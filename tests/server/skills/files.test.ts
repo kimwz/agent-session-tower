@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { projectFolders, SkillFiles } from '../../../server/skills/files.js';
 import { formatSkillFile, parseSkillFile } from '../../../server/skills/skill-file.js';
+import { blockQuarantine, captureErrors } from '../../helpers/quarantine.js';
 
 async function homes(t: test.TestContext) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-skills-')));
@@ -155,6 +156,27 @@ test('a skills state file that cannot be read is set aside, not overwritten, and
   const aside = names.find(name => name.startsWith('skills.json.unreadable-'));
   assert.ok(aside);
   assert.equal(await readFile(join(dir, aside!), 'utf8'), '{not json');
+});
+
+test('a skills state file is logged after it is set aside, and one that cannot be set aside is logged and skills still start', async t => {
+  const { SkillStateStore } = await import('../../../server/skills/state.js');
+  const dir = await mkdtemp(join(tmpdir(), 'tower-skill-state-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'skills.json');
+  await writeFile(path, '{not json', { mode: 0o600 });
+  const logged = captureErrors(t, path);
+  await new SkillStateStore(dir).start();
+  assert.match(String(logged[0].args[0]), /^Skill state was set aside: /);
+  assert.equal(logged[0].present, false, 'logged after the move');
+
+  await writeFile(path, '{not json', { mode: 0o600 });
+  const blocked = await blockQuarantine(t, path);
+  const store = new SkillStateStore(dir);
+  await store.start();
+  blocked.release();
+  assert.deepEqual(store.get().proposals, []);
+  assert.match(String(logged[1].args[0]), /^Skill state was set aside: /);
+  assert.deepEqual(await readdir(blocked.aside), ['occupied'], 'the move failed');
 });
 
 async function copy(root: string, name: string, text: string) {

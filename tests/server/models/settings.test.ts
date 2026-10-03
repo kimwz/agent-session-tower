@@ -1,6 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initialModelSettings } from '../../../shared/models.js';
@@ -102,4 +102,27 @@ test('the first settings never replace ones saved meanwhile', async t => {
   // Two readers migrate while the owner saves: whichever finishes last, the owner's save stays.
   await Promise.all([readModelSettings(directory), saveModelSettings(directory, chosen), readModelSettings(directory)]);
   assert.deepEqual(await resolveModel(directory, 'chat.new'), { provider: 'codex', model: 'gpt-6.1-sol' });
+});
+
+test('reading a corrupt settings file never writes it', async t => {
+  const directory = await stateDir(t);
+  const path = join(directory, 'models.json');
+  await writeFile(path, '{ not json', { mode: 0o600 });
+  for (let read = 0; read < 3; read++) {
+    assert.deepEqual(await readModelSettings(directory), initialModelSettings());
+    assert.deepEqual(await resolveModel(directory, 'slack.match', { provider: 'codex' }), { provider: 'codex', model: 'gpt-5.6-sol' });
+  }
+  assert.equal(await readFile(path, 'utf8'), '{ not json');
+  assert.deepEqual(await readdir(directory), ['models.json']);
+});
+
+test('a restore skips a settings file this computer cannot parse', async t => {
+  const { applyWorkerFiles } = await import('../../../server/backup/payload.js');
+  const directory = await stateDir(t);
+  const path = join(directory, 'models.json');
+  await writeFile(path, '{ not json', { mode: 0o600 });
+  const result = await applyWorkerFiles(directory, { 'models.json': initialModelSettings() });
+  assert.equal(result.parts.includes('models'), false);
+  assert.deepEqual(result.errors, ['models.json: 이 컴퓨터의 파일을 읽지 못해 건너뛰었습니다.']);
+  assert.equal(await readFile(path, 'utf8'), '{ not json');
 });

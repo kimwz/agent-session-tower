@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -234,4 +234,14 @@ test('a start cut off by a stop is matched to the run registry after restart, ne
   assert.equal(again.overview().agents[0].requests[0].runId, runs[0].id);
   assert.equal(created.length, 1);
   assert.equal(again.overview().agents[0].slug, published.slug);
+});
+
+test('unreadable agent data stops the start', async t => {
+  const f = await fixture(t);
+  const published = await publish(f.service, f.agent);
+  await f.service.flush();
+  const path = join(f.directory, 'public-agents', `${published.id}.json`);
+  await writeFile(path, '{ not json', { mode: 0o600 });
+  await assert.rejects(f.make().start(), SyntaxError);
+  assert.equal(await readFile(path, 'utf8'), '{ not json');
 });

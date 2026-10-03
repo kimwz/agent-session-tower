@@ -2,7 +2,7 @@ import test from 'node:test';
 import { until } from '../../helpers/until.js';
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { applySummary, conversationSince, DAILY_CALLS, SessionTasks, summarizable, type SessionTaskDependencies } from '../../../server/sessions/tasks.js';
@@ -11,6 +11,7 @@ import { saveModelSettings } from '../../../server/models/settings.js';
 import { initialModelSettings } from '../../../shared/models.js';
 import { currentTask } from '../../../shared/session-tasks.js';
 import type { ChatMessage, Session, SessionTask } from '../../../shared/types.js';
+import { asideNames, blockQuarantine, captureErrors } from '../../helpers/quarantine.js';
 
 const NOW = Date.now();
 const iso = (offset: number) => new Date(NOW + offset).toISOString();
@@ -329,4 +330,38 @@ test('a long stretch waiting for the next day is not read again and again meanwh
   for (let i = 0; i < 3; i++) { tasks.changed(); await new Promise(resolve => setTimeout(resolve, 15)); }
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.ok(reads <= 3, `read ${reads} times`);
+});
+
+test('unreadable session tasks are moved aside and start empty', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-tasks-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const path = join(stateDir, 'session-tasks.json');
+  await writeFile(path, '{ not json', { mode: 0o600 });
+  const logged = captureErrors(t, path);
+  const tasks = new SessionTasks({ stateDir, sessions: () => [], history: async () => ({ messages: [], hasMore: false }), model: async () => ({}) });
+  t.after(() => tasks.close());
+  await tasks.start();
+  await tasks.flush();
+  assert.equal(tasks.apply(session('a')).tasks, undefined);
+  const [aside] = await asideNames(path);
+  assert.equal(await readFile(join(stateDir, aside), 'utf8'), '{ not json');
+  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')).sessions, {}, 'fresh state is saved');
+  assert.match(String(logged[0].args[0]), /^Session tasks were set aside: /);
+  assert.equal(logged[0].present, false, 'logged after the move');
+});
+
+test('session tasks that cannot be moved aside are logged and the summaries still start', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-tasks-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const path = join(stateDir, 'session-tasks.json');
+  await writeFile(path, '{ not json', { mode: 0o600 });
+  const blocked = await blockQuarantine(t, path);
+  const logged = captureErrors(t, path);
+  const tasks = new SessionTasks({ stateDir, sessions: () => [], history: async () => ({ messages: [], hasMore: false }), model: async () => ({}) });
+  t.after(() => tasks.close());
+  await tasks.start();
+  blocked.release();
+  await tasks.flush();
+  assert.match(String(logged[0].args[0]), /^Session tasks were set aside: /);
+  assert.deepEqual(await readdir(blocked.aside), ['occupied'], 'the move failed');
 });

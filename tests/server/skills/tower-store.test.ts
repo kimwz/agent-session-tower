@@ -5,7 +5,8 @@ import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rename, r
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { SkillFiles } from '../../../server/skills/files.js';
-import { parseBundle, writeMoves } from '../../../server/skills/store.js';
+import { parseBundle, readMoves, writeMoves } from '../../../server/skills/store.js';
+import { asideNames, blockQuarantine, captureErrors } from '../../helpers/quarantine.js';
 import { SkillService } from '../../../server/skills/service.js';
 import { skillsCapability } from '../../../server/runs/durable-runner.js';
 import { installAgentGuidance, OWNER_GUIDANCE_FILE } from '../../../server/agent-guidance/install.js';
@@ -325,6 +326,32 @@ test('one move that cannot be settled never stops the others, and an unreadable 
   await writeFile(f.journal, '{not json');
   assert.deepEqual(await f.files.recover(), []);
   assert.ok((await readdir(f.state)).some(name => name.startsWith('skills-moves.json.unreadable-')));
+});
+
+test('an unreadable move record is logged after it is set aside; one that cannot be set aside is logged and read as empty', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-skill-moves-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'skills-moves.json');
+  const logged = captureErrors(t, path);
+  // Two moves within one millisecond would share a name.
+  let now = Date.now();
+  const clock = t.mock.method(Date, 'now', () => now++);
+  for (const text of ['{not json', '{}']) {
+    await writeFile(path, text, { mode: 0o600 });
+    assert.deepEqual(await readMoves(path), []);
+    assert.equal(logged.at(-1)!.args[0], 'The skill move record could not be read and was set aside.');
+    assert.equal(logged.at(-1)!.present, false, 'logged after the move');
+  }
+  assert.deepEqual((await Promise.all((await asideNames(path)).map(name => readFile(join(dir, name), 'utf8')))).sort(), ['{not json', '{}'].sort());
+  clock.mock.restore();
+
+  await writeFile(path, '{not json', { mode: 0o600 });
+  const blocked = await blockQuarantine(t, path);
+  assert.deepEqual(await readMoves(path), []);
+  blocked.release();
+  assert.equal(logged.length, 3);
+  assert.equal(logged[2].args[0], 'The skill move record could not be read and was set aside.');
+  assert.deepEqual(await readdir(blocked.aside), ['occupied'], 'the move failed');
 });
 
 test('an older execution worker is never asked for what came with Tower’s own skill folder', () => {

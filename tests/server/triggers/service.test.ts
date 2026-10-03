@@ -9,6 +9,7 @@ import { TriggerService, triggerRequestId, type TriggerExecutor } from '../../..
 import type { RunAdmission } from '../../../server/runs/manager.js';
 import type { AutoPromptJob, CreateSessionRequest, Run, Session } from '../../../shared/types.js';
 import type { TriggerActor, TriggerInput } from '../../../shared/triggers.js';
+import { asideNames, blockQuarantine, captureErrors } from '../../helpers/quarantine.js';
 
 const OWNER: TriggerActor = { kind: 'owner', via: 'ui' };
 const AGENT: TriggerActor = { kind: 'agent', via: 'mcp', sessionId: 'codex:agent', runId: randomUUID() };
@@ -263,6 +264,52 @@ test('unreadable trigger state is moved aside instead of guessed', async t => {
   const service = await f.open();
   assert.equal(service.list().length, 0);
   assert.ok((await readdir(f.directory)).some(name => name.startsWith('trigger-engine.json.unreadable-')));
+});
+
+test('trigger state of the wrong shape is moved aside and triggers start empty', async t => {
+  const f = await fixture(t);
+  const path = join(f.directory, 'trigger-engine.json');
+  await writeFile(path, '[]', { mode: 0o600 });
+  const logged = captureErrors(t, path);
+  const service = await f.open();
+  assert.equal(service.list().length, 0);
+  const [aside] = await asideNames(path);
+  assert.equal(await readFile(join(f.directory, aside), 'utf8'), '[]');
+  assert.equal(logged[0].args[0], 'Trigger state could not be read and was moved aside:');
+  assert.equal((logged[0].args[1] as Error).message, 'Saved trigger state is invalid.');
+  assert.equal(logged[0].present, true, 'logged before the move');
+});
+
+test('trigger state with an invalid once ledger is moved aside', async t => {
+  for (const onceConsumed of [[], { id: { bad: 1 } }]) {
+    const f = await fixture(t);
+    let service = await f.open();
+    await service.create(hourly(f.project), OWNER);
+    service.close(); await service.settle();
+    const path = join(f.directory, 'trigger-engine.json');
+    const saved = JSON.parse(await readFile(path, 'utf8'));
+    saved.onceConsumed = onceConsumed;
+    const text = JSON.stringify(saved);
+    await writeFile(path, text);
+    service = await f.open();
+    assert.equal(service.list().length, 0, JSON.stringify(onceConsumed));
+    const [aside] = await asideNames(path);
+    assert.equal(await readFile(join(f.directory, aside), 'utf8'), text);
+  }
+});
+
+test('trigger state that cannot be moved aside is logged and triggers still start', async t => {
+  const f = await fixture(t);
+  const path = join(f.directory, 'trigger-engine.json');
+  await writeFile(path, '{ not json', { mode: 0o600 });
+  const blocked = await blockQuarantine(t, path);
+  const logged = captureErrors(t, path);
+  const service = await f.open();
+  blocked.release();
+  assert.equal(service.list().length, 0);
+  assert.equal(logged[0].args[0], 'Trigger state could not be read and was moved aside:');
+  assert.ok(logged[0].args[1] instanceof SyntaxError);
+  assert.deepEqual(await readdir(blocked.aside), ['occupied'], 'the move failed');
 });
 
 test('schedules refuse second-level cron and unknown time zones', async t => {

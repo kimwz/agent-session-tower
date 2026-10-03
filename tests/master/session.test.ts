@@ -104,6 +104,14 @@ test('the first message starts the master session in its own folder, with its gu
   assert.equal(h.settings.current().session, undefined);
 });
 
+test('a missing follow file starts fresh and is saved', async t => {
+  const h = await harness(t);
+  const saved = JSON.parse(await readFile(join(h.dir, 'follow.json'), 'utf8'));
+  assert.equal(saved.version, 1);
+  assert.deepEqual({ followed: saved.followed, masterRuns: saved.masterRuns, stoppedAt: saved.stoppedAt }, { followed: [], masterRuns: [], stoppedAt: undefined });
+  assert.equal(typeof saved.baselineAt, 'string');
+});
+
 test('a start Tower refused is not bound, so the owner can try again', async t => {
   const h = await harness(t, { createStatus: 400 });
   await assert.rejects(h.session.begin({ provider: 'claude', text: '안녕' }), /시작하지 못했습니다: no/);
