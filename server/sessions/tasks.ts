@@ -152,6 +152,8 @@ export class SessionTasks extends EventEmitter {
   private writes: Promise<void> = Promise.resolve();
   /** Ends a call underway when the worker closes: Tower's own summary, so nothing waits on it. */
   private readonly abort = new AbortController();
+  /** Off when an unreadable file could not be moved aside: it is never written over. */
+  private persist = true;
 
   constructor(private readonly dependencies: SessionTaskDependencies) {
     super();
@@ -165,15 +167,26 @@ export class SessionTasks extends EventEmitter {
     let saved: unknown;
     try { saved = await readPrivateJson(this.path, MAX_FILE_BYTES); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        // A file this build cannot read is kept aside, never overwritten; summaries start over from new turns.
-        await quarantineFile(this.path).catch(() => {});
-        console.error(`Session tasks were set aside: ${error instanceof Error ? error.message : String(error)}`);
-      }
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') await this.setAside(error);
       this.save();
       return;
     }
+    if (!record(saved)) { await this.setAside(new Error('Saved session tasks are invalid.')); this.save(); return; }
     this.state = normalize(saved, this.state.startedAt);
+  }
+
+  /**
+   * A file this build cannot read is kept aside, never overwritten; summaries start over from new turns. One that
+   * cannot be moved stays as it is, and summaries are kept in memory only.
+   */
+  private async setAside(error: unknown): Promise<void> {
+    const message = (value: unknown) => value instanceof Error ? value.message : String(value);
+    let moveError: Error | undefined;
+    await quarantineFile(this.path).catch((reason: unknown) => { moveError = reason instanceof Error ? reason : new Error(String(reason)); });
+    console.error(`Session tasks were set aside: ${message(error)}`);
+    if (!moveError) return;
+    this.persist = false;
+    console.error(`Session tasks could not be moved aside, so summaries are kept in memory only until Tower restarts: ${moveError.message}`);
   }
 
   /** The session with its tasks, oldest first, when it has any. */
@@ -346,6 +359,7 @@ export class SessionTasks extends EventEmitter {
   }
 
   private save(): void {
+    if (!this.persist) return;
     const data = `${JSON.stringify(this.state)}\n`;
     const write = this.writes.then(() => writePrivateJson(this.path, data));
     this.writes = write.catch(error => console.error(`Session tasks were not saved: ${error instanceof Error ? error.message : String(error)}`));
