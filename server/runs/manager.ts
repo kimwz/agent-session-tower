@@ -1,35 +1,37 @@
 import type { PermissionRequest } from '../../shared/permissions.js';
-import { LAUNCH_MARKS_ENV } from '../sessions/launch-marks.js';
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { homedir, tmpdir } from 'node:os';
-import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { CreateSessionRequest, MessageAttachments, Provider, Run, RunApprovalResponse, RunInstructions, RunOrigin, Session, SteerBlock } from '../../shared/types.js';
-import { isImageAttachment } from '../../shared/attachments.js';
-import { attachmentMetadata, attachmentPrompt, AttachmentStore } from '../stores/attachments.js';
+import { attachmentMetadata, attachmentPrompt, AttachmentStore, claudeImageBlocks, imagePaths } from '../stores/attachments.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
 import type { CodexBridgeRun, CodexBridgeOptions } from './codex-bridge.js';
 import { requestedEffort, requestedModel, validModelId } from '../providers/models.js';
-import { requestedApprovalsReviewer } from '../providers/approvals.js';
 import { SteeringError } from './steering.js';
 import { ClaudeControl } from './claude-control.js';
 import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioRun } from './codex-stdio.js';
 import { claudeInputTokens, contextCapacity, modelContextWindow, nativeContextObservation, withNativeContext } from '../sessions/context.js';
 import { defaultStateDir } from '../state-dir.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
-import { findExecutable, providerDirectories, PROVIDERS } from '../providers/discovery.js';
+import { findExecutable, PROVIDERS } from '../providers/discovery.js';
 import { towerInstructionsBlock } from '../sessions/parser.js';
 import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
 import { ReplyLog } from './replies.js';
-import { checkClaudeSubscription, markMaster, MASTER_TOOL_TIMEOUT_SECONDS, subscriptionOnly, withoutKeys } from './subscription.js';
-import { awaitToolServers, CALLER_CAPABILITY_ENV, NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
+import { checkClaudeSubscription, markMaster, MASTER_TOOL_TIMEOUT_SECONDS, subscriptionOnly } from './subscription.js';
+import { awaitToolServers, NO_RUN_TOOLS, privateMcpConfig, type RunTools } from './session-mcp.js';
 import { automatedOrigin, ownerOrigin, parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
 import { WakeupTracker, type Wakeup } from './wakeup.js';
 import { TOWER_NOTICE } from '../../shared/task-notification.js';
 import { BackgroundTaskTracker, messageText, type FinishedTask } from './background-tasks.js';
+import { automaticApprovals, claudeStartMode, codexReviewer, creationReviewer } from './approval-policy.js';
+import { OwnerAnswers } from './owner-answers.js';
+import { MAX_INSTRUCTIONS, TurnNotes } from './turn-notes.js';
+import { sessionEnv, turnEnv, type LaunchMarks } from './turn-env.js';
+import { ToolNotices } from './tool-notices.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -48,11 +50,8 @@ interface RunnerOptions {
   /** How the master's Claude sign-in is checked before its turn (tests replace it). */
   checkClaudeSubscription?: typeof checkClaudeSubscription;
   env?: NodeJS.ProcessEnv;
-  /**
-   * Folder of the `claude`/`codex` shims put first in every turn's PATH, and where their marks go: a helper the turn starts
-   * notes who started it, so it is never shown as the owner's own session even when detached (see launch-marks.ts).
-   */
-  launchMarks?: { shims: string; marks: string };
+  /** The launch shims put first in every turn's PATH (see turn-env.ts). */
+  launchMarks?: LaunchMarks;
   spawnProcess?: SpawnProcess;
   findExecutable?: (provider: Provider) => Promise<string | undefined>;
   maxConcurrent?: number;
@@ -115,10 +114,8 @@ export interface RunAdmission {
 }
 
 const MAX_OUTPUT = 64_000;
-const MAX_INSTRUCTIONS = 48_000;
 /** Marks, in runs.json, a turn still to run whose instructions (kept only in memory) it cannot go without. */
 const NEEDS_INSTRUCTIONS = 'needsInstructions';
-const FIRST_TURN_NOTES_MS = 6_000;
 /** A run as anything outside the worker sees it: without its hidden instructions. */
 function shown(run: Run): Run { const { instructions: _hidden, ...rest } = run; return { ...rest }; }
 type SteerableAdapter = CodexStdioRun | CodexBridgeRun | ClaudeControl;
@@ -195,12 +192,10 @@ export class RunManager extends EventEmitter {
   private readonly attachments: AttachmentStore;
   private readonly createdSessions = new Map<string, CreatedSession>();
   private readonly runs = new Map<string, Run>();
-  /** The owner's answers to agents' questions, per conversation (memory only; see ownerAnswers). */
-  private readonly answers = new Map<string, { at: string; question: string; answer: string }[]>();
+  private readonly answers = new OwnerAnswers();
   private readonly owned = new Map<string, OwnedProcess>();
   private readonly bridged = new Map<string, CodexBridgeRun>();
-  /** Turns that already received their notes. */
-  private readonly noted = new Set<string>();
+  private readonly notes = new TurnNotes(() => this.options);
   private readonly stdio = new Map<string, CodexStdioRun>();
   private readonly reservedSessions = new Set<string>();
   /** CLIs being updated: none of their runs start until the update is done. */
@@ -253,25 +248,9 @@ export class RunManager extends EventEmitter {
    * at what the gate needs, after the last asynchronous step before a provider starts; the gate then answers at once.
    */
   setLaunchGate(gate: (run: Run) => string | undefined, prepare?: (run: Run) => Promise<void>): void { this.launchGate = gate; this.launchPrepare = prepare; }
-  /** Puts the launch shims first in a turn's PATH and tells them where to leave their marks. */
-  private markLaunches(env: NodeJS.ProcessEnv): void {
-    const launch = this.options.launchMarks;
-    if (!launch) return;
-    env.PATH = [launch.shims, ...(env.PATH ?? '').split(delimiter).filter(dir => dir && dir !== launch.shims)].join(delimiter);
-    env[LAUNCH_MARKS_ENV] = launch.marks;
-  }
-
-  /**
-   * The environment a command run for a conversation gets, so a `claude`/`codex` it starts is recorded as that
-   * conversation's own run, as if its agent had started it: the launch shims first on PATH, and the conversation's id.
-   */
+  /** The environment a command run for a conversation gets (see sessionEnv). */
   launchEnv(sessionId: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-    const next = { ...env };
-    this.markLaunches(next);
-    const session = this.getSession(sessionId);
-    // The id the provider itself sets for its own tools: the bare native id, as the shims expect it.
-    if (session?.nativeId) next[session.provider === 'codex' ? 'CODEX_THREAD_ID' : 'CLAUDE_CODE_SESSION_ID'] = session.nativeId;
-    return next;
+    return sessionEnv(env, this.getSession(sessionId), this.options.launchMarks);
   }
 
   private async prepareLaunch(run: Run): Promise<void> {
@@ -331,7 +310,7 @@ export class RunManager extends EventEmitter {
    * What the owner answered the agent's questions in a conversation, kept from the moment it is sent: native history
    * may not have it yet when Tower's permission reviewer reads the owner's words.
    */
-  ownerAnswers(sessionId: string): { at: string; question: string; answer: string }[] { return [...this.answers.get(this.monitorSessionId(sessionId)) ?? []]; }
+  ownerAnswers(sessionId: string): { at: string; question: string; answer: string }[] { return this.answers.list(this.monitorSessionId(sessionId)); }
   setClaudeSettings(settings: NonNullable<RunnerOptions['claudeSettings']>): void { this.options.claudeSettings = settings; }
   setRunToolResolver(resolver: NonNullable<RunnerOptions['resolveRunTools']>): void {
     this.options.resolveRunTools = resolver;
@@ -345,65 +324,18 @@ export class RunManager extends EventEmitter {
     return this.options.resolveRunTools?.(run, session) ?? NO_RUN_TOOLS;
   }
 
-  private providerInstructions(run: Run, tools: RunTools): string | undefined {
-    return [run.instructions?.text, tools.instructions].filter(Boolean).join('\n\n') || undefined;
-  }
-
-  private readonly toolNotices = new Map<string, string>();
-  private readonly toolNoticeSending = new Set<string>();
+  private readonly toolNotices = new ToolNotices({
+    runs: () => this.runs.values(), run: id => this.runs.get(id), getSession: id => this.getSession(id), runTools: (run, session) => this.runTools(run, session),
+    stopping: () => this.stopping, updating: () => this.updating,
+    admitting: run => this.admissions.has(run.id) || run.steering?.state === 'sending',
+    writer: id => this.stdio.get(id) ?? this.owned.get(id)?.claude,
+    finishInput: id => this.owned.get(id)?.finishInput?.(),
+  });
 
   /** An explicit owner connection targets one session; never creates or resumes a provider turn. */
-  notifyToolChange(instructions: string, sessionId: string): void {
-    if (!sessionId || this.stopping || this.updating) return;
-    for (const run of this.runs.values()) {
-      if (run.status !== 'running' || run.steering || run.sessionId !== sessionId) continue;
-      if (this.secretNoticeEligible(run)) this.toolNotices.set(run.id, instructions);
-    }
-    // Coalesce changes committed in the same tick before touching the native transport.
-    queueMicrotask(() => this.flushToolNotices());
-  }
+  notifyToolChange(instructions: string, sessionId: string): void { this.toolNotices.notify(instructions, sessionId); }
 
-  private secretNoticeEligible(run: Run): boolean {
-    const session = this.getSession(run.sessionId);
-    return Boolean(session && !session.closed && !run.ownerStopped && run.origin?.kind === 'owner'
-      && run.towerTools === 'attached' && this.runTools(run, session).servers?.tower_secrets);
-  }
-
-  private flushToolNotices(): void {
-    for (const [id, text] of this.toolNotices) {
-      const run = this.runs.get(id);
-      if (!run || run.status !== 'running' || !this.secretNoticeEligible(run)) { this.toolNotices.delete(id); continue; }
-      if (this.stopping || this.updating || this.toolNoticeSending.has(id) || run.approvals?.length) continue;
-      if ([...this.runs.values()].some(other => other.sessionId === run.sessionId && (this.admissions.has(other.id) || other.steering?.state === 'sending'))) continue;
-      // Only Tower-owned native writers receive private instructions; desktop bridges own their own context.
-      const adapter = this.stdio.get(id) ?? this.owned.get(id)?.claude;
-      if (!adapter?.canSteer?.() || !adapter.steer) continue;
-      this.toolNotices.delete(id); this.toolNoticeSending.add(id);
-      const messageId = randomUUID();
-      const prompt = towerInstructionsBlock(text);
-      const send = async () => {
-        if (run.status !== 'running' || this.stopping || this.updating || !this.secretNoticeEligible(run) || !adapter.canSteer?.()) throw new SteeringError('Private notice target is no longer available.', 'rejected');
-        if (adapter instanceof ClaudeControl) await adapter.steer({ type: 'user', uuid: messageId, session_id: this.getSession(run.sessionId)!.nativeId, parent_tool_use_id: null,
-          message: { role: 'user', content: [{ type: 'text', text: prompt }] } });
-        else {
-          const steer = adapter.steer;
-          if (!steer) throw new SteeringError('Private notice writer is no longer available.', 'rejected');
-          await steer.call(adapter, { id: messageId, prompt });
-        }
-      };
-      void send().catch(error => {
-        if (error instanceof SteeringError && error.disposition === 'rejected' && run.status === 'running' && !this.stopping && this.secretNoticeEligible(run)) {
-          if (!this.toolNotices.has(id)) this.toolNotices.set(id, text);
-        } else {
-          // An uncertain message may already be in the turn: do not resend it or log provider text.
-          console.warn('Tower could not confirm a private secret-connection notice; credentials remain discoverable when needed.');
-        }
-      }).finally(() => {
-        this.toolNoticeSending.delete(id);
-        this.owned.get(id)?.finishInput?.();
-      });
-    }
-  }
+  private flushToolNotices(): void { this.toolNotices.flush(); }
 
   /**
    * Provenance of a session Tower created. Native sessions the owner opened elsewhere return undefined.
@@ -640,10 +572,7 @@ export class RunManager extends EventEmitter {
     if (!PROVIDERS.includes(input.provider)) throw new RunError('Claude 또는 Codex를 선택하세요.');
     const model = requestedModel(input.model);
     const effort = requestedEffort(input.effort, input.provider);
-    // Only a Codex thread has an approvals reviewer. The owner's own turns always use the automatic one (see
-    // launchCodex), so one an older page sends is still checked, then left out; triggers and Slack keep theirs.
-    const requestedReviewer = input.provider === 'codex' ? requestedApprovalsReviewer(input.codexApprovalsReviewer) : undefined;
-    const approvalsReviewer = ownerOrigin(internal.origin) ? undefined : requestedReviewer;
+    const approvalsReviewer = creationReviewer(input, internal.origin);
     if (typeof input.cwd !== 'string' || input.cwd.includes('\0') || input.cwd.length > 4096) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
     const cwd = input.cwd === '~' || input.cwd.startsWith('~/') ? join(homedir(), input.cwd.slice(1)) : input.cwd;
     if (!isAbsolute(cwd)) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
@@ -756,24 +685,6 @@ export class RunManager extends EventEmitter {
     for (const other of this.runs.values()) if (other.sessionId === sessionId && other.status === 'queued' && other.scheduled && (other.scheduled.resume !== 'update' || other.permissionRequestIds?.length)) this.supersede(other, 'A newer instruction was sent before the scheduled time.');
     void this.pump();
     return shown(run);
-  }
-
-  /**
-   * Adds `firstTurnNotes` to a new conversation's first turn and `turnNotes` to every turn. Never delays a turn by more
-   * than a few seconds, never fails it, and a turn gets them once however often it is launched.
-   */
-  private async addTurnNotes(run: Run, session: Session, creating: boolean): Promise<void> {
-    if (run.origin?.controllerId || this.noted.has(run.id)) return;
-    if (this.noted.size >= 10_000) this.noted.clear();
-    this.noted.add(run.id);
-    const ask = (notes: ((run: Run, session: Session) => Promise<string | undefined>) | undefined) => notes ? notes(run, session).catch(() => undefined) : Promise.resolve(undefined);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const all = Promise.all([creating ? ask(this.options.firstTurnNotes) : undefined, ask(this.options.turnNotes)]);
-    const notes = await Promise.race([all, new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), FIRST_TURN_NOTES_MS); })]);
-    clearTimeout(timer);
-    const text = [run.instructions?.text, ...(notes ?? [])].filter(item => item?.trim()).join('\n\n');
-    if (run.status !== 'queued' || !text || text === run.instructions?.text) return;
-    if (text.length <= MAX_INSTRUCTIONS) run.instructions = { text, ...(run.instructions?.required ? { required: true } : {}) };
   }
 
   private steeringTarget(run: Run) {
@@ -906,16 +817,14 @@ export class RunManager extends EventEmitter {
       this.noteHandedOver(run);
       if (selected.adapter instanceof ClaudeControl) {
         const delivery = selected.adapter.steer({ type: 'user', uuid: run.id, session_id: this.getSession(run.sessionId)!.nativeId, parent_tool_use_id: null,
-          message: { role: 'user', content: [{ type: 'text', text: prompt }, ...attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => ({
-            type: 'image', source: { type: 'base64', media_type: item.metadata.mimeType, data: item.content.toString('base64') },
-          }))] } });
+          message: { role: 'user', content: [{ type: 'text', text: prompt }, ...claudeImageBlocks(attachments)] } });
         // Claude confirms only when it takes the instruction at its next step, which can be minutes away, so the
         // answer is that it was handed over and the run records how it ends.
         this.admissions.delete(run.id);
         void delivery.then(() => this.settleSteer(run, selected.target.id), error => this.settleSteer(run, selected.target.id, error)).catch(() => {});
         return this.list().find(item => item.id === runId)!;
       }
-      const sending = selected.adapter.steer!({ id: run.id, prompt, imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) });
+      const sending = selected.adapter.steer!({ id: run.id, prompt, imagePaths: imagePaths(attachments) });
       // Codex takes one insert at a time: other queued instructions show they wait for this one. Its outcome is
       // recorded even if telling the page fails.
       try { this.changed(); } finally { await sending; }
@@ -982,12 +891,7 @@ export class RunManager extends EventEmitter {
       throw new RunError('This permission request is no longer pending. Refresh the conversation.', 409);
     }
     // The owner's own words to the agent, kept whole with what was asked, before they go (see ownerAnswers).
-    if (typeof decision === 'object') {
-      const asked = run.approvals!.find(approval => approval.id === approvalId)!;
-      const question = JSON.stringify(asked.interaction?.type === 'questions' ? asked.interaction.questions : asked.input);
-      const kept = [...this.answers.get(run.sessionId) ?? [], { at: new Date().toISOString(), question, answer: JSON.stringify(decision) }].slice(-50);
-      this.answers.set(run.sessionId, kept);
-    }
+    this.answers.record(run.sessionId, run.approvals!.find(approval => approval.id === approvalId)!, decision);
     if (stdio) await stdio.respondToApproval(approvalId, decision);
     else {
       await owned!.claude!.respond(approvalId, decision);
@@ -1168,7 +1072,7 @@ export class RunManager extends EventEmitter {
       threadId: session.nativeId, runId: run.id, prompt: attachmentPrompt(run.prompt, attachments),
       ...(ownerOrigin(run.origin) ? { approvalsReviewer: 'auto_review' as const } : {}),
       ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
-      ...(attachments.length ? { imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) } : {}),
+      ...(attachments.length ? { imagePaths: imagePaths(attachments) } : {}),
       onStarted: () => {
         if (FINISHED.has(run.status)) return;
         started = true;
@@ -1235,43 +1139,30 @@ export class RunManager extends EventEmitter {
     if (!creating) this.validateSession(latest);
     else if (!latest) throw new RunError('Session no longer exists.', 404);
     const master = this.masterSession(session);
-    const env = master ? withoutKeys({ ...process.env, ...this.options.env }) : { ...process.env, ...this.options.env };
-    env.PATH = providerDirectories(env).join(delimiter);
-    this.markLaunches(env);
-    delete env.CLAUDECODE;
-    delete env.CLAUDE_CODE_SESSION_ID;
-    delete env.CODEX_THREAD_ID;
     let started = false;
     let registered = false;
-    await this.addTurnNotes(run, session, creating);
+    await this.notes.add(run, session, creating);
     const tools = this.runTools(run, session);
     await awaitToolServers(tools);
     if (run.status !== 'queued' || this.stopping) {
       this.reservedSessions.delete(session.id);
       return;
     }
+    const env = turnEnv(this.options.env, master, tools, this.options.launchMarks);
     // The master's own tools may take longer than Codex's default minute (see MASTER_TOOL_TIMEOUT_SECONDS).
-    delete env[CALLER_CAPABILITY_ENV];
-    Object.assign(env, tools.env);
     const mcpServers = master && tools.servers?.tower_master
       ? { ...tools.servers, tower_master: { ...tools.servers.tower_master, tool_timeout_sec: MASTER_TOOL_TIMEOUT_SECONDS } as typeof tools.servers.tower_master } : tools.servers;
     if (tools.towerTools) run.towerTools = tools.towerTools;
-    // The owner's own turns hand approvals to Codex's automatic reviewer, in new and resumed threads alike; if Codex
-    // does not confirm it, the turn still runs and approvals wait in Tower. Other work keeps the reviewer its setting
-    // chose when the thread started, and Slack's tools require the automatic one.
-    const owner = ownerOrigin(run.origin);
-    const approvalsReviewer = mcpServers?.tower_slack || owner ? 'auto_review' as const : creating ? run.codexApprovalsReviewer : undefined;
     const codexReplies = master ? new ReplyLog(run, Date.now) : undefined;
     const owned = await (this.options.openCodexStdio ?? openCodexStdioRun)({
       executable, cwd: session.cwd, env, spawnProcess: this.options.spawnProcess,
       mcpServers, ...(master ? { subscriptionOnly: true } : {}),
       ...(!creating ? { threadId: session.nativeId } : {}),
-      ...(approvalsReviewer ? { approvalsReviewer } : {}),
-      ...(owner && !mcpServers?.tower_slack ? { approvalsReviewerPreferred: true } : {}),
+      ...codexReviewer(run, creating, Boolean(mcpServers?.tower_slack)),
       ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
       prompt: attachmentPrompt(run.prompt, attachments),
-      ...(this.providerInstructions(run, tools) ? { instructions: this.providerInstructions(run, tools) } : {}),
-      imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path),
+      ...(run.instructions?.text ? { instructions: run.instructions.text } : {}),
+      imagePaths: imagePaths(attachments),
       onSession: async id => {
         if (!UUID.test(id) || (!creating && id !== session.nativeId)) throw new Error('Codex returned a different or invalid conversation ID. No message was submitted.');
         if (run.status !== 'running' || this.stopping) throw new Error('The task stopped before a message was submitted.');
@@ -1331,15 +1222,12 @@ export class RunManager extends EventEmitter {
     if (!executable) throw new Error(`${session.provider} CLI is no longer available in PATH.`);
     if (!(await stat(session.cwd)).isDirectory()) throw new Error('The session working directory no longer exists.');
     const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
-    const images = attachments.filter(item => isImageAttachment(item.metadata.mimeType));
-    await this.addTurnNotes(run, session, creating);
+    await this.notes.add(run, session, creating);
     const args = creating ? buildCreateArgs(session, run.model, run.effort) : buildResumeArgs(session, run.model, run.effort);
     const tools = this.runTools(run, session);
     await awaitToolServers(tools);
     const mcpServers = tools.servers;
     if (tools.towerTools) run.towerTools = tools.towerTools;
-    // A capability in a tool server's environment would be visible in the process list as an argument,
-    // so such a configuration goes to a private file that lives only as long as the turn.
     if (automaticApprovals(run)) args.push('--permission-mode', 'auto');
     // The owner's allow rules go to every turn Tower starts, as Codex reads them in every run: the owner also set up the
     // triggers, Slack and GitHub watches and public agents that start work here, and chose what that work may do.
@@ -1352,8 +1240,8 @@ export class RunManager extends EventEmitter {
       message: { role: 'user', content: [
         { type: 'text', text: prompt },
         // A block of its own, not the system prompt: Claude keeps a conversation's first system prompt for every later turn.
-        ...(this.providerInstructions(run, tools) ? [{ type: 'text', text: towerInstructionsBlock(this.providerInstructions(run, tools)!) }] : []),
-        ...images.map(item => ({ type: 'image', source: { type: 'base64', media_type: item.metadata.mimeType, data: item.content.toString('base64') } })),
+        ...(run.instructions?.text ? [{ type: 'text', text: towerInstructionsBlock(run.instructions.text) }] : []),
+        ...claudeImageBlocks(attachments),
       ] },
     };
     // Recheck after asynchronous filesystem discovery, immediately before creating the writer.
@@ -1366,15 +1254,7 @@ export class RunManager extends EventEmitter {
     if (!creating) this.validateSession(latest);
     else if (!latest) throw new RunError('Session no longer exists.', 404);
     const master = this.masterSession(session);
-    const env = master ? withoutKeys({ ...process.env, ...this.options.env }) : { ...process.env, ...this.options.env };
-    env.PATH = providerDirectories(env).join(delimiter);
-    this.markLaunches(env);
-    // The web server may itself have been started from inside Claude Code.
-    delete env[CALLER_CAPABILITY_ENV];
-    Object.assign(env, tools.env);
-    delete env.CLAUDECODE;
-    delete env.CLAUDE_CODE_SESSION_ID;
-    delete env.CODEX_THREAD_ID;
+    const env = turnEnv(this.options.env, master, tools, this.options.launchMarks);
     if (master) {
       env.MCP_TOOL_TIMEOUT = String(MASTER_TOOL_TIMEOUT_SECONDS * 1000);
       // Asked the way the turn will start: same program, folder and environment.
@@ -1382,6 +1262,7 @@ export class RunManager extends EventEmitter {
       await this.prepareLaunch(run);
       if (run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session)) { this.reservedSessions.delete(session.id); return; }
     }
+    // A capability in a tool server's environment would be visible in the process list as an argument (see privateMcpConfig).
     const privateConfig = mcpServers && Object.values(mcpServers).some(server => server.env) ? await privateMcpConfig(mcpServers) : undefined;
     // Writing the file yielded; nothing may have stopped the run in the meantime.
     if (privateConfig || run.permissionRequestIds?.length) await this.prepareLaunch(run);
@@ -1546,15 +1427,14 @@ export class RunManager extends EventEmitter {
       // Claude reports the mode it actually runs in before doing anything, for example the one it falls back to
       // where automatic mode is not available. An unattended run continues only in automatic mode, or in a mode
       // that asks the owner; any other or missing mode is stopped. The owner's own turns go on and say so.
-      if (actualId && automaticApprovals(run) && event.permissionMode !== 'auto') {
-        const mode = event.permissionMode === undefined ? 'not reported' : String(event.permissionMode);
-        const asksOwner = OWNER_APPROVAL_MODES.has(mode);
-        if (!asksOwner && run.unattended) {
-          streamError = `Claude started in an unexpected permission mode (${mode}). The unattended run was stopped before doing anything.`;
-          this.stopOwned(run.id, owned);
-          return;
-        }
-        if (!modeNoted) this.append(run, `[Tower] Claude did not start in automatic permission mode (${mode}).${asksOwner ? ' Approval requests will wait for you in Tower.' : ''}\n`);
+      const startMode = actualId ? claudeStartMode(run, event.permissionMode) : undefined;
+      if (startMode && 'stop' in startMode) {
+        streamError = startMode.stop;
+        this.stopOwned(run.id, owned);
+        return;
+      }
+      if (startMode) {
+        if (!modeNoted) this.append(run, startMode.note);
         modeNoted = true;
       }
       if (actualId && actualId !== session.nativeId) {
@@ -2009,7 +1889,7 @@ export class RunManager extends EventEmitter {
   }
 
   /** True while any provider process, desktop turn or admission is still live, whatever the run status says. */
-  busy(): boolean { return this.owned.size + this.bridged.size + this.stdio.size + this.admissions.size + this.reservedSessions.size + this.toolNoticeSending.size > 0 || this.pumping; }
+  busy(): boolean { return this.owned.size + this.bridged.size + this.stdio.size + this.admissions.size + this.reservedSessions.size + this.toolNotices.sending > 0 || this.pumping; }
 
   private async flush(): Promise<void> {
     await this.writes;
@@ -2019,18 +1899,4 @@ export class RunManager extends EventEmitter {
 
 const scheduledOutput = 'Scheduled by the agent. Tower resumes this conversation at the scheduled time.';
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-async function privateMcpConfig(mcpServers: NonNullable<RunTools['servers']>): Promise<{ path: string; remove: () => void }> {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-mcp-'));
-  const remove = () => { void rm(directory, { recursive: true, force: true }).catch(() => {}); };
-  try {
-    await chmod(directory, 0o700);
-    const path = join(directory, 'config.json');
-    await writeFile(path, JSON.stringify({ mcpServers }), { mode: 0o600, flag: 'wx' });
-    return { path, remove };
-  } catch (error) { remove(); throw error; }
-}
 function automated(run: Run): boolean { return automatedOrigin(run.origin); }
-/** The owner's own turns always run in the provider's automatic approval mode; triggers and Slack follow their setting. */
-function automaticApprovals(run: Run): boolean { return run.unattended === true || ownerOrigin(run.origin); }
-/** Modes at least as careful as asking the owner. Anything else is not what an unattended run asked for. */
-const OWNER_APPROVAL_MODES = new Set(['default', 'manual', 'plan', 'dontAsk']);

@@ -64,9 +64,9 @@ async function fixture() {
 test('unrelated turns receive no secret guide and vault state changes stay silent', async () => {
   const f = await fixture();
   try {
-    assert.equal(f.resolver(f.addRun('unrelated-before-setup'), f.session).instructions, undefined);
+    assert.equal((f.resolver(f.addRun('unrelated-before-setup'), f.session) as { instructions?: unknown }).instructions, undefined);
     await f.initialize();
-    assert.equal(f.resolver(f.addRun('unrelated-after-setup'), f.session).instructions, undefined);
+    assert.equal((f.resolver(f.addRun('unrelated-after-setup'), f.session) as { instructions?: unknown }).instructions, undefined);
     await f.runtime.control('lock', {});
     await f.runtime.control('unlock', { password });
     await f.runtime.control('create', { scope: 'global', name: 'QUIET_SAVED_KEY', kind: 'scalar', value: canary });
@@ -92,7 +92,7 @@ test('explicit assignment is value-free, committed before its receipt, and unrel
   try {
     await f.initialize();
     const run = f.addRun('notice-owner'); const tools = f.resolver(run, f.session);
-    assert.equal(tools.instructions, undefined);
+    assert.equal((tools as { instructions?: unknown }).instructions, undefined);
     assert.ok(tools.servers?.tower_secrets, 'lazy discovery remains available');
     assert.ok(SECRET_TOOLS.find(tool => tool.name === 'secrets_list')!.description.includes(SECRET_USE_INSTRUCTIONS));
     const saved = await f.runtime.control('create', { sessionId: f.session.id, scope: 'task', name: canary, kind: 'scalar', value: canary, connect: true, notifySession: true }) as SecretOverview;

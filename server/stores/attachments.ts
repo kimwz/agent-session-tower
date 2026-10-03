@@ -162,3 +162,15 @@ export function attachmentPrompt(prompt: string, attachments: readonly StoredAtt
   const instruction = prompt || ATTACHMENT_ONLY_PROMPT;
   return `${instruction}\n\n첨부 파일 (사용자가 이번 메시지에 첨부한 로컬 파일):\n${attachments.map(({ metadata, path }) => `- ${JSON.stringify(metadata.name)} (${metadata.mimeType}, ${metadata.size} bytes): ${JSON.stringify(path)}`).join('\n')}`;
 }
+
+/** Paths of the image attachments, for a provider that reads them from disk. */
+export function imagePaths(attachments: readonly StoredAttachment[]): string[] {
+  return attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path);
+}
+
+/** The image attachments as Claude message blocks. */
+export function claudeImageBlocks(attachments: readonly StoredAttachment[]) {
+  return attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => ({
+    type: 'image', source: { type: 'base64', media_type: item.metadata.mimeType, data: item.content.toString('base64') },
+  }));
+}

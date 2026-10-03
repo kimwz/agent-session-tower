@@ -1,5 +1,6 @@
-import { access } from 'node:fs/promises';
-import { isAbsolute } from 'node:path';
+import { access, chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export const CALLER_CAPABILITY_ENV = 'TOWER_CALLER_CAPABILITY';
@@ -24,8 +25,6 @@ export interface RunTools {
   /** Run-scoped reporting credentials, inherited by the provider's command tools. Never persisted. */
   env?: Record<string, string>;
   required: boolean;
-  /** Fixed worker guidance delivered in a private provider block, never the visible request. */
-  instructions?: string;
   /** For an owner turn: whether Tower's own tools are attached, and if not, why. */
   towerTools?: 'attached' | 'external-input' | 'not-owner-session' | 'remote';
 }
@@ -53,4 +52,19 @@ export async function awaitToolServers(tools: RunTools, options: { timeoutMs?: n
     }
     await delay(options.intervalMs ?? 250);
   }
+}
+
+/**
+ * A capability in a tool server's environment would be visible in the process list as an argument, so such a
+ * configuration goes to a private file (0600 in its own 0700 folder) that lives only as long as the turn.
+ */
+export async function privateMcpConfig(mcpServers: SessionMcpServers): Promise<{ path: string; remove: () => void }> {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-mcp-'));
+  const remove = () => { void rm(directory, { recursive: true, force: true }).catch(() => {}); };
+  try {
+    await chmod(directory, 0o700);
+    const path = join(directory, 'config.json');
+    await writeFile(path, JSON.stringify({ mcpServers }), { mode: 0o600, flag: 'wx' });
+    return { path, remove };
+  } catch (error) { remove(); throw error; }
 }
