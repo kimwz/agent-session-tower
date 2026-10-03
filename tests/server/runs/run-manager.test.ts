@@ -1360,3 +1360,32 @@ test('a bridge whose start reports the end and then rejects ends once: the repor
   assert.equal(result.finishedAt, ended.finishedAt);
   assert.equal(closes, 1, 'the rejection only closes the adapter');
 });
+
+for (const kind of ['codex', 'bridge'] as const) {
+  test(`a ${kind} launch gate that throws at the last look closes the prepared adapter, registers nothing and lets the next run go`, async t => {
+    const log: string[] = [];
+    const bridge: OpenCodexBridge = async options => { log.push('open'); return { done: Promise.resolve(), start: async () => { log.push('start'); options.onStarted('turn'); options.onFinished({ status: 'completed' }); },
+      cancel: async () => { log.push('cancel'); }, close: () => { log.push('close'); } }; };
+    const f = await adapters(t, kind === 'codex' ? { stdio: stdioAdapter(log) } : { bridge, held: true });
+    const looks = new Map<string, number>();
+    let firstId = '';
+    // The pump's look passes; the synchronous gate at the manager's last look throws for the first run only.
+    f.manager.setLaunchGate(run => {
+      const count = (looks.get(run.id) ?? 0) + 1; looks.set(run.id, count);
+      if (run.id === firstId && count === 2) throw new Error('The gate failed.');
+      return undefined;
+    });
+    const first = await f.manager.enqueue(f.first, 'Gate throws', {}, { origin: { kind: 'owner' } });
+    firstId = first.id;
+    const second = await f.manager.enqueue(f.first, 'Goes next', {}, { origin: { kind: 'owner' } });
+    const failed = await finished(f.manager, first.id);
+    assert.equal(failed.status, 'error');
+    assert.match(failed.error!, /The gate failed/);
+    await until(() => log.filter(entry => entry === 'start').length === 1);
+    assert.deepEqual(log.slice(0, 3), ['open', 'close', 'open'], 'the prepared adapter is closed once and never started');
+    const live = f.manager as unknown as { stdio: Map<string, unknown>; bridged: Map<string, unknown> };
+    assert.equal(live.stdio.has(first.id) || live.bridged.has(first.id), false, 'nothing is registered for it');
+    if (kind === 'codex') await until(() => f.read(second.id)?.status === 'running');
+    else assert.equal((await finished(f.manager, second.id)).status, 'completed');
+  });
+}

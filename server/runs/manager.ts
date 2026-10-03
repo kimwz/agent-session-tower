@@ -753,8 +753,11 @@ export class RunManager extends EventEmitter {
     const prepared = await prepareBridgeTurn(this.turnHost, run, session);
     if (prepared.kind === 'unsupported') return false;
     if (prepared.kind === 'refused') return true;
-    // The last look, in the same step as the start: nothing can land between them.
-    if (run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session)) {
+    // The last look, in the same step as the start: nothing can land between them. A look that throws frees the adapter.
+    let refused: boolean;
+    try { refused = run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session); }
+    catch (error) { prepared.dispose({ heldForUpdate: false }); throw error; }
+    if (refused) {
       prepared.dispose({ heldForUpdate: run.status === 'queued' && this.updating });
       this.reservedSessions.delete(session.id);
       return true;
@@ -771,9 +774,13 @@ export class RunManager extends EventEmitter {
   private async launchCodex(run: Run, session: Session, creating: boolean): Promise<void> {
     const prepared = await prepareCodexTurn(this.turnHost, run, session, creating);
     if (prepared.kind !== 'ready') return;
-    // The last look, in the same step as the start: nothing can land between them.
-    const current = this.getSession(session.id);
-    if (run.status !== 'queued' || this.stopping || (current && (this.isWorking(current) || current.activeProcess)) || this.refusedAtLaunch(run, session)) {
+    // The last look, in the same step as the start: nothing can land between them. A look that throws frees the adapter.
+    let refused: boolean;
+    try {
+      const current = this.getSession(session.id);
+      refused = run.status !== 'queued' || this.stopping || Boolean(current && (this.isWorking(current) || current.activeProcess)) || this.refusedAtLaunch(run, session);
+    } catch (error) { prepared.dispose(); throw error; }
+    if (refused) {
       prepared.dispose();
       this.reservedSessions.delete(session.id);
       return;
