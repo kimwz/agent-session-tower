@@ -75,6 +75,7 @@ async function checkedPath(root: string, path: string, missingLeaf = false): Pro
 async function checkHandle(handle: FileHandle, root: string, path: string): Promise<void> {
   const target = await checkedPath(root, path);
   const [opened, current] = await Promise.all([handle.stat(), lstat(target)]);
+  if (!opened.isFile() && current.isDirectory()) throw failure('Only regular text files can be opened.');
   if (!opened.isFile() || opened.dev !== current.dev || opened.ino !== current.ino) {
     throw failure('File changed while opening it. Reload and try again.', 'conflict');
   }
