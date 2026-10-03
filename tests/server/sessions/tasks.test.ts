@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { applySummary, conversationSince, DAILY_CALLS, SessionTasks, summarizable, type SessionTaskDependencies } from '../../../server/sessions/tasks.js';
 import { runAutoPromptModel, type AutoPromptModelRequest } from '../../../server/auto-prompt/native.js';
 import { saveModelSettings } from '../../../server/models/settings.js';
@@ -24,8 +24,9 @@ const message = (role: ChatMessage['role'], text: string, at = iso(-2_000), tool
 type Answer = Record<string, unknown> | Error;
 const update = (action: string, taskId: string, title: string, stage: string) => ({ action, taskId, title, stage });
 const u = (action: string, taskId: string, title: string, stage: string) => ({ updates: [update(action, taskId, title, stage)] });
-async function setup(t: test.TestContext, options: { list?: Session[]; answers?: Answer[]; history?: ChatMessage[]; startedAt?: number } = {}) {
+async function setup(t: test.TestContext, options: { list?: Session[]; answers?: Answer[]; history?: ChatMessage[]; startedAt?: number; prepare?: (stateDir: string) => Promise<unknown> } = {}) {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-tasks-'));
+  await options.prepare?.(stateDir);
   const list = options.list ?? [session('a')];
   const requests: AutoPromptModelRequest[] = [];
   const answers = [...options.answers ?? [u('new', '', 'Voice playback fix', '원인 분석중')]];
@@ -364,4 +365,31 @@ test('session tasks that cannot be moved aside are logged and the summaries stil
   await tasks.flush();
   assert.match(String(logged[0].args[0]), /^Session tasks were set aside: /);
   assert.deepEqual(await readdir(blocked.aside), ['occupied'], 'the move failed');
+});
+
+test('session tasks that cannot be moved aside are never written over, and summaries go on in memory', async t => {
+  let blocked: Awaited<ReturnType<typeof blockQuarantine>> | undefined;
+  const logged: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => { logged.push(args); });
+  const { stateDir, tasks, list, settle } = await setup(t, { prepare: async dir => {
+    await writeFile(join(dir, 'session-tasks.json'), '{ not json', { mode: 0o600 });
+    blocked = await blockQuarantine(t, join(dir, 'session-tasks.json'));
+  } });
+  blocked!.release();
+  await settle();
+  assert.equal(tasks.apply(list[0]).tasks?.[0].title, 'Voice playback fix', 'the summary is kept in memory');
+  await tasks.flush();
+  assert.equal(await readFile(join(stateDir, 'session-tasks.json'), 'utf8'), '{ not json');
+  assert.deepEqual((await readdir(stateDir)).filter(name => name.startsWith('session-tasks.json')).sort(), ['session-tasks.json', basename(blocked!.aside)].sort());
+  assert.equal(logged.filter(args => String(args[0]).startsWith('Session tasks could not be moved aside')).length, 1, 'said once');
+});
+
+test('session tasks of the wrong shape are moved aside', async t => {
+  const { stateDir, tasks } = await setup(t, { prepare: dir => writeFile(join(dir, 'session-tasks.json'), '[]', { mode: 0o600 }) });
+  await tasks.flush();
+  const path = join(stateDir, 'session-tasks.json');
+  const [aside] = await asideNames(path);
+  assert.ok(aside);
+  assert.equal(await readFile(join(stateDir, aside), 'utf8'), '[]');
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).version, 1, 'fresh state is saved');
 });
