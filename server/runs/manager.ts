@@ -4,29 +4,26 @@ import { mkdir, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import type { CreateSessionRequest, MessageAttachments, Provider, Run, RunApprovalResponse, RunInstructions, RunOrigin, Session, SteerBlock } from '../../shared/types.js';
 import { attachmentPrompt, AttachmentStore, claudeImageBlocks, imagePaths } from '../stores/attachments.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
 import type { CodexBridgeRun, CodexBridgeOptions } from './codex-bridge.js';
-import { requestedEffort, requestedModel, validModelId } from '../providers/models.js';
+import { requestedEffort, requestedModel } from '../providers/models.js';
 import { SteeringError } from './steering.js';
 import { ClaudeControl } from './claude-control.js';
 import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioRun } from './codex-stdio.js';
-import { claudeInputTokens, contextCapacity, modelContextWindow, withNativeContext } from '../sessions/context.js';
+import { withNativeContext } from '../sessions/context.js';
 import { defaultStateDir } from '../state-dir.js';
 import { findExecutable, PROVIDERS } from '../providers/discovery.js';
-import { towerInstructionsBlock } from '../sessions/parser.js';
 import { UUID, type CreatedSession } from './saved-state.js';
-import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
 import { ReplyLog } from './replies.js';
 import { checkClaudeSubscription, markMaster, MASTER_TOOL_TIMEOUT_SECONDS, subscriptionOnly } from './subscription.js';
-import { awaitToolServers, NO_RUN_TOOLS, privateMcpConfig, type RunTools } from './session-mcp.js';
+import { awaitToolServers, NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
 import { automatedOrigin, ownerOrigin, sameOrigin, type SessionOrigin } from './origin.js';
-import { WakeupTracker, type Wakeup } from './wakeup.js';
+import type { Wakeup } from './wakeup.js';
 import { TOWER_NOTICE } from '../../shared/task-notification.js';
-import { BackgroundTaskTracker, messageText, type FinishedTask } from './background-tasks.js';
-import { automaticApprovals, claudeStartMode, codexReviewer, creationReviewer } from './approval-policy.js';
+import { codexReviewer, creationReviewer } from './approval-policy.js';
 import { OwnerAnswers } from './owner-answers.js';
 import { checkedInstructions, TurnNotes } from './turn-notes.js';
 import { sessionEnv, turnEnv, type LaunchMarks } from './turn-env.js';
@@ -37,6 +34,8 @@ import { PermissionContinuations, retainedReceipts } from './permission-continua
 import { inheritedRunFields } from './continuations.js';
 import { CreatedSessionRegistry } from './session-registry.js';
 import { UPDATE_WAIT, UpdateDrain } from './update-drain.js';
+import { prepareClaudeTurn } from './claude-turn.js';
+import type { OwnedProcess, TurnExit, TurnHost } from './turn-host.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -87,13 +86,6 @@ interface RunnerOptions {
   /** Queued runs wait until `markReady()`: a worker first sets up everything a launch asks (tools, gates, limits). */
   holdUntilReady?: boolean;
 }
-interface OwnedProcess {
-  child: ChildProcessWithoutNullStreams;
-  done: Promise<void>;
-  killTimer?: ReturnType<typeof setTimeout>;
-  claude?: ClaudeControl;
-  finishInput?: () => void;
-}
 /** Internal admission data is never accepted from the public message endpoint. */
 export interface RunAdmission {
   autoPromptId?: string;
@@ -124,14 +116,6 @@ function steerable(steering: { target: Run } | { blocked: SteerBlock } | undefin
   return steering && 'blocked' in steering ? { canSteer: false, steerBlocked: steering.blocked } : { canSteer: Boolean(steering) };
 }
 const MAX_QUEUED = 32;
-const BACKGROUND_FOLLOW_UP_MS = 60_000;
-const BACKGROUND_WAIT_MAX_MS = 2 * 60 * 60 * 1000;
-/** What Tower tells Claude when a finished background task did not start a follow-up turn by itself. */
-function backgroundNotice(finished: readonly FinishedTask[]): string {
-  const lines = finished.map(task => `- ${task.status}${task.summary ? `: ${task.summary}` : ''}${task.outputFile ? ` (output: ${task.outputFile})` : ''}`);
-  return `${TOWER_NOTICE} Background work you started in this conversation has finished${lines.length ? `:\n${lines.join('\n')}` : '.'}\n`
-    + 'Continue with what you planned to do once it finished, and report the result.';
-}
 const due = (run: Run, now = Date.now()) => !run.scheduled || Date.parse(run.scheduled.at) <= now;
 
 export { RunError };
@@ -173,12 +157,26 @@ export class RunManager extends EventEmitter {
   private started = false;
   private stopping = false;
 
+  /** What the turn modules use of this manager (see turn-host.ts). */
+  private readonly turnHost: TurnHost;
+
   constructor(options: RunnerOptions) {
     super();
     this.options = options;
     this.history = new RunHistory(options.stateDir ?? defaultStateDir());
     this.ready = !options.holdUntilReady;
     this.attachments = new AttachmentStore(options.stateDir ?? defaultStateDir());
+    const manager = this;
+    this.turnHost = {
+      get options() { return manager.options; }, registry: this.registry, attachments: this.attachments, notes: this.notes,
+      changed: () => this.changed(), append: (run, text) => this.append(run, text), notifyOutput: () => this.notifyOutput(), flush: () => this.flush(),
+      stopping: () => this.stopping, updating: () => this.updating, stop: (id, owned) => this.stopOwned(id, owned),
+      prepareLaunch: run => this.prepareLaunch(run), refusedAtLaunch: (run, session) => this.refusedAtLaunch(run, session),
+      release: sessionId => { this.reservedSessions.delete(sessionId); }, exited: exit => this.exited(exit),
+      runTools: (run, session) => this.runTools(run, session), executable: provider => this.executable(provider),
+      getSession: id => this.getSession(id), isWorking: session => this.isWorking(session),
+      validateSession: session => this.validateSession(session), masterSession: session => this.masterSession(session),
+    };
   }
 
   /** Slack and trigger work together start at most this many provider turns at once; the rest wait in the queue. */
@@ -906,320 +904,29 @@ export class RunManager extends EventEmitter {
 
   private async launch(run: Run, session: Session, creating = false): Promise<void> {
     if (session.provider === 'codex') return this.launchCodex(run, session, creating);
-    const executable = await this.executable(session.provider);
-    if (!executable) throw new Error(`${session.provider} CLI is no longer available in PATH.`);
-    if (!(await stat(session.cwd)).isDirectory()) throw new Error('The session working directory no longer exists.');
-    const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
-    await this.notes.add(run, session, creating);
-    const args = creating ? buildCreateArgs(session, run.model, run.effort) : buildResumeArgs(session, run.model, run.effort);
-    const tools = this.runTools(run, session);
-    await awaitToolServers(tools);
-    const mcpServers = tools.servers;
-    if (tools.towerTools) run.towerTools = tools.towerTools;
-    if (automaticApprovals(run)) args.push('--permission-mode', 'auto');
-    // The owner's allow rules go to every turn Tower starts, as Codex reads them in every run: the owner also set up the
-    // triggers, Slack and GitHub watches and public agents that start work here, and chose what that work may do.
-    const settings = this.options.claudeSettings?.(session.cwd, session.id);
-    if (settings) args.push('--settings', settings);
-    for (const directory of new Set(attachments.map(item => dirname(item.path)))) args.push('--add-dir', directory);
-    const prompt = attachmentPrompt(run.prompt, attachments);
-    const input = {
-      type: 'user', session_id: session.nativeId, parent_tool_use_id: null,
-      message: { role: 'user', content: [
-        { type: 'text', text: prompt },
-        // A block of its own, not the system prompt: Claude keeps a conversation's first system prompt for every later turn.
-        ...(run.instructions?.text ? [{ type: 'text', text: towerInstructionsBlock(run.instructions.text) }] : []),
-        ...claudeImageBlocks(attachments),
-      ] },
-    };
-    // Recheck after asynchronous filesystem discovery, immediately before creating the writer.
-    await this.prepareLaunch(run);
-    const latest = this.getSession(session.id);
-    if (run.status !== 'queued' || this.stopping || (latest && (this.isWorking(latest) || (latest.provider === 'codex' && latest.activeProcess))) || this.refusedAtLaunch(run, session)) {
-      this.reservedSessions.delete(session.id);
-      return;
-    }
-    if (!creating) this.validateSession(latest);
-    else if (!latest) throw new RunError('Session no longer exists.', 404);
-    const master = this.masterSession(session);
-    const env = turnEnv(this.options.env, master, tools, this.options.launchMarks);
-    if (master) {
-      env.MCP_TOOL_TIMEOUT = String(MASTER_TOOL_TIMEOUT_SECONDS * 1000);
-      // Asked the way the turn will start: same program, folder and environment.
-      await (this.options.checkClaudeSubscription ?? checkClaudeSubscription)(executable, session.cwd, env);
-      await this.prepareLaunch(run);
-      if (run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session)) { this.reservedSessions.delete(session.id); return; }
-    }
-    // A capability in a tool server's environment would be visible in the process list as an argument (see privateMcpConfig).
-    const privateConfig = mcpServers && Object.values(mcpServers).some(server => server.env) ? await privateMcpConfig(mcpServers) : undefined;
-    // Writing the file yielded; nothing may have stopped the run in the meantime.
-    if (privateConfig || run.permissionRequestIds?.length) await this.prepareLaunch(run);
-    if ((privateConfig || run.permissionRequestIds?.length) && (run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session))) {
-      privateConfig?.remove(); this.reservedSessions.delete(session.id); return;
-    }
-    if (mcpServers) args.push('--mcp-config', privateConfig?.path ?? JSON.stringify({ mcpServers }));
-    let child: ChildProcessWithoutNullStreams;
+    const prepared = await prepareClaudeTurn(this.turnHost, run, session, creating);
+    if (prepared.kind !== 'ready') return;
+    // The last look, in the same step as the start: nothing can land between them.
+    let refused: boolean;
     try {
-      child = (this.options.spawnProcess ?? spawn)(executable, args, {
-        cwd: session.cwd, env, detached: true, stdio: 'pipe', shell: false,
-      });
-    } catch (error) { privateConfig?.remove(); throw error; }
-    if (privateConfig) child.once('close', privateConfig.remove);
-    run.status = 'running';
-    run.startedAt = new Date().toISOString();
-    run.output = '';
-    let finish!: () => void;
-    const owned: OwnedProcess = { child, done: new Promise<void>((resolve) => { finish = resolve; }) };
+      const latest = this.getSession(session.id);
+      refused = run.status !== 'queued' || this.stopping || Boolean(latest && (this.isWorking(latest) || (latest.provider === 'codex' && latest.activeProcess))) || this.refusedAtLaunch(run, session);
+      if (!refused) {
+        if (!creating) this.validateSession(latest);
+        else if (!latest) throw new RunError('Session no longer exists.', 404);
+      }
+    } catch (error) { prepared.dispose(); throw error; }
+    if (refused) { prepared.dispose(); this.reservedSessions.delete(session.id); return; }
+    const owned = prepared.handle();
     this.owned.set(run.id, owned);
-    let buffer = '';
-    let stderr = '';
-    let streamError: string | undefined;
-    let sawCompletion = false;
-    let sawSessionId = false;
-    let sawPartial = false;
-    let messageHasPartial = false;
-    // What Claude itself put in the output, apart from Tower's notes: its final result is shown only if nothing was.
-    let shown = false;
-    const show = (text: string) => { shown = true; this.append(run, text); };
-    // The master's words, block by block, so they can be read aloud as they are written.
-    const replies = this.masterSession(session) ? new ReplyLog(run) : undefined;
-    let replyMessage = '';
-    /** Messages whose words came as partial text: their complete form adds nothing. */
-    const streamedMessages = new Set<string>();
-    const replied = (changed: boolean) => { if (changed) this.notifyOutput(); };
-    let modeNoted = false;
-    let contextInput: { model: string; usedTokens: number } | undefined;
-    let identitySaved: Promise<void> = Promise.resolve();
-    const wakeups = new WakeupTracker(MAX_PROMPT);
-    // A turn ends at its result, but background work it started keeps running in this process. Input stays open
-    // until that work has ended and Claude has taken each notice in a follow-up turn of this same run.
-    const tasks = new BackgroundTaskTracker();
-    const followUpMs = this.options.backgroundFollowUpMs ?? BACKGROUND_FOLLOW_UP_MS;
-    const waitMaxMs = this.options.backgroundWaitMaxMs ?? BACKGROUND_WAIT_MAX_MS;
-    let turnActive = true;
-    /** Tower handed Claude the notice itself and Claude has not yet replayed it. */
-    let noticeId: string | undefined;
-    let waitTimedOut = false;
-    let followUpTimer: ReturnType<typeof setTimeout> | undefined;
-    let waitTimer: ReturnType<typeof setTimeout> | undefined;
-    let finishTimer: ReturnType<typeof setTimeout> | undefined;
-    let inputClosedByTower = false;
-    const clearFinishTimer = () => { if (finishTimer) clearTimeout(finishTimer); finishTimer = undefined; };
-    const clearWaitTimers = () => {
-      if (followUpTimer) clearTimeout(followUpTimer);
-      if (waitTimer) clearTimeout(waitTimer);
-      followUpTimer = waitTimer = undefined;
-    };
-    const endWait = () => { if (run.backgroundWait) { delete run.backgroundWait; this.changed(); } };
-    const beginTurn = () => {
-      if (turnActive) return;
-      clearFinishTimer();
-      turnActive = true; clearWaitTimers(); endWait(); tasks.observeTurnStart(); owned.claude?.setTurnIdle(false);
-      // Each turn reports its own completion and its own reply.
-      sawCompletion = false; shown = false; sawPartial = false; messageHasPartial = false;
-    };
-    owned.claude = new ClaudeControl({
-      write: message => new Promise<void>((resolve, reject) => {
-        if (run.status !== 'running' || child.exitCode !== null || child.stdin.destroyed || child.stdin.writableEnded) { reject(new Error('Provider input is closed.')); return; }
-        child.stdin.write(JSON.stringify(message) + '\n', error => error ? reject(error) : resolve());
-      }),
-      onApproval: approval => { if (run.status === 'running') { run.approvals = [...(run.approvals || []), approval]; this.changed(); } },
-      onCancelled: id => {
-        if (!run.approvals?.some(approval => approval.id === id)) return;
-        run.approvals = run.approvals.filter(approval => approval.id !== id);
-        if (!run.approvals.length) delete run.approvals;
-        this.changed();
-      },
-      onError: error => { streamError = error.message; this.stopOwned(run.id, owned); },
-      // Instructions queued behind this turn can be inserted now; the page is told without waiting for output.
-      onReady: () => this.changed(),
-    });
-    const closeInput = () => { inputClosedByTower = true; clearFinishTimer(); clearWaitTimers(); owned.claude?.close(); if (!child.stdin.writableEnded) child.stdin.end(); };
-    const idle = () => !turnActive && run.status === 'running' && child.exitCode === null && !child.stdin.writableEnded;
-    const arm = (timer: 'followUp' | 'wait', ms: number) => {
-      const handle = setTimeout(timer === 'followUp' ? followUp : waitLimit, ms);
-      handle.unref();
-      if (timer === 'followUp') followUpTimer = handle; else waitTimer = handle;
-    };
-    // Claude normally takes a finished task's notice by itself. If it has not, Tower hands it over as a message.
-    const followUp = () => {
-      followUpTimer = undefined;
-      if (!idle()) return;
-      if (run.approvals?.length) { arm('followUp', followUpMs); return; }
-      if (noticeId) { this.append(run, '\n[Tower] Claude has not answered the background work notice yet.\n'); return; }
-      const unread = tasks.takeUnread();
-      if (!unread.length) { owned.finishInput?.(); return; }
-      noticeId = randomUUID();
-      this.append(run, '\n[Tower] Background work finished; asking Claude to continue.\n');
-      child.stdin.write(JSON.stringify({ type: 'user', uuid: noticeId, session_id: session.nativeId, parent_tool_use_id: null,
-        message: { role: 'user', content: [{ type: 'text', text: backgroundNotice(unread) }] } }) + '\n');
-      arm('followUp', followUpMs);
-    };
-    const waitLimit = () => {
-      waitTimer = undefined;
-      if (!idle()) return;
-      if (run.approvals?.length) { arm('wait', followUpMs); return; }
-      // Closing input is how every turn ended before; Claude ends what is left. Never reported as success.
-      waitTimedOut = true;
-      this.append(run, `\n[Tower] Background work was still running after ${Math.round(waitMaxMs / 60_000)} minutes; closing the turn.\n`);
-      closeInput();
-    };
-    owned.finishInput = () => {
-      if (!sawCompletion || turnActive || owned.claude?.hasPendingSteers() || child.stdin.writableEnded) return;
-      // A failed turn is not kept open for its background work.
-      if (streamError) { endWait(); closeInput(); return; }
-      if (!tasks.outstanding && !noticeId) {
-        // Task bookends can follow a result, even in the next stdout chunk. Recheck after they drain.
-        if (!finishTimer) finishTimer = setTimeout(() => {
-          finishTimer = undefined;
-          if (!idle() || owned.claude?.hasPendingSteers()) return;
-          if (tasks.outstanding || noticeId) { owned.finishInput?.(); return; }
-          endWait(); closeInput();
-        }, 250);
-        return;
-      }
-      clearFinishTimer();
-      if (tasks.unreadCount && !followUpTimer) arm('followUp', followUpMs);
-      if (!run.backgroundWait) {
-        run.backgroundWait = { since: new Date().toISOString(), tasks: tasks.runningCount };
-        this.append(run, tasks.runningCount ? `\n[Tower] Waiting for ${tasks.runningCount} background task${tasks.runningCount === 1 ? '' : 's'} before this turn ends.\n`
-          : '\n[Tower] Waiting for Claude to take the finished background work.\n');
-        arm('wait', waitMaxMs);
-      } else run.backgroundWait.tasks = tasks.runningCount;
-      this.changed();
-    };
-    const parseEventLine = (line: string): void => {
-      if (!line.trim()) return;
-      let event: Record<string, any>;
-      try { event = JSON.parse(line); } catch { show(line + '\n'); return; }
-      if (!event || typeof event !== 'object' || Array.isArray(event)) throw new Error('Expected a provider event object.');
-      if (owned.claude?.handle(event)) {
-        if (event.type === 'user' && event.isReplay) { beginTurn(); sawCompletion = false; tasks.observeReplay(event); }
-        return;
-      }
-      const actualId = event.type === 'system' && event.subtype === 'init' ? event.session_id : undefined;
-      if (actualId && creating && this.registry.unconfirmed(session.id) && typeof actualId === 'string' && UUID.test(actualId)
-        && actualId === session.nativeId) {
-        this.registry.confirm(session.id, actualId);
-        session.nativeId = actualId;
-        this.changed();
-        identitySaved = this.flush().catch(error => {
-          streamError = `Cannot save the new conversation identity: ${errorMessage(error)}`;
-          this.stopOwned(run.id, owned);
-        });
-      }
-      if (actualId === session.nativeId) sawSessionId = true;
-      // Claude reports the mode it actually runs in before doing anything, for example the one it falls back to
-      // where automatic mode is not available. An unattended run continues only in automatic mode, or in a mode
-      // that asks the owner; any other or missing mode is stopped. The owner's own turns go on and say so.
-      const startMode = actualId ? claudeStartMode(run, event.permissionMode) : undefined;
-      if (startMode && 'stop' in startMode) {
-        streamError = startMode.stop;
-        this.stopOwned(run.id, owned);
-        return;
-      }
-      if (startMode) {
-        if (!modeNoted) this.append(run, startMode.note);
-        modeNoted = true;
-      }
-      if (actualId && actualId !== session.nativeId) {
-        streamError = creating ? 'The provider did not confirm the new conversation ID. The task was stopped.' : 'The provider opened a different conversation instead of resuming the requested session. The task was stopped.';
-        this.stopOwned(run.id, owned);
-        return;
-      }
-      const mainContext = event.parent_tool_use_id == null && (event.session_id === undefined || event.session_id === session.nativeId);
-      // Anything the main conversation says after a result is a follow-up turn, typically Claude taking a task's notice.
-      if (mainContext && ['assistant', 'user', 'stream_event'].includes(event.type)) beginTurn();
-      if (mainContext && event.type === 'user' && event.isReplay) {
-        // Tower's own notice is taken once Claude replays it; the turn it starts must then reach its result.
-        if (noticeId && event.uuid === noticeId) noticeId = undefined;
-        else { tasks.observeReplay(event); wakeups.observeReplay(messageText(event)); }
-      }
-      if ((event.session_id === undefined || event.session_id === session.nativeId) && tasks.observe(event) && !turnActive) owned.finishInput?.();
-      if (mainContext && event.type === 'system' && event.subtype === 'compact_boundary') contextInput = undefined;
-      if (mainContext) wakeups.observe(event);
-      if (mainContext && event.type === 'stream_event' && event.event?.type === 'message_start') tasks.observeReply(event.event.message?.id);
-      if (mainContext && event.type === 'assistant' && !event.isMeta && !event.is_meta) {
-        const model = event.message?.model;
-        if (!String(model || '').includes('synthetic')) {
-          tasks.observeReply(event.message?.id);
-          contextInput = undefined;
-          const usedTokens = claudeInputTokens(event.message?.usage);
-          if (validModelId(model) && usedTokens !== undefined) contextInput = { model, usedTokens };
-        }
-      }
-      if (replies && mainContext && event.type === 'stream_event') {
-        const part = event.event;
-        const block = `${replyMessage}:${Number(part?.index) || 0}`;
-        if (part?.type === 'message_start') replyMessage = typeof part.message?.id === 'string' ? part.message.id : randomUUID();
-        else if (part?.type === 'content_block_start' && part.content_block?.type === 'text') replied(replies.add(block, typeof part.content_block.text === 'string' ? part.content_block.text : ''));
-        else if (part?.type === 'content_block_delta' && part.delta?.type === 'text_delta' && typeof part.delta.text === 'string') { streamedMessages.add(replyMessage); replied(replies.add(block, part.delta.text)); }
-        else if (part?.type === 'content_block_stop') replied(replies.finish(block));
-      }
-      if (event.type === 'stream_event') {
-        if (event.event?.type === 'message_start') messageHasPartial = false;
-        const delta = event.event?.delta;
-        if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
-          show(delta.text); sawPartial = true; messageHasPartial = true;
-        }
-        if (event.event?.type === 'message_stop' && messageHasPartial) show('\n\n');
-      } else if (event.type === 'assistant') {
-        const messageId = typeof event.message?.id === 'string' ? event.message.id : randomUUID();
-        for (const [index, block] of (event.message?.content ?? []).entries()) {
-          if (block.type === 'text' && replies && mainContext && !streamedMessages.has(messageId)) replied(replies.add(`${messageId}:a${index}`, String(block.text), true));
-          if (block.type === 'text' && !messageHasPartial) show(String(block.text) + '\n\n');
-          if (block.type === 'tool_use') show(`[${block.name}]\n`);
-        }
-        messageHasPartial = false;
-      } else if (event.type === 'result' && mainContext) {
-        const capacity = contextInput && mainContext ? modelContextWindow(event.modelUsage, contextInput.model) : undefined;
-        if (contextInput && contextCapacity(capacity) && sawSessionId && !streamError) {
-          run.contextUsage = { ...contextInput, contextWindow: capacity, usedPercent: contextInput.usedTokens / capacity * 100,
-            updatedAt: new Date().toISOString() };
-          this.changed();
-        }
-        sawCompletion = true;
-        turnActive = false;
-        owned.claude?.setTurnIdle(true);
-        if (event.is_error) streamError = (event.errors ?? [event.result ?? 'Claude Code could not complete this turn.']).join('\n');
-        // A denied tool call (by the user or the auto mode classifier) is part of a turn that
-        // still finished; Claude's own reply explains it. Only a failed turn is reported.
-        if (event.is_error && event.permission_denials?.length) {
-          const denied = [...new Set(event.permission_denials.map((denial: any) => denial.tool_name ?? 'tool'))].join(', ');
-          streamError = `Permission was denied for: ${denied}. The instruction could not complete with the current permissions.`;
-          show(`\n${streamError}\n`);
-        }
-        if (!sawPartial && !shown && event.result) show(String(event.result));
-        owned.finishInput?.();
-      }
-    };
-    const parseLine = (line: string): void => {
-      try { parseEventLine(line); }
-      catch {
-        streamError = 'The provider emitted an invalid output event. The task was stopped.';
-        this.stopOwned(run.id, owned);
-      }
-    };
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => {
-      buffer += chunk;
-      let newline: number;
-      while ((newline = buffer.indexOf('\n')) >= 0) { const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); parseLine(line); }
-      if (buffer.length > 2_000_000) { streamError = 'Provider emitted an oversized output event.'; buffer = ''; this.stopOwned(run.id, owned); }
-    });
-    child.stderr.on('data', (chunk: string) => { stderr = (stderr + chunk).slice(-8000); });
-    child.stdin.on('error', (error: NodeJS.ErrnoException) => { if (error.code !== 'EPIPE') streamError = errorMessage(error); });
-    child.on('error', (error: Error) => { streamError = errorMessage(error); });
-    child.on('close', async (code: number | null, signal: NodeJS.Signals | null) => {
-      if (buffer) parseLine(buffer);
-      clearFinishTimer(); clearWaitTimers();
-      const pendingApproval = !!run.approvals?.length;
-      const pendingSteer = owned.claude?.hasPendingSteers();
-      delete run.backgroundWait;
-      owned.claude?.close();
-      // A newly bound UUID must be durable before this turn reports success.
-      await identitySaved;
+    prepared.start();
+  }
+
+  /** The only place a turn's end is decided: it leaves the live turns, frees its conversation, and gets its outcome. */
+  private exited(exit: TurnExit): void {
+    const { run, session } = exit;
+    if (exit.kind === 'claude') {
+      const { owned, summary } = exit;
       if (owned.killTimer) clearTimeout(owned.killTimer);
       this.owned.delete(run.id);
       this.reservedSessions.delete(session.id);
@@ -1227,16 +934,18 @@ export class RunManager extends EventEmitter {
       this.locallySettled.delete(session.id);
       this.locallySettled.set(session.id, Date.now());
       if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
+      const { code, signal, sawCompletion, sawSessionId, waitTimedOut, outstanding, noticePending } = summary;
+      let streamError = summary.streamError;
       if (run.status !== 'cancelled') {
-        const recover = !streamError && !waitTimedOut && sawSessionId && (tasks.outstanding > 0 || !!noticeId)
-          && !pendingApproval && !pendingSteer && !this.stopping && run.origin?.kind === 'owner';
-        if (tasks.outstanding || noticeId) this.append(run, `\n[Tower] Provider exit: code=${code ?? 'none'}, signal=${signal ?? 'none'}, result=${sawCompletion}, inputClosedByTower=${inputClosedByTower}, runningTasks=${tasks.runningCount}, unreadTasks=${tasks.unreadCount}.\n`);
+        const recover = !streamError && !waitTimedOut && sawSessionId && (outstanding > 0 || noticePending)
+          && !summary.pendingApproval && !summary.pendingSteer && !this.stopping && run.origin?.kind === 'owner';
+        if (outstanding || noticePending) this.append(run, `\n[Tower] Provider exit: code=${code ?? 'none'}, signal=${signal ?? 'none'}, result=${sawCompletion}, inputClosedByTower=${summary.inputClosedByTower}, runningTasks=${summary.runningTasks}, unreadTasks=${summary.unreadTasks}.\n`);
         if (!streamError && code === 0 && (!sawCompletion || !sawSessionId)) streamError = 'The provider exited without confirming completion in the requested conversation.';
         if (!streamError && waitTimedOut) streamError = 'The turn answered, but its background work did not finish within the time Tower waits; the work was ended with the turn.';
-        else if (!streamError && (tasks.outstanding || noticeId)) streamError = 'Claude Code exited before it took the results of background work it started in this turn.';
+        else if (!streamError && (outstanding || noticePending)) streamError = 'Claude Code exited before it took the results of background work it started in this turn.';
         if (streamError || code !== 0) {
           const detail = `The provider exited ${signal ? `with signal ${signal}` : `with code ${code ?? 'unknown'}`}.`;
-          this.fail(run, [streamError, detail, stderr.trim()].filter(Boolean).join('\n'));
+          this.fail(run, [streamError, detail, summary.stderr.trim()].filter(Boolean).join('\n'));
           if (recover) {
             const attempt = (run.scheduled?.backgroundRecoveryAttempt ?? 0) + 1;
             if (attempt <= 3) {
@@ -1247,16 +956,13 @@ export class RunManager extends EventEmitter {
         }
         else {
           run.status = 'completed'; run.finishedAt = new Date().toISOString();
-          const wakeup = wakeups.pending;
-          if (wakeup && !this.stopping) this.scheduleContinuation(run, wakeup);
+          if (summary.wakeup && !this.stopping) this.scheduleContinuation(run, summary.wakeup);
           this.changed();
         }
       } else this.changed();
-      finish();
+      exit.finish();
       if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
-    });
-    owned.claude.start(input);
-    this.changed();
+    }
   }
 
   /**
