@@ -12,7 +12,8 @@ import { triggerBackupOf } from '../../../server/triggers/backup.js';
 import { ONCE_FALLBACK } from '../../../server/triggers/once-storage.js';
 import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
 import type { Run } from '../../../shared/types.js';
-import { RepeatingScheduleSchema, type TriggerActor, type TriggerInput } from '../../../shared/triggers.js';
+import type { TriggerActor, TriggerInput } from '../../../shared/triggers.js';
+import * as OldSchema from './fixtures/trigger-schema-1.105.0.js';
 
 const OWNER: TriggerActor = { kind: 'owner', via: 'ui' };
 const FIXTURES = join(import.meta.dirname, 'fixtures');
@@ -143,16 +144,21 @@ test('the saved file after a fixed sequence of operations is byte-identical', as
 
 test('the saved file stays readable by a 1.105.0 engine', async () => {
   const saved = await goldenState();
-  const text = JSON.stringify(saved);
-  assert.doesNotMatch(text, /"type":"once"/, 'no schedule an older engine does not know');
+  assert.doesNotMatch(JSON.stringify(saved), /"type":"once"/, 'no schedule an older engine does not know');
+  // Exactly what a 1.105.0 engine's parseState reads of each definition, checked with its own frozen schema.
+  const projection = (value: Record<string, any>) => ({ name: value.name, enabled: value.enabled, source: value.source, handler: value.handler, policy: value.policy });
   const definitions = [...saved.triggers, ...saved.tombstones, ...Object.values(saved.revisions as Record<string, unknown[]>).flat()] as Array<Record<string, any>>;
   for (const definition of definitions) {
-    assert.equal(RepeatingScheduleSchema.safeParse(definition.source.schedule).success, true, definition.name);
+    const parsed = OldSchema.TriggerInputSchema.safeParse(projection(definition));
+    assert.equal(parsed.success, true, `${definition.name}: ${parsed.success ? '' : parsed.error.message}`);
+    assert.equal(typeof definition.id, 'string');
+    assert.ok(Number.isInteger(definition.revision));
     if (definition.onceSchedule) {
       assert.equal(definition.enabled, false, 'an older engine never schedules a once reservation');
       assert.deepEqual(definition.source.schedule, ONCE_FALLBACK);
     }
   }
+  assert.equal(OldSchema.TriggerSettingsSchema.safeParse(saved.settings).success, true);
   assert.ok(definitions.some(definition => definition.onceSchedule), 'the sequence stored a once reservation');
   assert.ok(Object.keys(saved.onceConsumed).length >= 2, 'the ledger keeps both consumptions');
 });
