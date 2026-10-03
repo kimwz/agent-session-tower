@@ -2,12 +2,13 @@ import { subscriptionOnly } from '../runs/subscription.js';
 import { requestedEffort, requestedModel, validEffort, validModelId } from '../providers/models.js';
 import { EventEmitter } from 'node:events';
 import { constants } from 'node:fs';
-import { mkdir, open, rename, stat, unlink } from 'node:fs/promises';
-import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, open, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
 import type { Attachment, AttachmentInput, AutoPromptDecision, AutoPromptJob, AutoPromptInput, AutoPromptRequest, Run, RunOrigin, Session, SessionDetail, Snapshot } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { AttachmentStore, attachmentMetadata, type StoredAttachment } from '../stores/attachments.js';
+import { writePrivateJson } from '../stores/private-json.js';
 import { RunError, type RunAdmission, type RunManager } from '../runs/manager.js';
 import { isSavedDelegation } from '../runs/saved-state.js';
 import { ownerOrigin, parseRunOrigin } from '../runs/origin.js';
@@ -472,14 +473,7 @@ export class AutoPromptManager extends EventEmitter {
   busy(): boolean { return this.admissions.size > 0 || this.controllers.size > 0 || Boolean(this.processing); }
   private persist(): Promise<void> {
     const data = JSON.stringify([...this.entries.values()]);
-    const write = this.writes.then(async () => {
-      const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
-      try {
-        const file = await open(temporary, 'wx', 0o600);
-        try { await file.writeFile(data); await file.sync(); } finally { await file.close(); }
-        await rename(temporary, this.path);
-      } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
-    });
+    const write = this.writes.then(() => writePrivateJson(this.path, data));
     this.writes = write.catch(() => {});
     return write;
   }
