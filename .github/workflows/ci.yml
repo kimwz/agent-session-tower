@@ -30,3 +30,14 @@ jobs:
       - if: matrix.node == 24
         run: node --import tsx -e "import('./server/tower-tools/read-db.ts').then(m => { if (!m.lookupsSupported()) { console.error('no SQLite authorizer'); process.exit(1); } })"
       - run: npm run check
+  test-integrity:
+    # Lists removed tests, new skips and changed assertions for the reviewer; fails only on a new unconditional skip.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 2 }
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: npm }
+      - run: npm ci --ignore-scripts
+      - run: node --import tsx scripts/test-integrity.ts
