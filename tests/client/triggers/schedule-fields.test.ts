@@ -78,7 +78,8 @@ test('the server accepts one minute to 31 days and nothing outside', () => {
 test('new HTTP and GitHub checks start every 5 minutes', () => {
   assert.deepEqual(blankHttpSource().schedule, { type: 'interval', everySeconds: 300 });
   assert.deepEqual(blankGitHubSource().schedule, { type: 'interval', everySeconds: 300 });
-  assert.equal(blankTrigger().source.kind === 'schedule' && blankTrigger().source.schedule.type, 'cron');
+  const { source } = blankTrigger();
+  assert.equal(source.kind === 'schedule' && source.schedule.type, 'cron');
 });
 
 test('a scheduled run offers once, cron and interval, and once starts an hour ahead', t => {
