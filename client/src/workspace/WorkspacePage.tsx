@@ -51,8 +51,15 @@ export function WorkspacePage({ cwd, machine: machineName, initialTool, file, to
     catch (error) { if (request.current === revision) setError(message(error), path); }
     finally { if (request.current === revision) setFileLoading(false); }
   };
-  // A clean document is read again, so a file the agent has just changed shows its current content.
-  useEffect(() => { if (file) void openFile(file, documentRef.current?.content === documentRef.current?.saved); }, [toolRequest]);
+  // A clean document is read again, so a file the agent has just changed shows its current content. A later request
+  // also lists the folders again, since the agent may have created the file after they were listed.
+  const requested = useRef(false);
+  useEffect(() => {
+    if (!file) return;
+    if (requested.current) setRefresh(value => value + 1);
+    requested.current = true;
+    void openFile(file, documentRef.current?.content === documentRef.current?.saved);
+  }, [toolRequest]);
   // Paths and bodies name the folder as its own computer knows it.
   const { node, id: folderPath } = splitScopedId(cwd);
   // A workspace page opened on its own asks this Tower for the computer's name.

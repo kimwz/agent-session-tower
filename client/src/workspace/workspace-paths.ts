@@ -36,23 +36,33 @@ export function hrefPath(href: string | undefined): string | undefined {
   return path === undefined || TOWER_ROUTES.has(path.split('/')[1] ?? '') ? undefined : absolutePath(path);
 }
 
-/** Inline code that is one absolute path, which may hold spaces; a command with flags is not a path. */
+/**
+ * Inline code that is one absolute path, which may hold spaces. A command with flags, or with a second absolute path,
+ * is not a path; a command with a relative argument cannot be told apart from a name with a space.
+ */
 export function inlineCodePath(code: string): string | undefined {
   const value = code.trim();
-  return value.includes('\n') || /\s-/.test(value) ? undefined : absolutePath(value);
+  return /\n|\s-|\s\//.test(value) ? undefined : absolutePath(value);
 }
 
 const PROSE_PATH = /(^|[\s(\[「『"'“‘:=,，])(\/[^\s`'"<>(){}[\]|「」『』“”‘’]+)/g;
-const TRAILING_PUNCTUATION = /[.,;:!?。、，]+$/;
-/** Hangul written straight after a file name is a particle (`a.md를`), not part of the name. */
-const PARTICLE_AFTER_EXTENSION = /^(.*\/[^/]*\.[A-Za-z0-9]{1,10})[ᄀ-ᇿ㄰-㆏가-힯]+$/;
+const PUNCTUATION = new Set('.,;:!?。、，');
+/**
+ * Hangul written straight after a Latin name or a line number is a particle or ending (`a.md를`, `Makefile을`,
+ * `a.ts:42에서`, `a.md입니다`), not part of the name. Only the usual particles count, so a name such as
+ * `report.txt백업` keeps its Hangul.
+ */
+const PARTICLE = /^(.*[\x21-\x7E])(?:을|를|이|가|은|는|에|의|로|으로|와|과|도|만|까지|부터|처럼|보다|입|인|라)[가-힯]*$/;
 
 /** Absolute paths written in prose, by their place in `text`. Paths with spaces are only found in code or links. */
 export function prosePaths(text: string): Array<{ start: number; end: number; path: string }> {
   const found: Array<{ start: number; end: number; path: string }> = [];
   for (const match of text.matchAll(PROSE_PATH)) {
-    let written = match[2].replace(TRAILING_PUNCTUATION, '');
-    written = PARTICLE_AFTER_EXTENSION.exec(written)?.[1] ?? written;
+    let written = match[2];
+    let end = written.length;
+    while (end > 0 && PUNCTUATION.has(written[end - 1])) end--;
+    written = written.slice(0, end);
+    written = PARTICLE.exec(written)?.[1] ?? written;
     const path = absolutePath(written);
     if (!path) continue;
     const start = match.index + match[1].length;

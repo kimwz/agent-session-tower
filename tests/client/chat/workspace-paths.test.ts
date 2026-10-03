@@ -45,7 +45,7 @@ test('link targets name files only when they are not web addresses or Tower rout
 test('inline code is a path only when it is one absolute path', () => {
   assert.equal(inlineCodePath('/Users/me/video/대본 초안.md'), '/Users/me/video/대본 초안.md');
   assert.equal(inlineCodePath(' /Users/me/video/a.md:12 '), '/Users/me/video/a.md');
-  for (const code of ['npm run check', '/usr/bin/env -S node', 'text-only/a.md', '/a', '/Users/me\n/x']) assert.equal(inlineCodePath(code), undefined, code);
+  for (const code of ['npm run check', '/usr/bin/env -S node', 'text-only/a.md', '/a', '/Users/me\n/x', '/Users/me/a.ts /Users/me/b.ts']) assert.equal(inlineCodePath(code), undefined, code);
   assert.equal(inlineCodePath('/Users/me/video/'), '/Users/me/video');
 });
 
@@ -57,6 +57,17 @@ test('prose paths end at punctuation and Korean particles and need a separator b
     ['/Users/me/video/c.ts:42', '/Users/me/video/c.ts'],
   ]);
   assert.deepEqual(prosePaths('and/or, a/b/c, ssh://host/a/b, /tmp, 1/2/3'), []);
+  const written = (value: string) => prosePaths(value).map(found => [value.slice(found.start, found.end), found.path]);
+  assert.deepEqual(written('/w/monitor/Makefile을 고쳤고 /w/monitor/client에서 /w/a.ts:42:7에서 /w/a.md입니다'), [
+    ['/w/monitor/Makefile', '/w/monitor/Makefile'], ['/w/monitor/client', '/w/monitor/client'], ['/w/a.ts:42:7', '/w/a.ts'], ['/w/a.md', '/w/a.md'],
+  ]);
+  assert.deepEqual(written('/w/report.txt백업 /w/영상/대본.md를 /w/영상에서'), [
+    ['/w/report.txt백업', '/w/report.txt백업'], ['/w/영상/대본.md', '/w/영상/대본.md'], ['/w/영상에서', '/w/영상에서'],
+  ]);
+  const long = `/w/a${'.'.repeat(100_000)}x`;
+  const started = performance.now();
+  prosePaths(long);
+  assert.ok(performance.now() - started < 200, 'trailing punctuation is trimmed in linear time');
 });
 
 const opened: unknown[] = [];
