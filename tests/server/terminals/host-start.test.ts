@@ -23,6 +23,20 @@ test('a new shell starts the terminal host when none answers and waits while it 
   const pending = new Set<Promise<unknown>>();
   const children: Array<InstanceType<typeof EventEmitter>> = [];
   let stateDir: string | undefined;
+  // Everything the after hook reads exists before it is added and before anything is awaited, so a setup that fails
+  // early is cleaned up too. The socket answers only once it listens, by when `paths` is set.
+  let status = 200;
+  const methods: string[] = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', chunk => chunks.push(chunk as Buffer));
+    req.on('end', () => {
+      const method = (JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as { method?: string }).method ?? '';
+      methods.push(method);
+      if (status !== 200) { res.writeHead(status).end(); return; }
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ protocol: RUNNER_PROTOCOL, stateDir: paths.stateDir, instance: 'i', version: '1', result: method === 'create' ? { id: 'shell' } : 'pong' }));
+    });
+  });
   t.after(async () => {
     for (const made of clients) made.dispose();
     for (const child of children) child.emit('error', new Error('the fixture is closing'));
@@ -49,18 +63,6 @@ test('a new shell starts the terminal host when none answers and waits while it 
   syncBuiltinESMExports();
   stateDir = await mkdtemp(join(tmpdir(), 'tower-terminal-start-'));
   const paths = await terminalHostPaths(stateDir);
-  let status = 200;
-  const methods: string[] = [];
-  const server = createServer((req, res) => {
-    const chunks: Buffer[] = [];
-    req.on('data', chunk => chunks.push(chunk as Buffer));
-    req.on('end', () => {
-      const method = (JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as { method?: string }).method ?? '';
-      methods.push(method);
-      if (status !== 200) { res.writeHead(status).end(); return; }
-      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ protocol: RUNNER_PROTOCOL, stateDir: paths.stateDir, instance: 'i', version: '1', result: method === 'create' ? { id: 'shell' } : 'pong' }));
-    });
-  });
   /** Registers a promise the test started, with a handler at once; the test still awaits it for its outcome. */
   const pend = <T>(work: Promise<T>): Promise<T> => { pending.add(work); work.catch(() => {}); return work; };
   /** A client, registered when made, whose start work is registered whenever it begins. */
