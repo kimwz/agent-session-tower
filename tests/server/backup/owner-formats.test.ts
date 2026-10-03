@@ -16,6 +16,7 @@ import { decryptBackup } from '../../../server/backup/crypto.js';
 import { SecretService } from '../../../server/secrets/service.js';
 import { SecretStore } from '../../../server/triggers/secrets.js';
 import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
+import type { TriggerBackup } from '../../../server/triggers/backup.js';
 import { initialModelSettings } from '../../../shared/models.js';
 import type { TriggerActor, TriggerInput } from '../../../shared/triggers.js';
 import type { Run } from '../../../shared/types.js';
@@ -57,7 +58,7 @@ async function engine(t: TestContext, stateDir: string, clock = { now: Date.pars
       runs.push(run); return { run, session: { id: run.sessionId, nativeId: 'n', provider: 'codex', title: '', cwd: stateDir, project: 'p', status: 'idle', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true } }; },
     enqueue: async () => { throw new Error('not used'); }, runs: () => structuredClone(runs), session: () => undefined,
   };
-  const open = async (restore?: Parameters<TriggerService['start']>[0]['restore']) => {
+  const open = async (restore?: TriggerBackup) => {
     const service = new TriggerService({ stateDir, executor, now: () => clock.now, tickMs: 60_000, ...(secretStore ? { secretStore } : {}) });
     const result = await service.start(restore ? { restore } : {});
     t.after(async () => { service.close(); await service.settle(); });
