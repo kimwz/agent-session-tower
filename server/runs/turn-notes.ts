@@ -1,6 +1,12 @@
-import type { Run, Session } from '../../shared/types.js';
+import type { Run, RunInstructions, Session } from '../../shared/types.js';
+import { RunError } from './run-records.js';
 
 export const MAX_INSTRUCTIONS = 48_000;
+/** Instructions as a turn may carry them, or a 413. */
+export function checkedInstructions(value: RunInstructions): RunInstructions {
+  if (typeof value?.text !== 'string' || !value.text.trim() || value.text.length > MAX_INSTRUCTIONS) throw new RunError('Tower instructions for this turn are invalid or too long.', 413);
+  return { text: value.text, ...(value.required ? { required: true } : {}) };
+}
 const NOTES_MS = 6_000;
 type Notes = (run: Run, session: Session) => Promise<string | undefined>;
 

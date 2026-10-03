@@ -1056,7 +1056,6 @@ test('the private MCP config is removed when the provider cannot be spawned', as
   const directory = await mkdtemp(join(tmpdir(), 'tower-mcp-spawn-failure-'));
   const privateTmp = join(directory, 'tmp'); await mkdir(privateTmp);
   const previous = process.env.TMPDIR; process.env.TMPDIR = privateTmp;
-  t.after(async () => { if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous; await rm(directory, { recursive: true, force: true }); });
   const session = makeSession(directory, { provider: 'claude', id: `claude:${ID}` });
   let configPath: string | undefined;
   const manager = new RunManager({ stateDir: join(directory, 'state'), getSession: id => id === session.id ? session : undefined, refreshSessions: async () => {}, pollMs: 20,
@@ -1064,7 +1063,11 @@ test('the private MCP config is removed when the provider cannot be spawned', as
     resolveRunTools: () => ({ required: false, servers: { tower: { command: '/fixture/node', args: [], env: { TOWER_MCP_CAPABILITY: 'e'.repeat(64) } } } }),
     spawnProcess: ((_file: string, args: string[]) => { configPath = args[args.indexOf('--mcp-config') + 1]; throw new Error('spawn refused by the fixture'); }) as never });
   await manager.start();
-  t.after(() => manager.close());
+  t.after(async () => {
+    await manager.close();
+    if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous;
+    await rm(directory, { recursive: true, force: true });
+  });
   const run = await manager.enqueue(session.id, 'Use the tools');
   const result = await finished(manager, run.id);
   assert.equal(result.status, 'error');

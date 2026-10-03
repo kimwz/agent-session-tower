@@ -28,3 +28,16 @@ export function continuedRunById(runs: readonly Run[], id: string | undefined): 
   if (!id) return undefined;
   return continuedRun(runs, runs.find(item => item.id === id) ?? runs.find(item => (item.scheduled?.resume === 'update' || item.scheduled?.resume === 'permission') && item.scheduled.afterRunId === id));
 }
+
+/**
+ * What a run Tower queues to carry `after`'s work on keeps of it: the same authority (origin, delegation), the
+ * instructions it could not go without (a first turn's notes do not go on), unattended, model and effort. A permission
+ * continuation also keeps the Codex reviewer its thread chose (`reviewer`).
+ */
+export function inheritedRunFields(after: Run, options: { reviewer?: boolean } = {}): Pick<Run, 'origin' | 'delegation' | 'instructions' | 'codexApprovalsReviewer' | 'unattended' | 'model' | 'effort'> {
+  return { origin: after.origin ?? { kind: 'unknown' },
+    ...(after.delegation ? { delegation: { ...after.delegation } } : {}),
+    ...(after.instructions?.required ? { instructions: { ...after.instructions } } : {}),
+    ...(options.reviewer && after.codexApprovalsReviewer ? { codexApprovalsReviewer: after.codexApprovalsReviewer } : {}),
+    ...(after.unattended ? { unattended: true } : {}), ...(after.model ? { model: after.model } : {}), ...(after.effort ? { effort: after.effort } : {}) };
+}

@@ -1,39 +1,40 @@
 import type { PermissionRequest } from '../../shared/permissions.js';
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
-import { mkdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { CreateSessionRequest, MessageAttachments, Provider, Run, RunApprovalResponse, RunInstructions, RunOrigin, Session, SteerBlock } from '../../shared/types.js';
-import { attachmentMetadata, attachmentPrompt, AttachmentStore, claudeImageBlocks, imagePaths } from '../stores/attachments.js';
+import { attachmentPrompt, AttachmentStore, claudeImageBlocks, imagePaths } from '../stores/attachments.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
 import type { CodexBridgeRun, CodexBridgeOptions } from './codex-bridge.js';
 import { requestedEffort, requestedModel, validModelId } from '../providers/models.js';
 import { SteeringError } from './steering.js';
 import { ClaudeControl } from './claude-control.js';
 import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioRun } from './codex-stdio.js';
-import { claudeInputTokens, contextCapacity, modelContextWindow, nativeContextObservation, withNativeContext } from '../sessions/context.js';
+import { claudeInputTokens, contextCapacity, modelContextWindow, withNativeContext } from '../sessions/context.js';
 import { defaultStateDir } from '../state-dir.js';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { findExecutable, PROVIDERS } from '../providers/discovery.js';
 import { towerInstructionsBlock } from '../sessions/parser.js';
-import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
+import { isCreatedSession, UUID, type CreatedSession } from './saved-state.js';
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
 import { ReplyLog } from './replies.js';
 import { checkClaudeSubscription, markMaster, MASTER_TOOL_TIMEOUT_SECONDS, subscriptionOnly } from './subscription.js';
 import { awaitToolServers, NO_RUN_TOOLS, privateMcpConfig, type RunTools } from './session-mcp.js';
-import { automatedOrigin, ownerOrigin, parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
+import { automatedOrigin, ownerOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
 import { WakeupTracker, type Wakeup } from './wakeup.js';
 import { TOWER_NOTICE } from '../../shared/task-notification.js';
 import { BackgroundTaskTracker, messageText, type FinishedTask } from './background-tasks.js';
 import { automaticApprovals, claudeStartMode, codexReviewer, creationReviewer } from './approval-policy.js';
 import { OwnerAnswers } from './owner-answers.js';
-import { MAX_INSTRUCTIONS, TurnNotes } from './turn-notes.js';
+import { checkedInstructions, TurnNotes } from './turn-notes.js';
 import { sessionEnv, turnEnv, type LaunchMarks } from './turn-env.js';
 import { ToolNotices } from './tool-notices.js';
-import { errorMessage, FINISHED, finishedTime, notAdmitted, RunError, shown } from './run-records.js';
-import { PermissionContinuations, restorePermissionRun, retainedReceipts } from './permission-continuation.js';
+import { errorMessage, FINISHED, finishedTime, MAX_OUTPUT, MAX_PROMPT, notAdmitted, RunError, shown } from './run-records.js';
+import { MAX_RUNS, RunHistory, SCHEDULED_OUTPUT, UPDATE_RESUME_WAIT } from './run-history.js';
+import { PermissionContinuations, retainedReceipts } from './permission-continuation.js';
+import { inheritedRunFields } from './continuations.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -115,33 +116,12 @@ export interface RunAdmission {
   instructions?: RunInstructions;
 }
 
-const MAX_OUTPUT = 64_000;
-/** Marks, in runs.json, a turn still to run whose instructions (kept only in memory) it cannot go without. */
-const NEEDS_INSTRUCTIONS = 'needsInstructions';
 type SteerableAdapter = CodexStdioRun | CodexBridgeRun | ClaudeControl;
 /** What the page shows about inserting a queued instruction now: the button, or why not. */
 function steerable(steering: { target: Run } | { blocked: SteerBlock } | undefined): Pick<Run, 'canSteer' | 'steerBlocked'> {
   return steering && 'blocked' in steering ? { canSteer: false, steerBlocked: steering.blocked } : { canSteer: Boolean(steering) };
 }
-function checkedInstructions(value: RunInstructions): RunInstructions {
-  if (typeof value?.text !== 'string' || !value.text.trim() || value.text.length > MAX_INSTRUCTIONS) throw new RunError('Tower instructions for this turn are invalid or too long.', 413);
-  return { text: value.text, ...(value.required ? { required: true } : {}) };
-}
-const MAX_PROMPT = 32_000;
-/** Finished runs kept; unfinished runs, and runs an automation still has to report, are never dropped for this. */
-const MAX_RUNS = 100;
-const MAX_RETAINED = 50;
-/** A retained finished run keeps what its result notice uses. */
-const RETAINED_OUTPUT = 20_000;
-const MAX_SAVED_BYTES = 64 * 1024 * 1024;
-/** What builds before 1.86.0 read at most. */
-const LEGACY_SAVED_BYTES = 11_500_000;
-/** Marks, in runs.json, a queued turn accepted while Tower switched workers: a restart keeps it queued. */
-const KEEP_QUEUED = 'keepQueued';
-/** Marks, in runs.json, a finished run an automation still has to report. */
-const RETAIN = 'retain';
 const UPDATE_WAIT = 'Waiting: Tower is switching to its new version; this starts right after.';
-const UPDATE_RESUME_WAIT = 'Tower resumes this conversation on its new version.';
 const WRAP_UP_RETRY_MS = 30_000;
 const WRAP_UP_NOTICE = `${TOWER_NOTICE} Tower is about to restart to apply an update. Within the next few minutes bring your work to a safe stopping point: finish or pause the current step, do not start long or risky operations, and do not leave half-applied changes. Then end your turn with a short note of what is done and what remains. Tower resumes this conversation automatically right after the update. Do not report the task as finished unless it is.`;
 const RESUME_NOTICE = `${TOWER_NOTICE} Tower was updated while this conversation was working, and the previous turn was ended for the update. Continue the original task. First check the conversation, files and running processes to see what was already done; do not repeat actions with outside effects (deploys, pushes, sent messages) without checking their result. If the task is already complete, say so briefly and stop.`;
@@ -162,8 +142,6 @@ interface UpdateTarget { delegated: boolean; retryAt: number;
 /** `active` while new turns wait; after a give-up, turns already stopped or asked to wrap up are still settled. */
 interface UpdateDrain { sequence: number; startedAt: number; deadline: number; delegated: (run: Run) => boolean; active: boolean; targets: Map<string, UpdateTarget>; stoppingBridges: Set<string>; wrapUps: Set<string> }
 const MAX_QUEUED = 32;
-/** A scheduled continuation Tower was not running for is still delivered this long after its time. */
-const SCHEDULE_GRACE_MS = 60 * 60 * 1000;
 const BACKGROUND_FOLLOW_UP_MS = 60_000;
 const BACKGROUND_WAIT_MAX_MS = 2 * 60 * 60 * 1000;
 /** What Tower tells Claude when a finished background task did not start a follow-up turn by itself. */
@@ -179,8 +157,7 @@ export { RunError };
 /** Owns only processes launched by this monitor; never signals an external agent. */
 export class RunManager extends EventEmitter {
   private readonly options: RunnerOptions;
-  private readonly stateFile: string;
-  private readonly createdFile: string;
+  private readonly history: RunHistory;
   private readonly attachments: AttachmentStore;
   private readonly createdSessions = new Map<string, CreatedSession>();
   private readonly runs = new Map<string, Run>();
@@ -195,39 +172,24 @@ export class RunManager extends EventEmitter {
   private readonly admissions = new Set<string>();
   private readonly locallySettled = new Map<string, number>();
   private readonly settledRuns = new Set<string>();
-  /** Queued runs accepted while Tower switched workers; a restart keeps them queued (see KEEP_QUEUED). */
-  private readonly carried = new Set<string>();
   /** Runs the owner asked to stop; a Codex app submission taken back for an update is then not queued again. */
   private readonly ownerStopped = new Set<string>();
-  private retained: () => Iterable<string> = () => [];
-  /** Runs saved as retained: kept until the automations that know which runs they need are loaded (`markReady`). */
-  private readonly restoredRetained = new Set<string>();
   private drain?: UpdateDrain;
   private ready: boolean;
-  private readonly instructionsFile: string;
   private pollTimer?: ReturnType<typeof setInterval>;
   private notifyTimer?: ReturnType<typeof setTimeout>;
   private outputPersistTimer?: ReturnType<typeof setTimeout>;
-  /** The last content each file holds. Updated only inside the write queue, after a successful write. */
-  private readonly saved: { runs?: string; created?: string; instructions?: string } = {};
   private pumping = false;
   private automationLimit = Infinity;
   private launchGate?: (run: Run) => string | undefined;
   private launchPrepare?: (run: Run) => Promise<void>;
   private started = false;
   private stopping = false;
-  private writes: Promise<void> = Promise.resolve();
-  private persistenceError?: Error;
-  /** The last save of required instructions failed: a handoff would lose them, so `flushState` refuses. */
-  private instructionsError?: Error;
 
   constructor(options: RunnerOptions) {
     super();
     this.options = options;
-    this.stateFile = join(options.stateDir ?? defaultStateDir(), 'runs.json');
-    this.createdFile = join(options.stateDir ?? defaultStateDir(), 'created-sessions.json');
-    // Instructions a queued turn cannot go without, kept apart from runs.json so no older Tower ever shows them.
-    this.instructionsFile = join(options.stateDir ?? defaultStateDir(), 'run-instructions.json');
+    this.history = new RunHistory(options.stateDir ?? defaultStateDir());
     this.ready = !options.holdUntilReady;
     this.attachments = new AttachmentStore(options.stateDir ?? defaultStateDir());
   }
@@ -353,113 +315,33 @@ export class RunManager extends EventEmitter {
     if (this.started) return;
     await mkdir(this.options.stateDir ?? defaultStateDir(), { recursive: true, mode: 0o700 });
     await this.attachments.start();
-    try {
-      const saved = await readPrivateJson(this.createdFile);
+    const saved = await this.history.readCreated();
+    if (saved !== undefined) {
       if (!Array.isArray(saved) || saved.some(value => !isCreatedSession(value))) throw new Error('Saved created sessions are invalid.');
       for (const value of saved) {
         const origin = restoredSessionOrigin((value as { origin?: unknown }).origin);
         if (origin) value.origin = origin; else delete value.origin;
         this.createdSessions.set(value.session.id, value);
       }
-      this.saved.created = JSON.stringify([...this.createdSessions.values()]);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      // Without any created session, the identities file is never created.
-      this.saved.created = '[]';
+      this.history.noteCreated(JSON.stringify([...this.createdSessions.values()]));
     }
-    const kept = await this.savedInstructions();
-    try {
-      if ((await stat(this.stateFile)).size > MAX_SAVED_BYTES) throw new Error('Saved run history is too large.');
-      const saved: unknown = JSON.parse(await readFile(this.stateFile, 'utf8'));
-      if (!Array.isArray(saved)) throw new Error('Saved run history is invalid.');
-      const valid = saved.slice(-1000).filter(isSavedRun);
-      // Every unfinished run and every run an automation still has to report comes back; of the rest, the newest.
-      const marked = (value: Run, key: string) => (value as unknown as Record<string, unknown>)[key] === true;
-      const finished = valid.filter(value => FINISHED.has(value.status) && !marked(value, RETAIN)).sort((a, b) => finishedTime(a) - finishedTime(b));
-      const dropped = new Set(finished.slice(0, Math.max(0, finished.length - MAX_RUNS)));
-      for (const value of valid) {
-        if (dropped.has(value)) continue;
-        const run: Run = { ...value, prompt: value.prompt.slice(0, MAX_PROMPT), output: value.output.slice(-MAX_OUTPUT),
-          ...(value.attachments ? { attachments: value.attachments.map(item => attachmentMetadata(item)!) } : {}) };
-        // A malformed origin never reads back as owner work.
-        if (value.origin !== undefined) run.origin = parseRunOrigin(value.origin) ?? { kind: 'unknown' };
-        // A permission request belongs to a live process, never a restored run.
-        delete run.approvals;
-        delete run.instructions;
-        let needsInstructions = marked(value, NEEDS_INSTRUCTIONS);
-        const keepQueued = marked(value, KEEP_QUEUED);
-        if (marked(value, RETAIN)) this.restoredRetained.add(run.id);
-        for (const key of [NEEDS_INSTRUCTIONS, KEEP_QUEUED, RETAIN]) delete (run as unknown as Record<string, unknown>)[key];
-        const instructions = needsInstructions && !FINISHED.has(run.status) ? kept.get(run.id) : undefined;
-        if (instructions) { run.instructions = instructions; needsInstructions = false; }
-        delete run.canSteer; delete run.steerBlocked;
-        delete run.backgroundWait;
-        if (run.steering?.state === 'sending') run.steering.state = 'uncertain';
-        const context = nativeContextObservation(run.contextUsage);
-        if (context) run.contextUsage = context; else delete run.contextUsage;
-        // A continuation that has not started is only a time and the agent's own prompt; it waits again, unless it needed
-        // instructions, which did not survive the restart.
-        if (run.status === 'queued' && run.scheduled && needsInstructions) {
-          run.status = 'cancelled';
-          run.error = 'Agent Session Tower restarted before this continuation, and it would have run without the instructions Tower gave its turn. It was not started; send an instruction to continue.';
-          run.finishedAt = new Date().toISOString();
-        } else if (restorePermissionRun(run)) { /* A permission notice or continuation (see permission-continuation.ts). */ }
-        else if (run.status === 'queued' && run.scheduled?.resume === 'update') run.output = UPDATE_RESUME_WAIT;
-        else if (run.status === 'queued' && run.scheduled && Date.parse(run.scheduled.at) > Date.now() - SCHEDULE_GRACE_MS) run.output = scheduledOutput;
-        // Accepted while Tower switched to its new version: it runs here, exactly once.
-        else if (run.status === 'queued' && keepQueued && !needsInstructions) this.carried.add(run.id);
-        else if (run.status === 'running' || run.status === 'queued') {
-          const missedSchedule = run.status === 'queued' && run.scheduled;
-          run.status = run.status === 'running' ? 'error' : 'cancelled';
-          run.error = run.steering
-            ? 'Agent Session Tower stopped before this inserted instruction finished. It was not resent. Check the conversation before sending again.'
-            : missedSchedule
-              ? 'Agent Session Tower was not running when this scheduled continuation was due. It was not started; send an instruction to continue.'
-              : 'Agent Session Tower stopped before this task finished. It was not restarted; send the instruction again to continue.';
-          run.finishedAt = new Date().toISOString();
-        }
-        this.runs.set(run.id, run);
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
+    for (const run of await this.history.restore()) this.runs.set(run.id, run);
     this.started = true;
     // Without a worker to load the automations later, the retained runs are whatever they report from now on.
-    if (this.ready) this.restoredRetained.clear();
+    if (this.ready) this.history.restoredRetained.clear();
     this.changed();
     await this.flush();
     this.pollTimer = setInterval(() => { void this.pump(); }, this.options.pollMs ?? 1500);
     this.pollTimer.unref();
   }
 
-  /** Required instructions of queued turns, saved apart from runs.json. A file that cannot be read keeps none. */
-  private async savedInstructions(): Promise<Map<string, RunInstructions>> {
-    const kept = new Map<string, RunInstructions>();
-    try {
-      const saved = await readPrivateJson(this.instructionsFile);
-      if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
-        for (const [id, value] of Object.entries(saved as Record<string, unknown>)) {
-          try { if (UUID.test(id)) kept.set(id, { ...checkedInstructions(value as RunInstructions), required: true }); } catch { /* An invalid entry is left out. */ }
-        }
-      }
-      this.saved.instructions = JSON.stringify(Object.fromEntries(kept));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error(`Saved turn instructions were not read: ${errorMessage(error)}`);
-    }
-    return kept;
-  }
-
   /** Starts queued runs once everything a launch asks for is in place (see `holdUntilReady`). */
-  markReady(): void { if (this.ready) return; this.ready = true; this.restoredRetained.clear(); void this.pump(); }
+  markReady(): void { if (this.ready) return; this.ready = true; this.history.restoredRetained.clear(); void this.pump(); }
 
   /** Runs an automation still has to report: kept through pruning and restarts. */
-  setRetained(retained: () => Iterable<string>): void { this.retained = retained; }
+  setRetained(retained: () => Iterable<string>): void { this.history.setRetained(retained); }
 
-  private retainedIds(): Set<string> {
-    const ids = [...new Set([...this.restoredRetained, ...this.retained()])].map(id => this.runs.get(id)).filter((run): run is Run => !!run)
-      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, MAX_RETAINED).map(run => run.id);
-    return new Set([...ids, ...retainedReceipts(this.runs.values())]);
-  }
+  private retainedIds(): Set<string> { return this.history.retainedIds(this.runs, retainedReceipts(this.runs.values())); }
 
   list(): Run[] { return [...this.runs.values()].map((run) => ({ ...shown(run), ...steerable(this.steering(run)), ...(run.steering ? { steering: { ...run.steering } } : {}), ...(run.attachments ? { attachments: run.attachments.map(item => ({ ...item })) } : {}),
     ...(run.contextUsage ? { contextUsage: { ...run.contextUsage } } : {}),
@@ -1479,11 +1361,8 @@ export class RunManager extends EventEmitter {
     if (live.some(run => run.sessionId === after.sessionId && run.steering?.targetRunId !== after.id)
       || live.filter(run => run.scheduled && run.scheduled.resume !== 'update').length >= MAX_QUEUED) return;
     // Instructions the turn could not go without (receipts, policy) go on with it; a first turn's notes do not.
-    const run: Run = { id: randomUUID(), sessionId: after.sessionId, origin: after.origin ?? { kind: 'unknown' }, prompt: wakeup.prompt, status: 'queued',
-      ...(after.delegation ? { delegation: { ...after.delegation } } : {}),
-      ...(after.instructions?.required ? { instructions: { ...after.instructions } } : {}),
-      createdAt: new Date().toISOString(), output: scheduledOutput, scheduled: { at: new Date(wakeup.at).toISOString(), afterRunId: after.id, ...(backgroundRecoveryAttempt ? { backgroundRecoveryAttempt } : {}) },
-      ...(after.unattended ? { unattended: true } : {}), ...(after.model ? { model: after.model } : {}), ...(after.effort ? { effort: after.effort } : {}) };
+    const run: Run = { id: randomUUID(), sessionId: after.sessionId, ...inheritedRunFields(after), prompt: wakeup.prompt, status: 'queued',
+      createdAt: new Date().toISOString(), output: SCHEDULED_OUTPUT, scheduled: { at: new Date(wakeup.at).toISOString(), afterRunId: after.id, ...(backgroundRecoveryAttempt ? { backgroundRecoveryAttempt } : {}) } };
     if (backgroundRecoveryAttempt) {
       run.output = 'Tower will resume unfinished background work after an unexpected provider exit.';
       this.append(after, `\n[Tower] Scheduled background recovery ${backgroundRecoveryAttempt}/3.\n`);
@@ -1617,11 +1496,8 @@ export class RunManager extends EventEmitter {
     }
     const now = new Date().toISOString();
     const id = randomUUID();
-    this.runs.set(id, { id, sessionId: run.sessionId, origin: run.origin ?? { kind: 'unknown' }, prompt: RESUME_NOTICE, status: 'queued',
-      ...(run.delegation ? { delegation: { ...run.delegation } } : {}),
-      ...(run.instructions?.required ? { instructions: { ...run.instructions } } : {}),
-      createdAt: now, output: UPDATE_RESUME_WAIT, scheduled: { at: now, afterRunId: run.id, resume: 'update' },
-      ...(run.unattended ? { unattended: true } : {}), ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}) });
+    this.runs.set(id, { id, sessionId: run.sessionId, ...inheritedRunFields(run), prompt: RESUME_NOTICE, status: 'queued',
+      createdAt: now, output: UPDATE_RESUME_WAIT, scheduled: { at: now, afterRunId: run.id, resume: 'update' } });
   }
 
   private supersede(run: Run, reason: string): void {
@@ -1711,47 +1587,15 @@ export class RunManager extends EventEmitter {
   private persist(retained = this.retainedIds()): void {
     // This save includes any streamed output that was waiting for its slower cadence.
     this.cancelOutputPersist();
-    // Instruction text never reaches disk, where an older Tower could show it. A turn still to run records only that it
-    // needs instructions; after a restart it is cancelled rather than started without them.
-    for (const id of this.carried) if (this.runs.get(id)?.status !== 'queued') this.carried.delete(id);
     // A wrap-up request is never carried: after a restart it would start as a turn of its own.
-    if (this.updating) for (const run of this.runs.values()) if (run.status === 'queued' && !run.scheduled && !this.drain!.wrapUps.has(run.id)) this.carried.add(run.id);
-    const serialize = (finishedOutput?: number) => JSON.stringify(this.list().map(({ approvals: _liveApprovals, canSteer: _liveSteering, steerBlocked: _liveBlock, ...run }) => {
-      const saved: Record<string, unknown> = { ...run };
-      if (finishedOutput !== undefined && FINISHED.has(run.status)) saved.output = run.output.slice(-finishedOutput);
-      if (this.runs.get(run.id)?.instructions?.required && !FINISHED.has(run.status)) saved[NEEDS_INSTRUCTIONS] = true;
-      if (this.carried.has(run.id)) saved[KEEP_QUEUED] = true;
-      if (retained.has(run.id) && FINISHED.has(run.status)) { saved[RETAIN] = true; saved.output = run.output.slice(-RETAINED_OUTPUT); }
-      return saved;
-    }));
-    // Older builds refuse a history over 12 MB, so a rollback could not start: long finished output is shortened first.
-    let data = serialize();
-    if (Buffer.byteLength(data) > LEGACY_SAVED_BYTES) data = serialize(2_000);
-    // Kept only for turns still to run, in a private file older Towers do not read (see instructionsFile).
-    const instructions = JSON.stringify(Object.fromEntries([...this.runs.values()]
-      .filter(run => run.instructions?.required && !FINISHED.has(run.status)).map(run => [run.id, run.instructions])));
-    const created = JSON.stringify([...this.createdSessions.values()]);
-    this.writes = this.writes.then(async () => {
-      // Compare inside the queue: an earlier queued write may still change what a file holds.
-      // Write identities first. A crash between commits may leave an orphaned
-      // placeholder, which recovery displays as failed and never submits again.
-      if (created !== this.saved.created) { await writePrivateJson(this.createdFile, created); this.saved.created = created; }
-      // Instructions before the runs that name them, so a saved marker always finds its text.
-      // A failure here costs only those turns' restart (they are cancelled then, as before); runs.json is still saved.
-      if (instructions === (this.saved.instructions ?? '{}')) this.instructionsError = undefined;
-      else {
-        try { await writePrivateJson(this.instructionsFile, instructions); this.saved.instructions = instructions; this.instructionsError = undefined; }
-        catch (error) { this.instructionsError = error as Error; console.error(`Turn instructions were not saved: ${errorMessage(error)}`); }
-      }
-      if (data !== this.saved.runs) { await writePrivateJson(this.stateFile, data); this.saved.runs = data; }
-      this.persistenceError = undefined;
-    }).catch((error: Error) => { this.persistenceError = error; });
+    if (this.updating) for (const run of this.runs.values()) if (run.status === 'queued' && !run.scheduled && !this.drain!.wrapUps.has(run.id)) this.history.carried.add(run.id);
+    this.history.save(this.runs, this.list(), JSON.stringify([...this.createdSessions.values()]), retained);
   }
 
   /** Waits for every accepted change to reach disk, without stopping or cancelling anything. */
   async flushState(): Promise<void> {
     this.persist(); await this.flush();
-    if (this.instructionsError) throw new RunError(`Cannot save instructions of turns still to run: ${this.instructionsError.message}`, 503);
+    this.history.checkInstructionsSaved();
   }
 
   /**
@@ -1777,11 +1621,7 @@ export class RunManager extends EventEmitter {
   /** True while any provider process, desktop turn or admission is still live, whatever the run status says. */
   busy(): boolean { return this.owned.size + this.bridged.size + this.stdio.size + this.admissions.size + this.reservedSessions.size + this.toolNotices.sending > 0 || this.pumping; }
 
-  private async flush(): Promise<void> {
-    await this.writes;
-    if (this.persistenceError) throw notAdmitted(new RunError(`Cannot save the instruction queue: ${this.persistenceError.message}`, 503));
-  }
+  private flush(): Promise<void> { return this.history.flush(); }
 }
 
-const scheduledOutput = 'Scheduled by the agent. Tower resumes this conversation at the scheduled time.';
 function automated(run: Run): boolean { return automatedOrigin(run.origin); }

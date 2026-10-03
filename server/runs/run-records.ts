@@ -11,6 +11,9 @@ export class RunError extends Error {
 }
 export function notAdmitted(error: RunError): RunError { error.retryable = true; return error; }
 
+export const MAX_PROMPT = 32_000;
+export const MAX_OUTPUT = 64_000;
+
 export const FINISHED = new Set<Run['status']>(['completed', 'error', 'cancelled']);
 /** When a run finished, for keeping the most recently finished ones. */
 export const finishedTime = (run: Run) => Date.parse(run.finishedAt ?? run.createdAt) || 0;

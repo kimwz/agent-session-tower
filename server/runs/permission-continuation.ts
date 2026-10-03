@@ -3,6 +3,7 @@ import type { EventEmitter } from 'node:events';
 import type { PermissionRequest } from '../../shared/permissions.js';
 import { TOWER_NOTICE } from '../../shared/task-notification.js';
 import type { Run, Session } from '../../shared/types.js';
+import { inheritedRunFields } from './continuations.js';
 import { FINISHED, finishedTime, RunError } from './run-records.js';
 
 export interface PermissionHost {
@@ -93,13 +94,10 @@ export class PermissionContinuations {
     const stopped = options.closed || session?.closed || finishedTask || superseded || target.ownerStopped
       || (target.status === 'cancelled' && !updateResume) || target.status === 'error';
     const merge = approved && !stopped ? [...this.host.runs.values()].find(run => run.status === 'queued' && run.sessionId === target!.sessionId && run.scheduled?.afterRunId === target!.id && (run.scheduled.resume === 'permission' || run.scheduled.resume === 'update')) : undefined;
-    const continuation: Run = merge ?? { id: request.id, sessionId: target.sessionId, origin: target.origin ?? { kind: 'unknown' },
+    const continuation: Run = merge ?? { id: request.id, sessionId: target.sessionId, ...inheritedRunFields(target, { reviewer: true }),
       prompt: `${TOWER_NOTICE} ${prompt.replace(/the next provider turn/g, 'this provider turn')}\nFirst inspect the conversation, existing artifacts and task results. Continue only unfinished work; do not repeat completed actions.`,
       status: approved && !stopped ? 'queued' : 'cancelled', createdAt: now, output: 'Permission decision recorded.',
-      ...(approved && !stopped ? { scheduled: { at: now, afterRunId: target.id, resume: 'permission' as const } } : { finishedAt: now }),
-      ...(target.delegation ? { delegation: { ...target.delegation } } : {}), ...(target.instructions?.required ? { instructions: { ...target.instructions } } : {}),
-      ...(target.codexApprovalsReviewer ? { codexApprovalsReviewer: target.codexApprovalsReviewer } : {}),
-      ...(target.unattended ? { unattended: true } : {}), ...(target.model ? { model: target.model } : {}), ...(target.effort ? { effort: target.effort } : {}) };
+      ...(approved && !stopped ? { scheduled: { at: now, afterRunId: target.id, resume: 'permission' as const } } : { finishedAt: now }) };
     if (!approved) continuation.error = 'Permission decision notice could not be delivered to its requesting turn.';
     continuation.permissionRequestedAt = !continuation.permissionRequestedAt || Date.parse(request.createdAt) < Date.parse(continuation.permissionRequestedAt)
       ? request.createdAt : continuation.permissionRequestedAt;

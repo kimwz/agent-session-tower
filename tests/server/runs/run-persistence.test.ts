@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { RunManager } from '../../../server/runs/manager.js';
+import { restoreRuns, SCHEDULED_OUTPUT, serializeRuns } from '../../../server/runs/run-history.js';
 import type { CodexBridgeOptions } from '../../../server/runs/codex-bridge.js';
 import type { CreatedSession } from '../../../server/runs/saved-state.js';
 import type { Run, Session } from '../../../shared/types.js';
@@ -226,4 +227,26 @@ test('a wakeup continuation, an update resume and a permission continuation inhe
   const permission = await f.manager.permissionDecision(request, 'Approved.');
   assert.deepEqual(inherited(f.internals.runs.get(permission.id)), expected);
   assert.equal(f.internals.runs.get(permission.id)?.codexApprovalsReviewer, 'user', 'only the permission continuation keeps the reviewer');
+});
+
+test('restoreRuns keeps a scheduled continuation within its hour of grace and ends one past it', () => {
+  const now = Date.parse('2026-10-01T12:00:00.000Z');
+  const scheduled = (id: string, at: number): unknown => ({ id, sessionId: `codex:${ID}`, prompt: 'Later', status: 'queued', createdAt: '2026-10-01T00:00:00.000Z', output: '',
+    scheduled: { at: new Date(at).toISOString(), afterRunId: '50000000-0000-4000-8000-000000000099' } });
+  const { runs, carried, restoredRetained } = restoreRuns([scheduled('50000000-0000-4000-8000-000000000001', now - 59 * 60_000), scheduled('50000000-0000-4000-8000-000000000002', now - 61 * 60_000)], new Map(), now);
+  assert.deepEqual(runs.map(run => run.status), ['queued', 'cancelled']);
+  assert.equal(runs[0].output, SCHEDULED_OUTPUT);
+  assert.deepEqual([carried, restoredRetained], [[], []]);
+});
+
+test('serializeRuns adds the markers a restore reads and leaves live fields out', () => {
+  const base = { sessionId: `codex:${ID}`, prompt: 'p', createdAt: '2026-10-01T00:00:00.000Z' };
+  const listed: Run[] = [
+    { ...base, id: 'queued', status: 'queued', output: '', canSteer: true, steerBlocked: 'starting', approvals: [] },
+    { ...base, id: 'kept', status: 'completed', output: 'k'.repeat(25_000) },
+  ];
+  const saved = JSON.parse(serializeRuns(listed, { required: id => id === 'queued', carried: new Set(['queued']), retained: new Set(['kept']) })) as Array<Record<string, unknown>>;
+  assert.deepEqual(saved[0], { ...base, id: 'queued', status: 'queued', output: '', needsInstructions: true, keepQueued: true });
+  assert.equal(saved[1].retain, true);
+  assert.equal((saved[1].output as string).length, 20_000);
 });
