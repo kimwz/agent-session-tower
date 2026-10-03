@@ -4,7 +4,7 @@ import { createElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { TriggerEditor } from '../../../client/src/triggers/TriggerEditor.js';
 import { blankGitHubSource, blankHttpSource, blankTrigger, browserZone, type Source, type SourceKind } from '../../../client/src/triggers/trigger-helpers.js';
-import { RepeatingScheduleSchema, ScheduleSchema } from '../../../shared/triggers.js';
+import { INTERVAL_MAX_SECONDS, INTERVAL_MIN_SECONDS, RepeatingScheduleSchema, ScheduleSchema } from '../../../shared/triggers.js';
 
 type Schedule = Source['schedule'];
 type Element = ReactElement<Record<string, unknown> & { children?: ReactNode }>;
@@ -88,4 +88,11 @@ test('a scheduled run offers once, cron and interval, and once starts an hour ah
   const now = Date.parse('2026-10-03T00:00:00.000Z');
   t.mock.method(Date, 'now', () => now);
   assert.deepEqual(fields.choose('once'), { type: 'once', at: new Date(now + 3600000).toISOString() });
+});
+
+test('the editor\'s limits are the schema\'s', () => {
+  assert.equal(INTERVAL_MIN_SECONDS / 60, 1);
+  assert.equal(INTERVAL_MAX_SECONDS / 60, 44640);
+  const accepts = (everySeconds: number) => RepeatingScheduleSchema.safeParse({ type: 'interval', everySeconds }).success;
+  assert.deepEqual([accepts(INTERVAL_MIN_SECONDS - 1), accepts(INTERVAL_MIN_SECONDS), accepts(INTERVAL_MAX_SECONDS), accepts(INTERVAL_MAX_SECONDS + 1)], [false, true, true, false]);
 });
