@@ -21,6 +21,8 @@ import { startLegacyRunner } from './fixtures/legacy-runner.ts';
 import { CapabilityRegistry } from '../../../server/api/mcp.js';
 import { handoffHeld, updatePaths } from '../../../server/link/update.js';
 import { runtimePaths } from '../../../server/link/service.js';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'tower-durable-fixture-'));
@@ -647,6 +649,38 @@ test('a handoff that cannot be recorded leaves the worker fully in service', asy
   assert.ok(quiesced >= 1);
   const run = await client.enqueue(f.session.id, 'Still accepted');
   assert.equal(run.status, 'queued');
+});
+
+test('a handoff record that cannot be flushed to disk leaves the worker fully in service', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  // Test-only: syncing the handoff record's temporary file fails, as on a disk error.
+  const original = fsPromises.open;
+  const record = join(f.paths.runtime, 'handoff.json');
+  let failedSyncs = 0;
+  t.mock.method(fsPromises, 'open', async (...args: Parameters<typeof original>) => {
+    const handle = await original(...args);
+    if (String(args[0]).startsWith(`${record}.`) && String(args[0]).endsWith('.tmp')) handle.sync = async () => { failedSyncs++; throw Object.assign(new Error('EIO: i/o error, fsync'), { code: 'EIO' }); };
+    return handle;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  t.mock.method(console, 'error', () => {});
+  let quiesced = 0, resumed = 0, started = 0;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs,
+    quiesce: async () => { quiesced++; }, resume: () => { resumed++; }, startSuccessor: () => { started++; } });
+  t.after(() => host.close());
+  const client = await f.connect();
+  await client.requestHandoff(true);
+  await until(() => resumed >= 1);
+  assert.equal(failedSyncs, 1);
+  assert.equal(started, 0, 'no successor is started without a durable record');
+  assert.ok(quiesced >= 1);
+  assert.equal(existsSync(record), false);
+  const run = await client.enqueue(f.session.id, 'Still accepted');
+  assert.equal(run.status, 'queued');
+  await until(() => f.starts() === 1);
+  assert.equal(f.cancels(), 0);
 });
 
 test('the web starts a worker itself when a handed-off successor never answers', async t => {

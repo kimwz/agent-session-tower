@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { lstat, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -28,5 +28,18 @@ test('a failed write leaves no temp file and rethrows the raw error', async t =>
   assert.equal(error?.statusCode, undefined);
   assert.deepEqual(await temporaryFiles(runtime), []);
   await restore();
+  assert.deepEqual(await readHandoff(runtime), record);
+});
+
+test('a stale handoff temp file is not reused', async t => {
+  const runtime = await mkdtemp(join(tmpdir(), 'tower-handoff-stale-'));
+  t.after(() => rm(runtime, { recursive: true, force: true }));
+  const outside = join(runtime, 'outside.txt');
+  await writeFile(outside, 'not the handoff record');
+  // What an earlier writer of the same pid could have left behind, here pointing somewhere else.
+  await symlink(outside, `${handoffPath(runtime)}.${process.pid}.tmp`);
+  await writeHandoff(runtime, record);
+  assert.equal(await readFile(outside, 'utf8'), 'not the handoff record', 'the symlink is never written through');
+  assert.equal((await lstat(handoffPath(runtime))).isFile(), true);
   assert.deepEqual(await readHandoff(runtime), record);
 });
