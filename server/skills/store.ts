@@ -33,8 +33,10 @@ export async function readMoves(path: string): Promise<SkillMove[]> {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     // A record that cannot be parsed is kept aside for the owner, not guessed at; moves start over from an empty one.
     if (error instanceof SyntaxError || (error as Error).name === 'SyntaxError') {
-      await quarantineFile(path).catch(() => {});
+      // One that cannot be moved fails like any other read, so it is never written over.
+      const moved = await quarantineFile(path).then(() => true, () => false);
       console.error('The skill move record could not be read and was set aside.');
+      if (!moved) throw error;
       return [];
     }
     throw error;

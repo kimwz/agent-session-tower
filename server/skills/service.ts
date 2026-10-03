@@ -72,6 +72,8 @@ export class SkillService {
   private ready(): Promise<void> {
     this.initialized ??= (async () => {
       await this.state.start();
+      // A locked store leaves a pending move, its folders and links as they are until a restart can read the state.
+      if (this.state.locked) return;
       const finished = await this.files.recover().catch(error => { console.error(`Skill moves were not recovered: ${error instanceof Error ? error.message : String(error)}`); return []; });
       await this.moved(finished.map(move => ({ from: move.places, to: move.to })));
       // Links are brought in line in the background, among the other changes: a project on a volume that stopped
@@ -115,7 +117,7 @@ export class SkillService {
   inFlight(): boolean { return this.advisor.inFlight(); }
   pause(): void { this.advisor.pause(); }
   resume(): void { this.advisor.resume(); }
-  flush(): Promise<void> { return this.state.update(() => {}); }
+  flush(): Promise<void> { return this.state.flush(); }
   /** Resolves once the changes queued so far, the start-up link check included, are done. */
   settled(): Promise<void> { return this.queue.then(() => {}, () => {}); }
 
@@ -337,7 +339,7 @@ export class SkillService {
     const pinned = await this.pinned();
     const stored = (await this.files.managed()).map(skill => this.withTargets({ ...skill, pinned: folders(skill).some(dir => pinned.has(dir)) }));
     return { skills: (await this.withPins(await this.files.list(cwd))).map(skill => this.withTargets(skill)), stored, proposals, notes, settings: state.settings, advisor: this.advisor.status(),
-      guidance: await this.guidance(), ...(cwd ? { cwd } : {}) };
+      guidance: await this.guidance(), ...(cwd ? { cwd } : {}), ...(this.state.locked ? { problem: this.state.locked } : {}) };
   }
 
   summary(): SkillSummary {
@@ -355,7 +357,11 @@ export class SkillService {
   private queue: Promise<unknown> = Promise.resolve();
   /** Changes run one at a time, from reading what they change to writing Tower's record of it. */
   private exclusive<T>(change: () => Promise<T>): Promise<T> {
-    const next = this.queue.catch(() => {}).then(change);
+    // Every change that touches links, folders, default skills or the move record comes here: none runs while locked.
+    const next = this.queue.catch(() => {}).then(() => {
+      if (this.state.locked) throw new SkillError(this.state.locked, 503);
+      return change();
+    });
     this.queue = next;
     return next;
   }

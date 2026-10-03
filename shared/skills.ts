@@ -124,6 +124,8 @@ export interface SkillOverview {
   advisor: SkillAdvisorStatus;
   /** The project the listing is for; its skills come with the global ones. */
   cwd?: string;
+  /** Why skills cannot be changed now: Tower's skill state could not be read or set aside. */
+  problem?: string;
 }
 export interface SkillSummary {
   proposals: number;
