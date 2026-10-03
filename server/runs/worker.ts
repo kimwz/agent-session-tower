@@ -28,7 +28,7 @@ import { parseRunOrigin } from './origin.js';
 import { autoUpdateEnabled, ToolUpdates } from '../updates/tools.js';
 import { defaultStateDir } from '../state-dir.js';
 import { join, resolve } from 'node:path';
-import { parseSuccessor, spawnSuccessor, writeHandoff, type SuccessorCommand } from './handoff.js';
+import { parseSuccessor, readHandoffCarry, spawnSuccessor, writeHandoff, type SuccessorCommand } from './handoff.js';
 import { REMOTE_FOLDER_REFUSED, TriggerService } from '../triggers/service.js';
 import { GitHubCoordinator } from '../triggers/github-coordinator.js';
 import { PUBLIC_TRIGGER_PREFIX, PublicAgentService } from '../public-agents/service.js';
@@ -104,7 +104,9 @@ export interface RunnerHostOptions {
   quiesce?: () => Promise<void>;
   /** Undoes quiesce when the handoff cannot be recorded, so the worker stays fully in service. */
   resume?: () => void;
-  startSuccessor?: (command: SuccessorCommand, nonce: string) => void;
+  startSuccessor?: (command: SuccessorCommand, nonce: string, carry?: Buffer) => void;
+  /** State only the successor may receive (the open vault key), taken right before it is started. */
+  handoffCarry?: () => Buffer | undefined;
   onHandedOff?: () => void;
   handoffHoldMs?: number;
   /** The proof a predecessor gave this worker when it started it. */
@@ -429,7 +431,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     }
     // Socket and credential are removed while this worker still holds the lock, so a successor's are never touched.
     await close();
-    (options.startSuccessor ?? spawnSuccessor)(successor, nonce);
+    (options.startSuccessor ?? spawnSuccessor)(successor, nonce, options.handoffCarry?.());
     options.onHandedOff?.();
   };
   const close = async (idle = false) => {
@@ -529,9 +531,13 @@ async function runnerContext({ stateDir, runs, sessions, slack, exclusions }: Pi
 
 export async function runRunnerWorker(stateDir: string): Promise<void> {
   const paths = await runnerPaths(stateDir);
+  // Read once, before anything is started: children of this worker must inherit neither the proof nor its stdin.
+  const handoffNonce = process.env.TOWER_HANDOFF && /^[a-f\d]{32}$/.test(process.env.TOWER_HANDOFF) ? process.env.TOWER_HANDOFF : undefined;
+  delete process.env.TOWER_HANDOFF;
+  let carry = handoffNonce ? await readHandoffCarry(process.stdin) : undefined;
   let release: () => Promise<void>;
   try { release = await acquireStateLock(paths.runtime, 0); }
-  catch (error) { if (error instanceof MonitorAlreadyRunning) return; throw error; }
+  catch (error) { carry?.fill(0); if (error instanceof MonitorAlreadyRunning) return; throw error; }
   // A restore's worker part: its files are written before any service below reads them.
   const restoring = await takeWorkerRestore(stateDir).catch(error => { console.error(`A waiting restore was not applied: ${error instanceof Error ? error.message : String(error)}`); return undefined; });
   const sessions = new SessionService({ launchProofs: join(stateDir, 'agent-launches.json'), launchMarks: launchMarksDir(stateDir) });
@@ -586,6 +592,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       migrate: () => secretStore.migrate(), pendingImports: () => listPendingSecretImports(stateDir),
       importPending: (id, password) => importPendingSecret(stateDir, id, password, secretService, { openLegacy: openLegacyImport, restoreTriggers: async backup => { if (!triggerEngine) throw new Error('Triggers are still starting.'); await triggerEngine.restoreBackup(backup); } }) });
     runs.setRunToolResolver(runToolResolver({ stateDir, runs, slack, github, capabilities, secrets }));
+    // The previous worker's open vault: turns restored below find it as the owner left it.
+    if (carry) await secrets.adopt(carry).catch(() => { console.error('The vault handed over by the previous worker did not open; it stays locked until unlocked.'); }).finally(() => { carry?.fill(0); carry = undefined; });
     const secretExpiry = setInterval(() => { void secrets.sweep().catch(() => { console.error('Secret expiry cleanup failed; the vault remains unavailable until unlocked.'); }); }, 60_000); secretExpiry.unref();
     const visible = await runnerContext({ stateDir, runs, sessions, slack, exclusions });
     autoPrompts.updateContext(visible);
@@ -597,9 +605,6 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // Sessions created before provenance existed are classified once from surviving ledger links.
     runs.setExternalLinkResolver(ids => { const linked = slack.linkedSessions().sessionIds; return ids.some(id => linked.has(id)); });
     runs.backfillSessionOrigins(slack.linkedSessions());
-    // Read once: children of this worker must not inherit the proof.
-    const handoffNonce = process.env.TOWER_HANDOFF && /^[a-f\d]{32}$/.test(process.env.TOWER_HANDOFF) ? process.env.TOWER_HANDOFF : undefined;
-    delete process.env.TOWER_HANDOFF;
     // Ports seen once stay blocked, so a web restart never opens a moment when Tower can call itself.
     const towerPorts = new Set<number>();
     const ownPorts = async () => { for (const port of await lockedPorts(stateDir)) towerPorts.add(port); return [...towerPorts]; };
@@ -825,7 +830,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
     // A restore's skills are still being written (below): the worker hands over only after them.
     let restoringSkills = Boolean(restoring);
-    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, api, secrets, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
+    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, api, secrets, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce, handoffCarry: () => secrets.handoff(),
       onIdle: async () => { clearInterval(secretExpiry); secrets.close(); stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await tasks.close(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
       inFlight: () => secrets.inFlight() || restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       transient: () => secrets.inFlight() || restoringSkills || slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
@@ -848,7 +853,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // A parent terminal or Tower shutdown must not interrupt provider work.
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => {});
-  } catch (error) { void tools?.stop(); sessions.stop(); await release(); throw error; }
+  } catch (error) { carry?.fill(0); void tools?.stop(); sessions.stop(); await release(); throw error; }
 }
 
 /** Every `cwd` a setting names, at any depth: the folders triggers and their rules work in. */

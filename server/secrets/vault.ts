@@ -46,7 +46,18 @@ export class SecretVault {
   async writeIndex(state: unknown) { if (!this.envelope) throw new Error('Vault not initialized'); this.index = undefined; await this.write('index.json', Buffer.from(JSON.stringify({ format: 1, vaultId: this.vaultId, saved: await this.saved(), state }))); this.index = JSON.parse(JSON.stringify(state)); }
   async unlock(password: string): Promise<unknown> {
     if (!this.envelope) throw new Error('Vault not initialized'); const wrapper = await passwordKey(password, this.envelope.salt); let key: Buffer | undefined;
-    try { key = decrypt(wrapper, this.envelope.wrappedKey, this.aad('key')); if (key.length !== 32) throw new Error('Invalid vault key'); const payload = JSON.parse(decrypt(key, this.envelope.payload, this.aad('permanent')).toString()); this.lock(); this.key = key; return payload; } catch { key?.fill(0); throw new Error('Cannot unlock vault'); } finally { wrapper.fill(0); }
+    try { key = decrypt(wrapper, this.envelope.wrappedKey, this.aad('key')); return this.open(key); } catch { key?.fill(0); throw new Error('Cannot unlock vault'); } finally { wrapper.fill(0); }
+  }
+  /** Opens with the key a previous worker handed over; the key is kept only if it decrypts this vault. */
+  unlockWithKey(key: Buffer): unknown {
+    if (!this.envelope) throw new Error('Vault not initialized'); const copy = Buffer.from(key);
+    try { return this.open(copy); } catch { copy.fill(0); throw new Error('Cannot unlock vault'); }
+  }
+  /** A copy of the open key for the successor worker; never written anywhere. */
+  exportKey(): Buffer | undefined { return this.key ? Buffer.from(this.key) : undefined; }
+  private open(key: Buffer): unknown {
+    if (key.length !== 32) throw new Error('Invalid vault key');
+    const payload = JSON.parse(decrypt(key, this.envelope!.payload, this.aad('permanent')).toString()); this.lock(); this.key = key; return payload;
   }
   lock() { this.key?.fill(0); this.key = undefined; }
   async save(payload: unknown, journal: unknown, index: unknown) {

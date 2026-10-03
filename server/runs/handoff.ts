@@ -42,9 +42,36 @@ export async function readHandoff(runtime: string): Promise<HandoffRecord | unde
   } catch { return undefined; } finally { await file.close(); }
 }
 
-/** The nonce lets the web tell this successor apart from any other worker that might start instead. */
-export function spawnSuccessor(command: SuccessorCommand, nonce: string): void {
-  const child = spawn(command.execPath, command.args, { detached: true, stdio: 'ignore', env: { ...process.env, TOWER_HANDOFF: nonce } });
+/** Largest state a worker hands to its successor over stdin. */
+const MAX_CARRY = 4096;
+
+/**
+ * The nonce lets the web tell this successor apart from any other worker that might start instead. `carry` is state that
+ * must not touch disk, argv or the environment (the open vault key): only the successor can read its stdin pipe.
+ */
+export function spawnSuccessor(command: SuccessorCommand, nonce: string, carry?: Buffer): void {
+  const child = spawn(command.execPath, command.args, { detached: true, stdio: ['pipe', 'ignore', 'ignore'], env: { ...process.env, TOWER_HANDOFF: nonce } });
   child.on('error', error => { console.error('Could not start the successor execution worker:', error); });
+  child.stdin?.on('error', () => { console.error('The successor execution worker did not take the handed-over state; it starts without it.'); });
+  if (carry?.length && carry.length <= MAX_CARRY) child.stdin?.end(carry, () => { carry.fill(0); });
+  else { carry?.fill(0); child.stdin?.end(); }
   child.unref();
+}
+
+/** What the predecessor handed over on stdin; undefined when it sent nothing (an older build) or did not finish in time. */
+export function readHandoffCarry(stream: NodeJS.ReadableStream & { destroy(): void }, timeoutMs = 10_000): Promise<Buffer | undefined> {
+  return new Promise(resolve => {
+    const chunks: Buffer[] = []; let size = 0; let done = false;
+    const finish = (value: Buffer | undefined, problem?: string) => {
+      if (done) return; done = true; clearTimeout(timer);
+      stream.removeAllListeners('data'); stream.removeAllListeners('end'); stream.removeAllListeners('error'); stream.destroy();
+      if (problem) console.error(`The predecessor's handed-over state was not taken: ${problem}.`);
+      if (!value) for (const chunk of chunks) chunk.fill(0);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(undefined, 'it did not arrive in time'), timeoutMs);
+    stream.on('data', (chunk: Buffer) => { size += chunk.length; chunks.push(chunk); if (size > MAX_CARRY) finish(undefined, 'it is too large'); });
+    stream.on('end', () => { const value = size ? Buffer.concat(chunks) : undefined; for (const chunk of chunks) chunk.fill(0); finish(value); });
+    stream.on('error', () => finish(undefined, 'stdin could not be read'));
+  });
 }
