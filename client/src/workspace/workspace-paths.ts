@@ -49,20 +49,24 @@ const PROSE_PATH = /(^|[\s(\[「『"'“‘:=,，])(\/[^\s`'"<>(){}[\]|「」『
 const PUNCTUATION = new Set('.,;:!?。、，');
 /**
  * Hangul written straight after a Latin name or a line number is a particle or ending (`a.md를`, `Makefile을`,
- * `a.ts:42에서`, `a.md입니다`), not part of the name. Only the usual particles count, so a name such as
- * `report.txt백업` keeps its Hangul.
+ * `a.ts:42에서`, `a.md입니다`), not part of the name. Only these whole endings count, so a name such as
+ * `report.txt백업` or `report.txt이전` keeps its Hangul.
  */
-const PARTICLE = /^(.*[\x21-\x7E])(?:을|를|이|가|은|는|에|의|로|으로|와|과|도|만|까지|부터|처럼|보다|입|인|라)[가-힯]*$/;
+const ENDINGS = ['을', '를', '이', '가', '은', '는', '의', '도', '만', '와', '과', '랑', '이랑', '에', '에는', '에도', '에서', '에서는', '에서도', '로', '로는', '로도', '으로', '으로는', '으로도', '까지', '부터', '처럼', '보다', '이다', '입니다', '이고', '이며', '이나', '인데', '이라는', '라는', '이에요', '예요'];
+const PARTICLE = new RegExp(`^(.*[\\x21-\\x7E])(?:${ENDINGS.join('|')})$`);
+
+function trimmed(value: string): string {
+  let end = value.length;
+  while (end > 0 && PUNCTUATION.has(value[end - 1])) end--;
+  return value.slice(0, end);
+}
 
 /** Absolute paths written in prose, by their place in `text`. Paths with spaces are only found in code or links. */
 export function prosePaths(text: string): Array<{ start: number; end: number; path: string }> {
   const found: Array<{ start: number; end: number; path: string }> = [];
   for (const match of text.matchAll(PROSE_PATH)) {
-    let written = match[2];
-    let end = written.length;
-    while (end > 0 && PUNCTUATION.has(written[end - 1])) end--;
-    written = written.slice(0, end);
-    written = PARTICLE.exec(written)?.[1] ?? written;
+    const bare = trimmed(match[2]);
+    const written = trimmed(PARTICLE.exec(bare)?.[1] ?? bare);
     const path = absolutePath(written);
     if (!path) continue;
     const start = match.index + match[1].length;

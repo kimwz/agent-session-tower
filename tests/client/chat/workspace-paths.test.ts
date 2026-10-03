@@ -61,8 +61,10 @@ test('prose paths end at punctuation and Korean particles and need a separator b
   assert.deepEqual(written('/w/monitor/Makefile을 고쳤고 /w/monitor/client에서 /w/a.ts:42:7에서 /w/a.md입니다'), [
     ['/w/monitor/Makefile', '/w/monitor/Makefile'], ['/w/monitor/client', '/w/monitor/client'], ['/w/a.ts:42:7', '/w/a.ts'], ['/w/a.md', '/w/a.md'],
   ]);
-  assert.deepEqual(written('/w/report.txt백업 /w/영상/대본.md를 /w/영상에서'), [
-    ['/w/report.txt백업', '/w/report.txt백업'], ['/w/영상/대본.md', '/w/영상/대본.md'], ['/w/영상에서', '/w/영상에서'],
+  assert.deepEqual(written('/w/a.md,를 보세요'), [['/w/a.md', '/w/a.md']]);
+  assert.deepEqual(written('/w/report.txt백업 /w/report.txt이전 /w/v2.0도면 /w/영상/대본.md를 /w/영상에서 /w/a.md에서는'), [
+    ['/w/report.txt백업', '/w/report.txt백업'], ['/w/report.txt이전', '/w/report.txt이전'], ['/w/v2.0도면', '/w/v2.0도면'],
+    ['/w/영상/대본.md', '/w/영상/대본.md'], ['/w/영상에서', '/w/영상에서'], ['/w/a.md', '/w/a.md'],
   ]);
   const long = `/w/a${'.'.repeat(100_000)}x`;
   const started = performance.now();

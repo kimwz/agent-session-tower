@@ -54,14 +54,15 @@ function DirectoryListing({ cwd, path, refresh, ...selection }: DirectoryProps) 
   </div>;
 }
 
-export function WorkspaceFileTree({ cwd, refresh, onSelectFolder, ...selection }: Omit<TreeSelection, 'expanded' | 'onFolder'> & { cwd: string; refresh: number; onSelectFolder: (path: string) => void }) {
+/** `reveal` changes with each request to show the selected file, which opens its folders again. */
+export function WorkspaceFileTree({ cwd, refresh, reveal, onSelectFolder, ...selection }: Omit<TreeSelection, 'expanded' | 'onFolder'> & { cwd: string; refresh: number; reveal?: number; onSelectFolder: (path: string) => void }) {
   useI18n();
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
-  // A file opened from elsewhere (a path in a conversation) is shown in its place in the tree, again on each refresh.
+  // A file opened from elsewhere (a path in a conversation) is shown in its place in the tree.
   useEffect(() => {
     const parents = selection.selectedFile?.split('/').slice(0, -1).map((_, index, parts) => parts.slice(0, index + 1).join('/')) ?? [];
     if (parents.length) setExpanded(previous => parents.every(path => previous.has(path)) ? previous : new Set([...previous, ...parents]));
-  }, [selection.selectedFile, refresh]);
+  }, [selection.selectedFile, reveal]);
   const onFolder = (path: string) => {
     onSelectFolder(path);
     setExpanded(previous => { const next = new Set(previous); if (next.has(path)) next.delete(path); else next.add(path); return next; });
