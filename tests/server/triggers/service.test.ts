@@ -3,7 +3,7 @@ import { collectTriggers } from '../../../server/backup/payload.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { TriggerService, triggerRequestId, type TriggerExecutor } from '../../../server/triggers/service.js';
 import type { RunAdmission } from '../../../server/runs/manager.js';
@@ -310,6 +310,39 @@ test('trigger state that cannot be moved aside is logged and triggers still star
   assert.equal(logged[0].args[0], 'Trigger state could not be read and was moved aside:');
   assert.ok(logged[0].args[1] instanceof SyntaxError);
   assert.deepEqual(await readdir(blocked.aside), ['occupied'], 'the move failed');
+});
+
+test('trigger secrets that were moved aside are shown on the triggers page', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.directory, 'trigger-secrets.json'), '{}', { mode: 0o600 });
+  captureErrors(t, join(f.directory, 'trigger-secrets.json'));
+  const service = await f.open();
+  assert.match(service.overview().storageError ?? '', /^Trigger secrets could not be read and were kept as .*trigger-secrets\.json\.unreadable-\d+; triggers that use them fail until they are entered again\.$/);
+});
+
+test('trigger state that cannot be moved aside is never written over', async t => {
+  const f = await fixture(t);
+  const path = join(f.directory, 'trigger-engine.json');
+  const original = '{ "version": 1, "triggers": [ not json';
+  await writeFile(path, original, { mode: 0o600 });
+  const blocked = await blockQuarantine(t, path);
+  captureErrors(t, path);
+  const service = await f.open();
+  blocked.release();
+  const locked = /Trigger state could not be read or moved aside; nothing is saved until Tower restarts\./;
+  assert.match(service.overview().storageError ?? '', locked);
+  f.clock.now += 2 * HOUR;
+  await service.tick();
+  await assert.rejects(service.create(hourly(f.project), OWNER), { statusCode: 503, message: locked });
+  const backup = { triggers: [{ ...hourly(f.project), id: randomUUID(), revision: 1, createdAt: '', updatedAt: '', updatedBy: OWNER }], settings: service.settings(), trustedFolders: [f.project], secretGrants: {}, fired: {}, github: {} };
+  await assert.rejects(service.restoreBackup(backup as any), { statusCode: 503 });
+  await service.flush();
+  assert.equal(service.inFlight(), false);
+  await service.settle();
+  assert.equal(f.calls.length, 0);
+  assert.equal(await readFile(path, 'utf8'), original);
+  assert.deepEqual((await readdir(f.directory)).filter(name => name.startsWith('trigger-engine.json')).sort(), ['trigger-engine.json', basename(blocked.aside)].sort(), 'no other state file is written');
+  assert.match(service.overview().storageError ?? '', locked);
 });
 
 test('schedules refuse second-level cron and unknown time zones', async t => {
