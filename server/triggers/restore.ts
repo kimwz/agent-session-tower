@@ -72,7 +72,7 @@ export async function restoreFrom(backup: TriggerBackup, context: RestoreContext
     if (!local.has(value.id) && !value.archivedAt && !consumed[value.id] && added >= room) { errors.push(`트리거 "${name}": 트리거 개수 한도에 걸려 건너뛰었습니다.`); continue; }
     if (!local.has(value.id) && !value.archivedAt && !consumed[value.id]) added++;
     const trigger: Trigger = { ...(value as unknown as Trigger), ...input.data };
-    if (consumed[trigger.id]) { trigger.enabled = false; trigger.consumed = consumed[trigger.id]; trigger.archivedAt ??= trigger.consumed.at; }
+    if (consumed[trigger.id]) { trigger.enabled = false; trigger.consumed = { ...consumed[trigger.id] }; trigger.archivedAt ??= trigger.consumed.at; }
     else if (trigger.source.schedule.type === 'once' && Date.parse(trigger.source.schedule.at) <= clock()) {
       trigger.enabled = false;
       errors.push(`Trigger "${name}" was restored turned off because its once reservation is in the past.`);
@@ -116,7 +116,7 @@ export async function restoreFrom(backup: TriggerBackup, context: RestoreContext
         if (current.archivedAt) { trigger.archivedAt = current.archivedAt; trigger.enabled = false; }
       }
       if (state.onceConsumed[trigger.id]) {
-        trigger.enabled = false; trigger.consumed = state.onceConsumed[trigger.id];
+        trigger.enabled = false; trigger.consumed = { ...state.onceConsumed[trigger.id] };
         if (!current) trigger.archivedAt ??= trigger.consumed.at;
       }
       if (current && same(current, trigger)) continue;
@@ -125,7 +125,7 @@ export async function restoreFrom(backup: TriggerBackup, context: RestoreContext
         if (current) {
           const next = definitions.replace(draft, current, { name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy }, actor);
           if (trigger.archivedAt) next.archivedAt = trigger.archivedAt;
-          if (state.onceConsumed[trigger.id]) next.consumed = state.onceConsumed[trigger.id];
+          if (state.onceConsumed[trigger.id]) next.consumed = { ...state.onceConsumed[trigger.id] };
           // A restored definition counts from now: times missed before the restore never run with it.
           // What its source observed (GitHub history, an HTTP condition's state) stays: only the timing starts over.
           if (next.enabled) { const { failures: _failures, lastError: _error, ...previous } = draft.cursors[next.id] ?? { anchorAt: clock() }; definitions.schedule(draft, next); draft.cursors[next.id] = { ...previous, ...draft.cursors[next.id]! }; }

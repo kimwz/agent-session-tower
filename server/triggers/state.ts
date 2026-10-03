@@ -57,7 +57,7 @@ export const empty = (): EngineState => ({ version: 1, onceConsumed: {}, trigger
  * fires (see once-storage.ts), with its consumption projected onto each copy of the definition.
  */
 export function serializeState(draft: EngineState): string {
-  const encode = (trigger: Trigger) => encodeOnceTrigger({ ...trigger, ...(draft.onceConsumed[trigger.id] ? { consumed: draft.onceConsumed[trigger.id] } : {}) });
+  const encode = (trigger: Trigger) => encodeOnceTrigger({ ...trigger, ...(draft.onceConsumed[trigger.id] ? { consumed: { ...draft.onceConsumed[trigger.id] } } : {}) });
   return JSON.stringify({ ...draft, triggers: draft.triggers.map(encode), tombstones: draft.tombstones.map(encode),
     revisions: Object.fromEntries(Object.entries(draft.revisions).map(([id, list]) => [id, list.map(encode)])) });
 }
