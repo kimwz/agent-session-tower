@@ -23,6 +23,7 @@ import { handoffHeld, updatePaths } from '../../../server/link/update.js';
 import { runtimePaths } from '../../../server/link/service.js';
 import fsPromises from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
+import { acquireStateLock, MonitorAlreadyRunning } from '../../../server/instance/state-lock.js';
 
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'tower-durable-fixture-'));
@@ -790,6 +791,103 @@ test('a turn that is still closing its provider keeps the old worker, whatever i
   assert.equal(started, 0);
   closing = false;
   await until(() => started === 1);
+});
+
+/**
+ * A worker with the production idle shutdown (onIdle, idleMs 0) and a real state lock, released through
+ * releaseStateLock as the production worker does. `events` records each lifecycle step in order.
+ */
+async function idleWorker(f: Awaited<ReturnType<typeof fixture>>, options: Partial<Parameters<typeof startRunnerHost>[0]> = {}) {
+  await f.host.close();
+  const events: string[] = [];
+  const lock = await acquireStateLock(f.paths.runtime, 0);
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, idleMs: 0,
+    releaseStateLock: async () => { await lock(); events.push('release'); },
+    onIdle: async () => { events.push('onIdle'); }, ...options });
+  // A newer web asks for the handoff and goes away (a web replaced during an update), so nothing keeps the worker busy.
+  const ask = async () => { const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0' }); await client.start(); await client.close(); };
+  return { events, host, ask };
+}
+
+test('an idle tick never closes a worker whose handoff is pausing: the state stays locked until the record is durable', { timeout: 20_000 }, async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  let open!: () => void;
+  const gate = new Promise<void>(resolve => { open = resolve; });
+  let atSuccessor: { record: boolean; socket: boolean; token: boolean; released: boolean } | undefined;
+  let other: (() => Promise<void>) | undefined;
+  const w = await idleWorker(f, {
+    quiesce: async () => { w.events.push('quiesce'); await gate; w.events.push('quiesced'); },
+    startSuccessor: () => {
+      atSuccessor = { record: existsSync(join(f.paths.runtime, 'handoff.json')), socket: existsSync(f.paths.socket), token: existsSync(f.paths.token), released: w.events.includes('release') };
+      w.events.push('startSuccessor');
+    },
+    onHandedOff: () => { w.events.push('onHandedOff'); } });
+  try {
+    await w.ask();
+    await until(() => w.events.includes('quiesce'));
+    // Two idle ticks pass while the handoff is pausing.
+    await new Promise(resolve => setTimeout(resolve, 2200));
+    assert.deepEqual(w.events, ['quiesce'], 'no idle shutdown and no lock release while the handoff owns shutdown');
+    await assert.rejects(acquireStateLock(f.paths.runtime, 0).then(release => { other = release; }), MonitorAlreadyRunning);
+    open();
+    await until(() => w.events.includes('onHandedOff'));
+    assert.deepEqual(w.events, ['quiesce', 'quiesced', 'release', 'startSuccessor', 'onHandedOff']);
+    assert.deepEqual(atSuccessor, { record: true, socket: false, token: false, released: true }, 'the record is durable and the endpoint closed before the successor starts');
+    // From here the successor may take the state.
+    other = await acquireStateLock(f.paths.runtime, 0);
+  } finally {
+    open();
+    if (w.events.includes('quiesce')) await until(() => w.events.includes('onHandedOff') || w.events.includes('resume'));
+    if (w.events.includes('onIdle') || w.events.includes('quiesced')) await until(() => w.events.includes('release'));
+    await other?.();
+  }
+});
+
+test('a handoff whose pause fails resumes the worker, which can then shut down when idle', { timeout: 20_000 }, async t => {
+  t.mock.method(console, 'error', () => {});
+  const f = await fixture(); t.after(f.cleanup);
+  const w = await idleWorker(f, {
+    quiesce: async () => { w.events.push('quiesce'); throw new Error('flush failed after intake paused'); },
+    resume: () => { w.events.push('resume'); },
+    startSuccessor: () => { w.events.push('startSuccessor'); },
+    onHandedOff: () => { w.events.push('onHandedOff'); } });
+  try {
+    await w.ask();
+    await until(() => w.events.includes('release'));
+    assert.deepEqual(w.events, ['quiesce', 'resume', 'onIdle', 'release']);
+    assert.equal(existsSync(join(f.paths.runtime, 'handoff.json')), false);
+  } finally {
+    if (w.events.includes('onIdle')) await until(() => w.events.includes('release'));
+  }
+});
+
+test('an idle shutdown that started first is never joined by a handoff', { timeout: 20_000 }, async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  // Quiet is false (a provider is still closing) while the idle conditions hold, so the idle tick comes first.
+  let closingProvider = true;
+  const busy = f.runs.busy.bind(f.runs);
+  f.runs.busy = () => closingProvider || busy();
+  let open!: () => void;
+  const gate = new Promise<void>(resolve => { open = resolve; });
+  const w = await idleWorker(f, {
+    onIdle: async () => { w.events.push('onIdle'); await gate; w.events.push('idle done'); },
+    quiesce: async () => { w.events.push('quiesce'); },
+    startSuccessor: () => { w.events.push('startSuccessor'); },
+    onHandedOff: () => { w.events.push('onHandedOff'); } });
+  try {
+    await w.ask();
+    await until(() => w.events.includes('onIdle'));
+    closingProvider = false;
+    // Handoff ticks come while the idle shutdown is still under way.
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    open();
+    await until(() => w.events.includes('release'));
+    assert.deepEqual(w.events, ['onIdle', 'idle done', 'release']);
+    assert.equal(existsSync(join(f.paths.runtime, 'handoff.json')), false);
+  } finally {
+    open();
+    if (w.events.includes('onIdle')) await until(() => w.events.includes('release'));
+  }
 });
 
 test('a pause that fails halfway is undone and the worker stays in service', async t => {
