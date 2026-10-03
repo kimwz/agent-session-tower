@@ -1,6 +1,7 @@
 import { constants } from 'node:fs';
 import { open, rename, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
+import { dirname } from 'node:path';
 
 /** An owner-only file in the state directory, as it is on disk: no symlink follow, at most `maxBytes`. */
 export async function readPrivateBytes(path: string, maxBytes = 12_000_000): Promise<Buffer> {
@@ -28,13 +29,23 @@ export async function quarantineFile(path: string): Promise<string> {
   return aside;
 }
 
-export async function writePrivateJson(path: string, data: string): Promise<void> {
+/**
+ * Replaces an owner-only file whole: a new 0600 temporary file (never an existing one or a symlink), synced, then
+ * renamed over `path` (a symlink there is replaced, not followed). With `syncDirectory` the folder is synced as well
+ * before this returns, so the new name survives a crash too. On failure the temporary file is removed and the
+ * original error is thrown.
+ */
+export async function writePrivateJson(path: string, data: string | Uint8Array, options: { syncDirectory?: boolean } = {}): Promise<void> {
   const temporary = `${path}.${process.pid}.${createHash('sha256').update(randomUUID()).digest('hex').slice(0, 12)}.tmp`;
   try {
     const file = await open(temporary, 'wx', 0o600);
     try { await file.writeFile(data); await file.sync(); }
     finally { await file.close(); }
     await rename(temporary, path);
+    if (options.syncDirectory) {
+      const directory = await open(dirname(path), constants.O_RDONLY);
+      try { await directory.sync(); } finally { await directory.close(); }
+    }
   } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
 }
 

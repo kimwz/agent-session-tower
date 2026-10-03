@@ -39,7 +39,7 @@ async function stage(stateDir: string, pending: PendingSecret): Promise<string> 
     const saved = await readPrivateJson(join(root(stateDir), `${PREFIX}${id}.json`), 45 * 1024 * 1024) as PendingSecret;
     if (saved.restoreId === pending.restoreId && saved.kind === pending.kind) return id;
   }
-  const id = randomUUID(); await writePrivateJson(join(root(stateDir), `${PREFIX}${id}.json`), JSON.stringify(pending)); await syncDirectory(stateDir); return id;
+  const id = randomUUID(); await writePrivateJson(join(root(stateDir), `${PREFIX}${id}.json`), JSON.stringify(pending), { syncDirectory: true }); return id;
 }
 export async function listPendingSecretImports(stateDir: string): Promise<string[]> {
   if (!await directory(stateDir)) return [];

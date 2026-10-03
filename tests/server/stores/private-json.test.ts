@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { quarantineFile, readPrivateBytes, readPrivateJson } from '../../../server/stores/private-json.js';
+import { quarantineFile, readPrivateBytes, readPrivateJson, writePrivateJson } from '../../../server/stores/private-json.js';
 
 test('readPrivateJson keeps its errors and limits', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-private-json-'));
@@ -58,4 +58,15 @@ test('quarantineFile moves the file aside and answers where; a missing file thro
   assert.equal(await readFile(aside, 'utf8'), '{ not json');
   assert.equal((await stat(aside)).mode & 0o777, 0o600);
   await assert.rejects(quarantineFile(path), { code: 'ENOENT' });
+});
+
+test('writePrivateJson writes bytes as given, and with syncDirectory still leaves only the file', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-private-write-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'vault.json');
+  const bytes = Uint8Array.from([0, 1, 2, 0xff, 0x0a]);
+  await writePrivateJson(path, bytes, { syncDirectory: true });
+  assert.deepEqual(new Uint8Array(await readFile(path)), bytes);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  assert.deepEqual(await readdir(directory), ['vault.json']);
 });
