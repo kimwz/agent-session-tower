@@ -234,3 +234,36 @@ test('copies with links inside are never called identical, and a merge that cann
   assert.ok((await lstat(join(f.claudeHome, 'skills', 'plain'))).isDirectory());
   assert.deepEqual((await readdir(join(f.claudeHome, 'skills'))).sort(), ['linked', 'plain'], 'no half-made link is left behind');
 });
+
+test('skill state of the wrong shape is set aside like an unreadable one', async t => {
+  const { SkillStateStore } = await import('../../../server/skills/state.js');
+  const dir = await mkdtemp(join(tmpdir(), 'tower-skill-state-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, 'skills.json'), '[]', { mode: 0o600 });
+  captureErrors(t, join(dir, 'skills.json'));
+  const store = new SkillStateStore(dir);
+  await store.start();
+  const aside = (await readdir(dir)).find(name => name.startsWith('skills.json.unreadable-'));
+  assert.ok(aside);
+  assert.equal(await readFile(join(dir, aside!), 'utf8'), '[]');
+  assert.equal(store.locked, undefined);
+});
+
+test('skill state that cannot be moved aside is never written over, and flush only waits', async t => {
+  const { SkillStateStore } = await import('../../../server/skills/state.js');
+  const dir = await mkdtemp(join(tmpdir(), 'tower-skill-state-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'skills.json');
+  await writeFile(path, '{not json', { mode: 0o600 });
+  const blocked = await blockQuarantine(t, path);
+  captureErrors(t, path);
+  const store = new SkillStateStore(dir);
+  await store.start();
+  blocked.release();
+  assert.equal(store.locked, 'Skill state could not be read or moved aside; skills are not changed until Tower restarts.');
+  let changed = false;
+  await assert.rejects(store.update(() => { changed = true; }), { statusCode: 503 });
+  assert.equal(changed, false, 'the change is never applied, even in memory');
+  await store.flush();
+  assert.equal(await readFile(path, 'utf8'), '{not json');
+});

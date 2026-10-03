@@ -328,7 +328,7 @@ test('one move that cannot be settled never stops the others, and an unreadable 
   assert.ok((await readdir(f.state)).some(name => name.startsWith('skills-moves.json.unreadable-')));
 });
 
-test('an unreadable move record is logged after it is set aside; one that cannot be set aside is logged and read as empty', async t => {
+test('an unreadable move record is logged after it is set aside', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-skill-moves-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const path = join(dir, 'skills-moves.json');
@@ -345,13 +345,20 @@ test('an unreadable move record is logged after it is set aside; one that cannot
   assert.deepEqual((await Promise.all((await asideNames(path)).map(name => readFile(join(dir, name), 'utf8')))).sort(), ['{not json', '{}'].sort());
   clock.mock.restore();
 
-  await writeFile(path, '{not json', { mode: 0o600 });
-  const blocked = await blockQuarantine(t, path);
-  assert.deepEqual(await readMoves(path), []);
+});
+
+test('a skill move record that cannot be moved aside is not replaced', async t => {
+  const f = await homes(t);
+  await mkdir(f.state, { recursive: true });
+  await writeFile(f.journal, '{not json', { mode: 0o600 });
+  const blocked = await blockQuarantine(t, f.journal);
+  const logged = captureErrors(t, f.journal);
+  await assert.rejects(readMoves(f.journal), SyntaxError);
+  await assert.rejects(f.files.recover(), SyntaxError);
   blocked.release();
-  assert.equal(logged.length, 3);
-  assert.equal(logged[2].args[0], 'The skill move record could not be read and was set aside.');
+  assert.equal(await readFile(f.journal, 'utf8'), '{not json');
   assert.deepEqual(await readdir(blocked.aside), ['occupied'], 'the move failed');
+  assert.equal(logged[0].args[0], 'The skill move record could not be read and was set aside.');
 });
 
 test('an older execution worker is never asked for what came with Tower’s own skill folder', () => {
