@@ -95,3 +95,13 @@ test('adopting a handoff completes it like a password unlock: archives made whil
   assert.equal(next.currentTask('codex:session-a', f.root), undefined, 'the archive recorded while locked closed the task');
   assert.ok(runtime.handoff(), 'once open, the next handoff carries it on');
 });
+
+test('a handoff whose unlock cannot be completed leaves the vault locked with nothing to hand on', async t => {
+  const f = await fixture(t);
+  const carry = f.service.handoff()!;
+  const next = await f.successor();
+  const runtime = new SecretRuntime({ stateDir: f.stateDir, service: next, runs: new FixtureRuns(), migrate: async () => { throw new Error('migration failed'); } }); t.after(() => runtime.close());
+  await assert.rejects(runtime.adopt(carry), /migration failed/);
+  assert.equal(next.status().locked, true);
+  assert.equal(runtime.handoff(), undefined);
+});
