@@ -6,8 +6,7 @@ import type { GitHubCursor } from '../triggers/github.js';
 import type { TriggerBackup } from '../triggers/backup.js';
 import type { SkillBackup } from '../skills/backup.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
-import { validateSlackRules } from '../slack/automation.js';
-import { validSlackConnection } from '../slack/service.js';
+import { automationBackupOf, hasUnfinishedSlackWork, mergeAutomation, restoreSlackConnection, slackAccountKey } from '../slack/backup.js';
 import { parsePublicAgents } from '../public-agents/service.js';
 import { mergePermissions, permissionsBackupOf } from '../permissions/backup.js';
 
@@ -60,7 +59,7 @@ function settingsOf(name: WorkerFile, value: unknown): unknown {
   switch (name) {
     case 'permissions.json': return permissionsBackupOf(value);
     case 'slack-automation.json':
-    case 'github-automation.json': return { rules: value.rules ?? [] };
+    case 'github-automation.json': return automationBackupOf(value);
     default: return value;
   }
 }
@@ -94,10 +93,6 @@ export async function collectTriggers(stateDir: string): Promise<TriggerBackup |
   };
 }
 
-/** Slack work not yet finished belongs to the account that received it. */
-const UNFINISHED_SLACK = new Set(['received', 'matching', 'dispatching', 'running', 'composing', 'sending', 'reply-uncertain']);
-const accountOf = (value: unknown) => record(value) && record(value.account) ? `${value.account.teamId}:${value.account.userId}` : '';
-
 /**
  * Writes the worker's files from a backup, each merged with what this computer holds: the backup's settings, this
  * computer's runtime records. Only called by a worker that holds its lock and has not started its services yet.
@@ -109,9 +104,8 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
   const current = async (name: WorkerFile) => readOptional(join(stateDir, name)).catch(() => { unreadable.add(name); return undefined; });
   // A different Slack account is not switched in while the current one still has work under way.
   let slackBlocked = false;
-  if (files['slack-connection.json'] !== undefined && accountOf(files['slack-connection.json']) !== accountOf(await current('slack-connection.json'))) {
-    const automation = await current('slack-automation.json');
-    if (record(automation) && Array.isArray(automation.workflows) && automation.workflows.some(item => record(item) && UNFINISHED_SLACK.has(String(item.status)))) {
+  if (files['slack-connection.json'] !== undefined && slackAccountKey(files['slack-connection.json']) !== slackAccountKey(await current('slack-connection.json'))) {
+    if (hasUnfinishedSlackWork(await current('slack-automation.json'))) {
       slackBlocked = true;
       errors.push('진행 중인 Slack 작업이 있어 Slack 연결은 복원하지 않았습니다. 작업이 끝난 뒤 다시 복원하세요.');
     }
@@ -127,13 +121,7 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
       switch (name) {
         case 'permissions.json': next = mergePermissions(incoming, existing); if (next === undefined) throw new Error('invalid'); break;
         case 'slack-automation.json':
-        case 'github-automation.json': {
-          if (!record(incoming) || !Array.isArray(incoming.rules)) throw new Error('invalid');
-          // GitHub automation keeps its rules in the same form as Slack's (one coordinator manager for both).
-          try { validateSlackRules(incoming.rules); } catch { throw new Error('invalid'); }
-          next = { rules: incoming.rules, workflows: record(existing) && Array.isArray(existing.workflows) ? existing.workflows : [] };
-          break;
-        }
+        case 'github-automation.json': next = mergeAutomation(incoming, existing); if (next === undefined) throw new Error('invalid'); break;
         case 'trigger-secrets.json': {
           // The backup's secrets come in (its value wins for the same one); secrets only this computer has stay, so a
           // trigger kept here never loses the one it uses.
@@ -145,7 +133,7 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
         // Read again by every call, so it applies as soon as it is written. Read like a saved file: roles this version does not know are dropped.
         case 'models.json': if (!record(incoming)) throw new Error('invalid'); next = parseModelSettings(incoming); break;
         // What the worker's services refuse at start is never written: one would keep the worker from starting.
-        case 'slack-connection.json': if (!validSlackConnection(incoming)) throw new Error('invalid'); next = incoming; break;
+        case 'slack-connection.json': next = restoreSlackConnection(incoming); if (next === undefined) throw new Error('invalid'); break;
         case 'public-agents.json': {
           const agents = parsePublicAgents(incoming);
           if (!agents) throw new Error('invalid');
