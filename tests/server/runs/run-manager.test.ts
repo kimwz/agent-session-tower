@@ -4,6 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
+import { readdirSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import { MASTER_FOLDER } from '../../../shared/master.js';
@@ -90,6 +91,15 @@ function processPrompt() {
   await manager.start();
   return { manager, sessions, session, launches, children, directory, stateDir, refreshes: () => refreshes,
     cleanup: async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); } };
+}
+
+/** Waits until an asynchronous check holds (`until` takes only synchronous ones). */
+async function eventually(check: () => Promise<boolean>, timeout = 5000): Promise<void> {
+  const deadline = Date.now() + timeout;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error(`Timed out after ${timeout}ms waiting for: ${check}`);
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
 }
 
 const finished = (manager: RunManager, id: string) => until(() => {
@@ -1076,7 +1086,7 @@ test('the private MCP config is removed when the provider cannot be spawned', as
   assert.equal(result.status, 'error');
   assert.match(result.error!, /spawn refused by the fixture/);
   assert.ok(configPath?.startsWith(privateTmp), 'the config was written to its own private folder');
-  await until(() => readdir(privateTmp).then(names => names.length === 0));
+  await eventually(() => readdir(privateTmp).then(names => names.length === 0));
 });
 
 /** A Claude conversation whose provider is a fake child that sends whatever the test writes. */
@@ -1281,4 +1291,59 @@ test('while a Codex app submission is being started, the queue waits for it befo
   release();
   await until(() => f.read(other.id)?.status === 'running');
   assert.equal((await finished(f.manager, submitted.id)).status, 'completed');
+});
+
+/** A Claude turn with a private MCP config, in a private TMPDIR, whose provider never starts unless `spawned` allows it. */
+async function claudeWithPrivateConfig(t: TestContext) {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-mcp-final-'));
+  const privateTmp = join(directory, 'tmp'); await mkdir(privateTmp);
+  const previous = process.env.TMPDIR; process.env.TMPDIR = privateTmp;
+  const sessions = new Map([[`claude:${ID}`, makeSession(directory, { provider: 'claude', id: `claude:${ID}` })]]);
+  const spawned: string[][] = [];
+  const manager = new RunManager({ stateDir: join(directory, 'state'), getSession: id => sessions.get(id), refreshSessions: async () => {}, pollMs: 20,
+    findExecutable: async provider => `/fixture/${provider}`,
+    resolveRunTools: () => ({ required: false, servers: { tower: { command: '/fixture/node', args: [], env: { TOWER_MCP_CAPABILITY: 'f'.repeat(64) } } } }),
+    spawnProcess: ((_file: string, args: string[]) => { spawned.push(args); throw new Error('Fixtures never start providers.'); }) as never });
+  await manager.start();
+  t.after(async () => {
+    await manager.close();
+    if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous;
+    await rm(directory, { recursive: true, force: true });
+  });
+  const configs = () => readdir(privateTmp).then(names => names.filter(name => name.startsWith('tower-mcp-')));
+  return { manager, sessions, spawned, configs, privateTmp, id: `claude:${ID}` };
+}
+
+test('a launch look that throws after the private MCP config was written removes the config and starts nothing', async t => {
+  const f = await claudeWithPrivateConfig(t);
+  let looks = 0;
+  // The pump's look and the one before the session check pass; the look after the config was written throws.
+  let written: string[] = [];
+  f.manager.setLaunchGate(() => undefined, (() => {
+    looks++;
+    if (looks === 3) { written = readdirSync(f.privateTmp).filter(name => name.startsWith('tower-mcp-')); throw new Error('The launch look failed.'); }
+    return Promise.resolve();
+  }) as (run: Run) => Promise<void>);
+  const run = await f.manager.enqueue(f.id, 'Use the tools');
+  const result = await finished(f.manager, run.id);
+  assert.equal(result.status, 'error');
+  assert.match(result.error!, /The launch look failed/);
+  assert.equal(looks, 3);
+  assert.equal(written.length, 1, 'the config had been written when the look threw');
+  assert.deepEqual(f.spawned, []);
+  await eventually(() => f.configs().then(names => names.length === 0));
+});
+
+test('a session that disappears before the last look fails the run, removes the private MCP config and starts nothing', async t => {
+  const f = await claudeWithPrivateConfig(t);
+  let looks = 0;
+  let written: string[] = [];
+  f.manager.setLaunchGate(() => undefined, async () => { looks++; if (looks === 3) { written = readdirSync(f.privateTmp).filter(name => name.startsWith('tower-mcp-')); f.sessions.delete(f.id); } });
+  const run = await f.manager.enqueue(f.id, 'Use the tools');
+  const result = await finished(f.manager, run.id);
+  assert.equal(result.status, 'error');
+  assert.match(result.error!, /Session no longer exists/);
+  assert.equal(written.length, 1, 'the config had been written before the last look');
+  assert.deepEqual(f.spawned, []);
+  await eventually(() => f.configs().then(names => names.length === 0));
 });

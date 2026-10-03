@@ -85,7 +85,9 @@ export async function prepareClaudeTurn(host: TurnHost, run: Run, session: Sessi
   const privateConfig = mcpServers && Object.values(mcpServers).some(server => server.env) ? await privateMcpConfig(mcpServers) : undefined;
   if (mcpServers) args.push('--mcp-config', privateConfig?.path ?? JSON.stringify({ mcpServers }));
   // Writing the file yielded; nothing may have stopped the run in the meantime. The manager looks once more after this.
-  if (privateConfig || run.permissionRequestIds?.length) await host.prepareLaunch(run);
+  if (privateConfig || run.permissionRequestIds?.length) {
+    try { await host.prepareLaunch(run); } catch (error) { privateConfig?.remove(); throw error; }
+  }
   const turn = claudeProcess(host, run, session, creating, { executable, args, env, input, privateConfig });
   return { kind: 'ready', handle: turn.spawn, start: turn.start, dispose: () => privateConfig?.remove() };
 }
