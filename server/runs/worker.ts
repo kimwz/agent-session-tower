@@ -47,7 +47,8 @@ import { SecretService } from '../secrets/service.js';
 import { SecretRuntime, SECRET_TOOLS } from '../secrets/runtime.js';
 import { SECRET_CONNECTION_INSTRUCTIONS } from '../secrets/notices.js';
 import { SecretStore } from '../triggers/secrets.js';
-import { listPendingSecretImports, importPendingSecret } from '../backup/secrets.js';
+import { listPendingSecretImports, importPendingSecret } from '../secrets/imports.js';
+import { openLegacyImport } from '../backup/secrets.js';
 import type { SecretTarget } from '../../shared/secrets.js';
 import type { Capability } from '../api/mcp.js';
 import type { RemoteSecretRequest, RemoteSecretResponse } from '../secrets/remote.js';
@@ -580,7 +581,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       onConnect: sessionId => runs.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, sessionId),
       isClosed: async id => { const saved = new ClosedSessionStore(stateDir); await saved.start(); return saved.closedIds().has(id); },
       migrate: () => secretStore.migrate(), pendingImports: () => listPendingSecretImports(stateDir),
-      importPending: (id, password) => importPendingSecret(stateDir, id, password, secretService, { restoreTriggers: async backup => { if (!triggerEngine) throw new Error('Triggers are still starting.'); await triggerEngine.restoreBackup(backup); } }) });
+      importPending: (id, password) => importPendingSecret(stateDir, id, password, secretService, { openLegacy: openLegacyImport, restoreTriggers: async backup => { if (!triggerEngine) throw new Error('Triggers are still starting.'); await triggerEngine.restoreBackup(backup); } }) });
     runs.setRunToolResolver(runToolResolver({ stateDir, runs, slack, github, capabilities, secrets }));
     const secretExpiry = setInterval(() => { void secrets.sweep().catch(() => { console.error('Secret expiry cleanup failed; the vault remains unavailable until unlocked.'); }); }, 60_000); secretExpiry.unref();
     const visible = await runnerContext({ stateDir, runs, sessions, slack, exclusions });

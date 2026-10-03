@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { BACKUP_EXTENSION, DEFAULT_BACKUP_SETTINGS, MAX_BACKUP_FILE_BYTES, type BackupOverview, type BackupPart, type BackupPreview, type BackupSettingsInput, type BackupStatus, type RemoteBackup, type RestoreReport } from '../../shared/backup.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { BackupError, checkPassphrase, decryptBackup, encryptBackup, readBackupHeader, type BackupHeader } from './crypto.js';
-import { collectEncryptedVault, stageVaultImport, stageLegacyImport } from './secrets.js';
+import { stageLegacyImport } from './secrets.js';
+import { deferredSecretParts, encryptedVaultOf, stageVaultImport } from '../secrets/imports.js';
 import { collectTriggers, collectWorkerFiles, parsePayload, payloadParts, WORKER_FILES, type BackupPayload } from './payload.js';
 import type { SkillBackup } from '../skills/backup.js';
 import { keepBefore, readReport, removePendingWorker, writePendingWorker, writeReport } from './restore-files.js';
@@ -160,7 +161,7 @@ export class BackupService {
     return {
       version: 1,
       machine: this.saved.machine,
-      worker: { files: await collectWorkerFiles(stateDir), encryptedVault: await collectEncryptedVault(stateDir), ...(triggers ? { triggers } : {}), skills },
+      worker: { files: await collectWorkerFiles(stateDir), encryptedVault: await encryptedVaultOf(stateDir), ...(triggers ? { triggers } : {}), skills },
       web: { projectGroups: this.options.stores.groups.backupValue(), remoteExclusions: this.options.stores.exclusions.backupValue(), decisions: this.options.stores.decisions.backupValue(), backup: settings },
       // Only a computer that set the master up has anything to bring back.
       ...(record(master) && master.voice !== undefined || record(voiceKey) && typeof voiceKey.apiKey === 'string'
@@ -306,14 +307,15 @@ export class BackupService {
     const { header, passphrase } = item;
     const payload = structuredClone(item.payload);
     const stateDir = this.options.stateDir;
-    const targetHasVault = Boolean(await collectEncryptedVault(stateDir));
+    const targetHasVault = Boolean(await encryptedVaultOf(stateDir));
     const before = await keepBefore(stateDir, targetHasVault ? REPLACED.filter(name => name !== 'trigger-secrets.json') : REPLACED, new Date(this.now()));
     // A worker part still waiting from an earlier restore is replaced by this one.
     await removePendingWorker(stateDir);
     const restoreId = randomUUID(); const pendingSecretImports: string[] = [];
     if (payload.worker.encryptedVault) { pendingSecretImports.push(await stageVaultImport(stateDir, payload.worker.encryptedVault, restoreId)); delete payload.worker.encryptedVault; }
-    if ((targetHasVault || pendingSecretImports.length > 0) && (payload.worker.files['trigger-secrets.json'] !== undefined || payload.worker.triggers)) {
-      pendingSecretImports.push(await stageLegacyImport(stateDir, payload.worker.files['trigger-secrets.json'] ?? [], passphrase, restoreId, payload.worker.triggers));
+    const { legacy } = deferredSecretParts(payload.worker, targetHasVault, pendingSecretImports.length > 0);
+    if (legacy) {
+      pendingSecretImports.push(await stageLegacyImport(stateDir, legacy.records, passphrase, restoreId, legacy.triggers));
       delete payload.worker.files['trigger-secrets.json']; delete payload.worker.triggers;
     }
     const worker = payloadParts({ ...payload, web: {}, master: undefined });

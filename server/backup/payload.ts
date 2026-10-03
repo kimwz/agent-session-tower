@@ -1,4 +1,4 @@
-import { collectEncryptedVault } from './secrets.js';
+import { encryptedVaultOf } from '../secrets/imports.js';
 import { parseModelSettings } from '../../shared/models.js';
 import { join } from 'node:path';
 import type { BackupPart } from '../../shared/backup.js';
@@ -67,7 +67,7 @@ function settingsOf(name: WorkerFile, value: unknown): unknown {
 /** Reads the worker's settings from its files as they are saved now. */
 export async function collectWorkerFiles(stateDir: string): Promise<WorkerRestore['files']> {
   const files: WorkerRestore['files'] = {};
-  const encryptedVault = await collectEncryptedVault(stateDir);
+  const encryptedVault = await encryptedVaultOf(stateDir);
   for (const name of Object.keys(WORKER_FILES) as WorkerFile[]) {
     if (encryptedVault && name === 'trigger-secrets.json') continue;
     const kept = settingsOf(name, await readOptional(join(stateDir, name)));
@@ -100,7 +100,7 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
   }
   for (const name of Object.keys(WORKER_FILES) as WorkerFile[]) {
     const incoming = files[name];
-    if (name === 'trigger-secrets.json' && incoming !== undefined && await collectEncryptedVault(stateDir)) { errors.push('trigger-secrets.json: Vault가 초기화되어 평문 시크릿 복원은 거부했습니다. 암호화 가져오기를 사용하세요.'); continue; }
+    if (name === 'trigger-secrets.json' && incoming !== undefined && await encryptedVaultOf(stateDir)) { errors.push('trigger-secrets.json: Vault가 초기화되어 평문 시크릿 복원은 거부했습니다. 암호화 가져오기를 사용하세요.'); continue; }
     if (incoming === undefined || (slackBlocked && (name === 'slack-connection.json' || name === 'slack-tone.json'))) continue;
     try {
       const existing = await current(name);

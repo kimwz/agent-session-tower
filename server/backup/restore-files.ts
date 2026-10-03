@@ -2,7 +2,7 @@ import { cp, mkdir, readdir, rename, rm, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { BackupPart, RestoreReport } from '../../shared/backup.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
-import { listPendingSecretImports, stageVaultImport } from './secrets.js';
+import { listPendingSecretImports, stageVaultImport } from '../secrets/imports.js';
 import { applyWorkerFiles, type WorkerRestore } from './payload.js';
 
 /** Where restores keep their state: the worker's part waiting for it, the last report, and copies of replaced files. */
