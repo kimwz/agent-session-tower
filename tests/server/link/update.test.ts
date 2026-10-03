@@ -1,5 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -292,4 +293,50 @@ test('a hold stops holding once it is old, and only the service’s own install 
   await writeFile(elsewhere, '');
   await symlink(elsewhere, join(state, 'link.mjs'));
   assert.equal(await managedByService(state, join(state, 'link.mjs'), true), false);
+});
+
+/** A pid no process has: a child that already exited. */
+const deadPid = () => spawnSync(process.execPath, ['-e', '']).pid!;
+const activeUpdate = (state: string, updatedAt = '2026-09-24T00:00:00.000Z') =>
+  writeFile(updatePaths(state).status, JSON.stringify({ version: '1.1.0', previous: '1.0.0', stage: 'verifying', startedAt: updatedAt, updatedAt }));
+
+test('an expired hold whose helper lock names a dead process is removed', async t => {
+  const state = await stateDir(t);
+  await writeFile(updatePaths(state).hold, '{}');
+  await writeFile(updatePaths(state).lock, String(deadPid()));
+  assert.equal(await handoffHeld(state, Date.now() + 16 * 60_000), false);
+  assert.equal(existsSync(updatePaths(state).hold), false);
+});
+
+test('a lock left by a dead helper is taken over', async t => {
+  const state = await stateDir(t);
+  await requested(state);
+  await writeFile(updatePaths(state).lock, String(deadPid()));
+  assert.equal((await runUpdateHelper(state, '1.1.0', service(state).steps))?.stage, 'done');
+});
+
+test('prune removes unused versions when no update runs', async t => {
+  const state = await stateDir(t);
+  await mkdir(versionDirectory(state, '0.9.0'), { recursive: true });
+  await new Updates({ stateDir: state, version: '1.0.0', port: 1, managed: true }).prune(async () => []);
+  assert.equal(existsSync(versionDirectory(state, '0.9.0')), false);
+});
+
+test('recover resumes an active update for this version with a fresh hold', async t => {
+  const state = await stateDir(t);
+  await activeUpdate(state);
+  const resumed: Array<[string, boolean]> = [];
+  await new Updates({ stateDir: state, version: '1.1.0', port: 1, managed: true, spawnHelper: (version, resume) => resumed.push([version, resume]) }).recover();
+  assert.deepEqual(resumed, [['1.1.0', true]]);
+  assert.equal(existsSync(updatePaths(state).hold), true);
+  assert.equal((await readUpdateStatus(state))?.stage, 'verifying');
+});
+
+test('an update whose helper is gone is reported interrupted', async t => {
+  const state = await stateDir(t);
+  await activeUpdate(state);
+  await writeFile(updatePaths(state).lock, String(deadPid()));
+  const status = await new Updates({ stateDir: state, version: '1.0.0', port: 1, managed: true }).status();
+  assert.equal(status?.stage, 'failed');
+  assert.equal(status?.code, 'interrupted');
 });

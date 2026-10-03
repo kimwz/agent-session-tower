@@ -505,6 +505,16 @@ test('while an update of this computer is being tried, the new web does not take
   } finally { await client.close(); await host.close(); }
 });
 
+test('while an update is verified, a restore or an update on request is refused with the verification message', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: async () => true });
+  try {
+    await client.start();
+    await assert.rejects(client.restartWorker(), { statusCode: 409, message: /still verifying/ });
+    await assert.rejects(client.forceUpdate(), { statusCode: 409, message: /still verifying/ });
+  } finally { await client.close(); }
+});
+
 test('a worker newer than this web, left by an update that was undone, is not handed back to it', async t => {
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();
