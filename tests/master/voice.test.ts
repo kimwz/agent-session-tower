@@ -17,6 +17,7 @@ import type { FirstReply } from '../../server/master/first-reply.js';
 import type { MasterEntry, MasterSpeak, MasterStreamEvent } from '../../shared/master.js';
 import type { ChatMessage, Run, Snapshot } from '../../shared/types.js';
 import { until } from '../helpers/until.js';
+import { audioSink } from '../../server/http/sinks.js';
 
 const TOKEN = 'a'.repeat(64);
 const SECRET = 'b'.repeat(64);
@@ -184,7 +185,7 @@ const autoPlay = (h: Harness, session: string) => h.room.subscribe(event => {
 
 /** Reads a GET as the page would, through an HTTP server that hands the request to the voice. */
 async function audioServer(t: test.TestContext, voice: MasterVoice) {
-  const server = createServer((req, res) => { void voice.serveAudio(req.url!.slice(1), res); });
+  const server = createServer((req, res) => { void voice.serveAudio(req.url!.slice(1), audioSink(res)); });
   const port = await listen(server);
   t.after(() => stop(server));
   const fetchAudio = (id: string) => new Promise<{ status: number; body: Buffer; complete: boolean; length?: string }>(resolve => {
@@ -201,7 +202,7 @@ async function audioServer(t: test.TestContext, voice: MasterVoice) {
 
 test('voice is one session at a time: a new one ends the one before, whose page is refused from then on and cannot take it back', async t => {
   const h = await harness(t);
-  assert.throws(() => h.voice.voiceOn({ tabId: 'not-a-uuid', local: true }), { statusCode: 400 });
+  assert.throws(() => h.voice.voiceOn({ tabId: 'not-a-uuid', local: true }), { kind: 'invalid' });
   const first = on(h);
   assert.equal(h.voice.status().session, digestOf(first));
   assert.equal(h.voice.voicePresence({ session: first, listening: true }), true);
@@ -209,7 +210,7 @@ test('voice is one session at a time: a new one ends the one before, whose page 
   assert.equal(h.voice.status().session, digestOf(second));
   assert.equal(h.voice.voicePresence({ session: first, listening: true }), false, 'presence never takes voice back');
   assert.deepEqual(await request(h, first, '지금 뭐 돌아가?'), { stale: true });
-  await assert.rejects(h.voice.voiceToken({ session: first }), { statusCode: 409 });
+  await assert.rejects(h.voice.voiceToken({ session: first }), { kind: 'conflict' });
   assert.equal(h.voice.voiceActivity({ session: first, speaking: true }), false);
   assert.equal(h.voice.voiceOff({ session: first }), false);
   assert.equal(h.voice.voiceOff({ session: second }), true);
@@ -220,7 +221,7 @@ test('voice is one session at a time: a new one ends the one before, whose page 
 
 test('voice needs an ElevenLabs key; tokens come from it, each reserving an utterance until settled once, from any session', async t => {
   const h = await harness(t, { voiceKey: false });
-  assert.throws(() => on(h), { statusCode: 409 });
+  assert.throws(() => on(h), { kind: 'conflict' });
   await h.settings.update({ voiceKey: VOICE_KEY });
   const session = on(h);
   const first = await h.voice.voiceToken({ session });
@@ -230,7 +231,7 @@ test('voice needs an ElevenLabs key; tokens come from it, each reserving an utte
   const reserved = h.voice.status().today.dollars;
   assert.ok(reserved > 0, 'a token holds a whole utterance');
   await h.voice.voiceToken({ session });
-  await assert.rejects(h.voice.voiceToken({ session }), { statusCode: 409 }, 'at most two unsettled a session');
+  await assert.rejects(h.voice.voiceToken({ session }), { kind: 'conflict' }, 'at most two unsettled a session');
   // Voice moves to another tab: the first page's utterance is still settled.
   const other = on(h, randomUUID());
   assert.equal(await h.voice.voiceUsage({ tokenId: first.tokenId, seconds: 6 }), true);
@@ -238,9 +239,11 @@ test('voice needs an ElevenLabs key; tokens come from it, each reserving an utte
   assert.equal(h.voice.status().today.sttSeconds, 6);
   await h.voice.voiceToken({ session: other });
   // A token never settled counts as a whole utterance once it can no longer be used, on the day it runs out.
-  const file = (h.voice as unknown as { file: { tokens: Array<{ issuedAt: number }> } }).file;
+  // Test-only access to the private records owner (C8): the same file object and the owner's own expiry sweep.
+  const usage = (h.voice as unknown as { usage: { file: { tokens: Array<{ issuedAt: number }> }; settleExpired(now: number): void } }).usage;
+  const file = usage.file;
   for (const token of file.tokens) token.issuedAt -= 17 * 60_000;
-  (h.voice as unknown as { settleExpired(now: number): void }).settleExpired(Date.now());
+  usage.settleExpired(Date.now());
   assert.equal(h.voice.status().today.sttSeconds, 6 + 180 * 2);
   assert.equal(file.tokens.length, 0);
 });
@@ -251,7 +254,7 @@ test('a daily limit holds every unsettled token and every reading before it star
   const session = on(h);
   const token = await h.voice.voiceToken({ session });
   // Three minutes held (about $0.0195): a second would pass the limit.
-  await assert.rejects(h.voice.voiceToken({ session }), { statusCode: 409 });
+  await assert.rejects(h.voice.voiceToken({ session }), { kind: 'conflict' });
   await h.voice.voiceUsage({ tokenId: token.tokenId, seconds: 2 });
   await h.voice.voiceToken({ session });
   assert.equal(h.voice.status().limited, false);
@@ -287,7 +290,8 @@ test('what the owner said is a request like a typed one, answered first with a r
   await masterEntry(h, /두 개입니다/);
   assert.ok(!h.room.recent(50).some(entry => JSON.stringify(entry.data).includes(FIRST)), 'the first reply is not part of the conversation');
   assert.deepEqual(await readdir(join(h.dir, 'voice-clips')).catch(() => []), [], 'nothing recorded');
-  await (h.voice as unknown as { writes: Promise<void> }).writes;
+  // Test-only access to the private records owner (C8): the same caught write tail the facade's `writes` was.
+  await (h.voice as unknown as { usage: { flush(): Promise<void> } }).usage.flush();
   const days = (JSON.parse(await readFile(join(h.dir, 'voice.json'), 'utf8')) as { days: Record<string, { firstReplies?: number }> }).days;
   assert.ok(Object.values(days).some(day => day.firstReplies === 1), 'the model call is counted');
   assert.equal(isNoise('네 알겠어요'), false);
@@ -336,7 +340,7 @@ test('a voice is heard before it is chosen: a Korean sample read brightly in tha
   const h = await harness(t, { steps: [] });
   const { fetchAudio } = await audioServer(t, h.voice);
   const OTHER = 'bv62BmVlrpG0pQegOpuN';
-  await assert.rejects(h.voice.voicePreview({ voiceId: 'bad id' }), { statusCode: 400 });
+  await assert.rejects(h.voice.voicePreview({ voiceId: 'bad id' }), { kind: 'invalid' });
   const first = await h.voice.voicePreview({ voiceId: OTHER });
   assert.match(first.audio, /^\/api\/master\/voice\/audio\/preview-[a-f0-9]{64}$/);
   assert.equal(h.labs.speeches.length, 1);
@@ -362,14 +366,14 @@ test('a voice is heard before it is chosen: a Korean sample read brightly in tha
   assert.deepEqual(await readdir(join(h.dir, 'voice-clips')).catch(() => []), []);
   assert.equal((await readdir(join(h.dir, 'voice-previews'))).length, 2);
   h.labs.mode = 'error';
-  await assert.rejects(h.voice.voicePreview({ voiceId: 'cgSgspJ2msm6clMCkdW9' }), { statusCode: 502 });
+  await assert.rejects(h.voice.voicePreview({ voiceId: 'cgSgspJ2msm6clMCkdW9' }), { kind: 'upstream' });
   assert.equal((await fetchAudio(`preview-${'0'.repeat(64)}`)).status, 404);
 });
 
 test('voices are listed and heard with only a key, before the master session starts; without a key neither is', async t => {
   const h = await harness(t, { steps: [], voiceKey: false });
-  await assert.rejects(h.voice.voiceVoices(), { statusCode: 409 });
-  await assert.rejects(h.voice.voicePreview({ voiceId: 'cgSgspJ2msm6clMCkdW9' }), { statusCode: 409 });
+  await assert.rejects(h.voice.voiceVoices(), { kind: 'conflict' });
+  await assert.rejects(h.voice.voicePreview({ voiceId: 'cgSgspJ2msm6clMCkdW9' }), { kind: 'conflict' });
   await h.settings.update({ voiceKey: VOICE_KEY });
   await h.settings.bind(undefined);
   assert.deepEqual(await h.voice.voiceVoices(), [{ id: 'cgSgspJ2msm6clMCkdW9', name: 'Jessica', category: 'premade' }]);
@@ -796,4 +800,21 @@ test('finite first response retains the original deadline while TTS is incomplet
   const started = Date.now();
   assert.deepEqual(await request(h, session, '느린 첫 음성'), {});
   assert.ok(Date.now() - started < 2_900, 'the existing 2.5 second first-response deadline also covers synthesis');
+});
+
+test('missing preview and live audio are bodiless 404s, and a preview is a finite file with its length', async t => {
+  const h = await harness(t, { steps: [] });
+  const { port } = await audioServer(t, h.voice);
+  const fetchHead = (id: string) => new Promise<{ status: number; body: string; headers: Record<string, string | undefined> }>((resolve, reject) => {
+    httpRequest({ host: '127.0.0.1', port, path: `/${id}` }, res => {
+      const chunks: Buffer[] = [];
+      res.on('data', chunk => chunks.push(chunk as Buffer));
+      res.on('end', () => resolve({ status: res.statusCode!, body: Buffer.concat(chunks).toString(), headers: { type: res.headers['content-type'], cache: res.headers['cache-control'], length: res.headers['content-length'], encoding: res.headers['transfer-encoding'] } }));
+    }).on('error', reject).end();
+  });
+  const bodiless = { body: '', headers: { type: undefined, cache: undefined, length: undefined, encoding: 'chunked' } };
+  assert.deepEqual(await fetchHead(`preview-${'0'.repeat(64)}`), { status: 404, ...bodiless });
+  assert.deepEqual(await fetchHead(randomUUID()), { status: 404, ...bodiless });
+  const preview = await h.voice.voicePreview({ voiceId: 'bv62BmVlrpG0pQegOpuN' });
+  assert.deepEqual(await fetchHead(preview.audio.split('/').at(-1)!), { status: 200, body: 'ID3-first-second-part', headers: { type: 'audio/mpeg', cache: 'no-store', length: String('ID3-first-second-part'.length), encoding: undefined } });
 });

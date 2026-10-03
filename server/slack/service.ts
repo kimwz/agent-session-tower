@@ -19,6 +19,7 @@ import { SlackApiError, SlackClient } from './client.js';
 import { SlackSocket, type SlackSocketOptions } from './socket.js';
 import { judgeSlackFollowUp } from './follow-up.js';
 import type { DecisionEngine } from '../decisions/engine.js';
+import { TowerError } from '../../shared/errors.js';
 
 type Account = { teamId: string; userId: string; teamName?: string; userName?: string };
 type Settings = { enabled: boolean; allowSelfMentions?: boolean; language?: 'ko' | 'en'; workingReaction?: string; appToken?: string; userToken?: string; account?: Account };
@@ -36,7 +37,7 @@ interface Dependencies {
   model?: typeof runAutoPromptModel;
 }
 const FOLLOW_UP_JUDGMENT_MS = 10_000;
-const invalid = (message: string) => Object.assign(new Error(message), { statusCode: 400 });
+const invalid = (message: string) => new TowerError('invalid', message);
 const slackOrigin = (workflowId: string): RunOrigin => ({ kind: 'slack', workflowId });
 
 /** Credentials and event processing belong to the execution worker, never the web process. */

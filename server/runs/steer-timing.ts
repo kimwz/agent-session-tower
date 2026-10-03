@@ -128,6 +128,15 @@ export async function insertIfItBelongs(dependencies: InsertDependencies, queued
   return 'uncertain';
 }
 
+/**
+ * Judges a message without making anyone wait. Judgment failures, waits and uncertain deliveries are recorded by the
+ * judgment itself; only an unexpected error reaches here, and it is logged without the message or a claim about
+ * whether the message arrived.
+ */
+export function insertInBackground(dependencies: InsertDependencies, queued: Run, log: (line: string) => void = console.error): void {
+  void insertIfItBelongs(dependencies, queued).catch(error => log(`Judging whether a message belongs to the running turn ended with an unexpected error: ${message(error)}`));
+}
+
 async function settled(dependencies: InsertDependencies, runId: string, returned: Run): Promise<'delivered' | 'uncertain' | 'unknown'> {
   const wait = dependencies.wait ?? (ms => new Promise<void>(resolve => { setTimeout(resolve, ms); }));
   const deadline = (dependencies.now?.() ?? Date.now()) + SETTLE_MS;

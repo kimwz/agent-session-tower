@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LiveState } from '../../server/tower-tools/live-state.js';
@@ -11,11 +11,12 @@ import { MasterSession } from '../../server/master/session.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
 import { TowerClient } from '../../server/tower-tools/tower-client.js';
 import type { AutoPromptJob, ChatMessage, Run, SessionOutcome, Snapshot } from '../../shared/types.js';
+import { asideNames, blockQuarantine, captureErrors, failOpen } from '../helpers/quarantine.js';
 
 const MASTER = 'claude:master';
 
 /** Tower as the master session sees it, with sessions, runs and Auto Prompt jobs the test changes as it goes. */
-async function harness(t: test.TestContext, options: { bound?: boolean; createStatus?: number } = {}) {
+async function harness(t: test.TestContext, options: { bound?: boolean; createStatus?: number; prepare?: (dir: string) => unknown } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'tower-master-session-'));
   const cleanup: Array<() => unknown> = [];
   t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(dir, { recursive: true, force: true }); });
@@ -84,6 +85,7 @@ async function harness(t: test.TestContext, options: { bound?: boolean; createSt
     cleanup.push(async () => { await session.close(); await room.flush(); });
     return session;
   };
+  await options.prepare?.(dir);
   const session = await open();
   // Reports Tower took: each became a turn of the master session.
   const reports = () => runs.filter(run => run.sessionId === MASTER && run.prompt.startsWith('[Tower report]')).map(run => ({ body: { prompt: run.prompt } }));
@@ -97,11 +99,62 @@ test('the first message starts the master session in its own folder, with its gu
   assert.deepEqual(h.posted[0], { path: '/api/sessions', body: { provider: 'claude', cwd: join(h.dir, 'master-session'), prompt: '안녕', title: '마스터', model: 'opus' } });
   assert.match(await readFile(join(h.dir, 'master-session', 'AGENTS.md'), 'utf8'), /master agent of Agent Session Tower/);
   assert.equal(h.settings.current().session?.sessionId, MASTER);
-  await assert.rejects(h.session.begin({ provider: 'codex', text: '또' }), { statusCode: 409 });
+  await assert.rejects(h.session.begin({ provider: 'codex', text: '또' }), { kind: 'conflict' });
   await h.session.begin({ provider: 'codex', text: '새로', replace: true });
   assert.equal(h.settings.current().session?.provider, 'codex');
   await h.session.release();
   assert.equal(h.settings.current().session, undefined);
+});
+
+test('a missing follow file starts fresh and is saved', async t => {
+  const h = await harness(t);
+  const saved = JSON.parse(await readFile(join(h.dir, 'follow.json'), 'utf8'));
+  assert.equal(saved.version, 1);
+  assert.deepEqual({ followed: saved.followed, masterRuns: saved.masterRuns, stoppedAt: saved.stoppedAt }, { followed: [], masterRuns: [], stoppedAt: undefined });
+  assert.equal(typeof saved.baselineAt, 'string');
+});
+
+test('unreadable or wrong-shape follow state is moved aside before anything is saved', async t => {
+  for (const text of ['{ not json', '{"version":2,"followed":[]}']) {
+    let path = '';
+    const h = await harness(t, { prepare: async dir => { path = join(dir, 'follow.json'); await writeFile(path, text, { mode: 0o600 }); captureErrors(t, path); } });
+    const [aside] = await asideNames(path);
+    assert.ok(aside, text);
+    assert.equal(await readFile(join(h.dir, aside), 'utf8'), text);
+    assert.equal(JSON.parse(await readFile(path, 'utf8')).version, 1, 'fresh state is saved');
+    assert.equal(h.session.stateProblem(), 'moved-aside');
+  }
+});
+
+test('follow state that cannot be read is left as it is and nothing is saved', async t => {
+  let path = '', opened: { hits: () => number } | undefined, before = 0;
+  const h = await harness(t, { prepare: async dir => {
+    path = join(dir, 'follow.json');
+    await writeFile(path, JSON.stringify({ version: 1, baselineAt: '2026-10-01T00:00:00.000Z', masterRuns: [], followed: [], stoppedAt: '2026-10-01T00:00:00.000Z' }), { mode: 0o600 });
+    before = (await stat(path)).mtimeMs;
+    opened = failOpen(t, path);
+  } });
+  assert.ok(opened!.hits() >= 1, 'the follow reader was refused');
+  assert.equal(h.session.stateProblem(), 'not-saved');
+  await h.session.close();
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).stoppedAt, '2026-10-01T00:00:00.000Z');
+  assert.equal((await stat(path)).mtimeMs, before);
+  assert.deepEqual(await asideNames(path), []);
+});
+
+test('follow state that cannot be moved aside is never written over', async t => {
+  let path = '', release = () => {};
+  const h = await harness(t, { prepare: async dir => {
+    path = join(dir, 'follow.json');
+    await writeFile(path, '{ not json', { mode: 0o600 });
+    captureErrors(t, path);
+    release = (await blockQuarantine(t, path)).release;
+  } });
+  release();
+  assert.equal(h.session.stateProblem(), 'not-saved');
+  await h.session.close();
+  assert.equal(await readFile(path, 'utf8'), '{ not json');
+  assert.ok((await readdir(h.dir)).every(name => !name.startsWith('follow.json.') || name.includes('.unreadable-')));
 });
 
 test('a start Tower refused is not bound, so the owner can try again', async t => {
@@ -465,4 +518,34 @@ test('a master report cancelled by worker recovery does not stop later goal repo
   await h.session.follow();
   assert.equal(h.reports().length, 2, 'one recovered record and one newly delivered report');
   assert.match(h.reports()[1].body.prompt, /Deployment verified/);
+});
+
+test('start and send failures keep the remote status: uncertain is 503, none is 502 to start and 503 to send', async t => {
+  const { errorStatus } = await import('../../server/http/requests.js');
+  const answers: Array<{ state: string; status: number; body?: unknown }> = [];
+  const failed = async (work: Promise<unknown>) => { const error = await work.then(() => undefined, (caught: unknown) => caught) as Error; return { status: errorStatus(error), message: error.message }; };
+  const fresh = await harness(t);
+  // A stand-in for Tower's answers, so every state and status can be given.
+  (fresh.session as unknown as { options: { tower: { call: () => Promise<unknown> } } }).options.tower = { call: async () => answers.shift() };
+  answers.push({ state: 'uncertain', status: 0 });
+  assert.deepEqual(await failed(fresh.session.begin({ provider: 'claude', text: 'a' })), { status: 503, message: '마스터 세션을 만들었는지 알 수 없습니다. 세션 목록에서 "마스터" 세션을 확인해 주세요.' });
+  answers.push({ state: 'uncertain', status: 500 });
+  assert.equal((await failed(fresh.session.begin({ provider: 'claude', text: 'a' }))).status, 503, 'uncertain wins over a status');
+  answers.push({ state: 'failed', status: 0 });
+  assert.deepEqual(await failed(fresh.session.begin({ provider: 'claude', text: 'a' })), { status: 502, message: '마스터 세션을 시작하지 못했습니다.' });
+  answers.push({ state: 'failed', status: 418, body: { error: 'x' } });
+  assert.deepEqual(await failed(fresh.session.begin({ provider: 'claude', text: 'a' })), { status: 418, message: '마스터 세션을 시작하지 못했습니다: x' });
+  answers.push({ state: 'failed', status: 599, body: {} });
+  assert.equal((await failed(fresh.session.begin({ provider: 'claude', text: 'a' }))).status, 599);
+
+  const bound = await harness(t, { bound: true });
+  (bound.session as unknown as { options: { tower: { call: () => Promise<unknown> } } }).options.tower = { call: async () => answers.shift() };
+  answers.push({ state: 'failed', status: 0, body: {} });
+  assert.deepEqual(await failed(bound.session.spoken({ text: 'b', voiceSession: 'v', key: 'k1' })), { status: 503, message: '마스터 세션에 보내지 못했습니다.' });
+  answers.push({ state: 'failed', status: 409, body: { error: 'busy' } });
+  assert.deepEqual(await failed(bound.session.spoken({ text: 'b', voiceSession: 'v', key: 'k2' })), { status: 409, message: 'busy' });
+  answers.push({ state: 'uncertain', status: 0 });
+  assert.deepEqual(await failed(bound.session.spoken({ text: 'b', voiceSession: 'v', key: 'k3' })), { status: 503, message: '마스터 세션에 보내지 못했습니다.' });
+  answers.push({ state: 'failed', status: 599, body: { error: 'odd' } });
+  assert.deepEqual(await failed(bound.session.spoken({ text: 'b', voiceSession: 'v', key: 'k4' })), { status: 599, message: 'odd' });
 });

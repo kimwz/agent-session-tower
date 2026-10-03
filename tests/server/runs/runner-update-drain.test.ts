@@ -11,6 +11,8 @@ import { SteeringError } from '../../../server/runs/steering.js';
 import { continuedRun, continuedRunById } from '../../../server/runs/continuations.js';
 import type { Run, Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 
 const nativeId = '10000000-0000-4000-8000-000000000001';
 const owner = { kind: 'owner' as const };
@@ -377,4 +379,77 @@ test('an update continuation retains the trigger event identity used by launch a
   await until(() => f.continuation());
   assert.deepEqual(f.continuation()!.origin, origin);
   assert.equal(f.continuation()!.scheduled!.afterRunId, f.first.id);
+});
+
+/** One Codex conversation held by the desktop app, whose submissions wait in the app until they start. */
+async function bridgeFixture() {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-update-drain-bridge-'));
+  const session: Session = { id: `codex:${nativeId}`, nativeId, provider: 'codex', title: 'Bridge fixture', cwd: directory,
+    project: 'fixture', status: 'idle', statusReason: '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    lastMessage: '', messageCount: 1, isSubagent: false, resumable: true, activeProcess: true };
+  const bridges: Array<{ finish(result: { status: 'completed' | 'cancelled'; withdrawn?: boolean }): void; withdrawn: number }> = [];
+  const manager = new RunManager({ stateDir: directory, getSession: id => id === session.id ? session : undefined,
+    refreshSessions: async () => {}, findExecutable: async () => '/fixture/codex', pollMs: 10,
+    spawnProcess: () => { throw new Error('fixture: no provider process'); },
+    openCodexBridge: async options => {
+      const state = { withdrawn: 0, finish: (result: { status: 'completed' | 'cancelled'; withdrawn?: boolean }) => options.onFinished(result) };
+      bridges.push(state);
+      return { done: new Promise<void>(() => {}), start: async () => {}, cancel: async () => { options.onFinished({ status: 'cancelled' }); }, close: () => {},
+        withdraw: async () => { state.withdrawn++; options.onFinished({ status: 'cancelled', withdrawn: true }); return 'withdrawn' as const; } };
+    } });
+  await manager.start();
+  return { manager, session, bridges, cleanup: async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); } };
+}
+
+test('updateDrainStatus counts running targets and Codex app submissions not yet started', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  assert.equal(f.manager.updateDrainStatus()?.running, 1, 'the running turn');
+  const b = await bridgeFixture(); t.after(b.cleanup);
+  const submitted = await b.manager.enqueue(b.session.id, 'Sent to the desktop app', {}, { origin: owner });
+  await until(() => b.bridges.length === 1 && b.manager.busy());
+  b.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  assert.equal(b.manager.updateDrainStatus()?.running, 1, 'the submission the app has not started');
+  assert.equal(b.manager.list().find(run => run.id === submitted.id)?.status, 'queued');
+});
+
+test('a Codex app submission withdrawn for the update waits for the new worker', async t => {
+  const b = await bridgeFixture(); t.after(b.cleanup);
+  const submitted = await b.manager.enqueue(b.session.id, 'Sent to the desktop app', {}, { origin: owner });
+  await until(() => b.bridges.length === 1 && b.manager.busy());
+  b.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  b.manager.driveUpdateDrain();
+  await until(() => b.bridges[0].withdrawn === 1);
+  const waiting = b.manager.list().find(run => run.id === submitted.id)!;
+  assert.equal(waiting.status, 'queued');
+  assert.equal(waiting.output, 'Waiting: Tower is switching to its new version; this starts right after.');
+  assert.equal(waiting.towerTools, undefined);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(b.bridges.length, 1, 'it is not submitted again on this worker');
+});
+
+test('a wrap-up request is never saved as keepQueued', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  // Test-only: what each save of runs.json writes, read as it is written.
+  const original = fsPromises.open;
+  const writes: Array<Array<Record<string, unknown>>> = [];
+  t.mock.method(fsPromises, 'open', async (...args: Parameters<typeof original>) => {
+    const handle = await original(...args);
+    if (String(args[0]).startsWith(join(f.directory, 'runs.json.'))) {
+      const writeFile = handle.writeFile.bind(handle);
+      handle.writeFile = (async (data: string) => { writes.push(JSON.parse(String(data))); return writeFile(data); }) as typeof handle.writeFile;
+    }
+    return handle;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const waiting = await f.manager.enqueue(f.session.id, 'queued behind the turn', {}, { origin: owner });
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  f.manager.driveUpdateDrain();
+  await f.manager.flushState();
+  const saved = writes.flat();
+  const wrapUps = saved.filter(run => run.updateWrapUp);
+  assert.ok(wrapUps.some(run => run.status === 'queued'), 'a save saw the wrap-up while it was still queued');
+  assert.ok(wrapUps.every(run => run.keepQueued === undefined));
+  assert.ok(saved.some(run => run.id === waiting.id && run.keepQueued === true), 'a message accepted during the switch is kept queued');
 });

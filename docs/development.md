@@ -2,7 +2,7 @@
 
 ## Run from source
 
-Node.js 22.13+, npm, and Git are required. macOS is the verified platform.
+Node.js 22.13+, npm, and Git are required. macOS and Linux are verified; CI runs the checks on both.
 
 ```sh
 git clone https://github.com/kimwz/agent-session-tower.git
@@ -94,7 +94,7 @@ If the builder cannot locate the Node.js license beside the installed runtime, s
 | `tests/` | Parser, state, UI logic, runner, and HTTP tests |
 | `scripts/` | Standalone executable build and smoke test |
 
-A Node HTTP process serves the API and built React UI. A separate detached execution worker owns provider connections, queued work, approvals, Auto Prompt routing, and terminal shells. The web process reconnects through an authenticated owner-only local socket; stopping the web process does not stop work. Server-sent events update the browser. No database or hosted backend is required. The graph uses React Flow.
+A Node HTTP process serves the API and built React UI. A separate detached execution worker owns provider connections, queued work, approvals, and Auto Prompt routing; terminal shells run in a separate terminal host (see [Web restart and execution worker](#web-restart-and-execution-worker)). The web process reaches both through authenticated owner-only local sockets; stopping the web process does not stop work or close shells. Server-sent events update the browser. No database or hosted backend is required. The graph uses React Flow.
 
 ### Browser workspace
 
@@ -132,7 +132,7 @@ Development and fixture instances should run with `TOWER_AUTO_UPDATE=off`. Tower
 
 Restart the web PID only. Its shutdown closes HTTP streams and authentication sessions, but never sends provider cancellation or termination. The worker owns `runs.json`, `created-sessions.json`, and `auto-prompts.json`; only one worker may write them. Its separate lock is in `<state-dir>/runner-runtime/`. Local RPC uses a short Unix socket in an owner-only `/tmp/tower-runner-<uid>-<hash>/` directory plus a private random credential. This worker transport currently targets POSIX systems.
 
-After the web server stops, running and queued work and approval waits remain live. Restarting with the same state directory reattaches without resubmitting prompts. Mutating RPC requests are not retried after uncertain transport failures. An incompatible worker is never replaced while handling work. The worker exits only after at least 30 seconds without a web client and with no active runs, routing jobs, or terminal shells. Slack monitoring keeps the worker active.
+After the web server stops, running and queued work and approval waits remain live. Restarting with the same state directory reattaches without resubmitting prompts. Mutating RPC requests are not retried after uncertain transport failures. An incompatible worker is never replaced while handling work. The worker exits only after at least 30 seconds without a web client and with no active runs, routing jobs, or shells of its own (opened before the terminal host). Slack monitoring keeps the worker active.
 
 A web process that attaches to a worker from an older build asks it to hand off; a newer worker (left by an update that was undone) is never handed back to an older web. The worker keeps serving, including Slack, until a moment when no run, routing job, Slack task in progress, or shell of its own is active. It then refuses new submissions for that instant, saves its state, records `runner-runtime/handoff.json`, releases its lock, starts the web build's worker, and exits. The web reattaches to that successor only with this record; any other worker change still requires a restart. A submission refused during the switch returns 503 and was not accepted, so it can be sent again. If no quiet moment comes for six hours, new Slack mentions are saved but left for the successor to start; running work is never interrupted. While the attached worker runs a different build from the web page, the header shows **Worker update pending**; features added since that build do not apply until the handoff.
 

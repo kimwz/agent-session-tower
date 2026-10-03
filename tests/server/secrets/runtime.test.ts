@@ -64,9 +64,9 @@ async function fixture() {
 test('unrelated turns receive no secret guide and vault state changes stay silent', async () => {
   const f = await fixture();
   try {
-    assert.equal(f.resolver(f.addRun('unrelated-before-setup'), f.session).instructions, undefined);
+    assert.equal((f.resolver(f.addRun('unrelated-before-setup'), f.session) as { instructions?: unknown }).instructions, undefined);
     await f.initialize();
-    assert.equal(f.resolver(f.addRun('unrelated-after-setup'), f.session).instructions, undefined);
+    assert.equal((f.resolver(f.addRun('unrelated-after-setup'), f.session) as { instructions?: unknown }).instructions, undefined);
     await f.runtime.control('lock', {});
     await f.runtime.control('unlock', { password });
     await f.runtime.control('create', { scope: 'global', name: 'QUIET_SAVED_KEY', kind: 'scalar', value: canary });
@@ -92,7 +92,7 @@ test('explicit assignment is value-free, committed before its receipt, and unrel
   try {
     await f.initialize();
     const run = f.addRun('notice-owner'); const tools = f.resolver(run, f.session);
-    assert.equal(tools.instructions, undefined);
+    assert.equal((tools as { instructions?: unknown }).instructions, undefined);
     assert.ok(tools.servers?.tower_secrets, 'lazy discovery remains available');
     assert.ok(SECRET_TOOLS.find(tool => tool.name === 'secrets_list')!.description.includes(SECRET_USE_INSTRUCTIONS));
     const saved = await f.runtime.control('create', { sessionId: f.session.id, scope: 'task', name: canary, kind: 'scalar', value: canary, connect: true, notifySession: true }) as SecretOverview;
@@ -242,7 +242,7 @@ test('owner MCP binds canonical cwd and one open task across summaries, turn com
     assert.equal(initial.root, f.projectRoot); assert.notEqual(initial.root, f.alias);
     f.session.tasks = [{ id: 'summary-task', title: 'A model summary ended', stage: 'completed', startedAt: 'now', updatedAt: 'now' }];
     assert.equal((await f.runtime.context(capability)).taskId, initial.taskId);
-    first.status = 'completed'; await assert.rejects(f.list(token), { statusCode: 403 });
+    first.status = 'completed'; await assert.rejects(f.list(token), { kind: 'forbidden' });
     const followup = f.addRun('run-followup'); const followupToken = f.tokenFor(followup);
     const followupCapability = f.capabilities.resolve(followupToken) as Extract<Capability, { kind: 'secret-run' }>;
     assert.notEqual(followupToken, token);
@@ -279,31 +279,31 @@ test('resolver and runtime refuse trigger, agent, subagent, foreign session, ext
       const run = f.addRun(`run-${kind}`, f.session, { origin: { kind, ...(kind === 'trigger' ? { triggerId: 'fixture-trigger' } : {}) } });
       assert.equal(f.resolver(run, f.session).servers?.tower_secrets, undefined);
       const forced = f.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: run.sessionId });
-      await assert.rejects(f.list(forced), { statusCode: 403 });
+      await assert.rejects(f.list(forced), { kind: 'forbidden' });
     }
     const restrictions: Partial<Session>[] = [ { isSubagent: true }, { launchedByAgent: true }, { parentId: 'root' }, { launchedBy: { kind: 'trigger', triggerId: 'fixture-trigger' } } ];
     for (const [index, patch] of restrictions.entries()) {
       const session = sessionRecord(f.projectRoot, { id: `child-${index}`, ...patch }); f.sessions.set(session.id, session); f.origins.set(session.id, { kind: 'owner', untrustedInput: false });
       const run = f.addRun(`run-child-${index}`, session);
       assert.equal(f.resolver(run, session).servers?.tower_secrets, undefined);
-      await assert.rejects(f.list(f.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: session.id })), { statusCode: 403 });
-      await assert.rejects(f.runtime.target(session.id), { statusCode: 403 });
+      await assert.rejects(f.list(f.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: session.id })), { kind: 'forbidden' });
+      await assert.rejects(f.runtime.target(session.id), { kind: 'forbidden' });
     }
     const owner = f.addRun('run-owner');
     f.origins.set(f.session.id, { kind: 'owner', untrustedInput: true });
     assert.equal(f.resolver(owner, f.session).towerTools, 'external-input');
-    await assert.rejects(f.list(f.capabilities.issue({ kind: 'secret-run', runId: owner.id, sessionId: owner.sessionId })), { statusCode: 403 });
+    await assert.rejects(f.list(f.capabilities.issue({ kind: 'secret-run', runId: owner.id, sessionId: owner.sessionId })), { kind: 'forbidden' });
     f.origins.set(f.session.id, { kind: 'trigger', untrustedInput: false, triggerId: 'fixture-trigger' });
     assert.equal(f.resolver(owner, f.session).towerTools, 'not-owner-session');
-    await assert.rejects(f.runtime.target(f.session.id), { statusCode: 403 });
+    await assert.rejects(f.runtime.target(f.session.id), { kind: 'forbidden' });
     f.origins.set(f.session.id, { kind: 'owner', untrustedInput: false });
     const token = f.tokenFor(owner);
-    await assert.rejects(f.list('f'.repeat(64)), { statusCode: 403 });
-    await assert.rejects(f.list(f.capabilities.issue({ kind: 'secret-run', runId: owner.id, sessionId: 'forged-session' })), { statusCode: 403 });
+    await assert.rejects(f.list('f'.repeat(64)), { kind: 'forbidden' });
+    await assert.rejects(f.list(f.capabilities.issue({ kind: 'secret-run', runId: owner.id, sessionId: 'forged-session' })), { kind: 'forbidden' });
     await assert.rejects(f.call(token, 'secrets_list', { sessionId: 'forged', cwd: '/forged' }));
-    await assert.rejects(f.list(f.capabilities.issue({ kind: 'session-reader' })), { statusCode: 404 });
+    await assert.rejects(f.list(f.capabilities.issue({ kind: 'session-reader' })), { kind: 'not-found' });
     for (const towerTools of ['desktop-app', 'external-input', 'not-owner-session', 'remote'] as const) {
-      owner.towerTools = towerTools; await assert.rejects(f.list(token), { statusCode: 403 });
+      owner.towerTools = towerTools; await assert.rejects(f.list(token), { kind: 'forbidden' });
     }
     assert.deepEqual(f.ledger, []);
   } finally { await f.cleanup(); }
@@ -442,7 +442,7 @@ test('session archival cleans stored tasks without granting child or automation 
     f.sessions.set(trigger.id, trigger); f.origins.set(trigger.id, { kind: 'trigger', triggerId: 'fixture-trigger', untrustedInput: false });
     for (const session of [child, trigger]) {
       await f.runtime.endSession(session.id);
-      await assert.rejects(f.runtime.target(session.id), { statusCode: 403 });
+      await assert.rejects(f.runtime.target(session.id), { kind: 'forbidden' });
     }
     const run = f.addRun('active-archived-run');
     const target = await f.runtime.target(f.session.id);
@@ -475,7 +475,7 @@ test('locked session closure survives runtime restart and removes task-only secr
     const registry = { list: () => [...f.runs.values()], getSession: (id: string) => f.sessions.get(id), sessionOrigin: (id: string) => f.origins.get(id) };
     restartedRuntime = new SecretRuntime({ stateDir: f.stateDir, service: restarted, runs: registry });
     const capabilities = new CapabilityRegistry(); const context: McpContext = { capabilities, run: id => f.runs.get(id), secretTools: SECRET_TOOLS, secretTool: (capability, name, args) => restartedRuntime!.tool(capability, name, args) };
-    await assert.rejects(handleMcpRequest(context, token, { method: 'tools/call', name: 'secrets_list', arguments: {} }), { statusCode: 403 });
+    await assert.rejects(handleMcpRequest(context, token, { method: 'tools/call', name: 'secrets_list', arguments: {} }), { kind: 'forbidden' });
     await restartedRuntime.control('unlock', { password });
     await assert.rejects(readFile(closurePath), { code: 'ENOENT' });
     assert.equal(restarted.overview(target).task?.status, 'closed'); assert.equal(restarted.overview().secrets.some(item => item.id === secret.id), false);
@@ -525,4 +525,33 @@ test('rotated versions and broadened rules require explicit owner reapproval wit
     assert.deepEqual((await f.list(token)).secrets, [], 'reapproving an expired grant does not extend its deadline');
     await assert.rejects(f.service.resolve(context, updated.reference, 'env'), /Grant denied/);
   } finally { await f.cleanup(); }
+});
+
+test('a tool that fails because the Vault locked meanwhile is answered as locked only when the failure has no status', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-secret-runtime-status-'));
+  const state = { locked: false };
+  const runtime = new SecretRuntime({ stateDir: directory, service: { status: () => ({ locked: state.locked }) } as unknown as SecretService, runs: { list: () => [], getSession: () => undefined, sessionOrigin: () => undefined } });
+  try {
+    let thrown: unknown;
+    const inner = runtime as unknown as { unlockedTool: () => Promise<unknown>; lockedTool: () => Promise<unknown> };
+    inner.unlockedTool = async () => { state.locked = true; throw thrown; };
+    inner.lockedTool = async () => 'answered as locked';
+    const outcome = async (value: unknown) => {
+      state.locked = false; thrown = value;
+      return runtime.tool({ kind: 'secret-run' } as never, 'secrets_list', {}).then(result => result, (error: unknown) => error === value ? 'thrown' : error);
+    };
+    const plain = (statusCode: unknown) => Object.assign(new Error('x'), { statusCode });
+    assert.equal(await outcome(new Error('untyped')), 'answered as locked');
+    assert.equal(await outcome(plain(403)), 'thrown', 'a mapped status is a typed failure');
+    assert.equal(await outcome(plain(599)), 'thrown', 'an unmapped numeric status is a typed failure');
+    assert.equal(await outcome(plain(0)), 'answered as locked', 'zero counts as no status');
+    assert.equal(await outcome(plain(Number.NaN)), 'answered as locked', 'NaN counts as no status');
+    assert.equal(await outcome(plain(undefined)), 'answered as locked');
+    assert.equal(await outcome(plain('0')), 'thrown', 'a non-empty string counts as a status');
+    assert.equal(await outcome({ statusCode: 409 }), 'thrown', 'any object with a status');
+    assert.equal(await outcome('text'), 'answered as locked');
+    // Not locked after the failure: always the failure.
+    inner.unlockedTool = async () => { throw thrown; };
+    assert.equal(await outcome(new Error('untyped')), 'thrown');
+  } finally { runtime.close(); await rm(directory, { recursive: true, force: true }); }
 });

@@ -7,6 +7,7 @@ import { SKILL_NAME } from '../../shared/skills.js';
 import { isTaskNotification } from '../../shared/task-notification.js';
 import type { AutoPromptModelRequest } from '../auto-prompt/native.js';
 import type { SkillStateStore } from './state.js';
+import { TowerError } from '../../shared/errors.js';
 
 export interface SkillAdvisorDependencies {
   stateDir: string;
@@ -111,7 +112,13 @@ export class SkillAdvisor {
 
   constructor(private readonly deps: SkillAdvisorDependencies) {}
 
-  start(): void { this.timer = setInterval(() => void this.tick(), TICK_MS); this.timer.unref?.(); }
+  start(): void {
+    this.timer = setInterval(() => {
+      // A pass that fails is reported and the next interval tries again; nothing is left unhandled in the worker.
+      this.tick().catch(error => console.error(`The skill advisor's pass failed: ${error instanceof Error ? error.message : String(error)}`));
+    }, TICK_MS);
+    this.timer.unref?.();
+  }
   /** Stops starting new analyses. One already asked finishes by itself; Tower never ends a Claude or Codex process for this. */
   stop(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
   private paused = false;
@@ -154,7 +161,8 @@ export class SkillAdvisor {
 
   async tick(): Promise<void> {
     const state = this.deps.state.get();
-    if (!state.settings.enabled || this.paused || this.running || this.backfilling) return;
+    // A locked store keeps nothing until Tower restarts: no history is read, no model asked, no call counted.
+    if (this.deps.state.locked || !state.settings.enabled || this.paused || this.running || this.backfilling) return;
     this.running = true;
     try {
       for (const session of this.due().slice(0, SESSIONS_PER_TICK)) {
@@ -258,7 +266,7 @@ export class SkillAdvisor {
 
   /** Reads the owner's requests of the last days at once and proposes the ways of working that repeat across them. */
   async backfill(days = 7): Promise<number> {
-    if (this.backfilling || this.paused) throw Object.assign(new Error('이미 분석하고 있습니다.'), { statusCode: 409 });
+    if (this.backfilling || this.paused) throw new TowerError('conflict', '이미 분석하고 있습니다.');
     this.backfilling = true; this.backfillStatus = undefined; this.deps.onChange();
     try {
       const since = new Date(this.now() - days * 24 * 60 * 60_000).toISOString();

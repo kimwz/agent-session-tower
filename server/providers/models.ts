@@ -1,3 +1,4 @@
+import { TowerError } from '../../shared/errors.js';
 /** Models are argv/RPC values, never command fragments or provider configuration. */
 export function validModelId(value: unknown): value is string {
   return typeof value === 'string' && value.length <= 160 && /^[a-zA-Z0-9][a-zA-Z0-9._:/\[\]-]*$/.test(value);
@@ -5,7 +6,7 @@ export function validModelId(value: unknown): value is string {
 
 export function requestedModel(value: unknown): string | undefined {
   if (value === undefined) return undefined;
-  if (!validModelId(value)) throw Object.assign(new Error('Invalid model. Choose a valid provider model.'), { statusCode: 400 });
+  if (!validModelId(value)) throw new TowerError('invalid', 'Invalid model. Choose a valid provider model.');
   return value;
 }
 
@@ -19,6 +20,6 @@ export const CLAUDE_EFFORT_LEVELS: readonly string[] = ['low', 'medium', 'high',
 
 export function requestedEffort(value: unknown, provider?: 'claude' | 'codex'): string | undefined {
   if (value === undefined) return undefined;
-  if (!validEffort(value) || (provider === 'claude' && !CLAUDE_EFFORT_LEVELS.includes(value))) throw Object.assign(new Error('Invalid reasoning effort. Choose a level the model supports.'), { statusCode: 400 });
+  if (!validEffort(value) || (provider === 'claude' && !CLAUDE_EFFORT_LEVELS.includes(value))) throw new TowerError('invalid', 'Invalid reasoning effort. Choose a level the model supports.');
   return value;
 }

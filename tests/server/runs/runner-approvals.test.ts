@@ -50,12 +50,12 @@ test('runner publishes a live approval, keeps stdin open, and sends only an expl
   assert.equal(pending.status, 'running'); assert.equal(pending.approvals![0].toolName, 'Bash');
   await assert.rejects(readFile(f.replies), { code: 'ENOENT' });
   pending.approvals![0].input.command = 'tampered copy';
-  await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', { answers: { q: { answers: ['unsupported'] } } }), { statusCode: 400 });
-  await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', { action: 'accept', content: {} }), { statusCode: 400 });
+  await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', { answers: { q: { answers: ['unsupported'] } } }), { kind: 'invalid' });
+  await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', { action: 'accept', content: {} }), { kind: 'invalid' });
   assert.equal(f.manager.list()[0].approvals?.length, 1);
   await assert.rejects(readFile(f.replies), { code: 'ENOENT' });
   await f.manager.respondToApproval(f.accepted.id, 'permission-1', 'allow');
-  await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', 'allow'), { statusCode: 409 });
+  await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', 'allow'), { kind: 'conflict' });
   const finished = await until(() => f.manager.list().find(run => run.id === f.accepted.id && run.status === 'completed'));
   assert.equal(finished.approvals, undefined);
   const frames = (await readFile(f.replies, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
@@ -78,7 +78,7 @@ test('cancel and restart cannot revive or answer a pending permission request', 
   assert.equal(JSON.parse(liveSaved)[0].approvals, undefined);
   assert.doesNotMatch(liveSaved, /gh --version/);
   await f.manager.cancel(f.accepted.id); await f.manager.close();
-  await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', 'allow'), { statusCode: 409 });
+  await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', 'allow'), { kind: 'conflict' });
   assert.equal(f.manager.list()[0].approvals, undefined);
   const saved = JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'));
   assert.equal(saved[0].approvals, undefined);
@@ -87,7 +87,7 @@ test('cancel and restart cannot revive or answer a pending permission request', 
   await writeFile(join(f.stateDir, 'runs.json'), JSON.stringify(saved));
   const restarted = new RunManager({ stateDir: f.stateDir, getSession: () => f.session, refreshSessions: async () => {}, spawnProcess: () => { throw new Error('Must not start'); } });
   await restarted.start();
-  try { assert.equal(restarted.list()[0].approvals, undefined); await assert.rejects(restarted.respondToApproval(f.accepted.id, 'stale', 'allow'), { statusCode: 409 }); }
+  try { assert.equal(restarted.list()[0].approvals, undefined); await assert.rejects(restarted.respondToApproval(f.accepted.id, 'stale', 'allow'), { kind: 'conflict' }); }
   finally { await restarted.close(); }
   await assert.rejects(readFile(f.replies), { code: 'ENOENT' });
 });
@@ -96,7 +96,7 @@ test('a terminal native result clears an unanswered approval before process shut
   const f = await fixture(t, 'finish-pending');
   const finished = await until(() => f.manager.list().find(run => run.id === f.accepted.id && run.status === 'completed'));
   assert.equal(finished.approvals, undefined);
-  await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', 'allow'), { statusCode: 409 });
+  await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', 'allow'), { kind: 'conflict' });
 });
 
 test('runner forwards structured Codex answers and keeps child form metadata live without persisting answers', async t => {
@@ -129,7 +129,7 @@ test('runner forwards structured Codex answers and keeps child form metadata liv
   await manager.respondToApproval(accepted.id, form.id, formResponse);
   assert.deepEqual(responses, [{ id: questions.id, response: answer }, { id: form.id, response: formResponse }]);
   assert.equal(manager.list()[0].approvals, undefined);
-  await assert.rejects(manager.respondToApproval(accepted.id, questions.id, answer), { statusCode: 409 });
+  await assert.rejects(manager.respondToApproval(accepted.id, questions.id, answer), { kind: 'conflict' });
   await (manager as unknown as { flush(): Promise<void> }).flush();
   const saved = await readFile(join(directory, 'runs.json'), 'utf8');
   assert.doesNotMatch(saved, /private-token-not-saved|Enter secret|Credential/);
@@ -142,7 +142,7 @@ test('runner roundtrips Claude question answers through the owned provider trans
   const interaction = pending.approvals![0].interaction;
   assert.equal(interaction?.type, 'questions');
   if (interaction?.type !== 'questions') throw new Error('Expected question interaction');
-  await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', 'allow'), { statusCode: 400 });
+  await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', 'allow'), { kind: 'invalid' });
   await assert.rejects(readFile(f.replies), { code: 'ENOENT' });
   await f.manager.respondToApproval(f.accepted.id, 'permission-1', { answers: { [interaction.questions[0].id]: { answers: ['private-fixture-answer'] } } });
   const finished = await until(() => f.manager.list().find(run => run.id === f.accepted.id && run.status === 'completed'));
@@ -154,4 +154,24 @@ test('runner roundtrips Claude question answers through the owned provider trans
   const saved = await readFile(join(f.stateDir, 'runs.json'), 'utf8');
   assert.doesNotMatch(saved, /private-fixture-answer|Get game code/);
   assert.equal(JSON.parse(saved)[0].approvals, undefined);
+});
+
+test('the owner’s answers are kept per conversation with the question; allow and deny are not kept', async t => {
+  const plain = await fixture(t);
+  await until(() => plain.manager.list().find(run => run.id === plain.accepted.id && run.approvals?.length));
+  await plain.manager.respondToApproval(plain.accepted.id, 'permission-1', 'allow');
+  await until(() => plain.manager.list().find(run => run.id === plain.accepted.id && run.status === 'completed'));
+  assert.deepEqual(plain.manager.ownerAnswers(plain.session.id), []);
+  const f = await fixture(t, 'questions');
+  const pending = await until(() => f.manager.list().find(run => run.id === f.accepted.id && run.approvals?.length));
+  const interaction = pending.approvals![0].interaction;
+  if (interaction?.type !== 'questions') throw new Error('Expected question interaction');
+  const answer = { answers: { [interaction.questions[0].id]: { answers: ['Clone'] } } };
+  await f.manager.respondToApproval(f.accepted.id, 'permission-1', answer);
+  const kept = f.manager.ownerAnswers(f.session.id);
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].question, JSON.stringify(interaction.questions));
+  assert.equal(kept[0].answer, JSON.stringify(answer));
+  assert.ok(Date.parse(kept[0].at));
+  assert.deepEqual(f.manager.ownerAnswers('claude:other'), []);
 });

@@ -1,7 +1,8 @@
-import { mkdir, rename } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SkillAdvisorSettings, SkillNote, SkillProposal } from '../../shared/skills.js';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { SkillError } from './files.js';
 
 /** What Tower keeps about skills beside the skill folders themselves, in `<state>/skills.json`. */
 export interface SkillState {
@@ -44,6 +45,8 @@ export class SkillStateStore {
   private readonly path: string;
   private state: SkillState = emptySkillState();
   private writes: Promise<void> = Promise.resolve();
+  /** Set when an unreadable file could not be moved aside: no change is made or saved until Tower restarts. */
+  locked?: string;
 
   constructor(private readonly stateDir: string) { this.path = join(stateDir, 'skills.json'); }
 
@@ -53,23 +56,38 @@ export class SkillStateStore {
     try { saved = await readPrivateJson(this.path, MAX_BYTES); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') { await this.save(); return; }
-      // A file this build cannot read is kept aside, never overwritten, and skills start over; the worker still starts.
-      await rename(this.path, `${this.path}.unreadable-${Date.now()}`).catch(() => {});
-      console.error(`Skill state was set aside: ${error instanceof Error ? error.message : String(error)}`);
-      await this.save();
-      return;
+      return this.setAside(error);
     }
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return this.setAside(new Error('Saved skill state is invalid.'));
     this.state = normalize(saved);
+  }
+
+  /**
+   * A file this build cannot read is kept aside, never overwritten, and skills start over; the worker still starts.
+   * One that cannot be moved locks the store: skills stay empty in memory and nothing changes until a restart.
+   */
+  private async setAside(error: unknown): Promise<void> {
+    const message = (value: unknown) => value instanceof Error ? value.message : String(value);
+    let moveError: Error | undefined;
+    await quarantineFile(this.path).catch((reason: unknown) => { moveError = reason instanceof Error ? reason : new Error(String(reason)); });
+    console.error(`Skill state was set aside: ${message(error)}`);
+    if (!moveError) { await this.save(); return; }
+    this.locked = 'Skill state could not be read or moved aside; skills are not changed until Tower restarts.';
+    console.error(`${this.locked} ${moveError.message}`);
   }
 
   get(): SkillState { return this.state; }
 
   /** Changes the state and writes it; writes are kept in order. */
   update(change: (state: SkillState) => void): Promise<void> {
+    if (this.locked) return Promise.reject(new SkillError(this.locked, 'unavailable'));
     change(this.state);
     trim(this.state);
     return this.save();
   }
+
+  /** Waits for the writes under way; never saves and never fails, so a handoff is never held up. */
+  flush(): Promise<void> { return this.writes.catch(() => {}); }
 
   private save(): Promise<void> {
     const data = JSON.stringify(this.state, null, 2);

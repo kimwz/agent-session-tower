@@ -43,9 +43,9 @@ test('attachments persist privately, preserve names and verify content after res
 test('attachment IDs are scoped to the original session and cannot reference arbitrary files', async t => {
   const { store } = await fixture(t);
   const saved = await store.prepare('one', { attachments: [upload()] });
-  await assert.rejects(store.prepare('two', { attachmentIds: [saved.attachments[0].id] }), { statusCode: 404 });
-  for (const id of ['../runs.json', '/etc/passwd', '', '00000000-0000-4000-8000-000000000000']) await assert.rejects(store.read(id), { statusCode: 404 });
-  await assert.rejects(store.prepare('one', { attachmentIds: [saved.attachments[0].id, saved.attachments[0].id] }), { statusCode: 400 });
+  await assert.rejects(store.prepare('two', { attachmentIds: [saved.attachments[0].id] }), { kind: 'not-found' });
+  for (const id of ['../runs.json', '/etc/passwd', '', '00000000-0000-4000-8000-000000000000']) await assert.rejects(store.read(id), { kind: 'not-found' });
+  await assert.rejects(store.prepare('one', { attachmentIds: [saved.attachments[0].id, saved.attachments[0].id] }), { kind: 'invalid' });
 });
 
 test('validation rejects malformed names, MIME, base64 and disguised images without creating files', async t => {
@@ -57,8 +57,8 @@ test('validation rejects malformed names, MIME, base64 and disguised images with
     upload('fake.png', Buffer.from('<html>active content</html>'), 'image/png'),
     upload('wrong.jpg', PNG, 'image/jpeg'),
   ];
-  for (const input of bad) await assert.rejects(store.prepare('one', { attachments: [input] }), { statusCode: 400 });
-  await assert.rejects(store.prepare('one', { attachments: null } as never), { statusCode: 400 });
+  for (const input of bad) await assert.rejects(store.prepare('one', { attachments: [input] }), { kind: 'invalid' });
+  await assert.rejects(store.prepare('one', { attachments: null } as never), { kind: 'invalid' });
   assert.deepEqual(await readdir(store.directory), []);
 });
 
@@ -67,11 +67,11 @@ test('limits cover large valid files, image bytes, combined retries and uploads'
   const large = upload('large.bin', Buffer.alloc(MAX_ATTACHMENT_BYTES), 'application/octet-stream');
   const saved = await store.prepare('one', { attachments: [large] });
   assert.equal(saved.attachments[0].size, MAX_ATTACHMENT_BYTES);
-  await assert.rejects(store.prepare('one', { attachments: [upload('large.bin', Buffer.alloc(MAX_ATTACHMENT_BYTES + 1))] }), { statusCode: 413 });
+  await assert.rejects(store.prepare('one', { attachments: [upload('large.bin', Buffer.alloc(MAX_ATTACHMENT_BYTES + 1))] }), { kind: 'too-large' });
   const image = Buffer.alloc(MAX_IMAGE_ATTACHMENT_BYTES + 1); PNG.copy(image);
-  await assert.rejects(store.prepare('one', { attachments: [upload('big.png', image, 'image/png')] }), { statusCode: 413 });
-  await assert.rejects(store.prepare('one', { attachments: Array.from({ length: 11 }, () => upload()) }), { statusCode: 413 });
-  await assert.rejects(store.prepare('one', { attachmentIds: [saved.attachments[0].id], attachments: [large, upload()] }), { statusCode: 413 });
+  await assert.rejects(store.prepare('one', { attachments: [upload('big.png', image, 'image/png')] }), { kind: 'too-large' });
+  await assert.rejects(store.prepare('one', { attachments: Array.from({ length: 11 }, () => upload()) }), { kind: 'too-large' });
+  await assert.rejects(store.prepare('one', { attachmentIds: [saved.attachments[0].id], attachments: [large, upload()] }), { kind: 'too-large' });
   assert.deepEqual(await readdir(store.directory), saved.createdIds);
 });
 
@@ -80,15 +80,15 @@ test('owned downloads reject tampered content, replaced files, symlinks and inva
   const { attachments } = await store.prepare('one', { attachments: [upload('first'), upload('second'), upload('third')] });
   const first = await store.read(attachments[0].id);
   await writeFile(first.path, 'other');
-  await assert.rejects(store.read(attachments[0].id), { statusCode: 404 });
+  await assert.rejects(store.read(attachments[0].id), { kind: 'not-found' });
   const second = await store.read(attachments[1].id);
   const outside = join(directory, 'outside'); await writeFile(outside, 'hello');
   await rm(second.path); await symlink(outside, second.path);
-  await assert.rejects(store.read(attachments[1].id), { statusCode: 404 });
+  await assert.rejects(store.read(attachments[1].id), { kind: 'not-found' });
   const manifestPath = join(store.directory, attachments[2].id, '.metadata.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   await writeFile(manifestPath, JSON.stringify({ ...manifest, name: '../../outside' }));
-  await assert.rejects(store.read(attachments[2].id), { statusCode: 404 });
+  await assert.rejects(store.read(attachments[2].id), { kind: 'not-found' });
 });
 
 test('attachment storage refuses a symlink root and rolls back partial writes', async t => {
@@ -104,5 +104,5 @@ test('attachment storage refuses a symlink root and rolls back partial writes', 
   await rm(store.directory, { recursive: true });
   const outside = join(directory, 'outside'); await mkdir(outside);
   await symlink(outside, store.directory);
-  await assert.rejects(store.start(), { statusCode: 503 });
+  await assert.rejects(store.start(), { kind: 'unavailable' });
 });

@@ -46,7 +46,7 @@ test('instructions reach the provider beside the request, and never leave the wo
   const claude = await f.manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Owner reply' }, { origin: { kind: 'owner' }, instructions: { text: 'Receipt' } });
   await f.settled(claude.run.id);
   assert.ok(!f.claude[0]!.includes('--append-system-prompt'), 'Claude keeps a conversation’s first system prompt, so instructions go in the message');
-  await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'x' }, { instructions: { text: 'x'.repeat(48_001) } }), { statusCode: 413 });
+  await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'x' }, { instructions: { text: 'x'.repeat(48_001) } }), { kind: 'too-large' });
 });
 
 test('a new conversation’s first turn gets its notes; a later turn does not', async t => {
@@ -84,21 +84,6 @@ test('notes that fail or take too long never hold up or break the turn', async t
   await f.settled(run.id);
   assert.equal(f.codex.length, 1);
   assert.equal(f.codex[0].instructions, undefined);
-});
-
-test('run-scoped tool guidance accompanies every eligible turn without becoming a visible request', async t => {
-  const f = await fixture(t);
-  f.manager.setRunToolResolver(() => ({ required: true, instructions: 'Use secrets_list before requesting credentials.' }));
-  const first = await f.manager.enqueue(f.native.id, 'Authenticate', {}, { origin: { kind: 'owner' }, instructions: { text: 'Existing policy' } });
-  await f.settled(first.id);
-  assert.equal(f.codex[0].prompt, 'Authenticate');
-  assert.equal(f.codex[0].instructions, 'Existing policy\n\nUse secrets_list before requesting credentials.');
-  const second = await f.manager.enqueue(f.native.id, 'Continue', {}, { origin: { kind: 'owner' } });
-  await f.settled(second.id);
-  assert.equal(f.codex[1].instructions, 'Use secrets_list before requesting credentials.');
-  await f.manager.flushState();
-  assert.doesNotMatch(JSON.stringify(f.manager.list()), /Use secrets_list/);
-  assert.doesNotMatch(await readFile(join(f.stateDir, 'runs.json'), 'utf8'), /Use secrets_list/);
 });
 
 test('a continuation keeps the instructions its turn could not go without, and is not started without them after a restart', async t => {
@@ -139,4 +124,11 @@ test('the conversation leaves out exactly Tower’s own instruction blocks', () 
   assert.equal(parseMessages('codex', { type: 'response_item', timestamp: now, payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: quoted }] } })[0]!.text, quoted);
   // An assistant quoting one is shown as written.
   assert.match(parseMessages('claude', { type: 'assistant', uuid: 'a', timestamp: now, message: { role: 'assistant', content: [{ type: 'text', text: block }] } })[0]!.text, /Coordinator policy/);
+});
+
+test('notes that would exceed the limit are left out; the turn’s own instructions stay', async t => {
+  const f = await fixture(t, async () => 'x'.repeat(48_000));
+  const { run } = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Task' }, { origin: { kind: 'owner' }, instructions: { text: 'Policy', required: true } });
+  await f.settled(run.id);
+  assert.equal(f.codex[0].instructions, 'Policy');
 });

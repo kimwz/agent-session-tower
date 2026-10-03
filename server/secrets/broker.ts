@@ -6,10 +6,11 @@ import { isAbsolute, join, relative, resolve as absolute, sep } from 'node:path'
 import { SECRET_OPERATIONS, type SecretContext, type SecretMetadata, type SecretOperation, type SecretRunInput, type SecretRunResult } from '../../shared/secrets.js';
 import type { ResolvedSecret, SecretDispatchUse, SecretService } from './service.js';
 import type { RemoteSecretBroker } from './remote.js';
+import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
 type SourceFailure = { sourceHostId: string; code: 'SECRET_SOURCE_UNAVAILABLE' };
 type Resolved = ResolvedSecret;
-const failure = (message: string, statusCode = 400) => Object.assign(new Error(message), { statusCode });
+const failure = (message: string, kind: ErrorKind = 'invalid') => new TowerError(kind, message);
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const OUTPUT_BYTES = 512 * 1024;
 const MAX_TIMEOUT = 10 * 60_000;
@@ -79,7 +80,7 @@ export class SecretBroker {
     const peers = this.options.service.peers().filter(peer => peer.enabled && peer.direction === 'controller');
     const remote = await Promise.all(peers.map(async peer => {
       try {
-        if (!this.options.remote) throw failure('원격 원본에 연결할 수 없습니다.', 503);
+        if (!this.options.remote) throw failure('원격 원본에 연결할 수 없습니다.', 'unavailable');
         this.options.service.checkTask(context);
         const result = await this.options.remote.request(peer.device.id, context, 'list', {});
         this.options.service.checkTask(context);
@@ -91,7 +92,7 @@ export class SecretBroker {
           || (item.fields !== undefined && (!Array.isArray(item.fields) || item.fields.length > 4096 || item.fields.some(field => typeof field !== 'string' || !ENV_NAME.test(field))))
           || (item.operations !== undefined && (!Array.isArray(item.operations) || item.operations.some(operation => !SECRET_OPERATIONS.includes(operation))))
           || (item.expiresAt !== undefined && !Number.isSafeInteger(item.expiresAt))
-          || (item.activation !== undefined && !['auto', 'manual'].includes(String(item.activation))))) throw failure('원격 목록이 올바르지 않습니다.', 502);
+          || (item.activation !== undefined && !['auto', 'manual'].includes(String(item.activation))))) throw failure('원격 목록이 올바르지 않습니다.', 'upstream');
         return result.filter(item => { try { this.options.service.checkTask(context, item.id); return true; } catch { return false; } }).map(item => ({ ...item, sourceHostId: peer.device.id })) as SecretMetadata[];
       } catch { failures.push({ sourceHostId: peer.device.id, code: 'SECRET_SOURCE_UNAVAILABLE' }); return []; }
     }));
@@ -106,7 +107,7 @@ export class SecretBroker {
     if (!match) throw failure('유효한 시크릿 참조가 필요합니다.');
     if (match[1] === this.options.service.device().id) return this.options.service.resolve(context, reference, operation);
     this.options.service.checkTask(context, match[2]);
-    if (!this.options.remote) throw failure('시크릿 원본 컴퓨터에 연결할 수 없습니다.', 503);
+    if (!this.options.remote) throw failure('시크릿 원본 컴퓨터에 연결할 수 없습니다.', 'unavailable');
     const answer = await this.options.remote.request(match[1], context, 'resolve', { reference, operation }) as Resolved;
     try {
       this.options.service.checkTask(context, match[2]);
@@ -116,7 +117,7 @@ export class SecretBroker {
         || (answer.metadata.sourceHostId !== undefined && answer.metadata.sourceHostId !== match[1])
         || (answer.fields !== undefined && (!plain(answer.fields) || Object.keys(answer.fields).length > 2048
           || Object.entries(answer.fields).some(([key, value]) => !ENV_NAME.test(key) || typeof value !== 'string')
-          || Object.values(answer.fields).reduce((total, value) => total + Buffer.byteLength(value), 0) > MAX_INPUT_BYTES))) throw failure('원격 시크릿 응답이 올바르지 않습니다.', 502);
+          || Object.values(answer.fields).reduce((total, value) => total + Buffer.byteLength(value), 0) > MAX_INPUT_BYTES))) throw failure('원격 시크릿 응답이 올바르지 않습니다.', 'upstream');
       return { ...answer, metadata: { ...answer.metadata, sourceHostId: match[1] } };
     } catch (error) { if (Buffer.isBuffer(answer?.bytes)) answer.bytes.fill(0); throw error; }
   }
@@ -129,7 +130,7 @@ export class SecretBroker {
       const claim = await this.options.service.beginOperation(context, input.operationId, digest);
       if (!claim.fresh) {
         if (claim.state === 'done') return claim.result as SecretRunResult;
-        throw failure('이 요청의 전달 상태가 불확실합니다. 같은 요청을 다시 실행하지 않았습니다.', 409);
+        throw failure('이 요청의 전달 상태가 불확실합니다. 같은 요청을 다시 실행하지 않았습니다.', 'conflict');
       }
       const values: Buffer[] = [];
       let deliveredBytes = 0;
@@ -138,7 +139,7 @@ export class SecretBroker {
       try {
         const cwd = await realpath(input.cwd ?? context.root), root = await realpath(context.root);
         const nested = relative(root, cwd);
-        if (nested === '..' || nested.startsWith(`..${sep}`) || isAbsolute(nested)) throw failure('현재 프로젝트 안에서만 실행할 수 있습니다.', 403);
+        if (nested === '..' || nested.startsWith(`..${sep}`) || isAbsolute(nested)) throw failure('현재 프로젝트 안에서만 실행할 수 있습니다.', 'forbidden');
         const env: NodeJS.ProcessEnv = {};
         for (const key of ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TMPDIR', 'SYSTEMROOT']) if (process.env[key]) env[key] = process.env[key];
         const put = (name: string, value: string) => {
@@ -182,7 +183,7 @@ export class SecretBroker {
         // Staging files and fetching another secret can await owner policy changes. Re-authorize each use before spawning.
         for (const item of used) {
           const current = await this.resolve(context, item.ref, item.operation);
-          try { if (current.metadata.id !== item.value.metadata.id || current.metadata.version !== item.value.metadata.version || !current.bytes.equals(item.value.bytes) || JSON.stringify(current.fields) !== JSON.stringify(item.value.fields)) throw failure('시크릿 권한 또는 값이 변경되었습니다.', 403); }
+          try { if (current.metadata.id !== item.value.metadata.id || current.metadata.version !== item.value.metadata.version || !current.bytes.equals(item.value.bytes) || JSON.stringify(current.fields) !== JSON.stringify(item.value.fields)) throw failure('시크릿 권한 또는 값이 변경되었습니다.', 'forbidden'); }
           finally { current.bytes.fill(0); }
         }
         const dispatched = await this.options.service.dispatch(context, used, () => this.consume(input, args, cwd, env, stdin, timeoutMs, values));

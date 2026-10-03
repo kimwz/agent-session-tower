@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SkillBundle } from '../../../shared/skills.js';
@@ -9,6 +9,9 @@ import { targetsRevision } from '../../../shared/skills.js';
 import type { Session } from '../../../shared/types.js';
 import { skillsCapability } from '../../../server/runs/durable-runner.js';
 import { SkillService } from '../../../server/skills/service.js';
+import { writeMoves } from '../../../server/skills/store.js';
+import { DEFAULT_SKILLS } from '../../../server/skills/defaults.js';
+import { blockQuarantine, captureErrors } from '../../helpers/quarantine.js';
 
 function session(id: string, cwd: string): Session {
   return { id: `claude:${id}`, nativeId: id, provider: 'claude', title: id, cwd, project: 'p', status: 'completed', statusReason: '',
@@ -74,7 +77,7 @@ test('changing a skill’s projects moves its links, and a change made elsewhere
   await f.service.mutate('assign', { dir: skill.dir, targets: { all: false, projects: [f.blog] }, targetsRevision: revision });
   assert.equal(await f.linked(f.shop, 'deploy'), false);
   assert.equal(await f.linked(f.blog, 'deploy'), true);
-  await assert.rejects(f.service.mutate('assign', { dir: skill.dir, targets: { all: false, projects: [f.docs] }, targetsRevision: revision }), { statusCode: 409 });
+  await assert.rejects(f.service.mutate('assign', { dir: skill.dir, targets: { all: false, projects: [f.docs] }, targetsRevision: revision }), { kind: 'conflict' });
   assert.equal(await f.linked(f.docs, 'deploy'), false, 'nothing changed');
   const all = await f.service.mutate('assign', { dir: skill.dir, targets: { all: true } });
   assert.equal(await f.global('deploy'), true);
@@ -86,7 +89,7 @@ test('changing a skill’s projects moves its links, and a change made elsewhere
   assert.equal(await f.global('deploy'), false);
   assert.equal(await f.service.turnNotes(session('b', f.docs)), undefined);
   assert.equal(none.stored!.length, 1, 'a skill applying nowhere is still Tower’s');
-  await assert.rejects(f.service.mutate('assign', { dir: skill.dir, targets: { all: false, projects: ['/etc'] } }), { statusCode: 404 }, 'only projects Tower knows');
+  await assert.rejects(f.service.mutate('assign', { dir: skill.dir, targets: { all: false, projects: ['/etc'] } }), { kind: 'not-found' }, 'only projects Tower knows');
 });
 
 test('a project with another skill of that name, or a skills folder that is a link, is refused before anything changes', async t => {
@@ -95,7 +98,7 @@ test('a project with another skill of that name, or a skills folder that is a li
   await mkdir(theirs, { recursive: true });
   await writeFile(join(theirs, 'SKILL.md'), '---\nname: deploy\ndescription: theirs\n---\n');
   const skill = (await save(f.service, 'deploy', { all: false, projects: [f.shop] })).stored![0]!;
-  await assert.rejects(f.service.mutate('assign', { dir: skill.dir, targets: { all: false, projects: [f.blog, f.docs] } }), { statusCode: 409 });
+  await assert.rejects(f.service.mutate('assign', { dir: skill.dir, targets: { all: false, projects: [f.blog, f.docs] } }), { kind: 'conflict' });
   assert.equal(await f.linked(f.blog, 'deploy'), false, 'the other project was not linked either');
   assert.equal(await f.linked(f.shop, 'deploy'), true, 'the skill still applies where it did');
   assert.ok((await lstat(theirs)).isDirectory(), 'the other skill is untouched');
@@ -104,7 +107,7 @@ test('a project with another skill of that name, or a skills folder that is a li
   await mkdir(join(outside, 'skills'), { recursive: true });
   await symlink(skill.dir, join(outside, 'skills', 'deploy'));
   await symlink(outside, join(f.blog, '.agents'));
-  await assert.rejects(f.service.mutate('assign', { dir: skill.dir, targets: { all: false, projects: [f.blog] } }), { statusCode: 409 });
+  await assert.rejects(f.service.mutate('assign', { dir: skill.dir, targets: { all: false, projects: [f.blog] } }), { kind: 'conflict' });
   await rm(join(f.blog, '.agents'));
   // The project's .claude turned into a link since: unassigning cleans its own folders only.
   await rm(join(f.shop, '.claude'), { recursive: true });
@@ -238,7 +241,7 @@ test('a project that is gone never blocks editing the skill, and a same-named sk
   await writeFile(join(theirs, 'SKILL.md'), '---\nname: review\ndescription: theirs\n---\n');
   await save(f.service, 'review', { all: false, projects: [f.shop] });
   assert.equal(await f.linked(f.shop, 'review'), true);
-  await assert.rejects(f.service.mutate('assign', { dir: join(f.state, 'skills', 'global', 'review'), targets: { all: true } }), { statusCode: 409 }, 'but it cannot take the global name');
+  await assert.rejects(f.service.mutate('assign', { dir: join(f.state, 'skills', 'global', 'review'), targets: { all: true } }), { kind: 'conflict' }, 'but it cannot take the global name');
 });
 
 test('a project skill restored into a project chosen here applies there', async t => {
@@ -284,4 +287,69 @@ test('the permission reviewer gets the Tower skills that apply to a folder, as t
   assert.deepEqual(shop.skills.map(skill => skill.name).sort(), ['deploy', 'everywhere']);
   assert.equal(shop.guidance?.trim(), 'Deploy after merge.');
   assert.deepEqual((await f.service.authority(f.blog)).skills.map(skill => skill.name), ['everywhere']);
+});
+
+/** Every entry under `dir`, links by where they point, so a test can tell nothing outside changed. */
+async function tree(dir: string): Promise<string[]> {
+  const found: string[] = [];
+  const walk = async (folder: string): Promise<void> => {
+    for (const entry of await readdir(folder, { withFileTypes: true }).catch(() => [])) {
+      const path = join(folder, entry.name);
+      if (entry.isSymbolicLink()) found.push(`${path} -> ${await readlink(path)}`);
+      else if (entry.isDirectory()) { found.push(`${path}/`); await walk(path); }
+      else found.push(`${path} ${await readFile(path, 'utf8')}`);
+    }
+  };
+  await walk(dir);
+  return found.sort();
+}
+
+async function lockedStore(t: test.TestContext, f: Awaited<ReturnType<typeof fixture>>, options: { seed?: boolean } = {}) {
+  const file = join(f.state, 'skills.json');
+  const original = '{ "version": 1, "targets": [ not json';
+  await writeFile(file, original, { mode: 0o600 });
+  const blocked = await blockQuarantine(t, file);
+  captureErrors(t, file);
+  const service = new SkillService({ stateDir: f.state, homes: f.homes, sessions: () => [f.shop, f.blog, f.docs].map((cwd, index) => session(String(index), cwd)), runs: () => [],
+    history: async () => [], model: async () => ({}), advise: false, ...options });
+  t.after(() => service.close());
+  await service.start();
+  blocked.release();
+  await service.settled();
+  return { service, file, original };
+}
+
+const LOCKED = 'Skill state could not be read or moved aside; skills are not changed until Tower restarts.';
+
+test('a locked skill store changes no links, makes no default skills and saves nothing', async t => {
+  const f = await fixture(t);
+  await save(f.service, 'deploy', { all: false, projects: [f.shop] });
+  f.service.close(); await f.service.flush();
+  const before = await tree(f.root);
+  const { service, file, original } = await lockedStore(t, f, { seed: true });
+  await assert.rejects(save(service, 'deploy', { all: false, projects: [f.blog] }), { kind: 'unavailable', message: LOCKED });
+  await assert.rejects(save(service, 'fresh', { all: true, projects: [] }), { kind: 'unavailable', message: LOCKED });
+  await service.flush();
+  await service.settled();
+  assert.equal(await readFile(file, 'utf8'), original);
+  assert.equal(await f.linked(f.shop, 'deploy'), true);
+  assert.equal(await f.linked(f.blog, 'deploy'), false);
+  for (const skill of DEFAULT_SKILLS) assert.equal(await f.global(skill.name), false);
+  const after = (await tree(f.root)).filter(entry => !entry.includes('skills.json.unreadable-'));
+  assert.deepEqual(after, before.map(entry => entry.startsWith(`${file} `) ? `${file} ${original}` : entry));
+  assert.equal((await service.overview()).problem, LOCKED);
+});
+
+test('a locked skill store leaves a pending move as it is', async t => {
+  const f = await fixture(t);
+  f.service.close(); await f.service.flush();
+  const place = join(f.homes.agentsHome, 'skills', 'moving');
+  await mkdir(place, { recursive: true });
+  await writeFile(join(place, 'SKILL.md'), '---\nname: moving\ndescription: d\n---\n');
+  const to = join(f.state, 'skills', 'global', 'moving');
+  await writeMoves(f.homes.journal, [{ id: '0000000a', to, incoming: join(f.state, 'skills', 'global', '.incoming-0000000a'), places: [place] }]);
+  const before = await tree(f.root);
+  const { file, original } = await lockedStore(t, f);
+  const after = (await tree(f.root)).filter(entry => !entry.includes('skills.json.unreadable-'));
+  assert.deepEqual(after, before.map(entry => entry.startsWith(`${file} `) ? `${file} ${original}` : entry));
 });

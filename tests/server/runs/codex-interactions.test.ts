@@ -70,7 +70,7 @@ test('parent and verified nested children hold concurrent approvals, with scoped
   await f.run.respondToApproval(network.id, 'allow');
   f.complete(GRAND, 'grand-turn'); f.complete(CHILD, CHILD_TURN); await flush();
   assert.equal(f.finished.length, 0); assert.ok(f.cleared.includes(patch.id));
-  await assert.rejects(f.run.respondToApproval(patch.id, 'allow'), { statusCode: 409 });
+  await assert.rejects(f.run.respondToApproval(patch.id, 'allow'), { kind: 'conflict' });
   await f.run.respondToApproval(root.id, 'deny');
   assert.deepEqual(f.sent.find(frame => frame.id === 'parent')?.result, { decision: 'cancel' });
   assert.deepEqual(f.sent.find(frame => frame.id === 'nested-network')?.result, { decision: 'accept' });
@@ -129,7 +129,7 @@ test('resolution, child closure, child completion and root completion preempt de
 test('new child turns retire pending approvals and cannot reuse cached old patches', async t => {
   const f = await fixture(t); f.thread(CHILD, ROOT); f.turn(CHILD, CHILD_TURN); f.request('old', CHILD, CHILD_TURN); await flush();
   const old = f.approvals[0]; f.turn(CHILD, 'next-child-turn');
-  await assert.rejects(f.run.respondToApproval(old.id, 'allow'), { statusCode: 409 });
+  await assert.rejects(f.run.respondToApproval(old.id, 'allow'), { kind: 'conflict' });
   f.request('next', CHILD, 'next-child-turn'); await flush(); assert.equal(f.approvals.length, 2);
   f.notice('serverRequest/resolved', { threadId: CHILD, requestId: 'old' });
   await f.run.respondToApproval(f.approvals[1].id, 'deny');
@@ -139,9 +139,9 @@ const questions = [{ id: 'choice', header: 'Scope', question: 'Pick a scope', is
 test('multiple native questions retain original constraints and reply without persisting secret answers', async t => {
   const f = await fixture(t); f.request('questions', ROOT, ROOT_TURN, { questions }, 'item/tool/requestUserInput'); await flush();
   const approval = f.approvals[0]; assert.equal(approval.interaction?.type, 'questions');
-  await assert.rejects(f.run.respondToApproval(approval.id, 'allow'), { statusCode: 400 });
+  await assert.rejects(f.run.respondToApproval(approval.id, 'allow'), { kind: 'invalid' });
   (approval.interaction as any).questions[0].isOther = true;
-  await assert.rejects(f.run.respondToApproval(approval.id, { answers: { choice: { answers: ['unlisted'] }, secret: { answers: ['secret-value'] } } }), { statusCode: 400 });
+  await assert.rejects(f.run.respondToApproval(approval.id, { answers: { choice: { answers: ['unlisted'] }, secret: { answers: ['secret-value'] } } }), { kind: 'invalid' });
   const answers = { choice: { answers: ['Remote'] }, secret: { answers: ['secret-value'] } };
   await f.run.respondToApproval(approval.id, { answers });
   assert.deepEqual(f.sent.find(frame => frame.id === 'questions')?.result, { answers });
@@ -169,7 +169,7 @@ test('questions can be cancelled and MCP form/url replies preserve native action
 test('cancel admission blocks stale allow responses before native interruption completes', async t => {
   const f = await fixture(t); f.request('pending'); await flush(); const approval = f.approvals[0];
   const cancelled = f.run.cancel();
-  await assert.rejects(f.run.respondToApproval(approval.id, 'allow'), { statusCode: 409 });
+  await assert.rejects(f.run.respondToApproval(approval.id, 'allow'), { kind: 'conflict' });
   await flush(); f.notice('turn/completed', { threadId: ROOT, turn: { id: ROOT_TURN, status: 'interrupted', items: [] } });
   await cancelled;
   assert.deepEqual(f.sent.find(frame => frame.id === 'pending')?.result, { decision: 'cancel' });
@@ -206,7 +206,7 @@ test('a closed child reopens only after fresh active metadata and a new nonretir
   } });
   f.thread(CHILD, ROOT); f.turn(CHILD, CHILD_TURN); f.request('original', CHILD, CHILD_TURN); await flush();
   f.notice('thread/closed', { threadId: CHILD });
-  await assert.rejects(f.run.respondToApproval(f.approvals[0].id, 'allow'), { statusCode: 409 });
+  await assert.rejects(f.run.respondToApproval(f.approvals[0].id, 'allow'), { kind: 'conflict' });
   f.request('unloaded', CHILD, 'resumed-turn'); await flush(); assert.equal(f.approvals.length, 1);
   assert.ok(f.sent.find(frame => frame.id === 'unloaded')?.error);
   loaded = true;

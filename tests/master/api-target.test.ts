@@ -28,10 +28,10 @@ test('the master calls the same routes as the pages, and refuses paths the serve
   assert.equal(apiTarget('POST', `/api/nodes/${NODE}/runs/r/cancel`).node, NODE);
   for (const [method, path] of [['GET', '/api/master'], ['POST', '/api/master/messages'], ['POST', '/api/auth/login'], ['GET', '/api/events'], ['GET', '/api/workspace/terminals/x/events'],
     ['GET', '/api/sessions/%2e%2e/x'], ['GET', '/api/a%2fb'], ['GET', '/api//snapshot'], ['GET', '/api/../x'], ['DELETE', '/api/snapshot'], ['GET', '/other'], ['GET', `/api/nodes/${NODE}/nodes/${NODE}/snapshot`]]) {
-    assert.throws(() => apiTarget(method, path), { statusCode: 400 }, `${method} ${path}`);
+    assert.throws(() => apiTarget(method, path), { kind: 'invalid' }, `${method} ${path}`);
   }
-  assert.throws(() => apiTarget('GET', `/api/nodes/${NODE}/snapshot`, NODE), { statusCode: 400 });
-  assert.throws(() => apiTarget('GET', '/api/snapshot', 'not-a-node'), { statusCode: 400 });
+  assert.throws(() => apiTarget('GET', `/api/nodes/${NODE}/snapshot`, NODE), { kind: 'invalid' });
+  assert.throws(() => apiTarget('GET', '/api/snapshot', 'not-a-node'), { kind: 'invalid' });
 });
 
 test('an approval answers the ID the run gave, encoded slash included, and only there', () => {
@@ -40,14 +40,14 @@ test('an approval answers the ID the run gave, encoded slash included, and only 
   assert.equal(answer.write, true);
   assert.equal(apiTarget('POST', '/api/runs/run-1/approvals/request%2F1', NODE).path, `/api/nodes/${NODE}/runs/run-1/approvals/request%2F1`);
   assert.equal(apiTarget('POST', `/api/nodes/${NODE}/runs/run-1/approvals/a%2Fb`).node, NODE);
-  for (const path of ['/api/runs/run-1/cancel%2Fx', '/api/sessions/a%2Fb/messages', '/api/runs/r%2Fx/approvals']) assert.throws(() => apiTarget('POST', path), { statusCode: 400 }, path);
+  for (const path of ['/api/runs/run-1/cancel%2Fx', '/api/sessions/a%2Fb/messages', '/api/runs/r%2Fx/approvals']) assert.throws(() => apiTarget('POST', path), { kind: 'invalid' }, path);
 });
 
 test('an agent of the owner\'s may call the master\'s routes too, but never sign-in or live streams', () => {
   assert.equal(apiTarget('POST', '/api/master/settings', undefined, AGENT_REFUSED).local, '/api/master/settings');
   assert.equal(apiTarget('GET', '/api/master/state', undefined, AGENT_REFUSED).write, false);
   for (const [method, path] of [['POST', '/api/auth/logout'], ['POST', '/api/auth/login'], ['GET', '/api/bootstrap'], ['GET', '/api/events'], ['GET', '/api/master/events'], ['GET', '/api/workspace/terminals/x/events']]) {
-    assert.throws(() => apiTarget(method, path, undefined, AGENT_REFUSED), { statusCode: 400 }, `${method} ${path}`);
+    assert.throws(() => apiTarget(method, path, undefined, AGENT_REFUSED), { kind: 'invalid' }, `${method} ${path}`);
   }
-  assert.throws(() => apiTarget('POST', '/api/master/settings'), { statusCode: 400 }, 'the master itself keeps off them');
+  assert.throws(() => apiTarget('POST', '/api/master/settings'), { kind: 'invalid' }, 'the master itself keeps off them');
 });

@@ -68,7 +68,7 @@ test('a credential works only for the turn it was given to, only while that turn
   const f = await fixture(t);
   const first = f.ownerTurn('codex:mine');
   const token = f.token(first);
-  await assert.rejects(handleMcpRequest(f.context, 'f'.repeat(64), { method: 'tools/list' }), { statusCode: 403 });
+  await assert.rejects(handleMcpRequest(f.context, 'f'.repeat(64), { method: 'tools/list' }), { kind: 'forbidden' });
   first.status = 'completed';
   await assert.rejects(handleMcpRequest(f.context, token, { method: 'tools/list' }), /only during the turn/);
   f.ownerTurn('codex:mine');
@@ -105,7 +105,7 @@ test('work an agent hands to Auto Prompt runs as the agent’s, never as the own
   const { validate, ...admission } = (f.submitted[0] as { internal: { validate?: () => void } }).internal;
   assert.equal(typeof validate, 'function');
   assert.deepEqual(admission, { origin: { kind: 'agent', runId: run.id }, delegation: { parentRunId: run.id, rootRunId: run.id } });
-  await assert.rejects(f.api.call('triggers.updateSettings', { settings: { maxTriggers: 5, maxConcurrentRuns: 1, maxEventsPerHour: 5 } }, { kind: 'agent', via: 'mcp', sessionId: 'codex:mine' }), { statusCode: 403 });
+  await assert.rejects(f.api.call('triggers.updateSettings', { settings: { maxTriggers: 5, maxConcurrentRuns: 1, maxEventsPerHour: 5 } }, { kind: 'agent', via: 'mcp', sessionId: 'codex:mine' }), { kind: 'forbidden' });
 });
 
 test('a Slack conversation credential opens only that conversation’s Slack tools', async t => {
@@ -190,7 +190,7 @@ test('a full retry ledger refuses new agent changes but still answers retries of
   const first = await call({ requestKey: 'first', trigger: schedule(f.project) });
   const ledger = (f.api as unknown as { requests: Map<string, unknown> }).requests;
   for (let index = 0; ledger.size < 1000; index++) ledger.set(`filler\n${index}`, { at: Date.now(), fingerprint: 'x', status: 'done', result: {} });
-  await assert.rejects(call({ requestKey: 'new', trigger: { ...schedule(f.project), name: 'One too many' } }), { statusCode: 429 });
+  await assert.rejects(call({ requestKey: 'new', trigger: { ...schedule(f.project), name: 'One too many' } }), { kind: 'rate-limited' });
   assert.deepEqual(await call({ requestKey: 'first', trigger: schedule(f.project) }), first);
   assert.equal(f.triggers.list().length, 1);
 });
@@ -201,10 +201,10 @@ test('the standing session key opens only the read-only session tools, for any c
   f.capabilities.grant(key, { kind: 'session-reader' });
   const { tools } = await handleMcpRequest(f.context, key, { method: 'tools/list' }) as { tools: Array<{ name: string }> };
   assert.deepEqual(tools.map(tool => tool.name).sort(), ['models_get', 'sessions_list', 'sessions_read', 'sessions_search']);
-  await assert.rejects(handleMcpRequest(f.context, key, { method: 'tools/call', name: 'triggers_create', arguments: { requestKey: 'k', trigger: schedule(f.project) } }), { statusCode: 404 });
-  await assert.rejects(handleMcpRequest(f.context, key, { method: 'tools/call', name: 'autoPrompt_submit', arguments: {} }), { statusCode: 404 });
+  await assert.rejects(handleMcpRequest(f.context, key, { method: 'tools/call', name: 'triggers_create', arguments: { requestKey: 'k', trigger: schedule(f.project) } }), { kind: 'not-found' });
+  await assert.rejects(handleMcpRequest(f.context, key, { method: 'tools/call', name: 'autoPrompt_submit', arguments: {} }), { kind: 'not-found' });
   // No sessions service in this fixture: the call reaches the operation and reports that.
-  await assert.rejects(handleMcpRequest(f.context, key, { method: 'tools/call', name: 'sessions_list', arguments: {} }), { statusCode: 503 });
+  await assert.rejects(handleMcpRequest(f.context, key, { method: 'tools/call', name: 'sessions_list', arguments: {} }), { kind: 'unavailable' });
 });
 
 test('the session tool server answers through the worker with the key kept in the state directory', async t => {
@@ -258,17 +258,17 @@ test('reporting credentials prove a live local caller but cannot grant owner too
   const token = f.capabilities.issue({ kind: 'caller-run', runId: run.id, sessionId: run.sessionId });
   const resolve = (key: string) => callerDelegation(f.capabilities, f.context.run, key);
   assert.deepEqual(resolve(token), { parentRunId: run.id, rootRunId: 'master' });
-  await assert.rejects(handleMcpRequest(f.context, token, { method: 'tools/list' }), { statusCode: 403 });
-  assert.throws(() => resolve(f.token(run)), { statusCode: 403 });
-  assert.throws(() => resolve('invalid'), { statusCode: 403 });
+  await assert.rejects(handleMcpRequest(f.context, token, { method: 'tools/list' }), { kind: 'forbidden' });
+  assert.throws(() => resolve(f.token(run)), { kind: 'forbidden' });
+  assert.throws(() => resolve('invalid'), { kind: 'forbidden' });
   const mismatched = f.capabilities.issue({ kind: 'caller-run', runId: run.id, sessionId: 'codex:other' });
-  assert.throws(() => resolve(mismatched), { statusCode: 403 });
+  assert.throws(() => resolve(mismatched), { kind: 'forbidden' });
   run.status = 'completed';
-  assert.throws(() => resolve(token), { statusCode: 403, disposition: 'not-admitted' });
+  assert.throws(() => resolve(token), { kind: 'forbidden', disposition: 'not-admitted' });
   f.ownerTurn(run.sessionId);
-  assert.throws(() => resolve(token), { statusCode: 403 });
+  assert.throws(() => resolve(token), { kind: 'forbidden' });
   run.status = 'running'; run.origin = { kind: 'owner', controllerId: 'c'.repeat(32) };
-  assert.throws(() => resolve(token), { statusCode: 403 });
+  assert.throws(() => resolve(token), { kind: 'forbidden' });
 });
 
 test('only existing owner authority gets local tools; reporting env never grants tools or crosses controllers', async t => {
@@ -299,7 +299,7 @@ test('MCP rechecks parent authority after async preparation and before new job a
       const run = f.ownerTurn('codex:parent');
       const token = f.token(run);
       const pending = handleMcpRequest(f.context, token, { method: 'tools/call', name: 'autoPrompt_submit', arguments: { requestId: randomUUID(), provider: 'codex', prompt: 'follow up' } });
-      const refused = assert.rejects(pending, { statusCode: 403, disposition: 'not-admitted' });
+      const refused = assert.rejects(pending, { kind: 'forbidden', disposition: 'not-admitted' });
       await ready;
       switch (change) {
         case 'completed': run.status = 'completed'; break;

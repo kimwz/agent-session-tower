@@ -149,6 +149,8 @@ label.settings-row { cursor:pointer; }
 
 /* Settings › Models: one row per role, the text on the left and its provider, model and effort on the right. */
 .models-body { display: flex; flex-direction: column; gap: 18px; }
+/* A settings problem can name a long recovery path; let it wrap instead of running past a narrow screen. */
+.models-body > .slack-error { overflow-wrap: anywhere; }
 .models-group { display: flex; flex-direction: column; gap: 8px; }
 .models-group h3 { margin: 0; font-size: 14px; color: var(--text); }
 .models-group > .auth-hint { margin: 0 0 4px; }

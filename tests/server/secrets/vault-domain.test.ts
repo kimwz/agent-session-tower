@@ -1,10 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, stat, writeFile, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SecretService } from '../../../server/secrets/service.js';
 import { parseDotenv } from '../../../server/secrets/dotenv.js';
+import { SecretVault } from '../../../server/secrets/vault.js';
+import { collectEncryptedVault, listPendingSecretImports, stageVaultImport } from '../../../server/backup/secrets.js';
+import { blockRename } from '../../helpers/private-writes.js';
 const password = 'fixture-password-1234';
 test('dotenv preserves literals, empty values and multiline; duplicate assignments fail', () => {
   assert.deepEqual({ ...parseDotenv('\uFEFFA=\r\nB="one\\ntwo"\r\nC=\'${literal}\'\nD="multi\nline"\n') }, { A: '', B: 'one\ntwo', C: '${literal}', D: 'multi\nline' });
@@ -135,5 +139,45 @@ test('explicit dotenv field grants reject duplicates and stale selections after 
     const saved = await service.vault.decryptImport((await service.exportEncryptedVault())!, password) as { rules: { id: string; fields?: Record<string, string[]> }[] }; saved.rules.find(item => item.id === rule.id)!.fields = { [secret.id]: ['A', 'A'] }; await service.vault.save(saved, await service.vault.journal(), service.vault.index); await service.lock(); await service.unlock(password);
     assert.deepEqual(await service.list(context), []); await assert.rejects(service.resolve(context, wildcard.reference, 'env'), /field selection/); await assert.rejects(service.resolve(context, wildcard.reference, 'file'), /field selection/); await assert.rejects(service.resolve(context, wildcard.reference + '#A', 'env'), /field selection/); await assert.rejects(service.attach(target, [secret.id]), /field selection/);
 
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+test('vault files are 0600 in a 0700 directory and no temp file remains', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-vault-files-'));
+  try {
+    const vault = new SecretVault(directory);
+    await vault.initialize(password, { secrets: [] });
+    await vault.save({ secrets: ['saved'] }, { operations: [] }, { names: [] });
+    const secrets = join(directory, 'secrets');
+    assert.equal((await stat(secrets)).mode & 0o777, 0o700);
+    assert.deepEqual((await readdir(secrets)).sort(), ['index.json', 'journal.json', 'vault.json']);
+    for (const name of ['index.json', 'journal.json', 'vault.json']) assert.equal((await stat(join(secrets, name))).mode & 0o777, 0o600, name);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+test('a failed vault write keeps the previous vault.json and leaves no temp', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-vault-failed-write-'));
+  try {
+    const vault = new SecretVault(directory);
+    await vault.initialize(password, { secrets: [] });
+    const secrets = join(directory, 'secrets'); const path = join(secrets, 'vault.json');
+    const before = await readFile(path);
+    const restore = await blockRename(path);
+    const error = await vault.changePassword(password, 'another-fixture-password').then(() => undefined, (caught: unknown) => caught as NodeJS.ErrnoException);
+    assert.ok(error?.code, 'the filesystem error itself');
+    assert.deepEqual((await readdir(secrets)).sort(), ['vault.json', 'vault.json.aside']);
+    await restore();
+    assert.deepEqual(await readFile(path), before);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+test('a pending secret import is listed only by its own name', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-vault-pending-list-'));
+  try {
+    const vault = new SecretVault(directory);
+    await vault.initialize(password, { secrets: [] });
+    const id = await stageVaultImport(directory, (await collectEncryptedVault(directory))!);
+    const secrets = join(directory, 'secrets');
+    await writeFile(join(secrets, `vault.json.${process.pid}.0123456789ab.tmp`), '');
+    await writeFile(join(secrets, `.vault.json.${randomUUID()}`), '');
+    await writeFile(join(secrets, `pending-import-${randomUUID()}.json.${process.pid}.0123456789ab.tmp`), '');
+    assert.deepEqual(await listPendingSecretImports(directory), [id]);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

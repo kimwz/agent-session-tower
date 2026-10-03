@@ -1,7 +1,10 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { existsSync, writeFileSync } from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { UpdateStatus } from '../../../shared/link.js';
@@ -292,4 +295,169 @@ test('a hold stops holding once it is old, and only the service’s own install 
   await writeFile(elsewhere, '');
   await symlink(elsewhere, join(state, 'link.mjs'));
   assert.equal(await managedByService(state, join(state, 'link.mjs'), true), false);
+});
+
+/** A pid no process has: a child that already exited. */
+const deadPid = () => spawnSync(process.execPath, ['-e', '']).pid!;
+const activeUpdate = (state: string, updatedAt = '2026-09-24T00:00:00.000Z') =>
+  writeFile(updatePaths(state).status, JSON.stringify({ version: '1.1.0', previous: '1.0.0', stage: 'verifying', startedAt: updatedAt, updatedAt }));
+
+test('an expired hold whose helper lock names a dead process is removed', async t => {
+  const state = await stateDir(t);
+  await writeFile(updatePaths(state).hold, '{}');
+  await writeFile(updatePaths(state).lock, String(deadPid()));
+  assert.equal(await handoffHeld(state, Date.now() + 16 * 60_000), false);
+  assert.equal(existsSync(updatePaths(state).hold), false);
+});
+
+test('a lock left by a dead helper is taken over', async t => {
+  const state = await stateDir(t);
+  await requested(state);
+  await writeFile(updatePaths(state).lock, String(deadPid()));
+  assert.equal((await runUpdateHelper(state, '1.1.0', service(state).steps))?.stage, 'done');
+});
+
+test('prune removes unused versions when no update runs', async t => {
+  const state = await stateDir(t);
+  await mkdir(versionDirectory(state, '0.9.0'), { recursive: true });
+  await new Updates({ stateDir: state, version: '1.0.0', port: 1, managed: true }).prune(async () => []);
+  assert.equal(existsSync(versionDirectory(state, '0.9.0')), false);
+});
+
+test('recover resumes an active update for this version with a fresh hold', async t => {
+  const state = await stateDir(t);
+  await activeUpdate(state);
+  const resumed: Array<[string, boolean]> = [];
+  await new Updates({ stateDir: state, version: '1.1.0', port: 1, managed: true, spawnHelper: (version, resume) => resumed.push([version, resume]) }).recover();
+  assert.deepEqual(resumed, [['1.1.0', true]]);
+  assert.equal(existsSync(updatePaths(state).hold), true);
+  assert.equal((await readUpdateStatus(state))?.stage, 'verifying');
+});
+
+test('an update whose helper is gone is reported interrupted', async t => {
+  const state = await stateDir(t);
+  await activeUpdate(state);
+  await writeFile(updatePaths(state).lock, String(deadPid()));
+  const status = await new Updates({ stateDir: state, version: '1.0.0', port: 1, managed: true }).status();
+  assert.equal(status?.stage, 'failed');
+  assert.equal(status?.code, 'interrupted');
+});
+
+// Errors are made without chmod (a hold that links to itself, a lock that is a folder), so these hold as root too.
+const unreadableHold = (state: string) => symlink(updatePaths(state).hold, updatePaths(state).hold);
+const unreadableLock = (state: string) => mkdir(updatePaths(state).lock);
+const later = () => Date.now() + 16 * 60_000;
+
+test('a hold that cannot be read holds the worker back and is never removed', async t => {
+  t.mock.method(console, 'error', () => {});
+  const state = await stateDir(t);
+  await unreadableHold(state);
+  await assert.rejects(handoffHeld(state), { code: 'ELOOP' });
+  await assert.rejects(handoffHeld(state, later()), { code: 'ELOOP' });
+  assert.ok((await lstat(updatePaths(state).hold)).isSymbolicLink(), 'the hold is still there');
+  await rm(updatePaths(state).hold);
+  await writeFile(updatePaths(state).hold, '{}');
+  const old = new Date(Date.now() - 16 * 60_000);
+  await utimes(updatePaths(state).hold, old, old);
+  assert.equal(await handoffHeld(state), false, 'once readable, the existing conditions decide');
+});
+
+test('an expired hold is kept while its helper lock cannot be read, however long', async t => {
+  t.mock.method(console, 'error', () => {});
+  const state = await stateDir(t);
+  await writeFile(updatePaths(state).hold, '{}');
+  await unreadableLock(state);
+  await assert.rejects(handoffHeld(state, later()), { code: 'EISDIR' });
+  await assert.rejects(handoffHeld(state, Date.now() + 24 * 60 * 60_000), { code: 'EISDIR' });
+  assert.equal(existsSync(updatePaths(state).hold), true);
+});
+
+test('a hold that cannot be read is logged once per error, and once when it can be read again', async t => {
+  const errors = t.mock.method(console, 'error', () => {});
+  const logs = t.mock.method(console, 'log', () => {});
+  const state = await stateDir(t);
+  await unreadableHold(state);
+  for (let poll = 0; poll < 3; poll++) await assert.rejects(handoffHeld(state));
+  assert.equal(errors.mock.callCount(), 1);
+  assert.match(String(errors.mock.calls[0].arguments[0]), /update hold could not be read .*not handed over until it can/);
+  await rm(updatePaths(state).hold);
+  assert.equal(await handoffHeld(state), false);
+  assert.equal(await handoffHeld(state), false);
+  assert.deepEqual(logs.mock.calls.map(call => call.arguments[0]), ['The update hold can be read again.']);
+});
+
+test('while the hold cannot be read, a worker that must start is the previous version’s', async t => {
+  t.mock.method(console, 'error', () => {});
+  const state = await stateDir(t);
+  await requested(state);
+  const entry = join(versionDirectory(state, '1.0.0'), 'node_modules', 'agent-session-tower', 'bin', 'agent-session-tower.mjs');
+  await mkdir(join(entry, '..'), { recursive: true });
+  await writeFile(entry, '');
+  await unreadableHold(state);
+  assert.equal(await heldWorkerEntry(state), entry);
+});
+
+test('a helper never takes over a lock it cannot read', async t => {
+  const state = await stateDir(t);
+  await requested(state);
+  const before = await readFile(updatePaths(state).status, 'utf8');
+  await unreadableLock(state);
+  await assert.rejects(runUpdateHelper(state, '1.1.0', service(state).steps), { code: 'EISDIR' });
+  assert.equal(await readFile(updatePaths(state).status, 'utf8'), before);
+  assert.ok((await stat(updatePaths(state).lock)).isDirectory());
+  assert.deepEqual((await readdir(runtimePaths(state).root)).filter(name => name.startsWith('update.lock.')), []);
+});
+
+test('an update whose helper lock cannot be read is not reported interrupted, and no other update starts', async t => {
+  const state = await stateDir(t);
+  const spawned: string[] = [];
+  const updates = new Updates({ stateDir: state, version: '1.0.0', port: 1, managed: true, spawnHelper: version => spawned.push(version), now: later });
+  await activeUpdate(state);
+  await unreadableLock(state);
+  assert.equal((await updates.status())?.stage, 'verifying');
+  assert.equal((await updates.request('1.2.0')).body.code, 'busy');
+  assert.equal((await updates.request('1.1.0')).status, 202);
+  assert.deepEqual(spawned, []);
+});
+
+test('recovery with an unreadable helper lock holds the worker but starts no helper', async t => {
+  const state = await stateDir(t);
+  await activeUpdate(state);
+  const before = await readFile(updatePaths(state).status, 'utf8');
+  await unreadableLock(state);
+  const resumed: string[] = [];
+  await assert.rejects(new Updates({ stateDir: state, version: '1.1.0', port: 1, managed: true, spawnHelper: version => resumed.push(version) }).recover(), { code: 'EISDIR' });
+  assert.equal(existsSync(updatePaths(state).hold), true);
+  assert.deepEqual(resumed, []);
+  assert.equal(await readFile(updatePaths(state).status, 'utf8'), before);
+  await assert.rejects(new Updates({ stateDir: state, version: '1.0.0', port: 1, managed: true }).recover(), { code: 'EISDIR' });
+  assert.equal(await readFile(updatePaths(state).status, 'utf8'), before, 'the previous version settles nothing either');
+});
+
+test('nothing is pruned while the helper lock cannot be read', async t => {
+  const state = await stateDir(t);
+  await mkdir(versionDirectory(state, '0.9.0'), { recursive: true });
+  await unreadableLock(state);
+  await assert.rejects(new Updates({ stateDir: state, version: '1.0.0', port: 1, managed: true }).prune(async () => []), { code: 'EISDIR' });
+  assert.ok(existsSync(versionDirectory(state, '0.9.0')));
+});
+
+test('a hold written just after it was found missing is left in place', async t => {
+  const state = await stateDir(t);
+  const { hold } = updatePaths(state);
+  // Test-only: right after this reader's own stat of the hold finds nothing, a helper writes a new hold.
+  const original = fsPromises.stat;
+  let raced = 0;
+  t.mock.method(fsPromises, 'stat', async (...args: Parameters<typeof original>) => {
+    try { return await original(...args); }
+    catch (error) {
+      if (args[0] === hold && (error as NodeJS.ErrnoException).code === 'ENOENT') { raced++; writeFileSync(hold, JSON.stringify({ version: '1.1.0' })); }
+      throw error;
+    }
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  assert.equal(await handoffHeld(state), false, 'no hold was there when it looked');
+  assert.equal(raced, 1, 'the reader saw the hold missing');
+  assert.equal(existsSync(hold), true, 'the hold the helper wrote meanwhile is not removed');
 });

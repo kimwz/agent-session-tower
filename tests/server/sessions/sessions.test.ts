@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionService } from '../../../server/sessions/service.js';
 import { parseMessages } from '../../../server/sessions/parser.js';
-import { parseCodexOpenFiles } from '../../../server/sessions/processes.js';
+import { isClaudeRegistryCommand, parseCodexOpenFiles } from '../../../server/sessions/processes.js';
 
 const rootId = '11111111-1111-4111-8111-111111111111';
 const childId = '22222222-2222-4222-8222-222222222222';
@@ -550,6 +550,12 @@ test('a verified Claude process can remain idle despite an old transcript, while
   assert.equal(service.get(`claude:${rootId}`)?.activeProcess, true);
   assert.equal(service.get(`claude:${childId}`)?.status, 'error');
   assert.equal(service.get(`claude:${childId}`)?.activeProcess, false);
+});
+
+test('a Claude registry entry is kept for a Claude or Node.js process, including Node.js 24+ on Linux, and for nothing else', () => {
+  // Node.js 24 names its main thread "MainThread", which Linux `ps -o comm=` reports instead of "node".
+  for (const command of ['claude', '/usr/local/bin/claude', 'node', 'node-MainThread', 'MainThread']) assert.equal(isClaudeRegistryCommand(command), true, command);
+  for (const command of ['python', 'MainThreadX', 'XMainThread', 'mainthread', 'bash']) assert.equal(isClaudeRegistryCommand(command), false, command);
 });
 
 test('a conversation keeps its latest user requests, newest first and shortened, without injected context', async (t) => {

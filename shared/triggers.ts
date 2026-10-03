@@ -9,9 +9,15 @@ const text = (max: number) => z.string().trim().min(1).max(max);
 const absolutePath = z.string().min(1).max(4096).refine(value => value.startsWith('/') && !value.includes('\0'), 'An absolute folder path is required.');
 
 export const CRON_FIELDS = 5;
+/** Interval schedules run at most once a minute and at least every 31 days. */
+export const INTERVAL_MIN_SECONDS = 60;
+export const INTERVAL_MAX_SECONDS = 31 * 24 * 60 * 60;
+/** Where a new interval starts: a check (HTTP, GitHub) every 5 minutes, a scheduled run every hour. */
+export const POLL_INTERVAL_DEFAULT_SECONDS = 300;
+export const SCHEDULE_INTERVAL_DEFAULT_SECONDS = 3600;
 export const RepeatingScheduleSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('cron'), expression: text(200), timezone: text(100) }).strict(),
-  z.object({ type: z.literal('interval'), everySeconds: z.number().int().min(60).max(31 * 24 * 60 * 60) }).strict(),
+  z.object({ type: z.literal('interval'), everySeconds: z.number().int().min(INTERVAL_MIN_SECONDS).max(INTERVAL_MAX_SECONDS) }).strict(),
 ]);
 export const OnceScheduleSchema = z.object({ type: z.literal('once'), at: z.string().datetime({ offset: true }).transform(value => new Date(value).toISOString()) }).strict();
 export const ScheduleSchema = z.discriminatedUnion('type', [...RepeatingScheduleSchema.options, OnceScheduleSchema]);

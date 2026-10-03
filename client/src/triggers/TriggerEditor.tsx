@@ -3,7 +3,7 @@ import type { ResolvedModel } from '../../../shared/models';
 import { useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, KeyRound, Plus, Trash2 } from 'lucide-react';
 import type { ProviderHealth, Session } from '../../../shared/types';
-import { GITHUB_API, type CoordinatorRule, type GitHubCheck, type IssuePreview, type IssuePreviewItem, type IssueWatch, type HttpCondition, type HttpTestResult, type Trigger, type TriggerInput, type TriggerSecret } from '../../../shared/triggers';
+import { GITHUB_API, INTERVAL_MAX_SECONDS, INTERVAL_MIN_SECONDS, POLL_INTERVAL_DEFAULT_SECONDS, SCHEDULE_INTERVAL_DEFAULT_SECONDS, type CoordinatorRule, type GitHubCheck, type IssuePreview, type IssuePreviewItem, type IssueWatch, type HttpCondition, type HttpTestResult, type Trigger, type TriggerInput, type TriggerSecret } from '../../../shared/triggers';
 import { EffortPicker, ModelPicker } from '../chat/ModelPicker';
 import { absoluteTime, sessionTitle } from '../common/lib';
 import { translateMessage, useI18n } from '../i18n/i18n';
@@ -88,14 +88,14 @@ function ScheduleFields({ token, schedule, onChange, polled = false }: { token: 
     catch (cause) { setPreview(cause instanceof Error ? cause.message : String(cause)); }
   };
   return <>
-    <Choice label={t('방식')} value={schedule.type} onChange={type => { setPreview(''); onChange(type === 'once' ? { type: 'once', at: new Date(Date.now() + 3600000).toISOString() } : type === 'interval' ? { type: 'interval', everySeconds: polled ? 300 : 3600 } : { type: 'cron', expression: polled ? '*/15 9-18 * * 1-5' : '0 9 * * 1-5', timezone: browserZone() }); }}
+    <Choice label={t('방식')} value={schedule.type} onChange={type => { setPreview(''); onChange(type === 'once' ? { type: 'once', at: new Date(Date.now() + 3600000).toISOString() } : type === 'interval' ? { type: 'interval', everySeconds: polled ? POLL_INTERVAL_DEFAULT_SECONDS : SCHEDULE_INTERVAL_DEFAULT_SECONDS } : { type: 'cron', expression: polled ? '*/15 9-18 * * 1-5' : '0 9 * * 1-5', timezone: browserZone() }); }}
       options={polled ? [['interval', t('일정 간격')], ['cron', t('정한 시각 (크론)')]] : [['once', t('한 번만')], ['cron', t('정한 시각 (크론)')], ['interval', t('일정 간격')]]} />
     {schedule.type === 'once' ? <label>{t('예약 시각')}<input type="datetime-local" required value={schedule.at ? new Date(Date.parse(schedule.at) - new Date(schedule.at).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ''}
       onChange={event => { setPreview(''); onChange({ type: 'once', at: event.target.value ? new Date(event.target.value).toISOString() : '' }); }} />
       <small>{t('이 브라우저의 시간대: {0}', { 0: browserZone() })}</small><small>{t('예약은 한 번 소비되고 보관됩니다. 실패해도 자동으로 다시 예약하지 않습니다.')}</small></label> : schedule.type === 'cron' ? <div className="trigger-grid">
       <label>{t('크론 표현식')}<input required value={schedule.expression} onChange={event => { setPreview(''); onChange({ ...schedule, expression: event.target.value }); }} /><small>{t('분 시 일 월 요일 (예: 0 9 * * 1-5 = 평일 9시)')}</small></label>
       <label>{t('시간대')}<input required value={schedule.timezone} onChange={event => { setPreview(''); onChange({ ...schedule, timezone: event.target.value }); }} /></label>
-    </div> : <label className="trigger-inline">{t('간격')}<span><input type="number" required min={1} max={44640} value={Math.round(schedule.everySeconds / 60)} onChange={event => { setPreview(''); onChange({ type: 'interval', everySeconds: Math.max(1, Number(event.target.value) || 1) * 60 }); }} />{t('분마다')}</span></label>}
+    </div> : <label className="trigger-inline">{t('간격')}<span><input type="number" required min={INTERVAL_MIN_SECONDS / 60} max={INTERVAL_MAX_SECONDS / 60} value={Math.round(schedule.everySeconds / 60)} onChange={event => { setPreview(''); onChange({ type: 'interval', everySeconds: Math.max(INTERVAL_MIN_SECONDS / 60, Number(event.target.value) || INTERVAL_MIN_SECONDS / 60) * 60 }); }} />{t('분마다')}</span></label>}
     <div className="trigger-preview"><button type="button" className="secondary-button" onClick={() => void showPreview()}>{polled ? t('다음 확인 시간 보기') : t('다음 실행 시간 보기')}</button>
       {typeof preview === 'string' ? preview && <p className="slack-error">{translateMessage(preview)}</p> : <ol>{preview.map(time => <li key={time}>{absoluteTime(time)}</li>)}</ol>}</div>
   </>;

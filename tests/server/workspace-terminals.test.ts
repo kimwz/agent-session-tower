@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import type { ServerResponse } from 'node:http';
 import { WorkspaceTerminals, type WorkspacePty, type TerminalSpawnOptions } from '../../server/workspace-terminals.js';
+import { sseSink } from '../../server/http/sinks.js';
 
 class Pty implements WorkspacePty {
   written: string[] = [];
@@ -27,7 +28,8 @@ class Response extends EventEmitter {
   write(data: string) { this.frames.push(data); return !this.block; }
   end() { this.writableEnded = true; this.emit('close'); }
   destroy() { this.destroyed = true; this.emit('close'); }
-  asHttp() { return this as unknown as ServerResponse; }
+  /** The fake as the event-stream sink the web server gives a terminal. */
+  asSink() { return sseSink(this as unknown as ServerResponse); }
 }
 function setup(options: { disconnectGraceMs?: number; maxTerminals?: number; keepAliveOnDisconnect?: boolean } = {}) {
   const ptys: Pty[] = [];
@@ -46,56 +48,56 @@ test('PTY starts in exact cwd, accepts raw input and resize, and is killed on cl
   terminals.input(id, 'pwd\r'); terminals.resize(id, 100, 40);
   assert.deepEqual(ptys[0].written, ['pwd\r']); assert.deepEqual(ptys[0].sizes, [[100, 40]]);
   terminals.close(id); assert.equal(ptys[0].killed, 1);
-  assert.throws(() => terminals.input(id, 'x'), { statusCode: 404 });
+  assert.throws(() => terminals.input(id, 'x'), { kind: 'not-found' });
 });
 
 test('SSE replays early output and resumes after last event without duplicating it', async t => {
   const { terminals, ptys } = setup(); t.after(() => terminals.dispose());
   const { id } = await terminals.create('/fixture', 80, 24);
   ptys[0].output('before connection\r\n');
-  const response = new Response(); terminals.attach(id, response.asHttp());
+  const response = new Response(); terminals.attach(id, response.asSink());
   ptys[0].output('live\nwith newline');
   assert.match(response.frames.join(''), /id: 1\nevent: output\ndata: \{"data":"before connection\\r\\n"\}/);
   response.destroy();
-  const reconnect = new Response(); terminals.attach(id, reconnect.asHttp(), '1');
+  const reconnect = new Response(); terminals.attach(id, reconnect.asSink(), '1');
   assert.doesNotMatch(reconnect.frames.join(''), /before connection/);
   assert.match(reconnect.frames.join(''), /id: 2\nevent: output/);
   ptys[0].exit(7);
   assert.match(reconnect.frames.join(''), /event: exit\ndata: \{"exitCode":7\}/);
-  assert.throws(() => terminals.input(id, 'x'), { statusCode: 409 });
+  assert.throws(() => terminals.input(id, 'x'), { kind: 'conflict' });
 });
 
 test('output replay is bounded and slow consumers are disconnected', async t => {
   const { terminals, ptys } = setup(); t.after(() => terminals.dispose());
   const { id } = await terminals.create('/fixture', 80, 24);
   ptys[0].output('a'.repeat(1024 * 1024));
-  const replay = new Response(); terminals.attach(id, replay.asHttp());
+  const replay = new Response(); terminals.attach(id, replay.asSink());
   assert.ok(replay.frames.join('').length < 300 * 1024);
   assert.match(replay.frames.join(''), /Earlier terminal output was truncated/);
-  const slow = new Response(); slow.block = true; terminals.attach(id, slow.asHttp());
+  const slow = new Response(); slow.block = true; terminals.attach(id, slow.asSink());
   ptys[0].output('b'.repeat(1024 * 1024));
   assert.equal(slow.destroyed, true);
 });
 
 test('input limits, size validation and terminal caps do not spawn extra processes', async t => {
   const { terminals, ptys } = setup({ maxTerminals: 1 }); t.after(() => terminals.dispose());
-  await assert.rejects(terminals.create('/fixture', 1000, 24), { statusCode: 400 });
+  await assert.rejects(terminals.create('/fixture', 1000, 24), { kind: 'invalid' });
   const { id } = await terminals.create('/fixture', 80, 24);
-  await assert.rejects(terminals.create('/fixture', 80, 24), { statusCode: 429 });
+  await assert.rejects(terminals.create('/fixture', 80, 24), { kind: 'rate-limited' });
   assert.equal(ptys.length, 1);
-  assert.throws(() => terminals.resize(id, 80, 0), { statusCode: 400 });
-  assert.throws(() => terminals.input(id, 'x'.repeat(16385)), { statusCode: 400 });
+  assert.throws(() => terminals.resize(id, 80, 0), { kind: 'invalid' });
+  assert.throws(() => terminals.input(id, 'x'.repeat(16385)), { kind: 'invalid' });
   for (let i = 0; i < 128; i++) terminals.input(id, 'x'.repeat(16384));
-  assert.throws(() => terminals.input(id, 'x'), { statusCode: 429 });
+  assert.throws(() => terminals.input(id, 'x'), { kind: 'rate-limited' });
   assert.equal(ptys[0].written.length, 128);
-  assert.throws(() => terminals.attach(id, new Response().asHttp(), '999'), { statusCode: 400 });
+  assert.throws(() => terminals.attach(id, new Response().asSink(), '999'), { kind: 'invalid' });
 });
 
 test('unattached and disconnected terminals expire; attached terminals survive grace period', async t => {
   const { terminals, ptys } = setup({ disconnectGraceMs: 10 }); t.after(() => terminals.dispose());
   await terminals.create('/fixture', 80, 24);
   const { id } = await terminals.create('/fixture', 80, 24);
-  const response = new Response(); terminals.attach(id, response.asHttp());
+  const response = new Response(); terminals.attach(id, response.asSink());
   await new Promise(resolve => setTimeout(resolve, 25));
   assert.equal(ptys[0].killed, 1); assert.equal(ptys[1].killed, 0);
   response.destroy();
@@ -106,27 +108,27 @@ test('unattached and disconnected terminals expire; attached terminals survive g
 test('disposal kills all PTYs, ends streams, and handles an in-flight spawn', async () => {
   const { terminals, ptys } = setup();
   const { id } = await terminals.create('/fixture', 80, 24);
-  const response = new Response(); terminals.attach(id, response.asHttp());
+  const response = new Response(); terminals.attach(id, response.asSink());
   terminals.dispose(); terminals.dispose();
   assert.equal(ptys[0].killed, 1); assert.equal(response.writableEnded, true);
-  await assert.rejects(terminals.create('/fixture', 80, 24), { statusCode: 503 });
+  await assert.rejects(terminals.create('/fixture', 80, 24), { kind: 'unavailable' });
   let finish!: (pty: WorkspacePty) => void;
   const pending = new WorkspaceTerminals({ spawnPty: () => new Promise(resolve => { finish = resolve; }) });
   const creating = pending.create('/fixture', 80, 24);
   pending.dispose();
   const pty = new Pty(); finish(pty);
-  await assert.rejects(creating, { statusCode: 503 }); assert.equal(pty.killed, 1);
+  await assert.rejects(creating, { kind: 'unavailable' }); assert.equal(pty.killed, 1);
 });
 
 
 test('durable shells survive browser disconnects and only explicit close terminates them', async t => {
   const { terminals, ptys } = setup({ disconnectGraceMs: 5, keepAliveOnDisconnect: true }); t.after(() => terminals.dispose());
   const { id } = await terminals.create('/fixture', 80, 24);
-  const response = new Response(); terminals.attach(id, response.asHttp()); response.destroy();
+  const response = new Response(); terminals.attach(id, response.asSink()); response.destroy();
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(ptys[0].killed, 0); assert.equal(terminals.hasActive(), true);
   ptys[0].output('continued while Tower was disconnected');
-  const next = new Response(); terminals.attach(id, next.asHttp());
+  const next = new Response(); terminals.attach(id, next.asSink());
   assert.match(next.frames.join(''), /continued while Tower was disconnected/);
   terminals.close(id); assert.equal(ptys[0].killed, 1); assert.equal(terminals.hasActive(), false);
 });
@@ -153,7 +155,7 @@ test('each shell knows its folder and who opened it, and a controller’s repeat
   assert.deepEqual(listed.map(item => [item.id, item.cwd, item.opener, item.exited]), [[own.id, '/work/app', 'local', false], [remote.id, '/work/app', 'controller-a', false], [other.id, '/work/app', 'controller-b', false]]);
   assert.ok(listed.every(item => !Number.isNaN(Date.parse(item.openedAt))));
   terminals.close(remote.id);
-  await assert.rejects(terminals.create('/work/app', 80, 24, { opener: 'controller-a', requestId: 'r1' }), { statusCode: 410 },
+  await assert.rejects(terminals.create('/work/app', 80, 24, { opener: 'controller-a', requestId: 'r1' }), { kind: 'gone' },
     'a request whose shell was closed meanwhile (by another window, say) opens nothing when it arrives again');
   assert.equal(ptys.length, 3);
   terminals.dispose();
@@ -163,7 +165,28 @@ test('windows on this computer and on several controllers can watch one shell to
   const { terminals } = setup();
   const { id } = await terminals.create('/work/app', 80, 24);
   const windows = Array.from({ length: 6 }, () => new Response());
-  for (const window of windows) terminals.attach(id, window.asHttp());
-  assert.throws(() => terminals.attach(id, new Response().asHttp()), /너무 많습니다/);
+  for (const window of windows) terminals.attach(id, window.asSink());
+  assert.throws(() => terminals.attach(id, new Response().asSink()), /너무 많습니다/);
   terminals.dispose();
+});
+
+test('SSE head and replay order, and a seventh window on one shell is refused with 429', async t => {
+  const { errorStatus } = await import('../../server/http/requests.js');
+  const { terminals, ptys } = setup(); t.after(() => terminals.dispose());
+  const { id } = await terminals.create('/fixture', 80, 24);
+  ptys[0].output('one'); ptys[0].output('two');
+  class Headed extends Response { head: unknown[] = []; writeHead(...args: unknown[]) { this.head = args; return this; } }
+  const first = new Headed(); terminals.attach(id, first.asSink());
+  // Named change: the local terminal stream now says no-store, as the worker and terminal-host relays always did.
+  assert.deepEqual(first.head, [200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' }]);
+  assert.deepEqual(first.frames, [': connected\n\n', 'id: 1\nevent: output\ndata: {"data":"one"}\n\n', 'id: 2\nevent: output\ndata: {"data":"two"}\n\n']);
+  for (let i = 0; i < 5; i++) terminals.attach(id, new Headed().asSink());
+  const seventh = new Headed();
+  let refused: unknown;
+  try { terminals.attach(id, seventh.asSink()); } catch (error) { refused = error; }
+  assert.deepEqual({ status: errorStatus(refused), message: (refused as Error).message }, { status: 429, message: '터미널에 연결된 창이 너무 많습니다.' });
+  assert.deepEqual(seventh.head, [], 'nothing is written to a refused window');
+  let bad: unknown;
+  try { terminals.attach(id, new Headed().asSink(), 'x'); } catch (error) { bad = error; }
+  assert.equal(errorStatus(bad), 400);
 });

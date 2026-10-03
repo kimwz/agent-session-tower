@@ -19,6 +19,8 @@ import { remoteJob, remoteJobVisible, remotePage, remoteRepository, remoteRun, r
 import type { RepositoryAction } from '../../shared/repositories.js';
 import { isOperationName, OPERATIONS, REMOTE_PAGE_OPERATIONS } from '../../shared/api/operations.js';
 import type { RemoteAction, RemoteChange } from '../../shared/link.js';
+import { TowerError } from '../../shared/errors.js';
+import { sseSink } from '../http/sinks.js';
 
 type Request = IncomingMessage | Http2ServerRequest;
 // The HTTP/2 compatibility response offers the same calls as an HTTP/1 response.
@@ -294,7 +296,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       shellStreams.add(res);
       res.once('close', () => shellStreams.delete(res));
       await shell(terminal[1]);
-      await terminals.attach(terminal[1], res, cursor);
+      await terminals.attach(terminal[1], sseSink(res), cursor);
       return;
     }
     const autoPrompt = path.match(/^\/api\/auto-prompts\/([a-f\d-]+)(\/cancel)?$/i);
@@ -317,7 +319,12 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       // sent as a conflict.
       let result: unknown;
       try { result = await backend.api(operation, body, context(principal, write ? requestId(req) : undefined)); }
-      catch (error) { const status = errorStatus(error); throw Object.assign(error as Error, status === 403 ? { statusCode: 409 } : {}, { shown: status !== 500 }); }
+      catch (error) {
+        const status = errorStatus(error);
+        // Tower's own refusal keeps its message and disposition; another error is marked as before.
+        if (status === 403 && error instanceof TowerError) throw Object.assign(new TowerError('conflict', error.message, { cause: error, ...(error.disposition ? { disposition: error.disposition } : {}) }), { shown: true });
+        throw Object.assign(error as Error, status === 403 ? { statusCode: 409 } : {}, { shown: status !== 500 });
+      }
       if (write && operation.startsWith('triggers.')) note('trigger', { target: triggerName(body, result), detail: triggerChange(operation, body) });
       return json(res, 200, { result });
     }

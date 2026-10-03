@@ -27,7 +27,7 @@ Your browser opens at **http://localhost:8000** with a canvas like this:
 
 ![Claude Code and Codex sessions grouped by project on the Agent Session Tower graph canvas](docs/images/session-graph.png)
 
-Requires **Node.js 22.13+**, **npm**, and **Git**. Use your existing Claude Code or Codex installation and sign-in. The first run downloads and builds the app; later runs reuse npm's cache. Tested on macOS. The web UI supports **English and Korean**.
+Requires **Node.js 22.13+**, **npm**, and **Git**. Use your existing Claude Code or Codex installation and sign-in. The first run downloads and builds the app; later runs reuse npm's cache. Tested on macOS and Linux. The web UI supports **English and Korean**.
 
 ## Browser editor and terminal
 
@@ -41,7 +41,7 @@ The integrated terminal runs an interactive shell in that folder on the Tower se
 - **Follow work on a live graph.** View projects, sessions, and subagents together, with working, waiting, completed, and error states. Temporary projects under `/tmp` and `/private/tmp` stay off the canvas; their sessions remain accessible in the sidebar.
 - **Check account usage.** See Claude Code and Codex usage as small donuts inside the machine node. Hover or focus for usage windows and reset times.
 - **Create new sessions.** Choose Claude Code or Codex, pick a project folder, and send the first request from the web. A folder that does not exist yet is created, and the folder is marked as trusted for that CLI so it does not stop at the trust prompt.
-- **Route a prompt automatically.** Open **Auto Prompt** from the sparkle button on a machine or folder. A separate Opus or GPT Sol agent chooses a suitable existing session or starts a new one, and shows its reason.
+- **Route a prompt automatically.** Open **Auto Prompt** from the sparkle button on a machine or folder. A separate routing agent (its model is set in **Settings → Model**) chooses a suitable existing session or starts a new one, and shows its reason.
 - **Fast suggestions and quieter notifications (optional).** Save a Jev API key under **Settings → Fast judgment**. Auto Prompt then suggests the project and conversation while you type; keep the checkbox on to send there at once. Notifications skip turns that were only an intermediate step.
 - **Continue a conversation.** Read the original history and send the next instruction to the same native session. Attach files or paste images.
 - **Insert a queued request into active work.** Click **Send into current turn** on an eligible queued request to deliver it to the same active Claude Code or Codex turn without stopping it. Available for turns controlled by Tower; a different model must wait for the next turn. Unconfirmed delivery is never retried automatically.
@@ -57,7 +57,7 @@ The integrated terminal runs an interactive shell in that folder on the Tower se
 - **Back up and move your setup.** **Settings → Backup** exports triggers, permission rules, Slack, public agents, skills and guidance, fast judgment and folder settings as one passphrase-encrypted file, and restores it on another computer without stopping running work. It can also upload encrypted backups on a schedule to S3-compatible storage such as Cloudflare R2. Sessions and remote computer links are not included.
 - **Stay up to date.** Installed as the background service (`agent-session-tower service install`), Tower keeps itself, Claude Code and Codex at their latest releases, and computers it controls follow it. Running agents and terminals are never interrupted. See [staying up to date](docs/usage.md#staying-up-to-date).
 
-Local use needs no Tower login, API key, database, or CLI hooks; the only provider files Tower writes are the guidance sections above. Remote use requires an account configured on the host. Your agents keep using their existing CLI accounts and model settings.
+Local use needs no Tower login, API key, database, or CLI hooks; besides the guidance sections above, Tower writes to agent settings only the folder trust entry for sessions it creates, Codex's `tower.rules` for permission rules you allow, and links to skills kept in Tower. Remote use requires an account configured on the host. Your agents keep using their existing CLI accounts and model settings.
 
 ## Encrypted secrets
 

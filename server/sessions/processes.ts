@@ -70,6 +70,12 @@ export function processLaunchers(parents: ReadonlyMap<number, number>, owners: R
   return launchers;
 }
 
+/** Whether a `ps` process name can belong to a Claude Code registry entry. */
+export function isClaudeRegistryCommand(command: string): boolean {
+  // Node.js 24+ names its main thread "MainThread", which Linux reports as the process name.
+  return /claude|node/i.test(command) || command === 'MainThread';
+}
+
 /** Read only process metadata. Never reads credentials or Claude peer key files. */
 export async function inspectProcesses(claudeHome: string, codexHome: string): Promise<ProcessSnapshot> {
   const snapshot: ProcessSnapshot = {
@@ -101,7 +107,7 @@ export async function inspectProcesses(claudeHome: string, codexHome: string): P
         // A stale registry entry must not attach to a recycled non-Claude PID.
         const processInfo = commands.get(pid);
         const command = processInfo?.command;
-        if (command && !/claude|node/i.test(command)) return;
+        if (command && !isClaudeRegistryCommand(command)) return;
         if (processInfo && typeof data.updatedAt === 'number' && processInfo.startedAt > data.updatedAt + 2000) return;
         try { process.kill(pid, 0); } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'EPERM') return;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -10,6 +10,7 @@ import type { RunAdmission } from '../../../server/runs/manager.js';
 import type { PublicAgentInput } from '../../../shared/public-agents.js';
 import type { CreateSessionRequest, Run, Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.js';
+import { asideNames, blockQuarantine, captureErrors } from '../../helpers/quarantine.js';
 
 type Answer = (request: AutoPromptModelRequest) => unknown;
 const kind = (request: AutoPromptModelRequest) => request.systemPrompt.includes('final gate') ? 'review'
@@ -234,4 +235,68 @@ test('a start cut off by a stop is matched to the run registry after restart, ne
   assert.equal(again.overview().agents[0].requests[0].runId, runs[0].id);
   assert.equal(created.length, 1);
   assert.equal(again.overview().agents[0].slug, published.slug);
+});
+
+test('unreadable agent data stops the start', async t => {
+  const f = await fixture(t);
+  const published = await publish(f.service, f.agent);
+  await f.service.flush();
+  const path = join(f.directory, 'public-agents', `${published.id}.json`);
+  await writeFile(path, '{ not json', { mode: 0o600 });
+  await assert.rejects(f.make().start(), SyntaxError);
+  assert.equal(await readFile(path, 'utf8'), '{ not json');
+});
+
+test('agent data of the wrong shape is moved aside, not overwritten', async t => {
+  for (const text of ['{"version":2,"conversations":[]}', 'null']) {
+    const f = await fixture(t);
+    const published = await publish(f.service, f.agent);
+    await f.service.flush();
+    const path = join(f.directory, 'public-agents', `${published.id}.json`);
+    await writeFile(path, text, { mode: 0o600 });
+    captureErrors(t, path);
+    const service = f.make();
+    await service.start();
+    const [aside] = await asideNames(path);
+    assert.ok(aside, text);
+    assert.equal(service.overview().storageError, `공개 에이전트 ${published.name}의 저장된 대화를 읽지 못해 ${join(f.directory, 'public-agents', aside)}로 옮겼습니다.`);
+    await service.visit('state', published.slug, { ip: '203.0.113.5' });
+    await service.flush();
+    assert.equal(await readFile(join(f.directory, 'public-agents', aside), 'utf8'), text);
+    assert.equal(JSON.parse(await readFile(path, 'utf8')).version, 1, 'the agent goes on with empty data');
+  }
+});
+
+test('agent data that cannot be moved aside is never written over and the agent is closed', async t => {
+  const f = await fixture(t);
+  const published = await publish(f.service, f.agent);
+  await f.service.flush();
+  const path = join(f.directory, 'public-agents', `${published.id}.json`);
+  const text = '{"version":2,"conversations":[]}';
+  await writeFile(path, text, { mode: 0o600 });
+  const blocked = await blockQuarantine(t, path);
+  captureErrors(t, path);
+  const service = f.make();
+  await service.start();
+  blocked.release();
+  assert.equal(service.overview().storageError, `공개 에이전트 ${published.name}의 저장된 대화를 읽지도 옮기지도 못했습니다. 파일은 그대로 두고 Tower를 다시 시작할 때까지 이 에이전트를 닫습니다.`);
+  await assert.rejects(service.visit('state', published.slug, { ip: '203.0.113.5' }), { kind: 'not-found', message: 'not_found' });
+  assert.equal(service.launchAllowed(published.id), false);
+  await service.mutate('update', { id: published.id, agent: { ...f.agent, name: 'Renamed desk' } });
+  await service.flush();
+  assert.equal(await readFile(path, 'utf8'), text);
+  await service.mutate('delete', { id: published.id });
+  await service.flush();
+  assert.equal(await readFile(path, 'utf8'), text, 'deleting the agent leaves the file it could not read');
+});
+
+test('a missing agent data file starts empty without a note', async t => {
+  const f = await fixture(t);
+  const published = await publish(f.service, f.agent);
+  await f.service.flush();
+  await rm(join(f.directory, 'public-agents', `${published.id}.json`));
+  const service = f.make();
+  await service.start();
+  assert.equal(service.overview().storageError, undefined);
+  assert.equal(service.launchAllowed(published.id), true);
 });

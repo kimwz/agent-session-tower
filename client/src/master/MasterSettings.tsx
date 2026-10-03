@@ -34,6 +34,8 @@ export function MasterSettingsView({ token, overview, onNewSession }: { token: s
       <h3>{words('마스터 세션', 'Master session')}</h3>
       <p>{overview.session ? `${overview.session.provider === 'claude' ? 'Claude Code' : 'Codex'} · ${overview.session.title ?? overview.session.id}` : words('아직 없습니다.', 'None yet.')}</p>
       <p>{words('모델과 추론 수준은 대화창에서 여느 세션처럼 고릅니다. 다른 도구로 바꾸거나 새로 시작하려면 새 마스터 세션을 여세요.', 'Choose the model and reasoning in the conversation, as in any session. To switch tools or start fresh, open a new master session.')}</p>
+      {overview.followState === 'moved-aside' ? <p className="master-error" role="alert">{words('마스터가 지켜보던 일의 기록을 읽지 못해 따로 옮겨 두고 새로 시작했습니다. 그 전에 맡긴 일은 끝나도 보고되지 않습니다.', 'The master’s record of followed work could not be read; it was moved aside and started over. Work handed out before is not reported when it ends.')}</p> : null}
+      {overview.followState === 'not-saved' ? <p className="master-error" role="alert">{words('마스터가 지켜보던 일의 기록을 읽지 못해 그대로 두었습니다. Tower를 다시 시작할 때까지 새로 맡긴 일은 저장되지 않습니다.', 'The master’s record of followed work could not be read and was left as it is. Newly handed-out work is not saved until Tower restarts.')}</p> : null}
       {overview.failedReports ? <p className="master-error">{words(`끝난 일 ${overview.failedReports}건의 보고를 마스터 세션에 전하지 못했습니다. 세션 목록에서 확인해 주세요.`, `${overview.failedReports} reports of finished work could not be given to the master session. Check them in the session list.`)}</p> : null}
       <div className="master-key-row"><button className="secondary-button" disabled={busy} onClick={onNewSession}><RefreshCw size={13} />{words('새 마스터 세션', 'New master session')}</button></div>
     </section>

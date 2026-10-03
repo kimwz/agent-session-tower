@@ -5,7 +5,8 @@ import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rename, r
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { SkillFiles } from '../../../server/skills/files.js';
-import { parseBundle, writeMoves } from '../../../server/skills/store.js';
+import { parseBundle, readMoves, writeMoves } from '../../../server/skills/store.js';
+import { asideNames, blockQuarantine, captureErrors } from '../../helpers/quarantine.js';
 import { SkillService } from '../../../server/skills/service.js';
 import { skillsCapability } from '../../../server/runs/durable-runner.js';
 import { installAgentGuidance, OWNER_GUIDANCE_FILE } from '../../../server/agent-guidance/install.js';
@@ -50,10 +51,10 @@ test('a skill with a link inside, or with per-agent copies that differ, is not m
   const f = await homes(t);
   const linked = await external(f.agentsHome, 'linked');
   await symlink('../shared.md', join(linked, 'shared.md'));
-  await assert.rejects(f.files.adopt(linked), { statusCode: 409 });
+  await assert.rejects(f.files.adopt(linked), { kind: 'conflict' });
   await external(f.agentsHome, 'tmux', 'Codex panes');
   await external(f.claudeHome, 'tmux', 'Claude panes');
-  await assert.rejects(f.files.adopt(join(f.agentsHome, 'skills', 'tmux')), { statusCode: 409 });
+  await assert.rejects(f.files.adopt(join(f.agentsHome, 'skills', 'tmux')), { kind: 'conflict' });
   assert.ok((await lstat(join(f.claudeHome, 'skills', 'tmux'))).isDirectory(), 'nothing moved');
   // Identical copies are merged first, then moved as one.
   await external(f.agentsHome, 'same');
@@ -165,7 +166,7 @@ test('links to a Tower skill in a git project are kept out of git status, and th
   await mkdir(join(repo, '.agents', 'skills', 'shared'), { recursive: true });
   await writeFile(join(repo, '.agents', 'skills', 'shared', 'SKILL.md'), '---\nname: shared\ndescription: d\n---\n');
   execFileSync('git', ['-C', repo, 'add', '.agents/skills/shared']);
-  await assert.rejects(f.files.adopt(join(repo, '.agents', 'skills', 'shared'), repo), { statusCode: 409 });
+  await assert.rejects(f.files.adopt(join(repo, '.agents', 'skills', 'shared'), repo), { kind: 'conflict' });
   assert.ok((await lstat(join(repo, '.agents', 'skills', 'shared'))).isDirectory());
 });
 
@@ -187,12 +188,12 @@ test('a backup file is checked before use: names, paths inside a skill and SKILL
   const file = (path: string) => ({ path, mode: 0o644, base64: Buffer.from('a').toString('base64') });
   assert.equal(parseBundle(skill([file('SKILL.md'), file('references/a.md')])).skills[0].files.length, 2);
   for (const path of ['../escape', '/etc/passwd', 'a/../../b', 'a//b', 'a\\b', './SKILL.md']) {
-    assert.throws(() => parseBundle(skill([file('SKILL.md'), file(path)])), { statusCode: 400 }, path);
+    assert.throws(() => parseBundle(skill([file('SKILL.md'), file(path)])), { kind: 'invalid' }, path);
   }
-  assert.throws(() => parseBundle(skill([file('notes.md')])), { statusCode: 400 }, 'SKILL.md is required');
-  assert.throws(() => parseBundle(skill([file('SKILL.md'), file('SKILL.md')])), { statusCode: 400 });
-  assert.throws(() => parseBundle({ ...skill([file('SKILL.md')]), skills: [{ name: 'Bad Name', scope: 'global', files: [file('SKILL.md')] }] }), { statusCode: 400 });
-  assert.throws(() => parseBundle({ format: 'other' }), { statusCode: 400 });
+  assert.throws(() => parseBundle(skill([file('notes.md')])), { kind: 'invalid' }, 'SKILL.md is required');
+  assert.throws(() => parseBundle(skill([file('SKILL.md'), file('SKILL.md')])), { kind: 'invalid' });
+  assert.throws(() => parseBundle({ ...skill([file('SKILL.md')]), skills: [{ name: 'Bad Name', scope: 'global', files: [file('SKILL.md')] }] }), { kind: 'invalid' });
+  assert.throws(() => parseBundle({ format: 'other' }), { kind: 'invalid' });
 });
 
 function session(cwd: string): Session {
@@ -241,7 +242,7 @@ test('chosen Tower skills, their pins and the owner’s guidance go to another c
   await external(b.agentsHome, 'outside');
   const outsider = { ...bundle, skills: [{ ...bundle.skills[0], name: 'outside' }] };
   assert.equal((await to.importPlan(outsider)).items[0].conflict, 'external');
-  await assert.rejects(to.mutate('import', { bundle: outsider, choices: [{ index: 0, action: 'replace' }] }), { statusCode: 409 });
+  await assert.rejects(to.mutate('import', { bundle: outsider, choices: [{ index: 0, action: 'replace' }] }), { kind: 'conflict' });
   assert.match(await readFile(join(b.agentsHome, 'skills', 'outside', 'SKILL.md'), 'utf8'), /name: outside/);
   const changed = { ...bundle, skills: [{ ...bundle.skills[0], files: bundle.skills[0].files.map((file: { path: string }) => file.path === 'SKILL.md' ? { ...file, base64: Buffer.from('---\nname: review\ndescription: New.\n---\nNew steps\n').toString('base64') } : file) }] };
   assert.equal((await to.importPlan(changed)).items[0].conflict, 'managed');
@@ -284,7 +285,7 @@ test('the owner’s guidance: two saves of one revision never both win, Tower’
   const bundle = { format: 'agent-session-tower.skills', version: 1, exportedAt: '', from: '', guidance: 'Imported rule',
     skills: [{ name: 'broken', scope: 'global', pinned: false, description: 'd', files: [{ path: 'SKILL.md', mode: 0o644, base64: Buffer.from('x').toString('base64') }] }] };
   await external(f.agentsHome, 'broken');
-  await assert.rejects(skills.mutate('import', { bundle, choices: [{ index: 0, action: 'add' }], guidance: 'append' }), { statusCode: 409 });
+  await assert.rejects(skills.mutate('import', { bundle, choices: [{ index: 0, action: 'add' }], guidance: 'append' }), { kind: 'conflict' });
   assert.equal((await skills.overview()).guidance!.owner, 'Keep\nThis\n', 'nothing to add twice on a retry');
 });
 
@@ -325,6 +326,39 @@ test('one move that cannot be settled never stops the others, and an unreadable 
   await writeFile(f.journal, '{not json');
   assert.deepEqual(await f.files.recover(), []);
   assert.ok((await readdir(f.state)).some(name => name.startsWith('skills-moves.json.unreadable-')));
+});
+
+test('an unreadable move record is logged after it is set aside', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-skill-moves-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'skills-moves.json');
+  const logged = captureErrors(t, path);
+  // Two moves within one millisecond would share a name.
+  let now = Date.now();
+  const clock = t.mock.method(Date, 'now', () => now++);
+  for (const text of ['{not json', '{}']) {
+    await writeFile(path, text, { mode: 0o600 });
+    assert.deepEqual(await readMoves(path), []);
+    assert.equal(logged.at(-1)!.args[0], 'The skill move record could not be read and was set aside.');
+    assert.equal(logged.at(-1)!.present, false, 'logged after the move');
+  }
+  assert.deepEqual((await Promise.all((await asideNames(path)).map(name => readFile(join(dir, name), 'utf8')))).sort(), ['{not json', '{}'].sort());
+  clock.mock.restore();
+
+});
+
+test('a skill move record that cannot be moved aside is not replaced', async t => {
+  const f = await homes(t);
+  await mkdir(f.state, { recursive: true });
+  await writeFile(f.journal, '{not json', { mode: 0o600 });
+  const blocked = await blockQuarantine(t, f.journal);
+  const logged = captureErrors(t, f.journal);
+  await assert.rejects(readMoves(f.journal), SyntaxError);
+  await assert.rejects(f.files.recover(), SyntaxError);
+  blocked.release();
+  assert.equal(await readFile(f.journal, 'utf8'), '{not json');
+  assert.deepEqual(await readdir(blocked.aside), ['occupied'], 'the move failed');
+  assert.equal(logged[0].args[0], 'The skill move record could not be read and was set aside.');
 });
 
 test('an older execution worker is never asked for what came with Tower’s own skill folder', () => {

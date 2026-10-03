@@ -2,8 +2,12 @@ import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, isAbsolute, join } from 'node:path';
-import { test } from 'node:test';
+import { delimiter, dirname, isAbsolute, join } from 'node:path';
+import { test, type TestContext } from 'node:test';
+import { readdirSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { PassThrough, Writable } from 'node:stream';
+import { MASTER_FOLDER } from '../../../shared/master.js';
 import { CapabilityRegistry } from '../../../server/api/mcp.js';
 import { runToolResolver } from '../../../server/api/run-tools.js';
 import { RunManager } from '../../../server/runs/manager.js';
@@ -87,6 +91,15 @@ function processPrompt() {
   await manager.start();
   return { manager, sessions, session, launches, children, directory, stateDir, refreshes: () => refreshes,
     cleanup: async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); } };
+}
+
+/** Waits until an asynchronous check holds (`until` takes only synchronous ones). */
+async function eventually(check: () => Promise<boolean>, timeout = 5000): Promise<void> {
+  const deadline = Date.now() + timeout;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error(`Timed out after ${timeout}ms waiting for: ${check}`);
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
 }
 
 const finished = (manager: RunManager, id: string) => until(() => {
@@ -334,7 +347,7 @@ for (const decision of ['allow', 'deny'] as const) test(`owned Codex exposes a l
   await (f.manager as unknown as { flush(): Promise<void> }).flush();
   assert.equal(JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'))[0].approvals, undefined);
   await f.manager.respondToApproval(accepted.id, approval.id, decision);
-  await assert.rejects(f.manager.respondToApproval(accepted.id, approval.id, decision), { statusCode: 409 });
+  await assert.rejects(f.manager.respondToApproval(accepted.id, approval.id, decision), { kind: 'conflict' });
   const result = await finished(f.manager, accepted.id);
   assert.equal(result.status, 'completed', result.error);
   assert.equal(result.approvals, undefined);
@@ -407,7 +420,7 @@ test('retries retain attachments after restart, enforce session ownership, and n
     assert.deepEqual(retry.attachments, run.attachments);
     const other = makeSession(f.directory, { id: `codex:${ID2}`, nativeId: ID2 });
     f.sessions.set(other.id, other);
-    await assert.rejects(reopened.enqueue(other.id, 'other session', { attachmentIds: [run.attachments![0].id] }), { statusCode: 404 });
+    await assert.rejects(reopened.enqueue(other.id, 'other session', { attachmentIds: [run.attachments![0].id] }), { kind: 'not-found' });
     assert.equal(f.launches.length, 0);
   } finally { await reopened?.close(); await f.cleanup(); }
 });
@@ -964,19 +977,21 @@ test("a bridged Codex turn asks the desktop app for the automatic reviewer for T
 
 test('a tool capability reaches Claude through a private file that is gone when the turn ends, never through argv', async t => {
   const mcpServers = { tower: { command: '/fixture/node', args: ['index.js', '--tower-mcp', '/state'], env: { TOWER_MCP_CAPABILITY: 'a'.repeat(64) } } };
-  let seen: { mode: number; content: string } | undefined;
-  const f = await fixture({ provider: 'claude', resolveRunTools: () => ({ servers: mcpServers, required: false, towerTools: 'attached' }) });
-  t.after(f.cleanup);
-  const run = await f.manager.enqueue(f.session.id, 'Set up a trigger', {}, { origin: { kind: 'owner' } });
-  await until(() => f.launches.length === 1);
-  const args = f.launches[0].args;
+  // The fake provider holds the turn open until the test ends it, so the file is looked at while the turn runs.
+  const f = await fakeClaude(t, { resolveRunTools: () => ({ servers: mcpServers, required: false, towerTools: 'attached' }) });
+  const args = f.spawned[0];
   const path = args[args.indexOf('--mcp-config') + 1];
   assert.equal(args.join(' ').includes('a'.repeat(64)), false);
-  try { seen = { mode: (await stat(path)).mode & 0o777, content: await readFile(path, 'utf8') }; } catch { /* The turn may already be over. */ }
-  const result = await finished(f.manager, run.id);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  assert.equal((await stat(dirname(path))).mode & 0o777, 0o700);
+  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), { mcpServers });
+  f.send({ type: 'system', subtype: 'init', session_id: ID, permissionMode: 'auto' });
+  f.send({ type: 'result', is_error: false, result: 'Set up' });
+  const result = await finished(f.manager, f.run.id);
+  assert.equal(result.status, 'completed');
   assert.equal(result.towerTools, 'attached');
-  if (seen) { assert.equal(seen.mode, 0o600); assert.deepEqual(JSON.parse(seen.content), { mcpServers }); }
-  await until(() => stat(path).then(() => false, () => true));
+  await eventually(() => stat(path).then(() => false, () => true));
+  await eventually(() => stat(dirname(path)).then(() => false, () => true));
 });
 
 test('a turn forwarded to the open Codex app is marked as having no Tower tools', async t => {
@@ -1032,3 +1047,349 @@ test('optional desktop forwarding attaches neither caller environment nor CLI to
   assert.doesNotMatch(JSON.stringify(bridge), /stale-caller|cccccccc|dddddddd/, 'bridge receives neither reporting nor MCP credentials');
   await assert.rejects(stat(join(f.directory, 'received.json.env')), { code: 'ENOENT' });
 });
+
+test('a private notice is not sent to a Codex app (bridged) turn', async t => {
+  const steered: unknown[] = [];
+  let bridge!: CodexBridgeOptions;
+  const f = await fixture({
+    resolveRunTools: () => ({ required: false, towerTools: 'attached', servers: { tower_secrets: { command: '/fixture/secret-tool', args: [] } } }),
+    openCodexBridge: async options => { bridge = options; return { done: new Promise<void>(() => {}), start: async () => { options.onStarted('turn'); },
+      canSteer: () => true, steer: async input => { steered.push(input); }, cancel: async () => { options.onFinished({ status: 'cancelled' }); }, close: () => {} }; },
+  });
+  t.after(f.cleanup);
+  f.sessions.set(f.session.id, { ...f.session, status: 'idle', activeProcess: true });
+  const run = await f.manager.enqueue(f.session.id, 'Work in the desktop app', {}, { origin: { kind: 'owner' } });
+  await until(() => f.manager.list().find(item => item.id === run.id)?.status === 'running');
+  f.manager.notifyToolChange('A private notice', f.session.id);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(steered, []);
+  assert.equal(f.manager.busy(), true, 'the bridged turn itself is live');
+  bridge.onFinished({ status: 'completed' });
+});
+
+test('the private MCP config is removed when the provider cannot be spawned', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-mcp-spawn-failure-'));
+  const privateTmp = join(directory, 'tmp'); await mkdir(privateTmp);
+  const previous = process.env.TMPDIR; process.env.TMPDIR = privateTmp;
+  const session = makeSession(directory, { provider: 'claude', id: `claude:${ID}` });
+  let configPath: string | undefined;
+  const manager = new RunManager({ stateDir: join(directory, 'state'), getSession: id => id === session.id ? session : undefined, refreshSessions: async () => {}, pollMs: 20,
+    findExecutable: async provider => `/fixture/${provider}`,
+    resolveRunTools: () => ({ required: false, servers: { tower: { command: '/fixture/node', args: [], env: { TOWER_MCP_CAPABILITY: 'e'.repeat(64) } } } }),
+    spawnProcess: ((_file: string, args: string[]) => { configPath = args[args.indexOf('--mcp-config') + 1]; throw new Error('spawn refused by the fixture'); }) as never });
+  await manager.start();
+  t.after(async () => {
+    await manager.close();
+    if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous;
+    await rm(directory, { recursive: true, force: true });
+  });
+  const run = await manager.enqueue(session.id, 'Use the tools');
+  const result = await finished(manager, run.id);
+  assert.equal(result.status, 'error');
+  assert.match(result.error!, /spawn refused by the fixture/);
+  assert.ok(configPath?.startsWith(privateTmp), 'the config was written to its own private folder');
+  await eventually(() => readdir(privateTmp).then(names => names.length === 0));
+});
+
+/** A Claude conversation whose provider is a fake child that sends whatever the test writes. */
+async function fakeClaude(t: TestContext, options: { master?: boolean; resolveRunTools?: ConstructorParameters<typeof RunManager>[0]['resolveRunTools'] } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-fake-claude-'));
+  const stateDir = join(directory, 'state');
+  const cwd = options.master ? join(stateDir, MASTER_FOLDER) : directory;
+  await mkdir(cwd, { recursive: true });
+  const session = makeSession(cwd, { id: `claude:${ID}`, provider: 'claude' });
+  const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+  const received: Record<string, any>[] = [];
+  const exit = (code = 0) => { if (child.exitCode !== null) return; Object.assign(child, { exitCode: code }); child.emit('close', code, null); };
+  Object.assign(child, { stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, pid: undefined, kill: () => { exit(1); return true; },
+    stdin: new Writable({ write(chunk, _encoding, done) {
+      const input = JSON.parse(String(chunk)); received.push(input);
+      if (input.type === 'control_request') setImmediate(() => send({ type: 'control_response', response: { subtype: 'success', request_id: input.request_id } }));
+      done();
+    } }) });
+  child.stdin.on('finish', () => setImmediate(() => exit()));
+  const send = (frame: unknown) => child.stdout.push(`${typeof frame === 'string' ? frame : JSON.stringify(frame)}\n`);
+  const spawned: string[][] = [];
+  const manager = new RunManager({ stateDir, getSession: id => id === session.id ? session : undefined, refreshSessions: async () => {}, pollMs: 10,
+    findExecutable: async () => '/fixture/claude', checkClaudeSubscription: async () => {}, resolveRunTools: options.resolveRunTools,
+    spawnProcess: (_file, args) => { spawned.push(args); return child; } });
+  await manager.start();
+  t.after(async () => { exit(); await manager.close(); await rm(directory, { recursive: true, force: true }); });
+  const run = await manager.enqueue(session.id, 'Fake turn', {}, { origin: { kind: 'owner' } });
+  await until(() => received.some(frame => frame.type === 'user'));
+  return { manager, run, send, exit, child, spawned, read: () => manager.list().find(item => item.id === run.id)! };
+}
+
+test('an output event over 2 MB stops the turn with its reason', async t => {
+  const f = await fakeClaude(t);
+  f.send({ type: 'system', subtype: 'init', session_id: ID, permissionMode: 'auto' });
+  f.child.stdout.push('x'.repeat(2_000_001));
+  const result = await finished(f.manager, f.run.id);
+  assert.equal(result.status, 'error');
+  assert.match(result.error!, /^Provider emitted an oversized output event\./);
+});
+
+test('a non-object event stops the turn as invalid output', async t => {
+  const f = await fakeClaude(t);
+  f.send({ type: 'system', subtype: 'init', session_id: ID, permissionMode: 'auto' });
+  f.send('[1,2]');
+  const result = await finished(f.manager, f.run.id);
+  assert.equal(result.status, 'error');
+  assert.match(result.error!, /^The provider emitted an invalid output event\. The task was stopped\./);
+});
+
+test('master replies stream block by block and complete messages add nothing after partial text', async t => {
+  const f = await fakeClaude(t, { master: true });
+  f.send({ type: 'system', subtype: 'init', session_id: ID, permissionMode: 'auto' });
+  f.send({ type: 'stream_event', event: { type: 'message_start', message: { id: 'm1' } } });
+  f.send({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
+  f.send({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello ' } } });
+  await until(() => f.read().replies?.[0]?.text === 'Hello ');
+  f.send({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'there' } } });
+  f.send({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+  f.send({ type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'Hello there' }] } });
+  f.send({ type: 'assistant', message: { id: 'm2', content: [{ type: 'text', text: 'Second whole message' }] } });
+  f.send({ type: 'result', is_error: false, result: 'done' });
+  await until(() => f.read().replies?.length === 2);
+  const replies = f.read().replies!;
+  assert.deepEqual(replies.map(reply => [reply.id, reply.text, reply.done]), [['m1:0', 'Hello there', true], ['m2:a0', 'Second whole message', true]]);
+  f.exit();
+  await finished(f.manager, f.run.id);
+});
+
+test('a Claude master reply records firstAt on its first text and completedAt when done', async t => {
+  const f = await fakeClaude(t, { master: true });
+  f.send({ type: 'system', subtype: 'init', session_id: ID, permissionMode: 'auto' });
+  const before = Date.now();
+  f.send({ type: 'stream_event', event: { type: 'message_start', message: { id: 'm1' } } });
+  f.send({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hi' } } });
+  await until(() => f.read().replies?.[0]?.text === 'Hi');
+  const first = f.read().replies![0];
+  assert.ok(first.firstAt !== undefined && first.firstAt >= before, 'first text is timed');
+  assert.equal(first.completedAt, undefined);
+  f.send({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+  await until(() => f.read().replies?.[0]?.done);
+  const done = f.read().replies![0];
+  assert.ok(done.completedAt !== undefined && done.completedAt >= first.firstAt!, 'completion is timed');
+  f.send({ type: 'result', is_error: false, result: 'done' });
+  f.exit();
+  await finished(f.manager, f.run.id);
+});
+
+/** Codex conversations whose turns go to injected adapters; nothing is spawned. `held` sessions are open in the Codex app. */
+async function adapters(t: TestContext, options: { stdio?: ConstructorParameters<typeof RunManager>[0]['openCodexStdio']; bridge?: OpenCodexBridge; held?: boolean } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-turn-adapters-'));
+  const sessions = new Map([ID, ID2].map(id => [`codex:${id}`, makeSession(directory, { id: `codex:${id}`, nativeId: id, status: 'idle', activeProcess: options.held })]));
+  const manager = new RunManager({ stateDir: join(directory, 'state'), getSession: id => sessions.get(id), refreshSessions: async () => {}, pollMs: 10,
+    findExecutable: async () => '/fixture/codex', spawnProcess: () => { throw new Error('Native provider launch is forbidden in this fixture.'); },
+    openCodexStdio: options.stdio, openCodexBridge: options.bridge });
+  await manager.start();
+  t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
+  const read = (id: string) => manager.list().find(run => run.id === id);
+  return { manager, sessions, read, first: `codex:${ID}`, second: `codex:${ID2}` };
+}
+type StdioOptions = Parameters<NonNullable<ConstructorParameters<typeof RunManager>[0]['openCodexStdio']>>[0];
+/** A Codex adapter that records what happens to it; `start` waits for `gate`. */
+function stdioAdapter(log: string[], gate?: Promise<void>) {
+  return async (options: StdioOptions) => {
+    log.push('open');
+    let ended = false;
+    const finish = (status: 'completed' | 'cancelled') => { if (ended) return; ended = true; options.onFinished({ status }); };
+    return { done: Promise.resolve(), respondToApproval: async () => {},
+      start: async () => { log.push('start'); await gate; await options.onSession(options.threadId!); options.onStarted?.('turn'); },
+      cancel: async () => { log.push('cancel'); finish('cancelled'); }, close: () => { log.push('close'); finish('cancelled'); },
+      complete: () => finish('completed') } as never;
+  };
+}
+
+test('a Codex turn cancelled right after it is registered, before its start completes, is interrupted and ends cancelled', async t => {
+  const log: string[] = [];
+  let release!: () => void;
+  const f = await adapters(t, { stdio: stdioAdapter(log, new Promise<void>(resolve => { release = resolve; })) });
+  t.after(() => release());
+  const run = await f.manager.enqueue(f.first, 'Cancel me early', {}, { origin: { kind: 'owner' } });
+  await until(() => f.read(run.id)?.status === 'running' && log.includes('start'));
+  await f.manager.cancel(run.id);
+  assert.deepEqual(log.slice(0, 3), ['open', 'start', 'cancel']);
+  assert.equal((await finished(f.manager, run.id)).status, 'cancelled');
+});
+
+for (const kind of ['codex', 'bridge'] as const) {
+  test(`a ${kind} turn refused at its last check leaves no handle and releases the conversation for the next queued run`, async t => {
+    const log: string[] = [];
+    const bridge: OpenCodexBridge = async options => { log.push('open'); return { done: Promise.resolve(), start: async () => { log.push('start'); options.onStarted('turn'); options.onFinished({ status: 'completed' }); },
+      cancel: async () => { log.push('cancel'); }, close: () => { log.push('close'); } }; };
+    const f = await adapters(t, kind === 'codex' ? { stdio: stdioAdapter(log) } : { bridge, held: true });
+    const refused = new Set<string>();
+    const looks = new Map<string, number>();
+    let firstId = '';
+    // The pump's own look passes; the turn's look after its adapter opened refuses the first run.
+    f.manager.setLaunchGate(run => refused.has(run.id) ? 'Refused at the last look.' : undefined,
+      async run => { const count = (looks.get(run.id) ?? 0) + 1; looks.set(run.id, count); if (run.id === firstId && count === 2) refused.add(run.id); });
+    const first = await f.manager.enqueue(f.first, 'Refused', {}, { origin: { kind: 'owner' } });
+    firstId = first.id;
+    const second = await f.manager.enqueue(f.first, 'Goes next', {}, { origin: { kind: 'owner' } });
+    const ended = await finished(f.manager, first.id);
+    assert.equal(ended.status, 'cancelled');
+    assert.equal(ended.error, 'Refused at the last look.');
+    await until(() => log.filter(entry => entry === 'start').length === 1);
+    assert.deepEqual(log.slice(0, 3), ['open', 'close', 'open'], 'the refused adapter is closed and never started');
+    if (kind === 'codex') await until(() => f.read(second.id)?.status === 'running');
+    else assert.equal((await finished(f.manager, second.id)).status, 'completed');
+  });
+}
+
+test('a cancel that lands while a turn is being prepared stops it before register: the adapter is closed, nothing starts', async t => {
+  const log: string[] = [];
+  const f = await adapters(t, { stdio: stdioAdapter(log) });
+  const looks = new Map<string, number>();
+  f.manager.setLaunchGate(() => undefined, async run => {
+    const count = (looks.get(run.id) ?? 0) + 1; looks.set(run.id, count);
+    if (count === 2) await f.manager.cancel(run.id);
+  });
+  const run = await f.manager.enqueue(f.first, 'Cancelled while preparing', {}, { origin: { kind: 'owner' } });
+  assert.equal((await finished(f.manager, run.id)).status, 'cancelled');
+  await until(() => log.includes('close'));
+  assert.deepEqual(log, ['open', 'close']);
+});
+
+test('a bridged turn that finished keeps the session settled only when it started', async t => {
+  let started = true;
+  const f = await adapters(t, { held: true, bridge: async options => ({ done: Promise.resolve(), cancel: async () => {}, close: () => {},
+    start: async () => { if (started) options.onStarted('turn'); options.onFinished({ status: 'completed' }); } }) });
+  const run = await f.manager.enqueue(f.first, 'Started', {}, { origin: { kind: 'owner' } });
+  assert.equal((await finished(f.manager, run.id)).status, 'completed');
+  assert.equal(f.manager.settledRunIds().has(run.id), true);
+  started = false;
+  const other = await f.manager.enqueue(f.second, 'Never started', {}, { origin: { kind: 'owner' } });
+  assert.equal((await finished(f.manager, other.id)).status, 'completed');
+  assert.equal(f.manager.settledRunIds().has(other.id), false);
+});
+
+test('a bridge whose start reports the end and then rejects ends with its error, and the conversation is released', async t => {
+  let attempts = 0;
+  const f = await adapters(t, { held: true, bridge: async options => ({ done: Promise.resolve(), cancel: async () => {}, close: () => {},
+    start: async () => { attempts++; if (attempts === 1) { options.onFinished({ status: 'error', error: 'The app refused the turn.' }); throw new Error('The app refused the turn.'); } options.onStarted('turn'); options.onFinished({ status: 'completed' }); } }) });
+  const run = await f.manager.enqueue(f.first, 'Refused by the app', {}, { origin: { kind: 'owner' } });
+  const next = await f.manager.enqueue(f.first, 'Next', {}, { origin: { kind: 'owner' } });
+  const result = await finished(f.manager, run.id);
+  assert.equal(result.status, 'error');
+  assert.equal(result.error, 'The app refused the turn.');
+  assert.equal((await finished(f.manager, next.id)).status, 'completed');
+});
+
+test('while a Codex app submission is being started, the queue waits for it before launching other runs', async t => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const log: string[] = [];
+  // Only the first conversation is open in the Codex app; the other one goes to Tower's own Codex.
+  const f = await adapters(t, { stdio: stdioAdapter(log), bridge: async options => options.threadId !== ID ? undefined : ({ done: Promise.resolve(), cancel: async () => {}, close: () => {},
+    start: async () => { await gate; options.onStarted('turn'); options.onFinished({ status: 'completed' }); } }) });
+  t.after(() => release());
+  f.sessions.set(f.first, { ...f.sessions.get(f.first)!, activeProcess: true });
+  const submitted = await f.manager.enqueue(f.first, 'To the app', {}, { origin: { kind: 'owner' } });
+  await until(() => f.read(submitted.id)?.output.includes('Codex 앱'));
+  const other = await f.manager.enqueue(f.second, 'Elsewhere', {}, { origin: { kind: 'owner' } });
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.deepEqual(log, [], 'no other run launches while the submission is being started');
+  release();
+  await until(() => f.read(other.id)?.status === 'running');
+  assert.equal((await finished(f.manager, submitted.id)).status, 'completed');
+});
+
+/** A Claude turn with a private MCP config, in a private TMPDIR, whose provider never starts unless `spawned` allows it. */
+async function claudeWithPrivateConfig(t: TestContext) {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-mcp-final-'));
+  const privateTmp = join(directory, 'tmp'); await mkdir(privateTmp);
+  const previous = process.env.TMPDIR; process.env.TMPDIR = privateTmp;
+  const sessions = new Map([[`claude:${ID}`, makeSession(directory, { provider: 'claude', id: `claude:${ID}` })]]);
+  const spawned: string[][] = [];
+  const manager = new RunManager({ stateDir: join(directory, 'state'), getSession: id => sessions.get(id), refreshSessions: async () => {}, pollMs: 20,
+    findExecutable: async provider => `/fixture/${provider}`,
+    resolveRunTools: () => ({ required: false, servers: { tower: { command: '/fixture/node', args: [], env: { TOWER_MCP_CAPABILITY: 'f'.repeat(64) } } } }),
+    spawnProcess: ((_file: string, args: string[]) => { spawned.push(args); throw new Error('Fixtures never start providers.'); }) as never });
+  await manager.start();
+  t.after(async () => {
+    await manager.close();
+    if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous;
+    await rm(directory, { recursive: true, force: true });
+  });
+  const configs = () => readdir(privateTmp).then(names => names.filter(name => name.startsWith('tower-mcp-')));
+  return { manager, sessions, spawned, configs, privateTmp, id: `claude:${ID}` };
+}
+
+test('a launch look that throws after the private MCP config was written removes the config and starts nothing', async t => {
+  const f = await claudeWithPrivateConfig(t);
+  let looks = 0;
+  // The pump's look and the one before the session check pass; the look after the config was written throws.
+  let written: string[] = [];
+  f.manager.setLaunchGate(() => undefined, (() => {
+    looks++;
+    if (looks === 3) { written = readdirSync(f.privateTmp).filter(name => name.startsWith('tower-mcp-')); throw new Error('The launch look failed.'); }
+    return Promise.resolve();
+  }) as (run: Run) => Promise<void>);
+  const run = await f.manager.enqueue(f.id, 'Use the tools');
+  const result = await finished(f.manager, run.id);
+  assert.equal(result.status, 'error');
+  assert.match(result.error!, /The launch look failed/);
+  assert.equal(looks, 3);
+  assert.equal(written.length, 1, 'the config had been written when the look threw');
+  assert.deepEqual(f.spawned, []);
+  await eventually(() => f.configs().then(names => names.length === 0));
+});
+
+test('a session that disappears before the last look fails the run, removes the private MCP config and starts nothing', async t => {
+  const f = await claudeWithPrivateConfig(t);
+  let looks = 0;
+  let written: string[] = [];
+  f.manager.setLaunchGate(() => undefined, async () => { looks++; if (looks === 3) { written = readdirSync(f.privateTmp).filter(name => name.startsWith('tower-mcp-')); f.sessions.delete(f.id); } });
+  const run = await f.manager.enqueue(f.id, 'Use the tools');
+  const result = await finished(f.manager, run.id);
+  assert.equal(result.status, 'error');
+  assert.match(result.error!, /Session no longer exists/);
+  assert.equal(written.length, 1, 'the config had been written before the last look');
+  assert.deepEqual(f.spawned, []);
+  await eventually(() => f.configs().then(names => names.length === 0));
+});
+
+test('a bridge whose start reports the end and then rejects ends once: the reported error stays and is not written again', async t => {
+  let closes = 0;
+  const f = await adapters(t, { held: true, bridge: async options => ({ done: Promise.resolve(), cancel: async () => {}, close: () => { closes++; },
+    start: async () => { options.onFinished({ status: 'error', error: 'The app refused the turn.' }); throw new Error('The submission failed after its end was reported.'); } }) });
+  const run = await f.manager.enqueue(f.first, 'Refused by the app', {}, { origin: { kind: 'owner' } });
+  const ended = await finished(f.manager, run.id);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const result = f.read(run.id)!;
+  assert.equal(result.error, 'The app refused the turn.');
+  assert.equal(result.finishedAt, ended.finishedAt);
+  assert.equal(closes, 1, 'the rejection only closes the adapter');
+});
+
+for (const kind of ['codex', 'bridge'] as const) {
+  test(`a ${kind} launch gate that throws at the last look closes the prepared adapter, registers nothing and lets the next run go`, async t => {
+    const log: string[] = [];
+    const bridge: OpenCodexBridge = async options => { log.push('open'); return { done: Promise.resolve(), start: async () => { log.push('start'); options.onStarted('turn'); options.onFinished({ status: 'completed' }); },
+      cancel: async () => { log.push('cancel'); }, close: () => { log.push('close'); } }; };
+    const f = await adapters(t, kind === 'codex' ? { stdio: stdioAdapter(log) } : { bridge, held: true });
+    const looks = new Map<string, number>();
+    let firstId = '';
+    // The pump's look passes; the synchronous gate at the manager's last look throws for the first run only.
+    f.manager.setLaunchGate(run => {
+      const count = (looks.get(run.id) ?? 0) + 1; looks.set(run.id, count);
+      if (run.id === firstId && count === 2) throw new Error('The gate failed.');
+      return undefined;
+    });
+    const first = await f.manager.enqueue(f.first, 'Gate throws', {}, { origin: { kind: 'owner' } });
+    firstId = first.id;
+    const second = await f.manager.enqueue(f.first, 'Goes next', {}, { origin: { kind: 'owner' } });
+    const failed = await finished(f.manager, first.id);
+    assert.equal(failed.status, 'error');
+    assert.match(failed.error!, /The gate failed/);
+    await until(() => log.filter(entry => entry === 'start').length === 1);
+    assert.deepEqual(log.slice(0, 3), ['open', 'close', 'open'], 'the prepared adapter is closed once and never started');
+    const live = f.manager as unknown as { stdio: Map<string, unknown>; bridged: Map<string, unknown> };
+    assert.equal(live.stdio.has(first.id) || live.bridged.has(first.id), false, 'nothing is registered for it');
+    if (kind === 'codex') await until(() => f.read(second.id)?.status === 'running');
+    else assert.equal((await finished(f.manager, second.id)).status, 'completed');
+  });
+}

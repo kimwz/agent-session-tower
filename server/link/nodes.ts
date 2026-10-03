@@ -7,6 +7,7 @@ import { NodeMirrors, plausible } from './mirror.js';
 import { linkRequest } from './transport.js';
 import { updateActive } from './update.js';
 import type { NodeViewStore } from './views.js';
+import { TowerError } from '../../shared/errors.js';
 
 /**
  * The computers this Tower controls, as its page shows them: each one's shared snapshot with this Tower's own
@@ -57,7 +58,7 @@ export class RemoteNodes extends EventEmitter {
   known(id: string): boolean { return this.links.list().some(node => node.id === id); }
 
   setView(id: string, cwd: unknown, patch: { pinned?: unknown; hidden?: unknown }): Promise<void> {
-    if (!this.known(id)) return Promise.reject(Object.assign(new Error('연결된 컴퓨터가 아닙니다.'), { statusCode: 404 }));
+    if (!this.known(id)) return Promise.reject(new TowerError('not-found', '연결된 컴퓨터가 아닙니다.'));
     return this.views.set(id, cwd, patch);
   }
 

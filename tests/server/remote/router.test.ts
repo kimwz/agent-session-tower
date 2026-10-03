@@ -10,6 +10,7 @@ import type { RequestContext } from '../../../server/http/request-context.js';
 import { RemoteExclusionStore } from '../../../server/remote/exclusions.js';
 import { createRemoteRouter } from '../../../server/remote/router.js';
 import { RemoteAudit } from '../../../server/remote/audit.js';
+import { failure as triggerFailure } from '../../../server/triggers/errors.js';
 
 const CONTROLLER = 'controllera1b2c3d4e5f6';
 const REQUEST_ID = '0199a2b3-c4d5-7123-8abc-0123456789ab';
@@ -72,6 +73,10 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
       calls.push({ method: 'api', args: [operation, input, context] });
       if (operation === 'triggers.get') throw Object.assign(new Error(`Cannot read properties of undefined (reading '${(input as { id: string }).id}')`), { statusCode: 500 });
       if (operation === 'triggers.run') throw Object.assign(new Error('GitHub coordinator triggers are created, changed and run on that computer itself.'), { statusCode: 403 });
+      // Tower's own refusals as the domain makes them.
+      if (operation === 'triggers.delete') throw triggerFailure('Only on that computer.', 'forbidden');
+      if (operation === 'triggers.revert') throw Object.assign(triggerFailure('Maybe changed.', 'unavailable'), { disposition: 'uncertain' });
+      if (operation === 'triggers.restore') throw triggerFailure('Hidden failure.', 'internal');
       return { answered: operation };
     },
     ...(options.repositories ? { repositoryAction: async (cwd: string, action: string) => {
@@ -354,4 +359,13 @@ test('a controller can sync a shared folder’s branch, never one reaching into 
   assert.equal((await f.call('/api/repositories', { body: { cwd: join(f.open, 'unknown'), action: 'pull' } })).status, 404, 'a pull needs a repository Tower already knows');
   assert.equal((await f.call('/api/repositories', { body: { cwd: f.open, action: 'rebase' } })).status, 400);
   assert.deepEqual(f.calls.filter(call => call.method === 'repositoryAction').map(call => call.args), [[f.open, 'pull']]);
+});
+
+test('a domain refusal reaches a controlling computer as before: 403 as a conflict, an uncertain 503 with its disposition, 500 undescribed', async t => {
+  const f = await fixture(t);
+  const call = (operation: string) => f.call(`/api/v1/${operation}`, { body: { id: 't' }, headers: { 'x-tower-request-id': REQUEST_ID } });
+  const answer = async (operation: string) => { const response = await call(operation); return [response.status, response.json]; };
+  assert.deepEqual(await answer('triggers.delete'), [409, { error: 'Only on that computer.' }]);
+  assert.deepEqual(await answer('triggers.revert'), [503, { error: 'Maybe changed.', disposition: 'uncertain' }]);
+  assert.deepEqual(await answer('triggers.restore'), [500, { error: '요청을 처리하지 못했습니다.' }], 'a 500 is not described');
 });

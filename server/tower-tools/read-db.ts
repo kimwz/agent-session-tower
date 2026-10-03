@@ -4,6 +4,7 @@ import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
 import type { Snapshot } from '../../shared/types.js';
 import { currentTask } from '../../shared/session-tasks.js';
+import { TowerError } from '../../shared/errors.js';
 
 export interface Table { name: string; columns: string[]; rows: Array<Array<string | number | null>> }
 export interface QueryResult { columns: string[]; rows: Array<Record<string, unknown>>; truncated: boolean }
@@ -59,14 +60,14 @@ export class ReadDatabase {
 
   /** `version` tells whether the tables changed since the last build. */
   async query(sql: string, version: string, tables: () => Table[]): Promise<QueryResult> {
-    if (typeof sql !== 'string' || !sql.trim() || sql.length > 20_000) throw Object.assign(new Error('SQL을 한 문장으로 주세요.'), { statusCode: 400 });
+    if (typeof sql !== 'string' || !sql.trim() || sql.length > 20_000) throw new TowerError('invalid', 'SQL을 한 문장으로 주세요.');
     if (!this.child || this.builtFrom !== version) {
       const built = await this.send({ type: 'rebuild', tables: tables() }, 10_000);
-      if (!built.ok) throw Object.assign(new Error(built.error ?? 'The lookup data could not be prepared.'), { statusCode: 503 });
+      if (!built.ok) throw new TowerError('unavailable', built.error ?? 'The lookup data could not be prepared.');
       this.builtFrom = version;
     }
     const reply = await this.send({ type: 'query', sql, maxRows: MAX_ROWS, maxBytes: MAX_BYTES }, TIMEOUT_MS);
-    if (!reply.ok) throw Object.assign(new Error(reply.error ?? 'The query failed.'), { statusCode: 400 });
+    if (!reply.ok) throw new TowerError('invalid', reply.error ?? 'The query failed.');
     return { columns: reply.columns ?? [], rows: reply.rows ?? [], truncated: Boolean(reply.truncated) };
   }
 

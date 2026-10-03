@@ -1,11 +1,12 @@
-import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { mkdir, open, rename, unlink } from 'node:fs/promises';
+import { mkdir, open } from 'node:fs/promises';
+import { writePrivateJson } from './private-json.js';
 import { isAbsolute, join } from 'node:path';
 import type { ProjectGroup, ProjectGroupPatch } from '../../shared/types.js';
 import { normalizeSessionTitle } from './session-titles.js';
+import { TowerError } from '../../shared/errors.js';
 
-const invalid = (message: string) => Object.assign(new Error(message), { statusCode: 400 });
+const invalid = (message: string) => new TowerError('invalid', message);
 
 export function normalizeProjectGroupPatch(value: unknown): ProjectGroupPatch {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid('폴더 그룹 변경 형식이 올바르지 않습니다.');
@@ -98,15 +99,9 @@ export class ProjectGroupStore {
   }
 
   private async save(groups: Map<string, ProjectGroup>): Promise<void> {
-    const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
-    try {
-      const file = await open(temporary, 'wx', 0o600);
-      try { await file.writeFile(`${JSON.stringify([...groups.values()])}\n`); await file.sync(); }
-      finally { await file.close(); }
-      await rename(temporary, this.path);
-    } catch (error) {
-      await unlink(temporary).catch(() => {});
-      throw Object.assign(new Error(`폴더 그룹을 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`), { statusCode: 503 });
+    try { await writePrivateJson(this.path, `${JSON.stringify([...groups.values()])}\n`); }
+    catch (error) {
+      throw new TowerError('unavailable', `폴더 그룹을 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 

@@ -49,7 +49,7 @@ test('agents list sessions a page at a time, most recently active first', async 
   assert.equal(last.nextCursor, undefined);
   const period = await f.call<Page>('sessions.list', { since: '2026-09-02T00:00:00Z', until: '2026-09-04T00:00:00Z' });
   assert.deepEqual(period.sessions.map(item => item.id), [`claude:${id(3)}`, `claude:${id(2)}`]);
-  await assert.rejects(f.call('sessions.list', { cursor: 'nonsense' }), { statusCode: 400 });
+  await assert.rejects(f.call('sessions.list', { cursor: 'nonsense' }), { kind: 'invalid' });
 });
 
 test('listed sessions carry the task they work on now and every task, and a query finds a task title', async t => {
@@ -130,7 +130,7 @@ test('agents find earlier sessions by keywords within a period, and read up to a
 
   const around = await f.call<{ messages: Array<{ text: string }> }>('sessions.read', { id: `claude:${id(1)}`, cursor: words.sessions[0].matches[1].cursor });
   assert.deepEqual(around.messages.map(message => message.text), ['Please fix the PAYMENT webhook retry']);
-  await assert.rejects(f.call('sessions.search', { query: 'x', since: '2026-09-02', until: '2026-09-01' }), { statusCode: 400 });
+  await assert.rejects(f.call('sessions.search', { query: 'x', since: '2026-09-02', until: '2026-09-01' }), { kind: 'invalid' });
 });
 
 test('a search term with quotes matches what the JSONL file stores escaped', async t => {

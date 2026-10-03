@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,6 +19,12 @@ import { until } from '../../helpers/until.ts';
 import { nativeHistory } from '../../../server/sessions/native-history.js';
 import { startLegacyRunner } from './fixtures/legacy-runner.ts';
 import { CapabilityRegistry } from '../../../server/api/mcp.js';
+import { handoffHeld, updatePaths } from '../../../server/link/update.js';
+import { runtimePaths } from '../../../server/link/service.js';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
+import { acquireStateLock, MonitorAlreadyRunning } from '../../../server/instance/state-lock.js';
+import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
 
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'tower-durable-fixture-'));
@@ -61,15 +67,20 @@ async function fixture() {
     await client.start();
     return client;
   };
+  /** Closes the clients, the fixture's own host, sessions and runs; `remove` then deletes its folders. */
+  const close = async () => {
+    await Promise.all(clients.map(client => client.close()));
+    await host.close(); sessions.stop(); await runs.close();
+  };
+  const remove = async () => {
+    await rm(directory, { recursive: true, force: true });
+    await rm(paths.directory, { recursive: true, force: true });
+  };
   return { directory, stateDir, session, sessions, runs, host, paths, connect, starts: () => starts, cancels: () => cancels,
     output: (text: string) => { assert.ok(bridge); bridge.onOutput(text); },
     finish: () => { assert.ok(bridge); bridge.onFinished({ status: 'completed' }); resolveDone(); },
-    cleanup: async () => {
-      await Promise.all(clients.map(client => client.close()));
-      await host.close(); sessions.stop(); await runs.close();
-      await rm(directory, { recursive: true, force: true });
-      await rm(paths.directory, { recursive: true, force: true });
-    },
+    cleanup: async () => { await close(); await remove(); },
+    close, remove,
   };
 }
 
@@ -333,7 +344,7 @@ test('the worker serves native conversation pages without the native file path o
   assert.equal(history.indexing, false);
   assert.deepEqual(await history.read(f.session.nativeId, 100, 50), { messages, hasMore: true, nextBefore: 42 });
   assert.deepEqual(calls, [[f.session.nativeId, 100, 50]]);
-  await assert.rejects(client.sessionHistory(''), { statusCode: 400 });
+  await assert.rejects(client.sessionHistory(''), { kind: 'invalid' });
   const token = await readFile(f.paths.token, 'utf8');
   const { instance } = JSON.parse((await rpc(f.host.socketPath, token, { protocol: RUNNER_PROTOCOL, method: 'snapshot', args: [] })).body) as { instance: string };
   const reply = JSON.parse((await rpc(f.host.socketPath, token, { protocol: RUNNER_PROTOCOL, method: 'sessionHistory', args: [f.session.nativeId, -1, 1.5], instance })).body);
@@ -368,7 +379,7 @@ test('a web process attached to a 1.12 worker reads conversations from its own i
   assert.equal(stopped, 1);
   assert.ok(!legacy.methods.includes('sessionHistory'), `sent: ${legacy.methods.join(', ')}`);
   // Why the capability check exists: the old worker rejects the operation outright.
-  await assert.rejects(client.sessionHistory(session.nativeId), { statusCode: 400, message: 'Unknown runner operation.' });
+  await assert.rejects(client.sessionHistory(session.nativeId), { kind: 'invalid', message: 'Unknown runner operation.' });
 });
 
 test('an outdated worker is only given the owner’s own requests, never work on anyone else’s behalf', async t => {
@@ -382,7 +393,7 @@ test('an outdated worker is only given the owner’s own requests, never work on
   await client.start();
   assert.equal(client.supports('origins'), false);
   const agent = { kind: 'agent' as const, runId: '12345678-1234-4234-8234-123456789abc' };
-  await assert.rejects(client.enqueue(session.id, '1번 보내주세요', {}, { origin: agent }), { statusCode: 409, message: /outdated/ });
+  await assert.rejects(client.enqueue(session.id, '1번 보내주세요', {}, { origin: agent }), { kind: 'conflict', message: /outdated/ });
   await assert.rejects(client.create({ provider: 'codex', cwd: directory, prompt: 'Agent task' }, { origin: agent }), /outdated/);
   await assert.rejects(client.submitAutoPrompt({ requestId: '12345678-1234-4234-8234-123456789abd', provider: 'codex', prompt: 'Agent task' }, { origin: agent }), /outdated/);
   const caller = { callerCapability: 'a'.repeat(64) };
@@ -485,14 +496,15 @@ test('updating on request stops the running turn at the deadline, hands off, and
 test('updating on request is refused while the worker already runs this version', async t => {
   const f = await fixture(); t.after(f.cleanup);
   const client = await f.connect();
-  await assert.rejects(client.forceUpdate(), { statusCode: 409 });
+  await assert.rejects(client.forceUpdate(), { kind: 'conflict' });
 });
 
 test('while an update of this computer is being tried, the new web does not take the worker over', async t => {
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();
   let handoffs = 0;
-  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => {} });
+  let handedOff = false;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => {}, onHandedOff: () => { handedOff = true; } });
   let held = true;
   const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: async () => held });
   // Closed here, before the fixture's own cleanup removes the folder they write to.
@@ -501,7 +513,77 @@ test('while an update of this computer is being tried, the new web does not take
     await new Promise(resolve => setTimeout(resolve, 300));
     assert.equal(handoffs, 0, 'going back to the previous version must still find the previous worker');
     held = false;
-    await until(() => handoffs === 1);
+    await until(() => handedOff);
+    assert.equal(handoffs, 1);
+  } finally { await client.close(); await host.close(); }
+});
+
+test('while an update is verified, a restore or an update on request is refused with the verification message', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: async () => true });
+  try {
+    await client.start();
+    await assert.rejects(client.restartWorker(), { kind: 'conflict', message: /still verifying/ });
+    await assert.rejects(client.forceUpdate(), { kind: 'conflict', message: /still verifying/ });
+  } finally { await client.close(); }
+});
+
+test('a hold that cannot be checked keeps the worker until the check works again', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  let handoffs = 0;
+  let handedOff = false;
+  // Quiesce runs before the handoff record is written; only onHandedOff says the worker has stopped writing here.
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => {}, onHandedOff: () => { handedOff = true; } });
+  let unreadable = true;
+  const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: async () => { if (unreadable) throw new Error('ELOOP: too many symbolic links'); return false; } });
+  try {
+    await client.start();
+    // The worker looks at a handoff request once a second.
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    assert.equal(handoffs, 0, 'whether an update is still tried cannot be told, so the previous worker stays');
+    unreadable = false;
+    await until(() => handedOff);
+    assert.equal(handoffs, 1);
+  } finally { await client.close(); await host.close(); }
+});
+
+test('with a live helper and a hold unreadable past 15 minutes, automatic handoff, restore and update on request are all refused, across a web restart', async t => {
+  t.mock.method(console, 'error', () => {});
+  t.mock.method(console, 'log', () => {});
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  let handoffs = 0;
+  let successors = 0;
+  const run = await f.runs.enqueue(f.session.id, 'Keeps running while the hold cannot be read');
+  await until(() => f.starts() === 1);
+  let handedOff = false;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => { successors++; }, onHandedOff: () => { handedOff = true; } });
+  const { hold, lock } = updatePaths(f.stateDir);
+  await mkdir(runtimePaths(f.stateDir).root, { recursive: true });
+  await symlink(hold, hold);
+  await writeFile(lock, String(process.pid));
+  const web = () => new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: () => handoffHeld(f.stateDir, Date.now() + 16 * 60_000) });
+  let client = web();
+  try {
+    await client.start();
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    assert.equal(handoffs, 0);
+    await assert.rejects(client.restartWorker(), { kind: 'conflict', message: /could not check/ });
+    await assert.rejects(client.forceUpdate(), { kind: 'conflict', message: /could not check/ });
+    await client.close();
+    client = web();
+    await client.start();
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    assert.equal(handoffs, 0, 'a new web attached meanwhile does not take the worker either');
+    assert.equal(successors, 0);
+    assert.equal(f.cancels(), 0, 'the running turn is untouched');
+    assert.equal(f.runs.list().find(item => item.id === run.id)?.status, 'running');
+    await rm(hold);
+    await rm(lock);
+    f.finish();
+    await until(() => handedOff);
+    assert.equal(handoffs, 1);
   } finally { await client.close(); await host.close(); }
 });
 
@@ -542,7 +624,7 @@ test('requests that arrive while the worker hands off are refused, never half-ac
   const client = await f.connect();
   await client.requestHandoff(true);
   await until(() => entered);
-  await assert.rejects(client.enqueue(f.session.id, 'Arrives mid-handoff'), { statusCode: 503, disposition: 'handoff' });
+  await assert.rejects(client.enqueue(f.session.id, 'Arrives mid-handoff'), { kind: 'unavailable', disposition: 'handoff' });
   const token = await readFile(f.paths.token, 'utf8');
   const tool = JSON.parse((await rpc(f.paths.socket, token, { protocol: RUNNER_PROTOCOL, method: 'slackTool', args: ['workflow', 'slack_send', { text: 'hi' }] })).body);
   assert.equal(tool.error.disposition, 'handoff', 'coordinator tool calls are refused too');
@@ -581,6 +663,38 @@ test('a handoff that cannot be recorded leaves the worker fully in service', asy
   assert.ok(quiesced >= 1);
   const run = await client.enqueue(f.session.id, 'Still accepted');
   assert.equal(run.status, 'queued');
+});
+
+test('a handoff record that cannot be flushed to disk leaves the worker fully in service', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  // Test-only: syncing the handoff record's temporary file fails, as on a disk error.
+  const original = fsPromises.open;
+  const record = join(f.paths.runtime, 'handoff.json');
+  let failedSyncs = 0;
+  t.mock.method(fsPromises, 'open', async (...args: Parameters<typeof original>) => {
+    const handle = await original(...args);
+    if (String(args[0]).startsWith(`${record}.`) && String(args[0]).endsWith('.tmp')) handle.sync = async () => { failedSyncs++; throw Object.assign(new Error('EIO: i/o error, fsync'), { code: 'EIO' }); };
+    return handle;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  t.mock.method(console, 'error', () => {});
+  let quiesced = 0, resumed = 0, started = 0;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs,
+    quiesce: async () => { quiesced++; }, resume: () => { resumed++; }, startSuccessor: () => { started++; } });
+  t.after(() => host.close());
+  const client = await f.connect();
+  await client.requestHandoff(true);
+  await until(() => resumed >= 1);
+  assert.equal(failedSyncs, 1);
+  assert.equal(started, 0, 'no successor is started without a durable record');
+  assert.ok(quiesced >= 1);
+  assert.equal(existsSync(record), false);
+  const run = await client.enqueue(f.session.id, 'Still accepted');
+  assert.equal(run.status, 'queued');
+  await until(() => f.starts() === 1);
+  assert.equal(f.cancels(), 0);
 });
 
 test('the web starts a worker itself when a handed-off successor never answers', async t => {
@@ -685,6 +799,197 @@ test('a turn that is still closing its provider keeps the old worker, whatever i
   await until(() => started === 1);
 });
 
+/**
+ * A worker with the production idle shutdown (onIdle, idleMs 0) and a real state lock, released through
+ * releaseStateLock as the production worker does. `events` records each lifecycle step in order.
+ */
+async function idleWorker(f: Awaited<ReturnType<typeof fixture>>, options: Partial<Parameters<typeof startRunnerHost>[0]> = {}) {
+  await f.host.close();
+  const events: string[] = [];
+  /** Per release, whether the handoff record was already on disk. */
+  const recordAtRelease: boolean[] = [];
+  const lock = await acquireStateLock(f.paths.runtime, 0);
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, idleMs: 0,
+    releaseStateLock: async () => { recordAtRelease.push(existsSync(join(f.paths.runtime, 'handoff.json'))); await lock(); events.push('release'); },
+    onIdle: async () => { events.push('onIdle'); }, ...options });
+  // A newer web asks for the handoff and goes away (a web replaced during an update), so nothing keeps the worker busy.
+  const ask = async () => { const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0' }); await client.start(); await client.close(); };
+  /**
+   * Ends this worker before the fixture folder goes, whatever point a test stopped at: test gates opened, every handoff
+   * attempt that paused finished or resumed (an earlier attempt's resume does not end a later one), then the worker
+   * closed (a no-op when a handoff or idle shutdown already closes it) and its lock released. host.close() alone does
+   * not wait for a close already under way, so the release is awaited.
+   */
+  const settle = async (...gates: Array<() => void>) => {
+    for (const open of gates) open();
+    // Each handoff attempt that paused ends with either a handoff or a resume; wait until every one has ended.
+    const count = (name: string) => events.filter(event => event === name).length;
+    await until(() => count('quiesce') === count('onHandedOff') + count('resume'));
+    // Synchronous with the check above: a handoff not yet started finds the worker closing and never starts.
+    await host.close();
+    await until(() => events.includes('release'));
+  };
+  return { events, recordAtRelease, host, ask, settle };
+}
+
+test('an idle tick never closes a worker whose handoff is pausing: the state stays locked until the record is durable', { timeout: 20_000 }, async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  let open!: () => void;
+  const gate = new Promise<void>(resolve => { open = resolve; });
+  let atSuccessor: { record: boolean; socket: boolean; token: boolean; released: boolean } | undefined;
+  let other: (() => Promise<void>) | undefined;
+  const w = await idleWorker(f, {
+    quiesce: async () => { w.events.push('quiesce'); await gate; w.events.push('quiesced'); },
+    startSuccessor: () => {
+      atSuccessor = { record: existsSync(join(f.paths.runtime, 'handoff.json')), socket: existsSync(f.paths.socket), token: existsSync(f.paths.token), released: w.events.includes('release') };
+      w.events.push('startSuccessor');
+    },
+    onHandedOff: () => { w.events.push('onHandedOff'); } });
+  try {
+    await w.ask();
+    await until(() => w.events.includes('quiesce'));
+    // Two idle ticks pass while the handoff is pausing.
+    await new Promise(resolve => setTimeout(resolve, 2200));
+    assert.deepEqual(w.events, ['quiesce'], 'no idle shutdown and no lock release while the handoff owns shutdown');
+    await assert.rejects(acquireStateLock(f.paths.runtime, 0).then(release => { other = release; }), MonitorAlreadyRunning);
+    open();
+    await until(() => w.events.includes('onHandedOff'));
+    assert.deepEqual(w.events, ['quiesce', 'quiesced', 'release', 'startSuccessor', 'onHandedOff']);
+    assert.deepEqual(atSuccessor, { record: true, socket: false, token: false, released: true }, 'the record is durable and the endpoint closed before the successor starts');
+    // From here the successor may take the state.
+    other = await acquireStateLock(f.paths.runtime, 0);
+  } finally {
+    await w.settle(open);
+    await other?.();
+  }
+});
+
+test('a handoff whose pause fails resumes the worker, which can then shut down when idle', { timeout: 20_000 }, async t => {
+  t.mock.method(console, 'error', () => {});
+  const f = await fixture(); t.after(f.cleanup);
+  const w = await idleWorker(f, {
+    quiesce: async () => { w.events.push('quiesce'); throw new Error('flush failed after intake paused'); },
+    resume: () => { w.events.push('resume'); },
+    startSuccessor: () => { w.events.push('startSuccessor'); },
+    onHandedOff: () => { w.events.push('onHandedOff'); } });
+  try {
+    await w.ask();
+    await until(() => w.events.includes('release'));
+    assert.deepEqual(w.events, ['quiesce', 'resume', 'onIdle', 'release']);
+    assert.equal(existsSync(join(f.paths.runtime, 'handoff.json')), false);
+  } finally { await w.settle(); }
+});
+
+test('an idle shutdown that started first is never joined by a handoff', { timeout: 20_000 }, async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  // Quiet is false (a provider is still closing) while the idle conditions hold, so the idle tick comes first.
+  let closingProvider = true;
+  const busy = f.runs.busy.bind(f.runs);
+  f.runs.busy = () => closingProvider || busy();
+  let open!: () => void;
+  const gate = new Promise<void>(resolve => { open = resolve; });
+  const w = await idleWorker(f, {
+    onIdle: async () => { w.events.push('onIdle'); await gate; w.events.push('idle done'); },
+    quiesce: async () => { w.events.push('quiesce'); },
+    startSuccessor: () => { w.events.push('startSuccessor'); },
+    onHandedOff: () => { w.events.push('onHandedOff'); } });
+  try {
+    await w.ask();
+    await until(() => w.events.includes('onIdle'));
+    closingProvider = false;
+    // Handoff ticks come while the idle shutdown is still under way.
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    open();
+    await until(() => w.events.includes('release'));
+    assert.deepEqual(w.events, ['onIdle', 'idle done', 'release']);
+    assert.equal(existsSync(join(f.paths.runtime, 'handoff.json')), false);
+  } finally { await w.settle(open); }
+});
+
+test('after a pause fails and the worker resumes, the same worker hands off on its next try', { timeout: 20_000 }, async t => {
+  t.mock.method(console, 'error', () => {});
+  // The worker waits a minute before trying a handoff it could not record again; the clock is moved past that.
+  let skew = 0;
+  const now = Date.now.bind(Date);
+  t.mock.method(Date, 'now', () => now() + skew);
+  const f = await fixture(); t.after(f.cleanup);
+  let failures = 1;
+  let atSuccessor: { record: boolean; socket: boolean; token: boolean; released: boolean } | undefined;
+  const w = await idleWorker(f, {
+    // Idle shutdown stays possible but not yet due, so only the handoff can end this worker.
+    idleMs: 10 * 60_000,
+    quiesce: async () => { w.events.push('quiesce'); if (failures-- > 0) throw new Error('flush failed after intake paused'); },
+    resume: () => { w.events.push('resume'); },
+    startSuccessor: () => {
+      atSuccessor = { record: existsSync(join(f.paths.runtime, 'handoff.json')), socket: existsSync(f.paths.socket), token: existsSync(f.paths.token), released: w.events.includes('release') };
+      w.events.push('startSuccessor');
+    },
+    onHandedOff: () => { w.events.push('onHandedOff'); } });
+  try {
+    await w.ask();
+    await until(() => w.events.includes('resume'));
+    assert.deepEqual(w.events, ['quiesce', 'resume']);
+    skew = 61_000;
+    await until(() => w.events.includes('onHandedOff'));
+    assert.deepEqual(w.events, ['quiesce', 'resume', 'quiesce', 'release', 'startSuccessor', 'onHandedOff']);
+    assert.deepEqual(atSuccessor, { record: true, socket: false, token: false, released: true });
+  } finally { await w.settle(); }
+});
+
+test('cleanup during a second handoff attempt waits for that attempt, not for the first one that resumed', { timeout: 20_000 }, async t => {
+  t.mock.method(console, 'error', () => {});
+  let skew = 0;
+  const now = Date.now.bind(Date);
+  t.mock.method(Date, 'now', () => now() + skew);
+  const f = await fixture(); t.after(f.cleanup);
+  let attempts = 0;
+  let openFirst!: () => void, openSecond!: () => void;
+  const first = new Promise<void>(resolve => { openFirst = resolve; });
+  const second = new Promise<void>(resolve => { openSecond = resolve; });
+  const w = await idleWorker(f, { idleMs: 10 * 60_000,
+    // The second attempt pauses in two steps: cleanup opens the first, the test holds the second.
+    quiesce: async () => { w.events.push('quiesce'); if (attempts++ === 0) throw new Error('flush failed after intake paused'); await first; w.events.push('quiesced'); await second; },
+    resume: () => { w.events.push('resume'); },
+    startSuccessor: () => { w.events.push('startSuccessor'); },
+    onHandedOff: () => { w.events.push('onHandedOff'); } });
+  let settling: Promise<void> | undefined;
+  try {
+    await w.ask();
+    await until(() => w.events.includes('resume'));
+    skew = 61_000;
+    await until(() => w.events.filter(event => event === 'quiesce').length === 2);
+    settling = w.settle(openFirst);
+    await until(() => w.events.includes('quiesced'));
+    // The second attempt is still under way: cleanup must not close the worker and release its lock meanwhile.
+    await until(() => w.events.includes('release'), 500).then(() => {}, () => {});
+    assert.deepEqual(w.events, ['quiesce', 'resume', 'quiesce', 'quiesced'], 'nothing is closed or released while the current attempt has not finished');
+    openSecond();
+    await settling;
+    assert.deepEqual(w.events, ['quiesce', 'resume', 'quiesce', 'quiesced', 'release', 'startSuccessor', 'onHandedOff']);
+    assert.deepEqual(w.recordAtRelease, [true], 'the lock is released only after the record is on disk');
+  } finally {
+    openSecond();
+    await (settling ?? w.settle(openFirst));
+  }
+});
+
+test('an idle-shutdown fixture that fails before any handoff still closes its worker and frees the lock', { timeout: 20_000 }, async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  let w: Awaited<ReturnType<typeof idleWorker>> | undefined;
+  let open!: () => void;
+  const gate = new Promise<void>(resolve => { open = resolve; });
+  // A test body that fails right after the worker started, before it asked for anything.
+  await assert.rejects((async () => {
+    w = await idleWorker(f, { idleMs: 10 * 60_000, quiesce: async () => { w!.events.push('quiesce'); await gate; } });
+    try { throw new Error('early failure'); } finally { await w.settle(open); }
+  })(), /early failure/);
+  assert.deepEqual(w!.events, ['release']);
+  assert.equal(existsSync(f.paths.socket), false);
+  assert.equal(existsSync(f.paths.token), false);
+  const again = await acquireStateLock(f.paths.runtime, 0);
+  await again();
+});
+
 test('a pause that fails halfway is undone and the worker stays in service', async t => {
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();
@@ -734,8 +1039,8 @@ test('trigger operations run in the worker as the owner and their state reaches 
   const { trigger } = await client.api('triggers.create', { trigger: input }) as { trigger: { id: string; createdBy: { kind: string } } };
   assert.equal(trigger.createdBy.kind, 'owner');
   await until(() => client.triggerOverview()?.triggers.some(item => item.id === trigger.id));
-  await assert.rejects(client.api('triggers.updateSettings', { settings: { maxTriggers: 0 } }), { statusCode: 400 });
-  await assert.rejects(client.api('sessions.destroyEverything', {}), { statusCode: 404 });
+  await assert.rejects(client.api('triggers.updateSettings', { settings: { maxTriggers: 0 } }), { kind: 'invalid' });
+  await assert.rejects(client.api('sessions.destroyEverything', {}), { kind: 'not-found' });
   assert.equal(client.supports('triggers'), true);
 });
 
@@ -746,7 +1051,7 @@ test('with an outdated worker, trigger operations explain the pending update ins
   const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
   t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
-  await assert.rejects(client.api('triggers.list', {}), { statusCode: 503, message: /not updated yet/ });
+  await assert.rejects(client.api('triggers.list', {}), { kind: 'unavailable', message: /not updated yet/ });
   assert.equal(client.triggerOverview(), undefined);
   assert.ok(!legacy.methods.includes('api'));
 });
@@ -760,8 +1065,8 @@ test('an outdated worker is never given a request that names its place, since it
   await client.start();
   assert.equal(client.supports('autoPromptTargets'), false);
   const base = { provider: 'codex' as const, prompt: 'Continue', cwd: directory };
-  await assert.rejects(client.submitAutoPrompt({ ...base, requestId: '12345678-1234-4234-8234-123456789abd', targetSessionId: 'codex:legacy' }), { statusCode: 503, disposition: 'not-admitted' });
-  await assert.rejects(client.submitAutoPrompt({ ...base, requestId: '12345678-1234-4234-8234-123456789abe', sessionMode: 'new' }), { statusCode: 503, disposition: 'not-admitted' });
+  await assert.rejects(client.submitAutoPrompt({ ...base, requestId: '12345678-1234-4234-8234-123456789abd', targetSessionId: 'codex:legacy' }), { kind: 'unavailable', disposition: 'not-admitted' });
+  await assert.rejects(client.submitAutoPrompt({ ...base, requestId: '12345678-1234-4234-8234-123456789abe', sessionMode: 'new' }), { kind: 'unavailable', disposition: 'not-admitted' });
   assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
 });
 
@@ -779,7 +1084,7 @@ test('an outdated worker is never asked to insert into a chosen turn, since it w
   t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
   assert.equal(client.supports('steerTargets'), false);
-  await assert.rejects(client.steer('queued-run', { targetRunId: 'turn' }), { statusCode: 503, disposition: 'not-admitted' });
+  await assert.rejects(client.steer('queued-run', { targetRunId: 'turn' }), { kind: 'unavailable', disposition: 'not-admitted' });
   assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
 });
 
@@ -792,8 +1097,8 @@ test('an outdated worker is never given the master, which it would run on whatev
   await client.start();
   assert.equal(client.supports('subscriptionOnly'), false);
   const master = join(stateDir, 'master-session');
-  await assert.rejects(client.create({ provider: 'claude', prompt: 'hello', cwd: master }), { statusCode: 503, disposition: 'not-admitted' });
-  await assert.rejects(client.submitAutoPrompt({ provider: 'claude', prompt: 'hello', cwd: master, requestId: '12345678-1234-4234-8234-123456789abf' }), { statusCode: 503, disposition: 'not-admitted' });
+  await assert.rejects(client.create({ provider: 'claude', prompt: 'hello', cwd: master }), { kind: 'unavailable', disposition: 'not-admitted' });
+  await assert.rejects(client.submitAutoPrompt({ provider: 'claude', prompt: 'hello', cwd: master, requestId: '12345678-1234-4234-8234-123456789abf' }), { kind: 'unavailable', disposition: 'not-admitted' });
   assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
 });
 
@@ -805,8 +1110,8 @@ test('while an outdated worker has a master session, it is not asked to route wo
   const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
   t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
-  await assert.rejects(client.submitAutoPrompt({ provider: 'claude', prompt: 'somewhere', requestId: '12345678-1234-4234-8234-123456789ac0' }), { statusCode: 503, disposition: 'not-admitted' });
-  await assert.rejects(client.enqueue('claude:master', 'hello'), { statusCode: 503, disposition: 'not-admitted' });
+  await assert.rejects(client.submitAutoPrompt({ provider: 'claude', prompt: 'somewhere', requestId: '12345678-1234-4234-8234-123456789ac0' }), { kind: 'unavailable', disposition: 'not-admitted' });
+  await assert.rejects(client.enqueue('claude:master', 'hello'), { kind: 'unavailable', disposition: 'not-admitted' });
   assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
 });
 
@@ -834,14 +1139,14 @@ test('worker records a verified calling turn without treating its message as own
   assert.deepEqual(child.origin, { kind: 'owner' }, 'reporting lineage never changes execution authority');
   assert.deepEqual(ownerMessages, ['Implement the goal'], 'an attributed agent message cannot consume owner approval');
   const before = f.runs.list().length;
-  await assert.rejects(client.enqueue(f.session.id, 'Forged', {}, { callerCapability: 'f'.repeat(64) }), { statusCode: 403 });
+  await assert.rejects(client.enqueue(f.session.id, 'Forged', {}, { callerCapability: 'f'.repeat(64) }), { kind: 'forbidden' });
   const mismatched = capabilities.issue({ kind: 'caller-run', runId: parent.id, sessionId: 'codex:someone-else' });
-  await assert.rejects(client.enqueue(f.session.id, 'Wrong session', {}, { callerCapability: mismatched }), { statusCode: 403 });
+  await assert.rejects(client.enqueue(f.session.id, 'Wrong session', {}, { callerCapability: mismatched }), { kind: 'forbidden' });
   assert.equal(f.runs.list().length, before);
   await f.runs.cancel(child.id);
   f.finish();
   await until(() => f.runs.list().find(run => run.id === parent.id)?.status === 'completed');
-  await assert.rejects(client.enqueue(f.session.id, 'Expired', {}, { callerCapability: token }), { statusCode: 403 });
+  await assert.rejects(client.enqueue(f.session.id, 'Expired', {}, { callerCapability: token }), { kind: 'forbidden' });
   const saved = await readFile(join(f.stateDir, 'runs.json'), 'utf8');
   assert.equal(saved.includes(token), false, 'credentials never enter persisted run history');
   assert.ok(saved.includes(parent.id));
@@ -856,7 +1161,7 @@ test('an old worker cannot silently ignore master.worker on direct, Auto Prompt,
   t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
   const input = { provider: 'codex' as const, prompt: 'work', cwd: directory, modelRole: 'master.worker' as const };
-  const expected = { statusCode: 503, disposition: 'not-admitted' };
+  const expected = { kind: 'unavailable', disposition: 'not-admitted' };
   await assert.rejects(client.create(input), expected);
   await assert.rejects(client.submitAutoPrompt({ ...input, requestId: '12345678-1234-4234-8234-123456789abd' }), expected);
   await assert.rejects(client.api('autoPrompt.submit', { ...input, requestId: '12345678-1234-4234-8234-123456789abe' }), expected);
@@ -877,4 +1182,457 @@ test('the receiving worker resolves master.worker for direct creation before Run
   assert.deepEqual(received[0], { provider: 'codex', model: 'gpt-6.1-sol', cwd: f.directory, prompt: 'new work' });
   await client.create({ provider: 'codex', cwd: f.directory, prompt: 'ordinary' });
   assert.deepEqual(received[1], { provider: 'codex', cwd: f.directory, prompt: 'ordinary' });
+});
+
+/** Failures a test injects into a trigger handoff fixture, and where it sees the fixture's parts even if building it fails. */
+interface HandoffInjection {
+  /** Each submission takes this much longer after its barrier opens. */
+  submitDelayMs?: number;
+  /** Runs after the first engine started and before its host starts (a test may hold the state lock here). */
+  beforeHost?: (f: Awaited<ReturnType<typeof fixture>>) => Promise<void>;
+  /** Starts the successor's engine in place of `engine.start()`; a rejection fails that start with the engine created. */
+  startSuccessorEngine?: (engine: TriggerService) => Promise<void>;
+  /** Runs after the successor's engine started and before its host starts; a rejection fails the successor's start. */
+  beforeSuccessorHost?: () => Promise<void>;
+  seen?: { f?: Awaited<ReturnType<typeof fixture>>; cleanup?: (options?: CleanupOptions) => Promise<void>; engines?: () => TriggerService[] };
+}
+
+/** `waitMs` bounds each wait; `keep` leaves the folder for the test to inspect (a later cleanup removes it). */
+interface CleanupOptions { waitMs?: number; keep?: boolean }
+
+/** The tick an engine has under way, read from its engine (the service's settle does not wait for it). */
+const tickUnderWay = (service: TriggerService) => (service as unknown as { engine: { ticking?: Promise<void> } }).engine.ticking;
+
+/** Waits for `work` up to `ms`; past that it fails with `what` rather than going on as if the work had ended. */
+async function within<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try { return await Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} did not end within ${ms}ms`)), ms); })]); }
+  finally { clearTimeout(timer); }
+}
+
+/**
+ * Something the fixture starts. Recorded before its start is awaited; three things are kept apart: its start settles
+ * once (with the created value, without one, or failed), a failed start is reported once, and the value is closed.
+ */
+interface Started<T> { name: string; value?: T; settled: Promise<void>; isSettled: boolean; failure?: { error: unknown; reported: boolean }; closed: boolean; settle(failure?: { error: unknown; reported: boolean }): void }
+function started<T>(name: string): Started<T> {
+  let done!: () => void;
+  const record: Started<T> = { name, settled: new Promise<void>(resolve => { done = resolve; }), isSettled: false, closed: false,
+    settle: failure => { if (record.isSettled) return; record.isSettled = true; record.failure = failure; done(); } };
+  return record;
+}
+
+/**
+ * A trigger engine on the fixture's runs, handed over the way the production worker does it (hold, wait for nothing in
+ * flight, pause and flush, close; the successor starts its own engine on the same state). `enqueues` counts submissions;
+ * `hold()` holds submissions until the returned release; `delaySuccessor()` holds the successor's start the same way.
+ * Each host takes the state lock itself and releases it when it closes.
+ *
+ * The folder is removed only once everything this fixture started is confirmed to have ended (see `cleanup`). Cleanup is
+ * registered as the test's after hook as soon as the fixture exists, so a failure while building it is cleaned up too.
+ */
+async function triggerHandoff(t: test.TestContext, inject: HandoffInjection = {}) {
+  const f = await fixture();
+  const events: string[] = [];
+  let enqueues = 0;
+  let gate: Promise<void> | undefined;
+  let successorGate: Promise<void> | undefined;
+  /** Every barrier a test set; cleanup opens them all, whatever point the test stopped at. */
+  const barriers: Array<() => void> = [];
+  const barrier = () => {
+    let open!: () => void;
+    const held = new Promise<void>(resolve => { open = resolve; });
+    barriers.push(open);
+    return { held, open };
+  };
+  type Host = Awaited<ReturnType<typeof startRunnerHost>>;
+  // The first engine and host are recorded together before anything is awaited; the successor's two are recorded
+  // together when the first host asks for a successor, before its start awaits anything. Only the first host can ask,
+  // so once it is closed no new record can appear.
+  const engineRecords: Array<Started<TriggerService>> = [];
+  const hostRecords: Array<Started<Host>> = [];
+  const firstEngine = started<TriggerService>('first engine');
+  const firstHost = started<Host>('first host');
+  engineRecords.push(firstEngine); hostRecords.push(firstHost);
+  let b: TriggerService | undefined;
+  let successor: Host | undefined;
+  const engines = () => engineRecords.flatMap(record => record.value ? [record.value] : []);
+  const busy = (item: TriggerService) => item.inFlight() || Boolean(tickUnderWay(item));
+  const count = (name: string) => events.filter(event => event === name).length;
+  /** Every tick seen under way, with how it settled; kept across cleanups so a rejection after a timeout is still reported. */
+  const ticks = new Map<Promise<void>, { settled: boolean; failure?: { error: unknown; reported: boolean } }>();
+  const observeTicks = () => {
+    for (const item of engines()) {
+      const tick = tickUnderWay(item);
+      if (!tick || ticks.has(tick)) continue;
+      const seen: { settled: boolean; failure?: { error: unknown; reported: boolean } } = { settled: false };
+      ticks.set(tick, seen);
+      tick.then(() => { seen.settled = true; }, error => { seen.settled = true; seen.failure = { error, reported: false }; });
+    }
+  };
+  /** Waits until no engine has work and every tick seen has settled; repeatable, so an engine started later is seen too. */
+  const engineWork = async (ms: number) => {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      observeTicks();
+      if (!engines().some(busy) && [...ticks.values()].every(seen => seen.settled)) return;
+      if (Date.now() > deadline) throw new Error(`engine work did not end within ${ms}ms`);
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+  };
+  /** Closes what a record started, once its start has settled; a close that fails is tried again by the next cleanup. */
+  const close = async <T>(record: Started<T>, ms: number, end: (value: T) => Promise<void>) => {
+    if (record.closed) return;
+    await within(record.settled, ms, `${record.name} start`);
+    if (record.value !== undefined) await end(record.value);
+    record.closed = true;
+  };
+  const closeHost = (record: Started<Host>, ms: number) => close(record, ms, async host => {
+    // Every paused handoff ends first; the close follows the check without a turn of the event loop in between, so a
+    // handoff not yet started finds the worker closing and never starts.
+    if (record === firstHost) await until(() => count('quiesce') === count('onHandedOff') + count('resume'), ms).catch(() => { throw new Error(`a paused handoff did not end within ${ms}ms`); });
+    await host.close();
+  });
+  const closeEngine = (record: Started<TriggerService>, ms: number) => close(record, ms, async engine => {
+    engine.close();
+    await within(engine.settle(), ms, `${record.name} settle`);
+    if (busy(engine)) throw new Error(`${record.name} still had work after it settled`);
+  });
+  let fixtureClosed = false;
+  let running: Promise<void> | undefined;
+  /**
+   * Ends everything this fixture started, then removes its folder unless `keep`. Each part that fails or cannot be
+   * confirmed in time is reported and the parts that do not depend on it still run; engines are closed only after every
+   * host (and so no new record can appear), the fixture's runs after the engines, and the state lock is then taken
+   * back. A failed start or tick is reported once. Any report keeps the folder and fails; calling again resumes what
+   * did not end, and removes the folder only when everything has.
+   */
+  const cleanup = (options: CleanupOptions = {}) => running ??= (async () => {
+    const ms = options.waitMs ?? 8000;
+    const errors: Error[] = [];
+    const attempt = async (name: string, work: () => Promise<void>) => {
+      try { await work(); } catch (error) { errors.push(Object.assign(new Error(`${name}: ${error instanceof Error ? error.message : String(error)}`), { cause: error })); }
+    };
+    for (const open of barriers) open();
+    gate = undefined; successorGate = undefined;
+    await attempt('engine work', () => engineWork(ms));
+    await attempt('first host', () => closeHost(firstHost, ms));
+    for (const record of hostRecords.slice(1)) await attempt(record.name, () => closeHost(record, ms));
+    const hostsClosed = hostRecords.every(record => record.closed);
+    if (hostsClosed) {
+      // An engine that started late (the successor's) may have work of its own by now.
+      await attempt('engine work', () => engineWork(ms));
+      for (const record of engineRecords) await attempt(record.name, () => closeEngine(record, ms));
+    }
+    const enginesClosed = hostsClosed && engineRecords.every(record => record.closed);
+    if (enginesClosed && !fixtureClosed) await attempt('fixture runs and clients', async () => { await f.close(); fixtureClosed = true; });
+    // Confirms both hosts let go of the state.
+    if (fixtureClosed) await attempt('state lock', async () => { await (await acquireStateLock(f.paths.runtime, 0))(); });
+    // What failed along the way, each reported once: in this cleanup's error, which keeps the folder.
+    for (const record of [...engineRecords, ...hostRecords]) {
+      if (record.failure && !record.failure.reported) { record.failure.reported = true; errors.push(Object.assign(new Error(`${record.name} start failed: ${String(record.failure.error)}`), { cause: record.failure.error })); }
+    }
+    for (const seen of ticks.values()) {
+      if (seen.failure && !seen.failure.reported) { seen.failure.reported = true; errors.push(Object.assign(new Error(`a tick failed: ${String(seen.failure.error)}`), { cause: seen.failure.error })); }
+    }
+    if (!errors.length && !(enginesClosed && fixtureClosed)) errors.push(new Error('not everything this fixture started was confirmed to have ended'));
+    if (errors.length) throw new AggregateError(errors, `The trigger handoff fixture could not confirm that everything ended; ${f.directory} is kept.`);
+    if (!options.keep) await f.remove();
+  })().finally(() => { running = undefined; });
+  t.after(() => cleanup());
+  if (inject.seen) Object.assign(inject.seen, { f, cleanup, engines });
+
+  const executor: TriggerExecutor = {
+    submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
+    create: async () => { throw new Error('unused'); },
+    enqueue: async (sessionId, prompt, request, internal) => { enqueues++; await gate; if (inject.submitDelayMs) await new Promise(resolve => setTimeout(resolve, inject.submitDelayMs)); return f.runs.enqueue(sessionId, prompt, request, internal); },
+    runs: () => f.runs.list(), session: id => f.runs.getSession(id),
+  };
+  const engine = () => new TriggerService({ stateDir: f.stateDir, executor, tickMs: 3_600_000 });
+  let first: TriggerService;
+  try {
+    await f.host.close();
+    first = firstEngine.value = engine();
+    // A failure while building is thrown to the test, which counts as its report.
+    try { await first.start(); firstEngine.settle(); } catch (error) { firstEngine.settle({ error, reported: true }); throw error; }
+    try { await inject.beforeHost?.(f); } catch (error) { firstHost.settle({ error, reported: true }); throw error; }
+    const engineA = first;
+    try {
+      firstHost.value = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, triggers: engineA,
+        inFlight: () => engineA.inFlight(), transient: () => engineA.inFlight(),
+        quiesce: async () => { events.push('quiesce'); engineA.pause(); await engineA.flush(); },
+        resume: () => { events.push('resume'); engineA.resume(); },
+        onHandedOff: () => { events.push('onHandedOff'); engineA.close(); },
+        startSuccessor: (_command, nonce) => {
+          events.push('startSuccessor');
+          const nextEngine = started<TriggerService>('successor engine');
+          const nextHost = started<Host>('successor host');
+          engineRecords.push(nextEngine); hostRecords.push(nextHost);
+          const next = b = nextEngine.value = engine();
+          void (async () => {
+            await successorGate;
+            try { await (inject.startSuccessorEngine ?? (item => item.start()))(next); nextEngine.settle(); }
+            // Its host is then never started: settled without a value.
+            catch (error) { nextEngine.settle({ error, reported: false }); nextHost.settle(); return; }
+            try {
+              await inject.beforeSuccessorHost?.();
+              successor = nextHost.value = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, triggers: next, handoffNonce: nonce });
+              events.push('successorStarted');
+              nextHost.settle();
+            } catch (error) { nextHost.settle({ error, reported: false }); }
+          })();
+        } });
+      firstHost.settle();
+    } catch (error) { firstHost.settle({ error, reported: true }); throw error; }
+  } finally {
+    // Whatever was not started because something before it failed is settled without a value.
+    firstEngine.settle(); firstHost.settle();
+  }
+  const trigger = await first.create({ name: 'Session follow-up', enabled: true, source: { kind: 'schedule', schedule: { type: 'cron', expression: '0 * * * *', timezone: 'UTC' }, catchUp: 'latest' },
+    handler: { kind: 'task', instructions: 'Continue the work', provider: 'codex', approvals: 'auto', target: { node: 'local', mode: 'session', sessionId: f.session.id } },
+    policy: { overlap: 'skip', maxEventsPerHour: 20 } }, { kind: 'owner', via: 'ui' });
+  return { f, a: first, b: () => b, successor: () => successor, events, trigger, enqueues: () => enqueues, cleanup, engines,
+    hold: () => { const { held, open } = barrier(); gate = held; return () => { open(); gate = undefined; }; },
+    delaySuccessor: () => { const { held, open } = barrier(); successorGate = held; return open; } };
+}
+
+/** After cleanup: the state lock is free, no engine has work in flight, and nothing changes the engine file later. */
+async function nothingLeft(h: Awaited<ReturnType<typeof triggerHandoff>>) {
+  const f = h.f;
+  const release = await acquireStateLock(f.paths.runtime, 0);
+  await release();
+  assert.deepEqual(h.engines().map(item => item.inFlight()), h.engines().map(() => false));
+  const file = join(f.stateDir, 'trigger-engine.json');
+  const before = await readFile(file, 'utf8');
+  const enqueues = h.enqueues();
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(await readFile(file, 'utf8'), before, 'nothing writes the engine file after cleanup');
+  assert.equal(h.enqueues(), enqueues, 'nothing is submitted after cleanup');
+}
+
+test('cleanup during a trigger handoff whose claim is still held opens it, ends both workers and frees the state lock', { timeout: 20_000 }, async t => {
+  const h = await triggerHandoff(t);
+  h.hold();
+  const fired = await h.a.run(h.trigger.id, { kind: 'owner', via: 'ui' });
+  await until(() => h.enqueues() === 1 && h.a.event(fired.id).status === 'claimed');
+  const client = await h.f.connect();
+  assert.equal(await client.requestHandoff(true), true);
+  // The test stops here, the claim still held.
+  await h.cleanup({ keep: true });
+  assert.equal(h.a.event(fired.id).status, 'running', 'the held submission finished before the workers closed');
+  await nothingLeft(h);
+  assert.equal(h.enqueues(), 1);
+});
+
+test('cleanup during a trigger handoff whose successor is still starting waits for it, then frees the state lock', { timeout: 20_000 }, async t => {
+  const h = await triggerHandoff(t);
+  h.delaySuccessor();
+  const client = await h.f.connect();
+  assert.equal(await client.requestHandoff(true), true);
+  await until(() => h.events.includes('onHandedOff'));
+  assert.equal(h.successor(), undefined, 'the successor is still starting');
+  // The test stops here, the successor not yet started.
+  await h.cleanup({ keep: true });
+  assert.ok(h.events.includes('successorStarted'), 'cleanup let the successor start and then closed it');
+  await nothingLeft(h);
+});
+
+test('cleanup during a slow trigger tick waits for the tick itself to end', { timeout: 20_000 }, async t => {
+  const h = await triggerHandoff(t, { submitDelayMs: 2500 });
+  const fired = await h.a.run(h.trigger.id, { kind: 'owner', via: 'ui' });
+  await until(() => h.enqueues() === 1);
+  assert.ok(tickUnderWay(h.a), 'a tick is under way, submitting');
+  await h.cleanup({ keep: true });
+  assert.equal(tickUnderWay(h.a), undefined, 'the tick ended before cleanup did');
+  assert.equal(h.a.event(fired.id).status, 'running', 'its submission was recorded');
+  await nothingLeft(h);
+});
+
+test('a cleanup that cannot confirm the end of a tick in time fails, keeps the folder, and can be run again', { timeout: 20_000 }, async t => {
+  const h = await triggerHandoff(t, { submitDelayMs: 1500 });
+  await h.a.run(h.trigger.id, { kind: 'owner', via: 'ui' });
+  await until(() => h.enqueues() === 1);
+  await assert.rejects(h.cleanup({ waitMs: 200 }), (error: unknown) => error instanceof AggregateError && error.errors.some(item => /engine work did not end within 200ms/.test(String(item))));
+  assert.ok(existsSync(h.f.directory), 'the fixture folder is kept while work may still run in it');
+  await h.cleanup({ keep: true });
+  assert.equal(tickUnderWay(h.a), undefined);
+  await nothingLeft(h);
+  await h.cleanup();
+  assert.ok(!existsSync(h.f.directory), 'removed once everything is confirmed to have ended');
+});
+
+test('cleanup after a successor that failed to start reports it, still ends everything, and removes the folder when run again', { timeout: 20_000 }, async t => {
+  const h = await triggerHandoff(t, { beforeSuccessorHost: async () => { throw new Error('successor host failed to start'); } });
+  const client = await h.f.connect();
+  assert.equal(await client.requestHandoff(true), true);
+  await until(() => h.events.includes('onHandedOff') && h.b());
+  await assert.rejects(h.cleanup({ keep: true }), (error: unknown) => error instanceof AggregateError && error.errors.some(item => /successor host failed to start/.test(String(item))));
+  assert.ok(existsSync(h.f.directory), 'kept after a failure');
+  assert.deepEqual(h.engines().map(tickUnderWay), [undefined, undefined]);
+  await nothingLeft(h);
+  await h.cleanup();
+  assert.ok(!existsSync(h.f.directory), 'the failure was reported once; with everything ended the folder goes');
+});
+
+test('a trigger handoff fixture whose first host cannot start still ends the engine it started', { timeout: 20_000 }, async t => {
+  const seen: NonNullable<HandoffInjection['seen']> = {};
+  let held: (() => Promise<void>) | undefined;
+  await assert.rejects(triggerHandoff(t, { seen, beforeHost: async f => { held = await acquireStateLock(f.paths.runtime, 0); } }), MonitorAlreadyRunning);
+  await held!();
+  assert.ok(seen.cleanup && seen.engines, 'the cleanup was registered before the host started');
+  await seen.cleanup({ keep: true });
+  const [a] = seen.engines();
+  assert.equal((a as unknown as { engine: { timer?: unknown } }).engine.timer, undefined, "the engine's timer is stopped");
+  assert.equal(a.inFlight(), false);
+  await (await acquireStateLock(seen.f!.paths.runtime, 0))();
+});
+
+test('a successor host that starts after its start timed out is still closed by a later cleanup', { timeout: 20_000 }, async t => {
+  const h = await triggerHandoff(t, { beforeSuccessorHost: () => new Promise(resolve => setTimeout(resolve, 600)) });
+  const client = await h.f.connect();
+  assert.equal(await client.requestHandoff(true), true);
+  await until(() => h.events.includes('onHandedOff') && h.b());
+  try {
+    await assert.rejects(h.cleanup({ keep: true, waitMs: 200 }), (error: unknown) => error instanceof AggregateError && error.errors.some(item => /successor host start did not end within 200ms/.test(String(item))));
+    // The late host now holds the state lock; a later cleanup must close it.
+    await until(() => h.successor());
+    await h.cleanup({ keep: true });
+    await nothingLeft(h);
+    await h.cleanup();
+    assert.ok(!existsSync(h.f.directory));
+  } finally {
+    // Repro safety net only: never leave the late host (and its lock) behind whatever the cleanup did.
+    await h.successor()?.close();
+  }
+});
+
+test('a tick that rejects while cleanup waits for it is reported, and the folder is kept until a later cleanup', { timeout: 20_000 }, async t => {
+  const h = await triggerHandoff(t);
+  // Stands in for a tick of the first engine that fails while cleanup watches it; like the engine's own tick, it
+  // clears itself when it settles (engine.ts: this.ticking ??= this.step().finally(() => { this.ticking = undefined; })).
+  const engine = (h.a as unknown as { engine: { ticking?: Promise<void> } }).engine;
+  const failing = new Promise<void>((_, reject) => setTimeout(() => reject(new Error('tick failed')), 300)).finally(() => { engine.ticking = undefined; });
+  failing.catch(() => {});
+  engine.ticking = failing;
+  await assert.rejects(h.cleanup({ keep: true }), (error: unknown) => error instanceof AggregateError && error.errors.some(item => /tick failed/.test(String(item))));
+  assert.ok(existsSync(h.f.directory), 'kept after a tick failed');
+  await h.cleanup();
+  assert.ok(!existsSync(h.f.directory));
+});
+
+test('a tick that rejects after cleanup gave up waiting for it is reported by the next cleanup', { timeout: 20_000 }, async t => {
+  const h = await triggerHandoff(t);
+  const engine = (h.a as unknown as { engine: { ticking?: Promise<void> } }).engine;
+  const failing = new Promise<void>((_, reject) => setTimeout(() => reject(new Error('late tick failed')), 500)).finally(() => { engine.ticking = undefined; });
+  failing.catch(() => {});
+  engine.ticking = failing;
+  await assert.rejects(h.cleanup({ keep: true, waitMs: 100 }), (error: unknown) => error instanceof AggregateError
+    && error.errors.some(item => /engine work did not end within 100ms/.test(String(item))) && !error.errors.some(item => /late tick failed/.test(String(item))));
+  await until(() => !tickUnderWay(h.a));
+  // The tick is gone from the engine, but the cleanup that saw it keeps its outcome.
+  await assert.rejects(h.cleanup({ keep: true }), (error: unknown) => error instanceof AggregateError && error.errors.some(item => /a tick failed: Error: late tick failed/.test(String(item))));
+  assert.ok(existsSync(h.f.directory), 'kept by the cleanup that reported it');
+  await h.cleanup();
+  assert.ok(!existsSync(h.f.directory), 'reported once; the next cleanup removes the folder');
+});
+
+test('a successor engine whose start fails is reported once and still closed', { timeout: 20_000 }, async t => {
+  const h = await triggerHandoff(t, { startSuccessorEngine: async engine => { await engine.start(); throw new Error('successor engine start failed'); } });
+  const client = await h.f.connect();
+  assert.equal(await client.requestHandoff(true), true);
+  await until(() => h.events.includes('onHandedOff') && h.b());
+  const b = h.b()!;
+  await until(() => (b as unknown as { engine: { timer?: unknown } }).engine.timer !== undefined);
+  await assert.rejects(h.cleanup({ keep: true }), (error: unknown) => error instanceof AggregateError
+    && error.errors.filter(item => /successor engine start failed/.test(String(item))).length === 1);
+  assert.equal((b as unknown as { engine: { timer?: unknown } }).engine.timer, undefined, 'the engine it created is closed');
+  assert.equal(h.successor(), undefined, 'its host never started');
+  await nothingLeft(h);
+  await h.cleanup();
+  assert.ok(!existsSync(h.f.directory));
+});
+
+test('a cleanup while the first host is still starting waits for it, and a later cleanup closes it', { timeout: 20_000 }, async t => {
+  const seen: NonNullable<HandoffInjection['seen']> = {};
+  let open!: () => void;
+  const starting = triggerHandoff(t, { seen, beforeHost: () => new Promise<void>(resolve => { open = resolve; }) });
+  await until(() => seen.cleanup && open);
+  await assert.rejects(seen.cleanup!({ keep: true, waitMs: 200 }), (error: unknown) => error instanceof AggregateError && error.errors.some(item => /first host start did not end within 200ms/.test(String(item))));
+  open();
+  const h = await starting;
+  await h.cleanup({ keep: true });
+  await nothingLeft(h);
+});
+
+test('a trigger run in flight survives a worker handoff and is not submitted again', { timeout: 20_000 }, async t => {
+  const h = await triggerHandoff(t);
+  const f = h.f;
+  const fired = await h.a.run(h.trigger.id, { kind: 'owner', via: 'ui' });
+  await until(() => f.starts() === 1 && h.a.event(fired.id).status === 'running');
+  const runId = h.a.event(fired.id).dispatch?.runId;
+  const client = await f.connect();
+  assert.equal(await client.requestHandoff(true), true);
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  assert.deepEqual(h.events, [], 'a running turn keeps the old worker and its engine in service');
+  f.finish();
+  await until(() => h.events.includes('onHandedOff') && h.successor());
+  assert.equal((h.a as unknown as { engine: { timer?: unknown } }).engine.timer, undefined, "the old engine's timer is stopped");
+  const b = h.b()!;
+  for (let i = 0; i < 200 && b.event(fired.id).status !== 'completed'; i++) { await b.tick(); await new Promise(resolve => setTimeout(resolve, 10)); }
+  assert.equal(b.event(fired.id).status, 'completed');
+  assert.equal(b.event(fired.id).dispatch?.runId, runId, 'the successor follows the same run');
+  assert.equal(h.enqueues(), 1, 'submitted exactly once');
+  assert.equal(f.cancels(), 0, 'nothing is cancelled');
+});
+
+test('a handoff asked for while a trigger run is being claimed waits until the claim is recorded', { timeout: 20_000 }, async t => {
+  const h = await triggerHandoff(t);
+  const f = h.f;
+  const release = h.hold();
+  const fired = await h.a.run(h.trigger.id, { kind: 'owner', via: 'ui' });
+  await until(() => h.enqueues() === 1 && h.a.event(fired.id).status === 'claimed');
+  const client = await f.connect();
+  assert.equal(await client.requestHandoff(true), true);
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  assert.deepEqual(h.events, [], 'the claim keeps the old worker in service');
+  release();
+  await until(() => h.a.event(fired.id).status === 'running' && f.starts() === 1);
+  f.finish();
+  await until(() => h.events.includes('onHandedOff') && h.successor());
+  const b = h.b()!;
+  for (let i = 0; i < 200 && b.event(fired.id).status !== 'completed'; i++) { await b.tick(); await new Promise(resolve => setTimeout(resolve, 10)); }
+  assert.equal(b.event(fired.id).status, 'completed');
+  assert.equal(h.enqueues(), 1, 'submitted exactly once');
+  assert.equal(f.cancels(), 0);
+});
+
+test('worker error replies keep their status, message and disposition across the runner wire', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const client = await f.connect();
+  const { errorDisposition, errorStatus } = await import('../../../server/http/requests.js');
+  const { RunError } = await import('../../../server/runs/run-records.js');
+  const { SteeringError } = await import('../../../server/runs/steering.js');
+  const plain = (message: string, fields: Record<string, unknown>) => Object.assign(new Error(message), fields);
+  const cases: Array<[name: string, thrown: unknown, expected: { status: number; message: string; disposition?: string; edge?: string }]> = [
+    ['mapped status', plain('a', { statusCode: 404 }), { status: 404, message: 'a' }],
+    ['unmapped status', plain('b', { statusCode: 599 }), { status: 599, message: 'b' }],
+    ['zero', plain('c', { statusCode: 0 }), { status: 0, message: 'c' }],
+    ['NaN travels as null and reads as 0', plain('d', { statusCode: Number.NaN }), { status: 0, message: 'd' }],
+    ['numeric string', plain('e', { statusCode: '404' }), { status: 404, message: 'e' }],
+    ['no status is 500', new Error('f'), { status: 500, message: 'f' }],
+    ['not an Error', 'boom', { status: 500, message: 'Runner operation failed.' }],
+    ['rejected is carried but not shown', plain('g', { statusCode: 409, disposition: 'rejected' }), { status: 409, message: 'g', disposition: 'rejected' }],
+    ['uncertain', plain('h', { statusCode: 503, disposition: 'uncertain' }), { status: 503, message: 'h', disposition: 'uncertain', edge: 'uncertain' }],
+    ['handoff', plain('i', { statusCode: 503, disposition: 'handoff' }), { status: 503, message: 'i', disposition: 'handoff', edge: 'not-admitted' }],
+    ['a disposition without a status', plain('j', { disposition: 'not-admitted' }), { status: 500, message: 'j', disposition: 'not-admitted', edge: 'not-admitted' }],
+    ['RunError', new RunError('k', 'not-found'), { status: 404, message: 'k' }],
+    ['SteeringError', new SteeringError('l', 'rejected'), { status: 409, message: 'l', disposition: 'rejected' }],
+  ];
+  for (const [name, thrown, expected] of cases) {
+    f.runs.create = async () => { throw thrown; };
+    const error = await client.create({ provider: 'codex', cwd: f.directory, prompt: 'x' }).then(() => undefined, (caught: unknown) => caught);
+    assert.ok(error instanceof Error, name);
+    assert.deepEqual({ status: errorStatus(error), message: error.message, disposition: (error as { disposition?: string }).disposition, edge: errorDisposition(error) },
+      { status: expected.status, message: expected.message, disposition: expected.disposition, edge: expected.edge }, name);
+  }
 });

@@ -241,10 +241,21 @@ try {
   start();
   await ready();
   assert.equal(await readFile(authFile, 'utf8'), savedAuth);
-  assert.equal((await fetch(`${base}/api/snapshot`, { headers })).status, 401, 'restart invalidates in-memory sessions');
+  // Sign-ins are kept across restarts (auth-sessions.json) until they expire, log out or the password changes.
+  assert.equal((await fetch(`${base}/api/snapshot`, { headers })).status, 200, 'a remote sign-in survives a restart');
+  assert.equal((await fetch(`${base}/api/snapshot`, { headers: remoteHeaders })).status, 401, 'a restart signs no one in without a sign-in cookie');
+  const { token: pageToken } = await (await fetch(`${base}/api/auth/status`, { headers })).json();
+  assert.equal((await fetch(`${base}/api/auth/logout`, {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': pageToken }, body: '{}',
+  })).status, 200);
+  assert.equal((await fetch(`${base}/api/snapshot`, { headers })).status, 401, 'logging out revokes the sign-in');
+  await stop();
+  start();
+  await ready();
+  assert.equal((await fetch(`${base}/api/snapshot`, { headers })).status, 401, 'a revoked sign-in stays revoked after a restart');
   const renewedHeaders = await loginRemote();
   assert.equal((await fetch(`${base}/api/snapshot`, { headers: renewedHeaders })).status, 200);
-  console.log(`PASS: copied executable alone, minimal PATH, ${Object.keys(config.assets).length} embedded assets, duplicate launch, persistent private session titles and reset, persistent private project group titles/pins and reset without sessions, durable session close/reopen and creation validation, persistent failure dismissal with unchanged lifecycle and raw history, unchanged native history, shutdown/restart, authenticated public-interface binding and persistent 0600 password hash, local bypass and remote session renewal.`);
+  console.log(`PASS: copied executable alone, minimal PATH, ${Object.keys(config.assets).length} embedded assets, duplicate launch, persistent private session titles and reset, persistent private project group titles/pins and reset without sessions, durable session close/reopen and creation validation, persistent failure dismissal with unchanged lifecycle and raw history, unchanged native history, shutdown/restart, authenticated public-interface binding and persistent 0600 password hash, local bypass, remote sign-in kept across restart, revoked by logout and still revoked after restart, and a new sign-in.`);
 } finally {
   await stop();
   await rm(dir, { recursive: true, force: true });

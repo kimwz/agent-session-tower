@@ -1,12 +1,14 @@
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { normalizeProjectGroupPatch, ProjectGroupStore } from '../../../server/stores/project-groups.js';
+import { blockRename, temporaryFiles } from '../../helpers/private-writes.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import type { Session } from '../../../shared/types.js';
+import { statusOf } from '../../../shared/errors.js';
 
 test('project labels and pins survive restart privately without changing cwd identity or native history', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'monitor-groups-'));
@@ -104,7 +106,7 @@ test('a failed group save preserves memory and disk and does not poison later pa
   const store = new ProjectGroupStore(stateDir); await store.start();
   await store.set({ cwd: '/project', title: 'Committed' });
   await rename(stateDir, savedDir); await writeFile(stateDir, 'Prevent writes');
-  await assert.rejects(store.set({ cwd: '/project', pinned: true }), { statusCode: 503 });
+  await assert.rejects(store.set({ cwd: '/project', pinned: true }), { kind: 'unavailable' });
   await store.flush();
   assert.deepEqual(store.list(), [{ cwd: '/project', title: 'Committed', pinned: false }]);
   assert.deepEqual(JSON.parse(await readFile(join(savedDir, 'project-groups.json'), 'utf8')), store.list());
@@ -125,7 +127,7 @@ test('group patches validate exact booleans and title limits while preserving ab
     ...[undefined, null, 0, 1, 'true', [], {}].map(pinned => ({ cwd: '/valid', pinned })),
     ...[undefined, null, 0, 1, 'true', [], {}].map(hidden => ({ cwd: '/valid', hidden })),
     ...[undefined, null, 42, [], {}, 'x'.repeat(121), '😀'.repeat(61)].map(title => ({ cwd: '/valid', title })),
-  ]) assert.throws(() => normalizeProjectGroupPatch(invalid), { statusCode: 400 });
+  ]) assert.throws(() => normalizeProjectGroupPatch(invalid), { kind: 'invalid' });
 });
 
 test('group startup rejects symlink metadata and invalid saved documents', async t => {
@@ -205,4 +207,41 @@ test('group HTTP validates authentication, commits before SSE and allows groups 
     assert.deepEqual(store.list(), []);
     assert.deepEqual(native, original);
   } finally { controller.abort(); }
+});
+
+test('writes exact bytes and failure message', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'monitor-groups-bytes-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'project-groups.json');
+  const store = new ProjectGroupStore(dir);
+  await store.start();
+  await store.set({ cwd: '/project', title: 'Saved' });
+  assert.equal(await readFile(path, 'utf8'), `${JSON.stringify([{ cwd: '/project', title: 'Saved', pinned: false }])}\n`);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  const restored = [{ cwd: '/a', title: 'A', pinned: true }, { cwd: '/b', title: '', pinned: false, hidden: true }];
+  await store.restore(restored);
+  assert.equal(await readFile(path, 'utf8'), `${JSON.stringify(restored)}\n`);
+  assert.deepEqual(await temporaryFiles(dir), []);
+  const restore = await blockRename(path);
+  const error = await store.set({ cwd: '/project', pinned: true }).then(() => undefined, (caught: unknown) => caught as Error);
+  assert.match(String(error?.message), /^폴더 그룹을 저장하지 못했습니다: /);
+  assert.equal(statusOf(error), 503);
+  assert.deepEqual(await temporaryFiles(dir), []);
+  await restore();
+  assert.equal(await readFile(path, 'utf8'), `${JSON.stringify(restored)}\n`);
+});
+
+test('a symlink placed at the saved path after start is replaced, its target untouched', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'monitor-groups-symlink-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'project-groups.json');
+  const store = new ProjectGroupStore(dir);
+  await store.start();
+  const outside = join(dir, 'outside.json');
+  await writeFile(outside, 'outside');
+  await symlink(outside, path);
+  await store.set({ cwd: '/project', title: 'Saved' });
+  assert.equal(await readFile(outside, 'utf8'), 'outside');
+  assert.equal((await lstat(path)).isFile(), true);
+  assert.equal(await readFile(path, 'utf8'), `${JSON.stringify([{ cwd: '/project', title: 'Saved', pinned: false }])}\n`);
 });

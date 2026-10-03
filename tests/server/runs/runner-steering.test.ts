@@ -174,13 +174,13 @@ test('external activity and requested model changes cannot receive steering', as
   const external = await fixture(t, { external: true });
   const queued = await external.manager.enqueue(external.session.id, 'Wait for external writer');
   assert.equal(external.read(queued.id).canSteer, false);
-  await assert.rejects(external.manager.steer(queued.id), { statusCode: 409 });
+  await assert.rejects(external.manager.steer(queued.id), { kind: 'conflict' });
   assert.equal(external.controls.length, 0);
   const f = await fixture(t);
   await f.pair();
   const differentModel = await f.manager.enqueue(f.session.id, 'Different model', { model: 'model-b' });
   assert.equal(f.read(differentModel.id).canSteer, false);
-  await assert.rejects(f.manager.steer(differentModel.id), { statusCode: 409 });
+  await assert.rejects(f.manager.steer(differentModel.id), { kind: 'conflict' });
   assert.equal(f.inputs.length, 0);
 });
 
@@ -262,7 +262,7 @@ test('duplicate delivery and an active turn finishing during attachment preparat
   const sending = f.manager.steer(second.id);
   const rejected = assert.rejects(sending, { disposition: 'rejected' });
   await entered.promise;
-  await assert.rejects(f.manager.steer(second.id), { statusCode: 409 });
+  await assert.rejects(f.manager.steer(second.id), { kind: 'conflict' });
   f.controls[0].finish();
   // Keep the normal scheduler waiting on external activity after the original finishes.
   f.session.status = 'working';
@@ -547,4 +547,37 @@ test('an approved continuation is consumed when its still-running parent finishe
   await until(() => f.read(resume.id).status === 'cancelled');
   assert.equal(f.controls.length, 1, 'finishing the goal consumes the pending resume without another provider turn');
   assert.equal((await f.manager.permissionDecision(request, 'Retry')).id, resume.id);
+});
+
+test('two decisions for the same request return the same delivery', async t => {
+  const f = await fixture(t); const parent = await f.running();
+  const request = permissionRequest(f, parent.id);
+  const first = f.manager.permissionDecision(request, 'Approved.');
+  const second = f.manager.permissionDecision(request, 'Approved again.');
+  assert.equal(first, second);
+  assert.equal((await first).id, request.id);
+  f.controls[0].finish(); await until(() => f.controls.length === 2); f.controls[1].finish();
+});
+
+test('a reopened decision after a withdrawn one records a new revision', async t => {
+  let rejectNotice = true;
+  const f = await fixture(t, { onSteer: async () => { if (rejectNotice) throw new SteeringError('Refused insert', 'rejected'); } });
+  const parent = await f.running(); const request = permissionRequest(f, parent.id, 'withdrawn'); request.decidedAt = new Date().toISOString();
+  await assert.rejects(f.manager.permissionDecision(request, 'Ask narrower'), /could not be delivered/);
+  assert.equal(f.read(request.id).permissionDecisionRevisions?.[request.id], `withdrawn:${request.decidedAt}`);
+  rejectNotice = false;
+  const approval = { ...request, status: 'approved' as const, decidedAt: new Date(Date.now() + 1).toISOString() };
+  const resume = await f.manager.permissionDecision(approval, 'Approved.');
+  assert.equal(f.read(resume.id).permissionDecisionRevisions?.[request.id], `approved:${approval.decidedAt}`);
+  f.controls[0].finish(); await until(() => f.controls.length === 2); f.controls[1].finish();
+});
+
+test('a permission continuation whose native history cannot be read completely is superseded with its reason', async t => {
+  const f = await fixture(t, { latestUserMessage: async () => { throw new Error('The native user history could not be read completely.'); } });
+  const parent = await f.running();
+  const resume = await f.manager.permissionDecision(permissionRequest(f, parent.id), 'Approved.');
+  await until(() => f.read(resume.id).status === 'cancelled');
+  assert.equal(f.read(resume.id).output, 'Scheduled continuation not started: The latest native user instruction could not be verified.');
+  f.controls[0].finish(); await until(() => f.read(parent.id).status === 'completed');
+  assert.equal(f.controls.length, 1);
 });

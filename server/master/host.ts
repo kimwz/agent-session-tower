@@ -18,6 +18,8 @@ import { ElevenLabs, type ElevenLabsOptions } from './elevenlabs.js';
 import { FirstReplyMaker } from './first-reply.js';
 import { MasterVoice, type MasterVoiceOptions, type VoiceTiming } from './voice.js';
 import { keepEndpoint } from '../runs/endpoint-keeper.js';
+import { TowerError, statusOf, type ErrorKind } from '../../shared/errors.js';
+import { audioSink } from '../http/sinks.js';
 
 export const MASTER_PROTOCOL = 1;
 const MAX_REQUEST = 256 * 1024;
@@ -35,7 +37,7 @@ export interface MasterHostOptions {
   voice?: { elevenLabs?: Omit<ElevenLabsOptions, 'key'>; timing?: Partial<VoiceTiming>; firstReply?: MasterVoiceOptions['firstReply'] };
 }
 
-const failure = (message: string, statusCode: number) => Object.assign(new Error(message), { statusCode });
+const failure = (message: string, kind: ErrorKind) => new TowerError(kind, message);
 
 /**
  * The master's own process: it keeps the master session's guide, gives the session Tower's page tools, follows the
@@ -79,6 +81,7 @@ export async function startMasterHost(options: MasterHostOptions) {
       voiceConfigured, ...(voiceConfigured ? { voiceKeyHint: settings.voiceKeyHint() } : {}),
       activeTasks: session?.activeTasks() ?? 0,
       ...(session?.failedReports() ? { failedReports: session.failedReports() } : {}),
+      ...(session?.stateProblem() ? { followState: session.stateProblem() } : {}),
       ...(voice ? { voice: voice.status() } : {}),
     };
   };
@@ -95,8 +98,8 @@ export async function startMasterHost(options: MasterHostOptions) {
       case 'overview': return overview();
       case 'checkpoint': return { ...room.position(), overview: overview() };
       case 'start': {
-        if (args.provider !== 'claude' && args.provider !== 'codex') throw failure('Claude 또는 Codex를 선택하세요.', 400);
-        if (typeof args.text !== 'string' || !args.text.trim() || args.text.length > 32_000) throw failure('첫 메시지를 적어 주세요.', 400);
+        if (args.provider !== 'claude' && args.provider !== 'codex') throw failure('Claude 또는 Codex를 선택하세요.', 'invalid');
+        if (typeof args.text !== 'string' || !args.text.trim() || args.text.length > 32_000) throw failure('첫 메시지를 적어 주세요.', 'invalid');
         const text = (value: unknown, pattern: RegExp) => typeof value === 'string' && pattern.test(value) ? value : undefined;
         const binding = await master.begin({ provider: args.provider as Provider, text: args.text.trim(), replace: args.replace === true,
           ...(text(args.model, /^[a-zA-Z0-9._:\[\]-]{1,80}$/) ? { model: args.model as string } : {}), ...(text(args.effort, /^[a-z]{1,20}$/) ? { effort: args.effort as string } : {}) });
@@ -105,12 +108,12 @@ export async function startMasterHost(options: MasterHostOptions) {
       }
       case 'release': { await master.release(); broadcastOverview(); return overview(); }
       case 'presence': {
-        if (typeof args.tabId !== 'string' || !/^[a-zA-Z0-9-]{8,80}$/.test(args.tabId)) throw failure('탭 ID가 올바르지 않습니다.', 400);
+        if (typeof args.tabId !== 'string' || !/^[a-zA-Z0-9-]{8,80}$/.test(args.tabId)) throw failure('탭 ID가 올바르지 않습니다.', 'invalid');
         tools!.present(args.tabId);
         return true;
       }
       case 'ack': {
-        if (typeof args.id !== 'string' || !['done', 'unavailable', 'failed'].includes(String(args.result))) throw failure('화면 응답이 올바르지 않습니다.', 400);
+        if (typeof args.id !== 'string' || !['done', 'unavailable', 'failed'].includes(String(args.result))) throw failure('화면 응답이 올바르지 않습니다.', 'invalid');
         return tools!.ack(args.id, args.result as 'done' | 'unavailable' | 'failed', typeof args.note === 'string' ? args.note : undefined);
       }
       case 'settings': {
@@ -121,7 +124,7 @@ export async function startMasterHost(options: MasterHostOptions) {
       }
       case 'tools': return MASTER_TOOLS;
       case 'tool': {
-        if (typeof args.name !== 'string' || !args.arguments || typeof args.arguments !== 'object' || Array.isArray(args.arguments)) throw failure('도구 호출이 올바르지 않습니다.', 400);
+        if (typeof args.name !== 'string' || !args.arguments || typeof args.arguments !== 'object' || Array.isArray(args.arguments)) throw failure('도구 호출이 올바르지 않습니다.', 'invalid');
         return tools!.call(args.name, args.arguments as Record<string, unknown>);
       }
       case 'voiceOn': return speech.voiceOn({ tabId: args.tabId, local: args.local === true });
@@ -145,7 +148,7 @@ export async function startMasterHost(options: MasterHostOptions) {
         return true;
       }
     }
-    throw failure('Unknown master operation.', 400);
+    throw failure('Unknown master operation.', 'invalid');
   };
 
   const server = createServer(async (req, res) => {
@@ -160,7 +163,7 @@ export async function startMasterHost(options: MasterHostOptions) {
       lastRequest = Date.now();
       const at = Number(url.searchParams.get('at') ?? '0');
       const requestId = req.headers['x-tower-audio-request-id'];
-      void voice!.serveAudio(audio[1], res, Number.isFinite(at) && at > 0 && at <= 1_200 ? at : 0, typeof requestId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId) ? requestId : undefined).catch(() => { if (!res.headersSent) res.writeHead(500); res.destroy(); });
+      void voice!.serveAudio(audio[1], audioSink(res), Number.isFinite(at) && at > 0 && at <= 1_200 ? at : 0, typeof requestId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId) ? requestId : undefined).catch(() => { if (!res.headersSent) res.writeHead(500); res.destroy(); });
       return;
     }
     if (req.method !== 'POST' || url.pathname !== '/rpc') { res.writeHead(404); res.end(); return; }
@@ -170,17 +173,17 @@ export async function startMasterHost(options: MasterHostOptions) {
       const chunks: Buffer[] = []; let bytes = 0;
       for await (const chunk of req) {
         bytes += chunk.length;
-        if (bytes > MAX_REQUEST) throw failure('Master request too large.', 413);
+        if (bytes > MAX_REQUEST) throw failure('Master request too large.', 'too-large');
         chunks.push(chunk);
       }
       const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { protocol?: number; method?: string; args?: Record<string, unknown>; web?: unknown };
-      if (input.protocol !== MASTER_PROTOCOL || typeof input.method !== 'string') throw failure('Incompatible master request.', 409);
+      if (input.protocol !== MASTER_PROTOCOL || typeof input.method !== 'string') throw failure('Incompatible master request.', 'conflict');
       credentials(input.web);
       if (!['hello', 'ping', 'voiceActivity', 'voicePresence', 'presence'].includes(input.method)) lastRequest = Date.now();
       reply.result = await dispatch(input.method, input.args && typeof input.args === 'object' ? input.args : {}) ?? null;
     } catch (error) {
-      const value = error as { message?: string; statusCode?: number };
-      reply.error = { message: value.message ?? 'Master operation failed.', statusCode: value.statusCode ?? 500 };
+      const value = error as { message?: string };
+      reply.error = { message: value.message ?? 'Master operation failed.', statusCode: statusOf(error) ?? 500 };
     } finally { pending--; }
     if (!res.destroyed) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(reply)); }
   });

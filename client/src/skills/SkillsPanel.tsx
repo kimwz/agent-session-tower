@@ -164,6 +164,7 @@ export function TowerSkills({ overview, cwd, busy, proposals, onNew, onEdit, onT
   const needle = filter.trim().toLowerCase();
   const shown = stored.filter(skill => !needle || `${skill.name} ${skill.description}`.toLowerCase().includes(needle)).sort((a, b) => a.name.localeCompare(b.name));
   return <section className="tower-skills">
+    {overview.problem && <p className="auth-error" role="alert">{translateMessage(overview.problem)}</p>}
     {proposals > 0 && <button type="button" className="skills-suggest" onClick={onProposals}><Sparkles size={14} />{t('추천 스킬 {0}개가 기다리고 있습니다', { 0: proposals })}<ChevronRight size={14} /></button>}
     {stored.length > 0 && <div className="skills-toolbar"><input type="search" placeholder={t('스킬 찾기')} aria-label={t('스킬 찾기')} value={filter} onChange={event => setFilter(event.target.value)} />
       <button className="primary-button" disabled={busy} onClick={onNew}><Plus size={14} />{t('새 스킬')}</button></div>}

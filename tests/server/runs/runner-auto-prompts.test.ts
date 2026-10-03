@@ -32,7 +32,7 @@ test('new sessions retain blank attachment prompts and persist Auto Prompt corre
   const persisted = JSON.parse(await readFile(join(f.directory, 'runs.json'), 'utf8'));
   assert.equal(persisted[0].autoPromptId, autoPromptId);
   assert.equal(persisted[0].attachments[0].id, run.attachments![0].id);
-  await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Duplicate' }, { autoPromptId }), { statusCode: 409 });
+  await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Duplicate' }, { autoPromptId }), { kind: 'conflict' });
 });
 
 test('correlation survives restart and old queued instructions are not replayed', async t => {
@@ -45,7 +45,7 @@ test('correlation survives restart and old queued instructions are not replayed'
   assert.equal(restored.autoPromptId, autoPromptId);
   assert.equal(restored.prompt, '  Original\n prompt  ');
   assert.equal(restored.status, 'cancelled');
-  await assert.rejects(restarted.enqueue(f.session.id, 'Duplicate', {}, { autoPromptId }), { statusCode: 409 });
+  await assert.rejects(restarted.enqueue(f.session.id, 'Duplicate', {}, { autoPromptId }), { kind: 'conflict' });
   await restarted.close();
 });
 

@@ -210,7 +210,7 @@ test('a slow folder trust answer never lets the same request ID be admitted twic
     const autoPromptId = randomUUID();
     const first = manager.create({ provider: 'claude', cwd: f.directory, prompt: 'One' }, { autoPromptId, origin: { kind: 'owner' } });
     await new Promise(resolve => setTimeout(resolve, 20));
-    await assert.rejects(manager.create({ provider: 'claude', cwd: f.directory, prompt: 'One' }, { autoPromptId, origin: { kind: 'owner' } }), { statusCode: 409 });
+    await assert.rejects(manager.create({ provider: 'claude', cwd: f.directory, prompt: 'One' }, { autoPromptId, origin: { kind: 'owner' } }), { kind: 'conflict' });
     release();
     await first;
     assert.equal(manager.list().filter(run => run.autoPromptId === autoPromptId).length, 1);

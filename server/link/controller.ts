@@ -14,6 +14,7 @@ import type { AutoUpdateStatus, HubStatus, NodeReport, NodeStatus, NodeSummary, 
 import { newerVersion } from './service.js';
 import { updateActive } from './update.js';
 import { failedAgain, parseRetry, retryDue, type RetryRecord } from '../updates/schedule.js';
+import { TowerError } from '../../shared/errors.js';
 
 export const DEFAULT_LINK_PORT = 8765;
 const INVITE_MS = 10 * 60_000;
@@ -125,7 +126,7 @@ export class ControllerLinks extends EventEmitter {
   /** `port` 0 takes any free port; `bind` and `custom` addresses are for setups the automatic ones do not cover. */
   async setHub(patch: { enabled?: boolean; port?: number; bind?: string; custom?: string[] }): Promise<HubStatus> {
     const settings = { ...this.state.settings, ...patch };
-    if (!Number.isInteger(settings.port) || (settings.port !== 0 && (settings.port < 1024 || settings.port > 65535))) throw Object.assign(new Error('포트는 1024에서 65535 사이여야 합니다.'), { statusCode: 400 });
+    if (!Number.isInteger(settings.port) || (settings.port !== 0 && (settings.port < 1024 || settings.port > 65535))) throw new TowerError('invalid', '포트는 1024에서 65535 사이여야 합니다.');
     const restart = settings.enabled !== this.state.settings.enabled || settings.port !== this.state.settings.port || settings.bind !== this.state.settings.bind;
     await this.save({ ...this.state, settings });
     if (restart) { await this.stopListening(); if (settings.enabled) await this.listen(); }
@@ -135,9 +136,9 @@ export class ControllerLinks extends EventEmitter {
 
   /** A single-use code valid for ten minutes. Needs the link port open, since the joining computer dials it. */
   async invite(): Promise<{ id: string; code: string; command: string; expiresAt: number }> {
-    if (!this.listener) throw Object.assign(new Error('먼저 다른 컴퓨터의 연결 받기를 켜세요.'), { statusCode: 409 });
+    if (!this.listener) throw new TowerError('conflict', '먼저 다른 컴퓨터의 연결 받기를 켜세요.');
     const addresses = this.hub().addresses.map(item => item.url);
-    if (!addresses.length) throw Object.assign(new Error('다른 컴퓨터가 이 컴퓨터에 닿을 네트워크 주소가 없습니다.'), { statusCode: 409 });
+    if (!addresses.length) throw new TowerError('conflict', '다른 컴퓨터가 이 컴퓨터에 닿을 네트워크 주소가 없습니다.');
     const invite: InviteRecord = { id: randomUUID(), secret: randomBytes(32).toString('base64url'), expiresAt: this.now() + INVITE_MS };
     const now = this.now();
     await this.save({ ...this.state, invites: [...this.state.invites.filter(item => item.expiresAt + CLAIM_GRACE_MS > now), invite] });
@@ -167,11 +168,11 @@ export class ControllerLinks extends EventEmitter {
   /** The owner asks a joined computer to move to this Tower's version, for example again after a failed update. */
   async update(id: string): Promise<void> {
     const live = this.connected.get(id);
-    if (!live) throw Object.assign(new Error('그 컴퓨터가 연결되어 있지 않습니다. 연결되면 다시 시도하세요.'), { statusCode: 409 });
-    if (!live.hello.features.includes('update')) throw Object.assign(new Error('그 컴퓨터는 Tower를 백그라운드 서비스로 실행하지 않아 여기서 업데이트할 수 없습니다.'), { statusCode: 409 });
+    if (!live) throw new TowerError('conflict', '그 컴퓨터가 연결되어 있지 않습니다. 연결되면 다시 시도하세요.');
+    if (!live.hello.features.includes('update')) throw new TowerError('conflict', '그 컴퓨터는 Tower를 백그라운드 서비스로 실행하지 않아 여기서 업데이트할 수 없습니다.');
     const { code, update } = await this.askUpdate(id, live);
-    if (code === 'busy') throw Object.assign(new Error('그 컴퓨터가 다른 버전으로 업데이트하는 중입니다. 끝난 뒤 다시 시도하세요.'), { statusCode: 409 });
-    if (code) throw Object.assign(new Error('그 컴퓨터가 업데이트 요청을 받지 않았습니다.'), { statusCode: 502 });
+    if (code === 'busy') throw new TowerError('conflict', '그 컴퓨터가 다른 버전으로 업데이트하는 중입니다. 끝난 뒤 다시 시도하세요.');
+    if (code) throw new TowerError('upstream', '그 컴퓨터가 업데이트 요청을 받지 않았습니다.');
     // The owner tries at once, whatever the schedule says, and a failure of that try leaves the schedule as it is.
     if (update && updateActive(update)) await this.retries(id, node => node.manual === update.startedAt ? undefined : { manual: update.startedAt });
     this.watch(id, live);
@@ -185,7 +186,7 @@ export class ControllerLinks extends EventEmitter {
 
   async rename(id: string, label: string): Promise<void> {
     const trimmed = label.trim().slice(0, 80);
-    if (!this.state.nodes.some(node => node.id === id)) throw Object.assign(new Error('연결된 컴퓨터가 아닙니다.'), { statusCode: 404 });
+    if (!this.state.nodes.some(node => node.id === id)) throw new TowerError('not-found', '연결된 컴퓨터가 아닙니다.');
     await this.save({ ...this.state, nodes: this.state.nodes.map(node => node.id === id ? { ...node, ...(trimmed ? { label: trimmed } : { label: undefined }) } : node) });
     this.emit('change');
   }
@@ -460,7 +461,7 @@ export class ControllerLinks extends EventEmitter {
   }
 
   private save(next: State): Promise<void> {
-    if (this.broken) return Promise.reject(Object.assign(new Error(this.broken), { statusCode: 503 }));
+    if (this.broken) return Promise.reject(new TowerError('unavailable', this.broken));
     // Codes past their grace period, and their secrets, are not kept.
     const now = this.now();
     this.state = next.invites.every(item => item.expiresAt + CLAIM_GRACE_MS > now) ? next : { ...next, invites: next.invites.filter(item => item.expiresAt + CLAIM_GRACE_MS > now) };

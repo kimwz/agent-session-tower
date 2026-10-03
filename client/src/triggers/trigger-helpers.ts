@@ -1,7 +1,7 @@
 import { absoluteTime } from '../common/lib';
 import type { ResolvedModel } from '../../../shared/models';
 import { createContext } from 'react';
-import type { IssueWatch, Trigger, TriggerAuditEntry, TriggerEvent, TriggerInput, TriggerOverview } from '../../../shared/triggers';
+import { POLL_INTERVAL_DEFAULT_SECONDS, type IssueWatch, type Trigger, type TriggerAuditEntry, type TriggerEvent, type TriggerInput, type TriggerOverview } from '../../../shared/triggers';
 import { isOperationName, OPERATIONS } from '../../../shared/api/operations';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { authPost } from '../auth/AuthGate';
@@ -88,10 +88,10 @@ export function scheduleLabel(trigger: Pick<Trigger, 'source'>, t: Translate): s
 /** Who counts as an author by default: the repository's owners, members and collaborators. */
 export const MEMBERS = ['OWNER', 'MEMBER', 'COLLABORATOR'] as const;
 export const browserZone = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; } };
-export function blankHttpSource(schedule: HttpSource['schedule'] = { type: 'interval', everySeconds: 300 }): HttpSource {
+export function blankHttpSource(schedule: HttpSource['schedule'] = { type: 'interval', everySeconds: POLL_INTERVAL_DEFAULT_SECONDS }): HttpSource {
   return { kind: 'http', schedule, request: { method: 'GET', url: '', headers: [], timeoutSeconds: 30 }, condition: { type: 'changed' } };
 }
-export function blankGitHubSource(schedule: GitHubSource['schedule'] = { type: 'interval', everySeconds: 300 }): GitHubSource {
+export function blankGitHubSource(schedule: GitHubSource['schedule'] = { type: 'interval', everySeconds: POLL_INTERVAL_DEFAULT_SECONDS }): GitHubSource {
   return { kind: 'github', schedule, auth: { type: 'gh' }, account: '', watch: blankIssueWatch([]) };
 }
 type Watch = GitHubSource['watch'];

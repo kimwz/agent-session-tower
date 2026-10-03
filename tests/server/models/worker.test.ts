@@ -22,6 +22,6 @@ test('new-session admission resolves the role and explicit fields, leaving ordin
   assert.deepEqual(await newWorkerSession(directory, parseCreateSession({ ...role, model: 'chosen' })), { ...base, provider: 'claude', model: 'chosen', effort: 'high' });
   assert.deepEqual(await newWorkerSession(directory, parseCreateSession({ ...base, provider: 'codex' })), { ...base, provider: 'codex' });
   await assert.rejects(newWorkerSession(directory, { ...base, modelRole: 'master.worker', effort: 'minimal' }), /reasoning effort/);
-  for (const extra of [{ provider: 'bad' }, { model: '' }, { effort: '' }, { modelRole: 'reviewer.codex' }]) assert.throws(() => parseCreateSession({ ...role, ...extra }), { statusCode: 400 });
+  for (const extra of [{ provider: 'bad' }, { model: '' }, { effort: '' }, { modelRole: 'reviewer.codex' }]) assert.throws(() => parseCreateSession({ ...role, ...extra }), { kind: 'invalid' });
   assert.equal(parseAutoPrompt({ ...role, requestId: '11111111-1111-4111-8111-111111111111' }).provider, undefined);
 });

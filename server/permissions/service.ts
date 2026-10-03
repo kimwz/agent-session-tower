@@ -11,6 +11,7 @@ import {
 import type { Provider } from '../../shared/types.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { codexRulesPath, realLocation, syncCodex } from './native.js';
+import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
 /** What Tower keeps about permission rules, in `<state>/permissions.json`. */
 export interface PermissionState {
@@ -33,7 +34,7 @@ const MAX_DECIDED = 200;
 const DECIDED_DAYS = 30;
 const MAX_BYTES = 4_000_000;
 
-const failure = (message: string, statusCode = 400) => Object.assign(new Error(message), { statusCode });
+const failure = (message: string, kind: ErrorKind = 'invalid') => new TowerError(kind, message);
 const empty = (): PermissionState => ({ version: 1, rules: [], requests: [], codex: [] });
 /** A conversation the reviewer sent back for a narrower request this often in a day hears from the owner next. */
 const MAX_NARROW = 2;
@@ -338,9 +339,9 @@ export class PermissionService {
   /** An agent asks the owner for a rule. The same pending request is returned again rather than repeated. */
   request(input: { kind: PermissionRuleInput['kind']; value: string; providers?: PermissionProvider[]; scope: PermissionRuleInput['scope']; reason: string }, caller: PermissionCaller) {
     return this.serial(async () => {
-      if (caller.controllerId) throw failure('다른 컴퓨터에서 시작한 작업은 이 컴퓨터의 권한을 요청할 수 없습니다.', 403);
+      if (caller.controllerId) throw failure('다른 컴퓨터에서 시작한 작업은 이 컴퓨터의 권한을 요청할 수 없습니다.', 'forbidden');
       const session = caller.sessionId ? this.options.session(caller.sessionId) : undefined;
-      if (!caller.sessionId || !session?.cwd) throw failure('권한 요청은 Tower에서 시작한 대화에서만 보낼 수 있습니다.', 403);
+      if (!caller.sessionId || !session?.cwd) throw failure('권한 요청은 Tower에서 시작한 대화에서만 보낼 수 있습니다.', 'forbidden');
       const provider: PermissionProvider = session.provider === 'codex' ? 'codex' : 'claude';
       if (input.scope === 'conversation' && provider !== 'claude') throw failure('Codex 대화에는 대화 한정 규칙을 줄 수 없습니다. project 범위로 요청하거나 permissions_run으로 한 번 실행을 요청하세요.');
       const rule = await this.checked(clean({ kind: input.kind, value: input.value, providers: input.kind === 'claude' || input.scope === 'conversation' ? ['claude'] : input.providers ?? [provider], scope: input.scope,
@@ -360,7 +361,7 @@ export class PermissionService {
       const same = this.state.requests.find(request => request.status === 'pending' && request.sessionId === caller.sessionId && sameRule(request.rule, rule)
         && rule.providers.every(item => request.rule.providers.includes(item)));
       if (same) return { request: { id: same.id, status: same.status }, note: WAIT_NOTE };
-      if (this.pending() >= MAX_PENDING) throw failure('기다리는 권한 요청이 너무 많습니다. 소유자가 Tower에서 먼저 정리해야 합니다.', 429);
+      if (this.pending() >= MAX_PENDING) throw failure('기다리는 권한 요청이 너무 많습니다. 소유자가 Tower에서 먼저 정리해야 합니다.', 'rate-limited');
       const request: PermissionRequest = { id: randomUUID(), status: 'pending', rule, reason: input.reason.trim(), sessionId: caller.sessionId, ...(caller.runId ? { runId: caller.runId } : {}),
         cwd: session.cwd, provider, createdAt: this.now() };
       if (this.autoReview().enabled) {
@@ -379,9 +380,9 @@ export class PermissionService {
    */
   requestRun(input: { command: string; reason: string; timeoutSeconds?: number; key?: string }, caller: PermissionCaller) {
     return this.serial(async () => {
-      if (caller.controllerId) throw failure('다른 컴퓨터에서 시작한 작업은 이 컴퓨터에서 명령을 실행해 달라고 요청할 수 없습니다.', 403);
+      if (caller.controllerId) throw failure('다른 컴퓨터에서 시작한 작업은 이 컴퓨터에서 명령을 실행해 달라고 요청할 수 없습니다.', 'forbidden');
       const session = caller.sessionId ? this.options.session(caller.sessionId) : undefined;
-      if (!caller.sessionId || !session?.cwd) throw failure('실행 요청은 Tower에서 시작한 대화에서만 보낼 수 있습니다.', 403);
+      if (!caller.sessionId || !session?.cwd) throw failure('실행 요청은 Tower에서 시작한 대화에서만 보낼 수 있습니다.', 'forbidden');
       const provider: PermissionProvider = session.provider === 'codex' ? 'codex' : 'claude';
       const command = input.command.replace(/\r\n/g, '\n');
       const rule = clean({ kind: 'run', value: command, providers: [provider], scope: 'project', cwd: session.cwd });
@@ -392,10 +393,10 @@ export class PermissionService {
         && ((explicit && request.status !== 'denied' && request.status !== 'withdrawn') || request.status === 'pending' || (request.status === 'approved' && !finishedRun(request.run))
           || (request.status === 'approved' && now - Date.parse(request.run?.finishedAt ?? request.createdAt) < SAME_RUN_MS)));
       if (same) {
-        if (same.rule.value !== command) throw failure('같은 key로 다른 명령을 요청했습니다. 다른 명령에는 새 key를 쓰세요.', 409);
+        if (same.rule.value !== command) throw failure('같은 key로 다른 명령을 요청했습니다. 다른 명령에는 새 key를 쓰세요.', 'conflict');
         return { request: runView(same), note: same.status === 'approved' ? RUN_SAME_NOTE : RUN_NOTE };
       }
-      if (this.pending() >= MAX_PENDING) throw failure('기다리는 권한 요청이 너무 많습니다. 소유자가 Tower에서 먼저 정리해야 합니다.', 429);
+      if (this.pending() >= MAX_PENDING) throw failure('기다리는 권한 요청이 너무 많습니다. 소유자가 Tower에서 먼저 정리해야 합니다.', 'rate-limited');
       const request: PermissionRequest = { id: randomUUID(), status: 'pending', rule, reason: input.reason.trim(), sessionId: caller.sessionId, ...(caller.runId ? { runId: caller.runId } : {}),
         cwd: session.cwd, provider, createdAt: this.now(), key, ...(explicit ? { keyExplicit: true } : {}), timeoutSeconds: Math.min(input.timeoutSeconds ?? MAX_RUN_SECONDS, MAX_RUN_SECONDS) };
       if (this.autoReview().enabled) {
@@ -416,7 +417,7 @@ export class PermissionService {
     const deadline = Date.now() + Math.min(input.waitSeconds ?? 0, 50) * 1000;
     const find = () => {
       const request = this.state.requests.find(item => item.id === input.id && item.rule.kind === 'run');
-      if (!request || request.sessionId !== caller.sessionId) throw failure('이 대화의 실행 요청이 아닙니다.', 404);
+      if (!request || request.sessionId !== caller.sessionId) throw failure('이 대화의 실행 요청이 아닙니다.', 'not-found');
       return request;
     };
     let request = find();
@@ -509,7 +510,7 @@ export class PermissionService {
 
   remove(id: string): Promise<PermissionOverview> {
     return this.serial(async () => {
-      if (!this.state.rules.some(rule => rule.id === id)) throw failure('규칙을 찾지 못했습니다.', 404);
+      if (!this.state.rules.some(rule => rule.id === id)) throw failure('규칙을 찾지 못했습니다.', 'not-found');
       await this.commit(state => { state.rules = state.rules.filter(rule => rule.id !== id); });
       await this.apply();
       return this.overview();
@@ -524,8 +525,8 @@ export class PermissionService {
     let replaced: string[] = [];
     const { request, rule, run } = await this.serial(async (): Promise<{ request: PermissionRequest; rule: PermissionRuleInput | undefined; run?: boolean }> => {
       const request = this.state.requests.find(item => item.id === id);
-      if (!request) throw failure('요청을 찾지 못했습니다.', 404);
-      if (request.status !== 'pending') throw failure('이미 처리한 요청입니다.', 409);
+      if (!request) throw failure('요청을 찾지 못했습니다.', 'not-found');
+      if (request.status !== 'pending') throw failure('이미 처리한 요청입니다.', 'conflict');
       const at = this.now();
       if (!approve) {
         await this.commit(state => { const item = state.requests.find(entry => entry.id === id)!; item.status = 'denied'; item.decidedAt = at; item.decidedBy = 'owner'; if (resume && request.rule.kind !== 'run') item.notification = { state: 'pending', message: decisionMessage(request.rule, undefined) }; });
@@ -572,7 +573,7 @@ export class PermissionService {
     await this.serial(async () => {
       const request = this.state.requests.find(item => item.id === id);
       if (!request || request.notification?.state !== 'pending') return;
-      if (request.status === 'approved' && this.targets(request.cwd).some(target => target.error)) throw failure('Permission rules could not be applied; continuation was not admitted.', 503);
+      if (request.status === 'approved' && this.targets(request.cwd).some(target => target.error)) throw failure('Permission rules could not be applied; continuation was not admitted.', 'unavailable');
       const notify = this.options.decision ?? fallback;
       if (notify) await notify(structuredClone(request), request.notification.message);
       else if (this.options.resume) await this.options.resume(request.sessionId, request.notification.message);
@@ -593,7 +594,7 @@ export class PermissionService {
   private now(): string { return (this.options.now?.() ?? new Date()).toISOString(); }
 
   private serial<T>(work: () => Promise<T>): Promise<T> {
-    if (this.closed) return Promise.reject(failure('권한 규칙을 지금은 바꿀 수 없습니다. 잠시 뒤 다시 시도하세요.', 503));
+    if (this.closed) return Promise.reject(failure('권한 규칙을 지금은 바꿀 수 없습니다. 잠시 뒤 다시 시도하세요.', 'unavailable'));
     const next = this.queue.catch(() => {}).then(work);
     this.queue = next;
     return next;
@@ -738,8 +739,8 @@ function dropOverlappingAuto(state: PermissionState, rule: PermissionRule): stri
 function upsert(state: PermissionState, rule: PermissionRuleInput, id: string | undefined, source: PermissionRule['source'], requestId: string | undefined, at: string): PermissionRule {
   if (id) {
     const index = state.rules.findIndex(item => item.id === id);
-    if (index < 0) throw failure('규칙을 찾지 못했습니다.', 404);
-    if (state.rules.some(item => item.id !== id && sameRule(item, rule))) throw failure('같은 규칙이 이미 있습니다.', 409);
+    if (index < 0) throw failure('규칙을 찾지 못했습니다.', 'not-found');
+    if (state.rules.some(item => item.id !== id && sameRule(item, rule))) throw failure('같은 규칙이 이미 있습니다.', 'conflict');
     state.rules[index] = { ...state.rules[index], ...rule, ...(rule.note ? {} : { note: undefined }), ...(rule.cwd ? {} : { cwd: undefined }), updatedAt: at,
       // A rule the reviewer made becomes the owner's once the owner changes what it allows; a note or its agents alone keep its deny rules.
       ...(state.rules[index]!.source === 'auto' && source !== 'auto' && !sameRule(state.rules[index]!, rule) ? { source } : {}) };
@@ -757,7 +758,7 @@ function upsert(state: PermissionState, rule: PermissionRuleInput, id: string | 
     if (same.scope === 'conversation' && requestId) same.requestId = requestId;
     return same;
   }
-  if (state.rules.length >= MAX_RULES) throw failure('규칙은 200개까지 저장할 수 있습니다.', 409);
+  if (state.rules.length >= MAX_RULES) throw failure('규칙은 200개까지 저장할 수 있습니다.', 'conflict');
   const made: PermissionRule = { ...rule, id: randomUUID(), source, ...(requestId ? { requestId } : {}), createdAt: at, updatedAt: at };
   state.rules.push(made);
   return made;

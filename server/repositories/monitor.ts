@@ -1,6 +1,7 @@
 import type { ProjectGroup, Session } from '../../shared/types.js';
 import { pullBlocker, pushBlocker, type RepositoryAction, type RepositoryActionResult, type RepositoryStatus } from '../../shared/repositories.js';
 import { gitRunner, parseStatus, type GitRunner } from './git.js';
+import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
 const TICK_MS = 60_000;
 const FETCH_EVERY_MS = 5 * 60_000;
@@ -31,7 +32,7 @@ export function watchedRepositoryPaths(sessions: readonly Session[], groups: rea
   return [...latest].filter(([cwd]) => !temporary(cwd)).sort((a, b) => b[1] - a[1]).slice(0, MAX_WATCHED).map(([cwd]) => cwd);
 }
 
-const repositoryError = (message: string, statusCode: number) => Object.assign(new Error(message), { statusCode });
+const repositoryError = (message: string, kind: ErrorKind) => new TowerError(kind, message);
 
 interface Entry { status?: RepositoryStatus; notRepositoryAt?: number; fetchAttemptAt?: number }
 
@@ -99,10 +100,10 @@ export class RepositoryMonitor {
   }
 
   async act(cwd: string, action: RepositoryAction): Promise<RepositoryStatus> {
-    if (!this.options.watched().includes(cwd) && !this.entries.get(cwd)?.status) throw repositoryError('Tower가 추적하는 프로젝트 폴더가 아닙니다.', 404);
+    if (!this.options.watched().includes(cwd) && !this.entries.get(cwd)?.status) throw repositoryError('Tower가 추적하는 프로젝트 폴더가 아닙니다.', 'not-found');
     if (action === 'refresh') {
       const status = await this.refresh(cwd, FETCH_TIMEOUT_MS);
-      if (!status) throw repositoryError('Git 저장소가 아닙니다.', 404);
+      if (!status) throw repositoryError('Git 저장소가 아닙니다.', 'not-found');
       return status;
     }
     return action === 'pull' ? this.pull(cwd, 'pull') : this.push(cwd);
@@ -125,9 +126,9 @@ export class RepositoryMonitor {
   private async pull(cwd: string, kind: 'pull' | 'auto-pull'): Promise<RepositoryStatus> {
     return this.exclusive(cwd, async () => {
       const before = await this.readStatus(cwd);
-      if (!before) throw repositoryError('Git 저장소가 아닙니다.', 404);
+      if (!before) throw repositoryError('Git 저장소가 아닙니다.', 'not-found');
       const blocker = pullBlocker(before, this.options.busy(before));
-      if (blocker) throw repositoryError(PULL_BLOCKERS[blocker], 409);
+      if (blocker) throw repositoryError(PULL_BLOCKERS[blocker], 'conflict');
       const result = await this.git(cwd, ['merge', '--ff-only', '--quiet', '@{upstream}'], LOCAL_TIMEOUT_MS)
         .then(() => ({ kind, ok: true, commits: before.behind }), (error: Error) => ({ kind, ok: false, error: error.message }));
       return this.record(cwd, { ...result, at: new Date(this.now()).toISOString() });
@@ -137,9 +138,9 @@ export class RepositoryMonitor {
   private async push(cwd: string): Promise<RepositoryStatus> {
     return this.exclusive(cwd, async () => {
       const before = await this.readStatus(cwd);
-      if (!before) throw repositoryError('Git 저장소가 아닙니다.', 404);
+      if (!before) throw repositoryError('Git 저장소가 아닙니다.', 'not-found');
       const blocker = pushBlocker(before);
-      if (blocker) throw repositoryError(PUSH_BLOCKERS[blocker], 409);
+      if (blocker) throw repositoryError(PUSH_BLOCKERS[blocker], 'conflict');
       const branch = before.branch!;
       // The upstream is named in full, so a branch tracking a differently named one still pushes there.
       const remote = (await this.git(cwd, ['config', '--get', `branch.${branch}.remote`], LOCAL_TIMEOUT_MS)).trim();
@@ -152,7 +153,7 @@ export class RepositoryMonitor {
 
   private async record(cwd: string, action: RepositoryActionResult): Promise<RepositoryStatus> {
     const status = await this.readStatus(cwd) ?? this.entries.get(cwd)?.status;
-    if (!status) throw repositoryError('Git 저장소가 아닙니다.', 404);
+    if (!status) throw repositoryError('Git 저장소가 아닙니다.', 'not-found');
     status.lastAction = action;
     this.options.onChange();
     return { ...status };

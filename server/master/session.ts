@@ -3,16 +3,18 @@ import { continuedRunById } from '../runs/continuations.js';
 import { join } from 'node:path';
 import { MASTER_FOLDER, type MasterBinding, type MasterSpeak, type MasterTaskState, type MasterUnspoken } from '../../shared/master.js';
 import type { AutoPromptJob, ChatMessage, Provider, Run, RunReply, SessionDetail, SessionOutcome, Snapshot } from '../../shared/types.js';
-import type { MasterEntryData } from '../../shared/master.js';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import type { MasterEntryData, MasterFollowState } from '../../shared/master.js';
+import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { ApiTarget } from '../tower-tools/api-target.js';
 import { REPORT_MARK, VOICE_MARK, writeMasterGuide } from './guide.js';
 import type { LiveState } from '../tower-tools/live-state.js';
+import { replyError } from '../tower-tools/tower-client.js';
 import type { Table } from '../tower-tools/read-db.js';
 import type { MasterRoom } from './room.js';
 import type { MasterSettingsStore } from './settings.js';
 import type { TowerClient } from '../tower-tools/tower-client.js';
 import { READ_CHARS } from './voice-text.js';
+import { TowerError } from '../../shared/errors.js';
 
 const FOLLOW_MS = 5_000;
 /** Work Tower cannot find for this long is reported as unknown. */
@@ -127,6 +129,9 @@ export class MasterSession {
   readonly folder: string;
   private file: FollowFile = { version: 1, baselineAt: new Date().toISOString(), masterRuns: [], followed: [] };
   private readonly path: string;
+  /** Off while the follow file could not be read or moved aside: it is never written over. */
+  private persist = true;
+  private problem?: MasterFollowState;
   private voice?: VoiceSide;
   private timer?: ReturnType<typeof setInterval>;
   private following?: Promise<void>;
@@ -144,8 +149,8 @@ export class MasterSession {
   }
 
   async start(): Promise<void> {
-    const saved = await readPrivateJson(this.path).catch(() => undefined) as Partial<FollowFile> | undefined;
-    if (saved?.version === 1 && Array.isArray(saved.followed) && Array.isArray(saved.masterRuns) && typeof saved.baselineAt === 'string') {
+    const saved = await this.read();
+    if (saved) {
       this.file = { version: 1, baselineAt: saved.baselineAt, masterRuns: saved.masterRuns.filter(id => typeof id === 'string'), followed: saved.followed.filter(item => item && typeof item.id === 'string'),
         ...(typeof saved.stoppedAt === 'string' ? { stoppedAt: saved.stoppedAt } : {}),
         voiced: (Array.isArray(saved.voiced) ? saved.voiced : []).filter(item => item && typeof item.turn === 'string')
@@ -230,6 +235,38 @@ export class MasterSession {
   /** Work handed out and not reported yet. */
   activeTasks(): number { return this.file.followed.filter(item => item.kind === 'delegated' && (item.state === 'running' || (item.report !== undefined && item.report !== 'sent' && item.report !== 'failed'))).length; }
   /** Reports Tower kept refusing, which the master never got. */
+  /** Why followed work may be missing: the file was moved aside, or it could not be read or moved and nothing is saved. */
+  stateProblem(): MasterFollowState | undefined { return this.problem; }
+
+  /**
+   * The saved follow file. A file that cannot be parsed or has the wrong shape is moved aside and the master starts
+   * fresh; one that cannot be read, or moved, is left as it is and nothing is saved over it until a restart.
+   */
+  private async read(): Promise<FollowFile | undefined> {
+    let saved: unknown;
+    try { saved = await readPrivateJson(this.path); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      if (!(error instanceof SyntaxError)) { this.keep(error); return undefined; }
+      await this.setAside(error);
+      return undefined;
+    }
+    const file = saved as Partial<FollowFile> | null;
+    if (file?.version === 1 && Array.isArray(file.followed) && Array.isArray(file.masterRuns) && typeof file.baselineAt === 'string') return file as FollowFile;
+    await this.setAside(new Error('Saved master follow state is invalid.'));
+    return undefined;
+  }
+  private async setAside(error: unknown): Promise<void> {
+    console.error('The master\'s follow state could not be read and was moved aside:', error);
+    try { await quarantineFile(this.path); this.problem = 'moved-aside'; }
+    catch (moveError) { this.keep(moveError); }
+  }
+  private keep(error: unknown): void {
+    this.persist = false;
+    this.problem = 'not-saved';
+    console.error('The master\'s follow state could not be read or moved aside; nothing is saved until Tower restarts:', error);
+  }
+
   failedReports(): number { return this.file.followed.filter(item => item.kind === 'delegated' && item.report === 'failed').length; }
 
   /** A report is on its way: a host of another build waits until it is sent. */
@@ -247,18 +284,18 @@ export class MasterSession {
    * ordinary session. A start whose answer was lost is not tried again: the owner sees it in the session list.
    */
   begin(input: { provider: Provider; text: string; model?: string; effort?: string; replace?: boolean }): Promise<MasterBinding> {
-    if (this.starting) throw Object.assign(new Error('마스터 세션을 시작하는 중입니다.'), { statusCode: 409 });
+    if (this.starting) throw new TowerError('conflict', '마스터 세션을 시작하는 중입니다.');
     const run = async (): Promise<MasterBinding> => {
-      if (this.binding() && !input.replace) throw Object.assign(new Error('마스터 세션이 이미 있습니다.'), { statusCode: 409 });
+      if (this.binding() && !input.replace) throw new TowerError('conflict', '마스터 세션이 이미 있습니다.');
       await writeMasterGuide(this.folder);
       const response = await this.options.tower.call('POST', '/api/sessions', { provider: input.provider, cwd: this.folder, prompt: input.text, title: '마스터',
         ...(input.model ? { model: input.model } : {}), ...(input.effort ? { effort: input.effort } : {}) }, { write: true });
       const created = response.body as { session?: { id?: string }; run?: Run } | undefined;
       if (response.state !== 'succeeded' || !created?.session?.id) {
         const message = (response.body as { error?: string } | undefined)?.error;
-        throw Object.assign(new Error(response.state === 'uncertain'
-          ? '마스터 세션을 만들었는지 알 수 없습니다. 세션 목록에서 "마스터" 세션을 확인해 주세요.'
-          : `마스터 세션을 시작하지 못했습니다${message ? `: ${message}` : '.'}`), { statusCode: response.state === 'uncertain' ? 503 : response.status || 502 });
+        throw response.state === 'uncertain'
+          ? new TowerError('unavailable', '마스터 세션을 만들었는지 알 수 없습니다. 세션 목록에서 "마스터" 세션을 확인해 주세요.')
+          : replyError(`마스터 세션을 시작하지 못했습니다${message ? `: ${message}` : '.'}`, response, 'upstream');
       }
       const binding: MasterBinding = { sessionId: created.session.id, provider: input.provider, startedAt: new Date().toISOString() };
       await this.options.settings.bind(binding);
@@ -279,7 +316,7 @@ export class MasterSession {
   /** A request the owner said aloud: sent to the master session, and its answer read aloud when it comes. */
   async spoken(input: { text: string; voiceSession: string; key: string }): Promise<void> {
     const binding = this.binding();
-    if (!binding) throw Object.assign(new Error('마스터 세션이 아직 없습니다. 먼저 글로 한 번 말을 걸어 주세요.'), { statusCode: 409 });
+    if (!binding) throw new TowerError('conflict', '마스터 세션이 아직 없습니다. 먼저 글로 한 번 말을 걸어 주세요.');
     // The same request (its page sent it again) goes once.
     if (this.sending.has(input.key) || this.file.followed.some(item => item.key === input.key)) return;
     this.sending.add(input.key);
@@ -306,7 +343,7 @@ export class MasterSession {
     // Refused, it can be said again; whether an uncertain one arrived is not known, so it is not sent again by its key.
     if (response.state !== 'uncertain') { this.file.followed = this.file.followed.filter(entry => entry !== item); await this.save(); }
     else { item.state = 'unknown'; await this.save(); }
-    throw Object.assign(new Error((response.body as { error?: string } | undefined)?.error ?? '마스터 세션에 보내지 못했습니다.'), { statusCode: response.status || 503 });
+    throw replyError((response.body as { error?: string } | undefined)?.error ?? '마스터 세션에 보내지 못했습니다.', response, 'unavailable');
   }
 
   /** Work a tower_api call started (a new session, a message, an Auto Prompt), followed so its end is reported. */
@@ -684,6 +721,7 @@ export class MasterSession {
   }
 
   private save(): Promise<void> {
+    if (!this.persist) return Promise.resolve();
     const text = JSON.stringify(this.file);
     const next = this.writes.then(() => writePrivateJson(this.path, text));
     this.writes = next.catch(() => {});

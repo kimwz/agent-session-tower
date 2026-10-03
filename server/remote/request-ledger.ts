@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { RunError } from '../runs/manager.js';
+import { TowerError, statusOf, type ErrorKind } from '../../shared/errors.js';
 
 /** How long a remote request ID is remembered. A retry older than this is refused instead of run again. */
 export const REMOTE_REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -22,12 +23,13 @@ interface Entry { key: string; fingerprint: string; at: number; issued: number; 
  * such as a missing CLI or a full queue), client errors, and anything explicitly marked as not admitted.
  */
 function refusedBeforeAdmission(error: unknown): boolean {
-  const { statusCode, disposition } = error as { statusCode?: number; disposition?: string };
+  const status = statusOf(error);
+  const { disposition } = error as { disposition?: string };
   if (disposition === 'uncertain') return false;
-  return error instanceof RunError || disposition === 'handoff' || disposition === 'not-admitted' || (statusCode !== undefined && statusCode < 500);
+  return error instanceof RunError || disposition === 'handoff' || disposition === 'not-admitted' || (status !== undefined && status < 500);
 }
 
-const failure = (message: string, statusCode: number, disposition?: 'uncertain' | 'not-admitted') => Object.assign(new Error(message), { statusCode, ...(disposition ? { disposition } : {}) });
+const failure = (message: string, kind: ErrorKind, disposition?: 'uncertain' | 'not-admitted') => new TowerError(kind, message, disposition ? { disposition } : {});
 
 /** Identifies a request's content, so a retry can be told apart from a different request reusing its ID. */
 export function requestFingerprint(content: unknown): string { return createHash('sha256').update(JSON.stringify(content)).digest('hex'); }
@@ -73,29 +75,29 @@ export class RemoteRequestLedger {
     record: (value: T) => RemoteResult, replay: (result: RemoteResult) => T | undefined): Promise<T> {
     const issued = remoteRequestTime(requestId);
     const now = this.now();
-    if (issued === undefined) throw failure('원격 요청 ID 형식이 올바르지 않습니다.', 400, 'not-admitted');
-    if (issued > now + FUTURE_SKEW_MS) throw failure('요청 시각이 이 컴퓨터의 시계보다 너무 앞서 있습니다. 두 컴퓨터의 시계를 확인하세요.', 409, 'not-admitted');
+    if (issued === undefined) throw failure('원격 요청 ID 형식이 올바르지 않습니다.', 'invalid', 'not-admitted');
+    if (issued > now + FUTURE_SKEW_MS) throw failure('요청 시각이 이 컴퓨터의 시계보다 너무 앞서 있습니다. 두 컴퓨터의 시계를 확인하세요.', 'conflict', 'not-admitted');
     // It may have run before its record expired; only a look at the conversation can tell.
-    if (issued < now - REMOTE_REQUEST_RETENTION_MS) throw failure('너무 오래된 원격 요청입니다. 대화 상태를 확인한 뒤 필요하면 새로 보내세요.', 409, 'uncertain');
+    if (issued < now - REMOTE_REQUEST_RETENTION_MS) throw failure('너무 오래된 원격 요청입니다. 대화 상태를 확인한 뒤 필요하면 새로 보내세요.', 'conflict', 'uncertain');
     const key = `${controllerId}\n${operation}\n${requestId.toLowerCase()}`;
     const fingerprint = requestFingerprint(content);
     const inFlight = this.running.get(key);
     if (inFlight) {
-      if (inFlight.fingerprint !== fingerprint) throw failure('같은 요청 ID에 다른 내용을 보낼 수 없습니다.', 409, 'not-admitted');
+      if (inFlight.fingerprint !== fingerprint) throw failure('같은 요청 ID에 다른 내용을 보낼 수 없습니다.', 'conflict', 'not-admitted');
       return inFlight.promise as Promise<T>;
     }
     const previous = this.entries.get(key);
     if (previous) {
-      if (previous.fingerprint !== fingerprint) throw failure('같은 요청 ID에 다른 내용을 보낼 수 없습니다.', 409, 'not-admitted');
-      if (!previous.result) throw failure('이전 요청의 처리 여부가 확실하지 않습니다. 대화 상태를 확인한 뒤 필요하면 새로 보내세요.', 409, 'uncertain');
+      if (previous.fingerprint !== fingerprint) throw failure('같은 요청 ID에 다른 내용을 보낼 수 없습니다.', 'conflict', 'not-admitted');
+      if (!previous.result) throw failure('이전 요청의 처리 여부가 확실하지 않습니다. 대화 상태를 확인한 뒤 필요하면 새로 보내세요.', 'conflict', 'uncertain');
       const value = replay(previous.result);
       // It ran; sending it again would run it twice.
-      if (value === undefined) throw failure('이미 처리된 요청입니다. 세부 기록은 만료되었습니다.', 409, 'uncertain');
+      if (value === undefined) throw failure('이미 처리된 요청입니다. 세부 기록은 만료되었습니다.', 'conflict', 'uncertain');
       return value;
     }
     this.prune();
     // A record still inside its window is never dropped to make room: forgetting it would let a retry run again.
-    if (this.entries.size >= this.capacity) throw failure('이 컴퓨터가 최근 원격 요청을 너무 많이 받았습니다. 잠시 후 다시 보내세요.', 503, 'not-admitted');
+    if (this.entries.size >= this.capacity) throw failure('이 컴퓨터가 최근 원격 요청을 너무 많이 받았습니다. 잠시 후 다시 보내세요.', 'unavailable', 'not-admitted');
     const promise = this.admit(key, fingerprint, now, issued, execute, record);
     this.running.set(key, { fingerprint, promise });
     try { return await promise; } finally { this.running.delete(key); }

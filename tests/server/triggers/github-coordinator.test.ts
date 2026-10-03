@@ -239,8 +239,8 @@ test('a comment refused before it leaves (rate limit) can be approved again', as
   await f.settle();
   const workflowId = f.service.events()[0].dispatch!.workflowId!;
   await f.coordinator.tool(workflowId, 'github_reply', { requestKey: 'p', text: 'Done' });
-  const blocked = (f.service as unknown as { githubBlocked: Map<string, number> }).githubBlocked;
-  const identity = [...(f.service as unknown as { logins: Map<string, unknown> }).logins.keys()][0];
+  const blocked = (f.service as unknown as { github: { githubBlocked: Map<string, number> } }).github.githubBlocked;
+  const identity = [...(f.service as unknown as { github: { logins: Map<string, unknown> } }).github.logins.keys()][0];
   blocked.set(identity, f.clock.now + 3_600_000);
   await assert.rejects(f.coordinator.approveReply(workflowId, 'p', 'Done'), /rate limit/);
   assert.equal(f.posts.length, 0);

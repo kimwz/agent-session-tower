@@ -40,7 +40,7 @@ test('reader rejects traversal, symlink escape, non-images, directories, missing
   const linked = join(cwd, 'link.png'); await symlink(outside, linked);
   const fake = join(cwd, 'fake.png'); await writeFile(fake, '<svg onload="alert(1)"/>');
   const huge = join(cwd, 'huge.png'); await writeFile(huge, Buffer.alloc(MAX_CHAT_IMAGE_BYTES + 1));
-  for (const path of [outside, linked, fake, huge, cwd, join(cwd, 'missing.png')]) await assert.rejects(() => readChatImage(session, path), { statusCode: 404 });
+  for (const path of [outside, linked, fake, huge, cwd, join(cwd, 'missing.png')]) await assert.rejects(() => readChatImage(session, path), { kind: 'not-found' });
 });
 test('image endpoint requires authentication and serves exact bytes with safe headers and HEAD', async t => {
   const { root, session, page } = await fixture(t);

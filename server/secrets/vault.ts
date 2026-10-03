@@ -1,9 +1,10 @@
 import { constants } from 'node:fs';
-import { mkdir, open, rename, unlink, lstat, chmod } from 'node:fs/promises';
+import { mkdir, open, lstat, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { KDF, encrypt, decrypt, passwordKey, type Ciphertext } from './crypto.js';
 import { MIN_VAULT_PASSWORD } from '../../shared/secrets.js';
+import { writePrivateJson } from '../stores/private-json.js';
 const MAX_FILE = 16 * 1024 * 1024;
 interface Envelope { format: 1; vaultId: string; kdf: typeof KDF; salt: string; wrappedKey: Ciphertext; payload: Ciphertext }
 export class SecretVault {
@@ -25,9 +26,8 @@ export class SecretVault {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     if (!(await lstat(this.directory)).isDirectory()) throw new Error('Invalid vault directory');
     await chmod(this.directory, 0o700);
-    const temporary = join(this.directory, `.${name}.${randomUUID()}`); const file = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    try { await file.writeFile(bytes); await file.sync(); } catch (error) { await unlink(temporary); throw error; } finally { await file.close(); }
-    try { await rename(temporary, join(this.directory, name)); const directory = await open(this.directory, constants.O_RDONLY); try { await directory.sync(); } finally { await directory.close(); } } catch (error) { await unlink(temporary).catch(() => undefined); throw error; }
+    // Durable, folder included, before the next file of a save is written (the journal before the vault).
+    await writePrivateJson(join(this.directory, name), bytes, { syncDirectory: true });
   }
   async start() {
     this.lock(); const bytes = await this.read('vault.json'); if (!bytes) return;

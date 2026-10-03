@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { Readable } from 'node:stream';
 import type { RemoteNodes } from '../../../server/link/nodes.js';
 import type { SecretPeer, SecretTarget } from '../../../shared/secrets.js';
-import { handleSecretLink, ownerSecretControl } from '../../../server/secrets/link-routes.js';
+import { handleSecretLink, ownerSecretControl } from '../../../server/link/secret-routes.js';
 
 const taskId = '9b979f3e-c6eb-4acf-b5b7-388cd7b2197b';
 const target: SecretTarget = { hostId: 'node-device', sessionId: 'codex:fixture-remote', taskId, root: '/fixture/remote' };

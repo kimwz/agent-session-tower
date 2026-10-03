@@ -1,3 +1,4 @@
+import { TowerError } from './errors.js';
 /**
  * Which provider, model and reasoning effort each kind of Claude/Codex call uses. Every call Tower starts by itself
  * gets its model from these roles (server/models/settings.ts), and the forms that create items start from them.
@@ -105,7 +106,7 @@ const cleanPick = (pick: ModelPick): ModelPick => ({ ...(pick.model ? { model: p
  * its value in `base` and an invalid custom role is dropped, so one bad entry never breaks every call.
  */
 export function parseModelSettings(value: unknown, strict = false, base: ModelSettings = initialModelSettings()): ModelSettings {
-  const fail = (message: string) => { throw Object.assign(new Error(message), { statusCode: 400 }); };
+  const fail = (message: string) => { throw new TowerError('invalid', message); };
   const input = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : strict ? fail('모델 설정이 올바르지 않습니다.') : {};
   // Roles left out keep `base` (a page of another version saves only the roles it knows); roles it does not know are ignored.
   const result: ModelSettings = { ...structuredClone(base), custom: [] };
@@ -152,7 +153,7 @@ export function parseModelSettings(value: unknown, strict = false, base: ModelSe
  */
 export function resolveRole(settings: ModelSettings, id: string, context: { provider?: ModelProvider } = {}): ResolvedModel {
   const setting: RoleSetting | undefined = isBuiltinRole(id) ? settings.roles[id] : settings.custom.find(role => role.id === id);
-  if (!setting) throw Object.assign(new Error(`알 수 없는 모델 역할입니다: ${id}`), { statusCode: 404 });
+  if (!setting) throw new TowerError('not-found', `알 수 없는 모델 역할입니다: ${id}`);
   const provider = setting.provider === 'follow' ? context.provider ?? 'claude' : setting.provider;
   return { provider, ...cleanPick(setting[provider]) };
 }
@@ -161,7 +162,7 @@ export function resolveRole(settings: ModelSettings, id: string, context: { prov
 export function masterWorkerModel(settings: ModelSettings, explicit: Partial<ResolvedModel> = {}): ResolvedModel {
   const role = settings.roles['master.worker'];
   const provider = explicit.provider === undefined ? role.provider : explicit.provider;
-  if (provider !== 'claude' && provider !== 'codex') throw Object.assign(new Error('Invalid worker provider.'), { statusCode: 400 });
+  if (provider !== 'claude' && provider !== 'codex') throw new TowerError('invalid', 'Invalid worker provider.');
   return { provider, ...role[provider], ...(explicit.model !== undefined ? { model: explicit.model } : {}),
     ...(explicit.effort !== undefined ? { effort: explicit.effort } : {}) };
 }

@@ -2,12 +2,13 @@ import { subscriptionOnly } from '../runs/subscription.js';
 import { requestedEffort, requestedModel, validEffort, validModelId } from '../providers/models.js';
 import { EventEmitter } from 'node:events';
 import { constants } from 'node:fs';
-import { mkdir, open, rename, stat, unlink } from 'node:fs/promises';
-import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, open, stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
 import type { Attachment, AttachmentInput, AutoPromptDecision, AutoPromptJob, AutoPromptInput, AutoPromptRequest, Run, RunOrigin, Session, SessionDetail, Snapshot } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { AttachmentStore, attachmentMetadata, type StoredAttachment } from '../stores/attachments.js';
+import { writePrivateJson } from '../stores/private-json.js';
 import { RunError, type RunAdmission, type RunManager } from '../runs/manager.js';
 import { isSavedDelegation } from '../runs/saved-state.js';
 import { ownerOrigin, parseRunOrigin } from '../runs/origin.js';
@@ -65,12 +66,12 @@ function adjacentAllowed(session: Session, snapshot: Snapshot): boolean {
     && session.status !== 'working' && pending(snapshot, session.id).length === 0;
 }
 function reason(value: unknown): string {
-  if (typeof value !== 'string' || !value.trim() || value.length > 1500) throw new RunError('라우터가 올바른 선택 이유를 반환하지 않았습니다.', 502);
+  if (typeof value !== 'string' || !value.trim() || value.length > 1500) throw new RunError('라우터가 올바른 선택 이유를 반환하지 않았습니다.', 'upstream');
   return value.trim();
 }
 function modelInput(value: unknown): string {
   const result = JSON.stringify(value);
-  if (result.length > MAX_INPUT) throw new RunError('라우팅에 필요한 프로젝트 정보가 너무 많습니다. 폴더를 직접 선택하거나 세션을 정리한 뒤 다시 시도하세요.', 413);
+  if (result.length > MAX_INPUT) throw new RunError('라우팅에 필요한 프로젝트 정보가 너무 많습니다. 폴더를 직접 선택하거나 세션을 정리한 뒤 다시 시도하세요.', 'too-large');
   return result;
 }
 /**
@@ -81,12 +82,12 @@ const routed = (request: Pick<AutoPromptRequest, 'cwd' | 'sessionMode' | 'target
 const providerName = (provider: AutoPromptJob['provider']) => provider === 'claude' ? 'Claude Code' : 'Codex';
 function providerReady(snapshot: Snapshot, provider: AutoPromptJob['provider'], router?: Pick<ResolvedModel, 'provider' | 'model'>): void {
   const health = snapshot.providers.find(value => value.provider === provider);
-  if (!health?.available) throw new RunError(`${providerName(provider)}를 사용할 수 없습니다. 설치와 로그인을 확인하세요.`, 422);
+  if (!health?.available) throw new RunError(`${providerName(provider)}를 사용할 수 없습니다. 설치와 로그인을 확인하세요.`, 'unprocessable');
   if (!router) return;
   const routing = snapshot.providers.find(value => value.provider === router.provider);
-  if (!routing?.available) throw new RunError(`라우팅에 쓰는 ${providerName(router.provider)}를 사용할 수 없습니다. 설치와 로그인을 확인하거나 설정 › 모델에서 라우팅 모델을 바꾸세요.`, 422);
+  if (!routing?.available) throw new RunError(`라우팅에 쓰는 ${providerName(router.provider)}를 사용할 수 없습니다. 설치와 로그인을 확인하거나 설정 › 모델에서 라우팅 모델을 바꾸세요.`, 'unprocessable');
   // Codex lists what the account may use; Claude's list is only its aliases, so any Claude model is tried as it is.
-  if (router.provider === 'codex' && router.model && routing.models?.length && !routing.models.some(model => model.id === router.model)) throw new RunError(`선택한 Codex 계정에서 라우팅 모델 ${router.model}을 사용할 수 없습니다. 설정 › 모델에서 라우팅 모델을 바꾸세요.`, 422);
+  if (router.provider === 'codex' && router.model && routing.models?.length && !routing.models.some(model => model.id === router.model)) throw new RunError(`선택한 Codex 계정에서 라우팅 모델 ${router.model}을 사용할 수 없습니다. 설정 › 모델에서 라우팅 모델을 바꾸세요.`, 'unprocessable');
 }
 const routerOf = (job: AutoPromptJob): Pick<ResolvedModel, 'provider' | 'model'> => ({ provider: job.routerProvider ?? job.provider, ...(job.routerModel ? { model: job.routerModel } : {}) });
 function attachmentContext(attachments: StoredAttachment[]) {
@@ -161,7 +162,7 @@ export class AutoPromptManager extends EventEmitter {
 
   /** `internal` comes from Tower itself (web owner, Slack, triggers); request fields cannot set it. */
   async submit(input: AutoPromptInput, internal: Pick<RunAdmission, 'origin' | 'untrustedInput' | 'unattended' | 'delegation' | 'validate'> = {}): Promise<AutoPromptJob> {
-    if (!this.started || this.stopping) throw new RunError('Auto Prompt가 요청을 받지 않고 있습니다.', 503);
+    if (!this.started || this.stopping) throw new RunError('Auto Prompt가 요청을 받지 않고 있습니다.', 'unavailable');
     const origin = internal.origin === undefined ? { kind: 'unknown' as const } : parseRunOrigin(internal.origin);
     if (!origin) throw new RunError('Auto Prompt 요청 출처가 올바르지 않습니다.');
     const delegation = internal.delegation;
@@ -197,10 +198,10 @@ export class AutoPromptManager extends EventEmitter {
     const admitting = this.admissions.get(input.requestId);
     // Jobs saved before origins existed were fingerprinted without one; a retry of the same request still matches.
     const matches = (entry: { fingerprint: string }, legacy: boolean) => entry.fingerprint === fingerprint || (legacy && entry.fingerprint === hash(request));
-    if ((previous && !matches(previous, previous.job.origin === undefined)) || (admitting && admitting.fingerprint !== fingerprint)) throw new RunError('같은 요청 ID에 다른 지시문이나 출처를 사용할 수 없습니다.', 409);
+    if ((previous && !matches(previous, previous.job.origin === undefined)) || (admitting && admitting.fingerprint !== fingerprint)) throw new RunError('같은 요청 ID에 다른 지시문이나 출처를 사용할 수 없습니다.', 'conflict');
     if (admitting) return admitting.promise;
     if (previous) return copy(previous.job);
-    if (this.admissions.size + [...this.entries.values()].filter(entry => !TERMINAL.has(entry.job.status)).length >= MAX_PENDING) throw new RunError('Auto Prompt 대기열이 가득 찼습니다. 진행 중인 라우팅을 기다려 주세요.', 429);
+    if (this.admissions.size + [...this.entries.values()].filter(entry => !TERMINAL.has(entry.job.status)).length >= MAX_PENDING) throw new RunError('Auto Prompt 대기열이 가득 찼습니다. 진행 중인 라우팅을 기다려 주세요.', 'rate-limited');
     const promise = this.admit(input, fingerprint, origin, untrustedInput, unattended, internal).finally(() => { this.admissions.delete(input.requestId); this.pump(); });
     this.admissions.set(input.requestId, { fingerprint, promise });
     return promise;
@@ -238,7 +239,7 @@ export class AutoPromptManager extends EventEmitter {
       ...(prepared.attachments.length ? { attachments: prepared.attachments.map(({ name, mimeType, size }) => ({ name, mimeType, size })) } : {}),
     } };
     try {
-      if (this.stopping) throw new RunError('Auto Prompt가 종료되고 있습니다.', 503);
+      if (this.stopping) throw new RunError('Auto Prompt가 종료되고 있습니다.', 'unavailable');
       context.validate?.();
       this.entries.set(entry.job.id, entry);
       this.prune();
@@ -256,9 +257,9 @@ export class AutoPromptManager extends EventEmitter {
   async cancel(id: string): Promise<AutoPromptJob> {
     id = id.toLowerCase();
     const entry = this.entries.get(id);
-    if (!entry) throw new RunError('Auto Prompt 요청을 찾을 수 없습니다.', 404);
+    if (!entry) throw new RunError('Auto Prompt 요청을 찾을 수 없습니다.', 'not-found');
     if (entry.job.status === 'cancelled') return copy(entry.job);
-    if (!['queued', 'routing'].includes(entry.job.status)) throw new RunError('이미 실행 대상으로 전달된 요청입니다. 세션의 작업 중지 기능을 사용하세요.', 409);
+    if (!['queued', 'routing'].includes(entry.job.status)) throw new RunError('이미 실행 대상으로 전달된 요청입니다. 세션의 작업 중지 기능을 사용하세요.', 'conflict');
     this.update(entry.job, { status: 'cancelled', error: 'Auto Prompt 라우팅을 취소했습니다.' });
     this.controllers.get(id)?.abort();
     await this.persist();
@@ -314,7 +315,7 @@ export class AutoPromptManager extends EventEmitter {
 
   private async route(entry: Entry, signal: AbortSignal): Promise<void> {
     const job = entry.job;
-    const active = () => { if (signal.aborted || this.stopping || job.status === 'cancelled') throw new RunError('Auto Prompt 라우팅을 취소했습니다.', 409); };
+    const active = () => { if (signal.aborted || this.stopping || job.status === 'cancelled') throw new RunError('Auto Prompt 라우팅을 취소했습니다.', 'conflict'); };
     this.update(job, { status: 'routing', stage: job.cwd ? 'session' : 'directory' });
     await this.persist(); this.emit('change');
     await this.options.refresh(); active();
@@ -338,11 +339,11 @@ export class AutoPromptManager extends EventEmitter {
           .map(session => ({ title: session.customTitle || session.title, provider: session.provider, closed: !!session.closed, lastMessage: session.lastMessage.slice(0, 300) })),
       })) }), DIRECTORY_SCHEMA, 'First select the directory. Honor the project specified in ownerRoutingInstructions when provided; if it cannot be resolved unambiguously to an inventory directory, return null instead of substituting another project. Return directoryId from the provided directory IDs, or null when the project cannot be determined.'));
       active();
-      if (!answer || (typeof answer.directoryId !== 'string' && answer.directoryId !== null)) throw new RunError('라우터가 올바른 폴더 선택을 반환하지 않았습니다.', 502);
+      if (!answer || (typeof answer.directoryId !== 'string' && answer.directoryId !== null)) throw new RunError('라우터가 올바른 폴더 선택을 반환하지 않았습니다.', 'upstream');
       reason(answer.reason);
       if (answer.directoryId === null) throw new RunError('작업할 프로젝트를 판단하지 못했습니다. 폴더를 직접 선택한 뒤 다시 보내 주세요.');
       cwd = inventory.find(directory => directory.id === answer.directoryId)?.cwd;
-      if (!cwd) throw new RunError('라우터가 목록에 없는 폴더를 선택했습니다. 실행하지 않았습니다.', 502);
+      if (!cwd) throw new RunError('라우터가 목록에 없는 폴더를 선택했습니다. 실행하지 않았습니다.', 'upstream');
     }
     await this.checkDirectory(cwd, inventory); active();
     this.update(job, { cwd, stage: 'session' });
@@ -358,7 +359,7 @@ export class AutoPromptManager extends EventEmitter {
     } else if (job.targetSessionId !== undefined) {
       // The owner chose this conversation; it must still be one the router itself could have continued.
       const selected = snapshot.sessions.find(session => session.id === job.targetSessionId);
-      if (!selected || !eligible(selected, job.provider, cwd)) throw new RunError('선택한 세션에서 이어갈 수 없습니다. 세션이 닫혔거나 다른 폴더·도구의 세션입니다. 실행하지 않았습니다.', 409);
+      if (!selected || !eligible(selected, job.provider, cwd)) throw new RunError('선택한 세션에서 이어갈 수 없습니다. 세션이 닫혔거나 다른 폴더·도구의 세션입니다. 실행하지 않았습니다.', 'conflict');
       expectedNativeId = selected.nativeId;
       relation = 'continuation';
       decision = { action: 'resume', cwd, sessionId: selected.id, reason: '선택한 세션에서 이어갑니다.' };
@@ -379,17 +380,17 @@ export class AutoPromptManager extends EventEmitter {
         ...(excerpts.has(session.id) ? { recentConversation: excerpts.get(session.id) } : { recentConversationOmitted: true }),
       })) }), SESSION_SCHEMA, 'The directory is fixed. Select an existing candidate session ID or create a new session. For create, sessionId must be null.'));
       active();
-      if (!answer || (answer.action !== 'resume' && answer.action !== 'create') || typeof answer.relation !== 'string' || !['continuation', 'adjacent', 'new'].includes(answer.relation)) throw new RunError('라우터가 올바른 세션 선택을 반환하지 않았습니다.', 502);
+      if (!answer || (answer.action !== 'resume' && answer.action !== 'create') || typeof answer.relation !== 'string' || !['continuation', 'adjacent', 'new'].includes(answer.relation)) throw new RunError('라우터가 올바른 세션 선택을 반환하지 않았습니다.', 'upstream');
       const explanation = reason(answer.reason);
       relation = answer.relation as Relation;
       if (answer.action === 'create') {
-        if (answer.sessionId !== null) throw new RunError('새 세션 선택에 기존 세션 ID가 포함되어 있습니다.', 502);
+        if (answer.sessionId !== null) throw new RunError('새 세션 선택에 기존 세션 ID가 포함되어 있습니다.', 'upstream');
         decision = { action: 'create', cwd, reason: explanation };
       } else {
         const selected = candidates.find(session => session.id === answer.sessionId);
-        if (!selected) throw new RunError('라우터가 선택할 수 없는 세션을 반환했습니다. 실행하지 않았습니다.', 502);
+        if (!selected) throw new RunError('라우터가 선택할 수 없는 세션을 반환했습니다. 실행하지 않았습니다.', 'upstream');
         expectedNativeId = selected.nativeId;
-        if (relation === 'new') throw new RunError('라우터가 새 작업을 기존 세션 재사용으로 선택했습니다. 선택이 명확하지 않아 실행하지 않았습니다.', 502);
+        if (relation === 'new') throw new RunError('라우터가 새 작업을 기존 세션 재사용으로 선택했습니다. 선택이 명확하지 않아 실행하지 않았습니다.', 'upstream');
         if (relation === 'adjacent' && !adjacentAllowed(selected, snapshot)) throw new RunError('선택한 세션은 인접 작업에 재사용할 수 없습니다. 컨텍스트 사용률이 확인된 30% 이하의 대기 세션이 필요합니다.');
         decision = { action: 'resume', cwd, sessionId: selected.id, reason: explanation };
       }
@@ -407,10 +408,10 @@ export class AutoPromptManager extends EventEmitter {
     const validate = () => {
       const current = this.snapshotNow(job.origin);
       providerReady(current, job.provider, routed(job) ? routerOf(job) : undefined);
-      if (!directories(current).some(directory => directory.cwd === cwd)) throw new RunError('라우팅 중 프로젝트 폴더가 변경되었습니다. 다시 시도하세요.', 409);
+      if (!directories(current).some(directory => directory.cwd === cwd)) throw new RunError('라우팅 중 프로젝트 폴더가 변경되었습니다. 다시 시도하세요.', 'conflict');
       if (decision.action === 'resume') {
         const session = current.sessions.find(session => session.id === decision.sessionId);
-        if (!session || session.nativeId !== expectedNativeId || !eligible(session, job.provider, cwd!) || (relation === 'adjacent' && !adjacentAllowed(session, current))) throw new RunError('라우팅 중 선택한 세션의 상태나 컨텍스트가 변경되었습니다. 실행하지 않았습니다. 다시 시도하세요.', 409);
+        if (!session || session.nativeId !== expectedNativeId || !eligible(session, job.provider, cwd!) || (relation === 'adjacent' && !adjacentAllowed(session, current))) throw new RunError('라우팅 중 선택한 세션의 상태나 컨텍스트가 변경되었습니다. 실행하지 않았습니다. 다시 시도하세요.', 'conflict');
       }
     };
     validate(); active();
@@ -434,7 +435,7 @@ export class AutoPromptManager extends EventEmitter {
    */
   private async snapshotFor(origin: RunOrigin | undefined): Promise<Snapshot> {
     if (origin?.controllerId) {
-      if (!this.options.remote) throw new RunError('원격 공유 제외 목록을 확인할 수 없어 실행하지 않았습니다.', 503);
+      if (!this.options.remote) throw new RunError('원격 공유 제외 목록을 확인할 수 없어 실행하지 않았습니다.', 'unavailable');
       const snapshot = this.options.snapshot();
       await this.options.remote.prepare([...snapshot.sessions.map(session => session.cwd), ...(snapshot.groups ?? []).map(group => group.cwd)]);
     }
@@ -445,7 +446,7 @@ export class AutoPromptManager extends EventEmitter {
     // The master's own conversation is never where other work goes.
     const snapshot = { ...everything, sessions: everything.sessions.filter(session => !subscriptionOnly(this.options.stateDir, session.cwd)) };
     if (!origin?.controllerId) return snapshot;
-    if (!this.options.remote) throw new RunError('원격 공유 제외 목록을 확인할 수 없어 실행하지 않았습니다.', 503);
+    if (!this.options.remote) throw new RunError('원격 공유 제외 목록을 확인할 수 없어 실행하지 않았습니다.', 'unavailable');
     return remoteWorkingSnapshot(snapshot, { matcher: this.options.remote.matcher(), coordinators: this.options.remote.coordinators() });
   }
 
@@ -472,14 +473,7 @@ export class AutoPromptManager extends EventEmitter {
   busy(): boolean { return this.admissions.size > 0 || this.controllers.size > 0 || Boolean(this.processing); }
   private persist(): Promise<void> {
     const data = JSON.stringify([...this.entries.values()]);
-    const write = this.writes.then(async () => {
-      const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
-      try {
-        const file = await open(temporary, 'wx', 0o600);
-        try { await file.writeFile(data); await file.sync(); } finally { await file.close(); }
-        await rename(temporary, this.path);
-      } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
-    });
+    const write = this.writes.then(() => writePrivateJson(this.path, data));
     this.writes = write.catch(() => {});
     return write;
   }

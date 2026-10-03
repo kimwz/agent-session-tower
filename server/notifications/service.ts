@@ -3,7 +3,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Run, RunApproval, Session } from '../../shared/types.js';
 import { DEFAULT_NOTIFICATION_EVENTS, type NotificationDevice, type NotificationEvents, type NotificationLanguage, type NotificationOverview, type NotificationPayload } from '../../shared/notifications.js';
-import { httpError } from '../http/requests.js';
+import { TowerError } from '../../shared/errors.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { generateVapidKeys, sendPush, type PushResult, type PushTarget, type VapidKeys } from './web-push.js';
 import type { TurnAttention, TurnAttentionInput } from './attention.js';
@@ -151,13 +151,13 @@ function parseEvents(value: unknown, fallback: NotificationEvents): Notification
   if (value === undefined) return fallback;
   const events = value as Record<string, unknown>;
   if (!events || typeof events !== 'object' || Object.keys(events).some(key => !(key in DEFAULT_NOTIFICATION_EVENTS)) || Object.values(events).some(item => typeof item !== 'boolean')) {
-    throw httpError(400, '알림 종류 설정이 올바르지 않습니다.');
+    throw new TowerError('invalid', '알림 종류 설정이 올바르지 않습니다.');
   }
   return { ...fallback, ...events as Partial<NotificationEvents> };
 }
 function parseLanguage(value: unknown, fallback: NotificationLanguage): NotificationLanguage {
   if (value === undefined) return fallback;
-  if (value !== 'ko' && value !== 'en') throw httpError(400, '알림 언어가 올바르지 않습니다.');
+  if (value !== 'ko' && value !== 'en') throw new TowerError('invalid', '알림 언어가 올바르지 않습니다.');
   return value;
 }
 function parseLabel(value: unknown): string {
@@ -275,14 +275,14 @@ export class NotificationService {
 
   async subscribe(body: Record<string, unknown>): Promise<NotificationOverview> {
     const saved = this.ready();
-    if (Object.keys(body).some(key => !['subscription', 'label', 'language', 'events'].includes(key))) throw httpError(400, '알림 구독 요청 형식이 올바르지 않습니다.');
+    if (Object.keys(body).some(key => !['subscription', 'label', 'language', 'events'].includes(key))) throw new TowerError('invalid', '알림 구독 요청 형식이 올바르지 않습니다.');
     const subscription = body.subscription as { endpoint?: unknown; keys?: { p256dh?: unknown; auth?: unknown } } | undefined;
     const endpoint = subscription?.endpoint, p256dh = subscription?.keys?.p256dh, auth = subscription?.keys?.auth;
     let url: URL | undefined;
     try { url = typeof endpoint === 'string' && endpoint.length <= 2048 ? new URL(endpoint) : undefined; } catch { /* Checked below. */ }
     if (!url || url.protocol !== 'https:' || url.username || url.password || typeof p256dh !== 'string' || typeof auth !== 'string'
       || !B64URL.test(p256dh) || !B64URL.test(auth) || Buffer.from(p256dh, 'base64url').length !== 65 || Buffer.from(auth, 'base64url').length !== 16) {
-      throw httpError(400, '브라우저 알림 구독 정보가 올바르지 않습니다.');
+      throw new TowerError('invalid', '브라우저 알림 구독 정보가 올바르지 않습니다.');
     }
     const id = deviceId(endpoint as string);
     const existing = saved.devices.find(device => device.id === id);
@@ -292,7 +292,7 @@ export class NotificationService {
       events: parseEvents(body.events, existing?.events ?? DEFAULT_NOTIFICATION_EVENTS),
       createdAt: existing?.createdAt ?? new Date(this.now()).toISOString(),
     };
-    if (!existing && saved.devices.length >= MAX_DEVICES) throw httpError(409, `알림 기기는 최대 ${MAX_DEVICES}개까지 등록할 수 있습니다. 사용하지 않는 기기를 먼저 삭제하세요.`);
+    if (!existing && saved.devices.length >= MAX_DEVICES) throw new TowerError('conflict', `알림 기기는 최대 ${MAX_DEVICES}개까지 등록할 수 있습니다. 사용하지 않는 기기를 먼저 삭제하세요.`);
     saved.devices = existing ? saved.devices.map(item => item.id === id ? device : item) : [...saved.devices, device];
     await this.save();
     return this.overview();
@@ -300,9 +300,9 @@ export class NotificationService {
 
   async update(body: Record<string, unknown>): Promise<NotificationOverview> {
     const saved = this.ready();
-    if (Object.keys(body).some(key => !['id', 'events', 'language'].includes(key))) throw httpError(400, '알림 설정 요청 형식이 올바르지 않습니다.');
+    if (Object.keys(body).some(key => !['id', 'events', 'language'].includes(key))) throw new TowerError('invalid', '알림 설정 요청 형식이 올바르지 않습니다.');
     const device = saved.devices.find(item => item.id === body.id);
-    if (!device) throw httpError(404, '알림 기기를 찾을 수 없습니다.');
+    if (!device) throw new TowerError('not-found', '알림 기기를 찾을 수 없습니다.');
     device.events = parseEvents(body.events, device.events);
     device.language = parseLanguage(body.language, device.language);
     await this.save();
@@ -311,7 +311,7 @@ export class NotificationService {
 
   async remove(body: Record<string, unknown>): Promise<NotificationOverview> {
     const saved = this.ready();
-    if (Object.keys(body).some(key => key !== 'id') || typeof body.id !== 'string') throw httpError(400, '삭제할 알림 기기를 지정하세요.');
+    if (Object.keys(body).some(key => key !== 'id') || typeof body.id !== 'string') throw new TowerError('invalid', '삭제할 알림 기기를 지정하세요.');
     saved.devices = saved.devices.filter(item => item.id !== body.id);
     await this.save();
     return this.overview();
@@ -319,12 +319,12 @@ export class NotificationService {
 
   async test(body: Record<string, unknown>): Promise<NotificationOverview> {
     const saved = this.ready();
-    if (Object.keys(body).some(key => key !== 'id') || typeof body.id !== 'string') throw httpError(400, '테스트할 알림 기기를 지정하세요.');
+    if (Object.keys(body).some(key => key !== 'id') || typeof body.id !== 'string') throw new TowerError('invalid', '테스트할 알림 기기를 지정하세요.');
     const device = saved.devices.find(item => item.id === body.id);
-    if (!device) throw httpError(404, '알림 기기를 찾을 수 없습니다.');
+    if (!device) throw new TowerError('not-found', '알림 기기를 찾을 수 없습니다.');
     const ko = device.language === 'ko';
     const result = await this.send(device, { title: 'Agent Session Tower', body: ko ? '이 기기에서 알림을 받을 수 있습니다.' : 'This device can receive notifications.', url: '/', tag: 'test' });
-    if (result !== 'sent') throw httpError(502, device.lastError || '알림을 보내지 못했습니다.');
+    if (result !== 'sent') throw new TowerError('upstream', device.lastError || '알림을 보내지 못했습니다.');
     return this.overview();
   }
 
@@ -343,7 +343,7 @@ export class NotificationService {
   }
 
   private ready(): Saved {
-    if (!this.saved) throw httpError(503, '알림을 사용할 수 없습니다.');
+    if (!this.saved) throw new TowerError('unavailable', '알림을 사용할 수 없습니다.');
     return this.saved;
   }
 

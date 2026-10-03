@@ -290,7 +290,7 @@ test('a changed gh login is checked again before anything is read, and GitHub ra
   await assert.rejects(service.run(trigger.id, OWNER), /noted the issues already open/);
   // The gh login changes to another account: the next check notices before reading issues.
   token = 'gho_second'; data.login = 'other';
-  (service as unknown as { ghToken?: unknown }).ghToken = undefined;
+  (service as unknown as { github: { ghToken?: unknown } }).github.ghToken = undefined;
   const before = github.calls.length;
   await assert.rejects(service.run(trigger.id, OWNER), /signed in as other, not me/);
   assert.deepEqual(github.calls.slice(before).map(call => call.path), ['/user']);

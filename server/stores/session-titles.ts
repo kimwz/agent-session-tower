@@ -1,13 +1,14 @@
-import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { mkdir, open, rename, unlink } from 'node:fs/promises';
+import { mkdir, open } from 'node:fs/promises';
+import { writePrivateJson } from './private-json.js';
 import { join } from 'node:path';
 import type { Session } from '../../shared/types.js';
 import { defaultStateDir } from '../state-dir.js';
+import { TowerError } from '../../shared/errors.js';
 
 export function normalizeSessionTitle(value: unknown): string {
   if (typeof value !== 'string' || value.trim().length > 120) {
-    throw Object.assign(new Error('제목은 120자 이하의 문자열이어야 합니다.'), { statusCode: 400 });
+    throw new TowerError('invalid', '제목은 120자 이하의 문자열이어야 합니다.');
   }
   return value.trim();
 }
@@ -58,17 +59,9 @@ export class SessionTitleStore {
       const next = new Map(this.titles);
       if (title || session.customTitle) next.set(session.id, title);
       else next.delete(session.id);
-      const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
-      try {
-        const file = await open(temporary, 'wx', 0o600);
-        try {
-          await file.writeFile(`${JSON.stringify(Object.fromEntries(next))}\n`);
-          await file.sync();
-        } finally { await file.close(); }
-        await rename(temporary, this.path);
-      } catch (error) {
-        await unlink(temporary).catch(() => {});
-        throw Object.assign(new Error(`제목을 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`), { statusCode: 503 });
+      try { await writePrivateJson(this.path, `${JSON.stringify(Object.fromEntries(next))}\n`); }
+      catch (error) {
+        throw new TowerError('unavailable', `제목을 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
       }
       this.titles = next;
       return this.apply(session);

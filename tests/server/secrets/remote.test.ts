@@ -3,7 +3,7 @@ import { generateKeyPairSync, randomUUID, sign, createCipheriv, createDecipheriv
 import test from 'node:test';
 import { connect, createServer } from 'node:http2';
 import type { AddressInfo } from 'node:net';
-import { SecretRelay } from '../../../server/secrets/relay.js';
+import { SecretRelay } from '../../../server/link/secret-relay.js';
 import type { SecretContext, SecretDevice, SecretPeer } from '../../../shared/secrets.js';
 import { RemoteSecretBroker, type RemoteSecretBrokerOptions, type RemoteSecretKeys, type RemoteSecretRequest } from '../../../server/secrets/remote.js';
 

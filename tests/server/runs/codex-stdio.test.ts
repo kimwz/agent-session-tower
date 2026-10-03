@@ -216,9 +216,9 @@ test('command approvals are correlated, retain network details, and grant only o
     assert.equal(approval.input.command, 'printf safe-marker');
     assert.equal(approval.input.environmentId, 'remote:command-fixture');
     assert.equal((approval.input.networkApprovalContext as any).host, 'api.github.com');
-    await assert.rejects(f.run.respondToApproval('not-pending', 'allow'), { statusCode: 409 });
+    await assert.rejects(f.run.respondToApproval('not-pending', 'allow'), { kind: 'conflict' });
     await f.run.respondToApproval(approval.id, 'allow');
-    await assert.rejects(f.run.respondToApproval(approval.id, 'allow'), { statusCode: 409 });
+    await assert.rejects(f.run.respondToApproval(approval.id, 'allow'), { kind: 'conflict' });
     await f.run.done;
     assert.deepEqual(f.sent.find(frame => frame.id === (mode === 'numeric-id' ? 0 : 'native-approval'))?.result, { decision: 'accept' });
     assert.deepEqual(f.cleared, [approval.id]);
@@ -336,7 +336,7 @@ test('closing an approval clears it and prevents stale responses or automatic re
   f.run.close(); await f.run.done;
   assert.equal(f.finished[0].status, 'error');
   assert.deepEqual(f.cleared, [f.approvals[0].id]);
-  await assert.rejects(f.run.respondToApproval(f.approvals[0].id, 'allow'), { statusCode: 409 });
+  await assert.rejects(f.run.respondToApproval(f.approvals[0].id, 'allow'), { kind: 'conflict' });
   assert.equal(f.sent.filter(frame => frame.method === 'turn/start').length, 1);
 });
 
@@ -344,7 +344,7 @@ test('server-resolved approvals are removed before a stale browser response can 
   const f = await fixture(t, 'resolved');
   await f.run.start(); await until(() => f.approvals.length === 1);
   await until(() => f.cleared.length === 1);
-  await assert.rejects(f.run.respondToApproval(f.approvals[0].id, 'allow'), { statusCode: 409 });
+  await assert.rejects(f.run.respondToApproval(f.approvals[0].id, 'allow'), { kind: 'conflict' });
   assert.equal(f.sent.some(frame => frame.id === 'native-approval'), false);
 });
 

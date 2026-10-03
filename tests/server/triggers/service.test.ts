@@ -3,12 +3,13 @@ import { collectTriggers } from '../../../server/backup/payload.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { TriggerService, triggerRequestId, type TriggerExecutor } from '../../../server/triggers/service.js';
 import type { RunAdmission } from '../../../server/runs/manager.js';
 import type { AutoPromptJob, CreateSessionRequest, Run, Session } from '../../../shared/types.js';
 import type { TriggerActor, TriggerInput } from '../../../shared/triggers.js';
+import { asideNames, blockQuarantine, captureErrors } from '../../helpers/quarantine.js';
 
 const OWNER: TriggerActor = { kind: 'owner', via: 'ui' };
 const AGENT: TriggerActor = { kind: 'agent', via: 'mcp', sessionId: 'codex:agent', runId: randomUUID() };
@@ -217,7 +218,7 @@ test('every change is audited, earlier revisions can be restored, and a stale re
   const service = await f.open();
   const created = await service.create(hourly(f.project), AGENT);
   const updated = await service.update(created.id, hourly(f.project, { name: 'Renamed' }), created.revision, OWNER);
-  await assert.rejects(service.update(created.id, hourly(f.project, { name: 'Stale' }), created.revision, OWNER), { statusCode: 409 });
+  await assert.rejects(service.update(created.id, hourly(f.project, { name: 'Stale' }), created.revision, OWNER), { kind: 'conflict' });
   const reverted = await service.revert(created.id, 1, updated.revision, OWNER);
   assert.equal(reverted.name, 'Hourly report');
   assert.equal(reverted.revision, 3);
@@ -250,7 +251,7 @@ test('a state file that cannot be saved stops new runs and says why', async t =>
   await service.tick();
   assert.equal(f.calls.length, 0);
   assert.match(service.overview().storageError ?? '', /Cannot save triggers/);
-  await assert.rejects(service.run(trigger.id, OWNER), { statusCode: 503 });
+  await assert.rejects(service.run(trigger.id, OWNER), { kind: 'unavailable' });
   await rm(path, { recursive: true });
   await service.tick();
   assert.equal(service.overview().storageError, undefined);
@@ -265,11 +266,90 @@ test('unreadable trigger state is moved aside instead of guessed', async t => {
   assert.ok((await readdir(f.directory)).some(name => name.startsWith('trigger-engine.json.unreadable-')));
 });
 
+test('trigger state of the wrong shape is moved aside and triggers start empty', async t => {
+  const f = await fixture(t);
+  const path = join(f.directory, 'trigger-engine.json');
+  await writeFile(path, '[]', { mode: 0o600 });
+  const logged = captureErrors(t, path);
+  const service = await f.open();
+  assert.equal(service.list().length, 0);
+  const [aside] = await asideNames(path);
+  assert.equal(await readFile(join(f.directory, aside), 'utf8'), '[]');
+  assert.equal(logged[0].args[0], 'Trigger state could not be read and was moved aside:');
+  assert.equal((logged[0].args[1] as Error).message, 'Saved trigger state is invalid.');
+  assert.equal(logged[0].present, true, 'logged before the move');
+});
+
+test('trigger state with an invalid once ledger is moved aside', async t => {
+  for (const onceConsumed of [[], { id: { bad: 1 } }]) {
+    const f = await fixture(t);
+    let service = await f.open();
+    await service.create(hourly(f.project), OWNER);
+    service.close(); await service.settle();
+    const path = join(f.directory, 'trigger-engine.json');
+    const saved = JSON.parse(await readFile(path, 'utf8'));
+    saved.onceConsumed = onceConsumed;
+    const text = JSON.stringify(saved);
+    await writeFile(path, text);
+    service = await f.open();
+    assert.equal(service.list().length, 0, JSON.stringify(onceConsumed));
+    const [aside] = await asideNames(path);
+    assert.equal(await readFile(join(f.directory, aside), 'utf8'), text);
+  }
+});
+
+test('trigger state that cannot be moved aside is logged and triggers still start', async t => {
+  const f = await fixture(t);
+  const path = join(f.directory, 'trigger-engine.json');
+  await writeFile(path, '{ not json', { mode: 0o600 });
+  const blocked = await blockQuarantine(t, path);
+  const logged = captureErrors(t, path);
+  const service = await f.open();
+  blocked.release();
+  assert.equal(service.list().length, 0);
+  assert.equal(logged[0].args[0], 'Trigger state could not be read and was moved aside:');
+  assert.ok(logged[0].args[1] instanceof SyntaxError);
+  assert.deepEqual(await readdir(blocked.aside), ['occupied'], 'the move failed');
+});
+
+test('trigger secrets that were moved aside are shown on the triggers page', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.directory, 'trigger-secrets.json'), '{}', { mode: 0o600 });
+  captureErrors(t, join(f.directory, 'trigger-secrets.json'));
+  const service = await f.open();
+  assert.match(service.overview().storageError ?? '', /^Trigger secrets could not be read and were kept as .*trigger-secrets\.json\.unreadable-\d+; triggers that use them fail until they are entered again\.$/);
+});
+
+test('trigger state that cannot be moved aside is never written over', async t => {
+  const f = await fixture(t);
+  const path = join(f.directory, 'trigger-engine.json');
+  const original = '{ "version": 1, "triggers": [ not json';
+  await writeFile(path, original, { mode: 0o600 });
+  const blocked = await blockQuarantine(t, path);
+  captureErrors(t, path);
+  const service = await f.open();
+  blocked.release();
+  const locked = /Trigger state could not be read or moved aside; nothing is saved until Tower restarts\./;
+  assert.match(service.overview().storageError ?? '', locked);
+  f.clock.now += 2 * HOUR;
+  await service.tick();
+  await assert.rejects(service.create(hourly(f.project), OWNER), { kind: 'unavailable', message: locked });
+  const backup = { triggers: [{ ...hourly(f.project), id: randomUUID(), revision: 1, createdAt: '', updatedAt: '', updatedBy: OWNER }], settings: service.settings(), trustedFolders: [f.project], secretGrants: {}, fired: {}, github: {} };
+  await assert.rejects(service.restoreBackup(backup as any), { kind: 'unavailable' });
+  await service.flush();
+  assert.equal(service.inFlight(), false);
+  await service.settle();
+  assert.equal(f.calls.length, 0);
+  assert.equal(await readFile(path, 'utf8'), original);
+  assert.deepEqual((await readdir(f.directory)).filter(name => name.startsWith('trigger-engine.json')).sort(), ['trigger-engine.json', basename(blocked.aside)].sort(), 'no other state file is written');
+  assert.match(service.overview().storageError ?? '', locked);
+});
+
 test('schedules refuse second-level cron and unknown time zones', async t => {
   const f = await fixture(t);
   const service = await f.open();
   for (const schedule of [{ type: 'cron', expression: '* * * * * *', timezone: 'UTC' }, { type: 'cron', expression: '0 9 * * *', timezone: 'Mars/Base' }] as const) {
-    await assert.rejects(service.create(hourly(f.project, { source: { kind: 'schedule', schedule, catchUp: 'latest' } }), OWNER), { statusCode: 400 });
+    await assert.rejects(service.create(hourly(f.project, { source: { kind: 'schedule', schedule, catchUp: 'latest' } }), OWNER), { kind: 'invalid' });
   }
   assert.deepEqual(service.preview({ type: 'cron', expression: '30 1 * * *', timezone: 'America/New_York' }).slice(0, 1), ['2026-09-24T05:30:00.000Z']);
 });
@@ -335,8 +415,8 @@ test('when trigger history is full, new runs and definitions stop but accepted r
   service.close();
   const size = (await readFile(join(f.directory, 'trigger-engine.json'))).byteLength;
   service = await f.open({ acceptBytes: size - 1, maxBytes: size + 5000 });
-  await assert.rejects(service.create(hourly(f.project, { name: 'One more' }), OWNER), { statusCode: 507 });
-  await assert.rejects(service.run(trigger.id, OWNER), { statusCode: 507 });
+  await assert.rejects(service.create(hourly(f.project, { name: 'One more' }), OWNER), { kind: 'storage-full' });
+  await assert.rejects(service.run(trigger.id, OWNER), { kind: 'storage-full' });
   assert.match(service.overview().storageError ?? '', /history is full/);
   for (const run of f.runs) Object.assign(run, { status: 'error', error: 'The provider failed: '.padEnd(1400, '.') });
   await service.tick();
@@ -369,7 +449,7 @@ test('a trigger at its record limit adds nothing more and says so', async t => {
   for (let index = 0; index < 20_000; index++) state.fired[`${trigger.id} old:${index}`] = new Date(start - 1000).toISOString();
   await writeFile(path, JSON.stringify(state));
   service = await f.open();
-  await assert.rejects(service.run(trigger.id, OWNER), { statusCode: 409 });
+  await assert.rejects(service.run(trigger.id, OWNER), { kind: 'conflict' });
   assert.match(service.overview().storageError ?? '', /20000 runs recorded/);
   assert.equal(Object.keys(JSON.parse(await readFile(path, 'utf8')).fired).length, 20_000);
 });
@@ -617,7 +697,7 @@ test('once parsing keeps past state readable; timing admission requires a future
   const service = await f.open();
   const source = (at: string): TriggerInput['source'] => ({ kind: 'schedule', schedule: { type: 'once', at }, catchUp: 'latest' });
   for (const at of ['2026-09-24T01:00:00', 'not-a-date', '2026-09-23T01:00:00Z']) {
-    await assert.rejects(service.create(hourly(f.project, { source: source(at) } as any), OWNER), { statusCode: 400 });
+    await assert.rejects(service.create(hourly(f.project, { source: source(at) } as any), OWNER), { kind: 'invalid' });
   }
   const trigger = await service.create(hourly(f.project, { source: source('2026-09-24T01:00:00Z') }), OWNER);
   f.clock.now += 24 * HOUR;
@@ -660,7 +740,7 @@ test('a disabled once cannot be consumed manually and a consumed source cannot b
   const service = await f.open();
   const input = hourly(f.project, { enabled: false, source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } });
   let trigger = await service.create(input, OWNER);
-  await assert.rejects(service.run(trigger.id, OWNER), { statusCode: 409 });
+  await assert.rejects(service.run(trigger.id, OWNER), { kind: 'conflict' });
   assert.equal(service.events().length, 0);
   trigger = await service.setEnabled(trigger.id, true, trigger.revision, OWNER);
   f.clock.now++;
@@ -741,7 +821,8 @@ test('a tick waiting for a commit rechecks an edited once due time before consum
   const f = await fixture(t); const service = await f.open();
   const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
   f.clock.now = Date.parse('2026-09-24T01:00:01Z');
-  const engine = service as any; const commit = engine.commit.bind(engine);
+  // Every commit goes through the engine's store; the first one, the tick's, waits.
+  const engine = (service as any).store; const commit = engine.commit.bind(engine);
   let entered!: () => void; let release!: () => void;
   const waiting = new Promise<void>(resolve => { entered = resolve; }); const gate = new Promise<void>(resolve => { release = resolve; });
   let first = true;
@@ -773,7 +854,8 @@ test('backup restore rechecks reservation capacity after concurrent local consum
   await writeFile(path, JSON.stringify(state)); service = await f.open();
   const backup = (await collectTriggers(f.directory))!;
   const newId = randomUUID(); backup.triggers = [{ ...service.get(trigger.id).trigger, id: newId, name: 'Incoming reservation' }];
-  const engine = service as any; const validate = engine.validate.bind(engine);
+  // A restore checks each incoming definition through the definitions' validate.
+  const engine = (service as any).definitions; const validate = engine.validate.bind(engine);
   let entered!: () => void; let release!: () => void;
   const waiting = new Promise<void>(resolve => { entered = resolve; }); const gate = new Promise<void>(resolve => { release = resolve; });
   engine.validate = async (...args: any[]) => { entered(); await gate; return validate(...args); };
@@ -868,7 +950,8 @@ test('a once skip policy uses the admission time after waiting for a commit', as
   const f = await fixture(t); const service = await f.open();
   const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'skip' } }), OWNER);
   f.clock.now = Date.parse('2026-09-24T01:00:01Z');
-  const engine = service as any; const commit = engine.commit.bind(engine);
+  // Every commit goes through the engine's store; the first one, the tick's, waits.
+  const engine = (service as any).store; const commit = engine.commit.bind(engine);
   let entered!: () => void; let release!: () => void;
   const waiting = new Promise<void>(resolve => { entered = resolve; }); const gate = new Promise<void>(resolve => { release = resolve; });
   let first = true;

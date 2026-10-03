@@ -1,15 +1,26 @@
 import { randomUUID } from 'node:crypto';
-import { rename, unlink, open } from 'node:fs/promises';
+import { unlink, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SecretService } from '../secrets/service.js';
 import type { SecretInput } from '../../shared/triggers.js';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { TowerError } from '../../shared/errors.js';
 
 export interface StoredSecret { id: string; name: string; origin: string; value: string; createdAt: string }
 const MAX_SECRETS = 50;
 
-const valid = (item: unknown): item is StoredSecret => !!item && typeof item === 'object'
+/** A saved trigger secret: all five fields are strings. The one check of that shape (load, migrate, backup, imports). */
+export const validStoredSecret = (item: unknown): item is StoredSecret => !!item && typeof item === 'object'
   && ['id', 'name', 'origin', 'value', 'createdAt'].every(key => typeof (item as Record<string, unknown>)[key] === 'string');
+
+/**
+ * The saved file's shape: every record valid, no id twice. No count limit: a restore merge may keep more than
+ * `MAX_SECRETS`, and those load as before.
+ */
+function parseLegacyFile(records: unknown): StoredSecret[] | undefined {
+  if (!Array.isArray(records) || !records.every(validStoredSecret) || new Set(records.map(record => record.id)).size !== records.length) return undefined;
+  return records;
+}
 
 /**
  * Header values for HTTP triggers, in an owner-only file apart from trigger definitions. Values are
@@ -17,10 +28,13 @@ const valid = (item: unknown): item is StoredSecret => !!item && typeof item ===
  */
 export class SecretStore {
   private secrets = new Map<string, StoredSecret>();
+  /** Why saved secrets are missing, for the triggers page: kept aside, or locked because they could not be. */
+  problem?: string;
+  private locked?: string;
   private writes: Promise<unknown> = Promise.resolve();
   constructor(private readonly stateDir: string, private readonly options: { vault?: SecretService } = {}) {}
   private get encrypted() { return this.options.vault?.status().initialized === true; }
-  private requireVault() { const vault = this.options.vault; if (!vault || vault.status().locked) throw Object.assign(new Error('Secret Vault is locked. Unlock it before using trigger secrets.'), { statusCode: 423 }); this.secrets.clear(); return vault; }
+  private requireVault() { const vault = this.options.vault; if (!vault || vault.status().locked) throw new TowerError('locked', 'Secret Vault is locked. Unlock it before using trigger secrets.'); this.secrets.clear(); return vault; }
   private get path() { return join(this.stateDir, 'trigger-secrets.json'); }
 
   async load(): Promise<void> {
@@ -29,12 +43,23 @@ export class SecretStore {
     try { saved = await readPrivateJson(this.path); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      // Kept aside rather than overwritten, so an unreadable file never silently loses the owner's values.
-      console.error('Trigger secrets could not be read and were moved aside:', error);
-      await rename(this.path, `${this.path}.unreadable-${Date.now()}`).catch(() => {});
-      return;
+      return this.setAside(error);
     }
-    for (const item of Array.isArray(saved) ? saved : []) if (valid(item)) this.secrets.set(item.id, item);
+    const records = parseLegacyFile(saved);
+    if (!records) return this.setAside(new Error('Saved trigger secrets are invalid.'));
+    for (const item of records) this.secrets.set(item.id, item);
+  }
+
+  /** Kept aside rather than overwritten, so an unreadable file never loses the owner's values; if it cannot be, nothing is saved. */
+  private async setAside(error: unknown): Promise<void> {
+    console.error('Trigger secrets could not be read and were moved aside:', error);
+    try {
+      const aside = await quarantineFile(this.path);
+      this.problem = `Trigger secrets could not be read and were kept as ${aside}; triggers that use them fail until they are entered again.`;
+    } catch (moveError) {
+      this.locked = this.problem = 'Trigger secrets could not be read or moved aside; nothing is saved until Tower restarts.';
+      console.error(this.locked, moveError);
+    }
   }
 
   get(id: string): StoredSecret | undefined { return this.encrypted ? this.requireVault().legacyGet(id) : structuredClone(this.secrets.get(id)); }
@@ -43,10 +68,10 @@ export class SecretStore {
   }
 
   async create(input: SecretInput, now: number): Promise<Omit<StoredSecret, 'value'>> {
-    if (this.encrypted) return this.encryptedUpdate(async () => { const vault = this.requireVault(); if (vault.legacyList().length >= MAX_SECRETS) throw Object.assign(new Error(`At most ${MAX_SECRETS} secrets can be saved. Delete one first.`), { statusCode: 409 }); const { value: _value, ...shown } = await vault.legacyCreate(input, now); return shown; });
+    if (this.encrypted) return this.encryptedUpdate(async () => { const vault = this.requireVault(); if (vault.legacyList().length >= MAX_SECRETS) throw new TowerError('conflict', `At most ${MAX_SECRETS} secrets can be saved. Delete one first.`); const { value: _value, ...shown } = await vault.legacyCreate(input, now); return shown; });
     const secret: StoredSecret = { id: randomUUID(), name: input.name, origin: input.origin, value: input.value, createdAt: new Date(now).toISOString() };
     await this.update(next => {
-      if (next.size >= MAX_SECRETS) throw Object.assign(new Error(`At most ${MAX_SECRETS} secrets can be saved. Delete one first.`), { statusCode: 409 });
+      if (next.size >= MAX_SECRETS) throw new TowerError('conflict', `At most ${MAX_SECRETS} secrets can be saved. Delete one first.`);
       next.set(secret.id, secret);
     });
     const { value: _value, ...shown } = secret;
@@ -54,10 +79,10 @@ export class SecretStore {
   }
 
   async remove(id: string): Promise<Omit<StoredSecret, 'value'>> {
-    if (this.encrypted) return this.encryptedUpdate(async () => { const vault = this.requireVault(); const found = vault.legacyGet(id); if (!found) throw Object.assign(new Error('Secret not found.'), { statusCode: 404 }); await vault.legacyRemove(id); const { value: _value, ...shown } = found; return shown; });
+    if (this.encrypted) return this.encryptedUpdate(async () => { const vault = this.requireVault(); const found = vault.legacyGet(id); if (!found) throw new TowerError('not-found', 'Secret not found.'); await vault.legacyRemove(id); const { value: _value, ...shown } = found; return shown; });
     const secret = await this.update(next => {
       const found = next.get(id);
-      if (!found) throw Object.assign(new Error('Secret not found.'), { statusCode: 404 });
+      if (!found) throw new TowerError('not-found', 'Secret not found.');
       next.delete(id);
       return found;
     });
@@ -77,15 +102,17 @@ export class SecretStore {
     const vault = this.requireVault();
     let records: unknown;
     try { records = await readPrivateJson(this.path); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
-    if (!Array.isArray(records) || !records.every(valid) || records.length > MAX_SECRETS || new Set(records.map(record => record.id)).size !== records.length) throw new Error('Invalid legacy trigger secrets; original file preserved.');
-    await vault.importLegacy(records);
-    for (const record of records) if (JSON.stringify(vault.legacyGet(record.id)) !== JSON.stringify(record)) throw new Error('Encrypted migration verification failed; original file preserved.');
+    const parsed = parseLegacyFile(records);
+    if (!parsed || parsed.length > MAX_SECRETS) throw new Error('Invalid legacy trigger secrets; original file preserved.');
+    await vault.importLegacy(parsed);
+    for (const record of parsed) if (JSON.stringify(vault.legacyGet(record.id)) !== JSON.stringify(record)) throw new Error('Encrypted migration verification failed; original file preserved.');
     await unlink(this.path); const directory = await open(this.stateDir, 'r'); try { await directory.sync(); } finally { await directory.close(); } this.secrets.clear();
   }
 
   /** Changes apply one at a time to a copy; only a saved copy becomes current. */
   private update<T>(change: (next: Map<string, StoredSecret>) => T): Promise<T> {
     const write = this.writes.catch(() => {}).then(async () => {
+      if (this.locked) throw new TowerError('unavailable', this.locked);
       const next = new Map(this.secrets);
       const result = change(next);
       await writePrivateJson(this.path, JSON.stringify([...next.values()]));

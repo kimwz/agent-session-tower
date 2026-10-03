@@ -1,34 +1,15 @@
-import { collectEncryptedVault } from './secrets.js';
+import { encryptedVaultOf } from '../secrets/imports.js';
 import { parseModelSettings } from '../../shared/models.js';
 import { join } from 'node:path';
 import type { BackupPart } from '../../shared/backup.js';
-import type { SkillBundle, SkillAdvisorSettings } from '../../shared/skills.js';
-import type { GitHubCursor } from '../triggers/github.js';
+import { mergeTriggerSecrets, secretsBackupOf, triggerBackupOf, type TriggerBackup } from '../triggers/backup.js';
+import type { SkillBackup } from '../skills/backup.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
-import { validateSlackRules } from '../slack/automation.js';
-import { validSlackConnection } from '../slack/service.js';
-import { parsePublicAgents } from '../public-agents/service.js';
+import { automationBackupOf, hasUnfinishedSlackWork, mergeAutomation, restoreSlackConnection, slackAccountKey } from '../slack/backup.js';
+import { restorePublicAgents } from '../public-agents/backup.js';
+import { mergePermissions, permissionsBackupOf } from '../permissions/backup.js';
 
-/** Trigger settings as a backup keeps them; the trigger service merges them with what it holds (`TriggerService.start`). */
-export interface TriggerBackup {
-  onceConsumed?: Record<string, import('../../shared/triggers.js').OnceConsumption>;
-  triggers: unknown[];
-  settings: unknown;
-  trustedFolders: string[];
-  secretGrants: Record<string, string[]>;
-  /** `${triggerId} ${dedupKey}` → when it fired. */
-  fired: Record<string, string>;
-  /** Per trigger, what its GitHub watch has already taken or noted. */
-  github: Record<string, GitHubCursor>;
-}
-
-/** Tower's own skills as a backup keeps them; `SkillService.restore` writes them back exactly. */
-export interface SkillBackup {
-  bundle: SkillBundle;
-  /** The owner's guidance, empty included. */
-  guidance: string;
-  settings: SkillAdvisorSettings;
-}
+export type { TriggerBackup, SkillBackup };
 
 /** Files the execution worker reads once when it starts, by the part of the settings they hold. */
 export const WORKER_FILES = {
@@ -73,11 +54,12 @@ async function readOptional(path: string): Promise<unknown> {
 
 /** The settings part of each worker file: what a backup keeps of it. Runtime records stay on their computer. */
 function settingsOf(name: WorkerFile, value: unknown): unknown {
-  if (!record(value)) return name === 'trigger-secrets.json' && Array.isArray(value) ? value : undefined;
+  if (name === 'trigger-secrets.json') return secretsBackupOf(value);
+  if (!record(value)) return undefined;
   switch (name) {
-    case 'permissions.json': return { rules: Array.isArray(value.rules) ? value.rules : [], ...(record(value.autoReview) ? { autoReview: value.autoReview } : {}) };
+    case 'permissions.json': return permissionsBackupOf(value);
     case 'slack-automation.json':
-    case 'github-automation.json': return { rules: value.rules ?? [] };
+    case 'github-automation.json': return automationBackupOf(value);
     default: return value;
   }
 }
@@ -85,7 +67,7 @@ function settingsOf(name: WorkerFile, value: unknown): unknown {
 /** Reads the worker's settings from its files as they are saved now. */
 export async function collectWorkerFiles(stateDir: string): Promise<WorkerRestore['files']> {
   const files: WorkerRestore['files'] = {};
-  const encryptedVault = await collectEncryptedVault(stateDir);
+  const encryptedVault = await encryptedVaultOf(stateDir);
   for (const name of Object.keys(WORKER_FILES) as WorkerFile[]) {
     if (encryptedVault && name === 'trigger-secrets.json') continue;
     const kept = settingsOf(name, await readOptional(join(stateDir, name)));
@@ -96,24 +78,8 @@ export async function collectWorkerFiles(stateDir: string): Promise<WorkerRestor
 
 /** The trigger engine's settings, from its saved state. */
 export async function collectTriggers(stateDir: string): Promise<TriggerBackup | undefined> {
-  const saved = await readOptional(join(stateDir, 'trigger-engine.json'));
-  if (!record(saved)) return undefined;
-  const github: Record<string, GitHubCursor> = {};
-  if (record(saved.cursors)) for (const [id, cursor] of Object.entries(saved.cursors)) if (record(cursor) && record(cursor.github)) github[id] = cursor.github as GitHubCursor;
-  return {
-    onceConsumed: record(saved.onceConsumed) ? saved.onceConsumed as TriggerBackup['onceConsumed'] : {},
-    triggers: Array.isArray(saved.triggers) ? saved.triggers : [],
-    settings: saved.settings ?? {},
-    trustedFolders: Array.isArray(saved.trustedFolders) ? saved.trustedFolders.filter((item): item is string => typeof item === 'string') : [],
-    secretGrants: record(saved.secretGrants) ? saved.secretGrants as Record<string, string[]> : {},
-    fired: record(saved.fired) ? saved.fired as Record<string, string> : {},
-    github,
-  };
+  return triggerBackupOf(await readOptional(join(stateDir, 'trigger-engine.json')));
 }
-
-/** Slack work not yet finished belongs to the account that received it. */
-const UNFINISHED_SLACK = new Set(['received', 'matching', 'dispatching', 'running', 'composing', 'sending', 'reply-uncertain']);
-const accountOf = (value: unknown) => record(value) && record(value.account) ? `${value.account.teamId}:${value.account.userId}` : '';
 
 /**
  * Writes the worker's files from a backup, each merged with what this computer holds: the backup's settings, this
@@ -126,56 +92,30 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
   const current = async (name: WorkerFile) => readOptional(join(stateDir, name)).catch(() => { unreadable.add(name); return undefined; });
   // A different Slack account is not switched in while the current one still has work under way.
   let slackBlocked = false;
-  if (files['slack-connection.json'] !== undefined && accountOf(files['slack-connection.json']) !== accountOf(await current('slack-connection.json'))) {
-    const automation = await current('slack-automation.json');
-    if (record(automation) && Array.isArray(automation.workflows) && automation.workflows.some(item => record(item) && UNFINISHED_SLACK.has(String(item.status)))) {
+  if (files['slack-connection.json'] !== undefined && slackAccountKey(files['slack-connection.json']) !== slackAccountKey(await current('slack-connection.json'))) {
+    if (hasUnfinishedSlackWork(await current('slack-automation.json'))) {
       slackBlocked = true;
       errors.push('진행 중인 Slack 작업이 있어 Slack 연결은 복원하지 않았습니다. 작업이 끝난 뒤 다시 복원하세요.');
     }
   }
   for (const name of Object.keys(WORKER_FILES) as WorkerFile[]) {
     const incoming = files[name];
-    if (name === 'trigger-secrets.json' && incoming !== undefined && await collectEncryptedVault(stateDir)) { errors.push('trigger-secrets.json: Vault가 초기화되어 평문 시크릿 복원은 거부했습니다. 암호화 가져오기를 사용하세요.'); continue; }
+    if (name === 'trigger-secrets.json' && incoming !== undefined && await encryptedVaultOf(stateDir)) { errors.push('trigger-secrets.json: Vault가 초기화되어 평문 시크릿 복원은 거부했습니다. 암호화 가져오기를 사용하세요.'); continue; }
     if (incoming === undefined || (slackBlocked && (name === 'slack-connection.json' || name === 'slack-tone.json'))) continue;
     try {
       const existing = await current(name);
       if (unreadable.has(name)) throw new Error('이 컴퓨터의 파일을 읽지 못해 건너뛰었습니다.');
       let next: unknown;
       switch (name) {
-        case 'permissions.json': {
-          if (!record(incoming) || !Array.isArray(incoming.rules)) throw new Error('invalid');
-          const kept = record(existing) ? existing : {};
-          next = { version: 1, requests: Array.isArray(kept.requests) ? kept.requests : [], codex: Array.isArray(kept.codex) ? kept.codex : [], ...(typeof kept.lost === 'string' ? { lost: kept.lost } : {}),
-            rules: incoming.rules, ...(record(incoming.autoReview) ? { autoReview: incoming.autoReview } : {}) };
-          break;
-        }
+        case 'permissions.json': next = mergePermissions(incoming, existing); if (next === undefined) throw new Error('invalid'); break;
         case 'slack-automation.json':
-        case 'github-automation.json': {
-          if (!record(incoming) || !Array.isArray(incoming.rules)) throw new Error('invalid');
-          // GitHub automation keeps its rules in the same form as Slack's (one coordinator manager for both).
-          try { validateSlackRules(incoming.rules); } catch { throw new Error('invalid'); }
-          next = { rules: incoming.rules, workflows: record(existing) && Array.isArray(existing.workflows) ? existing.workflows : [] };
-          break;
-        }
-        case 'trigger-secrets.json': {
-          // The backup's secrets come in (its value wins for the same one); secrets only this computer has stay, so a
-          // trigger kept here never loses the one it uses.
-          if (!Array.isArray(incoming) || !incoming.every(item => record(item) && ['id', 'name', 'origin', 'value', 'createdAt'].every(key => typeof item[key] === 'string'))) throw new Error('invalid');
-          const ids = new Set(incoming.map(item => (item as { id: string }).id));
-          next = [...incoming, ...(Array.isArray(existing) ? existing.filter(item => record(item) && !ids.has(String(item.id))) : [])];
-          break;
-        }
+        case 'github-automation.json': next = mergeAutomation(incoming, existing); if (next === undefined) throw new Error('invalid'); break;
+        case 'trigger-secrets.json': next = mergeTriggerSecrets(incoming, existing); if (next === undefined) throw new Error('invalid'); break;
         // Read again by every call, so it applies as soon as it is written. Read like a saved file: roles this version does not know are dropped.
         case 'models.json': if (!record(incoming)) throw new Error('invalid'); next = parseModelSettings(incoming); break;
         // What the worker's services refuse at start is never written: one would keep the worker from starting.
-        case 'slack-connection.json': if (!validSlackConnection(incoming)) throw new Error('invalid'); next = incoming; break;
-        case 'public-agents.json': {
-          const agents = parsePublicAgents(incoming);
-          if (!agents) throw new Error('invalid');
-          await signOutChangedVisitors(stateDir, parsePublicAgents(existing) ?? [], agents);
-          next = incoming;
-          break;
-        }
+        case 'slack-connection.json': next = restoreSlackConnection(incoming); if (next === undefined) throw new Error('invalid'); break;
+        case 'public-agents.json': next = await restorePublicAgents(stateDir, incoming, existing); if (next === undefined) throw new Error('invalid'); break;
         default: if (!record(incoming)) throw new Error('invalid'); next = incoming;
       }
       await writePrivateJson(join(stateDir, name), JSON.stringify(next));
@@ -185,29 +125,6 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
     }
   }
   return { parts: [...parts], errors };
-}
-
-/**
- * A restored public agent whose password or address differs from this computer's signs its visitors out, as changing
- * them on the page does: a visitor let in under one password is never let in under another.
- */
-async function signOutChangedVisitors(stateDir: string, current: { id: string; slug: string; password?: unknown; conversation?: string }[], restored: { id: string; slug: string; password?: unknown; conversation?: string }[]): Promise<void> {
-  for (const agent of restored) {
-    const before = current.find(item => item.id === agent.id);
-    const moved = !before || before.slug !== agent.slug, repassworded = !before || JSON.stringify(before.password) !== JSON.stringify(agent.password);
-    const regrouped = !before || before.conversation !== agent.conversation;
-    if (!moved && !repassworded && !regrouped) continue;
-    const path = join(stateDir, 'public-agents', `${agent.id}.json`);
-    const data = await readOptional(path);
-    if (!record(data) || !Array.isArray(data.visitors)) continue;
-    // Another way of sharing conversations starts each visitor's anew, as it does on the page.
-    const visitors = moved ? [] : data.visitors.map(visitor => {
-      if (!record(visitor)) return visitor;
-      const { conversationId: _conversation, ...rest } = visitor;
-      return { ...(regrouped ? rest : visitor), ...(repassworded ? { authorized: false } : {}) };
-    });
-    await writePrivateJson(path, JSON.stringify({ ...data, visitors }));
-  }
 }
 
 /** Which parts a payload holds, in the order the page lists them. */

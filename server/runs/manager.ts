@@ -1,35 +1,42 @@
 import type { PermissionRequest } from '../../shared/permissions.js';
-import { LAUNCH_MARKS_ENV } from '../sessions/launch-marks.js';
-import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from 'node:child_process';
+import { mkdir, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { homedir, tmpdir } from 'node:os';
-import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
+import { homedir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
 import type { CreateSessionRequest, MessageAttachments, Provider, Run, RunApprovalResponse, RunInstructions, RunOrigin, Session, SteerBlock } from '../../shared/types.js';
-import { isImageAttachment } from '../../shared/attachments.js';
-import { attachmentMetadata, attachmentPrompt, AttachmentStore } from '../stores/attachments.js';
+import { attachmentPrompt, AttachmentStore, claudeImageBlocks, imagePaths } from '../stores/attachments.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
 import type { CodexBridgeRun, CodexBridgeOptions } from './codex-bridge.js';
-import { requestedEffort, requestedModel, validModelId } from '../providers/models.js';
-import { requestedApprovalsReviewer } from '../providers/approvals.js';
+import { requestedEffort, requestedModel } from '../providers/models.js';
 import { SteeringError } from './steering.js';
 import { ClaudeControl } from './claude-control.js';
-import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioRun } from './codex-stdio.js';
-import { claudeInputTokens, contextCapacity, modelContextWindow, nativeContextObservation, withNativeContext } from '../sessions/context.js';
+import type { CodexStdioOptions, CodexStdioRun } from './codex-stdio.js';
+import { withNativeContext } from '../sessions/context.js';
 import { defaultStateDir } from '../state-dir.js';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
-import { findExecutable, providerDirectories, PROVIDERS } from '../providers/discovery.js';
-import { towerInstructionsBlock } from '../sessions/parser.js';
-import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
-import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
-import { ReplyLog } from './replies.js';
-import { checkClaudeSubscription, markMaster, MASTER_TOOL_TIMEOUT_SECONDS, subscriptionOnly, withoutKeys } from './subscription.js';
-import { awaitToolServers, CALLER_CAPABILITY_ENV, NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
-import { automatedOrigin, ownerOrigin, parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
-import { WakeupTracker, type Wakeup } from './wakeup.js';
+import { findExecutable, PROVIDERS } from '../providers/discovery.js';
+import { UUID, type CreatedSession } from './saved-state.js';
+import { checkClaudeSubscription, markMaster, subscriptionOnly } from './subscription.js';
+import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
+import { automatedOrigin, sameOrigin, type SessionOrigin } from './origin.js';
+import type { Wakeup } from './wakeup.js';
 import { TOWER_NOTICE } from '../../shared/task-notification.js';
-import { BackgroundTaskTracker, messageText, type FinishedTask } from './background-tasks.js';
+import { creationReviewer } from './approval-policy.js';
+import { OwnerAnswers } from './owner-answers.js';
+import { checkedInstructions, TurnNotes } from './turn-notes.js';
+import { sessionEnv, type LaunchMarks } from './turn-env.js';
+import { ToolNotices } from './tool-notices.js';
+import { errorMessage, FINISHED, finishedTime, MAX_OUTPUT, MAX_PROMPT, notAdmitted, RunError, shown } from './run-records.js';
+import { MAX_RUNS, RunHistory, SCHEDULED_OUTPUT } from './run-history.js';
+import { PermissionContinuations, retainedReceipts } from './permission-continuation.js';
+import { inheritedRunFields } from './continuations.js';
+import { CreatedSessionRegistry } from './session-registry.js';
+import { UPDATE_WAIT, UpdateDrain } from './update-drain.js';
+import { prepareClaudeTurn } from './claude-turn.js';
+import { prepareCodexTurn } from './codex-turn.js';
+import { prepareBridgeTurn } from './bridge-turn.js';
+import type { OwnedProcess, TurnExit, TurnHost } from './turn-host.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -48,11 +55,8 @@ interface RunnerOptions {
   /** How the master's Claude sign-in is checked before its turn (tests replace it). */
   checkClaudeSubscription?: typeof checkClaudeSubscription;
   env?: NodeJS.ProcessEnv;
-  /**
-   * Folder of the `claude`/`codex` shims put first in every turn's PATH, and where their marks go: a helper the turn starts
-   * notes who started it, so it is never shown as the owner's own session even when detached (see launch-marks.ts).
-   */
-  launchMarks?: { shims: string; marks: string };
+  /** The launch shims put first in every turn's PATH (see turn-env.ts). */
+  launchMarks?: LaunchMarks;
   spawnProcess?: SpawnProcess;
   findExecutable?: (provider: Provider) => Promise<string | undefined>;
   maxConcurrent?: number;
@@ -83,13 +87,6 @@ interface RunnerOptions {
   /** Queued runs wait until `markReady()`: a worker first sets up everything a launch asks (tools, gates, limits). */
   holdUntilReady?: boolean;
 }
-interface OwnedProcess {
-  child: ChildProcessWithoutNullStreams;
-  done: Promise<void>;
-  killTimer?: ReturnType<typeof setTimeout>;
-  claude?: ClaudeControl;
-  finishInput?: () => void;
-}
 /** Internal admission data is never accepted from the public message endpoint. */
 export interface RunAdmission {
   autoPromptId?: string;
@@ -114,93 +111,27 @@ export interface RunAdmission {
   instructions?: RunInstructions;
 }
 
-const MAX_OUTPUT = 64_000;
-const MAX_INSTRUCTIONS = 48_000;
-/** Marks, in runs.json, a turn still to run whose instructions (kept only in memory) it cannot go without. */
-const NEEDS_INSTRUCTIONS = 'needsInstructions';
-const FIRST_TURN_NOTES_MS = 6_000;
-/** A run as anything outside the worker sees it: without its hidden instructions. */
-function shown(run: Run): Run { const { instructions: _hidden, ...rest } = run; return { ...rest }; }
 type SteerableAdapter = CodexStdioRun | CodexBridgeRun | ClaudeControl;
 /** What the page shows about inserting a queued instruction now: the button, or why not. */
 function steerable(steering: { target: Run } | { blocked: SteerBlock } | undefined): Pick<Run, 'canSteer' | 'steerBlocked'> {
   return steering && 'blocked' in steering ? { canSteer: false, steerBlocked: steering.blocked } : { canSteer: Boolean(steering) };
 }
-function checkedInstructions(value: RunInstructions): RunInstructions {
-  if (typeof value?.text !== 'string' || !value.text.trim() || value.text.length > MAX_INSTRUCTIONS) throw new RunError('Tower instructions for this turn are invalid or too long.', 413);
-  return { text: value.text, ...(value.required ? { required: true } : {}) };
-}
-const MAX_PROMPT = 32_000;
-/** Finished runs kept; unfinished runs, and runs an automation still has to report, are never dropped for this. */
-const MAX_RUNS = 100;
-const MAX_RETAINED = 50;
-/** A retained finished run keeps what its result notice uses. */
-const RETAINED_OUTPUT = 20_000;
-const MAX_SAVED_BYTES = 64 * 1024 * 1024;
-/** What builds before 1.86.0 read at most. */
-const LEGACY_SAVED_BYTES = 11_500_000;
-/** Marks, in runs.json, a queued turn accepted while Tower switched workers: a restart keeps it queued. */
-const KEEP_QUEUED = 'keepQueued';
-/** Marks, in runs.json, a finished run an automation still has to report. */
-const RETAIN = 'retain';
-const UPDATE_WAIT = 'Waiting: Tower is switching to its new version; this starts right after.';
-const UPDATE_RESUME_WAIT = 'Tower resumes this conversation on its new version.';
-const WRAP_UP_RETRY_MS = 30_000;
-const WRAP_UP_NOTICE = `${TOWER_NOTICE} Tower is about to restart to apply an update. Within the next few minutes bring your work to a safe stopping point: finish or pause the current step, do not start long or risky operations, and do not leave half-applied changes. Then end your turn with a short note of what is done and what remains. Tower resumes this conversation automatically right after the update. Do not report the task as finished unless it is.`;
-const RESUME_NOTICE = `${TOWER_NOTICE} Tower was updated while this conversation was working, and the previous turn was ended for the update. Continue the original task. First check the conversation, files and running processes to see what was already done; do not repeat actions with outside effects (deploys, pushes, sent messages) without checking their result. If the task is already complete, say so briefly and stop.`;
-const UPDATE_STOPPED = 'Stopped for a Tower update before it finished; Tower resumes the conversation on its new version.';
-const DELEGATED_STOPPED = 'Stopped for a Tower update before it finished; it was not resumed automatically.';
-const UPDATE_NOT_STARTED = 'Stopped for a Tower update before it started in the Codex app. Send the instruction again.';
-
-/** A running turn a forced update is ending, and Tower's own continuation for it. */
-interface UpdateTarget { delegated: boolean; retryAt: number;
-  /** A wrap-up request is being inserted right now. */
-  sending?: boolean;
-  /** A wrap-up request was handed to the turn (it may or may not have taken it). */
-  reached?: boolean;
-  /** A deadline asked for its stop (kept across forced updates; decides whether it is carried on). */
-  stopping?: boolean;
-  /** The forced update (its sequence number) whose deadline sent the stop; a later one sends it again. */
-  stopSent?: number }
-/** `active` while new turns wait; after a give-up, turns already stopped or asked to wrap up are still settled. */
-interface UpdateDrain { sequence: number; startedAt: number; deadline: number; delegated: (run: Run) => boolean; active: boolean; targets: Map<string, UpdateTarget>; stoppingBridges: Set<string>; wrapUps: Set<string> }
 const MAX_QUEUED = 32;
-const FINISHED = new Set<Run['status']>(['completed', 'error', 'cancelled']);
-/** A scheduled continuation Tower was not running for is still delivered this long after its time. */
-const SCHEDULE_GRACE_MS = 60 * 60 * 1000;
-const BACKGROUND_FOLLOW_UP_MS = 60_000;
-const BACKGROUND_WAIT_MAX_MS = 2 * 60 * 60 * 1000;
-/** What Tower tells Claude when a finished background task did not start a follow-up turn by itself. */
-function backgroundNotice(finished: readonly FinishedTask[]): string {
-  const lines = finished.map(task => `- ${task.status}${task.summary ? `: ${task.summary}` : ''}${task.outputFile ? ` (output: ${task.outputFile})` : ''}`);
-  return `${TOWER_NOTICE} Background work you started in this conversation has finished${lines.length ? `:\n${lines.join('\n')}` : '.'}\n`
-    + 'Continue with what you planned to do once it finished, and report the result.';
-}
-/** When a run finished, for keeping the most recently finished ones. */
-const finishedTime = (run: Run) => Date.parse(run.finishedAt ?? run.createdAt) || 0;
 const due = (run: Run, now = Date.now()) => !run.scheduled || Date.parse(run.scheduled.at) <= now;
 
-export class RunError extends Error {
-  /** Nothing was accepted and the same request may succeed a little later (a full queue, a save that failed). */
-  retryable?: boolean;
-  constructor(message: string, public readonly statusCode = 400) { super(message); }
-}
-function notAdmitted(error: RunError): RunError { error.retryable = true; return error; }
+export { RunError };
 
 /** Owns only processes launched by this monitor; never signals an external agent. */
 export class RunManager extends EventEmitter {
   private readonly options: RunnerOptions;
-  private readonly stateFile: string;
-  private readonly createdFile: string;
+  private readonly history: RunHistory;
   private readonly attachments: AttachmentStore;
-  private readonly createdSessions = new Map<string, CreatedSession>();
+  private readonly registry = new CreatedSessionRegistry({ native: id => this.options.getSession(id), persist: () => this.persist() });
   private readonly runs = new Map<string, Run>();
-  /** The owner's answers to agents' questions, per conversation (memory only; see ownerAnswers). */
-  private readonly answers = new Map<string, { at: string; question: string; answer: string }[]>();
+  private readonly answers = new OwnerAnswers();
   private readonly owned = new Map<string, OwnedProcess>();
   private readonly bridged = new Map<string, CodexBridgeRun>();
-  /** Turns that already received their notes. */
-  private readonly noted = new Set<string>();
+  private readonly notes = new TurnNotes(() => this.options);
   private readonly stdio = new Map<string, CodexStdioRun>();
   private readonly reservedSessions = new Set<string>();
   /** CLIs being updated: none of their runs start until the update is done. */
@@ -208,41 +139,45 @@ export class RunManager extends EventEmitter {
   private readonly admissions = new Set<string>();
   private readonly locallySettled = new Map<string, number>();
   private readonly settledRuns = new Set<string>();
-  /** Queued runs accepted while Tower switched workers; a restart keeps them queued (see KEEP_QUEUED). */
-  private readonly carried = new Set<string>();
   /** Runs the owner asked to stop; a Codex app submission taken back for an update is then not queued again. */
   private readonly ownerStopped = new Set<string>();
-  private retained: () => Iterable<string> = () => [];
-  /** Runs saved as retained: kept until the automations that know which runs they need are loaded (`markReady`). */
-  private readonly restoredRetained = new Set<string>();
-  private drain?: UpdateDrain;
+  private readonly drain = new UpdateDrain({
+    runs: this.runs, bridged: this.bridged, ownerStopped: id => this.ownerStopped.has(id), stopping: () => this.stopping,
+    steer: (runId, options) => this.steer(runId, options), cancel: (runId, reason) => this.cancel(runId, reason),
+    changed: () => this.changed(), pump: () => { void this.pump(); },
+    mergePermission: (run, notice, wait) => this.permissions.mergeIntoUpdate(run, notice, wait),
+  });
   private ready: boolean;
-  private readonly instructionsFile: string;
   private pollTimer?: ReturnType<typeof setInterval>;
   private notifyTimer?: ReturnType<typeof setTimeout>;
   private outputPersistTimer?: ReturnType<typeof setTimeout>;
-  /** The last content each file holds. Updated only inside the write queue, after a successful write. */
-  private readonly saved: { runs?: string; created?: string; instructions?: string } = {};
   private pumping = false;
   private automationLimit = Infinity;
   private launchGate?: (run: Run) => string | undefined;
   private launchPrepare?: (run: Run) => Promise<void>;
   private started = false;
   private stopping = false;
-  private writes: Promise<void> = Promise.resolve();
-  private persistenceError?: Error;
-  /** The last save of required instructions failed: a handoff would lose them, so `flushState` refuses. */
-  private instructionsError?: Error;
+
+  /** What the turn modules use of this manager (see turn-host.ts). */
+  private readonly turnHost: TurnHost;
 
   constructor(options: RunnerOptions) {
     super();
     this.options = options;
-    this.stateFile = join(options.stateDir ?? defaultStateDir(), 'runs.json');
-    this.createdFile = join(options.stateDir ?? defaultStateDir(), 'created-sessions.json');
-    // Instructions a queued turn cannot go without, kept apart from runs.json so no older Tower ever shows them.
-    this.instructionsFile = join(options.stateDir ?? defaultStateDir(), 'run-instructions.json');
+    this.history = new RunHistory(options.stateDir ?? defaultStateDir());
     this.ready = !options.holdUntilReady;
     this.attachments = new AttachmentStore(options.stateDir ?? defaultStateDir());
+    const manager = this;
+    this.turnHost = {
+      get options() { return manager.options; }, registry: this.registry, attachments: this.attachments, notes: this.notes,
+      changed: () => this.changed(), append: (run, text) => this.append(run, text), notifyOutput: () => this.notifyOutput(), flush: () => this.flush(),
+      stopping: () => this.stopping, updating: () => this.updating, stop: (id, owned) => this.stopOwned(id, owned),
+      prepareLaunch: run => this.prepareLaunch(run), refusedAtLaunch: (run, session) => this.refusedAtLaunch(run, session),
+      release: sessionId => { this.reservedSessions.delete(sessionId); }, exited: exit => this.exited(exit),
+      runTools: (run, session) => this.runTools(run, session), executable: provider => this.executable(provider),
+      getSession: id => this.getSession(id), isWorking: session => this.isWorking(session),
+      validateSession: session => this.validateSession(session), masterSession: session => this.masterSession(session),
+    };
   }
 
   /** Slack and trigger work together start at most this many provider turns at once; the rest wait in the queue. */
@@ -253,58 +188,15 @@ export class RunManager extends EventEmitter {
    * at what the gate needs, after the last asynchronous step before a provider starts; the gate then answers at once.
    */
   setLaunchGate(gate: (run: Run) => string | undefined, prepare?: (run: Run) => Promise<void>): void { this.launchGate = gate; this.launchPrepare = prepare; }
-  /** Puts the launch shims first in a turn's PATH and tells them where to leave their marks. */
-  private markLaunches(env: NodeJS.ProcessEnv): void {
-    const launch = this.options.launchMarks;
-    if (!launch) return;
-    env.PATH = [launch.shims, ...(env.PATH ?? '').split(delimiter).filter(dir => dir && dir !== launch.shims)].join(delimiter);
-    env[LAUNCH_MARKS_ENV] = launch.marks;
-  }
-
-  /**
-   * The environment a command run for a conversation gets, so a `claude`/`codex` it starts is recorded as that
-   * conversation's own run, as if its agent had started it: the launch shims first on PATH, and the conversation's id.
-   */
+  /** The environment a command run for a conversation gets (see sessionEnv). */
   launchEnv(sessionId: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-    const next = { ...env };
-    this.markLaunches(next);
-    const session = this.getSession(sessionId);
-    // The id the provider itself sets for its own tools: the bare native id, as the shims expect it.
-    if (session?.nativeId) next[session.provider === 'codex' ? 'CODEX_THREAD_ID' : 'CLAUDE_CODE_SESSION_ID'] = session.nativeId;
-    return next;
+    return sessionEnv(env, this.getSession(sessionId), this.options.launchMarks);
   }
 
   private async prepareLaunch(run: Run): Promise<void> {
     // A look that fails leaves the gate with what it knows; a folder it cannot tell about counts as private.
     if (run.status === 'queued') await this.launchPrepare?.(run).catch(() => {});
-    if (run.status === 'queued' && run.permissionRequestIds?.length && run.scheduled) await this.checkPermissionUserMessage(run);
-  }
-
-  private permissionGoalFinished(target: Run | undefined): boolean {
-    if (!target || target.status !== 'completed' || !target.finishedAt) return false;
-    const session = this.getSession(target.sessionId);
-    return session?.outcome === 'done' && !!session.lastRequestAt
-      && Date.parse(session.lastRequestAt) >= Date.parse(target.startedAt ?? target.createdAt)
-      && Date.parse(session.lastRequestAt) <= Date.parse(target.finishedAt) && Date.parse(session.updatedAt) >= Date.parse(target.finishedAt);
-  }
-
-  private async checkPermissionUserMessage(run: Run): Promise<void> {
-    const observed = this.getSession(run.sessionId)?.lastRequestAt;
-    let latest: { text: string; timestamp: string } | undefined;
-    try { latest = await this.options.latestUserMessage?.(run.sessionId); }
-    catch { if (run.status === 'queued') this.supersede(run, 'The latest native user instruction could not be verified.'); return; }
-    if (run.status !== 'queued') return;
-    if (this.permissionGoalFinished(this.runs.get(run.scheduled!.afterRunId))) {
-      this.supersede(run, 'The requesting turn already completed the task.'); return;
-    }
-    const recorded = this.getSession(run.sessionId)?.lastRequestAt ?? observed;
-    const newest = Math.max(Date.parse(recorded ?? '') || 0, Date.parse(latest?.timestamp ?? '') || 0);
-    if (newest <= Date.parse(run.permissionRequestedAt ?? run.createdAt)) return;
-    const ownNotice = latest && Date.parse(latest.timestamp) === newest && [...this.runs.values()].some(notice =>
-      notice.sessionId === run.sessionId && notice.steering?.state === 'delivered' && notice.steering.targetRunId === run.scheduled!.afterRunId
-      && (notice.permissionNotice?.targetRunId === run.scheduled!.afterRunId || notice.updateWrapUp)
-      && notice.prompt === latest.text);
-    if (!ownNotice) this.supersede(run, 'A newer native user instruction replaced the permission continuation, or its source could not be confirmed.');
+    await this.permissions.verifyBeforeLaunch(run);
   }
 
   /** Checked again at the last moment before a provider is started, after every asynchronous step. */
@@ -331,7 +223,7 @@ export class RunManager extends EventEmitter {
    * What the owner answered the agent's questions in a conversation, kept from the moment it is sent: native history
    * may not have it yet when Tower's permission reviewer reads the owner's words.
    */
-  ownerAnswers(sessionId: string): { at: string; question: string; answer: string }[] { return [...this.answers.get(this.monitorSessionId(sessionId)) ?? []]; }
+  ownerAnswers(sessionId: string): { at: string; question: string; answer: string }[] { return this.answers.list(this.monitorSessionId(sessionId)); }
   setClaudeSettings(settings: NonNullable<RunnerOptions['claudeSettings']>): void { this.options.claudeSettings = settings; }
   setRunToolResolver(resolver: NonNullable<RunnerOptions['resolveRunTools']>): void {
     this.options.resolveRunTools = resolver;
@@ -345,65 +237,28 @@ export class RunManager extends EventEmitter {
     return this.options.resolveRunTools?.(run, session) ?? NO_RUN_TOOLS;
   }
 
-  private providerInstructions(run: Run, tools: RunTools): string | undefined {
-    return [run.instructions?.text, tools.instructions].filter(Boolean).join('\n\n') || undefined;
-  }
+  private readonly permissions = new PermissionContinuations({
+    runs: this.runs, events: this, getSession: id => this.getSession(id), supersede: (run, reason) => this.supersede(run, reason),
+    steer: (runId, options) => this.steer(runId, options), changed: () => this.changed(), flush: () => this.flush(), pump: () => { void this.pump(); },
+    stopping: () => this.stopping, admit: id => { this.admissions.add(id); }, unadmit: id => { this.admissions.delete(id); },
+    latestUserMessage: id => this.options.latestUserMessage?.(id), shown,
+  });
 
-  private readonly toolNotices = new Map<string, string>();
-  private readonly toolNoticeSending = new Set<string>();
+  /** Records the owner's decision about an agent's permission request (see permission-continuation.ts). */
+  permissionDecision(request: PermissionRequest, prompt: string, options: { closed?: boolean } = {}): Promise<Run> { return this.permissions.decide(request, prompt, options); }
+
+  private readonly toolNotices = new ToolNotices({
+    runs: () => this.runs.values(), run: id => this.runs.get(id), getSession: id => this.getSession(id), runTools: (run, session) => this.runTools(run, session),
+    stopping: () => this.stopping, updating: () => this.updating,
+    admitting: run => this.admissions.has(run.id) || run.steering?.state === 'sending',
+    writer: id => this.stdio.get(id) ?? this.owned.get(id)?.claude,
+    finishInput: id => this.owned.get(id)?.finishInput?.(),
+  });
 
   /** An explicit owner connection targets one session; never creates or resumes a provider turn. */
-  notifyToolChange(instructions: string, sessionId: string): void {
-    if (!sessionId || this.stopping || this.updating) return;
-    for (const run of this.runs.values()) {
-      if (run.status !== 'running' || run.steering || run.sessionId !== sessionId) continue;
-      if (this.secretNoticeEligible(run)) this.toolNotices.set(run.id, instructions);
-    }
-    // Coalesce changes committed in the same tick before touching the native transport.
-    queueMicrotask(() => this.flushToolNotices());
-  }
+  notifyToolChange(instructions: string, sessionId: string): void { this.toolNotices.notify(instructions, sessionId); }
 
-  private secretNoticeEligible(run: Run): boolean {
-    const session = this.getSession(run.sessionId);
-    return Boolean(session && !session.closed && !run.ownerStopped && run.origin?.kind === 'owner'
-      && run.towerTools === 'attached' && this.runTools(run, session).servers?.tower_secrets);
-  }
-
-  private flushToolNotices(): void {
-    for (const [id, text] of this.toolNotices) {
-      const run = this.runs.get(id);
-      if (!run || run.status !== 'running' || !this.secretNoticeEligible(run)) { this.toolNotices.delete(id); continue; }
-      if (this.stopping || this.updating || this.toolNoticeSending.has(id) || run.approvals?.length) continue;
-      if ([...this.runs.values()].some(other => other.sessionId === run.sessionId && (this.admissions.has(other.id) || other.steering?.state === 'sending'))) continue;
-      // Only Tower-owned native writers receive private instructions; desktop bridges own their own context.
-      const adapter = this.stdio.get(id) ?? this.owned.get(id)?.claude;
-      if (!adapter?.canSteer?.() || !adapter.steer) continue;
-      this.toolNotices.delete(id); this.toolNoticeSending.add(id);
-      const messageId = randomUUID();
-      const prompt = towerInstructionsBlock(text);
-      const send = async () => {
-        if (run.status !== 'running' || this.stopping || this.updating || !this.secretNoticeEligible(run) || !adapter.canSteer?.()) throw new SteeringError('Private notice target is no longer available.', 'rejected');
-        if (adapter instanceof ClaudeControl) await adapter.steer({ type: 'user', uuid: messageId, session_id: this.getSession(run.sessionId)!.nativeId, parent_tool_use_id: null,
-          message: { role: 'user', content: [{ type: 'text', text: prompt }] } });
-        else {
-          const steer = adapter.steer;
-          if (!steer) throw new SteeringError('Private notice writer is no longer available.', 'rejected');
-          await steer.call(adapter, { id: messageId, prompt });
-        }
-      };
-      void send().catch(error => {
-        if (error instanceof SteeringError && error.disposition === 'rejected' && run.status === 'running' && !this.stopping && this.secretNoticeEligible(run)) {
-          if (!this.toolNotices.has(id)) this.toolNotices.set(id, text);
-        } else {
-          // An uncertain message may already be in the turn: do not resend it or log provider text.
-          console.warn('Tower could not confirm a private secret-connection notice; credentials remain discoverable when needed.');
-        }
-      }).finally(() => {
-        this.toolNoticeSending.delete(id);
-        this.owned.get(id)?.finishInput?.();
-      });
-    }
-  }
+  private flushToolNotices(): void { this.toolNotices.flush(); }
 
   /**
    * Provenance of a session Tower created. Native sessions the owner opened elsewhere return undefined.
@@ -411,151 +266,37 @@ export class RunManager extends EventEmitter {
    */
   sessionOrigin(id: string): SessionOrigin | undefined {
     id = this.monitorSessionId(id);
-    const created = this.createdSessions.get(id);
-    const linked = this.options.isExternallyLinked?.([id, this.nativeSessionId(id)]) === true;
-    if (!created) return linked ? { kind: 'unknown', untrustedInput: true } : undefined;
-    if (linked && !created.origin?.untrustedInput) {
-      // The mark is permanent: record it so a later ledger cleanup cannot clear it.
-      created.origin = { ...(created.origin ?? { kind: 'unknown' as const }), untrustedInput: true };
-      this.persist();
-    }
-    return { ...(created.origin ?? { kind: 'unknown' as const, untrustedInput: true }) };
+    return this.registry.origin(id, this.options.isExternallyLinked?.([id, this.nativeSessionId(id)]) === true);
   }
 
-  /**
-   * Fills provenance for sessions created before it was recorded. Only evidence that survives in the
-   * run registry or in external ledgers is used; anything undecidable stays unknown and untrusted.
-   */
+  /** Fills provenance for sessions created before it was recorded (see CreatedSessionRegistry.backfill). */
   backfillSessionOrigins(links: { sessionIds: ReadonlySet<string>; requestIds: ReadonlySet<string> }): number {
-    let changed = 0;
-    for (const [id, created] of this.createdSessions) {
-      if (created.origin) continue;
-      const initial = this.runs.get(created.runId);
-      const aliases = [id, this.nativeSessionId(id)];
-      if (aliases.some(alias => links.sessionIds.has(alias)) || (initial?.autoPromptId && links.requestIds.has(initial.autoPromptId))) {
-        created.origin = { kind: 'slack', untrustedInput: true };
-      } else if (initial) created.origin = { kind: 'owner', untrustedInput: false };
-      else created.origin = { kind: 'unknown', untrustedInput: true };
-      changed++;
-    }
-    if (changed) this.persist();
-    return changed;
+    return this.registry.backfill(links, id => this.runs.get(id));
   }
 
   async start(): Promise<void> {
     if (this.started) return;
     await mkdir(this.options.stateDir ?? defaultStateDir(), { recursive: true, mode: 0o700 });
     await this.attachments.start();
-    try {
-      const saved = await readPrivateJson(this.createdFile);
-      if (!Array.isArray(saved) || saved.some(value => !isCreatedSession(value))) throw new Error('Saved created sessions are invalid.');
-      for (const value of saved) {
-        const origin = restoredSessionOrigin((value as { origin?: unknown }).origin);
-        if (origin) value.origin = origin; else delete value.origin;
-        this.createdSessions.set(value.session.id, value);
-      }
-      this.saved.created = JSON.stringify([...this.createdSessions.values()]);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      // Without any created session, the identities file is never created.
-      this.saved.created = '[]';
-    }
-    const kept = await this.savedInstructions();
-    try {
-      if ((await stat(this.stateFile)).size > MAX_SAVED_BYTES) throw new Error('Saved run history is too large.');
-      const saved: unknown = JSON.parse(await readFile(this.stateFile, 'utf8'));
-      if (!Array.isArray(saved)) throw new Error('Saved run history is invalid.');
-      const valid = saved.slice(-1000).filter(isSavedRun);
-      // Every unfinished run and every run an automation still has to report comes back; of the rest, the newest.
-      const marked = (value: Run, key: string) => (value as unknown as Record<string, unknown>)[key] === true;
-      const finished = valid.filter(value => FINISHED.has(value.status) && !marked(value, RETAIN)).sort((a, b) => finishedTime(a) - finishedTime(b));
-      const dropped = new Set(finished.slice(0, Math.max(0, finished.length - MAX_RUNS)));
-      for (const value of valid) {
-        if (dropped.has(value)) continue;
-        const run: Run = { ...value, prompt: value.prompt.slice(0, MAX_PROMPT), output: value.output.slice(-MAX_OUTPUT),
-          ...(value.attachments ? { attachments: value.attachments.map(item => attachmentMetadata(item)!) } : {}) };
-        // A malformed origin never reads back as owner work.
-        if (value.origin !== undefined) run.origin = parseRunOrigin(value.origin) ?? { kind: 'unknown' };
-        // A permission request belongs to a live process, never a restored run.
-        delete run.approvals;
-        delete run.instructions;
-        let needsInstructions = marked(value, NEEDS_INSTRUCTIONS);
-        const keepQueued = marked(value, KEEP_QUEUED);
-        if (marked(value, RETAIN)) this.restoredRetained.add(run.id);
-        for (const key of [NEEDS_INSTRUCTIONS, KEEP_QUEUED, RETAIN]) delete (run as unknown as Record<string, unknown>)[key];
-        const instructions = needsInstructions && !FINISHED.has(run.status) ? kept.get(run.id) : undefined;
-        if (instructions) { run.instructions = instructions; needsInstructions = false; }
-        delete run.canSteer; delete run.steerBlocked;
-        delete run.backgroundWait;
-        if (run.steering?.state === 'sending') run.steering.state = 'uncertain';
-        const context = nativeContextObservation(run.contextUsage);
-        if (context) run.contextUsage = context; else delete run.contextUsage;
-        // A continuation that has not started is only a time and the agent's own prompt; it waits again, unless it needed
-        // instructions, which did not survive the restart.
-        if (run.status === 'queued' && run.scheduled && needsInstructions) {
-          run.status = 'cancelled';
-          run.error = 'Agent Session Tower restarted before this continuation, and it would have run without the instructions Tower gave its turn. It was not started; send an instruction to continue.';
-          run.finishedAt = new Date().toISOString();
-        } else if (run.status === 'queued' && run.permissionNotice) { run.status = 'cancelled'; run.finishedAt = new Date().toISOString(); run.error = 'Turn-only permission notice was not resent after restart.'; }
-        else if (run.status === 'queued' && run.scheduled?.resume === 'permission') run.output = 'Waiting for the requesting turn to finish before permission continuation.';
-        else if (run.status === 'queued' && run.scheduled?.resume === 'update') run.output = UPDATE_RESUME_WAIT;
-        else if (run.status === 'queued' && run.scheduled && Date.parse(run.scheduled.at) > Date.now() - SCHEDULE_GRACE_MS) run.output = scheduledOutput;
-        // Accepted while Tower switched to its new version: it runs here, exactly once.
-        else if (run.status === 'queued' && keepQueued && !needsInstructions) this.carried.add(run.id);
-        else if (run.status === 'running' || run.status === 'queued') {
-          const missedSchedule = run.status === 'queued' && run.scheduled;
-          run.status = run.status === 'running' ? 'error' : 'cancelled';
-          run.error = run.steering
-            ? 'Agent Session Tower stopped before this inserted instruction finished. It was not resent. Check the conversation before sending again.'
-            : missedSchedule
-              ? 'Agent Session Tower was not running when this scheduled continuation was due. It was not started; send an instruction to continue.'
-              : 'Agent Session Tower stopped before this task finished. It was not restarted; send the instruction again to continue.';
-          run.finishedAt = new Date().toISOString();
-        }
-        this.runs.set(run.id, run);
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
+    const saved = await this.history.readCreated();
+    if (saved !== undefined) this.history.noteCreated(this.registry.load(saved));
+    for (const run of await this.history.restore()) this.runs.set(run.id, run);
     this.started = true;
     // Without a worker to load the automations later, the retained runs are whatever they report from now on.
-    if (this.ready) this.restoredRetained.clear();
+    if (this.ready) this.history.restoredRetained.clear();
     this.changed();
     await this.flush();
     this.pollTimer = setInterval(() => { void this.pump(); }, this.options.pollMs ?? 1500);
     this.pollTimer.unref();
   }
 
-  /** Required instructions of queued turns, saved apart from runs.json. A file that cannot be read keeps none. */
-  private async savedInstructions(): Promise<Map<string, RunInstructions>> {
-    const kept = new Map<string, RunInstructions>();
-    try {
-      const saved = await readPrivateJson(this.instructionsFile);
-      if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
-        for (const [id, value] of Object.entries(saved as Record<string, unknown>)) {
-          try { if (UUID.test(id)) kept.set(id, { ...checkedInstructions(value as RunInstructions), required: true }); } catch { /* An invalid entry is left out. */ }
-        }
-      }
-      this.saved.instructions = JSON.stringify(Object.fromEntries(kept));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error(`Saved turn instructions were not read: ${errorMessage(error)}`);
-    }
-    return kept;
-  }
-
   /** Starts queued runs once everything a launch asks for is in place (see `holdUntilReady`). */
-  markReady(): void { if (this.ready) return; this.ready = true; this.restoredRetained.clear(); void this.pump(); }
+  markReady(): void { if (this.ready) return; this.ready = true; this.history.restoredRetained.clear(); void this.pump(); }
 
   /** Runs an automation still has to report: kept through pruning and restarts. */
-  setRetained(retained: () => Iterable<string>): void { this.retained = retained; }
+  setRetained(retained: () => Iterable<string>): void { this.history.setRetained(retained); }
 
-  private retainedIds(): Set<string> {
-    const ids = [...new Set([...this.restoredRetained, ...this.retained()])].map(id => this.runs.get(id)).filter((run): run is Run => !!run)
-      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, MAX_RETAINED).map(run => run.id);
-    const receipts = [...this.runs.values()].filter(run => run.permissionRequestIds?.length);
-    const keptReceipts = [...receipts.filter(run => !FINISHED.has(run.status)), ...receipts.filter(run => FINISHED.has(run.status)).sort((a, b) => finishedTime(b) - finishedTime(a)).slice(0, 200)];
-    return new Set([...ids, ...keptReceipts.flatMap(run => [run.id, ...(run.scheduled ? [run.scheduled.afterRunId] : [])])]);
-  }
+  private retainedIds(): Set<string> { return this.history.retainedIds(this.runs, retainedReceipts(this.runs.values())); }
 
   list(): Run[] { return [...this.runs.values()].map((run) => ({ ...shown(run), ...steerable(this.steering(run)), ...(run.steering ? { steering: { ...run.steering } } : {}), ...(run.attachments ? { attachments: run.attachments.map(item => ({ ...item })) } : {}),
     ...(run.contextUsage ? { contextUsage: { ...run.contextUsage } } : {}),
@@ -579,57 +320,23 @@ export class RunManager extends EventEmitter {
   }
 
   /** Stable monitor IDs keep layout, titles and closure attached after native discovery. */
-  nativeSessionId(id: string): string {
-    id = this.monitorSessionId(id);
-    const created = this.createdSessions.get(id);
-    return created?.confirmed ? `${created.session.provider}:${created.session.nativeId}` : id;
-  }
+  nativeSessionId(id: string): string { return this.registry.nativeId(id); }
 
   getSession(id: string): Session | undefined {
     id = this.monitorSessionId(id);
-    const created = this.createdSessions.get(id);
-    if (!created) {
-      const native = this.options.getSession(id);
-      if (!native) return undefined;
-      return this.sessionWithContext(native.parentId ? { ...native, parentId: this.monitorSessionId(native.parentId) } : native);
-    }
-    const native = created.confirmed ? this.options.getSession(this.nativeSessionId(id)) : undefined;
-    if (native && !created.seenNative) { created.seenNative = true; this.persist(); }
-    const initialRun = this.runs.get(created.runId);
-    const launchedBy = created.origin?.kind === 'trigger' && created.origin.triggerId ? { launchedBy: { kind: 'trigger' as const, triggerId: created.origin.triggerId } } : {};
-    // The folder explicitly chosen at creation remains the project's identity.
-    // Native discovery may observe a later working directory or incomplete metadata.
-    if (native) return this.sessionWithContext({ ...native, id, cwd: created.session.cwd, project: created.session.project, ...(native.parentId ? { parentId: this.monitorSessionId(native.parentId) } : {}), ...(created.title ? { customTitle: created.title } : {}), ...launchedBy });
-    if (created.seenNative && (!initialRun || FINISHED.has(initialRun.status))) return undefined;
-    const live = initialRun?.status === 'queued' || initialRun?.status === 'running';
-    return {
-      ...created.session,
-      ...launchedBy,
-      resumable: created.confirmed,
-      creationPending: !created.confirmed && live,
-      status: initialRun?.status === 'running' ? 'working' : initialRun?.status === 'queued' ? 'idle' : initialRun?.status === 'completed' ? 'completed' : 'error',
-      statusReason: live ? '새 세션을 생성하고 있습니다.' : initialRun?.error || (initialRun?.status === 'completed' ? '첫 작업을 완료했습니다.' : '세션 생성이 완료되지 않았습니다. 새 세션으로 다시 시작할 수 있습니다.'),
-      updatedAt: initialRun?.finishedAt || initialRun?.startedAt || created.session.updatedAt,
-    };
+    if (this.registry.has(id)) return this.registry.view(id, runId => this.runs.get(runId), session => this.sessionWithContext(session));
+    const native = this.options.getSession(id);
+    if (!native) return undefined;
+    return this.sessionWithContext(native.parentId ? { ...native, parentId: this.monitorSessionId(native.parentId) } : native);
   }
 
-  private monitorSessionId(id: string): string {
-    if (this.createdSessions.has(id)) return id;
-    for (const [monitorId, created] of this.createdSessions) {
-      if (created.confirmed && `${created.session.provider}:${created.session.nativeId}` === id) return monitorId;
-    }
-    return id;
-  }
+  private monitorSessionId(id: string): string { return this.registry.monitorId(id); }
+
+  /** The records of created conversations, for tests that reach them directly; only the registry changes them. */
+  private get createdSessions(): Map<string, CreatedSession> { return this.registry.records; }
 
   sessionList(nativeSessions: readonly Session[]): Session[] {
-    const aliases = new Map([...this.createdSessions.keys()].map(id => [this.nativeSessionId(id), id]));
-    const sessions = new Map(nativeSessions.filter(session => !aliases.has(session.id)).map(session => [session.id, session]));
-    for (const id of this.createdSessions.keys()) {
-      const session = this.getSession(id);
-      if (session) sessions.set(id, session);
-    }
-    const listed = markMaster([...sessions.values()].map(session => this.sessionWithContext(session.parentId && aliases.has(session.parentId)
-      ? { ...session, parentId: aliases.get(session.parentId) } : session)), this.options.stateDir ?? defaultStateDir());
+    const listed = markMaster(this.registry.list(nativeSessions, id => this.getSession(id)).map(session => this.sessionWithContext(session)), this.options.stateDir ?? defaultStateDir());
     const overlay = this.options.sessionOverlay;
     return overlay ? listed.map(overlay) : listed;
   }
@@ -640,18 +347,15 @@ export class RunManager extends EventEmitter {
     if (!PROVIDERS.includes(input.provider)) throw new RunError('Claude 또는 Codex를 선택하세요.');
     const model = requestedModel(input.model);
     const effort = requestedEffort(input.effort, input.provider);
-    // Only a Codex thread has an approvals reviewer. The owner's own turns always use the automatic one (see
-    // launchCodex), so one an older page sends is still checked, then left out; triggers and Slack keep theirs.
-    const requestedReviewer = input.provider === 'codex' ? requestedApprovalsReviewer(input.codexApprovalsReviewer) : undefined;
-    const approvalsReviewer = ownerOrigin(internal.origin) ? undefined : requestedReviewer;
+    const approvalsReviewer = creationReviewer(input, internal.origin);
     if (typeof input.cwd !== 'string' || input.cwd.includes('\0') || input.cwd.length > 4096) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
     const cwd = input.cwd === '~' || input.cwd.startsWith('~/') ? join(homedir(), input.cwd.slice(1)) : input.cwd;
     if (!isAbsolute(cwd)) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
     input = { ...input, cwd };
     const title = input.title === undefined ? '' : normalizeSessionTitle(input.title);
-    if (!(await this.executable(input.provider))) throw new RunError(`Install the ${input.provider} CLI and ensure it is in PATH before creating a session.`, 503);
+    if (!(await this.executable(input.provider))) throw new RunError(`Install the ${input.provider} CLI and ensure it is in PATH before creating a session.`, 'unavailable');
     if (internal.createFolder === false) {
-      if (!(await stat(cwd).then(info => info.isDirectory(), () => false))) throw new RunError('The working folder does not exist. It was not created.', 404);
+      if (!(await stat(cwd).then(info => info.isDirectory(), () => false))) throw new RunError('The working folder does not exist. It was not created.', 'not-found');
     } else {
       // A folder that does not exist yet is created, like `mkdir -p` before starting the CLI there.
       try { await mkdir(cwd, { recursive: true }); if (!(await stat(cwd)).isDirectory()) throw new Error(); }
@@ -666,19 +370,13 @@ export class RunManager extends EventEmitter {
       internal.validate?.();
     } catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
     const createdAt = new Date().toISOString();
-    const session: Session = {
-      id, nativeId: input.provider === 'claude' ? uuid : '', provider: input.provider,
-      title: input.prompt.trim().replace(/\s+/g, ' ').slice(0, 120) || '첨부 파일 확인', ...(title ? { customTitle: title } : {}), cwd: input.cwd, project: basename(input.cwd) || input.cwd,
-      status: 'idle', statusReason: '새 세션을 생성하고 있습니다.', createdAt, updatedAt: createdAt,
-      lastRequestAt: createdAt, lastMessage: input.prompt.trim().slice(0, 512), messageCount: 0, isSubagent: false, resumable: false, creationPending: true,
-    };
     const origin = internal.origin ?? { kind: 'unknown' as const };
     const run: Run = { id: randomUUID(), sessionId: id, origin, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}), ...(effort ? { effort } : {}),
       ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
       ...(approvalsReviewer ? { codexApprovalsReviewer: approvalsReviewer } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
     // Provenance commits with the session identity, before any provider starts.
-    this.createdSessions.set(id, { session, runId: run.id, confirmed: false, ...(title ? { title } : {}), origin: sessionOriginOf(origin, internal.untrustedInput === true) });
+    this.registry.add(input, id, input.provider === 'claude' ? uuid : '', run, title, origin, internal.untrustedInput === true);
     this.runs.set(run.id, run);
     this.admissions.add(run.id);
     this.prune();
@@ -702,21 +400,21 @@ export class RunManager extends EventEmitter {
   }
 
   private validateAdmission(prompt: string, hasAttachments = false): void {
-    if (!this.started || this.stopping) throw notAdmitted(new RunError('The task runner is not accepting instructions.', 503));
+    if (!this.started || this.stopping) throw notAdmitted(new RunError('The task runner is not accepting instructions.', 'unavailable'));
     if (typeof prompt !== 'string' || (!prompt.trim() && !hasAttachments)) throw new RunError('Enter an instruction or attach a file first.');
-    if (prompt.length > MAX_PROMPT) throw new RunError(`Instructions must be at most ${MAX_PROMPT.toLocaleString()} characters.`, 413);
-    if ([...this.runs.values()].filter((run) => run.status === 'queued' && !run.scheduled).length >= MAX_QUEUED) throw notAdmitted(new RunError('The task queue is full. Wait for a task to finish.', 429));
+    if (prompt.length > MAX_PROMPT) throw new RunError(`Instructions must be at most ${MAX_PROMPT.toLocaleString()} characters.`, 'too-large');
+    if ([...this.runs.values()].filter((run) => run.status === 'queued' && !run.scheduled).length >= MAX_QUEUED) throw notAdmitted(new RunError('The task queue is full. Wait for a task to finish.', 'rate-limited'));
   }
 
   /** External content only enters conversations Tower created and can keep marked. */
   private admitUntrusted(sessionId: string): void {
-    if (!this.createdSessions.has(sessionId)) throw new RunError('External trigger content can only continue a conversation Tower created for it.', 409);
+    if (!this.registry.has(sessionId)) throw new RunError('External trigger content can only continue a conversation Tower created for it.', 'conflict');
   }
 
   private validateCorrelation(id: string | undefined): void {
     if (id === undefined) return;
     if (!UUID.test(id)) throw new RunError('Invalid Auto Prompt request ID.');
-    if ([...this.runs.values()].some(run => run.autoPromptId === id)) throw new RunError('This Auto Prompt already has an execution task.', 409);
+    if ([...this.runs.values()].some(run => run.autoPromptId === id)) throw new RunError('This Auto Prompt already has an execution task.', 'conflict');
   }
 
   async enqueue(sessionId: string, prompt: string, request: MessageAttachments = {}, internal: RunAdmission = {}): Promise<Run> {
@@ -729,15 +427,14 @@ export class RunManager extends EventEmitter {
     if (internal.untrustedInput) this.admitUntrusted(sessionId);
     const model = requestedModel(request.model);
     const effort = requestedEffort(request.effort, session.provider);
-    if (!(await this.executable(session.provider))) throw new RunError(`Install the ${session.provider} CLI and ensure it is in PATH before sending instructions.`, 503);
+    if (!(await this.executable(session.provider))) throw new RunError(`Install the ${session.provider} CLI and ensure it is in PATH before sending instructions.`, 'unavailable');
     const prepared = await this.attachments.prepare(sessionId, request);
     // File writes yield; recheck admission immediately before inserting the run.
     try { this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.(); }
     catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
     if (internal.untrustedInput) {
       // Recorded before the run exists: once external content is queued, the session stays marked.
-      const created = this.createdSessions.get(sessionId)!;
-      if (!created.origin?.untrustedInput) created.origin = { ...(created.origin ?? { kind: 'unknown' as const }), untrustedInput: true };
+      this.registry.markUntrusted(sessionId);
     }
     const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
       ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
@@ -758,24 +455,6 @@ export class RunManager extends EventEmitter {
     return shown(run);
   }
 
-  /**
-   * Adds `firstTurnNotes` to a new conversation's first turn and `turnNotes` to every turn. Never delays a turn by more
-   * than a few seconds, never fails it, and a turn gets them once however often it is launched.
-   */
-  private async addTurnNotes(run: Run, session: Session, creating: boolean): Promise<void> {
-    if (run.origin?.controllerId || this.noted.has(run.id)) return;
-    if (this.noted.size >= 10_000) this.noted.clear();
-    this.noted.add(run.id);
-    const ask = (notes: ((run: Run, session: Session) => Promise<string | undefined>) | undefined) => notes ? notes(run, session).catch(() => undefined) : Promise.resolve(undefined);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const all = Promise.all([creating ? ask(this.options.firstTurnNotes) : undefined, ask(this.options.turnNotes)]);
-    const notes = await Promise.race([all, new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), FIRST_TURN_NOTES_MS); })]);
-    clearTimeout(timer);
-    const text = [run.instructions?.text, ...(notes ?? [])].filter(item => item?.trim()).join('\n\n');
-    if (run.status !== 'queued' || !text || text === run.instructions?.text) return;
-    if (text.length <= MAX_INSTRUCTIONS) run.instructions = { text, ...(run.instructions?.required ? { required: true } : {}) };
-  }
-
   private steeringTarget(run: Run) {
     const steering = this.steering(run);
     return steering && 'target' in steering ? steering : undefined;
@@ -786,7 +465,7 @@ export class RunManager extends EventEmitter {
    * said when no turn runs there or the instruction is not one the owner could insert (scheduled, being admitted).
    */
   private steering(run: Run): { target: Run; adapter: SteerableAdapter } | { blocked: SteerBlock } | undefined {
-    if (run.permissionNotice && run.permissionNotice.targetRunId !== [...this.runs.values()].find(item => item.sessionId === run.sessionId && item.status === 'running' && !item.steering)?.id) return undefined;
+    if (this.permissions.noticeBlocked(run)) return undefined;
     if (this.stopping || run.status !== 'queued' || run.steering || run.scheduled || this.admissions.has(run.id) || this.bridged.has(run.id)) return undefined;
     const target = [...this.runs.values()].find(item => item.sessionId === run.sessionId && item.status === 'running' && !item.steering);
     if (!target) return undefined;
@@ -801,89 +480,13 @@ export class RunManager extends EventEmitter {
     return adapter?.canSteer?.() && adapter.steer ? { target, adapter } : { blocked: 'starting' };
   }
 
-  private readonly permissionDeliveries = new Map<string, Promise<Run>>();
-
-  permissionDecision(request: PermissionRequest, prompt: string, options: { closed?: boolean } = {}): Promise<Run> {
-    const pending = this.permissionDeliveries.get(request.id);
-    if (pending) return pending;
-    const delivery = this.recordPermissionDecision(request, prompt, options);
-    this.permissionDeliveries.set(request.id, delivery);
-    void delivery.finally(() => this.permissionDeliveries.delete(request.id)).catch(() => {});
-    return delivery;
-  }
-
-  /** Records a permission decision once; approval needs a fresh provider turn, never an insert. */
-  private async recordPermissionDecision(request: PermissionRequest, prompt: string, options: { closed?: boolean } = {}): Promise<Run> {
-    const existing = [...this.runs.values()].find(run => run.permissionRequestIds?.includes(request.id));
-    const revision = `${request.status}:${request.decidedAt ?? request.createdAt}`;
-    const reopenedDecision = existing?.error && existing.permissionDecisionRevisions?.[request.id]?.startsWith('withdrawn:')
-      && request.status !== 'withdrawn' && request.status !== 'pending' && existing.permissionDecisionRevisions[request.id] !== revision;
-    if (existing && !reopenedDecision) { await this.flush(); if (!existing.scheduled && existing.error) throw new RunError(existing.error, 409); return shown(existing); }
-    let target = request.runId ? this.runs.get(request.runId) : undefined;
-    const visited = new Set<string>();
-    while (target?.steering && !visited.has(target.id)) { visited.add(target.id); target = this.runs.get(target.steering.targetRunId); }
-    if (!target || target.sessionId !== request.sessionId) throw new RunError('The requesting turn can no longer be reached.', 409);
-    const now = new Date().toISOString();
-    const approved = request.status === 'approved' && request.rule.kind !== 'run';
-    const updateResume = [...this.runs.values()].find(run => run.status === 'queued' && run.sessionId === target!.sessionId && run.scheduled?.afterRunId === target!.id && run.scheduled.resume === 'update');
-    const session = this.getSession(target.sessionId);
-    // A latest native outcome is usable only when its user message falls inside this exact provider turn.
-    const finishedTask = this.permissionGoalFinished(target);
-    const superseded = [...this.runs.values()].some(run => run.sessionId === target!.sessionId && !run.permissionNotice && !run.permissionRequestIds?.length
-      && !run.steering && run.id !== target!.id && Date.parse(run.createdAt) > Date.parse(request.createdAt) && run.origin?.kind === 'owner');
-    const stopped = options.closed || session?.closed || finishedTask || superseded || target.ownerStopped
-      || (target.status === 'cancelled' && !updateResume) || target.status === 'error';
-    const merge = approved && !stopped ? [...this.runs.values()].find(run => run.status === 'queued' && run.sessionId === target!.sessionId && run.scheduled?.afterRunId === target!.id && (run.scheduled.resume === 'permission' || run.scheduled.resume === 'update')) : undefined;
-    const continuation: Run = merge ?? { id: request.id, sessionId: target.sessionId, origin: target.origin ?? { kind: 'unknown' },
-      prompt: `${TOWER_NOTICE} ${prompt.replace(/the next provider turn/g, 'this provider turn')}\nFirst inspect the conversation, existing artifacts and task results. Continue only unfinished work; do not repeat completed actions.`,
-      status: approved && !stopped ? 'queued' : 'cancelled', createdAt: now, output: 'Permission decision recorded.',
-      ...(approved && !stopped ? { scheduled: { at: now, afterRunId: target.id, resume: 'permission' as const } } : { finishedAt: now }),
-      ...(target.delegation ? { delegation: { ...target.delegation } } : {}), ...(target.instructions?.required ? { instructions: { ...target.instructions } } : {}),
-      ...(target.codexApprovalsReviewer ? { codexApprovalsReviewer: target.codexApprovalsReviewer } : {}),
-      ...(target.unattended ? { unattended: true } : {}), ...(target.model ? { model: target.model } : {}), ...(target.effort ? { effort: target.effort } : {}) };
-    if (!approved) continuation.error = 'Permission decision notice could not be delivered to its requesting turn.';
-    continuation.permissionRequestedAt = !continuation.permissionRequestedAt || Date.parse(request.createdAt) < Date.parse(continuation.permissionRequestedAt)
-      ? request.createdAt : continuation.permissionRequestedAt;
-    continuation.permissionDecisionRevisions = { ...(continuation.permissionDecisionRevisions ?? {}), [request.id]: revision };
-    continuation.permissionRequestIds = [...(continuation.permissionRequestIds ?? []), request.id];
-    if (merge) continuation.prompt += `\n${prompt.replace(/the next provider turn/g, 'this provider turn')}`;
-    this.runs.set(continuation.id, continuation);
-    this.changed(); await this.flush();
-    // Check the native owner record before our notice can become its latest user message.
-    if (approved && continuation.status === 'queued') { await this.checkPermissionUserMessage(continuation); await this.flush(); }
-    // Persisted intent precedes any notice. A failed/uncertain insert never becomes a separate native turn.
-    if (!stopped && target.status === 'running' && !this.stopping && (!approved || continuation.status === 'queued')) {
-      const notice: Run = { id: randomUUID(), sessionId: target.sessionId, origin: target.origin ?? { kind: 'unknown' },
-        prompt: `${TOWER_NOTICE} [Permission decision ${request.id}] ${approved ? 'The permission rule was approved and applies from the next provider turn. Bring the current step to a safe stopping point and end this turn normally. Tower will resume unfinished work in a fresh turn; do not repeat completed actions.' : prompt}`,
-        status: 'queued', createdAt: now, output: '', permissionNotice: { targetRunId: target.id } };
-      this.runs.set(notice.id, notice); this.admissions.add(notice.id); this.changed(); await this.flush(); this.admissions.delete(notice.id);
-      try {
-        await this.steer(notice.id, { targetRunId: target.id });
-        if (!approved && notice.steering?.state === 'sending') await new Promise<void>((resolve, reject) => {
-          const finish = (delivered: boolean) => { clearTimeout(timer); this.off('change', check); if (delivered) resolve(); else reject(new Error('Permission decision notice delivery could not be confirmed.')); };
-          const check = () => {
-            if (notice.steering?.state === 'sending' && target.status === 'running' && !this.stopping) return;
-            finish(notice.steering?.state === 'delivered');
-          };
-          const timer = setTimeout(() => finish(false), 30_000); timer.unref();
-          this.on('change', check); check();
-        });
-        if (!approved && notice.steering?.state === 'delivered') { delete continuation.error; this.changed(); await this.flush(); }
-      }
-      catch { if (notice.status === 'queued') { notice.status = 'cancelled'; notice.finishedAt = new Date().toISOString(); this.changed(); await this.flush(); } }
-    }
-    if (!approved && continuation.error) throw new RunError(continuation.error, 409);
-    void this.pump();
-    return shown(continuation);
-  }
-
   /** `targetRunId` inserts only into that turn: a decision made about one turn never lands in the next. */
   async steer(runId: string, options: { whileWaiting?: boolean; targetRunId?: string } = {}): Promise<Run> {
     const run = this.runs.get(runId);
-    if (!run) throw new RunError('Task not found.', 404);
+    if (!run) throw new RunError('Task not found.', 'not-found');
     if (run.steering) return this.list().find(item => item.id === runId)!;
     const selected = this.steeringTarget(run);
-    if (!selected) throw new RunError('This queued instruction cannot be inserted into an active Tower turn.', 409);
+    if (!selected) throw new RunError('This queued instruction cannot be inserted into an active Tower turn.', 'conflict');
     if (options.targetRunId !== undefined && selected.target.id !== options.targetRunId) throw new SteeringError('The active turn changed before delivery.', 'rejected');
     // Reserve synchronously before attachment reads so duplicate clicks cannot submit twice.
     this.admissions.add(run.id);
@@ -903,19 +506,17 @@ export class RunManager extends EventEmitter {
       if (options.whileWaiting && !selected.target.backgroundWait) throw new SteeringError('The waiting turn resumed before delivery.', 'rejected');
       const prompt = attachmentPrompt(run.prompt, attachments);
       submitted = true;
-      this.noteHandedOver(run);
+      this.drain.noteHandedOver(run);
       if (selected.adapter instanceof ClaudeControl) {
         const delivery = selected.adapter.steer({ type: 'user', uuid: run.id, session_id: this.getSession(run.sessionId)!.nativeId, parent_tool_use_id: null,
-          message: { role: 'user', content: [{ type: 'text', text: prompt }, ...attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => ({
-            type: 'image', source: { type: 'base64', media_type: item.metadata.mimeType, data: item.content.toString('base64') },
-          }))] } });
+          message: { role: 'user', content: [{ type: 'text', text: prompt }, ...claudeImageBlocks(attachments)] } });
         // Claude confirms only when it takes the instruction at its next step, which can be minutes away, so the
         // answer is that it was handed over and the run records how it ends.
         this.admissions.delete(run.id);
         void delivery.then(() => this.settleSteer(run, selected.target.id), error => this.settleSteer(run, selected.target.id, error)).catch(() => {});
         return this.list().find(item => item.id === runId)!;
       }
-      const sending = selected.adapter.steer!({ id: run.id, prompt, imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) });
+      const sending = selected.adapter.steer!({ id: run.id, prompt, imagePaths: imagePaths(attachments) });
       // Codex takes one insert at a time: other queued instructions show they wait for this one. Its outcome is
       // recorded even if telling the page fails.
       try { this.changed(); } finally { await sending; }
@@ -944,9 +545,9 @@ export class RunManager extends EventEmitter {
   /** `reason` is recorded on the cancelled run (a forced update says why it stopped). */
   async cancel(runId: string, reason?: string): Promise<void> {
     const run = this.runs.get(runId);
-    if (!run) throw new RunError('Task not found.', 404);
+    if (!run) throw new RunError('Task not found.', 'not-found');
     if (FINISHED.has(run.status)) return;
-    if (run.steering) throw new RunError('An inserted instruction belongs to the active turn. Stop the active turn instead.', 409);
+    if (run.steering) throw new RunError('An inserted instruction belongs to the active turn. Stop the active turn instead.', 'conflict');
     const noted = () => { if (reason && run.status === 'cancelled' && run.error !== reason) { run.error = reason; this.changed(); } };
     // Stopped by the owner, not by the update's deadline: the update does not bring the work back.
     if (!reason) { this.ownerStopped.add(runId); run.ownerStopped = true; this.changed(); }
@@ -975,19 +576,14 @@ export class RunManager extends EventEmitter {
 
   async respondToApproval(runId: string, approvalId: string, decision: RunApprovalResponse): Promise<Run> {
     const run = this.runs.get(runId);
-    if (!run) throw new RunError('Task not found.', 404);
+    if (!run) throw new RunError('Task not found.', 'not-found');
     const owned = this.owned.get(runId);
     const stdio = this.stdio.get(runId);
     if (this.stopping || run.status !== 'running' || (!owned?.claude && !stdio) || !run.approvals?.some(approval => approval.id === approvalId)) {
-      throw new RunError('This permission request is no longer pending. Refresh the conversation.', 409);
+      throw new RunError('This permission request is no longer pending. Refresh the conversation.', 'conflict');
     }
     // The owner's own words to the agent, kept whole with what was asked, before they go (see ownerAnswers).
-    if (typeof decision === 'object') {
-      const asked = run.approvals!.find(approval => approval.id === approvalId)!;
-      const question = JSON.stringify(asked.interaction?.type === 'questions' ? asked.interaction.questions : asked.input);
-      const kept = [...this.answers.get(run.sessionId) ?? [], { at: new Date().toISOString(), question, answer: JSON.stringify(decision) }].slice(-50);
-      this.answers.set(run.sessionId, kept);
-    }
+    this.answers.record(run.sessionId, run.approvals!.find(approval => approval.id === approvalId)!, decision);
     if (stdio) await stdio.respondToApproval(approvalId, decision);
     else {
       await owned!.claude!.respond(approvalId, decision);
@@ -1031,7 +627,7 @@ export class RunManager extends EventEmitter {
   }
 
   private validateSession(session: Session | undefined): asserts session is Session {
-    if (!session) throw new RunError('Session no longer exists. Refresh and select another session.', 404);
+    if (!session) throw new RunError('Session no longer exists. Refresh and select another session.', 'not-found');
     if (!session.resumable) throw new RunError('This session cannot be resumed by its provider.');
     if (!/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(session.nativeId)) throw new RunError('The native session ID is invalid.');
     if (!isAbsolute(session.cwd)) throw new RunError('The session has no valid working directory.');
@@ -1071,11 +667,7 @@ export class RunManager extends EventEmitter {
         // explicitly configure a worker limit impose a global queue.
         if (this.options.maxConcurrent !== undefined && this.owned.size + this.bridged.size + this.stdio.size >= this.options.maxConcurrent) break;
         if (run.status !== 'queued' || this.admissions.has(run.id) || !due(run) || run.permissionNotice) continue;
-        if (run.scheduled?.resume === 'permission') {
-          const parent = this.runs.get(run.scheduled.afterRunId);
-          if (!parent || parent.status === 'error' || parent.status === 'cancelled') { this.supersede(run, 'The requesting turn did not finish normally.'); continue; }
-          if (parent.status !== 'completed') continue;
-        }
+        if (!this.permissions.launchable(run)) continue;
         // Someone continued the conversation outside Tower after the agent scheduled this.
         // Tower's continuation after an update follows its own wrap-up message, which counts as a request.
         const requested = run.scheduled && run.scheduled.resume !== 'update' && run.scheduled.resume !== 'permission' && this.getSession(run.sessionId)?.lastRequestAt;
@@ -1094,9 +686,9 @@ export class RunManager extends EventEmitter {
           continue;
         }
         const session = this.getSession(run.sessionId);
-        const creating = this.createdSessions.get(run.sessionId)?.runId === run.id;
+        const creating = this.registry.creationRun(run.sessionId) === run.id;
         try {
-          if (!session) throw new RunError('Session no longer exists.', 404);
+          if (!session) throw new RunError('Session no longer exists.', 'not-found');
           if (!creating) this.validateSession(session);
           if (this.isWorking(session) || this.reservedSessions.has(session.id)) {
             const reason = this.waitReason(session);
@@ -1153,69 +745,26 @@ export class RunManager extends EventEmitter {
     }
   }
 
+  /**
+   * Hands a turn to the Codex app holding the conversation open; false when the app cannot take it. The submission is
+   * awaited only after it was registered and started in one step, so a run occupies the loop exactly as long as before.
+   */
   private async launchBridge(run: Run, session: Session): Promise<boolean> {
-    // The desktop app owns its tools; only turns that can do without Tower's tools are forwarded.
-    const tools = this.runTools(run, session);
-    if (tools.required || run.instructions?.required) return false;
-    if (!this.options.openCodexBridge) return false;
-    const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
-    let started = false;
-    /** Closed before it was sent because Tower is switching workers: the run waits for the new worker. */
-    let heldForUpdate = false;
-    const bridge = await this.options.openCodexBridge({
-      // The desktop app shows every block it is sent: a turn goes there only without instructions it must have, and without
-      // its notes.
-      threadId: session.nativeId, runId: run.id, prompt: attachmentPrompt(run.prompt, attachments),
-      ...(ownerOrigin(run.origin) ? { approvalsReviewer: 'auto_review' as const } : {}),
-      ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
-      ...(attachments.length ? { imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) } : {}),
-      onStarted: () => {
-        if (FINISHED.has(run.status)) return;
-        started = true;
-        run.status = 'running'; run.startedAt = new Date().toISOString(); run.output = '';
-        this.changed();
-      },
-      onOutput: text => { if (!FINISHED.has(run.status)) this.append(run, text); },
-      onFinished: result => {
-        this.bridged.delete(run.id);
-        this.reservedSessions.delete(session.id);
-        // Taken back out of the app's queue before it started: it waits in Tower's queue for the new worker.
-        if ((result.withdrawn || heldForUpdate) && !started && run.status === 'queued' && !this.ownerStopped.has(run.id)) {
-          run.output = UPDATE_WAIT; delete run.towerTools;
-          this.changed();
-          return;
-        }
-        // A lost shared connection does not prove the native turn stopped.
-        if (started && result.status === 'completed') {
-          this.settledRuns.add(run.id);
-          this.locallySettled.set(session.id, Date.now());
-        }
-        if (!FINISHED.has(run.status)) {
-          run.status = result.status; run.error = result.error; run.finishedAt = new Date().toISOString();
-          this.changed();
-        }
-        if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
-      },
-    });
-    if (!bridge) return false;
-    await this.prepareLaunch(run);
-    if (run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session)) {
-      heldForUpdate = run.status === 'queued' && this.updating;
-      bridge.close(); this.reservedSessions.delete(session.id); return true;
+    const prepared = await prepareBridgeTurn(this.turnHost, run, session);
+    if (prepared.kind === 'unsupported') return false;
+    if (prepared.kind === 'refused') return true;
+    // The last look, in the same step as the start: nothing can land between them. A look that throws frees the adapter.
+    let refused: boolean;
+    try { refused = run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session); }
+    catch (error) { prepared.dispose({ heldForUpdate: false }); throw error; }
+    if (refused) {
+      prepared.dispose({ heldForUpdate: run.status === 'queued' && this.updating });
+      this.reservedSessions.delete(session.id);
+      return true;
     }
-    this.bridged.set(run.id, bridge);
-    // The desktop app runs the turn with its own tools; Tower's cannot be attached there.
-    if (tools.towerTools) run.towerTools = tools.servers ? 'desktop-app' : tools.towerTools;
-    run.output = '열려 있는 Codex 앱의 기존 세션으로 요청을 전달하고 있습니다.';
-    this.changed();
-    try { await bridge.start(); }
-    catch (error) {
-      this.bridged.delete(run.id); this.reservedSessions.delete(session.id);
-      bridge.close();
-      // Once a shared-server submission was attempted, never fall back to a new
-      // writer: a lost acknowledgement must not duplicate the user's instruction.
-      this.fail(run, error);
-    }
+    this.bridged.set(run.id, prepared.handle);
+    const submitted = prepared.start();
+    await submitted;
     return true;
   }
 
@@ -1223,438 +772,50 @@ export class RunManager extends EventEmitter {
   private masterSession(session: Session): boolean { return subscriptionOnly(this.options.stateDir ?? defaultStateDir(), session.cwd); }
 
   private async launchCodex(run: Run, session: Session, creating: boolean): Promise<void> {
-    const executable = await this.executable('codex');
-    if (!executable) throw new Error('Codex CLI is no longer available in PATH.');
-    if (!(await stat(session.cwd)).isDirectory()) throw new Error('The session working directory no longer exists.');
-    const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
-    const latest = this.getSession(session.id);
-    if (run.status !== 'queued' || this.stopping || (latest && (this.isWorking(latest) || latest.activeProcess))) {
+    const prepared = await prepareCodexTurn(this.turnHost, run, session, creating);
+    if (prepared.kind !== 'ready') return;
+    // The last look, in the same step as the start: nothing can land between them. A look that throws frees the adapter.
+    let refused: boolean;
+    try {
+      const current = this.getSession(session.id);
+      refused = run.status !== 'queued' || this.stopping || Boolean(current && (this.isWorking(current) || current.activeProcess)) || this.refusedAtLaunch(run, session);
+    } catch (error) { prepared.dispose(); throw error; }
+    if (refused) {
+      prepared.dispose();
       this.reservedSessions.delete(session.id);
       return;
     }
-    if (!creating) this.validateSession(latest);
-    else if (!latest) throw new RunError('Session no longer exists.', 404);
-    const master = this.masterSession(session);
-    const env = master ? withoutKeys({ ...process.env, ...this.options.env }) : { ...process.env, ...this.options.env };
-    env.PATH = providerDirectories(env).join(delimiter);
-    this.markLaunches(env);
-    delete env.CLAUDECODE;
-    delete env.CLAUDE_CODE_SESSION_ID;
-    delete env.CODEX_THREAD_ID;
-    let started = false;
-    let registered = false;
-    await this.addTurnNotes(run, session, creating);
-    const tools = this.runTools(run, session);
-    await awaitToolServers(tools);
-    if (run.status !== 'queued' || this.stopping) {
-      this.reservedSessions.delete(session.id);
-      return;
-    }
-    // The master's own tools may take longer than Codex's default minute (see MASTER_TOOL_TIMEOUT_SECONDS).
-    delete env[CALLER_CAPABILITY_ENV];
-    Object.assign(env, tools.env);
-    const mcpServers = master && tools.servers?.tower_master
-      ? { ...tools.servers, tower_master: { ...tools.servers.tower_master, tool_timeout_sec: MASTER_TOOL_TIMEOUT_SECONDS } as typeof tools.servers.tower_master } : tools.servers;
-    if (tools.towerTools) run.towerTools = tools.towerTools;
-    // The owner's own turns hand approvals to Codex's automatic reviewer, in new and resumed threads alike; if Codex
-    // does not confirm it, the turn still runs and approvals wait in Tower. Other work keeps the reviewer its setting
-    // chose when the thread started, and Slack's tools require the automatic one.
-    const owner = ownerOrigin(run.origin);
-    const approvalsReviewer = mcpServers?.tower_slack || owner ? 'auto_review' as const : creating ? run.codexApprovalsReviewer : undefined;
-    const codexReplies = master ? new ReplyLog(run, Date.now) : undefined;
-    const owned = await (this.options.openCodexStdio ?? openCodexStdioRun)({
-      executable, cwd: session.cwd, env, spawnProcess: this.options.spawnProcess,
-      mcpServers, ...(master ? { subscriptionOnly: true } : {}),
-      ...(!creating ? { threadId: session.nativeId } : {}),
-      ...(approvalsReviewer ? { approvalsReviewer } : {}),
-      ...(owner && !mcpServers?.tower_slack ? { approvalsReviewerPreferred: true } : {}),
-      ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
-      prompt: attachmentPrompt(run.prompt, attachments),
-      ...(this.providerInstructions(run, tools) ? { instructions: this.providerInstructions(run, tools) } : {}),
-      imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path),
-      onSession: async id => {
-        if (!UUID.test(id) || (!creating && id !== session.nativeId)) throw new Error('Codex returned a different or invalid conversation ID. No message was submitted.');
-        if (run.status !== 'running' || this.stopping) throw new Error('The task stopped before a message was submitted.');
-        if (creating) {
-          const created = this.createdSessions.get(session.id);
-          if (!created || (created.confirmed && created.session.nativeId !== id)) throw new Error('The new conversation identity changed. No message was submitted.');
-          created.confirmed = true; created.session.nativeId = id; created.session.creationPending = false; session.nativeId = id;
-          this.changed();
-          try { await this.flush(); }
-          catch (error) { throw new Error(`Cannot save the new conversation identity: ${errorMessage(error)}`); }
-        }
-      },
-      onStarted: (_turnId, startedAt) => {
-        if (FINISHED.has(run.status)) return;
-        started = true; run.startedAt = startedAt ?? new Date().toISOString(); this.changed();
-      },
-      onOutput: text => { if (!FINISHED.has(run.status)) this.append(run, text); },
-      ...(codexReplies ? { onReply: (id: string, text: string, done: boolean) => { if (!FINISHED.has(run.status) && codexReplies.add(id, text, done)) this.notifyOutput(); } } : {}),
-      onApproval: approval => { if (run.status === 'running') { run.approvals = [...(run.approvals || []), approval]; this.changed(); } },
-      onApprovalCancelled: id => {
-        if (!run.approvals?.some(approval => approval.id === id)) return;
-        run.approvals = run.approvals.filter(approval => approval.id !== id);
-        if (!run.approvals.length) delete run.approvals;
-        this.changed();
-      },
-      // The adapter reports completion only after its native child has closed.
-      onFinished: result => {
-        if (!registered) return;
-        this.stdio.delete(run.id); this.reservedSessions.delete(session.id); delete run.approvals;
-        if (started) {
-          this.settledRuns.add(run.id); this.locallySettled.delete(session.id); this.locallySettled.set(session.id, Date.now());
-          if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
-        }
-        if (!FINISHED.has(run.status)) {
-          run.status = result.status; run.error = result.error; run.finishedAt = result.finishedAt ?? new Date().toISOString();
-        }
-        this.changed();
-        if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
-      },
-    });
-    // Opening an adapter does not spawn. Admission can be cancelled during discovery.
-    await this.prepareLaunch(run);
-    const current = this.getSession(session.id);
-    if (run.status !== 'queued' || this.stopping || (current && (this.isWorking(current) || current.activeProcess)) || this.refusedAtLaunch(run, session)) {
-      owned.close(); this.reservedSessions.delete(session.id); return;
-    }
-    registered = true;
-    this.stdio.set(run.id, owned);
-    run.status = 'running'; run.output = ''; this.changed();
+    this.stdio.set(run.id, prepared.handle);
+    prepared.start();
     // Initialization is independently cancellable and does not block unrelated sessions.
-    void owned.start().catch(() => { owned.close(); });
+    void prepared.handle.start().catch(() => { prepared.handle.close(); });
   }
 
   private async launch(run: Run, session: Session, creating = false): Promise<void> {
     if (session.provider === 'codex') return this.launchCodex(run, session, creating);
-    const executable = await this.executable(session.provider);
-    if (!executable) throw new Error(`${session.provider} CLI is no longer available in PATH.`);
-    if (!(await stat(session.cwd)).isDirectory()) throw new Error('The session working directory no longer exists.');
-    const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
-    const images = attachments.filter(item => isImageAttachment(item.metadata.mimeType));
-    await this.addTurnNotes(run, session, creating);
-    const args = creating ? buildCreateArgs(session, run.model, run.effort) : buildResumeArgs(session, run.model, run.effort);
-    const tools = this.runTools(run, session);
-    await awaitToolServers(tools);
-    const mcpServers = tools.servers;
-    if (tools.towerTools) run.towerTools = tools.towerTools;
-    // A capability in a tool server's environment would be visible in the process list as an argument,
-    // so such a configuration goes to a private file that lives only as long as the turn.
-    if (automaticApprovals(run)) args.push('--permission-mode', 'auto');
-    // The owner's allow rules go to every turn Tower starts, as Codex reads them in every run: the owner also set up the
-    // triggers, Slack and GitHub watches and public agents that start work here, and chose what that work may do.
-    const settings = this.options.claudeSettings?.(session.cwd, session.id);
-    if (settings) args.push('--settings', settings);
-    for (const directory of new Set(attachments.map(item => dirname(item.path)))) args.push('--add-dir', directory);
-    const prompt = attachmentPrompt(run.prompt, attachments);
-    const input = {
-      type: 'user', session_id: session.nativeId, parent_tool_use_id: null,
-      message: { role: 'user', content: [
-        { type: 'text', text: prompt },
-        // A block of its own, not the system prompt: Claude keeps a conversation's first system prompt for every later turn.
-        ...(this.providerInstructions(run, tools) ? [{ type: 'text', text: towerInstructionsBlock(this.providerInstructions(run, tools)!) }] : []),
-        ...images.map(item => ({ type: 'image', source: { type: 'base64', media_type: item.metadata.mimeType, data: item.content.toString('base64') } })),
-      ] },
-    };
-    // Recheck after asynchronous filesystem discovery, immediately before creating the writer.
-    await this.prepareLaunch(run);
-    const latest = this.getSession(session.id);
-    if (run.status !== 'queued' || this.stopping || (latest && (this.isWorking(latest) || (latest.provider === 'codex' && latest.activeProcess))) || this.refusedAtLaunch(run, session)) {
-      this.reservedSessions.delete(session.id);
-      return;
-    }
-    if (!creating) this.validateSession(latest);
-    else if (!latest) throw new RunError('Session no longer exists.', 404);
-    const master = this.masterSession(session);
-    const env = master ? withoutKeys({ ...process.env, ...this.options.env }) : { ...process.env, ...this.options.env };
-    env.PATH = providerDirectories(env).join(delimiter);
-    this.markLaunches(env);
-    // The web server may itself have been started from inside Claude Code.
-    delete env[CALLER_CAPABILITY_ENV];
-    Object.assign(env, tools.env);
-    delete env.CLAUDECODE;
-    delete env.CLAUDE_CODE_SESSION_ID;
-    delete env.CODEX_THREAD_ID;
-    if (master) {
-      env.MCP_TOOL_TIMEOUT = String(MASTER_TOOL_TIMEOUT_SECONDS * 1000);
-      // Asked the way the turn will start: same program, folder and environment.
-      await (this.options.checkClaudeSubscription ?? checkClaudeSubscription)(executable, session.cwd, env);
-      await this.prepareLaunch(run);
-      if (run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session)) { this.reservedSessions.delete(session.id); return; }
-    }
-    const privateConfig = mcpServers && Object.values(mcpServers).some(server => server.env) ? await privateMcpConfig(mcpServers) : undefined;
-    // Writing the file yielded; nothing may have stopped the run in the meantime.
-    if (privateConfig || run.permissionRequestIds?.length) await this.prepareLaunch(run);
-    if ((privateConfig || run.permissionRequestIds?.length) && (run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session))) {
-      privateConfig?.remove(); this.reservedSessions.delete(session.id); return;
-    }
-    if (mcpServers) args.push('--mcp-config', privateConfig?.path ?? JSON.stringify({ mcpServers }));
-    let child: ChildProcessWithoutNullStreams;
+    const prepared = await prepareClaudeTurn(this.turnHost, run, session, creating);
+    if (prepared.kind !== 'ready') return;
+    // The last look, in the same step as the start: nothing can land between them.
+    let refused: boolean;
     try {
-      child = (this.options.spawnProcess ?? spawn)(executable, args, {
-        cwd: session.cwd, env, detached: true, stdio: 'pipe', shell: false,
-      });
-    } catch (error) { privateConfig?.remove(); throw error; }
-    if (privateConfig) child.once('close', privateConfig.remove);
-    run.status = 'running';
-    run.startedAt = new Date().toISOString();
-    run.output = '';
-    let finish!: () => void;
-    const owned: OwnedProcess = { child, done: new Promise<void>((resolve) => { finish = resolve; }) };
+      const latest = this.getSession(session.id);
+      refused = run.status !== 'queued' || this.stopping || Boolean(latest && (this.isWorking(latest) || (latest.provider === 'codex' && latest.activeProcess))) || this.refusedAtLaunch(run, session);
+      if (!refused) {
+        if (!creating) this.validateSession(latest);
+        else if (!latest) throw new RunError('Session no longer exists.', 'not-found');
+      }
+    } catch (error) { prepared.dispose(); throw error; }
+    if (refused) { prepared.dispose(); this.reservedSessions.delete(session.id); return; }
+    const owned = prepared.handle();
     this.owned.set(run.id, owned);
-    let buffer = '';
-    let stderr = '';
-    let streamError: string | undefined;
-    let sawCompletion = false;
-    let sawSessionId = false;
-    let sawPartial = false;
-    let messageHasPartial = false;
-    // What Claude itself put in the output, apart from Tower's notes: its final result is shown only if nothing was.
-    let shown = false;
-    const show = (text: string) => { shown = true; this.append(run, text); };
-    // The master's words, block by block, so they can be read aloud as they are written.
-    const replies = this.masterSession(session) ? new ReplyLog(run) : undefined;
-    let replyMessage = '';
-    /** Messages whose words came as partial text: their complete form adds nothing. */
-    const streamedMessages = new Set<string>();
-    const replied = (changed: boolean) => { if (changed) this.notifyOutput(); };
-    let modeNoted = false;
-    let contextInput: { model: string; usedTokens: number } | undefined;
-    let identitySaved: Promise<void> = Promise.resolve();
-    const wakeups = new WakeupTracker(MAX_PROMPT);
-    // A turn ends at its result, but background work it started keeps running in this process. Input stays open
-    // until that work has ended and Claude has taken each notice in a follow-up turn of this same run.
-    const tasks = new BackgroundTaskTracker();
-    const followUpMs = this.options.backgroundFollowUpMs ?? BACKGROUND_FOLLOW_UP_MS;
-    const waitMaxMs = this.options.backgroundWaitMaxMs ?? BACKGROUND_WAIT_MAX_MS;
-    let turnActive = true;
-    /** Tower handed Claude the notice itself and Claude has not yet replayed it. */
-    let noticeId: string | undefined;
-    let waitTimedOut = false;
-    let followUpTimer: ReturnType<typeof setTimeout> | undefined;
-    let waitTimer: ReturnType<typeof setTimeout> | undefined;
-    let finishTimer: ReturnType<typeof setTimeout> | undefined;
-    let inputClosedByTower = false;
-    const clearFinishTimer = () => { if (finishTimer) clearTimeout(finishTimer); finishTimer = undefined; };
-    const clearWaitTimers = () => {
-      if (followUpTimer) clearTimeout(followUpTimer);
-      if (waitTimer) clearTimeout(waitTimer);
-      followUpTimer = waitTimer = undefined;
-    };
-    const endWait = () => { if (run.backgroundWait) { delete run.backgroundWait; this.changed(); } };
-    const beginTurn = () => {
-      if (turnActive) return;
-      clearFinishTimer();
-      turnActive = true; clearWaitTimers(); endWait(); tasks.observeTurnStart(); owned.claude?.setTurnIdle(false);
-      // Each turn reports its own completion and its own reply.
-      sawCompletion = false; shown = false; sawPartial = false; messageHasPartial = false;
-    };
-    owned.claude = new ClaudeControl({
-      write: message => new Promise<void>((resolve, reject) => {
-        if (run.status !== 'running' || child.exitCode !== null || child.stdin.destroyed || child.stdin.writableEnded) { reject(new Error('Provider input is closed.')); return; }
-        child.stdin.write(JSON.stringify(message) + '\n', error => error ? reject(error) : resolve());
-      }),
-      onApproval: approval => { if (run.status === 'running') { run.approvals = [...(run.approvals || []), approval]; this.changed(); } },
-      onCancelled: id => {
-        if (!run.approvals?.some(approval => approval.id === id)) return;
-        run.approvals = run.approvals.filter(approval => approval.id !== id);
-        if (!run.approvals.length) delete run.approvals;
-        this.changed();
-      },
-      onError: error => { streamError = error.message; this.stopOwned(run.id, owned); },
-      // Instructions queued behind this turn can be inserted now; the page is told without waiting for output.
-      onReady: () => this.changed(),
-    });
-    const closeInput = () => { inputClosedByTower = true; clearFinishTimer(); clearWaitTimers(); owned.claude?.close(); if (!child.stdin.writableEnded) child.stdin.end(); };
-    const idle = () => !turnActive && run.status === 'running' && child.exitCode === null && !child.stdin.writableEnded;
-    const arm = (timer: 'followUp' | 'wait', ms: number) => {
-      const handle = setTimeout(timer === 'followUp' ? followUp : waitLimit, ms);
-      handle.unref();
-      if (timer === 'followUp') followUpTimer = handle; else waitTimer = handle;
-    };
-    // Claude normally takes a finished task's notice by itself. If it has not, Tower hands it over as a message.
-    const followUp = () => {
-      followUpTimer = undefined;
-      if (!idle()) return;
-      if (run.approvals?.length) { arm('followUp', followUpMs); return; }
-      if (noticeId) { this.append(run, '\n[Tower] Claude has not answered the background work notice yet.\n'); return; }
-      const unread = tasks.takeUnread();
-      if (!unread.length) { owned.finishInput?.(); return; }
-      noticeId = randomUUID();
-      this.append(run, '\n[Tower] Background work finished; asking Claude to continue.\n');
-      child.stdin.write(JSON.stringify({ type: 'user', uuid: noticeId, session_id: session.nativeId, parent_tool_use_id: null,
-        message: { role: 'user', content: [{ type: 'text', text: backgroundNotice(unread) }] } }) + '\n');
-      arm('followUp', followUpMs);
-    };
-    const waitLimit = () => {
-      waitTimer = undefined;
-      if (!idle()) return;
-      if (run.approvals?.length) { arm('wait', followUpMs); return; }
-      // Closing input is how every turn ended before; Claude ends what is left. Never reported as success.
-      waitTimedOut = true;
-      this.append(run, `\n[Tower] Background work was still running after ${Math.round(waitMaxMs / 60_000)} minutes; closing the turn.\n`);
-      closeInput();
-    };
-    owned.finishInput = () => {
-      if (!sawCompletion || turnActive || owned.claude?.hasPendingSteers() || child.stdin.writableEnded) return;
-      // A failed turn is not kept open for its background work.
-      if (streamError) { endWait(); closeInput(); return; }
-      if (!tasks.outstanding && !noticeId) {
-        // Task bookends can follow a result, even in the next stdout chunk. Recheck after they drain.
-        if (!finishTimer) finishTimer = setTimeout(() => {
-          finishTimer = undefined;
-          if (!idle() || owned.claude?.hasPendingSteers()) return;
-          if (tasks.outstanding || noticeId) { owned.finishInput?.(); return; }
-          endWait(); closeInput();
-        }, 250);
-        return;
-      }
-      clearFinishTimer();
-      if (tasks.unreadCount && !followUpTimer) arm('followUp', followUpMs);
-      if (!run.backgroundWait) {
-        run.backgroundWait = { since: new Date().toISOString(), tasks: tasks.runningCount };
-        this.append(run, tasks.runningCount ? `\n[Tower] Waiting for ${tasks.runningCount} background task${tasks.runningCount === 1 ? '' : 's'} before this turn ends.\n`
-          : '\n[Tower] Waiting for Claude to take the finished background work.\n');
-        arm('wait', waitMaxMs);
-      } else run.backgroundWait.tasks = tasks.runningCount;
-      this.changed();
-    };
-    const parseEventLine = (line: string): void => {
-      if (!line.trim()) return;
-      let event: Record<string, any>;
-      try { event = JSON.parse(line); } catch { show(line + '\n'); return; }
-      if (!event || typeof event !== 'object' || Array.isArray(event)) throw new Error('Expected a provider event object.');
-      if (owned.claude?.handle(event)) {
-        if (event.type === 'user' && event.isReplay) { beginTurn(); sawCompletion = false; tasks.observeReplay(event); }
-        return;
-      }
-      const actualId = event.type === 'system' && event.subtype === 'init' ? event.session_id : undefined;
-      const created = creating ? this.createdSessions.get(session.id) : undefined;
-      if (actualId && created && !created.confirmed && typeof actualId === 'string' && UUID.test(actualId)
-        && actualId === session.nativeId) {
-        created.confirmed = true;
-        created.session.nativeId = actualId;
-        created.session.creationPending = false;
-        session.nativeId = actualId;
-        this.changed();
-        identitySaved = this.flush().catch(error => {
-          streamError = `Cannot save the new conversation identity: ${errorMessage(error)}`;
-          this.stopOwned(run.id, owned);
-        });
-      }
-      if (actualId === session.nativeId) sawSessionId = true;
-      // Claude reports the mode it actually runs in before doing anything, for example the one it falls back to
-      // where automatic mode is not available. An unattended run continues only in automatic mode, or in a mode
-      // that asks the owner; any other or missing mode is stopped. The owner's own turns go on and say so.
-      if (actualId && automaticApprovals(run) && event.permissionMode !== 'auto') {
-        const mode = event.permissionMode === undefined ? 'not reported' : String(event.permissionMode);
-        const asksOwner = OWNER_APPROVAL_MODES.has(mode);
-        if (!asksOwner && run.unattended) {
-          streamError = `Claude started in an unexpected permission mode (${mode}). The unattended run was stopped before doing anything.`;
-          this.stopOwned(run.id, owned);
-          return;
-        }
-        if (!modeNoted) this.append(run, `[Tower] Claude did not start in automatic permission mode (${mode}).${asksOwner ? ' Approval requests will wait for you in Tower.' : ''}\n`);
-        modeNoted = true;
-      }
-      if (actualId && actualId !== session.nativeId) {
-        streamError = creating ? 'The provider did not confirm the new conversation ID. The task was stopped.' : 'The provider opened a different conversation instead of resuming the requested session. The task was stopped.';
-        this.stopOwned(run.id, owned);
-        return;
-      }
-      const mainContext = event.parent_tool_use_id == null && (event.session_id === undefined || event.session_id === session.nativeId);
-      // Anything the main conversation says after a result is a follow-up turn, typically Claude taking a task's notice.
-      if (mainContext && ['assistant', 'user', 'stream_event'].includes(event.type)) beginTurn();
-      if (mainContext && event.type === 'user' && event.isReplay) {
-        // Tower's own notice is taken once Claude replays it; the turn it starts must then reach its result.
-        if (noticeId && event.uuid === noticeId) noticeId = undefined;
-        else { tasks.observeReplay(event); wakeups.observeReplay(messageText(event)); }
-      }
-      if ((event.session_id === undefined || event.session_id === session.nativeId) && tasks.observe(event) && !turnActive) owned.finishInput?.();
-      if (mainContext && event.type === 'system' && event.subtype === 'compact_boundary') contextInput = undefined;
-      if (mainContext) wakeups.observe(event);
-      if (mainContext && event.type === 'stream_event' && event.event?.type === 'message_start') tasks.observeReply(event.event.message?.id);
-      if (mainContext && event.type === 'assistant' && !event.isMeta && !event.is_meta) {
-        const model = event.message?.model;
-        if (!String(model || '').includes('synthetic')) {
-          tasks.observeReply(event.message?.id);
-          contextInput = undefined;
-          const usedTokens = claudeInputTokens(event.message?.usage);
-          if (validModelId(model) && usedTokens !== undefined) contextInput = { model, usedTokens };
-        }
-      }
-      if (replies && mainContext && event.type === 'stream_event') {
-        const part = event.event;
-        const block = `${replyMessage}:${Number(part?.index) || 0}`;
-        if (part?.type === 'message_start') replyMessage = typeof part.message?.id === 'string' ? part.message.id : randomUUID();
-        else if (part?.type === 'content_block_start' && part.content_block?.type === 'text') replied(replies.add(block, typeof part.content_block.text === 'string' ? part.content_block.text : ''));
-        else if (part?.type === 'content_block_delta' && part.delta?.type === 'text_delta' && typeof part.delta.text === 'string') { streamedMessages.add(replyMessage); replied(replies.add(block, part.delta.text)); }
-        else if (part?.type === 'content_block_stop') replied(replies.finish(block));
-      }
-      if (event.type === 'stream_event') {
-        if (event.event?.type === 'message_start') messageHasPartial = false;
-        const delta = event.event?.delta;
-        if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
-          show(delta.text); sawPartial = true; messageHasPartial = true;
-        }
-        if (event.event?.type === 'message_stop' && messageHasPartial) show('\n\n');
-      } else if (event.type === 'assistant') {
-        const messageId = typeof event.message?.id === 'string' ? event.message.id : randomUUID();
-        for (const [index, block] of (event.message?.content ?? []).entries()) {
-          if (block.type === 'text' && replies && mainContext && !streamedMessages.has(messageId)) replied(replies.add(`${messageId}:a${index}`, String(block.text), true));
-          if (block.type === 'text' && !messageHasPartial) show(String(block.text) + '\n\n');
-          if (block.type === 'tool_use') show(`[${block.name}]\n`);
-        }
-        messageHasPartial = false;
-      } else if (event.type === 'result' && mainContext) {
-        const capacity = contextInput && mainContext ? modelContextWindow(event.modelUsage, contextInput.model) : undefined;
-        if (contextInput && contextCapacity(capacity) && sawSessionId && !streamError) {
-          run.contextUsage = { ...contextInput, contextWindow: capacity, usedPercent: contextInput.usedTokens / capacity * 100,
-            updatedAt: new Date().toISOString() };
-          this.changed();
-        }
-        sawCompletion = true;
-        turnActive = false;
-        owned.claude?.setTurnIdle(true);
-        if (event.is_error) streamError = (event.errors ?? [event.result ?? 'Claude Code could not complete this turn.']).join('\n');
-        // A denied tool call (by the user or the auto mode classifier) is part of a turn that
-        // still finished; Claude's own reply explains it. Only a failed turn is reported.
-        if (event.is_error && event.permission_denials?.length) {
-          const denied = [...new Set(event.permission_denials.map((denial: any) => denial.tool_name ?? 'tool'))].join(', ');
-          streamError = `Permission was denied for: ${denied}. The instruction could not complete with the current permissions.`;
-          show(`\n${streamError}\n`);
-        }
-        if (!sawPartial && !shown && event.result) show(String(event.result));
-        owned.finishInput?.();
-      }
-    };
-    const parseLine = (line: string): void => {
-      try { parseEventLine(line); }
-      catch {
-        streamError = 'The provider emitted an invalid output event. The task was stopped.';
-        this.stopOwned(run.id, owned);
-      }
-    };
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => {
-      buffer += chunk;
-      let newline: number;
-      while ((newline = buffer.indexOf('\n')) >= 0) { const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); parseLine(line); }
-      if (buffer.length > 2_000_000) { streamError = 'Provider emitted an oversized output event.'; buffer = ''; this.stopOwned(run.id, owned); }
-    });
-    child.stderr.on('data', (chunk: string) => { stderr = (stderr + chunk).slice(-8000); });
-    child.stdin.on('error', (error: NodeJS.ErrnoException) => { if (error.code !== 'EPIPE') streamError = errorMessage(error); });
-    child.on('error', (error: Error) => { streamError = errorMessage(error); });
-    child.on('close', async (code: number | null, signal: NodeJS.Signals | null) => {
-      if (buffer) parseLine(buffer);
-      clearFinishTimer(); clearWaitTimers();
-      const pendingApproval = !!run.approvals?.length;
-      const pendingSteer = owned.claude?.hasPendingSteers();
-      delete run.backgroundWait;
-      owned.claude?.close();
-      // A newly bound UUID must be durable before this turn reports success.
-      await identitySaved;
+    prepared.start();
+  }
+
+  /** The only place a turn's end is decided: it leaves the live turns, frees its conversation, and gets its outcome. */
+  private exited(exit: TurnExit): void {
+    const { run, session } = exit;
+    if (exit.kind === 'claude') {
+      const { owned, summary } = exit;
       if (owned.killTimer) clearTimeout(owned.killTimer);
       this.owned.delete(run.id);
       this.reservedSessions.delete(session.id);
@@ -1662,16 +823,18 @@ export class RunManager extends EventEmitter {
       this.locallySettled.delete(session.id);
       this.locallySettled.set(session.id, Date.now());
       if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
+      const { code, signal, sawCompletion, sawSessionId, waitTimedOut, outstanding, noticePending } = summary;
+      let streamError = summary.streamError;
       if (run.status !== 'cancelled') {
-        const recover = !streamError && !waitTimedOut && sawSessionId && (tasks.outstanding > 0 || !!noticeId)
-          && !pendingApproval && !pendingSteer && !this.stopping && run.origin?.kind === 'owner';
-        if (tasks.outstanding || noticeId) this.append(run, `\n[Tower] Provider exit: code=${code ?? 'none'}, signal=${signal ?? 'none'}, result=${sawCompletion}, inputClosedByTower=${inputClosedByTower}, runningTasks=${tasks.runningCount}, unreadTasks=${tasks.unreadCount}.\n`);
+        const recover = !streamError && !waitTimedOut && sawSessionId && (outstanding > 0 || noticePending)
+          && !summary.pendingApproval && !summary.pendingSteer && !this.stopping && run.origin?.kind === 'owner';
+        if (outstanding || noticePending) this.append(run, `\n[Tower] Provider exit: code=${code ?? 'none'}, signal=${signal ?? 'none'}, result=${sawCompletion}, inputClosedByTower=${summary.inputClosedByTower}, runningTasks=${summary.runningTasks}, unreadTasks=${summary.unreadTasks}.\n`);
         if (!streamError && code === 0 && (!sawCompletion || !sawSessionId)) streamError = 'The provider exited without confirming completion in the requested conversation.';
         if (!streamError && waitTimedOut) streamError = 'The turn answered, but its background work did not finish within the time Tower waits; the work was ended with the turn.';
-        else if (!streamError && (tasks.outstanding || noticeId)) streamError = 'Claude Code exited before it took the results of background work it started in this turn.';
+        else if (!streamError && (outstanding || noticePending)) streamError = 'Claude Code exited before it took the results of background work it started in this turn.';
         if (streamError || code !== 0) {
           const detail = `The provider exited ${signal ? `with signal ${signal}` : `with code ${code ?? 'unknown'}`}.`;
-          this.fail(run, [streamError, detail, stderr.trim()].filter(Boolean).join('\n'));
+          this.fail(run, [streamError, detail, summary.stderr.trim()].filter(Boolean).join('\n'));
           if (recover) {
             const attempt = (run.scheduled?.backgroundRecoveryAttempt ?? 0) + 1;
             if (attempt <= 3) {
@@ -1682,16 +845,51 @@ export class RunManager extends EventEmitter {
         }
         else {
           run.status = 'completed'; run.finishedAt = new Date().toISOString();
-          const wakeup = wakeups.pending;
-          if (wakeup && !this.stopping) this.scheduleContinuation(run, wakeup);
+          if (summary.wakeup && !this.stopping) this.scheduleContinuation(run, summary.wakeup);
           this.changed();
         }
       } else this.changed();
-      finish();
+      exit.finish();
       if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
-    });
-    owned.claude.start(input);
-    this.changed();
+    } else if (exit.kind === 'codex') {
+      const { result, started } = exit;
+      this.stdio.delete(run.id); this.reservedSessions.delete(session.id); delete run.approvals;
+      if (started) {
+        this.settledRuns.add(run.id); this.locallySettled.delete(session.id); this.locallySettled.set(session.id, Date.now());
+        if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
+      }
+      if (!FINISHED.has(run.status)) {
+        run.status = result.status; run.error = result.error; run.finishedAt = result.finishedAt ?? new Date().toISOString();
+      }
+      this.changed();
+      if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
+    } else if (exit.kind === 'bridge') {
+      const { result, started } = exit;
+      this.bridged.delete(run.id);
+      this.reservedSessions.delete(session.id);
+      // Taken back out of the app's queue before it started: it waits in Tower's queue for the new worker.
+      if ((result.withdrawn || exit.heldForUpdate) && !started && run.status === 'queued' && !this.ownerStopped.has(run.id)) {
+        run.output = UPDATE_WAIT; delete run.towerTools;
+        this.changed();
+        return;
+      }
+      // A lost shared connection does not prove the native turn stopped.
+      if (started && result.status === 'completed') {
+        this.settledRuns.add(run.id);
+        this.locallySettled.set(session.id, Date.now());
+      }
+      if (!FINISHED.has(run.status)) {
+        run.status = result.status; run.error = result.error; run.finishedAt = new Date().toISOString();
+        this.changed();
+      }
+      if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
+    } else {
+      this.bridged.delete(run.id); this.reservedSessions.delete(session.id);
+      exit.handle.close();
+      // Once a shared-server submission was attempted, never fall back to a new
+      // writer: a lost acknowledgement must not duplicate the user's instruction.
+      this.fail(run, exit.error);
+    }
   }
 
   /**
@@ -1707,11 +905,8 @@ export class RunManager extends EventEmitter {
     if (live.some(run => run.sessionId === after.sessionId && run.steering?.targetRunId !== after.id)
       || live.filter(run => run.scheduled && run.scheduled.resume !== 'update').length >= MAX_QUEUED) return;
     // Instructions the turn could not go without (receipts, policy) go on with it; a first turn's notes do not.
-    const run: Run = { id: randomUUID(), sessionId: after.sessionId, origin: after.origin ?? { kind: 'unknown' }, prompt: wakeup.prompt, status: 'queued',
-      ...(after.delegation ? { delegation: { ...after.delegation } } : {}),
-      ...(after.instructions?.required ? { instructions: { ...after.instructions } } : {}),
-      createdAt: new Date().toISOString(), output: scheduledOutput, scheduled: { at: new Date(wakeup.at).toISOString(), afterRunId: after.id, ...(backgroundRecoveryAttempt ? { backgroundRecoveryAttempt } : {}) },
-      ...(after.unattended ? { unattended: true } : {}), ...(after.model ? { model: after.model } : {}), ...(after.effort ? { effort: after.effort } : {}) };
+    const run: Run = { id: randomUUID(), sessionId: after.sessionId, ...inheritedRunFields(after), prompt: wakeup.prompt, status: 'queued',
+      createdAt: new Date().toISOString(), output: SCHEDULED_OUTPUT, scheduled: { at: new Date(wakeup.at).toISOString(), afterRunId: after.id, ...(backgroundRecoveryAttempt ? { backgroundRecoveryAttempt } : {}) } };
     if (backgroundRecoveryAttempt) {
       run.output = 'Tower will resume unfinished background work after an unexpected provider exit.';
       this.append(after, `\n[Tower] Scheduled background recovery ${backgroundRecoveryAttempt}/3.\n`);
@@ -1721,139 +916,20 @@ export class RunManager extends EventEmitter {
     this.changed();
   }
 
-  /**
-   * The owner asked Tower to switch to its new version now. From here no new turn starts, each running turn is asked to
-   * wrap up, and at `deadline` the turns still running are stopped. When a turn the update interrupted ends, Tower
-   * queues its own continuation in that same step (see settleUpdateTarget). Delegated work of a Slack or GitHub workflow
-   * is neither asked nor resumed: its coordinator hears how it ended and decides.
-   */
-  beginUpdateDrain(deadline: number, delegated: (run: Run) => boolean): void {
-    if (this.updating || this.stopping) return;
-    // Turns from an earlier forced update that gave up are still followed until they end.
-    this.drain = { sequence: (this.drain?.sequence ?? 0) + 1, startedAt: Date.now(), deadline, delegated, active: true, targets: this.drain?.targets ?? new Map(), stoppingBridges: new Set(), wrapUps: this.drain?.wrapUps ?? new Set() };
-    this.changed();
-  }
+  /** The owner asked Tower to switch to its new version now (see UpdateDrain). */
+  beginUpdateDrain(deadline: number, delegated: (run: Run) => boolean): void { this.drain.begin(deadline, delegated); }
 
   /** While a forced update holds new turns back. */
-  private get updating(): boolean { return this.drain?.active === true; }
+  private get updating(): boolean { return this.drain.active; }
 
-  /**
-   * Gives up a forced update that could not hand off: queued turns start again here and nothing is cancelled. Turns it
-   * already stopped or asked to wrap up still get their continuation when they end.
-   */
-  endUpdateDrain(): void {
-    if (!this.drain?.active) return;
-    this.drain.active = false;
-    this.changed();
-    void this.pump();
-  }
+  /** Gives up a forced update that could not hand off: queued turns start again here and nothing is cancelled. */
+  endUpdateDrain(): void { this.drain.end(); }
 
   /** Shown while a forced update waits for running turns to wrap up. */
-  updateDrainStatus(): { startedAt: string; deadline: string; running: number } | undefined {
-    const drain = this.drain;
-    if (!drain?.active) return undefined;
-    const running = [...drain.targets.keys()].filter(id => this.runs.get(id)?.status === 'running').length
-      + [...this.bridged.keys()].filter(id => this.runs.get(id)?.status === 'queued').length;
-    return { startedAt: new Date(drain.startedAt).toISOString(), deadline: new Date(drain.deadline).toISOString(), running };
-  }
+  updateDrainStatus(): { startedAt: string; deadline: string; running: number } | undefined { return this.drain.status(); }
 
   /** Called about once a second while a forced update waits: wrap-up requests, Codex app submissions, the deadline. */
-  driveUpdateDrain(now = Date.now()): void {
-    const drain = this.drain;
-    if (!drain?.active || this.stopping) return;
-    for (const [id, bridge] of this.bridged) {
-      const run = this.runs.get(id);
-      if (run?.status !== 'queued') continue;
-      if (now < drain.deadline) void bridge.withdraw?.().catch(() => {});
-      else if (!drain.stoppingBridges.has(id)) { drain.stoppingBridges.add(id); void this.cancel(id, UPDATE_NOT_STARTED).catch(() => {}); }
-    }
-    for (const [id, target] of drain.targets) {
-      const run = this.runs.get(id);
-      if (run?.status !== 'running') continue;
-      if (now >= drain.deadline) {
-        if (target.stopSent !== drain.sequence) { target.stopSent = drain.sequence; target.stopping = true; void this.cancel(id, target.delegated ? DELEGATED_STOPPED : UPDATE_STOPPED).catch(() => {}); }
-      } else if (!target.delegated && !target.stopping && !target.reached && !target.sending && now >= target.retryAt) this.sendWrapUp(run, target);
-    }
-  }
-
-  /** Inserts the wrap-up request into a running turn. A request that surely did not reach it is removed and tried again. */
-  private sendWrapUp(target: Run, state: UpdateTarget): void {
-    const wrapUp: Run = { id: randomUUID(), sessionId: target.sessionId, origin: target.origin ?? { kind: 'unknown' }, prompt: WRAP_UP_NOTICE, status: 'queued',
-      createdAt: new Date().toISOString(), updateWrapUp: true,
-      output: 'Asking the running turn to wrap up for a Tower update.', ...(target.model ? { model: target.model } : {}), ...(target.effort ? { effort: target.effort } : {}) };
-    this.runs.set(wrapUp.id, wrapUp);
-    this.drain!.wrapUps.add(wrapUp.id);
-    state.sending = true;
-    state.retryAt = Date.now() + WRAP_UP_RETRY_MS;
-    this.changed();
-    void this.steer(wrapUp.id, { targetRunId: target.id }).catch(() => {}).finally(() => {
-      state.sending = false;
-      // Put back in the queue means it was never handed over; it must not start later as a turn of its own.
-      if (wrapUp.status !== 'queued' || wrapUp.steering || this.runs.get(wrapUp.id) !== wrapUp) return;
-      this.runs.delete(wrapUp.id);
-      state.reached = false;
-      // The turn ended meanwhile, counted as asked to wrap up: it was not, so it is not carried on.
-      const turn = this.runs.get(target.id);
-      if (turn?.status === 'completed') {
-        for (const run of [...this.runs.values()]) if (run.status === 'queued' && run.scheduled?.resume === 'update' && run.scheduled.afterRunId === turn.id) this.runs.delete(run.id);
-      }
-      this.changed();
-    });
-  }
-
-  /** Called as an inserted instruction is handed to its turn: a wrap-up request that got this far may have reached it. */
-  private noteHandedOver(run: Run): void {
-    if (!this.drain?.wrapUps.has(run.id) || !run.steering) return;
-    const target = this.drain.targets.get(run.steering.targetRunId);
-    if (target) target.reached = true;
-  }
-
-  /**
-   * Registers every turn running during a forced update in the same step as the change that shows it running, and
-   * settles each one in the same step as the change that shows it ended.
-   */
-  private trackUpdateTargets(): void {
-    const drain = this.drain;
-    if (!drain) return;
-    if (drain.active) for (const run of this.runs.values()) {
-      if (run.status !== 'running' || run.steering || drain.targets.has(run.id)) continue;
-      drain.targets.set(run.id, { delegated: drain.delegated(run), retryAt: 0 });
-    }
-    for (const [id, target] of drain.targets) {
-      const run = this.runs.get(id);
-      if (!run) { drain.targets.delete(id); continue; }
-      if (!FINISHED.has(run.status)) continue;
-      drain.targets.delete(id);
-      this.settleUpdateTarget(run, target);
-    }
-    if (!drain.active && !drain.targets.size) this.drain = undefined;
-  }
-
-  /**
-   * Only work the update itself interrupted is carried on: a turn the deadline stopped, or one that ended after its
-   * wrap-up request reached it. A turn the owner stopped, one stopped in the Codex app, one that failed, and one that
-   * finished its own work before any wrap-up reached it end as they are. The continuation is queued in the same step
-   * that shows the turn ended, so no watcher sees one without the other; it replaces the agent's own wakeup.
-   */
-  private settleUpdateTarget(run: Run, target: UpdateTarget): void {
-    if (target.delegated || this.ownerStopped.has(run.id)) return;
-    // A stop the deadline asked for counts only once confirmed ('cancelled'): an unconfirmed one may still be running there.
-    if (!((target.stopping && run.status === 'cancelled') || (run.status === 'completed' && target.reached))) return;
-    const permission = [...this.runs.values()].find(other => other.status === 'queued' && other.scheduled?.afterRunId === run.id && other.scheduled.resume === 'permission');
-    if (permission) {
-      permission.scheduled!.resume = 'update'; permission.prompt = `${RESUME_NOTICE}\n\n${permission.prompt}`; permission.output = UPDATE_RESUME_WAIT; return;
-    }
-    for (const other of [...this.runs.values()]) {
-      if (other.status === 'queued' && other.scheduled?.afterRunId === run.id && other.scheduled.resume !== 'update') this.runs.delete(other.id);
-    }
-    const now = new Date().toISOString();
-    const id = randomUUID();
-    this.runs.set(id, { id, sessionId: run.sessionId, origin: run.origin ?? { kind: 'unknown' }, prompt: RESUME_NOTICE, status: 'queued',
-      ...(run.delegation ? { delegation: { ...run.delegation } } : {}),
-      ...(run.instructions?.required ? { instructions: { ...run.instructions } } : {}),
-      createdAt: now, output: UPDATE_RESUME_WAIT, scheduled: { at: now, afterRunId: run.id, resume: 'update' },
-      ...(run.unattended ? { unattended: true } : {}), ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}) });
-  }
+  driveUpdateDrain(now = Date.now()): void { this.drain.drive(now); }
 
   private supersede(run: Run, reason: string): void {
     run.status = 'cancelled'; run.finishedAt = new Date().toISOString(); run.output = `Scheduled continuation not started: ${reason}`;
@@ -1925,11 +1001,8 @@ export class RunManager extends EventEmitter {
         this.settledRuns.add(run.id);
       }
     }
-    this.trackUpdateTargets();
-    for (const run of this.runs.values()) if (run.status === 'queued' && run.permissionRequestIds?.length && run.scheduled) {
-      const parent = this.runs.get(run.scheduled.afterRunId);
-      if (parent && (parent.ownerStopped || parent.status === 'error' || (parent.status === 'cancelled' && run.scheduled.resume !== 'update'))) { run.status = 'cancelled'; run.finishedAt = new Date().toISOString(); run.error = 'The requesting turn stopped; permission continuation was not started.'; }
-    }
+    this.drain.track();
+    this.permissions.sweep();
     const retained = this.retainedIds();
     this.prune(retained);
     this.persist(retained); this.emit('change');
@@ -1945,47 +1018,15 @@ export class RunManager extends EventEmitter {
   private persist(retained = this.retainedIds()): void {
     // This save includes any streamed output that was waiting for its slower cadence.
     this.cancelOutputPersist();
-    // Instruction text never reaches disk, where an older Tower could show it. A turn still to run records only that it
-    // needs instructions; after a restart it is cancelled rather than started without them.
-    for (const id of this.carried) if (this.runs.get(id)?.status !== 'queued') this.carried.delete(id);
     // A wrap-up request is never carried: after a restart it would start as a turn of its own.
-    if (this.updating) for (const run of this.runs.values()) if (run.status === 'queued' && !run.scheduled && !this.drain!.wrapUps.has(run.id)) this.carried.add(run.id);
-    const serialize = (finishedOutput?: number) => JSON.stringify(this.list().map(({ approvals: _liveApprovals, canSteer: _liveSteering, steerBlocked: _liveBlock, ...run }) => {
-      const saved: Record<string, unknown> = { ...run };
-      if (finishedOutput !== undefined && FINISHED.has(run.status)) saved.output = run.output.slice(-finishedOutput);
-      if (this.runs.get(run.id)?.instructions?.required && !FINISHED.has(run.status)) saved[NEEDS_INSTRUCTIONS] = true;
-      if (this.carried.has(run.id)) saved[KEEP_QUEUED] = true;
-      if (retained.has(run.id) && FINISHED.has(run.status)) { saved[RETAIN] = true; saved.output = run.output.slice(-RETAINED_OUTPUT); }
-      return saved;
-    }));
-    // Older builds refuse a history over 12 MB, so a rollback could not start: long finished output is shortened first.
-    let data = serialize();
-    if (Buffer.byteLength(data) > LEGACY_SAVED_BYTES) data = serialize(2_000);
-    // Kept only for turns still to run, in a private file older Towers do not read (see instructionsFile).
-    const instructions = JSON.stringify(Object.fromEntries([...this.runs.values()]
-      .filter(run => run.instructions?.required && !FINISHED.has(run.status)).map(run => [run.id, run.instructions])));
-    const created = JSON.stringify([...this.createdSessions.values()]);
-    this.writes = this.writes.then(async () => {
-      // Compare inside the queue: an earlier queued write may still change what a file holds.
-      // Write identities first. A crash between commits may leave an orphaned
-      // placeholder, which recovery displays as failed and never submits again.
-      if (created !== this.saved.created) { await writePrivateJson(this.createdFile, created); this.saved.created = created; }
-      // Instructions before the runs that name them, so a saved marker always finds its text.
-      // A failure here costs only those turns' restart (they are cancelled then, as before); runs.json is still saved.
-      if (instructions === (this.saved.instructions ?? '{}')) this.instructionsError = undefined;
-      else {
-        try { await writePrivateJson(this.instructionsFile, instructions); this.saved.instructions = instructions; this.instructionsError = undefined; }
-        catch (error) { this.instructionsError = error as Error; console.error(`Turn instructions were not saved: ${errorMessage(error)}`); }
-      }
-      if (data !== this.saved.runs) { await writePrivateJson(this.stateFile, data); this.saved.runs = data; }
-      this.persistenceError = undefined;
-    }).catch((error: Error) => { this.persistenceError = error; });
+    if (this.updating) for (const run of this.runs.values()) if (run.status === 'queued' && !run.scheduled && !this.drain.isWrapUp(run.id)) this.history.carried.add(run.id);
+    this.history.save(this.runs, this.list(), this.registry.serialize(), retained);
   }
 
   /** Waits for every accepted change to reach disk, without stopping or cancelling anything. */
   async flushState(): Promise<void> {
     this.persist(); await this.flush();
-    if (this.instructionsError) throw new RunError(`Cannot save instructions of turns still to run: ${this.instructionsError.message}`, 503);
+    this.history.checkInstructionsSaved();
   }
 
   /**
@@ -1994,7 +1035,7 @@ export class RunManager extends EventEmitter {
    * waited.
    */
   holdProvider(provider: Provider): (() => void) | undefined {
-    const of = (sessionId: string) => (this.getSession(sessionId) ?? this.createdSessions.get(sessionId)?.session)?.provider ?? sessionId.split(':')[0];
+    const of = (sessionId: string) => (this.getSession(sessionId) ?? this.registry.created(sessionId))?.provider ?? sessionId.split(':')[0];
     const inFlight = [...this.reservedSessions].some(id => of(id) === provider)
       || [...this.runs.values()].some(run => run.status === 'running' && of(run.sessionId) === provider);
     if (inFlight || this.heldProviders.has(provider)) return undefined;
@@ -2009,28 +1050,9 @@ export class RunManager extends EventEmitter {
   }
 
   /** True while any provider process, desktop turn or admission is still live, whatever the run status says. */
-  busy(): boolean { return this.owned.size + this.bridged.size + this.stdio.size + this.admissions.size + this.reservedSessions.size + this.toolNoticeSending.size > 0 || this.pumping; }
+  busy(): boolean { return this.owned.size + this.bridged.size + this.stdio.size + this.admissions.size + this.reservedSessions.size + this.toolNotices.sending > 0 || this.pumping; }
 
-  private async flush(): Promise<void> {
-    await this.writes;
-    if (this.persistenceError) throw notAdmitted(new RunError(`Cannot save the instruction queue: ${this.persistenceError.message}`, 503));
-  }
+  private flush(): Promise<void> { return this.history.flush(); }
 }
 
-const scheduledOutput = 'Scheduled by the agent. Tower resumes this conversation at the scheduled time.';
-function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-async function privateMcpConfig(mcpServers: NonNullable<RunTools['servers']>): Promise<{ path: string; remove: () => void }> {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-mcp-'));
-  const remove = () => { void rm(directory, { recursive: true, force: true }).catch(() => {}); };
-  try {
-    await chmod(directory, 0o700);
-    const path = join(directory, 'config.json');
-    await writeFile(path, JSON.stringify({ mcpServers }), { mode: 0o600, flag: 'wx' });
-    return { path, remove };
-  } catch (error) { remove(); throw error; }
-}
 function automated(run: Run): boolean { return automatedOrigin(run.origin); }
-/** The owner's own turns always run in the provider's automatic approval mode; triggers and Slack follow their setting. */
-function automaticApprovals(run: Run): boolean { return run.unattended === true || ownerOrigin(run.origin); }
-/** Modes at least as careful as asking the owner. Anything else is not what an unattended run asked for. */
-const OWNER_APPROVAL_MODES = new Set(['default', 'manual', 'plan', 'dontAsk']);

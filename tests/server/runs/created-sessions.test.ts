@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { RunManager } from '../../../server/runs/manager.js';
 import { SessionTitleStore } from '../../../server/stores/session-titles.js';
+import { MASTER_FOLDER } from '../../../shared/master.js';
 import type { Provider, Run, Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
 
@@ -101,7 +102,7 @@ test("Tower's own Codex turns hand approvals to the automatic reviewer, new or r
   assert.equal((await threadParams()).approvalsReviewer, undefined);
   const claude = await f.manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Claude ignores it', codexApprovalsReviewer: 'auto_review' });
   assert.equal(claude.run.codexApprovalsReviewer, undefined);
-  await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Invalid reviewer', codexApprovalsReviewer: 'always' as 'user' }), { statusCode: 400 });
+  await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Invalid reviewer', codexApprovalsReviewer: 'always' as 'user' }), { kind: 'invalid' });
 });
 
 test('a trigger keeps the reviewer it chose for a new Codex conversation, and never sends one on resume', async t => {
@@ -336,10 +337,10 @@ test('invalid input and a partially committed admission cannot launch a provider
     { provider: 'bad', cwd: f.directory, prompt: 'hi' },
     { provider: 'codex', cwd: join(f.stateDir, 'runs.json', 'child'), prompt: 'hi' },
     { provider: 'codex', cwd: f.directory, prompt: 'hi', title: 't'.repeat(121) },
-  ]) await assert.rejects(f.manager.create(input as Parameters<RunManager['create']>[0]), { statusCode: 400 });
+  ]) await assert.rejects(f.manager.create(input as Parameters<RunManager['create']>[0]), { kind: 'invalid' });
   await rm(join(f.stateDir, 'runs.json'));
   await mkdir(join(f.stateDir, 'runs.json'));
-  await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'must not run later' }), { statusCode: 503 });
+  await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'must not run later' }), { kind: 'unavailable' });
   assert.ok(f.manager.list().every(run => run.status === 'error'));
   assert.ok(f.manager.sessionList([]).every(session => session.status === 'error' && !session.creationPending));
   assert.equal(f.launches.length, 0);
@@ -382,3 +383,43 @@ for (const provider of ['claude', 'codex'] as const) {
     } finally { await restarted.close(); }
   });
 }
+
+test('a created session whose native record was seen and whose first run ended is hidden when the native record disappears', async t => {
+  const f = await fixture(t);
+  const accepted = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'seen then gone' });
+  await finished(f.manager, accepted.run.id);
+  const native = { ...f.manager.getSession(accepted.session.id)!, id: `codex:${CODEX_ID}`, creationPending: undefined };
+  f.native.set(native.id, native);
+  assert.equal(f.manager.getSession(accepted.session.id)?.id, accepted.session.id, 'seen under its stable ID');
+  f.native.delete(native.id);
+  assert.equal(f.manager.getSession(accepted.session.id), undefined);
+  assert.equal(f.manager.sessionList([]).some(session => session.id === accepted.session.id), false);
+});
+
+test('a session started by a trigger shows launchedBy, keeps its chosen folder, and its creation name is a custom title', async t => {
+  const f = await fixture(t);
+  const accepted = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'triggered work', title: 'Nightly report' },
+    { origin: { kind: 'trigger', triggerId: 'trigger-a' }, unattended: true, createFolder: false });
+  assert.deepEqual(accepted.session.launchedBy, { kind: 'trigger', triggerId: 'trigger-a' });
+  assert.equal(accepted.session.customTitle, 'Nightly report');
+  await finished(f.manager, accepted.run.id);
+  f.native.set(`codex:${CODEX_ID}`, { ...f.manager.getSession(accepted.session.id)!, id: `codex:${CODEX_ID}`, cwd: join(f.directory, 'elsewhere'), project: 'elsewhere', title: 'Native', customTitle: undefined });
+  const seen = f.manager.getSession(accepted.session.id)!;
+  assert.deepEqual(seen.launchedBy, { kind: 'trigger', triggerId: 'trigger-a' });
+  assert.equal(seen.cwd, f.directory);
+  assert.equal(seen.customTitle, 'Nightly report');
+});
+
+test('the session overlay (task summaries) is applied to listed sessions only, after master marking; getSession is not overlaid', async t => {
+  const f = await fixture(t);
+  const masterCwd = join(f.stateDir, MASTER_FOLDER);
+  const master: Session = { id: `claude:${OTHER_ID}`, nativeId: OTHER_ID, provider: 'claude', title: 'Master', cwd: masterCwd, project: 'master', status: 'idle', statusReason: '',
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
+  f.native.set(master.id, master);
+  const seen: Array<boolean | undefined> = [];
+  f.manager.setSessionOverlay(session => { seen.push(session.master); return { ...session, title: `${session.title} (summarized)` }; });
+  const listed = f.manager.sessionList([master]);
+  assert.equal(listed[0].title, 'Master (summarized)');
+  assert.deepEqual(seen, [true], 'the overlay sees the master marking');
+  assert.equal(f.manager.getSession(master.id)?.title, 'Master');
+});

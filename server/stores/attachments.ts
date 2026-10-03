@@ -4,11 +4,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { Attachment, MessageAttachments } from '../../shared/types.js';
 import { isImageAttachment, normalizeAttachmentMimeType, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../../shared/attachments.js';
+import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
 const ID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/;
 const MIME = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;
 const digest = (content: Buffer) => createHash('sha256').update(content).digest('hex');
-const invalid = (message: string, statusCode = 400) => Object.assign(new Error(message), { statusCode });
+const invalid = (message: string, kind: ErrorKind = 'invalid') => new TowerError(kind, message);
 
 /** `sessionId` is the conversation the file was attached in. */
 export interface StoredAttachment { metadata: Attachment; path: string; content: Buffer; sessionId: string }
@@ -47,7 +48,7 @@ export class AttachmentStore {
   async start(): Promise<void> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const info = await lstat(this.directory);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw invalid('첨부 파일 저장 폴더가 올바르지 않습니다.', 503);
+    if (!info.isDirectory() || info.isSymbolicLink()) throw invalid('첨부 파일 저장 폴더가 올바르지 않습니다.', 'unavailable');
     const dir = await open(this.directory, constants.O_RDONLY | constants.O_NOFOLLOW);
     try { await dir.chmod(0o700); } finally { await dir.close(); }
   }
@@ -56,34 +57,34 @@ export class AttachmentStore {
     const uploads = request.attachments === undefined ? [] : request.attachments;
     const ids = request.attachmentIds === undefined ? [] : request.attachmentIds;
     if (!Array.isArray(uploads) || !Array.isArray(ids)) throw invalid('첨부 파일 목록 형식이 올바르지 않습니다.');
-    if (uploads.length + ids.length > MAX_ATTACHMENTS) throw invalid(`첨부 파일은 최대 ${MAX_ATTACHMENTS}개까지 보낼 수 있습니다.`, 413);
+    if (uploads.length + ids.length > MAX_ATTACHMENTS) throw invalid(`첨부 파일은 최대 ${MAX_ATTACHMENTS}개까지 보낼 수 있습니다.`, 'too-large');
     if (new Set(ids).size !== ids.length) throw invalid('같은 첨부 파일을 중복으로 보낼 수 없습니다.');
     const existing: Attachment[] = [];
     let total = 0;
     for (const id of ids) {
       const saved = await this.read(id, sessionId);
       existing.push(saved.metadata); total += saved.metadata.size;
-      if (total > MAX_TOTAL_ATTACHMENT_BYTES) throw invalid('첨부 파일의 전체 크기는 20 MB 이하여야 합니다.', 413);
+      if (total > MAX_TOTAL_ATTACHMENT_BYTES) throw invalid('첨부 파일의 전체 크기는 20 MB 이하여야 합니다.', 'too-large');
     }
     const fresh = uploads.map(input => {
       if (!input || typeof input !== 'object' || !validName(input.name) || typeof input.mimeType !== 'string'
         || typeof input.data !== 'string') throw invalid('첨부 파일 이름 또는 형식이 올바르지 않습니다.');
       const suppliedMime = normalizeAttachmentMimeType(input.mimeType, input.name);
       if (suppliedMime.length > 127 || !MIME.test(suppliedMime)) throw invalid('첨부 파일 형식이 올바르지 않습니다.');
-      if (input.data.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4) throw invalid('파일 하나의 크기는 10 MB 이하여야 합니다.', 413);
+      if (input.data.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4) throw invalid('파일 하나의 크기는 10 MB 이하여야 합니다.', 'too-large');
       if (input.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(input.data)) throw invalid('첨부 파일 데이터가 올바른 Base64 형식이 아닙니다.');
       const content = Buffer.from(input.data, 'base64');
       if (content.toString('base64') !== input.data) throw invalid('첨부 파일 데이터가 올바른 Base64 형식이 아닙니다.');
-      if (content.length > MAX_ATTACHMENT_BYTES) throw invalid('파일 하나의 크기는 10 MB 이하여야 합니다.', 413);
+      if (content.length > MAX_ATTACHMENT_BYTES) throw invalid('파일 하나의 크기는 10 MB 이하여야 합니다.', 'too-large');
       const detected = rasterMime(content);
       if (isImageAttachment(suppliedMime) && suppliedMime !== detected) throw invalid('이미지 내용과 파일 형식이 일치하지 않습니다.');
       const mimeType = detected || suppliedMime;
-      if (isImageAttachment(mimeType) && content.length > MAX_IMAGE_ATTACHMENT_BYTES) throw invalid('이미지 하나의 크기는 5 MB 이하여야 합니다.', 413);
+      if (isImageAttachment(mimeType) && content.length > MAX_IMAGE_ATTACHMENT_BYTES) throw invalid('이미지 하나의 크기는 5 MB 이하여야 합니다.', 'too-large');
       total += content.length;
-      if (total > MAX_TOTAL_ATTACHMENT_BYTES) throw invalid('첨부 파일의 전체 크기는 20 MB 이하여야 합니다.', 413);
+      if (total > MAX_TOTAL_ATTACHMENT_BYTES) throw invalid('첨부 파일의 전체 크기는 20 MB 이하여야 합니다.', 'too-large');
       return { metadata: { id: randomUUID(), name: input.name, mimeType, size: content.length }, content };
     });
-    if (total > MAX_TOTAL_ATTACHMENT_BYTES) throw invalid('첨부 파일의 전체 크기는 20 MB 이하여야 합니다.', 413);
+    if (total > MAX_TOTAL_ATTACHMENT_BYTES) throw invalid('첨부 파일의 전체 크기는 20 MB 이하여야 합니다.', 'too-large');
     const createdIds: string[] = [];
     try {
       for (const { metadata, content } of fresh) {
@@ -103,7 +104,7 @@ export class AttachmentStore {
   }
 
   async read(id: string, sessionId?: string): Promise<StoredAttachment> {
-    if (typeof id !== 'string' || !ID.test(id)) throw invalid('첨부 파일을 찾을 수 없습니다.', 404);
+    if (typeof id !== 'string' || !ID.test(id)) throw invalid('첨부 파일을 찾을 수 없습니다.', 'not-found');
     try {
       const rootInfo = await lstat(this.directory);
       if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error();
@@ -121,7 +122,7 @@ export class AttachmentStore {
       if (content.length !== metadata.size || digest(content) !== manifest.sha256
         || (isImageAttachment(metadata.mimeType) && (rasterMime(content) !== metadata.mimeType || content.length > MAX_IMAGE_ATTACHMENT_BYTES))) throw new Error();
       return { metadata, path, content, sessionId: manifest.sessionId };
-    } catch { throw invalid('첨부 파일을 찾을 수 없거나 내용이 변경되었습니다. 파일을 다시 첨부하세요.', 404); }
+    } catch { throw invalid('첨부 파일을 찾을 수 없거나 내용이 변경되었습니다. 파일을 다시 첨부하세요.', 'not-found'); }
   }
 
   async resolve(sessionId: string, attachments: readonly Attachment[] = []): Promise<StoredAttachment[]> {
@@ -131,7 +132,7 @@ export class AttachmentStore {
     for (const attachment of attachments) {
       const value = await this.read(attachment.id, sessionId);
       total += value.metadata.size;
-      if (total > MAX_TOTAL_ATTACHMENT_BYTES) throw invalid('첨부 파일의 전체 크기는 20 MB 이하여야 합니다.', 413);
+      if (total > MAX_TOTAL_ATTACHMENT_BYTES) throw invalid('첨부 파일의 전체 크기는 20 MB 이하여야 합니다.', 'too-large');
       result.push(value);
     }
     return result;
@@ -161,4 +162,16 @@ export function attachmentPrompt(prompt: string, attachments: readonly StoredAtt
   if (!attachments.length) return prompt;
   const instruction = prompt || ATTACHMENT_ONLY_PROMPT;
   return `${instruction}\n\n첨부 파일 (사용자가 이번 메시지에 첨부한 로컬 파일):\n${attachments.map(({ metadata, path }) => `- ${JSON.stringify(metadata.name)} (${metadata.mimeType}, ${metadata.size} bytes): ${JSON.stringify(path)}`).join('\n')}`;
+}
+
+/** Paths of the image attachments, for a provider that reads them from disk. */
+export function imagePaths(attachments: readonly StoredAttachment[]): string[] {
+  return attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path);
+}
+
+/** The image attachments as Claude message blocks. */
+export function claudeImageBlocks(attachments: readonly StoredAttachment[]) {
+  return attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => ({
+    type: 'image', source: { type: 'base64', media_type: item.metadata.mimeType, data: item.content.toString('base64') },
+  }));
 }

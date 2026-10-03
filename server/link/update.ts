@@ -15,7 +15,10 @@ const run = promisify(execFile);
 const START_MS = 120_000;
 /** A restarted Tower dials its controllers at once; one that reaches none of them by then is given up on too. */
 const LINK_MS = 90_000;
-/** A hold left by an update that never finished stops holding anything back after this long, once no helper runs. */
+/**
+ * A hold left by an update that never finished stops holding anything back after this long, once no helper runs.
+ * A hold or helper lock that cannot be read keeps holding, however long.
+ */
 const HOLD_MS = 15 * 60_000;
 /** A new version is kept only after answering this long as the same process: longer than launchd waits to restart it. */
 const STABLE_MS = 60_000;
@@ -47,22 +50,39 @@ async function saveUpdateStatus(stateDir: string, status: SavedUpdate): Promise<
 export function publicUpdate({ controllers: _, ...status }: SavedUpdate): UpdateStatus { return status; }
 export const updateActive = (status: UpdateStatus | undefined): boolean => Boolean(status && ACTIVE.has(status.stage));
 
+const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT';
+/** The error last logged for each hold that could not be read, so a poll every second logs it once. */
+const unreadableHolds = new Map<string, string>();
+
 /**
  * While an update is being tried, the new web must not hand the worker over: until the update is kept, going back
- * to the previous version has to find the previous worker. A hold nobody released in time holds nothing.
+ * to the previous version has to find the previous worker. A hold nobody released in time holds nothing. Rejects
+ * when the hold or the helper lock cannot be read: whether to hold cannot be told then, and nothing is removed.
  */
 export async function handoffHeld(stateDir: string, now = Date.now()): Promise<boolean> {
   const { hold } = updatePaths(stateDir);
-  const info = await stat(hold).catch(() => undefined);
-  if (!info) return false;
-  if (now - info.mtimeMs < HOLD_MS || await helperRunning(stateDir)) return true;
+  let held: boolean | undefined;
+  try {
+    const info = await stat(hold).catch(error => { if (missing(error)) return undefined; throw error; });
+    // No hold: nothing to remove, and one a helper writes meanwhile must stay.
+    held = info && (now - info.mtimeMs < HOLD_MS || await helperRunning(stateDir));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (unreadableHolds.get(hold) !== message) console.error(`The update hold could not be read (${message}); the worker is not handed over until it can.`);
+    unreadableHolds.set(hold, message);
+    throw error;
+  }
+  if (unreadableHolds.delete(hold)) console.log('The update hold can be read again.');
+  if (held === undefined) return false;
+  if (held) return true;
   await rm(hold, { force: true });
   return false;
 }
 
 /** The previous version's entry point while an update is tried, for a worker that has to be started then. */
 export async function heldWorkerEntry(stateDir: string): Promise<string | undefined> {
-  if (!await handoffHeld(stateDir)) return undefined;
+  // A hold that cannot be read counts as held: the previous version's worker is the safe one to start.
+  if (!await handoffHeld(stateDir).catch(() => true)) return undefined;
   const status = await readUpdateStatus(stateDir);
   if (!status || !updateActive(status)) return undefined;
   const entry = entryPoint(versionDirectory(stateDir, status.previous));
@@ -81,9 +101,12 @@ function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
 }
 const startedAt = processStart;
-/** The lock's owner: its pid and when it started. However long the computer slept, a live helper still owns it. */
+/**
+ * The lock's owner: its pid and when it started. However long the computer slept, a live helper still owns it.
+ * No lock means no owner; a lock that cannot be read rejects, since a helper may still own it.
+ */
 async function lockOwner(stateDir: string): Promise<{ pid: number; started?: string } | undefined> {
-  const [pid, ...started] = (await readFile(updatePaths(stateDir).lock, 'utf8').catch(() => '')).split(' ');
+  const [pid, ...started] = (await readFile(updatePaths(stateDir).lock, 'utf8').catch(error => { if (missing(error)) return ''; throw error; })).split(' ');
   return Number(pid) > 0 && Number.isInteger(Number(pid)) ? { pid: Number(pid), ...(started.length ? { started: started.join(' ') } : {}) } : undefined;
 }
 async function helperRunning(stateDir: string): Promise<boolean> {
@@ -95,8 +118,8 @@ async function helperRunning(stateDir: string): Promise<boolean> {
 }
 /**
  * Takes the helper lock. It is published whole, with its owner's pid and start time in it, so another helper never
- * sees it empty; a lock whose owner is gone is taken over. Two helpers taking over the same stale lock at once
- * can both publish; the one whose lock is no longer there a moment later stands down.
+ * sees it empty; a lock whose owner is gone is taken over, one that cannot be read never is. Two helpers taking
+ * over the same stale lock at once can both publish; the one whose lock is no longer there a moment later stands down.
  */
 async function takeLock(stateDir: string): Promise<boolean> {
   const { lock } = updatePaths(stateDir);
@@ -142,7 +165,7 @@ export class Updates {
     return next;
   }
 
-  /** Where the last update stands; one whose helper is gone is reported as interrupted. */
+  /** Where the last update stands; one whose helper is gone is reported as interrupted, one whose helper cannot be told is not. */
   async status(): Promise<UpdateStatus | undefined> {
     const status = await readUpdateStatus(this.options.stateDir);
     if (!status) return undefined;
@@ -151,7 +174,7 @@ export class Updates {
   }
 
   private async busy(status: UpdateStatus): Promise<boolean> {
-    return await helperRunning(this.options.stateDir) || (this.options.now?.() ?? Date.now()) - Date.parse(status.updatedAt) < STARTING_MS;
+    return await helperRunning(this.options.stateDir).catch(() => true) || (this.options.now?.() ?? Date.now()) - Date.parse(status.updatedAt) < STARTING_MS;
   }
 
   private async start(version: unknown): Promise<UpdateRequestResult> {
@@ -182,8 +205,15 @@ export class Updates {
   async recover(): Promise<void> {
     const { stateDir, version } = this.options;
     const status = await readUpdateStatus(stateDir);
-    if (!this.options.managed || !status || await helperRunning(stateDir)) return;
-    if (updateActive(status) && status.version === version) {
+    if (!this.options.managed || !status) return;
+    const resumes = updateActive(status) && status.version === version;
+    const running = await helperRunning(stateDir).catch(async error => {
+      // Whether a helper still runs cannot be told: hold the worker, but start no helper and settle nothing.
+      if (resumes) await writeFile(updatePaths(stateDir).hold, JSON.stringify({ version }), { mode: 0o600 });
+      throw error;
+    });
+    if (running) return;
+    if (resumes) {
       // Held anew before the helper starts: however long the computer was off, this web must not take the worker.
       await writeFile(updatePaths(stateDir).hold, JSON.stringify({ version }), { mode: 0o600 });
       this.spawn(version, true);

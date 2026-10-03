@@ -5,8 +5,10 @@ import { join } from 'node:path';
 import { BACKUP_EXTENSION, DEFAULT_BACKUP_SETTINGS, MAX_BACKUP_FILE_BYTES, type BackupOverview, type BackupPart, type BackupPreview, type BackupSettingsInput, type BackupStatus, type RemoteBackup, type RestoreReport } from '../../shared/backup.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { BackupError, checkPassphrase, decryptBackup, encryptBackup, readBackupHeader, type BackupHeader } from './crypto.js';
-import { collectEncryptedVault, stageVaultImport, stageLegacyImport } from './secrets.js';
-import { collectTriggers, collectWorkerFiles, parsePayload, payloadParts, WORKER_FILES, type BackupPayload, type SkillBackup } from './payload.js';
+import { stageLegacyImport } from './secrets.js';
+import { deferredSecretParts, encryptedVaultOf, stageVaultImport } from '../secrets/imports.js';
+import { collectTriggers, collectWorkerFiles, parsePayload, payloadParts, WORKER_FILES, type BackupPayload } from './payload.js';
+import type { SkillBackup } from '../skills/backup.js';
 import { keepBefore, readReport, removePendingWorker, writePendingWorker, writeReport } from './restore-files.js';
 import { S3Client, endpointUrl, unsafeKey } from './s3.js';
 import { newerVersion } from '../link/service.js';
@@ -136,7 +138,7 @@ export class BackupService {
       const before = this.saved;
       await work();
       try { await writePrivateJson(this.path, JSON.stringify(this.saved)); }
-      catch (error) { this.saved = before; throw new BackupError(`백업 설정을 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`, 503); }
+      catch (error) { this.saved = before; throw new BackupError(`백업 설정을 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`, 'unavailable'); }
     });
     this.writes = next;
     return next;
@@ -151,7 +153,7 @@ export class BackupService {
     // Missing is "none"; unreadable fails the backup rather than record a key as absent (a restore would remove it).
     const optional = (path: string) => readPrivateJson(path).catch(error => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-      throw new BackupError(`${path}을(를) 읽지 못해 백업하지 않았습니다: ${error instanceof Error ? error.message : String(error)}`, 500);
+      throw new BackupError(`${path}을(를) 읽지 못해 백업하지 않았습니다: ${error instanceof Error ? error.message : String(error)}`, 'internal');
     });
     const master = await optional(join(stateDir, 'master', 'settings.json'));
     const voiceKey = await optional(join(stateDir, 'master', 'elevenlabs-key.json'));
@@ -159,7 +161,7 @@ export class BackupService {
     return {
       version: 1,
       machine: this.saved.machine,
-      worker: { files: await collectWorkerFiles(stateDir), encryptedVault: await collectEncryptedVault(stateDir), ...(triggers ? { triggers } : {}), skills },
+      worker: { files: await collectWorkerFiles(stateDir), encryptedVault: await encryptedVaultOf(stateDir), ...(triggers ? { triggers } : {}), skills },
       web: { projectGroups: this.options.stores.groups.backupValue(), remoteExclusions: this.options.stores.exclusions.backupValue(), decisions: this.options.stores.decisions.backupValue(), backup: settings },
       // Only a computer that set the master up has anything to bring back.
       ...(record(master) && master.voice !== undefined || record(voiceKey) && typeof voiceKey.apiKey === 'string'
@@ -258,7 +260,7 @@ export class BackupService {
 
   async download(key: unknown): Promise<{ name: string; text: string }> {
     const prefix = this.saved.settings.remote.prefix;
-    if (typeof key !== 'string' || !key.startsWith(prefix) || !key.endsWith(BACKUP_EXTENSION) || key.length > 1024 || unsafeKey(key)) throw new BackupError('백업을 찾을 수 없습니다.', 404);
+    if (typeof key !== 'string' || !key.startsWith(prefix) || !key.endsWith(BACKUP_EXTENSION) || key.length > 1024 || unsafeKey(key)) throw new BackupError('백업을 찾을 수 없습니다.', 'not-found');
     const text = (await this.client().get(key, MAX_BACKUP_FILE_BYTES)).toString('utf8');
     readBackupHeader(text);
     return { name: key.slice(key.lastIndexOf('/') + 1), text };
@@ -272,7 +274,7 @@ export class BackupService {
     const secret = checkPassphrase(passphrase);
     const { header, payload } = await decryptBackup(file, secret);
     // A newer Tower may save settings this build cannot read; they could keep its worker from starting.
-    if (newerVersion(header.towerVersion, this.options.version)) throw new BackupError(`Tower ${header.towerVersion}에서 만든 백업입니다. 이 Tower(${this.options.version})를 업데이트한 뒤 복원하세요.`, 409);
+    if (newerVersion(header.towerVersion, this.options.version)) throw new BackupError(`Tower ${header.towerVersion}에서 만든 백업입니다. 이 Tower(${this.options.version})를 업데이트한 뒤 복원하세요.`, 'conflict');
     let parsed: BackupPayload;
     try { parsed = parsePayload(payload); } catch (error) { throw new BackupError(error instanceof Error ? error.message : String(error)); }
     const now = this.now();
@@ -300,19 +302,20 @@ export class BackupService {
 
   private async applyNow(id: unknown): Promise<RestoreReport> {
     const item = typeof id === 'string' ? this.checked.get(id) : undefined;
-    if (!item || this.now() - item.at > CHECKED_KEPT_MS) throw new BackupError('확인한 백업이 만료되었습니다. 파일을 다시 확인하세요.', 409);
+    if (!item || this.now() - item.at > CHECKED_KEPT_MS) throw new BackupError('확인한 백업이 만료되었습니다. 파일을 다시 확인하세요.', 'conflict');
     this.checked.delete(id as string);
     const { header, passphrase } = item;
     const payload = structuredClone(item.payload);
     const stateDir = this.options.stateDir;
-    const targetHasVault = Boolean(await collectEncryptedVault(stateDir));
+    const targetHasVault = Boolean(await encryptedVaultOf(stateDir));
     const before = await keepBefore(stateDir, targetHasVault ? REPLACED.filter(name => name !== 'trigger-secrets.json') : REPLACED, new Date(this.now()));
     // A worker part still waiting from an earlier restore is replaced by this one.
     await removePendingWorker(stateDir);
     const restoreId = randomUUID(); const pendingSecretImports: string[] = [];
     if (payload.worker.encryptedVault) { pendingSecretImports.push(await stageVaultImport(stateDir, payload.worker.encryptedVault, restoreId)); delete payload.worker.encryptedVault; }
-    if ((targetHasVault || pendingSecretImports.length > 0) && (payload.worker.files['trigger-secrets.json'] !== undefined || payload.worker.triggers)) {
-      pendingSecretImports.push(await stageLegacyImport(stateDir, payload.worker.files['trigger-secrets.json'] ?? [], passphrase, restoreId, payload.worker.triggers));
+    const { legacy } = deferredSecretParts(payload.worker, targetHasVault, pendingSecretImports.length > 0);
+    if (legacy) {
+      pendingSecretImports.push(await stageLegacyImport(stateDir, legacy.records, passphrase, restoreId, legacy.triggers));
       delete payload.worker.files['trigger-secrets.json']; delete payload.worker.triggers;
     }
     const worker = payloadParts({ ...payload, web: {}, master: undefined });
@@ -371,9 +374,9 @@ export class BackupService {
   cancel(id: unknown): Promise<RestoreReport> { return this.oneRestore(() => this.cancelNow(id)); }
   private async cancelNow(id: unknown): Promise<RestoreReport> {
     const report = await readReport(this.options.stateDir);
-    if (report?.status !== 'waiting-worker' || report.id !== id) throw new BackupError('기다리는 복원이 없습니다.', 409);
+    if (report?.status !== 'waiting-worker' || report.id !== id) throw new BackupError('기다리는 복원이 없습니다.', 'conflict');
     // Once a worker has taken it, it is being applied and can no longer be stopped.
-    if (!await removePendingWorker(this.options.stateDir)) throw new BackupError('실행 워커가 이미 복원을 적용하고 있습니다.', 409);
+    if (!await removePendingWorker(this.options.stateDir)) throw new BackupError('실행 워커가 이미 복원을 적용하고 있습니다.', 'conflict');
     const next: RestoreReport = { ...report, status: 'cancelled' };
     await writeReport(this.options.stateDir, next);
     return next;

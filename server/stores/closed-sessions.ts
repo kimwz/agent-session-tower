@@ -1,8 +1,9 @@
-import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { mkdir, open, rename, unlink } from 'node:fs/promises';
+import { mkdir, open } from 'node:fs/promises';
+import { writePrivateJson } from './private-json.js';
 import { join } from 'node:path';
 import type { Session } from '../../shared/types.js';
+import { TowerError } from '../../shared/errors.js';
 
 /** Which conversations the owner closed. Native processes and conversation files are untouched; the worktrees a closed conversation made are removed by the worker. */
 export class ClosedSessionStore {
@@ -39,15 +40,9 @@ export class ClosedSessionStore {
       if (this.ids.has(session.id) === closed) return this.apply(session);
       const next = new Set(this.ids);
       if (closed) next.add(session.id); else next.delete(session.id);
-      const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
-      try {
-        const file = await open(temporary, 'wx', 0o600);
-        try { await file.writeFile(`${JSON.stringify([...next])}\n`); await file.sync(); }
-        finally { await file.close(); }
-        await rename(temporary, this.path);
-      } catch (error) {
-        await unlink(temporary).catch(() => {});
-        throw Object.assign(new Error(`세션 표시 상태를 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`), { statusCode: 503 });
+      try { await writePrivateJson(this.path, `${JSON.stringify([...next])}\n`); }
+      catch (error) {
+        throw new TowerError('unavailable', `세션 표시 상태를 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
       }
       this.ids = next;
       return this.apply(session);

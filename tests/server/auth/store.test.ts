@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AuthStore, canonicalIp, isLoopbackAddress, sessionKey } from '../../../server/auth/store.js';
+import { statusOf } from '../../../shared/errors.js';
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'tower-auth-'));
@@ -74,7 +75,7 @@ test('limits pending work and does not grant sessions when audit persistence fai
     await f.store.setCredentials('admin', 'password-test-123');
     const results = await Promise.allSettled(Array.from({ length: 20 }, () => f.store.login('192.0.2.10', 'admin', 'wrong')));
     assert.equal(results.filter(result => result.status === 'rejected').length, 4);
-    for (const result of results) if (result.status === 'rejected') assert.equal(result.reason.statusCode, 429);
+    for (const result of results) if (result.status === 'rejected') assert.equal(statusOf(result.reason), 429);
     await rm(join(f.dir, 'auth-security.json'));
     const { mkdir } = await import('node:fs/promises');
     await mkdir(join(f.dir, 'auth-security.json'));

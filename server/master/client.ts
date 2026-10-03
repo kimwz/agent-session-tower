@@ -12,9 +12,13 @@ import { MASTER_PROTOCOL, type MasterHostReply } from './host.js';
 import type { VoiceTransportStage } from './voice-timings.js';
 import { masterPaths, type MasterPaths } from './paths.js';
 import type { WebCredentials } from '../tower-tools/tower-client.js';
+import { TowerError, fromStatus, statusOf, type ErrorKind } from '../../shared/errors.js';
+import { audioSink } from '../http/sinks.js';
 
 const MAX_REPLY = 16 * 1024 * 1024;
-const failure = (message: string, statusCode: number, hostAbsent = false) => Object.assign(new Error(message), { statusCode, ...(hostAbsent ? { hostAbsent } : {}) });
+const failure = (message: string, kind: ErrorKind, hostAbsent = false) => hostAbsent ? Object.assign(new TowerError(kind, message), { hostAbsent }) : new TowerError(kind, message);
+/** A status the master host or its socket answered, kept as it came. */
+const relayed = (message: string, status: unknown) => fromStatus(status, message);
 
 export interface MasterClientOptions {
   stateDir: string;
@@ -48,7 +52,7 @@ export class MasterClient {
     const tell = () => { void this.exchange('hello').catch(() => {}); };
     tell();
     void this.pendingWork().then(pending => pending && !this.closed ? this.ensureHost() : undefined).catch(error => {
-      console.error(`Master could not resume waiting work: ${(error as NodeJS.ErrnoException)?.code ?? (error as { statusCode?: number })?.statusCode ?? 'error'}`);
+      console.error(`Master could not resume waiting work: ${(error as NodeJS.ErrnoException)?.code ?? (error === null || error === undefined ? undefined : statusOf(error)) ?? 'error'}`);
     });
     this.heartbeat = setInterval(tell, 15_000);
     this.heartbeat.unref();
@@ -86,7 +90,7 @@ export class MasterClient {
     await new Promise<void>((resolve, reject) => {
       const query = new URLSearchParams({ epoch, after: String(after) });
       const req = request({ socketPath: paths.socket, path: `/events?${query}`, headers: { authorization: `Bearer ${token}` } }, upstream => {
-        if (upstream.statusCode !== 200) { upstream.resume(); reject(failure('마스터에 연결하지 못했습니다.', 502)); return; }
+        if (upstream.statusCode !== 200) { upstream.resume(); reject(failure('마스터에 연결하지 못했습니다.', 'upstream')); return; }
         if (response.destroyed || response.writableEnded) { upstream.destroy(); resolve(); return; }
         response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
         response.flushHeaders();
@@ -112,14 +116,15 @@ export class MasterClient {
     const paths = await this.hostPaths();
     const requestId = randomUUID();
     const stage: VoiceTransportStage = { request: Date.now(), bytes: 0 };
+    const sink = audioSink(response);
     const report = () => { void this.exchange('voiceTransport', { live: id, requestId, web: { ...stage } }).catch(() => { /* Diagnostics never delay or retry audio. */ }); };
     response.once('finish', () => { stage.end = Date.now(); stage.normal = true; report(); });
     response.once('close', () => { stage.close = Date.now(); stage.normal ??= false; report(); });
     await new Promise<void>((resolve, reject) => {
       const req = request({ socketPath: paths.socket, path: `/audio/${encodeURIComponent(id)}${at > 0 ? `?at=${at}` : ''}`, headers: { authorization: `Bearer ${token}`, 'x-tower-audio-request-id': requestId } }, upstream => {
         if (response.destroyed || response.writableEnded) { upstream.destroy(); resolve(); return; }
-        if (upstream.statusCode !== 200) { upstream.resume(); response.writeHead(upstream.statusCode === 404 ? 404 : 502).end(); resolve(); return; }
-        response.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store', ...(upstream.headers['content-length'] ? { 'Content-Length': upstream.headers['content-length'] } : {}) });
+        if (upstream.statusCode !== 200) { upstream.resume(); sink.refuse(upstream.statusCode === 404 ? 'not-found' : 'upstream'); resolve(); return; }
+        sink.open(upstream.headers['content-length'] ? { length: upstream.headers['content-length'] } : {});
         upstream.on('error', () => response.destroy());
         upstream.on('aborted', () => response.destroy());
         upstream.on('close', () => { if (!upstream.complete) response.destroy(); });
@@ -157,9 +162,9 @@ export class MasterClient {
       const deadline = Date.now() + 10_000;
       while (Date.now() < deadline) {
         try { await this.exchange('ping'); await new Promise(resolve => setTimeout(resolve, 100)); }
-        catch (error) { if ((error as { statusCode?: number }).statusCode === 503) break; throw error; }
+        catch (error) { if (statusOf(error) === 503) break; throw error; }
       }
-    } catch (error) { if ((error as { statusCode?: number }).statusCode !== 503) throw error; }
+    } catch (error) { if (statusOf(error) !== 503) throw error; }
     const entry = this.options.hostEntry ?? fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? '../index.ts' : '../index.js', import.meta.url));
     const stateDir = (await this.hostPaths()).stateDir;
     const args = isSea() ? ['--master-host', stateDir] : [...process.execArgv.filter(arg => !/^--inspect(?:-brk|-port|-publish-uid)?(?:=|$)/.test(arg)), entry, '--master-host', stateDir];
@@ -172,7 +177,7 @@ export class MasterClient {
       if (spawnError) throw spawnError;
       try { await this.exchange('ping'); return; }
       catch (error) {
-        if ((error as { statusCode?: number }).statusCode !== 503 || Date.now() >= deadline) throw error;
+        if (statusOf(error) !== 503 || Date.now() >= deadline) throw error;
         await new Promise(resolve => setTimeout(resolve, 100));
       }
     }
@@ -181,11 +186,11 @@ export class MasterClient {
   private async hostPaths() { return this.paths ??= await masterPaths(this.options.stateDir); }
 
   private async credential(): Promise<string> {
-    if (this.closed) throw failure('Master connection is closed.', 503);
+    if (this.closed) throw failure('Master connection is closed.', 'unavailable');
     const paths = await this.hostPaths();
     let file;
     try { file = await open(paths.token, constants.O_RDONLY | constants.O_NOFOLLOW); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw failure('The master host is not running.', 503, true); throw error; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw failure('The master host is not running.', 'unavailable', true); throw error; }
     try {
       const info = await file.stat();
       if (!info.isFile() || (info.mode & 0o077) || (process.getuid && info.uid !== process.getuid()) || info.size !== 64) throw new Error('Invalid master host credentials.');
@@ -204,7 +209,7 @@ export class MasterClient {
         res.on('data', (chunk: Buffer) => { size += chunk.length; if (size > MAX_REPLY) res.destroy(new Error('Master reply is too large.')); else chunks.push(chunk); });
         res.on('error', reject);
         res.on('end', () => {
-          if (res.statusCode !== 200) { reject(failure('The master host refused the request.', res.statusCode === 403 ? 503 : res.statusCode || 502)); return; }
+          if (res.statusCode !== 200) { reject(res.statusCode === 403 ? failure('The master host refused the request.', 'unavailable') : relayed('The master host refused the request.', res.statusCode || 502)); return; }
           try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')) as MasterHostReply); } catch { reject(new Error('Invalid master host response.')); }
         });
       });
@@ -213,9 +218,9 @@ export class MasterClient {
       req.on('error', error => reject(Object.assign(error, { statusCode: 503, ...(['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '') ? { hostAbsent: true } : {}) })));
       req.end(body);
     });
-    if (reply.stateDir !== paths.stateDir) throw failure('The master host is incompatible.', 503);
-    if (reply.protocol !== MASTER_PROTOCOL) throw failure('마스터가 업데이트를 기다리는 중입니다. 진행 중인 일이 끝나면 새 버전으로 바뀝니다.', 503);
-    if (reply.error) throw failure(reply.error.message, reply.error.statusCode);
+    if (reply.stateDir !== paths.stateDir) throw failure('The master host is incompatible.', 'unavailable');
+    if (reply.protocol !== MASTER_PROTOCOL) throw failure('마스터가 업데이트를 기다리는 중입니다. 진행 중인 일이 끝나면 새 버전으로 바뀝니다.', 'unavailable');
+    if (reply.error) throw relayed(reply.error.message, reply.error.statusCode);
     return reply;
   }
 }

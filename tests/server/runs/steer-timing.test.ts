@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { DecisionEngine } from '../../../server/decisions/engine.js';
-import { INSERT_NOW, insertIfItBelongs, judgeSteerTiming, type InsertDependencies } from '../../../server/runs/steer-timing.js';
+import { INSERT_NOW, insertIfItBelongs, insertInBackground, judgeSteerTiming, type InsertDependencies } from '../../../server/runs/steer-timing.js';
+import { until } from '../../helpers/until.ts';
 import type { DecisionRecord } from '../../../shared/decisions.js';
 import type { Run } from '../../../shared/types.js';
 
@@ -142,4 +143,24 @@ test('the judgment sees the running request, the end of its progress without too
 test('a message that keeps the chat model and effort choice is still judged when it can join the turn', async () => {
   const same = harness({ now: 0.9, runs: [{ ...running, model: 'model-a', effort: 'high' }, queued({ canSteer: true, model: 'model-a', effort: 'high' })] });
   assert.equal(await insertIfItBelongs(same.dependencies, queued({ model: 'model-a', effort: 'high' })), 'inserted');
+});
+
+test('an exception from record escapes insertIfItBelongs', async () => {
+  const { dependencies } = harness({ now: 0.97 });
+  await assert.rejects(insertIfItBelongs({ ...dependencies, record: () => { throw new Error('the decision log is full'); } }, queued()), /decision log is full/);
+});
+
+test('insertInBackground logs an unexpected exception once and never rejects', async () => {
+  const { dependencies } = harness({ now: 0.97 });
+  const logged: string[] = [];
+  const message = queued({ prompt: 'Secret detail the log must not repeat' });
+  assert.equal(insertInBackground({ ...dependencies, record: () => { throw new Error('the decision log is full'); } }, message, line => logged.push(line)), undefined);
+  await until(() => logged.length === 1);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(logged, ['Judging whether a message belongs to the running turn ended with an unexpected error: the decision log is full']);
+  assert.ok(!logged[0].includes(message.prompt), 'the message itself is never logged');
+  const quiet: string[] = [];
+  insertInBackground(harness({ now: 0.97 }).dependencies, queued(), line => quiet.push(line));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(quiet, [], 'an ordinary judgment logs nothing');
 });

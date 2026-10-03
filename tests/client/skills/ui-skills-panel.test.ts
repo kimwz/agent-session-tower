@@ -83,3 +83,10 @@ test('a folder chosen together with a folder above it cannot be switched off on 
   const own = list([skill('deploy', { all: false, projects: ['/work/monitor/client'] })], { cwd: '/work/monitor/client' });
   assert.doesNotMatch(own.match(/<input[^>]*role="switch"[^>]*>/)![0], /disabled=""/);
 });
+
+test('a skill store that cannot be changed says why', () => {
+  const problem = 'Skill state could not be read or moved aside; skills are not changed until Tower restarts.';
+  const markup = renderToStaticMarkup(createElement(TowerSkills, { overview: { ...overview([]), problem }, busy: false, proposals: 0, onNew: noop, onEdit: noop, onToggle: noop, onProposals: noop, onAll: noop }));
+  assert.match(markup, new RegExp(`role="alert">${problem.replace(/[.;]/g, '\\$&')}<`));
+  assert.doesNotMatch(list([]), /role="alert"/);
+});

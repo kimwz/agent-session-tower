@@ -47,7 +47,7 @@ test('the master host keeps its folder private, relays its live stream through t
   assert.equal(before.session, undefined, 'no master session until the owner starts one');
   assert.equal(before.activeTasks, 0);
   assert.deepEqual(Object.keys(before.settings).sort(), ['voice']);
-  await assert.rejects(client.call('settings', { body: { apiKey: 'sk-test-0123456789abcdef' } }), { statusCode: 400 }, 'the master takes no model key');
+  await assert.rejects(client.call('settings', { body: { apiKey: 'sk-test-0123456789abcdef' } }), { kind: 'invalid' }, 'the master takes no model key');
 
   // A page's live stream goes through the web to the host.
   const checkpoint = await client.call('checkpoint') as MasterCheckpoint;
@@ -137,18 +137,18 @@ test('the host answers a page\'s voice requests, refusing what is not its call, 
   assert.deepEqual(overview.settings.voice, { voiceId: 'cgSgspJ2msm6clMCkdW9', model: 'eleven_v3_conversational', endSilenceMs: 1000, listenMinutes: 5, readReports: true, dailyDollars: 0, playbackRate: 1 });
   assert.equal(overview.voiceConfigured, false);
   const session = '0190f1c2-3d4e-7f00-8a00-000000000003';
-  await assert.rejects(client.call('voiceOn', { tabId: session }), { statusCode: 409 }, 'no master session yet');
+  await assert.rejects(client.call('voiceOn', { tabId: session }), { kind: 'conflict' }, 'no master session yet');
   assert.equal(await client.call('voiceOff', { session }), false);
   assert.equal(await client.call('voicePresence', { session, listening: true, panelOpen: true }), false);
   assert.equal(await client.call('voiceActivity', { session, speaking: true }), false);
   assert.equal(await client.call('voicePlayed', { session, id: 'x', result: 'played' }), false);
   assert.equal(await client.call('voiceUsage', { tokenId: 'x', seconds: 1 }), false);
   assert.deepEqual(await client.call('voiceRequest', { session, clientMessageId: 'message-0001', text: '안녕' }), { stale: true });
-  await assert.rejects(client.call('settings', { body: { voice: { model: 'nobody' } } }), { statusCode: 400 });
+  await assert.rejects(client.call('settings', { body: { voice: { model: 'nobody' } } }), { kind: 'invalid' });
   const saved = await client.call('settings', { body: { voiceKey: 'el-test-0123456789abcdef', voice: { endSilenceMs: 1200 } } }) as MasterOverview;
   assert.equal(saved.settings.voice.endSilenceMs, 1200);
   // Reading speed: from 1 (as made) to 2, kept to twentieths.
-  for (const playbackRate of [0.9, 2.5, Number.NaN, '1.4']) await assert.rejects(client.call('settings', { body: { voice: { playbackRate } } }), { statusCode: 400 });
+  for (const playbackRate of [0.9, 2.5, Number.NaN, '1.4']) await assert.rejects(client.call('settings', { body: { voice: { playbackRate } } }), { kind: 'invalid' });
   const faster = await client.call('settings', { body: { voice: { playbackRate: 1.43 } } }) as MasterOverview;
   assert.equal(faster.settings.voice.playbackRate, 1.45);
   assert.equal(faster.settings.voice.endSilenceMs, 1200, 'the rest is kept');
@@ -216,4 +216,41 @@ test('a settings file this build cannot read is left as it is, not replaced by d
   const host = await startMasterHost({ stateDir, idleMs: 60_000 });
   cleanup.push(() => host.close());
   assert.equal(await readFile(join(paths.data, 'settings.json'), 'utf8'), newer);
+});
+
+test('master host error replies keep their status and message across the host wire, and the route clamps what it answers', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-error-wire-'));
+  const host = await startMasterHost({ stateDir, idleMs: 60_000 });
+  const client = new MasterClient({ stateDir, credentials: () => undefined });
+  t.after(async () => { client.dispose(); await host.close(); await rm(stateDir, { recursive: true, force: true }); });
+  const { errorStatus } = await import('../../server/http/requests.js');
+  const { masterRoutes } = await import('../../server/master/routes.js');
+  const plain = (message: string, fields: Record<string, unknown>) => Object.assign(new Error(message), fields);
+  const cases: Array<[name: string, thrown: unknown, status: number, message: string]> = [
+    ['mapped', plain('a', { statusCode: 404 }), 404, 'a'],
+    ['unmapped', plain('b', { statusCode: 599 }), 599, 'b'],
+    ['zero', plain('c', { statusCode: 0 }), 0, 'c'],
+    ['no status', new Error('d'), 500, 'd'],
+    ['not an Error', 'boom', 500, 'Master operation failed.'],
+  ];
+  let thrown: unknown;
+  t.mock.method(MasterVoice.prototype, 'voicePlayed', () => { throw thrown; });
+  for (const [name, value, status, message] of cases) {
+    thrown = value;
+    const error = await client.call('voicePlayed', { session: 's', id: 'i', result: 'played' }).then(() => undefined, (caught: unknown) => caught);
+    assert.ok(error instanceof Error, name);
+    assert.deepEqual({ status: errorStatus(error), message: error.message, hostAbsent: (error as { hostAbsent?: boolean }).hostAbsent }, { status, message, hostAbsent: undefined }, name);
+  }
+  // The page route answers 400–599 as it is and anything else as 503, with the message or its own.
+  const answered = async (failure: unknown) => {
+    const handle = masterRoutes({ call: async () => { throw failure; } } as never);
+    let status: unknown; let body = '';
+    await handle({ method: 'GET' } as never, { writeHead: (value: unknown) => { status = value; }, end: (text: string) => { body = text; } } as never, '/api/master', new URL('http://x/api/master'), { local: true });
+    return { status, body: JSON.parse(body) as { error: string } };
+  };
+  assert.deepEqual(await answered(plain('e', { statusCode: 404 })), { status: 404, body: { error: 'e' } });
+  assert.deepEqual(await answered(plain('f', { statusCode: 599 })), { status: 599, body: { error: 'f' } });
+  for (const statusCode of [600, 399, 0, Number.NaN, undefined]) assert.deepEqual(await answered(plain('g', { statusCode })), { status: 503, body: { error: 'g' } }, String(statusCode));
+  assert.deepEqual(await answered(new Error('h')), { status: 503, body: { error: 'h' } });
+  assert.deepEqual(await answered({}), { status: 503, body: { error: '마스터를 사용할 수 없습니다.' } });
 });

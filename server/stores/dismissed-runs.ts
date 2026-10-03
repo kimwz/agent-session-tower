@@ -1,8 +1,9 @@
-import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { mkdir, open, rename, unlink } from 'node:fs/promises';
+import { mkdir, open } from 'node:fs/promises';
+import { writePrivateJson } from './private-json.js';
 import { join } from 'node:path';
 import type { Run } from '../../shared/types.js';
+import { TowerError } from '../../shared/errors.js';
 
 /** Display preferences only: raw run history remains available for lifecycle projection. */
 export class DismissedRunStore {
@@ -37,20 +38,12 @@ export class DismissedRunStore {
     const write = this.writes.then(async () => {
       // Retain idempotency even after the bounded raw history has aged out this run.
       if (this.ids.has(id)) return;
-      if (!run) throw Object.assign(new Error('작업을 찾을 수 없습니다.'), { statusCode: 404 });
-      if (run.status !== 'error') throw Object.assign(new Error('실패한 작업만 지울 수 있습니다.'), { statusCode: 409 });
+      if (!run) throw new TowerError('not-found', '작업을 찾을 수 없습니다.');
+      if (run.status !== 'error') throw new TowerError('conflict', '실패한 작업만 지울 수 있습니다.');
       const next = new Set(this.ids).add(id);
-      const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
-      try {
-        const file = await open(temporary, 'wx', 0o600);
-        try {
-          await file.writeFile(`${JSON.stringify([...next])}\n`);
-          await file.sync();
-        } finally { await file.close(); }
-        await rename(temporary, this.path);
-      } catch (error) {
-        await unlink(temporary).catch(() => {});
-        throw Object.assign(new Error(`실패 기록을 지우지 못했습니다: ${error instanceof Error ? error.message : String(error)}`), { statusCode: 503 });
+      try { await writePrivateJson(this.path, `${JSON.stringify([...next])}\n`); }
+      catch (error) {
+        throw new TowerError('unavailable', `실패 기록을 지우지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
       }
       this.ids = next;
     });
