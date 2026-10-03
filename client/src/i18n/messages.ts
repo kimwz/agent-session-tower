@@ -1954,6 +1954,8 @@ export const english: Record<string, string> = {
   "{0}에 연결할 수 없습니다.": "Cannot connect to {0}.",
   "포트 {0}를 다른 프로그램이 쓰고 있습니다.": "Another program is using port {0}.",
   "{0} 파일을 읽을 수 없어 원격 컴퓨터를 관리할 수 없습니다. 파일을 확인하거나 옮긴 뒤 Tower를 다시 시작하세요.": "Remote computers cannot be managed because {0} cannot be read. Check or move the file, then restart Tower.",
+  "공개 에이전트 {0}의 저장된 대화를 읽지 못해 {1}로 옮겼습니다.": "The saved conversations of public agent {0} could not be read and were moved to {1}.",
+  "공개 에이전트 {0}의 저장된 대화를 읽지도 옮기지도 못했습니다. 파일은 그대로 두고 Tower를 다시 시작할 때까지 이 에이전트를 닫습니다.": "The saved conversations of public agent {0} could neither be read nor moved aside. The file is left as it is and this agent stays closed until Tower restarts.",
   "{0} 파일을 읽을 수 없어 이 컴퓨터를 제어하는 컴퓨터를 관리할 수 없습니다. 파일을 확인하거나 옮긴 뒤 Tower를 다시 시작하세요.": "Computers controlling this one cannot be managed because {0} cannot be read. Check or move the file, then restart Tower.",
   "원격 컴퓨터를 사용할 수 없습니다: {0}": "Remote computers are unavailable: {0}",
   "다른 컴퓨터와 연결을 설정하지 못했습니다.": "Could not set up the link with the other computer.",

@@ -241,3 +241,12 @@ test('steering controls expose only eligible sends and never offer uncertain del
   assert.doesNotMatch(uncertain, /요청 다시 작성|지금 끼워넣기/);
   assert.equal(render({ ...run, status: 'completed', steering }), '');
 });
+
+test('public-agent data notices keep the agent name and the kept file in either language', () => {
+  setLanguage('en');
+  assert.equal(translateMessage('공개 에이전트 Content desk의 저장된 대화를 읽지 못해 /state/public-agents/a.json.unreadable-1로 옮겼습니다.'),
+    'The saved conversations of public agent Content desk could not be read and were moved to /state/public-agents/a.json.unreadable-1.');
+  assert.equal(translateMessage('공개 에이전트 Content desk의 저장된 대화를 읽지도 옮기지도 못했습니다. 파일은 그대로 두고 Tower를 다시 시작할 때까지 이 에이전트를 닫습니다.'),
+    'The saved conversations of public agent Content desk could neither be read nor moved aside. The file is left as it is and this agent stays closed until Tower restarts.');
+  setLanguage('ko');
+});
