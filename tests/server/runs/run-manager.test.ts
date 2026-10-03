@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, isAbsolute, join } from 'node:path';
+import { delimiter, dirname, isAbsolute, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { readdirSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
@@ -977,19 +977,21 @@ test("a bridged Codex turn asks the desktop app for the automatic reviewer for T
 
 test('a tool capability reaches Claude through a private file that is gone when the turn ends, never through argv', async t => {
   const mcpServers = { tower: { command: '/fixture/node', args: ['index.js', '--tower-mcp', '/state'], env: { TOWER_MCP_CAPABILITY: 'a'.repeat(64) } } };
-  let seen: { mode: number; content: string } | undefined;
-  const f = await fixture({ provider: 'claude', resolveRunTools: () => ({ servers: mcpServers, required: false, towerTools: 'attached' }) });
-  t.after(f.cleanup);
-  const run = await f.manager.enqueue(f.session.id, 'Set up a trigger', {}, { origin: { kind: 'owner' } });
-  await until(() => f.launches.length === 1);
-  const args = f.launches[0].args;
+  // The fake provider holds the turn open until the test ends it, so the file is looked at while the turn runs.
+  const f = await fakeClaude(t, { resolveRunTools: () => ({ servers: mcpServers, required: false, towerTools: 'attached' }) });
+  const args = f.spawned[0];
   const path = args[args.indexOf('--mcp-config') + 1];
   assert.equal(args.join(' ').includes('a'.repeat(64)), false);
-  try { seen = { mode: (await stat(path)).mode & 0o777, content: await readFile(path, 'utf8') }; } catch { /* The turn may already be over. */ }
-  const result = await finished(f.manager, run.id);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  assert.equal((await stat(dirname(path))).mode & 0o777, 0o700);
+  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), { mcpServers });
+  f.send({ type: 'system', subtype: 'init', session_id: ID, permissionMode: 'auto' });
+  f.send({ type: 'result', is_error: false, result: 'Set up' });
+  const result = await finished(f.manager, f.run.id);
+  assert.equal(result.status, 'completed');
   assert.equal(result.towerTools, 'attached');
-  if (seen) { assert.equal(seen.mode, 0o600); assert.deepEqual(JSON.parse(seen.content), { mcpServers }); }
-  await until(() => stat(path).then(() => false, () => true));
+  await eventually(() => stat(path).then(() => false, () => true));
+  await eventually(() => stat(dirname(path)).then(() => false, () => true));
 });
 
 test('a turn forwarded to the open Codex app is marked as having no Tower tools', async t => {
@@ -1090,7 +1092,7 @@ test('the private MCP config is removed when the provider cannot be spawned', as
 });
 
 /** A Claude conversation whose provider is a fake child that sends whatever the test writes. */
-async function fakeClaude(t: TestContext, options: { master?: boolean } = {}) {
+async function fakeClaude(t: TestContext, options: { master?: boolean; resolveRunTools?: ConstructorParameters<typeof RunManager>[0]['resolveRunTools'] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-fake-claude-'));
   const stateDir = join(directory, 'state');
   const cwd = options.master ? join(stateDir, MASTER_FOLDER) : directory;
@@ -1107,13 +1109,15 @@ async function fakeClaude(t: TestContext, options: { master?: boolean } = {}) {
     } }) });
   child.stdin.on('finish', () => setImmediate(() => exit()));
   const send = (frame: unknown) => child.stdout.push(`${typeof frame === 'string' ? frame : JSON.stringify(frame)}\n`);
+  const spawned: string[][] = [];
   const manager = new RunManager({ stateDir, getSession: id => id === session.id ? session : undefined, refreshSessions: async () => {}, pollMs: 10,
-    findExecutable: async () => '/fixture/claude', checkClaudeSubscription: async () => {}, spawnProcess: () => child });
+    findExecutable: async () => '/fixture/claude', checkClaudeSubscription: async () => {}, resolveRunTools: options.resolveRunTools,
+    spawnProcess: (_file, args) => { spawned.push(args); return child; } });
   await manager.start();
   t.after(async () => { exit(); await manager.close(); await rm(directory, { recursive: true, force: true }); });
   const run = await manager.enqueue(session.id, 'Fake turn', {}, { origin: { kind: 'owner' } });
   await until(() => received.some(frame => frame.type === 'user'));
-  return { manager, run, send, exit, child, read: () => manager.list().find(item => item.id === run.id)! };
+  return { manager, run, send, exit, child, spawned, read: () => manager.list().find(item => item.id === run.id)! };
 }
 
 test('an output event over 2 MB stops the turn with its reason', async t => {
