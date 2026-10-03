@@ -806,7 +806,19 @@ async function idleWorker(f: Awaited<ReturnType<typeof fixture>>, options: Parti
     onIdle: async () => { events.push('onIdle'); }, ...options });
   // A newer web asks for the handoff and goes away (a web replaced during an update), so nothing keeps the worker busy.
   const ask = async () => { const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0' }); await client.start(); await client.close(); };
-  return { events, host, ask };
+  /**
+   * Ends this worker before the fixture folder goes, whatever point a test stopped at: test gates opened, a handoff
+   * under way finished or resumed, then the worker closed (a no-op when a handoff or idle shutdown already closes it)
+   * and its lock released. host.close() alone does not wait for a close already under way, so the release is awaited.
+   */
+  const settle = async (...gates: Array<() => void>) => {
+    for (const open of gates) open();
+    if (events.includes('quiesce')) await until(() => events.includes('onHandedOff') || events.includes('resume'));
+    // Synchronous with the check above: a handoff not yet started finds the worker closing and never starts.
+    await host.close();
+    await until(() => events.includes('release'));
+  };
+  return { events, host, ask, settle };
 }
 
 test('an idle tick never closes a worker whose handoff is pausing: the state stays locked until the record is durable', { timeout: 20_000 }, async t => {
@@ -836,9 +848,7 @@ test('an idle tick never closes a worker whose handoff is pausing: the state sta
     // From here the successor may take the state.
     other = await acquireStateLock(f.paths.runtime, 0);
   } finally {
-    open();
-    if (w.events.includes('quiesce')) await until(() => w.events.includes('onHandedOff') || w.events.includes('resume'));
-    if (w.events.includes('onIdle') || w.events.includes('quiesced')) await until(() => w.events.includes('release'));
+    await w.settle(open);
     await other?.();
   }
 });
@@ -856,9 +866,7 @@ test('a handoff whose pause fails resumes the worker, which can then shut down w
     await until(() => w.events.includes('release'));
     assert.deepEqual(w.events, ['quiesce', 'resume', 'onIdle', 'release']);
     assert.equal(existsSync(join(f.paths.runtime, 'handoff.json')), false);
-  } finally {
-    if (w.events.includes('onIdle')) await until(() => w.events.includes('release'));
-  }
+  } finally { await w.settle(); }
 });
 
 test('an idle shutdown that started first is never joined by a handoff', { timeout: 20_000 }, async t => {
@@ -884,10 +892,54 @@ test('an idle shutdown that started first is never joined by a handoff', { timeo
     await until(() => w.events.includes('release'));
     assert.deepEqual(w.events, ['onIdle', 'idle done', 'release']);
     assert.equal(existsSync(join(f.paths.runtime, 'handoff.json')), false);
-  } finally {
-    open();
-    if (w.events.includes('onIdle')) await until(() => w.events.includes('release'));
-  }
+  } finally { await w.settle(open); }
+});
+
+test('after a pause fails and the worker resumes, the same worker hands off on its next try', { timeout: 20_000 }, async t => {
+  t.mock.method(console, 'error', () => {});
+  // The worker waits a minute before trying a handoff it could not record again; the clock is moved past that.
+  let skew = 0;
+  const now = Date.now.bind(Date);
+  t.mock.method(Date, 'now', () => now() + skew);
+  const f = await fixture(); t.after(f.cleanup);
+  let failures = 1;
+  let atSuccessor: { record: boolean; socket: boolean; token: boolean; released: boolean } | undefined;
+  const w = await idleWorker(f, {
+    // Idle shutdown stays possible but not yet due, so only the handoff can end this worker.
+    idleMs: 10 * 60_000,
+    quiesce: async () => { w.events.push('quiesce'); if (failures-- > 0) throw new Error('flush failed after intake paused'); },
+    resume: () => { w.events.push('resume'); },
+    startSuccessor: () => {
+      atSuccessor = { record: existsSync(join(f.paths.runtime, 'handoff.json')), socket: existsSync(f.paths.socket), token: existsSync(f.paths.token), released: w.events.includes('release') };
+      w.events.push('startSuccessor');
+    },
+    onHandedOff: () => { w.events.push('onHandedOff'); } });
+  try {
+    await w.ask();
+    await until(() => w.events.includes('resume'));
+    assert.deepEqual(w.events, ['quiesce', 'resume']);
+    skew = 61_000;
+    await until(() => w.events.includes('onHandedOff'));
+    assert.deepEqual(w.events, ['quiesce', 'resume', 'quiesce', 'release', 'startSuccessor', 'onHandedOff']);
+    assert.deepEqual(atSuccessor, { record: true, socket: false, token: false, released: true });
+  } finally { await w.settle(); }
+});
+
+test('an idle-shutdown fixture that fails before any handoff still closes its worker and frees the lock', { timeout: 20_000 }, async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  let w: Awaited<ReturnType<typeof idleWorker>> | undefined;
+  let open!: () => void;
+  const gate = new Promise<void>(resolve => { open = resolve; });
+  // A test body that fails right after the worker started, before it asked for anything.
+  await assert.rejects((async () => {
+    w = await idleWorker(f, { idleMs: 10 * 60_000, quiesce: async () => { w!.events.push('quiesce'); await gate; } });
+    try { throw new Error('early failure'); } finally { await w.settle(open); }
+  })(), /early failure/);
+  assert.deepEqual(w!.events, ['release']);
+  assert.equal(existsSync(f.paths.socket), false);
+  assert.equal(existsSync(f.paths.token), false);
+  const again = await acquireStateLock(f.paths.runtime, 0);
+  await again();
 });
 
 test('a pause that fails halfway is undone and the worker stays in service', async t => {
