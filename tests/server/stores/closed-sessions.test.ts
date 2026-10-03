@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ClosedSessionStore } from '../../../server/stores/closed-sessions.js';
+import { blockRename, temporaryFiles } from '../../helpers/private-writes.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import type { CreateSessionRequest, Run, Session, Snapshot } from '../../../shared/types.js';
 
@@ -114,4 +115,23 @@ test('session creation, closure and reopen HTTP routes authenticate, validate, a
   const body = await creation.json();
   assert.equal(body.session.filePath, undefined);
   assert.equal(body.run.id, run.id);
+});
+
+test('writes exact bytes and leaves no temp files after success or failure', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'monitor-closed-bytes-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'closed-sessions.json');
+  const store = new ClosedSessionStore(dir);
+  await store.start();
+  await store.set(session, true);
+  assert.equal(await readFile(path, 'utf8'), `${JSON.stringify([session.id])}\n`);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  assert.deepEqual(await temporaryFiles(dir), []);
+  const restore = await blockRename(path);
+  const error = await store.set({ ...session, id: 'claude:other' }, true).then(() => undefined, (caught: unknown) => caught as Error & { statusCode?: number });
+  assert.match(String(error?.message), /^세션 표시 상태를 저장하지 못했습니다: /);
+  assert.equal(error?.statusCode, 503);
+  assert.deepEqual(await temporaryFiles(dir), []);
+  await restore();
+  assert.equal(await readFile(path, 'utf8'), `${JSON.stringify([session.id])}\n`);
 });

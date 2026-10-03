@@ -5,6 +5,7 @@ import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionTitleStore, normalizeSessionTitle } from '../../../server/stores/session-titles.js';
+import { blockRename, temporaryFiles } from '../../helpers/private-writes.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import type { Session } from '../../../shared/types.js';
 import { computeConversationRevision } from '../../../shared/conversation-revision.js';
@@ -172,4 +173,23 @@ test('title HTTP endpoint validates, authenticates, persists, and broadcasts san
     assert.equal(saves, before);
     assert.equal(store.apply(native).customTitle, undefined);
   });
+});
+
+test('writes exact bytes and failure message', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'monitor-titles-bytes-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'session-titles.json');
+  const store = new SessionTitleStore(dir);
+  await store.start();
+  await store.set(native, 'Saved title');
+  assert.equal(await readFile(path, 'utf8'), `${JSON.stringify({ [native.id]: 'Saved title' })}\n`);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  assert.deepEqual(await temporaryFiles(dir), []);
+  const restore = await blockRename(path);
+  const error = await store.set(native, 'Unsaved').then(() => undefined, (caught: unknown) => caught as Error & { statusCode?: number });
+  assert.match(String(error?.message), /^제목을 저장하지 못했습니다: /);
+  assert.equal(error?.statusCode, 503);
+  assert.deepEqual(await temporaryFiles(dir), []);
+  await restore();
+  assert.equal(await readFile(path, 'utf8'), `${JSON.stringify({ [native.id]: 'Saved title' })}\n`);
 });

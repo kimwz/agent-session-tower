@@ -11,6 +11,10 @@ import type { AutoPromptModelRequest } from '../../../server/auto-prompt/native.
 import type { RunAdmission } from '../../../server/runs/manager.js';
 import type { AttachmentInput, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, Session, Snapshot } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
+import { blockRename, temporaryFiles } from '../../helpers/private-writes.js';
+import { readFileSync } from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 
 const nativeId = '11111111-1111-4111-8111-111111111111';
 const makeSession = (cwd: string, values: Partial<Session> = {}): Session => ({ id: `codex:${nativeId}`, nativeId, provider: 'codex',
@@ -715,4 +719,60 @@ test('Auto Prompt keeps a consumed trigger event identity through both routing d
     assert.deepEqual(job.origin, origin);
     assert.deepEqual(f.dispatches.at(-1)!.internal!.origin, origin);
   }
+});
+
+test('auto-prompts.json holds the compact job list without a trailing newline and no temp files', async t => {
+  const f = await fixture(t);
+  const accepted = await f.manager.submit(request(f.cwd), { origin: { kind: 'owner' } });
+  await f.finished(accepted.id);
+  await until(() => !f.manager.busy());
+  await f.manager.flush();
+  const path = join(f.directory, 'auto-prompts.json');
+  const text = await readFile(path, 'utf8');
+  assert.equal(text, JSON.stringify(JSON.parse(text)), 'compact, with nothing after the JSON');
+  assert.deepEqual((JSON.parse(text) as Array<{ job: { id: string } }>).map(entry => entry.job.id), [accepted.id]);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  assert.deepEqual(await temporaryFiles(f.directory), []);
+});
+
+test('a failed save rejects flush with the raw filesystem error and leaves no temp', async t => {
+  const f = await fixture(t);
+  await f.manager.flush();
+  const restore = await blockRename(join(f.directory, 'auto-prompts.json'));
+  const error = await f.manager.flush().then(() => undefined, (caught: unknown) => caught as NodeJS.ErrnoException & { statusCode?: number });
+  assert.ok(error?.code, 'the filesystem error itself');
+  assert.equal(error?.statusCode, undefined);
+  assert.deepEqual(await temporaryFiles(f.directory), []);
+  await restore();
+  await f.manager.flush();
+});
+
+test('a save writes the jobs as they were when it was asked for, not when its turn came', async t => {
+  const f = await fixture(t);
+  const path = join(f.directory, 'auto-prompts.json');
+  // Test-only: the first save's rename waits, and what each save wrote is read at its rename.
+  const original = fsPromises.rename;
+  const written: unknown[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let gated = false;
+  t.mock.method(fsPromises, 'rename', async (from: Parameters<typeof original>[0], to: Parameters<typeof original>[1]) => {
+    if (to === path) {
+      written.push(JSON.parse(readFileSync(from, 'utf8')));
+      if (!gated) { gated = true; await gate; }
+    }
+    return original(from, to);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const first = f.manager.flush();
+  await until(() => gated);
+  const input = request(f.cwd);
+  const submitted = f.manager.submit(input, { origin: { kind: 'owner' } });
+  await until(() => f.manager.get(input.requestId));
+  release();
+  await first;
+  await f.finished((await submitted).id);
+  assert.deepEqual(written[0], [], 'the first save holds no job: the job came after it was asked for');
+  assert.ok(written.slice(1).some(jobs => (jobs as Array<{ job: { id: string } }>).some(entry => entry.job.id === input.requestId)));
 });

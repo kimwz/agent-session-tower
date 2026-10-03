@@ -5,6 +5,7 @@ import { mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DismissedRunStore } from '../../../server/stores/dismissed-runs.js';
+import { blockRename, temporaryFiles } from '../../helpers/private-writes.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { projectSessionStates } from '../../../server/sessions/snapshot.js';
 import { RunManager } from '../../../server/runs/manager.js';
@@ -166,4 +167,23 @@ test('dismiss HTTP authenticates, validates, commits before SSE, and preserves l
       assert.deepEqual(restarted.visible(raw), raw.slice(1));
     } finally { controller.abort(); }
   });
+});
+
+test('writes exact bytes and failure message', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'monitor-dismissed-bytes-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'dismissed-runs.json');
+  const store = new DismissedRunStore(dir);
+  await store.start();
+  await store.dismiss(failed.id, failed);
+  assert.equal(await readFile(path, 'utf8'), `${JSON.stringify([failed.id])}\n`);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  assert.deepEqual(await temporaryFiles(dir), []);
+  const restore = await blockRename(path);
+  const error = await store.dismiss('other', { ...failed, id: 'other' }).then(() => undefined, (caught: unknown) => caught as Error & { statusCode?: number });
+  assert.match(String(error?.message), /^실패 기록을 지우지 못했습니다: /);
+  assert.equal(error?.statusCode, 503);
+  assert.deepEqual(await temporaryFiles(dir), []);
+  await restore();
+  assert.equal(await readFile(path, 'utf8'), `${JSON.stringify([failed.id])}\n`);
 });
