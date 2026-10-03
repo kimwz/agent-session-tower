@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
-import { request, type ServerResponse, type ClientRequest } from 'node:http';
+import { request, type ClientRequest } from 'node:http';
 import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
 import type { SlackPublicStatus } from '../../shared/slack.js';
