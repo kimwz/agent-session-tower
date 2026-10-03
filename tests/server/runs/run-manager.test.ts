@@ -1347,3 +1347,16 @@ test('a session that disappears before the last look fails the run, removes the 
   assert.deepEqual(f.spawned, []);
   await eventually(() => f.configs().then(names => names.length === 0));
 });
+
+test('a bridge whose start reports the end and then rejects ends once: the reported error stays and is not written again', async t => {
+  let closes = 0;
+  const f = await adapters(t, { held: true, bridge: async options => ({ done: Promise.resolve(), cancel: async () => {}, close: () => { closes++; },
+    start: async () => { options.onFinished({ status: 'error', error: 'The app refused the turn.' }); throw new Error('The submission failed after its end was reported.'); } }) });
+  const run = await f.manager.enqueue(f.first, 'Refused by the app', {}, { origin: { kind: 'owner' } });
+  const ended = await finished(f.manager, run.id);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const result = f.read(run.id)!;
+  assert.equal(result.error, 'The app refused the turn.');
+  assert.equal(result.finishedAt, ended.finishedAt);
+  assert.equal(closes, 1, 'the rejection only closes the adapter');
+});

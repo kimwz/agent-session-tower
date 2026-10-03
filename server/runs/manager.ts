@@ -1,5 +1,5 @@
 import type { PermissionRequest } from '../../shared/permissions.js';
-import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from 'node:child_process';
 import { mkdir, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -12,21 +12,20 @@ import type { CodexBridgeRun, CodexBridgeOptions } from './codex-bridge.js';
 import { requestedEffort, requestedModel } from '../providers/models.js';
 import { SteeringError } from './steering.js';
 import { ClaudeControl } from './claude-control.js';
-import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioRun } from './codex-stdio.js';
+import type { CodexStdioOptions, CodexStdioRun } from './codex-stdio.js';
 import { withNativeContext } from '../sessions/context.js';
 import { defaultStateDir } from '../state-dir.js';
 import { findExecutable, PROVIDERS } from '../providers/discovery.js';
 import { UUID, type CreatedSession } from './saved-state.js';
-import { ReplyLog } from './replies.js';
-import { checkClaudeSubscription, markMaster, MASTER_TOOL_TIMEOUT_SECONDS, subscriptionOnly } from './subscription.js';
-import { awaitToolServers, NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
-import { automatedOrigin, ownerOrigin, sameOrigin, type SessionOrigin } from './origin.js';
+import { checkClaudeSubscription, markMaster, subscriptionOnly } from './subscription.js';
+import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
+import { automatedOrigin, sameOrigin, type SessionOrigin } from './origin.js';
 import type { Wakeup } from './wakeup.js';
 import { TOWER_NOTICE } from '../../shared/task-notification.js';
-import { codexReviewer, creationReviewer } from './approval-policy.js';
+import { creationReviewer } from './approval-policy.js';
 import { OwnerAnswers } from './owner-answers.js';
 import { checkedInstructions, TurnNotes } from './turn-notes.js';
-import { sessionEnv, turnEnv, type LaunchMarks } from './turn-env.js';
+import { sessionEnv, type LaunchMarks } from './turn-env.js';
 import { ToolNotices } from './tool-notices.js';
 import { errorMessage, FINISHED, finishedTime, MAX_OUTPUT, MAX_PROMPT, notAdmitted, RunError, shown } from './run-records.js';
 import { MAX_RUNS, RunHistory, SCHEDULED_OUTPUT } from './run-history.js';
@@ -35,6 +34,8 @@ import { inheritedRunFields } from './continuations.js';
 import { CreatedSessionRegistry } from './session-registry.js';
 import { UPDATE_WAIT, UpdateDrain } from './update-drain.js';
 import { prepareClaudeTurn } from './claude-turn.js';
+import { prepareCodexTurn } from './codex-turn.js';
+import { prepareBridgeTurn } from './bridge-turn.js';
 import type { OwnedProcess, TurnExit, TurnHost } from './turn-host.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
@@ -744,69 +745,23 @@ export class RunManager extends EventEmitter {
     }
   }
 
+  /**
+   * Hands a turn to the Codex app holding the conversation open; false when the app cannot take it. The submission is
+   * awaited only after it was registered and started in one step, so a run occupies the loop exactly as long as before.
+   */
   private async launchBridge(run: Run, session: Session): Promise<boolean> {
-    // The desktop app owns its tools; only turns that can do without Tower's tools are forwarded.
-    const tools = this.runTools(run, session);
-    if (tools.required || run.instructions?.required) return false;
-    if (!this.options.openCodexBridge) return false;
-    const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
-    let started = false;
-    /** Closed before it was sent because Tower is switching workers: the run waits for the new worker. */
-    let heldForUpdate = false;
-    const bridge = await this.options.openCodexBridge({
-      // The desktop app shows every block it is sent: a turn goes there only without instructions it must have, and without
-      // its notes.
-      threadId: session.nativeId, runId: run.id, prompt: attachmentPrompt(run.prompt, attachments),
-      ...(ownerOrigin(run.origin) ? { approvalsReviewer: 'auto_review' as const } : {}),
-      ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
-      ...(attachments.length ? { imagePaths: imagePaths(attachments) } : {}),
-      onStarted: () => {
-        if (FINISHED.has(run.status)) return;
-        started = true;
-        run.status = 'running'; run.startedAt = new Date().toISOString(); run.output = '';
-        this.changed();
-      },
-      onOutput: text => { if (!FINISHED.has(run.status)) this.append(run, text); },
-      onFinished: result => {
-        this.bridged.delete(run.id);
-        this.reservedSessions.delete(session.id);
-        // Taken back out of the app's queue before it started: it waits in Tower's queue for the new worker.
-        if ((result.withdrawn || heldForUpdate) && !started && run.status === 'queued' && !this.ownerStopped.has(run.id)) {
-          run.output = UPDATE_WAIT; delete run.towerTools;
-          this.changed();
-          return;
-        }
-        // A lost shared connection does not prove the native turn stopped.
-        if (started && result.status === 'completed') {
-          this.settledRuns.add(run.id);
-          this.locallySettled.set(session.id, Date.now());
-        }
-        if (!FINISHED.has(run.status)) {
-          run.status = result.status; run.error = result.error; run.finishedAt = new Date().toISOString();
-          this.changed();
-        }
-        if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
-      },
-    });
-    if (!bridge) return false;
-    await this.prepareLaunch(run);
+    const prepared = await prepareBridgeTurn(this.turnHost, run, session);
+    if (prepared.kind === 'unsupported') return false;
+    if (prepared.kind === 'refused') return true;
+    // The last look, in the same step as the start: nothing can land between them.
     if (run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session)) {
-      heldForUpdate = run.status === 'queued' && this.updating;
-      bridge.close(); this.reservedSessions.delete(session.id); return true;
+      prepared.dispose({ heldForUpdate: run.status === 'queued' && this.updating });
+      this.reservedSessions.delete(session.id);
+      return true;
     }
-    this.bridged.set(run.id, bridge);
-    // The desktop app runs the turn with its own tools; Tower's cannot be attached there.
-    if (tools.towerTools) run.towerTools = tools.servers ? 'desktop-app' : tools.towerTools;
-    run.output = '열려 있는 Codex 앱의 기존 세션으로 요청을 전달하고 있습니다.';
-    this.changed();
-    try { await bridge.start(); }
-    catch (error) {
-      this.bridged.delete(run.id); this.reservedSessions.delete(session.id);
-      bridge.close();
-      // Once a shared-server submission was attempted, never fall back to a new
-      // writer: a lost acknowledgement must not duplicate the user's instruction.
-      this.fail(run, error);
-    }
+    this.bridged.set(run.id, prepared.handle);
+    const submitted = prepared.start();
+    await submitted;
     return true;
   }
 
@@ -814,92 +769,19 @@ export class RunManager extends EventEmitter {
   private masterSession(session: Session): boolean { return subscriptionOnly(this.options.stateDir ?? defaultStateDir(), session.cwd); }
 
   private async launchCodex(run: Run, session: Session, creating: boolean): Promise<void> {
-    const executable = await this.executable('codex');
-    if (!executable) throw new Error('Codex CLI is no longer available in PATH.');
-    if (!(await stat(session.cwd)).isDirectory()) throw new Error('The session working directory no longer exists.');
-    const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
-    const latest = this.getSession(session.id);
-    if (run.status !== 'queued' || this.stopping || (latest && (this.isWorking(latest) || latest.activeProcess))) {
-      this.reservedSessions.delete(session.id);
-      return;
-    }
-    if (!creating) this.validateSession(latest);
-    else if (!latest) throw new RunError('Session no longer exists.', 404);
-    const master = this.masterSession(session);
-    let started = false;
-    let registered = false;
-    await this.notes.add(run, session, creating);
-    const tools = this.runTools(run, session);
-    await awaitToolServers(tools);
-    if (run.status !== 'queued' || this.stopping) {
-      this.reservedSessions.delete(session.id);
-      return;
-    }
-    const env = turnEnv(this.options.env, master, tools, this.options.launchMarks);
-    // The master's own tools may take longer than Codex's default minute (see MASTER_TOOL_TIMEOUT_SECONDS).
-    const mcpServers = master && tools.servers?.tower_master
-      ? { ...tools.servers, tower_master: { ...tools.servers.tower_master, tool_timeout_sec: MASTER_TOOL_TIMEOUT_SECONDS } as typeof tools.servers.tower_master } : tools.servers;
-    if (tools.towerTools) run.towerTools = tools.towerTools;
-    const codexReplies = master ? new ReplyLog(run, Date.now) : undefined;
-    const owned = await (this.options.openCodexStdio ?? openCodexStdioRun)({
-      executable, cwd: session.cwd, env, spawnProcess: this.options.spawnProcess,
-      mcpServers, ...(master ? { subscriptionOnly: true } : {}),
-      ...(!creating ? { threadId: session.nativeId } : {}),
-      ...codexReviewer(run, creating, Boolean(mcpServers?.tower_slack)),
-      ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
-      prompt: attachmentPrompt(run.prompt, attachments),
-      ...(run.instructions?.text ? { instructions: run.instructions.text } : {}),
-      imagePaths: imagePaths(attachments),
-      onSession: async id => {
-        if (!UUID.test(id) || (!creating && id !== session.nativeId)) throw new Error('Codex returned a different or invalid conversation ID. No message was submitted.');
-        if (run.status !== 'running' || this.stopping) throw new Error('The task stopped before a message was submitted.');
-        if (creating) {
-          if (!this.registry.confirm(session.id, id)) throw new Error('The new conversation identity changed. No message was submitted.');
-          session.nativeId = id;
-          this.changed();
-          try { await this.flush(); }
-          catch (error) { throw new Error(`Cannot save the new conversation identity: ${errorMessage(error)}`); }
-        }
-      },
-      onStarted: (_turnId, startedAt) => {
-        if (FINISHED.has(run.status)) return;
-        started = true; run.startedAt = startedAt ?? new Date().toISOString(); this.changed();
-      },
-      onOutput: text => { if (!FINISHED.has(run.status)) this.append(run, text); },
-      ...(codexReplies ? { onReply: (id: string, text: string, done: boolean) => { if (!FINISHED.has(run.status) && codexReplies.add(id, text, done)) this.notifyOutput(); } } : {}),
-      onApproval: approval => { if (run.status === 'running') { run.approvals = [...(run.approvals || []), approval]; this.changed(); } },
-      onApprovalCancelled: id => {
-        if (!run.approvals?.some(approval => approval.id === id)) return;
-        run.approvals = run.approvals.filter(approval => approval.id !== id);
-        if (!run.approvals.length) delete run.approvals;
-        this.changed();
-      },
-      // The adapter reports completion only after its native child has closed.
-      onFinished: result => {
-        if (!registered) return;
-        this.stdio.delete(run.id); this.reservedSessions.delete(session.id); delete run.approvals;
-        if (started) {
-          this.settledRuns.add(run.id); this.locallySettled.delete(session.id); this.locallySettled.set(session.id, Date.now());
-          if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
-        }
-        if (!FINISHED.has(run.status)) {
-          run.status = result.status; run.error = result.error; run.finishedAt = result.finishedAt ?? new Date().toISOString();
-        }
-        this.changed();
-        if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
-      },
-    });
-    // Opening an adapter does not spawn. Admission can be cancelled during discovery.
-    await this.prepareLaunch(run);
+    const prepared = await prepareCodexTurn(this.turnHost, run, session, creating);
+    if (prepared.kind !== 'ready') return;
+    // The last look, in the same step as the start: nothing can land between them.
     const current = this.getSession(session.id);
     if (run.status !== 'queued' || this.stopping || (current && (this.isWorking(current) || current.activeProcess)) || this.refusedAtLaunch(run, session)) {
-      owned.close(); this.reservedSessions.delete(session.id); return;
+      prepared.dispose();
+      this.reservedSessions.delete(session.id);
+      return;
     }
-    registered = true;
-    this.stdio.set(run.id, owned);
-    run.status = 'running'; run.output = ''; this.changed();
+    this.stdio.set(run.id, prepared.handle);
+    prepared.start();
     // Initialization is independently cancellable and does not block unrelated sessions.
-    void owned.start().catch(() => { owned.close(); });
+    void prepared.handle.start().catch(() => { prepared.handle.close(); });
   }
 
   private async launch(run: Run, session: Session, creating = false): Promise<void> {
@@ -962,6 +844,44 @@ export class RunManager extends EventEmitter {
       } else this.changed();
       exit.finish();
       if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
+    } else if (exit.kind === 'codex') {
+      const { result, started } = exit;
+      this.stdio.delete(run.id); this.reservedSessions.delete(session.id); delete run.approvals;
+      if (started) {
+        this.settledRuns.add(run.id); this.locallySettled.delete(session.id); this.locallySettled.set(session.id, Date.now());
+        if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
+      }
+      if (!FINISHED.has(run.status)) {
+        run.status = result.status; run.error = result.error; run.finishedAt = result.finishedAt ?? new Date().toISOString();
+      }
+      this.changed();
+      if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
+    } else if (exit.kind === 'bridge') {
+      const { result, started } = exit;
+      this.bridged.delete(run.id);
+      this.reservedSessions.delete(session.id);
+      // Taken back out of the app's queue before it started: it waits in Tower's queue for the new worker.
+      if ((result.withdrawn || exit.heldForUpdate) && !started && run.status === 'queued' && !this.ownerStopped.has(run.id)) {
+        run.output = UPDATE_WAIT; delete run.towerTools;
+        this.changed();
+        return;
+      }
+      // A lost shared connection does not prove the native turn stopped.
+      if (started && result.status === 'completed') {
+        this.settledRuns.add(run.id);
+        this.locallySettled.set(session.id, Date.now());
+      }
+      if (!FINISHED.has(run.status)) {
+        run.status = result.status; run.error = result.error; run.finishedAt = new Date().toISOString();
+        this.changed();
+      }
+      if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
+    } else {
+      this.bridged.delete(run.id); this.reservedSessions.delete(session.id);
+      exit.handle.close();
+      // Once a shared-server submission was attempted, never fall back to a new
+      // writer: a lost acknowledgement must not duplicate the user's instruction.
+      this.fail(run, exit.error);
     }
   }
 
