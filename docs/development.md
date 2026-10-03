@@ -2,7 +2,7 @@
 
 ## Run from source
 
-Node.js 22.13+, npm, and Git are required. macOS is the verified platform.
+Node.js 22.13+, npm, and Git are required. macOS and Linux are verified; CI runs the checks on both.
 
 ```sh
 git clone https://github.com/kimwz/agent-session-tower.git

@@ -6,7 +6,7 @@ Auto Prompt routes one user request to one native Claude Code or Codex session. 
 flowchart TD
     A[Prompt, attachments, provider, folder or Auto] --> B[Persist request ID and queue routing]
     B --> C{Folder selected?}
-    C -- No --> D[Opus or GPT Sol selects a known folder]
+    C -- No --> D[Routing agent selects a known folder]
     C -- Yes --> E[Read sessions and recent conversation in that folder]
     D --> E
     E --> F[Select an existing session or create a new one]
@@ -28,7 +28,7 @@ The router receives bounded structured data: project labels, session titles, rec
 
 Codex context uses the latest `last_token_usage.total_tokens` and `model_context_window`, rather than cumulative billed tokens. Claude context uses the latest input, cache creation, and cache read token counts. Capacity and percentage are omitted when native data does not establish a window size; Tower does not infer capacity from a model name.
 
-The routing model is `opus` for Claude Code and `gpt-5.6-sol` for Codex. Its invocation is temporary and restricted to making the selection, using the user's existing native authentication. The destination keeps its native model and sandbox settings. Like every turn Tower starts, it runs in the provider's automatic approval mode, and the normal approval UI shows whatever still needs you (see [tool approvals](usage.md#tool-approvals)).
+The routing agent's provider, model and effort come from the **Auto Prompt routing** role in **Settings → Model**; by default it runs on the request's provider. Its invocation is temporary and restricted to making the selection, using the user's existing native authentication. The destination keeps its native model and sandbox settings. Like every turn Tower starts, it runs in the provider's automatic approval mode, and the normal approval UI shows whatever still needs you (see [tool approvals](usage.md#tool-approvals)).
 
 ## Request lifecycle
 
@@ -42,7 +42,7 @@ An admitted run stores its originating `autoPromptId`. On restart, Tower reconci
 
 ## HTTP API
 
-These endpoints use the same access protection as other Tower APIs. A remote client needs HTTP Basic authentication. POST requests also need the current `X-Agent-Monitor-Token` from `/api/bootstrap`, `Content-Type: application/json`, and an allowed origin.
+These endpoints use the same access protection as other Tower APIs. A remote client must be signed in to Tower (see [remote access](usage.md#remote-access)). POST requests also need the current `X-Agent-Monitor-Token` from `/api/bootstrap`, `Content-Type: application/json`, and an allowed origin.
 
 ### Start or recover a request
 
