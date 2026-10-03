@@ -64,6 +64,61 @@ test('image endpoint requires authentication and serves exact bytes with safe he
   assert.equal((await fetch(url + 'tampered', { headers: { cookie } })).status, 404);
 });
 
+test('an image link opened from another site opens again from Tower; embeds, reads and foreign origins stay closed', async t => {
+  const { request } = await import('node:http');
+  const { root, session, page } = await fixture(t);
+  const { auth, origins, cookie, fetch } = await createRemoteAuthFixture(join(root, 'auth'));
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: root, auth, remote: { origins }, backend: {
+    snapshot: () => ({ sessions: [session], runs: [], providers: [], scanning: false, hostname: 'fixture', version: 'test', updatedAt: '' }),
+    detail: async () => page, enqueue: async () => { throw new Error('unused'); }, cancel: async () => {}, subscribe: () => () => {},
+  } });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
+  const port = (server.address() as { port: number }).port;
+  const link: string = (await (await fetch(`http://127.0.0.1:${port}/api/sessions/${session.id}`, { headers: { cookie } })).json()).messages[0].images[0].url;
+  // Raw requests carrying exactly what Chromium and WebKit send (fetch() would set its own Sec-Fetch-Mode).
+  const send = (path: string, headers: Record<string, string>, method = 'GET') => new Promise<{ status?: number; type?: string; body: Buffer }>((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port, path, method, headers: { Host: `remote.test:${port}`, 'X-Forwarded-For': '192.0.2.1', ...headers } }, res => {
+      const chunks: Buffer[] = []; res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve({ status: res.statusCode, type: res.headers['content-type'], body: Buffer.concat(chunks) }));
+    });
+    req.on('error', reject); req.end();
+  });
+  const navigation = (site: string, dest = 'document') => ({ 'Sec-Fetch-Site': site, 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': dest });
+  // A click from another site, or back from a login there: no Tower session is sent, and only a page that opens the
+  // same link again comes back, never the image.
+  for (const headers of [navigation('cross-site'), { ...navigation('cross-site'), cookie }]) {
+    const reopen = await send(link, headers);
+    assert.equal(reopen.status, 200);
+    assert.equal(reopen.type, 'text/html; charset=utf-8');
+    assert.ok(reopen.body.toString().includes(`<meta http-equiv="refresh" content="0;url=${link}">`));
+    assert.equal(reopen.body.includes(png), false);
+  }
+  assert.equal((await send(link, navigation('cross-site'), 'HEAD')).body.length, 0);
+  // The browser then opens it from Tower itself, which carries the session and passes every usual check.
+  const opened = await send(link, { ...navigation('same-origin'), cookie });
+  assert.equal(opened.status, 200); assert.equal(opened.type, 'image/png'); assert.deepEqual(opened.body, png);
+  assert.equal((await send(link, navigation('same-origin'))).status, 401);
+  assert.equal((await send(`${link.slice(0, -2)}AA`, { ...navigation('same-origin'), cookie })).status, 404);
+  assert.equal((await send(link, { ...navigation('none'), cookie })).status, 200);
+  // Embeds, reads, changes, foreign origins and anything not shaped like an image link stay closed.
+  const closed: Array<[string, Record<string, string>, string?]> = [
+    [link, { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Dest': 'image', cookie }],
+    [link, { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty', cookie }],
+    [link, { ...navigation('cross-site', 'iframe'), cookie }],
+    [link, { ...navigation('cross-site'), cookie }, 'POST'],
+    [link, { ...navigation('cross-site'), Origin: 'https://attacker.example' }],
+    [`${link}?x=1`, navigation('cross-site')],
+    [`${link}%22%3E`, navigation('cross-site')],
+    ['/api/attachments/x', navigation('cross-site')],
+    [`/api/sessions/${session.id}`, navigation('cross-site')],
+  ];
+  for (const [path, headers, method] of closed) assert.equal((await send(path, headers, method)).status, 403, `${method || 'GET'} ${path} ${JSON.stringify(headers)}`);
+  // A joined computer's image link has the same shape under its node path.
+  const reopenNode = await send(`/api/nodes/${'a'.repeat(32)}${link.slice(4)}`, navigation('cross-site'));
+  assert.equal(reopenNode.status, 200); assert.equal(reopenNode.type, 'text/html; charset=utf-8');
+});
+
 test('joined-computer image access rechecks excluded files and session visibility', async t => {
   const { createServer } = await import('node:http');
   const { RemoteExclusionStore } = await import('../../../server/remote/exclusions.js');
