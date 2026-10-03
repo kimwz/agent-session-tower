@@ -800,9 +800,11 @@ test('a turn that is still closing its provider keeps the old worker, whatever i
 async function idleWorker(f: Awaited<ReturnType<typeof fixture>>, options: Partial<Parameters<typeof startRunnerHost>[0]> = {}) {
   await f.host.close();
   const events: string[] = [];
+  /** Per release, whether the handoff record was already on disk. */
+  const recordAtRelease: boolean[] = [];
   const lock = await acquireStateLock(f.paths.runtime, 0);
   const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, idleMs: 0,
-    releaseStateLock: async () => { await lock(); events.push('release'); },
+    releaseStateLock: async () => { recordAtRelease.push(existsSync(join(f.paths.runtime, 'handoff.json'))); await lock(); events.push('release'); },
     onIdle: async () => { events.push('onIdle'); }, ...options });
   // A newer web asks for the handoff and goes away (a web replaced during an update), so nothing keeps the worker busy.
   const ask = async () => { const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0' }); await client.start(); await client.close(); };
@@ -818,7 +820,7 @@ async function idleWorker(f: Awaited<ReturnType<typeof fixture>>, options: Parti
     await host.close();
     await until(() => events.includes('release'));
   };
-  return { events, host, ask, settle };
+  return { events, recordAtRelease, host, ask, settle };
 }
 
 test('an idle tick never closes a worker whose handoff is pausing: the state stays locked until the record is durable', { timeout: 20_000 }, async t => {
@@ -923,6 +925,43 @@ test('after a pause fails and the worker resumes, the same worker hands off on i
     assert.deepEqual(w.events, ['quiesce', 'resume', 'quiesce', 'release', 'startSuccessor', 'onHandedOff']);
     assert.deepEqual(atSuccessor, { record: true, socket: false, token: false, released: true });
   } finally { await w.settle(); }
+});
+
+test('cleanup during a second handoff attempt waits for that attempt, not for the first one that resumed', { timeout: 20_000 }, async t => {
+  t.mock.method(console, 'error', () => {});
+  let skew = 0;
+  const now = Date.now.bind(Date);
+  t.mock.method(Date, 'now', () => now() + skew);
+  const f = await fixture(); t.after(f.cleanup);
+  let attempts = 0;
+  let openFirst!: () => void, openSecond!: () => void;
+  const first = new Promise<void>(resolve => { openFirst = resolve; });
+  const second = new Promise<void>(resolve => { openSecond = resolve; });
+  const w = await idleWorker(f, { idleMs: 10 * 60_000,
+    // The second attempt pauses in two steps: cleanup opens the first, the test holds the second.
+    quiesce: async () => { w.events.push('quiesce'); if (attempts++ === 0) throw new Error('flush failed after intake paused'); await first; w.events.push('quiesced'); await second; },
+    resume: () => { w.events.push('resume'); },
+    startSuccessor: () => { w.events.push('startSuccessor'); },
+    onHandedOff: () => { w.events.push('onHandedOff'); } });
+  let settling: Promise<void> | undefined;
+  try {
+    await w.ask();
+    await until(() => w.events.includes('resume'));
+    skew = 61_000;
+    await until(() => w.events.filter(event => event === 'quiesce').length === 2);
+    settling = w.settle(openFirst);
+    await until(() => w.events.includes('quiesced'));
+    // The second attempt is still under way: cleanup must not close the worker and release its lock meanwhile.
+    await until(() => w.events.includes('release'), 500).then(() => {}, () => {});
+    assert.deepEqual(w.events, ['quiesce', 'resume', 'quiesce', 'quiesced'], 'nothing is closed or released while the current attempt has not finished');
+    openSecond();
+    await settling;
+    assert.deepEqual(w.events, ['quiesce', 'resume', 'quiesce', 'quiesced', 'release', 'startSuccessor', 'onHandedOff']);
+    assert.deepEqual(w.recordAtRelease, [true], 'the lock is released only after the record is on disk');
+  } finally {
+    openSecond();
+    await (settling ?? w.settle(openFirst));
+  }
 });
 
 test('an idle-shutdown fixture that fails before any handoff still closes its worker and frees the lock', { timeout: 20_000 }, async t => {
