@@ -174,7 +174,7 @@ async function quiet(t: TestContext) {
     spawnProcess: () => { throw new Error('Native provider launch is forbidden in this fixture.'); } });
   await manager.start();
   t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
-  const internals = manager as unknown as Internals & { scheduleContinuation(run: Run, wakeup: { prompt: string; at: number }): void; settleUpdateTarget(run: Run, target: { delegated: boolean; retryAt: number; stopping?: boolean }): void };
+  const internals = manager as unknown as Internals & { scheduleContinuation(run: Run, wakeup: { prompt: string; at: number }): void; drain: { settle(run: Run, target: { delegated: boolean; retryAt: number; stopping?: boolean }): void } };
   const saved = async (): Promise<Run[]> => JSON.parse(await readFile(join(stateDir, 'runs.json'), 'utf8'));
   return { directory, stateDir, session, manager, internals, saved };
 }
@@ -217,7 +217,7 @@ test('a wakeup continuation, an update resume and a permission continuation inhe
   assert.deepEqual(inherited(wakeup), { ...expected, origin: { kind: 'owner' } });
   assert.equal(wakeup?.codexApprovalsReviewer, undefined);
   owned.status = 'cancelled'; f.internals.runs.delete(wakeup!.id);
-  f.internals.settleUpdateTarget(owned, { delegated: false, retryAt: 0, stopping: true });
+  f.internals.drain.settle(owned, { delegated: false, retryAt: 0, stopping: true });
   const resume = [...f.internals.runs.values()].find(run => run.scheduled?.afterRunId === owned.id && run.scheduled.resume === 'update');
   assert.deepEqual(inherited(resume), { ...expected, origin: { kind: 'owner' } });
   assert.equal(resume?.codexApprovalsReviewer, undefined);

@@ -32,10 +32,11 @@ import { checkedInstructions, TurnNotes } from './turn-notes.js';
 import { sessionEnv, turnEnv, type LaunchMarks } from './turn-env.js';
 import { ToolNotices } from './tool-notices.js';
 import { errorMessage, FINISHED, finishedTime, MAX_OUTPUT, MAX_PROMPT, notAdmitted, RunError, shown } from './run-records.js';
-import { MAX_RUNS, RunHistory, SCHEDULED_OUTPUT, UPDATE_RESUME_WAIT } from './run-history.js';
+import { MAX_RUNS, RunHistory, SCHEDULED_OUTPUT } from './run-history.js';
 import { PermissionContinuations, retainedReceipts } from './permission-continuation.js';
 import { inheritedRunFields } from './continuations.js';
 import { CreatedSessionRegistry } from './session-registry.js';
+import { UPDATE_WAIT, UpdateDrain } from './update-drain.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -122,26 +123,6 @@ type SteerableAdapter = CodexStdioRun | CodexBridgeRun | ClaudeControl;
 function steerable(steering: { target: Run } | { blocked: SteerBlock } | undefined): Pick<Run, 'canSteer' | 'steerBlocked'> {
   return steering && 'blocked' in steering ? { canSteer: false, steerBlocked: steering.blocked } : { canSteer: Boolean(steering) };
 }
-const UPDATE_WAIT = 'Waiting: Tower is switching to its new version; this starts right after.';
-const WRAP_UP_RETRY_MS = 30_000;
-const WRAP_UP_NOTICE = `${TOWER_NOTICE} Tower is about to restart to apply an update. Within the next few minutes bring your work to a safe stopping point: finish or pause the current step, do not start long or risky operations, and do not leave half-applied changes. Then end your turn with a short note of what is done and what remains. Tower resumes this conversation automatically right after the update. Do not report the task as finished unless it is.`;
-const RESUME_NOTICE = `${TOWER_NOTICE} Tower was updated while this conversation was working, and the previous turn was ended for the update. Continue the original task. First check the conversation, files and running processes to see what was already done; do not repeat actions with outside effects (deploys, pushes, sent messages) without checking their result. If the task is already complete, say so briefly and stop.`;
-const UPDATE_STOPPED = 'Stopped for a Tower update before it finished; Tower resumes the conversation on its new version.';
-const DELEGATED_STOPPED = 'Stopped for a Tower update before it finished; it was not resumed automatically.';
-const UPDATE_NOT_STARTED = 'Stopped for a Tower update before it started in the Codex app. Send the instruction again.';
-
-/** A running turn a forced update is ending, and Tower's own continuation for it. */
-interface UpdateTarget { delegated: boolean; retryAt: number;
-  /** A wrap-up request is being inserted right now. */
-  sending?: boolean;
-  /** A wrap-up request was handed to the turn (it may or may not have taken it). */
-  reached?: boolean;
-  /** A deadline asked for its stop (kept across forced updates; decides whether it is carried on). */
-  stopping?: boolean;
-  /** The forced update (its sequence number) whose deadline sent the stop; a later one sends it again. */
-  stopSent?: number }
-/** `active` while new turns wait; after a give-up, turns already stopped or asked to wrap up are still settled. */
-interface UpdateDrain { sequence: number; startedAt: number; deadline: number; delegated: (run: Run) => boolean; active: boolean; targets: Map<string, UpdateTarget>; stoppingBridges: Set<string>; wrapUps: Set<string> }
 const MAX_QUEUED = 32;
 const BACKGROUND_FOLLOW_UP_MS = 60_000;
 const BACKGROUND_WAIT_MAX_MS = 2 * 60 * 60 * 1000;
@@ -175,7 +156,12 @@ export class RunManager extends EventEmitter {
   private readonly settledRuns = new Set<string>();
   /** Runs the owner asked to stop; a Codex app submission taken back for an update is then not queued again. */
   private readonly ownerStopped = new Set<string>();
-  private drain?: UpdateDrain;
+  private readonly drain = new UpdateDrain({
+    runs: this.runs, bridged: this.bridged, ownerStopped: id => this.ownerStopped.has(id), stopping: () => this.stopping,
+    steer: (runId, options) => this.steer(runId, options), cancel: (runId, reason) => this.cancel(runId, reason),
+    changed: () => this.changed(), pump: () => { void this.pump(); },
+    mergePermission: (run, notice, wait) => this.permissions.mergeIntoUpdate(run, notice, wait),
+  });
   private ready: boolean;
   private pollTimer?: ReturnType<typeof setInterval>;
   private notifyTimer?: ReturnType<typeof setTimeout>;
@@ -521,7 +507,7 @@ export class RunManager extends EventEmitter {
       if (options.whileWaiting && !selected.target.backgroundWait) throw new SteeringError('The waiting turn resumed before delivery.', 'rejected');
       const prompt = attachmentPrompt(run.prompt, attachments);
       submitted = true;
-      this.noteHandedOver(run);
+      this.drain.noteHandedOver(run);
       if (selected.adapter instanceof ClaudeControl) {
         const delivery = selected.adapter.steer({ type: 'user', uuid: run.id, session_id: this.getSession(run.sessionId)!.nativeId, parent_tool_use_id: null,
           message: { role: 'user', content: [{ type: 'text', text: prompt }, ...claudeImageBlocks(attachments)] } });
@@ -1297,133 +1283,20 @@ export class RunManager extends EventEmitter {
     this.changed();
   }
 
-  /**
-   * The owner asked Tower to switch to its new version now. From here no new turn starts, each running turn is asked to
-   * wrap up, and at `deadline` the turns still running are stopped. When a turn the update interrupted ends, Tower
-   * queues its own continuation in that same step (see settleUpdateTarget). Delegated work of a Slack or GitHub workflow
-   * is neither asked nor resumed: its coordinator hears how it ended and decides.
-   */
-  beginUpdateDrain(deadline: number, delegated: (run: Run) => boolean): void {
-    if (this.updating || this.stopping) return;
-    // Turns from an earlier forced update that gave up are still followed until they end.
-    this.drain = { sequence: (this.drain?.sequence ?? 0) + 1, startedAt: Date.now(), deadline, delegated, active: true, targets: this.drain?.targets ?? new Map(), stoppingBridges: new Set(), wrapUps: this.drain?.wrapUps ?? new Set() };
-    this.changed();
-  }
+  /** The owner asked Tower to switch to its new version now (see UpdateDrain). */
+  beginUpdateDrain(deadline: number, delegated: (run: Run) => boolean): void { this.drain.begin(deadline, delegated); }
 
   /** While a forced update holds new turns back. */
-  private get updating(): boolean { return this.drain?.active === true; }
+  private get updating(): boolean { return this.drain.active; }
 
-  /**
-   * Gives up a forced update that could not hand off: queued turns start again here and nothing is cancelled. Turns it
-   * already stopped or asked to wrap up still get their continuation when they end.
-   */
-  endUpdateDrain(): void {
-    if (!this.drain?.active) return;
-    this.drain.active = false;
-    this.changed();
-    void this.pump();
-  }
+  /** Gives up a forced update that could not hand off: queued turns start again here and nothing is cancelled. */
+  endUpdateDrain(): void { this.drain.end(); }
 
   /** Shown while a forced update waits for running turns to wrap up. */
-  updateDrainStatus(): { startedAt: string; deadline: string; running: number } | undefined {
-    const drain = this.drain;
-    if (!drain?.active) return undefined;
-    const running = [...drain.targets.keys()].filter(id => this.runs.get(id)?.status === 'running').length
-      + [...this.bridged.keys()].filter(id => this.runs.get(id)?.status === 'queued').length;
-    return { startedAt: new Date(drain.startedAt).toISOString(), deadline: new Date(drain.deadline).toISOString(), running };
-  }
+  updateDrainStatus(): { startedAt: string; deadline: string; running: number } | undefined { return this.drain.status(); }
 
   /** Called about once a second while a forced update waits: wrap-up requests, Codex app submissions, the deadline. */
-  driveUpdateDrain(now = Date.now()): void {
-    const drain = this.drain;
-    if (!drain?.active || this.stopping) return;
-    for (const [id, bridge] of this.bridged) {
-      const run = this.runs.get(id);
-      if (run?.status !== 'queued') continue;
-      if (now < drain.deadline) void bridge.withdraw?.().catch(() => {});
-      else if (!drain.stoppingBridges.has(id)) { drain.stoppingBridges.add(id); void this.cancel(id, UPDATE_NOT_STARTED).catch(() => {}); }
-    }
-    for (const [id, target] of drain.targets) {
-      const run = this.runs.get(id);
-      if (run?.status !== 'running') continue;
-      if (now >= drain.deadline) {
-        if (target.stopSent !== drain.sequence) { target.stopSent = drain.sequence; target.stopping = true; void this.cancel(id, target.delegated ? DELEGATED_STOPPED : UPDATE_STOPPED).catch(() => {}); }
-      } else if (!target.delegated && !target.stopping && !target.reached && !target.sending && now >= target.retryAt) this.sendWrapUp(run, target);
-    }
-  }
-
-  /** Inserts the wrap-up request into a running turn. A request that surely did not reach it is removed and tried again. */
-  private sendWrapUp(target: Run, state: UpdateTarget): void {
-    const wrapUp: Run = { id: randomUUID(), sessionId: target.sessionId, origin: target.origin ?? { kind: 'unknown' }, prompt: WRAP_UP_NOTICE, status: 'queued',
-      createdAt: new Date().toISOString(), updateWrapUp: true,
-      output: 'Asking the running turn to wrap up for a Tower update.', ...(target.model ? { model: target.model } : {}), ...(target.effort ? { effort: target.effort } : {}) };
-    this.runs.set(wrapUp.id, wrapUp);
-    this.drain!.wrapUps.add(wrapUp.id);
-    state.sending = true;
-    state.retryAt = Date.now() + WRAP_UP_RETRY_MS;
-    this.changed();
-    void this.steer(wrapUp.id, { targetRunId: target.id }).catch(() => {}).finally(() => {
-      state.sending = false;
-      // Put back in the queue means it was never handed over; it must not start later as a turn of its own.
-      if (wrapUp.status !== 'queued' || wrapUp.steering || this.runs.get(wrapUp.id) !== wrapUp) return;
-      this.runs.delete(wrapUp.id);
-      state.reached = false;
-      // The turn ended meanwhile, counted as asked to wrap up: it was not, so it is not carried on.
-      const turn = this.runs.get(target.id);
-      if (turn?.status === 'completed') {
-        for (const run of [...this.runs.values()]) if (run.status === 'queued' && run.scheduled?.resume === 'update' && run.scheduled.afterRunId === turn.id) this.runs.delete(run.id);
-      }
-      this.changed();
-    });
-  }
-
-  /** Called as an inserted instruction is handed to its turn: a wrap-up request that got this far may have reached it. */
-  private noteHandedOver(run: Run): void {
-    if (!this.drain?.wrapUps.has(run.id) || !run.steering) return;
-    const target = this.drain.targets.get(run.steering.targetRunId);
-    if (target) target.reached = true;
-  }
-
-  /**
-   * Registers every turn running during a forced update in the same step as the change that shows it running, and
-   * settles each one in the same step as the change that shows it ended.
-   */
-  private trackUpdateTargets(): void {
-    const drain = this.drain;
-    if (!drain) return;
-    if (drain.active) for (const run of this.runs.values()) {
-      if (run.status !== 'running' || run.steering || drain.targets.has(run.id)) continue;
-      drain.targets.set(run.id, { delegated: drain.delegated(run), retryAt: 0 });
-    }
-    for (const [id, target] of drain.targets) {
-      const run = this.runs.get(id);
-      if (!run) { drain.targets.delete(id); continue; }
-      if (!FINISHED.has(run.status)) continue;
-      drain.targets.delete(id);
-      this.settleUpdateTarget(run, target);
-    }
-    if (!drain.active && !drain.targets.size) this.drain = undefined;
-  }
-
-  /**
-   * Only work the update itself interrupted is carried on: a turn the deadline stopped, or one that ended after its
-   * wrap-up request reached it. A turn the owner stopped, one stopped in the Codex app, one that failed, and one that
-   * finished its own work before any wrap-up reached it end as they are. The continuation is queued in the same step
-   * that shows the turn ended, so no watcher sees one without the other; it replaces the agent's own wakeup.
-   */
-  private settleUpdateTarget(run: Run, target: UpdateTarget): void {
-    if (target.delegated || this.ownerStopped.has(run.id)) return;
-    // A stop the deadline asked for counts only once confirmed ('cancelled'): an unconfirmed one may still be running there.
-    if (!((target.stopping && run.status === 'cancelled') || (run.status === 'completed' && target.reached))) return;
-    if (this.permissions.mergeIntoUpdate(run, RESUME_NOTICE, UPDATE_RESUME_WAIT)) return;
-    for (const other of [...this.runs.values()]) {
-      if (other.status === 'queued' && other.scheduled?.afterRunId === run.id && other.scheduled.resume !== 'update') this.runs.delete(other.id);
-    }
-    const now = new Date().toISOString();
-    const id = randomUUID();
-    this.runs.set(id, { id, sessionId: run.sessionId, ...inheritedRunFields(run), prompt: RESUME_NOTICE, status: 'queued',
-      createdAt: now, output: UPDATE_RESUME_WAIT, scheduled: { at: now, afterRunId: run.id, resume: 'update' } });
-  }
+  driveUpdateDrain(now = Date.now()): void { this.drain.drive(now); }
 
   private supersede(run: Run, reason: string): void {
     run.status = 'cancelled'; run.finishedAt = new Date().toISOString(); run.output = `Scheduled continuation not started: ${reason}`;
@@ -1495,7 +1368,7 @@ export class RunManager extends EventEmitter {
         this.settledRuns.add(run.id);
       }
     }
-    this.trackUpdateTargets();
+    this.drain.track();
     this.permissions.sweep();
     const retained = this.retainedIds();
     this.prune(retained);
@@ -1513,7 +1386,7 @@ export class RunManager extends EventEmitter {
     // This save includes any streamed output that was waiting for its slower cadence.
     this.cancelOutputPersist();
     // A wrap-up request is never carried: after a restart it would start as a turn of its own.
-    if (this.updating) for (const run of this.runs.values()) if (run.status === 'queued' && !run.scheduled && !this.drain!.wrapUps.has(run.id)) this.history.carried.add(run.id);
+    if (this.updating) for (const run of this.runs.values()) if (run.status === 'queued' && !run.scheduled && !this.drain.isWrapUp(run.id)) this.history.carried.add(run.id);
     this.history.save(this.runs, this.list(), this.registry.serialize(), retained);
   }
 
