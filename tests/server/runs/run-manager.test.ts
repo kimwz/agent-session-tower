@@ -3,7 +3,10 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
+import { EventEmitter } from 'node:events';
+import { PassThrough, Writable } from 'node:stream';
+import { MASTER_FOLDER } from '../../../shared/master.js';
 import { CapabilityRegistry } from '../../../server/api/mcp.js';
 import { runToolResolver } from '../../../server/api/run-tools.js';
 import { RunManager } from '../../../server/runs/manager.js';
@@ -1074,4 +1077,68 @@ test('the private MCP config is removed when the provider cannot be spawned', as
   assert.match(result.error!, /spawn refused by the fixture/);
   assert.ok(configPath?.startsWith(privateTmp), 'the config was written to its own private folder');
   await until(() => readdir(privateTmp).then(names => names.length === 0));
+});
+
+/** A Claude conversation whose provider is a fake child that sends whatever the test writes. */
+async function fakeClaude(t: TestContext, options: { master?: boolean } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-fake-claude-'));
+  const stateDir = join(directory, 'state');
+  const cwd = options.master ? join(stateDir, MASTER_FOLDER) : directory;
+  await mkdir(cwd, { recursive: true });
+  const session = makeSession(cwd, { id: `claude:${ID}`, provider: 'claude' });
+  const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+  const received: Record<string, any>[] = [];
+  const exit = (code = 0) => { if (child.exitCode !== null) return; Object.assign(child, { exitCode: code }); child.emit('close', code, null); };
+  Object.assign(child, { stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, pid: undefined, kill: () => { exit(1); return true; },
+    stdin: new Writable({ write(chunk, _encoding, done) {
+      const input = JSON.parse(String(chunk)); received.push(input);
+      if (input.type === 'control_request') setImmediate(() => send({ type: 'control_response', response: { subtype: 'success', request_id: input.request_id } }));
+      done();
+    } }) });
+  child.stdin.on('finish', () => setImmediate(() => exit()));
+  const send = (frame: unknown) => child.stdout.push(`${typeof frame === 'string' ? frame : JSON.stringify(frame)}\n`);
+  const manager = new RunManager({ stateDir, getSession: id => id === session.id ? session : undefined, refreshSessions: async () => {}, pollMs: 10,
+    findExecutable: async () => '/fixture/claude', checkClaudeSubscription: async () => {}, spawnProcess: () => child });
+  await manager.start();
+  t.after(async () => { exit(); await manager.close(); await rm(directory, { recursive: true, force: true }); });
+  const run = await manager.enqueue(session.id, 'Fake turn', {}, { origin: { kind: 'owner' } });
+  await until(() => received.some(frame => frame.type === 'user'));
+  return { manager, run, send, exit, child, read: () => manager.list().find(item => item.id === run.id)! };
+}
+
+test('an output event over 2 MB stops the turn with its reason', async t => {
+  const f = await fakeClaude(t);
+  f.send({ type: 'system', subtype: 'init', session_id: ID, permissionMode: 'auto' });
+  f.child.stdout.push('x'.repeat(2_000_001));
+  const result = await finished(f.manager, f.run.id);
+  assert.equal(result.status, 'error');
+  assert.match(result.error!, /^Provider emitted an oversized output event\./);
+});
+
+test('a non-object event stops the turn as invalid output', async t => {
+  const f = await fakeClaude(t);
+  f.send({ type: 'system', subtype: 'init', session_id: ID, permissionMode: 'auto' });
+  f.send('[1,2]');
+  const result = await finished(f.manager, f.run.id);
+  assert.equal(result.status, 'error');
+  assert.match(result.error!, /^The provider emitted an invalid output event\. The task was stopped\./);
+});
+
+test('master replies stream block by block and complete messages add nothing after partial text', async t => {
+  const f = await fakeClaude(t, { master: true });
+  f.send({ type: 'system', subtype: 'init', session_id: ID, permissionMode: 'auto' });
+  f.send({ type: 'stream_event', event: { type: 'message_start', message: { id: 'm1' } } });
+  f.send({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
+  f.send({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello ' } } });
+  await until(() => f.read().replies?.[0]?.text === 'Hello ');
+  f.send({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'there' } } });
+  f.send({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+  f.send({ type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'Hello there' }] } });
+  f.send({ type: 'assistant', message: { id: 'm2', content: [{ type: 'text', text: 'Second whole message' }] } });
+  f.send({ type: 'result', is_error: false, result: 'done' });
+  await until(() => f.read().replies?.length === 2);
+  const replies = f.read().replies!;
+  assert.deepEqual(replies.map(reply => [reply.id, reply.text, reply.done]), [['m1:0', 'Hello there', true], ['m2:a0', 'Second whole message', true]]);
+  f.exit();
+  await finished(f.manager, f.run.id);
 });
