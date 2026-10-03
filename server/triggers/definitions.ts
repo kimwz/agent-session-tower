@@ -1,10 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import type { Session } from '../../shared/types.js';
-import {
-  GITHUB_API, TriggerInputSchema, TriggerSettingsSchema, carriesOutsideContent, type CoordinatorRule, type SecretInput, type Trigger, type TriggerActor,
-  type TriggerAuditEntry, type TriggerHandler, type TriggerInput, type TriggerSecret, type TriggerSettings, type TriggerTarget,
-} from '../../shared/triggers.js';
+import { GITHUB_API, TriggerInputSchema, TriggerSettingsSchema, carriesOutsideContent, type CoordinatorRule, type SecretInput, type Trigger, type TriggerActor, type TriggerAuditEntry, type TriggerHandler, type TriggerInput, type TriggerSecret, type TriggerSettings, type TriggerTarget } from '../../shared/triggers.js';
 import { requestedEffort, requestedModel } from '../providers/models.js';
 import { appendAudit, changedFields, describeTrigger, logTrigger } from './audit.js';
 import { failure } from './errors.js';
