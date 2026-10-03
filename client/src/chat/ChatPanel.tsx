@@ -4,6 +4,9 @@ import { Archive, ArchiveRestore, ArrowDown, ArrowUp, Check, ChevronDown, Copy, 
 import type { ChatMessage, ProviderHealth, Run, Session, SessionDetail } from '../../../shared/types';
 import { ProviderIcon } from '../common/Icons';
 import { WorkspaceActions } from '../workspace/WorkspaceActions';
+import { useOpenWorkspace } from '../workspace/WorkspaceOverlay';
+import { resolveWorkspaceFile, workspaceRoots } from '../workspace/workspace-paths';
+import { WorkspaceFilesContext, type WorkspaceFiles } from './WorkspacePath';
 import { SessionTitleEditor } from '../sessions/SessionTitleEditor';
 import { SessionFamilyNav } from '../sessions/SessionFamilyNav';
 import { SessionOutcomeBadge } from '../sessions/SessionOutcomeBadge';
@@ -30,7 +33,9 @@ import { RemoteContent } from '../remote/remote-content';
 
 const emptyMessages: readonly ChatMessage[] = [];
 
-export function ChatPanel({ sessionId, session, allSessions, provider, host, runs, token, connected, onClose, onNavigate, onSnapshotRefresh, onSessionUpdate, onSessionClose, onAcknowledgeOutcome, sessionClosed = false, changingClosed = false, readRevision = '', onRead, contextBanner }: { contextBanner?: ReactNode; sessionId: string; session?: Session; allSessions: Session[]; provider?: ProviderHealth;
+export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = [], provider, host, runs, token, connected, onClose, onNavigate, onSnapshotRefresh, onSessionUpdate, onSessionClose, onAcknowledgeOutcome, sessionClosed = false, changingClosed = false, readRevision = '', onRead, contextBanner }: { contextBanner?: ReactNode; sessionId: string; session?: Session; allSessions: Session[];
+  /** Folders Tower lists on every computer (scoped keys): the files a conversation names are opened from these. */
+  workspaceFolders?: readonly string[]; provider?: ProviderHealth;
   /** The joined computer this conversation lives on; absent for this computer. */
   host?: { name: string; live: boolean; canWork: boolean; problem?: string; workspace: boolean; workspaceNote?: string }; runs: Run[]; token: string; connected: boolean; onClose: () => void; onNavigate: (id: string) => void; onSnapshotRefresh: () => void; onSessionUpdate: (session: Session) => void; onSessionClose?: () => void; onAcknowledgeOutcome?: () => Promise<void>; sessionClosed?: boolean; changingClosed?: boolean; readRevision?: string; onRead?: (id: string, revision: string) => void }) {
   useI18n();
@@ -119,6 +124,16 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
   }, [detail, following, loadError, loading, onRead, pageVisible, readRevision, session, sessionId]);
 
   const current = session || detail?.session;
+  const openWorkspace = useOpenWorkspace();
+  const node = nodeOf(sessionId);
+  const roots = useMemo(() => workspaceRoots(node, [current?.cwd, ...workspaceFolders]), [node, current?.cwd, workspaceFolders]);
+  // The same conditions as the folder's own editor button.
+  const filesUnavailable = !connected || !token ? t('Tower에 연결되면 열 수 있습니다.') : host && !host.workspace ? host.workspaceNote ?? t('이 컴퓨터의 작업 공간을 지금 열 수 없습니다.') : undefined;
+  const files = useMemo<WorkspaceFiles | null>(() => openWorkspace ? {
+    resolve: path => resolveWorkspaceFile(path, roots),
+    open: target => openWorkspace(target.cwd, 'editor', host?.name, target.file),
+    ...(filesUnavailable ? { unavailable: filesUnavailable } : {}),
+  } : null, [openWorkspace, roots, host?.name, filesUnavailable]);
   const currentRuns = useMemo(() => runs.filter(run => run.sessionId === sessionId), [runs, sessionId]);
   useEffect(() => { restoreComposerEffort(sessionId, currentRuns, effort => supportedEffort(provider, current?.model || provider?.defaultModel, effort)); }, [sessionId, currentRuns, provider, current?.model]);
   const controlRuns = useMemo(() => currentRuns.filter(run => run.status === 'running' || run.status === 'queued' || run.status === 'error').sort((a, b) => Number(!!b.approvals?.length) - Number(!!a.approvals?.length)), [currentRuns]);
@@ -224,7 +239,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
   const disabled = !reachable || !current?.resumable || !provider?.available || !token || (host !== undefined && !host.canWork);
   const sendingLabel = stage === 'preparing' ? t("파일 준비 중") : t("보내는 중");
 
-  return <RemoteContent.Provider value={host?.name}><div className="chat-panel-spacer" aria-hidden="true" style={{ width: appearance.width, flexBasis: appearance.width }} /><aside className="chat-panel" style={{ '--chat-font-size': `${appearance.fontSize}px`, '--chat-width': `${appearance.width}px` } as CSSProperties} aria-label={t("세션 대화")}>
+  return <RemoteContent.Provider value={host?.name}><WorkspaceFilesContext.Provider value={files}><div className="chat-panel-spacer" aria-hidden="true" style={{ width: appearance.width, flexBasis: appearance.width }} /><aside className="chat-panel" style={{ '--chat-font-size': `${appearance.fontSize}px`, '--chat-width': `${appearance.width}px` } as CSSProperties} aria-label={t("세션 대화")}>
     <div className="chat-resize-handle" role="separator" tabIndex={0} aria-label={t("대화창 너비 조절")} aria-orientation="vertical" aria-valuemin={320} aria-valuemax={appearance.maxWidth} aria-valuenow={appearance.width}
       onPointerDown={appearance.startResize} onPointerMove={appearance.resize} onPointerUp={appearance.stopResize} onPointerCancel={appearance.stopResize} onLostPointerCapture={appearance.stopResize}
       onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); appearance.changeWidth(appearance.width + (event.key === 'ArrowLeft' ? 20 : -20)); } }} />
@@ -300,5 +315,5 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
       <p className="composer-note"><Terminal size={11} />{host ? t("{0}의 {1}에서 기존 대화를 이어갑니다.", { 0: host.name, 1: current ? providerLabels[current.provider] : t("에이전트") })
         : t("이 기기의 {0}에서 기존 대화를 이어갑니다.", { 0: current ? providerLabels[current.provider] : t("에이전트") })}</p>
     </div></SecretComposerProvider>
-  </aside></RemoteContent.Provider>;
+  </aside></WorkspaceFilesContext.Provider></RemoteContent.Provider>;
 }

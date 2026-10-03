@@ -169,3 +169,11 @@ test('existing files changed while staging retain external changes', async t => 
   assert.equal(await readFile(join(cwd, 'original'), 'utf8'), 'external update');
   assert.deepEqual(await readdir(cwd), ['original']);
 });
+
+test('a folder named as a file is refused as not a text file, and names with spaces and Hangul read as written', async t => {
+  const { cwd, snapshot } = await fixture(t);
+  await mkdir(join(cwd, '영상 대본'));
+  await writeFile(join(cwd, '영상 대본', '연출 대본.md'), '# 대본\n');
+  await assert.rejects(readWorkspaceFile(cwd, '영상 대본', snapshot), { kind: 'invalid', message: 'Only regular text files can be opened.' });
+  assert.equal((await readWorkspaceFile(cwd, '영상 대본/연출 대본.md', snapshot)).content, '# 대본\n');
+});

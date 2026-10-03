@@ -353,6 +353,26 @@
 .markdown a:hover {
   color:#c1d7f7
 }
+/* A file path that opens in the workspace editor reads like a link inside the text it belongs to. */
+.markdown .markdown-path-link {
+  display:inline;
+  padding:0;
+  border:0;
+  background:none;
+  font:inherit;
+  text-align:inherit;
+  overflow-wrap:anywhere;
+  cursor:pointer;
+  color:#97baf0;
+  text-decoration:underline dotted #587aad;
+  text-underline-offset:3px
+}
+.markdown .markdown-path-link:hover {
+  color:#c1d7f7
+}
+.markdown .markdown-path-link code {
+  color:inherit
+}
 .markdown code {
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   font-size:.91em;
