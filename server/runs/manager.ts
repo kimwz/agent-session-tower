@@ -32,6 +32,8 @@ import { OwnerAnswers } from './owner-answers.js';
 import { MAX_INSTRUCTIONS, TurnNotes } from './turn-notes.js';
 import { sessionEnv, turnEnv, type LaunchMarks } from './turn-env.js';
 import { ToolNotices } from './tool-notices.js';
+import { errorMessage, FINISHED, finishedTime, notAdmitted, RunError, shown } from './run-records.js';
+import { PermissionContinuations, restorePermissionRun, retainedReceipts } from './permission-continuation.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -116,8 +118,6 @@ export interface RunAdmission {
 const MAX_OUTPUT = 64_000;
 /** Marks, in runs.json, a turn still to run whose instructions (kept only in memory) it cannot go without. */
 const NEEDS_INSTRUCTIONS = 'needsInstructions';
-/** A run as anything outside the worker sees it: without its hidden instructions. */
-function shown(run: Run): Run { const { instructions: _hidden, ...rest } = run; return { ...rest }; }
 type SteerableAdapter = CodexStdioRun | CodexBridgeRun | ClaudeControl;
 /** What the page shows about inserting a queued instruction now: the button, or why not. */
 function steerable(steering: { target: Run } | { blocked: SteerBlock } | undefined): Pick<Run, 'canSteer' | 'steerBlocked'> {
@@ -162,7 +162,6 @@ interface UpdateTarget { delegated: boolean; retryAt: number;
 /** `active` while new turns wait; after a give-up, turns already stopped or asked to wrap up are still settled. */
 interface UpdateDrain { sequence: number; startedAt: number; deadline: number; delegated: (run: Run) => boolean; active: boolean; targets: Map<string, UpdateTarget>; stoppingBridges: Set<string>; wrapUps: Set<string> }
 const MAX_QUEUED = 32;
-const FINISHED = new Set<Run['status']>(['completed', 'error', 'cancelled']);
 /** A scheduled continuation Tower was not running for is still delivered this long after its time. */
 const SCHEDULE_GRACE_MS = 60 * 60 * 1000;
 const BACKGROUND_FOLLOW_UP_MS = 60_000;
@@ -173,16 +172,9 @@ function backgroundNotice(finished: readonly FinishedTask[]): string {
   return `${TOWER_NOTICE} Background work you started in this conversation has finished${lines.length ? `:\n${lines.join('\n')}` : '.'}\n`
     + 'Continue with what you planned to do once it finished, and report the result.';
 }
-/** When a run finished, for keeping the most recently finished ones. */
-const finishedTime = (run: Run) => Date.parse(run.finishedAt ?? run.createdAt) || 0;
 const due = (run: Run, now = Date.now()) => !run.scheduled || Date.parse(run.scheduled.at) <= now;
 
-export class RunError extends Error {
-  /** Nothing was accepted and the same request may succeed a little later (a full queue, a save that failed). */
-  retryable?: boolean;
-  constructor(message: string, public readonly statusCode = 400) { super(message); }
-}
-function notAdmitted(error: RunError): RunError { error.retryable = true; return error; }
+export { RunError };
 
 /** Owns only processes launched by this monitor; never signals an external agent. */
 export class RunManager extends EventEmitter {
@@ -256,34 +248,7 @@ export class RunManager extends EventEmitter {
   private async prepareLaunch(run: Run): Promise<void> {
     // A look that fails leaves the gate with what it knows; a folder it cannot tell about counts as private.
     if (run.status === 'queued') await this.launchPrepare?.(run).catch(() => {});
-    if (run.status === 'queued' && run.permissionRequestIds?.length && run.scheduled) await this.checkPermissionUserMessage(run);
-  }
-
-  private permissionGoalFinished(target: Run | undefined): boolean {
-    if (!target || target.status !== 'completed' || !target.finishedAt) return false;
-    const session = this.getSession(target.sessionId);
-    return session?.outcome === 'done' && !!session.lastRequestAt
-      && Date.parse(session.lastRequestAt) >= Date.parse(target.startedAt ?? target.createdAt)
-      && Date.parse(session.lastRequestAt) <= Date.parse(target.finishedAt) && Date.parse(session.updatedAt) >= Date.parse(target.finishedAt);
-  }
-
-  private async checkPermissionUserMessage(run: Run): Promise<void> {
-    const observed = this.getSession(run.sessionId)?.lastRequestAt;
-    let latest: { text: string; timestamp: string } | undefined;
-    try { latest = await this.options.latestUserMessage?.(run.sessionId); }
-    catch { if (run.status === 'queued') this.supersede(run, 'The latest native user instruction could not be verified.'); return; }
-    if (run.status !== 'queued') return;
-    if (this.permissionGoalFinished(this.runs.get(run.scheduled!.afterRunId))) {
-      this.supersede(run, 'The requesting turn already completed the task.'); return;
-    }
-    const recorded = this.getSession(run.sessionId)?.lastRequestAt ?? observed;
-    const newest = Math.max(Date.parse(recorded ?? '') || 0, Date.parse(latest?.timestamp ?? '') || 0);
-    if (newest <= Date.parse(run.permissionRequestedAt ?? run.createdAt)) return;
-    const ownNotice = latest && Date.parse(latest.timestamp) === newest && [...this.runs.values()].some(notice =>
-      notice.sessionId === run.sessionId && notice.steering?.state === 'delivered' && notice.steering.targetRunId === run.scheduled!.afterRunId
-      && (notice.permissionNotice?.targetRunId === run.scheduled!.afterRunId || notice.updateWrapUp)
-      && notice.prompt === latest.text);
-    if (!ownNotice) this.supersede(run, 'A newer native user instruction replaced the permission continuation, or its source could not be confirmed.');
+    await this.permissions.verifyBeforeLaunch(run);
   }
 
   /** Checked again at the last moment before a provider is started, after every asynchronous step. */
@@ -323,6 +288,16 @@ export class RunManager extends EventEmitter {
   private runTools(run: Run, session: Session): RunTools {
     return this.options.resolveRunTools?.(run, session) ?? NO_RUN_TOOLS;
   }
+
+  private readonly permissions = new PermissionContinuations({
+    runs: this.runs, events: this, getSession: id => this.getSession(id), supersede: (run, reason) => this.supersede(run, reason),
+    steer: (runId, options) => this.steer(runId, options), changed: () => this.changed(), flush: () => this.flush(), pump: () => { void this.pump(); },
+    stopping: () => this.stopping, admit: id => { this.admissions.add(id); }, unadmit: id => { this.admissions.delete(id); },
+    latestUserMessage: id => this.options.latestUserMessage?.(id), shown,
+  });
+
+  /** Records the owner's decision about an agent's permission request (see permission-continuation.ts). */
+  permissionDecision(request: PermissionRequest, prompt: string, options: { closed?: boolean } = {}): Promise<Run> { return this.permissions.decide(request, prompt, options); }
 
   private readonly toolNotices = new ToolNotices({
     runs: () => this.runs.values(), run: id => this.runs.get(id), getSession: id => this.getSession(id), runTools: (run, session) => this.runTools(run, session),
@@ -428,8 +403,7 @@ export class RunManager extends EventEmitter {
           run.status = 'cancelled';
           run.error = 'Agent Session Tower restarted before this continuation, and it would have run without the instructions Tower gave its turn. It was not started; send an instruction to continue.';
           run.finishedAt = new Date().toISOString();
-        } else if (run.status === 'queued' && run.permissionNotice) { run.status = 'cancelled'; run.finishedAt = new Date().toISOString(); run.error = 'Turn-only permission notice was not resent after restart.'; }
-        else if (run.status === 'queued' && run.scheduled?.resume === 'permission') run.output = 'Waiting for the requesting turn to finish before permission continuation.';
+        } else if (restorePermissionRun(run)) { /* A permission notice or continuation (see permission-continuation.ts). */ }
         else if (run.status === 'queued' && run.scheduled?.resume === 'update') run.output = UPDATE_RESUME_WAIT;
         else if (run.status === 'queued' && run.scheduled && Date.parse(run.scheduled.at) > Date.now() - SCHEDULE_GRACE_MS) run.output = scheduledOutput;
         // Accepted while Tower switched to its new version: it runs here, exactly once.
@@ -484,9 +458,7 @@ export class RunManager extends EventEmitter {
   private retainedIds(): Set<string> {
     const ids = [...new Set([...this.restoredRetained, ...this.retained()])].map(id => this.runs.get(id)).filter((run): run is Run => !!run)
       .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, MAX_RETAINED).map(run => run.id);
-    const receipts = [...this.runs.values()].filter(run => run.permissionRequestIds?.length);
-    const keptReceipts = [...receipts.filter(run => !FINISHED.has(run.status)), ...receipts.filter(run => FINISHED.has(run.status)).sort((a, b) => finishedTime(b) - finishedTime(a)).slice(0, 200)];
-    return new Set([...ids, ...keptReceipts.flatMap(run => [run.id, ...(run.scheduled ? [run.scheduled.afterRunId] : [])])]);
+    return new Set([...ids, ...retainedReceipts(this.runs.values())]);
   }
 
   list(): Run[] { return [...this.runs.values()].map((run) => ({ ...shown(run), ...steerable(this.steering(run)), ...(run.steering ? { steering: { ...run.steering } } : {}), ...(run.attachments ? { attachments: run.attachments.map(item => ({ ...item })) } : {}),
@@ -697,7 +669,7 @@ export class RunManager extends EventEmitter {
    * said when no turn runs there or the instruction is not one the owner could insert (scheduled, being admitted).
    */
   private steering(run: Run): { target: Run; adapter: SteerableAdapter } | { blocked: SteerBlock } | undefined {
-    if (run.permissionNotice && run.permissionNotice.targetRunId !== [...this.runs.values()].find(item => item.sessionId === run.sessionId && item.status === 'running' && !item.steering)?.id) return undefined;
+    if (this.permissions.noticeBlocked(run)) return undefined;
     if (this.stopping || run.status !== 'queued' || run.steering || run.scheduled || this.admissions.has(run.id) || this.bridged.has(run.id)) return undefined;
     const target = [...this.runs.values()].find(item => item.sessionId === run.sessionId && item.status === 'running' && !item.steering);
     if (!target) return undefined;
@@ -710,82 +682,6 @@ export class RunManager extends EventEmitter {
     if (!sameOrigin(run.origin, target.origin)) return { blocked: 'origin' };
     const adapter = this.stdio.get(target.id) ?? this.bridged.get(target.id) ?? this.owned.get(target.id)?.claude;
     return adapter?.canSteer?.() && adapter.steer ? { target, adapter } : { blocked: 'starting' };
-  }
-
-  private readonly permissionDeliveries = new Map<string, Promise<Run>>();
-
-  permissionDecision(request: PermissionRequest, prompt: string, options: { closed?: boolean } = {}): Promise<Run> {
-    const pending = this.permissionDeliveries.get(request.id);
-    if (pending) return pending;
-    const delivery = this.recordPermissionDecision(request, prompt, options);
-    this.permissionDeliveries.set(request.id, delivery);
-    void delivery.finally(() => this.permissionDeliveries.delete(request.id)).catch(() => {});
-    return delivery;
-  }
-
-  /** Records a permission decision once; approval needs a fresh provider turn, never an insert. */
-  private async recordPermissionDecision(request: PermissionRequest, prompt: string, options: { closed?: boolean } = {}): Promise<Run> {
-    const existing = [...this.runs.values()].find(run => run.permissionRequestIds?.includes(request.id));
-    const revision = `${request.status}:${request.decidedAt ?? request.createdAt}`;
-    const reopenedDecision = existing?.error && existing.permissionDecisionRevisions?.[request.id]?.startsWith('withdrawn:')
-      && request.status !== 'withdrawn' && request.status !== 'pending' && existing.permissionDecisionRevisions[request.id] !== revision;
-    if (existing && !reopenedDecision) { await this.flush(); if (!existing.scheduled && existing.error) throw new RunError(existing.error, 409); return shown(existing); }
-    let target = request.runId ? this.runs.get(request.runId) : undefined;
-    const visited = new Set<string>();
-    while (target?.steering && !visited.has(target.id)) { visited.add(target.id); target = this.runs.get(target.steering.targetRunId); }
-    if (!target || target.sessionId !== request.sessionId) throw new RunError('The requesting turn can no longer be reached.', 409);
-    const now = new Date().toISOString();
-    const approved = request.status === 'approved' && request.rule.kind !== 'run';
-    const updateResume = [...this.runs.values()].find(run => run.status === 'queued' && run.sessionId === target!.sessionId && run.scheduled?.afterRunId === target!.id && run.scheduled.resume === 'update');
-    const session = this.getSession(target.sessionId);
-    // A latest native outcome is usable only when its user message falls inside this exact provider turn.
-    const finishedTask = this.permissionGoalFinished(target);
-    const superseded = [...this.runs.values()].some(run => run.sessionId === target!.sessionId && !run.permissionNotice && !run.permissionRequestIds?.length
-      && !run.steering && run.id !== target!.id && Date.parse(run.createdAt) > Date.parse(request.createdAt) && run.origin?.kind === 'owner');
-    const stopped = options.closed || session?.closed || finishedTask || superseded || target.ownerStopped
-      || (target.status === 'cancelled' && !updateResume) || target.status === 'error';
-    const merge = approved && !stopped ? [...this.runs.values()].find(run => run.status === 'queued' && run.sessionId === target!.sessionId && run.scheduled?.afterRunId === target!.id && (run.scheduled.resume === 'permission' || run.scheduled.resume === 'update')) : undefined;
-    const continuation: Run = merge ?? { id: request.id, sessionId: target.sessionId, origin: target.origin ?? { kind: 'unknown' },
-      prompt: `${TOWER_NOTICE} ${prompt.replace(/the next provider turn/g, 'this provider turn')}\nFirst inspect the conversation, existing artifacts and task results. Continue only unfinished work; do not repeat completed actions.`,
-      status: approved && !stopped ? 'queued' : 'cancelled', createdAt: now, output: 'Permission decision recorded.',
-      ...(approved && !stopped ? { scheduled: { at: now, afterRunId: target.id, resume: 'permission' as const } } : { finishedAt: now }),
-      ...(target.delegation ? { delegation: { ...target.delegation } } : {}), ...(target.instructions?.required ? { instructions: { ...target.instructions } } : {}),
-      ...(target.codexApprovalsReviewer ? { codexApprovalsReviewer: target.codexApprovalsReviewer } : {}),
-      ...(target.unattended ? { unattended: true } : {}), ...(target.model ? { model: target.model } : {}), ...(target.effort ? { effort: target.effort } : {}) };
-    if (!approved) continuation.error = 'Permission decision notice could not be delivered to its requesting turn.';
-    continuation.permissionRequestedAt = !continuation.permissionRequestedAt || Date.parse(request.createdAt) < Date.parse(continuation.permissionRequestedAt)
-      ? request.createdAt : continuation.permissionRequestedAt;
-    continuation.permissionDecisionRevisions = { ...(continuation.permissionDecisionRevisions ?? {}), [request.id]: revision };
-    continuation.permissionRequestIds = [...(continuation.permissionRequestIds ?? []), request.id];
-    if (merge) continuation.prompt += `\n${prompt.replace(/the next provider turn/g, 'this provider turn')}`;
-    this.runs.set(continuation.id, continuation);
-    this.changed(); await this.flush();
-    // Check the native owner record before our notice can become its latest user message.
-    if (approved && continuation.status === 'queued') { await this.checkPermissionUserMessage(continuation); await this.flush(); }
-    // Persisted intent precedes any notice. A failed/uncertain insert never becomes a separate native turn.
-    if (!stopped && target.status === 'running' && !this.stopping && (!approved || continuation.status === 'queued')) {
-      const notice: Run = { id: randomUUID(), sessionId: target.sessionId, origin: target.origin ?? { kind: 'unknown' },
-        prompt: `${TOWER_NOTICE} [Permission decision ${request.id}] ${approved ? 'The permission rule was approved and applies from the next provider turn. Bring the current step to a safe stopping point and end this turn normally. Tower will resume unfinished work in a fresh turn; do not repeat completed actions.' : prompt}`,
-        status: 'queued', createdAt: now, output: '', permissionNotice: { targetRunId: target.id } };
-      this.runs.set(notice.id, notice); this.admissions.add(notice.id); this.changed(); await this.flush(); this.admissions.delete(notice.id);
-      try {
-        await this.steer(notice.id, { targetRunId: target.id });
-        if (!approved && notice.steering?.state === 'sending') await new Promise<void>((resolve, reject) => {
-          const finish = (delivered: boolean) => { clearTimeout(timer); this.off('change', check); if (delivered) resolve(); else reject(new Error('Permission decision notice delivery could not be confirmed.')); };
-          const check = () => {
-            if (notice.steering?.state === 'sending' && target.status === 'running' && !this.stopping) return;
-            finish(notice.steering?.state === 'delivered');
-          };
-          const timer = setTimeout(() => finish(false), 30_000); timer.unref();
-          this.on('change', check); check();
-        });
-        if (!approved && notice.steering?.state === 'delivered') { delete continuation.error; this.changed(); await this.flush(); }
-      }
-      catch { if (notice.status === 'queued') { notice.status = 'cancelled'; notice.finishedAt = new Date().toISOString(); this.changed(); await this.flush(); } }
-    }
-    if (!approved && continuation.error) throw new RunError(continuation.error, 409);
-    void this.pump();
-    return shown(continuation);
   }
 
   /** `targetRunId` inserts only into that turn: a decision made about one turn never lands in the next. */
@@ -975,11 +871,7 @@ export class RunManager extends EventEmitter {
         // explicitly configure a worker limit impose a global queue.
         if (this.options.maxConcurrent !== undefined && this.owned.size + this.bridged.size + this.stdio.size >= this.options.maxConcurrent) break;
         if (run.status !== 'queued' || this.admissions.has(run.id) || !due(run) || run.permissionNotice) continue;
-        if (run.scheduled?.resume === 'permission') {
-          const parent = this.runs.get(run.scheduled.afterRunId);
-          if (!parent || parent.status === 'error' || parent.status === 'cancelled') { this.supersede(run, 'The requesting turn did not finish normally.'); continue; }
-          if (parent.status !== 'completed') continue;
-        }
+        if (!this.permissions.launchable(run)) continue;
         // Someone continued the conversation outside Tower after the agent scheduled this.
         // Tower's continuation after an update follows its own wrap-up message, which counts as a request.
         const requested = run.scheduled && run.scheduled.resume !== 'update' && run.scheduled.resume !== 'permission' && this.getSession(run.sessionId)?.lastRequestAt;
@@ -1719,10 +1611,7 @@ export class RunManager extends EventEmitter {
     if (target.delegated || this.ownerStopped.has(run.id)) return;
     // A stop the deadline asked for counts only once confirmed ('cancelled'): an unconfirmed one may still be running there.
     if (!((target.stopping && run.status === 'cancelled') || (run.status === 'completed' && target.reached))) return;
-    const permission = [...this.runs.values()].find(other => other.status === 'queued' && other.scheduled?.afterRunId === run.id && other.scheduled.resume === 'permission');
-    if (permission) {
-      permission.scheduled!.resume = 'update'; permission.prompt = `${RESUME_NOTICE}\n\n${permission.prompt}`; permission.output = UPDATE_RESUME_WAIT; return;
-    }
+    if (this.permissions.mergeIntoUpdate(run, RESUME_NOTICE, UPDATE_RESUME_WAIT)) return;
     for (const other of [...this.runs.values()]) {
       if (other.status === 'queued' && other.scheduled?.afterRunId === run.id && other.scheduled.resume !== 'update') this.runs.delete(other.id);
     }
@@ -1806,10 +1695,7 @@ export class RunManager extends EventEmitter {
       }
     }
     this.trackUpdateTargets();
-    for (const run of this.runs.values()) if (run.status === 'queued' && run.permissionRequestIds?.length && run.scheduled) {
-      const parent = this.runs.get(run.scheduled.afterRunId);
-      if (parent && (parent.ownerStopped || parent.status === 'error' || (parent.status === 'cancelled' && run.scheduled.resume !== 'update'))) { run.status = 'cancelled'; run.finishedAt = new Date().toISOString(); run.error = 'The requesting turn stopped; permission continuation was not started.'; }
-    }
+    this.permissions.sweep();
     const retained = this.retainedIds();
     this.prune(retained);
     this.persist(retained); this.emit('change');
@@ -1898,5 +1784,4 @@ export class RunManager extends EventEmitter {
 }
 
 const scheduledOutput = 'Scheduled by the agent. Tower resumes this conversation at the scheduled time.';
-function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function automated(run: Run): boolean { return automatedOrigin(run.origin); }
