@@ -21,7 +21,7 @@ import type { SkillBackup } from '../backup/payload.js';
 interface Options { stateDir: string; workerEntry?: string; startupTimeoutMs?: number; pollMs?: number; version?: string;
   /** How long a handed-off worker's successor may stay silent before this web starts a worker itself. */
   successorTimeoutMs?: number;
-  /** While an update of this computer is being tried, the worker is not handed over to this web's build. */
+  /** While an update of this computer is being tried, the worker is not handed over to this web's build; rejects when that cannot be told. */
   handoffHeld?: () => Promise<boolean>;
   /** Meanwhile a worker that has to be started is the previous version's, from this entry point. */
   heldWorkerEntry?: () => Promise<string | undefined>;
@@ -76,7 +76,7 @@ export class DurableRunManager extends EventEmitter {
       void this.poll().finally(() => { this.polling = false; });
     }, this.options.pollMs ?? 1000);
     this.timer.unref();
-    if (await this.options.handoffHeld?.().catch(() => false)) this.handoffDue = true;
+    if ((await this.holdState()).held) this.handoffDue = true;
     else await this.requestHandoff().catch(() => {});
   }
 
@@ -126,7 +126,7 @@ export class DurableRunManager extends EventEmitter {
    * interrupted. False when the worker cannot hand over.
    */
   async restartWorker(): Promise<boolean> {
-    if (await this.options.handoffHeld?.().catch(() => false)) throw Object.assign(new Error('Tower is still verifying an update. Try again in a few minutes.'), { statusCode: 409 });
+    await this.refuseWhileHeld('Tower is still verifying an update. Try again in a few minutes.');
     // A worker newer than this build (left by an update that was undone) is never handed back to it.
     if (this.snapshot?.version && newerVersion(this.snapshot.version, this.options.version ?? APP_VERSION)) return false;
     // Only a worker of this same build waits patiently; an older one is replaced by the ordinary update handoff anyway.
@@ -143,7 +143,7 @@ export class DurableRunManager extends EventEmitter {
     if (!this.snapshot || !worker || worker === own || newerVersion(worker, own)) throw Object.assign(new Error('The execution worker already runs this version.'), { statusCode: 409 });
     if (!this.supports('forceUpdate')) throw Object.assign(new Error('This execution worker predates updating on request; it switches at its next quiet moment.'), { statusCode: 409 });
     // While a service update is still being verified, the web may yet go back to the version the worker runs.
-    if (await this.options.handoffHeld?.().catch(() => false)) throw Object.assign(new Error('Tower is still verifying this update. Try again in a few minutes.'), { statusCode: 409 });
+    await this.refuseWhileHeld('Tower is still verifying this update. Try again in a few minutes.');
     return await this.call('forceHandoff', [this.workerCommand(), { deadlineMs }]) as { deadline: string };
   }
 
@@ -170,9 +170,22 @@ export class DurableRunManager extends EventEmitter {
   }
 
   private async releaseHandoff(): Promise<void> {
-    if (!this.handoffDue || await this.options.handoffHeld?.().catch(() => false)) return;
+    if (!this.handoffDue || (await this.holdState()).held) return;
     this.handoffDue = false;
     await this.requestHandoff().catch(() => { this.handoffDue = true; });
+  }
+
+  /** Whether an update keeps the worker where it is. A hold that cannot be checked keeps it until it can. */
+  private async holdState(): Promise<{ held: boolean; error?: string }> {
+    try { return { held: Boolean(await this.options.handoffHeld?.()) }; }
+    catch (error) { return { held: true, error: error instanceof Error ? error.message : String(error) }; }
+  }
+
+  private async refuseWhileHeld(message: string): Promise<void> {
+    const { held, error } = await this.holdState();
+    if (!held) return;
+    throw Object.assign(new Error(error === undefined ? message
+      : `Tower could not check whether an update is being verified (${error}). The worker is not handed over until it can be checked; try again later.`), { statusCode: 409 });
   }
 
   private async handoffFrom(instance: string) {

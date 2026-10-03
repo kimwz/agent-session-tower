@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,6 +19,8 @@ import { until } from '../../helpers/until.ts';
 import { nativeHistory } from '../../../server/sessions/native-history.js';
 import { startLegacyRunner } from './fixtures/legacy-runner.ts';
 import { CapabilityRegistry } from '../../../server/api/mcp.js';
+import { handoffHeld, updatePaths } from '../../../server/link/update.js';
+import { runtimePaths } from '../../../server/link/service.js';
 
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'tower-durable-fixture-'));
@@ -513,6 +515,60 @@ test('while an update is verified, a restore or an update on request is refused 
     await assert.rejects(client.restartWorker(), { statusCode: 409, message: /still verifying/ });
     await assert.rejects(client.forceUpdate(), { statusCode: 409, message: /still verifying/ });
   } finally { await client.close(); }
+});
+
+test('a hold that cannot be checked keeps the worker until the check works again', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  let handoffs = 0;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => {} });
+  let unreadable = true;
+  const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: async () => { if (unreadable) throw new Error('ELOOP: too many symbolic links'); return false; } });
+  try {
+    await client.start();
+    // The worker looks at a handoff request once a second.
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    assert.equal(handoffs, 0, 'whether an update is still tried cannot be told, so the previous worker stays');
+    unreadable = false;
+    await until(() => handoffs === 1);
+  } finally { await client.close(); await host.close(); }
+});
+
+test('with a live helper and a hold unreadable past 15 minutes, automatic handoff, restore and update on request are all refused, across a web restart', async t => {
+  t.mock.method(console, 'error', () => {});
+  t.mock.method(console, 'log', () => {});
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  let handoffs = 0;
+  let successors = 0;
+  const run = await f.runs.enqueue(f.session.id, 'Keeps running while the hold cannot be read');
+  await until(() => f.starts() === 1);
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => { successors++; } });
+  const { hold, lock } = updatePaths(f.stateDir);
+  await mkdir(runtimePaths(f.stateDir).root, { recursive: true });
+  await symlink(hold, hold);
+  await writeFile(lock, String(process.pid));
+  const web = () => new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: () => handoffHeld(f.stateDir, Date.now() + 16 * 60_000) });
+  let client = web();
+  try {
+    await client.start();
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    assert.equal(handoffs, 0);
+    await assert.rejects(client.restartWorker(), { statusCode: 409, message: /could not check/ });
+    await assert.rejects(client.forceUpdate(), { statusCode: 409, message: /could not check/ });
+    await client.close();
+    client = web();
+    await client.start();
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    assert.equal(handoffs, 0, 'a new web attached meanwhile does not take the worker either');
+    assert.equal(successors, 0);
+    assert.equal(f.cancels(), 0, 'the running turn is untouched');
+    assert.equal(f.runs.list().find(item => item.id === run.id)?.status, 'running');
+    await rm(hold);
+    await rm(lock);
+    f.finish();
+    await until(() => handoffs === 1);
+  } finally { await client.close(); await host.close(); }
 });
 
 test('a worker newer than this web, left by an update that was undone, is not handed back to it', async t => {
