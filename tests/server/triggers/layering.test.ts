@@ -32,8 +32,9 @@ type Held = 'ledger' | 'copy' | 'entry';
  * The ledger is found by its declaration (`onceConsumed` in `interface EngineState`), through `.onceConsumed`, a
  * string-literal bracket, or a computed key whose type is the literal `'onceConsumed'` (also through type aliases and
  * mapped types such as Pick). An entry is an element of the ledger or of a spread copy of it (`{ ...ledger }` is a new
- * record, but its entries are still the ledger's). Entries and copies bound to local names are followed within the
- * file; the ledger itself bound to a name is reported (`alias`).
+ * record, but its entries are still the ledger's). A value carries every kind it may hold through ?:, ||, && and ??,
+ * and so does a local name it is bound to (followed within the file); a use is allowed only if every kind allows it.
+ * A name that may hold the ledger itself is reported (`alias`), and writes through it are reported as well.
  *
  * Reported: assigning, updating or deleting the ledger or one of its slots, or a field of an entry (`write`);
  * destructuring the ledger out of a state, by declaration or into existing names (`destructure`); a state literal that
@@ -67,33 +68,40 @@ export function ledgerWrites(checker: ts.TypeChecker, file: ts.SourceFile): stri
   const updated = (node: ts.Node) => ts.isDeleteExpression(node.parent) || ((ts.isPrefixUnaryExpression(node.parent) || ts.isPostfixUnaryExpression(node.parent))
     && [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.parent.operator));
   const variable = (node: ts.Identifier) => ts.isShorthandPropertyAssignment(node.parent) && node.parent.name === node ? checker.getShorthandAssignmentValueSymbol(node.parent) : checker.getSymbolAtLocation(node);
-  /** Entries and copies bound to local names. */
-  const aliases = new Map<ts.Symbol, Held>();
-  const held = (raw: ts.Expression): Held | undefined => {
+  /**
+   * Every kind a value may hold, through every branch of ?:, ||, && and ??: an empty set is ordinary code. Kinds only
+   * ever grow, so a value that may be a copy or an entry is judged as both.
+   */
+  type Kinds = ReadonlySet<Held>;
+  const NONE: Kinds = new Set();
+  const union = (...sets: Kinds[]) => new Set(sets.flatMap(set => [...set])) as Kinds;
+  /** Names bound to the ledger, copies or entries, with every kind they may hold. */
+  const aliases = new Map<ts.Symbol, Kinds>();
+  const held = (raw: ts.Expression): Kinds => {
     const node = inner(raw);
-    const container = (expression: ts.Expression) => { const kind = held(expression); return kind === 'ledger' || kind === 'copy'; };
-    if (ts.isIdentifier(node)) { const symbol = variable(node); return symbol && aliases.get(symbol); }
+    // An element of the ledger or of a copy is an entry; an element of an entry is one of its plain fields.
+    const element = (expression: ts.Expression): Kinds => { const kinds = held(expression); return kinds.has('ledger') || kinds.has('copy') ? new Set(['entry']) : NONE; };
+    if (ts.isIdentifier(node)) { const symbol = variable(node); return (symbol && aliases.get(symbol)) ?? NONE; }
     if (ts.isPropertyAccessExpression(node)) {
-      if (node.name.text === 'onceConsumed' && ledgerOf(checker.getTypeAtLocation(node.expression))) return 'ledger';
-      return container(node.expression) ? 'entry' : undefined;
+      return union(node.name.text === 'onceConsumed' && ledgerOf(checker.getTypeAtLocation(node.expression)) ? new Set(['ledger']) : NONE, element(node.expression));
     }
     if (ts.isElementAccessExpression(node)) {
-      if (ledgerKey(node.argumentExpression) && ledgerOf(checker.getTypeAtLocation(node.expression))) return 'ledger';
-      return container(node.expression) ? 'entry' : undefined;
+      return union(ledgerKey(node.argumentExpression) && ledgerOf(checker.getTypeAtLocation(node.expression)) ? new Set(['ledger']) : NONE, element(node.expression));
     }
-    if (ts.isObjectLiteralExpression(node) && node.properties.some(property => ts.isSpreadAssignment(property) && container(property.expression))) return 'copy';
-    if (ts.isConditionalExpression(node)) return held(node.whenTrue) ?? held(node.whenFalse);
-    if (ts.isBinaryExpression(node) && [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.QuestionQuestionToken].includes(node.operatorToken.kind)) return held(node.left) ?? held(node.right);
-    return undefined;
+    if (ts.isObjectLiteralExpression(node) && node.properties.some(property => ts.isSpreadAssignment(property) && (held(property.expression).has('ledger') || held(property.expression).has('copy')))) return new Set(['copy']);
+    if (ts.isConditionalExpression(node)) return union(held(node.whenTrue), held(node.whenFalse));
+    if (ts.isBinaryExpression(node) && [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.QuestionQuestionToken].includes(node.operatorToken.kind)) return union(held(node.left), held(node.right));
+    return NONE;
   };
-  // Follow entries and copies into names until nothing new is bound (an entry outranks a copy, so this ends).
+  // Follow values into names until no name may hold anything new (three kinds at most, so this ends).
   for (let changed = true; changed;) {
     changed = false;
     const bind = (name: ts.Node, value: ts.Expression) => {
-      const kind = ts.isIdentifier(name) ? held(value) : undefined;
       const symbol = ts.isIdentifier(name) ? checker.getSymbolAtLocation(name) : undefined;
-      if (!symbol || (kind !== 'entry' && kind !== 'copy') || aliases.get(symbol) === kind || aliases.get(symbol) === 'entry') return;
-      aliases.set(symbol, kind); changed = true;
+      if (!symbol) return;
+      const before = aliases.get(symbol) ?? NONE;
+      const after = union(before, held(value));
+      if (after.size > before.size) { aliases.set(symbol, after); changed = true; }
     };
     const scan = (node: ts.Node): void => {
       if (ts.isVariableDeclaration(node) && node.initializer) bind(node.name, node.initializer);
@@ -102,29 +110,29 @@ export function ledgerWrites(checker: ts.TypeChecker, file: ts.SourceFile): stri
     };
     scan(file);
   }
-  /** Where a value holding the ledger, a copy or an entry is used. */
-  const use = (node: ts.Expression, kind: Held) => {
+  /** Where a value that may hold the ledger, a copy or an entry is used; a use is allowed only if every kind allows it. */
+  const use = (node: ts.Expression, kinds: Kinds) => {
     const top = outer(node);
     const parent = top.parent;
-    // An element or field of it: an element is checked as its own value; a field of an entry must not be written.
+    // An element or field written: only a slot of a copy may be, so every kind must be a copy.
     if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === top) {
-      if (kind === 'entry' && (assigned(outer(parent)) || updated(outer(parent)))) report('write', parent);
+      if ((assigned(outer(parent)) || updated(outer(parent))) && [...kinds].some(kind => kind !== 'copy')) report('write', parent);
       return;
     }
     if (assigned(top) || updated(top)) {
       const slot = inner(top as ts.Expression);
-      // A name bound again, or a slot of a copy, is not the ledger; the ledger or one of its slots is.
+      // A name bound again is not the value; an element or field written is judged by what holds it (above).
       if (ts.isIdentifier(slot)) return;
-      if (kind === 'entry' && (ts.isElementAccessExpression(slot) || ts.isPropertyAccessExpression(slot)) && held(slot.expression) === 'copy') return;
+      if ((ts.isElementAccessExpression(slot) || ts.isPropertyAccessExpression(slot)) && held(slot.expression).size) return;
       report('write', top);
       return;
     }
-    // Bound to a name: entries and copies are followed; the ledger is not handed on under another name.
+    // Bound to a name: followed; a name that may hold the ledger itself is reported as well.
     const binding = ts.isVariableDeclaration(parent) && parent.initializer === top ? parent.name
       : ts.isBinaryExpression(parent) && parent.right === top && assigning(parent.operatorToken.kind) ? inner(parent.left) : undefined;
     if (binding) {
       if (!ts.isIdentifier(binding)) report(ts.isObjectBindingPattern(binding) || ts.isArrayBindingPattern(binding) || ts.isObjectLiteralExpression(binding) || ts.isArrayLiteralExpression(binding) ? 'destructure' : 'escape', top);
-      else if (kind === 'ledger') report('alias', top);
+      else if (kinds.has('ledger')) report('alias', top);
       return;
     }
     // Copied by spread: a copy of the ledger or a copy is a new copy, checked as its own value; a copy of an entry is free.
@@ -140,7 +148,7 @@ export function ledgerWrites(checker: ts.TypeChecker, file: ts.SourceFile): stri
     // An operand of ?:, ||, && or ?? holds what its expression holds, which is checked as its own value.
     if (ts.isConditionalExpression(parent) || (ts.isBinaryExpression(parent) && [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.QuestionQuestionToken].includes(parent.operatorToken.kind))) return;
     if (ts.isCallExpression(parent) && parent.arguments.includes(top as ts.Expression)) {
-      if (kind !== 'entry' && parent.expression.getText(file) === 'Object.keys') return;
+      if (!kinds.has('entry') && parent.expression.getText(file) === 'Object.keys') return;
       // The owner of the ledger may be handed it.
       if (checker.getResolvedSignature(parent)?.getDeclaration()?.getSourceFile().fileName.endsWith(`${TRIGGERS}/once.ts`)) return;
     }
@@ -157,8 +165,8 @@ export function ledgerWrites(checker: ts.TypeChecker, file: ts.SourceFile): stri
     || ts.isFunctionDeclaration(node.parent) || ts.isPropertyDeclaration(node.parent)) && (node.parent as { name?: ts.Node }).name === node;
   const visit = (node: ts.Node): void => {
     if (ts.isExpression(node) && !wrapper(node) && !(ts.isIdentifier(node) && (named(node) || (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)))) {
-      const kind = held(node);
-      if (kind) use(node, kind);
+      const kinds = held(node);
+      if (kinds.size) use(node, kinds);
     }
     // The ledger destructured out of a state: by declaration, or into existing names.
     if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent) && ledgerKey(node.propertyName ?? node.name as ts.Identifier) && ledgerOf(checker.getTypeAtLocation(node.parent))) report('destructure', node);
@@ -240,7 +248,7 @@ const listed = Object.keys(state['onceConsumed']);
 delete state['onceConsumed']['h'];
 `;
   assert.deepEqual(fixtureWrites(source), [
-    "write state['onceConsumed']['a']", "alias state['onceConsumed']", 'destructure onceConsumed', 'destructure onceConsumed: renamed', "write aliased.onceConsumed['c']",
+    "write state['onceConsumed']['a']", "alias state['onceConsumed']", "write viaBracket['b']", 'destructure onceConsumed', 'destructure onceConsumed: renamed', "write aliased.onceConsumed['c']",
     "write picked.onceConsumed['d']", "write state.onceConsumed['e'].at", 'literal onceConsumed: {}', "write (state.onceConsumed!)['g']", "write state['onceConsumed']['h']",
   ]);
 });
@@ -277,6 +285,28 @@ const listed = Object.keys(copy);
     'write entry.at', 'destructure onceConsumed: ledger', 'write state[key][id]', 'write again.eventId', 'escape state.onceConsumed[id]', 'escape state.onceConsumed[id]',
     'escape state.onceConsumed', 'write copy[id].at',
   ]);
+});
+
+test('a value that may be a copy or an entry (or the ledger) is judged by every kind it may hold', () => {
+  const source = `
+interface EngineState { onceConsumed: Record<string, { at: string; eventId?: string }>; triggers: unknown[] }
+declare const state: EngineState;
+declare const id: string;
+declare const condition: boolean;
+const mixed = condition ? { ...state.onceConsumed } : state.onceConsumed[id];
+mixed.at = '';
+const either = { ...state.onceConsumed } ?? state.onceConsumed[id];
+either.at = '';
+const or = { ...state.onceConsumed } || state.onceConsumed[id];
+or.at = '';
+const and = (condition && { ...state.onceConsumed }) || state.onceConsumed[id];
+and.at = '';
+const slots = condition ? { ...state.onceConsumed } : state.onceConsumed;
+slots[id] = { at: '' };
+const copies = condition ? { ...state.onceConsumed } : { ...state.onceConsumed };
+copies[id] = { at: '' };
+`;
+  assert.deepEqual(fixtureWrites(source), ['write mixed.at', 'write either.at', 'write or.at', 'write and.at', 'alias condition ? { ...state.onceConsumed } : state.onceConsumed', 'write slots[id]']);
 });
 
 test('in state.ts only the empty() literal may set the ledger, and only to {}', () => {
