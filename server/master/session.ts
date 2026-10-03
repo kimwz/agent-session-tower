@@ -3,8 +3,8 @@ import { continuedRunById } from '../runs/continuations.js';
 import { join } from 'node:path';
 import { MASTER_FOLDER, type MasterBinding, type MasterSpeak, type MasterTaskState, type MasterUnspoken } from '../../shared/master.js';
 import type { AutoPromptJob, ChatMessage, Provider, Run, RunReply, SessionDetail, SessionOutcome, Snapshot } from '../../shared/types.js';
-import type { MasterEntryData } from '../../shared/master.js';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import type { MasterEntryData, MasterFollowState } from '../../shared/master.js';
+import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { ApiTarget } from '../tower-tools/api-target.js';
 import { REPORT_MARK, VOICE_MARK, writeMasterGuide } from './guide.js';
 import type { LiveState } from '../tower-tools/live-state.js';
@@ -127,6 +127,9 @@ export class MasterSession {
   readonly folder: string;
   private file: FollowFile = { version: 1, baselineAt: new Date().toISOString(), masterRuns: [], followed: [] };
   private readonly path: string;
+  /** Off while the follow file could not be read or moved aside: it is never written over. */
+  private persist = true;
+  private problem?: MasterFollowState;
   private voice?: VoiceSide;
   private timer?: ReturnType<typeof setInterval>;
   private following?: Promise<void>;
@@ -144,8 +147,8 @@ export class MasterSession {
   }
 
   async start(): Promise<void> {
-    const saved = await readPrivateJson(this.path).catch(() => undefined) as Partial<FollowFile> | undefined;
-    if (saved?.version === 1 && Array.isArray(saved.followed) && Array.isArray(saved.masterRuns) && typeof saved.baselineAt === 'string') {
+    const saved = await this.read();
+    if (saved) {
       this.file = { version: 1, baselineAt: saved.baselineAt, masterRuns: saved.masterRuns.filter(id => typeof id === 'string'), followed: saved.followed.filter(item => item && typeof item.id === 'string'),
         ...(typeof saved.stoppedAt === 'string' ? { stoppedAt: saved.stoppedAt } : {}),
         voiced: (Array.isArray(saved.voiced) ? saved.voiced : []).filter(item => item && typeof item.turn === 'string')
@@ -230,6 +233,38 @@ export class MasterSession {
   /** Work handed out and not reported yet. */
   activeTasks(): number { return this.file.followed.filter(item => item.kind === 'delegated' && (item.state === 'running' || (item.report !== undefined && item.report !== 'sent' && item.report !== 'failed'))).length; }
   /** Reports Tower kept refusing, which the master never got. */
+  /** Why followed work may be missing: the file was moved aside, or it could not be read or moved and nothing is saved. */
+  stateProblem(): MasterFollowState | undefined { return this.problem; }
+
+  /**
+   * The saved follow file. A file that cannot be parsed or has the wrong shape is moved aside and the master starts
+   * fresh; one that cannot be read, or moved, is left as it is and nothing is saved over it until a restart.
+   */
+  private async read(): Promise<FollowFile | undefined> {
+    let saved: unknown;
+    try { saved = await readPrivateJson(this.path); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      if (!(error instanceof SyntaxError)) { this.keep(error); return undefined; }
+      await this.setAside(error);
+      return undefined;
+    }
+    const file = saved as Partial<FollowFile> | null;
+    if (file?.version === 1 && Array.isArray(file.followed) && Array.isArray(file.masterRuns) && typeof file.baselineAt === 'string') return file as FollowFile;
+    await this.setAside(new Error('Saved master follow state is invalid.'));
+    return undefined;
+  }
+  private async setAside(error: unknown): Promise<void> {
+    console.error('The master\'s follow state could not be read and was moved aside:', error);
+    try { await quarantineFile(this.path); this.problem = 'moved-aside'; }
+    catch (moveError) { this.keep(moveError); }
+  }
+  private keep(error: unknown): void {
+    this.persist = false;
+    this.problem = 'not-saved';
+    console.error('The master\'s follow state could not be read or moved aside; nothing is saved until Tower restarts:', error);
+  }
+
   failedReports(): number { return this.file.followed.filter(item => item.kind === 'delegated' && item.report === 'failed').length; }
 
   /** A report is on its way: a host of another build waits until it is sent. */
@@ -684,6 +719,7 @@ export class MasterSession {
   }
 
   private save(): Promise<void> {
+    if (!this.persist) return Promise.resolve();
     const text = JSON.stringify(this.file);
     const next = this.writes.then(() => writePrivateJson(this.path, text));
     this.writes = next.catch(() => {});

@@ -46,6 +46,7 @@ export interface MasterSettings {
 }
 export const DEFAULT_MASTER_SETTINGS: MasterSettings = { voice: DEFAULT_MASTER_VOICE };
 
+export type MasterFollowState = 'moved-aside' | 'not-saved';
 export interface MasterOverview {
   available: true;
   version: string;
@@ -59,6 +60,8 @@ export interface MasterOverview {
   activeTasks: number;
   /** Reports of finished work Tower could not give the master session, after trying for a while. */
   failedReports?: number;
+  /** The followed work saved for the master could not be read: moved aside, or left as it is and not saved. Absent from older hosts. */
+  followState?: MasterFollowState;
   voice?: MasterVoiceStatus;
 }
 

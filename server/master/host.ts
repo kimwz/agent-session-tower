@@ -79,6 +79,7 @@ export async function startMasterHost(options: MasterHostOptions) {
       voiceConfigured, ...(voiceConfigured ? { voiceKeyHint: settings.voiceKeyHint() } : {}),
       activeTasks: session?.activeTasks() ?? 0,
       ...(session?.failedReports() ? { failedReports: session.failedReports() } : {}),
+      ...(session?.stateProblem() ? { followState: session.stateProblem() } : {}),
       ...(voice ? { voice: voice.status() } : {}),
     };
   };
