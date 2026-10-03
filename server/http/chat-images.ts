@@ -71,6 +71,20 @@ export async function readChatImage(session: Session, path: string): Promise<{ c
     } finally { await file.close(); }
   } catch { throw missing(); }
 }
+/** A link to a chat image (this computer's or a joined one's), exactly as Tower issues it: nothing else, no query. */
+export const isChatImageLink = (url: string) => /^\/api\/(?:nodes\/[a-f0-9]{32}\/)?chat-images\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(url);
+/**
+ * Answers a top-level navigation to an image link that came from another site (a link in another app or page, or back
+ * from a login such as Cloudflare Access). That load carries no Tower session (SameSite=Strict), so this page only opens
+ * the same link again from Tower itself, and that request passes every usual check. `url` satisfies `isChatImageLink`, so
+ * it needs no escaping.
+ */
+export function sendChatImageReopen(res: ServerResponse, url: string, head: boolean): void {
+  if (!isChatImageLink(url)) throw new Error('Not a chat image link.');
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8',
+    'Content-Security-Policy': "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" });
+  res.end(head ? undefined : `<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${url}"><title>Agent Session Tower</title><a href="${url}">이미지 열기</a>\n`);
+}
 export function sendChatImage(res: ServerResponse, image: Awaited<ReturnType<typeof readChatImage>>, head: boolean): void {
   res.writeHead(200, { 'Content-Type': image.mime, 'Content-Length': image.content.length, 'Cache-Control': 'no-store',
     'Content-Disposition': 'inline', 'X-Content-Type-Options': 'nosniff',
