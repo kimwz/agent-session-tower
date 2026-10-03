@@ -8,10 +8,15 @@ import { towerOperation } from '../triggers/trigger-helpers';
  * them. A computer whose Tower predates them has none, and its forms keep their own defaults.
  */
 const cache = new Map<string, ModelSettings>();
+/** Per computer, why its settings are the defaults: its file could not be read. Cleared by a save there. */
+const problems = new Map<string, string>();
 const loading = new Map<string, Promise<ModelSettings | undefined>>();
 const listeners = new Set<() => void>();
 const keyOf = (node?: string) => node ?? '';
 const notify = () => { for (const listener of listeners) listener(); };
+
+/** Why a computer's settings, as this page last read them, are the defaults. */
+export function problemFor(node?: string): string | undefined { return problems.get(keyOf(node)); }
 
 export function loadModelSettings(token: string, node?: string, force = false): Promise<ModelSettings | undefined> {
   const key = keyOf(node);
@@ -19,8 +24,13 @@ export function loadModelSettings(token: string, node?: string, force = false): 
   if (!force && cache.has(key)) return Promise.resolve(cache.get(key));
   const pending = !force && loading.get(key);
   if (pending) return pending;
-  const next = towerOperation<{ settings: ModelSettings }>(token, 'models.settings', {}, node)
-    .then(result => { cache.set(key, result.settings); notify(); return result.settings; })
+  const next = towerOperation<{ settings: ModelSettings; problem?: string }>(token, 'models.settings', {}, node)
+    .then(result => {
+      cache.set(key, result.settings);
+      if (result.problem) problems.set(key, result.problem); else problems.delete(key);
+      notify();
+      return result.settings;
+    })
     .finally(() => { if (loading.get(key) === next) loading.delete(key); });
   loading.set(key, next);
   return next;
@@ -31,26 +41,28 @@ export async function saveModelSettings(token: string, settings: ModelSettings, 
   // A retried save on another computer answers only that it was done; the settings are read again then.
   if (!result?.settings) return (await loadModelSettings(token, node, true))!;
   cache.set(keyOf(node), result.settings);
+  problems.delete(keyOf(node));
   notify();
   return result.settings;
 }
 
-export function useModelSettings(token: string, node?: string): { settings?: ModelSettings; error?: string; reload: () => void } {
+export function useModelSettings(token: string, node?: string): { settings?: ModelSettings; problem?: string; error?: string; reload: () => void } {
   const [settings, setSettings] = useState(() => cache.get(keyOf(node)));
+  const [problem, setProblem] = useState(() => problemFor(node));
   const [error, setError] = useState<string>();
   const reload = useCallback(() => {
     setError(undefined);
     loadModelSettings(token, node, true).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
   }, [token, node]);
   useEffect(() => {
-    const update = () => setSettings(cache.get(keyOf(node)));
+    const update = () => { setSettings(cache.get(keyOf(node))); setProblem(problemFor(node)); };
     listeners.add(update);
     update();
     setError(undefined);
     loadModelSettings(token, node).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
     return () => { listeners.delete(update); };
   }, [token, node]);
-  return { settings, error, reload };
+  return { settings, problem, error, reload };
 }
 
 /**

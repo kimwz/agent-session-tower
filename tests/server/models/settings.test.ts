@@ -115,7 +115,7 @@ test('reading a corrupt settings file never writes it', async t => {
     assert.deepEqual(await resolveModel(directory, 'slack.match', { provider: 'codex' }), { provider: 'codex', model: 'gpt-5.6-sol' });
   }
   assert.equal(await readFile(path, 'utf8'), '{ not json');
-  assert.deepEqual(await readdir(directory), ['models.json']);
+  assert.deepEqual((await readdir(directory)).filter(name => !name.startsWith('models.json.unreadable-')), ['models.json'], 'only a copy is added beside it');
 });
 
 test('a restore skips a settings file this computer cannot parse', async t => {

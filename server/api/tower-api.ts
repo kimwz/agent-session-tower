@@ -9,7 +9,7 @@ import type { RunAdmission } from '../runs/manager.js';
 import type { PermissionService } from '../permissions/service.js';
 import type { SessionSearch, SessionSearchResult } from '../sessions/service.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
-import { readModelSettings, resolveModel, saveModelSettings } from '../models/settings.js';
+import { readModelSettingsState, resolveModel, saveModelSettings } from '../models/settings.js';
 import { modelArgs } from '../../shared/models.js';
 import { currentTask } from '../../shared/session-tasks.js';
 import type { TriggerScope, TriggerService } from '../triggers/service.js';
@@ -346,7 +346,7 @@ export class TowerApi {
       case 'permissions.delete': return this.permissions().remove(value.id);
       case 'permissions.decide': return this.permissions().decide(value.id, value.approve, value.rule, value.resume === true);
       case 'permissions.acknowledge': return this.permissions().acknowledge();
-      case 'models.settings': return { settings: await readModelSettings(this.services.stateDir) };
+      case 'models.settings': { const { settings, problem } = await readModelSettingsState(this.services.stateDir); return { settings, ...(problem ? { problem } : {}) }; }
       case 'models.update': return { settings: await saveModelSettings(this.services.stateDir, value.settings) };
       case 'models.get': {
         const resolved = await resolveModel(this.services.stateDir, value.role);

@@ -28,7 +28,7 @@ export function ModelsPanel({ token, providers: ownProviders, computers }: { tok
   const computer = node ? computers.find(item => item.node === node) : undefined;
   const providers = node ? computer?.providers ?? [] : ownProviders;
   const target = node || undefined;
-  const { settings, error: loadError, reload } = useModelSettings(token, target);
+  const { settings, problem, error: loadError, reload } = useModelSettings(token, target);
   const [draft, setDraft] = useState<ModelSettings>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -57,6 +57,7 @@ export function ModelsPanel({ token, providers: ownProviders, computers }: { tok
       {!ready ? <p className="slack-empty">{computer?.connected ? t('{0}의 Tower를 업데이트하면 여기서 모델을 정할 수 있습니다.', { 0: name }) : t('{0}에 지금 연결되어 있지 않습니다.', { 0: name })}</p>
         : !draft ? (loadError ? <p role="alert" className="slack-error">{translateMessage(loadError)} <button type="button" className="secondary-button" onClick={reload}>{t('다시 시도')}</button></p> : <LoaderCircle className="spin" aria-label={t('연결 중')} />)
         : <>
+          <SettingsProblem problem={problem} />
           {GROUPS.map(group => <section key={group.kind} className="models-group">
             <h3>{t(group.title)}</h3>
             <p className="auth-hint">{t(group.description)}</p>
@@ -123,6 +124,11 @@ function ProviderSelect({ value, follow, providers = ['claude', 'codex'], disabl
 }
 
 /** A model picked from that computer's list (empty for the CLI's default), or typed when it is not listed, and an effort it supports. */
+/** Why this computer's settings are the defaults, from its own Tower; older ones send nothing. */
+export function SettingsProblem({ problem }: { problem?: string }) {
+  return problem ? <p role="alert" className="slack-error">{translateMessage(problem)}</p> : null;
+}
+
 export function PickRow({ provider, labelled, pick, health, off, disabled, onChange }: { provider: ModelProvider; labelled: boolean; pick: ModelPick; health?: ProviderHealth; off: boolean; disabled: boolean; onChange: (pick: ModelPick) => void }) {
   const { t } = useI18n();
   const models = health?.models ?? [];

@@ -1,8 +1,8 @@
-import { randomUUID } from 'node:crypto';
-import { link, stat, unlink } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { link, open, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { initialModelSettings, parseModelSettings, resolveRole, type ModelProvider, type ModelSettings, type ResolvedModel } from '../../shared/models.js';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { readPrivateBytes, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
 /**
  * The one place Tower's own Claude/Codex calls get their provider, model and effort: `<state>/models.json`.
@@ -10,7 +10,7 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
  * call everywhere without restarting anything.
  */
 export const MODEL_SETTINGS_FILE = 'models.json';
-const cache = new Map<string, { mtimeMs: number; size: number; settings: ModelSettings }>();
+const cache = new Map<string, { mtimeMs: number; size: number; settings: ModelSettings; problem?: string }>();
 const writes = new Map<string, Promise<unknown>>();
 const missing = (error: unknown) => (error as NodeJS.ErrnoException)?.code === 'ENOENT';
 const record = (value: unknown): Record<string, any> | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : undefined;
@@ -36,19 +36,67 @@ export async function migratedModelSettings(stateDir: string): Promise<ModelSett
 }
 
 export async function readModelSettings(stateDir: string): Promise<ModelSettings> {
+  return (await readModelSettingsState(stateDir)).settings;
+}
+
+/**
+ * The settings with why they are the defaults, when a present file could not be used. The file itself is never
+ * renamed, removed or written here: only an explicit save replaces it. `hooks` is for tests.
+ */
+export async function readModelSettingsState(stateDir: string, hooks: { afterRead?(): Promise<void> } = {}): Promise<{ settings: ModelSettings; problem?: string }> {
   const path = join(stateDir, MODEL_SETTINGS_FILE);
   const info = await stat(path).catch(error => { if (missing(error)) return undefined; throw error; });
   if (!info) {
     const settings = await migratedModelSettings(stateDir);
     // Saved once so later changes elsewhere no longer move it; a Tower that cannot write keeps working from memory.
     await save(stateDir, settings, true).catch(() => {});
-    return structuredClone(settings);
+    return { settings: structuredClone(settings) };
   }
   const kept = cache.get(path);
-  if (kept && kept.mtimeMs === info.mtimeMs && kept.size === info.size) return structuredClone(kept.settings);
-  const settings = parseModelSettings(await readPrivateJson(path, 1_000_000).catch(() => undefined));
-  cache.set(path, { mtimeMs: info.mtimeMs, size: info.size, settings });
-  return structuredClone(settings);
+  if (kept && kept.mtimeMs === info.mtimeMs && kept.size === info.size) return state(kept);
+  const read = await readSettingsFile(path, hooks);
+  cache.set(path, { mtimeMs: info.mtimeMs, size: info.size, ...read });
+  return state(read);
+}
+
+const state = (read: { settings: ModelSettings; problem?: string }) => ({ settings: structuredClone(read.settings), ...(read.problem ? { problem: read.problem } : {}) });
+
+async function readSettingsFile(path: string, hooks: { afterRead?(): Promise<void> }): Promise<{ settings: ModelSettings; problem?: string }> {
+  let bytes: Buffer;
+  try { bytes = await readPrivateBytes(path, 1_000_000); }
+  catch (error) {
+    if (missing(error)) return { settings: initialModelSettings() };
+    console.error('Model settings could not be read; the defaults are used:', error);
+    return { settings: initialModelSettings(), problem: `모델 설정 파일을 읽지 못해 기본값을 쓰고 있습니다: ${error instanceof Error ? error.message : String(error)}. 파일은 그대로 두었습니다.` };
+  }
+  await hooks.afterRead?.();
+  let saved: unknown;
+  try { saved = JSON.parse(bytes.toString('utf8')); } catch { saved = undefined; }
+  if (record(saved)) return { settings: parseModelSettings(saved) };
+  console.error('Model settings could not be parsed; the defaults are used and the file is copied aside:', path);
+  try {
+    const copy = await copyAside(path, bytes);
+    return { settings: initialModelSettings(), problem: `모델 설정 파일(models.json)을 읽을 수 없어 기본값을 쓰고 있습니다. 원래 파일은 그대로 두고 ${copy}에 복사해 두었습니다. 저장하면 이 화면의 설정으로 바뀝니다.` };
+  } catch (error) {
+    return { settings: initialModelSettings(), problem: `모델 설정 파일(models.json)을 읽을 수 없어 기본값을 쓰고 있습니다. 원래 파일은 그대로 두었지만 복사하지 못했습니다: ${error instanceof Error ? error.message : String(error)}. 저장하면 이 화면의 설정으로 바뀝니다.` };
+  }
+}
+
+/**
+ * The exact bytes read, kept beside the file under a name of their hash, written whole before they get that name and
+ * never over an existing one: every process (web, worker, master) reading the same contents keeps one copy, and
+ * different contents each keep theirs.
+ */
+async function copyAside(path: string, bytes: Buffer): Promise<string> {
+  const copy = `${path}.unreadable-${createHash('sha256').update(bytes).digest('hex').slice(0, 16)}`;
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    const file = await open(temporary, 'wx', 0o600);
+    try { await file.writeFile(bytes); await file.sync(); }
+    finally { await file.close(); }
+    await link(temporary, copy).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; });
+  } finally { await unlink(temporary).catch(() => {}); }
+  return copy;
 }
 
 /** Replaces the settings with the owner's, which must be valid in full. */
