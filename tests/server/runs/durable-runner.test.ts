@@ -496,7 +496,8 @@ test('while an update of this computer is being tried, the new web does not take
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();
   let handoffs = 0;
-  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => {} });
+  let handedOff = false;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => {}, onHandedOff: () => { handedOff = true; } });
   let held = true;
   const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: async () => held });
   // Closed here, before the fixture's own cleanup removes the folder they write to.
@@ -505,7 +506,8 @@ test('while an update of this computer is being tried, the new web does not take
     await new Promise(resolve => setTimeout(resolve, 300));
     assert.equal(handoffs, 0, 'going back to the previous version must still find the previous worker');
     held = false;
-    await until(() => handoffs === 1);
+    await until(() => handedOff);
+    assert.equal(handoffs, 1);
   } finally { await client.close(); await host.close(); }
 });
 
