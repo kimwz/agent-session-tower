@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.106.1] - 2026-10-03
+
+### Fixed
+- **Image links open when followed from another site.** Opening a conversation image link from another app or page, from a Tower page at another address, or after signing in again to a login in front of Tower such as Cloudflare Access showed "다른 사이트에서의 접근은 허용되지 않습니다." The link now opens the image for the signed-in owner. Other sites still cannot embed or read images or call Tower's API, and tampered links are still refused.
+
 ## [1.106.0] - 2026-10-03
 
 ### Added
