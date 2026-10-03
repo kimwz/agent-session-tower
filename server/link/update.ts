@@ -61,10 +61,11 @@ const unreadableHolds = new Map<string, string>();
  */
 export async function handoffHeld(stateDir: string, now = Date.now()): Promise<boolean> {
   const { hold } = updatePaths(stateDir);
-  let held: boolean;
+  let held: boolean | undefined;
   try {
     const info = await stat(hold).catch(error => { if (missing(error)) return undefined; throw error; });
-    held = Boolean(info) && (now - info!.mtimeMs < HOLD_MS || await helperRunning(stateDir));
+    // No hold: nothing to remove, and one a helper writes meanwhile must stay.
+    held = info && (now - info.mtimeMs < HOLD_MS || await helperRunning(stateDir));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (unreadableHolds.get(hold) !== message) console.error(`The update hold could not be read (${message}); the worker is not handed over until it can.`);
@@ -72,6 +73,7 @@ export async function handoffHeld(stateDir: string, now = Date.now()): Promise<b
     throw error;
   }
   if (unreadableHolds.delete(hold)) console.log('The update hold can be read again.');
+  if (held === undefined) return false;
   if (held) return true;
   await rm(hold, { force: true });
   return false;

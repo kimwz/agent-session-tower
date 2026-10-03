@@ -1,7 +1,9 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -438,4 +440,24 @@ test('nothing is pruned while the helper lock cannot be read', async t => {
   await unreadableLock(state);
   await assert.rejects(new Updates({ stateDir: state, version: '1.0.0', port: 1, managed: true }).prune(async () => []), { code: 'EISDIR' });
   assert.ok(existsSync(versionDirectory(state, '0.9.0')));
+});
+
+test('a hold written just after it was found missing is left in place', async t => {
+  const state = await stateDir(t);
+  const { hold } = updatePaths(state);
+  // Test-only: right after this reader's own stat of the hold finds nothing, a helper writes a new hold.
+  const original = fsPromises.stat;
+  let raced = 0;
+  t.mock.method(fsPromises, 'stat', async (...args: Parameters<typeof original>) => {
+    try { return await original(...args); }
+    catch (error) {
+      if (args[0] === hold && (error as NodeJS.ErrnoException).code === 'ENOENT') { raced++; writeFileSync(hold, JSON.stringify({ version: '1.1.0' })); }
+      throw error;
+    }
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  assert.equal(await handoffHeld(state), false, 'no hold was there when it looked');
+  assert.equal(raced, 1, 'the reader saw the hold missing');
+  assert.equal(existsSync(hold), true, 'the hold the helper wrote meanwhile is not removed');
 });
