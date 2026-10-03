@@ -8,34 +8,28 @@ import type { ElevenLabs, VoiceInfo } from './elevenlabs.js';
 import type { FirstReplyMaker } from './first-reply.js';
 import type { MasterRoom } from './room.js';
 import type { MasterSettingsStore } from './settings.js';
-import { isNoise, READ_CHARS, speakable, streamTone, VOICE_REST, voiced, voicedChunkPairs, voicedPartPairs } from './voice-text.js';
-import { CHUNK_PAUSE_MS, TextFollower } from './voice-stream.js';
+import { isNoise, speakable, VOICE_REST, voiced, voicedPartPairs } from './voice-text.js';
 import { playbackRecord, VoiceTimings, progressRecord, elapsed, attemptNumber, transportStage } from './voice-timings.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
-import { LIVE_WAIT_MS, VoiceAudio } from './voice-audio.js';
+import { VoiceAudio } from './voice-audio.js';
 import { VoiceClips } from './voice-clips.js';
-import type { AudioHandle, VoiceTiming } from './voice-types.js';
+import { bare, MS_PER_CHAR, played, reasonOf, unspoken, VoiceReader, withSpeak, type StreamInput } from './voice-reader.js';
+import type { VoiceSession, VoiceTiming } from './voice-types.js';
 import { FIRST_REPLY_DOLLARS, localDay, ttsDollarsPerChar, VoiceUsage } from './voice-usage.js';
 
 export { frameAt, id3Size } from './mp3.js';
 export type { VoiceTiming } from './voice-types.js';
+export type { StreamInput } from './voice-reader.js';
 export { migrate, type VoiceFile } from './voice-usage.js';
 
 /** A first reply not ready this long after the request came is not said: the answer is near by then. */
 const FIRST_REPLY_MS = 2_500;
 const SAY_QUEUE = 20;
-/** How long reading aloud may take a character, at most: the page gives up on a player later than this too. */
-const MS_PER_CHAR = 200;
 /** News older than this is not read aloud any more: it is on the screen. */
 const STALE_MS = 60 * 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-/** Turns whose reading stopped, remembered (with why) until their end comes: this many. */
-const STOPPED_TURNS = 50;
 /** The page's word on something it played, as it may give it. */
 const PAGE_RESULTS = new Set(['played', 'stopped', 'interrupted', 'failed', 'blocked', 'expired']);
-/** Why reading ended, from the word on what was given to play (the page's, or the host's own: `timeout`, `away`, `restart`). */
-const REASONS: Record<string, MasterUnspoken> = { stopped: 'stopped', interrupted: 'stopped', blocked: 'blocked', expired: 'expired', timeout: 'timeout', away: 'away', restart: 'restart' };
-const reasonOf = (result: string): MasterUnspoken => REASONS[result] ?? 'failed';
 /** What the owner is told of beside the voice: everything but their own stop and a restart. */
 const QUIET = new Set<MasterUnspoken>(['stopped', 'restart']);
 
@@ -67,88 +61,12 @@ export interface MasterVoiceOptions {
   timing?: Partial<VoiceTiming>;
 }
 
-/** The tab where voice is on. Its id lives in memory only; pages know it by its digest. */
-interface Session {
-  id: string;
-  digest: string;
-  tabId: string;
-  local: boolean;
-  listening: boolean;
-  seenAt: number;
-  activity?: { receivedAt: number; lastSpeechAt: number };
-  /** How it ended (`endSession`), for what was still waiting on it. */
-  ended?: 'stopped' | 'away' | 'restart';
-}
-
-/** Input for reading a turn while the master writes it. */
-export interface StreamInput {
-  /** The turn's run (the one steered messages joined). */
-  turn: string;
-  kind: 'answer' | 'report';
-  /** The key of the timing record (the spoken request's key, or the report's). */
-  key: string;
-  /** The spoken request's key, for its first response and answer to keep their order. */
-  request?: string;
-  /** The voice session a spoken request belongs to (reports: whichever is on). */
-  voiceSession?: string;
-  replies: readonly RunReply[];
-}
-
-/** One reply (text block) of a turn read while it is written: its words, then its audio when its turn to play comes. */
-interface Segment {
-  reply: string;
-  follower: TextFollower;
-  /** What is sent to speech, and how many of those parts went into its audio. */
-  parts: Array<{ speech: string; text: string }>;
-  fed: number;
-  wake?: () => void;
-  /** What the page shows while it plays. */
-  text: string;
-  done: boolean;
-  queued: boolean;
-  queuedAt?: number;
-  /** Heard to its end on the page. */
-  played?: true;
-  /** Its sound started on the page. */
-  started?: true;
-  live?: AudioHandle;
-  say?: MasterSay;
-}
-
-interface Stream {
-  turn: string;
-  key: string;
-  kind: 'answer' | 'report';
-  request?: string;
-  session: Session;
-  segments: Segment[];
-  /** The tone tag so far (undefined before the first words). */
-  tag?: string;
-  read: number;
-  /** Reading ended at the limit (`READ_CHARS`). */
-  full: boolean;
-  /** Reading ended early at the daily limit: heard to there, it is not called heard to its end. */
-  limitHit?: true;
-  lastChunkAt: number;
-  state: 'starting' | 'streaming' | 'stopped' | 'finished';
-  played: number;
-  /** The words so far, looked at again when a pause passes. */
-  replies: readonly RunReply[];
-  /** The turn ended: once everything is played, its entry (if any) is added. */
-  finishing?: { data?: MasterEntryData };
-}
+/** The tab where voice is on (see `VoiceSession`): one object for its whole life, shared with the reader. */
+type Session = VoiceSession;
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32);
 const fail = (message: string, kind: ErrorKind) => new TowerError(kind, message);
 const speakOf = (data: MasterEntryData | undefined): MasterSpeak | undefined => data && (data.kind === 'master' || data.kind === 'error' || data.kind === 'event') ? data.speak : undefined;
-/** How an answer's reading stands, without how an earlier reading of it ended. */
-const bare = ({ reason: _reason, heard: _heard, ...rest }: MasterSpeak): MasterSpeak => rest;
-/** An answer's reading ended without it being heard to its end, and why. */
-const unspoken = (speak: MasterSpeak | undefined, reason: MasterUnspoken, heard = false): MasterSpeak =>
-  ({ ...(speak ? bare(speak) : {}), state: 'unspoken', reason, ...(heard ? { heard: true as const } : {}) });
-/** An answer's reading went to its end. */
-const played = (speak: MasterSpeak | undefined): MasterSpeak => ({ ...(speak ? bare(speak) : {}), state: 'played' });
-const withSpeak = (data: MasterEntryData, speak: MasterSpeak): MasterEntryData => ({ ...data, speak } as MasterEntryData);
 /**
  * The master's voice. The owner's page listens and writes down what is said with ElevenLabs directly, using a
  * single-use token from here; what is said becomes a request like a typed one. Answers, news of finished work, and
@@ -172,17 +90,14 @@ export class MasterVoice {
   private unsubscribe?: () => void;
   private closed = false;
   private readonly timing: VoiceTiming;
-  /** Turns read while they are written, by turn. */
-  private readonly streams = new Map<string, Stream>();
   /** A say's timing and accepted start, retained synchronously by its owning streamed segment. */
   private readonly says = new Map<string, { key: string; at: number; started?: boolean; onStarted?: () => void }>();
-  /** Turns whose reading stopped, and why, for when their end comes (`finishStream`). */
-  private readonly stoppedTurns = new Map<string, { reason: MasterUnspoken; heard: boolean }>();
   /** The latest answer or report not read aloud that the owner is told of (see `MasterVoiceStatus.missed`). */
   private missed?: MasterMissed & { order: number; at: number };
   /** The session that ended last, for an answer that comes after it (`quiet`). */
   private lastEnded?: Session;
-  private pauseTimer?: ReturnType<typeof setInterval>;
+  /** Turns read while the master writes them. */
+  private readonly reader: VoiceReader;
   readonly timings: VoiceTimings;
 
   constructor(private readonly options: MasterVoiceOptions) {
@@ -191,6 +106,24 @@ export class MasterVoice {
     this.timings = new VoiceTimings(join(options.dataDir, 'voice-timings.json'));
     this.audio = new VoiceAudio(this.usage, this.timings, options.elevenLabs, () => this.options.settings.current().voice, this.timing, () => this.broadcast());
     this.clips = new VoiceClips(join(options.dataDir, 'voice-previews'), this.audio, this.usage, options.settings, options.elevenLabs);
+    this.reader = new VoiceReader({
+      session: () => this.session,
+      alive: session => this.alive(session),
+      gone: session => this.gone(session),
+      speaks: report => this.speaks(report),
+      onLine: work => this.onLine(work),
+      play: (session, what, waitMs, signal, onSay, onStarted) => this.play(session, what, waitMs, signal, onSay, onStarted),
+      cancelSay: say => {
+        const done = this.results.get(say.id);
+        if (done) done('stopped');
+        else this.options.room.broadcast({ type: 'say', seq: 0, say: { ...say, cancelled: true } });
+      },
+      hide: text => { const hide = this.options.hooks.hide; return hide(text); },
+      model: () => this.options.settings.current().voice.model,
+      addEntry: data => { this.options.room.add(data); },
+      deliver: () => this.deliver(),
+      streamState: (turn, state) => this.options.hooks.streamState?.(turn, state),
+    }, this.audio, this.usage, this.timings, this.timing);
   }
 
   async start(): Promise<void> {
@@ -214,7 +147,7 @@ export class MasterVoice {
     this.closed = true;
     this.unsubscribe?.();
     if (this.timer) clearInterval(this.timer);
-    if (this.pauseTimer) clearInterval(this.pauseTimer);
+    this.reader.stopTimers();
     this.endSession(this.session, 'restart');
     this.options.firstReply?.close();
     this.audio.dropAll();
@@ -380,8 +313,7 @@ export class MasterVoice {
 
   /** Whether the answer to a spoken request has begun to be read: a first response would come too late then. */
   private answering(request: string): boolean {
-    return [...this.streams.values()].some(stream => stream.request === request && stream.segments.some(segment => segment.queued))
-      || [...this.says.values()].some(say => say.key === request);
+    return this.reader.answering(request) || [...this.says.values()].some(say => say.key === request);
   }
 
   // ─── reading aloud ───────────────────────────────────────────────────────────────────────────────────────────
@@ -530,235 +462,22 @@ export class MasterVoice {
    */
   stream(input: StreamInput): void {
     if (this.closed) return;
-    let stream = this.streams.get(input.turn);
-    if (!stream) {
-      const session = this.session;
-      if (!session || !this.alive(session) || (input.voiceSession && input.voiceSession !== session.digest) || this.speaks(input.kind === 'report') !== 'pending') return;
-      stream = { turn: input.turn, key: input.key, kind: input.kind, ...(input.request ? { request: input.request } : {}), session, segments: [], read: 0, full: false,
-        lastChunkAt: Date.now(), state: 'starting', played: 0, replies: input.replies };
-      this.take(stream, input.replies, false);
-      // Nothing whole to say yet: looked at again with more words (the same words give the same chunks).
-      if (!stream.segments.some(segment => segment.parts.length)) return;
-      this.streams.set(input.turn, stream);
-      this.timings.mark(stream.key, 'text', Date.now(), { kind: stream.kind, mode: 'stream' });
-      const started = stream;
-      void (this.options.hooks.streamState?.(input.turn, 'started') ?? Promise.resolve()).then(() => {
-        if (started.state !== 'starting') return;
-        started.state = 'streaming';
-        for (const segment of started.segments) this.pump(started, segment);
-      }, () => this.stopStream(started, 'failed'));
-      this.pauses();
-      return;
-    }
-    if (stream.state === 'starting' || stream.state === 'streaming') { stream.replies = input.replies; this.take(stream, input.replies, false); }
+    this.reader.stream(input);
   }
 
   /** Whether a turn is being read while it is written. */
-  streaming(turn: string): boolean { return this.streams.has(turn); }
-  streamingTurns(): string[] { return [...this.streams.keys()]; }
+  streaming(turn: string): boolean { return this.reader.streaming(turn); }
+  streamingTurns(): string[] { return this.reader.streamingTurns(); }
 
   /**
    * A turn that was read while it was written ended: what was not read yet is read, then its entry is added, marked
    * played when all of it was heard (or unspoken). Nothing is read twice, and no entry of it waits to be read. A turn
    * that failed or was stopped stops being read; its error is read only when nothing of the turn was.
    */
-  finishStream(input: { turn: string; replies?: readonly RunReply[]; completed: boolean; data?: MasterEntryData }): void {
-    const stream = this.streams.get(input.turn);
-    const add = (speak: (current: MasterSpeak | undefined) => MasterSpeak) => {
-      const data = input.data;
-      if (!data || (data.kind !== 'master' && data.kind !== 'event' && data.kind !== 'error')) return;
-      const added = speak(data.speak);
-      this.options.room.add(withSpeak(data, added));
-      if (added.state === 'pending') this.deliver();
-    };
-    // Stopped earlier (skipped, voice ended, failed on the page) or read before a restart: marked why, never read again.
-    if (!stream) {
-      const stopped = this.stoppedTurns.get(input.turn);
-      this.stoppedTurns.delete(input.turn);
-      add(current => unspoken(current, stopped?.reason ?? 'restart', stopped?.heard));
-      return;
-    }
-    // Already ending (told once by the request that waited on it): nothing changes.
-    if (stream.finishing) return;
-    if (!input.completed) {
-      const heard = this.heardOf(stream);
-      this.stopStream(stream, 'stopped');
-      this.stoppedTurns.delete(input.turn);
-      add(current => heard ? unspoken(current, 'stopped', true) : { ...(current ?? {}), state: 'pending' });
-      return;
-    }
-    if (input.replies) { stream.replies = input.replies; this.take(stream, input.replies, true); }
-    for (const segment of stream.segments) { segment.done = true; this.pump(stream, segment); }
-    stream.finishing = { ...(input.data ? { data: input.data } : {}) };
-    this.settle(stream);
-  }
+  finishStream(input: { turn: string; replies?: readonly RunReply[]; completed: boolean; data?: MasterEntryData }): void { this.reader.finishStream(input); }
 
   /** Whether reading aloud is under way: a turn being read, audio being made, or the page's word awaited. */
-  busy(): boolean { return this.streams.size > 0 || this.results.size > 0 || this.audio.busy(); }
-
-  /** Takes the words that are whole from each reply into its segment, in order. `done`: the turn ended, take all. */
-  private take(stream: Stream, replies: readonly RunReply[], done: boolean): void {
-    const now = Date.now();
-    for (const segment of stream.segments) {
-      // A reply no longer there (dropped to keep the run small) ends where it was read.
-      if (!segment.done && !replies.some(reply => reply.id === segment.reply)) { segment.done = true; this.pump(stream, segment); }
-    }
-    for (const reply of replies) {
-      let segment = stream.segments.find(item => item.reply === reply.id);
-      if (!segment) {
-        segment = { reply: reply.id, follower: new TextFollower(), parts: [], fed: 0, text: '', done: false, queued: false };
-        stream.segments.push(segment);
-      }
-      if (segment.done) continue;
-      const ended = done || Boolean(reply.done) || Boolean(reply.cut);
-      for (;;) {
-        const chunk = segment.follower.next(reply.text, { done: ended, first: stream.read === 0, paused: now - stream.lastChunkAt >= CHUNK_PAUSE_MS });
-        if (chunk === undefined) break;
-        this.chunk(stream, segment, chunk);
-      }
-      if (ended) segment.done = true;
-      this.pump(stream, segment);
-    }
-  }
-
-  /** One chunk of words: as heard, within the turn's limit, with the turn's tone, into its segment's parts. */
-  private chunk(stream: Stream, segment: Segment, raw: string): void {
-    if (stream.full) return;
-    let plain = this.hearable(raw).trim();
-    if (!plain) return;
-    const left = READ_CHARS - stream.read;
-    if (plain.length > left) {
-      // Past the limit, reading ends at a sentence and says the rest is on the screen.
-      const head = plain.slice(0, Math.max(0, left));
-      const end = Math.max(...[...head.matchAll(/[.!?…。]+["'”’)]*(?=\s|$)/g)].map(match => match.index + match[0].length), 0);
-      plain = `${head.slice(0, end).trim()} ${VOICE_REST}`.trim();
-      stream.full = true;
-    }
-    const model = this.options.settings.current().voice.model;
-    stream.tag = streamTone(plain, model, stream.kind, stream.tag);
-    this.timings.mark(stream.key, 'sentence');
-    segment.parts.push(...voicedChunkPairs(plain, model, stream.tag));
-    segment.text = `${segment.text} ${plain}`.trim();
-    stream.read += plain.length;
-    stream.lastChunkAt = Date.now();
-  }
-
-  /** What is heard of words the master wrote: hidden whole, as they are heard (without markdown), and hidden again. */
-  private hearable(raw: string): string {
-    const hide = this.options.hooks.hide;
-    return hide(speakable(hide(raw)));
-  }
-
-  /** Wakes a reply already owning the line, or queues its one playback task. */
-  private pump(stream: Stream, segment: Segment): void {
-    segment.wake?.();
-    if (stream.state !== 'streaming' || segment.queued || !segment.parts.length) return;
-    segment.queued = true;
-    segment.queuedAt = Date.now();
-    void this.onLine(() => this.playSegment(stream, segment));
-  }
-
-  /** A reply retains the line while its finite parts are completed, played and acknowledged in order. */
-  private async playSegment(stream: Stream, segment: Segment): Promise<void> {
-    const session = stream.session;
-    while (stream.state === 'streaming') {
-      if (this.session !== session || !this.alive(session)) { this.stopStream(stream, this.gone(session)); return; }
-      if (segment.fed >= segment.parts.length) {
-        if (segment.done) break;
-        if (!await this.nextPart(stream, segment)) segment.done = true;
-        continue;
-      }
-      const part = segment.parts[segment.fed];
-      const model = this.options.settings.current().voice.model;
-      if (this.usage.limited(Date.now(), part.speech.length * ttsDollarsPerChar(model))) { this.stopStream(stream, 'limit'); return; }
-      const live = this.audio.synthesize(part.speech, undefined, stream.key);
-      this.audio.configure(live, { held: true, session, queuedAt: segment.queuedAt, partIndex: segment.fed });
-      segment.live = live;
-      try {
-        if (!await this.audio.complete(live) || this.session !== session || stream.state !== 'streaming') {
-          this.audio.abandon(live);
-          if (stream.state === 'streaming') this.stopStream(stream, this.session !== session ? this.gone(session) : 'audio');
-          return;
-        }
-        const { result, started } = await this.play(session, { kind: stream.kind, text: part.text, audio: live.id, streaming: true, timing: stream.key,
-          ...(stream.request ? { request: stream.request } : {}) }, this.timing.playMs + part.speech.length * MS_PER_CHAR, undefined, say => { segment.say = say; }, () => { segment.started = true; });
-        if (started) segment.started = true;
-        if (result !== 'played' || stream.state !== 'streaming') {
-          if (stream.state === 'streaming') this.stopStream(stream, reasonOf(result));
-          return;
-        }
-        segment.fed++;
-        stream.played++;
-      } finally { this.audio.configure(live, { held: false }); segment.live = undefined; segment.say = undefined; }
-    }
-    segment.played = segment.done && segment.fed >= segment.parts.length ? true : undefined;
-    this.settle(stream);
-  }
-
-  /** No future text is awaited by a browser audio response; one bounded waiter owns the segment's pause. */
-  private nextPart(stream: Stream, segment: Segment): Promise<boolean> {
-    const ready = () => stream.state !== 'streaming' || segment.done || segment.fed < segment.parts.length;
-    if (ready()) return Promise.resolve(true);
-    return new Promise(resolve => {
-      const finish = (available: boolean) => { clearTimeout(timer); segment.wake = undefined; resolve(available); };
-      const timer = setTimeout(() => finish(false), LIVE_WAIT_MS);
-      segment.wake = () => { if (ready()) finish(true); };
-      segment.wake();
-    });
-  }
-
-  /** Once a finished turn's segments were all played, its entry is added (played) and its reading ends. */
-  private settle(stream: Stream): void {
-    if (stream.state !== 'streaming' || !stream.finishing) return;
-    if (stream.segments.some(segment => !segment.done || segment.fed < segment.parts.length || segment.live || segment.say)) return;
-    stream.state = 'finished';
-    this.streams.delete(stream.turn);
-    const entry = stream.finishing.data;
-    if (entry && (entry.kind === 'master' || entry.kind === 'event' || entry.kind === 'error')) this.options.room.add(withSpeak(entry, stream.limitHit ? unspoken(entry.speak, 'limit', true) : played(entry.speak)));
-    void this.options.hooks.streamState?.(stream.turn, 'done').catch(() => {});
-  }
-
-  /**
-   * A turn stops being read: its audio stops, nothing more of it is read, and its record says so. Its entry says why
-   * (now, or when the turn ends: `stoppedTurns`), so the owner is told of it beside the voice.
-   */
-  private stopStream(stream: Stream, reason: MasterUnspoken): void {
-    if (stream.state === 'stopped' || stream.state === 'finished') return;
-    stream.state = 'stopped';
-    this.streams.delete(stream.turn);
-    for (const segment of stream.segments) {
-      segment.wake?.();
-      if (segment.say && !segment.played) {
-        const done = this.results.get(segment.say.id);
-        if (done) done('stopped');
-        else this.options.room.broadcast({ type: 'say', seq: 0, say: { ...segment.say, cancelled: true } });
-      }
-      if (segment.live) { this.audio.abandon(segment.live); this.audio.configure(segment.live, { held: false }); }
-    }
-    const heard = this.heardOf(stream);
-    const finishing = stream.finishing?.data;
-    if (finishing && (finishing.kind === 'master' || finishing.kind === 'event' || finishing.kind === 'error')) this.options.room.add(withSpeak(finishing, unspoken(finishing.speak, reason, heard)));
-    else {
-      this.stoppedTurns.set(stream.turn, { reason, heard });
-      while (this.stoppedTurns.size > STOPPED_TURNS) this.stoppedTurns.delete(this.stoppedTurns.keys().next().value!);
-    }
-    // Ended without an entry (the turn's end tells): kept in the timing record now.
-    if (!finishing) this.timings.outcome(stream.key, { state: 'unspoken', reason, ...(heard ? { heard: true as const } : {}) });
-    void this.options.hooks.streamState?.(stream.turn, 'stopped').catch(() => {});
-  }
-
-  /** Whether any of a turn read while it was written was heard. */
-  private heardOf(stream: Stream): boolean { return stream.played > 0 || stream.segments.some(segment => segment.started); }
-
-  /** While turns are read, short waiting words go after a pause even when the master writes nothing new. */
-  private pauses(): void {
-    if (this.pauseTimer) return;
-    this.pauseTimer = setInterval(() => {
-      if (!this.streams.size) { clearInterval(this.pauseTimer); this.pauseTimer = undefined; return; }
-      for (const stream of this.streams.values()) if (stream.state === 'streaming' || stream.state === 'starting') this.take(stream, stream.replies, false);
-    }, 400);
-    this.pauseTimer.unref();
-  }
+  busy(): boolean { return this.reader.busy() || this.results.size > 0 || this.audio.busy(); }
 
   /**
    * Sends one thing to the session's page to play, and waits for its word (or gives up): how it went, and whether its
@@ -934,7 +653,7 @@ export class MasterVoice {
     // The page's word first, so what each said ended with is recorded before its reading's outcome.
     for (const done of [...this.results.values()]) done(reason);
     this.audio.abandonSession(session);
-    for (const stream of [...this.streams.values()]) if (stream.session === session) this.stopStream(stream, reason);
+    this.reader.stopSession(session, reason);
   }
 
   /** Playback, one thing at a time. */
