@@ -17,14 +17,42 @@ import type { MasterStreamEvent } from '../../shared/master.js';
 const VOICE_KEY = 'el-test-0123456789abcdef';
 const WORDS = '지금 확인한 결과를 하나씩 알려 드릴게요. 다음 ';
 
+/**
+ * A voice over a real room and settings, with the `started` record held by the test.
+ *
+ * Every piece of work the fixture sets going is tracked from the moment it exists: each `started` record's
+ * continuation (the record is a thenable, so whatever the voice chains on it is a promise kept here), each task on the
+ * voice's one playback line (its private `onLine`, wrapped on this instance only: test-only), and each fake speech
+ * request until its generator ends. The after hook, added first, then: lets every held record go, closes the voice,
+ * waits until all tracked work has settled and nothing new was added (or fails and keeps the folder), flushes the
+ * voice's records, its timings and the room, and only then removes this fixture's own folder.
+ */
 async function reader(t: test.TestContext) {
   const dir = await mkdtemp(join(tmpdir(), 'tower-voice-reader-'));
   let voice: MasterVoice | undefined;
   let room: MasterRoom | undefined;
   const gates: Array<() => void> = [];
-  // Whatever point the test stops at: every held record is let go, the voice closes, the room's writes end, the folder goes.
+  const work = new Set<Promise<unknown>>();
+  const track = <T>(promise: Promise<T>): Promise<T> => { work.add(promise); promise.catch(() => {}); return promise; };
   t.after(async () => {
-    try { for (const open of gates) open(); await voice?.close(); } finally { await room?.flush(); await rm(dir, { recursive: true, force: true }); }
+    for (const open of gates) open();
+    try { await voice?.close(); } finally {
+      // Everything set going has settled, including what settling set going.
+      const deadline = Date.now() + 10_000;
+      for (let seen = -1; seen !== work.size;) {
+        seen = work.size;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const settled = await Promise.race([Promise.allSettled([...work]).then(() => true), new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), Math.max(0, deadline - Date.now())); })]);
+        clearTimeout(timer);
+        if (!settled) throw new Error(`Voice work did not settle; ${dir} is kept.`);
+      }
+      // The voice's own records as last written (test-only: its private records owner, or before C8 its write tail).
+      const records = voice as unknown as { usage?: { flush(): Promise<void> }; writes?: Promise<void> } | undefined;
+      await (records?.usage ? records.usage.flush() : records?.writes);
+      await voice?.timings.flush();
+      await room?.flush();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
   const settings = new MasterSettingsStore(dir);
   await settings.start();
@@ -33,21 +61,34 @@ async function reader(t: test.TestContext) {
   room = new MasterRoom(dir);
   await room.start();
   const speeches: string[] = [];
-  const elevenLabs = { speak: async function* (text: string) { speeches.push(text); yield Buffer.from(`sound:${text}`); } };
+  const elevenLabs = {
+    speak: (text: string) => {
+      let ended!: () => void;
+      track(new Promise<void>(resolve => { ended = resolve; }));
+      return (async function* () { try { speeches.push(text); yield Buffer.from(`sound:${text}`); } finally { ended(); } })();
+    },
+  };
   const states: string[] = [];
   /** The next `started` record is kept only when the test says how it went. */
   let held: { settle: (ok: boolean) => void } | undefined;
   const streamState = (turn: string, state: 'started' | 'stopped' | 'done') => {
     states.push(`${turn}:${state}`);
     if (state !== 'started') return Promise.resolve();
-    return new Promise<void>((resolve, reject) => {
+    const record = new Promise<void>((resolve, reject) => {
       const settle = (ok: boolean) => { if (ok) resolve(); else reject(new Error('not kept')); };
       held = { settle };
       gates.push(() => settle(true));
     });
+    record.catch(() => {});
+    // What the voice chains on the record is tracked as it is chained.
+    return { then: (resolved?: () => unknown, rejected?: (error: unknown) => unknown) => track(record.then(resolved, rejected)) } as unknown as Promise<void>;
   };
   voice = new MasterVoice({ dataDir: dir, settings, room, elevenLabs: elevenLabs as never, timing: { firstChunkMs: 1_000, synthMs: 2_000, playMs: 200, waitMs: 200, presenceMs: 60_000 },
     hooks: { hide: text => text, connectedSince: () => 0, send: async () => undefined, streamState } });
+  // Test-only: the voice's one playback line, tracked task by task (this instance only).
+  const line = voice as unknown as { onLine<T>(work: () => Promise<T>): Promise<T> };
+  const onLine = line.onLine.bind(voice);
+  line.onLine = task => track(onLine(task));
   const events: MasterStreamEvent[] = [];
   room.subscribe(event => events.push(event));
   await voice.start();
