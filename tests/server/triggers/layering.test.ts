@@ -105,3 +105,18 @@ test('the store writes the engine file only through serializeState', async () =>
   assert.match(text, /const data = serializeState\(draft\);/);
   assert.doesNotMatch(text, /JSON\.stringify\(/, 'no other encoding of the state');
 });
+
+test('no trigger module imports the engine or the service but the service itself', async () => {
+  const files = await sourceFiles([TRIGGERS]);
+  const upward = [...files].flatMap(([path, text]) => importEdges(path, text).filter(edge => /-> server\/triggers\/(engine|service)$/.test(edge) && !edge.startsWith(`${TRIGGERS}/service ->`)));
+  assert.deepEqual(upward, []);
+});
+
+test('dispatch alone owns the claims being submitted and the close retries; polls alone the request locks', async () => {
+  const files = await sourceFiles([TRIGGERS]);
+  const owners = (name: string) => [...files].filter(([, text]) => new RegExp(`\\bthis\\.${name}\\b`).test(text)).map(([path]) => path).sort();
+  assert.deepEqual(owners('submitting'), [`${TRIGGERS}/dispatch.ts`]);
+  assert.deepEqual(owners('closeRetries'), [`${TRIGGERS}/dispatch.ts`]);
+  assert.deepEqual(owners('closingIssues'), [`${TRIGGERS}/dispatch.ts`]);
+  assert.deepEqual(owners('polling'), [`${TRIGGERS}/polls.ts`]);
+});

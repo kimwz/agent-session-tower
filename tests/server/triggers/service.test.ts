@@ -821,7 +821,8 @@ test('a tick waiting for a commit rechecks an edited once due time before consum
   const f = await fixture(t); const service = await f.open();
   const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
   f.clock.now = Date.parse('2026-09-24T01:00:01Z');
-  const engine = service as any; const commit = engine.commit.bind(engine);
+  // Every commit goes through the engine's store; the first one, the tick's, waits.
+  const engine = (service as any).store; const commit = engine.commit.bind(engine);
   let entered!: () => void; let release!: () => void;
   const waiting = new Promise<void>(resolve => { entered = resolve; }); const gate = new Promise<void>(resolve => { release = resolve; });
   let first = true;
@@ -949,7 +950,8 @@ test('a once skip policy uses the admission time after waiting for a commit', as
   const f = await fixture(t); const service = await f.open();
   const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'skip' } }), OWNER);
   f.clock.now = Date.parse('2026-09-24T01:00:01Z');
-  const engine = service as any; const commit = engine.commit.bind(engine);
+  // Every commit goes through the engine's store; the first one, the tick's, waits.
+  const engine = (service as any).store; const commit = engine.commit.bind(engine);
   let entered!: () => void; let release!: () => void;
   const waiting = new Promise<void>(resolve => { entered = resolve; }); const gate = new Promise<void>(resolve => { release = resolve; });
   let first = true;

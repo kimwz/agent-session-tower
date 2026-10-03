@@ -1,25 +1,21 @@
 import { EventEmitter } from 'node:events';
-import { continuedRun, continuedRunById } from '../runs/continuations.js';
-import { createHash, randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
-import type { Run } from '../../shared/types.js';
-import { carriesOutsideContent, type GitHubAuth, type GitHubCheck, type HttpCondition, type HttpRequest, type HttpTestResult, type SecretInput, type Trigger, type TriggerActor, type TriggerAuditEntry, type TriggerEvent, type TriggerOverview, type TriggerSecret, type TriggerSettings, type TriggerPolicy, type IssuePreview, type IssuePreviewItem, type TriggerSource, type Schedule } from '../../shared/triggers.js';
-import { CATCH_UP_WINDOW_MS, LATE_AFTER_MS, latestSlot, nextSlot, previewSlots } from './schedule.js';
-import { evaluate, performHttp, type HttpOutcome } from './http.js';
+import { type GitHubAuth, type GitHubCheck, type HttpCondition, type HttpRequest, type HttpTestResult, type SecretInput, type Trigger, type TriggerActor, type TriggerAuditEntry, type TriggerEvent, type TriggerOverview, type TriggerSecret, type TriggerSettings, type IssuePreview, type TriggerSource, type Schedule } from '../../shared/triggers.js';
+import { previewSlots } from './schedule.js';
+import { performHttp, type HttpOutcome } from './http.js';
 import { SecretStore, type StoredSecret } from './secrets.js';
 import type { TriggerBackup } from './backup.js';
-import { checkGitHub, GitHubError, keyOf, noted, passed, readIssues, refused, type GitHubCursor, type GitHubFetch, type GitHubIssue } from './github.js';
+import { checkGitHub, type GitHubFetch } from './github.js';
 import { failure } from './errors.js';
-import { logTrigger } from './audit.js';
-import { consumeOnce } from './once.js';
-import { ACTIVE, UNFINISHED, type Cursor, type EngineState } from './state.js';
-import { keptGitHub } from './github-cursor.js';
+import { UNFINISHED, type EngineState } from './state.js';
 import { GitHubAccess, readGhToken } from './github-access.js';
-import { handEvent, type TriggerExecutor } from './handover.js';
+import { type TriggerExecutor } from './handover.js';
 import { RequestBudget, sendRequest, testResult } from './outbound.js';
-import { asksToKeepOpen, issueRef, responsePayload, responseSummary } from './text.js';
 import { TriggerStore } from './store.js';
-import { hereOnly, seen, TriggerDefinitions, type TriggerScope } from './definitions.js';
+import { TriggerDispatch } from './dispatch.js';
+import { TriggerEngine } from './engine.js';
+import { TriggerPolls } from './polls.js';
+import { TriggerDefinitions, type TriggerScope } from './definitions.js';
 import { restoreFrom, restoreOwnerBackup } from './restore.js';
 import { type SlackProjection, auditPage, deletedTriggers, eventsPage, getTrigger, keptCopies, launchAllowed, listTriggers, oneEvent, overviewOf } from './views.js';
 
@@ -29,16 +25,7 @@ export { KEEP_OPEN } from './text.js';
 
 
 export { MAX_ONCE_RESERVATIONS, MAX_RETAINED_TRIGGERS, MAX_REVISIONS } from './limits.js';
-const MAX_FIRED_PER_TRIGGER = 20_000;
-const MAX_WAITING_PER_TRIGGER = 5;
-const MAX_PREVIEW = 100;
-const CLOSE_TRIES = 5;
-const CLOSE_RETRY_MS = 5 * 60_000;
-/** Deterministic, so a retried claim for the same slot is recognized by the run registry. */
-export function triggerRequestId(triggerId: string, dedupKey: string): string {
-  const hex = createHash('sha256').update(JSON.stringify(['trigger', triggerId, dedupKey])).digest('hex');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
-}
+export { triggerRequestId } from './firing.js';
 
 export { COORDINATOR_HERE, type TriggerScope } from './definitions.js';
 export type { SlackProjection } from './views.js';
@@ -51,19 +38,11 @@ export class TriggerService extends EventEmitter {
   private readonly store: TriggerStore;
   private get state(): EngineState { return this.store.state; }
   private readonly definitions: TriggerDefinitions;
-  private timer?: ReturnType<typeof setInterval>;
-  private ticking?: Promise<void>;
-  private started = false;
-  private held = false;
-  /** Claims this process is submitting right now; any other claim is reconciled, never resubmitted. */
-  private readonly submitting = new Set<string>();
-  private readonly polling = new Map<string, Promise<void>>();
   private readonly budget: RequestBudget;
   private readonly github: GitHubAccess;
-  /** Closes that failed in a way that may pass, by event: how often, and not again before `at`. */
-  private readonly closeRetries = new Map<string, { tries: number; at: number }>();
-  /** Open-issues runs' issues being closed now, one pass at a time. */
-  private closingIssues?: Promise<void>;
+  private readonly polls: TriggerPolls;
+  private readonly dispatch: TriggerDispatch;
+  private readonly engine: TriggerEngine;
   private readonly secrets: SecretStore;
   private readonly now: () => number;
 
@@ -92,6 +71,10 @@ export class TriggerService extends EventEmitter {
     this.github = new GitHubAccess({ secrets: this.secrets, budget: this.budget, grants: () => this.state.secretGrants, now: this.now, ghToken: options.ghToken ?? readGhToken,
       transport: () => this.options.githubTransport, ownPorts: options.ownPorts, resolve: options.resolve });
     this.definitions = new TriggerDefinitions(this.store, this.secrets, this.now, id => this.options.executor.session(id));
+    // The ports look their target up when called, so the order these are built in does not matter.
+    this.polls = new TriggerPolls(this.store, this.github, this.now, { requestTick: () => { void this.engine.tick().catch(() => {}); }, send: (request, usable) => this.send(request, usable) });
+    this.dispatch = new TriggerDispatch(this.store, options.executor, this.now, { isHeld: () => this.engine.isHeld(), githubClient: (id, fresh) => this.githubClient(id, fresh), sharing: options.sharing });
+    this.engine = new TriggerEngine(this.store, this.polls, this.dispatch, this.budget, this.now, options.tickMs ?? 1000);
   }
 
   /**
@@ -100,11 +83,11 @@ export class TriggerService extends EventEmitter {
    */
   async start(options: { restore?: TriggerBackup } = {}): Promise<{ errors: string[] }> {
     await mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
-    await this.store.load(loaded => { this.recoverClaims(loaded); this.recoverPolls(loaded); });
+    await this.store.load(loaded => TriggerDispatch.recoverLoaded(loaded, this.options.executor));
     await this.secrets.load();
     const errors = options.restore ? await restoreFrom(options.restore, this.restoreContext()).catch(error => [`트리거를 복원하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`]) : [];
-    await this.commit(() => undefined, 'settle').catch(() => {});
-    this.started = true;
+    await this.store.commit(() => undefined, 'settle').catch(() => {});
+    this.engine.markStarted();
     this.resume();
     return { errors };
   }
@@ -113,7 +96,7 @@ export class TriggerService extends EventEmitter {
    * Makes a backup's triggers the definitions here, the way the owner's own edits would (see restore.ts), on an engine
    * that is already running: the owner's restore after the secret Vault was imported.
    */
-  restoreBackup(backup: TriggerBackup): Promise<void> { return restoreOwnerBackup(backup, { ...this.restoreContext(), started: this.started }); }
+  restoreBackup(backup: TriggerBackup): Promise<void> { return restoreOwnerBackup(backup, { ...this.restoreContext(), started: this.engine.isStarted() }); }
   private restoreContext() { return { store: this.store, secrets: this.secrets, definitions: this.definitions, now: this.now }; }
 
   // ---- Reading ----------------------------------------------------------------------------------
@@ -180,25 +163,36 @@ export class TriggerService extends EventEmitter {
   }
 
   /** Stops firing and dispatching without discarding anything, for a worker handoff. */
-  pause(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
-  resume(): void {
-    this.pause();
-    this.timer = setInterval(() => { void this.tick().catch(() => {}); }, this.options.tickMs ?? 1000);
-    this.timer.unref();
-  }
-  close(): void { this.pause(); }
+  pause(): void { this.engine.pause(); }
+  resume(): void { this.engine.resume(); }
+  close(): void { this.engine.pause(); }
   /** New scheduled times are left for the successor worker; its catch-up runs them. */
-  hold(): void { this.held = true; }
+  hold(): void { this.engine.hold(); }
   /** A forced update that gave up: scheduled times fire here again. */
-  release(): void { this.held = false; }
+  release(): void { this.engine.release(); }
+  tick(): Promise<void> { return this.engine.tick(); }
+
+  /**
+   * Fires once now, under the trigger's usual overlap and hourly limits. An HTTP trigger sends its request
+   * first and runs with that response whatever its condition says; what later polls compare against stays as it was.
+   */
+  run(id: string, actor: TriggerActor, scope?: TriggerScope): Promise<TriggerEvent> { return this.polls.run(id, actor, scope); }
+  /**
+   * The open issues an issue watch would work on, in its order, and where each stands for the saved trigger `id`:
+   * what it took, what a run has now, and what a watch starting from now leaves. Only reads GitHub.
+   */
+  previewIssues(source: Extract<TriggerSource, { kind: 'github' }>, id: string | undefined, actor: TriggerActor, scope?: TriggerScope): Promise<IssuePreview> { return this.polls.previewIssues(source, id, actor, scope); }
+  /** Waits for requests in flight and their saves, so the state lock is released only after the last write. */
+  async settle(): Promise<void> {
+    await Promise.allSettled([this.polls.waitAll(), this.dispatch.closing()]);
+    await this.store.idle();
+  }
 
   hasActive(): boolean { return this.state.triggers.some(trigger => trigger.enabled) || this.state.events.some(event => UNFINISHED.has(event.status)); }
   /** Work a handoff must wait for: a tick, a save, or a claim whose submission is not yet recorded. */
-  inFlight(): boolean { return Boolean(this.ticking) || Boolean(this.closingIssues) || this.store.pending() > 0 || this.polling.size > 0 || this.state.events.some(event => event.status === 'claimed'); }
+  inFlight(): boolean { return this.engine.isTicking() || Boolean(this.dispatch.closing()) || this.store.pending() > 0 || this.polls.size() > 0 || this.state.events.some(event => event.status === 'claimed'); }
   /** Saves again; a locked engine never saves, and a handoff must not wait on it. */
   flush(): Promise<void> { return this.store.flush(); }
-  /** Every change goes through the store's one commit path (see TriggerStore.commit). */
-  private commit<T>(change: (state: EngineState) => T, kind: 'grow' | 'settle' = 'grow'): Promise<T> { return this.store.commit(change, kind); }
   settings(): TriggerSettings { return structuredClone(this.state.settings); }
   preview(schedule: Schedule): string[] { return previewSlots(schedule, this.now()); }
 
@@ -206,636 +200,5 @@ export class TriggerService extends EventEmitter {
 
   secretList(): TriggerSecret[] {
     return this.secrets.list().map(secret => ({ ...secret, triggerIds: [...(this.state.secretGrants[secret.id] ?? [])] }));
-  }
-
-  /**
-   * Fires once now, under the trigger's usual overlap and hourly limits. An HTTP trigger sends its request
-   * first and runs with that response whatever its condition says; what later polls compare against stays as it was.
-   */
-  async run(id: string, actor: TriggerActor, scope?: TriggerScope): Promise<TriggerEvent> {
-    const trigger = this.trigger(id);
-    if (!seen(trigger, scope)) throw failure('Trigger not found.', 404);
-    hereOnly(trigger, scope);
-    if (this.state.onceConsumed[id]) throw failure('This once reservation was consumed. Create a new reservation to retry.', 409);
-    if (trigger.archivedAt) throw failure('Unarchive this trigger before running it.', 409);
-    if (this.store.full()) throw failure('Trigger history is full. Delete old triggers or wait for finished runs to expire.', 507);
-    if (trigger.source.kind === 'github') {
-      if (!trigger.enabled) throw failure('Turn the trigger on before checking it.', 409);
-      const blocked = this.state.cursors[id]?.blockedUntil;
-      if (blocked && blocked > this.now()) throw failure(`GitHub's rate limit allows the next check at ${new Date(blocked).toISOString()}.`, 429);
-      const unlock = this.lock(id);
-      if (!unlock) throw failure('This trigger is checking GitHub right now. Try again in a moment.', 409);
-      let fired: TriggerEvent[];
-      const first = this.state.cursors[id]?.github?.checkedAt === undefined;
-      try {
-        await this.commit(state => { const position = state.cursors[id]; if (position) position.polling = { slot: this.now(), revision: trigger.revision, method: 'GET' }; }, 'settle');
-        fired = await this.pollGitHub(trigger, this.now(), actor);
-      } finally { unlock(); }
-      const problem = this.state.cursors[id]?.lastError;
-      const watch = trigger.source.watch;
-      const full = watch.type === 'issues' && this.unfinished(id) >= watch.concurrency;
-      const hour = this.now() - 60 * 60 * 1000;
-      const limited = watch.type === 'issues' && this.state.recentFires.filter(item => item.triggerId === id && item.at > hour).length >= trigger.policy.maxEventsPerHour;
-      const noted = watch.type === 'issues' && watch.start === 'new' && first && !problem;
-      if (!fired.length) throw failure(full ? 'Every place of this trigger is taken; the next issue is taken when a run ends.'
-        : problem ? `GitHub could not be checked: ${problem}`
-        : limited ? 'This trigger reached its runs for this hour; the next issue is taken when the hour allows.'
-        : noted ? 'Checked GitHub and noted the issues already open; issues that appear from now on will run.'
-        : 'Checked GitHub: nothing new since the last check.', problem && !full ? 502 : 409);
-      void this.tick().catch(() => {});
-      return structuredClone(fired[0]);
-    }
-    const event = trigger.source.kind === 'http' ? await this.runHttp(trigger, actor) : await this.commit(state => {
-      const current = state.triggers.find(item => item.id === id);
-      if (!current || !seen(current, scope)) throw failure('Trigger not found.', 404);
-      hereOnly(current, scope);
-      if (state.onceConsumed[id]) throw failure('This once reservation was consumed. Create a new reservation to retry.', 409);
-      if (current.archivedAt) throw failure('Unarchive this trigger before running it.', 409);
-      if (current.source.schedule.type === 'once' && !current.enabled) throw failure('Turn the once reservation on before running it.', 409);
-      const created = this.fire(state, current, `manual:${randomUUID()}`, this.now(), 'manual', actor);
-      this.log(state, actor, 'run', current, current.revision, current.revision, `Ran now: ${created?.status ?? 'skipped'}`);
-      return created;
-    });
-    if (!event) throw failure(`${trigger.name} did not run.`, 409);
-    void this.tick().catch(() => {});
-    return structuredClone(event);
-  }
-
-  /**
-   * Sends the request under the same one-at-a-time lock and saved claim as scheduled requests. Once a POST may
-   * have gone out, every failure says so, and an agent's retry with the same requestKey does not send it again.
-   */
-  private async runHttp(trigger: Trigger, actor: TriggerActor): Promise<TriggerEvent | undefined> {
-    if (trigger.source.kind !== 'http') return undefined;
-    const id = trigger.id;
-    const method = trigger.source.request.method;
-    // A turned-off trigger's run would never start, so its request is not sent either.
-    if (!trigger.enabled) throw failure('Turn the trigger on before running it.', 409);
-    // A run that limits would skip is refused before anything is sent. Tried on a copy, so nothing is recorded.
-    const warning = this.store.capacity;
-    const probe = this.fire(structuredClone(this.state), trigger, `manual:${randomUUID()}`, this.now(), 'manual', actor);
-    this.store.noteCapacity(warning);
-    if (!probe || probe.status === 'skipped') throw failure(`Nothing was sent: ${probe?.reason ?? 'this trigger cannot record more runs right now.'}`, 409);
-    const unlock = this.lock(id);
-    if (!unlock) throw failure('This trigger is sending its request right now. Try again in a moment.', 409);
-    let sent = false;
-    const uncertain = (error: unknown) => Object.assign(error instanceof Error ? error : new Error(String(error)), { uncertain: true,
-      message: `${error instanceof Error ? error.message : String(error)} The POST was sent, or may have been; it will not be sent again for this request.` });
-    try {
-      await this.commit(state => {
-        const position = state.cursors[id];
-        if (position) position.polling = { slot: this.now(), revision: trigger.revision, method };
-      }, 'settle');
-      const outcome = await this.request(trigger);
-      sent = method === 'POST' && (outcome.ok || outcome.uncertain);
-      const unclaim = (state: EngineState) => { const position = state.cursors[id]; if (position) delete position.polling; };
-      if (!outcome.ok) {
-        await this.commit(unclaim, 'settle').catch(() => {});
-        throw failure(`The request failed, so nothing ran: ${outcome.error}`, 502);
-      }
-      return await this.commit(state => {
-        unclaim(state);
-        const current = state.triggers.find(item => item.id === id);
-        if (!current) throw failure('Trigger not found.', 404);
-        if (current.revision !== trigger.revision) throw failure('The trigger changed while its request was sent, so nothing ran.', 409);
-        const created = this.fire(state, current, `manual:${randomUUID()}`, this.now(), 'manual', actor);
-        if (!created) throw failure(`${current.name} could not record this run.`, 409);
-        created.payload = responsePayload(current, outcome); created.summary = `Run now · ${responseSummary(outcome, undefined)}`;
-        this.log(state, actor, 'run', current, current.revision, current.revision, `Ran now: ${created?.status ?? 'skipped'}`);
-        return created;
-      }).catch(async error => {
-        await this.commit(unclaim, 'settle').catch(() => {});
-        throw error;
-      });
-    } catch (error) {
-      throw sent ? uncertain(error) : error;
-    } finally {
-      unlock();
-    }
-  }
-
-  private unfinished(triggerId: string): number {
-    return this.state.events.filter(event => event.triggerId === triggerId && UNFINISHED.has(event.status)).length;
-  }
-
-  /** One request at a time per trigger. Taken before anything is awaited; only its holder releases it. */
-  private lock(id: string): (() => void) | undefined {
-    if (this.polling.has(id)) return undefined;
-    let done = () => {};
-    const held = new Promise<void>(resolve => { done = resolve; });
-    this.polling.set(id, held);
-    return () => { if (this.polling.get(id) === held) this.polling.delete(id); done(); };
-  }
-
-  /** Waits for requests in flight and their saves, so the state lock is released only after the last write. */
-  async settle(): Promise<void> {
-    await Promise.allSettled([...this.polling.values(), this.closingIssues]);
-    await this.store.idle();
-  }
-
-  // ---- Firing and dispatch ------------------------------------------------------------------------
-
-  tick(): Promise<void> {
-    if (!this.started) return Promise.resolve();
-    return this.ticking ??= this.step().finally(() => { this.ticking = undefined; });
-  }
-
-  private async step(): Promise<void> {
-    // After a failed save, try saving again before anything new is accepted.
-    if (this.store.problem) await this.commit(() => undefined, 'settle').catch(() => {});
-    // A claim whose outcome could not be saved is matched to what was admitted, never submitted again.
-    if (this.state.events.some(event => event.status === 'claimed' && !this.submitting.has(event.id))) {
-      await this.commit(state => { this.reconcile(state, event => !this.submitting.has(event.id)); }, 'settle').catch(() => {});
-    }
-    const now = this.now();
-    if (!this.held && !this.store.problem) {
-      for (const trigger of this.state.triggers) {
-        if (!trigger.enabled) continue;
-        const cursor = this.state.cursors[trigger.id];
-        if (!cursor || cursor.paused || cursor.nextAt === undefined || cursor.nextAt > now || this.polling.has(trigger.id)) continue;
-        if (trigger.source.kind === 'github' && cursor.blockedUntil !== undefined && cursor.blockedUntil > now) continue;
-        // All HTTP triggers together send at most this many requests a minute; the rest wait for the next tick.
-        const polled = trigger.source.kind !== 'schedule';
-        if (polled && this.budget.sentSince(now - 60_000) >= this.budget.requestLimit) continue;
-        // Taken before the claim is saved, so a manual run cannot start a second request in between.
-        const unlock = polled ? this.lock(trigger.id) : undefined;
-        if (polled && !unlock) continue;
-        const full = this.store.full();
-        if (full && trigger.source.schedule.type === 'once') continue;
-        let poll: { slot: number; revision: number } | undefined;
-        await this.commit(state => {
-          const current = state.triggers.find(item => item.id === trigger.id);
-          const position = state.cursors[trigger.id];
-          const admissionNow = this.now();
-          if (this.held || !current || !current.enabled || state.onceConsumed[current.id] || !position || position.paused || position.nextAt === undefined || position.nextAt > admissionNow) return;
-          if (current.source.kind === 'schedule' && current.source.schedule.type === 'once') {
-            const slot = position.nextAt;
-            const event = this.fire(state, current, new Date(slot).toISOString(), slot, 'schedule');
-            if (event && current.source.catchUp === 'skip' && admissionNow - slot > LATE_AFTER_MS) {
-              event.status = 'skipped'; event.reason = 'The once reservation was missed and consumed without retrying.';
-            }
-            return;
-          }
-          // With history full, the schedule still moves on, but nothing new is recorded or run.
-          if (full) { position.nextAt = nextSlot(current.source.schedule, now, position.anchorAt); return; }
-          const schedule = current.source.schedule;
-          // Late, or more than one time already passed: this is a catch-up, not an on-time run.
-          const following = nextSlot(schedule, position.nextAt, position.anchorAt);
-          const late = now - position.nextAt > LATE_AFTER_MS || (following !== undefined && following <= now);
-          // A slot this late was missed; catch-up runs only the latest one inside the window. A poll always
-          // looks once after a gap: what it checks is the current state, not what happened meanwhile.
-          const catchUp = current.source.kind === 'schedule' ? current.source.catchUp : 'latest';
-          const slot = !late ? position.nextAt
-            : catchUp === 'latest' ? latestSlot(schedule, Math.max(position.lastSlot ?? -Infinity, now - CATCH_UP_WINDOW_MS), now, position.anchorAt) : undefined;
-          position.nextAt = nextSlot(schedule, Math.max(now, position.lastSlot ?? 0), position.anchorAt);
-          if (slot === undefined || (position.lastSlot !== undefined && slot <= position.lastSlot)) return;
-          position.lastSlot = slot;
-          if (current.source.kind === 'schedule') { this.fire(state, current, new Date(slot).toISOString(), slot, 'schedule'); return; }
-          // Claimed before the request goes out, so a POST cut off by a stop is never sent again for this time.
-          position.polling = { slot, revision: current.revision, method: current.source.kind === 'http' ? current.source.request.method : 'GET' };
-          poll = { slot, revision: current.revision };
-        }, full ? 'settle' : 'grow').then(() => { if (poll && unlock) this.startPoll(trigger.id, poll.slot, poll.revision, unlock); else unlock?.(); }).catch(async error => {
-          unlock?.();
-          if ((error as { statusCode?: number }).statusCode !== 507) return;
-          // A once reservation keeps its due time without repeated settle writes until history has room.
-          if (trigger.source.schedule.type === 'once') {
-            this.store.noteCapacity(`"${trigger.name}" is waiting because trigger history is full.`);
-            return;
-          }
-          // Repeating schedules move on, with a visible warning.
-          this.store.noteCapacity(`"${trigger.name}" skipped a scheduled run because trigger history is full.`);
-          await this.commit(state => {
-            const position = state.cursors[trigger.id];
-            const current = state.triggers.find(item => item.id === trigger.id);
-            if (position && current && current.source.schedule.type !== 'once') position.nextAt = nextSlot(current.source.schedule, now, position.anchorAt);
-          }, 'settle').catch(() => {});
-        });
-      }
-    }
-    await this.track();
-    // Closing issues talks to GitHub; it goes on beside the tick so a slow answer never holds up other triggers.
-    if (!this.closingIssues && !this.held && !this.store.problem) this.closingIssues = this.closeIssues().catch(() => {}).finally(() => { this.closingIssues = undefined; });
-    await this.dispatch();
-  }
-
-  /** One HTTP poll at a time per trigger; handoff waits for polls in flight. */
-  private startPoll(triggerId: string, slot: number, revision: number, unlock: () => void): void {
-    void this.poll(triggerId, slot, revision).catch(() => {}).finally(unlock);
-  }
-
-  private async poll(triggerId: string, slot: number, revision: number): Promise<void> {
-    const trigger = this.state.triggers.find(item => item.id === triggerId);
-    if (trigger?.source.kind === 'github' && trigger.revision === revision) { await this.pollGitHub(trigger, slot); return; }
-    if (!trigger || trigger.source.kind !== 'http' || trigger.revision !== revision) return;
-    const outcome = await this.request(trigger);
-    await this.commit(state => {
-      const current = state.triggers.find(item => item.id === triggerId);
-      const position = state.cursors[triggerId];
-      if (!position) return;
-      delete position.polling;
-      // A response to an older definition never updates what the current one compares against.
-      if (!current || current.revision !== revision || current.source.kind !== 'http') return;
-      if (!outcome.ok) { this.pollFailed(position, current, outcome.uncertain ? `${outcome.error} The POST may have reached the server; it was not sent again.` : outcome.error); return; }
-      const result = evaluate(current.source.condition, outcome, position.observed);
-      if (result.error) { this.pollFailed(position, current, result.error); return; }
-      position.failures = 0; delete position.lastError;
-      position.observed = result.state;
-      if (!result.fire) return;
-      const event = this.fire(state, current, new Date(slot).toISOString(), slot, 'http');
-      if (event) { event.payload = responsePayload(current, outcome, result.selected); event.summary = responseSummary(outcome, result.selected); }
-    }).catch(() => this.commit(state => {
-      // The result could not be recorded (history full): the claim is still released, so it is not reported as cut off.
-      const position = state.cursors[triggerId];
-      if (position?.polling?.slot === slot) delete position.polling;
-    }, 'settle').catch(() => {}));
-  }
-
-  /** Repeated failures back off, up to half an hour, instead of hammering a broken endpoint. */
-  private pollFailed(position: Cursor, trigger: Trigger, error: string, notBefore?: number): void {
-    position.failures = (position.failures ?? 0) + 1;
-    position.lastError = error.slice(0, 500);
-    const retry = Math.max(this.now() + Math.min(30 * 60_000, 60_000 * 2 ** Math.min(position.failures - 1, 5)), notBefore ?? 0);
-    if (position.nextAt !== undefined && position.nextAt < retry) position.nextAt = nextSlot(trigger.source.schedule, retry, position.anchorAt);
-  }
-
-  // ---- GitHub ---------------------------------------------------------------------------------------
-
-  /**
-   * Checks GitHub once and records what is new. The first check only remembers what is there. A check that
-   * does not finish changes nothing, so the next one looks at the same range again.
-   */
-  private async pollGitHub(trigger: Trigger, slot: number, manual?: TriggerActor): Promise<TriggerEvent[]> {
-    if (trigger.source.kind !== 'github') return [];
-    const source = trigger.source;
-    let result: { issues: GitHubIssue[]; cursor: GitHubCursor } | undefined;
-    let problem: { message: string; retryAt?: number } | undefined;
-    // Working through open issues: while every place is taken, there is nothing to ask GitHub.
-    if (source.watch.type === 'issues' && this.unfinished(trigger.id) >= source.watch.concurrency) {
-      return this.commit(state => { const position = state.cursors[trigger.id]; if (position?.polling?.slot === slot) delete position.polling; return []; }, 'settle').catch(() => []);
-    }
-    try {
-      const { fetch, identity } = await this.github.fetchFor(source.auth, trigger.id);
-      const login = await this.github.login(fetch, identity);
-      if (login.toLowerCase() !== source.account.toLowerCase()) throw new GitHubError(`GitHub is signed in as ${login}, not ${source.account}; this trigger stopped checking until the account is set again.`);
-      result = await checkGitHub(source.watch, this.state.cursors[trigger.id]?.github ?? {}, fetch, source.account, this.now());
-    } catch (error) { problem = { message: error instanceof Error ? error.message : String(error), ...((error as GitHubError).retryAt ? { retryAt: (error as GitHubError).retryAt } : {}) }; }
-    return this.commit(state => {
-      const current = state.triggers.find(item => item.id === trigger.id);
-      const position = state.cursors[trigger.id];
-      if (!position) return [];
-      delete position.polling;
-      if (!current || current.revision !== trigger.revision || current.source.kind !== 'github') return [];
-      if (!result) {
-        this.pollFailed(position, current, problem?.message ?? 'GitHub could not be checked.', problem?.retryAt);
-        if (problem?.retryAt) position.blockedUntil = problem.retryAt;
-        return [];
-      }
-      const baseline = !position.github;
-      position.github = result.cursor;
-      position.failures = 0; delete position.lastError; delete position.blockedUntil;
-      const fired: TriggerEvent[] = [];
-      if (source.watch.type === 'issues') {
-        const watch = source.watch;
-        const handled = new Set(result.cursor.handled ?? []);
-        const passedOver = passed(watch, result.cursor);
-        // An issue still being worked on is never taken twice, even after the remembered list was reset.
-        const working = new Set(state.events.filter(item => item.triggerId === current.id && UNFINISHED.has(item.status)).flatMap(item => { const ref = issueRef(item); return ref ? [keyOf(ref)] : []; }));
-        const now = this.now();
-        const hourly = state.recentFires.filter(item => item.at > now - 60 * 60 * 1000);
-        // Waiting for room, never pausing: the next issue is taken when a run ends or the hour allows it.
-        let room = Math.min(watch.concurrency - state.events.filter(item => item.triggerId === current.id && UNFINISHED.has(item.status)).length,
-          current.policy.maxEventsPerHour - hourly.filter(item => item.triggerId === current.id).length, state.settings.maxEventsPerHour - hourly.length);
-        for (const issue of result.issues) {
-          if (room <= 0) break;
-          const key = keyOf(issue);
-          if (passedOver.has(key) || working.has(key)) continue;
-          const dedup = `issue:${issue.repository}#${issue.number}:${slot}`;
-          const event = this.fire(state, current, manual ? `manual:${randomUUID()}:${dedup}` : dedup, slot, manual ? 'manual' : 'github', manual, watch.concurrency > 1 ? 'parallel' : 'skip');
-          if (!event) break;
-          event.payload = issue;
-          if (event.input.issue) Object.assign(event.input.issue, { repository: issue.repository, number: issue.number });
-          event.summary = `${issue.repository}#${issue.number} ${issue.title}`.slice(0, 200);
-          fired.push(event);
-          // Only an issue that is really waiting to run counts as taken; one refused by a limit is tried next time.
-          if (event.status !== 'queued') break;
-          handled.add(key);
-          room--;
-        }
-        position.github = { ...result.cursor, handled: [...handled] };
-        if (manual) this.log(state, manual, 'run', current, current.revision, current.revision, `Checked GitHub now: ${fired.length} issue${fired.length === 1 ? '' : 's'} taken`);
-        return structuredClone(fired);
-      }
-      for (const issue of result.issues) {
-        const key = `review:${issue.repository}#${issue.number}:${slot}`;
-        const event = this.fire(state, current, manual ? `manual:${randomUUID()}:${key}` : key, slot, manual ? 'manual' : 'github', manual);
-        if (!event) continue;
-        event.payload = issue;
-        event.summary = `${issue.repository}#${issue.number} ${issue.title}`.slice(0, 200);
-        fired.push(event);
-      }
-      if (manual) this.log(state, manual, 'run', current, current.revision, current.revision, baseline ? 'Checked GitHub and noted the current issues' : `Checked GitHub now: ${fired.length} new`);
-      return structuredClone(fired);
-    }).catch(() => this.commit(state => { const position = state.cursors[trigger.id]; if (position?.polling?.slot === slot) delete position.polling; return []; }, 'settle').catch(() => []));
-  }
-
-  /**
-   * The open issues an issue watch would work on, in its order, and where each stands for the saved trigger `id`:
-   * what it took, what a run has now, and what a watch starting from now leaves. Only reads GitHub.
-   */
-  async previewIssues(source: Extract<TriggerSource, { kind: 'github' }>, id: string | undefined, actor: TriggerActor, scope?: TriggerScope): Promise<IssuePreview> {
-    const watch = source.watch;
-    if (watch.type !== 'issues') throw failure('Only issue watches have a preview.');
-    if (source.auth.type === 'token' && actor.kind !== 'owner') throw failure('Only the owner can preview with a saved token.', 403);
-    const saved = id ? this.state.triggers.find(item => item.id === id) : undefined;
-    if (id && (!saved || !seen(saved, scope))) throw failure('Trigger not found.', 404);
-    let read;
-    try {
-      const { fetch, identity } = await this.github.fetchFor(source.auth);
-      const login = await this.github.login(fetch, identity);
-      if (login.toLowerCase() !== source.account.toLowerCase()) throw new GitHubError(`GitHub is signed in as ${login}, not ${source.account}.`);
-      read = await readIssues(watch, fetch, source.account);
-    } catch (error) { throw failure(error instanceof Error ? error.message : String(error), 502); }
-    // What the saved trigger remembers counts while it is on; an edit is judged as saving it would.
-    const cursor = saved?.enabled ? keptGitHub(saved, { ...saved, source }, this.state.cursors[saved.id]) ?? {} : {};
-    const working = new Set(saved ? this.state.events.filter(event => event.triggerId === saved.id && UNFINISHED.has(event.status)).flatMap(event => { const ref = issueRef(event); return ref ? [keyOf(ref)] : []; }) : []);
-    const handled = new Set(cursor.handled ?? []);
-    const left = new Set([...watch.start === 'new' ? cursor.skipped ?? [] : [], ...noted(watch, cursor, read.issues)]);
-    let position = 0;
-    const issues: IssuePreviewItem[] = read.issues.map(issue => {
-      const key = keyOf(issue);
-      const status: IssuePreviewItem['status'] = working.has(key) ? 'working' : handled.has(key) ? 'taken' : left.has(key) ? 'existing' : 'next';
-      return { repository: issue.repository, number: issue.number, title: issue.title, url: issue.url, labels: issue.labels, assignees: issue.assignees, createdAt: issue.createdAt, status,
-        ...(status === 'next' ? { position: ++position } : {}) };
-    });
-    const counts = { next: 0, working: 0, taken: 0, existing: 0 };
-    for (const issue of issues) counts[issue.status]++;
-    return { issues: issues.slice(0, MAX_PREVIEW), total: issues.length, counts };
-  }
-
-  /** A trigger's request, with only the secrets the owner gave this trigger. */
-  private request(trigger: Trigger): Promise<HttpOutcome> {
-    if (trigger.source.kind !== 'http') return Promise.resolve({ ok: false, error: 'Not an HTTP trigger.', uncertain: false });
-    return this.send(trigger.source.request, secret => (this.state.secretGrants[secret.id] ?? []).includes(trigger.id));
-  }
-
-  /**
-   * Records one firing. Overlap and hourly limits decide whether it waits, joins or is skipped. `by` is who asked for
-   * a run now: one asked for from a controlling computer counts as started there.
-   */
-  private fire(state: EngineState, trigger: Trigger, dedupKey: string, at: number, kind: TriggerEvent['kind'], by?: TriggerActor, overlapOverride?: TriggerPolicy['overlap']): TriggerEvent | undefined {
-    const key = `${trigger.id} ${dedupKey}`;
-    if (trigger.source.schedule.type === 'once' && state.onceConsumed[trigger.id]) return undefined;
-    if (state.fired[key]) {
-      if (trigger.source.schedule.type === 'once') consumeOnce(state, trigger, state.events.find(event => event.triggerId === trigger.id && event.dedupKey === dedupKey)?.id, this.now);
-      return undefined;
-    }
-    const now = this.now();
-    const iso = new Date(now).toISOString();
-    // Checked before anything is stored: a trigger at its record limit adds nothing more.
-    if (Object.keys(state.fired).filter(item => item.startsWith(`${trigger.id} `)).length >= MAX_FIRED_PER_TRIGGER) {
-      this.store.noteCapacity(`"${trigger.name}" has ${MAX_FIRED_PER_TRIGGER} runs recorded in the last 30 days; new runs are not accepted until older ones expire.`);
-      return undefined;
-    }
-    state.fired[key] = iso;
-    state.recentFires = [...state.recentFires.filter(item => item.at > now - 60 * 60 * 1000), { at: now, triggerId: trigger.id }];
-    const handler = trigger.handler;
-    const untrustedInput = carriesOutsideContent(trigger.source);
-    const remote = by?.controllerId ? { controllerId: by.controllerId } : trigger.remoteEdited;
-    // Open issues decide their own overlap from how many may be worked on at once.
-    const overlap = overlapOverride ?? trigger.policy.overlap;
-    const watch = trigger.source.kind === 'github' ? trigger.source.watch : undefined;
-    const issue = trigger.source.kind === 'github' && watch?.type === 'issues'
-      ? { issue: { account: trigger.source.account, assign: watch.assign, close: watch.close && handler.kind === 'task' } } : {};
-    // What runs is frozen with the event: a task's instructions and target, or a coordinator's rules.
-    const input: TriggerEvent['input'] = handler.kind === 'task'
-      ? { instructions: handler.instructions, provider: handler.provider, ...(handler.model ? { model: handler.model } : {}), ...(handler.effort ? { effort: handler.effort } : {}),
-        approvals: handler.approvals, target: handler.target, untrustedInput, overlap, ...(remote ? { remote: { controllerId: remote.controllerId } } : {}), ...issue }
-      : { instructions: '', provider: handler.rules[0].provider, approvals: handler.approvals, target: { node: 'local', mode: 'auto' }, untrustedInput, overlap, ...issue,
-        handler: 'coordinator', rules: structuredClone(handler.rules),
-        ...(trigger.source.kind === 'github' && trigger.source.watch.type === 'review-requested' ? { review: { verdicts: trigger.source.watch.verdicts } } : {}) };
-    const event: TriggerEvent = { id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name, triggerRevision: trigger.revision, kind, dedupKey,
-      occurredAt: new Date(at).toISOString(), receivedAt: iso, updatedAt: iso, status: 'queued', requestId: triggerRequestId(trigger.id, dedupKey),
-      input,
-      summary: kind === 'manual' ? 'Run now' : `Scheduled for ${new Date(at).toISOString()}` };
-    // The firing just recorded counts too, so the limit is the number that may run in any hour.
-    const recent = state.recentFires.slice(0, -1);
-    const unfinished = state.events.filter(item => item.triggerId === trigger.id && UNFINISHED.has(item.status));
-    if (recent.filter(item => item.triggerId === trigger.id).length >= trigger.policy.maxEventsPerHour) {
-      event.status = 'skipped';
-      event.reason = `Paused: more than ${trigger.policy.maxEventsPerHour} runs in an hour. Turn the trigger on again to resume.`;
-      state.cursors[trigger.id] = { ...(state.cursors[trigger.id] ?? { anchorAt: now }), paused: { reason: event.reason, at: iso } };
-    } else if (recent.length >= state.settings.maxEventsPerHour) {
-      event.status = 'skipped'; event.reason = `Skipped: all triggers together reached ${state.settings.maxEventsPerHour} runs in an hour.`;
-    } else if (unfinished.length && overlap === 'skip') {
-      event.status = 'skipped'; event.reason = 'Skipped: the previous run of this trigger is still working.';
-    } else if (unfinished.some(item => item.status === 'queued') && overlap === 'queue') {
-      event.status = 'coalesced'; event.reason = 'Joined the run already waiting for the previous one to finish.';
-    } else if (unfinished.filter(item => item.status === 'queued').length >= MAX_WAITING_PER_TRIGGER) {
-      event.status = 'skipped'; event.reason = `Skipped: ${MAX_WAITING_PER_TRIGGER} runs of this trigger are already waiting.`;
-    } else if (state.events.filter(item => item.status === 'queued').length >= 50) {
-      event.status = 'skipped'; event.reason = 'Skipped: 50 trigger runs are already waiting.';
-    }
-    state.events.push(event);
-    if (trigger.source.schedule.type === 'once') {
-      if (event.status === 'skipped') event.reason = `${event.reason ?? 'Skipped.'} This once reservation is consumed; create a new reservation to retry.`;
-      consumeOnce(state, trigger, event.id, this.now);
-    }
-    return event;
-  }
-
-  private async dispatch(): Promise<void> {
-    for (;;) {
-      const active = this.state.events.filter(event => ACTIVE.has(event.status)).length;
-      if (active >= this.state.settings.maxConcurrentRuns) return;
-      const next = this.state.events.find(event => event.status === 'queued' && this.ready(event));
-      if (!next) return;
-      // The claim is saved before anything is submitted; if the result is lost it is never submitted again.
-      const claimed = await this.commit(state => {
-        const event = state.events.find(item => item.id === next.id);
-        if (!event || event.status !== 'queued') return undefined;
-        Object.assign(event, { status: 'claimed', claimedAt: new Date(this.now()).toISOString(), updatedAt: new Date(this.now()).toISOString() });
-        return structuredClone(event);
-      }, 'settle').catch(() => undefined);
-      if (!claimed) return;
-      this.submitting.add(claimed.id);
-      try {
-        let outcome: Partial<TriggerEvent>;
-        try { outcome = await this.submit(claimed); }
-        catch (error) { outcome = { status: 'error', error: (error instanceof Error ? error.message : String(error)).slice(0, 1500) }; }
-        await this.commit(state => {
-          const event = state.events.find(item => item.id === claimed.id);
-          if (event) { Object.assign(event, outcome, { updatedAt: new Date(this.now()).toISOString() }); this.handFailed(state, event); }
-        }, 'settle').catch(() => {});
-      } finally { this.submitting.delete(claimed.id); }
-    }
-  }
-
-  /** Overlap `queue` waits for the previous run; `parallel` does not. */
-  private ready(event: TriggerEvent): boolean {
-    // The policy in force when it fired decides, not a later edit.
-    if ((event.input.overlap ?? 'skip') === 'parallel') return true;
-    return !this.state.events.some(item => item.triggerId === event.triggerId && item.id !== event.id && ACTIVE.has(item.status));
-  }
-
-  private async submit(event: TriggerEvent): Promise<Partial<TriggerEvent>> {
-    const outcome = await handEvent(event, { executor: this.options.executor, sharing: this.options.sharing, trustedFolders: () => this.state.trustedFolders });
-    // Assigned only once the run really started, so an issue nobody works on is not left assigned.
-    const assigned = event.input.issue?.assign && outcome.status === 'running' ? await this.assignIssue(event) : undefined;
-    return assigned ? { ...outcome, issueActions: assigned } : outcome;
-  }
-
-  /**
-   * An open issue whose run could not even start pauses its trigger: taking the next one would fail the same way
-   * and use up the queue. Turning the trigger on again takes the open issues again.
-   */
-  private handFailed(state: EngineState, event: TriggerEvent): void {
-    if (!event.input.issue || event.status !== 'error') return;
-    const position = state.cursors[event.triggerId];
-    if (!position || position.paused) return;
-    const reason = `Paused: the run for an issue could not start (${(event.error ?? 'unknown error').slice(0, 300)}). Turn the trigger on again to go on.`;
-    position.paused = { reason, at: new Date(this.now()).toISOString() };
-  }
-
-  /** An open issue is assigned to the trigger's account as its run starts; a failure is noted and the run goes on. */
-  private async assignIssue(event: TriggerEvent): Promise<NonNullable<TriggerEvent['issueActions']>> {
-    const issue = issueRef(event);
-    if (!issue || !event.input.issue) return { assignError: 'The event does not name an issue.' };
-    try {
-      const fetch = await this.githubClient(event.triggerId, true);
-      const response = await fetch(`/repos/${issue.repository}/issues/${issue.number}/assignees`, undefined, { method: 'POST', body: { assignees: [event.input.issue.account] } });
-      refused(response);
-      if (response.status < 200 || response.status > 299) return { assignError: `Assigning the issue failed: GitHub answered HTTP ${response.status}.` };
-      return { assignedAt: new Date(this.now()).toISOString() };
-    } catch (error) { return { assignError: `Assigning the issue failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500) }; }
-  }
-
-  /** Once an open issue's run ends, the next check comes now instead of at the next scheduled time. */
-  private nextIssue(state: EngineState, event: TriggerEvent): void {
-    if (!event.input.issue || UNFINISHED.has(event.status)) return;
-    const trigger = state.triggers.find(item => item.id === event.triggerId);
-    const position = state.cursors[event.triggerId];
-    // Only while the trigger still works through open issues, and never ahead of a failed check's back-off.
-    if (trigger?.source.kind !== 'github' || trigger.source.watch.type !== 'issues' || !position || position.failures) return;
-    if (position.nextAt !== undefined && !position.paused) position.nextAt = Math.min(position.nextAt, this.now());
-  }
-
-  /**
-   * A completed open-issues run closes its issue unless its report asks to keep it open. Closing an issue twice does
-   * no harm, so one cut off by a restart is simply sent again; one that failed is not.
-   */
-  private async closeIssues(): Promise<void> {
-    const due = this.state.events.filter(event => event.status === 'completed' && event.input.issue?.close
-      && !event.issueActions?.closedAt && !event.issueActions?.closeError && !event.issueActions?.keptOpen && (this.closeRetries.get(event.id)?.at ?? 0) <= this.now());
-    for (const event of due) {
-      if (this.held || this.store.problem) return;
-      const runs = this.options.executor.runs();
-      // A turn that scheduled its own continuation goes on in that run: its last run's report decides.
-      let run = runs.find(item => item.id === event.dispatch?.runId);
-      for (let next = run; next; next = runs.find(item => item.scheduled?.afterRunId === run!.id)) run = next;
-      if (run && (run.status === 'queued' || run.status === 'running')) continue;
-      const issue = issueRef(event);
-      let result: NonNullable<TriggerEvent['issueActions']>;
-      if (!run) result = { keptOpen: true, keptReason: 'The run record is no longer available, so the issue was left open.' };
-      else if (run.status !== 'completed') result = { keptOpen: true, keptReason: 'The run did not complete, so the issue was left open.' };
-      else if (asksToKeepOpen(run.output)) result = { keptOpen: true, keptReason: 'The run asked to keep the issue open.' };
-      else if (!issue) result = { closeError: 'The event does not name an issue.' };
-      else {
-        try {
-          const fetch = await this.githubClient(event.triggerId, true);
-          const response = await fetch(`/repos/${issue.repository}/issues/${issue.number}`, undefined, { method: 'PATCH', body: { state: 'closed', state_reason: 'completed' } });
-          refused(response);
-          if (response.status >= 200 && response.status <= 299) result = { closedAt: new Date(this.now()).toISOString() };
-          else if (response.status >= 500 || response.status === 429 || response.status === 403) throw new GitHubError(`GitHub answered HTTP ${response.status}.`);
-          else result = { closeError: `Closing the issue failed: GitHub answered HTTP ${response.status}.` };
-        } catch (error) {
-          // A failure that may pass (rate limits, the request budget, the network, GitHub's own errors) is tried again
-          // a few times, a few minutes apart, before it is recorded.
-          const message = `Closing the issue failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500);
-          const tries = (this.closeRetries.get(event.id)?.tries ?? 0) + 1;
-          if (tries < CLOSE_TRIES) { this.closeRetries.set(event.id, { tries, at: this.now() + CLOSE_RETRY_MS }); continue; }
-          result = { closeError: message };
-        }
-        this.closeRetries.delete(event.id);
-      }
-      await this.commit(state => {
-        const saved = state.events.find(item => item.id === event.id);
-        if (saved) { saved.issueActions = { ...saved.issueActions, ...result }; saved.updatedAt = new Date(this.now()).toISOString(); }
-      }, 'settle').catch(() => {});
-    }
-  }
-
-  /** Follows each submitted run to its end. Missing records are reported as uncertain, never resubmitted. */
-  private async track(): Promise<void> {
-    const runs = this.options.executor.runs();
-    const updates = new Map<string, Partial<TriggerEvent>>();
-    for (const event of this.state.events) {
-      if (event.status !== 'running') continue;
-      if (event.dispatch?.workflowId) {
-        // A coordinator event follows its conversation: done when the coordinator's turn is.
-        const conversation = this.options.executor.coordination?.(event.dispatch.workflowId);
-        const patch: Partial<TriggerEvent> = {};
-        if (conversation?.sessionId && event.dispatch.sessionId !== conversation.sessionId) {
-          patch.dispatch = { ...event.dispatch, sessionId: conversation.sessionId, createdSessionId: conversation.sessionId, ...(conversation.runId ? { runId: conversation.runId } : {}) };
-        }
-        if (!conversation) Object.assign(patch, { status: 'uncertain', error: 'The coordinator conversation record is no longer available.' });
-        else if (conversation.status === 'completed') patch.status = 'completed';
-        else if (conversation.status === 'error') Object.assign(patch, { status: 'error', ...(conversation.error ? { error: conversation.error.slice(0, 1500) } : {}) });
-        if (Object.keys(patch).length) updates.set(event.id, patch);
-        continue;
-      }
-      const job = event.input.target.mode === 'auto' ? this.options.executor.getAutoPrompt(event.requestId) : undefined;
-      // A turn a forced worker update ended goes on in Tower's continuation; the event follows it.
-      const run = continuedRunById(runs, event.dispatch?.runId ?? job?.runId) ?? continuedRun(runs, runs.find(item => item.autoPromptId === event.requestId));
-      const patch: Partial<TriggerEvent> = {};
-      // A queued continuation is not recorded yet: it is removed again when the turn turns out to have finished itself.
-      if (run && !(run.status === 'queued' && run.scheduled?.resume === 'update') && event.dispatch?.runId !== run.id) patch.dispatch = { ...event.dispatch, runId: run.id, sessionId: run.sessionId };
-      if (job?.decision?.action === 'create' && job.sessionId && !event.dispatch?.createdSessionId) patch.dispatch = { ...event.dispatch, ...patch.dispatch, createdSessionId: job.sessionId };
-      if (job && (job.status === 'error' || job.status === 'cancelled') && !run) Object.assign(patch, { status: job.status === 'error' ? 'error' : 'cancelled', error: job.error });
-      else if (run?.status === 'completed') patch.status = 'completed';
-      else if (run?.status === 'error') Object.assign(patch, { status: 'error', error: run.error });
-      else if (run?.status === 'cancelled') Object.assign(patch, { status: 'cancelled', ...(run.error ? { error: run.error } : {}) });
-      else if (!run && !job && event.input.target.mode !== 'auto') Object.assign(patch, { status: 'uncertain', error: 'The run record is no longer available; the outcome could not be confirmed.' });
-      else if (!run && !job) Object.assign(patch, { status: 'uncertain', error: 'The routing record is no longer available; the outcome could not be confirmed.' });
-      if (Object.keys(patch).length) updates.set(event.id, patch);
-    }
-    if (!updates.size) return;
-    await this.commit(state => {
-      for (const event of state.events) {
-        const patch = updates.get(event.id);
-        if (patch && event.status === 'running') { Object.assign(event, patch, { updatedAt: new Date(this.now()).toISOString() }); this.nextIssue(state, event); }
-      }
-    }, 'settle').catch(() => {});
-  }
-
-  /** A claim saved before a crash is matched to what the executor admitted, or left uncertain. */
-  private recoverClaims(state: EngineState): void { this.reconcile(state, () => true); }
-  /** A request cut off by a stop is not sent again for its time; a POST is reported, since it may have arrived. */
-  private recoverPolls(state: EngineState): void {
-    for (const position of Object.values(state.cursors)) {
-      if (!position.polling) continue;
-      if (position.polling.method === 'POST') position.lastError = 'Tower stopped while a POST was being sent. It may have reached the server and was not sent again.';
-      delete position.polling;
-    }
-  }
-  private reconcile(state: EngineState, include: (event: TriggerEvent) => boolean): void {
-    const runs = this.options.executor.runs();
-    for (const event of state.events) {
-      if (event.status !== 'claimed' || !include(event)) continue;
-      // Handing an event to its coordinator is idempotent, so an unfinished hand-over is simply done again.
-      if (event.input.handler === 'coordinator') { Object.assign(event, { status: 'queued', claimedAt: undefined }); continue; }
-      const job = this.options.executor.getAutoPrompt(event.requestId);
-      const run = runs.find(item => item.autoPromptId === event.requestId);
-      if (job || run) Object.assign(event, { status: 'running', dispatch: { ...(run ? { runId: run.id, sessionId: run.sessionId } : {}) } });
-      else Object.assign(event, { status: 'uncertain', error: 'Tower stopped while submitting this run. It was not submitted again; check before running it manually.' });
-    }
-  }
-
-  private trigger(id: string): Trigger {
-    const trigger = this.state.triggers.find(item => item.id === id);
-    if (!trigger) throw failure('Trigger not found.', 404);
-    return trigger;
-  }
-  private log(state: EngineState, actor: TriggerActor, action: TriggerAuditEntry['action'], trigger: Trigger, fromRevision: number | undefined, toRevision: number | undefined, summary: string): void {
-    logTrigger(state, this.now, actor, action, trigger, fromRevision, toRevision, summary);
   }
 }

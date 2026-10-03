@@ -1234,7 +1234,7 @@ test('a trigger run in flight survives a worker handoff and is not submitted aga
   assert.deepEqual(h.events, [], 'a running turn keeps the old worker and its engine in service');
   f.finish();
   await until(() => h.events.includes('onHandedOff') && h.successor());
-  assert.equal((h.a as unknown as { timer?: unknown }).timer, undefined, "the old engine's timer is stopped");
+  assert.equal((h.a as unknown as { engine: { timer?: unknown } }).engine.timer, undefined, "the old engine's timer is stopped");
   const b = h.b()!;
   for (let i = 0; i < 200 && b.event(fired.id).status !== 'completed'; i++) { await b.tick(); await new Promise(resolve => setTimeout(resolve, 10)); }
   assert.equal(b.event(fired.id).status, 'completed');
