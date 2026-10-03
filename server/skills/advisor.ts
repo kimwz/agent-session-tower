@@ -112,7 +112,13 @@ export class SkillAdvisor {
 
   constructor(private readonly deps: SkillAdvisorDependencies) {}
 
-  start(): void { this.timer = setInterval(() => void this.tick(), TICK_MS); this.timer.unref?.(); }
+  start(): void {
+    this.timer = setInterval(() => {
+      // A pass that fails is reported and the next interval tries again; nothing is left unhandled in the worker.
+      this.tick().catch(error => console.error(`The skill advisor's pass failed: ${error instanceof Error ? error.message : String(error)}`));
+    }, TICK_MS);
+    this.timer.unref?.();
+  }
   /** Stops starting new analyses. One already asked finishes by itself; Tower never ends a Claude or Codex process for this. */
   stop(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
   private paused = false;
@@ -155,7 +161,8 @@ export class SkillAdvisor {
 
   async tick(): Promise<void> {
     const state = this.deps.state.get();
-    if (!state.settings.enabled || this.paused || this.running || this.backfilling) return;
+    // A locked store keeps nothing until Tower restarts: no history is read, no model asked, no call counted.
+    if (this.deps.state.locked || !state.settings.enabled || this.paused || this.running || this.backfilling) return;
     this.running = true;
     try {
       for (const session of this.due().slice(0, SESSIONS_PER_TICK)) {

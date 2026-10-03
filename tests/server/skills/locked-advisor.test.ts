@@ -81,3 +81,39 @@ test('the advisor timer of a locked skill store leaves no rejected pass behind',
   assert.deepEqual(f.models, []);
   assert.equal(await readFile(f.file, 'utf8'), ORIGINAL);
 });
+
+test('an advisor pass the timer started that fails is logged, not left unhandled', async t => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  process.on('unhandledRejection', onUnhandled);
+  t.after(() => { process.off('unhandledRejection', onUnhandled); });
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-advisor-failing-pass-')));
+  const home = join(root, 'home'), project = join(home, 'work', 'shop'), stateDir = join(root, 'state');
+  await mkdir(project, { recursive: true });
+  const started = Date.now(), later = started + 30 * 60_000;
+  const session: Session = { id: 'claude:owner', nativeId: 'owner', provider: 'claude', title: 'Owner work', cwd: project, project: 'shop', status: 'completed', statusReason: '',
+    createdAt: minutesAgo(started, 120), updatedAt: minutesAgo(later, 25), lastRequestAt: minutesAgo(later, 29), lastMessage: '', messageCount: 2, isSubagent: false, resumable: true };
+  const service = new SkillService({
+    stateDir, homes: { home, agentsHome: join(home, '.agents'), claudeHome: join(home, '.claude'), codexHome: join(home, '.codex'), trash: join(stateDir, 'trash'), store: join(stateDir, 'skills'), journal: join(stateDir, 'skills-moves.json') },
+    sessions: () => [session], runs: () => [], history: async () => [{ id: 'u', role: 'user', text: 'Fix it.', timestamp: minutesAgo(later, 29) }],
+    model: async () => { throw new Error('not asked for a short request'); }, advise: true,
+  });
+  await service.start();
+  const internals = service as unknown as { state: { locked?: string }; advisor: { inFlight(): boolean; deps: { now?: () => number } } };
+  t.after(async () => { service.close(); await until(() => !internals.advisor.inFlight(), 5_000); await service.flush(); await rm(root, { recursive: true, force: true }); });
+  assert.equal(internals.state.locked, undefined, 'an unlocked store whose next save fails');
+  internals.advisor.deps.now = () => later;
+  // The store's next save cannot replace skills.json: the pass rejects from state.update.
+  await rm(join(stateDir, 'skills.json'));
+  await mkdir(join(stateDir, 'skills.json', 'blocked'), { recursive: true });
+  const logged: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => { logged.push(args); });
+  t.mock.timers.tick(2 * 60_000);
+  await until(() => !internals.advisor.inFlight() && logged.length > 0, 5_000);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(unhandled, []);
+  assert.match(String(logged[0][0]), /^The skill advisor's pass failed: /);
+  await rm(join(stateDir, 'skills.json'), { recursive: true, force: true });
+});
