@@ -77,7 +77,7 @@ import { judgeTurn } from './notifications/attention.js';
 import { DecisionService } from './decisions/service.js';
 import { SessionOutcomes } from './sessions/outcomes.js';
 import { autoPromptSuggestionResponse } from './auto-prompt/suggestion.js';
-import { insertIfItBelongs } from './runs/steer-timing.js';
+import { insertInBackground } from './runs/steer-timing.js';
 import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
 
 /** Every request this web server admits comes from the owner's browser session. */
@@ -459,8 +459,8 @@ async function main() {
       const run = await runs.enqueue(id, prompt, attachments, admit(context));
       // A message sent from this computer's page while the conversation works may belong to that work; the answer does
       // not wait for the judgment. Requests from a controlling computer (with `context`) are left as they are.
-      if (!context?.origin) void insertIfItBelongs({ engine: () => decisions.engine('steerTiming'), canTarget: () => runs.supports('steerTargets'), runs: () => runs.list(),
-        steer: (runId, targetRunId) => runs.steer(runId, { targetRunId }), record: entry => decisions.record(entry), claim: runId => judgedMessages.claim(runId) }, run).catch(() => {});
+      if (!context?.origin) insertInBackground({ engine: () => decisions.engine('steerTiming'), canTarget: () => runs.supports('steerTargets'), runs: () => runs.list(),
+        steer: (runId, targetRunId) => runs.steer(runId, { targetRunId }), record: entry => decisions.record(entry), claim: runId => judgedMessages.claim(runId) }, run);
       return run;
     },
     repositoryAction: (cwd, action) => repositories.act(cwd, action),
@@ -560,7 +560,7 @@ async function main() {
   const insertRemote = (nodeId: string, run: Run) => {
     const nodes = remoteNodes;
     if (!nodes || !identity) return;
-    void insertIfItBelongs({ engine: () => decisions.engine('steerTiming'), canTarget: () => nodes.known(nodeId),
+    insertInBackground({ engine: () => decisions.engine('steerTiming'), canTarget: () => nodes.known(nodeId),
       runs: () => nodes.snapshot(nodeId)?.runs ?? [],
       steer: async (runId, targetRunId) => {
         const session = nodes.session(nodeId);
@@ -573,7 +573,7 @@ async function main() {
         // A refusal (an older computer, a changed turn) leaves the message waiting; only a failure after it may have run is uncertain.
         throw Object.assign(new Error(body.error || `The joined computer answered ${answer.status}.`), { disposition: body.disposition === 'uncertain' || (answer.status >= 500 && answer.status !== 503) ? 'uncertain' : 'rejected' });
       },
-      record: entry => decisions.record(entry), claim: runId => judgedMessages.claim(`${nodeId}:${runId}`), sentBy: identity.id }, run).catch(() => {});
+      record: entry => decisions.record(entry), claim: runId => judgedMessages.claim(`${nodeId}:${runId}`), sentBy: identity.id }, run);
   };
   const { server, dispose, token: pageToken } = createMonitorServer({ port, clientDir, backend, nodes: remoteNodes, onNodeMessage: insertRemote, master: { callerSecret: masterCallerSecret, handle: masterRoutes(master, { turnEnd: new VoiceTurnEnd({ engine: () => decisions.engine('voiceTurnEnd'),
       known: async session => await master.call('voiceKnown', { session }) === true, record: entry => decisions.record(entry) }) }) },
