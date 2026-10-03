@@ -4,6 +4,22 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.106.2] - 2026-10-03
+
+### Fixed
+- **State files Tower cannot read are kept, not overwritten.** When trigger state, legacy trigger secrets, session tasks, skill state, public-agent data or the master's follow state cannot be read or moved aside, Tower keeps the original file and locks that store (session tasks keep summarizing in memory only) instead of saving over it, and the related panel shows a warning. Corrupt model settings are copied aside byte for byte and reported in **Settings → Model**. The encrypted Vault keeps failing closed as before.
+- **An update hold or helper lock that cannot be read keeps holding.** Worker handoffs, restores and **지금 업데이트** wait instead of treating it as released, and a missing hold no longer removes one written in the meantime.
+- An idle worker no longer shuts down while a handoff is under way.
+- The skill advisor stays still while its store is locked: it reads no history, calls no model and changes no counters, and a failed background pass is logged instead of left unhandled.
+- Claude master replies record when they were written, as Codex replies already did.
+- Unexpected errors in the insert-or-wait judgment are logged.
+- The model settings warning wraps long recovery paths on narrow screens.
+
+### Changed
+- Display stores, Auto Prompt state, the Vault, pending secret imports and the worker handoff record are saved through one private atomic writer with exclusive temporary files. A failed save reports its first error, and the handoff record is synced to disk before the handoff goes ahead.
+- Backups, run scheduling and handoff, trigger state and once consumption, and master voice records, audio and reading each have a single owner. Domain errors carry a kind; HTTP status codes, bodies, audio and event streams are set only at the HTTP edges, with the same responses as before. The local terminal event stream now sends `Cache-Control: no-store`, like the worker and terminal-host relays.
+- The trigger editor takes its interval limits and defaults from the same definitions the server checks.
+
 ## [1.106.1] - 2026-10-03
 
 ### Fixed
