@@ -1,0 +1,258 @@
+{
+  "version": 1,
+  "machine": "3663f8",
+  "worker": {
+    "files": {
+      "trigger-secrets.json": [
+        {
+          "id": "05d08a38-3138-4028-8af6-d5b7366c080c",
+          "name": "Status token",
+          "origin": "https://status.example.com",
+          "value": "Bearer FIXTURE_LEGACY_VALUE",
+          "createdAt": "2026-09-24T00:00:30.000Z"
+        }
+      ],
+      "permissions.json": {
+        "rules": [
+          {
+            "id": "r1",
+            "tool": "Bash",
+            "pattern": "npm test"
+          }
+        ],
+        "autoReview": {
+          "enabled": true,
+          "provider": "claude",
+          "model": "opus",
+          "resume": true
+        }
+      },
+      "slack-connection.json": {
+        "enabled": true,
+        "userToken": "xoxp-fixture",
+        "appToken": "xapp-fixture",
+        "account": {
+          "teamId": "TFIX",
+          "userId": "UFIX"
+        }
+      },
+      "slack-tone.json": {
+        "tone": "Short and friendly."
+      },
+      "slack-automation.json": {
+        "rules": [
+          {
+            "id": "rule",
+            "name": "Rule",
+            "enabled": true,
+            "condition": "Asked",
+            "instructions": "Answer",
+            "replyInstructions": "Reply",
+            "provider": "codex"
+          }
+        ]
+      },
+      "github-automation.json": {
+        "rules": [
+          {
+            "id": "github-rule",
+            "name": "Rule",
+            "enabled": true,
+            "condition": "Asked",
+            "instructions": "Answer",
+            "replyInstructions": "Reply",
+            "provider": "codex"
+          }
+        ]
+      },
+      "public-agents.json": {
+        "version": 1,
+        "agents": [
+          {
+            "name": "Content desk",
+            "description": "Ask for new posts.",
+            "scope": "Only publish new blog posts about tea.",
+            "workInstructions": "Use content/posts.",
+            "cwd": "/var/folders/v1/qhqvybqj4slc3kmc3g_mynkm0000gn/T/tower-backup-fixture-QAwhKR/project",
+            "provider": "claude",
+            "intakeProvider": "claude",
+            "conversation": "visitor",
+            "enabled": true,
+            "id": "4ebd145e-5dd4-47d4-9495-e85e2a1a3e2d",
+            "slug": "fdI_V8damK3djZpo4yJrqg",
+            "createdAt": "2026-10-03T03:52:32.648Z",
+            "updatedAt": "2026-10-03T03:52:32.648Z",
+            "password": {
+              "salt": "0e4693cd8432fd7cda834104efff8732",
+              "hash": "ee70b4b251e3739b3ebb629fc5cd7cfaba3b5b186e90bc922a2487aab424264236add1f037a465ca85c14cf71f778c2205eeddcacd98ee2840c0fe19f9d496c8"
+            }
+          }
+        ]
+      }
+    },
+    "triggers": {
+      "triggers": [
+        {
+          "name": "Hourly report",
+          "enabled": true,
+          "source": {
+            "kind": "schedule",
+            "schedule": {
+              "type": "cron",
+              "expression": "0 * * * *",
+              "timezone": "UTC"
+            },
+            "catchUp": "latest"
+          },
+          "handler": {
+            "kind": "task",
+            "instructions": "Hourly report instructions",
+            "provider": "codex",
+            "approvals": "auto",
+            "target": {
+              "node": "local",
+              "mode": "folder",
+              "cwd": "/var/folders/v1/qhqvybqj4slc3kmc3g_mynkm0000gn/T/tower-backup-fixture-QAwhKR/project"
+            }
+          },
+          "policy": {
+            "overlap": "skip",
+            "maxEventsPerHour": 20
+          },
+          "id": "f600b5d8-f67c-4335-903c-ffc6c4a06358",
+          "revision": 1,
+          "createdAt": "2026-09-24T00:00:30.000Z",
+          "updatedAt": "2026-09-24T00:00:30.000Z",
+          "createdBy": {
+            "kind": "owner",
+            "via": "ui"
+          },
+          "updatedBy": {
+            "kind": "owner",
+            "via": "ui"
+          }
+        },
+        {
+          "name": "Status",
+          "enabled": true,
+          "source": {
+            "kind": "http",
+            "schedule": {
+              "type": "interval",
+              "everySeconds": 300
+            },
+            "request": {
+              "method": "GET",
+              "url": "https://status.example.com/",
+              "headers": [
+                {
+                  "name": "authorization",
+                  "secretId": "05d08a38-3138-4028-8af6-d5b7366c080c"
+                }
+              ],
+              "timeoutSeconds": 5
+            },
+            "condition": {
+              "type": "every-success"
+            }
+          },
+          "handler": {
+            "kind": "task",
+            "instructions": "Status instructions",
+            "provider": "codex",
+            "approvals": "auto",
+            "target": {
+              "node": "local",
+              "mode": "folder",
+              "cwd": "/var/folders/v1/qhqvybqj4slc3kmc3g_mynkm0000gn/T/tower-backup-fixture-QAwhKR/project"
+            }
+          },
+          "policy": {
+            "overlap": "skip",
+            "maxEventsPerHour": 20
+          },
+          "id": "3aeba0e9-e385-4b9a-9a84-514b52f84728",
+          "revision": 1,
+          "createdAt": "2026-09-24T00:00:30.000Z",
+          "updatedAt": "2026-09-24T00:00:30.000Z",
+          "createdBy": {
+            "kind": "owner",
+            "via": "ui"
+          },
+          "updatedBy": {
+            "kind": "owner",
+            "via": "ui"
+          }
+        }
+      ],
+      "settings": {
+        "maxTriggers": 50,
+        "maxConcurrentRuns": 2,
+        "maxEventsPerHour": 60,
+        "privateHosts": []
+      },
+      "trustedFolders": [
+        "/var/folders/v1/qhqvybqj4slc3kmc3g_mynkm0000gn/T/tower-backup-fixture-QAwhKR/project"
+      ],
+      "secretGrants": {
+        "05d08a38-3138-4028-8af6-d5b7366c080c": [
+          "3aeba0e9-e385-4b9a-9a84-514b52f84728"
+        ]
+      },
+      "fired": {},
+      "github": {}
+    },
+    "skills": {
+      "bundle": {
+        "format": "agent-session-tower.skills",
+        "version": 1,
+        "exportedAt": "",
+        "from": "fixture",
+        "skills": []
+      },
+      "guidance": "Be brief.",
+      "settings": {
+        "enabled": true,
+        "provider": "claude"
+      }
+    }
+  },
+  "web": {
+    "projectGroups": [
+      {
+        "cwd": "/var/folders/v1/qhqvybqj4slc3kmc3g_mynkm0000gn/T/tower-backup-fixture-QAwhKR/project",
+        "title": "Fixture project",
+        "pinned": true
+      }
+    ],
+    "remoteExclusions": {
+      "folders": [
+        "/fixture/private"
+      ]
+    },
+    "decisions": {
+      "provider": "jev",
+      "features": {
+        "autoPromptSuggestions": true,
+        "attentionNotifications": true,
+        "steerTiming": true,
+        "sessionOutcomes": true,
+        "relatedSessions": true,
+        "slackFollowUps": true,
+        "voiceTurnEnd": true
+      }
+    },
+    "backup": {
+      "enabled": false,
+      "remote": {
+        "endpoint": "",
+        "bucket": "",
+        "prefix": "tower/",
+        "region": "auto",
+        "accessKeyId": ""
+      },
+      "intervalHours": 24,
+      "keep": 14
+    }
+  }
+}

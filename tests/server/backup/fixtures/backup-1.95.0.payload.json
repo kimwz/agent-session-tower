@@ -1,0 +1,392 @@
+{
+  "version": 1,
+  "machine": "1147d8",
+  "worker": {
+    "files": {
+      "trigger-secrets.json": [
+        {
+          "id": "832377bc-5ee0-42b5-8b9a-5bb07e8e96bf",
+          "name": "Status token",
+          "origin": "https://status.example.com",
+          "value": "Bearer FIXTURE_LEGACY_VALUE",
+          "createdAt": "2026-09-24T00:00:30.000Z"
+        }
+      ],
+      "permissions.json": {
+        "rules": [
+          {
+            "id": "r1",
+            "tool": "Bash",
+            "pattern": "npm test"
+          }
+        ],
+        "autoReview": {
+          "enabled": true,
+          "provider": "claude",
+          "model": "opus",
+          "resume": true
+        }
+      },
+      "models.json": {
+        "version": 1,
+        "roles": {
+          "autoPrompt.router": {
+            "provider": "follow",
+            "claude": {
+              "model": "opus"
+            },
+            "codex": {
+              "model": "gpt-5.6-sol"
+            }
+          },
+          "permissions.reviewer": {
+            "provider": "claude",
+            "claude": {
+              "model": "opus"
+            },
+            "codex": {
+              "model": "gpt-5.6-sol"
+            }
+          },
+          "skills.advisor": {
+            "provider": "claude",
+            "claude": {
+              "model": "sonnet"
+            },
+            "codex": {
+              "model": "gpt-5.6-terra"
+            }
+          },
+          "slack.match": {
+            "provider": "codex",
+            "claude": {},
+            "codex": {
+              "model": "gpt-6.1-sol",
+              "effort": "low"
+            }
+          },
+          "slack.replyIntent": {
+            "provider": "follow",
+            "claude": {
+              "model": "opus"
+            },
+            "codex": {
+              "model": "gpt-5.6-sol"
+            }
+          },
+          "slack.replyDraft": {
+            "provider": "follow",
+            "claude": {
+              "model": "opus"
+            },
+            "codex": {
+              "model": "gpt-5.6-sol"
+            }
+          },
+          "slack.toneGuide": {
+            "provider": "follow",
+            "claude": {
+              "model": "opus"
+            },
+            "codex": {
+              "model": "gpt-5.6-sol"
+            }
+          },
+          "github.replyIntent": {
+            "provider": "follow",
+            "claude": {
+              "model": "opus"
+            },
+            "codex": {
+              "model": "gpt-5.6-sol"
+            }
+          },
+          "publicAgents.judge": {
+            "provider": "follow",
+            "claude": {
+              "model": "opus"
+            },
+            "codex": {
+              "model": "gpt-5.6-sol"
+            }
+          },
+          "voice.firstReply": {
+            "provider": "claude",
+            "claude": {
+              "model": "haiku",
+              "effort": "off"
+            },
+            "codex": {}
+          },
+          "master.session": {
+            "provider": "claude",
+            "claude": {},
+            "codex": {}
+          },
+          "issues.register": {
+            "provider": "claude",
+            "claude": {},
+            "codex": {}
+          },
+          "chat.new": {
+            "provider": "claude",
+            "claude": {},
+            "codex": {}
+          },
+          "autoPrompt.new": {
+            "provider": "claude",
+            "claude": {},
+            "codex": {}
+          },
+          "triggers.new": {
+            "provider": "codex",
+            "claude": {},
+            "codex": {}
+          },
+          "slack.newRule": {
+            "provider": "codex",
+            "claude": {},
+            "codex": {}
+          },
+          "github.newRule": {
+            "provider": "codex",
+            "claude": {},
+            "codex": {}
+          },
+          "publicAgents.new": {
+            "provider": "claude",
+            "claude": {},
+            "codex": {}
+          }
+        },
+        "custom": []
+      },
+      "slack-connection.json": {
+        "enabled": true,
+        "userToken": "xoxp-fixture",
+        "appToken": "xapp-fixture",
+        "account": {
+          "teamId": "TFIX",
+          "userId": "UFIX"
+        }
+      },
+      "slack-tone.json": {
+        "tone": "Short and friendly."
+      },
+      "slack-automation.json": {
+        "rules": [
+          {
+            "id": "rule",
+            "name": "Rule",
+            "enabled": true,
+            "condition": "Asked",
+            "instructions": "Answer",
+            "replyInstructions": "Reply",
+            "provider": "codex"
+          }
+        ]
+      },
+      "github-automation.json": {
+        "rules": [
+          {
+            "id": "github-rule",
+            "name": "Rule",
+            "enabled": true,
+            "condition": "Asked",
+            "instructions": "Answer",
+            "replyInstructions": "Reply",
+            "provider": "codex"
+          }
+        ]
+      },
+      "public-agents.json": {
+        "version": 1,
+        "agents": [
+          {
+            "name": "Content desk",
+            "description": "Ask for new posts.",
+            "scope": "Only publish new blog posts about tea.",
+            "workInstructions": "Use content/posts.",
+            "cwd": "/var/folders/v1/qhqvybqj4slc3kmc3g_mynkm0000gn/T/tower-backup-fixture-6ec3Sf/project",
+            "provider": "claude",
+            "intakeProvider": "claude",
+            "conversation": "visitor",
+            "enabled": true,
+            "id": "2a12edca-ab31-4d77-9581-deeff43ec012",
+            "slug": "vK3H6U3NKsIVdJX3WFepPg",
+            "createdAt": "2026-10-03T03:52:33.029Z",
+            "updatedAt": "2026-10-03T03:52:33.029Z",
+            "password": {
+              "salt": "4bc2d6d69a30c7e56962a4905be34a91",
+              "hash": "89a7baaa324edb9a1632ec5867e27b9650b78f095649e853930e76700eab0dfbdd788a7e443a36385c225ee8a2144167c778c231ddfd69c0aa04b648d9f55652"
+            }
+          }
+        ]
+      }
+    },
+    "triggers": {
+      "triggers": [
+        {
+          "name": "Hourly report",
+          "enabled": true,
+          "source": {
+            "kind": "schedule",
+            "schedule": {
+              "type": "cron",
+              "expression": "0 * * * *",
+              "timezone": "UTC"
+            },
+            "catchUp": "latest"
+          },
+          "handler": {
+            "kind": "task",
+            "instructions": "Hourly report instructions",
+            "provider": "codex",
+            "approvals": "auto",
+            "target": {
+              "node": "local",
+              "mode": "folder",
+              "cwd": "/var/folders/v1/qhqvybqj4slc3kmc3g_mynkm0000gn/T/tower-backup-fixture-6ec3Sf/project"
+            }
+          },
+          "policy": {
+            "overlap": "skip",
+            "maxEventsPerHour": 20
+          },
+          "id": "516f8ea2-9386-408c-9e51-0654c764bc8c",
+          "revision": 1,
+          "createdAt": "2026-09-24T00:00:30.000Z",
+          "updatedAt": "2026-09-24T00:00:30.000Z",
+          "createdBy": {
+            "kind": "owner",
+            "via": "ui"
+          },
+          "updatedBy": {
+            "kind": "owner",
+            "via": "ui"
+          }
+        },
+        {
+          "name": "Status",
+          "enabled": true,
+          "source": {
+            "kind": "http",
+            "schedule": {
+              "type": "interval",
+              "everySeconds": 300
+            },
+            "request": {
+              "method": "GET",
+              "url": "https://status.example.com/",
+              "headers": [
+                {
+                  "name": "authorization",
+                  "secretId": "832377bc-5ee0-42b5-8b9a-5bb07e8e96bf"
+                }
+              ],
+              "timeoutSeconds": 5
+            },
+            "condition": {
+              "type": "every-success"
+            }
+          },
+          "handler": {
+            "kind": "task",
+            "instructions": "Status instructions",
+            "provider": "codex",
+            "approvals": "auto",
+            "target": {
+              "node": "local",
+              "mode": "folder",
+              "cwd": "/var/folders/v1/qhqvybqj4slc3kmc3g_mynkm0000gn/T/tower-backup-fixture-6ec3Sf/project"
+            }
+          },
+          "policy": {
+            "overlap": "skip",
+            "maxEventsPerHour": 20
+          },
+          "id": "533a7d6c-46b8-4d99-9dd2-d16dfd160fb7",
+          "revision": 1,
+          "createdAt": "2026-09-24T00:00:30.000Z",
+          "updatedAt": "2026-09-24T00:00:30.000Z",
+          "createdBy": {
+            "kind": "owner",
+            "via": "ui"
+          },
+          "updatedBy": {
+            "kind": "owner",
+            "via": "ui"
+          }
+        }
+      ],
+      "settings": {
+        "maxTriggers": 50,
+        "maxConcurrentRuns": 2,
+        "maxEventsPerHour": 60,
+        "privateHosts": []
+      },
+      "trustedFolders": [
+        "/var/folders/v1/qhqvybqj4slc3kmc3g_mynkm0000gn/T/tower-backup-fixture-6ec3Sf/project"
+      ],
+      "secretGrants": {
+        "832377bc-5ee0-42b5-8b9a-5bb07e8e96bf": [
+          "533a7d6c-46b8-4d99-9dd2-d16dfd160fb7"
+        ]
+      },
+      "fired": {},
+      "github": {}
+    },
+    "skills": {
+      "bundle": {
+        "format": "agent-session-tower.skills",
+        "version": 1,
+        "exportedAt": "",
+        "from": "fixture",
+        "skills": []
+      },
+      "guidance": "Be brief.",
+      "settings": {
+        "enabled": true,
+        "provider": "claude"
+      }
+    }
+  },
+  "web": {
+    "projectGroups": [
+      {
+        "cwd": "/var/folders/v1/qhqvybqj4slc3kmc3g_mynkm0000gn/T/tower-backup-fixture-6ec3Sf/project",
+        "title": "Fixture project",
+        "pinned": true
+      }
+    ],
+    "remoteExclusions": {
+      "folders": [
+        "/fixture/private"
+      ]
+    },
+    "decisions": {
+      "provider": "jev",
+      "features": {
+        "autoPromptSuggestions": true,
+        "attentionNotifications": true,
+        "steerTiming": true,
+        "sessionOutcomes": true,
+        "relatedSessions": true,
+        "slackFollowUps": true,
+        "voiceTurnEnd": true
+      }
+    },
+    "backup": {
+      "enabled": false,
+      "remote": {
+        "endpoint": "",
+        "bucket": "",
+        "prefix": "tower/",
+        "region": "auto",
+        "accessKeyId": ""
+      },
+      "intervalHours": 24,
+      "keep": 14
+    }
+  }
+}
