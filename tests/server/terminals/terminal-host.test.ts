@@ -12,6 +12,8 @@ import { WorkspaceTerminals, type WorkspacePty, type WorkspaceTerminalBackend } 
 import { until } from '../../helpers/until.ts';
 import { statusOf } from '../../../shared/errors.js';
 import { sseSink } from '../../../server/http/sinks.js';
+import type { StreamSink } from '../../../server/streams/sink.js';
+import { Writable } from 'node:stream';
 
 class Pty implements WorkspacePty {
   written: string[] = [];
@@ -166,7 +168,9 @@ test('the terminal client reads host failures as before: absent host, old host, 
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-terminal-client-'));
   const paths = await terminalHostPaths(stateDir);
   const legacyCalls: string[] = [];
-  const legacy = { attach: async (id: string, res: { writeHead(status: number): void; end(): void }) => { legacyCalls.push(`attach ${id}`); res.writeHead(299); res.end(); }, input: async (id: string) => { legacyCalls.push(`input ${id}`); }, dispose: () => {} } as unknown as WorkspaceTerminalBackend;
+  /** The sinks the older worker was given, so the same sink is seen to be handed on. */
+  const legacySinks: StreamSink[] = [];
+  const legacy = { attach: async (id: string, sink: StreamSink) => { legacyCalls.push(`attach ${id}`); legacySinks.push(sink); sink.open(); sink.body.end('legacy events'); }, input: async (id: string) => { legacyCalls.push(`input ${id}`); }, dispose: () => {} } as unknown as WorkspaceTerminalBackend;
   const plain = new TerminalHostClient({ stateDir, hostEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 200 });
   const withLegacy = new TerminalHostClient({ stateDir, legacy, hostEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 200 });
   let answer: { status: number; body?: unknown } = { status: 200 };
@@ -184,16 +188,30 @@ test('the terminal client reads host failures as before: absent host, old host, 
     await rm(stateDir, { recursive: true, force: true }); await rm(runner, { recursive: true, force: true });
   });
   const failed = async (work: Promise<unknown>) => { const error = await work.then(() => undefined, (caught: unknown) => caught) as Error & { hostAbsent?: boolean }; return { status: errorStatus(error), message: error.message, hostAbsent: error.hostAbsent }; };
-  const response = () => { const seen: { status?: number; headersSent: boolean } = { headersSent: false }; return { seen, res: { headersSent: false, destroyed: false, writableEnded: false, writeHead: (status: number) => { seen.status = status; }, end: () => {}, once: () => {} } as never }; };
+  /** An event-stream sink as the web server gives one: what was written to it, and how often its head was written. */
+  const fakeSink = (alreadyOpen = false) => {
+    const written: string[] = [];
+    let opened = alreadyOpen; let heads = 0;
+    const body = new Writable({ write(chunk, _encoding, done) { written.push(String(chunk)); done(); } });
+    const sink: StreamSink = { body, get opened() { return opened; }, open() { opened = true; heads++; }, refuse() { throw new Error('a terminal stream is never refused'); }, cutOff() { throw new Error('a terminal stream is never cut off'); } };
+    return { sink, written, heads: () => heads };
+  };
 
   // No host: absent, so list is empty and shells belong to the older worker.
   assert.deepEqual(await plain.list(), []);
   assert.deepEqual(await failed(plain.input('a', 'x')), { status: 503, message: 'The terminal host is not running.', hostAbsent: true });
   await withLegacy.input('a', 'x');
-  assert.deepEqual(await failed(plain.attach('a', response().res)), { status: 404, message: '터미널을 찾을 수 없습니다. 새 터미널을 여세요.', hostAbsent: undefined });
-  const viaLegacy = response();
-  await withLegacy.attach('b', viaLegacy.res);
-  assert.equal(viaLegacy.seen.status, 299);
+  const unanswered = fakeSink();
+  assert.deepEqual(await failed(plain.attach('a', unanswered.sink)), { status: 404, message: '터미널을 찾을 수 없습니다. 새 터미널을 여세요.', hostAbsent: undefined });
+  assert.deepEqual([unanswered.heads(), unanswered.written], [0, []], 'nothing is written to a sink the host could not serve');
+  const viaLegacy = fakeSink();
+  await withLegacy.attach('b', viaLegacy.sink);
+  assert.equal(legacySinks[0], viaLegacy.sink, 'the older worker is given the same sink');
+  assert.deepEqual([viaLegacy.heads(), viaLegacy.written], [1, ['legacy events']]);
+  // A sink whose head is already written is not handed on: the failure is the answer.
+  const opened = fakeSink(true);
+  assert.deepEqual(await failed(withLegacy.attach('c', opened.sink)), { status: 404, message: '터미널을 찾을 수 없습니다. 새 터미널을 여세요.', hostAbsent: undefined });
+  assert.deepEqual([legacySinks.length, opened.heads(), opened.written], [1, 0, []]);
   assert.equal(await plain.hostVersion(), null);
   assert.equal(await plain.displayVersion(), null);
   assert.deepEqual(legacyCalls, ['input a', 'attach b']);
