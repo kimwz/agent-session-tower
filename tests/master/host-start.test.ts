@@ -42,8 +42,10 @@ async function hostStart(t: test.TestContext) {
   t.after(async () => {
     t.mock.restoreAll(); syncBuiltinESMExports();
     server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    // Its runner folder is found before the state goes: finding it makes the state folder again.
+    const runner = (await (await import('../../server/runs/runner-protocol.js')).runnerPaths(stateDir)).directory;
     await rm(stateDir, { recursive: true, force: true });
-    await rm((await (await import('../../server/runs/runner-protocol.js')).runnerPaths(stateDir)).directory, { recursive: true, force: true });
+    await rm(runner, { recursive: true, force: true });
   });
   const credential = async () => { await mkdir(join(paths.token, '..'), { recursive: true }); await writeFile(paths.token, 'c'.repeat(64), { mode: 0o600 }); };
   const appear = async () => { await credential(); await new Promise<void>(resolve => server.listen(paths.socket, resolve)); };

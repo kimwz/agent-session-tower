@@ -177,7 +177,12 @@ test('the terminal client reads host failures as before: absent host, old host, 
       res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ protocol: RUNNER_PROTOCOL, stateDir: paths.stateDir, instance: 'i', version: '1', ...answer.body as object }));
     });
   });
-  t.after(async () => { server.closeAllConnections(); server.close(); plain.dispose(); withLegacy.dispose(); await rm(stateDir, { recursive: true, force: true }); await rm((await runnerPaths(stateDir)).directory, { recursive: true, force: true }); });
+  t.after(async () => {
+    server.closeAllConnections(); server.close(); plain.dispose(); withLegacy.dispose();
+    // Its runner folder is found before the state goes: finding it makes the state folder again.
+    const runner = (await runnerPaths(stateDir)).directory;
+    await rm(stateDir, { recursive: true, force: true }); await rm(runner, { recursive: true, force: true });
+  });
   const failed = async (work: Promise<unknown>) => { const error = await work.then(() => undefined, (caught: unknown) => caught) as Error & { hostAbsent?: boolean }; return { status: errorStatus(error), message: error.message, hostAbsent: error.hostAbsent }; };
   const response = () => { const seen: { status?: number; headersSent: boolean } = { headersSent: false }; return { seen, res: { headersSent: false, destroyed: false, writableEnded: false, writeHead: (status: number) => { seen.status = status; }, end: () => {}, once: () => {} } as never }; };
 

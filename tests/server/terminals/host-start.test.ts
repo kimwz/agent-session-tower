@@ -38,7 +38,9 @@ test('a new shell starts the terminal host when none answers and waits while it 
     for (const made of clients) made.dispose();
     t.mock.restoreAll(); syncBuiltinESMExports();
     server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
-    await rm(stateDir, { recursive: true, force: true }); await rm((await runnerPaths(stateDir)).directory, { recursive: true, force: true });
+    // Its runner folder is found before the state goes: finding it makes the state folder again.
+    const runner = (await runnerPaths(stateDir)).directory;
+    await rm(stateDir, { recursive: true, force: true }); await rm(runner, { recursive: true, force: true });
   });
   const failed = async (work: Promise<unknown>) => { const error = await work.then(() => undefined, (caught: unknown) => caught as Error & { hostAbsent?: boolean }); return { status: errorStatus(error), message: error?.message, hostAbsent: error?.hostAbsent }; };
 
