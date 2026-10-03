@@ -1161,3 +1161,124 @@ test('a Claude master reply records firstAt on its first text and completedAt wh
   f.exit();
   await finished(f.manager, f.run.id);
 });
+
+/** Codex conversations whose turns go to injected adapters; nothing is spawned. `held` sessions are open in the Codex app. */
+async function adapters(t: TestContext, options: { stdio?: ConstructorParameters<typeof RunManager>[0]['openCodexStdio']; bridge?: OpenCodexBridge; held?: boolean } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-turn-adapters-'));
+  const sessions = new Map([ID, ID2].map(id => [`codex:${id}`, makeSession(directory, { id: `codex:${id}`, nativeId: id, status: 'idle', activeProcess: options.held })]));
+  const manager = new RunManager({ stateDir: join(directory, 'state'), getSession: id => sessions.get(id), refreshSessions: async () => {}, pollMs: 10,
+    findExecutable: async () => '/fixture/codex', spawnProcess: () => { throw new Error('Native provider launch is forbidden in this fixture.'); },
+    openCodexStdio: options.stdio, openCodexBridge: options.bridge });
+  await manager.start();
+  t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
+  const read = (id: string) => manager.list().find(run => run.id === id);
+  return { manager, sessions, read, first: `codex:${ID}`, second: `codex:${ID2}` };
+}
+type StdioOptions = Parameters<NonNullable<ConstructorParameters<typeof RunManager>[0]['openCodexStdio']>>[0];
+/** A Codex adapter that records what happens to it; `start` waits for `gate`. */
+function stdioAdapter(log: string[], gate?: Promise<void>) {
+  return async (options: StdioOptions) => {
+    log.push('open');
+    let ended = false;
+    const finish = (status: 'completed' | 'cancelled') => { if (ended) return; ended = true; options.onFinished({ status }); };
+    return { done: Promise.resolve(), respondToApproval: async () => {},
+      start: async () => { log.push('start'); await gate; await options.onSession(options.threadId!); options.onStarted?.('turn'); },
+      cancel: async () => { log.push('cancel'); finish('cancelled'); }, close: () => { log.push('close'); finish('cancelled'); },
+      complete: () => finish('completed') } as never;
+  };
+}
+
+test('a Codex turn cancelled right after it is registered, before its start completes, is interrupted and ends cancelled', async t => {
+  const log: string[] = [];
+  let release!: () => void;
+  const f = await adapters(t, { stdio: stdioAdapter(log, new Promise<void>(resolve => { release = resolve; })) });
+  t.after(() => release());
+  const run = await f.manager.enqueue(f.first, 'Cancel me early', {}, { origin: { kind: 'owner' } });
+  await until(() => f.read(run.id)?.status === 'running' && log.includes('start'));
+  await f.manager.cancel(run.id);
+  assert.deepEqual(log.slice(0, 3), ['open', 'start', 'cancel']);
+  assert.equal((await finished(f.manager, run.id)).status, 'cancelled');
+});
+
+for (const kind of ['codex', 'bridge'] as const) {
+  test(`a ${kind} turn refused at its last check leaves no handle and releases the conversation for the next queued run`, async t => {
+    const log: string[] = [];
+    const bridge: OpenCodexBridge = async options => { log.push('open'); return { done: Promise.resolve(), start: async () => { log.push('start'); options.onStarted('turn'); options.onFinished({ status: 'completed' }); },
+      cancel: async () => { log.push('cancel'); }, close: () => { log.push('close'); } }; };
+    const f = await adapters(t, kind === 'codex' ? { stdio: stdioAdapter(log) } : { bridge, held: true });
+    const refused = new Set<string>();
+    const looks = new Map<string, number>();
+    let firstId = '';
+    // The pump's own look passes; the turn's look after its adapter opened refuses the first run.
+    f.manager.setLaunchGate(run => refused.has(run.id) ? 'Refused at the last look.' : undefined,
+      async run => { const count = (looks.get(run.id) ?? 0) + 1; looks.set(run.id, count); if (run.id === firstId && count === 2) refused.add(run.id); });
+    const first = await f.manager.enqueue(f.first, 'Refused', {}, { origin: { kind: 'owner' } });
+    firstId = first.id;
+    const second = await f.manager.enqueue(f.first, 'Goes next', {}, { origin: { kind: 'owner' } });
+    const ended = await finished(f.manager, first.id);
+    assert.equal(ended.status, 'cancelled');
+    assert.equal(ended.error, 'Refused at the last look.');
+    await until(() => log.filter(entry => entry === 'start').length === 1);
+    assert.deepEqual(log.slice(0, 3), ['open', 'close', 'open'], 'the refused adapter is closed and never started');
+    if (kind === 'codex') await until(() => f.read(second.id)?.status === 'running');
+    else assert.equal((await finished(f.manager, second.id)).status, 'completed');
+  });
+}
+
+test('a cancel that lands while a turn is being prepared stops it before register: the adapter is closed, nothing starts', async t => {
+  const log: string[] = [];
+  const f = await adapters(t, { stdio: stdioAdapter(log) });
+  const looks = new Map<string, number>();
+  f.manager.setLaunchGate(() => undefined, async run => {
+    const count = (looks.get(run.id) ?? 0) + 1; looks.set(run.id, count);
+    if (count === 2) await f.manager.cancel(run.id);
+  });
+  const run = await f.manager.enqueue(f.first, 'Cancelled while preparing', {}, { origin: { kind: 'owner' } });
+  assert.equal((await finished(f.manager, run.id)).status, 'cancelled');
+  await until(() => log.includes('close'));
+  assert.deepEqual(log, ['open', 'close']);
+});
+
+test('a bridged turn that finished keeps the session settled only when it started', async t => {
+  let started = true;
+  const f = await adapters(t, { held: true, bridge: async options => ({ done: Promise.resolve(), cancel: async () => {}, close: () => {},
+    start: async () => { if (started) options.onStarted('turn'); options.onFinished({ status: 'completed' }); } }) });
+  const run = await f.manager.enqueue(f.first, 'Started', {}, { origin: { kind: 'owner' } });
+  assert.equal((await finished(f.manager, run.id)).status, 'completed');
+  assert.equal(f.manager.settledRunIds().has(run.id), true);
+  started = false;
+  const other = await f.manager.enqueue(f.second, 'Never started', {}, { origin: { kind: 'owner' } });
+  assert.equal((await finished(f.manager, other.id)).status, 'completed');
+  assert.equal(f.manager.settledRunIds().has(other.id), false);
+});
+
+test('a bridge whose start reports the end and then rejects ends with its error, and the conversation is released', async t => {
+  let attempts = 0;
+  const f = await adapters(t, { held: true, bridge: async options => ({ done: Promise.resolve(), cancel: async () => {}, close: () => {},
+    start: async () => { attempts++; if (attempts === 1) { options.onFinished({ status: 'error', error: 'The app refused the turn.' }); throw new Error('The app refused the turn.'); } options.onStarted('turn'); options.onFinished({ status: 'completed' }); } }) });
+  const run = await f.manager.enqueue(f.first, 'Refused by the app', {}, { origin: { kind: 'owner' } });
+  const next = await f.manager.enqueue(f.first, 'Next', {}, { origin: { kind: 'owner' } });
+  const result = await finished(f.manager, run.id);
+  assert.equal(result.status, 'error');
+  assert.equal(result.error, 'The app refused the turn.');
+  assert.equal((await finished(f.manager, next.id)).status, 'completed');
+});
+
+test('while a Codex app submission is being started, the queue waits for it before launching other runs', async t => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const log: string[] = [];
+  // Only the first conversation is open in the Codex app; the other one goes to Tower's own Codex.
+  const f = await adapters(t, { stdio: stdioAdapter(log), bridge: async options => options.threadId !== ID ? undefined : ({ done: Promise.resolve(), cancel: async () => {}, close: () => {},
+    start: async () => { await gate; options.onStarted('turn'); options.onFinished({ status: 'completed' }); } }) });
+  t.after(() => release());
+  f.sessions.set(f.first, { ...f.sessions.get(f.first)!, activeProcess: true });
+  const submitted = await f.manager.enqueue(f.first, 'To the app', {}, { origin: { kind: 'owner' } });
+  await until(() => f.read(submitted.id)?.output.includes('Codex 앱'));
+  const other = await f.manager.enqueue(f.second, 'Elsewhere', {}, { origin: { kind: 'owner' } });
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.deepEqual(log, [], 'no other run launches while the submission is being started');
+  release();
+  await until(() => f.read(other.id)?.status === 'running');
+  assert.equal((await finished(f.manager, submitted.id)).status, 'completed');
+});
