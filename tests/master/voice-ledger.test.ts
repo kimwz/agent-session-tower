@@ -20,6 +20,8 @@ const TAB = '11111111-1111-4111-8111-111111111111';
 interface Ledger {
   dir: string; room: MasterRoom; voice: MasterVoice; settings: MasterSettingsStore;
   stt: { calls: number; gate?: Promise<void>; fail?: boolean };
+  /** Speech held until this settles, then refused (no sound). */
+  speech: { gate?: Promise<void>; asked: number };
   events: MasterStreamEvent[];
   saved(): Promise<{ speaking?: Array<{ id: string; order: number }>; tokens?: unknown[]; days?: Record<string, { sttSeconds: number }> }>;
 }
@@ -41,7 +43,9 @@ async function ledger(t: test.TestContext, prepare?: (room: MasterRoom, dir: str
   await room.start();
   await prepare?.(room, dir);
   const stt: Ledger['stt'] = { calls: 0 };
+  const speech: Ledger['speech'] = { asked: 0 };
   const elevenLabs = {
+    speak: async function* () { speech.asked++; await speech.gate; throw new Error('no sound'); },
     sttToken: async () => { const call = ++stt.calls; await stt.gate; if (stt.fail) throw new Error('no token'); return `sutkn_${call}`; },
     sttUrl: (token: string) => `wss://stt.invalid/?token=${token}`,
   };
@@ -50,7 +54,7 @@ async function ledger(t: test.TestContext, prepare?: (room: MasterRoom, dir: str
   room.subscribe(event => events.push(event));
   await voice.start();
   const made = voice;
-  return { dir, room, voice: made, settings, stt, events,
+  return { dir, room, voice: made, settings, stt, speech, events,
     saved: async () => { await made.close(); return JSON.parse(await readFile(join(dir, 'voice.json'), 'utf8')); } };
 }
 
@@ -67,10 +71,16 @@ test('tokens asked for at once each see the other reserved: a session holds two,
   h.stt.gate = new Promise<void>(resolve => { open = resolve; });
   const first = h.voice.voiceToken({ session });
   const second = h.voice.voiceToken({ session });
-  // Both are held before either token came back.
-  await assert.rejects(h.voice.voiceToken({ session }), { message: '받아쓰기 준비가 이미 되어 있습니다.' });
-  assert.equal(h.stt.calls, 2, 'the third was refused before asking ElevenLabs');
-  open();
+  // Watched from the start, and let go and settled whatever happens below, before the fixture closes.
+  first.catch(() => {}); second.catch(() => {});
+  try {
+    // Both are held before either token came back.
+    await assert.rejects(h.voice.voiceToken({ session }), { message: '받아쓰기 준비가 이미 되어 있습니다.' });
+    assert.equal(h.stt.calls, 2, 'the third was refused before asking ElevenLabs');
+  } finally {
+    open();
+    await Promise.allSettled([first, second]);
+  }
   const tokens = await Promise.all([first, second]);
   assert.notEqual(tokens[0].tokenId, tokens[1].tokenId);
 });
@@ -153,6 +163,35 @@ test('a 501st open entry gives up the oldest open one: it is marked queue once, 
   const saved = await h.saved();
   assert.equal(saved.speaking?.length, 500);
   assert.deepEqual(saved.speaking?.map(item => item.id), entries.slice(1).map(entry => entry.id));
+});
+
+test('a 501st open entry gives up the oldest one while it is pending and being read: queue, its listing removed once, 500 listed and saved', async t => {
+  const h = await ledger(t);
+  let release!: () => void;
+  h.speech.gate = new Promise<void>(resolve => { release = resolve; });
+  try {
+    h.voice.voiceOn({ tabId: TAB, local: true });
+    // The oldest news is pending and taken to be read: its speech is under way (held).
+    const oldest = h.room.add(open('pending'));
+    for (let tries = 0; h.speech.asked === 0; tries++) { if (tries > 1000) throw new Error('not read'); await new Promise(resolve => setTimeout(resolve, 5)); }
+    assert.deepEqual(speakOf(h.room, oldest.id), { state: 'pending' });
+    const entries: MasterEntry[] = [];
+    for (let index = 0; index < 500; index++) entries.push(h.room.add(open('playing')));
+    assert.deepEqual(speakOf(h.room, oldest.id), { state: 'unspoken', reason: 'queue' });
+    assert.equal(h.room.get(oldest.id)!.revision, 2, 'given up on once');
+    let listed: Array<{ id: string }> = [];
+    for (let tries = 0; !listed.some(item => item.id === entries.at(-1)!.id); tries++) {
+      if (tries > 1000) throw new Error('the list was not saved');
+      await new Promise(resolve => setTimeout(resolve, 5));
+      listed = (JSON.parse(await readFile(join(h.dir, 'voice.json'), 'utf8').catch(() => '{"speaking":[]}')) as { speaking: Array<{ id: string }> }).speaking;
+    }
+    assert.equal(listed.length, 500);
+    assert.deepEqual(listed.map(item => item.id), entries.map(entry => entry.id));
+  } finally {
+    // Its speech is refused, so its reading ends; nothing is left being made before the fixture closes.
+    release();
+    for (let tries = 0; h.voice.busy(); tries++) { if (tries > 2000) throw new Error('reading did not end'); await new Promise(resolve => setTimeout(resolve, 5)); }
+  }
 });
 
 test('listed news no longer open is dropped from the front without being marked, and a duplicate listing is removed one at a time', async t => {
