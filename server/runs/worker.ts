@@ -454,7 +454,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     handoffTimer.unref();
     if (options.onIdle) {
       idleTimer = setInterval(() => {
-        if (closing || pending || Date.now() - lastRequest < (options.idleMs ?? 30_000)) return;
+        // A handoff past its quiet check owns shutdown until it hands off or resumes: the state stays locked meanwhile.
+        if (closing || draining || pending || Date.now() - lastRequest < (options.idleMs ?? 30_000)) return;
         if (options.runs.list().some(run => run.status === 'running' || run.status === 'queued')) return;
         if (options.autoPrompts?.list().some(job => !['completed', 'error', 'cancelled'].includes(job.status))) return;
         if (options.terminals?.hasActive()) return;
