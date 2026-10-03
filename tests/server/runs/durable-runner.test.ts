@@ -1182,13 +1182,28 @@ test('the receiving worker resolves master.worker for direct creation before Run
 /**
  * A trigger engine on the fixture's runs, handed over the way the production worker does it (hold, wait for nothing in
  * flight, pause and flush, close; the successor starts its own engine on the same state). `enqueues` counts submissions;
- * `gate` holds the next one.
+ * `hold()` holds submissions until the returned release; `delaySuccessor()` holds the successor's start the same way.
+ * Each host takes the state lock itself and releases it when it closes. Builds its own fixture: after hooks run in the
+ * order they were added, so one hook ends the workers first and only then removes the fixture.
  */
-async function triggerHandoff(f: Awaited<ReturnType<typeof fixture>>, t: test.TestContext) {
+async function triggerHandoff(t: test.TestContext) {
+  const f = await fixture();
+  let ending: Promise<void> | undefined;
+  let end: (() => Promise<void>) | undefined;
+  t.after(async () => { try { await end?.(); } finally { await f.cleanup(); } });
   await f.host.close();
   const events: string[] = [];
   let enqueues = 0;
   let gate: Promise<void> | undefined;
+  let successorGate: Promise<void> | undefined;
+  /** Every barrier a test set; cleanup opens them all, whatever point the test stopped at. */
+  const barriers: Array<() => void> = [];
+  const barrier = () => {
+    let open!: () => void;
+    const held = new Promise<void>(resolve => { open = resolve; });
+    barriers.push(open);
+    return { held, open };
+  };
   const executor: TriggerExecutor = {
     submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
     create: async () => { throw new Error('unused'); },
@@ -1200,6 +1215,8 @@ async function triggerHandoff(f: Awaited<ReturnType<typeof fixture>>, t: test.Te
   await a.start();
   let b: TriggerService | undefined;
   let successor: Awaited<ReturnType<typeof startRunnerHost>> | undefined;
+  /** The successor's start, kept so cleanup waits for a start still under way instead of leaving its host behind. */
+  let successorStart: Promise<void> | undefined;
   const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, triggers: a,
     inFlight: () => a.inFlight(), transient: () => a.inFlight(),
     quiesce: async () => { events.push('quiesce'); a.pause(); await a.flush(); },
@@ -1207,24 +1224,85 @@ async function triggerHandoff(f: Awaited<ReturnType<typeof fixture>>, t: test.Te
     onHandedOff: () => { events.push('onHandedOff'); a.close(); },
     startSuccessor: (_command, nonce) => {
       events.push('startSuccessor');
-      b = engine();
-      void b.start().then(() => startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, triggers: b, handoffNonce: nonce })).then(next => { successor = next; });
+      const next = engine();
+      b = next;
+      successorStart = (async () => {
+        await successorGate;
+        await next.start();
+        successor = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, triggers: next, handoffNonce: nonce });
+        events.push('successorStarted');
+      })();
     } });
-  t.after(async () => {
+  const engines = () => [a, b].filter((item): item is TriggerService => Boolean(item));
+  /**
+   * Ends both workers before the fixture's own cleanup: barriers opened, every paused handoff ended, engine work in
+   * flight (a tick, a submission, a claim) finished, a successor still starting started, then both hosts closed (which
+   * releases the state lock) and both engines closed and settled. Safe to call from a test and again from the after hook.
+   */
+  const cleanup = () => ending ??= (async () => {
+    for (const open of barriers) open();
+    gate = undefined; successorGate = undefined;
     const count = (name: string) => events.filter(event => event === name).length;
     await until(() => count('quiesce') === count('onHandedOff') + count('resume'));
-    await host.close(); await successor?.close();
-    for (const engine of [a, b]) { engine?.close(); await engine?.settle(); }
-  });
+    for (let i = 0; i < 400 && engines().some(item => item.inFlight()); i++) await new Promise(resolve => setTimeout(resolve, 5));
+    await host.close();
+    await successorStart;
+    await successor?.close();
+    for (const item of engines()) { item.close(); await item.settle(); }
+  })();
+  end = cleanup;
   const trigger = await a.create({ name: 'Session follow-up', enabled: true, source: { kind: 'schedule', schedule: { type: 'cron', expression: '0 * * * *', timezone: 'UTC' }, catchUp: 'latest' },
     handler: { kind: 'task', instructions: 'Continue the work', provider: 'codex', approvals: 'auto', target: { node: 'local', mode: 'session', sessionId: f.session.id } },
     policy: { overlap: 'skip', maxEventsPerHour: 20 } }, { kind: 'owner', via: 'ui' });
-  return { a, b: () => b, successor: () => successor, events, trigger, enqueues: () => enqueues, hold: (barrier: Promise<void> | undefined) => { gate = barrier; } };
+  return { f, a, b: () => b, successor: () => successor, events, trigger, enqueues: () => enqueues, cleanup, engines,
+    hold: () => { const { held, open } = barrier(); gate = held; return () => { open(); gate = undefined; }; },
+    delaySuccessor: () => { const { held, open } = barrier(); successorGate = held; return open; } };
 }
 
+/** After cleanup: the state lock is free, no engine has work in flight, and nothing changes the engine file later. */
+async function nothingLeft(h: Awaited<ReturnType<typeof triggerHandoff>>) {
+  const f = h.f;
+  const release = await acquireStateLock(f.paths.runtime, 0);
+  await release();
+  assert.deepEqual(h.engines().map(item => item.inFlight()), h.engines().map(() => false));
+  const file = join(f.stateDir, 'trigger-engine.json');
+  const before = await readFile(file, 'utf8');
+  const enqueues = h.enqueues();
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(await readFile(file, 'utf8'), before, 'nothing writes the engine file after cleanup');
+  assert.equal(h.enqueues(), enqueues, 'nothing is submitted after cleanup');
+}
+
+test('cleanup during a trigger handoff whose claim is still held opens it, ends both workers and frees the state lock', { timeout: 20_000 }, async t => {
+  const h = await triggerHandoff(t);
+  h.hold();
+  const fired = await h.a.run(h.trigger.id, { kind: 'owner', via: 'ui' });
+  await until(() => h.enqueues() === 1 && h.a.event(fired.id).status === 'claimed');
+  const client = await h.f.connect();
+  assert.equal(await client.requestHandoff(true), true);
+  // The test stops here, the claim still held.
+  await h.cleanup();
+  assert.equal(h.a.event(fired.id).status, 'running', 'the held submission finished before the workers closed');
+  await nothingLeft(h);
+  assert.equal(h.enqueues(), 1);
+});
+
+test('cleanup during a trigger handoff whose successor is still starting waits for it, then frees the state lock', { timeout: 20_000 }, async t => {
+  const h = await triggerHandoff(t);
+  h.delaySuccessor();
+  const client = await h.f.connect();
+  assert.equal(await client.requestHandoff(true), true);
+  await until(() => h.events.includes('onHandedOff'));
+  assert.equal(h.successor(), undefined, 'the successor is still starting');
+  // The test stops here, the successor not yet started.
+  await h.cleanup();
+  assert.ok(h.events.includes('successorStarted'), 'cleanup let the successor start and then closed it');
+  await nothingLeft(h);
+});
+
 test('a trigger run in flight survives a worker handoff and is not submitted again', { timeout: 20_000 }, async t => {
-  const f = await fixture(); t.after(f.cleanup);
-  const h = await triggerHandoff(f, t);
+  const h = await triggerHandoff(t);
+  const f = h.f;
   const fired = await h.a.run(h.trigger.id, { kind: 'owner', via: 'ui' });
   await until(() => f.starts() === 1 && h.a.event(fired.id).status === 'running');
   const runId = h.a.event(fired.id).dispatch?.runId;
@@ -1244,17 +1322,16 @@ test('a trigger run in flight survives a worker handoff and is not submitted aga
 });
 
 test('a handoff asked for while a trigger run is being claimed waits until the claim is recorded', { timeout: 20_000 }, async t => {
-  const f = await fixture(); t.after(f.cleanup);
-  const h = await triggerHandoff(f, t);
-  let release!: () => void;
-  h.hold(new Promise<void>(resolve => { release = resolve; }));
+  const h = await triggerHandoff(t);
+  const f = h.f;
+  const release = h.hold();
   const fired = await h.a.run(h.trigger.id, { kind: 'owner', via: 'ui' });
   await until(() => h.enqueues() === 1 && h.a.event(fired.id).status === 'claimed');
   const client = await f.connect();
   assert.equal(await client.requestHandoff(true), true);
   await new Promise(resolve => setTimeout(resolve, 1500));
   assert.deepEqual(h.events, [], 'the claim keeps the old worker in service');
-  release(); h.hold(undefined);
+  release();
   await until(() => h.a.event(fired.id).status === 'running' && f.starts() === 1);
   f.finish();
   await until(() => h.events.includes('onHandedOff') && h.successor());
