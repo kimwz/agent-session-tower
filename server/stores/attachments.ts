@@ -345,7 +345,8 @@ export class AttachmentStore {
     const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
       const info = await file.stat();
-      if (!info.isFile() || info.size > maximum || info.nlink !== 1) throw new InvalidAttachmentManifest('Invalid attachment metadata file');
+      // Retain atomically replaces metadata, leaving an already opened immutable snapshot unlinked.
+      if (!info.isFile() || info.size > maximum || info.nlink > 1) throw new InvalidAttachmentManifest('Invalid attachment metadata file');
       const content = await file.readFile();
       if (content.length > maximum) throw new InvalidAttachmentManifest('Invalid attachment metadata size');
       return content;

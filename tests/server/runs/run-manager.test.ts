@@ -398,7 +398,8 @@ test('native app bridge receives stored image paths without launching a second w
   try {
     f.sessions.set(f.session.id, { ...f.session, activeProcess: true });
     const run = await f.manager.enqueue(f.session.id, 'explain picture', { attachments: [{ name: 'picture.png', mimeType: 'image/png', data: ATTACHED_PNG }] });
-    assert.equal((await finished(f.manager, run.id)).status, 'completed');
+    const result = await finished(f.manager, run.id);
+    assert.equal(result.status, 'completed', result.error);
     assert.equal(f.launches.length, 0);
     assert.equal(received?.threadId, ID);
     assert.match(received!.prompt, /^explain picture/);

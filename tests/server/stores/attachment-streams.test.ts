@@ -263,3 +263,44 @@ test('changing cached manifest SHA requires full verification even when the cont
   await writeFile(path, JSON.stringify(value));
   await assert.rejects(store.read(saved.id), { kind: 'not-found' });
 });
+
+test('reference resolution accepts its open metadata snapshot when retain atomically replaces the manifest', async t => {
+  const { store, root } = await fixture(t);
+  const saved = await store.upload('one', 'pending', 'text/plain', bytes(100), { pending: true });
+  const other = new AttachmentStore(root); await other.start();
+  const { open } = await import('node:fs/promises');
+  const path = join(store.directory, saved.id, '.metadata.json');
+  const probe = await open(path);
+  const inode = (await probe.stat()).ino;
+  const prototype = Object.getPrototypeOf(probe); await probe.close();
+  const originalStat = prototype.stat;
+  let replaced = false;
+  let unlinkedSnapshot = false;
+  t.mock.method(prototype, 'stat', async function (this: import('node:fs/promises').FileHandle, ...args: any[]) {
+    const before = await originalStat.apply(this, args);
+    if (!replaced && before.ino === inode) {
+      replaced = true;
+      await other.retain([saved.id]);
+      const after = await originalStat.apply(this, args);
+      unlinkedSnapshot = after.nlink === 0;
+      return after;
+    }
+    return before;
+  });
+  const resolved = await store.resolve('one', [saved]);
+  assert.equal(replaced, true); assert.equal(unlinkedSnapshot, true);
+  assert.equal(resolved[0].metadata.id, saved.id);
+  assert.equal(resolved[0].content.toString(), 'A'.repeat(100));
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).pendingUntil, undefined);
+});
+
+test('metadata and original content still reject multiple hard links', async t => {
+  const { store, root } = await fixture(t);
+  const { link } = await import('node:fs/promises');
+  const metadata = await store.upload('one', 'metadata', 'text/plain', bytes(10));
+  await link(join(store.directory, metadata.id, '.metadata.json'), join(root, 'metadata-link'));
+  await assert.rejects(store.openVerified(metadata.id), { kind: 'not-found' });
+  const content = await store.upload('one', 'content', 'text/plain', bytes(10));
+  await link(join(store.directory, content.id, 'content', content.name), join(root, 'content-link'));
+  await assert.rejects(store.openVerified(content.id), { kind: 'not-found' });
+});
