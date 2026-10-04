@@ -32,19 +32,21 @@
 .settings-shell { display:grid; grid-template-columns:220px minmax(0, 1fr); height:100%; }
 
 .settings-nav { display:flex; flex-direction:column; gap:16px; min-height:0; overflow-y:auto; padding:18px 10px 14px; border-right:1px solid var(--line); background:#0c121b; }
-.settings-nav-head { display:flex; align-items:center; justify-content:space-between; padding:2px 10px 0; }
+/* The nav scrolls as a whole; its head and groups keep their full height instead of shrinking into it. */
+.settings-nav-head { flex:none; display:flex; align-items:center; justify-content:space-between; padding:2px 10px 0; }
 .settings-nav-head h2 { margin:0; font-size:15px; font-weight:600; color:var(--bright); }
 .settings-nav .settings-nav-close { display:none; }
-.settings-nav-group { display:flex; flex-direction:column; gap:2px; }
+.settings-nav-group { flex:none; display:flex; flex-direction:column; gap:2px; }
 .settings-nav-group h3 { margin:0 10px 4px; color:var(--subtle); font-size:11px; font-weight:600; }
 .settings-nav-foot { margin-top:auto; padding-top:10px; border-top:1px solid var(--line); }
-.settings-nav button { display:flex; align-items:center; gap:10px; width:100%; min-height:34px; padding:6px 10px; border-radius:8px; color:#b6c4d6; font-size:13px; text-align:left; }
-.settings-nav button > svg:first-child { flex:none; color:#8ea3bd; }
-.settings-nav button > span:not(.settings-mark) { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.settings-nav button:hover { background:#172232; color:var(--text); }
-.settings-nav button.selected { background:#1f3350; color:var(--bright); }
-.settings-nav button.selected > svg:first-child { color:#a9c7f5; }
-.settings-nav button:focus-visible { outline:2px solid #97c4ff; outline-offset:-2px; }
+/* Only the menu rows: the close button in the head keeps its own icon-button look. */
+.settings-nav-group button { display:flex; align-items:center; gap:10px; width:100%; min-height:34px; padding:6px 10px; border-radius:8px; color:#b6c4d6; font-size:13px; text-align:left; }
+.settings-nav-group button > svg:first-child { flex:none; color:#8ea3bd; }
+.settings-nav-group button > span:not(.settings-mark) { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.settings-nav-group button:hover { background:#172232; color:var(--text); }
+.settings-nav-group button.selected { background:#1f3350; color:var(--bright); }
+.settings-nav-group button.selected > svg:first-child { color:#a9c7f5; }
+.settings-nav-group button:focus-visible { outline:2px solid #97c4ff; outline-offset:-2px; }
 .settings-nav-chevron { display:none; }
 
 .settings-main { display:flex; flex-direction:column; min-width:0; min-height:0; }
@@ -128,8 +130,8 @@ label.settings-row { cursor:pointer; }
   .settings-nav-group { gap:0; overflow:hidden; border-radius:12px; background:#162030; }
   .settings-nav-group h3 { margin:0; padding:10px 14px 4px; background:#101722; }
   .settings-nav-foot { margin-top:0; padding-top:0; border-top:0; }
-  .settings-nav button { min-height:48px; padding:10px 14px; border-radius:0; font-size:15px; }
-  .settings-nav button + button { border-top:1px solid #243145; }
+  .settings-nav-group button { min-height:48px; padding:10px 14px; border-radius:0; font-size:15px; }
+  .settings-nav-group button + button { border-top:1px solid #243145; }
   .settings-nav-chevron { display:block; flex:none; color:var(--subtle); }
   .settings-pane > .settings-pane-head { display:grid; grid-template-columns:1fr auto; gap:8px 10px; padding:12px 14px 10px 16px; }
   .settings-back { display:inline-flex; align-items:center; gap:2px; justify-self:start; margin-left:-6px; padding:4px 6px 4px 0; color:var(--blue); font-size:14px; }

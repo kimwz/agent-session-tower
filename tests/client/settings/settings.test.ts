@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { setLanguage } from '../../../client/src/i18n/i18n.js';
@@ -75,4 +76,16 @@ test('every section shares one frame: title, one line, tabs with their marks, a 
   assert.match(markup, /aria-label="Close"/);
   assert.doesNotMatch(markup, /settings-back/);
   assert.match(pane(() => {}), /class="settings-back"[^>]*>.*Settings<\/button>/);
+});
+
+test('the settings menu keeps row styles off its close button and never shrinks a group into the scrolling list', () => {
+  const css = readFileSync(new URL('../../../client/src/styles/settings.css', import.meta.url), 'utf8');
+  // A row style on every nav button stretched the phone's close button across the head, squeezing the title to one letter per line.
+  assert.doesNotMatch(css, /\.settings-nav button/);
+  // The nav scrolls; a group that shrank instead was cut off by its rounded clip on a phone.
+  for (const selector of ['.settings-nav-head', '.settings-nav-group']) {
+    const rule = css.match(new RegExp(`^${selector.replace(/[.-]/g, '\\$&')} \\{([^}]*)\\}`, 'm'));
+    assert.ok(rule, selector);
+    assert.match(rule[1], /flex:none/, selector);
+  }
 });

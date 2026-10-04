@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.108.1] - 2026-10-04
+
+### Fixed
+- **Settings on a phone show their whole menu again.** On screens up to 680 px wide the settings list no longer cuts off rows such as **모델**, **알림** and **백업** when the screen is short; the list scrolls instead. The **설정** title stays on one line, the close button sits at the right end of the header, and the list no longer scrolls sideways.
+
 ## [1.108.0] - 2026-10-04
 
 ### Added
