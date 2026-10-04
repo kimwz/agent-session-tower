@@ -1,8 +1,8 @@
-import { api } from '../common/lib';
+import { api, ApiError } from '../common/lib';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { translate as t } from '../i18n/i18n';
-import type { Attachment } from '../../../shared/types';
-import { MAX_ATTACHMENTS, UPLOAD_CHUNK_BYTES, normalizeAttachmentMimeType, isImageAttachment } from '../../../shared/attachments';
+import type { Attachment, AttachmentInput } from '../../../shared/types';
+import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES, UPLOAD_CHUNK_BYTES, normalizeAttachmentMimeType, isImageAttachment } from '../../../shared/attachments';
 import { localPart, nodeOf, nodePath, pathFor } from '../remote/scope';
 
 export interface DraftAttachment {
@@ -32,7 +32,10 @@ export function addDraftFiles(current: readonly DraftAttachment[], files: readon
 export interface AttachmentUploadContext { kind: 'chat' | 'auto'; sessionId: string; token: string }
 const uploads = new WeakMap<File, Map<string, { id: string; attachmentId?: string; chunkBytes?: number }>>();
 
-export async function prepareDraftAttachments(files: readonly DraftAttachment[], context?: AttachmentUploadContext): Promise<{ attachmentIds?: string[] }> {
+export async function prepareDraftAttachments(files: readonly DraftAttachment[], context?: AttachmentUploadContext): Promise<{ attachments?: AttachmentInput[]; attachmentIds?: string[] }> {
+  const attachments: AttachmentInput[] = [];
+  const legacyCompatible = files.reduce((total, item) => total + (item.file?.size ?? item.size), 0) <= MAX_TOTAL_ATTACHMENT_BYTES
+    && files.every(item => (item.file?.size ?? item.size) <= (isImageAttachment(item.mimeType) ? MAX_IMAGE_ATTACHMENT_BYTES : MAX_ATTACHMENT_BYTES));
   const attachmentIds: string[] = [];
   for (const item of files) {
     if (item.attachmentId) {
@@ -48,9 +51,19 @@ export async function prepareDraftAttachments(files: readonly DraftAttachment[],
     const headers = { [REQUEST_TOKEN_HEADER]: context.token };
     const endpoint = (suffix: string) => nodePath(node, `/api/attachment-uploads/${upload!.id}${suffix}`);
     if (!upload) {
-      upload = await api<{ id: string }>(pathFor(context.sessionId, id => `/api/${context.kind === 'chat' ? 'sessions' : 'auto-prompts'}/${encodeURIComponent(id)}/attachment-uploads`), {
-        method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: item.name, mimeType: item.mimeType, size: item.size }),
-      });
+      try {
+        upload = await api<{ id: string }>(pathFor(context.sessionId, id => `/api/${context.kind === 'chat' ? 'sessions' : 'auto-prompts'}/${encodeURIComponent(id)}/attachment-uploads`), {
+          method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: item.name, mimeType: item.mimeType, size: item.file.size }),
+        });
+      } catch (error) {
+        // Preserve bounded attachments while an active worker or joined computer waits for its update.
+        if (!legacyCompatible || !(error instanceof ApiError) || !(error.status === 404 || (error.status === 503 && error.disposition === 'not-admitted'))) throw error;
+        const bytes = new Uint8Array(await item.file.arrayBuffer());
+        const chunks: string[] = [];
+        for (let offset = 0; offset < bytes.length; offset += 8192) chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + 8192)));
+        attachments.push({ name: item.name, mimeType: item.mimeType, data: btoa(chunks.join('')) });
+        continue;
+      }
       known.set(key, upload);
     }
     if (!upload.attachmentId) {
@@ -77,7 +90,7 @@ export async function prepareDraftAttachments(files: readonly DraftAttachment[],
     }
     attachmentIds.push(upload.attachmentId);
   }
-  return attachmentIds.length ? { attachmentIds } : {};
+  return { ...(attachments.length ? { attachments } : {}), ...(attachmentIds.length ? { attachmentIds } : {}) };
 }
 
 export const isPreviewableAttachment = (attachment: Pick<DraftAttachment, 'mimeType'>) => isImageAttachment(attachment.mimeType);

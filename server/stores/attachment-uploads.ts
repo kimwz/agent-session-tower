@@ -120,14 +120,13 @@ export class AttachmentUploads {
       if (!recovered) {
         const file = await this.content(manifest);
         try { recovered = await store.upload(manifest.target.sessionId, manifest.name, manifest.mimeType, file.createReadStream({ start: 0, autoClose: false }), { pending: true, id: manifest.attachmentId, owner }); }
-        catch (error) { throw this.storageError(error); }
         finally { await file.close(); }
       }
       manifest.receipt = recovered; manifest.touched = Date.now();
       await this.save(manifest);
       await rm(join(this.directory, id, 'content'), { force: true });
       return recovered;
-    });
+    }).catch(error => { throw this.storageError(error); });
   }
 
   async cancel(id: string, owner: string): Promise<void> {
@@ -180,7 +179,7 @@ export class AttachmentUploads {
       // A crashed in-flight chunk can have a more recent prefix than its last manifest write.
       const content = await lstat(join(this.directory, id, 'content')).catch(error => { if (error.code === 'ENOENT') return undefined; throw error; });
       if (!content || content.mtimeMs <= Date.now() - ATTACHMENT_TTL_MS) throw missing();
-      manifest.touched = content.mtimeMs; await this.save(manifest);
+      manifest.touched = Math.floor(content.mtimeMs); await this.save(manifest);
     }
     return manifest;
   }

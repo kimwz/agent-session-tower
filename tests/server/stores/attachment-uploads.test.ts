@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { AttachmentUploads } from '../../../server/stores/attachment-uploads.js';
 import { ATTACHMENT_TTL_MS, AttachmentStore } from '../../../server/stores/attachments.js';
 import { UPLOAD_CHUNK_BYTES } from '../../../shared/attachments.js';
+import { TowerError } from '../../../shared/errors.js';
 
 async function* chunks(...values: Buffer[]) { yield* values; }
 async function fixture(t: test.TestContext, publishedGC = false) {
@@ -22,6 +23,26 @@ async function fixture(t: test.TestContext, publishedGC = false) {
 const target = { kind: 'chat' as const, sessionId: 'conversation' };
 async function manifest(uploads: AttachmentUploads, id: string) { return JSON.parse(await readFile(join(uploads.directory, id, 'manifest.json'), 'utf8')); }
 async function age(path: string) { const old = new Date(Date.now() - ATTACHMENT_TTL_MS - 60_000); await utimes(path, old, old); }
+
+for (const code of ['ENOSPC', 'EDQUOT']) test(`receipt ${code} reports storage-full and recovers the same published original`, async t => {
+  const { uploads, chat } = await fixture(t);
+  const started = await uploads.start(target, 'receipt.txt', 'text/plain', 1, 'local');
+  await uploads.append(started.id, 'local', 0, chunks(Buffer.from('x')));
+  const before = await manifest(uploads, started.id);
+  const io = Object.assign(new Error('receipt disk full'), { code });
+  const save = t.mock.method(uploads as unknown as { save(...args: unknown[]): Promise<void> }, 'save', async () => { throw io; });
+  await assert.rejects(uploads.complete(started.id, 'local'), error => {
+    assert.ok(error instanceof TowerError);
+    assert.equal(error.kind, 'storage-full'); assert.match(error.message, /디스크/); assert.equal(error.cause, io);
+    return true;
+  });
+  save.mock.restore();
+  assert.equal((await chat.read(before.attachmentId)).content.toString(), 'x');
+  assert.deepEqual(await readdir(chat.directory), [before.attachmentId]);
+  const recovered = await uploads.complete(started.id, 'local');
+  assert.equal(recovered.id, before.attachmentId);
+  assert.deepEqual(await uploads.complete(started.id, 'local'), recovered);
+});
 
 test('chunk upload roundtrip exceeds JSON limits and completion receipts survive restart', async t => {
   const { uploads, root, chat, auto } = await fixture(t);
@@ -241,4 +262,24 @@ test('web upload cleanup defaults to partial-only even with a stale published pr
   await chat.sweepPending(); await auto.sweepPending();
   await assert.rejects(chat.read(saved.id), { kind: 'not-found' });
   await assert.rejects(auto.read(staged.id), { kind: 'not-found' });
+});
+
+
+test('resumed upload normalizes fractional content mtime before persisting a refreshed TTL', async t => {
+  const { uploads, chat } = await fixture(t);
+  const started = await uploads.start(target, 'resumed.txt', 'text/plain', 1, 'local');
+  const path = join(uploads.directory, started.id, 'manifest.json');
+  const value = await manifest(uploads, started.id); value.touched = Date.now() - ATTACHMENT_TTL_MS - 60_000;
+  await writeFile(path, JSON.stringify(value));
+  const content = join(uploads.directory, started.id, 'content');
+  const recent = Math.floor(Date.now() / 1000) - 1 + 0.123456;
+  await utimes(content, recent, recent);
+  const info = await stat(content);
+  assert.equal(Number.isSafeInteger(info.mtimeMs), false, 'fixture must exercise fractional filesystem milliseconds');
+  assert.equal((await uploads.status(started.id, 'local')).offset, 0);
+  assert.equal((await uploads.status(started.id, 'local')).offset, 0);
+  assert.equal((await manifest(uploads, started.id)).touched, Math.floor(info.mtimeMs));
+  await uploads.append(started.id, 'local', 0, chunks(Buffer.from('x')));
+  const saved = await uploads.complete(started.id, 'local');
+  assert.equal((await chat.read(saved.id)).content.toString(), 'x');
 });

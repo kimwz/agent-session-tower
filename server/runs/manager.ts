@@ -311,7 +311,7 @@ export class RunManager extends EventEmitter {
     ...(run.contextUsage ? { contextUsage: { ...run.contextUsage } } : {}),
     ...(run.approvals ? { approvals: structuredClone(run.approvals) } : {}) })); }
   async attachment(id: string) {
-    const { metadata, content, sessionId } = await this.attachments.read(id);
+    const { metadata, content, sessionId } = await this.attachments.readLegacyDownload(id);
     return { metadata, content, sessionId };
   }
   settledRunIds(): ReadonlySet<string> { return new Set(this.settledRuns); }

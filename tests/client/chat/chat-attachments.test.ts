@@ -7,7 +7,7 @@ import { finishComposerSend, getComposerState, markComposerSending, setComposerD
 import { SavedAttachments } from '../../../client/src/chat/ChatAttachments.js';
 import { ChatTranscript } from '../../../client/src/chat/ChatTranscript.js';
 import { matchChatRuns } from '../../../client/src/chat/chat-runs.js';
-import { MAX_ATTACHMENTS, UPLOAD_CHUNK_BYTES } from '../../../shared/attachments.js';
+import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_IMAGE_ATTACHMENT_BYTES, UPLOAD_CHUNK_BYTES } from '../../../shared/attachments.js';
 import type { Attachment, Run } from '../../../shared/types.js';
 
 const saved: Attachment = { id: 'saved-image', name: '화면.png', mimeType: 'image/png', size: 1024 };
@@ -152,4 +152,52 @@ test('attachment-only requests show their files on the native user message', () 
   assert.match(html, /화면\.png/);
   assert.doesNotMatch(html, /첨부한 파일을 확인|첨부 파일 \(사용자가|Image attachment|run-card/);
   assert.equal((html.match(/href="\/api\/attachments\/saved-image"/g) || []).length, 1);
+});
+
+for (const kind of ['chat', 'auto'] as const) for (const remote of [false, true]) for (const status of [404, 503]) {
+  test(`${kind} preserves bounded attachments on ${remote ? 'old joined computer' : 'old worker'} (${status})`, async t => {
+    const originalFetch = globalThis.fetch; t.after(() => { globalThis.fetch = originalFetch; });
+    const node = 'b'.repeat(32);
+    const sessionId = remote ? `@${node}/session` : 'session';
+    const reference = savedAttachmentDraft({ ...saved, id: remote ? `@${node}/saved` : 'saved' });
+    const bytes = Buffer.from('bounded original bytes');
+    const files = addDraftFiles([reference], [new File([bytes], 'notes.txt', { type: 'text/plain' })]);
+    let calls = 0;
+    globalThis.fetch = (async (path, init) => {
+      calls++; assert.equal(init?.method, 'POST'); assert.ok(String(path).endsWith('/attachment-uploads'));
+      assert.equal(String(path).startsWith('/api/nodes/'), remote);
+      return new Response(JSON.stringify({ error: 'not supported', ...(status === 503 ? { disposition: 'not-admitted' } : {}) }), { status });
+    }) as typeof fetch;
+    assert.deepEqual(await prepareDraftAttachments(files, { kind, sessionId, token: 'token' }), {
+      attachments: [{ name: 'notes.txt', mimeType: 'text/plain', data: bytes.toString('base64') }], attachmentIds: ['saved'],
+    });
+    assert.equal(calls, 1);
+  });
+}
+
+test('unsupported upload never reads files exceeding the legacy file, image or aggregate budget', async t => {
+  const originalFetch = globalThis.fetch; t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = (async () => new Response(JSON.stringify({ error: 'update pending', disposition: 'not-admitted' }), { status: 503 })) as typeof fetch;
+  const file = (size: number, type = 'application/octet-stream') => {
+    const original = new File([new Uint8Array(size)], 'file', { type });
+    original.arrayBuffer = async () => { throw new Error('whole-file read forbidden'); };
+    return original;
+  };
+  for (const originals of [[file(MAX_ATTACHMENT_BYTES + 1)], [file(MAX_IMAGE_ATTACHMENT_BYTES + 1, 'image/png')], [file(8 * 1024 * 1024), file(8 * 1024 * 1024), file(8 * 1024 * 1024)]]) {
+    const draft = addDraftFiles([], originals);
+    draft.forEach(item => { item.size = 0; }); // The actual File size owns the memory bound.
+    await assert.rejects(prepareDraftAttachments(draft, { kind: 'chat', sessionId: 'session', token: 'token' }), /update pending/);
+  }
+});
+
+test('permission denials and uncertain failures do not fall back to a second attachment transport', async t => {
+  const originalFetch = globalThis.fetch; t.after(() => { globalThis.fetch = originalFetch; });
+  for (const failure of [403, 503, 'network'] as const) {
+    const file = new File(['private'], 'notes.txt'); file.arrayBuffer = async () => { throw new Error('fallback forbidden'); };
+    globalThis.fetch = (async () => {
+      if (failure === 'network') throw new Error('network failure');
+      return new Response(JSON.stringify({ error: 'request refused' }), { status: failure });
+    }) as typeof fetch;
+    await assert.rejects(prepareDraftAttachments(addDraftFiles([], [file]), { kind: 'auto', sessionId: 'session', token: 'token' }), /request refused|network failure/);
+  }
 });

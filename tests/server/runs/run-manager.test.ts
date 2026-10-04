@@ -11,6 +11,8 @@ import { MASTER_FOLDER } from '../../../shared/master.js';
 import { CapabilityRegistry } from '../../../server/api/mcp.js';
 import { runToolResolver } from '../../../server/api/run-tools.js';
 import { RunManager } from '../../../server/runs/manager.js';
+import { AttachmentStore } from '../../../server/stores/attachments.js';
+import { MAX_ATTACHMENT_BYTES } from '../../../shared/attachments.js';
 import { buildCreateArgs, buildResumeArgs } from '../../../server/runs/claude-args.js';
 import { findExecutable } from '../../../server/providers/discovery.js';
 import type { Run, Session } from '../../../shared/types.js';
@@ -1394,3 +1396,18 @@ for (const kind of ['codex', 'bridge'] as const) {
     else assert.equal((await finished(f.manager, second.id)).status, 'completed');
   });
 }
+
+test('legacy attachment RPC returns the whole original above the native excerpt budget and rejects oversized originals', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const store = new AttachmentStore(f.stateDir); await store.start();
+  const bytes = Buffer.alloc(6 * 1024 * 1024, 193);
+  const saved = await store.upload(f.session.id, 'legacy.bin', 'application/octet-stream', (async function* () { yield bytes; })());
+  const downloaded = await f.manager.attachment(saved.id);
+  assert.equal(downloaded.metadata.size, bytes.length);
+  assert.equal(downloaded.content.length, bytes.length);
+  assert.deepEqual(downloaded.content, bytes);
+  assert.equal(downloaded.sessionId, f.session.id);
+  assert.equal((await store.read(saved.id)).content.length, 4000);
+  const oversized = await store.upload(f.session.id, 'new-large.bin', 'application/octet-stream', (async function* () { yield Buffer.alloc(MAX_ATTACHMENT_BYTES + 1, 37); })());
+  await assert.rejects(f.manager.attachment(oversized.id), { kind: 'too-large' });
+});

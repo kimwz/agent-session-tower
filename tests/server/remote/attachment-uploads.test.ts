@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
@@ -47,8 +47,16 @@ test('remote chunks bind canonical sessions and controller ownership and recheck
     assert.equal(response.status, 200, 'chunks do not consume the metadata mutation budget');
   }
   const complete = () => fetch(`${url}/complete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  const publishedId = JSON.parse(await readFile(join(uploads.directory, id, 'manifest.json'), 'utf8')).attachmentId;
+  for (const code of ['ENOSPC', 'EDQUOT']) {
+    const save = t.mock.method(uploads as unknown as { save(...args: unknown[]): Promise<void> }, 'save', async () => { throw Object.assign(new Error('receipt disk full'), { code }); });
+    const refused = await complete(); assert.equal(refused.status, 507);
+    assert.equal((await refused.json()).error, '파일을 저장할 디스크 여유 공간이 부족합니다.');
+    save.mock.restore();
+  }
   const completed = await complete(); assert.equal(completed.status, 200);
   const { attachment } = await completed.json();
+  assert.equal(attachment.id, publishedId, 'receipt retries recover the original ID');
   const download = await fetch(`${base}/api/attachments/${attachment.id}`); assert.deepEqual(Buffer.from(await download.arrayBuffer()), bytes);
   const activeDownload = await fetch(`${base}/api/attachments/${attachment.id}`);
   const reader = activeDownload.body!.getReader(); assert.equal((await reader.read()).done, false);

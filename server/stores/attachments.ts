@@ -227,9 +227,19 @@ export class AttachmentStore {
   }
 
   async read(id: string, sessionId?: string): Promise<StoredAttachment> {
+    return this.readContent(id, sessionId, false);
+  }
+
+  /** Older web processes download through RPC: return the whole bounded original or fail explicitly. */
+  async readLegacyDownload(id: string): Promise<StoredAttachment> {
+    return this.readContent(id, undefined, true);
+  }
+
+  private async readContent(id: string, sessionId: string | undefined, legacyDownload: boolean): Promise<StoredAttachment> {
     const opened = await this.openVerified(id, sessionId);
     try {
-      const length = opened.metadata.size <= MAX_IMAGE_ATTACHMENT_BYTES ? opened.metadata.size : Math.min(4000, opened.metadata.size);
+      if (legacyDownload && opened.metadata.size > MAX_ATTACHMENT_BYTES) throw invalid('이 파일을 다운로드하려면 Tower 웹을 업데이트하세요.', 'too-large');
+      const length = legacyDownload || opened.metadata.size <= MAX_IMAGE_ATTACHMENT_BYTES ? opened.metadata.size : Math.min(4000, opened.metadata.size);
       const content = Buffer.alloc(length);
       let offset = 0;
       while (offset < length) {
