@@ -406,6 +406,24 @@ test('an outdated worker is only given the owner’s own requests, never work on
   assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), ['enqueue']);
 });
 
+test('an older worker refuses attachment references before RPC while accepting legacy inline uploads', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-attachments-'));
+  const stateDir = join(directory, 'state');
+  const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [], nativeIds: {}, settled: [], autoPrompts: [] });
+  const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
+  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  await client.start();
+  assert.equal(client.supports('attachmentReferences'), false);
+  const attachmentIds = ['12345678-1234-4234-8234-123456789abc'];
+  const input = { provider: 'codex' as const, cwd: directory, prompt: '', attachmentIds };
+  await assert.rejects(client.create(input), { kind: 'unavailable', disposition: 'not-admitted' });
+  await assert.rejects(client.enqueue('codex:legacy', '', { attachmentIds }), { kind: 'unavailable', disposition: 'not-admitted' });
+  await assert.rejects(client.submitAutoPrompt({ ...input, requestId: '12345678-1234-4234-8234-123456789abd' }), { kind: 'unavailable', disposition: 'not-admitted' });
+  assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
+  await client.enqueue('codex:legacy', '', { attachments: [{ name: 'a.txt', mimeType: 'text/plain', data: 'YQ==' }] });
+  assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), ['enqueue']);
+});
+
 test('a web Auto Prompt is admitted as the owner’s request but never read as Slack send approval', async t => {
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();

@@ -7,7 +7,7 @@ import { finishComposerSend, getComposerState, markComposerSending, setComposerD
 import { SavedAttachments } from '../../../client/src/chat/ChatAttachments.js';
 import { ChatTranscript } from '../../../client/src/chat/ChatTranscript.js';
 import { matchChatRuns } from '../../../client/src/chat/chat-runs.js';
-import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../../../shared/attachments.js';
+import { MAX_ATTACHMENTS, UPLOAD_CHUNK_BYTES } from '../../../shared/attachments.js';
 import type { Attachment, Run } from '../../../shared/types.js';
 
 const saved: Attachment = { id: 'saved-image', name: '화면.png', mimeType: 'image/png', size: 1024 };
@@ -26,34 +26,62 @@ test('selection retains original files and infers raster MIME for pasted or uplo
   assert.ok(next[1].key !== next[2].key);
 });
 
-test('selection enforces file count, raster size and total size across saved and new attachments without changing the draft', () => {
+test('selection enforces only count and retains large originals including images', () => {
   const previous = Array.from({ length: MAX_ATTACHMENTS }, (_, index) => savedAttachmentDraft({ ...saved, id: `saved-${index}` }));
   assert.throws(() => addDraftFiles(previous, [new File(['x'], 'extra.txt')]), /최대 10개/);
-  const sizedFile = (size: number, type = 'text/plain') => ({ size, type, name: 'large-file' }) as File;
-  assert.throws(() => addDraftFiles([], [sizedFile(MAX_ATTACHMENT_BYTES + 1)]), /파일 하나/);
-  assert.throws(() => addDraftFiles([], [sizedFile(MAX_IMAGE_ATTACHMENT_BYTES + 1, 'image/png')]), /이미지는/);
-  assert.throws(() => addDraftFiles([savedAttachmentDraft({ ...saved, size: MAX_TOTAL_ATTACHMENT_BYTES - 10 })], [sizedFile(11)]), /전체 크기/);
+  const file = { size: 1024 * 1024 * 1024, type: 'image/png', name: 'large.png' } as File;
+  assert.equal(addDraftFiles([savedAttachmentDraft({ ...saved, size: 1024 * 1024 * 1024 })], [file])[1].file, file);
   assert.equal(previous.length, MAX_ATTACHMENTS);
-  assert.equal(previous[0].attachmentId, 'saved-0');
 });
 
-test('preparation sends exact binary bytes as base64 and reuses saved attachment IDs without reading them again', async () => {
-  const bytes = Uint8Array.from({ length: 30_000 }, (_, index) => index % 256);
-  const files = addDraftFiles([savedAttachmentDraft(saved)], [new File([bytes], 'binary.dat', { type: 'application/octet-stream' })]);
-  const prepared = await prepareDraftAttachments(files);
-  assert.deepEqual(prepared.attachmentIds, [saved.id]);
-  assert.equal(prepared.attachments?.[0].name, 'binary.dat');
-  assert.deepEqual(Buffer.from(prepared.attachments![0].data, 'base64'), Buffer.from(bytes));
-  assert.ok(!prepared.attachments![0].data.startsWith('data:'));
+test('preparation streams bounded original slices and sends only scoped references', async t => {
+  const originalFetch = globalThis.fetch; t.after(() => { globalThis.fetch = originalFetch; });
+  const bytes = Buffer.alloc(21 * 1024 * 1024 + 17, 173);
+  const original = new File([bytes], 'binary.dat', { type: 'application/octet-stream' });
+  original.arrayBuffer = async () => { throw new Error('whole file reads forbidden'); };
+  const node = 'a'.repeat(32);
+  const received: Buffer[] = []; let offset = 0; let starts = 0;
+  globalThis.fetch = (async (path, init) => {
+    assert.match(String(path), new RegExp(`^/api/nodes/${node}/`));
+    let result: unknown;
+    if (String(path).endsWith('/attachment-uploads')) { starts++; assert.deepEqual(JSON.parse(init!.body as string), { name: 'binary.dat', mimeType: 'application/octet-stream', size: bytes.length }); result = { id: 'upload' }; }
+    else if (String(path).includes('?offset=')) {
+      const chunk = Buffer.from(await (init!.body as Blob).arrayBuffer()); assert.ok(chunk.length <= UPLOAD_CHUNK_BYTES);
+      assert.ok(String(path).endsWith(`?offset=${offset}`)); received.push(chunk); offset += chunk.length; result = { offset };
+    } else if (String(path).endsWith('/complete')) result = { attachment: { ...saved, id: 'uploaded', size: bytes.length } };
+    else result = { offset };
+    return new Response(JSON.stringify(result), { status: 200 });
+  }) as typeof fetch;
+  const files = addDraftFiles([savedAttachmentDraft({ ...saved, id: `@${node}/${saved.id}` })], [original]);
+  const context = { kind: 'chat' as const, sessionId: `@${node}/canonical-session`, token: 'token' };
+  const prepared = await prepareDraftAttachments(files, context);
+  assert.deepEqual(prepared, { attachmentIds: [saved.id, 'uploaded'] });
+  assert.deepEqual(Buffer.concat(received), bytes);
+  assert.deepEqual(await prepareDraftAttachments(files, context), prepared); assert.equal(starts, 1);
   assert.deepEqual(await prepareDraftAttachments([]), {});
 });
 
-test('a file read failure does not consume the attachment draft', async () => {
-  const original = new File(['x'], 'unreadable.txt');
-  original.arrayBuffer = async () => { throw new Error('The file could not be read.'); };
-  const files = addDraftFiles([], [original]);
-  await assert.rejects(prepareDraftAttachments(files), /could not be read/);
+test('failed upload retains draft and resumes from server offset with the same upload ID', async t => {
+  const originalFetch = globalThis.fetch; t.after(() => { globalThis.fetch = originalFetch; });
+  const original = new File([Buffer.alloc(UPLOAD_CHUNK_BYTES + 100, 7)], 'retry.bin');
+  const files = addDraftFiles([], [original]); let starts = 0; let offset = 0; let failed = false; const sentOffsets: number[] = [];
+  globalThis.fetch = (async (path, init) => {
+    let result: unknown;
+    if (String(path).endsWith('/attachment-uploads')) { starts++; result = { id: 'stable-upload' }; }
+    else if (String(path).includes('?offset=')) {
+      sentOffsets.push(Number(String(path).split('=')[1]));
+      offset += (init!.body as Blob).size;
+      if (!failed) { failed = true; throw new Error('connection lost after chunk accepted'); }
+      result = { offset };
+    } else if (String(path).endsWith('/complete')) result = { attachment: { ...saved, id: 'finished' } };
+    else result = { offset };
+    return new Response(JSON.stringify(result), { status: 200 });
+  }) as typeof fetch;
+  const context = { kind: 'auto' as const, sessionId: 'stable-request', token: 'token' };
+  await assert.rejects(prepareDraftAttachments(files, context), /connection lost/);
   assert.equal(files[0].file, original);
+  assert.deepEqual(await prepareDraftAttachments(files, context), { attachmentIds: ['finished'] });
+  assert.equal(starts, 1); assert.deepEqual(sentOffsets, [0, UPLOAD_CHUNK_BYTES]);
 });
 
 test('sending state survives panel unsubscribe and return, blocks duplicate submits, and leaves a different session intact', () => {

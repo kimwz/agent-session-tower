@@ -1,6 +1,6 @@
 import type { Attachment, ChatMessage, Run } from '../../../shared/types';
 import { localPart } from '../remote/scope';
-import { isImageAttachment } from '../../../shared/attachments';
+import { selectInlineImages } from '../../../shared/attachments';
 
 export interface ChatRunMatch {
   runId: string;
@@ -39,7 +39,8 @@ function matchesAttachmentPrompt(text: string, run: Run): boolean {
     } catch { return false; }
   }
   const instruction = normalize(run.prompt || defaultAttachmentPrompt);
-  const images = attachments.flatMap((attachment, index) => isImageAttachment(attachment.mimeType) ? [paths[index]] : []);
+  const selected = new Set(selectInlineImages(attachments).map(item => item.id));
+  const images = attachments.flatMap((attachment, index) => selected.has(attachment.id) ? [paths[index]] : []);
   const leadingImages = images.map((path, index) => `<image name=[Image #${index + 1}] path="${path}">\n[Image attachment]\n</image>\n`).join('');
   const before = text.slice(0, markerAt);
   const after = lines.slice(attachments.length).join('\n');

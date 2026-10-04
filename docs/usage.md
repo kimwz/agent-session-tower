@@ -99,7 +99,7 @@ Codex questions show their choices and, when allowed, a text input. MCP connecto
 
 For work sent to an already open Codex desktop session, its original app continues to handle approvals. Check that app when it is waiting for permission. Explicit provider deny rules still apply.
 
-You can upload up to 10 attachments per request: 10 MB per file, 5 MB per image, and 20 MB total. PNG, JPEG, GIF, and WebP images use native image input; other files are provided as local copies. Uploaded files remain on the host so the conversation can keep referencing them.
+You can upload up to 10 original files per request without a fixed file or total size limit. Disk space, network availability, and filesystem limits still apply. Tower transfers files in small chunks and sends only file references with the chat request. PNG, JPEG, GIF, and WebP images that fit the native image budget use image input; larger images and other files are provided as local copies. Accepted files remain on the host so the conversation can keep referencing them. If an upload fails, the draft retains its files and a retry resumes the upload. Unsubmitted uploads expire after 24 hours.
 
 ## Auto Prompt
 

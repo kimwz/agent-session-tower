@@ -4,7 +4,7 @@ import { constants } from 'node:fs';
 import { lstat, mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
 import { delimiter, isAbsolute, join } from 'node:path';
 import type { Provider } from '../../shared/types.js';
-import { MAX_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../../shared/attachments.js';
+import { MAX_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, MAX_INLINE_IMAGE_TOTAL_BYTES } from '../../shared/attachments.js';
 import { rasterMime } from '../stores/attachments.js';
 import { findExecutable, providerDirectories } from '../providers/discovery.js';
 import { CLAUDE_EFFORT_LEVELS, validEffort, validModelId } from '../providers/models.js';
@@ -123,7 +123,7 @@ async function imagesForRequest(paths: readonly string[], directory: string): Pr
       if (!info.isFile() || info.nlink !== 1 || info.size > MAX_IMAGE_ATTACHMENT_BYTES) throw failure('routing image is invalid or too large.');
       content = await file.readFile();
       total += content.length;
-      if (content.length > MAX_IMAGE_ATTACHMENT_BYTES || total > MAX_TOTAL_ATTACHMENT_BYTES) throw failure('routing images are too large.');
+      if (content.length > MAX_IMAGE_ATTACHMENT_BYTES || total > MAX_INLINE_IMAGE_TOTAL_BYTES) throw failure('routing images are too large.');
     } finally { await file.close(); }
     const mime = rasterMime(content);
     if (!mime) throw failure('routing image format is unsupported.');

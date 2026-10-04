@@ -240,7 +240,13 @@ export class DurableRunManager extends EventEmitter {
       throw new TowerError('unavailable', 'The execution worker has not updated to support master.worker. Nothing was submitted.', { disposition: 'not-admitted' });
     }
   }
+  private requireAttachmentReferences(input: { attachmentIds?: string[] }): void {
+    if (input.attachmentIds?.length && !this.supports('attachmentReferences')) {
+      throw new TowerError('unavailable', '실행 워커가 아직 업데이트되지 않아 첨부 파일을 보내지 않았습니다. 진행 중인 작업이 끝난 뒤 다시 시도하세요.', { disposition: 'not-admitted' });
+    }
+  }
   async create(input: NewSessionInput, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
+    this.requireAttachmentReferences(input);
     this.requireModelRole(input);
     internal.validate?.();
     this.requireOrigins(internal);
@@ -248,6 +254,7 @@ export class DurableRunManager extends EventEmitter {
     return this.call('create', [input, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]) as Promise<{ session: Session; run: Run }>;
   }
   async enqueue(id: string, prompt: string, attachments: MessageAttachments = {}, internal: RunAdmission = {}): Promise<Run> {
+    this.requireAttachmentReferences(attachments);
     internal.validate?.();
     this.requireOrigins(internal);
     this.requireSubscription(this.getSession(id)?.cwd);
@@ -305,6 +312,7 @@ export class DurableRunManager extends EventEmitter {
   }
   getAutoPrompt(id: string): AutoPromptJob | undefined { return this.autoPromptList().find(job => job.id === id.toLowerCase()); }
   async submitAutoPrompt(input: AutoPromptInput, internal: Pick<RunAdmission, 'origin' | 'requestId' | 'callerCapability'> = {}): Promise<AutoPromptJob> {
+    this.requireAttachmentReferences(input);
     this.requireModelRole(input);
     this.requireOrigins(internal);
     // An older worker would ignore a target it does not know and route the request somewhere else.

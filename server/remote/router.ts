@@ -1,9 +1,11 @@
+import type { AttachmentStore } from '../stores/attachments.js';
+import type { AttachmentUploads } from '../stores/attachment-uploads.js';
 import { chatImageReference, readChatImage, sendChatImage, withChatImages } from '../http/chat-images.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Http2ServerRequest, Http2ServerResponse } from 'node:http2';
 import type { Backend } from '../http/server.js';
 import type { RequestContext } from '../http/request-context.js';
-import { approvalResponse, ATTACHMENT_BODY_BYTES, errorDisposition, errorStatus, httpError, parseAutoPrompt, parseCreateSession, parseMessage, readJson, UUID } from '../http/requests.js';
+import { attachmentUploadRoute, approvalResponse, ATTACHMENT_BODY_BYTES, errorDisposition, errorStatus, httpError, parseAutoPrompt, parseCreateSession, parseMessage, readJson, UUID } from '../http/requests.js';
 import { publicSnapshot } from '../http/public-snapshot.js';
 import { SnapshotStream } from '../http/snapshot-stream.js';
 import { SseClient } from '../http/sse-client.js';
@@ -20,7 +22,7 @@ import type { RepositoryAction } from '../../shared/repositories.js';
 import { isOperationName, OPERATIONS, REMOTE_PAGE_OPERATIONS } from '../../shared/api/operations.js';
 import type { RemoteAction, RemoteChange } from '../../shared/link.js';
 import { TowerError } from '../../shared/errors.js';
-import { sseSink } from '../http/sinks.js';
+import { sendStoredAttachment, sseSink } from '../http/sinks.js';
 
 type Request = IncomingMessage | Http2ServerRequest;
 // The HTTP/2 compatibility response offers the same calls as an HTTP/1 response.
@@ -29,6 +31,8 @@ type Reply = ServerResponse;
 export interface RemotePrincipal { controllerId: string }
 
 export interface RemoteRouterOptions {
+  attachmentStores?: { chat: AttachmentStore; auto: AttachmentStore };
+  attachmentUploads?: AttachmentUploads;
   backend: Backend;
   exclusions: RemoteExclusionStore;
   /** This computer's shells; a controller opens and joins them in folders it can see. */
@@ -49,9 +53,10 @@ const REQUEST_ID_HEADER = 'x-tower-request-id';
  * answers with remote views that leave out excluded folders and coordinator conversations. Local management
  * (accounts, pairing, the exclusion list) has no route here at all.
  */
-export function createRemoteRouter({ backend, exclusions, terminals, mutationsPerMinute = 60, audit }: RemoteRouterOptions) {
+export function createRemoteRouter({ attachmentStores, attachmentUploads, backend, exclusions, terminals, mutationsPerMinute = 60, audit }: RemoteRouterOptions) {
   const streams = new Map<string, { stream: SnapshotStream; clients: Set<SseClient> }>();
   /** Terminal output streams to controllers; they end when the sharing list changes (the shells go on). */
+  const downloads = new Map<string, Set<Reply>>();
   const shellStreams = new Set<Reply>();
   const rates = new Map<string, { count: number; at: number }>();
   let scheduled: ReturnType<typeof setTimeout> | undefined;
@@ -79,6 +84,8 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
   // A frame built or queued under the old list must never go out: end every stream; controllers reconnect to a fresh view.
   const listChanged = () => {
     for (const id of [...streams.keys()]) disconnect(id);
+    for (const active of downloads.values()) for (const res of active) res.destroy();
+    downloads.clear();
     for (const res of [...shellStreams]) res.end();
     shellStreams.clear();
   };
@@ -90,6 +97,8 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
   const recheck = setInterval(publish, 30_000);
   recheck.unref();
   const disconnect = (controllerId: string) => {
+    for (const res of downloads.get(controllerId) ?? []) res.destroy();
+    downloads.delete(controllerId);
     const entry = streams.get(controllerId);
     if (!entry) return;
     streams.delete(controllerId);
@@ -243,8 +252,18 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       if (scope().matcher.excludes(ref.path) || scope().matcher.excludes(image.path)) throw notFound();
       return sendChatImage(res, image, method === 'HEAD');
     }
+    if (await attachmentUploadRoute(req, res, url, attachmentUploads, principal.controllerId, async target => {
+      if (target.kind === 'chat') return { ...target, sessionId: (await confirm(target.sessionId)).id };
+      return target;
+    }, () => backend.attachmentReferences?.() === true, () => limit(principal))) return;
     const attachment = path.match(/^\/api\/attachments\/([^/]+)$/);
     if ((method === 'GET' || method === 'HEAD') && attachment) {
+      if (attachmentStores) {
+        const active = downloads.get(principal.controllerId) ?? new Set<Reply>();
+        active.add(res); downloads.set(principal.controllerId, active);
+        try { return await sendStoredAttachment(res, attachmentStores.chat, attachment[1], method === 'HEAD', async id => { await confirm(id); }); }
+        finally { active.delete(res); if (!active.size) downloads.delete(principal.controllerId); }
+      }
       if (!backend.attachment) throw notFound();
       const { metadata, content, sessionId } = await backend.attachment(attachment[1]).catch(() => { throw notFound(); });
       // A worker too old to say whose file this is cannot prove it is shared.
@@ -463,6 +482,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
     }
     if (path === '/api/auto-prompts') {
       const request = parseAutoPrompt(await readJson(req, ATTACHMENT_BODY_BYTES));
+      if (request.attachmentIds?.length && backend.attachmentReferences?.() !== true) throw Object.assign(new TowerError('unavailable', '실행 작업자가 원본 첨부 지원 업데이트를 기다리고 있습니다. 잠시 후 다시 시도하세요.'), { disposition: 'not-admitted' });
       if (request.cwd) await listedFolder(request.cwd);
       if (!backend.startAutoPrompt) throw httpError(503, 'Auto Prompt를 현재 사용할 수 없습니다.');
       const job = await backend.startAutoPrompt(request, context(principal, request.requestId.toLowerCase()));
@@ -541,6 +561,8 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       clearInterval(recheck);
       if (scheduled) clearTimeout(scheduled);
       for (const id of [...streams.keys()]) disconnect(id);
+      for (const active of downloads.values()) for (const res of active) res.destroy();
+      downloads.clear();
       for (const res of shellStreams) res.end();
       shellStreams.clear();
     },

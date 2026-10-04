@@ -46,6 +46,7 @@ export function proxyToNode(req: IncomingMessage, res: ServerResponse, session: 
     }
     const headers: OutgoingHttpHeaders = { ':method': req.method ?? 'GET', ':path': path };
     for (const name of REQUEST_HEADERS) { const value = req.headers[name]; if (typeof value === 'string') headers[name] = value; }
+    const fileDownload = (req.method === 'GET' || req.method === 'HEAD') && /^\/api\/attachments\/[^/]+$/.test(path.split('?')[0]);
     const bodyless = req.method === 'GET' || req.method === 'HEAD';
     const lost = typeof req.headers['x-tower-request-id'] === 'string' ? LOST + ONCE : LOST;
     let stream: ClientHttp2Stream;
@@ -90,7 +91,7 @@ export function proxyToNode(req: IncomingMessage, res: ServerResponse, session: 
       // The other computer refusing this link must not read as this browser being signed out.
       if (status === 401 || status === 403) { stream.close(http2.constants.NGHTTP2_CANCEL); fail(res, 502, '그 컴퓨터가 이 요청을 거절했습니다.', NODE_REFUSED, 'not-admitted'); finish(); return; }
       if (!ANSWER_TYPES.test(type) || status < 200 || (status >= 300 && status < 400)) { stream.close(http2.constants.NGHTTP2_CANCEL); fail(res, 502, '그 컴퓨터의 응답을 읽을 수 없습니다.', NODE_ANSWER, 'uncertain'); finish(); return; }
-      if (!/^text\/event-stream/i.test(type)) deadline = setTimeout(() => { stream.close(http2.constants.NGHTTP2_CANCEL); res.destroy(); finish(); }, ANSWER_MS);
+      if (!fileDownload && !/^text\/event-stream/i.test(type)) deadline = setTimeout(() => { stream.close(http2.constants.NGHTTP2_CANCEL); res.destroy(); finish(); }, ANSWER_MS);
       const out: Record<string, string | number> = { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
       if (/^text\/event-stream/i.test(type)) out['X-Accel-Buffering'] = 'no';
       else if (!/^application\/json/i.test(type)) {
@@ -111,7 +112,7 @@ export function proxyToNode(req: IncomingMessage, res: ServerResponse, session: 
         touch();
         received += chunk.length;
         if (observed && received <= OBSERVED_BYTES) observed.push(chunk);
-        if (received > MAX_ANSWER_BYTES) { stream.close(http2.constants.NGHTTP2_CANCEL); res.destroy(); finish(); return; }
+        if (!fileDownload && received > MAX_ANSWER_BYTES) { stream.close(http2.constants.NGHTTP2_CANCEL); res.destroy(); finish(); return; }
         if (!res.write(chunk)) { stream.pause(); res.once('drain', () => stream.resume()); }
       });
       stream.on('end', () => {

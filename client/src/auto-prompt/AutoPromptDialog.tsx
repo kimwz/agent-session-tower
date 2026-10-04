@@ -5,10 +5,10 @@ import { Check, ChevronDown, ChevronRight, Folder, LoaderCircle, Monitor, Paperc
 import type { DecisionOverview } from '../../../shared/decisions';
 import { suggestionTarget, useAutoPromptSuggestion, type SuggestionState } from './suggestion';
 import type { AutoPromptJob, Provider, ProviderHealth, Session } from '../../../shared/types';
-import { MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../../../shared/attachments';
+import { MAX_ATTACHMENTS } from '../../../shared/attachments';
 import { DraftAttachments } from '../chat/ChatAttachments';
 import { ProviderIcon } from '../common/Icons';
-import { addDraftFiles, formatAttachmentSize, prepareDraftAttachments, type DraftAttachment } from '../chat/chat-attachments';
+import { addDraftFiles, prepareDraftAttachments, type DraftAttachment } from '../chat/chat-attachments';
 import { autoPromptPending, createAutoPromptAttempt, newerAutoPromptJob, type AutoPromptAttempt } from './auto-prompt-request';
 import { api, providerLabels, sessionTitle } from '../common/lib';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
@@ -53,6 +53,7 @@ export function AutoPromptDialog({ visible, initialCwd, initialNode, providers: 
   const dialog = useRef<HTMLDialogElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const uploadRequest = useRef<{ key: string; id: string } | undefined>(undefined);
   const attempt = useRef<AutoPromptAttempt | undefined>(undefined);
   const currentJob = useRef<AutoPromptJob | undefined>(undefined);
   const seenTerminalId = useRef('');
@@ -117,6 +118,7 @@ export function AutoPromptDialog({ visible, initialCwd, initialNode, providers: 
 
   function resetRequest(clearPrompt = false) {
     generation.current++;
+    uploadRequest.current = undefined;
     sending.current = false;
     attempt.current = undefined;
     currentJob.current = undefined;
@@ -135,6 +137,7 @@ export function AutoPromptDialog({ visible, initialCwd, initialNode, providers: 
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     if (currentJob.current && !autoPromptPending(currentJob.current) && seenTerminalId.current === currentJob.current.id && !sending.current) {
       generation.current++;
+      uploadRequest.current = undefined;
       attempt.current = undefined; currentJob.current = undefined;
       seenTerminalId.current = '';
       setAttemptId(''); setJob(undefined); setError(''); setUncertain(false);
@@ -217,11 +220,13 @@ export function AutoPromptDialog({ visible, initialCwd, initialNode, providers: 
     try {
       if (!attempt.current) {
         setPreparing(true);
-        const prepared = await prepareDraftAttachments(attachments);
+        const uploadKey = JSON.stringify([machine, prompt, provider, cwd, attachments.map(item => item.key)]);
+        if (uploadRequest.current?.key !== uploadKey) uploadRequest.current = { key: uploadKey, id: requestId() };
+        const prepared = await prepareDraftAttachments(attachments, { kind: 'auto', sessionId: scopedId(machine, uploadRequest.current.id), token });
         seenTerminalId.current = '';
         // The suggestion shown when sending is fixed into this request, whatever arrives later.
         const place = accepted ? suggestionTarget(accepted) : cwd ? { cwd } : {};
-        attempt.current = createAutoPromptAttempt({ requestId: requestId(), provider, ...place, prompt, ...prepared,
+        attempt.current = createAutoPromptAttempt({ requestId: uploadRequest.current.id, provider, ...place, prompt, ...prepared,
           ...(model ? { model } : {}), ...(effort ? { effort } : {}) }, undefined, machine);
         setAttemptId(attempt.current.id);
         setPreparing(false);
@@ -317,7 +322,7 @@ export function AutoPromptDialog({ visible, initialCwd, initialNode, providers: 
         if (!event.clipboardData.getData('text/plain')) event.preventDefault();
         addFiles(files);
       }} />
-      <div className="composer-bottom"><button type="button" className="attach-button" aria-label={t('파일 첨부')} title={t('파일 첨부 · 최대 {0}개, 합계 {1} · 이미지 붙여넣기 가능', { 0: MAX_ATTACHMENTS, 1: formatAttachmentSize(MAX_TOTAL_ATTACHMENT_BYTES) })} disabled={locked} onClick={() => fileInput.current?.click()}><Paperclip size={17} aria-hidden="true" /></button><span className="composer-hint">{prompt.length > 24000 ? t('{0} / 32,000자', { 0: prompt.length.toLocaleString() }) : <><kbd>⌘ / Ctrl</kbd><kbd>Enter</kbd><span>{t('전송')}</span></>}</span><ModelPicker provider={providerHealth} value={model} disabled={locked} onChange={next => { chosenModel.current = true; setModel(next); setEffort(value => supportedEffort(providerHealth, next || providerHealth?.defaultModel, value)); }} /><EffortPicker provider={providerHealth} model={model || providerHealth?.defaultModel} value={effort} disabled={locked} onChange={next => { chosenModel.current = true; setEffort(next); }} /><button type="submit" className="send-button" disabled={unavailable || locked || (!prompt.trim() && !attachments.length)} aria-label={submitting || pending ? t('요청 보내는 중') : t('요청 보내기')}>{submitting || pending ? <LoaderCircle size={15} className="spin" /> : <Send size={15} />}<span>{t('보내기')}</span></button></div>
+      <div className="composer-bottom"><button type="button" className="attach-button" aria-label={t('파일 첨부')} title={t('파일 첨부 · 최대 {0}개 · 원본 업로드 · 이미지 붙여넣기 가능', { 0: MAX_ATTACHMENTS })} disabled={locked} onClick={() => fileInput.current?.click()}><Paperclip size={17} aria-hidden="true" /></button><span className="composer-hint">{prompt.length > 24000 ? t('{0} / 32,000자', { 0: prompt.length.toLocaleString() }) : <><kbd>⌘ / Ctrl</kbd><kbd>Enter</kbd><span>{t('전송')}</span></>}</span><ModelPicker provider={providerHealth} value={model} disabled={locked} onChange={next => { chosenModel.current = true; setModel(next); setEffort(value => supportedEffort(providerHealth, next || providerHealth?.defaultModel, value)); }} /><EffortPicker provider={providerHealth} model={model || providerHealth?.defaultModel} value={effort} disabled={locked} onChange={next => { chosenModel.current = true; setEffort(next); }} /><button type="submit" className="send-button" disabled={unavailable || locked || (!prompt.trim() && !attachments.length)} aria-label={submitting || pending ? t('요청 보내는 중') : t('요청 보내기')}>{submitting || pending ? <LoaderCircle size={15} className="spin" /> : <Send size={15} />}<span>{t('보내기')}</span></button></div>
     </form>
     {!job && suggestion && <SuggestionRow state={suggestion} accepted={acceptSuggestion} disabled={locked} machine={machine} projects={choices} sessions={sessions} onChange={setAcceptSuggestion} />}
     {statusLabel && <div className="auto-prompt-progress" role="status"><LoaderCircle size={18} className="spin" aria-hidden="true" /><div><strong>{statusLabel}</strong>{job?.status === 'routing' && !directed(job) && <small title={job.routerModel}>{t('{0}가 요청을 살펴보고 있습니다.', { 0: job.routerModel || providerLabels[job.routerProvider ?? job.provider] })}</small>}<small>{t('창을 닫아도 요청은 계속됩니다.')}</small></div>{job && ['queued', 'routing'].includes(job.status) && <button type="button" className="auto-prompt-cancel" disabled={cancelling || !connected || !token} onClick={() => { void cancel(); }}>{cancelling ? <LoaderCircle size={12} className="spin" /> : <Square size={11} />}{t('취소')}</button>}</div>}

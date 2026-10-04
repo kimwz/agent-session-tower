@@ -1,4 +1,5 @@
-import type { IncomingMessage } from 'node:http';
+import type { AttachmentUploads } from '../stores/attachment-uploads.js';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Http2ServerRequest } from 'node:http2';
 import type { AutoPromptInput, NewSessionInput, MessageAttachments, RunApprovalResponse } from '../../shared/types.js';
 import { MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../../shared/attachments.js';
@@ -52,6 +53,7 @@ export function approvalResponse(body: Record<string, unknown>): RunApprovalResp
 
 /** A new session request, validated before admission. Throws an HTTP error for anything else. */
 export function parseCreateSession(body: Record<string, unknown>): NewSessionInput {
+  if (body.attachmentIds !== undefined) throw httpError(400, '새 세션의 첨부 파일은 Auto Prompt로 보내세요.');
   if (body.modelRole !== undefined && body.modelRole !== 'master.worker') throw httpError(400, '알 수 없는 작업 모델 역할입니다.');
   if (body.provider !== 'claude' && body.provider !== 'codex' && !(body.provider === undefined && body.modelRole === 'master.worker')) throw httpError(400, 'Claude 또는 Codex를 선택하세요.');
   if (typeof body.cwd !== 'string' || !body.cwd.trim()) throw httpError(400, '작업 폴더의 절대 경로를 입력하세요.');
@@ -79,7 +81,7 @@ export function parseMessage(body: Record<string, unknown>): MessageRequest {
 }
 
 export function parseAutoPrompt(body: Record<string, unknown>): AutoPromptInput {
-  if (Object.keys(body).some(key => !['modelRole', 'requestId', 'provider', 'cwd', 'sessionMode', 'targetSessionId', 'prompt', 'attachments', 'codexApprovalsReviewer', 'model', 'effort'].includes(key))) {
+  if (Object.keys(body).some(key => !['modelRole', 'requestId', 'provider', 'cwd', 'sessionMode', 'targetSessionId', 'prompt', 'attachments', 'attachmentIds', 'codexApprovalsReviewer', 'model', 'effort'].includes(key))) {
     throw httpError(400, 'Auto Prompt 요청에는 폴더, 도구, 프롬프트와 첨부 파일만 지정할 수 있습니다.');
   }
   if (typeof body.requestId !== 'string' || !UUID.test(body.requestId)) throw httpError(400, 'Auto Prompt 요청 ID가 올바르지 않습니다.');
@@ -94,10 +96,12 @@ export function parseAutoPrompt(body: Record<string, unknown>): AutoPromptInput 
   if (body.targetSessionId !== undefined && (!validTargetSessionId(body.targetSessionId) || body.cwd === undefined || body.sessionMode !== undefined)) {
     throw httpError(400, '이어갈 세션과 그 작업 폴더를 함께 지정하세요.');
   }
-  if (body.attachments !== undefined && !Array.isArray(body.attachments)) throw httpError(400, '첨부 파일 목록 형식이 올바르지 않습니다.');
+  if ((body.attachments !== undefined && !Array.isArray(body.attachments)) || (body.attachmentIds !== undefined && !Array.isArray(body.attachmentIds))) throw httpError(400, '첨부 파일 목록 형식이 올바르지 않습니다.');
   const attachments = body.attachments as AutoPromptInput['attachments'];
-  if ((attachments?.length || 0) > MAX_ATTACHMENTS) throw httpError(413, `첨부 파일은 최대 ${MAX_ATTACHMENTS}개까지 보낼 수 있습니다.`);
-  if (typeof body.prompt !== 'string' || (!body.prompt.trim() && !attachments?.length) || body.prompt.length > 32_000) {
+  const attachmentIds = body.attachmentIds as AutoPromptInput['attachmentIds'];
+  const count = (attachments?.length || 0) + (attachmentIds?.length || 0);
+  if (count > MAX_ATTACHMENTS) throw httpError(413, `첨부 파일은 최대 ${MAX_ATTACHMENTS}개까지 보낼 수 있습니다.`);
+  if (typeof body.prompt !== 'string' || (!body.prompt.trim() && !count) || body.prompt.length > 32_000) {
     throw httpError(400, '메시지나 첨부 파일을 추가하세요. 메시지는 32,000자 이하여야 합니다.');
   }
   const reviewer = requestedApprovalsReviewer(body.codexApprovalsReviewer);
@@ -105,7 +109,7 @@ export function parseAutoPrompt(body: Record<string, unknown>): AutoPromptInput 
   const effort = requestedEffort(body.effort, body.provider);
   return { ...(body.modelRole ? { modelRole: body.modelRole } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}), requestId: body.requestId, provider: body.provider, prompt: body.prompt,
     ...(body.cwd !== undefined ? { cwd: body.cwd as string } : {}), ...(body.sessionMode === 'new' ? { sessionMode: 'new' as const } : {}),
-    ...(body.targetSessionId !== undefined ? { targetSessionId: body.targetSessionId as string } : {}), ...(attachments ? { attachments } : {}),
+    ...(body.targetSessionId !== undefined ? { targetSessionId: body.targetSessionId as string } : {}), ...(attachments ? { attachments } : {}), ...(attachmentIds ? { attachmentIds } : {}),
     ...(reviewer && body.provider === 'codex' ? { codexApprovalsReviewer: reviewer } : {}) };
 }
 
@@ -137,4 +141,50 @@ export function errorDisposition(error: unknown): Disposition | undefined {
   if (value === 'handoff' || value === 'not-admitted') return 'not-admitted';
   if (value === 'uncertain') return 'uncertain';
   return undefined;
+}
+
+type Request = IncomingMessage | Http2ServerRequest;
+type Target = { kind: 'chat' | 'auto'; sessionId: string };
+export const uploadAppendPath = (path: string) => /^\/api\/(?:nodes\/[a-f0-9]{32}\/)?attachment-uploads\/[a-f0-9-]{36}$/.test(path);
+const running = new WeakMap<AttachmentUploads, number>();
+export async function attachmentUploadRoute(req: Request, res: ServerResponse, url: URL, uploads: AttachmentUploads | undefined, owner: string,
+  authorize: (target: Target) => Promise<Target>, available: () => boolean, mutation: () => void = () => {}): Promise<boolean> {
+  const path = decodeURIComponent(url.pathname);
+  const start = path.match(/^\/api\/(sessions|auto-prompts)\/([^/]+)\/attachment-uploads$/);
+  const item = path.match(/^\/api\/attachment-uploads\/([a-f0-9-]{36})(?:\/(complete|cancel))?$/);
+  if (!start && !item) return false;
+  if (!uploads) throw httpError(503, '원본 파일 업로드를 사용할 수 없습니다.');
+  const json = (status: number, value: unknown) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)); };
+  if (start && req.method === 'POST') {
+    mutation();
+    if (!available()) throw Object.assign(httpError(503, '실행 작업자가 원본 첨부 지원 업데이트를 기다리고 있습니다. 잠시 후 다시 시도하세요.'), { disposition: 'not-admitted' });
+    if (!req.headers['content-type']?.startsWith('application/json')) throw httpError(415, 'JSON 요청이 필요합니다.');
+    const target = await authorize({ kind: start[1] === 'sessions' ? 'chat' : 'auto', sessionId: start[2] });
+    if (target.kind === 'auto' && !UUID.test(target.sessionId)) throw httpError(400, '요청 ID 형식이 올바르지 않습니다.');
+    const body = await readJson(req);
+    if (Object.keys(body).some(key => !['name', 'mimeType', 'size'].includes(key))) throw httpError(400, '첨부 파일 형식이 올바르지 않습니다.');
+    json(201, await uploads.start(target, body.name as string, body.mimeType as string, body.size as number, owner)); return true;
+  }
+  if (!item || !['GET', 'POST'].includes(req.method ?? '') || (req.method === 'GET' && item[2])) throw httpError(404, '찾을 수 없습니다.');
+  const state = await uploads.status(item[1], owner);
+  await authorize(state.target);
+  if (req.method === 'GET') { json(200, { offset: state.offset }); return true; }
+  if (item[2]) {
+    mutation();
+    if (!req.headers['content-type']?.startsWith('application/json')) throw httpError(415, 'JSON 요청이 필요합니다.');
+    if (Object.keys(await readJson(req)).length) throw httpError(400, '첨부 파일 형식이 올바르지 않습니다.');
+    if (item[2] === 'cancel') { await uploads.cancel(item[1], owner); json(200, { ok: true }); }
+    else { const attachment = await uploads.complete(item[1], owner); await authorize(state.target); json(200, { attachment }); }
+    return true;
+  }
+  if (req.headers['content-type'] !== 'application/octet-stream') throw httpError(415, '원본 파일 요청이 필요합니다.');
+  const raw = url.searchParams.get('offset');
+  if (raw === null || !/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) throw httpError(400, '업로드 위치가 올바르지 않습니다.');
+  const active = running.get(uploads) ?? 0;
+  if (active >= 4) throw httpError(429, '동시에 업로드하는 파일이 너무 많습니다. 잠시 후 다시 시도하세요.');
+  running.set(uploads, active + 1);
+  try { const result = await uploads.append(item[1], owner, Number(raw), req.iterator({ destroyOnReturn: false })); await authorize(state.target); json(200, result); }
+  catch (error) { req.resume(); throw error; }
+  finally { running.set(uploads, (running.get(uploads) ?? 1) - 1); }
+  return true;
 }

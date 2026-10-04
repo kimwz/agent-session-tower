@@ -1,3 +1,4 @@
+import { MAX_ATTACHMENTS } from '../../shared/attachments.js';
 import type { PermissionRequest } from '../../shared/permissions.js';
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from 'node:child_process';
 import { mkdir, stat } from 'node:fs/promises';
@@ -126,6 +127,7 @@ export class RunManager extends EventEmitter {
   private readonly options: RunnerOptions;
   private readonly history: RunHistory;
   private readonly attachments: AttachmentStore;
+  private readonly autoAttachments: AttachmentStore;
   private readonly registry = new CreatedSessionRegistry({ native: id => this.options.getSession(id), persist: () => this.persist() });
   private readonly runs = new Map<string, Run>();
   private readonly answers = new OwnerAnswers();
@@ -167,6 +169,7 @@ export class RunManager extends EventEmitter {
     this.history = new RunHistory(options.stateDir ?? defaultStateDir());
     this.ready = !options.holdUntilReady;
     this.attachments = new AttachmentStore(options.stateDir ?? defaultStateDir());
+    this.autoAttachments = new AttachmentStore(join(options.stateDir ?? defaultStateDir(), 'auto-prompt-staging'));
     const manager = this;
     this.turnHost = {
       get options() { return manager.options; }, registry: this.registry, attachments: this.attachments, notes: this.notes,
@@ -343,7 +346,8 @@ export class RunManager extends EventEmitter {
 
   async create(input: CreateSessionRequest, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
     this.validateCorrelation(internal.autoPromptId);
-    this.validateAdmission(input.prompt, Boolean(input.attachments?.length));
+    if (input.attachmentIds?.length && !internal.autoPromptId) throw new RunError('새 세션의 첨부 파일은 Auto Prompt로 보내세요.');
+    this.validateAdmission(input.prompt, Boolean(input.attachments?.length || input.attachmentIds?.length));
     if (!PROVIDERS.includes(input.provider)) throw new RunError('Claude 또는 Codex를 선택하세요.');
     const model = requestedModel(input.model);
     const effort = requestedEffort(input.effort, input.provider);
@@ -363,7 +367,7 @@ export class RunManager extends EventEmitter {
     }
     const uuid = randomUUID();
     const id = `${input.provider}:${input.provider === 'codex' ? 'monitor-' : ''}${uuid}`;
-    const prepared = await this.attachments.prepare(id, { attachments: input.attachments });
+    const prepared = await this.prepareAttachments(id, input, internal.autoPromptId);
     try {
       this.validateAdmission(input.prompt, prepared.attachments.length > 0);
       this.validateCorrelation(internal.autoPromptId);
@@ -395,8 +399,24 @@ export class RunManager extends EventEmitter {
       await this.attachments.rollback(prepared.createdIds);
       throw error;
     } finally { this.admissions.delete(run.id); }
+    await this.retainAttachments(run);
     void this.pump();
     return { session: this.getSession(id)!, run: shown(run) };
+  }
+
+  private async prepareAttachments(sessionId: string, request: MessageAttachments, autoPromptId?: string) {
+    if (!autoPromptId || !request.attachmentIds?.length) return this.attachments.prepare(sessionId, request);
+    if (!Array.isArray(request.attachmentIds) || !Array.isArray(request.attachments ?? []) || request.attachmentIds.length + (request.attachments?.length ?? 0) > MAX_ATTACHMENTS) throw new RunError(`첨부 파일은 최대 ${MAX_ATTACHMENTS}개까지 보낼 수 있습니다.`);
+    const imported = await this.attachments.import(sessionId, this.autoAttachments, autoPromptId, request.attachmentIds);
+    try {
+      const prepared = await this.attachments.prepare(sessionId, { attachments: request.attachments, attachmentIds: imported.attachments.map(item => item.id) });
+      return { attachments: prepared.attachments, createdIds: [...imported.createdIds, ...prepared.createdIds] };
+    } catch (error) { await this.attachments.rollback(imported.createdIds); throw error; }
+  }
+
+  private async retainAttachments(run: Run): Promise<void> {
+    try { await this.attachments.retain(run.attachments?.map(item => item.id) ?? []); }
+    catch { console.error('Accepted run attachment retention failed; durable references protect the files until the next sweep.'); }
   }
 
   private validateAdmission(prompt: string, hasAttachments = false): void {
@@ -428,7 +448,7 @@ export class RunManager extends EventEmitter {
     const model = requestedModel(request.model);
     const effort = requestedEffort(request.effort, session.provider);
     if (!(await this.executable(session.provider))) throw new RunError(`Install the ${session.provider} CLI and ensure it is in PATH before sending instructions.`, 'unavailable');
-    const prepared = await this.attachments.prepare(sessionId, request);
+    const prepared = await this.prepareAttachments(sessionId, request, internal.autoPromptId);
     // File writes yield; recheck admission immediately before inserting the run.
     try { this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.(); }
     catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
@@ -448,6 +468,7 @@ export class RunManager extends EventEmitter {
     try { await this.flush(); } // An accepted instruction is durable before launching the provider.
     catch (error) { this.runs.delete(run.id); this.changed(); await this.attachments.rollback(prepared.createdIds); throw error; }
     finally { this.admissions.delete(run.id); }
+    await this.retainAttachments(run);
     // An accepted instruction replaces the continuation the agent planned; its next turn can schedule again.
     // Tower's own continuation after an update is not the agent's plan: it runs first, then this instruction.
     for (const other of this.runs.values()) if (other.sessionId === sessionId && other.status === 'queued' && other.scheduled && (other.scheduled.resume !== 'update' || other.permissionRequestIds?.length)) this.supersede(other, 'A newer instruction was sent before the scheduled time.');
