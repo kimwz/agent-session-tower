@@ -17,6 +17,7 @@ import type { CodexBridgeOptions } from '../../../server/runs/codex-bridge.js';
 import type { Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
 import { nativeHistory } from '../../../server/sessions/native-history.js';
+import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { startLegacyRunner } from './fixtures/legacy-runner.ts';
 import { CapabilityRegistry } from '../../../server/api/mcp.js';
 import { handoffHeld, updatePaths } from '../../../server/link/update.js';
@@ -406,7 +407,7 @@ test('an outdated worker is only given the owner’s own requests, never work on
   assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), ['enqueue']);
 });
 
-test('an older worker refuses attachment references before RPC while accepting legacy inline uploads', async t => {
+test('an older worker reuses bounded saved chat references and refuses new originals before RPC', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-attachments-'));
   const stateDir = join(directory, 'state');
   const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [], nativeIds: {}, settled: [], autoPrompts: [] });
@@ -420,8 +421,17 @@ test('an older worker refuses attachment references before RPC while accepting l
   await assert.rejects(client.enqueue('codex:legacy', '', { attachmentIds }), { kind: 'unavailable', disposition: 'not-admitted' });
   await assert.rejects(client.submitAutoPrompt({ ...input, requestId: '12345678-1234-4234-8234-123456789abd' }), { kind: 'unavailable', disposition: 'not-admitted' });
   assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
+  const store = new AttachmentStore(stateDir); await store.start();
+  const saved = await store.upload('codex:legacy', 'saved.txt', 'text/plain', (async function* () { yield Buffer.from('saved'); })());
+  await client.enqueue('codex:legacy', '', { attachmentIds: [saved.id] });
+  const large = await store.upload('codex:legacy', 'large.bin', 'application/octet-stream', (async function* () { for (let index = 0; index < 11; index++) yield Buffer.alloc(1024 * 1024); })());
+  await assert.rejects(client.enqueue('codex:legacy', '', { attachmentIds: [large.id] }), { kind: 'unavailable', disposition: 'not-admitted' });
+  const parts = [];
+  for (let number = 0; number < 3; number++) parts.push(await store.upload('codex:legacy', `part-${number}.bin`, 'application/octet-stream', (async function* () { for (let index = 0; index < 8; index++) yield Buffer.alloc(1024 * 1024); })()));
+  await assert.rejects(client.enqueue('codex:legacy', '', { attachmentIds: parts.map(part => part.id) }), { kind: 'unavailable', disposition: 'not-admitted' });
+  await assert.rejects(client.enqueue('codex:legacy', '', { attachmentIds: [saved.id] }, { autoPromptId: '12345678-1234-4234-8234-123456789abc' }), { kind: 'unavailable', disposition: 'not-admitted' });
   await client.enqueue('codex:legacy', '', { attachments: [{ name: 'a.txt', mimeType: 'text/plain', data: 'YQ==' }] });
-  assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), ['enqueue']);
+  assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), ['enqueue', 'enqueue']);
 });
 
 test('a web Auto Prompt is admitted as the owner’s request but never read as Slack send approval', async t => {
@@ -432,7 +442,7 @@ test('a web Auto Prompt is admitted as the owner’s request but never read as S
   const slack = { sessionMcp: () => undefined, coordinatorSessionIds: () => [], ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return message; } } as unknown as SlackService;
   const { EventEmitter } = await import('node:events');
   const autoPrompts = Object.assign(new EventEmitter(), {
-    list: () => [], updateContext: () => {}, cancel: async () => { throw new Error('unused'); },
+    list: () => [], updateContext: () => {}, pauseAttachmentCleanup: async () => {}, resumeAttachmentCleanup: () => {}, cancel: async () => { throw new Error('unused'); },
     submit: async (input: { requestId: string; provider: 'codex'; prompt: string }, internal: unknown) => {
       submitted.push(internal);
       return { id: input.requestId, provider: input.provider, prompt: input.prompt, routerModel: 'gpt', status: 'queued' as const, createdAt: '', updatedAt: '' };

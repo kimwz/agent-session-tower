@@ -145,6 +145,7 @@ export function errorDisposition(error: unknown): Disposition | undefined {
 
 type Request = IncomingMessage | Http2ServerRequest;
 type Target = { kind: 'chat' | 'auto'; sessionId: string };
+export const uploadProgressPath = (path: string) => /^\/api\/(?:nodes\/[a-f0-9]{32}\/)?attachment-uploads\/[a-f0-9-]{36}(?:\/(complete|cancel))?$/.test(path);
 export const uploadAppendPath = (path: string) => /^\/api\/(?:nodes\/[a-f0-9]{32}\/)?attachment-uploads\/[a-f0-9-]{36}$/.test(path);
 const running = new WeakMap<AttachmentUploads, number>();
 export async function attachmentUploadRoute(req: Request, res: ServerResponse, url: URL, uploads: AttachmentUploads | undefined, owner: string,
@@ -160,31 +161,39 @@ export async function attachmentUploadRoute(req: Request, res: ServerResponse, u
     if (!available()) throw Object.assign(httpError(503, '실행 작업자가 원본 첨부 지원 업데이트를 기다리고 있습니다. 잠시 후 다시 시도하세요.'), { disposition: 'not-admitted' });
     if (!req.headers['content-type']?.startsWith('application/json')) throw httpError(415, 'JSON 요청이 필요합니다.');
     const target = await authorize({ kind: start[1] === 'sessions' ? 'chat' : 'auto', sessionId: start[2] });
-    if (target.kind === 'auto' && !UUID.test(target.sessionId)) throw httpError(400, '요청 ID 형식이 올바르지 않습니다.');
+    if (target.kind === 'auto') {
+      if (!UUID.test(target.sessionId)) throw httpError(400, '요청 ID 형식이 올바르지 않습니다.');
+      target.sessionId = target.sessionId.toLowerCase();
+    }
     const body = await readJson(req);
     if (Object.keys(body).some(key => !['name', 'mimeType', 'size'].includes(key))) throw httpError(400, '첨부 파일 형식이 올바르지 않습니다.');
     json(201, await uploads.start(target, body.name as string, body.mimeType as string, body.size as number, owner)); return true;
   }
   if (!item || !['GET', 'POST'].includes(req.method ?? '') || (req.method === 'GET' && item[2])) throw httpError(404, '찾을 수 없습니다.');
-  const state = await uploads.status(item[1], owner);
-  await authorize(state.target);
-  if (req.method === 'GET') { json(200, { offset: state.offset }); return true; }
-  if (item[2]) {
-    mutation();
-    if (!req.headers['content-type']?.startsWith('application/json')) throw httpError(415, 'JSON 요청이 필요합니다.');
-    if (Object.keys(await readJson(req)).length) throw httpError(400, '첨부 파일 형식이 올바르지 않습니다.');
-    if (item[2] === 'cancel') { await uploads.cancel(item[1], owner); json(200, { ok: true }); }
-    else { const attachment = await uploads.complete(item[1], owner); await authorize(state.target); json(200, { attachment }); }
-    return true;
+  if (req.method === 'GET') {
+    const state = await uploads.status(item[1], owner);
+    await authorize(state.target);
+    json(200, { offset: state.offset }); return true;
   }
-  if (req.headers['content-type'] !== 'application/octet-stream') throw httpError(415, '원본 파일 요청이 필요합니다.');
-  const raw = url.searchParams.get('offset');
-  if (raw === null || !/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) throw httpError(400, '업로드 위치가 올바르지 않습니다.');
   const active = running.get(uploads) ?? 0;
   if (active >= 4) throw httpError(429, '동시에 업로드하는 파일이 너무 많습니다. 잠시 후 다시 시도하세요.');
   running.set(uploads, active + 1);
-  try { const result = await uploads.append(item[1], owner, Number(raw), req.iterator({ destroyOnReturn: false })); await authorize(state.target); json(200, result); }
-  catch (error) { req.resume(); throw error; }
+  try {
+    const state = await uploads.status(item[1], owner);
+    await authorize(state.target);
+    if (item[2]) {
+      if (!req.headers['content-type']?.startsWith('application/json')) throw httpError(415, 'JSON 요청이 필요합니다.');
+      if (Object.keys(await readJson(req)).length) throw httpError(400, '첨부 파일 형식이 올바르지 않습니다.');
+      if (item[2] === 'cancel') { await uploads.cancel(item[1], owner); json(200, { ok: true }); }
+      else { const attachment = await uploads.complete(item[1], owner); await authorize(state.target); json(200, { attachment }); }
+      return true;
+    }
+    if (req.headers['content-type'] !== 'application/octet-stream') throw httpError(415, '원본 파일 요청이 필요합니다.');
+    const raw = url.searchParams.get('offset');
+    if (raw === null || !/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) throw httpError(400, '업로드 위치가 올바르지 않습니다.');
+    const result = await uploads.append(item[1], owner, Number(raw), req.iterator({ destroyOnReturn: false }));
+    await authorize(state.target); json(200, result);
+  } catch (error) { req.resume(); throw error; }
   finally { running.set(uploads, (running.get(uploads) ?? 1) - 1); }
   return true;
 }

@@ -108,6 +108,10 @@ export class AutoPromptManager extends EventEmitter {
   private processing?: Promise<void>;
   private started = false;
   private stopping = false;
+  private attachmentCleanupPaused = true;
+  private attachmentCleanupTimer?: ReturnType<typeof setInterval>;
+  private attachmentCleanup?: Promise<void>;
+
 
   constructor(private readonly options: AutoPromptOptions) {
     super();
@@ -154,6 +158,7 @@ export class AutoPromptManager extends EventEmitter {
     }
     await this.persist();
     this.started = true;
+    this.resumeAttachmentCleanup();
   }
 
   list(): AutoPromptJob[] { return [...this.entries.values()].map(entry => copy(entry.job)); }
@@ -201,7 +206,7 @@ export class AutoPromptManager extends EventEmitter {
     if (admitting) return admitting.promise;
     if (previous) return copy(previous.job);
     if (this.admissions.size + [...this.entries.values()].filter(entry => !TERMINAL.has(entry.job.status)).length >= MAX_PENDING) throw new RunError('Auto Prompt 대기열이 가득 찼습니다. 진행 중인 라우팅을 기다려 주세요.', 'rate-limited');
-    const promise = this.admit(input, fingerprint, origin, untrustedInput, unattended, internal).finally(() => { this.admissions.delete(input.requestId); this.pump(); });
+    const promise = Promise.resolve().then(() => this.admit(input, fingerprint, origin, untrustedInput, unattended, internal)).finally(() => { this.admissions.delete(input.requestId); this.pump(); });
     this.admissions.set(input.requestId, { fingerprint, promise });
     return promise;
   }
@@ -269,7 +274,38 @@ export class AutoPromptManager extends EventEmitter {
     return copy(entry.job);
   }
 
+
+  /** The state lock cannot be released while this store still deletes published originals. */
+  async pauseAttachmentCleanup(): Promise<void> {
+    this.attachmentCleanupPaused = true;
+    if (this.attachmentCleanupTimer) clearInterval(this.attachmentCleanupTimer);
+    this.attachmentCleanupTimer = undefined;
+    await this.attachmentCleanup;
+  }
+
+  resumeAttachmentCleanup(): void {
+    if (!this.started || this.stopping || this.attachmentCleanupTimer) return;
+    this.attachmentCleanupPaused = false;
+    this.attachmentCleanupTimer = setInterval(() => { void this.cleanupAttachments(); }, 60_000);
+    this.attachmentCleanupTimer.unref();
+  }
+
+  private cleanupAttachments(): Promise<void> {
+    if (this.attachmentCleanupPaused) return Promise.resolve();
+    if (this.attachmentCleanup) return this.attachmentCleanup;
+    const pending = this.sweepAttachments().catch(error => console.error('Auto Prompt attachment cleanup failed:', error));
+    this.attachmentCleanup = pending;
+    void pending.then(() => { if (this.attachmentCleanup === pending) this.attachmentCleanup = undefined; });
+    return pending;
+  }
+
+  private sweepAttachments(): Promise<void> {
+    return this.attachments.sweepPending(new Set(), new Set(), { isProtected: (_id, scope) =>
+      this.admissions.has(scope) || Boolean(this.entries.get(scope) && !TERMINAL.has(this.entries.get(scope)!.job.status)) });
+  }
+
   async close(): Promise<void> {
+    await this.pauseAttachmentCleanup();
     if (this.stopping) { await this.processing; return; }
     this.stopping = true;
     for (const entry of this.entries.values()) if (['queued', 'routing'].includes(entry.job.status)) {

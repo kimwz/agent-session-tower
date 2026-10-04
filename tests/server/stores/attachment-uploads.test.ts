@@ -9,12 +9,12 @@ import { ATTACHMENT_TTL_MS, AttachmentStore } from '../../../server/stores/attac
 import { UPLOAD_CHUNK_BYTES } from '../../../shared/attachments.js';
 
 async function* chunks(...values: Buffer[]) { yield* values; }
-async function fixture(t: test.TestContext) {
+async function fixture(t: test.TestContext, publishedGC = false) {
   const root = await mkdtemp(join(tmpdir(), 'tower-upload-'));
   const chat = new AttachmentStore(root); const auto = new AttachmentStore(join(root, 'auto'));
   await chat.start(); await auto.start();
   const protectedChat = new Set<string>(); const protectedAuto = new Set<string>();
-  const uploads = new AttachmentUploads(root, { chat, auto, protectedChat: () => protectedChat, protectedAuto: () => protectedAuto });
+  const uploads = new AttachmentUploads(root, { chat, auto, publishedGC, protectedChat: () => protectedChat, protectedAuto: () => protectedAuto });
   await uploads.start();
   t.after(async () => { uploads.close(); await rm(root, { recursive: true, force: true }); });
   return { root, chat, auto, uploads, protectedChat, protectedAuto };
@@ -110,7 +110,7 @@ test('completion recovers published file and stale atomic temporary folder after
 });
 
 test('TTL removes abandoned staging and pending originals but retains protected scopes and accepted originals', async t => {
-  const { uploads, chat, auto, protectedChat, protectedAuto } = await fixture(t);
+  const { uploads, chat, auto, protectedChat, protectedAuto } = await fixture(t, true);
   const abandoned = await uploads.start(target, 'unused', 'text/plain', 0, 'local');
   const expired = await uploads.start(target, 'expired', 'text/plain', 0, 'local');
   const retained = await uploads.start(target, 'retained', 'text/plain', 0, 'local');
@@ -132,10 +132,14 @@ test('TTL removes abandoned staging and pending originals but retains protected 
   await uploads.sweep();
   assert.deepEqual(await readdir(uploads.directory), []);
   await assert.rejects(chat.read(a.id), { kind: 'not-found' });
-  for (const [store, saved] of [[chat, b], [chat, c], [auto, d]] as const) {
+  for (const [store, saved] of [[chat, b], [chat, c]] as const) {
     assert.equal((await store.read(saved.id)).metadata.id, saved.id);
     assert.equal(JSON.parse(await readFile(join(store.directory, saved.id, '.metadata.json'), 'utf8')).pendingUntil, undefined);
   }
+  assert.equal((await auto.read(d.id)).metadata.id, d.id);
+  assert.ok(JSON.parse(await readFile(join(auto.directory, d.id, '.metadata.json'), 'utf8')).pendingUntil < Date.now());
+  protectedAuto.clear(); await uploads.sweep();
+  await assert.rejects(auto.read(d.id), { kind: 'not-found' });
   await assert.rejects(uploads.complete(retained.id, 'local'), { kind: 'not-found' });
 });
 
@@ -200,4 +204,41 @@ test('GC treats null and truncated staging manifests as old incomplete starts', 
   }
   await uploads.sweep();
   assert.deepEqual(await readdir(uploads.directory), []);
+});
+
+test('disk preflight includes the completion copy and startup cleanup errors remain visible without blocking service initialization', async t => {
+  const { uploads } = await fixture(t);
+  const { statfs } = await import('node:fs/promises');
+  const space = await statfs(uploads.directory, { bigint: true });
+  const size = Number(space.bavail * space.bsize * 3n / 4n);
+  assert.ok(Number.isSafeInteger(size));
+  await assert.rejects(uploads.start(target, 'too-much', 'application/octet-stream', size, 'local'), { kind: 'storage-full' });
+  const io = Object.assign(new Error('disk I/O failure'), { code: 'EIO' });
+  t.mock.method(uploads, 'sweep', () => Promise.reject(io));
+  const logs = t.mock.method(console, 'error', () => undefined);
+  await uploads.start();
+  assert.equal(logs.mock.callCount(), 1);
+  assert.equal(logs.mock.calls[0].arguments[1], io);
+});
+
+test('web upload cleanup defaults to partial-only even with a stale published protection snapshot', async t => {
+  const { uploads, chat, auto, protectedChat } = await fixture(t);
+  const saved = await chat.upload('conversation', 'pending', 'text/plain', chunks(Buffer.from('original')), { pending: true });
+  const staged = await auto.upload('unused-job', 'pending', 'text/plain', chunks(Buffer.from('original')), { pending: true });
+  for (const [store, item] of [[chat, saved], [auto, staged]] as const) {
+    const path = join(store.directory, item.id, '.metadata.json');
+    const value = JSON.parse(await readFile(path, 'utf8')); value.pendingUntil = Date.now() - 1;
+    await writeFile(path, JSON.stringify(value));
+  }
+  const partial = join(chat.directory, `.upload-${randomUUID()}`); await mkdir(partial); await age(partial);
+  await uploads.sweep();
+  await assert.rejects(stat(partial), { code: 'ENOENT' });
+  assert.equal((await chat.read(saved.id)).metadata.id, saved.id);
+  assert.equal((await auto.read(staged.id)).metadata.id, staged.id);
+  protectedChat.add(saved.id); await uploads.sweep();
+  assert.ok(JSON.parse(await readFile(join(chat.directory, saved.id, '.metadata.json'), 'utf8')).pendingUntil < Date.now());
+  // Execution-worker GC still owns published TTL recovery.
+  await chat.sweepPending(); await auto.sweepPending();
+  await assert.rejects(chat.read(saved.id), { kind: 'not-found' });
+  await assert.rejects(auto.read(staged.id), { kind: 'not-found' });
 });

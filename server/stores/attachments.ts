@@ -61,6 +61,8 @@ export function rasterMime(content: Buffer): string | undefined {
 export class AttachmentStore {
   readonly directory: string;
   private readonly active = new Set<string>();
+  private readonly pendingDeletions = new Map<string, Promise<void>>();
+  private readonly verified = new Map<string, { sha256: string; size: number; fingerprint: ContentFingerprint }>();
   constructor(stateDir: string) { this.directory = join(stateDir, 'attachments'); }
 
   async start(): Promise<void> {
@@ -171,11 +173,16 @@ export class AttachmentStore {
   }
 
   async rollback(ids: readonly string[]): Promise<void> {
-    for (const id of ids) if (ATTACHMENT_ID.test(id)) await rm(join(this.directory, id), { recursive: true, force: true });
+    for (const id of ids) if (ATTACHMENT_ID.test(id)) {
+      await rm(join(this.directory, id), { recursive: true, force: true });
+      this.verified.delete(id);
+    }
   }
 
   async openVerified(id: string, sessionId?: string, owner?: string): Promise<VerifiedAttachment> {
     if (typeof id !== 'string' || !ATTACHMENT_ID.test(id)) throw invalid('첨부 파일을 찾을 수 없습니다.', 'not-found');
+    // GC registers deletion before yielding, so a later admission must observe its result.
+    await this.pendingDeletions.get(id);
     let file: FileHandle | undefined;
     try {
       await this.checkDirectory(this.directory);
@@ -189,12 +196,13 @@ export class AttachmentStore {
       const info = await file.stat();
       if (!info.isFile() || info.nlink !== 1 || info.size !== manifest.size) throw new Error();
       let prefix: Buffer;
-      if (manifest.fingerprint) {
+      const cached = this.verified.get(id);
+      const previous = cached ? (cached.sha256 === manifest.sha256 && cached.size === manifest.size ? cached.fingerprint : undefined) : manifest.fingerprint;
+      const sameFingerprint = previous && previous.dev === info.dev && previous.ino === info.ino && previous.size === info.size
+        && previous.mtimeMs === info.mtimeMs && previous.ctimeMs === info.ctimeMs;
+      if (sameFingerprint) {
         // Immutable originals were hashed before publication. The same inode's unchanged timestamps
         // avoid re-reading gigabytes when a reference crosses the worker's bounded RPC deadline.
-        const previous = manifest.fingerprint;
-        if (previous.dev !== info.dev || previous.ino !== info.ino || previous.size !== info.size
-          || previous.mtimeMs !== info.mtimeMs || previous.ctimeMs !== info.ctimeMs) throw new Error();
         prefix = Buffer.alloc(Math.min(24, manifest.size));
         await file.read(prefix, 0, prefix.length, 0);
       } else {
@@ -204,8 +212,12 @@ export class AttachmentStore {
           if (prefix.length < 24) prefix = Buffer.concat([prefix, chunk.subarray(0, 24 - prefix.length)]);
         }
         if (size !== manifest.size || hash.digest('hex') !== manifest.sha256) throw new Error();
+        const after = await file.stat();
+        if (after.dev !== info.dev || after.ino !== info.ino || after.size !== info.size
+          || after.mtimeMs !== info.mtimeMs || after.ctimeMs !== info.ctimeMs) throw new Error();
       }
       if (isImageAttachment(manifest.mimeType) && rasterMime(prefix) !== manifest.mimeType) throw new Error();
+      this.verified.set(id, { sha256: manifest.sha256, size: manifest.size, fingerprint: { dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs } });
       return { metadata: attachmentMetadata(manifest)!, path, file, sessionId: manifest.sessionId };
     } catch (error) {
       if (file) await file.close();
@@ -249,18 +261,21 @@ export class AttachmentStore {
     }
   }
 
-  async sweepPending(protectedIDs: ReadonlySet<string> = new Set(), protectedScopes: ReadonlySet<string> = new Set()): Promise<void> {
+  async sweepPending(protectedIDs: ReadonlySet<string> = new Set(), protectedScopes: ReadonlySet<string> = new Set(), options: { published?: boolean; isProtected?: (id: string, scope: string) => boolean } = {}): Promise<void> {
     await this.checkDirectory(this.directory);
     const now = Date.now();
     for (const name of await readdir(this.directory)) {
       const temporary = name.startsWith('.upload-');
       const id = temporary ? name.slice(8) : name;
       if (!ATTACHMENT_ID.test(id) || this.active.has(id) || protectedIDs.has(id)) {
-        if (!temporary && ATTACHMENT_ID.test(id) && protectedIDs.has(id) && !this.active.has(id)) {
+        if (options.published !== false && !temporary && ATTACHMENT_ID.test(id) && protectedIDs.has(id) && !this.active.has(id)) {
           let manifest: Manifest | undefined;
           try { manifest = await this.manifest(id); }
           catch (error) { if (!isIncompleteAttachmentMetadata(error)) throw error; }
-          if (manifest) await this.retain([id]);
+          if (manifest) {
+            try { await this.retain([id]); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          }
         }
         continue;
       }
@@ -272,9 +287,18 @@ export class AttachmentStore {
         try { manifest = await this.manifest(id); }
         catch (error) { if (!isIncompleteAttachmentMetadata(error)) throw error; }
         if (manifest) {
-          if (protectedScopes.has(manifest.sessionId)) { await this.retain([id]); continue; }
+          if (options.published === false || protectedScopes.has(manifest.sessionId)) continue;
           if (manifest.pendingUntil === undefined || manifest.pendingUntil > now) continue;
-          await rm(path, { recursive: true, force: true });
+          if (options.isProtected?.(id, manifest.sessionId)) continue;
+          const previousDeletion = this.pendingDeletions.get(id);
+          if (previousDeletion) { await previousDeletion; continue; }
+          // No await between the final protection check, registration and starting removal.
+          let resolve!: () => void; let reject!: (error: unknown) => void;
+          const deletion = new Promise<void>((ok, fail) => { resolve = ok; reject = fail; });
+          this.pendingDeletions.set(id, deletion);
+          void rm(path, { recursive: true, force: true }).then(resolve, reject);
+          try { await deletion; }
+          finally { this.pendingDeletions.delete(id); this.verified.delete(id); }
           continue;
         }
       }
@@ -283,16 +307,21 @@ export class AttachmentStore {
   }
 
   private async latestWrite(directory: string): Promise<number> {
-    const info = await lstat(directory);
-    let latest = info.mtimeMs;
-    for (const name of await readdir(directory)) {
-      const entry = join(directory, name); const child = await lstat(entry);
-      latest = Math.max(latest, child.mtimeMs);
-      if (name === 'content' && child.isDirectory() && !child.isSymbolicLink()) {
-        for (const filename of await readdir(entry)) latest = Math.max(latest, (await lstat(join(entry, filename))).mtimeMs);
+    try {
+      const info = await lstat(directory);
+      let latest = info.mtimeMs;
+      for (const name of await readdir(directory)) {
+        const entry = join(directory, name); const child = await lstat(entry);
+        latest = Math.max(latest, child.mtimeMs);
+        if (name === 'content' && child.isDirectory() && !child.isSymbolicLink()) {
+          for (const filename of await readdir(entry)) latest = Math.max(latest, (await lstat(join(entry, filename))).mtimeMs);
+        }
       }
+      return latest;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      return Infinity;
     }
-    return latest;
   }
 
   private async manifest(id: string): Promise<Manifest> {

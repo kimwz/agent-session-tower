@@ -5,7 +5,7 @@ import { chatImageReference, isChatImageLink, readChatImage, sendChatImage, send
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readWebAsset } from './web-assets.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
-import { attachmentUploadRoute, uploadAppendPath, ATTACHMENT_BODY_BYTES, approvalResponse, errorDisposition, errorStatus, parseAutoPrompt, parseAutoPromptSuggestion, parseCreateSession, parseMessage, readJson, UUID } from './requests.js';
+import { attachmentUploadRoute, uploadAppendPath, uploadProgressPath, ATTACHMENT_BODY_BYTES, approvalResponse, errorDisposition, errorStatus, parseAutoPrompt, parseAutoPromptSuggestion, parseCreateSession, parseMessage, readJson, UUID } from './requests.js';
 import type { SkillBundle, SkillDetail, SkillImportPlan, SkillOverview, SkillSummary } from '../../shared/skills.js';
 import { MAX_SKILL_BUNDLE_BYTES } from '../../shared/skills.js';
 import type { RequestContext } from './request-context.js';
@@ -335,7 +335,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         // Reading Tower state is not a mutation; only changes count against the request budget.
         const read = path.match(/^\/api\/(?:nodes\/[a-f0-9]{32}\/)?v1\/([a-z][a-zA-Z]*\.[a-zA-Z]+)$/)?.[1];
         const readOnly = read !== undefined && isOperationName(read) && !OPERATIONS[read].write;
-        if (!uploadAppendPath(path) && !login && !readOnly && path !== SUGGESTION_PATH && path !== SCOPE_PATH && !/^\/api\/(nodes\/[a-f0-9]{32}\/)?workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
+        if (!uploadProgressPath(path) && !login && !readOnly && path !== SUGGESTION_PATH && path !== SCOPE_PATH && !/^\/api\/(nodes\/[a-f0-9]{32}\/)?workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
           // The master agent's own calls count apart, so they never use up the owner's budget (or the other way round).
           // The page where voice is on reports every few seconds, and turns voice off; each has a budget of its own,
           // so neither uses up the owner's changes and a flood of reports never keeps voice from turning off.
@@ -357,7 +357,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
           }
         }
       }
-      if (req.method === 'POST' && uploadAppendPath(path)) {
+      if (req.method === 'POST' && uploadProgressPath(path)) {
         if (activeUploads >= 4) return json(res, 429, { error: '동시에 업로드하는 파일이 너무 많습니다. 잠시 후 다시 시도하세요.' });
         activeUploads++;
         let released = false;

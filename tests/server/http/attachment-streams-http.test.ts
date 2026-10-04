@@ -81,11 +81,18 @@ test('original binary uploads send references, stream downloads, and preserve au
   assert.equal((await fetch(`${base}/api/sessions/no-session/attachment-uploads`, { method: 'POST', headers: jsonHeaders, body: metadata })).status, 404);
   assert.equal((await fetch(`${base}/api/sessions`, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ prompt: 'x'.repeat(140_000) }) })).status, 413);
   const requestId = crypto.randomUUID();
-  const autoFile = await upload(`${base}/api/auto-prompts/${requestId}/attachment-uploads`, Buffer.alloc(11 * 1024 * 1024, 65), 'large.txt', 'text/plain');
+  const autoFile = await upload(`${base}/api/auto-prompts/${requestId.toUpperCase()}/attachment-uploads`, Buffer.alloc(11 * 1024 * 1024, 65), 'large.txt', 'text/plain');
   const job = await fetch(`${base}/api/auto-prompts`, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ requestId, provider: 'codex', prompt: '', attachmentIds: [autoFile.id] }) });
   assert.equal(job.status, 202);
   assert.deepEqual(autoInput?.attachmentIds, [autoFile.id]);
   assert.equal(autoInput?.attachments, undefined);
+  for (let message = 0; message < 2; message++) {
+    const ids: string[] = [];
+    for (let index = 0; index < 10; index++) ids.push((await upload(endpoint, Buffer.from('tiny'), `file-${message}-${index}.bin`, 'application/octet-stream')).id);
+    const result = await fetch(`${base}/api/sessions/${session.id}/messages`, { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ prompt: 'ten files', attachmentIds: ids }) });
+    assert.equal(result.status, 202, 'two full attachment messages fit the ordinary mutation budget');
+    assert.equal((await result.json()).run.attachments.length, 10);
+  }
   const longDownload = await fetch(fileUrl, { headers: { cookie } });
   const reader = longDownload.body!.getReader();
   assert.equal((await reader.read()).done, false);

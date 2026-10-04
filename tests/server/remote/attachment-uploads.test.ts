@@ -8,6 +8,7 @@ import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { AttachmentUploads } from '../../../server/stores/attachment-uploads.js';
 import { RemoteExclusionStore } from '../../../server/remote/exclusions.js';
 import { createRemoteRouter } from '../../../server/remote/router.js';
+import { TowerError } from '../../../shared/errors.js';
 import type { Session } from '../../../shared/types.js';
 
 test('remote chunks bind canonical sessions and controller ownership and recheck current visibility', async t => {
@@ -29,6 +30,11 @@ test('remote chunks bind canonical sessions and controller ownership and recheck
   t.after(async () => { uploads.close(); router.dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(root, { recursive: true, force: true }); });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const start = async (size: number) => fetch(`${base}/api/sessions/codex:alias/attachment-uploads`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'original.bin', mimeType: 'application/octet-stream', size }) });
+  const originalStart = uploads.start.bind(uploads);
+  uploads.start = (async () => { throw new TowerError('storage-full', '첨부 파일을 저장할 디스크 여유 공간이 부족합니다.'); }) as typeof uploads.start;
+  const full = await start(1); assert.equal(full.status, 507);
+  assert.equal((await full.json()).error, '첨부 파일을 저장할 디스크 여유 공간이 부족합니다.');
+  uploads.start = originalStart;
   capable = false; assert.equal((await start(1)).status, 503); capable = true;
   const bytes = Buffer.alloc(21 * 1024 * 1024 + 1, 47);
   const started = await start(bytes.length); assert.equal(started.status, 201);

@@ -1,3 +1,5 @@
+import { AttachmentStore } from '../stores/attachments.js';
+import { isImageAttachment, MAX_ATTACHMENT_BYTES, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../../shared/attachments.js';
 import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
@@ -245,6 +247,25 @@ export class DurableRunManager extends EventEmitter {
       throw new TowerError('unavailable', '실행 워커가 아직 업데이트되지 않아 첨부 파일을 보내지 않았습니다. 진행 중인 작업이 끝난 뒤 다시 시도하세요.', { disposition: 'not-admitted' });
     }
   }
+  private async requireLegacyChatReferences(sessionId: string, input: MessageAttachments, internal: RunAdmission): Promise<void> {
+    if (!input.attachmentIds?.length || this.supports('attachmentReferences')) return;
+    if (internal.autoPromptId) { this.requireAttachmentReferences(input); return; }
+    const unavailable = () => new TowerError('unavailable', '실행 워커가 아직 업데이트되지 않아 이 첨부 파일을 보내지 않았습니다. 진행 중인 작업이 끝난 뒤 다시 시도하세요.', { disposition: 'not-admitted' });
+    const store = new AttachmentStore(this.paths?.stateDir ?? this.options.stateDir);
+    let total = 0;
+    for (const id of input.attachmentIds) {
+      let opened;
+      try { opened = await store.openVerified(id, this.getSession(sessionId)?.id ?? sessionId); }
+      catch { throw unavailable(); }
+      try {
+        const item = opened.metadata;
+        total += item.size;
+        if (item.size > MAX_ATTACHMENT_BYTES || (isImageAttachment(item.mimeType) && item.size > MAX_IMAGE_ATTACHMENT_BYTES) || total > MAX_TOTAL_ATTACHMENT_BYTES) throw unavailable();
+      } finally { await opened.file.close(); }
+    }
+    for (const item of input.attachments ?? []) if (typeof item?.data === 'string') total += Buffer.byteLength(item.data, 'base64');
+    if (total > MAX_TOTAL_ATTACHMENT_BYTES) throw unavailable();
+  }
   async create(input: NewSessionInput, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
     this.requireAttachmentReferences(input);
     this.requireModelRole(input);
@@ -254,10 +275,11 @@ export class DurableRunManager extends EventEmitter {
     return this.call('create', [input, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]) as Promise<{ session: Session; run: Run }>;
   }
   async enqueue(id: string, prompt: string, attachments: MessageAttachments = {}, internal: RunAdmission = {}): Promise<Run> {
-    this.requireAttachmentReferences(attachments);
     internal.validate?.();
     this.requireOrigins(internal);
     this.requireSubscription(this.getSession(id)?.cwd);
+    await this.requireLegacyChatReferences(id, attachments, internal);
+    internal.validate?.();
     return this.call('enqueue', [id, prompt, attachments, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]) as Promise<Run>;
   }
   /** An older worker would ignore `targetRunId` and insert into whatever turn runs, so it is never sent one. */

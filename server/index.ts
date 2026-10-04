@@ -265,12 +265,20 @@ async function main() {
   // Load persisted history before shutdown or an HTTP request can touch the runner.
   try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await exclusions.start(); await runs.start(); } catch (error) { auth.close(); await releaseLock(); throw error; }
   const attachmentStores = { chat: new AttachmentStore(stateDir), auto: new AttachmentStore(join(stateDir, 'auto-prompt-staging')) };
-  await Promise.all([attachmentStores.chat.start(), attachmentStores.auto.start()]);
   const attachmentUploads = new AttachmentUploads(stateDir, { ...attachmentStores,
+    publishedGC: false,
     protectedChat: () => new Set(runs.list().flatMap(run => run.attachments?.map(item => item.id) ?? [])),
     protectedAuto: () => new Set(runs.autoPromptList().filter(job => ['queued', 'routing', 'dispatching'].includes(job.status)).map(job => job.id)),
   });
-  await attachmentUploads.start();
+  try {
+    await Promise.all([attachmentStores.chat.start(), attachmentStores.auto.start()]);
+    await attachmentUploads.start();
+  } catch (error) {
+    attachmentUploads.close();
+    auth.close();
+    try { await runs.close(); } finally { await releaseLock(); }
+    throw error;
+  }
   /** Local browser requests are the owner's; a remote controller's carry its own origin and request ID. */
   // `authored` only keeps a 1.89/1.90 worker's permission reviewer working while an update waits for its handoff; newer workers ignore it.
   const forgetConversation = async (sessionId: string) => {

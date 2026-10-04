@@ -130,3 +130,136 @@ test('native image selectors agree on per-image and aggregate limits', async t =
   assert.deepEqual(imagePaths(resolved), resolved.slice(0, 4).map(item => item.path));
   assert.equal(claudeImageBlocks(resolved).length, 4);
 });
+
+test('restored originals reverify changed fingerprints once and remain usable afterward', async t => {
+  const { store, root } = await fixture(t);
+  const { cp, open } = await import('node:fs/promises');
+  const saved = await store.upload('one', 'original', 'text/plain', bytes(100));
+  const restoredRoot = join(root, 'restored');
+  await cp(store.directory, join(restoredRoot, 'attachments'), { recursive: true });
+  const restored = new AttachmentStore(restoredRoot); await restored.start();
+  assert.equal((await restored.read(saved.id)).content.toString(), 'A'.repeat(100));
+  const originalManifest = JSON.parse(await readFile(join(store.directory, saved.id, '.metadata.json'), 'utf8'));
+  const restoredManifest = JSON.parse(await readFile(join(restored.directory, saved.id, '.metadata.json'), 'utf8'));
+  assert.deepEqual(restoredManifest, originalManifest);
+  const probe = await open(join(restored.directory, saved.id, 'content', saved.name));
+  const prototype = Object.getPrototypeOf(probe); await probe.close();
+  const spy = t.mock.method(prototype, 'createReadStream', () => { throw new Error('Restored fingerprint should now be current'); });
+  assert.equal((await restored.read(saved.id)).content.length, 100); assert.equal(spy.mock.callCount(), 0);
+  spy.mock.restore();
+  const opened = await restored.read(saved.id); await writeFile(opened.path, 'B'.repeat(100));
+  await assert.rejects(restored.read(saved.id), { kind: 'not-found' });
+});
+
+test('GC tolerates publications disappearing during latest-write and protected-retain inspection', async t => {
+  const { store } = await fixture(t);
+  const { mkdir } = await import('node:fs/promises');
+  const { randomUUID } = await import('node:crypto');
+  const partial = join(store.directory, `.upload-${randomUUID()}`); await mkdir(partial);
+  const originalLatest = (store as any).latestWrite.bind(store);
+  const latest = t.mock.method(store as any, 'latestWrite', async (path: string) => { await rm(path, { recursive: true, force: true }); return originalLatest(path); });
+  await store.sweepPending(); latest.mock.restore();
+  const saved = await store.upload('one', 'pending', 'text/plain', bytes(1), { pending: true });
+  const originalRetain = store.retain.bind(store);
+  const retain = t.mock.method(store, 'retain', async (ids: readonly string[]) => { await store.rollback(ids); await originalRetain(ids); });
+  await store.sweepPending(new Set([saved.id])); retain.mock.restore();
+  const another = await store.upload('one', 'another', 'text/plain', bytes(1), { pending: true });
+  t.mock.method(store, 'retain', () => Promise.reject(Object.assign(new Error('I/O'), { code: 'EIO' })));
+  await assert.rejects(store.sweepPending(new Set([another.id])), { code: 'EIO' });
+});
+
+async function expire(store: AttachmentStore, id: string) {
+  const path = join(store.directory, id, '.metadata.json');
+  const value = JSON.parse(await readFile(path, 'utf8')); value.pendingUntil = Date.now() - 1;
+  await writeFile(path, JSON.stringify(value));
+  return path;
+}
+
+test('GC rechecks live admission protection after its manifest read and never retains failed admissions', async t => {
+  const { store } = await fixture(t);
+  const saved = await store.upload('one', 'pending', 'text/plain', bytes(1), { pending: true });
+  const path = await expire(store, saved.id);
+  let release!: () => void; let observed!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const reading = new Promise<void>(resolve => { observed = resolve; });
+  const original = (store as any).manifest.bind(store);
+  const spy = t.mock.method(store as any, 'manifest', async (id: string) => {
+    const value = await original(id); observed(); await gate; return value;
+  });
+  const admissions = new Set<string>();
+  const sweep = store.sweepPending(new Set(), new Set(), { isProtected: id => admissions.has(id) });
+  await reading; admissions.add(saved.id); release(); await sweep; spy.mock.restore();
+  assert.ok(JSON.parse(await readFile(path, 'utf8')).pendingUntil < Date.now());
+  assert.equal((await store.prepare('one', { attachmentIds: [saved.id] })).attachments[0].id, saved.id);
+  // A failed admission drops only its live protection; the original remains eligible for TTL.
+  admissions.clear(); await store.sweepPending(new Set(), new Set(), { isProtected: id => admissions.has(id) });
+  await assert.rejects(store.openVerified(saved.id), { kind: 'not-found' });
+});
+
+test('GC registers removal before a later admission can open the original', async t => {
+  const { store } = await fixture(t);
+  const saved = await store.upload('one', 'pending', 'text/plain', bytes(1), { pending: true });
+  await expire(store, saved.id);
+  const deletions = (store as any).pendingDeletions as Map<string, Promise<void>>;
+  const set = deletions.set.bind(deletions);
+  let admission: Promise<unknown> | undefined;
+  t.mock.method(deletions, 'set', (id: string, deletion: Promise<void>) => {
+    set(id, deletion);
+    admission = assert.rejects(store.prepare('one', { attachmentIds: [id] }), { kind: 'not-found' });
+    return deletions;
+  });
+  await store.sweepPending();
+  assert.ok(admission); await admission;
+});
+
+test('open waits for an existing deletion and forwards its I/O failure', async t => {
+  const { store } = await fixture(t);
+  const saved = await store.upload('one', 'pending', 'text/plain', bytes(1), { pending: true });
+  const deletions = (store as any).pendingDeletions as Map<string, Promise<void>>;
+  let release!: () => void;
+  deletions.set(saved.id, new Promise<void>(resolve => { release = resolve; }));
+  let finished = false;
+  const opening = store.openVerified(saved.id).then(value => { finished = true; return value; });
+  await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(finished, false);
+  await store.rollback([saved.id]); release();
+  await assert.rejects(opening, { kind: 'not-found' }); deletions.delete(saved.id);
+  const another = await store.upload('one', 'another', 'text/plain', bytes(1), { pending: true });
+  let fail!: (error: unknown) => void;
+  deletions.set(another.id, new Promise<void>((_, reject) => { fail = reject; }));
+  const io = Object.assign(new Error('delete failed'), { code: 'EIO' });
+  const rejection = assert.rejects(store.openVerified(another.id), error => error === io);
+  fail(io); await rejection; deletions.delete(another.id);
+});
+
+test('restored SHA cache survives retain without rewriting persistent retention metadata', async t => {
+  const { store, root } = await fixture(t);
+  const { cp, open } = await import('node:fs/promises');
+  const saved = await store.upload('one', 'original', 'text/plain', bytes(100), { pending: true });
+  const restoredRoot = join(root, 'restored-cache');
+  await cp(store.directory, join(restoredRoot, 'attachments'), { recursive: true });
+  const restored = new AttachmentStore(restoredRoot); await restored.start();
+  const path = join(restored.directory, saved.id, '.metadata.json');
+  const before = await readFile(path, 'utf8');
+  const probe = await open(join(restored.directory, saved.id, 'content', saved.name));
+  const prototype = Object.getPrototypeOf(probe); await probe.close();
+  const streams = t.mock.method(prototype, 'createReadStream');
+  assert.equal((await restored.read(saved.id)).content.length, 100);
+  assert.equal(streams.mock.callCount(), 1); assert.equal(await readFile(path, 'utf8'), before);
+  await restored.retain([saved.id]);
+  assert.equal((await restored.read(saved.id)).content.length, 100);
+  assert.equal(streams.mock.callCount(), 1);
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).pendingUntil, undefined);
+  await writeFile(join(restored.directory, saved.id, 'content', saved.name), 'B'.repeat(100));
+  await assert.rejects(restored.read(saved.id), { kind: 'not-found' });
+  assert.equal(streams.mock.callCount(), 2);
+});
+
+test('changing cached manifest SHA requires full verification even when the content fingerprint is unchanged', async t => {
+  const { store } = await fixture(t);
+  const saved = await store.upload('one', 'original', 'text/plain', bytes(100));
+  await store.read(saved.id);
+  const path = join(store.directory, saved.id, '.metadata.json');
+  const value = JSON.parse(await readFile(path, 'utf8')); value.sha256 = '0'.repeat(64);
+  await writeFile(path, JSON.stringify(value));
+  await assert.rejects(store.read(saved.id), { kind: 'not-found' });
+});

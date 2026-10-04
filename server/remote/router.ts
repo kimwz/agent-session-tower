@@ -546,7 +546,7 @@ export function createRemoteRouter({ attachmentStores, attachmentUploads, backen
       } catch (error) {
         const status = errorStatus(error);
         const disposition = errorDisposition(error);
-        const message = error instanceof Error && (status < 500 || status === 503 || (error as { shown?: boolean }).shown) ? error.message : '요청을 처리하지 못했습니다.';
+        const message = error instanceof Error && (status < 500 || status === 503 || status === 507 || (error as { shown?: boolean }).shown) ? error.message : '요청을 처리하지 못했습니다.';
         if (!res.headersSent) json(res, status, { error: message, ...(disposition ? { disposition } : {}) });
         else res.end();
       }

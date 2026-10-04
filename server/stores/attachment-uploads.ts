@@ -13,6 +13,7 @@ interface UploadManifest {
 }
 export interface AttachmentUploadsOptions {
   chat: AttachmentStore; auto: AttachmentStore;
+  publishedGC?: boolean;
   protectedChat?: () => ReadonlySet<string>; protectedAuto?: () => ReadonlySet<string>;
 }
 const missing = () => new TowerError('not-found', '업로드를 찾을 수 없습니다. 파일을 다시 첨부하세요.');
@@ -33,7 +34,7 @@ export class AttachmentUploads {
       await this.checkDirectory(this.directory);
       const root = await open(this.directory, constants.O_RDONLY | constants.O_NOFOLLOW);
       try { await root.chmod(0o700); } finally { await root.close(); }
-      await this.sweep();
+      await this.sweep().catch(error => console.error('Attachment upload startup cleanup failed:', error));
       if (!this.timer) { this.timer = setInterval(() => { void this.sweep().catch(error => console.error('Attachment upload cleanup failed:', error)); }, 60_000); this.timer.unref(); }
       return;
     }
@@ -42,7 +43,8 @@ export class AttachmentUploads {
     const normalized = validatedAttachmentMime(name!, mimeType!);
     await this.checkDirectory(this.directory);
     const space = await statfs(this.directory, { bigint: true });
-    if (BigInt(size!) > space.bavail * space.bsize) throw new TowerError('storage-full', '파일을 저장할 디스크 여유 공간이 부족합니다.');
+    // Completion publishes a verified copy while the resumable original is still present.
+    if (BigInt(size!) * 2n > space.bavail * space.bsize) throw new TowerError('storage-full', '파일을 저장할 디스크 여유 공간이 부족합니다.');
     const id = randomUUID();
     const manifest: UploadManifest = { id, attachmentId: randomUUID(), target: { ...target }, owner, name: name!, mimeType: normalized, size: size!, touched: Date.now() };
     const directory = join(this.directory, id);
@@ -153,8 +155,8 @@ export class AttachmentUploads {
         if (lastWrite <= now - ATTACHMENT_TTL_MS) await rm(directory, { recursive: true, force: true });
       });
     }
-    await this.options.chat.sweepPending(this.options.protectedChat?.() ?? new Set());
-    await this.options.auto.sweepPending(new Set(), this.options.protectedAuto?.() ?? new Set());
+    await this.options.chat.sweepPending(this.options.protectedChat?.() ?? new Set(), new Set(), { published: this.options.publishedGC ?? false });
+    await this.options.auto.sweepPending(new Set(), this.options.protectedAuto?.() ?? new Set(), { published: this.options.publishedGC ?? false });
   }
 
   private store(target: AttachmentUploadTarget): AttachmentStore { return target.kind === 'chat' ? this.options.chat : this.options.auto; }
