@@ -1,9 +1,11 @@
+import type { AttachmentStore } from '../stores/attachments.js';
+import type { AttachmentUploads } from '../stores/attachment-uploads.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { chatImageReference, isChatImageLink, readChatImage, sendChatImage, sendChatImageReopen, withChatImages } from './chat-images.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readWebAsset } from './web-assets.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
-import { ATTACHMENT_BODY_BYTES, approvalResponse, errorDisposition, errorStatus, parseAutoPrompt, parseAutoPromptSuggestion, parseCreateSession, parseMessage, readJson, UUID } from './requests.js';
+import { attachmentUploadRoute, uploadAppendPath, uploadProgressPath, ATTACHMENT_BODY_BYTES, approvalResponse, errorDisposition, errorStatus, parseAutoPrompt, parseAutoPromptSuggestion, parseCreateSession, parseMessage, readJson, UUID } from './requests.js';
 import type { SkillBundle, SkillDetail, SkillImportPlan, SkillOverview, SkillSummary } from '../../shared/skills.js';
 import { MAX_SKILL_BUNDLE_BYTES } from '../../shared/skills.js';
 import type { RequestContext } from './request-context.js';
@@ -36,7 +38,7 @@ import type { BackupOverview, BackupPreview, RemoteBackup, RestoreReport } from 
 import { MAX_BACKUP_FILE_BYTES } from '../../shared/backup.js';
 import type { AutoPromptSuggestionRequest, AutoPromptSuggestionResponse, DecisionOverview } from '../../shared/decisions.js';
 import { TowerError, statusOf } from '../../shared/errors.js';
-import { sseSink } from './sinks.js';
+import { sendStoredAttachment, sseSink } from './sinks.js';
 
 export interface Backend {
   /** Dedicated owner input channel; never included in agent operations or their request ledger. */
@@ -75,6 +77,7 @@ export interface Backend {
   cancelAutoPrompt?(id: string): Promise<AutoPromptJob>;
   enqueue(id: string, prompt: string, attachments?: MessageAttachments, context?: RequestContext): Promise<Run>;
   /** `sessionId` names the conversation the file belongs to; absent from workers that predate it. */
+  attachmentReferences?(): boolean;
   attachment?(id: string): Promise<{ metadata: Attachment; content: Buffer; sessionId?: string }>;
   /** The session with this Tower or native ID, resolved the same way requests about it are. */
   session?(id: string): Session | undefined;
@@ -88,6 +91,8 @@ export interface Backend {
   subscribe(listener: () => void): () => void;
 }
 export interface HttpOptions {
+  attachmentStores?: { chat: AttachmentStore; auto: AttachmentStore };
+  attachmentUploads?: AttachmentUploads;
   port: number;
   clientDir: string;
   backend: Backend;
@@ -168,7 +173,7 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, forceRunnerUpdate, service, notifications, decisions, master, backup, localMcp }: HttpOptions) {
+export function createMonitorServer({ attachmentStores, attachmentUploads, port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, forceRunnerUpdate, service, notifications, decisions, master, backup, localMcp }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   const unsubscribeAuth = auth?.onRevoke(id => {
@@ -187,6 +192,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
   const rates = new Map<string, { count: number; at: number }>();
   /** When the master and the owner's local agents last changed something on each joined computer. */
   const agentWrites = new Map<string, number[]>();
+  let activeUploads = 0;
   const suggestions = { count: 0, at: 0, running: 0 };
   let scheduled: ReturnType<typeof setTimeout> | undefined;
   const json = (res: ServerResponse, status: number, body: unknown) => {
@@ -324,12 +330,12 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         if (typeof header !== 'string' || !/^[a-f0-9]{64}$/.test(header) || !timingSafeEqual(Buffer.from(header), Buffer.from(token))) {
           return json(res, 403, { error: '연결 인증이 만료되었습니다. 페이지를 새로고침하세요.' });
         }
-        if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: 'JSON 요청이 필요합니다.' });
+        if (!uploadAppendPath(path) && !req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: 'JSON 요청이 필요합니다.' });
         // Keystrokes and resize events have their own per-terminal byte/request budget.
         // Reading Tower state is not a mutation; only changes count against the request budget.
         const read = path.match(/^\/api\/(?:nodes\/[a-f0-9]{32}\/)?v1\/([a-z][a-zA-Z]*\.[a-zA-Z]+)$/)?.[1];
         const readOnly = read !== undefined && isOperationName(read) && !OPERATIONS[read].write;
-        if (!login && !readOnly && path !== SUGGESTION_PATH && path !== SCOPE_PATH && !/^\/api\/(nodes\/[a-f0-9]{32}\/)?workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
+        if (!uploadProgressPath(path) && !login && !readOnly && path !== SUGGESTION_PATH && path !== SCOPE_PATH && !/^\/api\/(nodes\/[a-f0-9]{32}\/)?workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
           // The master agent's own calls count apart, so they never use up the owner's budget (or the other way round).
           // The page where voice is on reports every few seconds, and turns voice off; each has a budget of its own,
           // so neither uses up the owner's changes and a flood of reports never keeps voice from turning off.
@@ -350,6 +356,13 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
             agentWrites.set(node, [...recent, now]);
           }
         }
+      }
+      if (req.method === 'POST' && uploadProgressPath(path)) {
+        if (activeUploads >= 4) return json(res, 429, { error: '동시에 업로드하는 파일이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+        activeUploads++;
+        let released = false;
+        const release = () => { if (!released) { released = true; activeUploads--; } };
+        res.once('finish', release); res.once('close', release);
       }
       if (master && path.startsWith('/api/master')) {
         // A signed-out page loses the master's live stream too, like every other stream here.
@@ -583,6 +596,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (req.method === 'POST' && path === '/api/auto-prompts') {
         const body = await readJson(req, ATTACHMENT_BODY_BYTES);
         const request = parseAutoPrompt(masterCall ? { ...body, modelRole: 'master.worker' } : body);
+        if (request.attachmentIds?.length && backend.attachmentReferences?.() !== true) throw Object.assign(new TowerError('unavailable', '실행 작업자가 원본 첨부 지원 업데이트를 기다리고 있습니다. 잠시 후 다시 시도하세요.'), { disposition: 'not-admitted' });
         if (!backend.startAutoPrompt) return json(res, 503, { error: 'Auto Prompt를 현재 사용할 수 없습니다.' });
         return json(res, 202, { job: await backend.startAutoPrompt(request, callerContext()) });
       }
@@ -648,8 +662,16 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         if (!session) return json(res, 404, { error: '이미지를 찾을 수 없습니다.' });
         return sendChatImage(res, await readChatImage(session, ref.path), req.method === 'HEAD');
       }
+      if (await attachmentUploadRoute(req, res, url, attachmentUploads, 'local', async target => {
+        if (target.kind === 'auto') return target;
+        const found = backend.session?.(target.sessionId) ?? backend.snapshot().sessions.find(session => session.id === target.sessionId);
+        if (!found) throw new TowerError('not-found', '세션을 찾을 수 없습니다.');
+        return { ...target, sessionId: found.id };
+      }, () => backend.attachmentReferences?.() === true)) return;
       const attachmentMatch = path.match(/^\/api\/attachments\/([^/]+)$/);
       if ((req.method === 'GET' || req.method === 'HEAD') && attachmentMatch) {
+        if (!identity.local) trackStream(sessionId, res, () => res.destroy());
+        if (attachmentStores) return await sendStoredAttachment(res, attachmentStores.chat, attachmentMatch[1], req.method === 'HEAD');
         if (!backend.attachment) return json(res, 404, { error: '첨부 파일을 찾을 수 없습니다.' });
         const { metadata, content } = await backend.attachment(attachmentMatch[1]);
         const inline = isImageAttachment(metadata.mimeType);

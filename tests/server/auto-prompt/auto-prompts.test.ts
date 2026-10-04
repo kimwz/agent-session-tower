@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
+import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { AutoPromptManager } from '../../../server/auto-prompt/manager.js';
 import type { AutoPromptModelRequest } from '../../../server/auto-prompt/native.js';
 import type { RunAdmission } from '../../../server/runs/manager.js';
@@ -338,7 +339,9 @@ test('attachments are staged privately, described to the router, transferred int
   const job = await f.manager.submit(request(f.cwd, { prompt: '', attachments }));
   assert.deepEqual(job.attachments, [{ name: 'notes.txt', mimeType: 'text/plain', size: 19 }]);
   assert.equal((await f.finished(job.id)).status, 'completed');
-  assert.deepEqual(f.dispatches[0].input.attachments, attachments);
+  assert.equal(f.dispatches[0].input.attachments, undefined);
+  assert.equal(f.dispatches[0].input.attachmentIds?.length, 1);
+  assert.equal(f.dispatches[0].internal?.autoPromptId, job.id);
   assert.equal(f.dispatches[0].input.prompt, '');
   await f.manager.close();
   assert.deepEqual(await readdir(join(f.directory, 'auto-prompt-staging', 'attachments')), []);
@@ -775,4 +778,48 @@ test('a save writes the jobs as they were when it was asked for, not when its tu
   await f.finished((await submitted).id);
   assert.deepEqual(written[0], [], 'the first save holds no job: the job came after it was asked for');
   assert.ok(written.slice(1).some(jobs => (jobs as Array<{ job: { id: string } }>).some(entry => entry.job.id === input.requestId)));
+});
+
+ test('retention failure preserves the accepted durable Auto job and protects its staged scope', async t => {
+  const f = await fixture(t);
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  f.respond(async () => { await held; return create(); });
+  const requestId = randomUUID();
+  const source = new AttachmentStore(join(f.directory, 'auto-prompt-staging'));
+  const attachment = await source.upload(requestId, 'a.txt', 'text/plain', (async function* () { yield Buffer.from('original'); })(), { pending: true });
+  const store = (f.manager as unknown as { attachments: AttachmentStore }).attachments;
+  const retain = store.retain; store.retain = async () => { throw new Error('retention failed'); };
+  const messages: string[] = []; const error = console.error; console.error = (...values) => { messages.push(values.join(' ')); };
+  try {
+    const job = await f.manager.submit(request(f.cwd, { requestId, attachmentIds: [attachment.id] }));
+    assert.equal(job.id, requestId);
+  } finally { store.retain = retain; console.error = error; }
+  assert.ok(messages.some(message => /Auto Prompt attachment retention failed/.test(message)));
+  const saved = JSON.parse(await readFile(join(f.directory, 'auto-prompts.json'), 'utf8'));
+  assert.equal(saved[0].job.id, requestId);
+  assert.equal(saved[0].staged[0].id, attachment.id);
+  await source.sweepPending(new Set(), new Set([requestId]));
+  assert.equal((await source.read(attachment.id, requestId)).content.toString(), 'original');
+  release();
+  assert.equal((await f.finished(requestId)).status, 'completed');
+});
+
+ test('a large referenced text file gives the router a bounded excerpt with its original size', async t => {
+  const f = await fixture(t);
+  const requestId = randomUUID();
+  const source = new AttachmentStore(join(f.directory, 'auto-prompt-staging'));
+  const attachment = await source.upload(requestId, 'large.txt', 'text/plain', (async function* () { for (let index = 0; index < 6; index++) yield Buffer.alloc(1024 * 1024, 65); })(), { pending: true });
+  f.respond(async input => {
+    const context = JSON.parse(input.prompt).request.attachments[0];
+    assert.equal(context.size, 6 * 1024 * 1024);
+    assert.equal(context.excerpt.length, 4000);
+    assert.equal(context.truncated, true);
+    return create();
+  });
+  const input = request(f.cwd, { requestId, prompt: '', attachmentIds: [attachment.id] });
+  const job = await f.finished((await f.manager.submit(input)).id);
+  assert.equal(job.status, 'completed');
+  assert.deepEqual(f.dispatches[0].input.attachmentIds, [attachment.id]);
+  await assert.rejects(f.manager.submit({ ...input, attachmentIds: [randomUUID()] }), { kind: 'conflict' });
 });

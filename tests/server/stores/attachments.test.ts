@@ -62,7 +62,7 @@ test('validation rejects malformed names, MIME, base64 and disguised images with
   assert.deepEqual(await readdir(store.directory), []);
 });
 
-test('limits cover large valid files, image bytes, combined retries and uploads', async t => {
+test('legacy limits cover fresh uploads while references have no combined size cap', async t => {
   const { store } = await fixture(t);
   const large = upload('large.bin', Buffer.alloc(MAX_ATTACHMENT_BYTES), 'application/octet-stream');
   const saved = await store.prepare('one', { attachments: [large] });
@@ -71,8 +71,11 @@ test('limits cover large valid files, image bytes, combined retries and uploads'
   const image = Buffer.alloc(MAX_IMAGE_ATTACHMENT_BYTES + 1); PNG.copy(image);
   await assert.rejects(store.prepare('one', { attachments: [upload('big.png', image, 'image/png')] }), { kind: 'too-large' });
   await assert.rejects(store.prepare('one', { attachments: Array.from({ length: 11 }, () => upload()) }), { kind: 'too-large' });
-  await assert.rejects(store.prepare('one', { attachmentIds: [saved.attachments[0].id], attachments: [large, upload()] }), { kind: 'too-large' });
+  await assert.rejects(store.prepare('one', { attachmentIds: [saved.attachments[0].id], attachments: [large, large, upload()] }), { kind: 'too-large' });
   assert.deepEqual(await readdir(store.directory), saved.createdIds);
+  const mixed = await store.prepare('one', { attachmentIds: [saved.attachments[0].id], attachments: [large, upload()] });
+  assert.equal(mixed.attachments.length, 3);
+  assert.ok(mixed.attachments.reduce((total, item) => total + item.size, 0) > 20 * 1024 * 1024);
 });
 
 test('owned downloads reject tampered content, replaced files, symlinks and invalid manifests', async t => {
@@ -96,7 +99,7 @@ test('attachment storage refuses a symlink root and rolls back partial writes', 
   const originalWrite = (store as any).write.bind(store);
   let writes = 0;
   (store as any).write = async (path: string, content: Buffer) => {
-    if (++writes === 3) throw new Error('disk full');
+    if (++writes === 2) throw new Error('disk full');
     return originalWrite(path, content);
   };
   await assert.rejects(store.prepare('one', { attachments: [upload('first'), upload('second')] }), /disk full/);

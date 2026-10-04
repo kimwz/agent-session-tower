@@ -57,7 +57,7 @@ These endpoints use the same access protection as other Tower APIs. A remote cli
 }
 ```
 
-Omit `cwd` for Auto. The optional `attachments` array uses the same `{name, mimeType, data}` Base64 upload shape and limits as chat. The caller cannot specify a target session, routing decision, or model override. A successful admission returns HTTP 202 with `{ "job": ... }`.
+Omit `cwd` for Auto. The page uploads original files through the chunk upload endpoints, scoped to its stable `requestId`, and submits the returned IDs in optional `attachmentIds`. The legacy `attachments` array still accepts `{name, mimeType, data}` Base64 data with the existing bounded JSON limits. A request may contain at most 10 files across both forms. The caller cannot specify a target session, routing decision, or model override. A successful admission returns HTTP 202 with `{ "job": ... }`.
 
 ### Observe a request
 

@@ -5,9 +5,8 @@ import { constants } from 'node:fs';
 import { mkdir, open, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
-import type { Attachment, AttachmentInput, AutoPromptDecision, AutoPromptJob, AutoPromptInput, AutoPromptRequest, Run, RunOrigin, Session, SessionDetail, Snapshot } from '../../shared/types.js';
-import { isImageAttachment } from '../../shared/attachments.js';
-import { AttachmentStore, attachmentMetadata, type StoredAttachment } from '../stores/attachments.js';
+import type { Attachment, AutoPromptDecision, AutoPromptJob, AutoPromptInput, AutoPromptRequest, Run, RunOrigin, Session, SessionDetail, Snapshot } from '../../shared/types.js';
+import { AttachmentStore, attachmentMetadata, imagePaths, type StoredAttachment } from '../stores/attachments.js';
 import { writePrivateJson } from '../stores/private-json.js';
 import { RunError, type RunAdmission, type RunManager } from '../runs/manager.js';
 import { isSavedDelegation } from '../runs/saved-state.js';
@@ -93,7 +92,7 @@ const routerOf = (job: AutoPromptJob): Pick<ResolvedModel, 'provider' | 'model'>
 function attachmentContext(attachments: StoredAttachment[]) {
   return attachments.map(({ metadata, content }) => ({ name: metadata.name, mimeType: metadata.mimeType, size: metadata.size,
     ...(/^(text\/|application\/(?:json|xml|javascript|yaml)(?:$|[;+]))/.test(metadata.mimeType) ? {
-      excerpt: content.subarray(0, 4000).toString('utf8').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ''), truncated: content.length > 4000,
+      excerpt: content.subarray(0, 4000).toString('utf8').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ''), truncated: metadata.size > 4000,
     } : {}),
   }));
 }
@@ -109,6 +108,10 @@ export class AutoPromptManager extends EventEmitter {
   private processing?: Promise<void>;
   private started = false;
   private stopping = false;
+  private attachmentCleanupPaused = true;
+  private attachmentCleanupTimer?: ReturnType<typeof setInterval>;
+  private attachmentCleanup?: Promise<void>;
+
 
   constructor(private readonly options: AutoPromptOptions) {
     super();
@@ -155,6 +158,7 @@ export class AutoPromptManager extends EventEmitter {
     }
     await this.persist();
     this.started = true;
+    this.resumeAttachmentCleanup();
   }
 
   list(): AutoPromptJob[] { return [...this.entries.values()].map(entry => copy(entry.job)); }
@@ -172,7 +176,7 @@ export class AutoPromptManager extends EventEmitter {
     if (untrustedInput && input?.sessionMode !== 'new') throw new RunError('외부 입력 요청은 새 세션에서만 실행할 수 있습니다.');
     if (input?.modelRole !== undefined && input.modelRole !== 'master.worker') throw new RunError('알 수 없는 작업 모델 역할입니다.');
     if (!input || typeof input.requestId !== 'string' || !UUID.test(input.requestId) || (!['claude', 'codex'].includes(input.provider ?? '') && !(input.provider === undefined && input.modelRole === 'master.worker'))) throw new RunError('올바른 요청 ID와 Claude 또는 Codex가 필요합니다.');
-    if (typeof input.prompt !== 'string' || input.prompt.length > 32_000 || (!input.prompt.trim() && !input.attachments?.length)) throw new RunError('지시문 또는 첨부 파일이 필요하며 지시문은 32,000자 이하여야 합니다.');
+    if (typeof input.prompt !== 'string' || input.prompt.length > 32_000 || (!input.prompt.trim() && !input.attachments?.length && !input.attachmentIds?.length)) throw new RunError('지시문 또는 첨부 파일이 필요하며 지시문은 32,000자 이하여야 합니다.');
     if (input.cwd !== undefined && (typeof input.cwd !== 'string' || !isAbsolute(input.cwd) || input.cwd.includes('\0') || input.cwd.length > 4096)) throw new RunError('목록에 있는 작업 폴더를 선택하세요.');
     if (input.codexApprovalsReviewer !== undefined && !['user', 'auto_review'].includes(input.codexApprovalsReviewer)) throw new RunError('승인 검토는 자동 검토 또는 직접 확인만 선택할 수 있습니다.');
     if (input.sessionMode !== undefined && input.sessionMode !== 'new') throw new RunError('올바른 세션 생성 모드를 선택하세요.');
@@ -184,7 +188,7 @@ export class AutoPromptManager extends EventEmitter {
     requestedEffort(input.effort, input.provider);
     input = copy(input);
     input.requestId = input.requestId.toLowerCase();
-    const request = { ...(input.modelRole ? { modelRole: input.modelRole } : {}), provider: input.provider, cwd: input.cwd ?? null, prompt: input.prompt, attachments: input.attachments ?? [],
+    const request = { ...(input.modelRole ? { modelRole: input.modelRole } : {}), provider: input.provider, cwd: input.cwd ?? null, prompt: input.prompt, attachments: input.attachments ?? [], ...(input.attachmentIds !== undefined ? { attachmentIds: input.attachmentIds } : {}),
       ...(input.sessionMode ? { sessionMode: input.sessionMode } : {}),
       ...(input.targetSessionId !== undefined ? { targetSessionId: input.targetSessionId } : {}),
       ...(input.routingContext !== undefined ? { routingContext: input.routingContext } : {}),
@@ -202,7 +206,7 @@ export class AutoPromptManager extends EventEmitter {
     if (admitting) return admitting.promise;
     if (previous) return copy(previous.job);
     if (this.admissions.size + [...this.entries.values()].filter(entry => !TERMINAL.has(entry.job.status)).length >= MAX_PENDING) throw new RunError('Auto Prompt 대기열이 가득 찼습니다. 진행 중인 라우팅을 기다려 주세요.', 'rate-limited');
-    const promise = this.admit(input, fingerprint, origin, untrustedInput, unattended, internal).finally(() => { this.admissions.delete(input.requestId); this.pump(); });
+    const promise = Promise.resolve().then(() => this.admit(input, fingerprint, origin, untrustedInput, unattended, internal)).finally(() => { this.admissions.delete(input.requestId); this.pump(); });
     this.admissions.set(input.requestId, { fingerprint, promise });
     return promise;
   }
@@ -224,7 +228,7 @@ export class AutoPromptManager extends EventEmitter {
     if (input.cwd) await this.checkDirectory(input.cwd, inventory);
     const router = await resolveModel(this.options.stateDir, 'autoPrompt.router', { provider: input.provider });
     providerReady(snapshot, input.provider, routed(input) ? router : undefined);
-    const prepared = await this.attachments.prepare(input.requestId, { attachments: input.attachments });
+    const prepared = await this.attachments.prepare(input.requestId, { attachments: input.attachments, attachmentIds: input.attachmentIds }, origin.controllerId ?? 'local');
     const now = new Date().toISOString();
     const entry: Entry = { fingerprint, staged: prepared.attachments, job: {
       id: input.requestId, ...(newSessionModel ? { newSessionModel } : {}), origin, ...(context.delegation ? { delegation: { ...context.delegation } } : {}), ...(origin.controllerId ? { exclusionRevision: this.options.remote!.matcher().revision } : {}), ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}), provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
@@ -249,6 +253,8 @@ export class AutoPromptManager extends EventEmitter {
       await this.attachments.rollback(prepared.createdIds);
       throw error;
     }
+    try { await this.attachments.retain(entry.staged.map(item => item.id)); }
+    catch { console.error('Accepted Auto Prompt attachment retention failed; durable job scope protects the files until the next sweep.'); }
     this.emit('change');
     const accepted = copy(entry.job);
     return accepted;
@@ -268,7 +274,38 @@ export class AutoPromptManager extends EventEmitter {
     return copy(entry.job);
   }
 
+
+  /** The state lock cannot be released while this store still deletes published originals. */
+  async pauseAttachmentCleanup(): Promise<void> {
+    this.attachmentCleanupPaused = true;
+    if (this.attachmentCleanupTimer) clearInterval(this.attachmentCleanupTimer);
+    this.attachmentCleanupTimer = undefined;
+    await this.attachmentCleanup;
+  }
+
+  resumeAttachmentCleanup(): void {
+    if (!this.started || this.stopping || this.attachmentCleanupTimer) return;
+    this.attachmentCleanupPaused = false;
+    this.attachmentCleanupTimer = setInterval(() => { void this.cleanupAttachments(); }, 60_000);
+    this.attachmentCleanupTimer.unref();
+  }
+
+  private cleanupAttachments(): Promise<void> {
+    if (this.attachmentCleanupPaused) return Promise.resolve();
+    if (this.attachmentCleanup) return this.attachmentCleanup;
+    const pending = this.sweepAttachments().catch(error => console.error('Auto Prompt attachment cleanup failed:', error));
+    this.attachmentCleanup = pending;
+    void pending.then(() => { if (this.attachmentCleanup === pending) this.attachmentCleanup = undefined; });
+    return pending;
+  }
+
+  private sweepAttachments(): Promise<void> {
+    return this.attachments.sweepPending(new Set(), new Set(), { isProtected: (_id, scope) =>
+      this.admissions.has(scope) || Boolean(this.entries.get(scope) && !TERMINAL.has(this.entries.get(scope)!.job.status)) });
+  }
+
   async close(): Promise<void> {
+    await this.pauseAttachmentCleanup();
     if (this.stopping) { await this.processing; return; }
     this.stopping = true;
     for (const entry of this.entries.values()) if (['queued', 'routing'].includes(entry.job.status)) {
@@ -327,7 +364,7 @@ export class AutoPromptManager extends EventEmitter {
     const request = { prompt: job.prompt, attachments: attachmentContext(staged) };
     const invoke = (prompt: string, schema: Record<string, unknown>, extra: string) => {
       const input = { ...routerOf(job), ...(job.routerEffort ? { effort: job.routerEffort } : {}), systemPrompt: `${SYSTEM}\n${extra}`, prompt, schema, signal,
-        imagePaths: staged.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) };
+        imagePaths: imagePaths(staged) };
       return this.options.model ? this.options.model(input) : runAutoPromptModel(input, { stateDir: this.options.stateDir });
     };
     let cwd = job.cwd;
@@ -419,11 +456,11 @@ export class AutoPromptManager extends EventEmitter {
     // cancellation can no longer race persistence and the run's admission.
     this.update(job, { status: 'dispatching', decision });
     await this.persist(); this.emit('change');
-    const attachments: AttachmentInput[] = staged.map(({ metadata, content }) => ({ name: metadata.name, mimeType: metadata.mimeType, data: content.toString('base64') }));
+    const attachmentIds = entry.staged.map(item => item.id);
     const internal: RunAdmission = { autoPromptId: job.id, validate, origin: job.origin ?? { kind: 'unknown' }, ...(job.delegation ? { delegation: job.delegation } : {}), ...(job.untrustedInput ? { untrustedInput: true } : {}), ...(job.unattended ? { unattended: true } : {}) };
     const run = decision.action === 'resume'
-      ? await this.options.runs.enqueue(decision.sessionId!, job.prompt, { attachments, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}) }, internal)
-      : (await this.options.runs.create({ provider: job.provider, cwd, prompt: job.prompt, attachments, ...job.newSessionModel, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}),
+      ? await this.options.runs.enqueue(decision.sessionId!, job.prompt, { attachmentIds, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}) }, internal)
+      : (await this.options.runs.create({ provider: job.provider, cwd, prompt: job.prompt, attachmentIds, ...job.newSessionModel, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}),
         ...(job.codexApprovalsReviewer ? { codexApprovalsReviewer: job.codexApprovalsReviewer } : {}) }, internal)).run;
     this.complete(entry, run);
     await this.persist(); this.emit('change');

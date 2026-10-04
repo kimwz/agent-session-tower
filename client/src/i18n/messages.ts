@@ -851,6 +851,8 @@ export const english: Record<string, string> = {
   "작업할 세션을 찾고 있습니다…": "Finding a session…",
   "작업할 폴더와 세션을 찾고 있습니다…": "Finding a folder and session…",
   "요청 접수를 확인하고 있습니다…": "Confirming your request…",
+  "파일 첨부 · 최대 {0}개 · 원본 업로드 · 이미지 붙여넣기 가능": "Attach up to {0} original files · Paste images",
+  "업로드 위치가 올바르지 않습니다.": "The upload offset is invalid.",
   "첨부 파일 준비 중…": "Preparing attachments…",
   "{0}가 요청을 살펴보고 있습니다.": "{0} is reviewing your request.",
   "창을 닫아도 요청은 계속됩니다.": "Your request continues when you close this window.",

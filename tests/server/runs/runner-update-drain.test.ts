@@ -446,6 +446,8 @@ test('a wrap-up request is never saved as keepQueued', async t => {
   const waiting = await f.manager.enqueue(f.session.id, 'queued behind the turn', {}, { origin: owner });
   f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
   f.manager.driveUpdateDrain();
+  // Observe the dispatch this fixture started before its shutdown removes the state directory.
+  await until(() => f.received.some(frame => frame.uuid && /about to restart/.test(JSON.stringify(frame))));
   await f.manager.flushState();
   const saved = writes.flat();
   const wrapUps = saved.filter(run => run.updateWrapUp);

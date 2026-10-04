@@ -20,8 +20,8 @@ import { SessionTasks } from './SessionTasks';
 import { WorktreeCleanupNote } from './WorktreeCleanupNote';
 import { RunControl } from './RunControl';
 import { DraftAttachments } from './ChatAttachments';
-import { addDraftFiles, formatAttachmentSize, prepareDraftAttachments } from './chat-attachments';
-import { MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../../../shared/attachments';
+import { addDraftFiles, prepareDraftAttachments } from './chat-attachments';
+import { MAX_ATTACHMENTS } from '../../../shared/attachments';
 import { draftFromRun, finishComposerSend, restoreComposerEffort, getComposerState, markComposerSending, setComposerDraft, setComposerError, startComposerSend, subscribeComposer, type ChatDraft } from './chat-drafts';
 import { matchChatRuns } from './chat-runs';
 import { EffortPicker, ModelPicker, supportedEffort } from './ModelPicker';
@@ -180,7 +180,7 @@ export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = 
     const submitted = startComposerSend(id);
     if (!submitted) return;
     try {
-      const prepared = await prepareDraftAttachments(submitted.attachments);
+      const prepared = await prepareDraftAttachments(submitted.attachments, { kind: 'chat', sessionId: id, token });
       markComposerSending(id);
       const body = JSON.stringify({ prompt: message, ...prepared, ...(submitted.model ? { model: submitted.model } : {}), ...(submitted.effort ? { effort: submitted.effort } : {}) });
       await api<{ run: Run }>(pathFor(id, local => `/api/sessions/${encodeURIComponent(local)}/messages`), { method: 'POST', headers: nodeHeaders(nodeOf(id), { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, `message:${id}`, body), body }).catch(error => {
@@ -301,7 +301,7 @@ export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = 
           }}
           onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) { event.preventDefault(); void sendPrompt(); } }} />
         <div className="composer-bottom">
-          <button className="attach-button" type="button" aria-label={t("파일 첨부")} title={t("파일 첨부 · 최대 {0}개, 합계 {1} · 이미지 붙여넣기 가능", { 0: MAX_ATTACHMENTS, 1: formatAttachmentSize(MAX_TOTAL_ATTACHMENT_BYTES) })} disabled={disabled || sending} onClick={() => fileInput.current?.click()}><Paperclip size={16} aria-hidden="true" /></button>
+          <button className="attach-button" type="button" aria-label={t("파일 첨부")} title={t("파일 첨부 · 최대 {0}개 · 원본 업로드 · 이미지 붙여넣기 가능", { 0: MAX_ATTACHMENTS })} disabled={disabled || sending} onClick={() => fileInput.current?.click()}><Paperclip size={16} aria-hidden="true" /></button>
           <SecretComposer key={sessionId} token={token} sessionId={sessionId} cwd={current?.cwd} />
           <span className="composer-hint">{sending ? <span role="status">{sendingLabel}…</span> : prompt.length > 24000 ? t("{0} / 32,000자", { 0: prompt.length.toLocaleString() }) : composerHint}</span>
           <ModelPicker provider={provider} observedModel={current?.model} value={draft.model} disabled={disabled || sending} onChange={model => {

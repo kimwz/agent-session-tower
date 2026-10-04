@@ -302,6 +302,7 @@ export interface CreateSessionRequest {
   /** Kept for triggers and Slack. Tower's own turns always use Codex's automatic reviewer, whatever a page sends. */
   codexApprovalsReviewer?: CodexApprovalsReviewer;
   attachments?: AttachmentInput[];
+  attachmentIds?: string[];
 }
 export interface AutoPromptRequest {
   /** Defaults for a newly created session only; never changes authority or a resumed session's model. */
@@ -319,6 +320,7 @@ export interface AutoPromptRequest {
   /** Kept for triggers and Slack. Tower's own turns always use Codex's automatic reviewer, whatever a page sends. */
   codexApprovalsReviewer?: CodexApprovalsReviewer;
   attachments?: AttachmentInput[];
+  attachmentIds?: string[];
 }
 /** Only a request naming a model role may omit its provider; admission resolves it before creating a job. */
 export type AutoPromptInput = Omit<AutoPromptRequest, 'provider'> & { provider?: Provider };

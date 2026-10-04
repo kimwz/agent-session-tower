@@ -1,3 +1,5 @@
+import { AttachmentStore } from './stores/attachments.js';
+import { AttachmentUploads } from './stores/attachment-uploads.js';
 // First: Tower's processes never carry the identity of an agent turn that started them.
 import './sessions/launch-env.js';
 import { hostname, homedir } from 'node:os';
@@ -262,6 +264,21 @@ async function main() {
   const runs = new DurableRunManager({ stateDir, handoffHeld: () => handoffHeld(stateDir), heldWorkerEntry: () => heldWorkerEntry(stateDir) });
   // Load persisted history before shutdown or an HTTP request can touch the runner.
   try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await exclusions.start(); await runs.start(); } catch (error) { auth.close(); await releaseLock(); throw error; }
+  const attachmentStores = { chat: new AttachmentStore(stateDir), auto: new AttachmentStore(join(stateDir, 'auto-prompt-staging')) };
+  const attachmentUploads = new AttachmentUploads(stateDir, { ...attachmentStores,
+    publishedGC: false,
+    protectedChat: () => new Set(runs.list().flatMap(run => run.attachments?.map(item => item.id) ?? [])),
+    protectedAuto: () => new Set(runs.autoPromptList().filter(job => ['queued', 'routing', 'dispatching'].includes(job.status)).map(job => job.id)),
+  });
+  try {
+    await Promise.all([attachmentStores.chat.start(), attachmentStores.auto.start()]);
+    await attachmentUploads.start();
+  } catch (error) {
+    attachmentUploads.close();
+    auth.close();
+    try { await runs.close(); } finally { await releaseLock(); }
+    throw error;
+  }
   /** Local browser requests are the owner's; a remote controller's carry its own origin and request ID. */
   // `authored` only keeps a 1.89/1.90 worker's permission reviewer working while an update waits for its handoff; newer workers ignore it.
   const forgetConversation = async (sessionId: string) => {
@@ -465,6 +482,7 @@ async function main() {
       return run;
     },
     repositoryAction: (cwd, action) => repositories.act(cwd, action),
+    attachmentReferences: () => runs.supports('attachmentReferences'),
     attachment: id => runs.attachment(id), cancel: id => runs.cancel(id), steerRun: (id, options) => runs.steer(id, options),
     respondToApproval: (runId, approvalId, decision) => runs.respondToApproval(runId, approvalId, decision),
     dismiss: async id => {
@@ -486,7 +504,7 @@ async function main() {
   let controllerName = (_id: string): string | undefined => undefined;
   const remoteChanges = new RemoteAudit(stateDir, { name: id => controllerName(id) });
   await remoteChanges.start();
-  const remoteRouter = createRemoteRouter({ backend, exclusions, terminals: workspaceTerminals, audit: remoteChanges });
+  const remoteRouter = createRemoteRouter({ attachmentStores, attachmentUploads, backend, exclusions, terminals: workspaceTerminals, audit: remoteChanges });
   const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname, published: releasePublished });
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
@@ -576,7 +594,7 @@ async function main() {
       },
       record: entry => decisions.record(entry), claim: runId => judgedMessages.claim(`${nodeId}:${runId}`), sentBy: identity.id }, run);
   };
-  const { server, dispose, token: pageToken } = createMonitorServer({ port, clientDir, backend, nodes: remoteNodes, onNodeMessage: insertRemote, master: { callerSecret: masterCallerSecret, handle: masterRoutes(master, { turnEnd: new VoiceTurnEnd({ engine: () => decisions.engine('voiceTurnEnd'),
+  const { server, dispose, token: pageToken } = createMonitorServer({ attachmentStores, attachmentUploads, port, clientDir, backend, nodes: remoteNodes, onNodeMessage: insertRemote, master: { callerSecret: masterCallerSecret, handle: masterRoutes(master, { turnEnd: new VoiceTurnEnd({ engine: () => decisions.engine('voiceTurnEnd'),
       known: async session => await master.call('voiceKnown', { session }) === true, record: entry => decisions.record(entry) }) }) },
     auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges,
       sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })) } : { error: linkError },
@@ -674,6 +692,7 @@ async function main() {
     // The master host keeps running; this web only lets go of it.
     master.dispose();
     localMcp.close();
+    attachmentUploads.close();
     dispose();
     server.closeAllConnections();
     server.close();

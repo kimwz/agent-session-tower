@@ -1,3 +1,4 @@
+import { MAX_ATTACHMENTS } from '../../shared/attachments.js';
 import type { PermissionRequest } from '../../shared/permissions.js';
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from 'node:child_process';
 import { mkdir, stat } from 'node:fs/promises';
@@ -126,6 +127,7 @@ export class RunManager extends EventEmitter {
   private readonly options: RunnerOptions;
   private readonly history: RunHistory;
   private readonly attachments: AttachmentStore;
+  private readonly autoAttachments: AttachmentStore;
   private readonly registry = new CreatedSessionRegistry({ native: id => this.options.getSession(id), persist: () => this.persist() });
   private readonly runs = new Map<string, Run>();
   private readonly answers = new OwnerAnswers();
@@ -137,6 +139,7 @@ export class RunManager extends EventEmitter {
   /** CLIs being updated: none of their runs start until the update is done. */
   private readonly heldProviders = new Set<Provider>();
   private readonly admissions = new Set<string>();
+  private readonly incomingAttachments = new Set<ReadonlyArray<string>>();
   private readonly locallySettled = new Map<string, number>();
   private readonly settledRuns = new Set<string>();
   /** Runs the owner asked to stop; a Codex app submission taken back for an update is then not queued again. */
@@ -157,6 +160,10 @@ export class RunManager extends EventEmitter {
   private launchPrepare?: (run: Run) => Promise<void>;
   private started = false;
   private stopping = false;
+  private attachmentCleanupPaused = true;
+  private attachmentCleanupTimer?: ReturnType<typeof setInterval>;
+  private attachmentCleanup?: Promise<void>;
+
 
   /** What the turn modules use of this manager (see turn-host.ts). */
   private readonly turnHost: TurnHost;
@@ -167,6 +174,7 @@ export class RunManager extends EventEmitter {
     this.history = new RunHistory(options.stateDir ?? defaultStateDir());
     this.ready = !options.holdUntilReady;
     this.attachments = new AttachmentStore(options.stateDir ?? defaultStateDir());
+    this.autoAttachments = new AttachmentStore(join(options.stateDir ?? defaultStateDir(), 'auto-prompt-staging'));
     const manager = this;
     this.turnHost = {
       get options() { return manager.options; }, registry: this.registry, attachments: this.attachments, notes: this.notes,
@@ -288,6 +296,7 @@ export class RunManager extends EventEmitter {
     await this.flush();
     this.pollTimer = setInterval(() => { void this.pump(); }, this.options.pollMs ?? 1500);
     this.pollTimer.unref();
+    this.resumeAttachmentCleanup();
   }
 
   /** Starts queued runs once everything a launch asks for is in place (see `holdUntilReady`). */
@@ -302,7 +311,7 @@ export class RunManager extends EventEmitter {
     ...(run.contextUsage ? { contextUsage: { ...run.contextUsage } } : {}),
     ...(run.approvals ? { approvals: structuredClone(run.approvals) } : {}) })); }
   async attachment(id: string) {
-    const { metadata, content, sessionId } = await this.attachments.read(id);
+    const { metadata, content, sessionId } = await this.attachments.readLegacyDownload(id);
     return { metadata, content, sessionId };
   }
   settledRunIds(): ReadonlySet<string> { return new Set(this.settledRuns); }
@@ -342,61 +351,82 @@ export class RunManager extends EventEmitter {
   }
 
   async create(input: CreateSessionRequest, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
-    this.validateCorrelation(internal.autoPromptId);
-    this.validateAdmission(input.prompt, Boolean(input.attachments?.length));
-    if (!PROVIDERS.includes(input.provider)) throw new RunError('Claude 또는 Codex를 선택하세요.');
-    const model = requestedModel(input.model);
-    const effort = requestedEffort(input.effort, input.provider);
-    const approvalsReviewer = creationReviewer(input, internal.origin);
-    if (typeof input.cwd !== 'string' || input.cwd.includes('\0') || input.cwd.length > 4096) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
-    const cwd = input.cwd === '~' || input.cwd.startsWith('~/') ? join(homedir(), input.cwd.slice(1)) : input.cwd;
-    if (!isAbsolute(cwd)) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
-    input = { ...input, cwd };
-    const title = input.title === undefined ? '' : normalizeSessionTitle(input.title);
-    if (!(await this.executable(input.provider))) throw new RunError(`Install the ${input.provider} CLI and ensure it is in PATH before creating a session.`, 'unavailable');
-    if (internal.createFolder === false) {
-      if (!(await stat(cwd).then(info => info.isDirectory(), () => false))) throw new RunError('The working folder does not exist. It was not created.', 'not-found');
-    } else {
-      // A folder that does not exist yet is created, like `mkdir -p` before starting the CLI there.
-      try { await mkdir(cwd, { recursive: true }); if (!(await stat(cwd)).isDirectory()) throw new Error(); }
-      catch { throw new RunError('작업 폴더를 만들 수 없습니다. 경로와 권한을 확인하세요.'); }
-    }
-    const uuid = randomUUID();
-    const id = `${input.provider}:${input.provider === 'codex' ? 'monitor-' : ''}${uuid}`;
-    const prepared = await this.attachments.prepare(id, { attachments: input.attachments });
+    const incoming = Array.isArray(input.attachmentIds) ? input.attachmentIds.filter(id => typeof id === 'string') : [];
+    this.incomingAttachments.add(incoming);
     try {
-      this.validateAdmission(input.prompt, prepared.attachments.length > 0);
       this.validateCorrelation(internal.autoPromptId);
-      internal.validate?.();
-    } catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
-    const createdAt = new Date().toISOString();
-    const origin = internal.origin ?? { kind: 'unknown' as const };
-    const run: Run = { id: randomUUID(), sessionId: id, origin, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}), ...(effort ? { effort } : {}),
-      ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
-      ...(approvalsReviewer ? { codexApprovalsReviewer: approvalsReviewer } : {}),
-      ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
-    // Provenance commits with the session identity, before any provider starts.
-    this.registry.add(input, id, input.provider === 'claude' ? uuid : '', run, title, origin, internal.untrustedInput === true);
-    this.runs.set(run.id, run);
-    this.admissions.add(run.id);
-    this.prune();
-    this.changed();
+      if (input.attachmentIds?.length && !internal.autoPromptId) throw new RunError('새 세션의 첨부 파일은 Auto Prompt로 보내세요.');
+      this.validateAdmission(input.prompt, Boolean(input.attachments?.length || input.attachmentIds?.length));
+      if (!PROVIDERS.includes(input.provider)) throw new RunError('Claude 또는 Codex를 선택하세요.');
+      const model = requestedModel(input.model);
+      const effort = requestedEffort(input.effort, input.provider);
+      const approvalsReviewer = creationReviewer(input, internal.origin);
+      if (typeof input.cwd !== 'string' || input.cwd.includes('\0') || input.cwd.length > 4096) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
+      const cwd = input.cwd === '~' || input.cwd.startsWith('~/') ? join(homedir(), input.cwd.slice(1)) : input.cwd;
+      if (!isAbsolute(cwd)) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
+      input = { ...input, cwd };
+      const title = input.title === undefined ? '' : normalizeSessionTitle(input.title);
+      if (!(await this.executable(input.provider))) throw new RunError(`Install the ${input.provider} CLI and ensure it is in PATH before creating a session.`, 'unavailable');
+      if (internal.createFolder === false) {
+        if (!(await stat(cwd).then(info => info.isDirectory(), () => false))) throw new RunError('The working folder does not exist. It was not created.', 'not-found');
+      } else {
+        // A folder that does not exist yet is created, like `mkdir -p` before starting the CLI there.
+        try { await mkdir(cwd, { recursive: true }); if (!(await stat(cwd)).isDirectory()) throw new Error(); }
+        catch { throw new RunError('작업 폴더를 만들 수 없습니다. 경로와 권한을 확인하세요.'); }
+      }
+      const uuid = randomUUID();
+      const id = `${input.provider}:${input.provider === 'codex' ? 'monitor-' : ''}${uuid}`;
+      const prepared = await this.prepareAttachments(id, input, internal.autoPromptId);
+      try {
+        this.validateAdmission(input.prompt, prepared.attachments.length > 0);
+        this.validateCorrelation(internal.autoPromptId);
+        internal.validate?.();
+      } catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
+      const createdAt = new Date().toISOString();
+      const origin = internal.origin ?? { kind: 'unknown' as const };
+      const run: Run = { id: randomUUID(), sessionId: id, origin, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}), ...(effort ? { effort } : {}),
+        ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
+        ...(approvalsReviewer ? { codexApprovalsReviewer: approvalsReviewer } : {}),
+        ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
+      // Provenance commits with the session identity, before any provider starts.
+      this.registry.add(input, id, input.provider === 'claude' ? uuid : '', run, title, origin, internal.untrustedInput === true);
+      this.runs.set(run.id, run);
+      this.admissions.add(run.id);
+      this.prune();
+      this.changed();
+      try {
+        // The run is already registered, so a concurrent request with the same ID is refused while this waits.
+        // Only an admitted request answers the native trust prompt; a refused one leaves settings untouched.
+        if (internal.trustWorkspace !== false) await this.options.trustWorkspace?.(input.provider, cwd, { ...process.env, ...this.options.env }).catch(() => {});
+        await this.flush();
+      }
+      catch (error) {
+        // No provider starts until both records commit. Keep failure visible; never
+        // leave an unacknowledged request queued for a later polling cycle.
+        this.fail(run, error);
+        await this.flush().catch(() => {});
+        await this.attachments.rollback(prepared.createdIds);
+        throw error;
+      } finally { this.admissions.delete(run.id); }
+      await this.retainAttachments(run);
+      void this.pump();
+      return { session: this.getSession(id)!, run: shown(run) };
+    } finally { this.incomingAttachments.delete(incoming); }
+  }
+
+  private async prepareAttachments(sessionId: string, request: MessageAttachments, autoPromptId?: string) {
+    if (!autoPromptId || !request.attachmentIds?.length) return this.attachments.prepare(sessionId, request);
+    if (!Array.isArray(request.attachmentIds) || !Array.isArray(request.attachments ?? []) || request.attachmentIds.length + (request.attachments?.length ?? 0) > MAX_ATTACHMENTS) throw new RunError(`첨부 파일은 최대 ${MAX_ATTACHMENTS}개까지 보낼 수 있습니다.`);
+    const imported = await this.attachments.import(sessionId, this.autoAttachments, autoPromptId, request.attachmentIds);
     try {
-      // The run is already registered, so a concurrent request with the same ID is refused while this waits.
-      // Only an admitted request answers the native trust prompt; a refused one leaves settings untouched.
-      if (internal.trustWorkspace !== false) await this.options.trustWorkspace?.(input.provider, cwd, { ...process.env, ...this.options.env }).catch(() => {});
-      await this.flush();
-    }
-    catch (error) {
-      // No provider starts until both records commit. Keep failure visible; never
-      // leave an unacknowledged request queued for a later polling cycle.
-      this.fail(run, error);
-      await this.flush().catch(() => {});
-      await this.attachments.rollback(prepared.createdIds);
-      throw error;
-    } finally { this.admissions.delete(run.id); }
-    void this.pump();
-    return { session: this.getSession(id)!, run: shown(run) };
+      const prepared = await this.attachments.prepare(sessionId, { attachments: request.attachments, attachmentIds: imported.attachments.map(item => item.id) });
+      return { attachments: prepared.attachments, createdIds: [...imported.createdIds, ...prepared.createdIds] };
+    } catch (error) { await this.attachments.rollback(imported.createdIds); throw error; }
+  }
+
+  private async retainAttachments(run: Run): Promise<void> {
+    try { await this.attachments.retain(run.attachments?.map(item => item.id) ?? []); }
+    catch { console.error('Accepted run attachment retention failed; durable references protect the files until the next sweep.'); }
   }
 
   private validateAdmission(prompt: string, hasAttachments = false): void {
@@ -418,41 +448,46 @@ export class RunManager extends EventEmitter {
   }
 
   async enqueue(sessionId: string, prompt: string, request: MessageAttachments = {}, internal: RunAdmission = {}): Promise<Run> {
-    this.validateCorrelation(internal.autoPromptId);
-    sessionId = this.monitorSessionId(sessionId);
-    const hasAttachments = Boolean(request.attachments?.length || request.attachmentIds?.length);
-    this.validateAdmission(prompt, hasAttachments);
-    const session = this.getSession(sessionId);
-    this.validateSession(session);
-    if (internal.untrustedInput) this.admitUntrusted(sessionId);
-    const model = requestedModel(request.model);
-    const effort = requestedEffort(request.effort, session.provider);
-    if (!(await this.executable(session.provider))) throw new RunError(`Install the ${session.provider} CLI and ensure it is in PATH before sending instructions.`, 'unavailable');
-    const prepared = await this.attachments.prepare(sessionId, request);
-    // File writes yield; recheck admission immediately before inserting the run.
-    try { this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.(); }
-    catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
-    if (internal.untrustedInput) {
-      // Recorded before the run exists: once external content is queued, the session stays marked.
-      this.registry.markUntrusted(sessionId);
-    }
-    const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
-      ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
-      ...(model ? { model } : {}), ...(effort ? { effort } : {}),
-      ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),
-      ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}) };
-    this.admissions.add(run.id);
-    this.runs.set(run.id, run);
-    this.prune();
-    this.changed();
-    try { await this.flush(); } // An accepted instruction is durable before launching the provider.
-    catch (error) { this.runs.delete(run.id); this.changed(); await this.attachments.rollback(prepared.createdIds); throw error; }
-    finally { this.admissions.delete(run.id); }
-    // An accepted instruction replaces the continuation the agent planned; its next turn can schedule again.
-    // Tower's own continuation after an update is not the agent's plan: it runs first, then this instruction.
-    for (const other of this.runs.values()) if (other.sessionId === sessionId && other.status === 'queued' && other.scheduled && (other.scheduled.resume !== 'update' || other.permissionRequestIds?.length)) this.supersede(other, 'A newer instruction was sent before the scheduled time.');
-    void this.pump();
-    return shown(run);
+    const incoming = Array.isArray(request.attachmentIds) ? request.attachmentIds.filter(id => typeof id === 'string') : [];
+    this.incomingAttachments.add(incoming);
+    try {
+      this.validateCorrelation(internal.autoPromptId);
+      sessionId = this.monitorSessionId(sessionId);
+      const hasAttachments = Boolean(request.attachments?.length || request.attachmentIds?.length);
+      this.validateAdmission(prompt, hasAttachments);
+      const session = this.getSession(sessionId);
+      this.validateSession(session);
+      if (internal.untrustedInput) this.admitUntrusted(sessionId);
+      const model = requestedModel(request.model);
+      const effort = requestedEffort(request.effort, session.provider);
+      if (!(await this.executable(session.provider))) throw new RunError(`Install the ${session.provider} CLI and ensure it is in PATH before sending instructions.`, 'unavailable');
+      const prepared = await this.prepareAttachments(sessionId, request, internal.autoPromptId);
+      // File writes yield; recheck admission immediately before inserting the run.
+      try { this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.(); }
+      catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
+      if (internal.untrustedInput) {
+        // Recorded before the run exists: once external content is queued, the session stays marked.
+        this.registry.markUntrusted(sessionId);
+      }
+      const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
+        ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
+        ...(model ? { model } : {}), ...(effort ? { effort } : {}),
+        ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),
+        ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}) };
+      this.admissions.add(run.id);
+      this.runs.set(run.id, run);
+      this.prune();
+      this.changed();
+      try { await this.flush(); } // An accepted instruction is durable before launching the provider.
+      catch (error) { this.runs.delete(run.id); this.changed(); await this.attachments.rollback(prepared.createdIds); throw error; }
+      finally { this.admissions.delete(run.id); }
+      await this.retainAttachments(run);
+      // An accepted instruction replaces the continuation the agent planned; its next turn can schedule again.
+      // Tower's own continuation after an update is not the agent's plan: it runs first, then this instruction.
+      for (const other of this.runs.values()) if (other.sessionId === sessionId && other.status === 'queued' && other.scheduled && (other.scheduled.resume !== 'update' || other.permissionRequestIds?.length)) this.supersede(other, 'A newer instruction was sent before the scheduled time.');
+      void this.pump();
+      return shown(run);
+    } finally { this.incomingAttachments.delete(incoming); }
   }
 
   private steeringTarget(run: Run) {
@@ -591,7 +626,40 @@ export class RunManager extends EventEmitter {
     return this.list().find(item => item.id === runId)!;
   }
 
+
+  /** The state lock cannot be released while this store still deletes published originals. */
+  async pauseAttachmentCleanup(): Promise<void> {
+    this.attachmentCleanupPaused = true;
+    if (this.attachmentCleanupTimer) clearInterval(this.attachmentCleanupTimer);
+    this.attachmentCleanupTimer = undefined;
+    await this.attachmentCleanup;
+  }
+
+  resumeAttachmentCleanup(): void {
+    if (!this.started || this.stopping || this.attachmentCleanupTimer) return;
+    this.attachmentCleanupPaused = false;
+    this.attachmentCleanupTimer = setInterval(() => { void this.cleanupAttachments(); }, 60_000);
+    this.attachmentCleanupTimer.unref();
+  }
+
+  private cleanupAttachments(): Promise<void> {
+    if (this.attachmentCleanupPaused) return Promise.resolve();
+    if (this.attachmentCleanup) return this.attachmentCleanup;
+    const pending = this.sweepAttachments().catch(error => console.error('Run attachment cleanup failed:', error));
+    this.attachmentCleanup = pending;
+    void pending.then(() => { if (this.attachmentCleanup === pending) this.attachmentCleanup = undefined; });
+    return pending;
+  }
+
+  private sweepAttachments(): Promise<void> {
+    const protectedIDs = new Set([...this.runs.values()].filter(run => !this.admissions.has(run.id)).flatMap(run => run.attachments?.map(item => item.id) ?? []));
+    return this.attachments.sweepPending(protectedIDs, new Set(), { isProtected: id =>
+      [...this.runs.values()].some(run => run.attachments?.some(item => item.id === id))
+      || [...this.incomingAttachments].some(ids => ids.includes(id)) });
+  }
+
   async close(): Promise<void> {
+    await this.pauseAttachmentCleanup();
     if (this.stopping) return;
     this.stopping = true;
     this.toolNotices.clear();
