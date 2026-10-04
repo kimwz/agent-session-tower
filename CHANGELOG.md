@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.109.0] - 2026-10-05
+
+### Changed
+- **Attachments keep their originals on the execution computer.** Chat and Auto Prompt upload files in resumable chunks and send file references with the instruction. The new upload path has no fixed file or combined size limit; up to 10 files can be attached, subject to available disk space, filesystem and network limits. Small supported images still use native image input; larger images and other files are supplied as local originals.
+- Original downloads stream from disk, including downloads from joined computers larger than the previous 64 MiB response cap. Accepted files remain available to their conversations; unfinished uploads and unsubmitted originals expire after 24 hours.
+- File cleanup follows the execution worker's durable admissions and drains before worker handoff or shutdown. Existing bounded JSON attachments and saved chat references supported by an older worker remain compatible while an update waits for active work to finish.
+
 ## [1.108.1] - 2026-10-04
 
 ### Fixed
