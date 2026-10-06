@@ -65,7 +65,7 @@ function isClaudeRoutingProgress(frame: Record<string, any>): boolean {
     && frame.compact_result === undefined && frame.compact_error === undefined;
   if (frame.subtype === 'session_state_changed') return frame.state === 'idle' || frame.state === 'running';
   if (frame.subtype === 'notification') return typeof frame.key === 'string' && typeof frame.text === 'string';
-  // From 2.1.290 every print-mode run opens with a notice that the hooks engine's `ui.render` output moved, telling a
+  // From 2.1.290 every print-mode run opens with a notice that the hooks engine's `ui.render` output changed, telling a
   // remote surface to redraw, optionally naming the drawn instances. It runs nothing and the model never reads it.
   if (frame.subtype === 'ui_invalidate') return frame.event === 'ui.render'
     && (frame.instances === undefined || Array.isArray(frame.instances) && frame.instances.every((instance: unknown) =>
