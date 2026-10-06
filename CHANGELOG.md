@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.109.1] - 2026-10-06
+
+### Fixed
+- **Auto Prompt routes with Claude Code 2.1.290 again.** That version opens every routing run with a notice that plugin screens should redraw (`system/ui_invalidate`). Auto Prompt refused it as an unknown event, so every Claude routing request — including tasks Slack and trigger workflows delegate — failed with "unsupported routing event (system/ui_invalidate)". The notice runs nothing and adds nothing the model reads, so routing now accepts it; malformed versions of it and other plugin screen events are still refused.
+
 ## [1.109.0] - 2026-10-05
 
 ### Changed

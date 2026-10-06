@@ -22,6 +22,8 @@ const CLAUDE_STATUS = [
   { type: 'system', subtype: 'session_state_changed', state: 'running' },
   { type: 'system', subtype: 'notification', key: 'fixture', text: 'Synthetic notice.', priority: 'low' },
   { type: 'system', subtype: 'session_state_changed', state: 'idle' },
+  { type: 'system', subtype: 'ui_invalidate', event: 'ui.render' },
+  { type: 'system', subtype: 'ui_invalidate', event: 'ui.render', instances: [{ surface: 'fixture-surface', component: 'fixture', instance_id: 'fixture-1' }] },
 ].map(frame => ({ ...frame, uuid: '11111111-1111-4111-8111-111111111111', session_id: 'fixture-session' }));
 
 async function fixture(t: TestContext, provider: 'claude' | 'codex' = 'codex', mode = 'success', progress: object[] = []) {
@@ -49,6 +51,7 @@ else if (mode === 'oversized') process.stdout.write('x'.repeat(1000001));
 else if (mode === 'stderr') process.stderr.write('private'.repeat(10000));
 else if (mode === 'malformed') process.stdout.write('not JSON');
 else if (provider === 'claude') {
+  if (mode === 'status-before-init') for (const frame of JSON.parse(process.env.ROUTER_PROGRESS)) send(frame);
   send({type:'system', subtype:'init', tools: mode === 'tools' ? ['Bash'] : ['StructuredOutput'], mcp_servers:[]});
   for (const frame of JSON.parse(process.env.ROUTER_PROGRESS)) send(frame);
   if (mode === 'unknown-system') send({type:'system',subtype:'fixture_unknown',content:'private response content'});
@@ -218,11 +221,16 @@ test('Claude accepts the status lines newer versions send around a turn', async 
   assert.deepEqual(await runAutoPromptModel(f.request, f.dependencies), DECISION);
   const after = await fixture(t, 'claude', 'status-after-result', CLAUDE_STATUS.slice(-1));
   assert.deepEqual(await runAutoPromptModel(after.request, after.dependencies), DECISION);
-  const [commands, status, settled, state, notification] = CLAUDE_STATUS;
+  // Claude Code 2.1.290 sends ui_invalidate before init.
+  const before = await fixture(t, 'claude', 'status-before-init', CLAUDE_STATUS.slice(-2));
+  assert.deepEqual(await runAutoPromptModel(before.request, before.dependencies), DECISION);
+  const [commands, status, settled, state, notification, , , invalidate] = CLAUDE_STATUS;
   for (const frame of [
     { ...commands, commands: 'review' }, { ...commands, commands: [{ description: 'No name' }] },
     { ...status, status: 'running-tools' }, { ...status, status: 'compacting' }, { ...settled, compact_result: 'success' }, { ...settled, compact_error: 'Too long.' },
     { ...state, state: 'requires_action' }, { ...notification, text: {} },
+    { ...invalidate, event: 'ui.scroll' }, { ...invalidate, instances: 'all' }, { ...invalidate, instances: [{ surface: 'fixture-surface', component: 'fixture' }] },
+    { ...invalidate, subtype: 'ui_toast', text: 'Plugin output.' },
     { ...status, subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 1000 } },
     { ...status, subtype: 'informational', content: 'Hook output.', level: 'info' },
     { ...status, subtype: 'memory_recall', mode: 'select', memories: [{ path: '/private/memory.md', scope: 'personal' }] },
