@@ -45,7 +45,7 @@ const CLAUDE_RETRY_ERRORS = new Set([
   'rate_limit', 'overloaded', 'invalid_request', 'model_not_found', 'server_error', 'unknown', 'max_output_tokens',
 ]);
 
-// Progress and status lines Claude Code's SDK schema (2.1.263 to 2.1.281) documents for any turn. They neither run
+// Progress and status lines Claude Code's SDK schema (2.1.263 to 2.1.290) documents for any turn. They neither run
 // tools nor complete a decision; the final result is still required.
 function isClaudeRoutingProgress(frame: Record<string, any>): boolean {
   // A liveness heartbeat with no payload, which receivers must ignore.
@@ -65,6 +65,12 @@ function isClaudeRoutingProgress(frame: Record<string, any>): boolean {
     && frame.compact_result === undefined && frame.compact_error === undefined;
   if (frame.subtype === 'session_state_changed') return frame.state === 'idle' || frame.state === 'running';
   if (frame.subtype === 'notification') return typeof frame.key === 'string' && typeof frame.text === 'string';
+  // From 2.1.290 every print-mode run opens with a notice that the hooks engine's `ui.render` output changed, telling a
+  // remote surface to redraw, optionally naming the drawn instances. It runs nothing and the model never reads it.
+  if (frame.subtype === 'ui_invalidate') return frame.event === 'ui.render'
+    && (frame.instances === undefined || Array.isArray(frame.instances) && frame.instances.every((instance: unknown) =>
+      record(instance) && typeof instance.surface === 'string' && typeof instance.component === 'string'
+        && typeof instance.instance_id === 'string'));
   if (frame.subtype === 'api_retry') return Number.isSafeInteger(frame.attempt)
     && Number.isSafeInteger(frame.max_retries) && Number.isSafeInteger(frame.retry_delay_ms)
     && (frame.error_status === null || Number.isSafeInteger(frame.error_status))

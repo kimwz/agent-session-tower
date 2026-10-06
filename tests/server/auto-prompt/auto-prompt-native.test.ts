@@ -23,6 +23,12 @@ const CLAUDE_STATUS = [
   { type: 'system', subtype: 'notification', key: 'fixture', text: 'Synthetic notice.', priority: 'low' },
   { type: 'system', subtype: 'session_state_changed', state: 'idle' },
 ].map(frame => ({ ...frame, uuid: '11111111-1111-4111-8111-111111111111', session_id: 'fixture-session' }));
+// Claude Code 2.1.290 opens every run, before init, with the first; the hooks engine can name the drawn instances.
+const CLAUDE_UI_INVALIDATE = [
+  { type: 'system', subtype: 'ui_invalidate', event: 'ui.render' },
+  { type: 'system', subtype: 'ui_invalidate', event: 'ui.render', instances: [{ surface: 'fixture-surface', component: 'fixture', instance_id: 'fixture-1' }] },
+].map(frame => ({ ...frame, uuid: '11111111-1111-4111-8111-111111111111', session_id: 'fixture-session' }));
+const CLAUDE_NOTICES = [...CLAUDE_STATUS, ...CLAUDE_UI_INVALIDATE];
 
 async function fixture(t: TestContext, provider: 'claude' | 'codex' = 'codex', mode = 'success', progress: object[] = []) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-native-router-'));
@@ -49,6 +55,7 @@ else if (mode === 'oversized') process.stdout.write('x'.repeat(1000001));
 else if (mode === 'stderr') process.stderr.write('private'.repeat(10000));
 else if (mode === 'malformed') process.stdout.write('not JSON');
 else if (provider === 'claude') {
+  if (mode === 'status-before-init') for (const frame of JSON.parse(process.env.ROUTER_PROGRESS)) send(frame);
   send({type:'system', subtype:'init', tools: mode === 'tools' ? ['Bash'] : ['StructuredOutput'], mcp_servers:[]});
   for (const frame of JSON.parse(process.env.ROUTER_PROGRESS)) send(frame);
   if (mode === 'unknown-system') send({type:'system',subtype:'fixture_unknown',content:'private response content'});
@@ -204,7 +211,7 @@ test('Claude accepts documented retry and thinking progress before and between r
   ]);
   assert.deepEqual(await runAutoPromptModel(f.request, f.dependencies), DECISION);
 });
-for (const [label, frames] of [['progress', CLAUDE_PROGRESS], ['status lines', CLAUDE_STATUS]] as const) {
+for (const [label, frames] of [['progress', CLAUDE_PROGRESS], ['status lines', CLAUDE_NOTICES]] as const) {
   for (const mode of ['incomplete', 'missing-structured', 'error-result', 'tool-call', 'unknown-system']) {
     test(`Claude ${label} cannot hide ${mode}`, async t => {
       const f = await fixture(t, 'claude', mode, frames);
@@ -214,15 +221,20 @@ for (const [label, frames] of [['progress', CLAUDE_PROGRESS], ['status lines', C
   }
 }
 test('Claude accepts the status lines newer versions send around a turn', async t => {
-  const f = await fixture(t, 'claude', 'success', [{ type: 'keep_alive' }, ...CLAUDE_STATUS]);
+  const f = await fixture(t, 'claude', 'success', [{ type: 'keep_alive' }, ...CLAUDE_NOTICES]);
   assert.deepEqual(await runAutoPromptModel(f.request, f.dependencies), DECISION);
   const after = await fixture(t, 'claude', 'status-after-result', CLAUDE_STATUS.slice(-1));
   assert.deepEqual(await runAutoPromptModel(after.request, after.dependencies), DECISION);
+  const before = await fixture(t, 'claude', 'status-before-init', CLAUDE_UI_INVALIDATE);
+  assert.deepEqual(await runAutoPromptModel(before.request, before.dependencies), DECISION);
   const [commands, status, settled, state, notification] = CLAUDE_STATUS;
+  const [, invalidate] = CLAUDE_UI_INVALIDATE;
   for (const frame of [
     { ...commands, commands: 'review' }, { ...commands, commands: [{ description: 'No name' }] },
     { ...status, status: 'running-tools' }, { ...status, status: 'compacting' }, { ...settled, compact_result: 'success' }, { ...settled, compact_error: 'Too long.' },
     { ...state, state: 'requires_action' }, { ...notification, text: {} },
+    { ...invalidate, event: 'ui.scroll' }, { ...invalidate, instances: 'all' }, { ...invalidate, instances: [{ surface: 'fixture-surface', component: 'fixture' }] },
+    { ...invalidate, subtype: 'ui_toast', text: 'Plugin output.' },
     { ...status, subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 1000 } },
     { ...status, subtype: 'informational', content: 'Hook output.', level: 'info' },
     { ...status, subtype: 'memory_recall', mode: 'select', memories: [{ path: '/private/memory.md', scope: 'personal' }] },
@@ -230,6 +242,8 @@ test('Claude accepts the status lines newer versions send around a turn', async 
     const refused = await fixture(t, 'claude', 'success', [frame]);
     await assert.rejects(runAutoPromptModel(refused.request, refused.dependencies), /unsupported routing event/, JSON.stringify(frame));
   }
+  const early = await fixture(t, 'claude', 'status-before-init', [{ ...invalidate, event: 'ui.scroll' }]);
+  await assert.rejects(runAutoPromptModel(early.request, early.dependencies), /unsupported routing event/);
 });
 test('Claude rejects malformed progress and execution events', async t => {
   const invalid = [
