@@ -51,7 +51,7 @@ export function MasterSettingsView({ token, overview, onNewSession }: { token: s
       <VoicePicker token={token} voices={voices} current={(settings.voice ?? DEFAULT_MASTER_VOICE).voiceId} model={(settings.voice ?? DEFAULT_MASTER_VOICE).model} rate={(settings.voice ?? DEFAULT_MASTER_VOICE).playbackRate ?? 1} busy={busy} onChoose={voiceId => void voice({ voiceId })} onRate={playbackRate => void voice({ playbackRate })} />
       <label className="master-field">{words('읽어 주기 모델', 'Reading model')}
         <select value={(settings.voice ?? DEFAULT_MASTER_VOICE).model} disabled={busy} onChange={event => void voice({ model: event.target.value as MasterVoiceSettings['model'] })}>
-          {MASTER_TTS_MODELS.map(model => <option key={model} value={model}>{model === 'eleven_v3_conversational' ? words('v3 대화형 (빠름, 추천)', 'v3 conversational (fast, recommended)') : model === 'eleven_v3' ? words('v3 (표현력, 느림, 두 배 비쌈)', 'v3 (expressive, slower, twice the price)') : words('flash v2.5 (가장 빠름, 밝은 말투 없음)', 'flash v2.5 (fastest, no bright tone)')}</option>)}
+          {MASTER_TTS_MODELS.map(model => <option key={model} value={model}>{model === 'eleven_v4_turbo' ? words('v4 터보 (빠름, 추천)', 'v4 Turbo (fast, recommended)') : model === 'eleven_v3_conversational' ? words('v3 대화형 (빠름)', 'v3 conversational (fast)') : model === 'eleven_v3' ? words('v3 (표현력, 느림, 두 배 비쌈)', 'v3 (expressive, slower, twice the price)') : words('flash v2.5 (가장 빠름, 밝은 말투 없음)', 'flash v2.5 (fastest, no bright tone)')}</option>)}
         </select>
       </label>
       <label className="master-field">{words('말 끝으로 볼 멈춤 (밀리초, 600–3000)', 'Pause that ends what you say (ms, 600–3000)')}

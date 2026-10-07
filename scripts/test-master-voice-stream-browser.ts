@@ -64,8 +64,8 @@ let receiptOrder = 0;
 try {
   const labs = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
-    if (req.method === 'POST' && req.url?.includes('/text-to-speech/')) {
-      const call = { text: JSON.parse(raw).text.replace(/^\[[a-z]+\] /, ''), at: Date.now() } as typeof calls[number];
+    if (req.method === 'POST' && req.url?.startsWith('/v1/text-to-dialogue/stream')) {
+      const call = { text: JSON.parse(raw).inputs[0].text.replace(/^\[[a-z]+\] /, ''), at: Date.now() } as typeof calls[number];
       calls.push(call); const index = calls.length;
       res.once('finish', () => { call.responseEndedAt = Date.now(); });
       res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'history-item-id': `fixture-${index}` });

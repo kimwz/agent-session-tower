@@ -1,4 +1,5 @@
 import { TowerError } from '../../shared/errors.js';
+import { ttsModel } from './tts-models.js';
 /**
  * The only code that knows ElevenLabs: single-use tokens for the page's own speech-to-text connection, streaming
  * text-to-speech, the account's voices, and removing what text-to-speech leaves in the account's history. The key
@@ -72,14 +73,17 @@ export class ElevenLabs {
   }
 
   /**
-   * Reads text aloud: mp3 chunks as ElevenLabs makes them. What it keeps in the account's history is removed once
-   * it can be (a request not to log it is ignored on ordinary plans).
+   * Reads text aloud: mp3 chunks as ElevenLabs makes them, the same 128 kbps mp3 from either request. What it keeps in
+   * the account's history is removed once it can be (a request not to log it is ignored on ordinary plans).
    */
   async *speak(text: string, voiceId: string, model: string, signal: AbortSignal): AsyncGenerator<Buffer> {
-    const response = await this.fetcher(`${this.apiBase}/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream?output_format=mp3_44100_128&enable_logging=false`, {
-      method: 'POST', headers: { ...this.headers(), 'Content-Type': 'application/json' }, signal,
-      body: JSON.stringify({ text, model_id: model, language_code: 'ko' }),
-    });
+    const query = 'output_format=mp3_44100_128&enable_logging=false';
+    // Eleven v4 is offered through Text to Dialogue: one line in the one voice. A dialogue request is reliable up to
+    // 2,000 characters; each part Tower sends stays within that (tests/master/tts-models.test.ts).
+    const [url, body] = ttsModel(model).request === 'dialogue'
+      ? [`${this.apiBase}/v1/text-to-dialogue/stream?${query}`, { inputs: [{ text, voice_id: voiceId }], model_id: model, language_code: 'ko' }]
+      : [`${this.apiBase}/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream?${query}`, { text, model_id: model, language_code: 'ko' }];
+    const response = await this.fetcher(url, { method: 'POST', headers: { ...this.headers(), 'Content-Type': 'application/json' }, signal, body: JSON.stringify(body) });
     if (!response.ok || !response.body) {
       const detail = await response.text().catch(() => '');
       throw new Error(`읽어 주기에 실패했습니다 (HTTP ${response.status})${detail ? `: ${detail.slice(0, 200)}` : ''}`);
