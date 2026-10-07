@@ -27,6 +27,10 @@ export function isLoopbackAddress(address: string): boolean {
   try { const ip = canonicalIp(address); return ip === '::1' || (isIP(ip) === 4 && ip.startsWith('127.')); }
   catch { return false; }
 }
+/** A URL hostname that names this computer itself: `localhost` or a loopback address, IPv6 in brackets or not. */
+export function isLoopbackHostname(hostname: string): boolean {
+  return hostname === 'localhost' || isLoopbackAddress(hostname.replace(/^\[|\]$/g, ''));
+}
 /** Sign-ins are kept and revoked by this digest; the token itself exists only in the browser's cookie. */
 export function sessionKey(token: string): string { return createHash('sha256').update(token).digest('hex'); }
 function derive(password: string, salt: string): Promise<Buffer> {

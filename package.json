@@ -1,6 +1,6 @@
 {
   "name": "agent-session-tower",
-  "version": "1.112.0",
+  "version": "1.113.0",
   "description": "Keep using your Claude Code and Codex harnesses. Monitor and manage multiple agent sessions in a web UI, locally or remotely.",
   "type": "module",
   "license": "MIT",
@@ -80,6 +80,7 @@
   },
   "dependencies": {
     "@noble/hashes": "2.0.1",
+    "@playwright/mcp": "0.0.83",
     "croner": "10.0.1",
     "ws": "^8.21.3",
     "zod": "4.6.5"

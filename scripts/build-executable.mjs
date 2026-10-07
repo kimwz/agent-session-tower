@@ -20,6 +20,8 @@ await build({
   banner: { js: "import { createRequire as monitorCreateRequire } from 'node:module'; const require = monitorCreateRequire(import.meta.url);" },
   // Keep the single executable independent of optional native ws accelerators.
   define: { 'process.env.WS_NO_BUFFER_UTIL': '"1"', 'process.env.WS_NO_UTF_8_VALIDATE': '"1"' },
+  // Playwright needs its own files and browsers; the executable offers no browser tools (see server/browser/tools.ts).
+  external: ['@playwright/mcp', 'playwright', 'playwright-core'],
 });
 
 const assets = {};

@@ -2,6 +2,7 @@ import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
 import { subscriptionOnly } from '../runs/subscription.js';
 import type { Run, Session } from '../../shared/types.js';
+import { browserTools, type BrowserEnvironment, type BrowserTools } from '../browser/tools.js';
 import type { RunManager } from '../runs/manager.js';
 import { CALLER_CAPABILITY_ENV, NO_RUN_TOOLS, type RunTools, type SessionMcpServer, type SessionMcpServers } from '../runs/session-mcp.js';
 import type { SlackService } from '../slack/service.js';
@@ -24,25 +25,35 @@ function toolServer(stateDir: string, mode: '--tower-mcp' | '--slack-mcp', extra
   return { command: build.command, args: [...build.args, mode, stateDir, ...extra], env: { TOWER_MCP_CAPABILITY: capability } };
 }
 
+/** The browsers a turn in this conversation gets; a conversation that holds outside content gets fewer (see browser/tools.ts). */
+export function sessionBrowsers(stateDir: string, runs: Pick<RunManager, 'sessionOrigin'>, session: Session, environment?: BrowserEnvironment): BrowserTools {
+  return browserTools(thisBuild(), stateDir, session.provider, runs.sessionOrigin(session.id)?.untrustedInput === true, environment);
+}
+
 /**
  * Which tools a turn receives. Slack coordinator turns get their conversation tools. A turn the owner started
  * from Tower, here or from a controlling computer, gets Tower's tools, unless its conversation holds outside content
  * or its origin cannot be proven; a controlling computer's turn then sees only what that computer may see.
  * Trigger, Slack and agent-started turns never get Tower's tools. Every turn started here also gets the read-only session
  * lookups, which Claude Code and Codex elsewhere on this computer get from their user configuration. The owner's turns in
- * the master's folder also get the master's page tools.
+ * the master's folder also get the master's page tools. Every turn, whoever started it, gets the browsers
+ * (see browser/tools.ts).
  */
-export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp'>; github?: Pick<GitHubCoordinator, 'sessionWorkflow'>; capabilities: CapabilityRegistry; secrets?: { initialized(): boolean } }) {
+export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp'>; github?: Pick<GitHubCoordinator, 'sessionWorkflow'>; capabilities: CapabilityRegistry; secrets?: { initialized(): boolean }; browsers?: () => BrowserEnvironment }) {
   const lookups = { [SESSION_TOOLS_SERVER]: sessionToolServer(options.stateDir, thisBuild()) };
+  const withBrowsers = (session: Session, tools: RunTools): RunTools => {
+    const browsers = sessionBrowsers(options.stateDir, options.runs, session, options.browsers?.());
+    return { ...tools, servers: { ...tools.servers, ...browsers.servers }, claudeChrome: browsers.claudeChrome };
+  };
   return (run: Run, session: Session): RunTools => {
     const tools = resolve(run, session);
-    if (run.origin?.controllerId) return tools;
+    if (run.origin?.controllerId) return withBrowsers(session, tools);
     const env = { [CALLER_CAPABILITY_ENV]: options.capabilities.issue({ kind: 'caller-run', runId: run.id, sessionId: run.sessionId }) };
     // A global HTTP MCP connection has no per-turn environment. Override it only where owner tools already belong.
     const local: SessionMcpServers = tools.towerTools === 'attached' && !subscriptionOnly(options.stateDir, session.cwd)
       ? { tower_local: { ...thisBuild(), args: [...thisBuild().args, 'mcp', '--state-dir', options.stateDir], env } } : {};
     // Given here too, so they work even where the user configuration does not name them.
-    return { ...tools, env, servers: { ...tools.servers, ...local, ...lookups } };
+    return withBrowsers(session, { ...tools, env, servers: { ...tools.servers, ...local, ...lookups } });
   };
   function resolve(run: Run, session: Session): RunTools {
     const origin = run.origin;
