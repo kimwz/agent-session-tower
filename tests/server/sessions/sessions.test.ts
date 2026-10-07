@@ -63,6 +63,7 @@ test('retention metadata includes internal guardians and follows the latest even
   assert.equal(service.list().length, 0, 'guardian stays excluded from normal discovery');
   const first = service.retentionRecords();
   assert.equal(first.complete, true);
+  assert.deepEqual(first.issues, []);
   assert.equal(first.records.length, 1);
   assert.equal(first.records[0].internal, true);
   assert.equal(first.records[0].latestTaskEndedAt, '2026-01-01T00:00:00.000Z');
@@ -77,6 +78,7 @@ test('retention metadata includes internal guardians and follows the latest even
   await rm(join(codexHome, 'sessions'), { recursive: true });
   await service.refresh();
   assert.equal(service.retentionRecords().complete, false, 'lost native history cannot establish inactivity');
+  assert.ok(service.retentionRecords().issues.includes('native-history-incomplete:codex'));
 });
 
 for (const provider of ['claude', 'codex'] as const) {

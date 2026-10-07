@@ -8,12 +8,13 @@ import type { RetentionObservation, RetentionRecord } from './policy.js';
 
 export interface NativeRetentionObservation {
   complete: boolean;
+  issues?: string[];
   records: { session: Session; internal: boolean; fingerprint: string; lastActivityAt?: string; latestTaskEndedAt?: string }[];
 }
 interface InactiveObservation { fingerprint: string; since: string; observedAt: number }
 export interface RetentionObserverOptions {
   stateDir: string;
-  snapshot: () => NativeRetentionObservation;
+  snapshot: () => NativeRetentionObservation | Promise<NativeRetentionObservation>;
   reconcile: (sessions: Session[]) => Session[];
   runs: () => Run[];
   settled: () => ReadonlySet<string>;
@@ -66,8 +67,10 @@ export class RetentionObserver {
     return task;
   }
   private async readObservation(): Promise<RetentionObservation> {
+    let snapshot: NativeRetentionObservation;
+    try { snapshot = await this.options.snapshot(); }
+    catch (error) { this.inactive.clear(); this.restarted = true; throw error; }
     const now = this.options.now?.() ?? Date.now();
-    const snapshot = this.options.snapshot();
     const sessions = this.options.reconcile(snapshot.records.map(record => record.session));
     const byNative = new Map(sessions.map(session => [`${session.provider}:${session.nativeId}`, session]));
     const aliases = new Map<string, string>();
@@ -117,6 +120,6 @@ export class RetentionObserver {
     try { await writePrivateJson(this.path, JSON.stringify({ version: 1, entries: [...current] }), { syncDirectory: true }); }
     catch (error) { this.inactive.clear(); this.restarted = true; throw error; }
     this.inactive = current; this.restarted = false;
-    return { now, migratedAt: 0, complete: snapshot.complete, records, protectedIds };
+    return { now, migratedAt: 0, complete: snapshot.complete, issues: snapshot.issues, records, protectedIds };
   }
 }

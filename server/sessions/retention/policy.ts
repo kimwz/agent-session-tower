@@ -21,6 +21,7 @@ export interface RetentionObservation {
   now: number;
   migratedAt: number;
   complete: boolean;
+  issues?: string[];
   records: RetentionRecord[];
   protectedIds: ReadonlySet<string>;
   blockedIds?: ReadonlySet<string>;

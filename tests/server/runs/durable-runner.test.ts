@@ -175,6 +175,27 @@ test('a failed initial closure reload does not block snapshot or cancel and the 
   await writeFile(path, saved);
 });
 
+test('snapshot polling alone publishes closure recovery after its initial reload failed', async t => {
+  const f = await fixture(true); t.after(f.cleanup);
+  t.mock.method(console, 'error', () => {});
+  const original = f.closedSessions!.start.bind(f.closedSessions);
+  let attempts = 0;
+  let allowRecovery!: () => void;
+  const recovery = new Promise<void>(resolve => { allowRecovery = resolve; });
+  t.mock.method(f.closedSessions!, 'start', async () => {
+    if (++attempts === 1) throw new Error('Fixture first reload failed');
+    await recovery;
+    return original();
+  });
+  const client = await f.connect(10);
+  assert.equal(client.applyClosed(f.session).closed, undefined);
+  const legacy = new ClosedSessionStore(f.stateDir); await legacy.start(); await legacy.set(f.session, true);
+  allowRecovery();
+  await until(() => client.applyClosed(f.session).closed === true);
+  assert.equal(attempts, 2, 'a recovered readiness check is retained after its revision is published');
+  assert.equal(f.starts(), 0, 'no run, cancellation or other mutation is needed to invalidate the snapshot');
+});
+
 test('unsupported closure and retention operations fail before writing or dispatching', async t => {
   const f = await fixture(); t.after(f.cleanup);
   const client = await f.connect();

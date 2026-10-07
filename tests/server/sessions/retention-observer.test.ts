@@ -29,8 +29,9 @@ test('unknown termination needs uninterrupted fingerprint observations; restart 
   assert.equal((await observer.observe()).records[0]!.inactiveSince, first);
   snapshot.records[0]!.fingerprint = 'v2';
   assert.equal((await observer.observe()).records[0]!.inactiveSince, new Date(now).toISOString());
-  now += 3_600_000; snapshot.complete = false;
+  now += 3_600_000; snapshot.complete = false; snapshot.issues = ['native-history-incomplete:claude'];
   const incomplete = await observer.observe(); assert.equal(incomplete.complete, false); assert.equal(incomplete.records[0]!.inactiveSince, undefined);
+  assert.deepEqual(incomplete.issues, ['native-history-incomplete:claude']);
   snapshot.complete = true; now += 3_600_000;
   const afterGap = (await observer.observe()).records[0]!.inactiveSince;
   now += 3_600_000;
@@ -82,4 +83,56 @@ test('invalid retained observations fail closed and preserve the corrupt file fo
     reconcile: value => value, runs: () => [], settled: () => new Set(), protectedIds: () => [] });
   await assert.rejects(observer.start());
   assert.equal(await readFile(path, 'utf8'), '{broken fixture');
+}));
+
+test('a normal asynchronous scan finishes before inactivity, clock and pending-run state are observed', async () => fixture(async stateDir => {
+  let now = Date.parse('2026-10-01T00:00:00Z');
+  const snapshot: NativeRetentionObservation = { complete: true, records: [{ session: session('child', 'claude:parent'), internal: false, fingerprint: 'stable' }] };
+  let scan: Promise<void> = Promise.resolve();
+  let resumeScan!: () => void;
+  let requested!: () => void;
+  let pendingRuns: Run[] = [];
+  const observer = new RetentionObserver({ stateDir, now: () => now,
+    snapshot: async () => { requested?.(); await scan; return snapshot; }, reconcile: value => value,
+    runs: () => pendingRuns, settled: () => new Set(), protectedIds: () => [], projectIdentity: async () => undefined });
+  await observer.start();
+  const original = (await observer.observe()).records[0]!.inactiveSince;
+  now += 3_600_000;
+  scan = new Promise<void>(resolve => { resumeScan = resolve; });
+  const entered = new Promise<void>(resolve => { requested = resolve; });
+  let finished = false;
+  const next = observer.observe().then(value => { finished = true; return value; });
+  await entered;
+  await Promise.resolve(); assert.equal(finished, false, 'a scan in progress is awaited rather than persisted as incomplete');
+  now += 60_000; resumeScan();
+  const completed = await next;
+  assert.equal(completed.complete, true);
+  assert.equal(completed.now, now, 'clock is taken after the completed scan');
+  assert.equal(completed.records[0]!.inactiveSince, original, 'unchanged records retain their continuous inactivity');
+  scan = new Promise<void>(resolve => { resumeScan = resolve; });
+  const enteringAgain = new Promise<void>(resolve => { requested = resolve; });
+  const queuedDuringScan = observer.observe(); await enteringAgain;
+  pendingRuns = [{ id: 'new-run', sessionId: 'claude:child', status: 'queued' } as Run];
+  resumeScan();
+  const protectedObservation = await queuedDuringScan;
+  assert.ok(protectedObservation.protectedIds.has('claude:child'), 'run protection is also taken after scan completion');
+  assert.equal(protectedObservation.records[0]!.inactiveSince, undefined);
+}));
+
+test('a rejected scan breaks continuous inactive observation instead of extending an old clock', async () => fixture(async stateDir => {
+  let now = Date.parse('2026-10-01T00:00:00Z');
+  let fail = false;
+  const snapshot: NativeRetentionObservation = { complete: true, records: [{ session: session('child', 'claude:parent'), internal: false, fingerprint: 'stable' }] };
+  const observer = new RetentionObserver({ stateDir, now: () => now, snapshot: async () => { if (fail) throw new Error('fixture scan failure'); return snapshot; },
+    reconcile: value => value, runs: () => [], settled: () => new Set(), protectedIds: () => [], projectIdentity: async () => undefined });
+  await observer.start(); const original = (await observer.observe()).records[0]!.inactiveSince;
+  now += 3_600_000; fail = true;
+  const messages: unknown[][] = []; const previous = console.error;
+  console.error = (...args) => { messages.push(args); };
+  try { await assert.rejects(observer.observe(), /fixture scan failure/); } finally { console.error = previous; }
+  assert.ok(messages.some(args => String(args[0]).includes('fixture scan failure')));
+  fail = false; now += 60_000;
+  const recovered = await observer.observe();
+  assert.notEqual(recovered.records[0]!.inactiveSince, original);
+  assert.equal(recovered.records[0]!.inactiveSince, new Date(now).toISOString());
 }));

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, stat, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, stat, realpath, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Session } from '../../../shared/types.js';
@@ -71,7 +71,7 @@ test('private compressed backup verifies, preserves originals and survives expor
   const imported = new RetentionArchive(join(path, 'other-cold'), [native]); await imported.start();
   assert.equal((await imported.import(join(path, 'export'))).id, 'operation');
   await imported.verify('operation');
-  await assert.rejects(imported.import(join(path, 'export')), /already exists/);
+  assert.equal((await imported.import(join(path, 'export'))).id, 'operation'); // Identical verified import is idempotent.
   await writeFile(join(path, 'other-cold/operation/file-0.gz'), 'corrupt');
   await assert.rejects(imported.verify('operation'));
 }));
@@ -138,7 +138,7 @@ test('missing backups are exposed after restart and block further removal', asyn
     capability: () => ({ status: 'supported' }), files: async () => [], reserve: async () => { reserves++; return undefined; },
   } });
   await service.start();
-  try { const summary = await service.cycle(); assert.equal(summary.failures, 1); assert.equal(summary.archived, 0); assert.equal(store.get('lost')?.phase, 'missing-backup'); await assert.rejects(service.archiveSession('child'), /further original removal is blocked/); assert.equal(reserves, 0); }
+  try { const summary = await service.cycle(); assert.equal(summary.failures, 1); assert.equal(summary.archived, 0); assert.equal(store.get('lost')?.phase, 'archived'); assert.match(store.get('lost')?.backupError || '', /ENOENT/); await assert.rejects(service.archiveSession('child'), /further original removal is blocked/); await assert.rejects(service.restore('lost'), /further original removal is blocked/); assert.equal(reserves, 0); }
   finally { await service.quiesce(); }
 }));
 test('terminal operation identity survives inactive observer resets and stale unbacked metadata is pruned', async () => fixture(async path => {
@@ -161,7 +161,7 @@ test('worker initialization returns before cold verification; removal and restor
   await service.start(); assert.equal(verifyCalls, 0); assert.equal(service.overview().verification, 'pending');
   await assert.rejects(service.archiveSession('child'), /verification is pending/); await assert.rejects(service.restore('fixture-backup'), /verification is pending/);
   const checking = service.cycle(); await new Promise(resolve => setImmediate(resolve)); assert.equal(verifyCalls, 1); assert.equal(service.overview().verification, 'running');
-  release(); await checking; assert.equal(service.overview().verification, 'complete'); assert.equal(store.get('fixture-backup')?.phase, 'missing-backup'); await service.quiesce();
+  release(); await checking; assert.equal(service.overview().verification, 'complete'); assert.equal(store.get('fixture-backup')?.phase, 'backup-verified'); assert.match(store.get('fixture-backup')?.backupError || '', /missing fixture backup/); await service.quiesce();
 }));
 test('rejected nonempty export directory retains its original permissions', async () => fixture(async path => {
   const native = join(path, 'native'); await mkdir(native); const source = join(native, 'child'); await writeFile(source, 'fixture');
@@ -171,4 +171,45 @@ test('rejected nonempty export directory retains its original permissions', asyn
   const target = join(path, 'existing'); await mkdir(target, { mode: 0o755 }); await writeFile(join(target, 'existing-file'), 'untouched'); const before = (await stat(target)).mode;
   await assert.rejects(archive.export('operation', target, { id: 'operation', candidate, phase: 'backup-verified', updatedAt: new Date(now).toISOString() }), /must be empty/);
   assert.equal((await stat(target)).mode, before); assert.equal(await readFile(join(target, 'existing-file'), 'utf8'), 'untouched');
+}));
+test('transient verification failures retry without losing the original phase; legacy missing state recovers conservatively', async () => fixture(async path => {
+  const native = join(path, 'native'); await mkdir(native); const source = join(native, 'child'); await writeFile(source, 'fixture');
+  const archive = new RetentionArchive(join(path, 'cold'), [native]); await archive.start(); const candidate = { rootId: 'child', ids: ['child'], reason: 'child-expired' as const, revisions: {} };
+  await archive.create('operation', candidate, [record('child', true)], [{ path: source, root: native, nativeId: 'child', provider: 'claude' }]);
+  const store = new RetentionStore(join(path, 'state')); await store.start(now - 10 * day); await store.put({ id: 'operation', candidate, phase: 'backup-verified', updatedAt: new Date(now).toISOString() });
+  const verify = archive.verify.bind(archive); let calls = 0; archive.verify = async id => { if (++calls === 1) throw new Error('transient fixture I/O'); return verify(id); };
+  const service = new RetentionService({ store, archive, onError: () => {}, observe: async () => observation([]), adapter: { capability: () => ({ status: 'blocked' }), files: async () => [], reserve: async () => undefined } }); await service.start();
+  try {
+    await service.cycle(); assert.equal(store.get('operation')?.phase, 'backup-verified'); assert.match(store.get('operation')?.backupError || '', /transient/); assert.equal(service.overview().backupOnly, 0);
+    await service.cycle(); assert.equal(calls, 2); assert.equal(store.get('operation')?.backupError, undefined); assert.equal(store.get('operation')?.phase, 'backup-verified'); assert.equal(service.overview().backupOnly, 1);
+  } finally { await service.quiesce(); }
+  await store.put({ ...store.get('operation')!, phase: 'missing-backup', error: 'legacy verification error' });
+  const legacy = new RetentionService({ store: new RetentionStore(join(path, 'state')), archive, observe: async () => observation([]), adapter: { capability: () => ({ status: 'blocked' }), files: async () => [], reserve: async () => undefined } }); await legacy.start();
+  try { await legacy.cycle(); assert.equal(legacy.overview().backupOnly, 1); assert.equal(legacy.overview().failures, 0); } finally { await legacy.quiesce(); }
+}));
+test('import resumes its private scratch, registers an already committed bundle and quarantines corruption without touching native records', async () => fixture(async path => {
+  const native = join(path, 'native'); await mkdir(native); const source = join(native, 'child'); await writeFile(source, 'fixture');
+  const archive = new RetentionArchive(join(path, 'cold'), [native]); await archive.start(); const candidate = { rootId: 'child', ids: ['child'], reason: 'child-expired' as const, revisions: {} };
+  const manifest = await archive.create('operation', candidate, [record('child', true)], [{ path: source, root: native, nativeId: 'child', provider: 'claude' }]);
+  const entry = { id: 'operation', candidate, phase: 'backup-verified' as const, updatedAt: new Date(now).toISOString() }; const exported = join(path, 'export'); await archive.export('operation', exported, entry);
+  await chmod(join(exported, 'manifest.json'), 0o644); await chmod(join(exported, 'export.json'), 0o640);
+  const originalMode = (await stat(join(exported, 'manifest.json'))).mode; const originalExportMode = (await stat(join(exported, 'export.json'))).mode;
+  const recovered = new RetentionArchive(join(path, 'recovered'), [native]); await recovered.start(); const scratch = join(path, 'recovered/operation-importing'); await mkdir(scratch, { mode: 0o700 }); await writeFile(join(scratch, 'file-0.gz'), 'interrupted'); await writeFile(join(scratch, 'import.json'), JSON.stringify(manifest));
+  await recovered.import(exported); await recovered.verify('operation');
+  const store = new RetentionStore(join(path, 'state')); const service = new RetentionService({ store, archive: recovered, observe: async () => observation([]), adapter: { capability: () => ({ status: 'blocked' }), files: async () => [], reserve: async () => undefined } }); await service.start();
+  try {
+    await service.importBundle(exported); assert.equal(store.get('operation')?.phase, 'backup-verified'); // Final rename had committed without a journal.
+    const before = await recovered.diskBytes(); await writeFile(join(path, 'recovered/operation/file-0.gz'), 'corrupt'); await service.importBundle(exported); await recovered.verify('operation');
+    const directories = await (await import('node:fs/promises')).readdir(join(path, 'recovered')); const quarantine = directories.find(name => name.startsWith('operation-quarantine-')); assert.ok(quarantine); assert.equal(await readFile(join(path, 'recovered', quarantine!, 'file-0.gz'), 'utf8'), 'corrupt');
+    assert.equal((await recovered.list()).length, 1); assert.ok(await recovered.diskBytes() > before); assert.equal(await readFile(source, 'utf8'), 'fixture');
+    assert.equal((await stat(join(exported, 'manifest.json'))).mode, originalMode); assert.equal((await stat(join(exported, 'export.json'))).mode, originalExportMode);
+    const conflicting = structuredClone(manifest); conflicting.sessions[0].title = 'different snapshot'; await writeFile(join(exported, 'manifest.json'), JSON.stringify(conflicting));
+    await assert.rejects(service.importBundle(exported), /conflicts with another bundle/); assert.deepEqual(await recovered.verify('operation'), manifest);
+  } finally { await service.quiesce(); }
+}));
+test('incomplete observation exposes its reason and explicitly rejects backup and archive without source changes', async () => fixture(async path => {
+  const native = join(path, 'native'); await mkdir(native); const store = new RetentionStore(join(path, 'state')); await store.start(now - 10 * day);
+  const service = new RetentionService({ store, archive: new RetentionArchive(join(path, 'cold'), [native]), onError: () => {}, observe: async () => observation([record('parent'), record('child', true)], { complete: false, issues: ['native fixture root could not be read'] }), adapter: { capability: () => ({ status: 'blocked' }), files: async () => [], reserve: async () => undefined } }); await service.start();
+  try { const result = await service.cycle(); assert.equal(result.observationComplete, false); assert.equal(result.deferredReasons?.['incomplete-observation'], 2); assert.deepEqual(result.observationIssues, ['native fixture root could not be read']); await assert.rejects(service.backup('child'), /native fixture root/); await assert.rejects(service.archiveSession('child'), /native fixture root/); assert.equal(store.list().length, 0); }
+  finally { await service.quiesce(); }
 }));

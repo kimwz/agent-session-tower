@@ -189,7 +189,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   const dispatch = async (method: string, args: unknown[]) => {
     if (options.closedSessions) {
       // The predecessor's web may have completed a legacy closure write during startup.
-      closureReady ??= options.closedSessions.start().catch(error => {
+      closureReady ??= options.closedSessions.start().then(() => { changed(); }).catch(error => {
         closureReady = undefined;
         console.error(`Session closure reload failed; execution controls remain available and the next request will retry: ${error instanceof Error ? error.message : String(error)}`);
       });
@@ -888,7 +888,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const nativeRoots = { claude: [join(sessions.claudeHome, 'projects')], codex: [join(sessions.codexHome, 'sessions'), join(sessions.codexHome, 'archived_sessions')] };
     const retentionStore = new RetentionStore(join(stateDir, 'retention'));
     const retentionArchive = new RetentionArchive(join(stateDir, 'retention-cold'), [...nativeRoots.claude, ...nativeRoots.codex]);
-    const observer = new RetentionObserver({ stateDir, snapshot: () => sessions.retentionRecords(),
+    const observer = new RetentionObserver({ stateDir, snapshot: async () => { await sessions.refresh(); return sessions.retentionRecords(); },
       reconcile: native => runs.sessionList(native), runs: () => runs.list(), settled: () => runs.settledRunIds(),
       protectedIds: () => {
         const ids = new Set(coordinators());

@@ -1,6 +1,7 @@
 import { constants } from 'node:fs';
 import { open, lstat, readdir, rm, rename } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { Transform, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createGzip, createGunzip } from 'node:zlib';
@@ -47,6 +48,16 @@ async function verifiedHash(path: string, maxBytes: number, consume?: (chunk: Bu
     } }));
     return { sha256: hash.digest('hex'), bytes };
   } finally { stream.destroy(); await file.close(); }
+}
+function damagedBackup(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  return code === 'ENOENT' || code === 'Z_DATA_ERROR' || code === 'Z_BUF_ERROR' || error instanceof SyntaxError
+    || (error instanceof Error && /^(Invalid cold |Cold bundle verification failed|Cold payload exceeds declared size)/.test(error.message));
+}
+async function readExternalJson(path: string): Promise<unknown> {
+  await existingSafePath(path); const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try { const info = await handle.stat(); if (!info.isFile() || info.size > 4_000_000) throw new Error('Invalid cold import metadata.'); return JSON.parse(await handle.readFile('utf8')); }
+  finally { await handle.close(); }
 }
 async function syncDirectory(path: string): Promise<void> { const handle = await open(path, constants.O_RDONLY); try { await handle.sync(); } finally { await handle.close(); } }
 
@@ -132,14 +143,21 @@ export class RetentionArchive {
     return { file, text: Buffer.concat(chunks).toString('utf8'), truncated: file.bytes > limitBytes };
   }
   async diskBytes(): Promise<number> {
-    let bytes = 0;
-    for (const manifest of await this.list()) for (const file of manifest.files) bytes += (await lstat(join(this.directory(manifest.id), file.name))).size;
-    return bytes;
+    const walk = async (path: string): Promise<number> => {
+      await existingSafePath(path); let bytes = 0;
+      for (const entry of await readdir(path, { withFileTypes: true })) {
+        if (entry.isSymbolicLink()) throw new Error('Unsafe cold disk entry.');
+        const item = join(path, entry.name);
+        if (entry.isDirectory()) bytes += await walk(item); else if (entry.isFile()) bytes += (await lstat(item)).size;
+      }
+      return bytes;
+    };
+    return walk(this.root);
   }
   async list(): Promise<RetentionManifest[]> {
     const manifests: RetentionManifest[] = [];
     for (const item of await readdir(this.root, { withFileTypes: true })) {
-      if (!item.isDirectory() || (item.name.endsWith('-writing') || item.name.endsWith('-importing'))) continue;
+      if (!item.isDirectory() || (item.name.endsWith('-writing') || item.name.endsWith('-importing') || /-quarantine-[a-f0-9]{8}$/.test(item.name))) continue;
       validateOperationId(item.name); manifests.push(await this.manifest(item.name));
     }
     return manifests;
@@ -157,22 +175,53 @@ export class RetentionArchive {
   }
   async import(source: string): Promise<RetentionJournalEntry> {
     await existingSafePath(source);
-    const manifest = validateManifest(await readPrivateJson(join(source, 'manifest.json'), 4_000_000));
-    const metadata = await readPrivateJson(join(source, 'export.json'), 4_000_000) as { version: number; journal: RetentionJournalEntry };
+    const manifest = validateManifest(await readExternalJson(join(source, 'manifest.json')));
+    const metadata = await readExternalJson(join(source, 'export.json')) as { version: number; journal: RetentionJournalEntry };
     if (metadata.version !== 1 || metadata.journal?.id !== manifest.id || !Array.isArray(metadata.journal.candidate?.ids)) throw new Error('Invalid cold export metadata.');
     // Imported original paths are descriptive only; the provider must authorize explicit restoration.
     for (const file of manifest.files) {
       const actual = await verifiedHash(join(source, file.name), file.bytes);
       if (actual.sha256 !== file.sha256 || actual.bytes !== file.bytes) throw new Error('Cold import verification failed.');
     }
-    try { await this.verify(manifest.id); throw new Error('Cold import identity already exists.'); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    let existing: RetentionManifest | undefined;
+    if (await this.exists(manifest.id)) {
+      try { existing = await this.manifest(manifest.id); }
+      catch (error) { if (!damagedBackup(error)) throw error; /* Damaged private metadata is preserved in quarantine below. */ }
+      if (existing && !isDeepStrictEqual(existing, manifest)) throw new Error('Cold import identity conflicts with another bundle.');
+      try { await this.verify(manifest.id); return metadata.journal; }
+      catch (error) { if (!damagedBackup(error)) throw error; /* A verified source can repair this exact private bundle; the old copy is preserved. */ }
+    }
     const temporary = this.directory(`${manifest.id}-importing`);
-    await privateDirectory(temporary);
-    if ((await readdir(temporary)).length) throw new Error('Cold import scratch is not empty.');
-    try { await this.copyBundle(source, temporary, manifest); await rename(temporary, this.directory(manifest.id)); await syncDirectory(this.root); }
-    catch (error) { await rm(temporary, { recursive: true, force: true }); throw error; }
+    await this.prepareImportScratch(temporary, manifest);
+    try {
+      await this.copyBundle(source, temporary, manifest);
+      if (await this.exists(manifest.id)) {
+        const quarantine = join(this.root, `${manifest.id}-quarantine-${randomUUID().slice(0, 8)}`);
+        await rename(this.directory(manifest.id), quarantine); await syncDirectory(this.root);
+      }
+      await rename(temporary, this.directory(manifest.id)); await syncDirectory(this.root);
+    } catch (error) { await rm(temporary, { recursive: true, force: true }); throw error; }
     return metadata.journal;
+  }
+  private async prepareImportScratch(path: string, manifest: RetentionManifest): Promise<void> {
+    try {
+      await existingSafePath(path); const info = await lstat(path);
+      if (!info.isDirectory() || (typeof process.getuid === 'function' && info.uid !== process.getuid()) || (info.mode & 0o077)) throw new Error('Unsafe cold import scratch.');
+      const expected = new Set(['manifest.json', 'import.json', ...manifest.files.map(file => file.name)]);
+      for (const item of await readdir(path, { withFileTypes: true })) if (!expected.has(item.name) || !item.isFile()) throw new Error('Unrecognized cold import scratch.');
+      try {
+        const marker = await readExternalJson(join(path, 'import.json'));
+        if (!isDeepStrictEqual(marker, manifest)) throw new Error('Cold import scratch belongs to another manifest.');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        try { if (!isDeepStrictEqual(await readExternalJson(join(path, 'manifest.json')), manifest)) throw new Error('Cold import scratch belongs to another manifest.'); }
+        catch (legacyError) { if ((legacyError as NodeJS.ErrnoException).code !== 'ENOENT') throw legacyError; }
+      }
+      // Reserved, private scratch contains only copies; the complete external source was verified first.
+      await rm(path, { recursive: true });
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    await privateDirectory(path);
+    await writePrivateJson(join(path, 'import.json'), JSON.stringify(manifest), { syncDirectory: true });
   }
   private async copyBundle(source: string, target: string, manifest: RetentionManifest): Promise<void> {
     for (const file of manifest.files) {

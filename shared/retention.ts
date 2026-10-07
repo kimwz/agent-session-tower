@@ -13,7 +13,8 @@ export interface RetentionManifest {
 export type RetentionPhase = 'planned' | 'backup-verified' | 'blocked-provider' | 'removing' | 'archived' | 'conflict' | 'missing-backup' | 'restored-awaiting-start';
 export interface RetentionJournalEntry {
   id: string; candidate: RetentionCandidate; phase: RetentionPhase; updatedAt: string;
-  error?: string; restoredAt?: string; restoreOperationId?: string;
+  error?: string;
+  backupError?: string; restoredAt?: string; restoreOperationId?: string;
 }
 export interface RetentionCapability { status: 'supported' | 'blocked'; reason?: string }
 
@@ -22,6 +23,9 @@ export interface RetentionOverview {
   lastCheckedAt?: string;
   metricError?: string;
   running: boolean;
+  observationComplete?: boolean;
+  deferredReasons?: Record<string, number>;
+  observationIssues?: string[];
   verification?: 'pending' | 'running' | 'complete';
   candidates: number;
   deferred: number;

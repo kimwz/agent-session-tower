@@ -62,6 +62,7 @@ export class SessionService extends EventEmitter {
   private readonly generations = new WeakMap<RecordState, number>();
   private generationCount = 0;
   private retentionComplete = false;
+  private retentionIssues: string[] = ['scan-incomplete'];
 
   constructor(options: SessionOptions = {}) {
     super();
@@ -98,10 +99,12 @@ export class SessionService extends EventEmitter {
   resume(): void { this.quiesced = false; }
   list(): Session[] { return [...this.index.values()].map((record) => ({ ...record.session })).sort(sortSessions); }
   /** Metadata only, including internal guardian records omitted from ordinary discovery. */
-  retentionRecords(): { complete: boolean; records: { session: Session; internal: boolean; fingerprint: string; lastActivityAt?: string; latestTaskEndedAt?: string }[] } {
+  retentionRecords(): { complete: boolean; issues: string[]; records: { session: Session; internal: boolean; fingerprint: string; lastActivityAt?: string; latestTaskEndedAt?: string }[] } {
     const chosen = new Map(this.index);
     for (const state of this.records.values()) if (state.internal && !chosen.has(state.session.id)) chosen.set(state.session.id, state);
     return { complete: this.retentionComplete && !this.scanning && !this.quiesced && this.diagnostics.length === 0,
+      issues: [...new Set([...(this.scanning ? ['scan-in-progress'] : []), ...(this.quiesced ? ['observer-paused'] : []),
+        ...this.retentionIssues, ...this.diagnostics.map(item => `native-record-read-error:${item.provider}`)])],
       records: [...chosen.values()].map(state => ({ session: { ...state.session }, internal: state.internal,
         fingerprint: `${state.ino}:${state.size}:${state.mtimeMs}:${state.offset}:${state.ordinal}`,
         ...(state.activityAt > 0 ? { lastActivityAt: new Date(state.activityAt).toISOString() } : {}),
@@ -123,6 +126,7 @@ export class SessionService extends EventEmitter {
   private async scan(): Promise<void> {
     this.scanning = true;
     this.retentionComplete = false;
+    this.retentionIssues = ['scan-incomplete'];
     try {
       // Saved proofs come first: nothing is written before them, so a save can never drop what an earlier worker proved.
       if (this.proofFile && !this.proofsLoaded) {
@@ -207,7 +211,9 @@ export class SessionService extends EventEmitter {
         if (!duplicate || (duplicate.archived && !state.archived) || (duplicate.archived === state.archived && state.session.updatedAt > duplicate.session.updatedAt)) this.index.set(state.session.id, state);
       }
       if (resolveExecLineage(this.index.values(), this.launchers)) changed = true;
-      this.retentionComplete = ![...new Set([...observedProviders, ...[...this.records.values()].map(state => state.session.provider)])].some(provider => incomplete.has(provider));
+      const requiredProviders = new Set([...observedProviders, ...[...this.records.values()].map(state => state.session.provider)]);
+      this.retentionIssues = [...requiredProviders].filter(provider => incomplete.has(provider)).map(provider => `native-history-incomplete:${provider}`);
+      this.retentionComplete = this.retentionIssues.length === 0;
       if ((this.proofsChanged || this.proofFile?.failed) && this.proofFile?.save(this.launchers)) this.proofsChanged = false;
       this.scanning = false;
       if (changed) this.emit('change', this.list());
