@@ -456,6 +456,37 @@ test('a web Auto Prompt is admitted as the owner’s request but never read as S
   assert.deepEqual(ownerMessages, []);
 });
 
+test('Auto Prompt snapshots read coordinator IDs once and use a fresh set on each read', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  const listed = Array.from({ length: 200 }, (_, index) => ({ ...f.session, id: `codex:fixture-${index}`, nativeId: `fixture-${index}` }));
+  listed[198] = { ...listed[198]!, status: 'completed', activeProcess: false, launchedBy: { kind: 'trigger', triggerId: 'finished' } };
+  listed[199] = { ...listed[199]!, status: 'working', launchedBy: { kind: 'trigger', triggerId: 'active' } };
+  f.sessions.list = () => listed;
+  let calls = 0;
+  let coordinator = listed[0]!.id;
+  const slack = {
+    automation: { list: () => [] }, sessionMcp: () => undefined,
+    coordinatorSessionIds: () => { calls++; return [coordinator]; },
+  } as unknown as SlackService;
+  let context!: Parameters<import('../../../server/auto-prompt/manager.js').AutoPromptManager['updateContext']>[0];
+  const { EventEmitter } = await import('node:events');
+  const autoPrompts = Object.assign(new EventEmitter(), {
+    list: () => [], updateContext: (value: typeof context) => { context = value; },
+    pauseAttachmentCleanup: async () => {}, resumeAttachmentCleanup: () => {},
+  }) as unknown as import('../../../server/auto-prompt/manager.js').AutoPromptManager;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, slack, autoPrompts });
+  t.after(() => host.close());
+  const first = context.snapshot();
+  assert.equal(calls, 1);
+  assert.deepEqual(first.sessions.map(session => session.id), listed.filter(session => session.id !== coordinator && session.id !== listed[198]!.id).map(session => session.id));
+  coordinator = listed[1]!.id;
+  const second = context.snapshot();
+  assert.equal(calls, 2);
+  assert.deepEqual(second.sessions.map(session => session.id), listed.filter(session => session.id !== coordinator && session.id !== listed[198]!.id).map(session => session.id));
+  assert.equal(f.starts(), 0);
+});
+
 test('an outdated worker hands off only when nothing is running, and the web follows its successor', async t => {
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();

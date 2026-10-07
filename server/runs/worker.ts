@@ -524,7 +524,8 @@ async function runnerContext({ stateDir, runs, sessions, slack, exclusions }: Pi
   const visibleSessions = () => {
     const projected = projectedSessions();
     const finished = finishedAutomationSessionIds(slack?.automation.list() ?? [], projected, runs.list());
-    return projected.filter(session => !finished.has(session.id) && !slack?.coordinatorSessionIds().includes(session.id)).map(session => closed.apply(titles.apply(session)));
+    const coordinators = new Set(slack?.coordinatorSessionIds() ?? []);
+    return projected.filter(session => !finished.has(session.id) && !coordinators.has(session.id)).map(session => closed.apply(titles.apply(session)));
   };
   /** Every conversation, also those the canvas leaves out once their work is done (Slack coordinators and the work they delegated). */
   const allSessions = () => projectedSessions().map(session => closed.apply(titles.apply(session)));
