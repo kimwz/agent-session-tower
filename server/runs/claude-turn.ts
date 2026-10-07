@@ -48,6 +48,8 @@ export async function prepareClaudeTurn(host: TurnHost, run: Run, session: Sessi
   const mcpServers = tools.servers;
   if (tools.towerTools) run.towerTools = tools.towerTools;
   if (automaticApprovals(run)) args.push('--permission-mode', 'auto');
+  // Explicit either way: the owner's "enabled by default" setting must not bring their Chrome to a turn Tower left it out of.
+  args.push(tools.claudeChrome ? '--chrome' : '--no-chrome');
   // The owner's allow rules go to every turn Tower starts, as Codex reads them in every run: the owner also set up the
   // triggers, Slack and GitHub watches and public agents that start work here, and chose what that work may do.
   const settings = host.options.claudeSettings?.(session.cwd, session.id);

@@ -843,6 +843,17 @@ test('Claude receives only the session-bound MCP configuration as a single argum
   assert.deepEqual(JSON.parse(args[args.indexOf('--mcp-config') + 1]), { mcpServers });
 });
 
+test('Claude gets the owner\'s Chrome only when it is the turn\'s strong browser, and is told not to use it otherwise', async t => {
+  for (const claudeChrome of [true, false, undefined]) {
+    const f = await fixture({ provider: 'claude', resolveRunTools: () => ({ required: false, ...(claudeChrome === undefined ? {} : { claudeChrome }) }) });
+    t.after(f.cleanup);
+    const run = await f.manager.enqueue(f.session.id, 'Look at the dashboard');
+    assert.equal((await finished(f.manager, run.id)).status, 'completed');
+    const args = f.launches[0].args;
+    assert.deepEqual([args.includes('--chrome'), args.includes('--no-chrome')], claudeChrome ? [true, false] : [false, true], String(claudeChrome));
+  }
+});
+
 test('optional tools still let a turn go to the open Codex app, and a lost acknowledgement is never replayed', async t => {
   const starts: CodexBridgeOptions[] = [];
   const f = await fixture({

@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
 import { endianness } from 'node:os';
-import { SESSION_MS, canonicalIp, isLoopbackAddress } from '../auth/store.js';
+import { SESSION_MS, canonicalIp, isLoopbackAddress, isLoopbackHostname } from '../auth/store.js';
 
 export const SESSION_COOKIE = 'tower_session';
 
@@ -12,8 +12,7 @@ export function requestIdentity(req: IncomingMessage): { ip: string; local: bool
   let hostname = '';
   try { hostname = new URL(`http://${req.headers.host}`).hostname; } catch { /* Deny bypass. */ }
   const forwarded = Object.keys(req.headers).some(name => name === 'forwarded' || name.startsWith('x-forwarded-') || name === 'x-real-ip');
-  const localHost = hostname === 'localhost' || isLoopbackAddress(hostname.replace(/^\[|\]$/g, ''));
-  return { ip, local: isLoopbackAddress(ip) && localHost && !forwarded };
+  return { ip, local: isLoopbackAddress(ip) && isLoopbackHostname(hostname) && !forwarded };
 }
 
 /**
