@@ -1069,8 +1069,11 @@ test('finite parts hold their segment line so another entry cannot interrupt the
 for (const example of [
   { model: 'eleven_flash_v2_5', text: '[cheerfully] 본문에 적힌 문자열을 그대로 보여 줍니다.', speech: '[cheerfully] 본문에 적힌 문자열을 그대로 보여 줍니다.' },
   { model: 'eleven_v3_conversational', text: '[WIP] 본문의 괄호를 그대로 보여 줍니다.', speech: '[cheerfully] (WIP) 본문의 괄호를 그대로 보여 줍니다.' },
+  // Eleven v4 Turbo: no tone tag added, and brackets the master wrote (even a tag's name) are read as words.
+  { model: 'eleven_v4_turbo', text: '[WIP] 본문의 괄호를 그대로 보여 줍니다.', speech: '(WIP) 본문의 괄호를 그대로 보여 줍니다.' },
+  { model: 'eleven_v4_turbo', text: '[cheerfully] 배포까지 끝났어요!', speech: '(cheerfully) 배포까지 끝났어요!' },
 ]) {
-  for (const mode of ['stream', 'replay'] as const) test(`finite ${mode} preserves original display text for ${example.model}`, async t => {
+  for (const mode of ['stream', 'replay'] as const) test(`finite ${mode} preserves original display text for ${example.model}: ${example.text}`, async t => {
     const h = await harness(t, { settings: { voice: { model: example.model } }, page: { answer: () => undefined } });
     h.on();
     if (mode === 'stream') {

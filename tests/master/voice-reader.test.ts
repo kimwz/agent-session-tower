@@ -109,7 +109,7 @@ test('a turn whose started record is kept while its voice session is still on is
   assert.equal(h.voice.streaming('t1'), true);
   h.settle(true);
   for (let tries = 0; !h.speeches.length; tries++) { if (tries > 400) throw new Error('not read'); await tick(); }
-  assert.deepEqual(h.speeches, ['[cheerfully] 지금 확인한 결과를 하나씩 알려 드릴게요.'], 'the first whole sentence, with the tone the default model reads');
+  assert.deepEqual(h.speeches, ['지금 확인한 결과를 하나씩 알려 드릴게요.'], 'the first whole sentence, without a tone tag on the default model (Eleven v4 Turbo)');
 });
 
 test('a started record kept only after its voice session ended never starts the reading', async t => {

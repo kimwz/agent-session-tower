@@ -20,7 +20,7 @@ export function isNoise(text: string): boolean {
  * ElevenLabs v3 audio tags that set how a sentence is read, never read aloud themselves. `[excited]` is one of
  * ElevenLabs' documented tags; `[cheerfully]` is a descriptive one, which v3 also follows. Measured on the owner's
  * voice with eleven_v3_conversational: `[excited]` raised the pitch about 1.6 semitones and read a little faster.
- * Eleven v4 Turbo follows the same tags (checked on the owner's voice: neither is read out).
+ * Eleven v4 Turbo follows them too but overacts them, so it gets none (`tone` in tts-models.ts).
  */
 export const VOICE_TONES = { bright: '[cheerfully]', excited: '[excited]' } as const;
 /** Failures, warnings, apologies, loss, health: said in the voice's own calm tone, never cheerfully. */
@@ -29,11 +29,11 @@ const SERIOUS = /실패|오류|에러|못\s?했|못\s?합|못\s?해|안\s?돼|�
 const GOOD_NEWS = /완료|끝났|끝냈|마쳤|성공|해결|통과|배포했|배포됐|올렸|반영됐|됐어요|됐습니다|축하|좋은 소식|잘 됐|잘 돼/;
 
 /**
- * The tone tag for something the master says, for models that follow tags: none before an irreversible change, for
+ * The tone tag for something the master says, for models Tower tones (`tone` in tts-models.ts): none before an irreversible change, for
  * a failure, or for anything serious; excited for clear good news; bright otherwise. Judged on the whole text.
  */
 function tone(plain: string, model: string, kind: VoiceKind): string {
-  if (!ttsModel(model).tags || kind === 'notice' || kind === 'error' || SERIOUS.test(plain)) return '';
+  if (!ttsModel(model).tone || kind === 'notice' || kind === 'error' || SERIOUS.test(plain)) return '';
   return kind !== 'ack' && GOOD_NEWS.test(plain) ? VOICE_TONES.excited : VOICE_TONES.bright;
 }
 export type VoiceKind = 'answer' | 'report' | 'error' | 'notice' | 'ack';
