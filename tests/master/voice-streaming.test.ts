@@ -145,7 +145,7 @@ test('the page\'s place in the audio reaches the host through the web', async ()
 
 async function fakeElevenLabs() {
   // Each reading starts with an empty ID3 tag, as ElevenLabs' mp3 does; later parts of one audio lose theirs.
-  const state = { speeches: [] as string[], chunks: [Buffer.from([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 0]), Buffer.from('sound')], gapMs: 10, completed: [] as Array<{ speech: number; at: number }> };
+  const state = { speeches: [] as string[], requests: [] as Array<'speech' | 'dialogue'>, chunks: [Buffer.from([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 0]), Buffer.from('sound')], gapMs: 10, completed: [] as Array<{ speech: number; at: number }> };
   const server = createServer(async (req: IncomingMessage, res) => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
@@ -155,6 +155,7 @@ async function fakeElevenLabs() {
     if (req.method === 'POST' && (/^\/v1\/text-to-speech\/[^/]+\/stream$/.test(url.pathname) || url.pathname === '/v1/text-to-dialogue/stream')) {
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { text?: string; inputs?: Array<{ text: string }> };
       state.speeches.push(String(body.inputs?.[0]?.text ?? body.text));
+      state.requests.push(url.pathname === '/v1/text-to-dialogue/stream' ? 'dialogue' : 'speech');
       const speech = state.speeches.length;
       res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'history-item-id': `h${speech}` });
       res.write(state.chunks[0]);
@@ -311,7 +312,7 @@ test('what the master writes before a tool is read at once; its final answer aft
   await sleep(50);
   assert.deepEqual(h.spoken(), ['세션 목록을 볼게요.', '지금 두 개가 돌고 있어요. 하나는 배포, 하나는 리뷰예요.']);
   const data = done.data as { text: string };
-  assert.equal(data.text, '지금 두 개가 돌고 있어요. 하나는 배포, 하나는 리뷰예요.', 'the answer is the last message, as history would give it');
+  assert.equal(data.text, '지금 두 개가 돌고 있어요. 하나는 배포, 하나는 리뷰예요.', 'the answer is the last message, as history would give it');  assert.ok(h.labs.requests.length >= 3 && h.labs.requests.every(request => request === 'dialogue'), 'read while written through Text to Dialogue, the default\'s request');
 });
 
 test('an answer skipped on the page stops being read: nothing more of the turn, now or when it ends', async t => {

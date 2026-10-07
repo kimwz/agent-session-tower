@@ -38,7 +38,7 @@ const stop = (server: Server) => new Promise<void>(resolve => { server.closeAllC
 /** ElevenLabs as far as the master uses it: tokens, reading aloud (as a stream), voices, and history removal. */
 async function fakeElevenLabs() {
   const state = {
-    tokens: 0, speeches: [] as Array<{ request: 'speech' | 'dialogue'; voice: string; text: string; body: Record<string, unknown>; key?: string }>, deletes: [] as string[], keys: [] as string[],
+    tokens: 0, speeches: [] as Array<{ request: 'speech' | 'dialogue'; query: string; voice: string; text: string; body: Record<string, unknown>; key?: string }>, deletes: [] as string[], keys: [] as string[],
     mode: 'ok' as 'ok' | 'cut' | 'error', fail: (_text: string) => false, silent: (_text: string) => false, lagMs: 0, chunks: [Buffer.from('ID3-first-'), Buffer.from('second-part')], gapMs: 20, completed: [] as number[],
   };
   const server = createServer(async (req: IncomingMessage, res) => {
@@ -53,12 +53,9 @@ async function fakeElevenLabs() {
     const speech = /^\/v1\/text-to-speech\/([^/]+)\/stream$/.exec(url.pathname);
     const dialogue = url.pathname === '/v1/text-to-dialogue/stream';
     if (req.method === 'POST' && (speech || dialogue)) {
-      assert.equal(url.searchParams.get('output_format'), 'mp3_44100_128');
-      assert.equal(url.searchParams.get('enable_logging'), 'false');
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
       const line = dialogue ? (body.inputs as Array<{ text: string; voice_id: string }>)[0] : undefined;
-      if (dialogue) assert.equal((body.inputs as unknown[]).length, 1, 'one line in the one voice');
-      state.speeches.push({ request: dialogue ? 'dialogue' : 'speech', voice: line?.voice_id ?? speech![1], text: String(line?.text ?? body.text), body, key: req.headers['xi-api-key'] as string });
+      state.speeches.push({ request: dialogue ? 'dialogue' : 'speech', query: url.search, voice: line?.voice_id ?? speech![1], text: String(line?.text ?? body.text), body, key: req.headers['xi-api-key'] as string });
       if (state.mode === 'error' || state.fail(state.speeches.at(-1)!.text)) { res.writeHead(500).end('no'); return; }
       const speechNumber = state.speeches.length;
       res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'history-item-id': `h${speechNumber}` });
@@ -291,6 +288,7 @@ test('what the owner said is a request like a typed one, answered first with a r
   // The default, Eleven v4 Turbo, is read through Text to Dialogue: one line in the chosen voice, nothing more.
   assert.equal(h.labs.speeches[0].request, 'dialogue');
   assert.deepEqual(h.labs.speeches[0].body, { inputs: [{ text: `[cheerfully] ${FIRST}`, voice_id: 'cgSgspJ2msm6clMCkdW9' }], model_id: 'eleven_v4_turbo', language_code: 'ko' });
+  assert.equal(h.labs.speeches[0].query, '?output_format=mp3_44100_128&enable_logging=false');
   const owner = h.room.recent(20).find(entry => entry.data.kind === 'owner');
   assert.deepEqual(owner?.data, { kind: 'owner', text: '지금 작업 중인 세션 알려줘', voice: true });
   // It goes to the master session marked as said aloud, so the master answers it to be heard.
@@ -373,6 +371,7 @@ test('a voice is heard before it is chosen: a Korean sample read brightly in tha
   assert.equal(h.labs.speeches[1].request, 'speech');
   assert.equal(h.labs.speeches[1].voice, OTHER);
   assert.deepEqual(h.labs.speeches[1].body, { text: VOICE_SAMPLE, model_id: 'eleven_flash_v2_5', language_code: 'ko' });
+  assert.equal(h.labs.speeches[1].query, '?output_format=mp3_44100_128&enable_logging=false');
   await h.settings.update({ voice: { model: 'eleven_v3_conversational' } });
   await h.voice.voicePreview({ voiceId: OTHER });
   assert.equal(h.labs.speeches[2].request, 'speech');
@@ -394,7 +393,9 @@ test('a voice heard and then chosen is the one Eleven v4 Turbo reads answers in'
   const first = await request(h, session, '목소리 바꿨어');
   assert.equal(first.ack?.text, FIRST);
   await until(() => h.labs.speeches.find(item => item.text.includes('고른 목소리로')));
-  assert.deepEqual(h.labs.speeches.map(item => [item.request, item.voice]), h.labs.speeches.map(() => ['dialogue', OTHER]), 'sample, first reply and answer all in the chosen voice');
+  assert.deepEqual(h.labs.speeches.map(item => [item.request, item.voice, item.text]), [
+    ['dialogue', OTHER, `[cheerfully] ${VOICE_SAMPLE}`], ['dialogue', OTHER, `[cheerfully] ${FIRST}`], ['dialogue', OTHER, '[cheerfully] 고른 목소리로 읽습니다.'],
+  ], 'sample, first reply and answer, each in the chosen voice');
 });
 
 test('voices are listed and heard with only a key, before the master session starts; without a key neither is', async t => {

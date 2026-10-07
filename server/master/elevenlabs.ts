@@ -1,9 +1,9 @@
 import { TowerError } from '../../shared/errors.js';
 import { ttsModel } from './tts-models.js';
 /**
- * The only code that knows ElevenLabs: single-use tokens for the page's own speech-to-text connection, streaming
- * text-to-speech, the account's voices, and removing what text-to-speech leaves in the account's history. The key
- * is used here, on this computer, and nowhere else.
+ * The only code that knows ElevenLabs: single-use tokens for the page's own speech-to-text connection, reading aloud
+ * as a stream (Text to Speech or Text to Dialogue), the account's voices, and removing what reading aloud leaves in the
+ * account's history. The key is used here, on this computer, and nowhere else.
  */
 
 export interface ElevenLabsOptions {

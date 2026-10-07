@@ -20,7 +20,7 @@ export function isNoise(text: string): boolean {
  * ElevenLabs v3 audio tags that set how a sentence is read, never read aloud themselves. `[excited]` is one of
  * ElevenLabs' documented tags; `[cheerfully]` is a descriptive one, which v3 also follows. Measured on the owner's
  * voice with eleven_v3_conversational: `[excited]` raised the pitch about 1.6 semitones and read a little faster.
- * Eleven v4 Turbo follows the same tags, and one tag in front keeps its reading natural (more tags overact).
+ * Eleven v4 Turbo follows the same tags (checked on the owner's voice: neither is read out).
  */
 export const VOICE_TONES = { bright: '[cheerfully]', excited: '[excited]' } as const;
 /** Failures, warnings, apologies, loss, health: said in the voice's own calm tone, never cheerfully. */
