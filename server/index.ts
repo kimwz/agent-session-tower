@@ -14,7 +14,7 @@ import { nativeHistory } from './sessions/native-history.js';
 import { SessionTitleStore } from './stores/session-titles.js';
 import { DismissedRunStore } from './stores/dismissed-runs.js';
 import { ClosedSessionStore } from './stores/closed-sessions.js';
-import { worktreeCleanupFor } from './worktrees/janitor.js';
+import { worktreeCleanupFor, worktreeCleanupVisible } from './worktrees/janitor.js';
 import { ProjectGroupStore } from './stores/project-groups.js';
 import { DurableRunManager } from './runs/durable-runner.js';
 import { runRunnerWorker } from './runs/worker.js';
@@ -375,9 +375,7 @@ async function main() {
     const page = await history.read(runs.nativeSessionId(id), before, limit);
     // What became of the worktrees it made, once its work was over; the worker records it. Why one was kept only holds while
     // the conversation stays closed (or its automated work finished).
-    let root = session;
-    for (let depth = 0; depth < 20 && root.isSubagent && root.parentId; depth++) { const parent = runs.getSession(root.parentId); if (!parent) break; root = parent; }
-    const over = closedSessions.closedIds().has(root.id) || Boolean(root.launchedBy);
+    const over = worktreeCleanupVisible(session, id => runs.getSession(id), root => Boolean(applyClosed(root).closed));
     const worktrees = before === undefined ? (await worktreeCleanupFor(stateDir, [session.id]).catch(() => [])).filter(item => over || item.state === 'removed') : [];
     return { ...(page || { messages: [], hasMore: false }), session: applyClosed(titles.apply(session)), ...(worktrees.length ? { worktrees } : {}) };
   };

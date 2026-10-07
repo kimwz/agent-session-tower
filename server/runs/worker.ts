@@ -176,6 +176,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     return options.ledger.once(controllerId, operation, admitted.requestId, content, execute, record, replay);
   };
   const findRun = (id: string) => options.runs.list().find(run => run.id === id);
+  let closureReady: Promise<void> | undefined;
   const admit = (value: unknown): RunAdmission => {
     const admitted = admission(value);
     const token = record(value).callerCapability;
@@ -186,6 +187,11 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   };
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
   const dispatch = async (method: string, args: unknown[]) => {
+    if (options.closedSessions) {
+      // The predecessor's web may have completed a legacy closure write during startup.
+      closureReady ??= options.closedSessions.start();
+      await closureReady;
+    }
     if (draining && !READS_DURING_HANDOFF.has(method)) {
       throw new TowerError('unavailable', 'Tower is replacing its execution worker right now. Nothing was submitted; retry in a few seconds.', { disposition: 'handoff' });
     }

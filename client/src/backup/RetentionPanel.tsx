@@ -47,6 +47,7 @@ export function RetentionPanel({ token }: { token: string }) {
       {blocked && <p className="auth-hint" role="status">Claude·Codex의 안전한 원본 이전 계약이 확인되지 않아 자동 제거는 보류 중입니다. 원본·목록·스캔은 유지되며 현재 물리 절감은 0입니다.</p>}
       <p>후보 {overview.candidates} · 보호/유예 {overview.deferred} · 이전 완료 {overview.archived} · 제공자 보류 {overview.blockedProvider} · 백업만 {overview.backupOnly} · 실패 {overview.failures}</p>
       <p>별도 백업 {(overview.coldBytes / 1024 ** 2).toFixed(1)} MiB · 도입 {overview.migratedAt} · 마지막 확인 {overview.lastCheckedAt || '아직 없음'}</p>
+      {overview.verification && <p role="status">백업 검증: {overview.verification === 'complete' ? '완료' : overview.verification === 'running' ? '검증 중 · 원본 제거와 복원은 대기합니다.' : '대기 중 · 원본 제거와 복원은 대기합니다.'}</p>}
       <button type="button" disabled={busy} onClick={() => void act('check')}>현재 기록 확인</button>
       <p className="auth-hint">기존 닫기는 숨김만 수행합니다. 명시적 보관 요청도 제공자 보호 조건을 통과해야 이전됩니다. 백업만 만들면 원본과 디스크 사용량은 줄지 않습니다.</p>
       <label>하위 세션<select value={sessionId} onChange={event => setSessionId(event.target.value)}><option value="">세션 선택</option>{overview.targets?.map(target => <option key={target.id} value={target.id}>{target.title} ({target.id})</option>)}</select></label>

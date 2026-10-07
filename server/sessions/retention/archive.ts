@@ -57,6 +57,10 @@ export class RetentionArchive {
     for (const scanRoot of this.scanRoots) if (resolve(scanRoot) === resolve(this.root) || contains(scanRoot, this.root)) throw new Error('Cold storage must be outside native scan roots.');
   }
   private directory(id: string): string { validateOperationId(id); return join(this.root, id); }
+  async exists(id: string): Promise<boolean> {
+    try { await existingSafePath(this.directory(id)); const info = await lstat(this.directory(id)); if (!info.isDirectory()) throw new Error('Invalid cold bundle directory.'); return true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+  }
   async manifest(id: string): Promise<RetentionManifest> {
     await existingSafePath(this.directory(id));
     const manifest = validateManifest(await readPrivateJson(join(this.directory(id), 'manifest.json'), 4_000_000));
@@ -143,8 +147,11 @@ export class RetentionArchive {
   /** A separate, versioned directory export: never implicitly included in ordinary Tower state export. */
   async export(id: string, target: string, journal: RetentionJournalEntry): Promise<void> {
     const manifest = await this.verify(id);
+    try {
+      await existingSafePath(target); const info = await lstat(target);
+      if (!info.isDirectory() || (await readdir(target)).length) throw new Error('Cold export destination must be empty.');
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     await privateDirectory(target);
-    if ((await readdir(target)).length) throw new Error('Cold export destination must be empty.');
     await this.copyBundle(this.directory(id), target, manifest);
     await writePrivateJson(join(target, 'export.json'), JSON.stringify({ version: 1, journal }), { syncDirectory: true });
   }

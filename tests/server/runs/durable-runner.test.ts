@@ -31,6 +31,7 @@ import { RetentionService } from '../../../server/sessions/retention/service.js'
 import { RetentionStore } from '../../../server/sessions/retention/store.js';
 import { RetentionArchive } from '../../../server/sessions/retention/archive.js';
 import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
+import { worktreeCleanupVisible } from '../../../server/worktrees/janitor.js';
 
 async function fixture(workerClosed = false, withRetention = false) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'tower-durable-fixture-')));
@@ -104,10 +105,44 @@ test('closure writes stay in the capable worker and a second UI sees its project
   assert.equal((await first.setClosed(f.session.id, true))?.closed, true);
   const second = await f.connect();
   assert.equal(second.applyClosed(f.session).closed, true);
+  const child = { ...f.session, id: 'codex:fixture-child', isSubagent: true, parentId: f.session.id };
+  assert.equal(worktreeCleanupVisible(child, id => second.getSession(id), root => Boolean(second.applyClosed(root).closed)), true,
+    'detail visibility follows worker closure even though the native parent itself has no closed flag');
   assert.deepEqual(JSON.parse(await readFile(join(f.stateDir, 'closed-sessions.json'), 'utf8')), [f.session.id]);
   await first.setClosed(f.session.id, false);
   await until(() => !second.applyClosed(f.session).closed);
+  assert.equal(worktreeCleanupVisible(child, id => second.getSession(id), root => Boolean(second.applyClosed(root).closed)), false);
   assert.equal(f.starts(), 0, 'closing only changes visibility, without launching or cancelling native work');
+});
+
+test('worker closure adopts a legacy write during startup and preserves later legacy changes on its next write', async t => {
+  const f = await fixture(true); t.after(f.cleanup);
+  const legacy = new ClosedSessionStore(f.stateDir);
+  await legacy.start();
+  await legacy.set(f.session, true);
+  const client = await f.connect();
+  assert.equal(client.applyClosed(f.session).closed, true, 'first RPC reloads the web write made after worker startup');
+  const other = { ...f.session, id: 'codex:legacy-other' };
+  await legacy.set(other, true);
+  await client.setClosed(f.session.id, false);
+  assert.deepEqual(JSON.parse(await readFile(join(f.stateDir, 'closed-sessions.json'), 'utf8')), [other.id],
+    'new writer must preserve the predecessor web projection before saving');
+});
+
+test('closure projection uses constant-time lookups after snapshot adoption', async t => {
+  const f = await fixture(true); t.after(f.cleanup);
+  const client = await f.connect();
+  await client.setClosed(f.session.id, true);
+  const includes = Array.prototype.includes;
+  let linearLookups = 0;
+  Array.prototype.includes = function(value: unknown, ...rest: [number?]) {
+    if (value === f.session.id) linearLookups++;
+    return includes.call(this, value, ...rest);
+  };
+  try {
+    for (let index = 0; index < 3200; index++) assert.equal(client.applyClosed(f.session).closed, true);
+  } finally { Array.prototype.includes = includes; }
+  assert.equal(linearLookups, 0, 'session views must not scan the closed ID array once per session');
 });
 
 test('unsupported closure and retention operations fail before writing or dispatching', async t => {

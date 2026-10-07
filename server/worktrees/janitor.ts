@@ -561,6 +561,15 @@ async function loadCleanup(stateDir: string): Promise<Saved> {
 }
 
 /** What happened to the worktrees these conversations made, for the conversation's page. */
+/** Kept reasons are meaningful only while the owning family is closed or automated work has ended. */
+export function worktreeCleanupVisible(session: Session, lookup: (id: string) => Session | undefined, closed: (session: Session) => boolean): boolean {
+  let root = session;
+  for (let depth = 0; depth < 20 && root.isSubagent && root.parentId; depth++) {
+    const parent = lookup(root.parentId); if (!parent) break; root = parent;
+  }
+  return closed(root) || Boolean(root.launchedBy);
+}
+
 export async function worktreeCleanupFor(stateDir: string, ids: readonly string[]): Promise<WorktreeCleanup[]> {
   const saved = await loadCleanup(stateDir);
   const wanted = new Set(ids);

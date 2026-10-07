@@ -43,6 +43,10 @@ export class RetentionStore {
     for (const entry of entries) { validateOperationId(entry.id); this.entries.set(entry.id, structuredClone(entry)); }
     await this.save();
   }
+  async removeMetadata(ids: string[]): Promise<void> {
+    for (const id of ids) { const entry = this.entries.get(id); if (entry && ['planned', 'blocked-provider'].includes(entry.phase)) this.entries.delete(id); }
+    await this.save();
+  }
   private save(): Promise<void> {
     const data = JSON.stringify({ version: 1, migratedAt: this.migratedAt, entries: [...this.entries.values()], policies: [...this.policies.values()] });
     const next = this.writing.then(() => writePrivateJson(join(this.root, 'journal.json'), data, { syncDirectory: true }));

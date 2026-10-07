@@ -22,16 +22,13 @@ export class RetentionService {
   private coldBytes = 0;
   private originalBytes = 0;
   private metricError?: string;
+  private verification: 'pending' | 'running' | 'complete' = 'pending';
+  private verified = new Set<string>();
   private operations: Promise<unknown> = Promise.resolve();
   constructor(private readonly options: RetentionServiceOptions) {}
   async start(): Promise<void> {
     await this.options.store.start(); await this.options.archive.start();
-    for (const entry of this.options.store.list()) {
-      if (entry.phase === 'planned' || entry.phase === 'blocked-provider') continue;
-      try { await this.options.archive.verify(entry.id); }
-      catch (error) { await this.put(entry, 'missing-backup', String(error)); }
-    }
-    await this.countBytes();
+    this.verification = 'pending'; this.verified.clear();
     this.resume();
   }
   resume(): void {
@@ -43,7 +40,7 @@ export class RetentionService {
   overview(): RetentionOverview {
     const entries = this.options.store.list();
     return { migratedAt: new Date(this.options.store.migratedAt).toISOString(), lastCheckedAt: this.lastCheckedAt, metricError: this.metricError,
-      running: Boolean(this.checking), candidates: this.candidates, deferred: this.deferred,
+      running: Boolean(this.checking), verification: this.verification, candidates: this.candidates, deferred: this.deferred,
       archived: entries.filter(entry => entry.phase === 'archived').length,
       blockedProvider: entries.filter(entry => entry.phase === 'blocked-provider').length,
       backupOnly: entries.filter(entry => entry.phase === 'backup-verified').length,
@@ -56,16 +53,38 @@ export class RetentionService {
     void task.finally(() => { this.checking = undefined; }).catch(error => this.report(error));
     return task;
   }
+  verifyBackups(): Promise<void> { return this.serial(() => this.verifyBackupsNow()); }
+  private async verifyBackupsNow(): Promise<void> {
+    if (this.verification === 'complete') return;
+    this.verification = 'running';
+    for (const entry of this.options.store.list()) {
+      if (this.stopped) { this.verification = 'pending'; return; }
+      if (entry.phase === 'planned' || entry.phase === 'blocked-provider' || this.verified.has(entry.id)) continue;
+      try { await this.options.archive.verify(entry.id); }
+      catch (error) { await this.put(entry, 'missing-backup', String(error)); }
+      this.verified.add(entry.id);
+    }
+    await this.countBytes(); this.verification = 'complete';
+  }
   private async runCycle(): Promise<RetentionOverview> {
+    await this.verifyBackupsNow();
+    if (this.verification !== 'complete') return this.overview();
     const observation = await this.observe(); observation.migratedAt = this.options.store.migratedAt;
-    const selected = selectRetention(observation); this.candidates = selected.candidates.length; this.deferred = selected.deferred.length;
+    const selected = selectRetention(observation);
+    if (observation.complete) {
+      const current = new Set(selected.candidates.map(candidate => this.operationId(candidate, this.records(candidate, observation))));
+      const stale: string[] = [];
+      for (const entry of this.options.store.list()) if (['planned', 'blocked-provider'].includes(entry.phase) && !current.has(entry.id) && !await this.options.archive.exists(entry.id)) stale.push(entry.id);
+      if (stale.length) await this.options.store.removeMetadata(stale);
+    }
+    this.candidates = selected.candidates.length; this.deferred = selected.deferred.length;
     if (this.options.store.list().some(entry => entry.phase === 'missing-backup')) { this.deferred += selected.candidates.length; return this.overview(); }
     const started = Date.now(); let count = 0; const blockedEntries: RetentionJournalEntry[] = [];
     for (const candidate of selected.candidates) {
       if (this.stopped || Date.now() - started >= 30_000) break;
       const records = this.records(candidate, observation);
       const id = this.operationId(candidate, records); const existing = this.options.store.get(id);
-      if (existing && ['archived', 'conflict', 'missing-backup', 'restored-awaiting-start'].includes(existing.phase)) continue;
+      if (existing && ['archived', 'backup-verified', 'conflict', 'missing-backup', 'restored-awaiting-start'].includes(existing.phase)) continue;
       const entry = existing || { id, candidate, phase: 'planned' as const, updatedAt: new Date().toISOString() };
       const blocked = records.map(record => this.options.adapter.capability(record.session.provider)).find(capability => capability.status === 'blocked');
       if (blocked) {
@@ -81,6 +100,7 @@ export class RetentionService {
   }
   archiveSession(id: string): Promise<RetentionOverview> { return this.serial(() => this.archiveSessionNow(id)); }
   private async archiveSessionNow(id: string): Promise<RetentionOverview> {
+    this.assertRemovalReady();
     const observation = await this.observe(); observation.migratedAt = this.options.store.migratedAt;
     const record = observation.records.find(record => record.session.id === id);
     if (!record || record.kind === 'parent') throw new Error('Explicit archive requires a proven child session.');
@@ -109,6 +129,7 @@ export class RetentionService {
     return { id, phase: 'backup-verified' };
   }
   private async archiveCandidate(entry: RetentionJournalEntry, records: RetentionRecord[]): Promise<void> {
+    this.assertRemovalReady();
     const lease = await this.options.adapter.reserve(entry.candidate, records);
     if (!lease) { await this.put(entry, 'conflict', 'Admission reservation unavailable.'); return; }
     try {
@@ -125,6 +146,7 @@ export class RetentionService {
   }
   restore(id: string, operationId = randomUUID()): Promise<void> { return this.serial(() => this.restoreNow(id, operationId)); }
   private async restoreNow(id: string, operationId: string): Promise<void> {
+    if (this.verification !== 'complete') throw new Error('Cold backup verification is pending.');
     const entry = this.options.store.get(id); if (!entry || !['archived', 'restored-awaiting-start'].includes(entry.phase)) throw new Error('Bundle has no archived original to restore.');
     const manifest = await this.options.archive.verify(id);
     if (!this.options.adapter.restore || manifest.sessions.some(session => this.options.adapter.capability(session.provider).status !== 'supported')) throw new Error('Provider restore contract unavailable.');
@@ -146,10 +168,14 @@ export class RetentionService {
     return candidate.ids.map(id => { const record = observation.records.find(record => record.session.id === id); if (!record) throw new Error('Retention candidate no longer exists.'); return record; });
   }
   private operationId(candidate: RetentionCandidate, records: RetentionRecord[]): string {
-    return createHash('sha256').update(JSON.stringify({ candidate, revisions: records.map(record => [record.session.id, record.session.readRevision, record.latestTaskEndedAt, record.inactiveSince]) })).digest('hex');
+    return createHash('sha256').update(JSON.stringify({ candidate, revisions: records.map(record => [record.session.id, record.session.readRevision, record.latestTaskEndedAt, record.latestTaskEndedAt ? undefined : record.inactiveSince]) })).digest('hex');
   }
   private async put(entry: RetentionJournalEntry, phase: RetentionJournalEntry['phase'], error?: string): Promise<void> {
     await this.options.store.put({ ...entry, phase, error, updatedAt: new Date().toISOString() });
+  }
+  private assertRemovalReady(): void {
+    if (this.verification !== 'complete') throw new Error('Cold backup verification is pending.');
+    if (this.options.store.list().some(entry => entry.phase === 'missing-backup')) throw new Error('A cold backup is missing; further original removal is blocked.');
   }
   private report(error: unknown): void { if (this.options.onError) this.options.onError(error); else console.error('Retention operation failed:', error); }
   private serial<T>(work: () => Promise<T>): Promise<T> {

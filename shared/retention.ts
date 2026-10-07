@@ -22,6 +22,7 @@ export interface RetentionOverview {
   lastCheckedAt?: string;
   metricError?: string;
   running: boolean;
+  verification?: 'pending' | 'running' | 'complete';
   candidates: number;
   deferred: number;
   archived: number;
