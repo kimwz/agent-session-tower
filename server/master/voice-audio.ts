@@ -5,7 +5,8 @@ import type { ElevenLabs } from './elevenlabs.js';
 import { frameAt, id3Size, MP3_BYTES_PER_SECOND, withoutTag } from './mp3.js';
 import type { VoiceTimings, VoiceTransportStage, VoiceTtsRecord } from './voice-timings.js';
 import type { AudioHandle, VoiceTiming } from './voice-types.js';
-import { ttsDollarsPerChar, type VoiceUsage } from './voice-usage.js';
+import { ttsDollarsPerChar } from './tts-models.js';
+import type { VoiceUsage } from './voice-usage.js';
 
 const LIVE_COUNT = 40;
 /** Audio is kept longer than the longest answer read takes (`READ_CHARS` at `MS_PER_CHAR`). */
