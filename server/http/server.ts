@@ -553,9 +553,11 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         return json(res, 200, await readWorkspaceFile(url.searchParams.get('cwd'), url.searchParams.get('path'), backend.snapshot()));
       }
       if ((req.method === 'GET' || req.method === 'HEAD') && path === '/api/workspace/media') {
-        const media = await openWorkspaceMedia(url.searchParams.get('cwd'), url.searchParams.get('path'), backend.snapshot());
+        // Tracked before the file opens, so a sign-out meanwhile ends this answer too.
         if (!identity.local) trackStream(sessionId, res, () => res.destroy());
-        return sendWorkspaceMedia(res, media, req.headers.range, req.method === 'HEAD');
+        const media = await openWorkspaceMedia(url.searchParams.get('cwd'), url.searchParams.get('path'), backend.snapshot());
+        if (res.destroyed) { await media.handle.close(); return; }
+        return await sendWorkspaceMedia(res, media, req.headers.range, req.method === 'HEAD');
       }
       if (req.method === 'POST' && path === '/api/workspace/file') {
         return json(res, 200, await saveWorkspaceFile(await readJson(req, 6 * MAX_WORKSPACE_FILE_BYTES + 16 * 1024), backend.snapshot()));

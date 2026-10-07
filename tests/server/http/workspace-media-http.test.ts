@@ -77,3 +77,47 @@ test('workspace media streams to a signed-in page with ranges, and never as a pa
   assert.equal((await media('missing.mp4')).status, 404);
   assert.equal((await media('../clip.mp4')).status, 400);
 });
+
+test('a player leaving mid-file, or a sign-out while the file opens, ends the answer without sending it or failing the server', async t => {
+  const cwd = await mkdtemp(join(tmpdir(), 'tower-media-leave-'));
+  const authDir = await mkdtemp(join(tmpdir(), 'tower-media-leave-auth-'));
+  t.after(() => rm(authDir, { recursive: true, force: true }));
+  const { auth, origins, cookie, fetch } = await createRemoteAuthFixture(authDir);
+  let signOutOnRead = false;
+  const snapshot: Snapshot = { sessions: [], runs: [], providers: [], scanning: false, hostname: 'fixture', version: 'test', updatedAt: new Date().toISOString(), groups: [{ cwd, title: '', pinned: true }] };
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: cwd, auth, remote: { origins },
+    backend: {
+      // Reading the folder list is the media route's first step; signing out there lands while the file is opened.
+      snapshot: () => { if (signOutOnRead) { signOutOnRead = false; auth.logout(cookie.slice('tower_session='.length)); } return snapshot; },
+      detail: async () => undefined, enqueue: async () => { throw new Error('unused'); }, cancel: async () => {}, subscribe: () => () => {},
+    },
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const unhandled: unknown[] = [];
+  const record = (reason: unknown) => { unhandled.push(reason); };
+  process.on('unhandledRejection', record);
+  t.after(async () => { process.off('unhandledRejection', record); dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(cwd, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const size = 32 * 1024 * 1024;
+  await writeFile(join(cwd, 'long.mp4'), Buffer.alloc(size));
+  const url = `${base}/api/workspace/media?${new URLSearchParams({ cwd, path: 'long.mp4' })}`;
+
+  const leaving = new AbortController();
+  const started = await fetch(url, { headers: { cookie }, signal: leaving.signal });
+  assert.equal(started.status, 200);
+  await started.body!.getReader().read();
+  leaving.abort();
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.deepEqual(unhandled, [], 'a player that leaves is not a server failure');
+
+  signOutOnRead = true;
+  let received = 0;
+  await fetch(url, { headers: { cookie } }).then(async response => {
+    const reader = response.body!.getReader();
+    for (;;) { const next = await reader.read(); if (next.done) break; received += next.value.length; }
+  }).catch(() => {});
+  assert.ok(received < size, `a sign-out while the file opened still sent ${received} bytes`);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.deepEqual(unhandled, []);
+  assert.equal((await fetch(url, { headers: { cookie } })).status, 401, 'the sign-out took effect');
+});
