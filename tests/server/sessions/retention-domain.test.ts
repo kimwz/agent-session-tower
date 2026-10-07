@@ -456,7 +456,7 @@ for(const action of ['automatic-retry','backup-only-attempt'] as const) test(`pa
 import { writeFileSync } from 'node:fs';
 for(const changed of ['new-completion','restarted-inactivity'] as const)test(`native archive defers a selected inactive child after ${changed}`,async()=>fixture(async path=>{
  const native=join(path,'native'),coldRoot=join(path,'originals');await mkdir(native);const hot=join(native,'child.jsonl'),meta=join(native,'child.meta.json');await writeFile(hot,'old finished review');await writeFile(meta,'untouched metadata');
- const source=record('child',true);source.session.filePath=hot;source.session.readRevision=1;
+ const source=record('child',true);source.session.filePath=hot;source.session.readRevision='1';
  if(changed==='restarted-inactivity'){source.latestTaskEndedAt=undefined;source.inactiveSince=new Date(now-8*day).toISOString();}
  const store=new RetentionStore(join(path,'state'));await store.start(now-10*day);let changedOnce=false;
  const adapter=createNativeRetentionAdapter({claude:[native],codex:[join(path,'sessions'),join(path,'archived_sessions')]},{coldRoot,codexHome:path,claudeHome:path,inspect:async()=>({complete:true,activeIds:new Set(),issues:[]})});
