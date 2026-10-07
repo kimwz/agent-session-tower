@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { Browser, BrowserContext } from 'playwright';
 import { newContext, startBrowser, type BrowserTier } from './launch.js';
 import { findBrowserPid, forgetBrowser, markerSwitch, recordBrowser, stillRunning, systemProbe, type ProcessProbe } from './live.js';
-import { LoginSaver, readState, type Cookie, type OriginState, type StorageState } from './logins.js';
+import { isWebOrigin, LoginSaver, readState, type Cookie, type OriginState, type StorageState } from './logins.js';
 
 export interface TurnBrowserOptions { tier: BrowserTier; stateDir: string; savedLogins: boolean; outsideContent?: boolean }
 
@@ -158,20 +158,23 @@ export class TurnBrowser {
   }
 
   /**
-   * The cookies, and the local storage of each open page (opaque and non-web pages have none). Cheap: no navigation.
-   * A page that does not answer by the deadline (or within half a second) is left out.
+   * The cookies, and the local storage of each open web page, read without navigating. The page's origin comes from
+   * its URL as the browser knows it, never from what the page answers. A page that does not answer by the deadline (or
+   * within half a second) is left out.
    */
   private async capture(context: BrowserContext, deadline = Infinity): Promise<StorageState> {
     const cookies = await within(context.cookies(), Math.min(1_000, deadline - Date.now())) as Cookie[];
+    const read = async (page: ReturnType<BrowserContext['pages']>[number]): Promise<OriginState | undefined> => {
+      let origin: string;
+      // best-effort: a page whose URL is not a web address has no local storage to keep.
+      try { origin = new URL(page.url()).origin; } catch { return undefined; }
+      if (!isWebOrigin(origin)) return undefined;
+      const items = await within(page.evaluate(() => Object.entries(localStorage).map(([name, value]) => ({ name, value }))), Math.min(500, deadline - Date.now()));
+      return Array.isArray(items) && items.every(item => typeof item?.name === 'string' && typeof item?.value === 'string') ? { origin, localStorage: items } : undefined;
+    };
     const origins = new Map<string, OriginState>();
-    for (const page of context.pages()) {
-      try {
-        const origin = await within(page.evaluate(() => /^https?:$/.test(location.protocol)
-          ? { origin: location.origin, localStorage: Object.entries(localStorage).map(([name, value]) => ({ name, value })) } : undefined), Math.min(500, deadline - Date.now()));
-        if (origin) origins.set(origin.origin, origin);
-      // best-effort: a page that is navigating or closing has nothing to read now; the next save sees it.
-      } catch { /* See above. */ }
-    }
+    // best-effort: a page that is navigating or closing has nothing to read now; the next save sees it.
+    for (const origin of await Promise.all(context.pages().map(page => read(page).catch(() => undefined)))) if (origin) origins.set(origin.origin, origin);
     return { cookies, origins: [...origins.values()] };
   }
 

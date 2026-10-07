@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { applyChanges, EMPTY_STATE, fitToBudget, LoginSaver, loginsPath, readState, saveChanges, type Cookie, type StorageState } from '../../../server/browser/logins.js';
+import { applyChanges, EMPTY_STATE, fitToBudget, LoginSaver, loginsPath, parseState, readState, saveChanges, type Cookie, type StorageState } from '../../../server/browser/logins.js';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const cookie = (name: string, value: string, extra: Partial<Cookie> = {}): Cookie => ({ name, value, domain: 'example.com', path: '/', expires: -1, httpOnly: false, secure: true, sameSite: 'Lax', ...extra });
@@ -110,6 +110,35 @@ test('an origin the turn used without changing it moves to the end, so a login i
   const used = applyChanges(saved, saved, state([], [origin('login'), origin('a'), origin('b')]), 0, new Set(['https://login.com']));
   assert.deepEqual(used.origins.map(o => o.origin), ['https://a.com', 'https://b.com', 'https://login.com']);
   assert.deepEqual(used.origins.at(-1), origin('login'), 'with the saved value');
+});
+
+test('pages with empty local storage are never saved, so they cannot push a login out; an emptied origin is removed', async t => {
+  const dir = await stateDir(t);
+  const saver = new LoginSaver(dir, () => {});
+  saver.started(EMPTY_STATE);
+  let read = 0;
+  await saver.save(state([], [{ origin: 'https://app.com', localStorage: [{ name: 'token', value: 't' }] }]), ++read);
+  for (let i = 0; i < 31; i++) await saver.save(state([], [{ origin: `https://docs${i}.com`, localStorage: [] }]), ++read);
+  assert.deepEqual((await readState(dir)).origins.map(o => o.origin), ['https://app.com']);
+  await saver.save(state([], [{ origin: 'https://app.com', localStorage: [] }]), ++read);
+  assert.deepEqual((await readState(dir)).origins, [], 'logging out empties it');
+});
+
+test('a late read still adds the origins only it saw, without overwriting what a newer read saw', async t => {
+  const dir = await stateDir(t);
+  const saver = new LoginSaver(dir, () => {});
+  saver.started(EMPTY_STATE);
+  await saver.save(state([cookie('a', 'new')], [{ origin: 'https://other.com', localStorage: [{ name: 'k', value: 'new' }] }]), 2);
+  await saver.save(state([cookie('a', 'old')], [{ origin: 'https://login.com', localStorage: [{ name: 'refresh', value: 'r2' }] }, { origin: 'https://other.com', localStorage: [{ name: 'k', value: 'old' }] }]), 1);
+  const saved = await readState(dir);
+  assert.deepEqual(values(saved), ['a=new']);
+  assert.deepEqual(Object.fromEntries(saved.origins.map(o => [o.origin, o.localStorage[0].value])), { 'https://other.com': 'new', 'https://login.com': 'r2' });
+});
+
+test('only http(s) origins written as a browser writes them are read back', () => {
+  const ok = { origin: 'https://ok.com', localStorage: [] };
+  const parsed = parseState({ cookies: [], origins: [ok, { origin: 'null', localStorage: [] }, { origin: 'file://', localStorage: [] }, { origin: 'https://ok.com/path', localStorage: [] }, { origin: 'chrome-error://chromewebdata', localStorage: [] }] });
+  assert.deepEqual(parsed.origins, [ok]);
 });
 
 test('concurrent saves from several turns all land', async t => {

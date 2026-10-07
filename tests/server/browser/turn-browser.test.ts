@@ -30,7 +30,7 @@ function fakes(options: { refuseClose?: boolean; state?: () => StorageState; con
       const current = () => options.state?.() ?? { cookies: [], origins: [] };
       context.cookies = async () => current().cookies;
       // One open page per origin in the state, answering what its local storage holds.
-      context.pages = () => current().origins.map(origin => ({ evaluate: async () => origin }));
+      context.pages = () => current().origins.map(origin => ({ url: () => `${origin.origin}/page`, evaluate: async () => origin.localStorage }));
       context.close = async () => { context.emit('close'); };
       return context as unknown as BrowserContext;
     },
@@ -228,7 +228,7 @@ test('a page that does not answer in time is skipped; the cookies and the other 
   f.hooks.newContext = async (...args) => {
     const context = await original(...args) as unknown as { pages(): unknown[] };
     const pages = context.pages.bind(context);
-    context.pages = () => [{ evaluate: () => new Promise(() => {}) }, ...pages()];
+    context.pages = () => [{ url: () => 'https://slow.com/', evaluate: () => new Promise(() => {}) }, ...pages()];
     return context as never;
   };
   const browser = new TurnBrowser({ tier: 'general', stateDir: dir, savedLogins: true }, () => {}, f.hooks);
@@ -247,14 +247,36 @@ test('a save already under way when the turn ends is waited for before the brows
   f.hooks.newContext = async (...args) => {
     const context = await original(...args) as unknown as { cookies(): Promise<unknown> };
     const cookies = context.cookies.bind(context);
-    context.cookies = async () => { await gate; return cookies(); };
+    // Like a real browser: once it has closed, nothing can be read from it.
+    context.cookies = async () => { await gate; if (f.closed.length) throw new Error('Target closed'); return cookies(); };
     return context as never;
   };
   const browser = new TurnBrowser({ tier: 'general', stateDir: dir, savedLogins: true }, () => {}, f.hooks);
   const context = await browser.context();
-  const closing = context.close();
+  void context.close();
   const ending = browser.shutdown();
   setTimeout(release, 50);
-  await Promise.all([closing, ending]);
-  assert.deepEqual((await readState(dir)).cookies.map(c => c.name), ['mid-close']);
+  await ending;
+  assert.deepEqual((await readState(dir)).cookies.map(c => c.name), ['mid-close'], 'the turn ended only after the save under way');
+});
+
+test('only web pages give local storage, under the origin of their URL, whatever the page answers', async t => {
+  const dir = await stateDir(t);
+  const f = fakes({ state: () => ({ cookies: [], origins: [] }) });
+  const original = f.hooks.newContext!;
+  f.hooks.newContext = async (...args) => {
+    const context = await original(...args) as unknown as { pages(): unknown[] };
+    context.pages = () => [
+      { url: () => 'about:blank', evaluate: async () => [{ name: 'poison', value: '1' }] },
+      { url: () => 'chrome-error://chromewebdata/', evaluate: async () => [{ name: 'x', value: '1' }] },
+      { url: () => 'https://real.com/app', evaluate: async () => [{ name: 'token', value: 't' }] },
+      { url: () => 'https://empty.com/', evaluate: async () => [] },
+      { url: () => 'https://liar.com/', evaluate: async () => ({ origin: 'null' }) },
+    ];
+    return context as never;
+  };
+  const browser = new TurnBrowser({ tier: 'general', stateDir: dir, savedLogins: true }, () => {}, f.hooks);
+  await browser.context();
+  await browser.shutdown();
+  assert.deepEqual((await readState(dir)).origins, [{ origin: 'https://real.com', localStorage: [{ name: 'token', value: 't' }] }]);
 });

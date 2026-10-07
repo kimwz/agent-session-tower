@@ -32,7 +32,8 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
  * Applies what one turn changed to the saved state. `baseline` is what the turn's browser started from (or last saved);
  * `current` is what it has now. Only cookies and origins that differ from the baseline are written, and a cookie is
  * deleted only when the turn had it and its browser dropped it, so a turn never undoes what another turn saved
- * meanwhile. What a save writes moves to the end, so the saved order is the order of last change. Expired cookies go.
+ * meanwhile. What a save writes moves to the end, so the saved order is the order of last change. An origin whose local
+ * storage the turn emptied is removed; one that was empty all along is never written. Expired cookies go.
  */
 export function applyChanges(saved: StorageState, baseline: StorageState, current: StorageState, now = Date.now() / 1000, seen: ReadonlySet<string> = new Set()): StorageState {
   const before = new Map(baseline.cookies.map(cookie => [cookieKey(cookie), cookie]));
@@ -42,7 +43,11 @@ export function applyChanges(saved: StorageState, baseline: StorageState, curren
   for (const [key, cookie] of after) if (!same(before.get(key), cookie)) { cookies.delete(key); cookies.set(key, cookie); }
   const origins = new Map(saved.origins.map(origin => [origin.origin, origin]));
   const startedWith = new Map(baseline.origins.map(origin => [origin.origin, origin]));
-  for (const origin of current.origins) if (!same(startedWith.get(origin.origin), origin)) { origins.delete(origin.origin); origins.set(origin.origin, origin); }
+  for (const origin of current.origins) {
+    if (same(startedWith.get(origin.origin), origin)) continue;
+    origins.delete(origin.origin);
+    if (origin.localStorage.length) origins.set(origin.origin, origin);
+  }
   // An origin the turn used but did not change moves to the end too, with the value saved: it is in use.
   for (const name of seen) { const kept = origins.get(name); if (kept && !changedOrigin(startedWith.get(name), current.origins.find(origin => origin.origin === name))) { origins.delete(name); origins.set(name, kept); } }
   return { cookies: [...cookies.values()].filter(cookie => cookie.expires === -1 || cookie.expires > now), origins: [...origins.values()] };
@@ -56,7 +61,7 @@ function changedKeys(baseline: StorageState, current: StorageState): { cookies: 
   const startedWith = new Map(baseline.origins.map(origin => [origin.origin, origin]));
   return {
     cookies: new Set(current.cookies.filter(cookie => !same(before.get(cookieKey(cookie)), cookie)).map(cookieKey)),
-    origins: new Set(current.origins.filter(origin => !same(startedWith.get(origin.origin), origin)).map(origin => origin.origin)),
+    origins: new Set(current.origins.filter(origin => origin.localStorage.length && !same(startedWith.get(origin.origin), origin)).map(origin => origin.origin)),
   };
 }
 
@@ -116,8 +121,15 @@ function isCookie(value: unknown): value is Cookie {
 }
 function isOrigin(value: unknown): value is OriginState {
   const origin = value as OriginState;
-  return !!origin && typeof origin.origin === 'string' && Array.isArray(origin.localStorage)
+  return !!origin && isWebOrigin(origin.origin) && Array.isArray(origin.localStorage)
     && origin.localStorage.every(item => item && typeof item.name === 'string' && typeof item.value === 'string');
+}
+
+/** An http(s) origin as a browser writes it; anything else cannot be restored (a browser cannot open `null`). */
+export function isWebOrigin(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  // best-effort: a string that is not a URL is not an origin.
+  try { const url = new URL(value); return /^https?:$/.test(url.protocol) && url.origin === value; } catch { return false; }
 }
 
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; } };
@@ -183,18 +195,15 @@ async function takeOver(lock: string, deadHolder: string): Promise<void> {
 
 /**
  * One turn's saves, in order. Each applies what changed since the last save that succeeded, so a failed save's changes
- * go with the next one.
- */
-/**
- * One turn's saves, in order. Each applies what changed since the last save that succeeded, so a failed save's changes
  * go with the next one. A save carries the cookies and the local storage of the pages open at the time: the origins it
- * did not see keep what was saved for them.
+ * did not see keep what was saved for them. Reads are numbered by when they started, for the cookies and for each origin
+ * apart, so a read that finished late never overwrites what a newer one saw, and still adds what only it saw.
  */
 export class LoginSaver {
   private baseline: StorageState = EMPTY_STATE;
   private queue: Promise<void> = Promise.resolve();
-  /** The newest read that was queued: a read that finished later but started earlier never overwrites it. */
-  private newest = 0;
+  private cookiesRead = 0;
+  private readonly originsRead = new Map<string, number>();
   constructor(private readonly stateDir: string, private readonly log: (error: unknown) => void, private readonly options: { waitMs?: number } = {}) {}
 
   /** A new browser started from `state`. */
@@ -202,14 +211,17 @@ export class LoginSaver {
 
   /** `read` numbers when the state was read. */
   save(seen: StorageState, read: number): Promise<void> {
-    if (read <= this.newest) return this.queue;
-    this.newest = read;
+    const cookies = read > this.cookiesRead ? seen.cookies : undefined;
+    if (cookies) this.cookiesRead = read;
+    const fresh = seen.origins.filter(origin => read > (this.originsRead.get(origin.origin) ?? 0));
+    for (const origin of fresh) this.originsRead.set(origin.origin, read);
+    if (!cookies && !fresh.length) return this.queue;
     this.queue = this.queue.then(async () => {
       const origins = new Map(this.baseline.origins.map(origin => [origin.origin, origin]));
-      for (const origin of seen.origins) origins.set(origin.origin, origin);
-      const next = { cookies: seen.cookies, origins: [...origins.values()] };
-      await saveChanges(this.stateDir, this.baseline, next, { ...this.options, log: this.log, seen: new Set(seen.origins.map(origin => origin.origin)) });
-      this.baseline = next;
+      for (const origin of fresh) origins.set(origin.origin, origin);
+      const next = { cookies: cookies ?? this.baseline.cookies, origins: [...origins.values()] };
+      await saveChanges(this.stateDir, this.baseline, next, { ...this.options, log: this.log, seen: new Set(fresh.filter(origin => origin.localStorage.length).map(origin => origin.origin)) });
+      this.baseline = { cookies: next.cookies, origins: next.origins.filter(origin => origin.localStorage.length) };
     }).catch(this.log);
     return this.queue;
   }
