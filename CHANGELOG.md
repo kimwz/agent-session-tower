@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.114.1] - 2026-10-08
+
+### Changed
+
+- Show active project connections as flowing rainbow dashed lines using the session activity border palette. Idle and stale connections, reduced motion and the canvas motion setting keep their existing appearance.
+
 ## [1.114.0] - 2026-10-07
 
 ### Changed
