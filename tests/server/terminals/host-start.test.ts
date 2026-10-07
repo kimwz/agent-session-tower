@@ -1,3 +1,4 @@
+import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -49,7 +50,7 @@ test('a new shell starts the terminal host when none answers and waits while it 
     if (stateDir) {
       // Its runner folder is found before the state goes: finding it makes the state folder again.
       const runner = (await runnerPaths(stateDir)).directory;
-      await rm(stateDir, { recursive: true, force: true }); await rm(runner, { recursive: true, force: true });
+      await removeTemporaryFixture(stateDir); await rm(runner, { recursive: true, force: true });
     }
   });
   // No process is started: spawn is replaced; a socket with a credential answers like a host once it appears.
@@ -61,7 +62,7 @@ test('a new shell starts the terminal host when none answers and waits while it 
     return child;
   });
   syncBuiltinESMExports();
-  stateDir = await mkdtemp(join(tmpdir(), 'tower-terminal-start-'));
+  stateDir = await temporaryFixture('tower-terminal-start-');
   const paths = await terminalHostPaths(stateDir);
   /** Registers a promise the test started, with a handler at once; the test still awaits it for its outcome. */
   const pend = <T>(work: Promise<T>): Promise<T> => { pending.add(work); work.catch(() => {}); return work; };

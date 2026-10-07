@@ -1,3 +1,5 @@
+import { resolveRetentionLineage } from '../sessions/retention/ancestry.js';
+import type { RetentionMember } from '../../shared/retention.js';
 import { MAX_ATTACHMENTS } from '../../shared/attachments.js';
 import type { PermissionRequest } from '../../shared/permissions.js';
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from 'node:child_process';
@@ -136,6 +138,88 @@ export class RunManager extends EventEmitter {
   private readonly notes = new TurnNotes(() => this.options);
   private readonly stdio = new Map<string, CodexStdioRun>();
   private readonly reservedSessions = new Set<string>();
+  private readonly retentionReservations = new Set<string>();
+  private readonly retentionWaiters = new Set<() => void>();
+  private retentionMembers: readonly RetentionMember[] = [];
+  private retentionLaunchers: ReadonlyMap<string, readonly string[]> = new Map();
+  setRetentionLineage(members: readonly RetentionMember[], launchers: ReadonlyMap<string, readonly string[]> = new Map()): void {
+    this.retentionMembers=structuredClone(members); this.retentionLaunchers=new Map(launchers);
+  }
+  private coldSessionIds: ReadonlySet<string> = new Set();
+  private restoreCold?: (id: string) => Promise<void>;
+  setColdSessions(ids: Iterable<string>, restore?: (id: string) => Promise<void>): void {
+    this.coldSessionIds = new Set([...ids].map(id => this.nativeSessionId(id))); this.restoreCold = restore;
+  }
+  reserveRetention(ids: readonly string[]): (() => void) | undefined {
+    const keys = new Set(ids.map(id => this.nativeSessionId(id)));
+    const metadata = new Map<string, RetentionMember>();
+    const provenParents = new Map<string, Set<string>>();
+    const edge = (id:string,parent:string) => { const values=provenParents.get(id)||new Set<string>();values.add(parent);provenParents.set(id,values); };
+    for(const member of this.retentionMembers) {
+      for(const alias of [member.sessionId,`${member.provider}:${member.nativeId}`]) {
+        if(member.state==='cold') metadata.set(alias,member);
+        if(member.parentId) edge(alias,member.parentId);
+      }
+      for(const relation of member.relationships || []) for(const alias of [relation.id,`${relation.provider}:${relation.nativeId}`]) edge(alias,relation.parentId);
+    }
+    const pending=[...keys],seenIds=new Set<string>(),hotById=new Map<string,Session>();
+    while(pending.length) {
+      const id=pending.pop()!;if(seenIds.has(id))continue;seenIds.add(id);
+      const hot=this.getSession(id),cold=metadata.get(id),node=hot||cold;
+      if(hot)hotById.set(hot.id,hot);
+      if(node?.provider!=='claude')continue;
+      if(node.parentId)pending.push(node.parentId);
+      for(const alias of [id,hot?.id,cold?.sessionId,`${node.provider}:${node.nativeId}`]) if(alias) {
+        pending.push(...provenParents.get(alias)||[],...this.retentionLaunchers.get(alias)||[]);
+      }
+    }
+    const hot=[...hotById.values()];
+    const lineage=resolveRetentionLineage(hot,this.retentionMembers,this.retentionLaunchers);
+    const nodeFor=(id:string)=>lineage.nodes.get(lineage.aliases.get(id)??id);
+    // A lost hot exec edge and each cold intermediate use the same policy-only proof.
+    // Reserve every reachable Claude ancestor even when its historical role is unknown.
+    for (const id of [...keys]) {
+      const seen = new Set<string>(); let node = nodeFor(id);
+      while (node?.provider === 'claude' && node.parentId && !seen.has(node.parentId)) {
+        seen.add(node.parentId); keys.add(this.nativeSessionId(node.parentId)); node = nodeFor(node.parentId);
+      }
+    }
+    if ([...keys].some(id => this.retentionReservations.has(id))) return undefined;
+    if ([...this.reservedSessions].some(id => keys.has(this.nativeSessionId(id)))) return undefined;
+    if ([...this.runs.values()].some(run => keys.has(this.nativeSessionId(run.sessionId)) &&
+      (run.status === 'queued' || run.status === 'running' || run.approvals?.length || run.backgroundWait || !this.settledRuns.has(run.id)))) return undefined;
+    for (const id of keys) this.retentionReservations.add(id);
+    let released = false;
+    return () => { if (released) return; released = true; for (const id of keys) this.retentionReservations.delete(id); for (const notify of this.retentionWaiters) notify(); void this.pump(); };
+  }
+  retentionReservedIds(): ReadonlySet<string> { return new Set(this.retentionReservations); }
+  private retentionHeld(id: string): boolean { return this.retentionReservations.has(this.nativeSessionId(id)); }
+  private assertRetentionAdmission(id: string): void {
+    if (this.retentionHeld(id)) throw notAdmitted(new RunError('Session cold storage maintenance has not finished; retry after it finishes.', 'unavailable'));
+  }
+  private async awaitRetentionAdmission(id: string): Promise<void> {
+    const deadline = Date.now() + 30_000;
+    while (this.retentionHeld(id) || this.coldSessionIds.has(this.nativeSessionId(id))) {
+      if (!this.started || this.stopping) throw notAdmitted(new RunError('The task runner is not accepting instructions.', 'unavailable'));
+      if (this.retentionHeld(id)) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) this.assertRetentionAdmission(id);
+        await new Promise<void>((resolve, reject) => {
+          const notify = () => { clearTimeout(timer); this.retentionWaiters.delete(notify); resolve(); };
+          const timer = setTimeout(() => { this.retentionWaiters.delete(notify); reject(notAdmitted(new RunError('Session cold storage maintenance has not finished; retry after it finishes.', 'unavailable'))); }, remaining);
+          this.retentionWaiters.add(notify);
+        });
+      } else {
+        await this.restoreCold?.(id);
+        if (this.coldSessionIds.has(this.nativeSessionId(id)) && !this.retentionHeld(id)) throw notAdmitted(new RunError('Session cold storage restore did not complete.', 'unavailable'));
+      }
+    }
+  }
+  private retentionWait(run: Run): boolean {
+    if (!this.retentionHeld(run.sessionId)) return false;
+    run.output = 'Waiting for session cold storage maintenance.'; this.changed(); return true;
+  }
+
   /** CLIs being updated: none of their runs start until the update is done. */
   private readonly heldProviders = new Set<Provider>();
   private readonly admissions = new Set<string>();
@@ -209,6 +293,7 @@ export class RunManager extends EventEmitter {
 
   /** Checked again at the last moment before a provider is started, after every asynchronous step. */
   private refusedAtLaunch(run: Run, session: Session): boolean {
+    if (this.retentionWait(run)) { this.reservedSessions.delete(session.id); return true; }
     // A switch to the new worker began while this turn was being prepared: it waits for the new worker.
     if (this.updating && run.status === 'queued') {
       if (run.output !== UPDATE_WAIT) run.output = UPDATE_WAIT;
@@ -288,7 +373,12 @@ export class RunManager extends EventEmitter {
     await this.attachments.start();
     const saved = await this.history.readCreated();
     if (saved !== undefined) this.history.noteCreated(this.registry.load(saved));
-    for (const run of await this.history.restore()) this.runs.set(run.id, run);
+    for (const run of await this.history.restore()) {
+      this.runs.set(run.id, run);
+      // No transport from the predecessor remains for an already terminal history item.
+      // Unread results and approvals have their own retention protection; native activity is checked separately.
+      if (FINISHED.has(run.status) && !run.approvals?.length && !run.backgroundWait) this.settledRuns.add(run.id);
+    }
     this.started = true;
     // Without a worker to load the automations later, the retained runs are whatever they report from now on.
     if (this.ready) this.history.restoredRetained.clear();
@@ -333,6 +423,7 @@ export class RunManager extends EventEmitter {
 
   getSession(id: string): Session | undefined {
     id = this.monitorSessionId(id);
+    if (this.coldSessionIds.has(this.nativeSessionId(id))) return undefined;
     if (this.registry.has(id)) return this.registry.view(id, runId => this.runs.get(runId), session => this.sessionWithContext(session));
     const native = this.options.getSession(id);
     if (!native) return undefined;
@@ -345,7 +436,7 @@ export class RunManager extends EventEmitter {
   private get createdSessions(): Map<string, CreatedSession> { return this.registry.records; }
 
   sessionList(nativeSessions: readonly Session[]): Session[] {
-    const listed = markMaster(this.registry.list(nativeSessions, id => this.getSession(id)).map(session => this.sessionWithContext(session)), this.options.stateDir ?? defaultStateDir());
+    const listed = markMaster(this.registry.list(nativeSessions, id => this.getSession(id)).filter(session => !this.coldSessionIds.has(this.nativeSessionId(session.id))).map(session => this.sessionWithContext(session)), this.options.stateDir ?? defaultStateDir());
     const overlay = this.options.sessionOverlay;
     return overlay ? listed.map(overlay) : listed;
   }
@@ -453,6 +544,8 @@ export class RunManager extends EventEmitter {
     try {
       this.validateCorrelation(internal.autoPromptId);
       sessionId = this.monitorSessionId(sessionId);
+      while (this.retentionHeld(sessionId) || this.coldSessionIds.has(this.nativeSessionId(sessionId))) await this.awaitRetentionAdmission(sessionId);
+      this.assertRetentionAdmission(sessionId);
       const hasAttachments = Boolean(request.attachments?.length || request.attachmentIds?.length);
       this.validateAdmission(prompt, hasAttachments);
       const session = this.getSession(sessionId);
@@ -463,7 +556,10 @@ export class RunManager extends EventEmitter {
       if (!(await this.executable(session.provider))) throw new RunError(`Install the ${session.provider} CLI and ensure it is in PATH before sending instructions.`, 'unavailable');
       const prepared = await this.prepareAttachments(sessionId, request, internal.autoPromptId);
       // File writes yield; recheck admission immediately before inserting the run.
-      try { this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.(); }
+      try {
+        // Maintenance may have started while executable/attachment preparation yielded.
+        while (this.retentionHeld(sessionId) || this.coldSessionIds.has(this.nativeSessionId(sessionId))) await this.awaitRetentionAdmission(sessionId);
+        this.assertRetentionAdmission(sessionId); this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.(); }
       catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
       if (internal.untrustedInput) {
         // Recorded before the run exists: once external content is queued, the session stays marked.
@@ -500,7 +596,7 @@ export class RunManager extends EventEmitter {
    * said when no turn runs there or the instruction is not one the owner could insert (scheduled, being admitted).
    */
   private steering(run: Run): { target: Run; adapter: SteerableAdapter } | { blocked: SteerBlock } | undefined {
-    if (this.permissions.noticeBlocked(run)) return undefined;
+    if (this.retentionHeld(run.sessionId) || this.permissions.noticeBlocked(run)) return undefined;
     if (this.stopping || run.status !== 'queued' || run.steering || run.scheduled || this.admissions.has(run.id) || this.bridged.has(run.id)) return undefined;
     const target = [...this.runs.values()].find(item => item.sessionId === run.sessionId && item.status === 'running' && !item.steering);
     if (!target) return undefined;
@@ -735,6 +831,7 @@ export class RunManager extends EventEmitter {
         // explicitly configure a worker limit impose a global queue.
         if (this.options.maxConcurrent !== undefined && this.owned.size + this.bridged.size + this.stdio.size >= this.options.maxConcurrent) break;
         if (run.status !== 'queued' || this.admissions.has(run.id) || !due(run) || run.permissionNotice) continue;
+        if (this.retentionWait(run)) continue;
         if (!this.permissions.launchable(run)) continue;
         // Someone continued the conversation outside Tower after the agent scheduled this.
         // Tower's continuation after an update follows its own wrap-up message, which counts as a request.
@@ -742,7 +839,7 @@ export class RunManager extends EventEmitter {
         if (requested && Date.parse(requested) > Date.parse(run.createdAt)) { this.supersede(run, 'The conversation continued before the scheduled time.'); continue; }
         // Each run's own look, taken now: an earlier run's start may have taken a while.
         await this.prepareLaunch(run);
-        if (run.status !== 'queued' || this.admissions.has(run.id) || this.stopping) continue;
+        if (run.status !== 'queued' || this.admissions.has(run.id) || this.stopping || this.retentionWait(run)) continue;
         const refused = this.launchGate?.(run);
         if (refused) {
           run.status = 'cancelled'; run.error = refused; run.finishedAt = new Date().toISOString(); this.changed();
@@ -824,9 +921,9 @@ export class RunManager extends EventEmitter {
     // The last look, in the same step as the start: nothing can land between them. A look that throws frees the adapter.
     let refused: boolean;
     try { refused = run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session); }
-    catch (error) { prepared.dispose({ heldForUpdate: false }); throw error; }
+    catch (error) { await prepared.dispose({ heldForUpdate: false }); throw error; }
     if (refused) {
-      prepared.dispose({ heldForUpdate: run.status === 'queued' && this.updating });
+      await prepared.dispose({ heldForUpdate: run.status === 'queued' && this.updating });
       this.reservedSessions.delete(session.id);
       return true;
     }
@@ -847,9 +944,9 @@ export class RunManager extends EventEmitter {
     try {
       const current = this.getSession(session.id);
       refused = run.status !== 'queued' || this.stopping || Boolean(current && (this.isWorking(current) || current.activeProcess)) || this.refusedAtLaunch(run, session);
-    } catch (error) { prepared.dispose(); throw error; }
+    } catch (error) { await prepared.dispose(); throw error; }
     if (refused) {
-      prepared.dispose();
+      await prepared.dispose();
       this.reservedSessions.delete(session.id);
       return;
     }
@@ -872,8 +969,8 @@ export class RunManager extends EventEmitter {
         if (!creating) this.validateSession(latest);
         else if (!latest) throw new RunError('Session no longer exists.', 'not-found');
       }
-    } catch (error) { prepared.dispose(); throw error; }
-    if (refused) { prepared.dispose(); this.reservedSessions.delete(session.id); return; }
+    } catch (error) { await prepared.dispose(); throw error; }
+    if (refused) { await prepared.dispose(); this.reservedSessions.delete(session.id); return; }
     const owned = prepared.handle();
     this.owned.set(run.id, owned);
     prepared.start();

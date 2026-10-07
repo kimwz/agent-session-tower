@@ -1,5 +1,5 @@
-import { access, chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { access, chmod, writeFile } from 'node:fs/promises';
+import { createPrivateTemporary } from '../temporary/directories.js';
 import { isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -60,13 +60,14 @@ export async function awaitToolServers(tools: RunTools, options: { timeoutMs?: n
  * A capability in a tool server's environment would be visible in the process list as an argument, so such a
  * configuration goes to a private file (0600 in its own 0700 folder) that lives only as long as the turn.
  */
-export async function privateMcpConfig(mcpServers: SessionMcpServers): Promise<{ path: string; remove: () => void }> {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-mcp-'));
-  const remove = () => { void rm(directory, { recursive: true, force: true }).catch(() => {}); };
+export async function privateMcpConfig(mcpServers: SessionMcpServers): Promise<{ path: string; bindConsumer(pid: number): Promise<void>; remove: () => Promise<void> }> {
+  const temporary = await createPrivateTemporary('mcp');
+  const { directory } = temporary;
+  const remove = () => temporary.release();
   try {
     await chmod(directory, 0o700);
     const path = join(directory, 'config.json');
     await writeFile(path, JSON.stringify({ mcpServers }), { mode: 0o600, flag: 'wx' });
-    return { path, remove };
-  } catch (error) { remove(); throw error; }
+    return { path, bindConsumer: pid => temporary.bindConsumer(pid), remove };
+  } catch (error) { await remove(); throw error; }
 }

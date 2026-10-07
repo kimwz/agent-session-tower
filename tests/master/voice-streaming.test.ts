@@ -1,3 +1,4 @@
+import { temporaryFixture, removeTemporaryFixture } from '../helpers/temporary.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -178,8 +179,8 @@ interface Page { answer?: (say: MasterSay) => string | undefined; delayMs?: numb
  */
 async function harness(t: test.TestContext, options: { settings?: Record<string, unknown>; page?: Page; followMs?: number; prepare?: (dir: string) => Promise<void>; playMs?: number } = {}) {
   const cleanup: Array<() => unknown> = [];
-  const dir = await mkdtemp(join(tmpdir(), 'tower-voice-stream-'));
-  t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(dir, { recursive: true, force: true }); });
+  const dir = await temporaryFixture('tower-voice-stream-');
+  t.after(async () => { for (const step of cleanup.reverse()) await step(); await removeTemporaryFixture(dir); });
   const labs = await fakeElevenLabs();
   cleanup.push(() => labs.close());
   const runs: Run[] = [];
@@ -776,8 +777,8 @@ test('live progress records receipt and real start before turn end without settl
 
 test('timing traces bound TTS attempts and preserve first attempt, and snapshots are detached', async t => {
   const { VoiceTimings } = await import('../../server/master/voice-timings.js');
-  const dir = await mkdtemp(join(tmpdir(), 'voice-trace-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  const dir = await temporaryFixture('voice-trace-');
+  t.after(() => removeTemporaryFixture(dir));
   const timings = new VoiceTimings(join(dir, 'trace.json'));
   timings.mark('key', 'request', 1);
   for (let part = 0; part < 100; part++) timings.piece('key', { live: 'live', part, attempt: 0, start: part, bytes: 1, result: 'done' });
@@ -803,12 +804,12 @@ test('actual host socket and web relay correlate writes, EOF and late transport 
   const transport = MasterVoice.prototype.voiceTransport;
   t.mock.method(MasterVoice.prototype, 'serveAudio', (...args: Parameters<typeof serve>) => serve.call(h.voice, ...args));
   t.mock.method(MasterVoice.prototype, 'voiceTransport', (...args: Parameters<typeof transport>) => transport.call(h.voice, ...args));
-  const dir = await mkdtemp(join(tmpdir(), 'voice-stage-host-'));
+  const dir = await temporaryFixture('voice-stage-host-');
   const host = await startMasterHost({ stateDir: dir, idleMs: 60_000 });
   const client = new MasterClient({ stateDir: dir, credentials: () => undefined });
   const relay = createServer((_req, res) => { void client.pipeAudio(res, live); });
   const port = await listen(relay);
-  t.after(async () => { await stop(relay); client.dispose(); await host.close(); await rm(dir, { recursive: true, force: true }); });
+  t.after(async () => { await stop(relay); client.dispose(); await host.close(); await removeTemporaryFixture(dir); });
   const response = await fetch(`http://127.0.0.1:${port}/`);
   const reader = response.body!.getReader();
   const initial = await reader.read();
@@ -872,12 +873,12 @@ test('two socket readers stay distinct and a truncated relay never settles playb
     return serve.call(h.voice, ...args);
   });
   t.mock.method(MasterVoice.prototype, 'voiceTransport', (...args: Parameters<typeof transport>) => transport.call(h.voice, ...args));
-  const dir = await mkdtemp(join(tmpdir(), 'voice-stage-cut-'));
+  const dir = await temporaryFixture('voice-stage-cut-');
   const host = await startMasterHost({ stateDir: dir, idleMs: 60_000 });
   const client = new MasterClient({ stateDir: dir, credentials: () => undefined });
   const relay = createServer((_req, res) => { void client.pipeAudio(res, live); });
   const port = await listen(relay);
-  t.after(async () => { await stop(relay); client.dispose(); await host.close(); await rm(dir, { recursive: true, force: true }); });
+  t.after(async () => { await stop(relay); client.dispose(); await host.close(); await removeTemporaryFixture(dir); });
   const first = await fetch(`http://127.0.0.1:${port}/`);
   const firstReader = first.body!.getReader();
   assert.ok((await firstReader.read()).value!.length > 0);
@@ -1263,12 +1264,12 @@ test('failed synthesized audio is rejected with 502 through the actual host and 
   const transport = MasterVoice.prototype.voiceTransport;
   t.mock.method(MasterVoice.prototype, 'serveAudio', (...args: Parameters<typeof serve>) => serve.call(h.voice, ...args));
   t.mock.method(MasterVoice.prototype, 'voiceTransport', (...args: Parameters<typeof transport>) => transport.call(h.voice, ...args));
-  const dir = await mkdtemp(join(tmpdir(), 'voice-failed-http-'));
+  const dir = await temporaryFixture('voice-failed-http-');
   const host = await startMasterHost({ stateDir: dir, idleMs: 60_000 });
   const client = new MasterClient({ stateDir: dir, credentials: () => undefined });
   const relay = createServer((_req, res) => { void client.pipeAudio(res, failed.live); });
   const port = await listen(relay);
-  t.after(async () => { await stop(relay); client.dispose(); await host.close(); await rm(dir, { recursive: true, force: true }); });
+  t.after(async () => { await stop(relay); client.dispose(); await host.close(); await removeTemporaryFixture(dir); });
   const response = await fetch(`http://127.0.0.1:${port}/`);
   assert.equal(response.status, 502);
   assert.equal((await response.arrayBuffer()).byteLength, 0);

@@ -50,12 +50,17 @@ export interface RunnerReply {
   error?: { message: string; statusCode: number; disposition?: string };
 }
 
+/** Pure calculation for fixture teardown: never recreates a deleted state directory. */
+export function runnerDirectoryForCanonicalState(canonical: string): string {
+  const hash = createHash('sha256').update(canonical).digest('hex').slice(0, 24);
+  return join('/tmp', `tower-runner-${process.getuid?.() ?? 'user'}-${hash}`);
+}
+
 /** Short UDS paths work on macOS; an owner-only directory protects socket and token. */
 export async function runnerPaths(stateDir: string) {
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   const canonical = await realpath(stateDir);
-  const hash = createHash('sha256').update(canonical).digest('hex').slice(0, 24);
-  const directory = join('/tmp', `tower-runner-${process.getuid?.() ?? 'user'}-${hash}`);
+  const directory = runnerDirectoryForCanonicalState(canonical);
   await mkdir(directory, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'EEXIST') throw error; });
   const info = await lstat(directory);
   if (!info.isDirectory() || info.isSymbolicLink() || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o077)) {

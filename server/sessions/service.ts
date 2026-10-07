@@ -61,6 +61,13 @@ export class SessionService extends EventEmitter {
   private readonly checked = new Set<string>();
   private readonly generations = new WeakMap<RecordState, number>();
   private generationCount = 0;
+  private coldPaths: ReadonlySet<string> = new Set();
+  private coldIds: ReadonlySet<string> = new Set();
+  private coldIssues: string[] = [];
+  private reconcileCold?: () => Promise<{ complete: boolean; issues: string[] } | void>;
+  setColdRegistry(paths: Iterable<string>, ids: Iterable<string>, reconcile?: () => Promise<{ complete: boolean; issues: string[] } | void>): void {
+    this.coldPaths = new Set(paths); this.coldIds = new Set(ids); this.reconcileCold = reconcile;
+  }
   private retentionComplete = false;
   private retentionIssues: string[] = ['scan-incomplete'];
 
@@ -99,10 +106,10 @@ export class SessionService extends EventEmitter {
   resume(): void { this.quiesced = false; }
   list(): Session[] { return [...this.index.values()].map((record) => ({ ...record.session })).sort(sortSessions); }
   /** Metadata only, including internal guardian records omitted from ordinary discovery. */
-  retentionRecords(): { complete: boolean; issues: string[]; records: { session: Session; internal: boolean; fingerprint: string; lastActivityAt?: string; latestTaskEndedAt?: string }[] } {
+  retentionRecords(): { launchers: ReadonlyMap<string, readonly string[]>; complete: boolean; issues: string[]; records: { session: Session; internal: boolean; fingerprint: string; lastActivityAt?: string; latestTaskEndedAt?: string }[] } {
     const chosen = new Map(this.index);
     for (const state of this.records.values()) if (state.internal && !chosen.has(state.session.id)) chosen.set(state.session.id, state);
-    return { complete: this.retentionComplete && !this.scanning && !this.quiesced && this.diagnostics.length === 0,
+    return { launchers:new Map([...this.launchers].filter(([id]) => { const child=chosen.get(id); return Boolean(child && (child.execOrigin || (child.session.provider === 'claude' && child.programmatic))); }).map(([id, parents])=>[id,[...parents]])), complete: this.retentionComplete && !this.scanning && !this.quiesced && this.diagnostics.length === 0,
       issues: [...new Set([...(this.scanning ? ['scan-in-progress'] : []), ...(this.quiesced ? ['observer-paused'] : []),
         ...this.retentionIssues, ...this.diagnostics.map(item => `native-record-read-error:${item.provider}`)])],
       records: [...chosen.values()].map(state => ({ session: { ...state.session }, internal: state.internal,
@@ -135,6 +142,8 @@ export class SessionService extends EventEmitter {
     this.retentionComplete = false;
     this.retentionIssues = ['scan-incomplete'];
     try {
+      try { const cold = await this.reconcileCold?.(); this.coldIssues = cold && !cold.complete ? cold.issues : []; }
+      catch (error) { this.coldIssues = [`cold-inspection-failed:${String(error)}`]; }
       // Saved proofs come first: nothing is written before them, so a save can never drop what an earlier worker proved.
       if (this.proofFile && !this.proofsLoaded) {
         for (const [id, parents] of await this.proofFile.load()) if (!this.launchers.has(id)) this.launchers.set(id, parents);
@@ -142,6 +151,7 @@ export class SessionService extends EventEmitter {
       }
       // A provider whose history could not be listed completely (a folder unreadable or missing) proves no conversation of it is gone.
       const incomplete = new Set<Provider>();
+      const coldIdsAtStart = new Set(this.coldIds);
       const [codex, archived, claude] = await Promise.all([
         walk(join(this.codexHome, 'sessions'), 6, () => incomplete.add('codex')), walk(join(this.codexHome, 'archived_sessions'), 6, () => incomplete.add('codex')),
         walk(join(this.claudeHome, 'projects'), 6, () => incomplete.add('claude')),
@@ -150,7 +160,7 @@ export class SessionService extends EventEmitter {
       if (Date.now() - this.lastProcesses > 8000) await this.inspect();
       const files = [...codex.map((path) => ({ path, provider: 'codex' as const, archived: false })),
         ...archived.map((path) => ({ path, provider: 'codex' as const, archived: true })),
-        ...claude.map((path) => ({ path, provider: 'claude' as const, archived: false }))];
+        ...claude.map((path) => ({ path, provider: 'claude' as const, archived: false }))].filter(entry => !this.coldPaths.has(entry.path));
       const existing = new Set(files.map(({ path }) => path));
       let changed = false;
       this.diagnostics = [];
@@ -185,6 +195,8 @@ export class SessionService extends EventEmitter {
       if (unchecked.some(state => Date.now() - Date.parse(state.session.createdAt) < 120_000) && Date.now() - this.lastProcesses > 1000) await this.inspect();
       for (const state of unchecked) this.checked.add(state.session.id);
       const live = new Set([...this.records.values()].map(state => state.session.id));
+      for (const id of coldIdsAtStart) live.add(id);
+      for (const id of this.coldIds) live.add(id);
       // A helper that was detached from its launcher, so the process tree no longer shows who started it, left a mark.
       if (this.launchMarks) {
         // The folder is read again only when it changed, or a minute later for expiry; matching runs on every scan.
@@ -219,7 +231,7 @@ export class SessionService extends EventEmitter {
       }
       if (resolveExecLineage(this.index.values(), this.launchers)) changed = true;
       const requiredProviders = new Set([...observedProviders, ...[...this.records.values()].map(state => state.session.provider)]);
-      this.retentionIssues = [...requiredProviders].filter(provider => incomplete.has(provider)).map(provider => `native-history-incomplete:${provider}`);
+      this.retentionIssues = [...this.coldIssues, ...[...requiredProviders].filter(provider => incomplete.has(provider)).map(provider => `native-history-incomplete:${provider}`)];
       this.retentionComplete = this.retentionIssues.length === 0;
       if ((this.proofsChanged || this.proofFile?.failed) && this.proofFile?.save(this.launchers)) this.proofsChanged = false;
       this.scanning = false;

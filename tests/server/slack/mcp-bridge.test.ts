@@ -1,3 +1,4 @@
+import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Readable, Writable } from 'node:stream';
@@ -34,10 +35,10 @@ test('a Slack tool server started without a capability serves only a worker from
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
   const { startLegacyRunner } = await import('../runs/fixtures/legacy-runner.ts');
-  const directory = await mkdtemp(join(tmpdir(), 'tower-slack-legacy-'));
+  const directory = await temporaryFixture('tower-slack-legacy-');
   const stateDir = join(directory, 'state');
   const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [], nativeIds: {}, settled: [], autoPrompts: [] });
-  t.after(async () => { await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  t.after(async () => { await legacy.close(); await removeTemporaryFixture(directory); await rm(legacy.directory, { recursive: true, force: true }); });
   const previous = process.env.TOWER_MCP_CAPABILITY;
   delete process.env.TOWER_MCP_CAPABILITY;
   let text = '';

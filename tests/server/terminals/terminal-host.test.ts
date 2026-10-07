@@ -1,3 +1,4 @@
+import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -29,13 +30,13 @@ class Pty implements WorkspacePty {
 }
 
 async function fixture(t: TestContext, options: { idleMs?: number; legacy?: WorkspaceTerminalBackend; keepIntervalMs?: number } = {}) {
-  const stateDir = await mkdtemp(join(tmpdir(), 'tower-terminal-host-'));
+  const stateDir = await temporaryFixture('tower-terminal-host-');
   const ptys: Pty[] = [];
   const terminals = new WorkspaceTerminals({ keepAliveOnDisconnect: true, env: { SHELL: '/bin/fixture-shell' }, platform: 'darwin', spawnPty: () => { const pty = new Pty(); ptys.push(pty); return pty; } });
   let idle = 0;
   const host = await startTerminalHost({ stateDir, terminals, idleMs: options.idleMs, keepIntervalMs: options.keepIntervalMs, onIdle: options.idleMs === undefined ? undefined : () => { idle++; terminals.dispose(); } });
   const client = new TerminalHostClient({ stateDir, legacy: options.legacy, hostEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 500 });
-  t.after(async () => { client.dispose(); await host.close(); terminals.dispose(); await rm(stateDir, { recursive: true, force: true }); await rm((await runnerPaths(stateDir)).directory, { recursive: true, force: true }); });
+  t.after(async () => { client.dispose(); await host.close(); terminals.dispose(); await removeTemporaryFixture(stateDir); });
   return { stateDir, ptys, terminals, host, client, idle: () => idle };
 }
 
@@ -165,7 +166,7 @@ test('the terminal client reads host failures as before: absent host, old host, 
   const { errorStatus } = await import('../../../server/http/requests.js');
   const { RUNNER_PROTOCOL } = await import('../../../server/runs/runner-protocol.js');
   const { chmod } = await import('node:fs/promises');
-  const stateDir = await mkdtemp(join(tmpdir(), 'tower-terminal-client-'));
+  const stateDir = await temporaryFixture('tower-terminal-client-');
   const paths = await terminalHostPaths(stateDir);
   const legacyCalls: string[] = [];
   /** The sinks the older worker was given, so the same sink is seen to be handed on. */
@@ -185,7 +186,7 @@ test('the terminal client reads host failures as before: absent host, old host, 
     server.closeAllConnections(); server.close(); plain.dispose(); withLegacy.dispose();
     // Its runner folder is found before the state goes: finding it makes the state folder again.
     const runner = (await runnerPaths(stateDir)).directory;
-    await rm(stateDir, { recursive: true, force: true }); await rm(runner, { recursive: true, force: true });
+    await removeTemporaryFixture(stateDir); await rm(runner, { recursive: true, force: true });
   });
   const failed = async (work: Promise<unknown>) => { const error = await work.then(() => undefined, (caught: unknown) => caught) as Error & { hostAbsent?: boolean }; return { status: errorStatus(error), message: error.message, hostAbsent: error.hostAbsent }; };
   /** An event-stream sink as the web server gives one: what was written to it, and how often its head was written. */

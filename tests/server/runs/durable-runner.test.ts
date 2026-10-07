@@ -1,3 +1,4 @@
+import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -33,8 +34,8 @@ import { RetentionArchive } from '../../../server/sessions/retention/archive.js'
 import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
 import { worktreeCleanupVisible } from '../../../server/worktrees/janitor.js';
 
-async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string) {
-  const directory = await realpath(await mkdtemp(join(tmpdir(), 'tower-durable-fixture-')));
+async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector) {
+  const directory = await realpath(await temporaryFixture('tower-durable-fixture-'));
   const stateDir = join(directory, 'state');
   const id = '10000000-0000-4000-8000-000000000001';
   const session: Session = {
@@ -69,7 +70,7 @@ async function fixture(workerClosed = false, withRetention = false, retentionUna
   await closedSessions?.start();
   const archive = new RetentionArchive(join(stateDir, 'cold'), []);
   const retentionStore = new RetentionStore(join(stateDir, 'retention'));
-  const retention = withRetention ? { archive, service: new RetentionService({ archive, store: retentionStore,
+  const retention = withRetention ? { archive, temporary, service: new RetentionService({ archive, store: retentionStore,
     adapter: createNativeRetentionAdapter({ claude: [], codex: [] }), observe: async () => ({ now: Date.now(), migratedAt: Date.now(), complete: true, records: [], protectedIds: new Set() }) }) } : undefined;
   await retention?.service.start();
   const host = await startRunnerHost({ stateDir, sessions, runs, closedSessions, retention, retentionUnavailable });
@@ -88,7 +89,7 @@ async function fixture(workerClosed = false, withRetention = false, retentionUna
     await host.close(); sessions.stop(); await runs.close();
   };
   const remove = async () => {
-    await rm(directory, { recursive: true, force: true });
+    await removeTemporaryFixture(directory);
     await rm(paths.directory, { recursive: true, force: true });
   };
   return { directory, stateDir, session, sessions, runs, host, paths, connect, closedSessions, retention, retentionStore, starts: () => starts, cancels: () => cancels,
@@ -387,7 +388,7 @@ test('a stale client cannot send cancellation to a replacement runner instance',
 
 for (const provider of ['claude', 'codex'] as const) {
   test(`detached ${provider} stdio task survives actual UI SIGTERM, retains approval, and supports explicit cancel`, { timeout: 30_000 }, async t => {
-    const directory = await mkdtemp(join(tmpdir(), `tower-process-${provider}-`));
+    const directory = await temporaryFixture(`tower-process-${provider}-`);
     const stateDir = join(directory, 'state');
     for (const name of ['home', 'codex', 'claude']) await mkdir(join(directory, name));
     const paths = await runnerPaths(stateDir);
@@ -411,7 +412,7 @@ for (const provider of ['claude', 'codex'] as const) {
         process.kill(fixtureWorkerPid, 'SIGTERM');
         await until(() => !alive(fixtureWorkerPid), 5000).catch(() => { if (alive(fixtureWorkerPid)) process.kill(fixtureWorkerPid, 'SIGKILL'); });
       }
-      await rm(directory, { recursive: true, force: true });
+      await removeTemporaryFixture(directory);
       await rm(paths.directory, { recursive: true, force: true });
     });
     await until(() => {
@@ -551,13 +552,13 @@ test('the worker serves native conversation pages without the native file path o
 });
 
 test('a web process attached to a 1.12 worker reads conversations from its own index and never sends the missing operation', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-worker-'));
+  const directory = await temporaryFixture('tower-legacy-worker-');
   const stateDir = join(directory, 'state');
   const session: Session = { id: 'codex:legacy', nativeId: 'legacy', provider: 'codex', title: 'Legacy', cwd: directory, project: 'fixture', status: 'idle',
     statusReason: '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
   const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [session], nativeIds: { [session.id]: session.nativeId }, settled: [], autoPrompts: [] });
   const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
-  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  t.after(async () => { await client.close(); await legacy.close(); await removeTemporaryFixture(directory); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
   assert.equal(client.runnerVersion(), '1.12.3');
   assert.equal(client.supports('sessionHistory'), false);
@@ -580,13 +581,13 @@ test('a web process attached to a 1.12 worker reads conversations from its own i
 });
 
 test('an outdated worker is only given the owner’s own requests, never work on anyone else’s behalf', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-origin-'));
+  const directory = await temporaryFixture('tower-legacy-origin-');
   const stateDir = join(directory, 'state');
   const session: Session = { id: 'codex:legacy', nativeId: 'legacy', provider: 'codex', title: 'Legacy', cwd: directory, project: 'fixture', status: 'idle',
     statusReason: '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
   const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [session], nativeIds: { [session.id]: session.nativeId }, settled: [], autoPrompts: [] });
   const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
-  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  t.after(async () => { await client.close(); await legacy.close(); await removeTemporaryFixture(directory); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
   assert.equal(client.supports('origins'), false);
   const agent = { kind: 'agent' as const, runId: '12345678-1234-4234-8234-123456789abc' };
@@ -604,11 +605,11 @@ test('an outdated worker is only given the owner’s own requests, never work on
 });
 
 test('an older worker reuses bounded saved chat references and refuses new originals before RPC', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-attachments-'));
+  const directory = await temporaryFixture('tower-legacy-attachments-');
   const stateDir = join(directory, 'state');
   const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [], nativeIds: {}, settled: [], autoPrompts: [] });
   const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
-  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  t.after(async () => { await client.close(); await legacy.close(); await removeTemporaryFixture(directory); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
   assert.equal(client.supports('attachmentReferences'), false);
   const attachmentIds = ['12345678-1234-4234-8234-123456789abc'];
@@ -860,11 +861,11 @@ test('a worker newer than this web, left by an update that was undone, is not ha
 });
 
 test('a worker that has to start while an update is tried is the previous version’s', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-held-worker-'));
+  const directory = await temporaryFixture('tower-held-worker-');
   const stateDir = join(directory, 'state');
   const spawned: Array<{ execPath: string; args: string[] }> = [];
   const client = new DurableRunManager({ stateDir, startupTimeoutMs: 200, heldWorkerEntry: async () => '/versions/1.0.0/bin/tower.mjs', spawn: command => spawned.push(command) });
-  t.after(async () => { await client.close(); await rm(directory, { recursive: true, force: true }); await rm((await runnerPaths(stateDir)).directory, { recursive: true, force: true }); });
+  t.after(async () => { await client.close(); await removeTemporaryFixture(directory); });
   await assert.rejects(client.start());
   assert.deepEqual(spawned.map(command => command.args), [['/versions/1.0.0/bin/tower.mjs', '--runner-worker', await realpath(stateDir)]]);
 });
@@ -1303,11 +1304,11 @@ test('trigger operations run in the worker as the owner and their state reaches 
 });
 
 test('with an outdated worker, trigger operations explain the pending update instead of failing oddly', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-triggers-'));
+  const directory = await temporaryFixture('tower-legacy-triggers-');
   const stateDir = join(directory, 'state');
   const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [], nativeIds: {}, settled: [], autoPrompts: [] });
   const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
-  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  t.after(async () => { await client.close(); await legacy.close(); await removeTemporaryFixture(directory); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
   await assert.rejects(client.api('triggers.list', {}), { kind: 'unavailable', message: /not updated yet/ });
   assert.equal(client.triggerOverview(), undefined);
@@ -1315,11 +1316,11 @@ test('with an outdated worker, trigger operations explain the pending update ins
 });
 
 test('an outdated worker is never given a request that names its place, since it would route it elsewhere', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-target-'));
+  const directory = await temporaryFixture('tower-legacy-target-');
   const stateDir = join(directory, 'state');
   const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [], nativeIds: {}, settled: [], autoPrompts: [] });
   const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
-  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  t.after(async () => { await client.close(); await legacy.close(); await removeTemporaryFixture(directory); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
   assert.equal(client.supports('autoPromptTargets'), false);
   const base = { provider: 'codex' as const, prompt: 'Continue', cwd: directory };
@@ -1335,11 +1336,11 @@ test('the current worker says it takes requests that name their place', async t 
 });
 
 test('an outdated worker is never asked to insert into a chosen turn, since it would insert into any', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-steer-'));
+  const directory = await temporaryFixture('tower-legacy-steer-');
   const stateDir = join(directory, 'state');
   const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [], nativeIds: {}, settled: [], autoPrompts: [] });
   const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
-  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  t.after(async () => { await client.close(); await legacy.close(); await removeTemporaryFixture(directory); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
   assert.equal(client.supports('steerTargets'), false);
   await assert.rejects(client.steer('queued-run', { targetRunId: 'turn' }), { kind: 'unavailable', disposition: 'not-admitted' });
@@ -1347,11 +1348,11 @@ test('an outdated worker is never asked to insert into a chosen turn, since it w
 });
 
 test('an outdated worker is never given the master, which it would run on whatever sign-in its CLI has', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-master-'));
+  const directory = await temporaryFixture('tower-legacy-master-');
   const stateDir = join(directory, 'state');
   const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [], nativeIds: {}, settled: [], autoPrompts: [] });
   const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
-  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  t.after(async () => { await client.close(); await legacy.close(); await removeTemporaryFixture(directory); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
   assert.equal(client.supports('subscriptionOnly'), false);
   const master = join(stateDir, 'master-session');
@@ -1361,12 +1362,12 @@ test('an outdated worker is never given the master, which it would run on whatev
 });
 
 test('while an outdated worker has a master session, it is not asked to route work by itself, since it would not keep it out of the master', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-master-route-'));
+  const directory = await temporaryFixture('tower-legacy-master-route-');
   const stateDir = join(directory, 'state');
   const master: Session = { id: 'claude:master', nativeId: 'm', provider: 'claude', title: '마스터', cwd: join(stateDir, 'master-session'), project: 'master-session', status: 'idle', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
   const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [master], nativeIds: {}, settled: [], autoPrompts: [] });
   const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
-  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  t.after(async () => { await client.close(); await legacy.close(); await removeTemporaryFixture(directory); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
   await assert.rejects(client.submitAutoPrompt({ provider: 'claude', prompt: 'somewhere', requestId: '12345678-1234-4234-8234-123456789ac0' }), { kind: 'unavailable', disposition: 'not-admitted' });
   await assert.rejects(client.enqueue('claude:master', 'hello'), { kind: 'unavailable', disposition: 'not-admitted' });
@@ -1412,11 +1413,11 @@ test('worker records a verified calling turn without treating its message as own
 
 
 test('an old worker cannot silently ignore master.worker on direct, Auto Prompt, or v1 submissions', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-worker-role-'));
+  const directory = await temporaryFixture('tower-legacy-worker-role-');
   const stateDir = join(directory, 'state');
   const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [], nativeIds: {}, settled: [], autoPrompts: [] });
   const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/must-not-spawn.js', startupTimeoutMs: 1000 });
-  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  t.after(async () => { await client.close(); await legacy.close(); await removeTemporaryFixture(directory); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
   const input = { provider: 'codex' as const, prompt: 'work', cwd: directory, modelRole: 'master.worker' as const };
   const expected = { kind: 'unavailable', disposition: 'not-admitted' };
@@ -1585,7 +1586,8 @@ async function triggerHandoff(t: test.TestContext, inject: HandoffInjection = {}
     const enginesClosed = hostsClosed && engineRecords.every(record => record.closed);
     if (enginesClosed && !fixtureClosed) await attempt('fixture runs and clients', async () => { await f.close(); fixtureClosed = true; });
     // Confirms both hosts let go of the state.
-    if (fixtureClosed) await attempt('state lock', async () => { await (await acquireStateLock(f.paths.runtime, 0))(); });
+    // A successful earlier removal already verified the lock and removed its runtime; acquiring again would recreate the fixture.
+    if (fixtureClosed && existsSync(f.directory)) await attempt('state lock', async () => { await (await acquireStateLock(f.paths.runtime, 0))(); });
     // What failed along the way, each reported once: in this cleanup's error, which keeps the folder.
     for (const record of [...engineRecords, ...hostRecords]) {
       if (record.failure && !record.failure.reported) { record.failure.reported = true; errors.push(Object.assign(new Error(`${record.name} start failed: ${String(record.failure.error)}`), { cause: record.failure.error })); }
@@ -1893,4 +1895,20 @@ test('worker error replies keep their status, message and disposition across the
     assert.deepEqual({ status: errorStatus(error), message: error.message, disposition: (error as { disposition?: string }).disposition, edge: errorDisposition(error) },
       { status: expected.status, message: expected.message, disposition: expected.disposition, edge: expected.edge }, name);
   }
+});
+
+
+test('temporary cleanup failure remains visible without blocking native retention checks', async t => {
+  let fail=true,calls=0;
+  const base={examined:0,removedEmpty:0,releasedOwned:0,eligibleEmpty:0,eligibleOwned:0,deferredActive:0,deferredUnproven:0,failed:0,issues:[],eligiblePaths:[],removedPaths:[]};
+  const temporary={overview:()=>({...base}),cycle:async()=>{if(fail)throw Object.assign(new Error('private file location must not be exposed'),{code:'EACCES'});return {...base};}} as unknown as import('../../../server/temporary/directories.js').TemporaryCollector;
+  const f=await fixture(true,true,undefined,temporary);t.after(f.cleanup);
+  const cycle=f.retention!.service.cycle.bind(f.retention!.service);
+  t.mock.method(f.retention!.service,'cycle',async()=>{calls++;return cycle();});
+  const client=await f.connect();
+  const first=await client.retention('check') as {temporary:typeof base};
+  assert.equal(calls,1);assert.equal(first.temporary.failed,1);assert.deepEqual(first.temporary.issues,['Temporary cleanup failed: EACCES']);
+  const persisted=await client.retention('overview') as {temporary:typeof base};assert.equal(persisted.temporary.failed,1);
+  fail=false;const recovered=await client.retention('check') as {temporary:typeof base};assert.equal(calls,2);assert.equal(recovered.temporary.failed,0);assert.deepEqual(recovered.temporary.issues,[]);
+  assert.equal(f.starts(),0);assert.equal(f.cancels(),0);
 });

@@ -69,8 +69,9 @@ import { sseSink } from '../http/sinks.js';
 import { RetentionService } from '../sessions/retention/service.js';
 import { RetentionArchive } from '../sessions/retention/archive.js';
 import { RetentionStore } from '../sessions/retention/store.js';
-import { RetentionObserver } from '../sessions/retention/observer.js';
+import { permissionRetentionPending, RetentionObserver } from '../sessions/retention/observer.js';
 import { createNativeRetentionAdapter } from '../sessions/retention/provider.js';
+import { TemporaryCollector, inspectTemporaryProtection } from '../temporary/directories.js';
 
 const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan', 'skillsBackup', 'secretCall']);
 
@@ -79,7 +80,7 @@ export interface RunnerHostOptions {
   runs: RunManager;
   sessions: SessionService;
   closedSessions?: ClosedSessionStore;
-  retention?: { service: RetentionService; archive: RetentionArchive };
+  retention?: { service: RetentionService; archive: RetentionArchive; temporary?: TemporaryCollector };
   retentionUnavailable?: string;
   autoPrompts?: AutoPromptManager;
   slack?: SlackService;
@@ -177,6 +178,11 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     return options.ledger.once(controllerId, operation, admitted.requestId, content, execute, record, replay);
   };
   const findRun = (id: string) => options.runs.list().find(run => run.id === id);
+  let temporaryFailure: string | undefined;
+  const temporaryOverview = () => {
+    const overview = options.retention?.temporary?.overview();
+    return overview && temporaryFailure ? { ...overview, failed: Math.max(overview.failed, 1), issues: [...overview.issues, temporaryFailure] } : overview;
+  };
   let closureReady: Promise<void> | undefined;
   const admit = (value: unknown): RunAdmission => {
     const admitted = admission(value);
@@ -205,8 +211,15 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (!options.retention) throw new TowerError('unavailable', options.retentionUnavailable || '세션 보관 정책은 실행 워커 업데이트 후 사용할 수 있습니다.');
         const [action, value, extra] = args;
         const service = options.retention.service;
-        if (action === 'overview') return { ...service.overview(), targets: options.runs.sessionList(options.sessions.list()).filter(session => !session.master && (session.isSubagent || session.launchedByAgent && session.parentId)).map(session => ({ id: session.id, title: session.customTitle || session.title })) };
-        if (action === 'check') return service.cycle();
+        if (action === 'overview') return { ...service.overview(), temporary: temporaryOverview(), targets: options.runs.sessionList(options.sessions.list()).filter(session => !session.master && (session.isSubagent || session.launchedByAgent && session.parentId)).map(session => ({ id: session.id, title: session.customTitle || session.title })) };
+        if (action === 'check') {
+          try { await options.retention.temporary?.cycle(); temporaryFailure = undefined; }
+          catch (error) {
+            const code = (error as NodeJS.ErrnoException)?.code;
+            temporaryFailure = `Temporary cleanup failed: ${typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,31}$/.test(code) ? code : 'unknown error'}`;
+          }
+          return { ...await service.cycle(), temporary: temporaryOverview() };
+        }
         if (typeof value !== 'string' || !value || value.length > 4096) throw new TowerError('invalid', 'Invalid retention target.');
         if (action === 'archive') return service.archiveSession(value);
         if (action === 'backup') return service.backup(value);
@@ -220,6 +233,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'setClosed': {
         if (!options.closedSessions) throw new TowerError('unavailable', 'Session closure is unavailable.');
         if (typeof args[0] !== 'string' || typeof args[1] !== 'boolean') throw new TowerError('invalid', 'Invalid session closure request.');
+        if (!args[1] && options.retention) await options.retention.service.restoreSession(args[0]);
         const session = options.runs.getSession(args[0]);
         if (!session) return undefined;
         if (!args[1]) {
@@ -613,9 +627,41 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     hold: (provider, quiet) => quiet && sessions.list().some(session => session.provider === provider && session.status === 'working') ? undefined : runs.holdProvider(provider) }) : undefined;
   let initializedAutoPrompts: AutoPromptManager | undefined;
   let initializedRetention: RetentionService | undefined;
+  let retentionBootstrapError: unknown;
+  let retentionBootstrapIssues: string[] = [];
+  const nativeRoots = { claude: [join(sessions.claudeHome, 'projects')], codex: [join(sessions.codexHome, 'sessions'), join(sessions.codexHome, 'archived_sessions')] };
+  const retentionStore = new RetentionStore(join(stateDir, 'retention'));
+  const retentionArchive = new RetentionArchive(join(stateDir, 'retention-cold'), [...nativeRoots.claude, ...nativeRoots.codex], [join(stateDir, 'retention-originals')]);
+  const nativeRetention = createNativeRetentionAdapter(nativeRoots, { coldRoot: join(stateDir, 'retention-originals'), codexHome: sessions.codexHome, claudeHome: sessions.claudeHome });
+  const publishCold = () => {
+    const allMembers = retentionStore.list().flatMap(entry => entry.members || []);
+    runs.setRetentionLineage(allMembers,sessions.retentionRecords().launchers);
+    const members = retentionStore.list().flatMap(entry => entry.members || []).filter(member => member.state === 'cold');
+    sessions.setColdRegistry(members.flatMap(member => [member.originalPath, ...(member.coldPath ? [member.coldPath] : [])]), allMembers.filter(member => member.state !== 'restored').map(member => `${member.provider}:${member.nativeId}`), async () => { await initializedRetention?.reconcileCold(); const issues = initializedRetention?.coldInspectionIssues() || (retentionBootstrapError ? ['cold-registry-bootstrap-failed'] : retentionBootstrapIssues); return { complete: !issues.length, issues }; });
+    runs.setColdSessions(members.map(member => member.sessionId), id => initializedRetention ? initializedRetention.restoreSession(id) : Promise.reject(new Error('Retention is not ready.')));
+  };
+  let temporaryReferences = (): string[] => [];
+  const temporary = new TemporaryCollector({ protection: async () => {
+    const inspected = await inspectTemporaryProtection();
+    return { complete: inspected.complete && !sessions.scanning,
+    issues: [...inspected.issues, ...(sessions.scanning ? ['session-scan-in-progress'] : [])], openedPaths: inspected.openedPaths, paths: [...inspected.paths, ...temporaryReferences(), stateDir, paths.directory,
+      ...runs.sessionList(sessions.list()).filter(session => session.activeProcess || session.status === 'working' || session.scheduledAt || session.creationPending || runs.list().some(run => run.sessionId === session.id && ['queued', 'running'].includes(run.status))).map(session => session.cwd)] }; } });
   try {
     const closedSessions = new ClosedSessionStore(stateDir);
     await closedSessions.start();
+    try {
+      await retentionStore.start();
+      const entries = retentionStore.list();
+      const members = entries.flatMap(entry => entry.members || []).filter(member => member.state !== 'restored');
+      if (members.length) {
+        const inspected = await nativeRetention.inspectCold(members);
+        retentionBootstrapIssues = inspected.complete ? [] : inspected.issues;
+        const updates = new Map(inspected.members.map(member => [`${member.operationId}:${member.sessionId}`, member]));
+        const changed = entries.map(entry => ({ ...entry, members: entry.members?.map(member => updates.get(`${member.operationId}:${member.sessionId}`) || member) })).filter((entry, index) => JSON.stringify(entry) !== JSON.stringify(entries[index]));
+        if (changed.length) await retentionStore.putMany(changed);
+      }
+    } catch (error) { retentionBootstrapError = error; console.error(`Cold registry maintenance unavailable: ${String(error)}`); }
+    publishCold();
     await sessions.start();
     // Before any turn can start: a CLI still being replaced by an installer from before is held first.
     await tools?.start(autoUpdateEnabled());
@@ -890,10 +936,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         read: async (id, limit, before) => runs.getSession(id) ? (await sessions.detail(runs.nativeSessionId(id), before, limit)) ?? { messages: [], hasMore: false } : undefined,
         search: async (id, query) => runs.getSession(id) ? (await sessions.search(runs.nativeSessionId(id), query)) ?? { count: 0, matches: [], bytes: 0 } : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
-    const nativeRoots = { claude: [join(sessions.claudeHome, 'projects')], codex: [join(sessions.codexHome, 'sessions'), join(sessions.codexHome, 'archived_sessions')] };
-    const retentionStore = new RetentionStore(join(stateDir, 'retention'));
-    const retentionArchive = new RetentionArchive(join(stateDir, 'retention-cold'), [...nativeRoots.claude, ...nativeRoots.codex]);
-    const observer = new RetentionObserver({ stateDir, snapshot: () => sessions.completedRetentionRecords(),
+    const observer = new RetentionObserver({ stateDir, journalMembers: () => retentionStore.list().flatMap(entry=>entry.members || []), snapshot: () => sessions.completedRetentionRecords(),
       reconcile: native => runs.sessionList(native), runs: () => runs.list(), settled: () => runs.settledRunIds(),
       protectedIds: () => {
         const ids = new Set(coordinators());
@@ -915,19 +958,25 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
             event.input.target.mode === 'session' ? event.input.target.sessionId : undefined]) if (id) ids.add(id);
         }
 
-        for (const request of permissions.overview().requests) if (request.status === 'pending' || request.notification?.state === 'pending') ids.add(request.sessionId);
+        for (const request of permissions.overview().requests) if (permissionRetentionPending(request)) ids.add(request.sessionId);
         return ids;
       } });
+    temporaryReferences = () => {
+      const ids = new Set([...coordinators(), ...runs.retentionReservedIds(), ...sessionTargets(triggers.list().filter(trigger => trigger.enabled))]);
+      return [...ids].map(id => runs.getSession(id)?.cwd || sessions.get(runs.nativeSessionId(id))?.cwd).filter((cwd): cwd is string => Boolean(cwd));
+    };
     const retentionService = new RetentionService({ store: retentionStore, archive: retentionArchive,
-      adapter: createNativeRetentionAdapter(nativeRoots), observe: () => observer.observe(),
+      adapter: nativeRetention, observe: () => observer.observe(), reserveAdmission: ids => runs.reserveRetention(ids),
+      onColdChanged: () => publishCold(), refresh: () => sessions.refresh(true),
       onError: error => console.error(`Session retention: ${error instanceof Error ? error.message : String(error)}`) });
     let retention: RunnerHostOptions['retention'];
     let retentionUnavailable: string | undefined;
     try {
+      if (retentionBootstrapError) throw retentionBootstrapError;
       await observer.start();
       await retentionService.start();
-      initializedRetention = retentionService;
-      retention = { service: retentionService, archive: retentionArchive };
+      initializedRetention = retentionService; publishCold(); temporary.start();
+      retention = { service: retentionService, archive: retentionArchive, temporary };
     } catch (error) {
       retentionService.stop();
       retentionUnavailable = `세션 보관 정책 초기화가 보류되었습니다. 기존 세션은 유지됩니다: ${error instanceof Error ? error.message : String(error)}`;
@@ -936,17 +985,17 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // A restore's skills are still being written (below): the worker hands over only after them.
     let restoringSkills = Boolean(restoring);
     await startRunnerHost({ stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, api, secrets, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce, handoffCarry: () => secrets.handoff(),
-      onIdle: async () => { await retention?.service.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); clearInterval(secretExpiry); secrets.close(); stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await tasks.close(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
+      onIdle: async () => { await retention?.service.quiesce(); await temporary.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); clearInterval(secretExpiry); secrets.close(); stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await tasks.close(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
       inFlight: () => secrets.inFlight() || restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       transient: () => secrets.inFlight() || restoringSkills || slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       // Work a Slack or GitHub coordinator delegated: its coordinator hears how it ended and decides what follows.
       delegated: run => Boolean(run.origin?.workflowId) && !coordinators().has(run.sessionId),
       releaseIntake: () => { slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); tasks.resume(); worktrees.resume(); reviewer.release(); },
       holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); publicAgents.hold(); skills.pause(); tasks.pause(); worktrees.pause(); reviewer.hold(); },
-      quiesce: async () => { await retention?.service.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); paused = true; secrets.pause(); tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); tasks.pause(); worktrees.pause(); reviewer.hold(); await reviewer.flush(); permissions.pause(); await Promise.all([secrets.flush(), worktrees.flush(), tasks.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
-      resume: () => { retention?.service.resume(); runs.resumeAttachmentCleanup(); autoPrompts.resumeAttachmentCleanup(); paused = false; secrets.resume(); tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); tasks.resume(); worktrees.resume(); permissions.resume(); reviewer.release(); sessions.resume(); },
+      quiesce: async () => { await retention?.service.quiesce(); await temporary.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); paused = true; secrets.pause(); tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); tasks.pause(); worktrees.pause(); reviewer.hold(); await reviewer.flush(); permissions.pause(); await Promise.all([secrets.flush(), worktrees.flush(), tasks.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
+      resume: () => { retention?.service.resume(); temporary.resume(); runs.resumeAttachmentCleanup(); autoPrompts.resumeAttachmentCleanup(); paused = false; secrets.resume(); tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); tasks.resume(); worktrees.resume(); permissions.resume(); reviewer.release(); sessions.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
-      onHandedOff: () => { retention?.service.stop(); clearInterval(secretExpiry); secrets.close(); stopTelling(); void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); void tasks.close(); worktrees.close(); reviewer.close(); clearInterval(expiryTimer); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
+      onHandedOff: () => { retention?.service.stop(); void temporary.close(); clearInterval(secretExpiry); secrets.close(); stopTelling(); void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); void tasks.close(); worktrees.close(); reviewer.close(); clearInterval(expiryTimer); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     await permissions.reconcileNotifications().catch(error => console.error(`Permission decisions did not recover: ${error instanceof Error ? error.message : String(error)}`));
     runs.markReady();
     void retention?.service.cycle().catch(error => console.error(`Session retention: ${error instanceof Error ? error.message : String(error)}`));
@@ -959,7 +1008,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // A parent terminal or Tower shutdown must not interrupt provider work.
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => {});
-  } catch (error) { await initializedRetention?.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), initializedAutoPrompts?.pauseAttachmentCleanup()]); carry?.fill(0); void tools?.stop(); sessions.stop(); await release(); throw error; }
+  } catch (error) { await initializedRetention?.quiesce(); await temporary.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), initializedAutoPrompts?.pauseAttachmentCleanup()]); carry?.fill(0); void tools?.stop(); sessions.stop(); await release(); throw error; }
 }
 
 /** Every `cwd` a setting names, at any depth: the folders triggers and their rules work in. */

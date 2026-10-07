@@ -1,3 +1,4 @@
+import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -56,7 +57,7 @@ const lines = (path: string) => existsSync(path) ? readFileSync(path, 'utf8').tr
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
 test('locked state does not stop a handoff and is never written over; the turn ends on its own and the shell survives', { timeout: 90_000 }, async t => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-locked-handoff-')));
+  const root = await realpath(await temporaryFixture('tower-locked-handoff-'));
   const stateDir = join(root, 'state');
   for (const name of ['home', 'codex', 'claude']) await mkdir(join(root, name));
   await mkdir(stateDir, { mode: 0o700 });
@@ -94,7 +95,7 @@ test('locked state does not stop a handoff and is never written over; the turn e
     }
     if (first.exitCode === null && first.signalCode === null) first.kill('SIGKILL');
     await terminalHost.close(); terminals.dispose();
-    await rm(root, { recursive: true, force: true });
+    await removeTemporaryFixture(root);
     await rm(paths.directory, { recursive: true, force: true });
   });
   const unchanged = async () => { for (const [name, text] of Object.entries(corrupt)) assert.equal(await readFile(join(stateDir, name), 'utf8'), text, `${name} is never written over`); };

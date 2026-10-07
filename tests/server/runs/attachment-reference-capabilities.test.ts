@@ -1,3 +1,4 @@
+import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -18,7 +19,7 @@ function client(stateDir: string, capabilities: string[]) {
 async function* megabytes(count: number) { for (let index = 0; index < count; index++) yield Buffer.alloc(1024 * 1024); }
 
 test('legacy worker chat references retain their supported sizes while unsupported originals never reach RPC', async t => {
-  const stateDir = await mkdtemp(join(tmpdir(), 'tower-legacy-reference-capability-')); t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const stateDir = await temporaryFixture('tower-legacy-reference-capability-'); t.after(() => removeTemporaryFixture(stateDir));
   const { manager, calls } = client(stateDir, []);
   const store = new AttachmentStore(stateDir); await store.start();
   const sessionId = 'codex:legacy';

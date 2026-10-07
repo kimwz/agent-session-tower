@@ -47,6 +47,13 @@ export class RetentionStore {
     for (const entry of inputs) validateOperationId(entry.id);
     return this.commit(draft => { for (const entry of inputs) draft.set(entry.id, entry); });
   }
+  async putIfUnchanged(updates: { previous: RetentionJournalEntry; next: RetentionJournalEntry }[], allowed: (id: string) => boolean): Promise<void> {
+    const inputs = structuredClone(updates);
+    for (const item of inputs) validateOperationId(item.next.id);
+    return this.commit(draft => {
+      for (const { previous, next } of inputs) if (allowed(previous.id) && JSON.stringify(draft.get(previous.id)) === JSON.stringify(previous)) draft.set(next.id, next);
+    });
+  }
   async removeMetadata(ids: string[]): Promise<void> {
     const inputs = [...ids];
     return this.commit(draft => {

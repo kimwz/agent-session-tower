@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 import type { Session, Run } from '../../../shared/types.js';
-import { RetentionObserver, gitProjectIdentity, type NativeRetentionObservation } from '../../../server/sessions/retention/observer.js';
+import { permissionRetentionPending, RetentionObserver, gitProjectIdentity, type NativeRetentionObservation } from '../../../server/sessions/retention/observer.js';
 
 function session(id: string, parentId?: string): Session {
   return { id: `claude:${id}`, nativeId: id, provider: 'claude', title: 'fixture', cwd: '/fixture', project: 'fixture',
@@ -39,7 +39,7 @@ test('unknown termination needs uninterrupted fingerprint observations; restart 
   assert.notEqual((await successor.observe()).records[0]!.inactiveSince, afterGap);
 }));
 
-test('native aliases protect waiting runs and unknown Claude descendants, but terminal children do not inherit a busy parent', async () => fixture(async stateDir => {
+test('native aliases protect waiting runs and all Claude descendants, including terminal children, inherit a busy parent', async () => fixture(async stateDir => {
   const parent = session('parent'); parent.activeProcess = true;
   const child = session('child', 'claude:parent');
   const grandchild = session('grandchild', 'claude:child');
@@ -60,7 +60,7 @@ test('native aliases protect waiting runs and unknown Claude descendants, but te
   assert.ok(observation.protectedIds.has('claude:monitor-grandchild'));
   assert.ok(observation.protectedIds.has('claude:monitor-child'));
   assert.ok(observation.protectedIds.has('claude:monitor-waiting'));
-  assert.ok(!observation.protectedIds.has('claude:monitor-completed'));
+  assert.ok(observation.protectedIds.has('claude:monitor-completed'));
   assert.equal(observation.records.find(record => record.session.nativeId === 'completed')!.session.parentId, 'claude:monitor-parent');
   assert.equal(observation.records.find(record => record.session.nativeId === 'completed')!.latestTaskEndedAt, '2026-01-01T00:00:00Z');
 }));
@@ -136,3 +136,15 @@ test('a rejected scan breaks continuous inactive observation instead of extendin
   assert.notEqual(recovered.records[0]!.inactiveSince, original);
   assert.equal(recovered.records[0]!.inactiveSince, new Date(now).toISOString());
 }));
+
+
+test('finished permission command results stay protected until actually delivered', () => {
+  for(const status of ['done','failed']) {
+    assert.equal(permissionRetentionPending({status:'approved',run:{status}}),true);
+    assert.equal(permissionRetentionPending({status:'approved',run:{status,delivered:true}}),false);
+  }
+  assert.equal(permissionRetentionPending({status:'approved',run:{status:'running',delivered:true}}),true);
+  assert.equal(permissionRetentionPending({status:'pending'}),true);
+  assert.equal(permissionRetentionPending({status:'approved',notification:{state:'pending'}}),true);
+  assert.equal(permissionRetentionPending({status:'denied'}),false);
+});
