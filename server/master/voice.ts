@@ -15,7 +15,8 @@ import { VoiceAudio } from './voice-audio.js';
 import { VoiceClips } from './voice-clips.js';
 import { bare, MS_PER_CHAR, played, reasonOf, unspoken, VoiceReader, withSpeak, type StreamInput } from './voice-reader.js';
 import type { VoiceSession, VoiceTiming } from './voice-types.js';
-import { FIRST_REPLY_DOLLARS, localDay, ttsDollarsPerChar, VoiceUsage } from './voice-usage.js';
+import { ttsDollarsPerChar } from './tts-models.js';
+import { FIRST_REPLY_DOLLARS, localDay, VoiceUsage } from './voice-usage.js';
 
 export { frameAt, id3Size } from './mp3.js';
 export type { VoiceTiming } from './voice-types.js';

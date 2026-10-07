@@ -38,7 +38,7 @@ const stop = (server: Server) => new Promise<void>(resolve => { server.closeAllC
 /** ElevenLabs as far as the master uses it: tokens, reading aloud (as a stream), voices, and history removal. */
 async function fakeElevenLabs() {
   const state = {
-    tokens: 0, speeches: [] as Array<{ voice: string; body: Record<string, unknown>; key?: string }>, deletes: [] as string[], keys: [] as string[],
+    tokens: 0, speeches: [] as Array<{ request: 'speech' | 'dialogue'; query: string; voice: string; text: string; body: Record<string, unknown>; key?: string }>, deletes: [] as string[], keys: [] as string[],
     mode: 'ok' as 'ok' | 'cut' | 'error', fail: (_text: string) => false, silent: (_text: string) => false, lagMs: 0, chunks: [Buffer.from('ID3-first-'), Buffer.from('second-part')], gapMs: 20, completed: [] as number[],
   };
   const server = createServer(async (req: IncomingMessage, res) => {
@@ -49,13 +49,17 @@ async function fakeElevenLabs() {
     if (req.method === 'POST' && url.pathname === '/v1/single-use-token/realtime_scribe') { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ token: `sutkn_${++state.tokens}` })); return; }
     if (req.method === 'GET' && url.pathname === '/v2/voices') { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ voices: [{ voice_id: 'cgSgspJ2msm6clMCkdW9', name: 'Jessica', category: 'premade' }, { voice_id: 'bad id', name: 'x' }], has_more: false })); return; }
     if (req.method === 'DELETE' && url.pathname.startsWith('/v1/history/')) { state.deletes.push(url.pathname.slice('/v1/history/'.length)); res.writeHead(200).end(); return; }
+    // Text to Speech names the voice in the path; Text to Dialogue in its one line.
     const speech = /^\/v1\/text-to-speech\/([^/]+)\/stream$/.exec(url.pathname);
-    if (req.method === 'POST' && speech) {
-      state.speeches.push({ voice: speech[1], body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>, key: req.headers['xi-api-key'] as string });
-      if (state.mode === 'error' || state.fail(String(state.speeches.at(-1)!.body.text))) { res.writeHead(500).end('no'); return; }
+    const dialogue = url.pathname === '/v1/text-to-dialogue/stream';
+    if (req.method === 'POST' && (speech || dialogue)) {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+      const line = dialogue ? (body.inputs as Array<{ text: string; voice_id: string }>)[0] : undefined;
+      state.speeches.push({ request: dialogue ? 'dialogue' : 'speech', query: url.search, voice: line?.voice_id ?? speech![1], text: String(line?.text ?? body.text), body, key: req.headers['xi-api-key'] as string });
+      if (state.mode === 'error' || state.fail(state.speeches.at(-1)!.text)) { res.writeHead(500).end('no'); return; }
       const speechNumber = state.speeches.length;
       res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'history-item-id': `h${speechNumber}` });
-      if (state.silent(String(state.speeches.at(-1)!.body.text))) { res.end(); return; }
+      if (state.silent(state.speeches.at(-1)!.text)) { res.end(); return; }
       if (state.lagMs) await sleep(state.lagMs);
       res.write(state.chunks[0]);
       await sleep(state.gapMs);
@@ -263,7 +267,7 @@ test('a daily limit holds every unsettled token and every reading before it star
   assert.ok(answer.ack);
   const entry = await masterEntry(h, /세 가지입니다/);
   await until(() => h.speakOf(entry.id)?.state === 'unspoken');
-  assert.equal(h.labs.speeches.filter(item => String(item.body.text).includes('세 가지입니다')).length, 0);
+  assert.equal(h.labs.speeches.filter(item => item.text.includes('세 가지입니다')).length, 0);
   assert.ok(h.voice.status().today.dollars <= 0.03);
 });
 
@@ -280,9 +284,11 @@ test('what the owner said is a request like a typed one, answered first with a r
   assert.equal(first.ack?.kind, 'ack');
   assert.match(first.ack!.audio, /^\/api\/master\/voice\/audio\/[0-9a-f-]{36}$/, 'made for this request, not a recording');
   assert.equal(first.ack!.session, digestOf(session));
-  assert.equal(h.labs.speeches[0].body.text, `[cheerfully] ${FIRST}`, 'read brightly');
-  assert.equal(h.labs.speeches[0].body.model_id, 'eleven_v3_conversational');
-  assert.equal(h.labs.speeches[0].body.language_code, 'ko');
+  assert.equal(h.labs.speeches[0].text, `[cheerfully] ${FIRST}`, 'read brightly');
+  // The default, Eleven v4 Turbo, is read through Text to Dialogue: one line in the chosen voice, nothing more.
+  assert.equal(h.labs.speeches[0].request, 'dialogue');
+  assert.deepEqual(h.labs.speeches[0].body, { inputs: [{ text: `[cheerfully] ${FIRST}`, voice_id: 'cgSgspJ2msm6clMCkdW9' }], model_id: 'eleven_v4_turbo', language_code: 'ko' });
+  assert.equal(h.labs.speeches[0].query, '?output_format=mp3_44100_128&enable_logging=false');
   const owner = h.room.recent(20).find(entry => entry.data.kind === 'owner');
   assert.deepEqual(owner?.data, { kind: 'owner', text: '지금 작업 중인 세션 알려줘', voice: true });
   // It goes to the master session marked as said aloud, so the master answers it to be heard.
@@ -324,7 +330,7 @@ test('no first reply is said when the model says nothing, it comes too late, it 
   on(h, randomUUID());
   assert.deepEqual(await moved, {});
   assert.equal(h.prompts.length, 4, 'every request reached the master');
-  assert.equal(h.labs.speeches.filter(item => String(item.body.text).includes(FIRST)).length, 0, 'none was read');
+  assert.equal(h.labs.speeches.filter(item => item.text.includes(FIRST)).length, 0, 'none was read');
 });
 
 test('a spoken request that runs long says nothing more on its own: no recorded "still working"', async t => {
@@ -345,8 +351,7 @@ test('a voice is heard before it is chosen: a Korean sample read brightly in tha
   assert.match(first.audio, /^\/api\/master\/voice\/audio\/preview-[a-f0-9]{64}$/);
   assert.equal(h.labs.speeches.length, 1);
   assert.equal(h.labs.speeches[0].voice, OTHER, 'read in the voice asked about, not the one chosen');
-  assert.equal(h.labs.speeches[0].body.text, `[cheerfully] ${VOICE_SAMPLE}`);
-  assert.equal(h.labs.speeches[0].body.language_code, 'ko');
+  assert.deepEqual(h.labs.speeches[0].body, { inputs: [{ text: `[cheerfully] ${VOICE_SAMPLE}`, voice_id: OTHER }], model_id: 'eleven_v4_turbo', language_code: 'ko' });
   assert.equal(h.settings.current().voice.voiceId, 'cgSgspJ2msm6clMCkdW9', 'hearing a voice does not choose it');
   assert.ok(h.voice.status().today.ttsChars >= VOICE_SAMPLE.length);
   const heard = await fetchAudio(first.audio.split('/').at(-1)!);
@@ -361,13 +366,36 @@ test('a voice is heard before it is chosen: a Korean sample read brightly in tha
   await h.settings.update({ voice: { model: 'eleven_flash_v2_5' } });
   const flash = await h.voice.voicePreview({ voiceId: OTHER });
   assert.notEqual(flash.audio, first.audio);
-  assert.equal(h.labs.speeches[1].body.text, VOICE_SAMPLE, 'no tag for a model that would read it out');
+  assert.equal(h.labs.speeches[1].text, VOICE_SAMPLE, 'no tag for a model that would read it out');
+  // Models before v4 are asked through Text to Speech as they always were.
+  assert.equal(h.labs.speeches[1].request, 'speech');
+  assert.equal(h.labs.speeches[1].voice, OTHER);
+  assert.deepEqual(h.labs.speeches[1].body, { text: VOICE_SAMPLE, model_id: 'eleven_flash_v2_5', language_code: 'ko' });
+  assert.equal(h.labs.speeches[1].query, '?output_format=mp3_44100_128&enable_logging=false');
+  await h.settings.update({ voice: { model: 'eleven_v3_conversational' } });
+  await h.voice.voicePreview({ voiceId: OTHER });
+  assert.equal(h.labs.speeches[2].request, 'speech');
+  assert.deepEqual(h.labs.speeches[2].body, { text: `[cheerfully] ${VOICE_SAMPLE}`, model_id: 'eleven_v3_conversational', language_code: 'ko' });
   // Samples are kept apart from the recorded replies.
   assert.deepEqual(await readdir(join(h.dir, 'voice-clips')).catch(() => []), []);
-  assert.equal((await readdir(join(h.dir, 'voice-previews'))).length, 2);
+  assert.equal((await readdir(join(h.dir, 'voice-previews'))).length, 3);
   h.labs.mode = 'error';
   await assert.rejects(h.voice.voicePreview({ voiceId: 'cgSgspJ2msm6clMCkdW9' }), { kind: 'upstream' });
   assert.equal((await fetchAudio(`preview-${'0'.repeat(64)}`)).status, 404);
+});
+
+test('a voice heard and then chosen is the one Eleven v4 Turbo reads answers in', async t => {
+  const h = await harness(t, { steps: ['고른 목소리로 읽습니다.'] });
+  const OTHER = 'bv62BmVlrpG0pQegOpuN';
+  await h.voice.voicePreview({ voiceId: OTHER });
+  await h.settings.update({ voice: { voiceId: OTHER } });
+  const session = on(h);
+  const first = await request(h, session, '목소리 바꿨어');
+  assert.equal(first.ack?.text, FIRST);
+  await until(() => h.labs.speeches.find(item => item.text.includes('고른 목소리로')));
+  assert.deepEqual(h.labs.speeches.map(item => [item.request, item.voice, item.text]), [
+    ['dialogue', OTHER, `[cheerfully] ${VOICE_SAMPLE}`], ['dialogue', OTHER, `[cheerfully] ${FIRST}`], ['dialogue', OTHER, '[cheerfully] 고른 목소리로 읽습니다.'],
+  ], 'sample, first reply and answer, each in the chosen voice');
 });
 
 test('voices are listed and heard with only a key, before the master session starts; without a key neither is', async t => {
@@ -396,7 +424,7 @@ test('an answer to a spoken request is read aloud where voice is on and marked p
   const answer = await masterEntry(h, /두 개입니다/);
   const reading = await until(() => h.says().find(item => item.kind === 'answer'));
   assert.equal(reading.text, '작업 두 개입니다. 자세한 목록은 화면에.', 'the whole answer, not only its first paragraph');
-  assert.ok(h.labs.speeches.some(item => item.body.text === '[cheerfully] 작업 두 개입니다. 자세한 목록은 화면에.'), 'the tone tag goes only to speech');
+  assert.ok(h.labs.speeches.some(item => item.text === '[cheerfully] 작업 두 개입니다. 자세한 목록은 화면에.'), 'the tone tag goes only to speech');
   assert.equal(h.speakOf(answer.id)?.state, 'playing');
   assert.equal(h.voice.voicePlayed({ session, id: reading.id, result: 'played' }), true);
   await until(() => h.speakOf(answer.id)?.state === 'played');
@@ -428,6 +456,7 @@ test('an answer to a spoken request is read aloud where voice is on and marked p
   assert.equal(h.speakOf(late.id)?.state, 'unspoken');
   await until(() => h.labs.deletes.length >= 2);
   assert.ok(h.labs.deletes.every(id => /^h\d+$/.test(id)), 'what ElevenLabs kept of a reading is removed');
+  assert.ok(h.labs.speeches.every(item => item.request === 'dialogue'), 'read through Text to Dialogue, history and all');
 });
 
 test('finite audio has exact length; partial synthesis stays unpublished and a page gone leaves nothing waiting', async t => {
@@ -468,7 +497,7 @@ test('finite audio has exact length; partial synthesis stays unpublished and a p
 
 /** An mp3 as ElevenLabs sends it: an ID3 tag of `size` bytes after its header, then frames. */
 /** What was sent to speech for answers, the short replies left out. */
-const readings = (h: Harness) => h.labs.speeches.map(item => String(item.body.text)).filter(text => !text.endsWith(FIRST));
+const readings = (h: Harness) => h.labs.speeches.map(item => item.text).filter(text => !text.endsWith(FIRST));
 const mp3 = (frames: string, size = 35) => Buffer.concat([Buffer.from([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, size]), Buffer.alloc(size, 0x54), Buffer.from(frames)]);
 
 /** Read each completed file and ACK it; synthesis must not advance while its ACK is pending. */
@@ -555,8 +584,9 @@ test('a later part that fails before any sound is asked for once more; one that 
   assert.ok(!earlier.some(item => item.text.includes('5번째')), 'failed synthesis never becomes a say');
   // What is counted is what was asked for: the parts after the one that failed were never sent, nor paid for.
   assert.ok(!readings(h).some(text => text.includes('30번째 문장은 조금 길게 이어지는 이야기')));
-  const asked = () => h.labs.speeches.reduce((sum, item) => sum + String(item.body.text).length, 0);
+  const asked = () => h.labs.speeches.reduce((sum, item) => sum + item.text.length, 0);
   await until(() => h.voice.status().today.ttsChars === asked());
+  assert.ok(h.labs.speeches.every(item => item.request === 'dialogue'));
 });
 
 test('a long answer skipped partway stops being made: the parts not yet asked for are not asked for, nor paid for', async t => {
@@ -573,10 +603,10 @@ test('a long answer skipped partway stops being made: the parts not yet asked fo
   const made = readings(h).length;
   await sleep(600);
   assert.equal(readings(h).length, made, 'nothing more is asked for');
-  const all = voicedParts(speakable(answer), 'eleven_v3_conversational', 'answer');
+  const all = voicedParts(speakable(answer), 'eleven_v4_turbo', 'answer');
   assert.ok(made < all.length);
   // Paid for: what was asked for, and at most the one part whose request the skip cut short on its way.
-  const asked = h.labs.speeches.reduce((sum, item) => sum + String(item.body.text).length, 0);
+  const asked = h.labs.speeches.reduce((sum, item) => sum + item.text.length, 0);
   const paid = h.voice.status().today.ttsChars;
   assert.ok(paid >= asked && paid <= asked + 520, `${paid} for ${asked} asked`);
   assert.ok(paid < all.reduce((sum, part) => sum + part.length, 0) / 2);
@@ -648,7 +678,7 @@ test('voice records from GPT-Live calls become dollars once, counted and not yet
   await restarted.start();
   const settings = restarted.current();
   assert.deepEqual(Object.keys(settings), ['voice'], 'what the API master kept is dropped');
-  assert.equal(settings.voice.model, 'eleven_v3_conversational');
+  assert.equal(settings.voice.model, 'eleven_v4_turbo');
   assert.equal(h.voice.status().today.dollars, Math.round(95 * (0.05 / 60) * 100) / 100);
   const saved = JSON.parse(await readFile(join(h.dir, 'voice.json'), 'utf8')) as Record<string, unknown>;
   assert.equal(saved.version, 6);

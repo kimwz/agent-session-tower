@@ -4,7 +4,7 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.110.0] - 2026-10-07
+## [1.111.0] - 2026-10-07
 
 ### Added
 - **Images, video and audio open in the workspace pane.** A conversation path or a file in the workspace file tree that names a png, jpg, gif, webp, avif or bmp image is shown fitted to the pane; mp4, m4v, webm, mov or ogv video and mp3, m4a, aac, wav, ogg, oga, opus or flac audio play in the browser's own player, with seeking. Files on joined computers play the same way once those computers run this version. Large files stream by byte range instead of loading whole, so seeking works and phones such as iPhone play video. A file the browser cannot decode, or one that is missing or not shared, names itself with the reason and a retry button. Text files still open in the editor, and other binary files keep the editor's refusal.
@@ -13,6 +13,12 @@ format, and saved browser preferences are the compatibility surface.
 ### Fixed
 - On a joined computer, a download that a sharing change cut off no longer keeps the next download or playback from being cut off by a later sharing change.
 - A download from a joined computer that is cancelled while its file is being opened now closes the file. Before, the file stayed open, and Node.js 26 could stop the Tower that served it when it later cleaned up the file.
+
+## [1.110.0] - 2026-10-07
+
+### Changed
+- **The master reads aloud with ElevenLabs Eleven v4 Turbo.** It is the new default and the first choice in the master's settings under **읽어 주기 모델** ("v4 터보 (빠름, 추천)"). ElevenLabs offers Eleven v4 through Text to Dialogue, so Tower asks for it there, as one line in the chosen voice. Answers are still made part by part as finite 128 kbps mp3, so stopping, listening again, the first reply, the daily limit and removing what ElevenLabs keeps in its history work as before. Each part keeps its one bright or excited tone at the start, and it is counted at v3 conversational's price. v3 conversational, v3 and flash v2.5 remain available and are asked for as before; a model chosen earlier stays chosen.
+- Tower 1.109.2 and older cannot read master settings that name Eleven v4 Turbo: they start the master with its default settings and without its session, and saving settings there replaces the file. Restoring a backup that names it on such a version leaves out the master's settings and ElevenLabs key. Choose another reading model before going back to such a version.
 
 ## [1.109.2] - 2026-10-07
 
