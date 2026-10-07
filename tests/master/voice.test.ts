@@ -54,6 +54,7 @@ async function fakeElevenLabs() {
     const dialogue = url.pathname === '/v1/text-to-dialogue/stream';
     if (req.method === 'POST' && (speech || dialogue)) {
       assert.equal(url.searchParams.get('output_format'), 'mp3_44100_128');
+      assert.equal(url.searchParams.get('enable_logging'), 'false');
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
       const line = dialogue ? (body.inputs as Array<{ text: string; voice_id: string }>)[0] : undefined;
       if (dialogue) assert.equal((body.inputs as unknown[]).length, 1, 'one line in the one voice');
