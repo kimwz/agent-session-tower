@@ -14,6 +14,7 @@ export interface RetentionServiceOptions {
   refresh?: () => Promise<void>;
   onArchived?: (ids: string[]) => Promise<void>;
   onError?: (error: unknown) => void;
+  now?: () => number;
 }
 export class RetentionService {
   private timer?: ReturnType<typeof setInterval>;
@@ -33,6 +34,7 @@ export class RetentionService {
   private activeOperation?: string;
   private inspecting?: Promise<void>;
   private coldIssues: string[] = [];
+  private lastColdInspection = Number.NEGATIVE_INFINITY;
   coldInspectionIssues(): string[] { return [...this.coldIssues]; }
   private operations: Promise<unknown> = Promise.resolve();
   constructor(private readonly options: RetentionServiceOptions) {}
@@ -45,9 +47,12 @@ export class RetentionService {
     return this.options.store.list().flatMap(entry => entry.members || []).filter(member => member.state === 'cold');
   }
   publishCold(): void { this.options.onColdChanged?.(this.coldMembers()); }
-  reconcileCold(): Promise<void> {
+  reconcileCold(force = false): Promise<void> {
     if (this.stopped) return Promise.resolve();
     if (this.inspecting) return this.inspecting;
+    const now = this.options.now?.() ?? Date.now();
+    if (!force && now - this.lastColdInspection < 30_000) return Promise.resolve();
+    this.lastColdInspection = now;
     const task = this.inspectColdNow(); this.inspecting = task;
     void task.finally(() => { this.inspecting = undefined; }).catch(error => this.report(error)); return task;
   }
@@ -62,7 +67,9 @@ export class RetentionService {
     for (const entry of entries) {
       const next = entry.members!.map(member => updates.get(`${member.operationId}:${member.sessionId}`) || member);
       if (JSON.stringify(next) === JSON.stringify(entry.members)) continue;
-      changed.push({ previous: entry, next: { ...entry, members: next, phase: next.every(member => member.state === 'cold') ? 'archived' : next.every(member => member.state === 'restored') ? 'restored-awaiting-start' : 'conflict', updatedAt: new Date().toISOString() } });
+      // A failed intent left hot is not a restoration. Previously confirmed cold -> hot is evidence of external restore.
+      const restored = next.every(member => member.state === 'restored') && Boolean(entry.restoredAt || entry.members!.some(member => member.state === 'cold'));
+      changed.push({ previous: entry, next: { ...entry, members: next, phase: next.every(member => member.state === 'cold') ? 'archived' : restored ? 'restored-awaiting-start' : 'conflict', ...(restored ? { restoredAt: entry.restoredAt || new Date().toISOString() } : {}), updatedAt: new Date().toISOString() } });
     }
     if (changed.length) await this.options.store.putIfUnchanged(changed, id => !this.stopped && id !== this.activeOperation);
     this.publishCold();
@@ -145,7 +152,7 @@ export class RetentionService {
       if (Date.now() - started >= 30_000) { this.addDeferred('time-budget', selected.candidates.length - index); break; }
       const records = this.records(candidate, observation);
       const id = this.operationId(candidate, records); const existing = this.options.store.get(id);
-      if (existing && (existing.members?.every(member => member.state === 'cold') || ['archived', 'restored-awaiting-start'].includes(existing.phase))) continue;
+      if (existing && ((existing.members?.length && existing.members.every(member => member.state === 'cold')) || existing.phase === 'archived' || (existing.phase === 'restored-awaiting-start' && existing.restoredAt))) continue;
       const entry = existing || { id, candidate, phase: 'planned' as const, updatedAt: new Date().toISOString() };
       const blocked = records.map(record => this.options.adapter.capability(record.session.provider)).find(capability => capability.status === 'blocked');
       if (blocked) {

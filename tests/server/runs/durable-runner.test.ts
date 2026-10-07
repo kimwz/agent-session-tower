@@ -34,7 +34,7 @@ import { RetentionArchive } from '../../../server/sessions/retention/archive.js'
 import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
 import { worktreeCleanupVisible } from '../../../server/worktrees/janitor.js';
 
-async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string) {
+async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector) {
   const directory = await realpath(await temporaryFixture('tower-durable-fixture-'));
   const stateDir = join(directory, 'state');
   const id = '10000000-0000-4000-8000-000000000001';
@@ -70,7 +70,7 @@ async function fixture(workerClosed = false, withRetention = false, retentionUna
   await closedSessions?.start();
   const archive = new RetentionArchive(join(stateDir, 'cold'), []);
   const retentionStore = new RetentionStore(join(stateDir, 'retention'));
-  const retention = withRetention ? { archive, service: new RetentionService({ archive, store: retentionStore,
+  const retention = withRetention ? { archive, temporary, service: new RetentionService({ archive, store: retentionStore,
     adapter: createNativeRetentionAdapter({ claude: [], codex: [] }), observe: async () => ({ now: Date.now(), migratedAt: Date.now(), complete: true, records: [], protectedIds: new Set() }) }) } : undefined;
   await retention?.service.start();
   const host = await startRunnerHost({ stateDir, sessions, runs, closedSessions, retention, retentionUnavailable });
@@ -1895,4 +1895,20 @@ test('worker error replies keep their status, message and disposition across the
     assert.deepEqual({ status: errorStatus(error), message: error.message, disposition: (error as { disposition?: string }).disposition, edge: errorDisposition(error) },
       { status: expected.status, message: expected.message, disposition: expected.disposition, edge: expected.edge }, name);
   }
+});
+
+
+test('temporary cleanup failure remains visible without blocking native retention checks', async t => {
+  let fail=true,calls=0;
+  const base={examined:0,removedEmpty:0,releasedOwned:0,eligibleEmpty:0,eligibleOwned:0,deferredActive:0,deferredUnproven:0,failed:0,issues:[],eligiblePaths:[],removedPaths:[]};
+  const temporary={overview:()=>({...base}),cycle:async()=>{if(fail)throw Object.assign(new Error('private file location must not be exposed'),{code:'EACCES'});return {...base};}} as unknown as import('../../../server/temporary/directories.js').TemporaryCollector;
+  const f=await fixture(true,true,undefined,temporary);t.after(f.cleanup);
+  const cycle=f.retention!.service.cycle.bind(f.retention!.service);
+  t.mock.method(f.retention!.service,'cycle',async()=>{calls++;return cycle();});
+  const client=await f.connect();
+  const first=await client.retention('check') as {temporary:typeof base};
+  assert.equal(calls,1);assert.equal(first.temporary.failed,1);assert.deepEqual(first.temporary.issues,['Temporary cleanup failed: EACCES']);
+  const persisted=await client.retention('overview') as {temporary:typeof base};assert.equal(persisted.temporary.failed,1);
+  fail=false;const recovered=await client.retention('check') as {temporary:typeof base};assert.equal(calls,2);assert.equal(recovered.temporary.failed,0);assert.deepEqual(recovered.temporary.issues,[]);
+  assert.equal(f.starts(),0);assert.equal(f.cancels(),0);
 });

@@ -1,4 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { delimiter } from 'node:path';
+import { providerDirectories } from '../../providers/discovery.js';
 
 export interface NativeThreadMetadata { id: string; path: string | null }
 export interface CodexMaintenance {
@@ -17,8 +19,8 @@ export class CodexMaintenanceClient implements CodexMaintenance {
   private stopped = false;
   private closed: Promise<void>;
   private ready: Promise<void>;
-  constructor(executable: string, home: string, private timeoutMs = 15_000) {
-    this.child = spawn(executable, ['app-server', '--stdio'], { env: { ...process.env, CODEX_HOME: home }, stdio: 'pipe', shell: false });
+  constructor(executable: string, home: string, private timeoutMs = 15_000, environment: NodeJS.ProcessEnv = process.env) {
+    this.child = spawn(executable, ['app-server', '--stdio'], { env: { ...environment, PATH: providerDirectories(environment).join(delimiter), CODEX_HOME: home }, stdio: 'pipe', shell: false });
     // Native diagnostics can contain account details. They are never forwarded.
     this.child.stderr.resume();
     this.closed = new Promise(resolve => this.child.once('close', () => { this.fail(new Error('Native maintenance server closed.')); resolve(); }));

@@ -68,7 +68,7 @@ import { sseSink } from '../http/sinks.js';
 import { RetentionService } from '../sessions/retention/service.js';
 import { RetentionArchive } from '../sessions/retention/archive.js';
 import { RetentionStore } from '../sessions/retention/store.js';
-import { RetentionObserver } from '../sessions/retention/observer.js';
+import { permissionRetentionPending, RetentionObserver } from '../sessions/retention/observer.js';
 import { createNativeRetentionAdapter } from '../sessions/retention/provider.js';
 import { TemporaryCollector, inspectTemporaryProtection } from '../temporary/directories.js';
 
@@ -177,6 +177,11 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     return options.ledger.once(controllerId, operation, admitted.requestId, content, execute, record, replay);
   };
   const findRun = (id: string) => options.runs.list().find(run => run.id === id);
+  let temporaryFailure: string | undefined;
+  const temporaryOverview = () => {
+    const overview = options.retention?.temporary?.overview();
+    return overview && temporaryFailure ? { ...overview, failed: Math.max(overview.failed, 1), issues: [...overview.issues, temporaryFailure] } : overview;
+  };
   let closureReady: Promise<void> | undefined;
   const admit = (value: unknown): RunAdmission => {
     const admitted = admission(value);
@@ -205,8 +210,15 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (!options.retention) throw new TowerError('unavailable', options.retentionUnavailable || '세션 보관 정책은 실행 워커 업데이트 후 사용할 수 있습니다.');
         const [action, value, extra] = args;
         const service = options.retention.service;
-        if (action === 'overview') return { ...service.overview(), temporary: options.retention.temporary?.overview(), targets: options.runs.sessionList(options.sessions.list()).filter(session => !session.master && (session.isSubagent || session.launchedByAgent && session.parentId)).map(session => ({ id: session.id, title: session.customTitle || session.title })) };
-        if (action === 'check') { await options.retention.temporary?.cycle(); return { ...await service.cycle(), temporary: options.retention.temporary?.overview() }; }
+        if (action === 'overview') return { ...service.overview(), temporary: temporaryOverview(), targets: options.runs.sessionList(options.sessions.list()).filter(session => !session.master && (session.isSubagent || session.launchedByAgent && session.parentId)).map(session => ({ id: session.id, title: session.customTitle || session.title })) };
+        if (action === 'check') {
+          try { await options.retention.temporary?.cycle(); temporaryFailure = undefined; }
+          catch (error) {
+            const code = (error as NodeJS.ErrnoException)?.code;
+            temporaryFailure = `Temporary cleanup failed: ${typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,31}$/.test(code) ? code : 'unknown error'}`;
+          }
+          return { ...await service.cycle(), temporary: temporaryOverview() };
+        }
         if (typeof value !== 'string' || !value || value.length > 4096) throw new TowerError('invalid', 'Invalid retention target.');
         if (action === 'archive') return service.archiveSession(value);
         if (action === 'backup') return service.backup(value);
@@ -629,7 +641,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   const temporary = new TemporaryCollector({ protection: async () => {
     const inspected = await inspectTemporaryProtection();
     return { complete: inspected.complete && !sessions.scanning,
-    issues: [...inspected.issues, ...(sessions.scanning ? ['session-scan-in-progress'] : [])], paths: [...inspected.paths, ...temporaryReferences(), stateDir, paths.directory,
+    issues: [...inspected.issues, ...(sessions.scanning ? ['session-scan-in-progress'] : [])], openedPaths: inspected.openedPaths, paths: [...inspected.paths, ...temporaryReferences(), stateDir, paths.directory,
       ...runs.sessionList(sessions.list()).filter(session => session.activeProcess || session.status === 'working' || session.scheduledAt || session.creationPending || runs.list().some(run => run.sessionId === session.id && ['queued', 'running'].includes(run.status))).map(session => session.cwd)] }; } });
   try {
     const closedSessions = new ClosedSessionStore(stateDir);
@@ -943,7 +955,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
             event.input.target.mode === 'session' ? event.input.target.sessionId : undefined]) if (id) ids.add(id);
         }
 
-        for (const request of permissions.overview().requests) if (request.status === 'pending' || request.notification?.state === 'pending') ids.add(request.sessionId);
+        for (const request of permissions.overview().requests) if (permissionRetentionPending(request)) ids.add(request.sessionId);
         return ids;
       } });
     temporaryReferences = () => {

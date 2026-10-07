@@ -12,7 +12,7 @@ const MARKER_VERSION = 1;
 const GRACE_MS = 48 * 60 * 60_000;
 const LEGACY = /^(tower-terminal-host|tower-nodes-same)-[A-Za-z0-9]{6}$/;
 interface Owner { version: 1; id: string; kind: 'mcp' | 'pty'; directory: string; uid: number; dev: number; ino: number; ownerPid: number; ownerStartedAt: number; consumerPids: number[]; createdAt: number }
-export interface TemporaryProtection { complete: boolean; issues: string[]; paths: string[] }
+export interface TemporaryProtection { complete: boolean; issues: string[]; paths: string[]; openedPaths?: string[] }
 export interface TemporaryOverview { checkedAt?: string; examined: number; removedEmpty: number; releasedOwned: number; eligibleEmpty: number; eligibleOwned: number; deferredActive: number; deferredUnproven: number; failed: number; issues: string[]; eligiblePaths: string[]; removedPaths: string[] }
 export interface PrivateTemporary { directory: string; bindConsumer(pid: number): Promise<void>; release(): Promise<void>; releaseOnExit(): void }
 const blank = (): TemporaryOverview => ({ examined: 0, removedEmpty: 0, releasedOwned: 0, eligibleEmpty: 0, eligibleOwned: 0, deferredActive: 0, deferredUnproven: 0, failed: 0, issues: [], eligiblePaths: [], removedPaths: [] });
@@ -68,7 +68,7 @@ export class TemporaryCollector {
   private latest = blank();
   private offsets = new Map<string, number>();
   private ordered(key: string, names: string[]): string[] { const start = (this.offsets.get(key) ?? 0) % (names.length || 1); this.offsets.set(key, start + 100); return [...names.slice(start), ...names.slice(0, start)].slice(0, 100); }
-  constructor(private readonly options: { protection: () => Promise<TemporaryProtection>; roots?: string[]; now?: () => number; dryRun?: boolean }) {}
+  constructor(private readonly options: { protection: () => Promise<TemporaryProtection>; roots?: string[]; now?: () => number; dryRun?: boolean; resolvePath?: (path: string) => Promise<string>; inspectCandidate?: (path: string) => Promise<{ complete: boolean; open: boolean }> }) {}
   overview(): TemporaryOverview { return structuredClone(this.latest); }
   start(): void { if (this.closed || this.timer) return; this.timer = setTimeout(() => { this.timer = undefined; void this.cycle().catch(error => console.error('Temporary collection failed:', error)).finally(() => this.start()); }, 5 * 60_000); this.timer.unref(); }
   async quiesce(): Promise<void> { this.paused = true; if (this.timer) clearTimeout(this.timer); this.timer = undefined; await this.running; }
@@ -80,8 +80,36 @@ export class TemporaryCollector {
     const protection = await this.options.protection(); result.issues.push(...protection.issues);
     if (!protection.complete) { result.issues.push('Process/path inspection incomplete; temporary cleanup deferred.'); return this.latest = result; }
     const roots = [...new Set(await Promise.all((this.options.roots ?? ['/tmp', tmpdir()]).map(path => realpath(path))))];
-    const protectedPaths = await Promise.all(protection.paths.map(canonicalPath));
-    const protectedPath = (path: string) => protectedPaths.some(value => overlaps(path, value));
+    const resolvePath = this.options.resolvePath ?? canonicalPath;
+    const normalise = async (snapshot: TemporaryProtection) => {
+      const paths: string[] = [], opened: string[] = []; let uncertainOpened = false;
+      for (const path of snapshot.paths) {
+        try { paths.push(await resolvePath(path)); }
+        catch (error) { result.issues.push(`Reserved temporary path cannot be resolved: ${(error as NodeJS.ErrnoException).code ?? 'unknown'}`); return { complete: false, paths, opened, uncertainOpened }; }
+      }
+      for (const path of snapshot.openedPaths ?? []) {
+        try { opened.push(await resolvePath(path)); }
+        catch (error) { uncertainOpened = true; const issue = `OS opened path requires inode inspection: ${(error as NodeJS.ErrnoException).code ?? 'unknown'}`; if (!result.issues.includes(issue)) result.issues.push(issue); }
+      }
+      return { complete: snapshot.complete, paths, opened, uncertainOpened };
+    };
+    const initial = await normalise(protection);
+    if (!initial.complete) return this.latest = result;
+    // NAME resolution is only an early protection signal; every OS-backed deletion also needs the fresh inode query.
+    const hasOpenInside = (path: string, values: string[]) => values.some(value => value === path || value.startsWith(path + sep));
+    const protectedPath = (path: string) => initial.paths.some(value => overlaps(path, value)) || hasOpenInside(path, initial.opened);
+    const freshProtected = async (path: string) => {
+      const snapshot = await this.options.protection();
+      if (!snapshot.complete) { result.issues.push(...snapshot.issues); return true; }
+      const fresh = await normalise(snapshot);
+      if (!fresh.complete || fresh.paths.some(value => overlaps(path, value)) || hasOpenInside(path, fresh.opened)) return true;
+      if (snapshot.openedPaths !== undefined || protection.openedPaths !== undefined) {
+        const inspection = await (this.options.inspectCandidate ?? inspectTemporaryCandidate)(path);
+        if (!inspection.complete) result.issues.push('Candidate open-file inode inspection incomplete; kept.');
+        return !inspection.complete || inspection.open;
+      }
+      return false;
+    };
     const stopped = () => this.paused || this.closed || result.examined >= 500 || (Date.now() - started > 5000);
     const started = Date.now();
     for (const root of roots) {
@@ -100,8 +128,8 @@ export class TemporaryCollector {
           if (!ownerShape(value, namespace) || name !== `${value.id}.json`) { result.deferredUnproven++; continue; }
           if (alive(value.ownerPid) || value.consumerPids.some(alive) || protectedPath(value.directory) || now - value.createdAt < GRACE_MS) { result.deferredActive++; continue; }
           try { if (!await identity(value)) { result.deferredUnproven++; continue; } } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; result.eligibleOwned++; result.eligiblePaths.push(value.directory); if (!this.options.dryRun) { await unlink(file); result.releasedOwned++; } continue; }
-          const fresh = await this.options.protection();
-          if (!fresh.complete || (await Promise.all(fresh.paths.map(canonicalPath))).some(path => overlaps(value.directory, path)) || stopped() || alive(value.ownerPid) || value.consumerPids.some(alive)) { result.deferredActive++; continue; }
+          if (await freshProtected(value.directory) || stopped() || alive(value.ownerPid) || value.consumerPids.some(alive)) { result.deferredActive++; continue; }
+          if (!await identity(value)) { result.deferredUnproven++; continue; }
           result.eligibleOwned++; result.eligiblePaths.push(value.directory);
           if (!this.options.dryRun) { await rm(value.directory, { recursive: true }); await unlink(file); result.releasedOwned++; result.removedPaths.push(value.directory); }
         } catch (error) { result.failed++; result.issues.push(`Owned temporary cleanup failed: ${(error as NodeJS.ErrnoException).code ?? 'invalid-record'}`); }
@@ -115,8 +143,8 @@ export class TemporaryCollector {
           const before = await lstat(path);
           if (!before.isDirectory() || before.isSymbolicLink() || before.uid !== uid() || (before.mode & 0o022) || now - before.mtimeMs < GRACE_MS || (await readdir(path)).length) { result.deferredUnproven++; continue; }
           if (protectedPath(path)) { result.deferredActive++; continue; }
-          const fresh = await this.options.protection(), after = await lstat(path);
-          if (!fresh.complete || (await Promise.all(fresh.paths.map(canonicalPath))).some(value => overlaps(path, value)) || stopped()) { result.deferredActive++; continue; }
+          if (await freshProtected(path) || stopped()) { result.deferredActive++; continue; }
+          const after = await lstat(path);
           if (before.dev !== after.dev || before.ino !== after.ino || !after.isDirectory() || after.isSymbolicLink() || after.uid !== uid()) { result.deferredUnproven++; continue; }
           result.eligibleEmpty++; result.eligiblePaths.push(path);
           if (!this.options.dryRun) { await rmdir(path); result.removedEmpty++; result.removedPaths.push(path); }
@@ -125,6 +153,29 @@ export class TemporaryCollector {
     }
     return this.latest = result;
   }
+}
+
+/** lsof +D matches directory device/inodes instead of trusting inaccessible NAME paths. */
+export async function inspectTemporaryCandidate(directory: string): Promise<{ complete: boolean; open: boolean }> {
+  try {
+    const pending = [directory]; let entries = 0;
+    while (pending.length) {
+      const current = pending.pop()!;
+      for (const name of await readdir(current)) {
+        if (++entries > 200) return { complete: false, open: false };
+        const path = join(current, name), info = await lstat(path);
+        if (info.isDirectory() && !info.isSymbolicLink()) pending.push(path);
+      }
+    }
+    try {
+      const { stdout, stderr } = await promisify(execFile)(process.platform === 'darwin' ? '/usr/sbin/lsof' : 'lsof', ['-nP', '-a', '-u', String(uid()), '+D', directory, '-F', 'f'], { timeout: 1000, maxBuffer: 1024 * 1024 });
+      return { complete: !stderr.trim(), open: stdout.split('\n').some(line => line.startsWith('f')) };
+    } catch (error) {
+      const failure = error as { code?: number; stdout?: string; stderr?: string; killed?: boolean };
+      // Exit 1 without output means no selected open inode; warnings and timeouts fail closed.
+      return { complete: failure.code === 1 && !failure.killed && !failure.stdout?.trim() && !failure.stderr?.trim(), open: !!failure.stdout?.split('\n').some(line => line.startsWith('f')) };
+    }
+  } catch (error) { console.error('Temporary candidate inode inspection failed:', (error as NodeJS.ErrnoException).code ?? 'unknown'); return { complete: false, open: false }; }
 }
 
 /** Inspects paths only, never process arguments, configuration contents or authentication values. Partial listings fail closed. */
@@ -146,11 +197,17 @@ export async function inspectTemporaryProtection(): Promise<TemporaryProtection>
     } catch (error) { issues.push(`Temporary process directory inspection failed: ${(error as NodeJS.ErrnoException).code ?? 'unknown'}`); }
   } else {
     try {
-      const { stdout, stderr } = await promisify(execFile)(process.platform === 'darwin' ? '/usr/sbin/lsof' : 'lsof', ['-nP', '-a', '-u', String(uid()), '-F', 'n'], { timeout: 10_000, maxBuffer: 32 * 1024 * 1024 });
+      const { stdout, stderr } = await promisify(execFile)(process.platform === 'darwin' ? '/usr/sbin/lsof' : 'lsof', ['-nP', '-a', '-u', String(uid()), '-F', 'tn'], { timeout: 10_000, maxBuffer: 32 * 1024 * 1024 });
       if (stderr.trim()) issues.push('Temporary open-path inspection reported warnings; completeness unproven.');
-      for (const line of stdout.split('\n')) if (line.startsWith('n/')) paths.add(line.slice(1));
+      let fileType = '';
+      for (const line of stdout.split('\n')) {
+        if (line.startsWith('t')) fileType = line.slice(1);
+        if (!line.startsWith('n')) continue;
+        if (line.startsWith('n/') && !line.includes(' -- ')) paths.add(line.slice(1));
+        else if (['REG', 'DIR', 'LNK'].includes(fileType)) issues.push('Temporary filesystem NAME reporting is partial; completeness unproven.');
+      }
       if (!paths.size) issues.push('Temporary open-path listing is empty.');
     } catch (error) { issues.push(`Temporary open-path inspection failed or incomplete: ${(error as NodeJS.ErrnoException).code ?? 'unknown'}`); }
   }
-  return { complete: issues.length === 0, issues, paths: [...paths] };
+  return { complete: issues.length === 0, issues, paths: [], openedPaths: [...paths] };
 }

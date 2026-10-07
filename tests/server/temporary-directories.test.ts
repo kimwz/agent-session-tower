@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createPrivateTemporary, TemporaryCollector } from '../../server/temporary/directories.js';
+import { createPrivateTemporary, inspectTemporaryCandidate, TemporaryCollector } from '../../server/temporary/directories.js';
 import { temporaryFixture, removeTemporaryFixture } from '../helpers/temporary.js';
 const old = new Date(Date.now() - 3 * 86400_000);
 test('owned temporary release is awaited, records consumer and is idempotent after failure', async t => {
@@ -98,4 +98,39 @@ test('consumer registration publishes only after durable save and a failed write
   await rm(file, { recursive: true }); await writeFile(file, original, { mode: 0o600 });
   await allocation.bindConsumer(999999998);
   assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).consumerPids, [999999998]); await allocation.release();
+});
+
+test('unresolvable OS names require candidate inode evidence while reserved paths still fail closed', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'temp-inode-test-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const candidate = join(root, 'tower-terminal-host-INO123'); await mkdir(candidate); await utimes(candidate, old, old);
+  const unavailable = '/fixture/inaccessible-system-open-file';
+  let open = false, complete = true, queries = 0;
+  const resolvePath = async (path: string) => { if (path === unavailable) throw Object.assign(new Error('inaccessible fixture'), { code: 'EACCES' }); return path; };
+  const protection = async () => ({ complete: true, issues: [], paths: [] as string[], openedPaths: [unavailable] });
+  const collector = new TemporaryCollector({ roots: [root], dryRun: true, protection, resolvePath, inspectCandidate: async path => { assert.equal(path, await realpath(candidate)); queries++; return { complete, open }; } });
+  assert.equal((await collector.cycle()).eligibleEmpty, 1); await lstat(candidate); assert.equal(queries, 1);
+  open = true; assert.equal((await collector.cycle()).eligibleEmpty, 0);
+  open = false; complete = false; const uncertain = await collector.cycle(); assert.equal(uncertain.eligibleEmpty, 0); assert.ok(uncertain.issues.some(issue => issue.includes('inode inspection incomplete')));
+  await collector.close();
+  const reserved = new TemporaryCollector({ roots: [root], protection: async () => ({ complete: true, issues: [], paths: [unavailable] }), resolvePath, inspectCandidate: async () => { throw new Error('Reserved uncertainty must not use OS-only fallback.'); } });
+  const blocked = await reserved.cycle(); assert.equal(blocked.removedEmpty, 0); assert.ok(blocked.issues.some(issue => issue.includes('Reserved temporary path'))); await lstat(candidate); await reserved.close();
+});
+
+test('reserved symlink aliases continue protecting tmp candidates with unresolved unrelated OS names', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'temp-alias-test-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const candidate = join(root, 'tower-nodes-same-ALS123'); await mkdir(candidate); await utimes(candidate, old, old);
+  const alias = join(root, 'alias'); await symlink(candidate, alias);
+  const collector = new TemporaryCollector({ roots: [root], protection: async () => ({ complete: true, issues: [], paths: [alias] }), inspectCandidate: async () => { throw new Error('Known alias should protect before fallback.'); } });
+  assert.equal((await collector.cycle()).removedEmpty, 0); await lstat(candidate); await collector.close();
+});
+
+
+test('candidate inode selection detects an actual open fixture file and bounds directory enumeration', { skip: process.platform !== 'darwin' }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'temp-inode-live-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'open-file'); await writeFile(path, 'fixture');
+  const handle = await open(path, 'r');
+  try { assert.equal((await inspectTemporaryCandidate(root)).open, true, 'even a nonzero lsof status must preserve a positively selected open inode'); } finally { await handle.close(); }
+  assert.deepEqual(await inspectTemporaryCandidate(root), { complete: true, open: false });
+  await Promise.all(Array.from({ length: 201 }, (_, i) => writeFile(join(root, `bound-${i}`), '')));
+  assert.deepEqual(await inspectTemporaryCandidate(root), { complete: false, open: false });
 });

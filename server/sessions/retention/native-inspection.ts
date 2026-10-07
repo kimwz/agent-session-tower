@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { basename, join, sep } from 'node:path';
 import { promisify } from 'node:util';
 const execute = promisify(execFile);
@@ -10,12 +10,27 @@ export interface NativeInspection { complete: boolean; activeIds: ReadonlySet<st
 export async function inspectNativeRetention(claudeHome: string, roots: { claude: readonly string[]; codex: readonly string[] }, run: NativeInspectionRunner = (file, args, options) => execute(file, args, { ...options, encoding: 'utf8' })): Promise<NativeInspection> {
   const activeIds = new Set<string>(); const issues: string[] = [];
   try {
+    const uid = process.getuid?.();
+    if (uid === undefined) throw new Error('Native process ownership unavailable.');
+    // This service can prove writers only within its OS-user boundary. Foreign
+    // sessions require their own service; silently ignoring their writers is unsafe.
+    for (const root of new Set([...roots.claude, ...roots.codex])) {
+      try { if ((await stat(root)).uid !== uid) throw new Error('Native root belongs to another OS user.'); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    }
     const processSnapshot = async () => {
-      const { stdout, stderr } = await run(process.platform === 'darwin' ? '/bin/ps' : 'ps', ['-axo', 'pid=,comm='], { timeout: 2500, maxBuffer: 4_000_000 });
+      const { stdout, stderr } = await run(process.platform === 'darwin' ? '/bin/ps' : 'ps', ['-axo', 'uid=,pid=,comm='], { timeout: 2500, maxBuffer: 4_000_000 });
       if (stderr.trim()) throw new Error('Partial process inspection.');
       const result = new Map<number, string>();
-      for (const line of stdout.split('\n')) { const match = line.trim().match(/^(\d+)\s+(.+)$/); if (match) result.set(Number(match[1]), match[2]!); }
-      if (!result.size) throw new Error('Empty process snapshot.');
+      let rows = 0;
+      for (const line of stdout.split('\n')) {
+        if (!line.trim()) continue;
+        const match = line.trim().match(/^(-?\d+)\s+([1-9]\d*)\s+(.+)$/);
+        if (!match) throw new Error('Invalid process ownership metadata.');
+        rows++;
+        if (Number(match[1]) === uid) result.set(Number(match[2]), match[3]!);
+      }
+      if (!rows || !result.size) throw new Error('Empty owned process snapshot.');
       return result;
     };
     let processes = await processSnapshot();

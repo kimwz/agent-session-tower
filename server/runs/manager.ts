@@ -137,6 +137,7 @@ export class RunManager extends EventEmitter {
   private readonly stdio = new Map<string, CodexStdioRun>();
   private readonly reservedSessions = new Set<string>();
   private readonly retentionReservations = new Set<string>();
+  private readonly retentionWaiters = new Set<() => void>();
   private coldSessionIds: ReadonlySet<string> = new Set();
   private restoreCold?: (id: string) => Promise<void>;
   setColdSessions(ids: Iterable<string>, restore?: (id: string) => Promise<void>): void {
@@ -157,12 +158,30 @@ export class RunManager extends EventEmitter {
       (run.status === 'queued' || run.status === 'running' || run.approvals?.length || run.backgroundWait || !this.settledRuns.has(run.id)))) return undefined;
     for (const id of keys) this.retentionReservations.add(id);
     let released = false;
-    return () => { if (released) return; released = true; for (const id of keys) this.retentionReservations.delete(id); void this.pump(); };
+    return () => { if (released) return; released = true; for (const id of keys) this.retentionReservations.delete(id); for (const notify of this.retentionWaiters) notify(); void this.pump(); };
   }
   retentionReservedIds(): ReadonlySet<string> { return new Set(this.retentionReservations); }
   private retentionHeld(id: string): boolean { return this.retentionReservations.has(this.nativeSessionId(id)); }
   private assertRetentionAdmission(id: string): void {
-    if (this.retentionHeld(id)) throw new RunError('Session is being moved to or restored from cold storage; retry after it finishes.', 'conflict');
+    if (this.retentionHeld(id)) throw notAdmitted(new RunError('Session cold storage maintenance has not finished; retry after it finishes.', 'unavailable'));
+  }
+  private async awaitRetentionAdmission(id: string): Promise<void> {
+    const deadline = Date.now() + 30_000;
+    while (this.retentionHeld(id) || this.coldSessionIds.has(this.nativeSessionId(id))) {
+      if (!this.started || this.stopping) throw notAdmitted(new RunError('The task runner is not accepting instructions.', 'unavailable'));
+      if (this.retentionHeld(id)) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) this.assertRetentionAdmission(id);
+        await new Promise<void>((resolve, reject) => {
+          const notify = () => { clearTimeout(timer); this.retentionWaiters.delete(notify); resolve(); };
+          const timer = setTimeout(() => { this.retentionWaiters.delete(notify); reject(notAdmitted(new RunError('Session cold storage maintenance has not finished; retry after it finishes.', 'unavailable'))); }, remaining);
+          this.retentionWaiters.add(notify);
+        });
+      } else {
+        await this.restoreCold?.(id);
+        if (this.coldSessionIds.has(this.nativeSessionId(id)) && !this.retentionHeld(id)) throw notAdmitted(new RunError('Session cold storage restore did not complete.', 'unavailable'));
+      }
+    }
   }
   private retentionWait(run: Run): boolean {
     if (!this.retentionHeld(run.sessionId)) return false;
@@ -322,7 +341,12 @@ export class RunManager extends EventEmitter {
     await this.attachments.start();
     const saved = await this.history.readCreated();
     if (saved !== undefined) this.history.noteCreated(this.registry.load(saved));
-    for (const run of await this.history.restore()) this.runs.set(run.id, run);
+    for (const run of await this.history.restore()) {
+      this.runs.set(run.id, run);
+      // No transport from the predecessor remains for an already terminal history item.
+      // Unread results and approvals have their own retention protection; native activity is checked separately.
+      if (FINISHED.has(run.status) && !run.approvals?.length && !run.backgroundWait) this.settledRuns.add(run.id);
+    }
     this.started = true;
     // Without a worker to load the automations later, the retained runs are whatever they report from now on.
     if (this.ready) this.history.restoredRetained.clear();
@@ -488,8 +512,8 @@ export class RunManager extends EventEmitter {
     try {
       this.validateCorrelation(internal.autoPromptId);
       sessionId = this.monitorSessionId(sessionId);
+      while (this.retentionHeld(sessionId) || this.coldSessionIds.has(this.nativeSessionId(sessionId))) await this.awaitRetentionAdmission(sessionId);
       this.assertRetentionAdmission(sessionId);
-      if (this.coldSessionIds.has(this.nativeSessionId(sessionId))) { await this.restoreCold?.(sessionId); this.assertRetentionAdmission(sessionId); }
       const hasAttachments = Boolean(request.attachments?.length || request.attachmentIds?.length);
       this.validateAdmission(prompt, hasAttachments);
       const session = this.getSession(sessionId);
@@ -500,7 +524,10 @@ export class RunManager extends EventEmitter {
       if (!(await this.executable(session.provider))) throw new RunError(`Install the ${session.provider} CLI and ensure it is in PATH before sending instructions.`, 'unavailable');
       const prepared = await this.prepareAttachments(sessionId, request, internal.autoPromptId);
       // File writes yield; recheck admission immediately before inserting the run.
-      try { this.assertRetentionAdmission(sessionId); this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.(); }
+      try {
+        // Maintenance may have started while executable/attachment preparation yielded.
+        while (this.retentionHeld(sessionId) || this.coldSessionIds.has(this.nativeSessionId(sessionId))) await this.awaitRetentionAdmission(sessionId);
+        this.assertRetentionAdmission(sessionId); this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.(); }
       catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
       if (internal.untrustedInput) {
         // Recorded before the run exists: once external content is queued, the session stays marked.

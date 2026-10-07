@@ -6,6 +6,11 @@ import type { Run, Session } from '../../../shared/types.js';
 import { readPrivateJson, writePrivateJson } from '../../stores/private-json.js';
 import type { RetentionObservation, RetentionRecord } from './policy.js';
 
+/** An execution result stays protected until delivered, even if no notification was requested. */
+export function permissionRetentionPending(request: { status: string; notification?: { state: string }; run?: { status: string; delivered?: boolean } }): boolean {
+  return request.status === 'pending' || request.notification?.state === 'pending' || Boolean(request.run && (!request.run.delivered || request.run.status === 'waiting' || request.run.status === 'running'));
+}
+
 export interface NativeRetentionObservation {
   complete: boolean;
   issues?: string[];

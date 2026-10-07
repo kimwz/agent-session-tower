@@ -344,3 +344,39 @@ test('cold reconciliation batches operations, keeps newer commits and drains bef
   assert.equal(calls,1);assert.equal(store.get('one')?.members?.[0].state,'restored');assert.equal(store.get('two')?.members?.[0].state,'cold','paused inspection cannot write after handoff');
   await service.reconcileCold();assert.equal(calls,1,'paused inspection never begins again');
 }));
+
+
+test('failed native intent that never reached cold retries after hot reconciliation', async () => fixture(async path => {
+  const store = new RetentionStore(join(path, 'store')); const archive = new RetentionArchive(join(path, 'bundles'), []);
+  let moves = 0;
+  const service = new RetentionService({ store, archive, observe: async () => observation([record('parent'),record('child', true)]), adapter: {
+    capability: () => ({status:'supported'}), files: async () => [],
+    inspectCold: async members => ({complete:true, members:members.map(member=>({...member,state:'restored' as const})),issues:[]}),
+    reserve: async (_candidate, _records, ctx) => ({revalidate:async()=>true,preserveOwnership:async()=>{},release:async()=>{},sources:async()=>[],moveCold:async()=>{
+      moves++; const member={sessionId:'child',provider:'claude' as const,nativeId:'child',originalPath:join(path,'hot'),operationId:ctx.operationId,state:'intent' as const,identity:{dev:1,ino:1,size:1,mtimeMs:1}};
+      await ctx.commitMember(member);
+      if(moves===1) throw new Error('temporary writer conflict');
+      const cold={...member,state:'cold' as const,coldPath:join(path,'cold')};await ctx.commitMember(cold);return[cold];
+    }}),
+  }});
+  await service.start();try {
+    await service.cycle();await service.reconcileCold(true);
+    assert.equal(store.list()[0].phase,'conflict');assert.equal(store.list()[0].restoredAt,undefined);
+    await service.cycle();assert.equal(moves,2);assert.equal(store.list()[0].members?.[0].state,'cold');
+    await service.reconcileCold(true);assert.equal(store.list()[0].phase,'restored-awaiting-start');assert.ok(store.list()[0].restoredAt,'cold to hot confirmation is actual external restore evidence');
+    await service.cycle();assert.equal(moves,2,'proven external restore is not treated as failed-intent retry');
+  }finally{await service.quiesce();}
+}));
+
+test('normal scan reconciliation polls cold metadata at most once per thirty seconds', async () => fixture(async path => {
+  const store=new RetentionStore(join(path,'store'));await store.start();
+  const member={sessionId:'child',provider:'claude' as const,nativeId:'child',operationId:'op',originalPath:join(path,'hot'),coldPath:join(path,'cold'),state:'cold' as const,identity:{dev:1,ino:1,size:1,mtimeMs:1}};
+  await store.put({id:'op',candidate:{rootId:'child',ids:['child'],reason:'child-expired',revisions:{}},phase:'archived',members:[member],updatedAt:new Date(now).toISOString()});
+  let clock=0,calls=0;const service=new RetentionService({store,archive:new RetentionArchive(join(path,'bundles'),[]),now:()=>clock,observe:async()=>observation([]),adapter:{capability:()=>({status:'supported'}),files:async()=>[],reserve:async()=>undefined,inspectCold:async members=>{calls++;return{complete:true,members,issues:[]};}}});
+  await service.start();try{
+    for(let scan=0;scan<20;scan++){clock=scan*1500;await service.reconcileCold();}
+    assert.equal(calls,1,'twenty 1.5 second scans must not run twenty process/open-file inspections');
+    clock=30_000;await service.reconcileCold();assert.equal(calls,2);
+    await service.reconcileCold(true);assert.equal(calls,3,'explicit repair may request fresh metadata');
+  }finally{await service.quiesce();}
+}));
