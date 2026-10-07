@@ -12,7 +12,7 @@ const readline = require('node:readline');
 readline.createInterface({ input: process.stdin }).on('line', line => { const req = JSON.parse(line); if (!req.id) return; let result = {}; if (req.method === 'thread/loaded/list') result = {data:[]}; if (req.method === 'thread/read') result = {thread:{id:req.params.threadId,path:process.env.PATH}}; process.stdout.write(JSON.stringify({id:req.id,result})+'\\n'); });
 `);
   await chmod(script, 0o700);
-  const client = new CodexMaintenanceClient('owned-maintenance-fixture', root, 500, env);
+  const client = new CodexMaintenanceClient('owned-maintenance-fixture', root, 5000, env);
   try { assert.equal((await client.metadata('fixture')).path, providerDirectories(env).join(delimiter)); }
   finally { await client.close(); await rm(temp, { recursive: true, force: true }); }
 });
