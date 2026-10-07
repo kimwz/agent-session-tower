@@ -8,6 +8,8 @@ import { selectRetention, type RetentionRecord, type RetentionObservation } from
 import { RetentionArchive } from '../../../server/sessions/retention/archive.js';
 import { RetentionStore } from '../../../server/sessions/retention/store.js';
 import { RetentionService } from '../../../server/sessions/retention/service.js';
+import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
+import type { RetentionOperationContext } from '../../../server/sessions/retention/types.js';
 const now = Date.UTC(2026, 9, 7); const day = 86_400_000;
 function record(id: string, child = false, overrides: Partial<RetentionRecord> = {}): RetentionRecord {
   const session: Session = { id, nativeId: id, provider: 'claude', title: id, cwd: '/project', project: 'project', status: 'completed', statusReason: '', createdAt: new Date(now - 20 * day).toISOString(), updatedAt: new Date(now - 8 * day).toISOString(), lastMessage: '', messageCount: 1, isSubagent: child, resumable: true, ...(child ? { parentId: 'parent' } : {}) };
@@ -193,14 +195,14 @@ test('import resumes its private scratch, registers an already committed bundle 
   const native = join(path, 'native'); await mkdir(native); const source = join(native, 'child'); await writeFile(source, 'fixture');
   const archive = new RetentionArchive(join(path, 'cold'), [native]); await archive.start(); const candidate = { rootId: 'child', ids: ['child'], reason: 'child-expired' as const, revisions: {} };
   const manifest = await archive.create('operation', candidate, [record('child', true)], [{ path: source, root: native, nativeId: 'child', provider: 'claude' }]);
-  const entry = { id: 'operation', candidate, phase: 'backup-verified' as const, updatedAt: new Date(now).toISOString() }; const exported = join(path, 'export'); await archive.export('operation', exported, entry);
+  const entry = { id: 'operation', candidate, phase: 'backup-verified' as const, updatedAt: new Date(now).toISOString(), members: [{ sessionId: 'child', nativeId: 'child', provider: 'claude' as const, operationId: 'operation', originalPath: source, coldPath: '/untrusted-private-path/child', state: 'cold' as const, identity: { dev: 1, ino: 2, size: 3, mtimeMs: 4 } }] }; const exported = join(path, 'export'); await archive.export('operation', exported, entry);
   await chmod(join(exported, 'manifest.json'), 0o644); await chmod(join(exported, 'export.json'), 0o640);
   const originalMode = (await stat(join(exported, 'manifest.json'))).mode; const originalExportMode = (await stat(join(exported, 'export.json'))).mode;
   const recovered = new RetentionArchive(join(path, 'recovered'), [native]); await recovered.start(); const scratch = join(path, 'recovered/operation-importing'); await mkdir(scratch, { mode: 0o700 }); await writeFile(join(scratch, 'file-0.gz'), 'interrupted'); await writeFile(join(scratch, 'import.json'), JSON.stringify(manifest));
   await recovered.import(exported); await recovered.verify('operation');
   const store = new RetentionStore(join(path, 'state')); const service = new RetentionService({ store, archive: recovered, observe: async () => observation([]), adapter: { inspectCold: async members => ({ complete: true, members, issues: [] }), capability: () => ({ status: 'blocked' }), files: async () => [], reserve: async () => undefined } }); await service.start();
   try {
-    await service.importBundle(exported); assert.equal(store.get('operation')?.phase, 'backup-verified'); // Final rename had committed without a journal.
+    await service.importBundle(exported); assert.equal(store.get('operation')?.phase, 'backup-verified'); assert.equal(store.get('operation')?.members, undefined, 'imported transcript members never become local native ownership'); // Final rename had committed without a journal.
     const before = await recovered.diskBytes(); await writeFile(join(path, 'recovered/operation/file-0.gz'), 'corrupt'); await service.importBundle(exported); await recovered.verify('operation');
     const directories = await (await import('node:fs/promises')).readdir(join(path, 'recovered')); const quarantine = directories.find(name => name.startsWith('operation-quarantine-')); assert.ok(quarantine); assert.equal(await readFile(join(path, 'recovered', quarantine!, 'file-0.gz'), 'utf8'), 'corrupt');
     assert.equal((await recovered.list()).length, 1); assert.ok(await recovered.diskBytes() > before); assert.equal(await readFile(source, 'utf8'), 'fixture');
@@ -378,5 +380,70 @@ test('normal scan reconciliation polls cold metadata at most once per thirty sec
     assert.equal(calls,1,'twenty 1.5 second scans must not run twenty process/open-file inspections');
     clock=30_000;await service.reconcileCold();assert.equal(calls,2);
     await service.reconcileCold(true);assert.equal(calls,3,'explicit repair may request fresh metadata');
+  }finally{await service.quiesce();}
+}));
+
+
+for (const damage of ['missing', 'malformed'] as const) test(`native original restores with ${damage} optional export manifest`, async () => fixture(async path => {
+  const native=join(path,'native'),originals=join(path,'originals');await mkdir(native);await mkdir(originals);
+  const hot=join(native,'child.jsonl'),cold=join(originals,'child.jsonl');await writeFile(cold,'intact raw original');const info=await stat(cold);
+  const store=new RetentionStore(join(path,'state'));await store.start(now-10*day);
+  const archive=new RetentionArchive(join(path,'bundles'),[native],[originals]);await archive.start();
+  const id='native-recovery',candidate={rootId:'child',ids:['child'],reason:'child-expired' as const,revisions:{}};
+  const member={sessionId:'child',provider:'claude' as const,nativeId:'child',parentId:'parent',originalPath:hot,coldPath:cold,operationId:id,state:'cold' as const,identity:{dev:info.dev,ino:info.ino,size:info.size,mtimeMs:info.mtimeMs}};
+  await archive.create(id,candidate,[record('child',true)],[{path:cold,originalPath:hot,root:native,nativeId:'child',provider:'claude',provenance:'cold-original'}]);
+  await store.put({id,candidate,phase:'archived',members:[member],updatedAt:new Date(now).toISOString()});
+  const manifestPath=join(archive.root,id,'manifest.json');if(damage==='missing')await unlink(manifestPath);else await writeFile(manifestPath,'{malformed');
+  assert.equal(await archive.exists(id),true);await assert.rejects(archive.manifest(id));
+  let published=-1,restores=0;
+  const service=new RetentionService({store,archive,observe:async()=>observation([]),onColdChanged:members=>{published=members.length;},adapter:{capability:()=>({status:'supported'}),files:async()=>[],reserve:async()=>undefined,inspectCold:async members=>({complete:true,members,issues:[]}),restore:async(manifest,_operation,members,ctx)=>{
+    restores++;assert.equal(manifest.id,id);assert.deepEqual(manifest.files,[]);assert.equal(manifest.sessions[0].nativeId,'child');
+    await rename(cold,hot);const restored={...members[0],state:'restored' as const};await ctx.commitMember(restored);return[restored];
+  }}});
+  await service.start();try{
+    if(damage==='missing')await service.restoreSession('child');else await service.restore(id);
+    assert.equal(restores,1);assert.equal(await readFile(hot,'utf8'),'intact raw original');assert.equal(published,0);
+    const reopened=new RetentionStore(store.root);await reopened.start();assert.equal(reopened.get(id)?.members?.[0].state,'restored');assert.equal(reopened.get(id)?.members?.[0].sessionId,'child');
+  }finally{await service.quiesce();}
+}));
+
+test('member commits preserve ownership and sidecar recovery while allowing validated native transitions', async () => fixture(async path => {
+  const store=new RetentionStore(join(path,'state'));const source=record('child',true);source.session.provider='codex';
+  let context!:RetentionOperationContext;
+  const service=new RetentionService({store,archive:new RetentionArchive(join(path,'bundles'),[]),observe:async()=>observation([record('parent'),source]),adapter:{capability:()=>({status:'supported'}),files:async()=>[],inspectCold:async members=>({complete:true,members,issues:[]}),reserve:async(_candidate,_records,ctx)=>{context=ctx;return undefined;}}});
+  await service.start();try{
+    await service.cycle();
+    const member={sessionId:'child',nativeId:'child',provider:'codex' as const,parentId:'parent',originalPath:join(path,'hot'),coldPath:join(path,'expected-cold'),operationId:context.operationId,state:'conflict' as const,identity:{dev:1,ino:2,size:3,mtimeMs:4},sidecars:[{originalPath:join(path,'hot.meta'),coldPath:join(path,'cold.meta'),identity:{dev:1,ino:3,size:4,mtimeMs:5}}]};
+    await context.commitMember(member);
+    await assert.rejects(context.commitMember({...member,sidecars:[]}),/sidecar recovery/);
+    await assert.rejects(context.commitMember({...member,operationId:'foreign-op'}),/operation ownership/);
+    await assert.rejects(context.commitMember({...member,nativeId:'foreign-native'}),/provenance/);
+    assert.deepEqual(store.get(context.operationId)?.members,[member]);
+    const read=context.journalMembers();read[0].sidecars=[];assert.deepEqual(context.journalMembers()[0].sidecars,member.sidecars,'ownership snapshots must be isolated clones');
+    assert.equal(context.managedCold().length,0);assert.equal(context.journalMembers()[0].state,'conflict');
+    const transitioned={...member,coldPath:join(path,'official-native-cold'),identity:{dev:1,ino:4,size:5,mtimeMs:6},state:'restored' as const};
+    await context.commitMember(transitioned);assert.deepEqual(store.get(context.operationId)?.members,[transitioned]);assert.equal(context.journalMembers()[0].state,'restored');
+  }finally{await service.quiesce();}
+}));
+
+for(const action of ['automatic-retry','backup-only-attempt'] as const) test(`partial native sidecar ownership survives ${action} and full restoration`,async()=>fixture(async path=>{
+  const native=join(path,'native'),coldRoot=join(path,'originals');await mkdir(native);
+  const hot=join(native,'child.jsonl'),meta=join(native,'child.meta.json');await writeFile(hot,'raw review result');await writeFile(meta,'original review metadata');
+  const source=record('child',true);source.session.filePath=hot;
+  const store=new RetentionStore(join(path,'state'));await store.start(now-10*day);
+  const archive=new RetentionArchive(join(path,'bundles'),[native],[coldRoot]);
+  const adapter=createNativeRetentionAdapter({claude:[native],codex:[join(path,'sessions'),join(path,'archived_sessions')]},{coldRoot,codexHome:path,claudeHome:path,inspect:async()=>({complete:true,activeIds:new Set(),issues:[]})});
+  const service=new RetentionService({store,archive,adapter,observe:async()=>observation([record('parent'),source])});
+  await service.start();try{
+    await service.cycle();const entry=store.list()[0];assert.equal(entry.members?.[0].state,'cold');const member=entry.members![0];assert.equal(member.sidecars?.length,1);
+    await rename(member.coldPath!,hot);await service.reconcileCold(true);assert.equal(store.get(entry.id)?.phase,'conflict');
+    const partial=store.get(entry.id)!;assert.equal(await readFile(member.sidecars![0].coldPath,'utf8'),'original review metadata');
+    if(action==='automatic-retry'){
+      await service.cycle();assert.equal(store.get(entry.id)?.members?.[0].state,'cold');assert.deepEqual(store.get(entry.id)?.members?.[0].sidecars,member.sidecars);
+    }else{
+      await assert.rejects(service.backup('child'),/native ownership.*backup-only/);assert.deepEqual(store.get(entry.id),partial,'rejected backup must preserve the complete partial recovery ledger');
+    }
+    await service.restore(entry.id);assert.equal(await readFile(hot,'utf8'),'raw review result');assert.equal(await readFile(meta,'utf8'),'original review metadata');
+    await assert.rejects(readFile(member.sidecars![0].coldPath),/ENOENT/);assert.equal(store.get(entry.id)?.members?.[0].state,'restored');assert.deepEqual(store.get(entry.id)?.members?.[0].sidecars,member.sidecars);
   }finally{await service.quiesce();}
 }));

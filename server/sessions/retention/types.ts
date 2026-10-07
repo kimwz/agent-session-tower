@@ -6,6 +6,8 @@ import type { RetentionManifest, RetentionCapability, RetentionMember } from '..
 export interface RetentionOperationContext {
   operationId: string;
   managedCold(): RetentionMember[];
+  /** Local durable ownership only; imported transcript journals never enter this ledger. */
+  journalMembers(): RetentionMember[];
   fresh(): Promise<import('./policy.js').RetentionObservation>;
   commitMember(member: RetentionMember): Promise<void>;
 }

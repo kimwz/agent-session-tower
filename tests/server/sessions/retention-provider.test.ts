@@ -11,7 +11,7 @@ function record(filePath: string): RetentionRecord { return { kind:'subagent',se
 const candidate={rootId:'claude:child',ids:['claude:child'],reason:'child-expired' as const,revisions:{}};
 const manifest:RetentionManifest={version:1,id:'fixture',createdAt:'2026-01-01T00:00:00Z',reason:'child-expired',sessions:[],files:[]};
 async function fixture(){const temporary=await mkdtemp(join(tmpdir(),'tower-retention-provider-'));const base=await realpath(temporary);const root=join(base,'projects');await mkdir(root);const file=join(root,'child.jsonl');await writeFile(file,'fixture');const source=record(file);let active=new Set<string>();let complete=true;const committed:RetentionMember[]=[];
- const context:RetentionOperationContext={operationId:'fixture-operation',managedCold:()=>[],fresh:async()=>({now:Date.now(),migratedAt:0,complete,records:[source],protectedIds:active}),commitMember:async member=>{committed.push(structuredClone(member));}};
+ const context:RetentionOperationContext={operationId:'fixture-operation',journalMembers:()=>{const latest=new Map(committed.map(member=>[member.sessionId,member]));return structuredClone([...latest.values()]);},managedCold:()=>[],fresh:async()=>({now:Date.now(),migratedAt:0,complete,records:[source],protectedIds:active}),commitMember:async member=>{committed.push(structuredClone(member));}};
  const adapter=createNativeRetentionAdapter({claude:[root],codex:[root]},{coldRoot:join(base,'cold'),codexHome:base,claudeHome:base,inspect:async()=>({complete,activeIds:active,issues:complete?[]:['denied']})});
  return {base,root,file,source,context,adapter,committed,active(value:Set<string>){active=value;},complete(value:boolean){complete=value;},close:()=>rm(temporary,{recursive:true,force:true})};}
 
@@ -29,7 +29,7 @@ test('native parent permits confirmed already-cold descendants but protects acti
  const db=new DatabaseSync(join(home,'state_5.sqlite'));db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT,archived INTEGER); CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT,status TEXT)');db.prepare('INSERT INTO threads VALUES (?,?,?)').run('parent',parentPath,0);db.prepare('INSERT INTO threads VALUES (?,?,?)').run('child',childPath,1);db.prepare('INSERT INTO thread_spawn_edges VALUES (?,?,?)').run('parent','child','closed');db.close();
  const info=await lstat(childPath);const cold:RetentionMember={sessionId:'codex:child',nativeId:'child',provider:'codex',parentId:'codex:parent',originalPath:join(hot,'child.jsonl'),coldPath:childPath,operationId:'old-operation',state:'cold',identity:{dev:Number(info.dev),ino:Number(info.ino),size:Number(info.size),mtimeMs:Number(info.mtimeMs)}};
  const parent=record(parentPath);parent.session.provider='codex';parent.session.id='codex:parent';parent.session.nativeId='parent';parent.session.parentId=undefined;parent.session.isSubagent=false;parent.kind='parent';let active=new Set<string>();
- const ctx:RetentionOperationContext={operationId:'new-operation',managedCold:()=>[cold],fresh:async()=>({now:Date.now(),migratedAt:0,complete:true,records:[parent],protectedIds:new Set()}),commitMember:async()=>{}};
+ const ctx:RetentionOperationContext={operationId:'new-operation',journalMembers:()=>[cold],managedCold:()=>[cold],fresh:async()=>({now:Date.now(),migratedAt:0,complete:true,records:[parent],protectedIds:new Set()}),commitMember:async()=>{}};
  const adapter=createNativeRetentionAdapter({claude:[f.root],codex:[hot,archive]},{codexHome:home,claudeHome:f.base,coldRoot:join(f.base,'cold'),inspect:async()=>({complete:true,activeIds:active,issues:[]})});const group={rootId:parent.session.id,ids:[parent.session.id],reason:'parent-limit' as const,revisions:{}};
  const lease=await adapter.reserve(group,[parent],ctx);assert.ok(lease);await lease.release();active=new Set(['codex:child']);assert.equal(await adapter.reserve(group,[parent],ctx),undefined);active=new Set();cold.state='conflict';assert.equal(await adapter.reserve(group,[parent],ctx),undefined);cold.state='cold';cold.parentId=undefined;assert.equal(await adapter.reserve(group,[parent],ctx),undefined);cold.parentId='codex:parent';await appendFile(childPath,' changed');assert.equal(await adapter.reserve(group,[parent],ctx),undefined);
  }finally{await f.close();}});
@@ -42,3 +42,30 @@ test('two thousand cold Codex records reuse one native metadata connection per r
  count=0;await appendFile(members[777].coldPath!,' late write');opened.subscribe(observed);const changed=await adapter.inspectCold(members);opened.unsubscribe(observed);assert.equal(count,1);assert.equal(changed.complete,true);assert.equal(changed.members[777].state,'conflict');assert.equal(changed.members.filter(member=>member.state==='cold').length,1999);
  count=0;opened.subscribe(observed);const oversized=await adapter.inspectCold(Array.from({length:20001},()=>members[0]));opened.unsubscribe(observed);assert.equal(oversized.complete,false);assert.match(oversized.issues.join(';'),/budget/);assert.equal(count,0);assert.equal(oversized.members.length,20001);assert.equal(oversized.members[0].state,'cold');
  }finally{opened.unsubscribe(observed);await f.close();}});
+
+test('partial sidecar ownership survives same-operation retry and full restoration', async () => {
+ const f=await fixture();try{
+  const meta=f.file.replace('.jsonl','.meta.json');await writeFile(meta,'metadata');
+  const first=await f.adapter.reserve(candidate,[f.source],f.context);assert.ok(first);const moved=await first.moveCold();await first.release();
+  await rename(moved[0].coldPath!,f.file);const partial=await f.adapter.inspectCold(moved);assert.equal(partial.members[0].state,'conflict');await f.context.commitMember(partial.members[0]);
+  const retry=await f.adapter.reserve(candidate,[f.source],f.context);assert.ok(retry);const retried=await retry.moveCold();assert.equal(retried[0].state,'cold');assert.deepEqual(retried[0].sidecars,moved[0].sidecars);assert.equal((await retry.sources(retried)).length,2);
+  const restored=await f.adapter.restore!(manifest,'restore-retry',retried,f.context);assert.equal(restored[0].state,'restored');assert.equal(await readFile(meta,'utf8'),'metadata');assert.equal(await readFile(f.file,'utf8'),'fixture');await assert.rejects(()=>access(moved[0].sidecars![0].coldPath));await retry.release();
+ }finally{await f.close();}
+});
+test('foreign-operation partial ownership and changed cold metadata defer without losing either original', async()=>{
+ const f=await fixture();try{
+  const meta=f.file.replace('.jsonl','.meta.json');await writeFile(meta,'metadata');const first=await f.adapter.reserve(candidate,[f.source],f.context);assert.ok(first);const moved=await first.moveCold();await first.release();await rename(moved[0].coldPath!,f.file);await f.context.commitMember((await f.adapter.inspectCold(moved)).members[0]);
+  const before=structuredClone(f.context.journalMembers());f.context.operationId='different-revision';assert.equal(await f.adapter.reserve(candidate,[f.source],f.context),undefined);assert.deepEqual(f.context.journalMembers(),before);
+  f.context.operationId='fixture-operation';await appendFile(moved[0].sidecars![0].coldPath,' late-write');assert.equal(await f.adapter.reserve(candidate,[f.source],f.context),undefined);assert.deepEqual(f.context.journalMembers(),before);assert.equal(await readFile(f.file,'utf8'),'fixture');assert.equal(await readFile(moved[0].sidecars![0].coldPath,'utf8'),'metadata late-write');
+ }finally{await f.close();}
+});
+test('partial retry preserves recreated hot metadata and completed restoration does not block a new operation',async()=>{
+ const f=await fixture();try{
+  const meta=f.file.replace('.jsonl','.meta.json');await writeFile(meta,'metadata');const first=await f.adapter.reserve(candidate,[f.source],f.context);assert.ok(first);const moved=await first.moveCold();await first.release();await rename(moved[0].coldPath!,f.file);await f.context.commitMember((await f.adapter.inspectCold(moved)).members[0]);
+  const before=structuredClone(f.context.journalMembers());await writeFile(meta,'new hot metadata');assert.equal(await f.adapter.reserve(candidate,[f.source],f.context),undefined);assert.deepEqual(f.context.journalMembers(),before);assert.equal(await readFile(meta,'utf8'),'new hot metadata');assert.equal(await readFile(moved[0].sidecars![0].coldPath,'utf8'),'metadata');
+ }finally{await f.close();}
+ const restored=await fixture();try{
+  const meta=restored.file.replace('.jsonl','.meta.json');await writeFile(meta,'metadata');const first=await restored.adapter.reserve(candidate,[restored.source],restored.context);assert.ok(first);const moved=await first.moveCold();await first.release();await restored.adapter.restore!(manifest,'restore-complete',moved,restored.context);
+  restored.context.operationId='new-owner-after-restoration';const next=await restored.adapter.reserve(candidate,[restored.source],restored.context);assert.ok(next);assert.equal((await next.moveCold())[0].state,'cold');await next.release();
+ }finally{await restored.close();}
+});

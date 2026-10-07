@@ -80,9 +80,19 @@ export class RetentionService {
     await this.restore(entry.id);
   }
   private context(entry: RetentionJournalEntry): RetentionOperationContext {
-    return { operationId: entry.id, managedCold: () => this.coldMembers(), fresh: () => this.observe(), commitMember: async member => {
+    return { operationId: entry.id, managedCold: () => this.coldMembers(), journalMembers: () => structuredClone(this.options.store.list().flatMap(item => item.members || [])), fresh: () => this.observe(), commitMember: async member => {
       const current = this.options.store.get(entry.id) || entry;
-      const members = new Map((current.members || []).map(item => [item.sessionId, item])); members.set(member.sessionId, member);
+      if (member.operationId !== entry.id || !entry.candidate.ids.includes(member.sessionId)) throw new Error('Native member operation ownership mismatch.');
+      const members = new Map((current.members || []).map(item => [item.sessionId, item]));
+      const previous = members.get(member.sessionId);
+      if (previous) {
+        if (previous.operationId !== member.operationId || previous.provider !== member.provider || previous.nativeId !== member.nativeId || previous.originalPath !== member.originalPath || previous.parentId !== member.parentId) throw new Error('Native member provenance cannot be replaced.');
+        if (previous.provider === 'claude' && previous.coldPath && previous.coldPath !== member.coldPath) throw new Error('Managed original path cannot be replaced.');
+        const sidecars = new Set((member.sidecars || []).map(file => JSON.stringify([file.originalPath, file.coldPath])));
+        if ((previous.sidecars || []).some(file => !sidecars.has(JSON.stringify([file.originalPath, file.coldPath])))) throw new Error('Owned sidecar recovery information cannot be removed.');
+      }
+      // Identity/state and Codex's official archived path can change after fresh provider validation.
+      members.set(member.sessionId, member);
       await this.options.store.put({ ...current, members: [...members.values()], updatedAt: new Date().toISOString() });
     } };
   }
@@ -200,7 +210,7 @@ export class RetentionService {
     if (!candidate) throw new Error('No eligible inactive session to back up.');
     const records = this.records(candidate, observation); const id = this.operationId(candidate, records);
     const existing = this.options.store.get(id);
-    if (existing && ['archived', 'removing', 'restored-awaiting-start'].includes(existing.phase)) throw new Error('Retention operation cannot be replaced by backup-only.');
+    if (existing && (existing.members?.length || ['archived', 'removing', 'restored-awaiting-start'].includes(existing.phase))) throw new Error('Retention operation with native ownership cannot be replaced by backup-only.');
     await this.options.archive.create(id, candidate, records, await this.options.adapter.files(records));
     await this.options.store.put({ id, candidate, phase: 'backup-verified', updatedAt: new Date().toISOString() }); await this.countBytes();
     return { id, phase: 'backup-verified' };
@@ -252,7 +262,7 @@ export class RetentionService {
     this.activeOperation = entry.id;
     try {
       // Native originals remain restorable even if the optional transcript export is damaged.
-      const manifest = await this.options.archive.exists(id) ? await this.options.archive.manifest(id) : {
+      const manifest = {
         version: 1 as const, id, createdAt: entry.updatedAt, reason: entry.candidate.reason, files: [],
         sessions: members.map(member => ({ id: member.sessionId, nativeId: member.nativeId, provider: member.provider, parentId: member.parentId, title: member.sessionId })) };
       await this.options.adapter.restore(manifest, operationId, members, this.context(entry));

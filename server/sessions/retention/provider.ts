@@ -90,7 +90,7 @@ export function createNativeRetentionAdapter(roots: Record<Provider, readonly st
   return {
     capability: () => options ? { status: 'supported' } : { status: 'blocked', reason: 'Native retention configuration unavailable.' },
     async reserve(candidate, records, context) {
-      configured(); if (!context?.fresh || !context.commitMember) throw new Error('Retention admission context required.'); validateOperationId(context.operationId);
+      configured(); if (!context?.fresh || !context.commitMember || !context.journalMembers) throw new Error('Retention admission context required.'); validateOperationId(context.operationId);
       if (candidate.ids.length !== records.length || records.some(record => !candidate.ids.includes(record.session.id))) throw new Error('Retention membership mismatch.');
       if (await protectedNow(records, context)) return undefined;
       for (const record of records.filter(value => value.session.provider === 'codex')) {
@@ -117,16 +117,52 @@ export function createNativeRetentionAdapter(roots: Record<Provider, readonly st
         }
       }
       const planned: RetentionMember[] = [];
+      const journal = context.journalMembers();
+      const claudeFiles = (member: RetentionMember) => [...member.sidecars || [], { originalPath: member.originalPath, coldPath: member.coldPath!, identity: member.identity }];
+      const validateClaudePaths = (member: RetentionMember) => {
+        const expected = join(resolve(options!.coldRoot), member.operationId, 'claude', member.nativeId, basename(member.originalPath));
+        validateOperationId(member.operationId);
+        if (!roots.claude.some(root => within(root, member.originalPath)) || member.coldPath !== expected) throw new Error('Invalid owned Claude cold path.');
+        for (const sidecar of member.sidecars || []) if (sidecar.originalPath !== member.originalPath.replace(/\.jsonl$/, '.meta.json') || sidecar.coldPath !== join(dirname(expected), basename(sidecar.originalPath))) throw new Error('Invalid owned Claude sidecar path.');
+      };
+      const claudeFileReady = async (file: { originalPath: string; coldPath: string; identity: RetentionMember['identity'] }) => {
+        const hot = await exists(file.originalPath), cold = await exists(file.coldPath);
+        if (cold) return !hot && same(file.identity, await safeFile(file.coldPath, [options!.coldRoot]));
+        return hot && same(file.identity, await safeFile(file.originalPath, roots.claude));
+      };
       for (const { session } of records) {
         if (!session.filePath || !/^[A-Za-z0-9_-]+$/.test(session.nativeId)) throw new Error('Native transcript identity missing.');
-        const member: RetentionMember = { sessionId: session.id, nativeId: session.nativeId, provider: session.provider, parentId: session.parentId, originalPath: session.filePath,
+        const owners = journal.filter(member => member.provider === session.provider && member.nativeId === session.nativeId);
+        for (const owner of owners.filter(member => member.operationId !== context.operationId)) {
+          // A newer revision must not adopt a partially moved original belonging to an older journal.
+          // Restored history alone is harmless; only an actually retained original defers this candidate.
+          if (owner.provider === 'claude') {
+            validateClaudePaths(owner);
+            for (const file of claudeFiles(owner)) if (await exists(file.coldPath)) { await safeFile(file.coldPath, [options!.coldRoot]); return undefined; }
+          } else if (owner.coldPath) {
+            if (!roots.codex.some(root => basename(root) === 'archived_sessions' && within(root, owner.coldPath!))) throw new Error('Invalid owned native archive path.');
+            if (await exists(owner.coldPath)) { await safeFile(owner.coldPath, roots.codex); return undefined; }
+          }
+        }
+        const owned = owners.find(member => member.operationId === context.operationId);
+        if (owned && (owned.sessionId !== session.id || owned.originalPath !== session.filePath || owned.parentId !== session.parentId)) return undefined;
+        const member: RetentionMember = owned ? { ...structuredClone(owned), state: 'intent' } : {
+          sessionId: session.id, nativeId: session.nativeId, provider: session.provider, parentId: session.parentId, originalPath: session.filePath,
           coldPath: session.provider === 'claude' ? join(resolve(options!.coldRoot), context.operationId, 'claude', session.nativeId, basename(session.filePath)) : join(options!.codexHome, 'archived_sessions', basename(session.filePath)),
           operationId: context.operationId, state: 'intent', identity: await safeFile(session.filePath, roots[session.provider]) };
-        if (session.provider === 'claude') { const sidecar = session.filePath.replace(/\.jsonl$/, '.meta.json'); if (await exists(sidecar)) member.sidecars = [{ originalPath: sidecar, coldPath: join(dirname(member.coldPath!), basename(sidecar)), identity: await safeFile(sidecar, roots.claude) }]; }
+        delete member.error;
+        if (session.provider === 'claude') {
+          validateClaudePaths(member);
+          const sidecar = session.filePath.replace(/\.jsonl$/, '.meta.json');
+          if (!member.sidecars?.length && await exists(sidecar)) member.sidecars = [{ originalPath: sidecar, coldPath: join(dirname(member.coldPath!), basename(sidecar)), identity: await safeFile(sidecar, roots.claude) }];
+          if (!(await Promise.all(claudeFiles(member).map(claudeFileReady))).every(Boolean)) return undefined;
+        }
         planned.push(member);
       }
       let maintenance: CodexMaintenance | undefined;
-      const revalidate = async () => !await protectedNow(records, context) && (await Promise.all(planned.filter(member => member.state === 'intent').map(async member => same(member.identity, await safeFile(member.originalPath, roots[member.provider]))))).every(Boolean);
+      const revalidate = async () => !await protectedNow(records, context) && (await Promise.all(planned.filter(member => member.state === 'intent').map(async member => member.provider === 'claude'
+        ? (await Promise.all(claudeFiles(member).map(claudeFileReady))).every(Boolean)
+        : same(member.identity, await safeFile(member.originalPath, roots.codex))))).every(Boolean);
       return {
         revalidate,
         async preserveOwnership() { if (!await revalidate()) throw new Error('Native retention preconditions changed.'); },
@@ -139,7 +175,11 @@ export function createNativeRetentionAdapter(roots: Record<Provider, readonly st
               else {
                 const destination = await privateDirectory(dirname(member.coldPath!)); if ((await lstat(destination)).dev !== member.identity.dev) throw new Error('Cold move requires the same filesystem.');
                 for (const file of [...member.sidecars || [], { originalPath: member.originalPath, coldPath: member.coldPath!, identity: member.identity }]) {
-                  if (await exists(file.coldPath)) throw new Error('Cold destination already exists.'); if (!same(await safeFile(file.originalPath, roots.claude), file.identity)) throw new Error('Native source changed before cold move.');
+                  if (await exists(file.coldPath)) {
+                    if (!await claudeFileReady(file)) throw new Error('Existing cold original changed or hot source appeared.');
+                    continue;
+                  }
+                  if (!same(await safeFile(file.originalPath, roots.claude), file.identity)) throw new Error('Native source changed before cold move.');
                   await rename(file.originalPath, file.coldPath); await sync(dirname(file.originalPath)); await sync(destination);
                 }
               }
