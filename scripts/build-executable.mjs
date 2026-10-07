@@ -20,7 +20,7 @@ await build({
   // Bundled CommonJS dependencies still require Node built-ins inside the SEA.
   banner: { js: "import { createRequire as monitorCreateRequire } from 'node:module'; const require = monitorCreateRequire(import.meta.url);" },
   // Keep the single executable independent of optional native ws accelerators. The storage thread is defined in as
-  // text: the executable has no JS files beside it to start a thread from.
+  // text, with the hash of it the worker expects: the executable has no JS files beside it to start a thread from.
   define: { 'process.env.WS_NO_BUFFER_UTIL': '"1"', 'process.env.WS_NO_UTF_8_VALIDATE': '"1"', ...await storageThreadDefine() },
   // Playwright needs its own files and browsers; the executable offers no browser tools (see server/browser/tools.ts).
   external: ['@playwright/mcp', 'playwright', 'playwright-core'],

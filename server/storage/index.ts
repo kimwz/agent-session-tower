@@ -14,7 +14,7 @@ export { openStorage, StorageClient, type CloseResult, type StorageClientOptions
 export { preflightStorage, type StoragePreflight, type StorageStatePreflight } from './preflight.js';
 export {
   activateRecoveryBarrier, adoptSnapshot, readRecoveryBarrier, readSnapshot, reconcileRecovery, recordRecoveryBarrier, recoveryHold, recoverySummary,
-  StorageRecoveryError, type KnownStorageEvidence, type RecoveryBarrier, type RecoveryBarrierRead, type SnapshotManifest,
+  StorageRecoveryError, type KnownStorageEvidence, type RecoveryBarrier, type RecoveryBarrierRead, type RecoveryReconciliation, type RecoveryScope, type SnapshotManifest,
 } from './recovery.js';
 export { evaluateRuntime, PATCHED_SQLITE, VERIFIED_NODE_LINES } from './runtime.js';
 export { STORAGE_DOMAIN_SCHEMAS, storageManifest } from './schema.js';

@@ -1,6 +1,7 @@
+import { randomBytes } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
-import { lstat, mkdir, open, realpath } from 'node:fs/promises';
-import { join } from 'node:path';
+import { copyFile, lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import type { StorageErrorCode } from './contract.js';
 
 /**
@@ -9,11 +10,11 @@ import type { StorageErrorCode } from './contract.js';
  * owner's (never a symlink); the database and its sidecars are the owner's regular 0600 files, never symlinks or hard
  * links. A path that fails is refused as it is: it is not repaired, replaced or removed.
  *
- * The recovery and snapshot folders sit beside storage/, not in it, so replacing the database folder leaves them.
+ * The recovery and snapshot folders sit beside the database, so replacing the database leaves them.
  */
 export interface StorageLayout {
   stateDir: string;
-  storageDir: string;
+  /** `<state-dir>/state.sqlite`. */
   database: string;
   wal: string;
   shm: string;
@@ -22,6 +23,11 @@ export interface StorageLayout {
   snapshotsDir: string;
   recoveryDir: string;
 }
+
+export const STORAGE_DATABASE_NAME = 'state.sqlite';
+/** The database and its sidecars, by the names a recovery barrier records them under. */
+export const STORAGE_FILE_NAMES = [STORAGE_DATABASE_NAME, `${STORAGE_DATABASE_NAME}-wal`, `${STORAGE_DATABASE_NAME}-shm`] as const;
+export type StorageFileName = typeof STORAGE_FILE_NAMES[number];
 
 export class StoragePathError extends Error {
   constructor(readonly code: StorageErrorCode, message: string, readonly retryable = false) { super(message); this.name = 'StoragePathError'; }
@@ -32,6 +38,40 @@ export interface FileGeneration { dev: number; ino: number; size: number; mtimeM
 export const generationOf = (info: Stats): FileGeneration => ({ dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs });
 export const sameFile = (a: FileGeneration, b: FileGeneration) => a.dev === b.dev && a.ino === b.ino;
 export const sameGeneration = (a: FileGeneration, b: FileGeneration) => sameFile(a, b) && a.size === b.size && a.mtimeMs === b.mtimeMs;
+
+/**
+ * The operations that create, move and sync storage files and folders. Every storage path goes through them so the
+ * order of new links and syncs is one checked contract: tests replace members (node:test mock.method) to record that
+ * order or to fail one step; nothing else does.
+ */
+export const storageFs = {
+  mkdir: async (path: string): Promise<void> => { await mkdir(path, { mode: 0o700 }); },
+  rename: (from: string, to: string): Promise<void> => rename(from, to),
+  /** A new file (never an existing one or a symlink) with `data`, synced before it is closed. */
+  createFile: async (path: string, data: string | Uint8Array): Promise<void> => {
+    const file = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    await closing(file, async () => { if (data.length) await file.writeFile(data); await file.sync(); });
+  },
+  /** A new copy of `from` (a clone where the file system can), made 0600 and synced. */
+  copyFile: async (from: string, to: string): Promise<void> => {
+    await copyFile(from, to, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
+    const file = await open(to, constants.O_RDONLY | constants.O_NOFOLLOW);
+    await closing(file, async () => { await file.chmod(0o600); await file.sync(); });
+  },
+  syncDirectory: async (path: string): Promise<void> => {
+    const directory = await open(path, constants.O_RDONLY);
+    await closing(directory, () => directory.sync());
+  },
+};
+
+/** Runs `work`, then always closes `handle`; a failed close is the error only when `work` itself succeeded. */
+async function closing(handle: { close(): Promise<void> }, work: () => Promise<void>): Promise<void> {
+  try { await work(); } catch (error) {
+    await handle.close().catch(() => undefined); // best-effort: the work's own error is the one to report
+    throw error;
+  }
+  await handle.close();
+}
 
 /** POSIX owner and mode checks are what protect the files. Windows ACLs are not verified yet, so storage refuses there. */
 export function storagePlatformSupported(): boolean {
@@ -59,21 +99,26 @@ export async function storageLayout(stateDir: string): Promise<StorageLayout> {
   try { real = await realpath(stateDir); } catch (error) { throw new StoragePathError('state-dir-invalid', `The state directory ${stateDir} is not usable: ${(error as Error).message}`); }
   const info = await lstat(real);
   if (!info.isDirectory() || info.uid !== uid() || (info.mode & 0o022)) throw new StoragePathError('state-dir-invalid', `The state directory ${real} must be the owner's and writable by the owner only.`);
-  const storageDir = join(real, 'storage');
-  const database = join(storageDir, 'tower.db');
+  const database = join(real, STORAGE_DATABASE_NAME);
   return {
-    stateDir: real, storageDir, database, wal: `${database}-wal`, shm: `${database}-shm`, journal: `${database}-journal`,
+    stateDir: real, database, wal: `${database}-wal`, shm: `${database}-shm`, journal: `${database}-journal`,
     snapshotsDir: join(real, 'storage-snapshots'), recoveryDir: join(real, 'storage-recovery'),
   };
 }
 
-/** An owner-only directory. With `create`, a missing one is made (its parent must exist); an existing one is never changed. */
+/**
+ * An owner-only directory. With `create`, a missing one is made (its parent must exist) and its parent synced, so the
+ * new name survives a crash before anything is put in it. An existing one is never changed.
+ */
 export async function privateDirectory(path: string, create: boolean): Promise<boolean> {
   let info: Stats;
   try { info = await lstat(path); } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw pathError(error, path);
     if (!create) return false;
-    try { await mkdir(path, { mode: 0o700 }); } catch (made) { throw pathError(made, path); }
+    try {
+      await storageFs.mkdir(path);
+      await storageFs.syncDirectory(dirname(path));
+    } catch (made) { throw pathError(made, path); }
     info = await lstat(path);
   }
   if (info.isSymbolicLink()) throw new StoragePathError('symlink', `${path} is a symlink.`);
@@ -101,23 +146,40 @@ export async function privateFile(path: string): Promise<FileGeneration | undefi
 /** Creates a new empty owner-only file; an existing file or symlink at `path` makes it fail. Synced with its folder. */
 export async function createPrivateFile(path: string): Promise<FileGeneration> {
   try {
-    const file = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-    try { await file.sync(); } finally { await file.close(); }
+    await storageFs.createFile(path, '');
+    await storageFs.syncDirectory(dirname(path));
   } catch (error) { throw pathError(error, path); }
-  await syncDirectory(join(path, '..'));
   return (await privateFile(path))!;
 }
 
-export async function syncDirectory(path: string): Promise<void> {
-  const directory = await open(path, constants.O_RDONLY);
-  try { await directory.sync(); } finally { await directory.close(); }
+/**
+ * Replaces an owner-only document whole: a new synced 0600 temporary file renamed over `path`, then the folder synced.
+ * Any failure is thrown as a StoragePathError; a failed folder sync means the new name may not survive a crash.
+ */
+export async function writePrivateDocument(path: string, text: string): Promise<void> {
+  const temporary = join(dirname(path), `.${basename(path)}.${randomBytes(6).toString('hex')}.tmp`);
+  try {
+    await storageFs.createFile(temporary, text);
+    await storageFs.rename(temporary, path);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined); // best-effort: only this call's own temporary file; the write error is reported
+    throw pathError(error, path);
+  }
+  try { await storageFs.syncDirectory(dirname(path)); } catch (error) { throw pathError(error, dirname(path)); }
 }
 
+export interface StorageFiles { database?: FileGeneration; wal?: FileGeneration; shm?: FileGeneration }
 /** The database files as they are: each one checked, absent ones undefined. */
-export async function storageFiles(layout: StorageLayout): Promise<{ database?: FileGeneration; wal?: FileGeneration; shm?: FileGeneration }> {
+export async function storageFiles(layout: StorageLayout): Promise<StorageFiles> {
   try {
     await lstat(layout.journal);
     throw new StoragePathError('unexpected-journal', `${layout.journal} exists; a WAL database never makes one, so it is left for the owner to inspect.`);
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw pathError(error, layout.journal); }
   return { database: await privateFile(layout.database), wal: await privateFile(layout.wal), shm: await privateFile(layout.shm) };
+}
+
+/** Whether two looks at the database files saw the same files, unchanged. */
+export function sameStorageFiles(a: StorageFiles, b: StorageFiles): boolean {
+  const same = (x?: FileGeneration, y?: FileGeneration) => x === undefined ? y === undefined : y !== undefined && sameGeneration(x, y);
+  return same(a.database, b.database) && same(a.wal, b.wal) && same(a.shm, b.shm);
 }

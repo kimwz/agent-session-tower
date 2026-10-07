@@ -69,8 +69,17 @@ export const fixtureDomain: StorageDomain = defineStorageDomain({
     } },
     later: { kind: 'read', run() { return Promise.resolve('async'); } },
     big: { kind: 'read', run(_context, payload) { return 'x'.repeat(Number(record(payload).bytes)); } },
+    putLarge: { kind: 'write', run(context, payload) {
+      const { key, bytes } = record(payload);
+      context.prepare('INSERT INTO fixture_items (key, value) VALUES (?, ?)').run(String(key), 'large-answer');
+      return 'x'.repeat(Number(bytes));
+    } },
   },
 });
+
+/** Release A of the fixture domain: the same tables and reader/writer contracts, no cutover. It may not import. */
+export const fixtureSchemaA: StorageDomainSchema = { domain: fixtureSchema.domain, migrations: fixtureSchema.migrations, preparation: fixtureSchema.preparation };
+export const fixtureDomainA: StorageDomain = defineStorageDomain({ schema: fixtureSchemaA, commands: fixtureDomain.commands });
 
 export const plainDomain: StorageDomain = defineStorageDomain({
   schema: plainSchema,

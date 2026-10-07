@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { StorageCommandError, type StorageStatus } from '../../../server/storage/contract.js';
-import { openFixture, sleep, stateDir } from './helpers.js';
+import { DatabaseSync } from 'node:sqlite';
+import { openStorage } from '../../../server/storage/client.js';
+import { databasePath, fixtureBundleA, fixtureManifest, fixtureManifestA, openFixture, sleep, stateDir } from './helpers.js';
 import { until } from '../../helpers/until.js';
 
 const failsWith = (promise: Promise<unknown>, expected: Partial<StorageCommandError>) =>
@@ -104,7 +106,7 @@ test('domain authority changes only through the owning domain\'s command, genera
   const client = await openFixture(t, dir);
   await client.prepare({ allowMigration: true });
   const sha = (char: string) => char.repeat(64);
-  await failsWith(client.write('fixture', 'export', { manifestSha256: sha('e') }, 'export-0'), { code: 'domain-failed', disposition: 'not-committed' });
+  await failsWith(client.write('fixture', 'export', { manifestSha256: sha('e') }, 'export-0'), { code: 'authority-missing', disposition: 'not-committed' });
   const imported = await client.write<{ generation: number; authority: string }>('fixture', 'import', { manifestSha256: sha('a') }, 'import-1');
   assert.deepEqual([imported.result.authority, imported.result.generation], ['database', 1]);
   const exported = await client.write<{ generation: number; authority: string }>('fixture', 'export', { manifestSha256: sha('b') }, 'export-1');
@@ -116,4 +118,59 @@ test('domain authority changes only through the owning domain\'s command, genera
   await failsWith(client.write('plain', 'import', null, 'plain-1'), { code: 'no-cutover-contract', disposition: 'not-committed' });
   const authority = (await client.inspect()).authority;
   assert.deepEqual(authority.map(row => [row.domain, row.authority, row.generation, row.manifestSha256]), [['fixture', 'database', 3, sha('c')]]);
+});
+
+test('release A (same schema and reader/writer contract, no cutover) never imports, yet reads, writes and exports back what release B imported', async t => {
+  const sha = (char: string) => char.repeat(64);
+  const a = (dir: string) => openStorage({ stateDir: dir, bundle: aBundle, manifest: fixtureManifestA });
+  const aBundle = await fixtureBundleA();
+  assert.notEqual(fixtureManifestA.digest, fixtureManifest.digest, 'A and B are different builds');
+  assert.deepEqual(fixtureManifestA.domains.map(({ scope, schemaDigest, preparation }) => ({ scope, schemaDigest, preparation })), fixtureManifest.domains.map(({ scope, schemaDigest, preparation }) => ({ scope, schemaDigest, preparation })), 'with the same schema and contracts');
+
+  // Before any cutover, A refuses the first import, on a database of its own and on one B prepared but never imported.
+  const fresh = await stateDir(t);
+  const prepOnly = await a(fresh);
+  t.after(() => prepOnly.close());
+  await prepOnly.prepare({ allowMigration: true });
+  await failsWith(prepOnly.write('fixture', 'import', { manifestSha256: sha('a') }, 'a-import-0'), { code: 'no-cutover-contract', disposition: 'not-committed' });
+  await failsWith(prepOnly.write('fixture', 'export', { manifestSha256: sha('a') }, 'a-export-0'), { code: 'authority-missing', disposition: 'not-committed' });
+  assert.deepEqual((await prepOnly.inspect()).authority, []);
+
+  // B imports and writes; A opens B's database as current (same schema), works in it, and exports it back.
+  const dir = await stateDir(t);
+  const b = await openFixture(t, dir);
+  await b.prepare({ allowMigration: true });
+  await b.write('fixture', 'import', { manifestSha256: sha('b') }, 'b-import');
+  await b.write('fixture', 'put', { key: 'from-b', value: 'b' }, 'b-put');
+  await b.close();
+  const rollback = await a(dir);
+  t.after(() => rollback.close());
+  assert.equal(rollback.status().schema?.kind, 'current');
+  await rollback.prepare({ allowMigration: false });
+  assert.deepEqual(await rollback.read('fixture', 'get', { key: 'from-b' }), { key: 'from-b', value: 'b' });
+  await rollback.write('fixture', 'put', { key: 'from-a', value: 'a' }, 'a-put');
+  await failsWith(rollback.write('fixture', 'import', { manifestSha256: sha('c') }, 'a-import'), { code: 'no-cutover-contract', disposition: 'not-committed' });
+  const exported = await rollback.write<{ authority: string; generation: number; readerContract: number; writerContract: number }>('fixture', 'export', { manifestSha256: sha('d') }, 'a-export');
+  assert.deepEqual([exported.result.authority, exported.result.generation, exported.result.readerContract, exported.result.writerContract], ['legacy-exported', 2, 1, 1]);
+  // Exported once, it is not exported again until something imports it.
+  await failsWith(rollback.write('fixture', 'export', { manifestSha256: sha('e') }, 'a-export-2'), { code: 'authority-missing' });
+  await rollback.close();
+
+  // B reads what A wrote and the marker A left, and only B imports again.
+  const forward = await openFixture(t, dir);
+  await forward.prepare({ allowMigration: false });
+  assert.deepEqual(await forward.read('fixture', 'get', { key: 'from-a' }), { key: 'from-a', value: 'a' });
+  assert.deepEqual((await forward.inspect()).authority.map(row => [row.domain, row.authority, row.generation]), [['fixture', 'legacy-exported', 2]]);
+  assert.equal((await forward.write<{ generation: number }>('fixture', 'import', { manifestSha256: sha('f') }, 'b-import-2')).result.generation, 3);
+  await forward.close();
+
+  // A database whose marker carries another reader/writer contract is not exported by A.
+  const raw = new DatabaseSync(databasePath(dir));
+  raw.exec("UPDATE domain_imports SET writer_contract = 2 WHERE domain = 'fixture'");
+  raw.close();
+  const mismatched = await a(dir);
+  t.after(() => mismatched.close());
+  await mismatched.prepare({ allowMigration: false });
+  await failsWith(mismatched.write('fixture', 'export', { manifestSha256: sha('0') }, 'a-export-3'), { code: 'contract-mismatch', disposition: 'not-committed' });
+  assert.deepEqual((await mismatched.inspect()).authority.map(row => [row.authority, row.generation]), [['database', 3]]);
 });

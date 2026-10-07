@@ -6,6 +6,10 @@ import type { DomainAuthorityWriter } from '../domain.js';
  * The one owner of domain_imports: which domains the database holds, by which generation. Rows change only inside a
  * domain's own write command, in that command's transaction, so an authority change and the data it describes commit
  * together. Nothing else (a flag, a file, a recovery) moves a domain's authority.
+ *
+ * Release A of a domain (its preparation: schema, reader/writer, exporter; no cutover) never imports. It can still
+ * export back a database that release B imported, which is how B rolls back to A: the marker must say the database
+ * holds the domain, under the reader/writer contracts this build has.
  */
 
 interface Row { domain: string; authority: string; generation: number; manifest_sha256: string; reader_contract: number; writer_contract: number; committed_at: string; app_version: string; source_hash: string; owner_epoch: number }
@@ -29,12 +33,19 @@ export function authorityWriter(db: DatabaseSync, schema: StorageDomainSchema, c
     const row = db.prepare('SELECT * FROM domain_imports WHERE domain = ?').get(schema.domain) as unknown as Row | undefined;
     return row ? authorityOf(row) : undefined;
   };
+  const refuse = (storageCode: 'no-cutover-contract' | 'authority-missing' | 'contract-mismatch', message: string) => Object.assign(new Error(message), { storageCode });
   const record = (authority: DomainAuthority['authority'], manifestSha256: string): DomainAuthority => {
     if (!SHA256.test(manifestSha256)) throw new Error(`${schema.domain}: an authority change needs the sha256 of its manifest.`);
-    // A domain without a cutover contract in this build's manifest has no import; marking one would be a made-up claim.
-    if (!schema.cutover) throw Object.assign(new Error(`${schema.domain} has no cutover contract in this build.`), { storageCode: 'no-cutover-contract' });
     const previous = current();
-    if (authority === 'legacy-exported' && previous?.authority !== 'database') throw new Error(`${schema.domain}: only a domain the database holds can be exported back.`);
+    if (authority === 'database') {
+      // A domain without a cutover contract in this build's manifest has no import; marking one would be a made-up claim.
+      if (!schema.cutover) throw refuse('no-cutover-contract', `${schema.domain} has no cutover contract in this build.`);
+    } else {
+      if (previous?.authority !== 'database') throw refuse('authority-missing', `${schema.domain}: only a domain the database holds can be exported back.`);
+      if (previous.readerContract !== schema.preparation.readerContract || previous.writerContract !== schema.preparation.writerContract) {
+        throw refuse('contract-mismatch', `${schema.domain} was imported under reader/writer contract ${previous.readerContract}/${previous.writerContract}; this build has ${schema.preparation.readerContract}/${schema.preparation.writerContract}.`);
+      }
+    }
     const generation = (previous?.generation ?? 0) + 1;
     db.prepare(`INSERT INTO domain_imports (domain, authority, generation, manifest_sha256, reader_contract, writer_contract, committed_at, app_version, source_hash, owner_epoch)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

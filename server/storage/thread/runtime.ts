@@ -4,8 +4,8 @@ import { parentPort } from 'node:worker_threads';
 import { APP_VERSION } from '../../../shared/app-identity.js';
 import {
   STORAGE_DATABASE_FORMAT, STORAGE_PROTOCOL,
-  type AppliedMigration, type CommitDisposition, type OpenRequest, type OpenResult, type PrepareThreadResult, type ProbeResult, type ReceiptLookup, type SchemaState,
-  type SnapshotThreadResult, type StorageBuildIdentity, type StorageErrorCode, type StorageInspection, type StoragePragmas, type ThreadError,
+  type AppliedMigration, type CheckRequest, type CommitDisposition, type OpenRequest, type OpenResult, type PrepareThreadResult, type ProbeResult, type ReceiptLookup,
+  type SchemaState, type SnapshotThreadResult, type StorageBuildIdentity, type StorageErrorCode, type StorageExpectation, type StorageInspection, type StoragePragmas, type ThreadError,
   type ThreadHello, type ThreadRequest, type ThreadResponse,
 } from '../contract.js';
 import type { DomainCommand, DomainReadContext, DomainWriteContext, StorageDomain } from '../domain.js';
@@ -19,6 +19,8 @@ import { authorityWriter, readAuthority } from './authority.js';
  */
 
 type Sqlite = typeof import('node:sqlite');
+/** Set by the first line of the bundle (thread-bundle.mjs): the hash of the text after that line. */
+declare const __TOWER_STORAGE_SOURCE_HASH__: string | undefined;
 class ThreadFailure extends Error {
   constructor(readonly error: ThreadError) { super(error.message); }
 }
@@ -78,6 +80,7 @@ export function runStorageThread(domains: readonly StorageDomain[]): void {
 
   const hello: ThreadHello = {
     type: 'hello', protocol: STORAGE_PROTOCOL, appVersion: APP_VERSION, manifest,
+    ...(typeof __TOWER_STORAGE_SOURCE_HASH__ === 'string' ? { sourceHash: __TOWER_STORAGE_SOURCE_HASH__ } : {}),
     runtime: {
       node: process.versions.node, ...(sqliteVersion ? { sqlite: sqliteVersion } : {}), platform: process.platform, arch: process.arch, execPath: process.execPath,
       apis: { DatabaseSync: typeof sqlite?.DatabaseSync === 'function', StatementSync: typeof sqlite?.StatementSync === 'function' },
@@ -150,18 +153,35 @@ export function runStorageThread(domains: readonly StorageDomain[]): void {
     try { return work(); } finally { db.exec('COMMIT'); }
   }
 
-  function receiptOf(db: DatabaseSync, commandId: string): ReceiptLookup {
-    const row = db.prepare('SELECT * FROM operation_receipts WHERE command_id = ?').get(commandId) as Record<string, string | number> | undefined;
+  interface ReceiptRow { command_id: string; scope: string; command: string; payload_sha256: string; owner_epoch: number; committed_at: string; result: string }
+  const receiptRow = (db: DatabaseSync, commandId: string) => db.prepare('SELECT * FROM operation_receipts WHERE command_id = ?').get(commandId) as ReceiptRow | undefined;
+  /**
+   * A committed command as this connection may answer it now: the stored answer is included only when the whole
+   * receipt fits `limit` (the current maxResultBytes, which may be smaller than when it was stored); otherwise its
+   * size and hash stand in for it, never a refusal that could read as "not committed".
+   */
+  function receiptOf(db: DatabaseSync, commandId: string, limit: number): ReceiptLookup {
+    const row = receiptRow(db, commandId);
     if (!row) return { found: false };
-    return { found: true, receipt: { commandId: String(row.command_id), scope: String(row.scope), command: String(row.command), payloadSha256: String(row.payload_sha256), ownerEpoch: Number(row.owner_epoch), committedAt: String(row.committed_at), result: JSON.parse(String(row.result)) } };
+    const base = { commandId: row.command_id, scope: row.scope, command: row.command, payloadSha256: row.payload_sha256, ownerEpoch: Number(row.owner_epoch), committedAt: row.committed_at };
+    const omitted: ReceiptLookup = { found: true, receipt: { ...base, result: { state: 'omitted', bytes: Buffer.byteLength(row.result), sha256: sha256(row.result), limit } } };
+    // The receipt with its answer is at least this long; the answer is parsed only when it may fit.
+    if (Buffer.byteLength(row.result) > limit) return omitted;
+    const included: ReceiptLookup = { found: true, receipt: { ...base, result: { state: 'included', value: JSON.parse(row.result) } } };
+    return Buffer.byteLength(JSON.stringify(included)) <= limit ? included : omitted;
   }
-  /** A command ID already committed: the same command again answers its stored result; anything else is refused. */
-  function replay(db: DatabaseSync, commandId: string, scope: string, command: string, payloadSha256: string): { result: unknown } | undefined {
-    const found = receiptOf(db, commandId);
-    if (!found.found) return undefined;
-    const { receipt } = found;
-    if (receipt.scope !== scope || receipt.command !== command || receipt.payloadSha256 !== payloadSha256) throw failure('command-id-conflict', `Command ${commandId} was already committed with another command or payload.`);
-    return { result: receipt.result };
+  /**
+   * A command ID already committed: the same command again answers its stored result; anything else is refused. A
+   * stored answer larger than `limit` is refused as such, and the refusal says the command committed.
+   */
+  function replay(db: DatabaseSync, commandId: string, scope: string, command: string, payloadSha256: string, limit: number): { result: unknown } | undefined {
+    const row = receiptRow(db, commandId);
+    if (!row) return undefined;
+    if (row.scope !== scope || row.command !== command || row.payload_sha256 !== payloadSha256) throw failure('command-id-conflict', `Command ${commandId} was already committed with another command or payload.`);
+    if (Buffer.byteLength(row.result) > limit) {
+      throw failure('result-too-large', `Command ${commandId} committed, but its stored answer is larger than ${limit} bytes; receipt() reports its size and hash.`, 'committed');
+    }
+    return { result: JSON.parse(row.result) };
   }
   function insertReceipt(db: DatabaseSync, row: { commandId: string; scope: string; command: string; payloadSha256: string; ownerEpoch: number; now: string; result: string }) {
     db.prepare('INSERT INTO operation_receipts (command_id, scope, command, payload_sha256, owner_epoch, committed_at, result) VALUES (?, ?, ?, ?, ?, ?, ?)')
@@ -173,22 +193,54 @@ export function runStorageThread(domains: readonly StorageDomain[]): void {
     return text;
   }
 
-  function doOpen(request: OpenRequest): OpenResult {
+  /** The storage recorded beside the database against what the file holds. */
+  function expectStorage(schema: SchemaState, expected: StorageExpectation | undefined): void {
+    if (!expected) return;
+    if (schema.kind === 'empty') {
+      if (expected.created) throw failure('database-missing', 'The storage recorded here is gone; this empty file is not used in its place.');
+      return;
+    }
+    if (schema.storageId !== expected.storageId) throw failure('storage-replaced', 'The database is not the storage recorded here.');
+  }
+
+  /** A connection with the storage's connection settings. None of these writes to the file. */
+  function connect(path: string, busyTimeoutMs: number): DatabaseSync {
     if (connection) throw failure('invalid-command', 'The storage database is already open.');
     if (!sqlite) throw failure('unsupported-runtime', runtimeError ?? 'node:sqlite is not available.');
-    if (!Number.isInteger(request.busyTimeoutMs) || request.busyTimeoutMs < 0) throw failure('invalid-command', 'busy timeout must be a whole number of milliseconds.');
+    if (!Number.isInteger(busyTimeoutMs) || busyTimeoutMs < 0) throw failure('invalid-command', 'busy timeout must be a whole number of milliseconds.');
     let db: DatabaseSync;
-    try { db = new sqlite.DatabaseSync(request.path); } catch (error) { throw sqliteFailure(error, 'not-committed'); }
+    try { db = new sqlite.DatabaseSync(path); } catch (error) { throw sqliteFailure(error, 'not-committed'); }
     try {
-      // Connection settings only: none of these writes to the file.
-      db.exec(`PRAGMA busy_timeout = ${request.busyTimeoutMs}`);
+      db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
       db.exec('PRAGMA foreign_keys = ON');
       db.exec('PRAGMA trusted_schema = OFF');
+    } catch (error) {
+      try { db.close(); } catch { /* best-effort: closing a connection that failed to open; the first error explains it. */ }
+      throw sqliteFailure(error, 'not-committed');
+    }
+    return db;
+  }
+
+  /**
+   * Opens the worker's private copy of the database (and of its WAL), which SQLite may recover and checkpoint, and
+   * decides there whether this build may open the live files. The live files are not opened here.
+   */
+  function doCheck(request: CheckRequest): { schema: SchemaState } {
+    const db = connect(request.path, request.busyTimeoutMs);
+    try {
       const schema = readSchema(db);
-      if (request.expectedStorageId !== undefined) {
-        if (schema.kind === 'empty') throw failure('database-missing', 'The storage recorded here is gone; this empty file is not used in its place.');
-        if (schema.storageId !== request.expectedStorageId) throw failure('storage-replaced', 'The database is not the storage recorded here.');
-      }
+      expectStorage(schema, request.expected);
+      return { schema };
+    } catch (error) { throw sqliteFailure(error, 'not-committed'); } finally {
+      try { db.close(); } catch { /* best-effort: the copy is the worker's own and is removed after this answer. */ }
+    }
+  }
+
+  function doOpen(request: OpenRequest): OpenResult {
+    const db = connect(request.path, request.busyTimeoutMs);
+    try {
+      const schema = readSchema(db);
+      expectStorage(schema, request.expected);
       // The first write to the file, made only to an empty file or a database whose schema this build knows.
       db.exec('PRAGMA journal_mode = WAL');
       db.exec('PRAGMA synchronous = FULL');
@@ -224,7 +276,7 @@ export function runStorageThread(domains: readonly StorageDomain[]): void {
     const outcome = writing(db, () => {
       const before = readSchema(db);
       if (before.kind !== 'empty') {
-        const replayed = replay(db, commandId, CORE_SCOPE, 'prepare', payloadSha256);
+        const replayed = replay(db, commandId, CORE_SCOPE, 'prepare', payloadSha256, current.maxResultBytes);
         if (replayed) return { ...(replayed.result as { ownerEpoch: number; applied: { scope: string; version: number }[]; created: boolean }), replayed: true };
       }
       const pending = before.kind === 'empty'
@@ -301,7 +353,7 @@ export function runStorageThread(domains: readonly StorageDomain[]): void {
     const now = new Date().toISOString();
     return writing(current.db, () => {
       if (Number(readMeta(current.db).owner_epoch) !== ownerEpoch) throw failure('stale-owner', 'Another worker has claimed the storage since this one prepared it.');
-      const replayed = replay(current.db, commandId, domain, name, payloadSha256);
+      const replayed = replay(current.db, commandId, domain, name, payloadSha256, current.maxResultBytes);
       if (replayed) return { result: replayed.result, replayed: true };
       const context: DomainWriteContext = { ...contextFor(current, domain), commandId, ownerEpoch, now, authority: authorityWriter(current.db, owner.schema, { ownerEpoch, now, identity: current.identity }) };
       const result = bounded(synchronous(command.run(context, input)), current.maxResultBytes);
@@ -357,12 +409,13 @@ export function runStorageThread(domains: readonly StorageDomain[]): void {
 
   function handle(request: ThreadRequest): unknown {
     switch (request.op) {
+      case 'check': return doCheck(request.check);
       case 'open': return doOpen(request.open);
       case 'inspect': return doInspect();
       case 'prepare': return doPrepare(request.commandId, request.allowMigration, request.storageId);
       case 'receipt': {
-        const { db } = open();
-        return readSchema(db).kind === 'empty' ? { found: false } : receiptOf(db, request.commandId);
+        const { db, maxResultBytes } = open();
+        return readSchema(db).kind === 'empty' ? { found: false } : receiptOf(db, request.commandId, maxResultBytes);
       }
       case 'read': return doRead(request.domain, request.command, request.payload);
       case 'write': return doWrite(request.domain, request.command, request.payload, request.commandId, request.ownerEpoch);

@@ -1,22 +1,23 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { appendFile, copyFile, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, copyFile, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { StorageCommandError, type StorageBuildIdentity } from '../../../server/storage/contract.js';
+import { StorageCommandError } from '../../../server/storage/contract.js';
 import {
-  activateRecoveryBarrier, adoptSnapshot, readRecoveryBarrier, readSnapshot, reconcileRecovery, recordRecoveryBarrier, recoveryHold, StorageRecoveryError,
-  type KnownStorageEvidence,
+  activateRecoveryBarrier, adoptSnapshot, readRecoveryBarrier, readSnapshot, reconcileRecovery, recordRecoveryBarrier, recoveryHold, recoverySummary, StorageRecoveryError,
+  type RecoveryBarrier,
 } from '../../../server/storage/recovery.js';
-import { filesUnder, openFixture, stateDir } from './helpers.js';
+import { storageManifest } from '../../../server/storage/schema.js';
+import { historyAfterSnapshot, recordedWithSidecars, sha } from './fixtures/history.js';
+import { DATABASE, databasePath, filesUnder, fixtureManifest, openFixture, stateDir } from './helpers.js';
 
 const run = promisify(execFile);
-const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 const hash = (char: string) => char.repeat(64);
+const barrierFile = (dir: string) => join(dir, 'storage-recovery', 'barrier.json');
 
 test('a snapshot holds the rows still in the WAL, is owner-only, checked and described by its manifest', async t => {
   const dir = await stateDir(t);
@@ -24,9 +25,10 @@ test('a snapshot holds the rows still in the WAL, is owner-only, checked and des
   await client.prepare({ allowMigration: true });
   await client.write('fixture', 'import', { manifestSha256: hash('a') }, 'import-1');
   await client.write('fixture', 'putMany', { prefix: 'wal', count: 40 }, 'rows-1');
-  const database = join(dir, 'storage', 'tower.db');
+  const database = databasePath(dir);
   // The rows are committed but not checkpointed: the main file alone does not have them.
-  const mainOnly = join(dir, 'main-only.db');
+  const probe = await stateDir(t);
+  const mainOnly = join(probe, 'main-only.db');
   await copyFile(database, mainOnly);
   const plain = new DatabaseSync(mainOnly, { readOnly: true });
   const inMain = (() => { try { return Number((plain.prepare('SELECT count(*) AS n FROM fixture_items').get() as { n: number }).n); } catch { return -1; } finally { plain.close(); } })();
@@ -60,39 +62,20 @@ test('a snapshot holds the rows still in the WAL, is owner-only, checked and des
   await assert.rejects(empty.snapshot(), (error: unknown) => error instanceof StorageCommandError && error.code === 'not-prepared');
 });
 
-interface Adopted { dir: string; build: StorageBuildIdentity; known: KnownStorageEvidence; snapshotId: string; liveSha: string }
-/** Snapshot at generation 1, then more history (generation 2, rows, receipts) the snapshot will not have. Closed. */
-async function historyAfterSnapshot(t: Parameters<typeof openFixture>[0]): Promise<Adopted> {
-  const dir = await stateDir(t);
-  const client = await openFixture(t, dir);
-  await client.prepare({ allowMigration: true });
-  await client.write('fixture', 'import', { manifestSha256: hash('a') }, 'import-1');
-  await client.write('fixture', 'put', { key: 'early', value: '1' }, 'early-1');
-  const snapshot = await client.snapshot();
-  await client.write('fixture', 'put', { key: 'late', value: '2' }, 'late-1');
-  await client.write('fixture', 'export', { manifestSha256: hash('b') }, 'export-1');
-  const inspection = await client.inspect();
-  const known: KnownStorageEvidence = {
-    schema: inspection.schema.kind === 'empty' ? [] : inspection.schema.applied.map(({ scope, version }) => ({ scope, version })),
-    authority: inspection.authority.map(({ domain, authority, generation }) => ({ domain, authority, generation })), ownerEpoch: inspection.ownerEpoch,
-  };
-  const build = client.status().identity!;
-  await client.close();
-  return { dir, build, known, snapshotId: snapshot.id, liveSha: sha(await readFile(join(dir, 'storage', 'tower.db'))) };
-}
-
-test('adopting a snapshot records the barrier first, preserves the originals, and holds every scope until the owner reconciles it', async t => {
+test('adopting a snapshot records the barrier first, preserves the originals, and holds every scope until the owner reconciles it by name', async t => {
   const { dir, build, known, snapshotId, liveSha } = await historyAfterSnapshot(t);
   const barrier = await adoptSnapshot(dir, { snapshotId, reason: 'fixture corruption', build, known });
   assert.equal(barrier.state, 'activated');
   assert.equal(barrier.snapshot.id, snapshotId);
+  assert.equal(barrier.source.preservedDir, `${barrier.id}/source`);
+  assert.deepEqual(barrier.source.files.map(file => file.name), [DATABASE]);
   assert.deepEqual(barrier.scopes.map(scope => [scope.scope, scope.snapshotGeneration, scope.knownGeneration, scope.retreated]), [
     ['core', undefined, undefined, false], ['fixture', 1, 2, true], ['plain', undefined, undefined, false],
   ]);
-  // The live database at the time is preserved byte for byte; the snapshot is the database now.
-  assert.equal(sha(await readFile(join(dir, 'storage-recovery', barrier.source.preservedDir, 'tower.db'))), liveSha);
-  assert.equal(sha(await readFile(join(dir, 'storage', 'tower.db'))), (await readSnapshot(dir, snapshotId)).file.sha256);
-  assert.equal((await stat(join(dir, 'storage-recovery', 'barrier.json'))).mode & 0o777, 0o600);
+  // The live database at the time is preserved byte for byte under its own name; the snapshot is the database now.
+  assert.equal(sha(await readFile(join(dir, 'storage-recovery', barrier.source.preservedDir, DATABASE))), liveSha);
+  assert.equal(sha(await readFile(databasePath(dir))), (await readSnapshot(dir, snapshotId)).file.sha256);
+  assert.equal((await stat(barrierFile(dir))).mode & 0o777, 0o600);
 
   // The storage opens on the snapshot, but nothing durable may go ahead: core, the domain, and domains it never saw.
   const client = await openFixture(t, dir);
@@ -112,21 +95,34 @@ test('adopting a snapshot records the barrier first, preserves the originals, an
 
   // Replacing the database again (here: with the preserved original) does not lift the barrier: it lives outside it.
   await client.close();
-  await copyFile(join(dir, 'storage-recovery', barrier.source.preservedDir, 'tower.db'), join(dir, 'storage', 'tower.db'));
+  await copyFile(join(dir, 'storage-recovery', barrier.source.preservedDir, DATABASE), databasePath(dir));
   assert.equal(recoveryHold(await readRecoveryBarrier(dir), 'fixture').held, true);
   await client.reopen();
   assert.equal((await client.gate('fixture')).open, false);
 
-  // The owner reconciles one scope with evidence, then the rest.
-  await assert.rejects(reconcileRecovery(dir, { barrierId: barrier.id, scope: 'fixture', by: 'owner', evidence: ' ' }), { code: 'invalid-command' });
-  await assert.rejects(reconcileRecovery(dir, { barrierId: 'other', scope: 'fixture', by: 'owner', evidence: 'x' }), { code: 'recovery-invalid' });
-  await reconcileRecovery(dir, { barrierId: barrier.id, scope: 'fixture', by: 'owner', evidence: 'compared once-consumed IDs with the remote ledger' });
+  // The owner reconciles named scopes this build supports, with evidence. There is no "all".
+  const reconcile = (scopes: string[], evidence = 'compared once-consumed IDs with the remote ledger') => reconcileRecovery(dir, { barrierId: barrier.id, scopes, by: 'owner', evidence, manifest: fixtureManifest });
+  await assert.rejects(reconcile(['fixture'], ' '), { code: 'invalid-command' });
+  await assert.rejects(reconcileRecovery(dir, { barrierId: 'other', scopes: ['fixture'], by: 'owner', evidence: 'x', manifest: fixtureManifest }), { code: 'recovery-invalid' });
+  await assert.rejects(reconcile(['*']), { code: 'invalid-command' });
+  await assert.rejects(reconcile([]), { code: 'invalid-command' });
+  await assert.rejects(reconcile(['fixture', 'fixture']), { code: 'invalid-command' });
+  const untouched = await readFile(barrierFile(dir), 'utf8');
+  await assert.rejects(reconcile(['later-domain']), { code: 'unknown-scope' });
+  await assert.rejects(reconcileRecovery(dir, { barrierId: barrier.id, scopes: ['fixture'], by: 'owner', evidence: 'x', manifest: storageManifest() }), { code: 'unknown-scope' }, 'a build without the domain cannot release it');
+  assert.equal(await readFile(barrierFile(dir), 'utf8'), untouched, 'refused reconciliations change nothing');
+  await reconcile(['fixture']);
   await client.prepare({ allowMigration: false });
   assert.deepEqual(await client.gate('fixture'), { open: true, reasons: [] });
   assert.equal((await client.gate('core')).open, false);
-  await reconcileRecovery(dir, { barrierId: barrier.id, scope: '*', by: 'owner', evidence: 'all scopes reviewed' });
-  assert.equal((await client.gate('later-domain')).open, true);
-  assert.deepEqual(client.status().recovery, { state: 'clear' });
+  await reconcile(['core', 'plain'], 'all listed scopes reviewed');
+  for (const scope of ['core', 'fixture', 'plain']) assert.equal((await client.gate(scope)).open, true, scope);
+  // Everything this build knows is released; a later or unknown domain is not, and the storage never reads as clear.
+  assert.equal((await client.gate('later-domain')).open, false);
+  assert.deepEqual(client.status().recovery, { state: 'held', barrierId: barrier.id, reason: 'Snapshot recovery holds every scope not reconciled by name.', reconciled: ['core', 'fixture', 'plain'], unreconciled: [] });
+  const saved = await readRecoveryBarrier(dir);
+  assert.ok(saved.state === 'present');
+  assert.deepEqual(saved.barrier.reconciled.map(entry => [entry.scope, entry.manifestDigest]), [['fixture', fixtureManifest.digest], ['core', fixtureManifest.digest], ['plain', fixtureManifest.digest]]);
 });
 
 test('live files that changed after the barrier was recorded are not moved; the barrier keeps holding; a retry continues', async t => {
@@ -134,19 +130,20 @@ test('live files that changed after the barrier was recorded are not moved; the 
   const recorded = await recordRecoveryBarrier(dir, { snapshotId, reason: 'test', build, known });
   assert.equal(recorded.state, 'recorded');
   // The worker opening the storage now is refused: activation has not finished.
-  const before = await filesUnder(join(dir, 'storage'));
+  const before = await filesUnder(dir);
   const blocked = await openFixture(t, dir);
   assert.deepEqual([blocked.status().state, blocked.status().failure?.phase, blocked.status().failure?.code], ['unavailable', 'recovery', 'recovery-in-progress']);
-  assert.deepEqual(await filesUnder(join(dir, 'storage')), before);
+  assert.deepEqual(await filesUnder(dir), before);
   assert.equal(recoveryHold(await readRecoveryBarrier(dir), 'core').held, true);
 
   // Someone writes to the live database between the steps.
-  const live = new DatabaseSync(join(dir, 'storage', 'tower.db'));
+  const live = new DatabaseSync(databasePath(dir));
   live.exec("INSERT INTO fixture_items (key, value) VALUES ('meanwhile', 'x')");
   live.close();
-  const changed = await filesUnder(join(dir, 'storage'));
+  const changed = await filesUnder(dir);
   await assert.rejects(activateRecoveryBarrier(dir, recorded.id), (error: unknown) => error instanceof StorageRecoveryError && error.code === 'source-changed');
-  assert.deepEqual(await filesUnder(join(dir, 'storage')), changed, 'nothing moved');
+  const after = await filesUnder(dir);
+  for (const name of [DATABASE, `${DATABASE}-wal`, `${DATABASE}-shm`]) assert.deepEqual(after[name], changed[name], `${name} was not moved`);
   const still = await readRecoveryBarrier(dir);
   assert.ok(still.state === 'present' && still.barrier.state === 'recorded');
 
@@ -165,10 +162,10 @@ test('a crash between moving the originals and installing the snapshot resumes f
   assert.ok(recorded.scopes.every(scope => scope.retreated), 'without evidence of the live database every scope counts as retreated');
   const preserved = join(dir, 'storage-recovery', recorded.source.preservedDir);
   await mkdir(preserved, { recursive: true, mode: 0o700 });
-  for (const file of recorded.source.files) await rename(join(dir, 'storage', file.name), join(preserved, file.name));
+  for (const file of recorded.source.files) await rename(join(dir, file.name), join(preserved, file.name));
   const activated = await activateRecoveryBarrier(dir, recorded.id);
   assert.equal(activated.state, 'activated');
-  assert.equal(sha(await readFile(join(preserved, 'tower.db'))), liveSha);
+  assert.equal(sha(await readFile(join(preserved, DATABASE))), liveSha);
   // Once activated, recording again is a new adoption: a new barrier that names the one it replaces.
   const next = await recordRecoveryBarrier(dir, { snapshotId, reason: 'second adoption', build });
   assert.notEqual(next.id, recorded.id);
@@ -176,25 +173,115 @@ test('a crash between moving the originals and installing the snapshot resumes f
   assert.equal(next.state, 'recorded');
 });
 
-test('an unreadable barrier holds everything and is left for the owner; a snapshot of another storage is refused', async t => {
-  const { dir, build, snapshotId } = await historyAfterSnapshot(t);
-  await mkdir(join(dir, 'storage-recovery'), { recursive: true, mode: 0o700 });
-  await writeFile(join(dir, 'storage-recovery', 'barrier.json'), '{ not json', { mode: 0o600 });
-  const read = await readRecoveryBarrier(dir);
-  assert.equal(read.state, 'invalid');
-  assert.equal(recoveryHold(read, 'core').held, true);
+test('activation counts the snapshot as installed only with every original preserved as recorded and no sidecar left live', async t => {
+  // A database equal to the snapshot (new inode) where the originals went somewhere else: not installed by this recovery.
+  {
+    const { dir, build, known, snapshotId } = await historyAfterSnapshot(t);
+    const barrier = await recordRecoveryBarrier(dir, { snapshotId, reason: 'lost originals', build, known });
+    await rename(databasePath(dir), join(dir, 'lost.db'));
+    await copyFile(join(dir, 'storage-snapshots', snapshotId, 'snapshot.db'), databasePath(dir));
+    await chmod(databasePath(dir), 0o600);
+    const before = await filesUnder(dir);
+    await assert.rejects(activateRecoveryBarrier(dir, barrier.id), { code: 'source-changed' });
+    assert.deepEqual(await filesUnder(dir), before, 'nothing moved, nothing claimed as preserved');
+    const read = await readRecoveryBarrier(dir);
+    assert.ok(read.state === 'present' && read.barrier.state === 'recorded');
+  }
+  // A preserved WAL that was changed after it was moved aside.
+  {
+    const { dir, barrier } = await recordedWithSidecars(t);
+    const preserved = join(dir, 'storage-recovery', barrier.source.preservedDir);
+    await mkdir(join(dir, 'storage-recovery', barrier.id), { mode: 0o700 });
+    await mkdir(preserved, { mode: 0o700 });
+    for (const file of barrier.source.files) await rename(join(dir, file.name), join(preserved, file.name));
+    const wal = join(preserved, `${DATABASE}-wal`);
+    const bytes = await readFile(wal);
+    bytes[bytes.length - 1] ^= 0xff;
+    await writeFile(wal, bytes);
+    await assert.rejects(activateRecoveryBarrier(dir, barrier.id), { code: 'source-changed' });
+    assert.equal(Object.keys(await filesUnder(dir)).includes(DATABASE), false, 'no snapshot installed over a doubtful original');
+  }
+  // A shm left live after the originals were preserved and the snapshot installed.
+  {
+    const { dir, barrier } = await recordedWithSidecars(t);
+    const preserved = join(dir, 'storage-recovery', barrier.source.preservedDir);
+    await mkdir(join(dir, 'storage-recovery', barrier.id), { mode: 0o700 });
+    await mkdir(preserved, { mode: 0o700 });
+    for (const file of barrier.source.files) await rename(join(dir, file.name), join(preserved, file.name));
+    await copyFile(join(dir, 'storage-snapshots', barrier.snapshot.id, 'snapshot.db'), databasePath(dir));
+    await chmod(databasePath(dir), 0o600);
+    await writeFile(databasePath(dir, '-shm'), Buffer.alloc(32768), { mode: 0o600 });
+    await assert.rejects(activateRecoveryBarrier(dir, barrier.id), { code: 'source-changed' });
+    const read = await readRecoveryBarrier(dir);
+    assert.ok(read.state === 'present' && read.barrier.state === 'recorded');
+    // With the stray shm gone, the same activation finishes and the originals are the recorded ones.
+    await rename(databasePath(dir, '-shm'), join(dir, 'stray-shm'));
+    assert.equal((await activateRecoveryBarrier(dir, barrier.id)).state, 'activated');
+    for (const file of barrier.source.files) assert.equal(sha(await readFile(join(preserved, file.name))), file.sha256, file.name);
+  }
+});
+
+test('a barrier is used only when whole: anything incomplete, malformed, unknown or outside its folder holds everything and is left as found', async t => {
+  const { dir, build, known, snapshotId } = await historyAfterSnapshot(t);
+  const valid = await adoptSnapshot(dir, { snapshotId, reason: 'whole', build, known });
+  const reconciledValid: RecoveryBarrier = { ...valid, reconciled: [{ scope: 'fixture', at: new Date().toISOString(), by: 'owner', evidence: 'checked', manifestDigest: fixtureManifest.digest }] };
+  const without = (value: object, key: string) => Object.fromEntries(Object.entries(value).filter(([name]) => name !== key));
+  const cases: [string, unknown][] = [
+    ['the reviewer\'s incomplete v1', { format: 'tower-storage-recovery-barrier', version: 1, state: 'activated', scopes: [], reconciled: [{ scope: '*' }] }],
+    ['unknown version', { ...valid, version: 2 }],
+    ['unknown format', { ...valid, format: 'other' }],
+    ['unknown state', { ...valid, state: 'finished' }],
+    ['an extra field', { ...valid, clearAll: true }],
+    ...(['id', 'state', 'recordedAt', 'recordedBy', 'snapshot', 'source', 'scopes', 'reconciled', 'previous', 'activatedAt'] as const).map(key => [`no ${key}`, without(valid, key)] as [string, unknown]),
+    ['bad id', { ...valid, id: '../escape' }],
+    ['recorded with an activation time', { ...valid, state: 'recorded' }],
+    ['snapshot without its hash', { ...valid, snapshot: without(valid.snapshot, 'sha256') }],
+    ['snapshot hash not a hash', { ...valid, snapshot: { ...valid.snapshot, sha256: 'x' } }],
+    ['snapshot storage id', { ...valid, snapshot: { ...valid.snapshot, storageId: 'someone' } }],
+    ['snapshot build', { ...valid, snapshot: { ...valid.snapshot, build: { ...valid.snapshot.build, sourceHash: undefined } } }],
+    ['authority generation 0', { ...valid, snapshot: { ...valid.snapshot, authority: [{ domain: 'fixture', authority: 'database', generation: 0 }] } }],
+    ['source file hash', { ...valid, source: { ...valid.source, files: valid.source.files.map(file => ({ ...file, sha256: 'nope' })) } }],
+    ['source file generation', { ...valid, source: { ...valid.source, files: valid.source.files.map(file => ({ ...file, generation: { ...file.generation, ino: -1 } })) } }],
+    ['source file name', { ...valid, source: { ...valid.source, files: valid.source.files.map(file => ({ ...file, name: '../../outside' })) } }],
+    ['source file twice', { ...valid, source: { ...valid.source, files: [...valid.source.files, ...valid.source.files] } }],
+    ['preserved folder outside', { ...valid, source: { ...valid.source, preservedDir: '../../elsewhere' } }],
+    ['preserved folder of another barrier', { ...valid, source: { ...valid.source, preservedDir: '20000101T000000Z-000000000000/source' } }],
+    ['known evidence', { ...valid, source: { ...valid.source, known: { schema: 'all' } } }],
+    ['scopes not from the evidence', { ...valid, scopes: valid.scopes.map(scope => ({ ...scope, retreated: false })) }],
+    ['scopes emptied', { ...valid, scopes: [] }],
+    ['wildcard reconciliation', { ...reconciledValid, reconciled: [{ ...reconciledValid.reconciled[0], scope: '*' }] }],
+    ...(['scope', 'at', 'by', 'evidence', 'manifestDigest'] as const).map(key => [`reconciliation without ${key}`, { ...reconciledValid, reconciled: [without(reconciledValid.reconciled[0], key)] }] as [string, unknown]),
+    ['reconciliation without evidence text', { ...reconciledValid, reconciled: [{ ...reconciledValid.reconciled[0], evidence: '  ' }] }],
+    ['reconciliation at no time', { ...reconciledValid, reconciled: [{ ...reconciledValid.reconciled[0], at: 'yesterday' }] }],
+    ['reconciled before activation', { ...without(reconciledValid, 'activatedAt'), state: 'recorded' }],
+    ['previous names itself', { ...valid, previous: [valid.id] }],
+  ];
+  // The whole one reads back as present, and the mutations below are measured against it.
+  await writeFile(barrierFile(dir), JSON.stringify(reconciledValid));
+  assert.equal((await readRecoveryBarrier(dir)).state, 'present');
   const client = await openFixture(t, dir);
   await client.prepare({ allowMigration: false });
-  assert.equal(client.status().recovery?.state, 'held');
-  assert.equal((await client.gate('fixture')).open, false);
-  await client.close();
-  await assert.rejects(recordRecoveryBarrier(dir, { snapshotId, reason: 'x', build }), { code: 'recovery-invalid' });
-  assert.equal(await readFile(join(dir, 'storage-recovery', 'barrier.json'), 'utf8'), '{ not json');
-  // A barrier of an unknown version holds too.
-  await writeFile(join(dir, 'storage-recovery', 'barrier.json'), JSON.stringify({ format: 'tower-storage-recovery-barrier', version: 2, state: 'activated', scopes: [], reconciled: [{ scope: '*' }] }));
+  assert.equal((await client.gate('fixture')).open, true, 'the whole barrier releases its reconciled scope');
+  for (const [name, value] of cases) {
+    const text = JSON.stringify(value);
+    await writeFile(barrierFile(dir), text);
+    const read = await readRecoveryBarrier(dir);
+    assert.equal(read.state, 'invalid', name);
+    for (const scope of ['core', 'fixture', 'plain', 'later-domain']) assert.equal(recoveryHold(read, scope).held, true, `${name}: ${scope}`);
+    assert.deepEqual(recoverySummary(read), { state: 'held', reason: (read as { reason: string }).reason, reconciled: [], unreconciled: [] }, name);
+    assert.equal((await client.gate('fixture')).open, false, name);
+    await assert.rejects(reconcileRecovery(dir, { barrierId: valid.id, scopes: ['fixture'], by: 'owner', evidence: 'x', manifest: fixtureManifest }), { code: 'recovery-invalid' }, name);
+    await assert.rejects(activateRecoveryBarrier(dir, valid.id), { code: 'recovery-invalid' }, name);
+    await assert.rejects(recordRecoveryBarrier(dir, { snapshotId, reason: 'x', build }), { code: 'recovery-invalid' }, name);
+    assert.equal(await readFile(barrierFile(dir), 'utf8'), text, `${name}: left as found`);
+  }
+  // Not JSON at all.
+  await writeFile(barrierFile(dir), '{ not json');
   assert.equal(recoveryHold(await readRecoveryBarrier(dir), 'core').held, true);
+  assert.equal(await readFile(barrierFile(dir), 'utf8'), '{ not json');
+});
 
-  // A snapshot taken of another storage cannot become this one's database.
+test('a snapshot of another storage is refused', async t => {
   const mine = await historyAfterSnapshot(t);
   const theirs = await historyAfterSnapshot(t);
   await rename(join(theirs.dir, 'storage-snapshots', theirs.snapshotId), join(mine.dir, 'storage-snapshots', theirs.snapshotId));

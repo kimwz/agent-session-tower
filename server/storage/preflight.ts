@@ -1,31 +1,37 @@
 import { Worker } from 'node:worker_threads';
-import type { StorageBundleCapture } from './bundle.js';
+import { verifyCapturedBundle, type StorageBundleCapture } from './bundle.js';
 import { threadOptions } from './client.js';
 import {
   STORAGE_PROTOCOL,
   type ProbeResult, type RecoveryHoldSummary, type RuntimeInfo, type StorageBuildIdentity, type StorageBuildManifest, type StorageErrorCode, type StorageErrorPhase,
   type ThreadHello, type ThreadResponse,
 } from './contract.js';
-import { privateDirectory, StoragePathError, storageFiles, storageLayout } from './paths.js';
+import { StoragePathError, storageFiles, storageLayout } from './paths.js';
 import { readRecoveryBarrier, readStorageIdentity, recoverySummary } from './recovery.js';
 import { evaluateRuntime } from './runtime.js';
 import { storageManifest } from './schema.js';
 
 /**
  * Whether this process could run its storage, decided without opening, restoring, migrating or checkpointing anything:
- * the captured bundle starts on this execPath, agrees with this build's contract, and runs SQLite on an in-memory
- * database. With `stateDir` it also reports the state directory's storage files as they are (lstat and owner-only
- * reads; nothing is created, chmodded or opened by SQLite).
+ * the captured bundle is the one this build trusts, starts on this execPath, agrees with this build's contract and
+ * source, and runs SQLite on an in-memory database. With `stateDir` it also reports the state directory's storage
+ * files as they are (lstat and owner-only reads; nothing is created, chmodded or opened by SQLite).
  */
 export interface StorageStatePreflight {
-  storage: 'absent' | 'present';
   database: 'absent' | 'present';
   sidecars: ('wal' | 'shm')[];
-  identity: 'absent' | 'present' | 'invalid';
+  /** `creating`: a storage may have been created here and its creation was not confirmed; it is not replaced either. */
+  identity: 'absent' | 'creating' | 'created' | 'invalid';
   recovery: RecoveryHoldSummary;
+  /** A path or file this state directory fails; openStorage would refuse it. */
   problem?: { code: StorageErrorCode; message: string };
 }
 export interface StoragePreflight {
+  /**
+   * The runtime verdict only: bundle, handshake, runtime gate and in-memory probe. It does not judge the state
+   * directory: a caller deciding readiness also checks `state.problem`, `state.identity === 'invalid'` and
+   * `state.recovery`, and the storage's schema is known only when it is opened (an unknown schema is refused there).
+   */
   supported: boolean;
   refusal?: { phase: StorageErrorPhase; code: StorageErrorCode; message: string };
   identity?: StorageBuildIdentity;
@@ -43,6 +49,8 @@ export async function preflightStorage(options: { bundle: StorageBundleCapture; 
 
 async function runtimePreflight(bundle: StorageBundleCapture, manifest: StorageBuildManifest, deadlineMs: number): Promise<Omit<StoragePreflight, 'state'>> {
   if (!bundle.ok) return { supported: false, refusal: { phase: 'bundle', code: bundle.failure.code, message: bundle.failure.message } };
+  const untrusted = verifyCapturedBundle(bundle);
+  if (untrusted) return { supported: false, refusal: { phase: 'bundle', code: untrusted.failure.code, message: untrusted.failure.message } };
   const identity: StorageBuildIdentity = { appVersion: manifest.appVersion, protocol: STORAGE_PROTOCOL, sourceHash: bundle.sourceHash, manifestDigest: manifest.digest };
   const refuse = (phase: StorageErrorPhase, code: StorageErrorCode, message: string, runtime?: RuntimeInfo) => ({ supported: false, refusal: { phase, code, message }, identity, ...(runtime ? { runtime } : {}) });
   let worker: Worker;
@@ -72,6 +80,7 @@ async function runtimePreflight(bundle: StorageBundleCapture, manifest: StorageB
     if (hello.protocol !== STORAGE_PROTOCOL) return refuse('handshake', 'protocol-mismatch', `The storage thread speaks ${hello.protocol}.`, hello.runtime);
     if (hello.appVersion !== manifest.appVersion) return refuse('handshake', 'app-version-mismatch', `The storage thread is from ${hello.appVersion}.`, hello.runtime);
     if (hello.manifest?.digest !== manifest.digest) return refuse('handshake', 'schema-contract-mismatch', 'The storage thread declares another schema contract.', hello.runtime);
+    if (hello.sourceHash !== bundle.sourceHash) return refuse('handshake', 'source-hash-mismatch', 'The storage thread runs another source than this build expects.', hello.runtime);
     const verdict = evaluateRuntime(hello.runtime, hello.runtimeError);
     if (!verdict.supported) return refuse('runtime', 'unsupported-runtime', verdict.reason, hello.runtime);
     worker.postMessage({ id: 1, op: 'probe' });
@@ -91,13 +100,12 @@ async function runtimePreflight(bundle: StorageBundleCapture, manifest: StorageB
 }
 
 async function inspectState(stateDir: string): Promise<StorageStatePreflight> {
-  const report: StorageStatePreflight = { storage: 'absent', database: 'absent', sidecars: [], identity: 'absent', recovery: { state: 'clear' } };
+  const report: StorageStatePreflight = { database: 'absent', sidecars: [], identity: 'absent', recovery: { state: 'clear' } };
   try {
     const layout = await storageLayout(stateDir);
-    report.identity = (await readStorageIdentity(layout)).state;
+    const identity = await readStorageIdentity(layout);
+    report.identity = identity.state === 'present' ? identity.identity.state : identity.state;
     report.recovery = recoverySummary(await readRecoveryBarrier(layout));
-    if (!(await privateDirectory(layout.storageDir, false))) return report;
-    report.storage = 'present';
     const files = await storageFiles(layout);
     if (files.database) report.database = 'present';
     if (files.wal) report.sidecars.push('wal');

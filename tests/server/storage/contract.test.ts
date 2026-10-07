@@ -49,5 +49,5 @@ test('the manifest names the contract: core only in this build, and any schema t
 });
 
 test('the settings backup names its files, and none of them is storage', () => {
-  for (const name of Object.keys(WORKER_FILES)) assert.doesNotMatch(name, /^(storage|tower\.db)/);
+  for (const name of Object.keys(WORKER_FILES)) assert.doesNotMatch(name, /^(storage|state\.sqlite|\.storage-check)/);
 });

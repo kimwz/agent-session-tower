@@ -52,7 +52,8 @@ async function build() {
     await rm(staging, { recursive: true, force: true });
     process.exit(result.status ?? 1);
   }
-  // The storage thread as one script beside the compiled server; a worker captures it once when it starts.
+  // The storage thread as one script beside the compiled server, and the hash of it the compiled worker expects; a
+  // worker captures it once when it starts and refuses any other.
   try { await writeStorageThreadArtifact(staging); } catch (error) {
     await rm(staging, { recursive: true, force: true });
     console.error(error);

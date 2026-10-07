@@ -7,7 +7,7 @@
 /** The command protocol between the worker and its thread. Additions are additive; a change of meaning is a new value. */
 export const STORAGE_PROTOCOL = 'tower-storage/1';
 /** The format of a generated thread bundle (dist/server/storage/generated/thread-bundle.json, or the SEA define). */
-export const STORAGE_BUNDLE_FORMAT = 'tower-storage-thread-bundle/1';
+export const STORAGE_BUNDLE_FORMAT = 'tower-storage-thread-bundle/2';
 /** What storage_meta.format holds in a database this project created. Any other database is refused, never adopted. */
 export const STORAGE_DATABASE_FORMAT = 'agent-session-tower/storage';
 
@@ -37,7 +37,11 @@ export interface StorageBuildManifest {
   /** sha256 over everything above. Equal digests mean the same contract. */
   digest: string;
 }
-/** Which build holds the storage: recorded in schema rows, snapshots and recovery barriers. */
+/**
+ * Which build holds the storage: recorded in schema rows, snapshots and recovery barriers. `sourceHash` is the sha256
+ * of the thread bundle text after its first line (the line that states this hash to the thread itself); the build
+ * fixes the hash its worker expects (see build-identity.ts), and the thread reports it in its hello.
+ */
 export interface StorageBuildIdentity { appVersion: string; protocol: string; sourceHash: string; manifestDigest: string }
 
 export interface RuntimeInfo {
@@ -54,15 +58,15 @@ export interface RuntimeInfo {
 export type StorageState = 'opening' | 'ready' | 'closing' | 'closed' | 'unavailable';
 export type StorageErrorPhase = 'bundle' | 'handshake' | 'runtime' | 'paths' | 'recovery' | 'open' | 'schema' | 'prepare' | 'command' | 'deadline' | 'thread-exit' | 'snapshot' | 'close';
 export type StorageErrorCode =
-  | 'bundle-missing' | 'bundle-invalid' | 'bundle-hash-mismatch'
-  | 'thread-start-failed' | 'handshake-timeout' | 'protocol-mismatch' | 'app-version-mismatch' | 'schema-contract-mismatch'
+  | 'bundle-missing' | 'bundle-invalid' | 'bundle-hash-mismatch' | 'bundle-untrusted'
+  | 'thread-start-failed' | 'handshake-timeout' | 'protocol-mismatch' | 'app-version-mismatch' | 'schema-contract-mismatch' | 'source-hash-mismatch'
   | 'unsupported-runtime' | 'unsupported-platform'
   | 'state-dir-invalid' | 'symlink' | 'not-regular' | 'wrong-owner' | 'wrong-permissions' | 'hard-linked' | 'unexpected-journal'
   | 'database-missing' | 'storage-replaced' | 'path-changed' | 'io-error' | 'no-space' | 'read-only'
-  | 'recovery-in-progress' | 'recovery-invalid' | 'source-changed' | 'snapshot-invalid' | 'snapshot-foreign' | 'barrier-in-progress'
+  | 'recovery-in-progress' | 'recovery-invalid' | 'source-changed' | 'snapshot-invalid' | 'snapshot-foreign' | 'barrier-in-progress' | 'unknown-scope'
   | 'not-a-database' | 'corrupt' | 'foreign-database' | 'unknown-schema' | 'pragma-mismatch' | 'busy' | 'migration-required'
   | 'not-ready' | 'not-prepared' | 'stale-owner' | 'queue-full' | 'payload-too-large' | 'result-too-large' | 'invalid-command'
-  | 'unknown-domain' | 'unknown-command' | 'command-id-conflict' | 'no-cutover-contract' | 'domain-failed'
+  | 'unknown-domain' | 'unknown-command' | 'command-id-conflict' | 'no-cutover-contract' | 'authority-missing' | 'contract-mismatch' | 'domain-failed'
   | 'deadline-exceeded' | 'thread-exited' | 'sqlite-error';
 
 /** Why the storage cannot serve, as a diagnostic shows it. Nothing here is turned into an empty state. */
@@ -72,7 +76,11 @@ export interface StorageFailure {
   message: string;
   /** An explicit retry (reopen, the same command again) can succeed without anyone changing files. */
   retryable: boolean;
-  /** The database and its sidecars are as they were found: nothing was deleted, replaced or initialised. */
+  /**
+   * Nothing was deleted, replaced or initialised, and SQLite wrote to the files only after they were checked as this
+   * build's storage. A database left with a WAL or shm is judged on a private copy; any refused open compares the
+   * live files with what it found and says false when they differ.
+   */
   sourcePreserved: boolean;
   at: string;
   sqlite?: { errcode?: number; errstr?: string };
@@ -81,6 +89,8 @@ export interface StorageFailure {
 /**
  * Whether a write is durable. `unknown` (a thread that exited or missed its deadline after receiving the command,
  * or a failed COMMIT) never means it was not written: look the command ID up with `receipt()` after a reopen.
+ * An error can say `committed`: the commit is durable and what failed came after it (a prepare whose storage identity
+ * could not be recorded, a replayed answer larger than this connection's maxResultBytes).
  */
 export type CommitDisposition = 'committed' | 'not-committed' | 'unknown';
 
@@ -172,8 +182,21 @@ export interface StorageInspection {
   freelistCount: number;
 }
 
-export interface ReceiptRecord { commandId: string; scope: string; command: string; payloadSha256: string; ownerEpoch: number; committedAt: string; result: unknown }
+/**
+ * A committed command. Its stored answer comes back only when it fits the connection's current maxResultBytes;
+ * otherwise only its size and hash do, which still settle whether (and as what) the command committed.
+ */
+export interface ReceiptRecord {
+  commandId: string;
+  scope: string;
+  command: string;
+  payloadSha256: string;
+  ownerEpoch: number;
+  committedAt: string;
+  result: { state: 'included'; value: unknown } | { state: 'omitted'; bytes: number; sha256: string; limit: number };
+}
 export type ReceiptLookup = { found: true; receipt: ReceiptRecord } | { found: false };
+/** Answered only once the storage identity beside the database names this storage (durably); see StorageClient.prepare. */
 export interface PrepareResult {
   ownerEpoch: number;
   applied: { scope: string; version: number }[];
@@ -182,16 +205,18 @@ export interface PrepareResult {
   created: boolean;
   /** The command ID had already committed; the answer is the stored one. */
   replayed: boolean;
-  /** The storage identity beside the database is recorded (a failed record is retried by the next open). */
-  identityRecorded: boolean;
 }
 export interface PrepareThreadResult { ownerEpoch: number; applied: { scope: string; version: number }[]; schema: SchemaState; created: boolean; replayed: boolean; claimed: boolean }
 export interface WriteResult<T = unknown> { disposition: 'committed'; result: T; replayed: boolean; commandId: string }
 
-/** Summary of the historical-recovery hold, for status and gates. See recovery.ts. */
+/**
+ * Summary of the historical-recovery hold, for status and diagnostics. While a barrier exists the storage is never
+ * `clear`: scopes are released one by one (gate(scope) is the answer per scope), and any scope not reconciled by name
+ * (`unreconciled` lists the barrier's own, an unknown or later domain is never listed) stays held. See recovery.ts.
+ */
 export type RecoveryHoldSummary =
   | { state: 'clear' }
-  | { state: 'held'; barrierId?: string; reason: string; reconciled: string[] };
+  | { state: 'held'; barrierId?: string; reason: string; reconciled: string[]; unreconciled: string[] };
 
 export interface StorageStatus {
   state: StorageState;
@@ -213,19 +238,28 @@ export interface ThreadHello {
   protocol: string;
   appVersion: string;
   manifest: StorageBuildManifest;
+  /** The source hash stated in the first line of the text this thread runs. */
+  sourceHash?: string;
   runtime: RuntimeInfo;
   /** Set when node:sqlite could not be loaded or queried. */
   runtimeError?: string;
 }
+/**
+ * The storage recorded beside the database. `created`: the database must hold it. Not yet created (its first
+ * prepare was about to run): the database is empty or holds it. Anything else is refused before it is written to.
+ */
+export interface StorageExpectation { storageId: string; created: boolean }
+/** Checks a private copy of the database (with its WAL) the way open would, then closes it. The live files are not opened. */
+export interface CheckRequest { path: string; busyTimeoutMs: number; expected?: StorageExpectation }
 export interface OpenRequest {
   path: string;
   busyTimeoutMs: number;
   maxResultBytes: number;
   identity: StorageBuildIdentity;
-  /** The storage recorded beside the database. The thread refuses a different or empty database before writing to it. */
-  expectedStorageId?: string;
+  expected?: StorageExpectation;
 }
 export type ThreadRequest =
+  | { id: number; op: 'check'; check: CheckRequest }
   | { id: number; op: 'open'; open: OpenRequest }
   | { id: number; op: 'inspect' }
   | { id: number; op: 'prepare'; commandId: string; allowMigration: boolean; storageId: string }

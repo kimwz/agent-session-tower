@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -6,7 +7,7 @@ import test from 'node:test';
 import { captureStorageBundle } from '../../../server/storage/bundle.js';
 import { openStorage } from '../../../server/storage/client.js';
 import { StorageCommandError, type StorageStatus } from '../../../server/storage/contract.js';
-import { fixtureBundle, fixtureManifest, openFixture, sleep, stateDir } from './helpers.js';
+import { databasePath, filesUnder, fixtureBundle, fixtureManifest, openFixture, sleep, stateDir } from './helpers.js';
 
 const rejectsWith = (promise: Promise<unknown>, expected: Partial<StorageCommandError>) =>
   assert.rejects(promise, (error: unknown) => {
@@ -30,7 +31,9 @@ test('the production storage opens, needs an explicit prepare, and keeps WAL/FUL
   assert.equal(prepared.created, true);
   assert.equal(prepared.ownerEpoch, 1);
   assert.deepEqual(prepared.applied, [{ scope: 'core', version: 1 }]);
-  assert.equal(prepared.identityRecorded, true);
+  const identity = JSON.parse(await readFile(join(dir, 'storage-recovery', 'identity.json'), 'utf8'));
+  assert.deepEqual([identity.state, identity.storageId], ['created', prepared.schema.kind !== 'empty' && prepared.schema.storageId], 'the claim comes after the identity says created');
+  assert.ok(!Object.keys(await filesUnder(dir)).some(name => name.startsWith('storage/') || name === 'storage'), 'the database is <state-dir>/state.sqlite, with no storage/ folder');
 
   const inspection = await client.inspect();
   assert.deepEqual(inspection.pragmas, { journalMode: 'wal', synchronous: 2, foreignKeys: 1, trustedSchema: 0, busyTimeout: 250 });
@@ -38,7 +41,7 @@ test('the production storage opens, needs an explicit prepare, and keeps WAL/FUL
   assert.deepEqual(inspection.authority, []);
 
   // An independent connection sees the file as WAL (header bytes 18/19 = 2) and the receipt of the prepare.
-  const database = join(dir, 'storage', 'tower.db');
+  const database = databasePath(dir);
   const header = await readFile(database);
   assert.deepEqual([header[18], header[19]], [2, 2]);
   const other = new DatabaseSync(database, { readOnly: true });
@@ -114,7 +117,7 @@ test('busy: another connection holding the write lock makes a write fail not-com
   const dir = await stateDir(t);
   const client = await openFixture(t, dir, { limits: { busyTimeoutMs: 50 } });
   await client.prepare({ allowMigration: true });
-  const other = new DatabaseSync(join(dir, 'storage', 'tower.db'));
+  const other = new DatabaseSync(databasePath(dir));
   t.after(() => other.close());
   other.exec('BEGIN IMMEDIATE');
   const started = Date.now();
@@ -163,4 +166,58 @@ test('a missed deadline fails the storage: the running write is unknown, waiting
   assert.deepEqual(await client.receipt('slow-1'), { found: false });
   assert.equal(await client.read('fixture', 'get', { key: 'slow' }), null);
   assert.deepEqual(await client.receipt('after-1'), { found: false });
+});
+
+test('a full queue still drains on flush and close: the accepted write commits, close acks, the thread exits 0, intake is refused meanwhile', async t => {
+  const dir = await stateDir(t);
+  const client = await openFixture(t, dir, { limits: { maxQueue: 1 } });
+  await client.prepare({ allowMigration: true });
+  const accepted = client.write('fixture', 'spinWrite', { key: 'slow', ms: 300 }, 'slow-1');
+  await rejectsWith(client.read('fixture', 'count', null), { code: 'queue-full', disposition: 'not-committed' });
+  // Barriers wait behind the full queue instead of being refused; a flush right behind another one shares it.
+  const flushed = [client.flush(), client.flush()];
+  const closing = client.close();
+  await new Promise(setImmediate);
+  assert.equal(client.status().state, 'closing');
+  await rejectsWith(client.write('fixture', 'put', { key: 'late', value: '1' }, 'late-1'), { code: 'not-ready', disposition: 'not-committed' });
+  await Promise.all(flushed);
+  assert.deepEqual(await accepted, { disposition: 'committed', result: 'spun', replayed: false, commandId: 'slow-1' });
+  const closed = await closing;
+  assert.deepEqual([closed.ack, closed.exitCode, closed.status.state, closed.status.failure], ['closed', 0, 'closed', undefined]);
+
+  assert.equal((await client.reopen()).state, 'ready');
+  await client.prepare({ allowMigration: false });
+  const receipt = await client.receipt('slow-1');
+  assert.ok(receipt.found && receipt.receipt.result.state === 'included' && receipt.receipt.result.value === 'spun');
+  assert.deepEqual(await client.receipt('late-1'), { found: false });
+});
+
+test('receipts and replays answer within the current maxResultBytes and still say the command committed', async t => {
+  const dir = await stateDir(t);
+  const roomy = await openFixture(t, dir, { limits: { maxResultBytes: 4096 } });
+  await roomy.prepare({ allowMigration: true });
+  const written = await roomy.write<string>('fixture', 'putLarge', { key: 'large', bytes: 2048 }, 'large-1');
+  assert.equal(written.result.length, 2048);
+  const stored = await roomy.receipt('large-1');
+  assert.ok(stored.found && stored.receipt.result.state === 'included');
+  await roomy.close();
+
+  const tight = await openFixture(t, dir, { limits: { maxResultBytes: 1024 } });
+  await tight.prepare({ allowMigration: false });
+  const lookup = await tight.receipt('large-1');
+  assert.ok(lookup.found);
+  const answer = JSON.stringify('x'.repeat(2048));
+  assert.deepEqual(lookup.receipt.result, { state: 'omitted', bytes: Buffer.byteLength(answer), sha256: createHash('sha256').update(answer).digest('hex'), limit: 1024 });
+  assert.deepEqual([lookup.receipt.commandId, lookup.receipt.scope, lookup.receipt.command], ['large-1', 'fixture', 'putLarge']);
+  assert.match(lookup.receipt.payloadSha256, /^[0-9a-f]{64}$/);
+  assert.ok(Buffer.byteLength(JSON.stringify(lookup)) <= 1024);
+  // The same command again: committed, its answer too large for this connection, nothing written twice.
+  await rejectsWith(tight.write('fixture', 'putLarge', { key: 'large', bytes: 2048 }, 'large-1'), { code: 'result-too-large', disposition: 'committed', commandId: 'large-1' });
+  assert.equal(await tight.read('fixture', 'count', null), 1);
+  // Another payload under the same ID is still a conflict, not a commit.
+  await rejectsWith(tight.write('fixture', 'putLarge', { key: 'other', bytes: 10 }, 'large-1'), { code: 'command-id-conflict', disposition: 'not-committed' });
+  // A fresh answer over the limit rolls its transaction back: not committed.
+  await rejectsWith(tight.write('fixture', 'putLarge', { key: 'fresh', bytes: 2048 }, 'fresh-1'), { code: 'result-too-large', disposition: 'not-committed' });
+  assert.deepEqual(await tight.receipt('fresh-1'), { found: false });
+  assert.equal(tight.status().state, 'ready');
 });
