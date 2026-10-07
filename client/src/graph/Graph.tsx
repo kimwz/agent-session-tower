@@ -5,6 +5,7 @@ import { Maximize, Minus, Plus, Scan } from 'lucide-react';
 import type { ProjectGroup, ProjectGroupPatch, ProviderHealth, Session } from '../../../shared/types';
 import type { RepositoryAction, RepositoryStatus } from '../../../shared/repositories';
 import type { SessionDraft } from '../sessions/NewSessionDialog';
+import { ProjectEdge } from './ProjectEdge';
 import { nodeTypes, type HostLink, type ProjectData } from './GraphNodes';
 import { workspaceNote, type Host } from '../remote/hosts';
 import { nodeOf } from '../remote/scope';
@@ -15,6 +16,7 @@ import { TriggerEventNode, TriggerMonitorNode } from './TriggerGraphNodes';
 import { SLACK_PAGE_SIZE, slackMentionLayout } from './slack-graph';
 import { slackWorkflowWorking } from '../slack/slack-monitor';
 import { monitorItems, monitorVisible, readMonitorPosition, TRIGGER_MONITOR_ID, TRIGGER_POSITION_KEY, triggerEventWorking } from '../triggers/trigger-monitor';
+const canvasEdgeTypes = { project: ProjectEdge };
 const canvasNodeTypes = { ...nodeTypes, triggerMonitor: TriggerMonitorNode, slackMention: SlackMentionNode, triggerEvent: TriggerEventNode };
 import { graphProjectId, graphProjectKey, graphSessionGroups, clearHostPosition, HOST_HEIGHT } from './graph-layout';
 import { defaultGraphPreferences, GRAPH_PREFERENCES_KEY, manualSessionGroups, moveManualGraphNodes, parseGraphPreferences, projectColumns, projectGrid, PROJECT_GAP, reconcileManualGraph, setGraphLayoutMode, setProjectColumns, type GraphLayoutMode, type GraphPreferences, type ProjectFrame } from './graph-layout-preferences';
@@ -177,7 +179,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
         const saved = manual ? manualLayout.projects[projectId] : undefined;
         const origin = saved?.position ?? { x, y: HOST_HEIGHT + 40 };
         ns.push({ id: projectId, type: 'projectGroup', zIndex: 1, position: origin, data: projectData, style: { width: grid.width, height: grid.height }, ...(saved ? { dragHandle: '.project-drag-handle', draggable: true } : { draggable: false }), selectable: false, focusable: false });
-        es.push({ id: `${hostId}-${projectId}`, source: hostId, target: projectId, type: 'smoothstep', zIndex: 0, animated: motion && !stale && members.some(s => s.status === 'working'), style: { stroke: '#2e3e52', strokeWidth: 1.2 }, pathOptions: { borderRadius: 14 } } as Edge);
+        es.push({ id: `${hostId}-${projectId}`, source: hostId, target: projectId, type: 'project', zIndex: 0, animated: motion && !stale && members.some(s => s.status === 'working'), style: { stroke: '#2e3e52', strokeWidth: 1.2 }, pathOptions: { borderRadius: 14 } } as Edge);
         // Cards keep flat world positions and follow their folder's corner in its grid.
         members.forEach((session, index) => {
           ns.push({ id: session.id, type: 'agent', position: { x: origin.x + grid.cards[index].x, y: origin.y + grid.cards[index].y }, zIndex: 3, data: { session, selected: session.id === selectedId, unread: unreadIds?.has(session.id) || false, onSelect, stale }, style: { pointerEvents: 'all' }, draggable: false, selectable: false, focusable: false });
@@ -287,7 +289,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
   }, []);
   const working = sessions.filter(session => session.status === 'working').length;
   return <div ref={canvas} className={`graph-canvas ${manual ? 'manual-layout' : 'auto-layout'} ${motion ? '' : 'motion-off'} ${settled ? '' : 'settling'}`}>
-    <ReactFlow onPaneClick={onCanvasClick} onDoubleClick={onCanvasDoubleClick} zoomOnDoubleClick={false} nodes={nodes} edges={edges} onNodesChange={onNodesChange} onNodeDragStart={() => { followingFit.current = false; }} nodeTypes={canvasNodeTypes} fitView fitViewOptions={GRAPH_FIT} minZoom={0.15} maxZoom={1.75} nodesDraggable={manual} nodeDragThreshold={5} nodesConnectable={false} edgesFocusable={false} elementsSelectable={false} panActivationKeyCode={null} proOptions={{ hideAttribution: true }} onMove={(event, viewport) => { if (event) followingFit.current = false; setZoom(Math.round(viewport.zoom * 100)); }} aria-label={t("프로젝트별 에이전트 세션 그래프")} colorMode="dark">
+    <ReactFlow onPaneClick={onCanvasClick} onDoubleClick={onCanvasDoubleClick} zoomOnDoubleClick={false} nodes={nodes} edges={edges} onNodesChange={onNodesChange} onNodeDragStart={() => { followingFit.current = false; }} nodeTypes={canvasNodeTypes} edgeTypes={canvasEdgeTypes} fitView fitViewOptions={GRAPH_FIT} minZoom={0.15} maxZoom={1.75} nodesDraggable={manual} nodeDragThreshold={5} nodesConnectable={false} edgesFocusable={false} elementsSelectable={false} panActivationKeyCode={null} proOptions={{ hideAttribution: true }} onMove={(event, viewport) => { if (event) followingFit.current = false; setZoom(Math.round(viewport.zoom * 100)); }} aria-label={t("프로젝트별 에이전트 세션 그래프")} colorMode="dark">
       <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="#283343" />
     </ReactFlow>
     {!showMonitor && emptyState}
