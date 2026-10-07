@@ -17,6 +17,7 @@ format, and saved browser preferences are the compatibility surface.
 
 ### Safety limits
 - A conversation that holds outside content (Slack, GitHub issues, public agents) gets both browsers without the saved logins, cannot reach this computer's own addresses (localhost) through them, redirects included, and is not offered `browser_run_code_unsafe`; it never gets the owner's own browser. Right after such a blocked address, the next navigation or two may be interrupted by the browser's error page.
+- Local storage is read from the pages open after each tool call: a site left within the same call right after logging in keeps only its cookies.
 - Tower installs no browser. A computer with neither Google Chrome nor Playwright's Chromium reports how to install one (`npx playwright install chromium`; on Linux also `sudo npx playwright install-deps chromium`).
 - The standalone executable has no browser tools. Aside is wired as its documented `aside mcp` server but was not tried, as it is not installed here.
 
