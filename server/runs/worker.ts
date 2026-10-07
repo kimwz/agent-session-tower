@@ -637,7 +637,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const allMembers = retentionStore.list().flatMap(entry => entry.members || []);
     runs.setRetentionLineage(allMembers,sessions.retentionRecords().launchers);
     const members = retentionStore.list().flatMap(entry => entry.members || []).filter(member => member.state === 'cold');
-    sessions.setColdRegistry(members.flatMap(member => [member.originalPath, ...(member.coldPath ? [member.coldPath] : [])]), members.map(member => `${member.provider}:${member.nativeId}`), async () => { await initializedRetention?.reconcileCold(); const issues = initializedRetention?.coldInspectionIssues() || (retentionBootstrapError ? ['cold-registry-bootstrap-failed'] : retentionBootstrapIssues); return { complete: !issues.length, issues }; });
+    sessions.setColdRegistry(members.flatMap(member => [member.originalPath, ...(member.coldPath ? [member.coldPath] : [])]), allMembers.filter(member => member.state !== 'restored').map(member => `${member.provider}:${member.nativeId}`), async () => { await initializedRetention?.reconcileCold(); const issues = initializedRetention?.coldInspectionIssues() || (retentionBootstrapError ? ['cold-registry-bootstrap-failed'] : retentionBootstrapIssues); return { complete: !issues.length, issues }; });
     runs.setColdSessions(members.map(member => member.sessionId), id => initializedRetention ? initializedRetention.restoreSession(id) : Promise.reject(new Error('Retention is not ready.')));
   };
   let temporaryReferences = (): string[] => [];

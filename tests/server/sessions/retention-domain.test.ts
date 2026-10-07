@@ -452,3 +452,15 @@ for(const action of ['automatic-retry','backup-only-attempt'] as const) test(`pa
     await assert.rejects(readFile(member.sidecars![0].coldPath),/ENOENT/);assert.equal(store.get(entry.id)?.members?.[0].state,'restored');assert.deepEqual(store.get(entry.id)?.members?.[0].sidecars,member.sidecars);
   }finally{await service.quiesce();}
 }));
+
+import { writeFileSync } from 'node:fs';
+for(const changed of ['new-completion','restarted-inactivity'] as const)test(`native archive defers a selected inactive child after ${changed}`,async()=>fixture(async path=>{
+ const native=join(path,'native'),coldRoot=join(path,'originals');await mkdir(native);const hot=join(native,'child.jsonl'),meta=join(native,'child.meta.json');await writeFile(hot,'old finished review');await writeFile(meta,'untouched metadata');
+ const source=record('child',true);source.session.filePath=hot;source.session.readRevision=1;
+ if(changed==='restarted-inactivity'){source.latestTaskEndedAt=undefined;source.inactiveSince=new Date(now-8*day).toISOString();}
+ const store=new RetentionStore(join(path,'state'));await store.start(now-10*day);let changedOnce=false;
+ const adapter=createNativeRetentionAdapter({claude:[native],codex:[join(path,'sessions'),join(path,'archived_sessions')]},{coldRoot,codexHome:path,claudeHome:path,inspect:async()=>({complete:true,activeIds:new Set(),issues:[]})});
+ const service=new RetentionService({store,archive:new RetentionArchive(join(path,'bundles'),[native],[coldRoot]),adapter,observe:async()=>observation(structuredClone([record('parent'),source])),reserveAdmission:()=>{
+   if(!changedOnce){changedOnce=true;if(changed==='new-completion'){source.latestTaskEndedAt=new Date(now).toISOString();source.lastActivityAt=source.latestTaskEndedAt;writeFileSync(hot,'new settled review');}else source.inactiveSince=new Date(now).toISOString();}return()=>{};
+ }});await service.start();try{await service.cycle();assert.equal(await readFile(hot,'utf8'),changed==='new-completion'?'new settled review':'old finished review');assert.equal(await readFile(meta,'utf8'),'untouched metadata');assert.equal(store.list().flatMap(entry=>entry.members||[]).filter(member=>member.state==='cold').length,0);}finally{await service.quiesce();}
+}));

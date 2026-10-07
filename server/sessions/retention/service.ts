@@ -79,8 +79,28 @@ export class RetentionService {
     if (!entry) return;
     await this.restore(entry.id);
   }
-  private context(entry: RetentionJournalEntry): RetentionOperationContext {
-    return { operationId: entry.id, managedCold: () => this.coldMembers(), journalMembers: () => structuredClone(this.options.store.list().flatMap(item => item.members || [])), fresh: () => this.observe(), commitMember: async member => {
+  private context(entry: RetentionJournalEntry, selectedRecords?: readonly RetentionRecord[]): RetentionOperationContext {
+    const baseline = new Map((selectedRecords || []).map(record => [record.session.id, this.policyRevision(record)]));
+    const fresh = async () => {
+      const observation = await this.observe(); observation.migratedAt = this.options.store.migratedAt;
+      if (!selectedRecords) return observation; // Restoration validates native ownership, not archive eligibility.
+      if (!observation.complete) throw new Error('Latest retention policy observation incomplete.');
+      const current = new Map(observation.records.map(record => [record.session.id, record]));
+      const owned = new Map((this.options.store.get(entry.id)?.members || []).map(member => [member.sessionId, member]));
+      for (const record of selectedRecords) {
+        const latest = current.get(record.session.id);
+        if (!latest) { if (owned.has(record.session.id)) continue; throw new Error('Retention source disappeared before ownership was established.'); }
+        if (baseline.get(record.session.id) !== this.policyRevision(latest)) throw new Error('Retention policy revision changed after candidate selection.');
+      }
+      // Before any source leaves hot discovery, confirm the whole family is still selected.
+      // Later fresh checks retain the original policy revision for every remaining hot source.
+      if (selectedRecords.every(record => current.has(record.session.id))) {
+        const candidate = selectRetention(observation).candidates.find(candidate => candidate.rootId === entry.candidate.rootId && candidate.reason === entry.candidate.reason);
+        if (!candidate || candidate.ids.length !== entry.candidate.ids.length || entry.candidate.ids.some(id => !candidate.ids.includes(id))) throw new Error('Retention candidate is no longer eligible.');
+      }
+      return observation;
+    };
+    return { operationId: entry.id, managedCold: () => this.coldMembers(), journalMembers: () => structuredClone(this.options.store.list().flatMap(item => item.members || [])), fresh, commitMember: async member => {
       const current = this.options.store.get(entry.id) || entry;
       if (member.operationId !== entry.id || !entry.candidate.ids.includes(member.sessionId)) throw new Error('Native member operation ownership mismatch.');
       const members = new Map((current.members || []).map(item => [item.sessionId, item]));
@@ -96,6 +116,7 @@ export class RetentionService {
       // Identity/state and Codex's official archived path can change after fresh provider validation.
       members.set(member.sessionId, member);
       await this.options.store.put({ ...current, members: [...members.values()], updatedAt: new Date().toISOString() });
+      this.publishCold(); // Intent must protect launcher proofs before the first physical move.
     } };
   }
   resume(): void {
@@ -228,7 +249,7 @@ export class RetentionService {
     this.activeOperation = entry.id;
     let lease: Awaited<ReturnType<RetentionAdapter['reserve']>>;
     try {
-      lease = await this.options.adapter.reserve(entry.candidate, records, this.context(entry));
+      lease = await this.options.adapter.reserve(entry.candidate, records, this.context(entry, records));
       if (!lease) { await this.put(entry, 'conflict', 'Provider reservation unavailable.'); return; }
       if (!await lease.revalidate()) { await this.put(entry, 'conflict', 'Retention preconditions changed.'); return; }
       await lease.preserveOwnership(); await this.put(entry, 'removing');
@@ -292,6 +313,12 @@ export class RetentionService {
   }
   private records(candidate: RetentionCandidate, observation: RetentionObservation): RetentionRecord[] {
     return candidate.ids.map(id => { const record = observation.records.find(record => record.session.id === id); if (!record) throw new Error('Retention candidate no longer exists.'); return record; });
+  }
+  private policyRevision(record: RetentionRecord): string {
+    return JSON.stringify([record.session.provider, record.session.nativeId, record.session.createdAt, record.session.readRevision,
+      record.session.parentId, record.session.isSubagent, record.session.parentLink, record.kind, record.projectKey,
+      record.latestTaskEndedAt, record.lastActivityAt, record.latestTaskEndedAt ? undefined : record.inactiveSince,
+      record.archivedAt, record.archiveRevision || 0, record.restoredAt]);
   }
   private operationId(candidate: RetentionCandidate, records: RetentionRecord[]): string {
     return createHash('sha256').update(JSON.stringify({ candidate, revisions: records.map(record => [record.session.id, record.session.readRevision, record.latestTaskEndedAt, record.latestTaskEndedAt ? undefined : record.inactiveSince]) })).digest('hex');
