@@ -327,3 +327,32 @@ test('an attachment download ending late does not untrack media played after it'
   await f.exclusions.add(join(f.open, 'new'));
   assert.equal(await media.finish(), 'cut off', 'the media answer was still tracked');
 });
+
+test('over the link’s HTTP/2, an original download whose answer ended while it opened is not sent and its request settles', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-remote-attachment-h2-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = join(root, 'original.bin');
+  await writeFile(original, Buffer.alloc(1024 * 1024, 1));
+  let router: ReturnType<typeof createRemoteRouter> | undefined;
+  const f = await fixture(t, { attachments: async id => {
+    // The controller goes away while the original is being opened.
+    router!.disconnect(CONTROLLER);
+    return { metadata: { id, name: 'original.bin', mimeType: 'application/octet-stream', size: 1024 * 1024 }, path: original, file: await openFile(original, 'r'), sessionId: 'codex:open' };
+  } });
+  router = f.router;
+  const handled: Promise<void>[] = [];
+  const link = http2.createServer((req, res) => { handled.push(f.router.handle(req, res, { controllerId: CONTROLLER })); });
+  await new Promise<void>(resolve => link.listen(0, '127.0.0.1', resolve));
+  const session = http2.connect(`http://127.0.0.1:${(link.address() as { port: number }).port}`);
+  t.after(async () => { session.destroy(); await new Promise(resolve => link.close(resolve)); });
+  const received = await new Promise<number>(resolve => {
+    let bytes = 0;
+    const stream = session.request({ ':path': '/api/attachments/11111111-1111-4111-8111-111111111111' });
+    stream.on('data', (chunk: Buffer) => { bytes += chunk.length; });
+    stream.on('error', () => {});
+    stream.on('close', () => resolve(bytes));
+  });
+  assert.equal(received, 0);
+  const settled = await Promise.race([Promise.allSettled(handled).then(() => 'settled'), new Promise(resolve => setTimeout(() => resolve('hanging'), 2000))]);
+  assert.equal(settled, 'settled', 'the request never finished, so the original stays open');
+});

@@ -12,6 +12,7 @@ format, and saved browser preferences are the compatibility surface.
 
 ### Fixed
 - On a joined computer, a download that a sharing change cut off no longer keeps the next download or playback from being cut off by a later sharing change.
+- A download from a joined computer that is cancelled while its file is being opened now closes the file. Before, the file stayed open, and Node.js 26 could stop the Tower that served it when it later cleaned up the file.
 
 ## [1.109.2] - 2026-10-07
 

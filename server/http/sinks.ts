@@ -29,11 +29,19 @@ export const sseSink = (res: ServerResponse): StreamSink => sink(res, () => ({ '
 /** Audio read aloud: mp3, never cached; with a length it is a finite file a player can seek in. */
 export const audioSink = (res: ServerResponse): StreamSink => sink(res, length => ({ 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store', ...(length !== undefined ? { 'Content-Length': length } : {}) }));
 
+/**
+ * Whether an answer already ended (sign-out, disconnect, sharing change). HTTP/1 answers say so themselves; the link's
+ * HTTP/2 compatibility answers only through their stream. Piping into an ended HTTP/2 answer never settles, so a file
+ * sent into one would stay open.
+ */
+const ended = (res: ServerResponse) => res.destroyed || Boolean((res as { stream?: { destroyed?: boolean } }).stream?.destroyed);
+
 export async function sendStoredAttachment(res: ServerResponse, store: AttachmentStore, id: string, head: boolean,
   authorize: (sessionId: string) => Promise<void> = async () => {}): Promise<void> {
   const value = await store.openVerified(id);
   try {
     await authorize(value.sessionId);
+    if (ended(res)) return;
     const { metadata } = value;
     const inline = isImageAttachment(metadata.mimeType);
     res.writeHead(200, { 'Content-Type': inline ? metadata.mimeType : 'application/octet-stream', 'Content-Length': metadata.size, 'Cache-Control': 'no-store',
@@ -66,17 +74,12 @@ export function byteRange(header: string | string[] | undefined, size: number): 
   return { start, end: Math.min(last, size - 1) };
 }
 
-/** HTTP/1 answers say they ended themselves; the link's HTTP/2 compatibility answers only through their stream. */
-const ended = (res: ServerResponse) => res.destroyed || Boolean((res as { stream?: { destroyed?: boolean } }).stream?.destroyed);
-
 /**
  * Sends an opened workspace media file, or the range of it a player asks for, and closes it. The headers keep any
  * file, whatever its bytes really are, from running as a page in Tower's origin.
  */
 export async function sendWorkspaceMedia(res: ServerResponse, media: WorkspaceMediaFile, range: string | string[] | undefined, head: boolean): Promise<void> {
   try {
-    // An answer ended while the file was opened (sign-out, disconnect, sharing change) gets nothing: piping into an
-    // ended HTTP/2 answer never settles, which would keep the file open.
     if (ended(res)) return;
     const headers = { 'Content-Type': media.type, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store', 'Content-Disposition': 'inline',
       'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'; frame-ancestors 'none'" };
