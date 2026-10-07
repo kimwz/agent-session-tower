@@ -16,7 +16,8 @@ export interface StorageState { cookies: Cookie[]; origins: OriginState[] }
 
 export const EMPTY_STATE: StorageState = { cookies: [], origins: [] };
 const MAX_BYTES = 8_000_000;
-const SAVE_BUDGET_BYTES = 4_000_000;
+/** Well under what is read back, so a saved file can always be read. */
+const SAVE_BUDGET_BYTES = 6_000_000;
 /** A lock folder still without its owner's name after this long was left by a process that died taking it. */
 const LOCK_UNNAMED_MS = 5_000;
 
@@ -59,24 +60,12 @@ export async function readState(stateDir: string, log: (error: unknown) => void 
   }
   try { return parseState(raw); }
   catch {
-    const aside = await quarantineFile(path);
+    let aside: string;
+    try { aside = await quarantineFile(path); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return EMPTY_STATE; throw error; }
     log(new Error(`The browser's saved logins could not be read and were set aside at ${aside}; the browser starts without them.`));
     return EMPTY_STATE;
   }
-}
-
-/**
- * Keeps the saved logins well under the reading limit. Local storage goes first: that of origins without a cookie, then
- * all of it. Cookies are what keeps a login.
- */
-export function withinBudget(state: StorageState, budget = SAVE_BUDGET_BYTES): StorageState {
-  const size = (value: StorageState) => Buffer.byteLength(JSON.stringify(value));
-  if (size(state) <= budget) return state;
-  const hosts = state.cookies.map(cookie => cookie.domain.replace(/^\./, ''));
-  // best-effort: an origin that is not a URL has no cookie to keep it.
-  const withCookie = (origin: string) => { try { const host = new URL(origin).hostname; return hosts.some(domain => host === domain || host.endsWith(`.${domain}`)); } catch { return false; } };
-  const trimmed = { cookies: state.cookies, origins: state.origins.filter(origin => withCookie(origin.origin)) };
-  return size(trimmed) <= budget ? trimmed : { cookies: state.cookies, origins: [] };
 }
 
 export function parseState(value: unknown): StorageState {
@@ -121,7 +110,10 @@ export async function saveChanges(stateDir: string, baseline: StorageState, curr
     }
   }
   try {
-    await writePrivateJson(loginsPath(stateDir), JSON.stringify(withinBudget(applyChanges(await readState(stateDir, options.log), baseline, current))));
+    const merged = JSON.stringify(applyChanges(await readState(stateDir, options.log), baseline, current));
+    // Nothing is dropped to fit: a save past the budget fails and the saved logins stay as they were.
+    if (Buffer.byteLength(merged) > SAVE_BUDGET_BYTES) throw new Error(`The browser's saved logins would grow past ${SAVE_BUDGET_BYTES / 1_000_000} MB; this turn's changes were not saved.`);
+    await writePrivateJson(loginsPath(stateDir), merged);
   } finally {
     // best-effort: a lock whose owner file is unreadable is not ours to remove.
     if (await readFile(owner, 'utf8').catch(() => '') === token) await rm(lock, { recursive: true, force: true });

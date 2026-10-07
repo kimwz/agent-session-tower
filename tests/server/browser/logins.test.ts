@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { applyChanges, EMPTY_STATE, loginsPath, readState, saveChanges, withinBudget, type Cookie, type StorageState } from '../../../server/browser/logins.js';
+import { applyChanges, EMPTY_STATE, loginsPath, readState, saveChanges, type Cookie, type StorageState } from '../../../server/browser/logins.js';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const cookie = (name: string, value: string, extra: Partial<Cookie> = {}): Cookie => ({ name, value, domain: 'example.com', path: '/', expires: -1, httpOnly: false, secure: true, sameSite: 'Lax', ...extra });
@@ -63,14 +63,13 @@ test('saved logins start empty and stay owner-only; an unreadable file is set as
   }
 });
 
-test('saved logins stay within their budget: local storage without a cookie goes first, then all local storage', () => {
-  const big = 'v'.repeat(1_000);
-  const origins = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => ({ origin: `https://${prefix}${i}.com`, localStorage: [{ name: 'k', value: big }] }));
-  const withLogin = state([cookie('sid', '1', { domain: '.keep0.com' })], [...origins('keep', 1), ...origins('drop', 20)]);
-  assert.deepEqual(withinBudget(withLogin, 10_000).origins.map(o => o.origin), ['https://keep0.com']);
-  assert.deepEqual(withinBudget(withLogin, 500).origins, []);
-  assert.equal(withinBudget(withLogin, 500).cookies.length, 1, 'cookies are what keeps a login');
-  assert.equal(withinBudget(withLogin), withLogin, 'unchanged under the budget');
+test('a save that would grow the logins past their budget fails and drops nothing', async t => {
+  const dir = await stateDir(t);
+  await saveChanges(dir, EMPTY_STATE, state([cookie('sid', '1')], [{ origin: 'https://app.com', localStorage: [{ name: 'token', value: 'login' }] }]));
+  const huge = state([], [{ origin: 'https://cache.com', localStorage: [{ name: 'blob', value: 'x'.repeat(6_000_001) }] }]);
+  await assert.rejects(saveChanges(dir, EMPTY_STATE, huge), /would grow past 6 MB.*not saved/);
+  const kept = await readState(dir);
+  assert.deepEqual([values(kept), kept.origins.map(o => o.origin)], [['sid=1'], ['https://app.com']]);
 });
 
 test('concurrent saves from several turns all land', async t => {

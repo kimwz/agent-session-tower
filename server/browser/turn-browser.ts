@@ -8,7 +8,7 @@ export interface TurnBrowserOptions { tier: BrowserTier; stateDir: string; saved
 
 /** What starts and finds a browser; tests replace these. */
 export interface TurnBrowserHooks {
-  startBrowser(tier: BrowserTier, marker: string): Promise<{ browser: Browser }>;
+  startBrowser(tier: BrowserTier, marker: string, options: { outsideContent?: boolean }): Promise<{ browser: Browser }>;
   newContext(tier: BrowserTier, browser: Browser, options: { storageState?: StorageState; outsideContent?: boolean }): Promise<BrowserContext>;
   findBrowserPid(marker: string): Promise<number | undefined>;
   probe: ProcessProbe;
@@ -30,7 +30,7 @@ function within<T>(work: Promise<T>, ms: number): Promise<T> {
   return Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('timed out')), ms); })]).finally(() => clearTimeout(timer));
 }
 
-interface Live { browser: Browser; marker: string; browserPid?: number; context?: BrowserContext; logins?: LoginSaver }
+interface Live { browser: Browser; marker: string; browserPid?: number; context?: BrowserContext; logins?: LoginSaver; closing?: Promise<void> }
 
 /**
  * The browser of one turn's tool server. It starts on first use; every browser it starts is tracked from the moment it
@@ -62,7 +62,7 @@ export class TurnBrowser {
   private async start(): Promise<BrowserContext> {
     await this.hooks.ready;
     const marker = randomBytes(16).toString('hex');
-    const { browser } = await this.hooks.startBrowser(this.options.tier, markerSwitch(marker));
+    const { browser } = await this.hooks.startBrowser(this.options.tier, markerSwitch(marker), { outsideContent: this.options.outsideContent });
     const live: Live = { browser, marker };
     this.tracked.add(live);
     try {
@@ -79,6 +79,12 @@ export class TurnBrowser {
       }
       const context = await this.hooks.newContext(this.options.tier, browser, { storageState: loaded, outsideContent: this.options.outsideContent });
       live.context = context;
+      // Code the agent runs may close the context itself; what that call changed in the logins is saved first.
+      const closeContext = context.close.bind(context);
+      context.close = async (...args: Parameters<BrowserContext['close']>) => {
+        if (this.active === live) { this.active = undefined; await this.saveLast(live); }
+        return closeContext(...args);
+      };
       this.active = live;
       // The agent may close the browser itself; the next tool call starts a new one.
       context.on('close', () => { if (this.active === live) this.active = undefined; void this.close(live); });
@@ -109,16 +115,25 @@ export class TurnBrowser {
 
   /** The agent asked to close the browser: its logins are saved first, and the next tool call starts a new one. */
   async closeActive(): Promise<void> {
+    // best-effort: a browser that failed to start has nothing to close.
+    if (this.starting) await this.starting.catch(() => undefined);
     const live = this.active;
     if (!live) return;
-    await this.saving;
-    let state: StorageState | undefined;
-    if (live.context && live.logins) {
-      try { state = await within(live.context.storageState() as Promise<StorageState>, this.hooks.stateTimeoutMs ?? 1_000); }
-      catch (error) { this.log(new Error(`This turn's logins could not be read before closing: ${error instanceof Error ? error.message : String(error)}`)); }
-    }
+    this.active = undefined;
+    await this.saveLast(live);
     await this.close(live);
-    if (state) await live.logins!.save(state);
+  }
+
+  /** Reads a browser's logins once more, briefly, and saves them; a running save is waited for only as briefly. */
+  private async saveLast(live: Live): Promise<void> {
+    // best-effort: a save still waiting for the lock goes on by itself; this one is queued behind it.
+    if (this.saving) await within(this.saving, this.hooks.stateTimeoutMs ?? 1_000).catch(() => undefined);
+    if (!live.context || !live.logins) return;
+    let state: StorageState;
+    try { state = await within(live.context.storageState() as Promise<StorageState>, this.hooks.stateTimeoutMs ?? 1_000); }
+    catch (error) { this.log(new Error(`This turn's logins could not be read before closing: ${error instanceof Error ? error.message : String(error)}`)); return; }
+    // best-effort: a save that waits longer for another turn's lock finishes by itself; shutdown waits for every saver.
+    await within(live.logins.save(state), this.hooks.stateTimeoutMs ?? 1_000).catch(() => undefined);
   }
 
   /**
@@ -128,22 +143,19 @@ export class TurnBrowser {
   async shutdown(): Promise<void> {
     if (this.finished) return;
     this.finished = true;
-    await this.saving;
-    const timeout = <T>(work: Promise<T>) => within(work, this.hooks.stateTimeoutMs ?? 1_000);
     // best-effort: a browser still setting up is closed below either way.
-    if (this.starting) await timeout(this.starting).catch(() => undefined);
-    let state: StorageState | undefined;
+    if (this.starting) await within(this.starting, this.hooks.stateTimeoutMs ?? 1_000).catch(() => undefined);
     const last = this.active;
-    if (last?.context && last.logins) {
-      try { state = await timeout(last.context.storageState() as Promise<StorageState>); }
-      catch (error) { this.log(new Error(`This turn's logins could not be read before closing: ${error instanceof Error ? error.message : String(error)}`)); }
-    }
+    this.active = undefined;
+    if (last) await this.saveLast(last);
     await Promise.all([...this.tracked].map(live => this.close(live)));
-    if (state) void last!.logins!.save(state);
     await Promise.all([...this.savers].map(saver => saver.idle()));
   }
 
-  private async close(live: Live): Promise<void> {
+  /** Once per browser: closing it fires its context's `close`, which asks for this again. */
+  private close(live: Live): Promise<void> { return live.closing ??= Promise.resolve().then(() => this.closeOnce(live)); }
+
+  private async closeOnce(live: Live): Promise<void> {
     if (this.active === live) this.active = undefined;
     // best-effort: whether it closed is checked below by its process.
     await within(live.browser.close(), this.hooks.closeTimeoutMs ?? 5_000).catch(() => {});

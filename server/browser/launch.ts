@@ -26,22 +26,31 @@ export function playwrightMcpVersion(): string {
   return (createRequire(import.meta.url)('@playwright/mcp/package.json') as { version: string }).version;
 }
 
-export function launchOptions(tier: BrowserTier, marker: string, channel: 'chrome' | undefined): LaunchOptions {
+/**
+ * Names that reach this computer itself never resolve in a browser of a conversation that holds outside content. The
+ * browser's own resolver applies this to every request, redirects included, which Playwright's routes do not see.
+ * It covers every form Tower's sign-in bypass accepts (isLoopbackHostname), IPv4-mapped IPv6 included.
+ */
+export const LOOPBACK_RESOLVER_RULES = '--host-resolver-rules=MAP localhost ~NOTFOUND, MAP *.localhost ~NOTFOUND, MAP 127.* ~NOTFOUND, MAP 0.0.0.0 ~NOTFOUND, '
+  + 'MAP [::1] ~NOTFOUND, MAP ::1 ~NOTFOUND, MAP [::] ~NOTFOUND, MAP [::ffff:*] ~NOTFOUND, MAP ::ffff:* ~NOTFOUND';
+
+export function launchOptions(tier: BrowserTier, marker: string, channel: 'chrome' | undefined, outsideContent = false): LaunchOptions {
   // The tool server closes the browser itself, after reading the turn's logins; Playwright's own signal handlers would
   // close it first and lose them.
-  const common: LaunchOptions = { headless: true, args: [marker], handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false, ...(channel ? { channel } : {}) };
+  const args = [marker, ...(outsideContent ? [LOOPBACK_RESOLVER_RULES] : [])];
+  const common: LaunchOptions = { headless: true, args, handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false, ...(channel ? { channel } : {}) };
   if (tier === 'light') return common;
-  return { ...common, args: [marker, '--disable-blink-features=AutomationControlled'], ignoreDefaultArgs: ['--enable-automation'] };
+  return { ...common, args: [...args, '--disable-blink-features=AutomationControlled'], ignoreDefaultArgs: ['--enable-automation'] };
 }
 
 /** The browser's own user agent, minus the word that gives a headless browser away. */
 export function regularUserAgent(userAgent: string): string { return userAgent.replace(/HeadlessChrome\//g, 'Chrome/'); }
 
 /** Starts the tier's browser: the installed Chrome first, Playwright's Chromium otherwise. Tower installs neither. */
-export async function startBrowser(tier: BrowserTier, marker: string, chromium: Pick<Playwright['chromium'], 'launch'> = playwright().chromium): Promise<{ browser: Browser }> {
-  try { return { browser: await chromium.launch(launchOptions(tier, marker, 'chrome')) }; }
+export async function startBrowser(tier: BrowserTier, marker: string, options: { outsideContent?: boolean } = {}, chromium: Pick<Playwright['chromium'], 'launch'> = playwright().chromium): Promise<{ browser: Browser }> {
+  try { return { browser: await chromium.launch(launchOptions(tier, marker, 'chrome', options.outsideContent)) }; }
   catch (error) { if (!missingBrowser(error)) throw error; }
-  try { return { browser: await chromium.launch(launchOptions(tier, marker, undefined)) }; }
+  try { return { browser: await chromium.launch(launchOptions(tier, marker, undefined, options.outsideContent)) }; }
   catch (error) {
     if (!missingBrowser(error)) throw error;
     throw new Error('No browser is installed on this computer: neither Google Chrome nor Playwright\'s Chromium. '
@@ -67,7 +76,8 @@ export async function newContext(tier: BrowserTier, browser: Browser, options: {
     context = await browser.newContext({ ...guarded, userAgent: regularUserAgent(userAgent), ...(options.storageState ? { storageState: options.storageState } : {}) });
   }
   if (options.outsideContent) {
-    // Answered rather than aborted: an aborted navigation's error page would cut into the agent's next navigation.
+    // Direct requests get a clear answer here (an aborted navigation's error page would cut into the agent's next one);
+    // redirects never come through routes, and the resolver rules above stop those.
     await context.route(url => isLoopbackHostname(url.hostname), route => route.fulfill({ status: 403, contentType: 'text/plain; charset=utf-8',
       body: 'Tower blocks this computer\'s own addresses in a conversation that holds outside content.' }));
     await context.routeWebSocket(url => isLoopbackHostname(url.hostname), socket => socket.close());

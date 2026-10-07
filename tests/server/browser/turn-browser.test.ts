@@ -173,3 +173,32 @@ test('a conversation with outside content gets a guarded context and no saved lo
   await browser.shutdown();
   assert.deepEqual(asked, [{ storageState: undefined, outsideContent: true }]);
 });
+
+test('code that closes the context itself saves what that call changed first', async t => {
+  const dir = await stateDir(t);
+  const f = fakes({ state: () => ({ cookies: [cookie('made-in-code', '1')], origins: [] }) });
+  const browser = new TurnBrowser({ tier: 'general', stateDir: dir, savedLogins: true }, () => {}, f.hooks);
+  const context = await browser.context();
+  await context.close();
+  assert.deepEqual((await readState(dir)).cookies.map(c => c.name), ['made-in-code']);
+  assert.notEqual(await browser.context(), context, 'the next call starts a new one');
+  await browser.shutdown();
+});
+
+test('browser_close while a browser is still starting closes that browser', async t => {
+  const dir = await stateDir(t);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const f = fakes();
+  const original = f.hooks.newContext!;
+  f.hooks.newContext = async (...args) => { await gate; return original(...args); };
+  const browser = new TurnBrowser({ tier: 'light', stateDir: dir, savedLogins: false }, () => {}, f.hooks);
+  const starting = browser.context();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  const closing = browser.closeActive();
+  release();
+  await starting;
+  await closing;
+  assert.equal(f.processes.size, 0);
+  await browser.shutdown();
+});

@@ -129,3 +129,36 @@ test('a character split between two chunks arrives whole, bad JSON gets an error
   await s.served;
   assert.deepEqual(['SIGTERM', 'SIGINT', 'SIGHUP'].map(signal => s.signals.listenerCount(signal)), [0, 0, 0]);
 });
+
+test('Playwright gets the turn\'s browser from Tower: a call starts it, its logins are saved after the call, and browser_close closes it', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-browser-wiring-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const closed: string[] = [];
+  const context = Object.assign(new EventEmitter(), { storageState: async () => ({ cookies: [{ name: 'sid', value: '1', domain: 'example.com', path: '/', expires: -1, httpOnly: false, secure: true, sameSite: 'Lax' }], origins: [] }), close: async () => {} });
+  const hooks: BrowserServerHooks = {
+    startBrowser: async () => ({ browser: { close: async () => { closed.push('browser'); context.emit('close'); } } as never }),
+    newContext: async () => context as never,
+    findBrowserPid: async () => undefined,
+    createConnection: (async (_config: unknown, getContext: () => Promise<unknown>) => ({
+      async connect(transport: { send(frame: Frame): Promise<void>; onmessage?: (frame: Frame) => void }) {
+        transport.onmessage = frame => {
+          if (frame.method === 'initialize') void transport.send({ jsonrpc: '2.0', id: frame.id, result: { protocolVersion: '2025-06-18', capabilities: {} } });
+          if (frame.method === 'tools/call') void getContext().then(() => transport.send({ jsonrpc: '2.0', id: frame.id, result: { content: [{ type: 'text', text: 'navigated' }] } }));
+        };
+      },
+      async close() {},
+    })) as never,
+  };
+  const s = await serve(t, { stateDir }, hooks);
+  await s.init();
+  s.send({ id: 'nav', method: 'tools/call', params: { name: 'browser_navigate', arguments: { url: 'https://example.com' } } });
+  await s.reply('nav');
+  const { readState } = await import('../../../server/browser/logins.js');
+  for (let i = 0; i < 100 && !(await readState(stateDir)).cookies.length; i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual((await readState(stateDir)).cookies.map(c => c.name), ['sid'], 'saved right after the call');
+  s.send({ id: 'close', method: 'tools/call', params: { name: 'browser_close', arguments: {} } });
+  await s.reply('close');
+  assert.deepEqual(closed, ['browser']);
+  s.input.end();
+  await s.served;
+});
