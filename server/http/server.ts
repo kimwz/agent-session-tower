@@ -24,7 +24,7 @@ import { scopeFromBody, scopeFromParams } from '../../shared/session-scope.js';
 import { sessionActivityAt } from '../../shared/session-activity.js';
 import { SnapshotStream, type FrameFormat } from './snapshot-stream.js';
 import { APP_VERSION, HEALTH_APPLICATION_ID, REQUEST_TOKEN_HEADER } from '../../shared/app-identity.js';
-import { assertWorkspace, listWorkspaceTree, readWorkspaceFile, saveWorkspaceFile, createWorkspaceDirectory, retentionWorkspacePath, MAX_WORKSPACE_FILE_BYTES } from '../workspace-files.js';
+import { assertWorkspace, listWorkspaceTree, readWorkspaceFile, saveWorkspaceFile, createWorkspaceDirectory, retentionWorkspacePath, openWorkspaceMedia, MAX_WORKSPACE_FILE_BYTES } from '../workspace-files.js';
 import { WorkspaceTerminals, type WorkspaceTerminalBackend } from '../workspace-terminals.js';
 import { sessionKey, type AuthStore } from '../auth/store.js';
 import { ownerIdentity, sessionCookie, setSessionCookie } from './auth.js';
@@ -38,7 +38,7 @@ import type { BackupOverview, BackupPreview, RemoteBackup, RestoreReport } from 
 import { MAX_BACKUP_FILE_BYTES } from '../../shared/backup.js';
 import type { AutoPromptSuggestionRequest, AutoPromptSuggestionResponse, DecisionOverview } from '../../shared/decisions.js';
 import { TowerError, statusOf } from '../../shared/errors.js';
-import { sendStoredAttachment, sseSink } from './sinks.js';
+import { sendStoredAttachment, sendWorkspaceMedia, sseSink } from './sinks.js';
 
 export interface Backend {
   /** Dedicated owner input channel; never included in agent operations or their request ledger. */
@@ -586,6 +586,12 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       }
       if (req.method === 'GET' && path === '/api/workspace/file') {
         return json(res, 200, await readWorkspaceFile(url.searchParams.get('cwd'), url.searchParams.get('path'), backend.snapshot()));
+      }
+      if ((req.method === 'GET' || req.method === 'HEAD') && path === '/api/workspace/media') {
+        // Tracked before the file opens, so a sign-out meanwhile ends this answer too.
+        if (!identity.local) trackStream(sessionId, res, () => res.destroy());
+        const media = await openWorkspaceMedia(url.searchParams.get('cwd'), url.searchParams.get('path'), backend.snapshot());
+        return await sendWorkspaceMedia(res, media, req.headers.range, req.method === 'HEAD');
       }
       if (req.method === 'POST' && path === '/api/workspace/file') {
         return json(res, 200, await saveWorkspaceFile(await readJson(req, 6 * MAX_WORKSPACE_FILE_BYTES + 16 * 1024), backend.snapshot()));

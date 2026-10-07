@@ -11,7 +11,7 @@ import { SnapshotStream } from '../http/snapshot-stream.js';
 import { SseClient } from '../http/sse-client.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
-import { assertWorkspace, createWorkspaceDirectory, listWorkspaceTree, MAX_WORKSPACE_FILE_BYTES, readWorkspaceFile, saveWorkspaceFile, wroteNothing } from '../workspace-files.js';
+import { assertWorkspace, createWorkspaceDirectory, listWorkspaceTree, MAX_WORKSPACE_FILE_BYTES, openWorkspaceMedia, readWorkspaceFile, saveWorkspaceFile, wroteNothing, type WorkspaceMediaFile } from '../workspace-files.js';
 import type { WorkspaceTerminalBackend } from '../workspace-terminals.js';
 import { realpath, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
@@ -22,7 +22,7 @@ import type { RepositoryAction } from '../../shared/repositories.js';
 import { isOperationName, OPERATIONS, REMOTE_PAGE_OPERATIONS } from '../../shared/api/operations.js';
 import type { RemoteAction, RemoteChange } from '../../shared/link.js';
 import { TowerError } from '../../shared/errors.js';
-import { sendStoredAttachment, sseSink } from '../http/sinks.js';
+import { sendStoredAttachment, sendWorkspaceMedia, sseSink } from '../http/sinks.js';
 
 type Request = IncomingMessage | Http2ServerRequest;
 // The HTTP/2 compatibility response offers the same calls as an HTTP/1 response.
@@ -96,6 +96,13 @@ export function createRemoteRouter({ attachmentStores, attachmentUploads, backen
   // Folder locations are checked again from time to time, so a symlink pointed elsewhere is noticed without other activity.
   const recheck = setInterval(publish, 30_000);
   recheck.unref();
+  /** Tracks an answer that a sharing-list change or disconnect must end; the returned call stops tracking it. */
+  const holdDownload = (controllerId: string, res: Reply) => {
+    const active = downloads.get(controllerId) ?? new Set<Reply>();
+    active.add(res); downloads.set(controllerId, active);
+    // A set that a list change already let go of is not this controller's current one.
+    return () => { active.delete(res); if (!active.size && downloads.get(controllerId) === active) downloads.delete(controllerId); };
+  };
   const disconnect = (controllerId: string) => {
     for (const res of downloads.get(controllerId) ?? []) res.destroy();
     downloads.delete(controllerId);
@@ -259,10 +266,9 @@ export function createRemoteRouter({ attachmentStores, attachmentUploads, backen
     const attachment = path.match(/^\/api\/attachments\/([^/]+)$/);
     if ((method === 'GET' || method === 'HEAD') && attachment) {
       if (attachmentStores) {
-        const active = downloads.get(principal.controllerId) ?? new Set<Reply>();
-        active.add(res); downloads.set(principal.controllerId, active);
+        const release = holdDownload(principal.controllerId, res);
         try { return await sendStoredAttachment(res, attachmentStores.chat, attachment[1], method === 'HEAD', async id => { await confirm(id); }); }
-        finally { active.delete(res); if (!active.size) downloads.delete(principal.controllerId); }
+        finally { release(); }
       }
       if (!backend.attachment) throw notFound();
       const { metadata, content, sessionId } = await backend.attachment(attachment[1]).catch(() => { throw notFound(); });
@@ -296,6 +302,22 @@ export function createRemoteRouter({ attachmentStores, attachmentUploads, backen
       const file = await readWorkspaceFile(cwd, url.searchParams.get('path'), backend.snapshot());
       await sharedPath(cwd, url.searchParams.get('path'));
       return json(res, 200, file);
+    }
+    if ((method === 'GET' || method === 'HEAD') && path === '/api/workspace/media') {
+      // Held from the start, so a sharing-list change or disconnect while the file is checked or opened ends it too.
+      const release = holdDownload(principal.controllerId, res);
+      let media: WorkspaceMediaFile | undefined;
+      try {
+        const cwd = await sharedPath(url.searchParams.get('cwd'), url.searchParams.get('path'));
+        media = await openWorkspaceMedia(cwd, url.searchParams.get('path'), backend.snapshot());
+        await sharedPath(cwd, url.searchParams.get('path'));
+        const sending = media;
+        media = undefined;
+        return await sendWorkspaceMedia(res, sending, req.headers.range, method === 'HEAD');
+      } finally {
+        await media?.handle.close();
+        release();
+      }
     }
     const terminal = path.match(/^\/api\/workspace\/terminals\/([0-9a-f-]{36})\/(events|input|resize|close)$/);
     if (method === 'GET' && path === '/api/workspace/terminals') {

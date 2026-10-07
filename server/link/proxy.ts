@@ -1,10 +1,11 @@
 import http2, { type ClientHttp2Session, type ClientHttp2Stream, type IncomingHttpHeaders, type OutgoingHttpHeaders } from 'node:http2';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isImageAttachment } from '../../shared/attachments.js';
+import { isWorkspaceMediaType } from '../../shared/workspace-media.js';
 import { ATTACHMENT_BODY_BYTES } from '../http/requests.js';
 
 /** Only what the other computer's routes read; cookies, tokens and this browser's origin stay here. */
-const REQUEST_HEADERS = ['content-type', 'content-length', 'accept', 'last-event-id', 'x-tower-request-id'] as const;
+const REQUEST_HEADERS = ['content-type', 'content-length', 'accept', 'last-event-id', 'x-tower-request-id', 'range'] as const;
 const ANSWER_TYPES = /^(application\/json|text\/event-stream|application\/octet-stream|image\/(png|jpeg|gif|webp))(\s*;|$)/i;
 /** Conversation pages and attachments; a larger answer is not one Tower sends. */
 const MAX_ANSWER_BYTES = 64 * 1024 * 1024;
@@ -46,7 +47,10 @@ export function proxyToNode(req: IncomingMessage, res: ServerResponse, session: 
     }
     const headers: OutgoingHttpHeaders = { ':method': req.method ?? 'GET', ':path': path };
     for (const name of REQUEST_HEADERS) { const value = req.headers[name]; if (typeof value === 'string') headers[name] = value; }
-    const fileDownload = (req.method === 'GET' || req.method === 'HEAD') && /^\/api\/attachments\/[^/]+$/.test(path.split('?')[0]);
+    const route = path.split('?')[0];
+    // A workspace video or song is played, possibly for long, from any byte on: a file, not a page.
+    const media = (req.method === 'GET' || req.method === 'HEAD') && route === '/api/workspace/media';
+    const fileDownload = media || ((req.method === 'GET' || req.method === 'HEAD') && /^\/api\/attachments\/[^/]+$/.test(route));
     const bodyless = req.method === 'GET' || req.method === 'HEAD';
     const lost = typeof req.headers['x-tower-request-id'] === 'string' ? LOST + ONCE : LOST;
     let stream: ClientHttp2Stream;
@@ -88,13 +92,23 @@ export function proxyToNode(req: IncomingMessage, res: ServerResponse, session: 
       touch();
       const status = Number(answer[':status']);
       const type = String(answer['content-type'] ?? '');
+      const playable = media && isWorkspaceMediaType(type.split(';')[0].trim());
       // The other computer refusing this link must not read as this browser being signed out.
       if (status === 401 || status === 403) { stream.close(http2.constants.NGHTTP2_CANCEL); fail(res, 502, '그 컴퓨터가 이 요청을 거절했습니다.', NODE_REFUSED, 'not-admitted'); finish(); return; }
-      if (!ANSWER_TYPES.test(type) || status < 200 || (status >= 300 && status < 400)) { stream.close(http2.constants.NGHTTP2_CANCEL); fail(res, 502, '그 컴퓨터의 응답을 읽을 수 없습니다.', NODE_ANSWER, 'uncertain'); finish(); return; }
+      if ((!ANSWER_TYPES.test(type) && !playable) || status < 200 || (status >= 300 && status < 400)) { stream.close(http2.constants.NGHTTP2_CANCEL); fail(res, 502, '그 컴퓨터의 응답을 읽을 수 없습니다.', NODE_ANSWER, 'uncertain'); finish(); return; }
       if (!fileDownload && !/^text\/event-stream/i.test(type)) deadline = setTimeout(() => { stream.close(http2.constants.NGHTTP2_CANCEL); res.destroy(); finish(); }, ANSWER_MS);
       const out: Record<string, string | number> = { 'Content-Type': type, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
+      const range = String(answer['content-range'] ?? '');
+      if (/^bytes (?:\d+-\d+|\*)\/\d+$/.test(range)) out['Content-Range'] = range;
+      if (answer['accept-ranges'] === 'bytes') out['Accept-Ranges'] = 'bytes';
       if (/^text\/event-stream/i.test(type)) out['X-Accel-Buffering'] = 'no';
-      else if (!/^application\/json/i.test(type)) {
+      else if (playable) {
+        // Shown or played in Tower's page, still never run there.
+        out['Content-Disposition'] = 'inline';
+        out['Content-Security-Policy'] = "sandbox; default-src 'none'; frame-ancestors 'none'";
+        const length = Number(answer['content-length']);
+        if (Number.isSafeInteger(length) && length >= 0) out['Content-Length'] = length;
+      } else if (!/^application\/json/i.test(type)) {
         // Files from another computer open inline only as images, and never run anything in this page's origin.
         const inline = isImageAttachment(type.split(';')[0].trim().toLowerCase());
         const disposition = String(answer['content-disposition'] ?? '');

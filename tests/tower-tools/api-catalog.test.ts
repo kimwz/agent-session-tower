@@ -80,7 +80,7 @@ test('the route catalog the master and the owner\'s agents read lists every rout
   assert.deepEqual(await missingFrom(apiCatalog()), [], 'add these to server/tower-tools/api-catalog.ts, or to NOT_FOR_AGENTS with the reason');
   const listed = catalogRoutes(apiCatalog());
   for (const route of FILE_ROUTES) assert.ok(listed.has(route.replace('{id}', '{}')), route);
-  assert.ok(isFileRoute('/api/attachments/abc') && isFileRoute('/api/backup/export') && !isFileRoute('/api/attachments/a/b') && !isFileRoute('/api/backup'));
+  assert.ok(isFileRoute('/api/attachments/abc') && isFileRoute('/api/backup/export') && isFileRoute('/api/workspace/media') && !isFileRoute('/api/attachments/a/b') && !isFileRoute('/api/backup') && !isFileRoute('/api/workspace/file'));
 });
 
 test('a route left out of the catalog is noticed, whether matched by literal, pattern, constant or for a joined computer', async () => {
