@@ -15,7 +15,9 @@ export interface LiveBrowser { serverPid: number; browserPid: number; marker: st
 /** The switch that names a browser as this record's; Chrome ignores switches it does not know. */
 export const markerSwitch = (marker: string) => `--tower-browser=${marker}`;
 export const liveDir = (stateDir: string) => join(stateDir, 'browser', 'live');
-const recordPath = (stateDir: string, serverPid: number) => join(liveDir(stateDir), `${serverPid}.json`);
+/** One record per browser, so a server that starts another browser (after the agent closed one) keeps track of both. */
+const recordPath = (stateDir: string, browser: Pick<LiveBrowser, 'serverPid' | 'marker'>) => join(liveDir(stateDir), `${browser.serverPid}-${browser.marker}.json`);
+const RECORD = /^\d+-[a-f\d]{32}\.json$/;
 
 export interface ProcessProbe {
   alive(pid: number): boolean;
@@ -31,6 +33,11 @@ export const systemProbe: ProcessProbe = {
   kill(pid, signal) { try { process.kill(pid, signal); } catch { /* Already gone. */ } },
 };
 
+/** Whether the recorded browser still runs: its process exists and still carries its marker. */
+export async function stillRunning(probe: ProcessProbe, browserPid: number, marker: string): Promise<boolean> {
+  return (await probe.command(browserPid))?.includes(markerSwitch(marker)) === true;
+}
+
 /** The browser's main process: the one whose command line carries the marker and is not one of its helpers. */
 export async function findBrowserPid(marker: string): Promise<number | undefined> {
   const listing = await new Promise<string>(done => execFile('ps', ['-A', '-ww', '-o', 'pid=,command='], { maxBuffer: 16_000_000 }, (error, stdout) => done(error ? '' : stdout)));
@@ -43,12 +50,12 @@ export async function findBrowserPid(marker: string): Promise<number | undefined
 
 export async function recordBrowser(stateDir: string, browser: LiveBrowser): Promise<void> {
   await mkdir(liveDir(stateDir), { recursive: true, mode: 0o700 });
-  await writePrivateJson(recordPath(stateDir, browser.serverPid), JSON.stringify(browser));
+  await writePrivateJson(recordPath(stateDir, browser), JSON.stringify(browser));
 }
 
-export async function forgetBrowser(stateDir: string, serverPid: number): Promise<void> {
+export async function forgetBrowser(stateDir: string, browser: Pick<LiveBrowser, 'serverPid' | 'marker'>): Promise<void> {
   // best-effort: a record left behind is removed by the next reaper once this process is gone.
-  await unlink(recordPath(stateDir, serverPid)).catch(() => {});
+  await unlink(recordPath(stateDir, browser)).catch(() => {});
 }
 
 /**
@@ -63,11 +70,11 @@ export async function reapBrowsers(stateDir: string, probe: ProcessProbe = syste
   let reaped = 0;
   // A record a reaper claimed and then died with is put back for this round.
   for (const name of names) {
-    const claim = /^(\d+\.json)\.reaping-(\d+)$/.exec(name);
+    const claim = /^(\d+-[a-f\d]{32}\.json)\.reaping-(\d+)$/.exec(name);
     // best-effort: another reaper may have put it back first.
     if (claim && !probe.alive(Number(claim[2])) && await rename(join(liveDir(stateDir), name), join(liveDir(stateDir), claim[1])).then(() => true, () => false)) names.push(claim[1]);
   }
-  for (const name of [...new Set(names)].filter(name => /^\d+\.json$/.test(name))) {
+  for (const name of [...new Set(names)].filter(name => RECORD.test(name))) {
     const path = join(liveDir(stateDir), name);
     let record: LiveBrowser;
     // best-effort: an unreadable record names no browser that could be checked; drop it.

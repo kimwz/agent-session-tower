@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { applyChanges, EMPTY_STATE, loginsPath, readState, saveChanges, type Cookie, type StorageState } from '../../../server/browser/logins.js';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const cookie = (name: string, value: string, extra: Partial<Cookie> = {}): Cookie => ({ name, value, domain: 'example.com', path: '/', expires: -1, httpOnly: false, secure: true, sameSite: 'Lax', ...extra });
 const state = (cookies: Cookie[], origins: StorageState['origins'] = []): StorageState => ({ cookies, origins });
@@ -75,4 +76,18 @@ test('a lock left by a dead process is taken over; a live owner is waited for an
   await assert.rejects(saveChanges(dir, EMPTY_STATE, state([cookie('blocked', '1')]), { waitMs: 200 }), /not saved/);
   assert.equal(await readFile(join(lock, 'owner'), 'utf8'), `${process.pid}:0:someone-else`, 'another owner\'s lock is left alone');
   assert.deepEqual(values(await readState(dir)), ['after-dead=1']);
+});
+
+test('when several turns find the same dead owner, only one takes the lock over and no live owner\'s lock is removed', async t => {
+  const dir = await stateDir(t);
+  const lock = join(dir, 'browser', 'logins.lock');
+  const dead = spawn(process.execPath, ['-e', '']);
+  await new Promise(resolve => dead.on('exit', resolve));
+  for (let round = 0; round < 5; round++) {
+    await mkdir(lock, { recursive: true });
+    await writeFile(join(lock, 'owner'), `${dead.pid}:0:dead`);
+    await Promise.all(Array.from({ length: 6 }, (_, n) => saveChanges(dir, EMPTY_STATE, state([cookie(`r${round}t${n}`, '1')]))));
+    assert.equal((await readState(dir)).cookies.filter(c => c.name.startsWith(`r${round}`)).length, 6, `round ${round}: every save landed`);
+    await delay(1);
+  }
 });

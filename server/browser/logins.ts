@@ -67,10 +67,12 @@ function isOrigin(value: unknown): value is OriginState {
 
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; } };
 
+
 /**
  * Adds one turn's changes to the saved logins under a lock the other turns' browsers take too. The lock names its
- * owner; it is taken over only when that process is gone, and released only by its owner. A live owner is waited for,
- * and the save fails rather than write alongside it.
+ * owner and is released only by that owner. A lock whose owner is gone is taken over one process at a time, after
+ * checking again that the same dead owner still holds it; a live owner is waited for, and the save fails rather than
+ * write alongside it.
  */
 export async function saveChanges(stateDir: string, baseline: StorageState, current: StorageState, options: { waitMs?: number } = {}): Promise<void> {
   const lock = join(stateDir, 'browser', 'logins.lock');
@@ -81,15 +83,10 @@ export async function saveChanges(stateDir: string, baseline: StorageState, curr
   for (;;) {
     try { await mkdir(lock, { mode: 0o700 }); await writeFile(owner, token, { mode: 0o600 }); break; } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      // best-effort: a lock without a readable owner yet is judged by its age below.
-      const holder = await readFile(owner, 'utf8').catch(() => '');
-      const pid = Number(holder.split(':')[0]);
-      // best-effort: a lock that vanished meanwhile is simply tried again.
-      const age = await stat(lock).then(info => Date.now() - info.mtimeMs, () => 0);
-      const gone = holder ? !(Number.isInteger(pid) && pid > 0 && alive(pid)) : age > LOCK_UNNAMED_MS;
-      if (gone) { await rm(lock, { recursive: true, force: true }); continue; }
-      if (Date.now() > deadline) throw new Error('Another turn is saving the browser\'s logins; this turn\'s changes were not saved.');
-      await delay(50);
+      const holder = await lockHolder(lock);
+      if (holder.gone) await takeOver(lock, holder.name);
+      else if (Date.now() > deadline) throw new Error('Another turn is saving the browser\'s logins; this turn\'s changes were not saved.');
+      else await delay(50);
     }
   }
   try {
@@ -98,4 +95,55 @@ export async function saveChanges(stateDir: string, baseline: StorageState, curr
     // best-effort: a lock whose owner file is unreadable is not ours to remove.
     if (await readFile(owner, 'utf8').catch(() => '') === token) await rm(lock, { recursive: true, force: true });
   }
+}
+
+/** Who holds the lock, and whether that holder is gone: its process ended, or it never wrote its name. */
+async function lockHolder(lock: string): Promise<{ name: string; gone: boolean }> {
+  // best-effort: a lock without a readable owner yet is judged by its age.
+  const name = await readFile(join(lock, 'owner'), 'utf8').catch(() => '');
+  if (name) { const pid = Number(name.split(':')[0]); return { name, gone: !(Number.isInteger(pid) && pid > 0 && alive(pid)) }; }
+  // best-effort: a lock that vanished meanwhile is simply tried again.
+  const age = await stat(lock).then(info => Date.now() - info.mtimeMs, () => 0);
+  return { name, gone: age > LOCK_UNNAMED_MS };
+}
+
+/** Removes a dead holder's lock, one process at a time, only if that same holder still has it. */
+async function takeOver(lock: string, deadHolder: string): Promise<void> {
+  const takeover = `${lock}.takeover`;
+  try { await mkdir(takeover, { mode: 0o700 }); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    // Another process is taking it over; one that died doing so left a folder only a few milliseconds of work old.
+    // best-effort: a takeover folder that vanished meanwhile needs nothing.
+    const age = await stat(takeover).then(info => Date.now() - info.mtimeMs, () => 0);
+    if (age > LOCK_UNNAMED_MS) await rm(takeover, { recursive: true, force: true });
+    else await delay(20);
+    return;
+  }
+  try {
+    const now = await lockHolder(lock);
+    if (now.gone && now.name === deadHolder) await rm(lock, { recursive: true, force: true });
+  } finally { await rm(takeover, { recursive: true, force: true }); }
+}
+
+/**
+ * One turn's saves, in order. Each applies what changed since the last save that succeeded, so a failed save's changes
+ * go with the next one.
+ */
+export class LoginSaver {
+  private baseline: StorageState = EMPTY_STATE;
+  private queue: Promise<void> = Promise.resolve();
+  constructor(private readonly stateDir: string, private readonly log: (error: unknown) => void, private readonly options: { waitMs?: number } = {}) {}
+
+  /** A new browser started from `state`. */
+  started(state: StorageState): void { this.baseline = state; }
+
+  save(state: StorageState): Promise<void> {
+    this.queue = this.queue.then(async () => {
+      await saveChanges(this.stateDir, this.baseline, state, this.options);
+      this.baseline = state;
+    }).catch(this.log);
+    return this.queue;
+  }
+
+  idle(): Promise<void> { return this.queue; }
 }

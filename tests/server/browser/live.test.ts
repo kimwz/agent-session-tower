@@ -45,7 +45,7 @@ test('a live tool server\'s browser and a reused process ID are never touched', 
   const { fake, signals } = probe(processes, new Set([100]));
   assert.equal(await reapBrowsers(f.stateDir, fake, { graceMs: 0, tempDir: f.temp }), 0);
   assert.deepEqual(signals, []);
-  assert.deepEqual((await readdir(liveDir(f.stateDir))).sort(), ['100.json'], 'the gone browser\'s record goes; the live one stays');
+  assert.deepEqual((await readdir(liveDir(f.stateDir))).sort(), [`100-${MARKER}.json`], 'the gone browser\'s record goes; the live one stays');
 });
 
 test('a browser that ignores SIGTERM gets SIGKILL; one that survives both keeps its record for the next start', async t => {
@@ -54,15 +54,15 @@ test('a browser that ignores SIGTERM gets SIGKILL; one that survives both keeps 
   const stubborn = probe(new Map([[200, `/chrome ${markerSwitch(MARKER)}`]]), new Set(), new Set([200]));
   assert.equal(await reapBrowsers(f.stateDir, stubborn.fake, { graceMs: 0, tempDir: f.temp }), 0);
   assert.deepEqual(stubborn.signals, [[200, 'SIGTERM'], [200, 'SIGKILL']]);
-  assert.deepEqual(await readdir(liveDir(f.stateDir)), ['100.json']);
+  assert.deepEqual(await readdir(liveDir(f.stateDir)), [`100-${MARKER}.json`]);
 });
 
 test('a record claimed by a reaper that died is put back; malformed records are dropped', async t => {
   const f = await fixture(t);
   await recordBrowser(f.stateDir, { serverPid: 100, browserPid: 200, marker: MARKER, startedAt: '' });
   const { rename } = await import('node:fs/promises');
-  await rename(join(liveDir(f.stateDir), '100.json'), join(liveDir(f.stateDir), '100.json.reaping-999'));
-  await writeFile(join(liveDir(f.stateDir), '300.json'), JSON.stringify({ serverPid: 300, browserPid: 400, marker: '../../etc' }));
+  await rename(join(liveDir(f.stateDir), `100-${MARKER}.json`), join(liveDir(f.stateDir), `100-${MARKER}.json.reaping-999`));
+  await writeFile(join(liveDir(f.stateDir), `300-${'c'.repeat(32)}.json`), JSON.stringify({ serverPid: 300, browserPid: 400, marker: '../../etc' }));
   const { fake } = probe(new Map([[200, `/chrome ${markerSwitch(MARKER)}`]]), new Set());
   assert.equal(await reapBrowsers(f.stateDir, fake, { graceMs: 0, tempDir: f.temp }), 1);
   assert.deepEqual(await readdir(liveDir(f.stateDir)), []);

@@ -17,7 +17,9 @@ let loaded: Playwright | undefined;
 export function playwright(): Playwright { return loaded ??= require('playwright') as Playwright; }
 
 export function launchOptions(tier: BrowserTier, marker: string, channel: 'chrome' | undefined): LaunchOptions {
-  const common: LaunchOptions = { headless: true, args: [marker], ...(channel ? { channel } : {}) };
+  // The tool server closes the browser itself, after reading the turn's logins; Playwright's own signal handlers would
+  // close it first and lose them.
+  const common: LaunchOptions = { headless: true, args: [marker], handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false, ...(channel ? { channel } : {}) };
   if (tier === 'light') return common;
   return { ...common, args: [marker, '--disable-blink-features=AutomationControlled'], ignoreDefaultArgs: ['--enable-automation'] };
 }
