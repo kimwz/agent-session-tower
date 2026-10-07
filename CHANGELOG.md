@@ -4,6 +4,21 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.113.0] - 2026-10-07
+
+### Added
+- **Every turn has browser tools.** Tower gives every Claude and Codex turn it starts two browsers, and names them in the turn's Tower instructions so agents use them for web pages before computer use:
+  - `browser_light` for pages a project serves (localhost, preview deployments, UI checks and screenshots): a fresh headless browser each turn, with no logins.
+  - `browser` for outside sites: the installed Google Chrome (Playwright's Chromium otherwise, installed on first use) running headless without the switches and the user agent that mark an automated browser, so ordinary bot checks see a regular Chrome. Logins made there are kept in `<state-dir>/browser/logins.json` (owner-only); each turn adds only what it changed, so turns running at the same time do not undo each other's logins.
+  - A strong browser for sites that block those: Aside when its CLI (`aside`) is installed, for Claude and Codex turns; otherwise Claude in Chrome for Claude turns when its extension is set up (`--chrome`). Every other Claude turn starts with `--no-chrome`.
+- Agents choose a browser from the uses each one lists; nothing asks for approval. When a site needs a login they look for the credentials in Tower's vault or ask the owner, and they never try to solve CAPTCHAs.
+- Each turn's browser closes when the turn ends. A browser left behind by a tool server that was killed outright is ended by the next one to start; only browsers carrying Tower's own marker are touched. Snapshots and screenshots go to the system temporary folder, never into the project.
+
+### Safety limits
+- A conversation that holds outside content (Slack, GitHub issues, public agents) gets both browsers without the saved logins, and never the owner's own browser.
+- The standalone executable has no browser tools. Aside is wired as its documented `aside mcp` server but was not tried, as it is not installed here.
+- On Linux, Chromium's system libraries need `sudo npx playwright install-deps chromium`; Tower never runs sudo.
+
 ## [1.112.0] - 2026-10-07
 
 ### Added
