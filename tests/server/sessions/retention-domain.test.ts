@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, stat, realpath, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, stat, realpath, chmod, rename, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Session } from '../../../shared/types.js';
@@ -252,4 +252,28 @@ test('failed checks do not abort quiesce, which still drains queued intent cance
   finishCancel(); await cancel; await quiesce;
   assert.equal(drained, true); assert.ok(errors.some(error => String(error).includes('fixture lookup failed')));
   assert.equal(store.policy('child')?.archivedAt, undefined); assert.equal(store.policy('child')?.archiveRevision, 3); assert.equal(store.policy('child')?.restoredAt, restoredAt);
+}));
+
+test('journal mutations publish only after durable writes and retry from committed state', async () => fixture(async path => {
+  const root = join(path, 'state'); const store = new RetentionStore(root); await store.start(now);
+  const initial = { id: 'child', archivedAt: new Date(now).toISOString(), archiveRevision: 2, restoredAt: new Date(now - day).toISOString() };
+  await store.setPolicy(initial);
+  const existing = { id: 'existing', candidate: { rootId: 'child', ids: ['child'], reason: 'child-expired' as const, revisions: {} }, phase: 'blocked-provider' as const, updatedAt: new Date(now).toISOString() };
+  await store.put(existing);
+  const service = new RetentionService({ store, archive: new RetentionArchive(join(path, 'cold'), []), adapter: { capability: () => ({ status: 'blocked' as const }), reserve: async () => undefined, files: async () => [], restore: async () => undefined }, observe: async () => observation([]), onError: () => {} });
+  await rename(root, join(path, 'saved')); await writeFile(root, 'fixture obstruction');
+  try {
+    await assert.rejects(service.cancelArchiveRequest('child'), { code: 'ENOTDIR' });
+    assert.deepEqual(store.policy('child'), initial);
+    const results = await Promise.allSettled([store.put({ ...existing, id: 'failed' }), store.removeMetadata(['existing'])]);
+    assert.ok(results.every(result => result.status === 'rejected'));
+    assert.equal(store.get('failed'), undefined); assert.deepEqual(store.get('existing'), existing);
+  } finally { await unlink(root); await rename(join(path, 'saved'), root); }
+  await service.cancelArchiveRequest('child');
+  await Promise.all([store.put({ ...existing, id: 'new' }), store.removeMetadata(['existing']), store.setPolicy({ id: 'other', archiveRevision: 1 })]);
+  const reloaded = new RetentionStore(root); await reloaded.start();
+  assert.deepEqual(reloaded.policy('child'), { id: 'child', archiveRevision: 3, restoredAt: initial.restoredAt });
+  assert.equal(reloaded.policy('other')?.archiveRevision, 1);
+  assert.equal(reloaded.get('existing'), undefined); assert.equal(reloaded.get('failed'), undefined); assert.equal(reloaded.get('new')?.id, 'new');
+  assert.deepEqual(reloaded.list(), store.list());
 }));

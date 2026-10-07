@@ -32,24 +32,36 @@ export class RetentionStore {
       this.migratedAt = data.migratedAt;
       for (const policy of data.policies || []) { if (typeof policy.id !== 'string' || !Number.isSafeInteger(policy.archiveRevision)) throw new Error('Invalid retention policy state.'); this.policies.set(policy.id, policy); }
       for (const entry of data.entries) { validateOperationId(entry.id); if (!entry.candidate || !Array.isArray(entry.candidate.ids)) throw new Error('Invalid retention journal entry.'); this.entries.set(entry.id, entry); }
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; this.migratedAt = now; await this.save(); }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; this.migratedAt = now; await this.commit(() => {}); }
   }
   policy(id: string): RetentionPolicyState | undefined { const policy = this.policies.get(id); return policy ? structuredClone(policy) : undefined; }
-  async setPolicy(policy: RetentionPolicyState): Promise<void> { this.policies.set(policy.id, structuredClone(policy)); await this.save(); }
+  async setPolicy(policy: RetentionPolicyState): Promise<void> {
+    const input = structuredClone(policy);
+    return this.commit((_entries, policies) => { policies.set(input.id, input); });
+  }
   list(): RetentionJournalEntry[] { return structuredClone([...this.entries.values()]); }
   get(id: string): RetentionJournalEntry | undefined { const entry = this.entries.get(id); return entry ? structuredClone(entry) : undefined; }
   async put(entry: RetentionJournalEntry): Promise<void> { await this.putMany([entry]); }
   async putMany(entries: RetentionJournalEntry[]): Promise<void> {
-    for (const entry of entries) { validateOperationId(entry.id); this.entries.set(entry.id, structuredClone(entry)); }
-    await this.save();
+    const inputs = structuredClone(entries);
+    for (const entry of inputs) validateOperationId(entry.id);
+    return this.commit(draft => { for (const entry of inputs) draft.set(entry.id, entry); });
   }
   async removeMetadata(ids: string[]): Promise<void> {
-    for (const id of ids) { const entry = this.entries.get(id); if (entry && ['planned', 'blocked-provider'].includes(entry.phase)) this.entries.delete(id); }
-    await this.save();
+    const inputs = [...ids];
+    return this.commit(draft => {
+      for (const id of inputs) { const entry = draft.get(id); if (entry && ['planned', 'blocked-provider'].includes(entry.phase)) draft.delete(id); }
+    });
   }
-  private save(): Promise<void> {
-    const data = JSON.stringify({ version: 1, migratedAt: this.migratedAt, entries: [...this.entries.values()], policies: [...this.policies.values()] });
-    const next = this.writing.then(() => writePrivateJson(join(this.root, 'journal.json'), data, { syncDirectory: true }));
+  private commit(mutate: (entries: Map<string, RetentionJournalEntry>, policies: Map<string, RetentionPolicyState>) => void): Promise<void> {
+    const next = this.writing.then(async () => {
+      // Build from the last committed state inside the queue; failed drafts never become visible.
+      const entries = new Map(this.entries), policies = new Map(this.policies);
+      mutate(entries, policies);
+      const data = JSON.stringify({ version: 1, migratedAt: this.migratedAt, entries: [...entries.values()], policies: [...policies.values()] });
+      await writePrivateJson(join(this.root, 'journal.json'), data, { syncDirectory: true });
+      this.entries = entries; this.policies = policies;
+    });
     this.writing = next.catch(error => { console.error('Retention journal write failed:', error); }); return next;
   }
 }

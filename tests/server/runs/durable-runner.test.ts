@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -248,6 +248,37 @@ test('reopening does not claim success or change visibility when archive cancell
   assert.equal(unavailableClient.supports('retention'), false);
   await assert.rejects(unavailableClient.setClosed(unavailable.session.id, false), /retention initialization unavailable/);
   assert.equal(unavailableClient.applyClosed(unavailable.session).closed, true);
+});
+
+test('reopening retries a real archive cancellation write failure and remains cancelled after state reload', async t => {
+  const f = await fixture(true, true); t.after(f.cleanup);
+  t.mock.method(console, 'error', () => {});
+  const client = await f.connect();
+  const restoredAt = '2026-10-01T00:00:00.000Z';
+  const archivedAt = '2026-10-02T00:00:00.000Z';
+  await f.retentionStore.setPolicy({ id: f.session.id, archivedAt, archiveRevision: 4, restoredAt });
+  const entry = { id: 'retained-backup', candidate: { rootId: f.session.id, ids: [f.session.id], reason: 'explicit-archive' as const, revisions: { [f.session.id]: 4 } }, phase: 'backup-verified' as const, updatedAt: restoredAt };
+  await f.retentionStore.put(entry);
+  await client.setClosed(f.session.id, true);
+  const root = f.retentionStore.root;
+  const displacedRoot = `${root}-displaced`;
+  await rename(root, displacedRoot);
+  await writeFile(root, 'fixture blocks retention directory writes');
+  try {
+    await assert.rejects(client.setClosed(f.session.id, false), /ENOTDIR/);
+    assert.equal(client.applyClosed(f.session).closed, true);
+  } finally {
+    await rm(root, { force: true });
+    await rename(displacedRoot, root);
+  }
+  await client.setClosed(f.session.id, false);
+  assert.equal(Boolean(client.applyClosed(f.session).closed), false);
+  const reloaded = new RetentionStore(root); await reloaded.start();
+  assert.equal(reloaded.policy(f.session.id)?.archivedAt, undefined, 'successful retry must persist cancellation rather than leave the archive request to revive after restart');
+  assert.equal(reloaded.policy(f.session.id)?.archiveRevision, 5);
+  assert.equal(reloaded.policy(f.session.id)?.restoredAt, restoredAt);
+  assert.deepEqual(reloaded.get(entry.id), entry);
+  assert.equal(f.starts(), 0);
 });
 
 test('UI disconnect and reconnect preserve a running provider turn and its output', async t => {
