@@ -151,6 +151,7 @@ export class SessionService extends EventEmitter {
       }
       // A provider whose history could not be listed completely (a folder unreadable or missing) proves no conversation of it is gone.
       const incomplete = new Set<Provider>();
+      const coldIdsAtStart = new Set(this.coldIds);
       const [codex, archived, claude] = await Promise.all([
         walk(join(this.codexHome, 'sessions'), 6, () => incomplete.add('codex')), walk(join(this.codexHome, 'archived_sessions'), 6, () => incomplete.add('codex')),
         walk(join(this.claudeHome, 'projects'), 6, () => incomplete.add('claude')),
@@ -194,6 +195,7 @@ export class SessionService extends EventEmitter {
       if (unchecked.some(state => Date.now() - Date.parse(state.session.createdAt) < 120_000) && Date.now() - this.lastProcesses > 1000) await this.inspect();
       for (const state of unchecked) this.checked.add(state.session.id);
       const live = new Set([...this.records.values()].map(state => state.session.id));
+      for (const id of coldIdsAtStart) live.add(id);
       for (const id of this.coldIds) live.add(id);
       // A helper that was detached from its launcher, so the process tree no longer shows who started it, left a mark.
       if (this.launchMarks) {

@@ -134,15 +134,29 @@ test('unknown cold role is policy-blocked while reservation and automatic restor
  const release=manager.reserveRetention([C.id]);assert.ok(release);assert.ok(manager.retentionReservedIds().has(A.id));release();assert.equal((await manager.enqueue(C.id,'new task after native restore')).status,'queued');
 });
 
-test('durable intent publication preserves launcher proofs between multi-member Claude moves and restoration',async t=>{
+for(const direction of ['ordinary','restore-race'] as const)test(`durable intent publication preserves launcher proofs through ${direction}`,async t=>{
  const root=await realpath(await mkdtemp(join(tmpdir(),'tower-retention-ancestry-')));const claudeHome=join(root,'claude'),codexHome=join(root,'codex'),native=join(claudeHome,'projects','fixture');await mkdir(native,{recursive:true});await mkdir(join(codexHome,'sessions'),{recursive:true});await mkdir(join(root,'observer'));
  const clock=Date.now(),created=new Date(clock-20*day).toISOString(),ended=new Date(clock-8*day).toISOString();
  for(const id of ['A','B','C'])await writeFile(join(native,id+'.jsonl'),JSON.stringify({type:'user',sessionId:id,cwd:root,entrypoint:id==='A'?'cli':'sdk-cli',timestamp:created,message:{role:'user',content:id}})+'\n'+JSON.stringify({type:'assistant',timestamp:ended,message:{role:'assistant',content:'finished',stop_reason:'end_turn'}})+'\n');
  let inspections=0;const proofs=join(root,'launch-proofs.json');const sessions=new SessionService({claudeHome,codexHome,launchProofs:proofs,inspectProcesses:async()=>({claude:new Map(),codex:new Set<string>(),providerRunning:{claude:false,codex:false},launchers:++inspections===1?new Map([['claude:B',['claude:A']],['claude:C',['claude:B']]]):new Map()})});await sessions.refresh(true);
  const store=new RetentionStore(join(root,'state'));await store.start(clock-10*day);const observer=new RetentionObserver({stateDir:join(root,'observer'),now:()=>clock,snapshot:()=>sessions.completedRetentionRecords(),journalMembers:()=>store.list().flatMap(entry=>entry.members||[]),reconcile:value=>value,runs:()=>[],settled:()=>new Set(),protectedIds:()=>[],projectIdentity:async()=>'fixture'});await observer.start();const originals=join(root,'originals');
- const adapter=createNativeRetentionAdapter({claude:[join(claudeHome,'projects')],codex:[join(codexHome,'sessions'),join(codexHome,'archived_sessions')]},{coldRoot:originals,claudeHome,codexHome,inspect:async()=>({complete:true,activeIds:new Set(),issues:[]})});
- const service=new RetentionService({store,archive:new RetentionArchive(join(root,'bundles'),[join(claudeHome,'projects')],[originals]),adapter,observe:()=>observer.observe(),refresh:()=>sessions.refresh(true),onColdChanged:members=>sessions.setColdRegistry(members.flatMap(member=>[member.originalPath,...member.coldPath?[member.coldPath]:[]]),store.list().flatMap(entry=>entry.members||[]).filter(member=>member.state!=='restored').map(member=>`${member.provider}:${member.nativeId}`))});await service.start();t.after(async()=>{await service.quiesce();sessions.stop();await rm(root,{recursive:true,force:true});});
+ let beginRestore=false,raceStarted=false,barrierEnabled=false;let pendingScan:Promise<void>|undefined;let entered!:()=>void,release!:()=>void;
+ const atBarrier=new Promise<void>(resolve=>{entered=resolve;}),continueScan=new Promise<void>(resolve=>{release=resolve;});const originalStat=fsPromises.stat;
+ const adapter=createNativeRetentionAdapter({claude:[join(claudeHome,'projects')],codex:[join(codexHome,'sessions'),join(codexHome,'archived_sessions')]},{coldRoot:originals,claudeHome,codexHome,inspect:async()=>{if(direction==='restore-race'&&beginRestore&&!raceStarted){raceStarted=true;barrierEnabled=true;pendingScan=sessions.refresh();await atBarrier;}return{complete:true,activeIds:new Set(),issues:[]};}});
+ const service=new RetentionService({store,archive:new RetentionArchive(join(root,'bundles'),[join(claudeHome,'projects')],[originals]),adapter,observe:()=>observer.observe(),refresh:()=>sessions.refresh(true),onColdChanged:members=>{
+   sessions.setColdRegistry(members.flatMap(member=>[member.originalPath,...member.coldPath?[member.coldPath]:[]]),store.list().flatMap(entry=>entry.members||[]).filter(member=>member.state!=='restored').map(member=>`${member.provider}:${member.nativeId}`));
+   if(raceStarted&&store.list().some(entry=>entry.members?.some(member=>member.state==='restored'))){barrierEnabled=false;release();}
+ }});await service.start();t.after(async()=>{barrierEnabled=false;release();fsPromises.stat=originalStat;syncBuiltinESMExports();await pendingScan;await service.quiesce();sessions.stop();await rm(root,{recursive:true,force:true});});
+
  await service.verifyBackups();await service.archiveSession('claude:B');const entry=store.list().find(entry=>entry.members?.length===2)!;assert.ok(entry);assert.ok(entry.members!.every(member=>member.state==='cold'));
  await sessions.quiesce();sessions.resume();const persisted=JSON.parse(await readFile(proofs,'utf8'));assert.deepEqual(persisted.launches['claude:B'],['claude:A']);assert.deepEqual(persisted.launches['claude:C'],['claude:B']);
+ if(direction==='restore-race'){
+   fsPromises.stat=(async(...args:Parameters<typeof fsPromises.stat>)=>{if(barrierEnabled&&String(args[0])===join(native,'A.jsonl')){entered();await continueScan;}return originalStat(...args);}) as typeof fsPromises.stat;syncBuiltinESMExports();beginRestore=true;
+ }
  await service.restore(entry.id);assert.equal(sessions.get('claude:B')?.parentId,'claude:A');assert.equal(sessions.get('claude:C')?.parentId,'claude:B');assert.equal(sessions.get('claude:B')?.isSubagent,true);assert.equal(sessions.get('claude:C')?.isSubagent,true);
+ await sessions.quiesce();const restoredProofs=JSON.parse(await readFile(proofs,'utf8'));assert.deepEqual(restoredProofs.launches['claude:B'],['claude:A']);assert.deepEqual(restoredProofs.launches['claude:C'],['claude:B']);if(direction==='restore-race')assert.equal(raceStarted,true);
+
 });
+
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
