@@ -634,6 +634,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   const retentionArchive = new RetentionArchive(join(stateDir, 'retention-cold'), [...nativeRoots.claude, ...nativeRoots.codex], [join(stateDir, 'retention-originals')]);
   const nativeRetention = createNativeRetentionAdapter(nativeRoots, { coldRoot: join(stateDir, 'retention-originals'), codexHome: sessions.codexHome, claudeHome: sessions.claudeHome });
   const publishCold = () => {
+    const allMembers = retentionStore.list().flatMap(entry => entry.members || []);
+    runs.setRetentionLineage(allMembers,sessions.retentionRecords().launchers);
     const members = retentionStore.list().flatMap(entry => entry.members || []).filter(member => member.state === 'cold');
     sessions.setColdRegistry(members.flatMap(member => [member.originalPath, ...(member.coldPath ? [member.coldPath] : [])]), members.map(member => `${member.provider}:${member.nativeId}`), async () => { await initializedRetention?.reconcileCold(); const issues = initializedRetention?.coldInspectionIssues() || (retentionBootstrapError ? ['cold-registry-bootstrap-failed'] : retentionBootstrapIssues); return { complete: !issues.length, issues }; });
     runs.setColdSessions(members.map(member => member.sessionId), id => initializedRetention ? initializedRetention.restoreSession(id) : Promise.reject(new Error('Retention is not ready.')));
@@ -934,7 +936,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         read: async (id, limit, before) => runs.getSession(id) ? (await sessions.detail(runs.nativeSessionId(id), before, limit)) ?? { messages: [], hasMore: false } : undefined,
         search: async (id, query) => runs.getSession(id) ? (await sessions.search(runs.nativeSessionId(id), query)) ?? { count: 0, matches: [], bytes: 0 } : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
-    const observer = new RetentionObserver({ stateDir, snapshot: () => sessions.completedRetentionRecords(),
+    const observer = new RetentionObserver({ stateDir, journalMembers: () => retentionStore.list().flatMap(entry=>entry.members || []), snapshot: () => sessions.completedRetentionRecords(),
       reconcile: native => runs.sessionList(native), runs: () => runs.list(), settled: () => runs.settledRunIds(),
       protectedIds: () => {
         const ids = new Set(coordinators());

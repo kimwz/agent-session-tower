@@ -86,8 +86,10 @@ export class RetentionService {
       const members = new Map((current.members || []).map(item => [item.sessionId, item]));
       const previous = members.get(member.sessionId);
       if (previous) {
-        if (previous.operationId !== member.operationId || previous.provider !== member.provider || previous.nativeId !== member.nativeId || previous.originalPath !== member.originalPath || previous.parentId !== member.parentId) throw new Error('Native member provenance cannot be replaced.');
+        if (previous.operationId !== member.operationId || previous.provider !== member.provider || previous.nativeId !== member.nativeId || previous.originalPath !== member.originalPath || previous.parentId !== member.parentId || previous.isSubagent !== member.isSubagent || previous.parentLink !== member.parentLink || previous.createdAt !== member.createdAt) throw new Error('Native member provenance cannot be replaced.');
         if (previous.provider === 'claude' && previous.coldPath && previous.coldPath !== member.coldPath) throw new Error('Managed original path cannot be replaced.');
+        const relationships = new Set((member.relationships || []).map(edge=>JSON.stringify(edge)));
+        if ((previous.relationships || []).some(edge=>!relationships.has(JSON.stringify(edge)))) throw new Error('Verified child relationships cannot be removed or replaced.');
         const sidecars = new Set((member.sidecars || []).map(file => JSON.stringify([file.originalPath, file.coldPath])));
         if ((previous.sidecars || []).some(file => !sidecars.has(JSON.stringify([file.originalPath, file.coldPath])))) throw new Error('Owned sidecar recovery information cannot be removed.');
       }

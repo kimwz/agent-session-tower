@@ -1,7 +1,7 @@
 import type { Provider } from '../../../shared/types.js';
 import type { RetentionCandidate, RetentionRecord } from './policy.js';
 export interface RetentionSourceFile { path: string; originalPath?: string; provenance?: 'native-archive' | 'cold-original'; root: string; nativeId: string; provider: Provider }
-export type { RetentionCandidate, RetentionFileManifest, RetentionManifest, RetentionPhase, RetentionJournalEntry, RetentionMember, RetentionCapability, RetentionOverview } from '../../../shared/retention.js';
+export type { RetentionCandidate, RetentionFileManifest, RetentionManifest, RetentionPhase, RetentionJournalEntry, RetentionMember, RetentionNode, RetentionRelationship, RetentionCapability, RetentionOverview } from '../../../shared/retention.js';
 import type { RetentionManifest, RetentionCapability, RetentionMember } from '../../../shared/retention.js';
 export interface RetentionOperationContext {
   operationId: string;

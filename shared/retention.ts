@@ -11,8 +11,18 @@ export interface RetentionManifest {
   files: RetentionFileManifest[];
 }
 export type RetentionPhase = 'planned' | 'backup-verified' | 'blocked-provider' | 'removing' | 'archived' | 'conflict' | 'missing-backup' | 'restored-awaiting-start';
+/** Proven relationship metadata only; it conveys no file ownership or move authority. */
+export interface RetentionRelationship {
+  id: string; provider: Provider; nativeId: string; parentId: string;
+  isSubagent: true; parentLink?: 'exec'; createdAt: string;
+}
+export interface RetentionNode {
+  id: string; provider: Provider; nativeId: string; parentId?: string;
+  isSubagent?: boolean; parentLink?: 'exec'; createdAt?: string;
+}
 export interface RetentionMember {
   sessionId: string; provider: Provider; nativeId: string; parentId?: string;
+  isSubagent?: boolean; parentLink?: 'exec'; createdAt?: string; relationships?: RetentionRelationship[];
   originalPath: string; coldPath?: string; operationId: string;
   state: 'intent' | 'cold' | 'restored' | 'conflict';
   identity: { dev: number; ino: number; size: number; mtimeMs: number };

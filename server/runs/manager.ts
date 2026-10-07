@@ -1,3 +1,5 @@
+import { resolveRetentionLineage } from '../sessions/retention/ancestry.js';
+import type { RetentionMember } from '../../shared/retention.js';
 import { MAX_ATTACHMENTS } from '../../shared/attachments.js';
 import type { PermissionRequest } from '../../shared/permissions.js';
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from 'node:child_process';
@@ -138,6 +140,11 @@ export class RunManager extends EventEmitter {
   private readonly reservedSessions = new Set<string>();
   private readonly retentionReservations = new Set<string>();
   private readonly retentionWaiters = new Set<() => void>();
+  private retentionMembers: readonly RetentionMember[] = [];
+  private retentionLaunchers: ReadonlyMap<string, readonly string[]> = new Map();
+  setRetentionLineage(members: readonly RetentionMember[], launchers: ReadonlyMap<string, readonly string[]> = new Map()): void {
+    this.retentionMembers=structuredClone(members); this.retentionLaunchers=new Map(launchers);
+  }
   private coldSessionIds: ReadonlySet<string> = new Set();
   private restoreCold?: (id: string) => Promise<void>;
   setColdSessions(ids: Iterable<string>, restore?: (id: string) => Promise<void>): void {
@@ -145,11 +152,36 @@ export class RunManager extends EventEmitter {
   }
   reserveRetention(ids: readonly string[]): (() => void) | undefined {
     const keys = new Set(ids.map(id => this.nativeSessionId(id)));
-    // A Claude parent may resume its native descendants; reserve its ancestor admission too.
+    const metadata = new Map<string, RetentionMember>();
+    const provenParents = new Map<string, Set<string>>();
+    const edge = (id:string,parent:string) => { const values=provenParents.get(id)||new Set<string>();values.add(parent);provenParents.set(id,values); };
+    for(const member of this.retentionMembers) {
+      for(const alias of [member.sessionId,`${member.provider}:${member.nativeId}`]) {
+        if(member.state==='cold') metadata.set(alias,member);
+        if(member.parentId) edge(alias,member.parentId);
+      }
+      for(const relation of member.relationships || []) for(const alias of [relation.id,`${relation.provider}:${relation.nativeId}`]) edge(alias,relation.parentId);
+    }
+    const pending=[...keys],seenIds=new Set<string>(),hotById=new Map<string,Session>();
+    while(pending.length) {
+      const id=pending.pop()!;if(seenIds.has(id))continue;seenIds.add(id);
+      const hot=this.getSession(id),cold=metadata.get(id),node=hot||cold;
+      if(hot)hotById.set(hot.id,hot);
+      if(node?.provider!=='claude')continue;
+      if(node.parentId)pending.push(node.parentId);
+      for(const alias of [id,hot?.id,cold?.sessionId,`${node.provider}:${node.nativeId}`]) if(alias) {
+        pending.push(...provenParents.get(alias)||[],...this.retentionLaunchers.get(alias)||[]);
+      }
+    }
+    const hot=[...hotById.values()];
+    const lineage=resolveRetentionLineage(hot,this.retentionMembers,this.retentionLaunchers);
+    const nodeFor=(id:string)=>lineage.nodes.get(lineage.aliases.get(id)??id);
+    // A lost hot exec edge and each cold intermediate use the same policy-only proof.
+    // Reserve every reachable Claude ancestor even when its historical role is unknown.
     for (const id of [...keys]) {
-      const seen = new Set<string>(); let session = this.getSession(id);
-      while (session?.provider === 'claude' && session.parentId && !seen.has(session.parentId)) {
-        seen.add(session.parentId); keys.add(this.nativeSessionId(session.parentId)); session = this.getSession(session.parentId);
+      const seen = new Set<string>(); let node = nodeFor(id);
+      while (node?.provider === 'claude' && node.parentId && !seen.has(node.parentId)) {
+        seen.add(node.parentId); keys.add(this.nativeSessionId(node.parentId)); node = nodeFor(node.parentId);
       }
     }
     if ([...keys].some(id => this.retentionReservations.has(id))) return undefined;

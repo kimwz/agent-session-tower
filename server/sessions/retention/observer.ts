@@ -4,6 +4,8 @@ import { join, isAbsolute } from 'node:path';
 import { promisify } from 'node:util';
 import type { Run, Session } from '../../../shared/types.js';
 import { readPrivateJson, writePrivateJson } from '../../stores/private-json.js';
+import { resolveRetentionLineage } from './ancestry.js';
+import type { RetentionMember } from '../../../shared/retention.js';
 import type { RetentionObservation, RetentionRecord } from './policy.js';
 
 /** An execution result stays protected until delivered, even if no notification was requested. */
@@ -15,6 +17,7 @@ export interface NativeRetentionObservation {
   complete: boolean;
   issues?: string[];
   records: { session: Session; internal: boolean; fingerprint: string; lastActivityAt?: string; latestTaskEndedAt?: string }[];
+  launchers?: ReadonlyMap<string, readonly string[]>;
 }
 interface InactiveObservation { fingerprint: string; since: string; observedAt: number }
 export interface RetentionObserverOptions {
@@ -27,6 +30,7 @@ export interface RetentionObserverOptions {
   protectedIds: () => Iterable<string>;
   projectIdentity?: (cwd: string) => Promise<string | undefined>;
   now?: () => number;
+  journalMembers?: () => RetentionMember[];
 }
 const exec = promisify(execFile);
 /** Existing git metadata proves linked worktrees share one project. Missing folders stay unclassified. */
@@ -76,10 +80,11 @@ export class RetentionObserver {
     try { snapshot = await this.options.snapshot(); }
     catch (error) { this.inactive.clear(); this.restarted = true; throw error; }
     const now = this.options.now?.() ?? Date.now();
-    const sessions = this.options.reconcile(snapshot.records.map(record => record.session));
+    const lineage=resolveRetentionLineage(this.options.reconcile(snapshot.records.map(record => record.session)),this.options.journalMembers?.() || [],snapshot.launchers);
+    const sessions = lineage.sessions;
     const byNative = new Map(sessions.map(session => [`${session.provider}:${session.nativeId}`, session]));
     const aliases = new Map<string, string>();
-    for (const session of sessions) { aliases.set(session.id, session.id); aliases.set(`${session.provider}:${session.nativeId}`, session.id); }
+    for (const session of [...lineage.ancestry,...sessions]) { aliases.set(session.id, session.id); aliases.set(`${session.provider}:${session.nativeId}`, session.id); }
     const protectedIds = new Set<string>();
     const protect = (id: string) => { protectedIds.add(aliases.get(id) ?? id); };
     for (const id of this.options.protectedIds()) protect(id);
@@ -88,8 +93,8 @@ export class RetentionObserver {
       if (run.status === 'queued' || run.status === 'running' || run.approvals?.length || run.backgroundWait || !settled.has(run.id)) protect(run.sessionId);
     }
     for (const session of sessions) if (session.activeProcess || session.status === 'working' || session.creationPending || session.scheduledAt) protect(session.id);
-    const byId = new Map(sessions.map(session => [session.id, session]));
-    const parentOf = (session: Session) => session.parentId ? aliases.get(session.parentId) ?? aliases.get(`${session.provider}:${session.parentId}`) ?? session.parentId : undefined;
+    const byId = lineage.nodes;
+    const parentOf = (session: {parentId?:string;provider:string}) => session.parentId ? aliases.get(session.parentId) ?? aliases.get(`${session.provider}:${session.parentId}`) ?? session.parentId : undefined;
     for (const raw of snapshot.records) {
       const session = byNative.get(`${raw.session.provider}:${raw.session.nativeId}`) ?? raw.session;
       if (session.provider !== 'claude' || !session.isSubagent) continue;
@@ -125,6 +130,6 @@ export class RetentionObserver {
     try { await writePrivateJson(this.path, JSON.stringify({ version: 1, entries: [...current] }), { syncDirectory: true }); }
     catch (error) { this.inactive.clear(); this.restarted = true; throw error; }
     this.inactive = current; this.restarted = false;
-    return { now, migratedAt: 0, complete: snapshot.complete, issues: snapshot.issues, records, protectedIds };
+    return { now, migratedAt: 0, complete: snapshot.complete, issues: snapshot.issues, records, protectedIds, ancestry:lineage.ancestry, blockedIds:lineage.blockedIds };
   }
 }

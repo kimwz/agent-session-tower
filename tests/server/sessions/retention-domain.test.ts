@@ -413,11 +413,16 @@ test('member commits preserve ownership and sidecar recovery while allowing vali
   const service=new RetentionService({store,archive:new RetentionArchive(join(path,'bundles'),[]),observe:async()=>observation([record('parent'),source]),adapter:{capability:()=>({status:'supported'}),files:async()=>[],inspectCold:async members=>({complete:true,members,issues:[]}),reserve:async(_candidate,_records,ctx)=>{context=ctx;return undefined;}}});
   await service.start();try{
     await service.cycle();
-    const member={sessionId:'child',nativeId:'child',provider:'codex' as const,parentId:'parent',originalPath:join(path,'hot'),coldPath:join(path,'expected-cold'),operationId:context.operationId,state:'conflict' as const,identity:{dev:1,ino:2,size:3,mtimeMs:4},sidecars:[{originalPath:join(path,'hot.meta'),coldPath:join(path,'cold.meta'),identity:{dev:1,ino:3,size:4,mtimeMs:5}}]};
+    const member={sessionId:'child',nativeId:'child',provider:'codex' as const,parentId:'parent',originalPath:join(path,'hot'),coldPath:join(path,'expected-cold'),operationId:context.operationId,state:'conflict' as const,isSubagent:true,parentLink:'exec' as const,createdAt:new Date(now-20*day).toISOString(),relationships:[{id:'grandchild',provider:'codex' as const,nativeId:'grandchild',parentId:'child',isSubagent:true as const,createdAt:new Date(now-19*day).toISOString()}],identity:{dev:1,ino:2,size:3,mtimeMs:4},sidecars:[{originalPath:join(path,'hot.meta'),coldPath:join(path,'cold.meta'),identity:{dev:1,ino:3,size:4,mtimeMs:5}}]};
     await context.commitMember(member);
     await assert.rejects(context.commitMember({...member,sidecars:[]}),/sidecar recovery/);
     await assert.rejects(context.commitMember({...member,operationId:'foreign-op'}),/operation ownership/);
     await assert.rejects(context.commitMember({...member,nativeId:'foreign-native'}),/provenance/);
+    await assert.rejects(context.commitMember({...member,isSubagent:false}),/provenance/);
+    await assert.rejects(context.commitMember({...member,relationships:[]}),/child relationships/);
+    const current=store.get(context.operationId)!;await store.put({...current,members:[{...member,isSubagent:undefined}]});
+    await assert.rejects(context.commitMember(member),/provenance/,'legacy unknown role cannot be granted on retry');
+    await store.put({...current,members:[member]});
     assert.deepEqual(store.get(context.operationId)?.members,[member]);
     const read=context.journalMembers();read[0].sidecars=[];assert.deepEqual(context.journalMembers()[0].sidecars,member.sidecars,'ownership snapshots must be isolated clones');
     assert.equal(context.managedCold().length,0);assert.equal(context.journalMembers()[0].state,'conflict');

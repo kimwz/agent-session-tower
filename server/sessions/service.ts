@@ -106,10 +106,10 @@ export class SessionService extends EventEmitter {
   resume(): void { this.quiesced = false; }
   list(): Session[] { return [...this.index.values()].map((record) => ({ ...record.session })).sort(sortSessions); }
   /** Metadata only, including internal guardian records omitted from ordinary discovery. */
-  retentionRecords(): { complete: boolean; issues: string[]; records: { session: Session; internal: boolean; fingerprint: string; lastActivityAt?: string; latestTaskEndedAt?: string }[] } {
+  retentionRecords(): { launchers: ReadonlyMap<string, readonly string[]>; complete: boolean; issues: string[]; records: { session: Session; internal: boolean; fingerprint: string; lastActivityAt?: string; latestTaskEndedAt?: string }[] } {
     const chosen = new Map(this.index);
     for (const state of this.records.values()) if (state.internal && !chosen.has(state.session.id)) chosen.set(state.session.id, state);
-    return { complete: this.retentionComplete && !this.scanning && !this.quiesced && this.diagnostics.length === 0,
+    return { launchers:new Map([...this.launchers].map(([id, parents])=>[id,[...parents]])), complete: this.retentionComplete && !this.scanning && !this.quiesced && this.diagnostics.length === 0,
       issues: [...new Set([...(this.scanning ? ['scan-in-progress'] : []), ...(this.quiesced ? ['observer-paused'] : []),
         ...this.retentionIssues, ...this.diagnostics.map(item => `native-record-read-error:${item.provider}`)])],
       records: [...chosen.values()].map(state => ({ session: { ...state.session }, internal: state.internal,

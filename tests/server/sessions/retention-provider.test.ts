@@ -10,8 +10,8 @@ import type { RetentionMember, RetentionManifest, RetentionOperationContext } fr
 function record(filePath: string): RetentionRecord { return { kind:'subagent',session:{ id:'claude:child',nativeId:'child',provider:'claude',title:'fixture',cwd:'/',project:'fixture',status:'completed',statusReason:'fixture',createdAt:'2026-01-01T00:00:00Z',updatedAt:'2026-01-01T00:00:00Z',lastMessage:'done',messageCount:1,isSubagent:true,resumable:false,filePath,parentId:'claude:parent' } }; }
 const candidate={rootId:'claude:child',ids:['claude:child'],reason:'child-expired' as const,revisions:{}};
 const manifest:RetentionManifest={version:1,id:'fixture',createdAt:'2026-01-01T00:00:00Z',reason:'child-expired',sessions:[],files:[]};
-async function fixture(){const temporary=await mkdtemp(join(tmpdir(),'tower-retention-provider-'));const base=await realpath(temporary);const root=join(base,'projects');await mkdir(root);const file=join(root,'child.jsonl');await writeFile(file,'fixture');const source=record(file);let active=new Set<string>();let complete=true;const committed:RetentionMember[]=[];
- const context:RetentionOperationContext={operationId:'fixture-operation',journalMembers:()=>{const latest=new Map(committed.map(member=>[member.sessionId,member]));return structuredClone([...latest.values()]);},managedCold:()=>[],fresh:async()=>({now:Date.now(),migratedAt:0,complete,records:[source],protectedIds:active}),commitMember:async member=>{committed.push(structuredClone(member));}};
+async function fixture(){const temporary=await mkdtemp(join(tmpdir(),'tower-retention-provider-'));const base=await realpath(temporary);const root=join(base,'projects');await mkdir(root);const file=join(root,'child.jsonl');await writeFile(file,'fixture');const source=record(file);const parent=record(file);Object.assign(parent.session,{id:'claude:parent',nativeId:'parent',isSubagent:false,parentId:undefined,filePath:undefined});parent.kind='parent';let active=new Set<string>();let complete=true;const committed:RetentionMember[]=[];
+ const context:RetentionOperationContext={operationId:'fixture-operation',journalMembers:()=>{const latest=new Map(committed.map(member=>[member.sessionId,member]));return structuredClone([...latest.values()]);},managedCold:()=>[],fresh:async()=>({now:Date.now(),migratedAt:0,complete,records:[source,parent],protectedIds:active}),commitMember:async member=>{committed.push(structuredClone(member));}};
  const adapter=createNativeRetentionAdapter({claude:[root],codex:[root]},{coldRoot:join(base,'cold'),codexHome:base,claudeHome:base,inspect:async()=>({complete,activeIds:active,issues:complete?[]:['denied']})});
  return {base,root,file,source,context,adapter,committed,active(value:Set<string>){active=value;},complete(value:boolean){complete=value;},close:()=>rm(temporary,{recursive:true,force:true})};}
 
@@ -68,4 +68,48 @@ test('partial retry preserves recreated hot metadata and completed restoration d
   const meta=restored.file.replace('.jsonl','.meta.json');await writeFile(meta,'metadata');const first=await restored.adapter.reserve(candidate,[restored.source],restored.context);assert.ok(first);const moved=await first.moveCold();await first.release();await restored.adapter.restore!(manifest,'restore-complete',moved,restored.context);
   restored.context.operationId='new-owner-after-restoration';const next=await restored.adapter.reserve(candidate,[restored.source],restored.context);assert.ok(next);assert.equal((await next.moveCold())[0].state,'cold');await next.release();
  }finally{await restored.close();}
+});
+
+test('cold ancestry keeps native-qualified live ancestors protected for archive and restore',async()=>{
+ const f=await fixture();try{
+  f.source.session.parentId='claude:bridge-alias';const fresh=f.context.fresh;
+  f.context.fresh=async()=>{const base=await fresh();return {...base,records:base.records.map(item=>item.session.id==='claude:parent'?{...item,session:{...item.session,nativeId:'native-ancestor'}}:item),ancestry:[{id:'claude:bridge-alias',provider:'claude',nativeId:'bridge-native',parentId:'claude:parent',isSubagent:true}]};};
+  for(const active of ['claude:native-ancestor','claude:bridge-native']){f.active(new Set([active]));assert.equal(await f.adapter.reserve(candidate,[f.source],f.context),undefined);}
+  f.active(new Set());const lease=await f.adapter.reserve(candidate,[f.source],f.context);assert.ok(lease);const moved=await lease.moveCold();await lease.release();
+  f.active(new Set(['claude:bridge-native']));const blocked=await f.adapter.restore!(manifest,'restore-active-bridge',moved,f.context);assert.equal(blocked[0].state,'conflict');await assert.rejects(()=>access(f.file));
+  f.active(new Set());const restored=await f.adapter.restore!(manifest,'restore-inactive-bridge',moved,f.context);assert.equal(restored[0].state,'restored');assert.equal(await readFile(f.file,'utf8'),'fixture');
+ }finally{await f.close();}
+});
+test('archive rejects unknown cold ancestry while restore tolerates unavailable ancestry roles',async()=>{
+ const f=await fixture();try{
+  const lease=await f.adapter.reserve(candidate,[f.source],f.context);assert.ok(lease);const moved=await lease.moveCold();await lease.release();
+  const fresh=f.context.fresh;f.context.fresh=async()=>({...await fresh(),ancestry:[{id:'claude:parent',provider:'claude',nativeId:'parent'}],records:[f.source]});
+  const restored=await f.adapter.restore!(manifest,'restore-unknown-role',moved,f.context);assert.equal(restored[0].state,'restored');assert.equal(await f.adapter.reserve(candidate,[f.source],f.context),undefined);
+  f.context.fresh=async()=>({...await fresh(),records:[f.source]});assert.equal(await f.adapter.reserve(candidate,[f.source],f.context),undefined);
+ }finally{await f.close();}
+});
+test('initial native member captures exact source role and verified direct child relations without retry grants',async()=>{
+ const f=await fixture();try{
+  f.source.session.parentLink='exec';const child=record(f.file);Object.assign(child.session,{id:'claude:descendant',nativeId:'descendant',parentId:f.source.session.id,parentLink:'exec'});const fresh=f.context.fresh;f.context.fresh=async()=>({...await fresh(),records:[...((await fresh()).records),child]});
+  const lease=await f.adapter.reserve(candidate,[f.source],f.context);assert.ok(lease);const moved=await lease.moveCold();await lease.release();assert.equal(moved[0].isSubagent,true);assert.equal(moved[0].parentLink,'exec');assert.equal(moved[0].relationships?.[0].id,child.session.id);assert.equal(moved[0].relationships?.[0].parentId,f.source.session.id);
+  await rename(moved[0].coldPath!,f.file);const legacy={...(await f.adapter.inspectCold(moved)).members[0]};delete legacy.isSubagent;delete legacy.parentLink;delete legacy.relationships;await f.context.commitMember(legacy);
+  const retry=await f.adapter.reserve(candidate,[f.source],f.context);assert.ok(retry);const again=await retry.moveCold();assert.equal(again[0].isSubagent,undefined);assert.equal(again[0].parentLink,undefined);assert.equal(again[0].relationships,undefined);await retry.release();
+ }finally{await f.close();}
+});
+
+test('cold ancestry cycles and resolved alias conflicts never grant archive or restoration',async()=>{
+ const f=await fixture();try{
+  const first=await f.adapter.reserve(candidate,[f.source],f.context);assert.ok(first);const moved=await first.moveCold();await first.release();const fresh=f.context.fresh;
+  f.context.fresh=async()=>({...await fresh(),records:[f.source],ancestry:[{id:'claude:parent',provider:'claude',nativeId:'parent',isSubagent:true,parentId:f.source.session.id}]});
+  assert.equal((await f.adapter.restore!(manifest,'restore-cycle',moved,f.context))[0].state,'conflict');
+  f.context.fresh=async()=>({...await fresh(),blockedIds:new Set(['claude:parent'])});assert.equal((await f.adapter.restore!(manifest,'restore-alias-conflict',moved,f.context))[0].state,'conflict');await assert.rejects(()=>access(f.file));
+ }finally{await f.close();}
+});
+test('one family reservation captures child relations from one shared fresh snapshot and still revalidates later',async()=>{
+ const f=await fixture();try{
+  const sources=[f.source];for(let index=1;index<128;index++){const path=join(f.root,'family-'+index+'.jsonl');await writeFile(path,'child');const child=record(path);Object.assign(child.session,{id:'claude:family-'+index,nativeId:'family-'+index,parentId:f.source.session.id});sources.push(child);}
+  const fresh=f.context.fresh;let observations=0;f.context.fresh=async()=>{observations++;const base=await fresh();return {...base,records:[...base.records,...sources.slice(1)]};};
+  const family={rootId:f.source.session.id,ids:sources.map(source=>source.session.id),reason:'explicit-archive' as const,revisions:{}};const lease=await f.adapter.reserve(family,sources,f.context);assert.ok(lease);assert.equal(observations,2);assert.equal(await lease.revalidate(),true);assert.equal(observations,3);
+  f.active(new Set(['claude:parent']));assert.equal(await lease.revalidate(),false);assert.equal(observations,4);assert.equal(await readFile(f.file,'utf8'),'fixture');await lease.release();
+ }finally{await f.close();}
 });

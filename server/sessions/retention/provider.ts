@@ -8,6 +8,7 @@ import type { RetentionAdapter, RetentionMember, RetentionOperationContext, Rete
 import { privateDirectory, validateOperationId } from './store.js';
 import { CodexMaintenanceClient, type CodexMaintenance } from './codex-maintenance.js';
 import { inspectNativeRetention, type NativeInspection } from './native-inspection.js';
+import { retentionNodeMap, nodeAliases } from './ancestry.js';
 
 export interface NativeRetentionOptions {
   coldRoot: string; codexHome: string; claudeHome: string; codexExecutable?: string;
@@ -47,10 +48,18 @@ export function createNativeRetentionAdapter(roots: Record<Provider, readonly st
   const configured = () => { if (!options) throw new Error('Native retention configuration unavailable.'); };
   async function protectedNow(records: RetentionRecord[], context: RetentionOperationContext): Promise<boolean> {
     const fresh = await context.fresh(); const processes = await inspect(); if (!fresh.complete || !processes.complete) throw new Error('Fresh native retention inspection incomplete.');
-    const current = new Map(fresh.records.map(record => [record.session.id, record]));
+    if ((fresh.ancestry?.length || 0) > 20_000) throw new Error('Native ancestry exceeds metadata budget.');
+    const current = retentionNodeMap(fresh);
     for (const record of records) { let id: string | undefined = record.session.id; const seen = new Set<string>();
-      while (id) { if (seen.has(id)) return true; seen.add(id); const native = current.get(id)?.session || (id === record.session.id ? record.session : undefined); if (fresh.protectedIds.has(id) || fresh.blockedIds?.has(id) || processes.activeIds.has(id) || (native && processes.activeIds.has(`${native.provider}:${native.nativeId}`))) return true;
-        id = record.session.provider === 'claude' ? (current.get(id)?.session.parentId || (id === record.session.id ? record.session.parentId : undefined)) : undefined;
+      while (id) {
+        const native = current.get(id) || (id === record.session.id ? record.session : undefined);
+        if (!native) return true;
+        if (seen.has(native.id)) return true; seen.add(native.id);
+        if (nodeAliases(native).some(alias => fresh.protectedIds.has(alias) || fresh.blockedIds?.has(alias) || processes.activeIds.has(alias))) return true;
+        if (native.isSubagent === undefined) return true;
+        if (record.session.provider !== 'claude' || native.isSubagent === false) break;
+        if (!native.parentId) return true;
+        id = native.parentId;
       }
     } return false;
   }
@@ -118,6 +127,22 @@ export function createNativeRetentionAdapter(roots: Record<Provider, readonly st
       }
       const planned: RetentionMember[] = [];
       const journal = context.journalMembers();
+      const ownersByNative = new Map<string, RetentionMember[]>();
+      for (const member of journal) { const key = `${member.provider}:${member.nativeId}`; const owners = ownersByNative.get(key) || []; owners.push(member); ownersByNative.set(key, owners); }
+      const relationshipsByParent = new Map<string, NonNullable<RetentionMember['relationships']>>();
+      if (records.some(({ session }) => !ownersByNative.get(`${session.provider}:${session.nativeId}`)?.some(member => member.operationId === context.operationId))) {
+        const fresh = await context.fresh();
+        if (!fresh.complete || (fresh.ancestry?.length || 0) > 20_000) throw new Error('Direct child relationship inspection incomplete.');
+        const nodes = retentionNodeMap(fresh);
+        for (const { session: child } of fresh.records) {
+          if (child.isSubagent !== true || !child.parentId || !child.createdAt || nodeAliases(child).some(alias => fresh.blockedIds?.has(alias))) continue;
+          const parent = nodes.get(child.parentId)?.id;
+          if (!parent || parent === child.id) continue;
+          const relationships = relationshipsByParent.get(parent) || [];
+          relationships.push({ id: child.id, provider: child.provider, nativeId: child.nativeId, parentId: parent, isSubagent: true, parentLink: child.parentLink, createdAt: child.createdAt });
+          relationshipsByParent.set(parent, relationships);
+        }
+      }
       const claudeFiles = (member: RetentionMember) => [...member.sidecars || [], { originalPath: member.originalPath, coldPath: member.coldPath!, identity: member.identity }];
       const validateClaudePaths = (member: RetentionMember) => {
         const expected = join(resolve(options!.coldRoot), member.operationId, 'claude', member.nativeId, basename(member.originalPath));
@@ -132,7 +157,7 @@ export function createNativeRetentionAdapter(roots: Record<Provider, readonly st
       };
       for (const { session } of records) {
         if (!session.filePath || !/^[A-Za-z0-9_-]+$/.test(session.nativeId)) throw new Error('Native transcript identity missing.');
-        const owners = journal.filter(member => member.provider === session.provider && member.nativeId === session.nativeId);
+        const owners = ownersByNative.get(`${session.provider}:${session.nativeId}`) || [];
         for (const owner of owners.filter(member => member.operationId !== context.operationId)) {
           // A newer revision must not adopt a partially moved original belonging to an older journal.
           // Restored history alone is harmless; only an actually retained original defers this candidate.
@@ -147,10 +172,11 @@ export function createNativeRetentionAdapter(roots: Record<Provider, readonly st
         const owned = owners.find(member => member.operationId === context.operationId);
         if (owned && (owned.sessionId !== session.id || owned.originalPath !== session.filePath || owned.parentId !== session.parentId)) return undefined;
         const member: RetentionMember = owned ? { ...structuredClone(owned), state: 'intent' } : {
-          sessionId: session.id, nativeId: session.nativeId, provider: session.provider, parentId: session.parentId, originalPath: session.filePath,
+          sessionId: session.id, nativeId: session.nativeId, provider: session.provider, parentId: session.parentId, isSubagent: session.isSubagent, parentLink: session.parentLink, createdAt: session.createdAt, originalPath: session.filePath,
           coldPath: session.provider === 'claude' ? join(resolve(options!.coldRoot), context.operationId, 'claude', session.nativeId, basename(session.filePath)) : join(options!.codexHome, 'archived_sessions', basename(session.filePath)),
           operationId: context.operationId, state: 'intent', identity: await safeFile(session.filePath, roots[session.provider]) };
         delete member.error;
+        if (!owned) member.relationships = structuredClone(relationshipsByParent.get(session.id) || []);
         if (session.provider === 'claude') {
           validateClaudePaths(member);
           const sidecar = session.filePath.replace(/\.jsonl$/, '.meta.json');
@@ -208,10 +234,17 @@ export function createNativeRetentionAdapter(roots: Record<Provider, readonly st
         for (const saved of members) { const member = structuredClone(saved);
           try {
             const fresh = await context.fresh(); const processes = await inspect(); if (!fresh.complete || !processes.complete) throw new Error('Fresh restore inspection incomplete.');
-            if (fresh.protectedIds.has(member.sessionId) || (processes.activeIds.has(member.sessionId) || processes.activeIds.has(`${member.provider}:${member.nativeId}`))) throw new Error('Native restore target active.');
+            if ([member.sessionId, `${member.provider}:${member.nativeId}`].some(alias => fresh.protectedIds.has(alias) || fresh.blockedIds?.has(alias) || processes.activeIds.has(alias))) throw new Error('Native restore target active or conflicted.');
             if (member.provider === 'claude') {
-              const records = new Map(fresh.records.map(record => [record.session.id, record])); const seen = new Set<string>(); let parent = member.parentId;
-              while (parent) { if (seen.has(parent) || fresh.protectedIds.has(parent) || processes.activeIds.has(parent)) throw new Error('Native parent active or unproven.'); seen.add(parent); parent = records.get(parent)?.session.parentId; }
+              if ((fresh.ancestry?.length || 0) > 20_000) throw new Error('Native ancestry exceeds metadata budget.');
+              const records = retentionNodeMap(fresh); const seen = new Set<string>([member.sessionId]); let parent = member.parentId;
+              while (parent) {
+                const node = records.get(parent);
+                if (fresh.protectedIds.has(parent) || fresh.blockedIds?.has(parent) || processes.activeIds.has(parent)) throw new Error('Native parent active or conflicted.');
+                if (!node) break; // Missing role/ancestry must not prevent restoration of an owned original.
+                if (seen.has(node.id) || nodeAliases(node).some(alias => fresh.protectedIds.has(alias) || fresh.blockedIds?.has(alias) || processes.activeIds.has(alias))) throw new Error('Native parent active or conflicted.');
+                seen.add(node.id); parent = node.parentId;
+              }
             }
             if (member.provider === 'codex') {
               const observation = await coldInspection([member]); if (!observation.complete) throw new Error(observation.issues.join('; '));
