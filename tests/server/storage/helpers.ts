@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { lstat, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import fsPromises, { lstat, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { TestContext } from 'node:test';
+import { Worker } from 'node:worker_threads';
 import { build } from 'esbuild';
 import type { CapturedStorageBundle, StorageBuildContext } from '../../../server/storage/bundle.js';
 import type { StorageClient, StorageClientOptions } from '../../../server/storage/client.js';
@@ -23,7 +25,7 @@ export const FIXTURE_A_ENTRY = here('./fixtures/fixture-thread-a.ts');
 export const fixtureManifest = storageManifest([fixtureSchema, plainSchema]);
 export const fixtureManifestA = storageManifest([fixtureSchemaA, plainSchema]);
 
-const FAULTS = ['protocol', 'app-version', 'forged-manifest', 'source-hash', 'no-sqlite', 'exit-on-check', 'exit-on-open', 'change-on-check', 'change-exit-on-check', 'stall-on-check', 'swap-on-open'] as const;
+const FAULTS = ['protocol', 'app-version', 'forged-manifest', 'source-hash', 'no-sqlite', 'exit-on-check', 'exit-on-open', 'exit-after-open', 'change-on-check', 'change-exit-on-check', 'stall-on-check', 'swap-on-open'] as const;
 export type FaultThread = typeof FAULTS[number];
 /** Every thread source the fixture build trusts, each with the contract its thread must declare. */
 const SOURCES: Record<'fixture' | 'fixture-a' | 'production' | FaultThread, [entry: string, manifest: StorageBuildManifest]> = {
@@ -129,6 +131,65 @@ export const rejectsWith = (promise: Promise<unknown>, expected: Partial<Record<
     for (const [key, value] of Object.entries(expected)) assert.equal((error as unknown as Record<string, unknown>)[key], value, `${key}: ${(error as Error).message}`);
     return true;
   });
+
+type Args<F> = F extends (...args: infer A) => unknown ? A : never;
+/**
+ * Puts `replacement` in place of `target[name]` until the test ends; it gets the original to call. `target` is a
+ * storageFs of the fixture build or node:fs/promises itself, whose functions the storage modules import by name (the
+ * builtin's named bindings are synced to the replacement and back).
+ */
+export function replaceCall<T extends object, K extends keyof T>(t: TestContext, target: T, name: K, replacement: (original: T[K], ...args: Args<T[K]>) => unknown): void {
+  const original = target[name];
+  target[name] = (async (...args: Args<T[K]>) => replacement(original, ...args)) as T[K];
+  syncBuiltinESMExports();
+  t.after(() => { target[name] = original; syncBuiltinESMExports(); });
+}
+export { fsPromises };
+
+/** A call held by holdCall: `reached` settles once the call is made and waiting; `release` lets it go on, or fail with `error`. */
+export interface Hold { reached: Promise<void>; release(error?: Error): void; readonly held: number }
+/**
+ * The next call of `target[name]` whose arguments `matches` waits until the test releases it. A test awaits `reached`,
+ * so a step that never ran (a cached proof, say) cannot pass for a wait. Other calls run as usual; the test's end releases it.
+ */
+export function holdCall<T extends object, K extends keyof T>(t: TestContext, target: T, name: K, matches: (...args: Args<T[K]>) => boolean): Hold {
+  let armed = true;
+  let held = 0;
+  let reached!: () => void;
+  let release!: (error?: Error) => void;
+  const reachedAt = new Promise<void>(resolve => { reached = resolve; });
+  const released = new Promise<Error | undefined>(resolve => { release = resolve; });
+  replaceCall(t, target, name, async (original, ...args) => {
+    if (armed && matches(...args)) {
+      armed = false;
+      held++;
+      reached();
+      const error = await released;
+      if (error) throw error;
+    }
+    return (original as (...values: unknown[]) => unknown)(...args);
+  });
+  t.after(() => release());
+  return { reached: reachedAt, release: error => release(error), get held() { return held; } };
+}
+
+/**
+ * The requests the storage posted to its threads, in order, each with the thread it went to and that thread's exit.
+ * `drop` keeps one from being delivered.
+ */
+export function threadRequests(t: TestContext, drop?: (op: string) => boolean): { op: string; worker: Worker; exited: Promise<number> }[] {
+  const posted: { op: string; worker: Worker; exited: Promise<number> }[] = [];
+  const exits = new WeakMap<Worker, Promise<number>>();
+  const post = Worker.prototype.postMessage;
+  t.mock.method(Worker.prototype, 'postMessage', function (this: Worker, message: unknown, transfer?: readonly never[]) {
+    const op = String((message as { op?: unknown })?.op);
+    if (!exits.has(this)) exits.set(this, new Promise<number>(resolve => this.once('exit', resolve)));
+    posted.push({ op, worker: this, exited: exits.get(this)! });
+    if (drop?.(op)) return;
+    post.call(this, message, transfer);
+  });
+  return posted;
+}
 
 /** Ends a process that holds the database without closing it, as a crash or power loss would: its WAL and shm stay. */
 export async function crashWith(database: string, sql: string): Promise<void> {

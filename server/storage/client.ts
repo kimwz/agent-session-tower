@@ -93,7 +93,10 @@ export class StorageClient {
   #inflight?: Pending;
   #nextId = 1;
   #schema?: SchemaState;
-  #ownerEpoch?: number;
+  /** A new object for every open: what gate() and prepare() started on, never reused (unlike owner numbers). */
+  #generation: object = {};
+  /** This worker's claim in the current open, a new object for every claim. */
+  #claim?: { readonly ownerEpoch: number };
   #runtime?: RuntimeInfo;
   #recovery?: RecoveryHoldSummary;
   #openCheck?: StorageOpenCheck;
@@ -124,7 +127,7 @@ export class StorageClient {
     return structuredClone({
       state: this.#state, pending: this.#queue.length + (this.#inflight ? 1 : 0),
       ...(this.identity ? { identity: this.identity } : {}), ...(this.#runtime ? { runtime: this.#runtime } : {}), ...(this.#schema ? { schema: this.#schema } : {}),
-      ...(this.#ownerEpoch !== undefined ? { ownerEpoch: this.#ownerEpoch } : {}), ...(this.#failure ? { failure: this.#failure } : {}), ...(this.#recovery ? { recovery: this.#recovery } : {}),
+      ...(this.#claim ? { ownerEpoch: this.#claim.ownerEpoch } : {}), ...(this.#failure ? { failure: this.#failure } : {}), ...(this.#recovery ? { recovery: this.#recovery } : {}),
       ...(this.#openCheck ? { openCheck: this.#openCheck } : {}),
     });
   }
@@ -132,21 +135,29 @@ export class StorageClient {
   /**
    * Whether durable work of `scope` (`core` or a domain) may go ahead now: the storage is ready and claimed by this
    * worker (prepare() succeeded since the last open), and no recovery barrier holds the scope. Reads the barrier fresh,
-   * and a barrier that releases the scope counts only once it is proven durable.
+   * and a barrier that releases the scope counts only once it is proven durable. The answer is for the open and claim
+   * the call started on, checked again after each wait: a thread that ended, a close, or a reopen and a new claim
+   * meanwhile keep it closed, and only a read of the current open is published as its recovery status.
    */
   async gate(scope: string): Promise<StorageGate> {
+    const generation = this.#generation;
+    const claim = this.#claim;
+    const current = () => this.#generation === generation && this.#state === 'ready' && this.#claim === claim;
     const reasons: string[] = [];
-    if (this.#state !== 'ready') reasons.push(this.#failure ? `Storage is unavailable: ${this.#failure.message}` : `Storage is ${this.#state}.`);
-    else if (this.#ownerEpoch === undefined) reasons.push('Storage is open but not prepared by this worker.');
+    if (this.#state !== 'ready') reasons.push(this.#stateReason());
+    else if (!claim) reasons.push('Storage is open but not prepared by this worker.');
     if (!this.#context.ok) return { open: false, reasons: [...reasons, this.#context.failure.message] };
     const read = await readRecoveryBarrier(this.#layout ?? this.#options.stateDir);
-    this.#recovery = recoverySummary(read, this.#context);
+    if (this.#generation === generation) this.#recovery = recoverySummary(read, this.#context);
     const hold = recoveryHold(read, scope, this.#context);
     if (hold.held) reasons.push(hold.reason!);
-    else if (read.state === 'present' && !reasons.length) {
+    else if (read.state === 'present' && !reasons.length && current()) {
       try { await proveRecoveryBarrier(this.#layout!, read); } catch (error) {
         reasons.push(`The recovery barrier that releases ${scope} is not durable yet: ${error instanceof Error ? error.message : String(error)}`);
       }
+    }
+    if (!reasons.length && !current()) {
+      reasons.push(this.#state === 'ready' ? 'Storage was reopened or claimed again while the gate was checked; ask again.' : this.#stateReason());
     }
     return { open: !reasons.length, reasons };
   }
@@ -180,7 +191,7 @@ export class StorageClient {
         thread.expected = true;
         const exitCode = await gone(thread);
         this.#state = 'closed';
-        this.#ownerEpoch = undefined;
+        this.#claim = undefined;
         return { ack: 'closed' as const, status: this.status(), exitCode };
       } catch (error) {
         if (!this.#unavailable()) this.#fail(failureOf('close', (error as StorageCommandError).code ?? 'sqlite-error', (error as Error).message, true));
@@ -209,9 +220,13 @@ export class StorageClient {
    * storage: creating a storage records it as `creating` first and `created` after the commit, and an identity found
    * there (from an earlier, perhaps failed, record) is proven durable again before it is used. A failed identity
    * record or proof leaves the storage unavailable; when the prepare had already committed, the error says `committed`.
+   * All of it belongs to the open the prepare started on: after a close or reopen meanwhile it claims nothing and fails
+   * nothing in the open since, and a commit the thread answered still says `committed`.
    */
   async prepare(input: { allowMigration: boolean; commandId?: string }): Promise<PrepareResult> {
     const commandId = input.commandId ?? `prepare-${randomUUID()}`;
+    const generation = this.#generation;
+    const current = () => this.#generation === generation && this.#state === 'ready';
     const layout = this.#layout;
     const schema = this.#schema;
     if (this.#state !== 'ready' || !layout || !schema) throw this.#refusal('prepare', commandId);
@@ -219,20 +234,22 @@ export class StorageClient {
     if (schema.kind === 'empty') {
       if (!input.allowMigration) throw new StorageCommandError({ phase: 'prepare', code: 'migration-required', message: 'The storage is empty; creating it is a schema change this start may not make.', disposition: 'not-committed', retryable: false, commandId });
       try { storageId = await this.#identityForCreation(layout); } catch (error) {
-        throw this.#failAfter(error, 'not-committed', commandId, 'The storage identity could not be recorded before creating the storage');
+        throw this.#failAfter(error, 'not-committed', commandId, 'The storage identity could not be recorded before creating the storage', generation);
       }
+      if (!current()) throw this.#stalePrepare(commandId, 'not-committed');
     } else storageId = schema.storageId;
     const result = await this.#send({ id: 0, op: 'prepare', commandId, allowMigration: input.allowMigration, storageId }, 'write', 'prepare', this.#limits.commandDeadlineMs, commandId) as PrepareThreadResult;
-    this.#schema = result.schema;
     // The commit is durable from here on: a failure below never says otherwise.
+    if (this.#generation === generation) this.#schema = result.schema;
+    if (!current()) throw this.#stalePrepare(commandId, 'committed');
     try {
       if (result.schema.kind === 'empty') throw new StoragePathError('database-missing', 'The prepare committed, yet the database reads as empty.');
       await this.#recordCreated(layout, result.schema.storageId);
     } catch (error) {
-      throw this.#failAfter(error, 'committed', commandId, 'The prepare committed, but the storage identity could not be recorded durably, so this worker does not claim the storage');
+      throw this.#failAfter(error, 'committed', commandId, 'The prepare committed, but the storage identity could not be recorded durably, so this worker does not claim the storage', generation);
     }
-    if (this.#state !== 'ready') throw this.#refusal('prepare', commandId, 'committed');
-    if (result.claimed) this.#ownerEpoch = result.ownerEpoch;
+    if (!current()) throw this.#stalePrepare(commandId, 'committed');
+    if (result.claimed) this.#claim = { ownerEpoch: result.ownerEpoch };
     return { ownerEpoch: result.ownerEpoch, applied: result.applied, schema: result.schema, created: result.created, replayed: result.replayed, claimed: result.claimed };
   }
 
@@ -251,9 +268,9 @@ export class StorageClient {
   /** A registered domain write command, committed once per command ID with its receipt. */
   async write<T = unknown>(domain: string, command: string, payload: unknown, commandId: string): Promise<WriteResult<T>> {
     const text = this.#payload(payload, commandId);
-    if (this.#ownerEpoch === undefined && this.#state === 'ready') throw new StorageCommandError({ phase: 'command', code: 'not-prepared', message: 'The storage was not prepared by this worker.', disposition: 'not-committed', retryable: false, commandId });
+    if (!this.#claim && this.#state === 'ready') throw new StorageCommandError({ phase: 'command', code: 'not-prepared', message: 'The storage was not prepared by this worker.', disposition: 'not-committed', retryable: false, commandId });
     // Not ready: #send refuses with the storage's own state or failure.
-    const value = await this.#send({ id: 0, op: 'write', domain, command, payload: text, commandId, ownerEpoch: this.#ownerEpoch ?? 0 }, 'write', 'command', this.#limits.commandDeadlineMs, commandId) as { result: T; replayed: boolean };
+    const value = await this.#send({ id: 0, op: 'write', domain, command, payload: text, commandId, ownerEpoch: this.#claim?.ownerEpoch ?? 0 }, 'write', 'command', this.#limits.commandDeadlineMs, commandId) as { result: T; replayed: boolean };
     return writeResult(value.result, value.replayed, commandId);
   }
 
@@ -289,18 +306,31 @@ export class StorageClient {
     return run;
   }
 
+  #stateReason(): string {
+    return this.#failure ? `Storage is unavailable: ${this.#failure.message}` : `Storage is ${this.#state}.`;
+  }
+
   /** The error for a command the storage cannot take in its current state. */
   #refusal(phase: StorageErrorPhase, commandId?: string, disposition: CommitDisposition = 'not-committed'): StorageCommandError {
     const code: StorageErrorCode = this.#state === 'unavailable' ? this.#failure?.code ?? 'not-ready' : 'not-ready';
-    return new StorageCommandError({ phase, code, message: this.#failure ? `Storage is unavailable: ${this.#failure.message}` : `Storage is ${this.#state}.`, disposition, retryable: this.#failure?.retryable ?? true, commandId });
+    return new StorageCommandError({ phase, code, message: this.#stateReason(), disposition, retryable: this.#failure?.retryable ?? true, commandId });
   }
 
-  /** A file failure around a prepare: the storage becomes unavailable (intake holds), and the error keeps the commit's disposition. */
-  #failAfter(error: unknown, disposition: CommitDisposition, commandId: string, context: string): StorageCommandError {
+  /** The error of a prepare whose open ended, or was replaced by another, while it waited. */
+  #stalePrepare(commandId: string, disposition: CommitDisposition): StorageCommandError {
+    if (this.#state !== 'ready') return this.#refusal('prepare', commandId, disposition);
+    return new StorageCommandError({ phase: 'prepare', code: 'not-ready', message: 'The storage was closed and opened again while this prepare ran, so it claims nothing; prepare again.', disposition, retryable: true, commandId });
+  }
+
+  /**
+   * A file failure around a prepare: the storage becomes unavailable (intake holds) when it is still the open the
+   * prepare started on (`generation`), and the error keeps the commit's disposition.
+   */
+  #failAfter(error: unknown, disposition: CommitDisposition, commandId: string, context: string, generation: object): StorageCommandError {
     if (error instanceof StorageCommandError) return error;
     const { code, retryable, message } = fileError(error);
     const text = `${context}: ${message}`;
-    if (!this.#unavailable()) this.#fail(failureOf('prepare', code, text, retryable));
+    if (!this.#unavailable() && this.#generation === generation) this.#fail(failureOf('prepare', code, text, retryable));
     return new StorageCommandError({ phase: 'prepare', code, message: text, disposition, retryable, commandId });
   }
 
@@ -352,7 +382,8 @@ export class StorageClient {
 
   async #open(): Promise<StorageStatus> {
     this.#state = 'opening';
-    this.#failure = undefined; this.#schema = undefined; this.#ownerEpoch = undefined; this.#runtime = undefined; this.#openCheck = undefined; this.#lost = undefined;
+    this.#generation = {};
+    this.#failure = undefined; this.#schema = undefined; this.#claim = undefined; this.#runtime = undefined; this.#openCheck = undefined; this.#lost = undefined;
     const context = this.#context;
     if (!context.ok) return this.#fail({ ...context.failure, at: now() });
 
@@ -370,8 +401,8 @@ export class StorageClient {
     const verdict = evaluateRuntime(hello.runtime, hello.runtimeError);
     if (!verdict.supported) return this.#fail(failureOf('runtime', 'unsupported-runtime', verdict.reason, false));
 
-    let layout: StorageLayout;
-    let before: StorageFiles;
+    let layout: StorageLayout | undefined;
+    let before: StorageFiles | undefined;
     let expected: StorageExpectation | undefined;
     let created = false;
     let phase: StorageErrorPhase = 'paths';
@@ -398,25 +429,26 @@ export class StorageClient {
         created = true;
       }
     } catch (error) {
-      // SQLite has not been asked to open anything yet, so the files are as found (or a new empty database was made).
-      if (this.#lost) return this.#fail(this.#lost);
       const { code, retryable, message, ...extra } = fileError(error);
-      return this.#fail(failureOf(RECOVERY_CODES.has(code) ? 'recovery' : phase, code, message, retryable, extra));
+      const failure = this.#lost ?? failureOf(RECOVERY_CODES.has(code) ? 'recovery' : phase, code, message, retryable, extra);
+      // Until the live files were found nothing was sent to SQLite, and there is nothing to compare them with: they
+      // are as found. From then on (a new empty database being made included) the refusal compares them.
+      return before ? this.#refuse(failure, layout!, before) : this.#fail(failure);
     }
-    if (this.#lost) return this.#fail(this.#lost);
+    if (this.#lost) return this.#refuse(this.#lost, layout, before);
 
     // Every existing database is judged on a private copy first: opening the live files read-write could recover,
     // checkpoint or remove a WAL before the schema is known, sidecars or not. A file this open just made is empty.
     let checked: SchemaState | undefined;
     if (!created) {
-      try { checked = await this.#checkCopy(layout, before, expected); } catch (error) { return this.#refuse(error, layout, before); }
+      try { checked = await this.#checkCopy(layout, before, expected); } catch (error) { return this.#refuse(this.#openFailure(error), layout, before); }
     }
     let opened: OpenResult;
     try {
       // The live files are opened only as they were checked: the same files, unchanged since.
       await this.#unchanged(layout, before);
       opened = await this.#send({ id: 0, op: 'open', open: { path: layout.database, busyTimeoutMs: this.#limits.busyTimeoutMs, maxResultBytes: this.#limits.maxResultBytes, identity: context.identity, ...(expected ? { expected } : {}) } }, 'control', 'open', this.#limits.handshakeDeadlineMs) as OpenResult;
-    } catch (error) { return this.#refuse(error, layout, before); }
+    } catch (error) { return this.#refuse(this.#openFailure(error), layout, before); }
 
     try {
       // The file SQLite opened is the one checked before, and it holds the storage its copy was checked as.
@@ -426,14 +458,10 @@ export class StorageClient {
       // A storage found without its identity (or still marked as being created) is named now, durably, before anything may claim it.
       if (opened.schema.kind !== 'empty') await this.#recordCreated(layout, opened.schema.storageId);
     } catch (error) {
-      if (this.#lost) return this.#fail(this.#lost);
-      // best-effort: the path failure is what is reported, and #fail ends the thread either way
-      await this.#send({ id: 0, op: 'close' }, 'control', 'close', this.#limits.commandDeadlineMs).catch(() => {});
       const { code, retryable, message, ...extra } = fileError(error);
-      // SQLite wrote to the live files only after they were checked; a file that turned out to be another one was not preserved.
-      return this.#fail(failureOf('paths', code, message, retryable, { ...extra, sourcePreserved: code !== 'source-changed' && code !== 'path-changed' }));
+      return this.#refuse(this.#lost ?? failureOf('paths', code, message, retryable, extra), layout, before);
     }
-    if (this.#lost) return this.#fail(this.#lost);
+    if (this.#lost) return this.#refuse(this.#lost, layout, before);
     this.#schema = opened.schema;
     this.#state = 'ready';
     return this.status();
@@ -444,19 +472,38 @@ export class StorageClient {
     if (!sameStorageFiles(before, await storageFiles(layout))) throw new StoragePathError('source-changed', `${layout.database} changed while it was checked; another process may be using it.`, true);
   }
 
+  /** Why the check or the open of the live files failed: the thread's own failure when it was lost. */
+  #openFailure(error: unknown): StorageFailure {
+    if (this.#lost) return this.#lost;
+    if (error instanceof StorageCommandError) return failureOf(SCHEMA_CODES.has(error.code) ? 'schema' : 'open', error.code, error.message, error.retryable);
+    const { code, retryable, message, ...extra } = fileError(error);
+    return failureOf('open', code, message, retryable, extra);
+  }
+
   /**
-   * A refused open after the live files were found: the failure (the thread's own when it was lost), with whether the
-   * live database, WAL and shm are still the files found, unchanged, compared now. A change the open saw is never
-   * reported as preserved.
+   * The one end of every open refused after the live files were found (`before`). `cause` is fixed on entry: what the
+   * cleanup meets (a lost thread, a failed close) never replaces it. The thread is first made unable to change the
+   * files: asked to close its connection (unless it was lost), then ended, each within the command deadline. Only
+   * then are the live database, WAL and shm compared with `before` and the storage failed, once. A thread that did not
+   * end in time (it stays, so the next reopen waits for it), files that cannot be compared, or a change the open saw
+   * are never reported as preserved.
    */
-  async #refuse(error: unknown, layout: StorageLayout, before: StorageFiles): Promise<StorageStatus> {
-    let failure: StorageFailure;
-    if (this.#lost) failure = this.#lost;
-    else if (error instanceof StorageCommandError) failure = failureOf(SCHEMA_CODES.has(error.code) ? 'schema' : 'open', error.code, error.message, error.retryable);
-    else { const { code, retryable, message, ...extra } = fileError(error); failure = failureOf('open', code, message, retryable, extra); }
-    // best-effort: files that can no longer be checked are reported as not preserved; the refusal itself is what is reported
-    const same = await storageFiles(layout).then(after => sameStorageFiles(before, after), () => false);
-    return this.#fail({ ...failure, sourcePreserved: same && failure.code !== 'source-changed' });
+  async #refuse(cause: StorageFailure, layout: StorageLayout, before: StorageFiles): Promise<StorageStatus> {
+    const thread = this.#thread;
+    let settled = !thread || thread.exitCode !== undefined;
+    if (thread && !settled) {
+      const deadlineMs = this.#limits.commandDeadlineMs;
+      // best-effort: a close that fails or is not answered is followed by ending the thread; the cause is what is reported
+      if (!this.#lost) await this.#send({ id: 0, op: 'close' }, 'control', 'close', deadlineMs).catch(() => {});
+      thread.expected = true;
+      if (thread.exitCode === undefined) void thread.worker.terminate();
+      let timer: NodeJS.Timeout | undefined;
+      settled = await Promise.race([gone(thread).then(() => true), new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), deadlineMs); })]);
+      clearTimeout(timer);
+    }
+    // best-effort: files that can no longer be compared are reported as not preserved
+    const same = settled && await storageFiles(layout).then(after => sameStorageFiles(before, after), () => false);
+    return this.#fail({ ...cause, sourcePreserved: same && cause.code !== 'source-changed' && cause.code !== 'path-changed' });
   }
 
   /**
@@ -608,7 +655,7 @@ export class StorageClient {
   #fail(failure: StorageFailure): StorageStatus {
     this.#state = 'unavailable';
     this.#failure = failure;
-    this.#ownerEpoch = undefined;
+    this.#claim = undefined;
     this.#stopThread(failure);
     const status = this.status();
     try { this.#options.onUnavailable?.(status); } catch { /* best-effort: the worker's hold callback must not change the storage's own state. */ }

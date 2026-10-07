@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -72,6 +72,60 @@ test('a checkout trusts only the thread its own first capture bundles from its c
     open: [true, 'closed', 'ready', true, true],
   });
   assert.deepEqual(Object.keys(await filesUnder(state)).sort(), [DATABASE, 'storage-recovery', 'storage-recovery/identity.json']);
+});
+
+test('a checkout whose own thread entry changes after its capture reopens with the capture, and trusts no thread bundled from the change (an isolated copy of the checkout)', async t => {
+  // A copy of what a checkout capture bundles (compileStorage's sources, and the tsconfig.json esbuild compiles them
+  // with), run by tsx from its own folder.
+  const checkout = await mkdtemp(join(tmpdir(), 'tower-storage-checkout-'));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  await cp(join(root, 'server/storage'), join(checkout, 'server/storage'), { recursive: true });
+  await cp(join(root, 'shared/app-identity.ts'), join(checkout, 'shared/app-identity.ts'));
+  await cp(join(root, 'tsconfig.json'), join(checkout, 'tsconfig.json'));
+  await writeFile(join(checkout, 'package.json'), '{"type":"module"}');
+  await symlink(join(root, 'node_modules'), join(checkout, 'node_modules'));
+  const state = await stateDir(t);
+  const fresh = await stateDir(t);
+  const module = (path: string) => JSON.stringify(join(checkout, path));
+  const script = `
+    const { captureStorageBundle, storageBundleFromArtifact } = await import(${module('server/storage/bundle.ts')});
+    const { openStorage } = await import(${module('server/storage/index.ts')});
+    const { bundleStorageThread, STORAGE_THREAD_ENTRY } = await import(${module('server/storage/thread-bundle.mjs')});
+    const { readdir, readFile, writeFile } = await import('node:fs/promises');
+    const code = bundle => bundle.ok ? 'ok' : bundle.failure.code;
+    const captured = await captureStorageBundle();
+    const client = await openStorage({ stateDir: ${JSON.stringify(state)}, bundle: captured });
+    const prepared = await client.prepare({ allowMigration: true });
+    const closed = await client.close();
+    // The checkout's own default entry changes, in code its thread would run.
+    const entry = await readFile(STORAGE_THREAD_ENTRY, 'utf8');
+    await writeFile(STORAGE_THREAD_ENTRY, entry.replace('runStorageThread([]);', 'if (Date.now() < 0) throw new Error("a changed checkout");\\nrunStorageThread([]);'));
+    const changed = await bundleStorageThread();
+    const reopened = await client.reopen();
+    const claimed = await client.prepare({ allowMigration: false });
+    const gate = await client.gate('core');
+    await client.close();
+    const other = await openStorage({ stateDir: ${JSON.stringify(fresh)}, bundle: { ok: true, source: changed.source, sourceHash: changed.sourceHash, origin: 'development', capturedAt: '' } });
+    const refusal = other.status().failure?.code;
+    await other.close();
+    console.log(JSON.stringify({
+      entry: STORAGE_THREAD_ENTRY, captured: captured.sourceHash, changed: changed.sourceHash, runsChange: changed.source.includes('a changed checkout'), once: (await captureStorageBundle()) === captured,
+      open: [prepared.created, closed.ack, reopened.state, reopened.identity.sourceHash, claimed.claimed, gate.open],
+      changedArtifact: code(storageBundleFromArtifact(JSON.stringify(changed), 'development')), refusal, freshFiles: (await readdir(${JSON.stringify(fresh)})).length,
+    }));`;
+  const { stdout } = await run(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], { cwd: checkout });
+  const result = lastJson(stdout);
+  const canonical = await bundleStorageThread();
+  assert.equal(result.entry, join(await realpath(checkout), 'server/storage/thread/main.ts'), 'the copy bundles its own default entry');
+  assert.equal(result.captured, canonical.sourceHash, 'the same sources as this checkout: the capture is the canonical thread');
+  assert.notEqual(result.changed, result.captured, 'the change is in the bundled code, not only in its comments');
+  assert.equal(result.runsChange, true);
+  assert.equal(result.once, true);
+  assert.deepEqual(result.open, [true, 'closed', 'ready', result.captured, true, true], 'the reopen runs the captured thread');
+  assert.equal(result.changedArtifact, 'bundle-untrusted');
+  assert.equal(result.refusal, 'bundle-untrusted');
+  assert.equal(result.freshFiles, 0, 'nothing touched for the changed thread');
+  assert.equal((await bundleStorageThread()).sourceHash, canonical.sourceHash, 'this checkout itself is unchanged');
 });
 
 test('the same sources give the same thread text and hash, in the format the worker reads', async () => {

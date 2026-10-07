@@ -8,8 +8,8 @@ import type { StorageClientOptions } from '../../../server/storage/client.js';
 import type { StorageStatus } from '../../../server/storage/contract.js';
 import { storageManifest } from '../../../server/storage/schema.js';
 import {
-  artifactOf, bundleBody, crashWith, DATABASE, databasePath, filesUnder, fixtureManifest, openFixture, rehashedArtifact, stateDir, statedSource, storage, threadBundle,
-  type FaultThread,
+  artifactOf, bundleBody, crashWith, DATABASE, databasePath, filesUnder, fixtureManifest, fsPromises, openFixture, rehashedArtifact, replaceCall, stateDir, statedSource, storage,
+  threadBundle, threadRequests, type FaultThread,
 } from './helpers.js';
 
 const { openStorage, storageBundleFromArtifact, readStorageBundleArtifact } = storage;
@@ -241,6 +241,85 @@ test('the live database opened must hold the storage its copy was checked as: on
   const status = await refused(t, { stateDir: dir, ...fault('swap-on-open') }, { phase: 'paths', code: 'source-changed', retryable: true, sourcePreserved: false });
   assert.match(status.failure!.message, /not the storage its copy was checked as/);
   assert.ok(!(await filesUnder(dir))['storage-recovery/identity.json'], 'no identity was recorded for the storage it found');
+});
+
+/** The live database files of a filesUnder() listing. */
+const liveFiles = (facts: Awaited<ReturnType<typeof filesUnder>>) => Object.fromEntries(Object.entries(facts).filter(([name]) => name.startsWith(DATABASE)));
+const eio = () => Object.assign(new Error('injected EIO'), { code: 'EIO' });
+/** A storage found without its identity: the open names it only after SQLite opened the live files. */
+async function unnamedShaped(t: Parameters<typeof openFixture>[0], crashed: boolean): Promise<{ dir: string; recoveryDir: string }> {
+  const dir = await existingShaped(t, crashed);
+  await rename(join(dir, 'storage-recovery', 'identity.json'), join(dir, 'identity-aside.json'));
+  return { dir, recoveryDir: (await storage.storageLayout(dir)).recoveryDir };
+}
+
+test('an open refused after SQLite opened the live files (the identity cannot be recorded) is compared once the thread closed them: changed when the close checkpointed a WAL, preserved when not', async t => {
+  for (const [shape, crashed] of shapes) {
+    const { dir, recoveryDir } = await unnamedShaped(t, crashed);
+    const before = await filesUnder(dir);
+    const requests = threadRequests(t);
+    let injected = 0;
+    replaceCall(t, storage.storageFs, 'syncDirectory', (original, path) => { if (path === recoveryDir) { injected++; throw eio(); } return original(path); });
+    await refused(t, { stateDir: dir, bundle: threadBundle('fixture') }, { phase: 'paths', code: 'io-error', retryable: true, sourcePreserved: !crashed });
+    assert.equal(injected, 1, `${shape}: the identity record failed after the open`);
+    assert.deepEqual(requests.map(request => request.op), ['check', 'open', 'close'], `${shape}: SQLite opened the live files, and closed them before the comparison`);
+    if (crashed) assert.notDeepEqual(liveFiles(await filesUnder(dir)), liveFiles(before), 'the close checkpointed the WAL into the database');
+    else assert.deepEqual(liveFiles(await filesUnder(dir)), liveFiles(before), 'nothing to checkpoint: the live files are as found');
+  }
+});
+
+test('a thread that ends right after it opened the live files: the refusal waits for the end, compares, and tells the worker once', async t => {
+  for (const [shape, crashed] of shapes) {
+    const { dir, recoveryDir } = await unnamedShaped(t, crashed);
+    const before = await filesUnder(dir);
+    const requests = threadRequests(t);
+    let recorded = 0;
+    // The open's identity record waits until the thread that answered the open has ended.
+    replaceCall(t, storage.storageFs, 'createFile', async (original, path, data) => {
+      if (path.startsWith(join(recoveryDir, '.identity.json.'))) { recorded++; await requests.find(request => request.op === 'open')!.exited; }
+      return original(path, data);
+    });
+    await refused(t, { stateDir: dir, ...fault('exit-after-open') }, { phase: 'thread-exit', code: 'thread-exited', sourcePreserved: !crashed });
+    assert.equal(recorded, 1, `${shape}: the open was answered before the thread ended`);
+    if (crashed) assert.notDeepEqual(liveFiles(await filesUnder(dir)), liveFiles(before), 'the connection recovered the WAL before the thread ended');
+    else assert.deepEqual(liveFiles(await filesUnder(dir)), liveFiles(before), 'the ended thread\'s connection left the live files as found');
+  }
+});
+
+test('a refusal whose own cleanup fails keeps its cause: a comparison that cannot be made, or a close that is never answered, is not preserved', async t => {
+  // The comparison cannot be made: a rollback journal appears beside the database.
+  const unreadable = await unnamedShaped(t, false);
+  replaceCall(t, storage.storageFs, 'syncDirectory', async (original, path) => {
+    if (path === unreadable.recoveryDir) { await writeFile(`${databasePath(unreadable.dir)}-journal`, '', { mode: 0o600 }); throw eio(); }
+    return original(path);
+  });
+  await refused(t, { stateDir: unreadable.dir, bundle: threadBundle('fixture') }, { phase: 'paths', code: 'io-error', sourcePreserved: false });
+  // The thread never answers the close: it is ended at the deadline, and the identity failure stays the cause.
+  const unanswered = await unnamedShaped(t, true);
+  const requests = threadRequests(t, op => op === 'close');
+  replaceCall(t, storage.storageFs, 'syncDirectory', (original, path) => { if (path === unanswered.recoveryDir) throw eio(); return original(path); });
+  const status = await refused(t, { stateDir: unanswered.dir, bundle: threadBundle('fixture'), limits: { commandDeadlineMs: 1000 } }, { phase: 'paths', code: 'io-error', sourcePreserved: false });
+  assert.match(status.failure!.message, /injected EIO/);
+  assert.deepEqual(requests.map(request => request.op), ['check', 'open', 'close']);
+});
+
+test('a change to the live files after the private copy was checked and removed, just before the open, is refused before SQLite is asked to open them', async t => {
+  const dir = await existingShaped(t, true);
+  const requests = threadRequests(t);
+  let removed = 0;
+  replaceCall(t, fsPromises, 'rm', async (original, path, options) => {
+    await original(path, options);
+    if (String(path).includes('.storage-check-')) {
+      removed++;
+      // Another process writes to the live database.
+      const other = new DatabaseSync(databasePath(dir));
+      try { other.exec('PRAGMA user_version = 77'); } finally { other.close(); }
+    }
+  });
+  const status = await refused(t, { stateDir: dir, bundle: threadBundle('fixture') }, { phase: 'open', code: 'source-changed', retryable: true, sourcePreserved: false });
+  assert.match(status.failure!.message, /changed while it was checked/);
+  assert.equal(removed, 1, 'the change came once the copy was checked and removed');
+  assert.deepEqual(requests.map(request => request.op).filter(op => op !== 'close'), ['check'], 'the open of the live files was never sent');
 });
 
 test('without room for the private check copy, the open is refused no-space and retryable, says how much it needs, and leaves the source as it was', async t => {
