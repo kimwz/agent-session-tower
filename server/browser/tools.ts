@@ -63,10 +63,11 @@ export function browserEnvironment(env: NodeJS.ProcessEnv = process.env, home = 
   return { playwright: playwrightInstalled(), aside: findAside(env), claudeInChrome: claudeInChromeManifests(home, platform).some(path => existsSync(path)) };
 }
 
-let installed: boolean | undefined;
+/** Remembered once found; a worker that looked while the package was still being installed looks again next turn. */
+let installed = false;
 function playwrightInstalled(): boolean {
   if (isSea()) return false;
-  try { installed ??= Boolean(createRequire(import.meta.url).resolve('@playwright/mcp')); } catch { installed = false; }
+  if (!installed) try { installed = Boolean(createRequire(import.meta.url).resolve('@playwright/mcp')); } catch { installed = false; }
   return installed;
 }
 

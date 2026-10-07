@@ -134,7 +134,8 @@ test('Playwright gets the turn\'s browser from Tower: a call starts it, its logi
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-browser-wiring-'));
   t.after(() => rm(stateDir, { recursive: true, force: true }));
   const closed: string[] = [];
-  const context = Object.assign(new EventEmitter(), { storageState: async () => ({ cookies: [{ name: 'sid', value: '1', domain: 'example.com', path: '/', expires: -1, httpOnly: false, secure: true, sameSite: 'Lax' }], origins: [] }), close: async () => {} });
+  const sid = { name: 'sid', value: '1', domain: 'example.com', path: '/', expires: -1, httpOnly: false, secure: true, sameSite: 'Lax' };
+  const context = Object.assign(new EventEmitter(), { storageState: async () => ({ cookies: [sid], origins: [] }), cookies: async () => [sid], close: async () => {} });
   const hooks: BrowserServerHooks = {
     startBrowser: async () => ({ browser: { close: async () => { closed.push('browser'); context.emit('close'); } } as never }),
     newContext: async () => context as never,

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { applyChanges, EMPTY_STATE, loginsPath, readState, saveChanges, type Cookie, type StorageState } from '../../../server/browser/logins.js';
+import { applyChanges, EMPTY_STATE, fitToBudget, LoginSaver, loginsPath, readState, saveChanges, type Cookie, type StorageState } from '../../../server/browser/logins.js';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const cookie = (name: string, value: string, extra: Partial<Cookie> = {}): Cookie => ({ name, value, domain: 'example.com', path: '/', expires: -1, httpOnly: false, secure: true, sameSite: 'Lax', ...extra });
@@ -42,7 +42,7 @@ test('local storage is replaced per origin the turn changed and never deleted', 
   const unchanged = applyChanges(saved, baseline, state([], [{ origin: 'https://a.com', localStorage: [{ name: 'k', value: '1' }] }]));
   assert.deepEqual(unchanged.origins, saved.origins);
   const changed = applyChanges(saved, baseline, state([], [{ origin: 'https://a.com', localStorage: [{ name: 'k', value: 'mine' }] }]));
-  assert.deepEqual(changed.origins.map(o => o.localStorage[0].value), ['mine', 'b']);
+  assert.deepEqual(changed.origins.map(o => o.localStorage[0].value), ['b', 'mine'], 'what changed moves to the end');
 });
 
 test('saved logins start empty and stay owner-only; an unreadable file is set aside and reported, not left to break every turn', async t => {
@@ -63,13 +63,44 @@ test('saved logins start empty and stay owner-only; an unreadable file is set as
   }
 });
 
-test('a save that would grow the logins past their budget fails and drops nothing', async t => {
+test('the saved order is the order of last change, and room is made from what changed least recently', () => {
+  const big = 'v'.repeat(1_000);
+  const origin = (name: string) => ({ origin: `https://${name}.com`, localStorage: [{ name: 'k', value: big }] });
+  const saved = state([cookie('old-session', 'x'.repeat(600)), cookie('persistent', 'y', { expires: 9_999_999_999 })], [origin('a'), origin('b'), origin('c')]);
+  const changed = applyChanges(saved, state([], [origin('a')]), state([cookie('fresh', '1')], [{ origin: 'https://a.com', localStorage: [{ name: 'k', value: 'new' }] }]));
+  assert.deepEqual(changed.origins.map(o => o.origin), ['https://b.com', 'https://c.com', 'https://a.com'], 'a moved to the end');
+  const keep = { cookies: new Set([JSON.stringify(['fresh', 'example.com', '/', ''])]), origins: new Set(['https://a.com']) };
+  assert.deepEqual(fitToBudget(changed, keep, { maxOrigins: 2 }).origins.map(o => o.origin), ['https://c.com', 'https://a.com']);
+  const tight = fitToBudget(changed, keep, { budget: 700 });
+  assert.deepEqual(tight.origins.map(o => o.origin), ['https://a.com'], 'unchanged local storage goes first');
+  assert.deepEqual(tight.cookies.map(c => c.name).sort(), ['fresh', 'persistent'], 'then session cookies; persistent ones expire by themselves');
+  assert.throws(() => fitToBudget(changed, keep, { budget: 10 }), /were not saved/, 'what this save changed is never dropped to fit');
+});
+
+test('saving keeps the logins under their budget without dropping what the turn changed, and a later save still lands', async t => {
   const dir = await stateDir(t);
-  await saveChanges(dir, EMPTY_STATE, state([cookie('sid', '1')], [{ origin: 'https://app.com', localStorage: [{ name: 'token', value: 'login' }] }]));
-  const huge = state([], [{ origin: 'https://cache.com', localStorage: [{ name: 'blob', value: 'x'.repeat(6_000_001) }] }]);
-  await assert.rejects(saveChanges(dir, EMPTY_STATE, huge), /would grow past 6 MB.*not saved/);
+  const many = Array.from({ length: 60 }, (_, i) => ({ origin: `https://site${i}.com`, localStorage: [{ name: 'k', value: 'v' }] }));
+  await saveChanges(dir, EMPTY_STATE, state([], many.slice(0, 30)));
+  await saveChanges(dir, EMPTY_STATE, state([], many.slice(30)));
   const kept = await readState(dir);
-  assert.deepEqual([values(kept), kept.origins.map(o => o.origin)], [['sid=1'], ['https://app.com']]);
+  assert.equal(kept.origins.length, 50);
+  assert.ok(kept.origins.some(o => o.origin === 'https://site59.com') && !kept.origins.some(o => o.origin === 'https://site0.com'), 'the oldest went');
+  await saveChanges(dir, EMPTY_STATE, state([cookie('login', 'yes')]));
+  assert.deepEqual(values(await readState(dir)), ['login=yes']);
+  const huge = state([], [{ origin: 'https://cache.com', localStorage: [{ name: 'blob', value: 'x'.repeat(4_000_001) }] }]);
+  await assert.rejects(saveChanges(dir, EMPTY_STATE, huge), /were not saved/);
+  assert.deepEqual(values(await readState(dir)), ['login=yes'], 'a save too big by itself changes nothing');
+});
+
+test('a read that started earlier never overwrites a newer one, and cookie-only saves leave local storage as saved', async t => {
+  const dir = await stateDir(t);
+  const saver = new LoginSaver(dir, () => {});
+  saver.started(EMPTY_STATE);
+  await saver.save(state([cookie('a', '1')], [{ origin: 'https://app.com', localStorage: [{ name: 'token', value: 't' }] }]), 1);
+  await saver.saveCookies([cookie('a', '2')], 3);
+  await saver.saveCookies([cookie('a', 'stale')], 2);
+  const saved = await readState(dir);
+  assert.deepEqual([values(saved), saved.origins.map(o => o.origin)], [['a=2'], ['https://app.com']]);
 });
 
 test('concurrent saves from several turns all land', async t => {

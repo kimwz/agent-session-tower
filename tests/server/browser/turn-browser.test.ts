@@ -16,7 +16,7 @@ function fakes(options: { refuseClose?: boolean; state?: () => StorageState; con
   let nextPid = 1000;
   const probe: ProcessProbe = { alive: () => true, command: async pid => processes.get(pid), kill: () => {} };
   const hooks: Partial<TurnBrowserHooks> = {
-    probe, closeTimeoutMs: 20, stateTimeoutMs: 50, saveWaitMs: 200, goneWaitMs: 30,
+    probe, closeTimeoutMs: 20, lastSaveMs: 300, saveWaitMs: 200, goneWaitMs: 30,
     startBrowser: async (_tier, marker) => {
       const pid = nextPid++;
       processes.set(pid, `/chrome ${marker}`);
@@ -26,8 +26,9 @@ function fakes(options: { refuseClose?: boolean; state?: () => StorageState; con
     findBrowserPid: async marker => [...processes].find(([, command]) => command.includes(markerSwitch(marker)))?.[0],
     newContext: async () => {
       if (options.contextFails) throw new Error('context failed');
-      const context = new EventEmitter() as EventEmitter & { storageState(): Promise<StorageState>; close(): Promise<void> };
+      const context = new EventEmitter() as EventEmitter & { storageState(): Promise<StorageState>; cookies(): Promise<StorageState['cookies']>; close(): Promise<void> };
       context.storageState = async () => options.state?.() ?? { cookies: [], origins: [] };
+      context.cookies = async () => (options.state?.() ?? { cookies: [], origins: [] }).cookies;
       context.close = async () => { context.emit('close'); };
       return context as unknown as BrowserContext;
     },
@@ -201,4 +202,31 @@ test('browser_close while a browser is still starting closes that browser', asyn
   await closing;
   assert.equal(f.processes.size, 0);
   await browser.shutdown();
+});
+
+test('code that closes the browser itself saves what that call changed first, and closing runs once', async t => {
+  const dir = await stateDir(t);
+  const f = fakes({ state: () => ({ cookies: [cookie('via-browser-close', '1')], origins: [{ origin: 'https://app.com', localStorage: [{ name: 'token', value: 't' }] }] }) });
+  const browser = new TurnBrowser({ tier: 'general', stateDir: dir, savedLogins: true }, () => {}, f.hooks);
+  const context = await browser.context() as unknown as { browser(): unknown };
+  const started = f.closed.length;
+  const live = [...(browser as unknown as { tracked: Set<{ browser: Browser }> }).tracked][0];
+  await live.browser.close();
+  const saved = await readState(dir);
+  assert.deepEqual([saved.cookies.map(c => c.name), saved.origins.map(o => o.origin)], [['via-browser-close'], ['https://app.com']], 'local storage too, read once more at close');
+  await browser.shutdown();
+  assert.equal(f.closed.length - started, 1, 'the browser itself closed once');
+  void context;
+});
+
+test('when local storage cannot be read in time at close, the cookies are still saved', async t => {
+  const dir = await stateDir(t);
+  const f = fakes({ state: () => ({ cookies: [cookie('kept', '1')], origins: [] }) });
+  const original = f.hooks.newContext!;
+  f.hooks.newContext = async (...args) => { const context = await original(...args) as unknown as { storageState(): Promise<unknown> }; context.storageState = () => new Promise(() => {}); return context as never; };
+  f.hooks.lastSaveMs = 100;
+  const browser = new TurnBrowser({ tier: 'general', stateDir: dir, savedLogins: true }, () => {}, f.hooks);
+  await browser.context();
+  await browser.shutdown();
+  assert.deepEqual((await readState(dir)).cookies.map(c => c.name), ['kept']);
 });
