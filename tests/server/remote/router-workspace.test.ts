@@ -10,6 +10,8 @@ import type { Backend } from '../../../server/http/server.js';
 import { RemoteExclusionStore } from '../../../server/remote/exclusions.js';
 import { createRemoteRouter } from '../../../server/remote/router.js';
 import { WorkspaceTerminals, type WorkspacePty } from '../../../server/workspace-terminals.js';
+import type { AttachmentStore, VerifiedAttachment } from '../../../server/stores/attachments.js';
+import http2 from 'node:http2';
 
 const CONTROLLER = 'controllera1b2c3d4e5f6';
 const now = new Date().toISOString();
@@ -26,7 +28,7 @@ class Pty implements WorkspacePty {
 }
 
 /** A computer sharing one folder, `open`, whose subfolder `open/secret` is excluded, with real files and fake shells. */
-async function fixture(t: TestContext, options: { oldHost?: boolean; onSnapshot?: () => void } = {}) {
+async function fixture(t: TestContext, options: { oldHost?: boolean; onSnapshot?: () => void; attachments?: (id: string) => Promise<VerifiedAttachment> } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-remote-workspace-')));
   const open = join(root, 'open'), secret = join(open, 'secret');
   await mkdir(secret, { recursive: true });
@@ -44,7 +46,8 @@ async function fixture(t: TestContext, options: { oldHost?: boolean; onSnapshot?
   const terminals = options.oldHost ? { ...shells, create: shells.create.bind(shells), attach: shells.attach.bind(shells), input: shells.input.bind(shells), resize: shells.resize.bind(shells), close: shells.close.bind(shells), dispose: shells.dispose.bind(shells), list: () => undefined } : shells;
   const backend: Backend = { snapshot, subscribe: () => () => {}, detail: async () => undefined, session: id => id === session.id ? session : undefined, coordinators: () => new Set(), cancel: async () => {},
     enqueue: async () => { throw new Error('unused'); } };
-  const router = createRemoteRouter({ backend, exclusions, terminals });
+  const store = options.attachments && { openVerified: options.attachments } as unknown as AttachmentStore;
+  const router = createRemoteRouter({ backend, exclusions, terminals, ...(store ? { attachmentStores: { chat: store, auto: store } } : {}) });
   const server = createServer((req, res) => { void router.handle(req, res, { controllerId: CONTROLLER }); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -257,4 +260,70 @@ test('an earlier answer ending late does not untrack a newer one', async t => {
   assert.equal(await first.finish(), 'cut off');
   await f.exclusions.add(join(f.open, 'new'));
   assert.equal(await second.finish(), 'cut off', 'the newer answer was still tracked');
+});
+
+test('over the link’s HTTP/2, media whose answer ended while it opened is not sent and its request settles', async t => {
+  for (const at of [2, 3, 4]) {
+    let reads = -1;
+    let router: ReturnType<typeof createRemoteRouter> | undefined;
+    const f = await fixture(t, { onSnapshot: () => { if (reads >= 0 && ++reads === at) router!.disconnect(CONTROLLER); } });
+    router = f.router;
+    await writeFile(join(f.open, 'clip.mp4'), Buffer.alloc(1024 * 1024, 1));
+    const handled: Promise<void>[] = [];
+    const link = http2.createServer((req, res) => { handled.push(f.router.handle(req, res, { controllerId: CONTROLLER })); });
+    await new Promise<void>(resolve => link.listen(0, '127.0.0.1', resolve));
+    const session = http2.connect(`http://127.0.0.1:${(link.address() as { port: number }).port}`);
+    t.after(async () => { session.destroy(); await new Promise(resolve => link.close(resolve)); });
+    reads = 0;
+    const received = await new Promise<number>(resolve => {
+      let bytes = 0;
+      const stream = session.request({ ':path': f.query('/api/workspace/media', { cwd: f.open, path: 'clip.mp4' }) });
+      stream.on('data', (chunk: Buffer) => { bytes += chunk.length; });
+      stream.on('error', () => {});
+      stream.on('close', () => resolve(bytes));
+    });
+    assert.equal(received, 0, `a disconnect at folder-list read ${at} still sent ${received} bytes`);
+    const settled = await Promise.race([Promise.allSettled(handled).then(() => 'settled'), new Promise(resolve => setTimeout(() => resolve('hanging'), 2000))]);
+    assert.equal(settled, 'settled', `the request ended at folder-list read ${at} never finished, so its file stays open`);
+  }
+});
+
+test('an attachment download ending late does not untrack media played after it', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-remote-attachment-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = join(root, 'original.bin');
+  await writeFile(original, Buffer.alloc(32 * 1024 * 1024));
+  const f = await fixture(t, { attachments: async id => ({ metadata: { id, name: 'original.bin', mimeType: 'application/octet-stream', size: 32 * 1024 * 1024 }, path: original, file: await openFile(original, 'r'), sessionId: 'codex:open' }) });
+  await mkdir(join(f.open, 'other')); await mkdir(join(f.open, 'new'));
+  await writeFile(join(f.open, 'new', 'b.mp4'), Buffer.alloc(32 * 1024 * 1024));
+  // The download is slow to stop reading, so its cleanup runs after the media answer is tracked.
+  const probe = await openFile(original, 'r');
+  const prototype = Object.getPrototypeOf(probe);
+  const createReadStream = prototype.createReadStream;
+  await probe.close();
+  let slow = false;
+  t.mock.method(prototype, 'createReadStream', function (this: typeof probe, ...args: unknown[]) {
+    const stream = createReadStream.apply(this, args);
+    if (slow) {
+      slow = false;
+      const destroy = stream._destroy.bind(stream);
+      stream._destroy = (error: Error | null, done: (error?: Error | null) => void) => { setTimeout(() => destroy(error, done), 300); };
+    }
+    return stream;
+  });
+  const fetchPaused = (path: string) => new Promise<{ status?: number; finish: () => Promise<string> }>(resolve => get(`${f.base}${path}`, res => {
+    res.pause();
+    res.on('error', () => {});
+    const ended = new Promise<string>(done => res.on('close', () => done(res.complete ? 'whole' : 'cut off')));
+    resolve({ status: res.statusCode, finish: () => { res.resume(); return ended; } });
+  }));
+  slow = true;
+  const download = await fetchPaused('/api/attachments/11111111-1111-4111-8111-111111111111');
+  assert.equal(download.status, 200);
+  await f.exclusions.add(join(f.open, 'other'));
+  const media = await fetchPaused(f.query('/api/workspace/media', { cwd: f.open, path: 'new/b.mp4' }));
+  await new Promise(resolve => setTimeout(resolve, 500));
+  assert.equal(await download.finish(), 'cut off');
+  await f.exclusions.add(join(f.open, 'new'));
+  assert.equal(await media.finish(), 'cut off', 'the media answer was still tracked');
 });

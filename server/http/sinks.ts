@@ -49,13 +49,14 @@ export async function sendStoredAttachment(res: ServerResponse, store: Attachmen
  * server may ignore, or several ranges) and `null` a range that lies past the end.
  */
 export function byteRange(header: string | string[] | undefined, size: number): { start: number; end: number } | null | undefined {
-  if (typeof header !== 'string') return undefined;
+  // An empty file has no bytes to range over; players asking for `bytes=0-` get it whole.
+  if (typeof header !== 'string' || size === 0) return undefined;
   const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
   if (!match || (!match[1] && !match[2])) return undefined;
   if (!match[1]) {
     const suffix = Number(match[2]);
     if (!Number.isSafeInteger(suffix)) return undefined;
-    if (suffix === 0 || size === 0) return null;
+    if (suffix === 0) return null;
     return { start: Math.max(0, size - suffix), end: size - 1 };
   }
   const start = Number(match[1]);
@@ -65,12 +66,18 @@ export function byteRange(header: string | string[] | undefined, size: number): 
   return { start, end: Math.min(last, size - 1) };
 }
 
+/** HTTP/1 answers say they ended themselves; the link's HTTP/2 compatibility answers only through their stream. */
+const ended = (res: ServerResponse) => res.destroyed || Boolean((res as { stream?: { destroyed?: boolean } }).stream?.destroyed);
+
 /**
  * Sends an opened workspace media file, or the range of it a player asks for, and closes it. The headers keep any
  * file, whatever its bytes really are, from running as a page in Tower's origin.
  */
 export async function sendWorkspaceMedia(res: ServerResponse, media: WorkspaceMediaFile, range: string | string[] | undefined, head: boolean): Promise<void> {
   try {
+    // An answer ended while the file was opened (sign-out, disconnect, sharing change) gets nothing: piping into an
+    // ended HTTP/2 answer never settles, which would keep the file open.
+    if (ended(res)) return;
     const headers = { 'Content-Type': media.type, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store', 'Content-Disposition': 'inline',
       'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'; frame-ancestors 'none'" };
     const wanted = byteRange(range, media.size);

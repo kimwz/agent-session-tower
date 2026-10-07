@@ -266,10 +266,9 @@ export function createRemoteRouter({ attachmentStores, attachmentUploads, backen
     const attachment = path.match(/^\/api\/attachments\/([^/]+)$/);
     if ((method === 'GET' || method === 'HEAD') && attachment) {
       if (attachmentStores) {
-        const active = downloads.get(principal.controllerId) ?? new Set<Reply>();
-        active.add(res); downloads.set(principal.controllerId, active);
+        const release = holdDownload(principal.controllerId, res);
         try { return await sendStoredAttachment(res, attachmentStores.chat, attachment[1], method === 'HEAD', async id => { await confirm(id); }); }
-        finally { active.delete(res); if (!active.size) downloads.delete(principal.controllerId); }
+        finally { release(); }
       }
       if (!backend.attachment) throw notFound();
       const { metadata, content, sessionId } = await backend.attachment(attachment[1]).catch(() => { throw notFound(); });
@@ -312,7 +311,6 @@ export function createRemoteRouter({ attachmentStores, attachmentUploads, backen
         const cwd = await sharedPath(url.searchParams.get('cwd'), url.searchParams.get('path'));
         media = await openWorkspaceMedia(cwd, url.searchParams.get('path'), backend.snapshot());
         await sharedPath(cwd, url.searchParams.get('path'));
-        if (res.destroyed) return;
         const sending = media;
         media = undefined;
         return await sendWorkspaceMedia(res, sending, req.headers.range, method === 'HEAD');

@@ -556,7 +556,6 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         // Tracked before the file opens, so a sign-out meanwhile ends this answer too.
         if (!identity.local) trackStream(sessionId, res, () => res.destroy());
         const media = await openWorkspaceMedia(url.searchParams.get('cwd'), url.searchParams.get('path'), backend.snapshot());
-        if (res.destroyed) { await media.handle.close(); return; }
         return await sendWorkspaceMedia(res, media, req.headers.range, req.method === 'HEAD');
       }
       if (req.method === 'POST' && path === '/api/workspace/file') {

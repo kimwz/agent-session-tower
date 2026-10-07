@@ -17,7 +17,7 @@ test('a player’s byte range is read as one inclusive span, the whole file, or 
   assert.deepEqual(byteRange('bytes=8-99', 10), { start: 8, end: 9 }, 'an end past the file stops at its last byte');
   assert.equal(byteRange('bytes=10-', 10), null);
   assert.equal(byteRange('bytes=-0', 10), null);
-  assert.equal(byteRange('bytes=0-', 0), null, 'an empty file has no first byte');
+  assert.equal(byteRange('bytes=0-', 0), undefined, 'an empty file is sent whole, as players ask for it');
   for (const header of ['bytes=5-2', 'bytes=0-1,4-5', 'items=0-1', 'bytes=-', 'bytes=x-1', 'bytes=99999999999999999999-']) {
     assert.equal(byteRange(header, 10), undefined, `${header} is answered with the whole file`);
   }
@@ -68,7 +68,7 @@ test('workspace media streams to a signed-in page with ranges, and never as a pa
   assert.equal(head.status, 206);
   assert.equal(head.headers.get('content-length'), '1');
   assert.equal(await head.text(), '');
-  const empty = await media('empty.mp3');
+  const empty = await media('empty.mp3', { Range: 'bytes=0-' });
   assert.equal(empty.status, 200);
   assert.equal(empty.headers.get('content-type'), 'audio/mpeg');
   assert.equal(await empty.text(), '');
