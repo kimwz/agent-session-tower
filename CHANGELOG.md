@@ -4,7 +4,7 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.110.0] - 2026-10-07
+## [1.111.0] - 2026-10-07
 
 ### Added
 - **Settings show session retention decisions and separate cold backups.** The worker observes a seven-day expiry for finished child sessions and a limit of 20 parent sessions per logical project, protecting active, queued and scheduled work, approvals, unread results and active descendants. Existing records receive seven days of migration grace; closing a session still only hides it.
@@ -13,6 +13,12 @@ format, and saved browser preferences are the compatibility surface.
 
 ### Safety limits
 - **Automatic native removal and native restore remain unavailable.** Neither installed provider exposes the verified writer reservation needed to preserve running work and a complete backup while removing records. Candidates remain `blocked-provider`, no duplicate backup is made automatically, and the present reduction in native files and scan load is zero. Manual backups retain their originals and use additional disk space.
+
+## [1.110.0] - 2026-10-07
+
+### Changed
+- **The master reads aloud with ElevenLabs Eleven v4 Turbo.** It is the new default and the first choice in the master's settings under **읽어 주기 모델** ("v4 터보 (빠름, 추천)"). ElevenLabs offers Eleven v4 through Text to Dialogue, so Tower asks for it there, as one line in the chosen voice. Answers are still made part by part as finite 128 kbps mp3, so stopping, listening again, the first reply, the daily limit and removing what ElevenLabs keeps in its history work as before. Each part keeps its one bright or excited tone at the start, and it is counted at v3 conversational's price. v3 conversational, v3 and flash v2.5 remain available and are asked for as before; a model chosen earlier stays chosen.
+- Tower 1.109.2 and older cannot read master settings that name Eleven v4 Turbo: they start the master with its default settings and without its session, and saving settings there replaces the file. Restoring a backup that names it on such a version leaves out the master's settings and ElevenLabs key. Choose another reading model before going back to such a version.
 
 ## [1.109.2] - 2026-10-07
 

@@ -10,8 +10,8 @@ import type { Provider, SessionStatus } from './types.js';
 /** The master's folder under Tower's state directory: the session runs there, with its guide files. */
 export const MASTER_FOLDER = 'master-session';
 
-/** ElevenLabs voices the master reads aloud with; the first is the default (fast, natural Korean). */
-export const MASTER_TTS_MODELS = ['eleven_v3_conversational', 'eleven_v3', 'eleven_flash_v2_5'] as const;
+/** ElevenLabs models the master reads aloud with; the first is the default (fast, natural Korean). */
+export const MASTER_TTS_MODELS = ['eleven_v4_turbo', 'eleven_v3_conversational', 'eleven_v3', 'eleven_flash_v2_5'] as const;
 export type MasterTtsModel = typeof MASTER_TTS_MODELS[number];
 /** A premade ElevenLabs voice every account has. */
 export const DEFAULT_MASTER_VOICE_ID = 'cgSgspJ2msm6clMCkdW9';
@@ -35,7 +35,7 @@ export interface MasterVoiceSettings {
 }
 /** Speeds offered in the settings; any value from the first to the last is accepted. */
 export const MASTER_PLAYBACK_RATES = [1, 1.2, 1.4, 1.6, 1.8, 2] as const;
-export const DEFAULT_MASTER_VOICE: MasterVoiceSettings = { voiceId: DEFAULT_MASTER_VOICE_ID, model: 'eleven_v3_conversational', endSilenceMs: 1000, listenMinutes: 5, readReports: true, dailyDollars: 0, playbackRate: 1 };
+export const DEFAULT_MASTER_VOICE: MasterVoiceSettings = { voiceId: DEFAULT_MASTER_VOICE_ID, model: 'eleven_v4_turbo', endSilenceMs: 1000, listenMinutes: 5, readReports: true, dailyDollars: 0, playbackRate: 1 };
 
 /** The session the master talks through, and the ones it replaced (kept as ordinary sessions). */
 export interface MasterBinding { sessionId: string; provider: Provider; startedAt: string }

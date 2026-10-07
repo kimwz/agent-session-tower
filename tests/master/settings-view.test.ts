@@ -21,3 +21,12 @@ test('followed work that could not be read is shown, in either language; an olde
   assert.match(render({ followState: 'moved-aside' }), /role="alert"[^>]*>The master’s record of followed work could not be read; it was moved aside and started over/);
   assert.match(render({ followState: 'not-saved' }), /role="alert"[^>]*>The master’s record of followed work could not be read and was left as it is/);
 });
+
+test('the reading models are offered with Eleven v4 Turbo first and chosen by default, in either language', () => {
+  setLanguage('ko');
+  const options = [...render().matchAll(/<option value="([^"]+)"[^>]*>([^<]+)<\/option>/g)].map(match => [match[1], match[2]]);
+  assert.deepEqual(options, [['eleven_v4_turbo', 'v4 터보 (빠름, 추천)'], ['eleven_v3_conversational', 'v3 대화형 (빠름)'], ['eleven_v3', 'v3 (표현력, 느림, 두 배 비쌈)'], ['eleven_flash_v2_5', 'flash v2.5 (가장 빠름, 밝은 말투 없음)']]);
+  assert.match(render(), /<option value="eleven_v4_turbo" selected="">/);
+  setLanguage('en');
+  assert.match(render(), /<option value="eleven_v4_turbo" selected="">v4 Turbo \(fast, recommended\)<\/option>/);
+});
