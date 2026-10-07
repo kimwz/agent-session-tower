@@ -221,6 +221,10 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (typeof args[0] !== 'string' || typeof args[1] !== 'boolean') throw new TowerError('invalid', 'Invalid session closure request.');
         const session = options.runs.getSession(args[0]);
         if (!session) return undefined;
+        if (!args[1]) {
+          if (options.retention) await options.retention.service.cancelArchiveRequest(session.id);
+          else if (options.retentionUnavailable) throw new TowerError('unavailable', options.retentionUnavailable);
+        }
         const updated = await options.closedSessions.set(session, args[1]);
         changed();
         return updated;
@@ -888,7 +892,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const nativeRoots = { claude: [join(sessions.claudeHome, 'projects')], codex: [join(sessions.codexHome, 'sessions'), join(sessions.codexHome, 'archived_sessions')] };
     const retentionStore = new RetentionStore(join(stateDir, 'retention'));
     const retentionArchive = new RetentionArchive(join(stateDir, 'retention-cold'), [...nativeRoots.claude, ...nativeRoots.codex]);
-    const observer = new RetentionObserver({ stateDir, snapshot: async () => { await sessions.refresh(); return sessions.retentionRecords(); },
+    const observer = new RetentionObserver({ stateDir, snapshot: () => sessions.completedRetentionRecords(),
       reconcile: native => runs.sessionList(native), runs: () => runs.list(), settled: () => runs.settledRunIds(),
       protectedIds: () => {
         const ids = new Set(coordinators());

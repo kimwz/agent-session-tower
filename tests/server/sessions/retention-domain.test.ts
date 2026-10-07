@@ -213,3 +213,43 @@ test('incomplete observation exposes its reason and explicitly rejects backup an
   try { const result = await service.cycle(); assert.equal(result.observationComplete, false); assert.equal(result.deferredReasons?.['incomplete-observation'], 2); assert.deepEqual(result.observationIssues, ['native fixture root could not be read']); await assert.rejects(service.backup('child'), /native fixture root/); await assert.rejects(service.archiveSession('child'), /native fixture root/); assert.equal(store.list().length, 0); }
   finally { await service.quiesce(); }
 }));
+test('deferred totals and per-reason counts use the same candidate unit for backup errors, budgets and stopped work', async () => {
+  const check = (summary: ReturnType<RetentionService['overview']>, reason: string, count: number) => {
+    assert.equal(summary.deferred, count); assert.equal(summary.deferredReasons?.[reason], count);
+    assert.equal(summary.deferred, Object.values(summary.deferredReasons || {}).reduce((sum, value) => sum + value, 0));
+  };
+  await fixture(async path => {
+    const native = join(path, 'native'); await mkdir(native); const store = new RetentionStore(join(path, 'state')); await store.start(now - 10 * day);
+    await store.put({ id: 'missing', candidate: { rootId: 'gone', ids: ['gone'], reason: 'child-expired', revisions: {} }, phase: 'backup-verified', updatedAt: new Date(now).toISOString() });
+    const service = new RetentionService({ store, archive: new RetentionArchive(join(path, 'cold'), [native]), observe: async () => observation([record('parent'), record('c1', true), record('c2', true)]), adapter: { capability: () => ({ status: 'supported' }), files: async () => [], reserve: async () => { throw new Error('Protected work must not reserve'); } } }); await service.start();
+    try { check(await service.cycle(), 'backup-unverified', 2); } finally { await service.quiesce(); }
+  });
+  await fixture(async path => {
+    const native = join(path, 'native'); await mkdir(native); const store = new RetentionStore(join(path, 'state')); await store.start(now - 10 * day);
+    const parents = Array.from({ length: 21 }, (_, i) => record(`p${i}`, false, { lastActivityAt: new Date(now - (i + 30) * day).toISOString() }));
+    const children = Array.from({ length: 100 }, (_, i) => { const child = record(`c${i}`, true, { lastActivityAt: new Date(now - 80 * day).toISOString() }); child.session.parentId = 'p20'; return child; });
+    const service = new RetentionService({ store, archive: new RetentionArchive(join(path, 'cold'), [native]), observe: async () => observation([...parents, ...children]), adapter: { capability: () => ({ status: 'supported' }), files: async () => [], reserve: async () => { throw new Error('Over-budget work must not reserve'); } } }); await service.start();
+    try { check(await service.cycle(), 'session-budget', 1); } finally { await service.quiesce(); }
+  });
+  await fixture(async path => {
+    const native = join(path, 'native'); await mkdir(native); const store = new RetentionStore(join(path, 'state')); await store.start(now - 10 * day);
+    const service = new RetentionService({ store, archive: new RetentionArchive(join(path, 'cold'), [native]), observe: async () => { service.stop(); return observation([record('parent'), record('c1', true), record('c2', true)]); }, adapter: { capability: () => ({ status: 'supported' }), files: async () => [], reserve: async () => { throw new Error('Stopped work must not reserve'); } } }); await service.start();
+    try { check(await service.cycle(), 'maintenance-paused', 2); } finally { await service.quiesce(); }
+  });
+});
+test('failed checks do not abort quiesce, which still drains queued intent cancellation', async () => fixture(async path => {
+  const native = join(path, 'native'); await mkdir(native); const store = new RetentionStore(join(path, 'state')); await store.start(now - 10 * day);
+  const restoredAt = new Date(now - day).toISOString(); await store.setPolicy({ id: 'child', archivedAt: new Date(now).toISOString(), archiveRevision: 2, restoredAt });
+  let begin!: () => void, fail!: () => void, cancelBegan!: () => void, finishCancel!: () => void;
+  const observed = new Promise<void>(resolve => { begin = resolve; }), failing = new Promise<void>(resolve => { fail = resolve; });
+  const writing = new Promise<void>(resolve => { cancelBegan = resolve; }), finishWriting = new Promise<void>(resolve => { finishCancel = resolve; });
+  const actualSetPolicy = store.setPolicy.bind(store); store.setPolicy = async policy => { cancelBegan(); await finishWriting; await actualSetPolicy(policy); };
+  const errors: unknown[] = [];
+  const service = new RetentionService({ store, archive: new RetentionArchive(join(path, 'cold'), [native]), onError: error => { errors.push(error); }, observe: async () => { begin(); await failing; throw new Error('fixture lookup failed'); }, adapter: { capability: () => ({ status: 'blocked' }), files: async () => [], reserve: async () => undefined } }); await service.start();
+  const check = service.cycle(); await observed;
+  const cancel = service.cancelArchiveRequest('child'); let drained = false; const quiesce = service.quiesce().then(() => { drained = true; });
+  fail(); await assert.rejects(check, /fixture lookup failed/); await writing; await new Promise(resolve => setImmediate(resolve)); assert.equal(drained, false);
+  finishCancel(); await cancel; await quiesce;
+  assert.equal(drained, true); assert.ok(errors.some(error => String(error).includes('fixture lookup failed')));
+  assert.equal(store.policy('child')?.archivedAt, undefined); assert.equal(store.policy('child')?.archiveRevision, 3); assert.equal(store.policy('child')?.restoredAt, restoredAt);
+}));

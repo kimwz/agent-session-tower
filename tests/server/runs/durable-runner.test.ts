@@ -33,7 +33,7 @@ import { RetentionArchive } from '../../../server/sessions/retention/archive.js'
 import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
 import { worktreeCleanupVisible } from '../../../server/worktrees/janitor.js';
 
-async function fixture(workerClosed = false, withRetention = false) {
+async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'tower-durable-fixture-')));
   const stateDir = join(directory, 'state');
   const id = '10000000-0000-4000-8000-000000000001';
@@ -68,10 +68,11 @@ async function fixture(workerClosed = false, withRetention = false) {
   const closedSessions = workerClosed ? new ClosedSessionStore(stateDir) : undefined;
   await closedSessions?.start();
   const archive = new RetentionArchive(join(stateDir, 'cold'), []);
-  const retention = withRetention ? { archive, service: new RetentionService({ archive, store: new RetentionStore(join(stateDir, 'retention')),
+  const retentionStore = new RetentionStore(join(stateDir, 'retention'));
+  const retention = withRetention ? { archive, service: new RetentionService({ archive, store: retentionStore,
     adapter: createNativeRetentionAdapter({ claude: [], codex: [] }), observe: async () => ({ now: Date.now(), migratedAt: Date.now(), complete: true, records: [], protectedIds: new Set() }) }) } : undefined;
   await retention?.service.start();
-  const host = await startRunnerHost({ stateDir, sessions, runs, closedSessions, retention });
+  const host = await startRunnerHost({ stateDir, sessions, runs, closedSessions, retention, retentionUnavailable });
   const paths = await runnerPaths(stateDir);
   const clients: DurableRunManager[] = [];
   const connect = async (pollMs = 10) => {
@@ -90,7 +91,7 @@ async function fixture(workerClosed = false, withRetention = false) {
     await rm(directory, { recursive: true, force: true });
     await rm(paths.directory, { recursive: true, force: true });
   };
-  return { directory, stateDir, session, sessions, runs, host, paths, connect, closedSessions, starts: () => starts, cancels: () => cancels,
+  return { directory, stateDir, session, sessions, runs, host, paths, connect, closedSessions, retention, retentionStore, starts: () => starts, cancels: () => cancels,
     output: (text: string) => { assert.ok(bridge); bridge.onOutput(text); },
     finish: () => { assert.ok(bridge); bridge.onFinished({ status: 'completed' }); resolveDone(); },
     cleanup: async () => { await close(); await remove(); },
@@ -216,6 +217,37 @@ test('retention RPC is advertised only with its worker-owned service and reports
   await client.retention('check');
   await assert.rejects(client.retention('unsupported'), /Invalid retention target/);
   assert.equal(f.starts(), 0);
+});
+
+test('reopening cancels the canonical archive request before visibility changes and preserves backup history', async t => {
+  const f = await fixture(true, true); t.after(f.cleanup);
+  const client = await f.connect();
+  const alias = 'codex:reopen-alias';
+  f.sessions.get = id => id === alias || id === f.session.id ? { ...f.session } : undefined;
+  const restoredAt = '2026-10-01T00:00:00.000Z';
+  await f.retentionStore.setPolicy({ id: f.session.id, archivedAt: '2026-10-02T00:00:00.000Z', archiveRevision: 4, restoredAt });
+  const entry = { id: 'retained-backup', candidate: { rootId: f.session.id, ids: [f.session.id], reason: 'explicit-archive' as const, revisions: { [f.session.id]: 4 } }, phase: 'backup-verified' as const, updatedAt: restoredAt };
+  await f.retentionStore.put(entry);
+  await client.setClosed(f.session.id, true);
+  await client.setClosed(alias, false);
+  assert.deepEqual(f.retentionStore.policy(f.session.id), { id: f.session.id, archivedAt: undefined, archiveRevision: 5, restoredAt });
+  assert.equal(f.retentionStore.policy(alias), undefined);
+  assert.deepEqual(f.retentionStore.get(entry.id), entry);
+  assert.equal(Boolean(client.applyClosed(f.session).closed), false);
+  assert.equal(f.starts(), 0);
+});
+
+test('reopening does not claim success or change visibility when archive cancellation fails or retention initialization is unavailable', async t => {
+  const f = await fixture(true, true); t.after(f.cleanup);
+  const client = await f.connect(); await client.setClosed(f.session.id, true);
+  t.mock.method(f.retention!.service, 'cancelArchiveRequest', async () => { throw new Error('fixture archive cancellation failed'); });
+  await assert.rejects(client.setClosed(f.session.id, false), /archive cancellation failed/);
+  assert.equal(client.applyClosed(f.session).closed, true);
+  const unavailable = await fixture(true, false, 'fixture retention initialization unavailable'); t.after(unavailable.cleanup);
+  const unavailableClient = await unavailable.connect(); await unavailableClient.setClosed(unavailable.session.id, true);
+  assert.equal(unavailableClient.supports('retention'), false);
+  await assert.rejects(unavailableClient.setClosed(unavailable.session.id, false), /retention initialization unavailable/);
+  assert.equal(unavailableClient.applyClosed(unavailable.session).closed, true);
 });
 
 test('UI disconnect and reconnect preserve a running provider turn and its output', async t => {

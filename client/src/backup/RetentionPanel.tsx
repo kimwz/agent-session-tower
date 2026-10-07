@@ -7,7 +7,8 @@ import { SettingsFrameContext } from '../settings/SettingsPane';
 function deferredLabel(reason: string): string {
   const labels: Record<string, string> = { 'incomplete-observation': '세션 기록 수집 불완전', 'unknown-relationship': '부모·하위 관계 확인 필요',
     protected: '실행·예약·결과 대기 보호', 'migration-grace': '기존 기록의 도입 유예 기간', 'unproven-inactivity': '작업 종료·비활성 확인 필요',
-    'newer-activity': '종료 이후 새 작업 확인', 'active-descendant': '활성 하위 작업 보호', 'missing-backup': '백업 누락·손상 확인 필요', 'maintenance-budget': '이번 정리 주기 예산 초과' };
+    'newer-activity': '종료 이후 새 작업 확인', 'active-descendant': '활성 하위 작업 보호', 'missing-backup': '백업 누락·손상 확인 필요', 'maintenance-budget': '이번 정리 주기 예산 초과',
+    'backup-unverified': '백업 검증 미완료', 'session-budget': '이번 정리 주기 세션 수 한도 초과', 'maintenance-paused': '워커 전환을 위해 정리 일시 정지', 'time-budget': '이번 정리 주기 시간 한도 초과' };
   return labels[reason] || `추가 확인 필요 (${reason})`;
 }
 function observationLabel(issue: string): string {

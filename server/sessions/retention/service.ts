@@ -39,7 +39,11 @@ export class RetentionService {
     this.timer = setInterval(() => { void this.cycle().catch(error => this.report(error)); }, 3_600_000); this.timer.unref();
   }
   stop(): void { this.stopped = true; if (this.timer) clearInterval(this.timer); this.timer = undefined; }
-  async quiesce(): Promise<void> { this.stop(); await this.checking; await this.operations; }
+  async quiesce(): Promise<void> {
+    this.stop();
+    // Queued errors are already reported by serial/cycle; maintenance failures must not strand the worker lock.
+    await Promise.allSettled([this.checking, this.operations]);
+  }
   overview(): RetentionOverview {
     const entries = this.options.store.list();
     return { migratedAt: new Date(this.options.store.migratedAt).toISOString(), lastCheckedAt: this.lastCheckedAt, metricError: this.metricError,
@@ -77,18 +81,20 @@ export class RetentionService {
     if (this.verification !== 'complete') return this.overview();
     const observation = await this.observe(); observation.migratedAt = this.options.store.migratedAt;
     const selected = selectRetention(observation);
-    this.deferredReasons = {}; for (const item of selected.deferred) this.deferredReasons[item.reason] = (this.deferredReasons[item.reason] || 0) + 1;
+    this.deferred = 0; this.deferredReasons = {};
+    for (const item of selected.deferred) this.addDeferred(item.reason);
     if (observation.complete) {
       const current = new Set(selected.candidates.map(candidate => this.operationId(candidate, this.records(candidate, observation))));
       const stale: string[] = [];
       for (const entry of this.options.store.list()) if (['planned', 'blocked-provider'].includes(entry.phase) && !current.has(entry.id) && !await this.options.archive.exists(entry.id)) stale.push(entry.id);
       if (stale.length) await this.options.store.removeMetadata(stale);
     }
-    this.candidates = selected.candidates.length; this.deferred = selected.deferred.length;
-    if (this.options.store.list().some(entry => entry.phase === 'missing-backup' || Boolean(entry.backupError))) { this.deferred += selected.candidates.length; return this.overview(); }
+    this.candidates = selected.candidates.length;
+    if (this.options.store.list().some(entry => entry.phase === 'missing-backup' || Boolean(entry.backupError))) { this.addDeferred('backup-unverified', selected.candidates.length); return this.overview(); }
     const started = Date.now(); let count = 0; const blockedEntries: RetentionJournalEntry[] = [];
-    for (const candidate of selected.candidates) {
-      if (this.stopped || Date.now() - started >= 30_000) break;
+    for (const [index, candidate] of selected.candidates.entries()) {
+      if (this.stopped) { this.addDeferred('maintenance-paused', selected.candidates.length - index); break; }
+      if (Date.now() - started >= 30_000) { this.addDeferred('time-budget', selected.candidates.length - index); break; }
       const records = this.records(candidate, observation);
       const id = this.operationId(candidate, records); const existing = this.options.store.get(id);
       if (existing && ['archived', 'backup-verified', 'conflict', 'missing-backup', 'restored-awaiting-start'].includes(existing.phase)) continue;
@@ -99,11 +105,17 @@ export class RetentionService {
         if (entry.phase !== 'blocked-provider' || entry.error !== error) blockedEntries.push({ ...entry, phase: 'blocked-provider', error, updatedAt: new Date().toISOString() });
         continue;
       }
-      if (count + candidate.ids.length > 100) { this.deferred++; continue; }
+      if (count + candidate.ids.length > 100) { this.addDeferred('session-budget'); continue; }
       await this.archiveCandidate(entry, records); count += candidate.ids.length;
     }
     if (blockedEntries.length) await this.options.store.putMany(blockedEntries);
     this.lastCheckedAt = new Date().toISOString(); await this.countBytes(); return this.overview();
+  }
+  cancelArchiveRequest(id: string): Promise<void> {
+    return this.serial(async () => {
+      const policy = this.options.store.policy(id); if (!policy?.archivedAt) return;
+      await this.options.store.setPolicy({ ...policy, archivedAt: undefined, archiveRevision: policy.archiveRevision + 1 });
+    });
   }
   archiveSession(id: string): Promise<RetentionOverview> { return this.serial(() => this.archiveSessionNow(id)); }
   private async archiveSessionNow(id: string): Promise<RetentionOverview> {
@@ -181,6 +193,9 @@ export class RetentionService {
   }
   private async put(entry: RetentionJournalEntry, phase: RetentionJournalEntry['phase'], error?: string): Promise<void> {
     await this.options.store.put({ ...entry, phase, error, updatedAt: new Date().toISOString() });
+  }
+  private addDeferred(reason: string, count = 1): void {
+    this.deferred += count; this.deferredReasons[reason] = (this.deferredReasons[reason] || 0) + count;
   }
   private assertObservationComplete(observation: RetentionObservation): void {
     if (!observation.complete) throw new Error(`세션 기록 수집이 불완전하여 작업을 보류합니다: ${observation.issues?.join('; ') || '관찰 미완료'}`);

@@ -111,6 +111,13 @@ export class SessionService extends EventEmitter {
         ...((state.activity === 'completed' || state.activity === 'error') && state.activityAt > 0 && state.offset >= state.size
           ? { latestTaskEndedAt: new Date(state.activityAt).toISOString() } : {}) })) };
   }
+  /** Queued forced refreshes can start another scan before an awaiting reader wakes. */
+  async completedRetentionRecords(): Promise<ReturnType<SessionService['retentionRecords']>> {
+    await this.refresh();
+    while (this.scanning && !this.quiesced) await this.refresh();
+    // No await between the last scan-state check and copying metadata.
+    return this.retentionRecords();
+  }
   get(id: string): Session | undefined { const state = this.index.get(id); return state ? { ...state.session } : undefined; }
   /** A conversation's latest user requests, newest first, each shortened to 300 characters. */
   recentRequests(id: string): string[] { return [...(this.index.get(id)?.recentRequests ?? [])]; }
