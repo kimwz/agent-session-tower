@@ -116,7 +116,7 @@ test('a player leaving mid-file, or a sign-out while the file opens, ends the an
     const reader = response.body!.getReader();
     for (;;) { const next = await reader.read(); if (next.done) break; received += next.value.length; }
   }).catch(() => {});
-  assert.ok(received < size, `a sign-out while the file opened still sent ${received} bytes`);
+  assert.equal(received, 0, `a sign-out while the file opened still sent ${received} bytes`);
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.deepEqual(unhandled, []);
   assert.equal((await fetch(url, { headers: { cookie } })).status, 401, 'the sign-out took effect');

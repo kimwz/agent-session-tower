@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, get } from 'node:http';
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open as openFile, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -26,7 +26,7 @@ class Pty implements WorkspacePty {
 }
 
 /** A computer sharing one folder, `open`, whose subfolder `open/secret` is excluded, with real files and fake shells. */
-async function fixture(t: TestContext, options: { oldHost?: boolean } = {}) {
+async function fixture(t: TestContext, options: { oldHost?: boolean; onSnapshot?: () => void } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-remote-workspace-')));
   const open = join(root, 'open'), secret = join(open, 'secret');
   await mkdir(secret, { recursive: true });
@@ -38,7 +38,7 @@ async function fixture(t: TestContext, options: { oldHost?: boolean } = {}) {
   await exclusions.add(secret);
   const session: Session = { id: 'codex:open', nativeId: 'open', provider: 'codex', title: 't', cwd: open, project: 'open', status: 'idle', statusReason: '',
     createdAt: now, updatedAt: now, lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
-  const snapshot = (): Snapshot => ({ sessions: [session], runs: [], providers: [], groups: [], scanning: false, hostname: 'machine-b', version: 'test', updatedAt: now });
+  const snapshot = (): Snapshot => { options.onSnapshot?.(); return { sessions: [session], runs: [], providers: [], groups: [], scanning: false, hostname: 'machine-b', version: 'test', updatedAt: now }; };
   const ptys: Pty[] = [];
   const shells = new WorkspaceTerminals({ keepAliveOnDisconnect: true, spawnPty: () => { const pty = new Pty(); ptys.push(pty); return pty; } });
   const terminals = options.oldHost ? { ...shells, create: shells.create.bind(shells), attach: shells.attach.bind(shells), input: shells.input.bind(shells), resize: shells.resize.bind(shells), close: shells.close.bind(shells), dispose: shells.dispose.bind(shells), list: () => undefined } : shells;
@@ -57,7 +57,7 @@ async function fixture(t: TestContext, options: { oldHost?: boolean } = {}) {
     return { status: response.status, json };
   };
   const query = (path: string, values: Record<string, string>) => `${path}?${new URLSearchParams(values)}`;
-  return { root, open, secret, exclusions, shells, ptys, base, call, query };
+  return { root, open, secret, exclusions, shells, ptys, base, call, query, router };
 }
 
 test('a controller browses and edits files in a shared folder, never inside an excluded one', async t => {
@@ -201,4 +201,60 @@ test('media being played stops when its folder stops being shared', async t => {
   assert.notEqual(await ended, 'end');
   assert.ok(received < 32 * 1024 * 1024, 'the file was not sent whole');
   assert.equal((await fetch(`${f.base}${f.query('/api/workspace/media', { cwd: f.open, path: 'clips/long.mp4' })}`)).status, 404);
+});
+
+test('a controller disconnected while media opens is sent none of it', async t => {
+  // The folder list is read several times while a media request is checked and opened; a disconnect at any of those
+  // reads, after the request reached the route, must end the answer.
+  for (const at of [2, 3, 4]) {
+    let reads = -1;
+    let router: ReturnType<typeof createRemoteRouter> | undefined;
+    const f = await fixture(t, { onSnapshot: () => { if (reads >= 0 && ++reads === at) router!.disconnect(CONTROLLER); } });
+    router = f.router;
+    await writeFile(join(f.open, 'clip.mp4'), Buffer.alloc(1024 * 1024, 1));
+    reads = 0;
+    let received = 0;
+    await fetch(`${f.base}${f.query('/api/workspace/media', { cwd: f.open, path: 'clip.mp4' })}`).then(async response => {
+      const reader = response.body!.getReader();
+      for (;;) { const next = await reader.read(); if (next.done) break; received += next.value.length; }
+    }).catch(() => {});
+    assert.equal(received, 0, `a disconnect at folder-list read ${at} still sent ${received} bytes`);
+  }
+});
+
+test('an earlier answer ending late does not untrack a newer one', async t => {
+  const f = await fixture(t);
+  await mkdir(join(f.open, 'old')); await mkdir(join(f.open, 'new'));
+  await writeFile(join(f.open, 'old', 'a.mp4'), Buffer.alloc(32 * 1024 * 1024));
+  await writeFile(join(f.open, 'new', 'b.mp4'), Buffer.alloc(32 * 1024 * 1024));
+  // The first answer's file is slow to stop reading, so its cleanup runs after the second answer is tracked.
+  const probe = await openFile(join(f.open, 'old', 'a.mp4'), 'r');
+  const prototype = Object.getPrototypeOf(probe);
+  const createReadStream = prototype.createReadStream;
+  await probe.close();
+  let slow = false;
+  t.mock.method(prototype, 'createReadStream', function (this: typeof probe, ...args: unknown[]) {
+    const stream = createReadStream.apply(this, args);
+    if (slow) {
+      slow = false;
+      const destroy = stream._destroy.bind(stream);
+      stream._destroy = (error: Error | null, done: (error?: Error | null) => void) => { setTimeout(() => destroy(error, done), 300); };
+    }
+    return stream;
+  });
+  // Paused like a player with a full buffer; a paused reader only learns how the answer ended once it reads again.
+  const play = (path: string) => new Promise<{ finish: () => Promise<string> }>(resolve => get(`${f.base}${f.query('/api/workspace/media', { cwd: f.open, path })}`, res => {
+    res.pause();
+    res.on('error', () => {});
+    const ended = new Promise<string>(done => res.on('close', () => done(res.complete ? 'whole' : 'cut off')));
+    resolve({ finish: () => { res.resume(); return ended; } });
+  }));
+  slow = true;
+  const first = await play('old/a.mp4');
+  await f.exclusions.add(join(f.open, 'old'));
+  const second = await play('new/b.mp4');
+  await new Promise(resolve => setTimeout(resolve, 500));
+  assert.equal(await first.finish(), 'cut off');
+  await f.exclusions.add(join(f.open, 'new'));
+  assert.equal(await second.finish(), 'cut off', 'the newer answer was still tracked');
 });
