@@ -39,7 +39,7 @@ test('unknown termination needs uninterrupted fingerprint observations; restart 
   assert.notEqual((await successor.observe()).records[0]!.inactiveSince, afterGap);
 }));
 
-test('native aliases protect waiting runs and unknown Claude descendants, but terminal children do not inherit a busy parent', async () => fixture(async stateDir => {
+test('native aliases protect waiting runs and all Claude descendants, including terminal children, inherit a busy parent', async () => fixture(async stateDir => {
   const parent = session('parent'); parent.activeProcess = true;
   const child = session('child', 'claude:parent');
   const grandchild = session('grandchild', 'claude:child');
@@ -60,7 +60,7 @@ test('native aliases protect waiting runs and unknown Claude descendants, but te
   assert.ok(observation.protectedIds.has('claude:monitor-grandchild'));
   assert.ok(observation.protectedIds.has('claude:monitor-child'));
   assert.ok(observation.protectedIds.has('claude:monitor-waiting'));
-  assert.ok(!observation.protectedIds.has('claude:monitor-completed'));
+  assert.ok(observation.protectedIds.has('claude:monitor-completed'));
   assert.equal(observation.records.find(record => record.session.nativeId === 'completed')!.session.parentId, 'claude:monitor-parent');
   assert.equal(observation.records.find(record => record.session.nativeId === 'completed')!.latestTaskEndedAt, '2026-01-01T00:00:00Z');
 }));

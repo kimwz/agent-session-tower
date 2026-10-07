@@ -490,7 +490,9 @@ test('a computer cannot join by replaying a pairing proof made for another conne
   const a = await computer(t, 'computer-a');
   const port = await a.listen();
   const invite = decodeJoinCode((await a.controller.invite()).code);
-  const stranger = await loadLinkIdentity(await mkdtemp(join(tmpdir(), 'tower-link-stranger-')));
+  const strangerRoot = await mkdtemp(join(tmpdir(), 'tower-link-stranger-'));
+  t.after(() => rm(strangerRoot, { recursive: true, force: true }));
+  const stranger = await loadLinkIdentity(strangerRoot);
   const attempt = new WebSocket(`ws://127.0.0.1:${port}/tower-link`, { perMessageDeflate: false });
   const closed = new Promise(resolve => attempt.once('close', resolve));
   attempt.once('open', () => {

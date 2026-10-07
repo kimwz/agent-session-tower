@@ -1,67 +1,44 @@
 import { strict as assert } from 'node:assert';
-import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { test } from 'node:test';
-import { createNativeRetentionAdapter, RetentionProviderBlockedError } from '../../../server/sessions/retention/provider.js';
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile, appendFile, access, rename } from 'node:fs/promises';
+import { tmpdir } from 'node:os'; import { join, dirname } from 'node:path'; import { test } from 'node:test';
+import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
+import { DatabaseSync } from 'node:sqlite';
+import { channel } from 'node:diagnostics_channel';
+import { lstat } from 'node:fs/promises';
 import type { RetentionRecord } from '../../../server/sessions/retention/policy.js';
-import type { RetentionManifest } from '../../../server/sessions/retention/types.js';
+import type { RetentionMember, RetentionManifest, RetentionOperationContext } from '../../../server/sessions/retention/types.js';
+function record(filePath: string): RetentionRecord { return { kind:'subagent',session:{ id:'claude:child',nativeId:'child',provider:'claude',title:'fixture',cwd:'/',project:'fixture',status:'completed',statusReason:'fixture',createdAt:'2026-01-01T00:00:00Z',updatedAt:'2026-01-01T00:00:00Z',lastMessage:'done',messageCount:1,isSubagent:true,resumable:false,filePath,parentId:'claude:parent' } }; }
+const candidate={rootId:'claude:child',ids:['claude:child'],reason:'child-expired' as const,revisions:{}};
+const manifest:RetentionManifest={version:1,id:'fixture',createdAt:'2026-01-01T00:00:00Z',reason:'child-expired',sessions:[],files:[]};
+async function fixture(){const temporary=await mkdtemp(join(tmpdir(),'tower-retention-provider-'));const base=await realpath(temporary);const root=join(base,'projects');await mkdir(root);const file=join(root,'child.jsonl');await writeFile(file,'fixture');const source=record(file);let active=new Set<string>();let complete=true;const committed:RetentionMember[]=[];
+ const context:RetentionOperationContext={operationId:'fixture-operation',managedCold:()=>[],fresh:async()=>({now:Date.now(),migratedAt:0,complete,records:[source],protectedIds:active}),commitMember:async member=>{committed.push(structuredClone(member));}};
+ const adapter=createNativeRetentionAdapter({claude:[root],codex:[root]},{coldRoot:join(base,'cold'),codexHome:base,claudeHome:base,inspect:async()=>({complete,activeIds:active,issues:complete?[]:['denied']})});
+ return {base,root,file,source,context,adapter,committed,active(value:Set<string>){active=value;},complete(value:boolean){complete=value;},close:()=>rm(temporary,{recursive:true,force:true})};}
 
-function record(filePath: string, provider: 'claude' | 'codex' = 'claude'): RetentionRecord {
-  return {
-    kind: 'subagent',
-    session: {
-      id: `${provider}:child`, nativeId: 'child', provider, title: 'fixture', cwd: '/', project: 'fixture',
-      status: 'completed', statusReason: 'fixture', createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z', lastMessage: 'done', messageCount: 1,
-      isSubagent: true, resumable: false, filePath,
-    },
-  };
-}
+test('Claude cold move and no-overwrite restore preserve original and exact sidecar',async()=>{const f=await fixture();try{await writeFile(f.file.replace('.jsonl','.meta.json'),'metadata');const lease=await f.adapter.reserve(candidate,[f.source],f.context);assert.ok(lease);await lease.preserveOwnership();const moved=await lease.moveCold();assert.equal(moved[0].state,'cold');assert.equal(f.committed[0].state,'intent');await assert.rejects(()=>access(f.file));assert.equal(await readFile(moved[0].coldPath!,'utf8'),'fixture');assert.equal((await lease.sources(moved)).length,2);const restored=await f.adapter.restore!(manifest,'restore-operation',moved,f.context);assert.equal(restored[0].state,'restored');assert.equal(await readFile(f.file,'utf8'),'fixture');assert.equal(await readFile(f.file.replace('.jsonl','.meta.json'),'utf8'),'metadata');await lease.release();}finally{await f.close();}});
+test('active native parent and incomplete fresh inspection cannot cold move',async()=>{const f=await fixture();try{f.active(new Set(['claude:parent']));assert.equal(await f.adapter.reserve(candidate,[f.source],f.context),undefined);f.active(new Set());f.complete(false);await assert.rejects(()=>f.adapter.reserve(candidate,[f.source],f.context),/incomplete/);assert.equal(await readFile(f.file,'utf8'),'fixture');}finally{await f.close();}});
+test('durable member intent failure leaves source untouched',async()=>{const f=await fixture();try{f.context.commitMember=async()=>{throw new Error('disk failed');};const lease=await f.adapter.reserve(candidate,[f.source],f.context);assert.ok(lease);await assert.rejects(()=>lease.moveCold(),/disk failed/);assert.equal(await readFile(f.file,'utf8'),'fixture');await lease.release();}finally{await f.close();}});
+test('source recreation and late cold writing preserve both copies and expose conflict',async()=>{const f=await fixture();try{const lease=await f.adapter.reserve(candidate,[f.source],f.context);assert.ok(lease);const moved=await lease.moveCold();await appendFile(moved[0].coldPath!,' late writer');assert.equal((await f.adapter.inspectCold(moved)).members[0].state,'conflict');await writeFile(f.file,'new hot');const restored=await f.adapter.restore!(manifest,'restore-operation',moved,f.context);assert.equal(restored[0].state,'conflict');assert.equal(await readFile(f.file,'utf8'),'new hot');assert.equal(await readFile(moved[0].coldPath!,'utf8'),'fixture late writer');await lease.release();}finally{await f.close();}});
+test('partial sidecar crash is recoverable without replacing an existing transcript',async()=>{const f=await fixture();try{await writeFile(f.file.replace('.jsonl','.meta.json'),'metadata');const lease=await f.adapter.reserve(candidate,[f.source],f.context);assert.ok(lease);const moved=await lease.moveCold();await rename(moved[0].coldPath!,f.file);const partial=await f.adapter.inspectCold(moved);assert.equal(partial.members[0].state,'conflict');const restored=await f.adapter.restore!(manifest,'restore-operation',partial.members,f.context);assert.equal(restored[0].state,'restored');assert.equal(await readFile(f.file.replace('.jsonl','.meta.json'),'utf8'),'metadata');await lease.release();}finally{await f.close();}});
+test('read-only backup discovery validates roots, symlink ancestors and alias identity',async()=>{const f=await fixture();try{const alias=record(f.file);alias.session.id='claude:monitor-child';assert.deepEqual(await f.adapter.files([f.source,alias]),[{path:f.file,root:f.root,provider:'claude',nativeId:'child'}]);alias.session.nativeId='different';await assert.rejects(()=>f.adapter.files([f.source,alias]),/Conflicting transcript identity/);await assert.rejects(()=>f.adapter.files([record(join(f.base,'outside.jsonl'))]),/outside native roots/);await assert.rejects(()=>f.adapter.files([record('relative.jsonl')]),/absolute/);const outside=join(f.base,'outside');await mkdir(outside);await writeFile(join(outside,'child.jsonl'),'outside');await symlink(outside,join(f.root,'linked'));await assert.rejects(()=>f.adapter.files([record(join(f.root,'linked','child.jsonl'))]),/Unsafe transcript/);assert.equal(await readFile(f.file,'utf8'),'fixture');}finally{await f.close();}});
+test('restore rejects forged native and cold paths without changing either original',async()=>{const f=await fixture();try{const lease=await f.adapter.reserve(candidate,[f.source],f.context);assert.ok(lease);const moved=await lease.moveCold();const outside=join(f.base,'outside.jsonl');await writeFile(outside,'outside');const bad={...moved[0],originalPath:outside};const restored=await f.adapter.restore!(manifest,'restore-operation',[bad],f.context);assert.equal(restored[0].state,'conflict');assert.equal(await readFile(outside,'utf8'),'outside');assert.equal(await readFile(moved[0].coldPath!,'utf8'),'fixture');const badCold={...moved[0],coldPath:outside};assert.equal((await f.adapter.restore!(manifest,'restore-operation',[badCold],f.context))[0].state,'conflict');assert.equal(await readFile(outside,'utf8'),'outside');await lease.release();}finally{await f.close();}});
+test('late-writing cold inode remains available for an explicit no-overwrite restoration',async()=>{const f=await fixture();try{const lease=await f.adapter.reserve(candidate,[f.source],f.context);assert.ok(lease);const moved=await lease.moveCold();await appendFile(moved[0].coldPath!,' latest');const changed=(await f.adapter.inspectCold(moved)).members;assert.equal(changed[0].state,'conflict');const restored=await f.adapter.restore!(manifest,'restore-operation',changed,f.context);assert.equal(restored[0].state,'restored');assert.equal(await readFile(f.file,'utf8'),'fixture latest');await lease.release();}finally{await f.close();}});
 
-test('native providers never remove or restore transcripts without a verified contract', async () => {
-  const temporary = await mkdtemp(join(tmpdir(), 'tower-retention-provider-'));
-  const root = await realpath(temporary);
-  try {
-    const file = join(root, 'child.jsonl');
-    await writeFile(file, '{"fixture":true}\n');
-    const adapter = createNativeRetentionAdapter({ claude: [root], codex: [root] });
-    for (const provider of ['claude', 'codex'] as const) {
-      assert.equal(adapter.capability(provider).status, 'blocked');
-      assert.ok(adapter.capability(provider).reason);
-      const source = record(file, provider);
-      await assert.rejects(adapter.reserve({ rootId: source.session.id, ids: [source.session.id], reason: 'child-expired', revisions: {} }, [source]), RetentionProviderBlockedError);
-      const manifest: RetentionManifest = {
-        version: 1, id: 'fixture', createdAt: '2026-01-01T00:00:00Z', reason: 'child-expired',
-        sessions: [{ id: source.session.id, nativeId: 'child', provider, title: 'fixture' }], files: [],
-      };
-      await assert.rejects(adapter.restore!(manifest, 'fixture-operation'), RetentionProviderBlockedError);
-      assert.equal(await readFile(file, 'utf8'), '{"fixture":true}\n');
-    }
-  } finally { await rm(temporary, { recursive: true, force: true }); }
-});
+test('native parent permits confirmed already-cold descendants but protects active, changed or conflicted descendants',async()=>{const f=await fixture();try{
+ const home=join(f.base,'codex'),hot=join(home,'sessions'),archive=join(home,'archived_sessions');await mkdir(home);await mkdir(hot);await mkdir(archive);const parentPath=join(hot,'parent.jsonl'),childPath=join(archive,'child.jsonl');await writeFile(parentPath,'parent');await writeFile(childPath,'child');
+ const db=new DatabaseSync(join(home,'state_5.sqlite'));db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT,archived INTEGER); CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT,status TEXT)');db.prepare('INSERT INTO threads VALUES (?,?,?)').run('parent',parentPath,0);db.prepare('INSERT INTO threads VALUES (?,?,?)').run('child',childPath,1);db.prepare('INSERT INTO thread_spawn_edges VALUES (?,?,?)').run('parent','child','closed');db.close();
+ const info=await lstat(childPath);const cold:RetentionMember={sessionId:'codex:child',nativeId:'child',provider:'codex',parentId:'codex:parent',originalPath:join(hot,'child.jsonl'),coldPath:childPath,operationId:'old-operation',state:'cold',identity:{dev:Number(info.dev),ino:Number(info.ino),size:Number(info.size),mtimeMs:Number(info.mtimeMs)}};
+ const parent=record(parentPath);parent.session.provider='codex';parent.session.id='codex:parent';parent.session.nativeId='parent';parent.session.parentId=undefined;parent.session.isSubagent=false;parent.kind='parent';let active=new Set<string>();
+ const ctx:RetentionOperationContext={operationId:'new-operation',managedCold:()=>[cold],fresh:async()=>({now:Date.now(),migratedAt:0,complete:true,records:[parent],protectedIds:new Set()}),commitMember:async()=>{}};
+ const adapter=createNativeRetentionAdapter({claude:[f.root],codex:[hot,archive]},{codexHome:home,claudeHome:f.base,coldRoot:join(f.base,'cold'),inspect:async()=>({complete:true,activeIds:active,issues:[]})});const group={rootId:parent.session.id,ids:[parent.session.id],reason:'parent-limit' as const,revisions:{}};
+ const lease=await adapter.reserve(group,[parent],ctx);assert.ok(lease);await lease.release();active=new Set(['codex:child']);assert.equal(await adapter.reserve(group,[parent],ctx),undefined);active=new Set();cold.state='conflict';assert.equal(await adapter.reserve(group,[parent],ctx),undefined);cold.state='cold';cold.parentId=undefined;assert.equal(await adapter.reserve(group,[parent],ctx),undefined);cold.parentId='codex:parent';await appendFile(childPath,' changed');assert.equal(await adapter.reserve(group,[parent],ctx),undefined);
+ }finally{await f.close();}});
 
-test('read-only backup discovery validates roots, symlink ancestors and alias identity', async () => {
-  const temporary = await mkdtemp(join(tmpdir(), 'tower-retention-provider-'));
-  const base = await realpath(temporary);
-  try {
-    const root = join(base, 'sessions');
-    const outside = join(base, 'sessions-other');
-    await mkdir(root); await mkdir(outside);
-    const file = join(root, 'child.jsonl');
-    await writeFile(file, 'fixture');
-    const adapter = createNativeRetentionAdapter({ claude: [root], codex: [root] });
-    const first = record(file);
-    const alias = record(file); alias.session.id = 'claude:monitor-child';
-    assert.deepEqual(await adapter.files([first, alias]), [{ path: file, root, provider: 'claude', nativeId: 'child' }]);
-    alias.session.nativeId = 'different';
-    await assert.rejects(adapter.files([first, alias]), /Conflicting transcript identity/);
-    await assert.rejects(adapter.files([record(join(outside, 'child.jsonl'))]), /outside native roots/);
-    await assert.rejects(adapter.files([record('relative.jsonl')]), /Missing absolute/);
-    const linked = join(root, 'linked');
-    await symlink(outside, linked);
-    await writeFile(join(outside, 'child.jsonl'), 'outside');
-    await assert.rejects(adapter.files([record(join(linked, 'child.jsonl'))]), /Unsafe transcript path/);
-    assert.equal(await readFile(file, 'utf8'), 'fixture');
-  } finally { await rm(temporary, { recursive: true, force: true }); }
-});
+test('two thousand cold Codex records reuse one native metadata connection per reconciliation',async t=>{const f=await fixture();const opened=channel('tower.retention.codex-metadata-open');let count=0;const observed=()=>{count++;};try{
+ const home=join(f.base,'codex'),hot=join(home,'sessions'),archive=join(home,'archived_sessions');await mkdir(home);await mkdir(hot);await mkdir(archive);const db=new DatabaseSync(join(home,'state_5.sqlite'));db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT,archived INTEGER)');const insert=db.prepare('INSERT INTO threads VALUES (?,?,?)');const members:RetentionMember[]=[];
+ for(let index=0;index<2000;index++){const id='fixture-'+index,path=join(archive,id+'.jsonl');await writeFile(path,'cold');const info=await lstat(path);insert.run(id,path,1);members.push({sessionId:'codex:'+id,nativeId:id,provider:'codex',originalPath:join(hot,id+'.jsonl'),coldPath:path,operationId:'old-operation',state:'cold',identity:{dev:Number(info.dev),ino:Number(info.ino),size:Number(info.size),mtimeMs:Number(info.mtimeMs)}});}db.close();
+ const adapter=createNativeRetentionAdapter({claude:[f.root],codex:[hot,archive]},{codexHome:home,claudeHome:f.base,coldRoot:join(f.base,'cold'),inspect:async()=>({complete:true,activeIds:new Set(),issues:[]})});
+ opened.subscribe(observed);const began=performance.now();const result=await adapter.inspectCold(members);const elapsed=performance.now()-began;opened.unsubscribe(observed);t.diagnostic(JSON.stringify({coldRecords:2000,metadataConnections:count,coldReconcileMs:Math.round(elapsed)}));assert.equal(result.complete,true);assert.equal(result.members.filter(member=>member.state==='cold').length,2000);assert.equal(count,1);
+ count=0;await appendFile(members[777].coldPath!,' late write');opened.subscribe(observed);const changed=await adapter.inspectCold(members);opened.unsubscribe(observed);assert.equal(count,1);assert.equal(changed.complete,true);assert.equal(changed.members[777].state,'conflict');assert.equal(changed.members.filter(member=>member.state==='cold').length,1999);
+ count=0;opened.subscribe(observed);const oversized=await adapter.inspectCold(Array.from({length:20001},()=>members[0]));opened.unsubscribe(observed);assert.equal(oversized.complete,false);assert.match(oversized.issues.join(';'),/budget/);assert.equal(count,0);assert.equal(oversized.members.length,20001);assert.equal(oversized.members[0].state,'cold');
+ }finally{opened.unsubscribe(observed);await f.close();}});

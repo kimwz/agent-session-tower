@@ -1,3 +1,4 @@
+import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
@@ -16,7 +17,7 @@ const session = (id: string): Session => ({ id, nativeId: id.split(':')[1], prov
   createdAt: '', updatedAt: '', lastMessage: '', messageCount: 1, isSubagent: false, resumable: true });
 
 async function fixture(t: TestContext, preparing?: (internal: { validate?: () => void }) => Promise<void>, withSessions = false) {
-  const stateDir = await mkdtemp(join(tmpdir(), 'tower-tools-'));
+  const stateDir = await temporaryFixture('tower-tools-');
   const project = join(stateDir, 'project');
   await mkdir(project);
   const runs: Run[] = [];
@@ -29,7 +30,7 @@ async function fixture(t: TestContext, preparing?: (internal: { validate?: () =>
     autoPrompts: { submit: async (request, internal) => { await preparing?.(internal); submitted.push({ request, internal }); return { id: request.requestId, provider: request.provider, prompt: request.prompt, routerModel: 'r', status: 'queued', createdAt: '', updatedAt: '' } as AutoPromptJob; }, get: () => undefined } });
   const capabilities = new CapabilityRegistry();
   const context: McpContext = { api, capabilities, run: runId => runs.find(run => run.id === runId) };
-  t.after(async () => { triggers.close(); await rm(stateDir, { recursive: true, force: true }); });
+  t.after(async () => { triggers.close(); await removeTemporaryFixture(stateDir); });
   const ownerTurn = (sessionId: string, towerTools: Run['towerTools'] = 'attached') => { const run: Run = { id: randomUUID(), sessionId, prompt: '', status: 'running', createdAt: '', output: '', origin: { kind: 'owner' }, towerTools }; runs.push(run); return run; };
   const token = (run: Run) => capabilities.issue({ kind: 'owner-run', runId: run.id, sessionId: run.sessionId });
   return { stateDir, project, runs, sessions, submitted, triggers, api, capabilities, context, ownerTurn, token };

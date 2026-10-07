@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { readdirSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import { MASTER_FOLDER } from '../../../shared/master.js';
@@ -1075,11 +1075,13 @@ test('the private MCP config is removed when the provider cannot be spawned', as
   const privateTmp = join(directory, 'tmp'); await mkdir(privateTmp);
   const previous = process.env.TMPDIR; process.env.TMPDIR = privateTmp;
   const session = makeSession(directory, { provider: 'claude', id: `claude:${ID}` });
+  const namespace = join(await realpath(privateTmp), `tower-owned-${process.getuid?.() ?? 0}`);
   let configPath: string | undefined;
+  let writtenConfig: unknown;
   const manager = new RunManager({ stateDir: join(directory, 'state'), getSession: id => id === session.id ? session : undefined, refreshSessions: async () => {}, pollMs: 20,
     findExecutable: async provider => `/fixture/${provider}`,
     resolveRunTools: () => ({ required: false, servers: { tower: { command: '/fixture/node', args: [], env: { TOWER_MCP_CAPABILITY: 'e'.repeat(64) } } } }),
-    spawnProcess: ((_file: string, args: string[]) => { configPath = args[args.indexOf('--mcp-config') + 1]; throw new Error('spawn refused by the fixture'); }) as never });
+    spawnProcess: ((_file: string, args: string[]) => { configPath = args[args.indexOf('--mcp-config') + 1]; writtenConfig = JSON.parse(readFileSync(configPath!, 'utf8')); throw new Error('spawn refused by the fixture'); }) as never });
   await manager.start();
   t.after(async () => {
     await manager.close();
@@ -1090,8 +1092,10 @@ test('the private MCP config is removed when the provider cannot be spawned', as
   const result = await finished(manager, run.id);
   assert.equal(result.status, 'error');
   assert.match(result.error!, /spawn refused by the fixture/);
-  assert.ok(configPath?.startsWith(privateTmp), 'the config was written to its own private folder');
-  await eventually(() => readdir(privateTmp).then(names => names.length === 0));
+  assert.equal(dirname(dirname(configPath!)), join(namespace, 'data'), 'the config belongs to its canonical private allocation');
+  assert.deepEqual(writtenConfig, { mcpServers: { tower: { command: '/fixture/node', args: [], env: { TOWER_MCP_CAPABILITY: 'e'.repeat(64) } } } });
+  await eventually(async () => (await readdir(join(namespace, 'data'))).length === 0 && (await readdir(join(namespace, 'records'))).length === 0);
+  await assert.rejects(stat(configPath!), { code: 'ENOENT' });
 });
 
 /** A Claude conversation whose provider is a fake child that sends whatever the test writes. */
@@ -1317,8 +1321,19 @@ async function claudeWithPrivateConfig(t: TestContext) {
     if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous;
     await rm(directory, { recursive: true, force: true });
   });
-  const configs = () => readdir(privateTmp).then(names => names.filter(name => name.startsWith('tower-mcp-')));
-  return { manager, sessions, spawned, configs, privateTmp, id: `claude:${ID}` };
+  const namespace = join(await realpath(privateTmp), `tower-owned-${process.getuid?.() ?? 0}`);
+  const dataDirectory = join(namespace, 'data');
+  const configs = () => readdir(dataDirectory);
+  const writtenConfigs = () => readdirSync(dataDirectory).map(name => {
+    const path = join(dataDirectory, name, 'config.json');
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { mcpServers: { tower: { command: '/fixture/node', args: [], env: { TOWER_MCP_CAPABILITY: 'f'.repeat(64) } } } });
+    return path;
+  });
+  const removed = async (paths: string[]) => {
+    await eventually(async () => (await configs()).length === 0 && (await readdir(join(namespace, 'records'))).length === 0);
+    for (const path of paths) await assert.rejects(stat(path), { code: 'ENOENT' });
+  };
+  return { manager, sessions, spawned, configs, writtenConfigs, removed, privateTmp, id: `claude:${ID}` };
 }
 
 test('a launch look that throws after the private MCP config was written removes the config and starts nothing', async t => {
@@ -1328,7 +1343,7 @@ test('a launch look that throws after the private MCP config was written removes
   let written: string[] = [];
   f.manager.setLaunchGate(() => undefined, (() => {
     looks++;
-    if (looks === 3) { written = readdirSync(f.privateTmp).filter(name => name.startsWith('tower-mcp-')); throw new Error('The launch look failed.'); }
+    if (looks === 3) { written = f.writtenConfigs(); throw new Error('The launch look failed.'); }
     return Promise.resolve();
   }) as (run: Run) => Promise<void>);
   const run = await f.manager.enqueue(f.id, 'Use the tools');
@@ -1338,21 +1353,21 @@ test('a launch look that throws after the private MCP config was written removes
   assert.equal(looks, 3);
   assert.equal(written.length, 1, 'the config had been written when the look threw');
   assert.deepEqual(f.spawned, []);
-  await eventually(() => f.configs().then(names => names.length === 0));
+  await f.removed(written);
 });
 
 test('a session that disappears before the last look fails the run, removes the private MCP config and starts nothing', async t => {
   const f = await claudeWithPrivateConfig(t);
   let looks = 0;
   let written: string[] = [];
-  f.manager.setLaunchGate(() => undefined, async () => { looks++; if (looks === 3) { written = readdirSync(f.privateTmp).filter(name => name.startsWith('tower-mcp-')); f.sessions.delete(f.id); } });
+  f.manager.setLaunchGate(() => undefined, async () => { looks++; if (looks === 3) { written = f.writtenConfigs(); f.sessions.delete(f.id); } });
   const run = await f.manager.enqueue(f.id, 'Use the tools');
   const result = await finished(f.manager, run.id);
   assert.equal(result.status, 'error');
   assert.match(result.error!, /Session no longer exists/);
   assert.equal(written.length, 1, 'the config had been written before the last look');
   assert.deepEqual(f.spawned, []);
-  await eventually(() => f.configs().then(names => names.length === 0));
+  await f.removed(written);
 });
 
 test('a bridge whose start reports the end and then rejects ends once: the reported error stays and is not written again', async t => {

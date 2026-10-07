@@ -75,7 +75,7 @@ export type Prepared<H, D = void> =
   /** A Codex app cannot take this turn (no app, or tools or instructions it must have); nothing to clean up. */
   | { kind: 'unsupported' }
   /** `dispose` frees what was prepared when the manager's last check refuses; `start` may answer when it settles. */
-  | { kind: 'ready'; handle: H; start(): void | Promise<void>; dispose(detail: D): void };
+  | { kind: 'ready'; handle: H; start(): void | Promise<void>; dispose(detail: D): void | Promise<void> };
 
 /** How a Codex app turn ended. */
 export type CodexBridgeResult = Parameters<CodexBridgeOptions['onFinished']>[0];

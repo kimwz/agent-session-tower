@@ -52,6 +52,14 @@ export function selectRetention(observation: RetentionObservation): RetentionSel
       siblings.push(session.id); children.set(session.parentId, siblings);
     }
   }
+  // Claude's parent can resume a native child even after its previous task ended.
+  for (const record of observation.records) if (record.session.provider === 'claude' && record.session.isSubagent) {
+    const seen = new Set<string>(); let parent = record.session.parentId;
+    while (parent && !seen.has(parent)) {
+      seen.add(parent); if (protectedIds.has(parent)) { protectedIds.add(record.session.id); break; }
+      parent = records.get(parent)?.session.parentId;
+    }
+  }
   const descendants = (id: string): string[] => {
     const found = new Set<string>(); const pending = [id];
     while (pending.length) {
@@ -73,6 +81,11 @@ export function selectRetention(observation: RetentionObservation): RetentionSel
     return false;
   };
   const emit = (id: string, reason: RetentionCandidate['reason'], ids: string[]) => {
+    if (reason === 'parent-limit' && ids.some(member => {
+      const record = records.get(member)!; if (record.kind === 'parent') return false;
+      const ended = Math.max(time(record.latestTaskEndedAt), time(record.restoredAt)) || time(record.inactiveSince);
+      return !ended || observation.now < ended + RETENTION_DAYS * DAY;
+    })) { result.deferred.push({ id, reason: 'young-descendant' }); return false; }
     const unsafe = ids.find(member => protectedIds.has(member) || observation.blockedIds?.has(member) || !validRelationship(member));
     if (unsafe) { result.deferred.push({ id, reason: !validRelationship(unsafe) ? 'unknown-relationship' : 'protected' }); return false; }
     result.candidates.push({ rootId: id, ids, reason, revisions: Object.fromEntries(ids.map(member => [member, records.get(member)?.archiveRevision || 0])) });
@@ -105,7 +118,7 @@ export function selectRetention(observation: RetentionObservation): RetentionSel
     const observed = end || time(record.inactiveSince);
     if (!observed) { result.deferred.push({ id: session.id, reason: 'unproven-inactivity' }); continue; }
     const explicit = Boolean(record.archivedAt);
-    if (!explicit && observation.now < Math.max(observed, observation.migratedAt) + RETENTION_DAYS * DAY) continue;
+    if (!explicit && observation.now < observed + RETENTION_DAYS * DAY) continue;
     // A newer activity invalidates an old completion, restore grace or archive request.
     if (time(record.lastActivityAt) > observed || (explicit && time(record.lastActivityAt) > time(record.archivedAt))) {
       result.deferred.push({ id: session.id, reason: 'newer-activity' }); continue;

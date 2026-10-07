@@ -11,9 +11,18 @@ export interface RetentionManifest {
   files: RetentionFileManifest[];
 }
 export type RetentionPhase = 'planned' | 'backup-verified' | 'blocked-provider' | 'removing' | 'archived' | 'conflict' | 'missing-backup' | 'restored-awaiting-start';
+export interface RetentionMember {
+  sessionId: string; provider: Provider; nativeId: string; parentId?: string;
+  originalPath: string; coldPath?: string; operationId: string;
+  state: 'intent' | 'cold' | 'restored' | 'conflict';
+  identity: { dev: number; ino: number; size: number; mtimeMs: number };
+  sidecars?: { originalPath: string; coldPath: string; identity: { dev: number; ino: number; size: number; mtimeMs: number } }[];
+  error?: string;
+}
 export interface RetentionJournalEntry {
   id: string; candidate: RetentionCandidate; phase: RetentionPhase; updatedAt: string;
   error?: string;
+  members?: RetentionMember[];
   backupError?: string; restoredAt?: string; restoreOperationId?: string;
 }
 export interface RetentionCapability { status: 'supported' | 'blocked'; reason?: string }
@@ -30,6 +39,8 @@ export interface RetentionOverview {
   candidates: number;
   deferred: number;
   archived: number;
+  archivedMembers?: number;
+  backupFailures?: number;
   blockedProvider: number;
   backupOnly: number;
   failures: number;
@@ -37,4 +48,5 @@ export interface RetentionOverview {
   originalBytes: number;
   providers: Record<Provider, RetentionCapability>;
   entries: RetentionJournalEntry[];
+  temporary?: { checkedAt?: string; examined: number; removedEmpty: number; releasedOwned: number; deferredActive: number; deferredUnproven: number; failed: number; issues: string[] };
 }

@@ -62,7 +62,7 @@ async function readExternalJson(path: string): Promise<unknown> {
 async function syncDirectory(path: string): Promise<void> { const handle = await open(path, constants.O_RDONLY); try { await handle.sync(); } finally { await handle.close(); } }
 
 export class RetentionArchive {
-  constructor(readonly root: string, readonly scanRoots: readonly string[]) {}
+  constructor(readonly root: string, readonly scanRoots: readonly string[], readonly originalColdRoots: readonly string[] = []) {}
   async start(): Promise<void> {
     await privateDirectory(this.root);
     for (const scanRoot of this.scanRoots) if (resolve(scanRoot) === resolve(this.root) || contains(scanRoot, this.root)) throw new Error('Cold storage must be outside native scan roots.');
@@ -92,7 +92,10 @@ export class RetentionArchive {
     if (!files.length || files.length > MAX_FILES) throw new Error('Cold bundle file budget exceeded.');
     let total = 0;
     for (const source of files) {
-      if (!contains(source.root, source.path) || !this.scanRoots.some(root => resolve(root) === resolve(source.root))) throw new Error('Source outside approved native root.');
+      const original = source.originalPath || source.path;
+      const knownNative = this.scanRoots.some(root => resolve(root) === resolve(source.root));
+      const sourceAllowed = contains(source.root, source.path) || Boolean(source.provenance && this.originalColdRoots.some(root => contains(root, source.path))) || Boolean(source.provenance === 'native-archive' && this.scanRoots.some(root => contains(root, source.path)));
+      if (!knownNative || !contains(source.root, original) || !sourceAllowed) throw new Error('Source outside approved native root.');
       await existingSafePath(source.path); const stat = await lstat(source.path);
       if (!stat.isFile()) throw new Error('Retention source is not a regular file.');
       total += stat.size;
@@ -119,7 +122,7 @@ export class RetentionArchive {
           } }), createGzip(), outputStream);
           await output.sync(); const after = await input.stat(); const named = await lstat(source.path);
           if (bytes !== before.size || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ino !== named.ino || before.dev !== named.dev || named.isSymbolicLink()) throw new Error('Retention source changed during backup.');
-          manifest.files.push({ name: `file-${index}.gz`, originalPath: source.path, root: source.root, nativeId: source.nativeId, provider: source.provider, bytes, sha256: hash.digest('hex') });
+          manifest.files.push({ name: `file-${index}.gz`, originalPath: source.originalPath || source.path, root: source.root, nativeId: source.nativeId, provider: source.provider, bytes, sha256: hash.digest('hex') });
         } finally { inputStream.destroy(); outputStream.destroy(); await input.close(); await output.close(); }
       }
       await writePrivateJson(join(temporary, 'manifest.json'), JSON.stringify(manifest), { syncDirectory: true });

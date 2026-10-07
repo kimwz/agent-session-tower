@@ -1,3 +1,4 @@
+import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
@@ -50,8 +51,8 @@ test('remote turns get Tower’s tools like the owner’s own, but never a coord
 });
 
 test('a remote origin is kept with the run and the conversation across a restart', async t => {
-  const stateDir = await mkdtemp(join(tmpdir(), 'tower-remote-origin-'));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const stateDir = await temporaryFixture('tower-remote-origin-');
+  t.after(() => removeTemporaryFixture(stateDir));
   const open = async () => {
     const manager = new RunManager({ stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000, findExecutable: async () => '/fixture/codex',
       spawnProcess: () => { throw new Error('No provider starts in this fixture.'); }, openCodexStdio: async () => { throw new Error('No provider starts in this fixture.'); } });
@@ -68,7 +69,7 @@ test('a remote origin is kept with the run and the conversation across a restart
 });
 
 async function worker(t: TestContext, coordinators: string[] = []) {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-remote-worker-'));
+  const directory = await temporaryFixture('tower-remote-worker-');
   const stateDir = join(directory, 'state');
   const id = '10000000-0000-4000-8000-000000000001';
   const session: Session = { id: `codex:${id}`, nativeId: id, provider: 'codex', title: 'fixture', cwd: directory, project: 'fixture', status: 'idle', statusReason: '',
@@ -87,7 +88,7 @@ async function worker(t: TestContext, coordinators: string[] = []) {
   const client = new DurableRunManager({ stateDir, pollMs: 10 });
   await client.start();
   const paths = await runnerPaths(stateDir);
-  t.after(async () => { await client.close(); await host.close(); sessions.stop(); await runs.close(); await rm(directory, { recursive: true, force: true }); await rm(paths.directory, { recursive: true, force: true }); });
+  t.after(async () => { await client.close(); await host.close(); sessions.stop(); await runs.close(); await removeTemporaryFixture(directory); await rm(paths.directory, { recursive: true, force: true }); });
   return { session, runs, client };
 }
 
@@ -119,7 +120,7 @@ test('remote work is not sent to a worker that cannot tell it apart from local w
 
 
 test('a worker keeps following the exclusion list the web process saves after it started', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-remote-worker-exclusions-'));
+  const directory = await temporaryFixture('tower-remote-worker-exclusions-');
   const stateDir = join(directory, 'state');
   const folder = join(directory, 'project'), other = join(directory, 'other');
   await mkdir(folder, { recursive: true });
@@ -146,7 +147,7 @@ test('a worker keeps following the exclusion list the web process saves after it
   const client = new DurableRunManager({ stateDir, pollMs: 10 });
   await client.start();
   const paths = await runnerPaths(stateDir);
-  t.after(async () => { await client.close(); await host.close(); sessions.stop(); await autoPrompts.close(); await runs.close(); await rm(directory, { recursive: true, force: true }); await rm(paths.directory, { recursive: true, force: true }); });
+  t.after(async () => { await client.close(); await host.close(); sessions.stop(); await autoPrompts.close(); await runs.close(); await removeTemporaryFixture(directory); await rm(paths.directory, { recursive: true, force: true }); });
   // The web process owns the list; the worker has its own copy.
   const web = new RemoteExclusionStore(stateDir);
   await web.start();

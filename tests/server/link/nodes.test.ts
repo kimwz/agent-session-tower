@@ -209,8 +209,9 @@ test('a joined computer that goes away stays shown as last seen, and leaves the 
 
 test('two joined computers with the same folder and session ids stay apart in streams, requests and views', async t => {
   const a = await tower(t);
-  const folder = join(await realpath(await mkdtemp(join(tmpdir(), 'tower-nodes-same-'))), 'app');
-  t.after(() => rm(folder, { recursive: true, force: true }));
+  const root = await mkdtemp(join(tmpdir(), 'tower-nodes-same-'));
+  const folder = join(await realpath(root), 'app');
+  t.after(() => rm(root, { recursive: true, force: true }));
   const b = await joined(t, a, 'computer-b', folder);
   const c = await joined(t, a, 'computer-c', folder);
   const frames = events(t, `${a.base}/api/events?patch=1&nodes=1`);

@@ -86,7 +86,7 @@ export async function prepareClaudeTurn(host: TurnHost, run: Run, session: Sessi
   if (mcpServers) args.push('--mcp-config', privateConfig?.path ?? JSON.stringify({ mcpServers }));
   // Writing the file yielded; nothing may have stopped the run in the meantime. The manager looks once more after this.
   if (privateConfig || run.permissionRequestIds?.length) {
-    try { await host.prepareLaunch(run); } catch (error) { privateConfig?.remove(); throw error; }
+    try { await host.prepareLaunch(run); } catch (error) { await privateConfig?.remove(); throw error; }
   }
   const turn = claudeProcess(host, run, session, creating, { executable, args, env, input, privateConfig });
   return { kind: 'ready', handle: turn.spawn, start: turn.start, dispose: () => privateConfig?.remove() };
@@ -95,7 +95,7 @@ export async function prepareClaudeTurn(host: TurnHost, run: Run, session: Sessi
 interface ClaudeLaunch {
   executable: string; args: string[]; env: NodeJS.ProcessEnv;
   input: Record<string, unknown>;
-  privateConfig?: { path: string; remove: () => void };
+  privateConfig?: { path: string; bindConsumer(pid: number): Promise<void>; remove: () => Promise<void> };
 }
 
 /** One Claude Code process for one run: its output parsing, background work, master replies and identity. */
@@ -103,6 +103,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
   let child!: ChildProcessWithoutNullStreams;
   let finish!: () => void;
   let owned!: OwnedProcess;
+  let configBound: Promise<void> = Promise.resolve();
   /** The process's end is reported once. */
   let reported = false;
   let buffer = '';
@@ -157,8 +158,9 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       child = (host.options.spawnProcess ?? spawn)(executable, args, {
         cwd: session.cwd, env, detached: true, stdio: 'pipe', shell: false,
       });
-    } catch (error) { privateConfig?.remove(); throw error; }
-    if (privateConfig) child.once('close', privateConfig.remove);
+    } catch (error) { void privateConfig?.remove().catch(cleanupError => console.error('Claude launch cleanup failed:', cleanupError)); throw error; }
+    configBound = privateConfig && child.pid ? privateConfig.bindConsumer(child.pid) : Promise.resolve();
+    configBound.catch(error => console.error('Claude temporary consumer registration failed:', error));
     run.status = 'running';
     run.startedAt = new Date().toISOString();
     run.output = '';
@@ -368,6 +370,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       owned.claude?.close();
       // A newly bound UUID must be durable before this turn reports success.
       await identitySaved;
+      try { await configBound; await privateConfig?.remove(); } catch (error) { console.error('Claude temporary config cleanup failed:', error); }
       if (reported) return;
       reported = true;
       host.exited({ kind: 'claude', run, session, owned, finish, summary: { code, signal, streamError, stderr, sawCompletion, sawSessionId, waitTimedOut, inputClosedByTower,

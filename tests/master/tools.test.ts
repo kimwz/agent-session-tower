@@ -1,3 +1,4 @@
+import { temporaryFixture, removeTemporaryFixture } from '../helpers/temporary.js';
 import { initialModelSettings } from '../../shared/models.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -66,9 +67,9 @@ test('the master\'s tools call Tower like a page, follow the work they start, an
 });
 
 test('the master session\'s tool server lists the tools and relays each call to the running master host, never starting one', async t => {
-  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-mcp-'));
+  const stateDir = await temporaryFixture('tower-master-mcp-');
   const cleanup: Array<() => unknown> = [];
-  t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(stateDir, { recursive: true, force: true }); });
+  t.after(async () => { for (const step of cleanup.reverse()) await step(); await removeTemporaryFixture(stateDir); });
   const web = await fakeWeb(t);
   const input = new PassThrough();
   const output = new PassThrough();

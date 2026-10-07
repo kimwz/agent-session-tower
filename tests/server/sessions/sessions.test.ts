@@ -1,4 +1,6 @@
 import test from 'node:test';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -667,4 +669,32 @@ test('a history page reports the records it could not read', async (t) => {
   const page = await service.detail(`codex:${childId}`);
   assert.deepEqual(page?.messages.map(message => message.text), ['Ship it', 'Then deploy']);
   assert.equal(page?.skipped, 1);
+});
+
+test('managed cold paths have zero stat/read calls and reenter after same-ID restoration', async t => {
+  const { service, codexHome, codex } = await fixture(t);
+  await mkdir(join(codexHome, 'archived_sessions'));
+  await writeFile(codex, lines([row('session_meta', { id: rootId, cwd: '/fixture' }), codexMessage('user', 'kept transcript'), row('event_msg', { type: 'task_complete' })]));
+  await service.refresh(); assert.equal(service.list().length, 1);
+  const originalStat = fsPromises.stat, originalOpen = fsPromises.open;
+  let stats = 0, reads = 0;
+  fsPromises.stat = (async (...args: Parameters<typeof fsPromises.stat>) => { if (String(args[0]) === codex) stats++; return originalStat(...args); }) as typeof fsPromises.stat;
+  fsPromises.open = (async (...args: Parameters<typeof fsPromises.open>) => { if (String(args[0]) === codex) reads++; return originalOpen(...args); }) as typeof fsPromises.open;
+  syncBuiltinESMExports();
+  try {
+    service.setColdRegistry([codex], [`codex:${rootId}`]); await service.refresh(true);
+    assert.equal(service.get(`codex:${rootId}`), undefined); assert.equal(service.list().length, 0); assert.equal(service.diagnostics.length, 0);
+    assert.equal(await service.detail(`codex:${rootId}`), undefined); assert.equal(stats, 0); assert.equal(reads, 0);
+    service.setColdRegistry([], []); await service.refresh(true);
+    assert.equal(service.get(`codex:${rootId}`)?.title, 'kept transcript'); assert.ok(stats > 0); assert.ok(reads > 0);
+  } finally { fsPromises.stat = originalStat; fsPromises.open = originalOpen; syncBuiltinESMExports(); }
+});
+
+test('cold inspection failure blocks maintenance while ordinary hot session refresh still succeeds', async t => {
+  const {service,codexHome,codex}=await fixture(t);await mkdir(join(codexHome,'archived_sessions'));
+  await writeFile(codex,lines([row('session_meta',{id:rootId,cwd:'/fixture'}),codexMessage('user','hot instruction')]));
+  service.setColdRegistry([],[],async()=>{throw new Error('fixture cold inspection failure');});
+  await service.refresh(true);assert.equal(service.get(`codex:${rootId}`)?.title,'hot instruction');
+  assert.equal(service.retentionRecords().complete,false);assert.ok(service.retentionRecords().issues.some(issue=>issue.includes('cold inspection failure')));
+  service.setColdRegistry([],[],async()=>({complete:true,issues:[]}));await service.refresh(true);assert.equal(service.retentionRecords().complete,true);
 });

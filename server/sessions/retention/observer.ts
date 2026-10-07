@@ -87,7 +87,7 @@ export class RetentionObserver {
     const parentOf = (session: Session) => session.parentId ? aliases.get(session.parentId) ?? aliases.get(`${session.provider}:${session.parentId}`) ?? session.parentId : undefined;
     for (const raw of snapshot.records) {
       const session = byNative.get(`${raw.session.provider}:${raw.session.nativeId}`) ?? raw.session;
-      if (session.provider !== 'claude' || !session.isSubagent || raw.latestTaskEndedAt) continue;
+      if (session.provider !== 'claude' || !session.isSubagent) continue;
       const seen = new Set<string>();
       for (let parent = parentOf(session); parent && !seen.has(parent); parent = byId.get(parent) && parentOf(byId.get(parent)!)) {
         seen.add(parent);

@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.113.0] - 2026-10-07
+
+### Changed
+
+- Move eligible inactive helper and subagent records out of ordinary native/Tower session discovery after an explicit retention archive request or seven days from their verified last task. Completed existing children use that last-task date; active, waiting, scheduled and coordinator work remain protected. Claude children also remain protected while an ancestor can resume them.
+- Use an unloaded independent Codex maintenance server for native archive/unarchive and preserve Codex original records and history databases. Keep Claude original files in permanent private cold storage with per-member recovery records, conflict detection and no-overwrite restoration. Managed cold records are excluded before normal transcript parsing; cold storage preserves originals, so disk savings are measured separately from list and parsing reductions. JSONL exports remain transcript copies rather than portable backups of complete Codex history.
+- Fix fixture teardown paths that recreated or left temporary directories, track exact runner siblings without recreating them, and await owned MCP configuration release after consumers exit. Collect stale Tower-owned temporary data conservatively with process/path inspection and worker-handoff draining. Legacy cleanup is limited to proven fixture patterns that are empty and at least 48 hours old; shared runner directories, nonempty unproven folders and active consumers remain untouched.
+
 ## [1.112.0] - 2026-10-07
 
 ### Added

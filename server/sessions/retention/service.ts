@@ -2,13 +2,16 @@ import { createHash, randomUUID } from 'node:crypto';
 import { selectRetention, type RetentionCandidate, type RetentionObservation, type RetentionRecord } from './policy.js';
 import { RetentionArchive } from './archive.js';
 import { RetentionStore } from './store.js';
-import type { RetentionAdapter, RetentionJournalEntry, RetentionOverview } from './types.js';
+import type { RetentionAdapter, RetentionJournalEntry, RetentionOverview, RetentionMember, RetentionOperationContext } from './types.js';
 
 export interface RetentionServiceOptions {
   store: RetentionStore;
   archive: RetentionArchive;
   adapter: RetentionAdapter;
   observe: () => Promise<RetentionObservation>;
+  reserveAdmission?: (ids: readonly string[]) => (() => void) | undefined;
+  onColdChanged?: (members: RetentionMember[]) => void;
+  refresh?: () => Promise<void>;
   onArchived?: (ids: string[]) => Promise<void>;
   onError?: (error: unknown) => void;
 }
@@ -27,12 +30,54 @@ export class RetentionService {
   private metricError?: string;
   private verification: 'pending' | 'running' | 'complete' = 'pending';
   private verified = new Set<string>();
+  private activeOperation?: string;
+  private inspecting?: Promise<void>;
+  private coldIssues: string[] = [];
+  coldInspectionIssues(): string[] { return [...this.coldIssues]; }
   private operations: Promise<unknown> = Promise.resolve();
   constructor(private readonly options: RetentionServiceOptions) {}
   async start(): Promise<void> {
     await this.options.store.start(); await this.options.archive.start();
     this.verification = 'pending'; this.verified.clear();
     this.resume();
+  }
+  coldMembers(): RetentionMember[] {
+    return this.options.store.list().flatMap(entry => entry.members || []).filter(member => member.state === 'cold');
+  }
+  publishCold(): void { this.options.onColdChanged?.(this.coldMembers()); }
+  reconcileCold(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    if (this.inspecting) return this.inspecting;
+    const task = this.inspectColdNow(); this.inspecting = task;
+    void task.finally(() => { this.inspecting = undefined; }).catch(error => this.report(error)); return task;
+  }
+  private async inspectColdNow(): Promise<void> {
+    const entries = this.options.store.list().filter(entry => entry.id !== this.activeOperation && entry.members?.length);
+    const members = entries.flatMap(entry => entry.members || []).filter(member => member.state !== 'restored');
+    if (!members.length) { this.coldIssues = []; this.publishCold(); return; }
+    const checked = await this.options.adapter.inspectCold(members);
+    this.coldIssues = checked.complete ? [] : checked.issues;
+    const updates = new Map(checked.members.map(member => [`${member.operationId}:${member.sessionId}`, member]));
+    const changed: { previous: RetentionJournalEntry; next: RetentionJournalEntry }[] = [];
+    for (const entry of entries) {
+      const next = entry.members!.map(member => updates.get(`${member.operationId}:${member.sessionId}`) || member);
+      if (JSON.stringify(next) === JSON.stringify(entry.members)) continue;
+      changed.push({ previous: entry, next: { ...entry, members: next, phase: next.every(member => member.state === 'cold') ? 'archived' : next.every(member => member.state === 'restored') ? 'restored-awaiting-start' : 'conflict', updatedAt: new Date().toISOString() } });
+    }
+    if (changed.length) await this.options.store.putIfUnchanged(changed, id => !this.stopped && id !== this.activeOperation);
+    this.publishCold();
+  }
+  async restoreSession(id: string): Promise<void> {
+    const entry = this.options.store.list().find(entry => entry.members?.some(member => (member.sessionId === id || `${member.provider}:${member.nativeId}` === id) && member.state === 'cold'));
+    if (!entry) return;
+    await this.restore(entry.id);
+  }
+  private context(entry: RetentionJournalEntry): RetentionOperationContext {
+    return { operationId: entry.id, managedCold: () => this.coldMembers(), fresh: () => this.observe(), commitMember: async member => {
+      const current = this.options.store.get(entry.id) || entry;
+      const members = new Map((current.members || []).map(item => [item.sessionId, item])); members.set(member.sessionId, member);
+      await this.options.store.put({ ...current, members: [...members.values()], updatedAt: new Date().toISOString() });
+    } };
   }
   resume(): void {
     if (this.timer) return; this.stopped = false;
@@ -42,13 +87,15 @@ export class RetentionService {
   async quiesce(): Promise<void> {
     this.stop();
     // Queued errors are already reported by serial/cycle; maintenance failures must not strand the worker lock.
-    await Promise.allSettled([this.checking, this.operations]);
+    await Promise.allSettled([this.checking, this.operations, this.inspecting]);
   }
   overview(): RetentionOverview {
     const entries = this.options.store.list();
     return { migratedAt: new Date(this.options.store.migratedAt).toISOString(), lastCheckedAt: this.lastCheckedAt, metricError: this.metricError,
       running: Boolean(this.checking), observationComplete: this.observationComplete, observationIssues: this.observationIssues, deferredReasons: this.deferredReasons, verification: this.verification, candidates: this.candidates, deferred: this.deferred,
-      archived: entries.filter(entry => entry.phase === 'archived' && !entry.backupError).length,
+      archived: entries.filter(entry => entry.members?.some(member => member.state === 'cold')).length,
+      archivedMembers: entries.reduce((sum, entry) => sum + (entry.members?.filter(member => member.state === 'cold').length || 0), 0),
+      backupFailures: entries.filter(entry => entry.backupError).length,
       blockedProvider: entries.filter(entry => entry.phase === 'blocked-provider').length,
       backupOnly: entries.filter(entry => entry.phase === 'backup-verified' && !entry.backupError).length,
       failures: entries.filter(entry => (['conflict', 'missing-backup'].includes(entry.phase) || entry.backupError)).length,
@@ -66,6 +113,7 @@ export class RetentionService {
     this.verification = 'running';
     for (const entry of this.options.store.list()) {
       if (this.stopped) { this.verification = 'pending'; return; }
+      if (entry.members?.length && !await this.options.archive.exists(entry.id)) continue;
       if (entry.phase === 'planned' || entry.phase === 'blocked-provider' || (this.verified.has(entry.id) && !entry.backupError && entry.phase !== 'missing-backup')) continue;
       try {
         await this.options.archive.verify(entry.id);
@@ -90,17 +138,18 @@ export class RetentionService {
       if (stale.length) await this.options.store.removeMetadata(stale);
     }
     this.candidates = selected.candidates.length;
-    if (this.options.store.list().some(entry => entry.phase === 'missing-backup' || Boolean(entry.backupError))) { this.addDeferred('backup-unverified', selected.candidates.length); return this.overview(); }
+
     const started = Date.now(); let count = 0; const blockedEntries: RetentionJournalEntry[] = [];
     for (const [index, candidate] of selected.candidates.entries()) {
       if (this.stopped) { this.addDeferred('maintenance-paused', selected.candidates.length - index); break; }
       if (Date.now() - started >= 30_000) { this.addDeferred('time-budget', selected.candidates.length - index); break; }
       const records = this.records(candidate, observation);
       const id = this.operationId(candidate, records); const existing = this.options.store.get(id);
-      if (existing && ['archived', 'backup-verified', 'conflict', 'missing-backup', 'restored-awaiting-start'].includes(existing.phase)) continue;
+      if (existing && (existing.members?.every(member => member.state === 'cold') || ['archived', 'restored-awaiting-start'].includes(existing.phase))) continue;
       const entry = existing || { id, candidate, phase: 'planned' as const, updatedAt: new Date().toISOString() };
       const blocked = records.map(record => this.options.adapter.capability(record.session.provider)).find(capability => capability.status === 'blocked');
       if (blocked) {
+        if (existing?.phase === 'backup-verified') continue;
         const error = blocked.reason || 'Provider removal contract unavailable.';
         if (entry.phase !== 'blocked-provider' || entry.error !== error) blockedEntries.push({ ...entry, phase: 'blocked-provider', error, updatedAt: new Date().toISOString() });
         continue;
@@ -151,30 +200,64 @@ export class RetentionService {
   }
   private async archiveCandidate(entry: RetentionJournalEntry, records: RetentionRecord[]): Promise<void> {
     this.assertRemovalReady();
-    const lease = await this.options.adapter.reserve(entry.candidate, records);
-    if (!lease) { await this.put(entry, 'conflict', 'Admission reservation unavailable.'); return; }
+    const admissionIds = new Set(entry.candidate.ids);
+    // Already-cold descendants are still in Codex's native subtree and must not be resumed mid-operation.
+    const cold = this.coldMembers(); let expanded = true;
+    while (expanded) { expanded = false; for (const member of cold) if (member.parentId && admissionIds.has(member.parentId) && !admissionIds.has(member.sessionId)) { admissionIds.add(member.sessionId); expanded = true; } }
+    const releaseAdmission = this.options.reserveAdmission?.([...admissionIds]);
+    if (this.options.reserveAdmission && !releaseAdmission) { await this.put(entry, 'conflict', 'Admission reservation unavailable.'); return; }
+    this.activeOperation = entry.id;
+    let lease: Awaited<ReturnType<RetentionAdapter['reserve']>>;
     try {
+      lease = await this.options.adapter.reserve(entry.candidate, records, this.context(entry));
+      if (!lease) { await this.put(entry, 'conflict', 'Provider reservation unavailable.'); return; }
       if (!await lease.revalidate()) { await this.put(entry, 'conflict', 'Retention preconditions changed.'); return; }
-      await lease.preserveOwnership();
-      const manifest = await this.options.archive.create(entry.id, entry.candidate, records, await this.options.adapter.files(records));
-      await this.put(entry, 'backup-verified');
-      if (this.stopped || !await lease.revalidate()) { await this.put(entry, 'conflict', 'Retention preconditions changed after backup.'); return; }
-      await this.put(entry, 'removing'); await lease.remove(manifest);
-      await this.options.archive.verify(entry.id);
-      await this.options.onArchived?.(entry.candidate.ids); await this.put(entry, 'archived');
+      await lease.preserveOwnership(); await this.put(entry, 'removing');
+      const members = await lease.moveCold();
+      this.publishCold();
+      const current = this.options.store.get(entry.id) || entry;
+      if (!members.length || members.some(member => member.state !== 'cold')) {
+        await this.options.store.put({ ...current, phase: 'conflict', error: 'Some members could not be moved to cold storage.', updatedAt: new Date().toISOString() }); return;
+      }
+      await this.options.store.put({ ...current, phase: 'archived', updatedAt: new Date().toISOString() });
+      try {
+        await this.options.archive.create(entry.id, entry.candidate, records, await lease.sources(members));
+        await this.options.archive.verify(entry.id); this.verified.add(entry.id);
+      } catch (error) {
+        const archived = this.options.store.get(entry.id)!;
+        await this.options.store.put({ ...archived, backupError: String(error), updatedAt: new Date().toISOString() });
+      }
+      await this.options.onArchived?.(entry.candidate.ids);
     } catch (error) { await this.put(entry, 'conflict', String(error)); }
-    finally { await lease.release(); }
+    finally {
+      this.activeOperation = undefined; this.publishCold();
+      try { await this.options.refresh?.(); } finally { await lease?.release(); releaseAdmission?.(); }
+    }
   }
   restore(id: string, operationId = randomUUID()): Promise<void> { return this.serial(() => this.restoreNow(id, operationId)); }
   private async restoreNow(id: string, operationId: string): Promise<void> {
-    this.assertRemovalReady();
-    const entry = this.options.store.get(id); if (entry?.backupError) throw new Error('Cold backup verification failed; retry verification or import a healthy backup.'); if (!entry || !['archived', 'restored-awaiting-start'].includes(entry.phase)) throw new Error('Bundle has no archived original to restore.');
-    const manifest = await this.options.archive.verify(id);
-    if (!this.options.adapter.restore || manifest.sessions.some(session => this.options.adapter.capability(session.provider).status !== 'supported')) throw new Error('Provider restore contract unavailable.');
-    if (entry.phase === 'restored-awaiting-start' && entry.restoreOperationId !== operationId) throw new Error('Restore already completed; its original grace is retained.');
-    await this.options.adapter.restore(manifest, operationId);
-    for (const session of manifest.sessions) await this.options.store.setPolicy({ id: session.id, archiveRevision: (this.options.store.policy(session.id)?.archiveRevision || 0) + 1, restoredAt: entry.restoredAt || new Date().toISOString() });
-    await this.options.store.put({ ...entry, phase: 'restored-awaiting-start', restoredAt: entry.restoredAt || new Date().toISOString(), restoreOperationId: operationId, updatedAt: new Date().toISOString() });
+    const entry = this.options.store.get(id);
+    if (!entry || !entry.members?.some(member => member.coldPath && ['cold', 'intent', 'conflict'].includes(member.state))) throw new Error('Bundle has no archived original to restore.');
+    if (!this.options.adapter.restore) throw new Error('Provider restore contract unavailable.');
+    const members = entry.members.filter(member => member.coldPath && ['cold', 'intent', 'conflict'].includes(member.state));
+    const releaseAdmission = this.options.reserveAdmission?.(members.flatMap(member => [member.sessionId, ...(member.provider === 'claude' && member.parentId ? [member.parentId] : [])]));
+    if (this.options.reserveAdmission && !releaseAdmission) throw new Error('Session has active or pending work.');
+    this.activeOperation = entry.id;
+    try {
+      // Native originals remain restorable even if the optional transcript export is damaged.
+      const manifest = await this.options.archive.exists(id) ? await this.options.archive.manifest(id) : {
+        version: 1 as const, id, createdAt: entry.updatedAt, reason: entry.candidate.reason, files: [],
+        sessions: members.map(member => ({ id: member.sessionId, nativeId: member.nativeId, provider: member.provider, parentId: member.parentId, title: member.sessionId })) };
+      await this.options.adapter.restore(manifest, operationId, members, this.context(entry));
+      const current = this.options.store.get(id)!;
+      const restoredAt = entry.restoredAt || new Date().toISOString();
+      for (const member of current.members || []) if (member.state === 'restored') await this.options.store.setPolicy({ id: member.sessionId, archiveRevision: (this.options.store.policy(member.sessionId)?.archiveRevision || 0) + 1, restoredAt });
+      await this.options.store.put({ ...current, phase: current.members?.every(member => member.state === 'restored') ? 'restored-awaiting-start' : 'conflict', restoredAt, restoreOperationId: operationId, updatedAt: new Date().toISOString() });
+    } catch (error) { await this.put(entry, 'conflict', String(error)); throw error; }
+    finally {
+      this.activeOperation = undefined; this.publishCold();
+      try { await this.options.refresh?.(); } finally { releaseAdmission?.(); }
+    }
   }
   exportBundle(id: string, target: string): Promise<void> { return this.serial(() => this.exportBundleNow(id, target)); }
   private async exportBundleNow(id: string, target: string): Promise<void> {
@@ -183,7 +266,10 @@ export class RetentionService {
   }
   importBundle(source: string): Promise<void> { return this.serial(() => this.importBundleNow(source)); }
   private async importBundleNow(source: string): Promise<void> {
-    const entry = await this.options.archive.import(source); await this.options.store.put({ ...entry, backupError: undefined }); this.verified.add(entry.id); await this.countBytes();
+    const entry = await this.options.archive.import(source);
+    // An exported journal is not ownership proof for local native/cold paths. Imported payloads are transcript-only.
+    const owned = this.options.store.get(entry.id);
+    await this.options.store.put(owned?.members?.length ? { ...owned, backupError: undefined } : { ...entry, members: undefined, phase: 'backup-verified', backupError: undefined }); this.verified.add(entry.id); await this.countBytes();
   }
   private records(candidate: RetentionCandidate, observation: RetentionObservation): RetentionRecord[] {
     return candidate.ids.map(id => { const record = observation.records.find(record => record.session.id === id); if (!record) throw new Error('Retention candidate no longer exists.'); return record; });
@@ -192,7 +278,7 @@ export class RetentionService {
     return createHash('sha256').update(JSON.stringify({ candidate, revisions: records.map(record => [record.session.id, record.session.readRevision, record.latestTaskEndedAt, record.latestTaskEndedAt ? undefined : record.inactiveSince]) })).digest('hex');
   }
   private async put(entry: RetentionJournalEntry, phase: RetentionJournalEntry['phase'], error?: string): Promise<void> {
-    await this.options.store.put({ ...entry, phase, error, updatedAt: new Date().toISOString() });
+    await this.options.store.put({ ...(this.options.store.get(entry.id) || entry), phase, error, updatedAt: new Date().toISOString() });
   }
   private addDeferred(reason: string, count = 1): void {
     this.deferred += count; this.deferredReasons[reason] = (this.deferredReasons[reason] || 0) + count;
@@ -202,7 +288,7 @@ export class RetentionService {
   }
   private assertRemovalReady(): void {
     if (this.verification !== 'complete') throw new Error('Cold backup verification is pending.');
-    if (this.options.store.list().some(entry => entry.phase === 'missing-backup' || Boolean(entry.backupError))) throw new Error('A cold backup is missing; further original removal is blocked.');
+
   }
   private report(error: unknown): void { if (this.options.onError) this.options.onError(error); else console.error('Retention operation failed:', error); }
   private serial<T>(work: () => Promise<T>): Promise<T> {

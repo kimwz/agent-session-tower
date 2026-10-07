@@ -1,3 +1,4 @@
+import { temporaryFixture, removeTemporaryFixture } from '../helpers/temporary.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -54,7 +55,7 @@ async function hostStart(t: test.TestContext) {
     if (stateDir) {
       // Its runner folder is found before the state goes: finding it makes the state folder again.
       const runner = (await runnerPaths(stateDir)).directory;
-      await rm(stateDir, { recursive: true, force: true });
+      await removeTemporaryFixture(stateDir);
       await rm(runner, { recursive: true, force: true });
     }
   });
@@ -64,7 +65,7 @@ async function hostStart(t: test.TestContext) {
     return child;
   });
   syncBuiltinESMExports();
-  stateDir = await mkdtemp(join(tmpdir(), 'tower-master-start-'));
+  stateDir = await temporaryFixture('tower-master-start-');
   const paths = await masterPaths(stateDir);
   let answer: { status: number } = { status: 200 };
   const methods: string[] = [];

@@ -1,3 +1,4 @@
+import { temporaryFixture, removeTemporaryFixture } from '../helpers/temporary.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -14,10 +15,10 @@ import type { MasterCheckpoint, MasterOverview } from '../../shared/master.js';
 import { until } from '../helpers/until.js';
 
 test('playback diagnostics survive the web to master-host RPC boundary', async t => {
-  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-playback-rpc-'));
+  const stateDir = await temporaryFixture('tower-master-playback-rpc-');
   const host = await startMasterHost({ stateDir, idleMs: 60_000 });
   const client = new MasterClient({ stateDir, credentials: () => undefined });
-  t.after(async () => { client.dispose(); await host.close(); await rm(stateDir, { recursive: true, force: true }); });
+  t.after(async () => { client.dispose(); await host.close(); await removeTemporaryFixture(stateDir); });
   // Observe the real callee; an unknown session still follows its normal rejection path.
   const heard = t.mock.method(MasterVoice.prototype, 'voicePlayed');
   const playback = { position: 2.5, muted: false, volume: 1, ready: 4, network: 1, context: 'running' };
@@ -26,10 +27,10 @@ test('playback diagnostics survive the web to master-host RPC boundary', async t
 });
 
 test('the master host keeps its folder private, relays its live stream through the web, and lets go of it without stopping', async t => {
-  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-host-'));
+  const stateDir = await temporaryFixture('tower-master-host-');
   const cleanup: Array<() => unknown> = [];
   // In order: pages and clients let go, the host flushes and stops, then its folder goes.
-  t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(stateDir, { recursive: true, force: true }); });
+  t.after(async () => { for (const step of cleanup.reverse()) await step(); await removeTemporaryFixture(stateDir); });
   const host = await startMasterHost({ stateDir, idleMs: 60_000 });
   cleanup.push(() => host.close());
   const paths = await masterPaths(stateDir);
@@ -76,9 +77,9 @@ test('the master host keeps its folder private, relays its live stream through t
 });
 
 test('settings of the master that talked through a model API are dropped, its key files deleted, and its conversation left as it was', async t => {
-  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-migrate-'));
+  const stateDir = await temporaryFixture('tower-master-migrate-');
   const cleanup: Array<() => unknown> = [];
-  t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(stateDir, { recursive: true, force: true }); });
+  t.after(async () => { for (const step of cleanup.reverse()) await step(); await removeTemporaryFixture(stateDir); });
   const paths = await masterPaths(stateDir);
   await mkdir(join(paths.data, 'room'), { recursive: true, mode: 0o700 });
   await writePrivateJson(join(paths.data, 'settings.json'), JSON.stringify({ enabled: true, model: 'gpt-6-sol', effort: 'medium', showResults: true, guards: { hideSecrets: true }, voice: { endSilenceMs: 1300, voice: 'old' } }));
@@ -101,9 +102,9 @@ test('settings of the master that talked through a model API are dropped, its ke
 });
 
 test('a master session keeps the host alive past its idle time, yet another build may take it over', async t => {
-  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-host-bound-'));
+  const stateDir = await temporaryFixture('tower-master-host-bound-');
   const cleanup: Array<() => unknown> = [];
-  t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(stateDir, { recursive: true, force: true }); });
+  t.after(async () => { for (const step of cleanup.reverse()) await step(); await removeTemporaryFixture(stateDir); });
   const paths = await masterPaths(stateDir);
   await mkdir(paths.data, { recursive: true, mode: 0o700 });
   await writePrivateJson(join(paths.data, 'settings.json'), JSON.stringify({ session: { sessionId: 'claude:master', provider: 'claude', startedAt: new Date().toISOString() } }));
@@ -125,9 +126,9 @@ test('a master session keeps the host alive past its idle time, yet another buil
 });
 
 test('the host answers a page\'s voice requests, refusing what is not its call, and shows voice use in its overview', async t => {
-  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-host-voice-'));
+  const stateDir = await temporaryFixture('tower-master-host-voice-');
   const cleanup: Array<() => unknown> = [];
-  t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(stateDir, { recursive: true, force: true }); });
+  t.after(async () => { for (const step of cleanup.reverse()) await step(); await removeTemporaryFixture(stateDir); });
   const host = await startMasterHost({ stateDir, idleMs: 60_000 });
   cleanup.push(() => host.close());
   const client = new MasterClient({ stateDir, credentials: () => undefined });
@@ -183,8 +184,8 @@ test('the master stays removable: only these existing files reach into it', asyn
 });
 
 test('a web that starts while a master session exists starts the master host itself, without waiting for a page', async t => {
-  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-resume-'));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const stateDir = await temporaryFixture('tower-master-resume-');
+  t.after(() => removeTemporaryFixture(stateDir));
   const paths = await masterPaths(stateDir);
   await mkdir(paths.data, { recursive: true, mode: 0o700 });
   const marker = join(stateDir, 'started');
@@ -206,9 +207,9 @@ test('a web that starts while a master session exists starts the master host its
 });
 
 test('a settings file this build cannot read is left as it is, not replaced by defaults', async t => {
-  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-unreadable-'));
+  const stateDir = await temporaryFixture('tower-master-unreadable-');
   const cleanup: Array<() => unknown> = [];
-  t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(stateDir, { recursive: true, force: true }); });
+  t.after(async () => { for (const step of cleanup.reverse()) await step(); await removeTemporaryFixture(stateDir); });
   const paths = await masterPaths(stateDir);
   await mkdir(paths.data, { recursive: true, mode: 0o700 });
   const newer = JSON.stringify({ voice: { endSilenceMs: 1300 }, session: { sessionId: 'claude:master', provider: 'claude', startedAt: '2026-09-28T00:00:00.000Z' }, somethingNewer: true });
@@ -219,10 +220,10 @@ test('a settings file this build cannot read is left as it is, not replaced by d
 });
 
 test('master host error replies keep their status and message across the host wire, and the route clamps what it answers', async t => {
-  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-error-wire-'));
+  const stateDir = await temporaryFixture('tower-master-error-wire-');
   const host = await startMasterHost({ stateDir, idleMs: 60_000 });
   const client = new MasterClient({ stateDir, credentials: () => undefined });
-  t.after(async () => { client.dispose(); await host.close(); await rm(stateDir, { recursive: true, force: true }); });
+  t.after(async () => { client.dispose(); await host.close(); await removeTemporaryFixture(stateDir); });
   const { errorStatus } = await import('../../server/http/requests.js');
   const { masterRoutes } = await import('../../server/master/routes.js');
   const plain = (message: string, fields: Record<string, unknown>) => Object.assign(new Error(message), fields);
