@@ -74,8 +74,8 @@ async function fixture(workerClosed = false, withRetention = false) {
   const host = await startRunnerHost({ stateDir, sessions, runs, closedSessions, retention });
   const paths = await runnerPaths(stateDir);
   const clients: DurableRunManager[] = [];
-  const connect = async () => {
-    const client = new DurableRunManager({ stateDir, pollMs: 10 });
+  const connect = async (pollMs = 10) => {
+    const client = new DurableRunManager({ stateDir, pollMs });
     clients.push(client);
     await client.start();
     return client;
@@ -90,7 +90,7 @@ async function fixture(workerClosed = false, withRetention = false) {
     await rm(directory, { recursive: true, force: true });
     await rm(paths.directory, { recursive: true, force: true });
   };
-  return { directory, stateDir, session, sessions, runs, host, paths, connect, starts: () => starts, cancels: () => cancels,
+  return { directory, stateDir, session, sessions, runs, host, paths, connect, closedSessions, starts: () => starts, cancels: () => cancels,
     output: (text: string) => { assert.ok(bridge); bridge.onOutput(text); },
     finish: () => { assert.ok(bridge); bridge.onFinished({ status: 'completed' }); resolveDone(); },
     cleanup: async () => { await close(); await remove(); },
@@ -143,6 +143,36 @@ test('closure projection uses constant-time lookups after snapshot adoption', as
     for (let index = 0; index < 3200; index++) assert.equal(client.applyClosed(f.session).closed, true);
   } finally { Array.prototype.includes = includes; }
   assert.equal(linearLookups, 0, 'session views must not scan the closed ID array once per session');
+});
+
+test('a failed initial closure reload does not block snapshot or cancel and the next RPC retries', async t => {
+  const f = await fixture(true); t.after(f.cleanup);
+  const logs: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => logs.push(args));
+  const original = f.closedSessions!.start.bind(f.closedSessions);
+  let attempts = 0;
+  t.mock.method(f.closedSessions!, 'start', async () => {
+    if (++attempts === 1) throw new Error('Fixture temporary closure read failure');
+    return original();
+  });
+  const run = await f.runs.enqueue(f.session.id, 'Fixture running turn');
+  await until(() => f.runs.list().some(item => item.id === run.id && item.status === 'running'));
+  const client = await f.connect(60_000);
+  assert.equal(client.list()[0].id, run.id, 'snapshot remains available after the failed first reload');
+  assert.equal(attempts, 1);
+  assert.match(String(logs[0]?.[0]), /closure reload failed; execution controls remain available/);
+
+  const legacy = new ClosedSessionStore(f.stateDir); await legacy.start(); await legacy.set(f.session, true);
+  await client.cancel(run.id);
+  assert.equal(f.cancels(), 1, 'the owner retains cancellation control');
+  assert.equal(attempts, 2, 'the rejected promise is not fixed as the readiness state');
+  assert.equal(client.applyClosed(f.session).closed, true, 'retry adopts the latest disk projection');
+
+  const path = join(f.stateDir, 'closed-sessions.json');
+  const saved = await readFile(path, 'utf8');
+  await writeFile(path, '{');
+  await assert.rejects(client.setClosed(f.session.id, false), { kind: 'unavailable' }, 'closure writes still surface a real storage failure');
+  await writeFile(path, saved);
 });
 
 test('unsupported closure and retention operations fail before writing or dispatching', async t => {

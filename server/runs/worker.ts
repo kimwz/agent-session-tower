@@ -189,7 +189,10 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   const dispatch = async (method: string, args: unknown[]) => {
     if (options.closedSessions) {
       // The predecessor's web may have completed a legacy closure write during startup.
-      closureReady ??= options.closedSessions.start();
+      closureReady ??= options.closedSessions.start().catch(error => {
+        closureReady = undefined;
+        console.error(`Session closure reload failed; execution controls remain available and the next request will retry: ${error instanceof Error ? error.message : String(error)}`);
+      });
       await closureReady;
     }
     if (draining && !READS_DURING_HANDOFF.has(method)) {
