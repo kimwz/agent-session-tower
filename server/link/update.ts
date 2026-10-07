@@ -8,10 +8,10 @@ import { promisify } from 'node:util';
 import type { UpdateFailure, UpdateStage, UpdateStatus } from '../../shared/link.js';
 import { writePrivateJson } from '../stores/private-json.js';
 import { processStart } from '../instance/process-start.js';
-import { currentVersion, entryPoint, installVersion, newerVersion, pointCurrent, RELEASE_WAIT_MS, restartService, runtimePaths, versionDirectory } from './service.js';
+import { currentVersion, entryPoint, installVersion, newerVersion, pointUpdate, RELEASE_WAIT_MS, restartService, runtimePaths, versionDirectory } from './service.js';
 import {
-  alive, pinnedVersion, preparationCheck, probeInstalledArtifact, readCurrentPointer, readHelperLock, readUpdateRecord, storageKeptVersions, updateActive, updatePaths,
-  type ArtifactRead, type SavedUpdate,
+  alive, pinnedVersion, preparationCheck, probeInstalledArtifact, readCurrentPointer, readHelperLock, readHold, readRollbackRecord, readUpdateRecord, rollbackActive, storageKeptVersions,
+  updateActive, updatePaths, type ArtifactRead, type SavedUpdate,
 } from './storage-update.js';
 
 export { updateActive, updatePaths, type SavedUpdate } from './storage-update.js';
@@ -49,7 +49,6 @@ async function saveUpdateStatus(stateDir: string, status: SavedUpdate): Promise<
 /** The part of an update a controller is told. */
 export function publicUpdate({ controllers: _, ...status }: SavedUpdate): UpdateStatus { return status; }
 
-const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT';
 /** The error last logged for each hold that could not be read, so a poll every second logs it once. */
 const unreadableHolds = new Map<string, string>();
 
@@ -62,9 +61,11 @@ export async function handoffHeld(stateDir: string, now = Date.now()): Promise<b
   const { hold } = updatePaths(stateDir);
   let held: boolean | undefined;
   try {
-    const info = await stat(hold).catch(error => { if (missing(error)) return undefined; throw error; });
+    // Read as it is: a link (even one to nowhere) or anything but a file is not a missing hold.
+    const read = await readHold(stateDir, now);
+    if (read.state === 'unreadable') throw read.error;
     // No hold: nothing to remove, and one a helper writes meanwhile must stay.
-    held = info && (now - info.mtimeMs < HOLD_MS || await helperRunning(stateDir));
+    held = read.state === 'present' ? read.ageMs < HOLD_MS || await helperRunning(stateDir) : undefined;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (unreadableHolds.get(hold) !== message) console.error(`The update hold could not be read (${message}); the worker is not handed over until it can.`);
@@ -182,17 +183,23 @@ export class Updates {
     const pin = await pinnedVersion(stateDir);
     if (pin.state === 'unknown') return { status: 409, body: { code: 'pin-unreadable', error: `The version pin cannot be read: ${pin.reason}` } };
     if (pin.state === 'pinned' && pin.version !== version) return { status: 409, body: { code: 'pinned', error: `The owner pinned this computer to ${pin.version}; release the pin to update it.` } };
+    // An owner's rollback under way (or one whose record cannot be read) is settled first. Its reservation is taken in
+    // turn with requests (Updates.exclusive), so it sees an update asked for meanwhile and the other way around.
+    const rollback = await readRollbackRecord(stateDir);
+    if (rollback.state === 'unreadable' || rollback.state === 'invalid') return { status: 409, body: { code: 'rollback-unreadable', error: `The owner's rollback record cannot be read: ${rollback.reason}` } };
+    if (rollback.state === 'present' && rollbackActive(rollback.record)) return { status: 409, body: { code: 'rollback-under-way', error: `The owner's rollback to ${rollback.record.target} is under way.` } };
     // A record that cannot be read may be an update under way; one this build does not understand is replaced only
     // when no helper or hold is left that could belong to it.
     if (read.state === 'unreadable') return { status: 409, body: { code: 'update-status-unreadable', error: `The last update cannot be read: ${read.reason}` } };
-    if (read.state === 'invalid' && (await helperRunning(stateDir).catch(() => true) || await stat(updatePaths(stateDir).hold).then(() => true, error => !missing(error)))) {
+    if (read.state === 'invalid' && (await helperRunning(stateDir).catch(() => true) || (await readHold(stateDir)).state !== 'absent')) {
       return { status: 409, body: { code: 'busy', error: 'The last update is not one this version understands, and its helper or hold is still there.' } };
     }
-    // The target needs its preparation release first, and nothing here changed since it said so: asked again, it is
-    // not installed again. Installing that release (or a newer one) first is what moves on.
-    if (current?.stage === 'failed' && current.version === version && current.previous === this.options.version && current.storage?.code === 'prerequisite-required') {
-      return { status: 409, body: { code: 'prerequisite-required', ...(current.storage.prepare ? { prepare: current.storage.prepare } : {}), update: publicUpdate(current),
-        error: `${version} needs ${current.storage.prepare ?? 'its preparation release'} to run here first.` } };
+    // The target needs its preparation release first (or cannot take over at all), and nothing here changed since it
+    // said so: asked again, it is not installed again. Installing that release (or a newer one) first is what moves on.
+    const refusal = current?.storage?.code;
+    if (current?.stage === 'failed' && current.version === version && current.previous === this.options.version && (refusal === 'prerequisite-required' || refusal === 'previous-incompatible')) {
+      return { status: 409, body: { code: refusal, ...(current.storage!.prepare ? { prepare: current.storage!.prepare } : {}), update: publicUpdate(current),
+        error: refusal === 'prerequisite-required' ? `${version} needs ${current.storage!.prepare ?? 'its preparation release'} to run here first.` : `${this.options.version} cannot take ${version}'s storage over; the owner decides how to move on.` } };
     }
     if (updateActive(current) && await this.busy(current!)) {
       // The newest version asked for wins; it is asked for again once this update has finished.
@@ -320,7 +327,7 @@ export function serviceSteps(stateDir: string, port: number): UpdateHelperSteps 
       if (stdout.trim() !== version) throw new Error(`The installed version reports ${stdout.trim().slice(0, 40) || 'nothing'}.`);
     },
     contract: probeInstalledArtifact,
-    point: version => pointCurrent(stateDir, version),
+    point: version => pointUpdate(stateDir, version),
     restart: () => restartService(stateDir),
     health: () => read<{ version: string; pid: number }>('/api/health'),
     // The new version answers these the way the helper's own version reads them; anything else counts as no answer.
@@ -442,6 +449,7 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
         if (check.state === 'prerequisite-required' || check.state === 'missing') {
           return await refusal({ code: 'prerequisite-required', ...(check.prepare ? { prepare: check.prepare } : {}), domains: check.domains }, `storage: ${check.reason}`);
         }
+        if (check.state === 'incompatible') return await refusal({ code: 'previous-incompatible', domains: check.domains }, `storage: ${check.reason}`);
         if (check.state !== 'not-required' && check.state !== 'satisfied') return await refusal({ code: 'contract-unverifiable', domains: check.domains }, `storage: ${check.reason}`);
       }
     }

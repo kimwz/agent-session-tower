@@ -3,9 +3,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { entryPoint, versionDirectory } from '../../../../server/link/service.js';
 import { artifactStorageContract, type RunningBuild } from '../../../../server/link/storage-update.js';
-import { STORAGE_PROTOCOL, type StorageBuildIdentity, type StorageBuildManifest, type StorageDomainSchema } from '../../../../server/storage/contract.js';
+import type { StorageBuildIdentity, StorageBuildManifest, StorageDomainSchema } from '../../../../server/storage/contract.js';
 import type { StoragePreflight } from '../../../../server/storage/preflight.js';
-import { storageManifest } from '../../../../server/storage/schema.js';
+import { manifestDigest, storageManifest } from '../../../../server/storage/schema.js';
 
 /**
  * Three releases of a staged domain, as their manifests say: L keeps everything in JSON (no storage contract at all),
@@ -34,17 +34,24 @@ export const manifests: Record<string, StorageBuildManifest> = {
 
 /** Any other version is another preparation release of the domain. */
 export const manifestOf = (version: string) => manifests[version] ?? storageManifest([retentionA], version);
-export const identityOf = (version: string, salt = ''): StorageBuildIdentity => ({
-  appVersion: version, protocol: STORAGE_PROTOCOL, sourceHash: createHash('sha256').update(`fixture-thread-${version}${salt}`).digest('hex'), manifestDigest: manifestOf(version).digest,
+export const identityOf = (version: string, salt = '', manifest = manifestOf(version)): StorageBuildIdentity => ({
+  appVersion: version, protocol: manifest.protocol, sourceHash: createHash('sha256').update(`fixture-thread-${version}${salt}`).digest('hex'), manifestDigest: manifest.digest,
 });
+/** `version`'s manifest changed by `change` (its digest recomputed), for a build that declares another schema. */
+export function changedManifest(version: string, change: (body: Omit<StorageBuildManifest, 'digest'>) => Omit<StorageBuildManifest, 'digest'>): StorageBuildManifest {
+  const { digest: _, ...body } = structuredClone(manifestOf(version));
+  const next = change(body);
+  return { ...next, digest: manifestDigest(next) };
+}
 const runtime = { node: 'v24.15.0', sqlite: '3.51.3', platform: process.platform, arch: process.arch, execPath: process.execPath, apis: { DatabaseSync: true, StatementSync: true } };
 
 /** What the running build's worker saw: its trusted manifest and a passing runtime preflight, with the state as given. */
-export function runningBuild(version: string, options: { supported?: boolean; state?: StoragePreflight['state']; salt?: string } = {}): RunningBuild {
-  const identity = identityOf(version, options.salt);
+export function runningBuild(version: string, options: { supported?: boolean; state?: StoragePreflight['state']; salt?: string; manifest?: StorageBuildManifest } = {}): RunningBuild {
+  const manifest = options.manifest ?? manifestOf(version);
+  const identity = identityOf(version, options.salt, manifest);
   const supported = options.supported ?? true;
   return {
-    version, manifest: manifestOf(version),
+    version, manifest,
     preflight: {
       supported, identity, runtime,
       ...(supported ? {} : { refusal: { phase: 'runtime' as const, code: 'unsupported-runtime' as const, message: 'Node.js v20.0.0 is not a verified storage runtime.' } }),
@@ -58,12 +65,12 @@ export function runningBuild(version: string, options: { supported?: boolean; st
  * release: `--version`, and `--storage-contract` with the contract the real producer (artifactStorageContract) makes
  * from its build's identity and manifest; a JSON-only release refuses the option exactly as Tower's CLI does.
  */
-export async function installArtifact(stateDir: string, version: string, options: { legacy?: boolean; supported?: boolean; salt?: string; broken?: boolean } = {}): Promise<string> {
+export async function installArtifact(stateDir: string, version: string, options: { legacy?: boolean; supported?: boolean; salt?: string; broken?: boolean; manifest?: StorageBuildManifest } = {}): Promise<string> {
   const directory = versionDirectory(stateDir, version);
   const entry = entryPoint(directory);
   await mkdir(join(entry, '..'), { recursive: true });
   if (!options.legacy) {
-    const build = runningBuild(version, { supported: options.supported, salt: options.salt });
+    const build = runningBuild(version, { supported: options.supported, salt: options.salt, manifest: options.manifest });
     const contract = artifactStorageContract({ identity: build.preflight.identity!, manifest: build.manifest! }, build.preflight);
     await writeFile(join(entry, '..', 'contract.json'), options.broken ? '{"format":"tower-artifact-storage-contract"' : JSON.stringify(contract));
   }

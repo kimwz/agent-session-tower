@@ -517,9 +517,13 @@ test('a controller or deploy agent goes through the preparation release, a bound
 
 // ---- Pin, pruning and requests ----
 
+/** A pin on `version` left by an owner's rollback that has ended (withdrawn, its hold released), as the owner may release it. */
 async function pin(state: string, version: string) {
   const value = { format: 'tower-storage-pin', version: 1, pinned: version, sourceHash: identityOf(version).sourceHash, manifestDigest: identityOf(version).manifestDigest, entrySha256: 'a'.repeat(64), rollbackId: 'r1', by: 'owner', reason: 'test', at };
   await writeFile(storagePinPath(state), JSON.stringify(value), { mode: 0o600 });
+  const ended = { format: 'tower-storage-rollback', version: 1, id: 'r1', from: C, target: version, sourceHash: value.sourceHash, manifestDigest: value.manifestDigest, entrySha256: value.entrySha256,
+    updateSha256: null, state: 'withdrawn', by: 'owner', reason: 'test', held: false, switched: false, startedAt: at, updatedAt: at };
+  await writeFile(storageUpdatePaths(state).rollback, JSON.stringify(ended), { mode: 0o600 });
 }
 
 test('update requests from the owner, the scheduler and controllers respect the pin; a pin that cannot be read refuses them', async t => {
@@ -574,10 +578,13 @@ test('pruning keeps the pinned version and a rollback\'s versions, and removes n
   await updates.prune(async () => []);
   assert.deepEqual(await installed(), ['0.9.0', L, A, B].sort(), 'a record that cannot be used keeps everything');
   await rm(updatePaths(state).status);
+  const ended = await readFile(storageUpdatePaths(state).rollback);
+  await rm(storageUpdatePaths(state).rollback);
   await mkdir(storageUpdatePaths(state).rollback);
   await updates.prune(async () => []);
   assert.deepEqual(await installed(), ['0.9.0', L, A, B].sort(), 'a rollback record that cannot be read keeps everything');
   await rm(storageUpdatePaths(state).rollback, { recursive: true });
+  await writeFile(storageUpdatePaths(state).rollback, ended, { mode: 0o600 });
   await rm(runtimePaths(state).current);
   await writeFile(runtimePaths(state).current, 'x');
   await updates.prune(async () => []);
@@ -627,6 +634,8 @@ async function rollbackState(t: TestContext) {
 }
 const contextFor = (state: string, port: RollbackPorts, updates = new Updates({ stateDir: state, version: B, port: 1, managed: true }), extra: Partial<RollbackContext> = {}): RollbackContext =>
   ({ stateDir: state, running: runningBuild(B), managed: true, ports: port, serialize: work => updates.exclusive(work), ...extra });
+/** The target's web, after the switch: it continues the rollback. */
+const onTarget = (state: string, port: RollbackPorts): RollbackContext => ({ stateDir: state, running: runningBuild(A), managed: true, ports: port, serialize: work => work() });
 
 test('a rollback is validated without changing anything, and refused for every target or state it cannot take', async t => {
   const state = await rollbackState(t);
@@ -657,6 +666,7 @@ test('a rollback is validated without changing anything, and refused for every t
   await pin(state, '1.1.4');
   await expectCode(check(A), 'pinned-elsewhere');
   await rm(storagePinPath(state));
+  await rm(storageUpdatePaths(state).rollback);
   await rm(versionDirectory(state, A), { recursive: true });
   await installArtifact(state, A, { supported: false });
   await expectCode(check(A), 'target-runtime-unsupported');
@@ -671,7 +681,7 @@ test('the owner\'s rollback pins, holds, waits for running work, switches, and k
   const updates = new Updates({ stateDir: state, version: B, port: 1, managed: true, spawnHelper: () => {} });
   const switched = await runRollback(contextFor(state, port.value, updates), { target: A, by: 'owner', reason: 'B misbehaves' });
   assert.equal(switched.state, 'switched');
-  assert.deepEqual(port.calls, ['inspect', 'hold:true', 'quiet', 'restart'], 'pinned before the hold, no provider cancelled');
+  assert.deepEqual(port.calls, ['inspect', 'hold:true', 'quiet', 'inspect', 'restart'], 'pinned before the hold, the database compared again after the quiet, no provider cancelled');
   assert.equal(await currentVersion(state), A);
   const pinned = await readStoragePin(state);
   assert.ok(pinned.state === 'present' && pinned.pin.pinned === A && pinned.pin.sourceHash === identityOf(A).sourceHash);
@@ -681,15 +691,15 @@ test('the owner\'s rollback pins, holds, waits for running work, switches, and k
   await updates.prune(async () => []);
   assert.ok(existsSync(versionDirectory(state, A)) && existsSync(versionDirectory(state, B)));
 
-  // The target's web resumes it.
-  const resumed = await resumeRollback({ stateDir: state, ports: port.value, serialize: work => work() });
+  // The target's web resumes it: admissions held and running work ended again, the database compared, then the handoff.
+  const resumed = await resumeRollback(onTarget(state, port.value));
   assert.equal(resumed.state, 'completed');
-  assert.deepEqual(port.calls.at(-1), `handoff:${A}`);
+  assert.deepEqual(port.calls.slice(-5), ['hold:true', 'quiet', 'inspect', `handoff:${A}`, 'release'], 'the hold is released once the worker answered as the pinned build');
   const done = await readRollbackRecord(state);
   assert.ok(done.state === 'present' && done.record.state === 'completed' && done.record.worker?.version === A && done.record.held === false);
   const onA = new Updates({ stateDir: state, version: A, port: 1, managed: true, spawnHelper: () => {} });
   assert.equal((await onA.request(B)).body.code, 'pinned', 'always-latest cannot reinstall B while the pin stays');
-  assert.equal((await runRollback(contextFor(state, port.value, onA), { target: A, by: 'owner', reason: 'again' })).state, 'completed', 'asked again, it is done');
+  assert.equal((await runRollback(contextFor(state, port.value, onA, { running: runningBuild(A) }), { target: A, by: 'owner', reason: 'again' })).state, 'completed', 'asked again, it is done');
   assert.equal((await releaseStoragePin(state, { version: A })).released, true);
   assert.equal((await onA.request(B)).status, 202, 'moving on is the owner\'s explicit step');
 });
@@ -711,18 +721,19 @@ test('a living legacy terminal keeps the rollback waiting; a failure releases th
 
   let fails = true;
   const handoffPorts = ports({ handoff: async target => { if (fails) throw new Error('worker busy'); return { version: target.version, sourceHash: target.sourceHash, pid: 7 }; } });
-  const failed = await resumeRollback({ stateDir: state, ports: handoffPorts.value, serialize: work => work() });
+  const failed = await resumeRollback(onTarget(state, handoffPorts.value));
   assert.equal(failed.state, 'failed');
   assert.ok(handoffPorts.calls.includes('release'), 'the admission hold is released');
   assert.equal((await readStoragePin(state)).state, 'present', 'the pin stays');
   fails = false;
-  assert.equal((await runRollback(contextFor(state, handoffPorts.value), { target: A, by: 'owner', reason: 'retry' })).state, 'completed');
+  assert.equal((await runRollback(contextFor(state, handoffPorts.value, undefined, { running: runningBuild(A) }), { target: A, by: 'owner', reason: 'retry' })).state, 'completed', 'asked again on the target, it goes on');
 
   const other = await rollbackState(t);
   const wrong = await runRollback(contextFor(other, ports({ handoff: async () => ({ version: A, pid: 1 }) }).value), { target: A, by: 'owner', reason: 'r' });
   assert.equal(wrong.state, 'switched');
-  const mismatch = await resumeRollback({ stateDir: other, ports: ports({ handoff: async () => ({ version: A, pid: 1 }) }).value, serialize: work => work() });
+  const mismatch = await resumeRollback(onTarget(other, ports({ handoff: async () => ({ version: A, pid: 1 }) }).value));
   assert.ok(mismatch.state === 'failed' && mismatch.record.failure?.phase === 'worker', 'a worker without the pinned identity is not taken for it');
+  assert.equal(mismatch.state === 'failed' && mismatch.record.held, true, 'and its hold stays: which worker serves cannot be told');
 });
 
 test('a hold that fails or a withdrawal releases admissions; the pin goes only when the owner releases it too', async t => {
@@ -767,7 +778,7 @@ test('pruning and a rollback\'s pin take turns: a pin never stands over a remove
   }
 });
 
-test('only the pinned version can be pointed back to, and useVersion stays monotonic', async t => {
+test('only the pinned version can be pointed back to; useVersion respects the pin and stays monotonic', async t => {
   const state = await stateDir(t);
   await installArtifact(state, A);
   await installArtifact(state, B);
@@ -776,8 +787,14 @@ test('only the pinned version can be pointed back to, and useVersion stays monot
   await pin(state, '1.1.4');
   await assert.rejects(pointRollbackTarget(state, A));
   await pin(state, A);
+  await assert.rejects(pointRollbackTarget(state, A, 'another-rollback'), 'only for the rollback that pinned it, when one is named');
   await pointRollbackTarget(state, A);
   assert.equal(await currentVersion(state), A);
+  await assert.rejects(useVersion(state, B), { code: 'pinned' }, 'installing B (service install, join) is not releasing the pin');
+  assert.equal(await currentVersion(state), A);
+  await useVersion(state, A);
+  assert.equal(await currentVersion(state), A, 'the pinned version itself is fine');
+  assert.equal((await releaseStoragePin(state, { version: A })).released, true);
   await useVersion(state, B);
   assert.equal(await currentVersion(state), B);
   await useVersion(state, A);
