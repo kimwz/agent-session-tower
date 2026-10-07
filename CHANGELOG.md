@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.110.0] - 2026-10-07
+
+### Added
+- **Settings show session retention decisions and separate cold backups.** The worker observes a seven-day expiry for finished child sessions and a limit of 20 parent sessions per logical project, protecting active, queued and scheduled work, approvals, unread results and active descendants. Existing records receive seven days of migration grace; closing a session still only hides it.
+- Eligible inactive sessions can be manually backed up to verified compressed bundles, read without restoring native history, and exported or imported through a separate directory in a registered workspace. These bundles are not included in Tower's existing settings backup.
+- Managed agent instructions direct one-off reviews and investigations to Claude's `--no-session-persistence` and Codex's `--ephemeral` execution options, with their results recorded in the parent task.
+
+### Safety limits
+- **Automatic native removal and native restore remain unavailable.** Neither installed provider exposes the verified writer reservation needed to preserve running work and a complete backup while removing records. Candidates remain `blocked-provider`, no duplicate backup is made automatically, and the present reduction in native files and scan load is zero. Manual backups retain their originals and use additional disk space.
+
 ## [1.109.2] - 2026-10-07
 
 ### Fixed
