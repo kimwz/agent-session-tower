@@ -134,7 +134,7 @@ test('the host answers a page\'s voice requests, refusing what is not its call, 
   cleanup.push(() => client.dispose());
   const overview = await client.call('overview') as MasterOverview;
   assert.deepEqual(overview.voice?.today, { sttSeconds: 0, ttsChars: 0, dollars: 0 });
-  assert.deepEqual(overview.settings.voice, { voiceId: 'cgSgspJ2msm6clMCkdW9', model: 'eleven_v3_conversational', endSilenceMs: 1000, listenMinutes: 5, readReports: true, dailyDollars: 0, playbackRate: 1 });
+  assert.deepEqual(overview.settings.voice, { voiceId: 'cgSgspJ2msm6clMCkdW9', model: 'eleven_v4_turbo', endSilenceMs: 1000, listenMinutes: 5, readReports: true, dailyDollars: 0, playbackRate: 1 });
   assert.equal(overview.voiceConfigured, false);
   const session = '0190f1c2-3d4e-7f00-8a00-000000000003';
   await assert.rejects(client.call('voiceOn', { tabId: session }), { kind: 'conflict' }, 'no master session yet');

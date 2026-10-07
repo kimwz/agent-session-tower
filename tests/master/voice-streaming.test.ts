@@ -12,6 +12,7 @@ import { lastMessage, MasterSession } from '../../server/master/session.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
 import { TowerClient } from '../../server/tower-tools/tower-client.js';
 import { frameAt, id3Size, MasterVoice } from '../../server/master/voice.js';
+import { withoutTag } from '../../server/master/mp3.js';
 import { FIRST_CHUNK, TextFollower } from '../../server/master/voice-stream.js';
 import { streamTone, VOICE_REST, VOICE_TONES, voicedChunk, voicedChunkPairs, voicedParts, voicedPartPairs } from '../../server/master/voice-text.js';
 
@@ -111,6 +112,23 @@ test('audio starts again partway at a whole frame after its tag, and a line tell
   assert.match(describe({ key: 'abcdef0123', mode: 'stream', request: 1000, text: 1500, audio: 2200, play: 2500 }), /abcdef01 \(stream\): text \+500ms, audio \+1200ms, play \+1500ms/);
 });
 
+test('a later part of one audio loses its tag even when the tag comes in pieces, as Eleven v4 Turbo makes it', async () => {
+  // Eleven v4 Turbo's mp3 (Text to Dialogue, mp3_44100_128) starts with this 45-byte tag, then 128 kbps frames.
+  const tag = Buffer.concat([Buffer.from('ID3'), Buffer.from([4, 0, 0, 0, 0, 0, 0x23]), Buffer.from('TSSE'), Buffer.from([0, 0, 0, 0x0f, 0, 0, 3]), Buffer.from('Lavf60.16.101'), Buffer.alloc(11)]);
+  assert.equal(tag.length, 45);
+  const frame = Buffer.concat([Buffer.from([0xff, 0xfb, 0x90, 0x00]), Buffer.alloc(417 - 4, 1)]);
+  const part = Buffer.concat([tag, frame, frame]);
+  const pieces = async function* () { for (let at = 0; at < part.length; at += 7) yield part.subarray(at, at + 7); };
+  const out: Buffer[] = [];
+  for await (const chunk of withoutTag(pieces())) out.push(chunk);
+  assert.deepEqual(Buffer.concat(out), Buffer.concat([frame, frame]));
+  // Joined after a first part that keeps its tag, the audio still starts again at whole frames past that one tag.
+  const joined = Buffer.concat([part, ...out]);
+  assert.equal(id3Size(joined), 45);
+  assert.equal(frameAt(joined, 45 + 1), 45 + 417);
+  assert.equal(frameAt(joined, 45 + 3 * 417 - 1), 45 + 3 * 417);
+});
+
 test('the page\'s place in the audio reaches the host through the web', async () => {
   const piped: Array<{ id: string; at: number }> = [];
   const handle = masterRoutes({ pipeAudio: async (res: import('node:http').ServerResponse, id: string, at: number) => { piped.push({ id, at }); res.writeHead(200).end(); } } as unknown as MasterClient);
@@ -127,14 +145,17 @@ test('the page\'s place in the audio reaches the host through the web', async ()
 
 async function fakeElevenLabs() {
   // Each reading starts with an empty ID3 tag, as ElevenLabs' mp3 does; later parts of one audio lose theirs.
-  const state = { speeches: [] as string[], chunks: [Buffer.from([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 0]), Buffer.from('sound')], gapMs: 10, completed: [] as Array<{ speech: number; at: number }> };
+  const state = { speeches: [] as string[], requests: [] as Array<'speech' | 'dialogue'>, chunks: [Buffer.from([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 0]), Buffer.from('sound')], gapMs: 10, completed: [] as Array<{ speech: number; at: number }> };
   const server = createServer(async (req: IncomingMessage, res) => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
     const url = new URL(req.url!, 'http://x');
     if (req.method === 'DELETE') { res.writeHead(200).end(); return; }
-    if (req.method === 'POST' && /^\/v1\/text-to-speech\/[^/]+\/stream$/.test(url.pathname)) {
-      state.speeches.push(String((JSON.parse(Buffer.concat(chunks).toString('utf8')) as { text: string }).text));
+    // Text to Speech (models before v4) or Text to Dialogue (Eleven v4: one line in the one voice).
+    if (req.method === 'POST' && (/^\/v1\/text-to-speech\/[^/]+\/stream$/.test(url.pathname) || url.pathname === '/v1/text-to-dialogue/stream')) {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { text?: string; inputs?: Array<{ text: string }> };
+      state.speeches.push(String(body.inputs?.[0]?.text ?? body.text));
+      state.requests.push(url.pathname === '/v1/text-to-dialogue/stream' ? 'dialogue' : 'speech');
       const speech = state.speeches.length;
       res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'history-item-id': `h${speech}` });
       res.write(state.chunks[0]);
@@ -291,7 +312,7 @@ test('what the master writes before a tool is read at once; its final answer aft
   await sleep(50);
   assert.deepEqual(h.spoken(), ['세션 목록을 볼게요.', '지금 두 개가 돌고 있어요. 하나는 배포, 하나는 리뷰예요.']);
   const data = done.data as { text: string };
-  assert.equal(data.text, '지금 두 개가 돌고 있어요. 하나는 배포, 하나는 리뷰예요.', 'the answer is the last message, as history would give it');
+  assert.equal(data.text, '지금 두 개가 돌고 있어요. 하나는 배포, 하나는 리뷰예요.', 'the answer is the last message, as history would give it');  assert.ok(h.labs.requests.length >= 3 && h.labs.requests.every(request => request === 'dialogue'), 'read while written through Text to Dialogue, the default\'s request');
 });
 
 test('an answer skipped on the page stops being read: nothing more of the turn, now or when it ends', async t => {

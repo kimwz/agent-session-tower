@@ -7,7 +7,8 @@ import type { ElevenLabs, VoiceInfo } from './elevenlabs.js';
 import type { MasterSettingsStore } from './settings.js';
 import type { VoiceAudio } from './voice-audio.js';
 import { VOICE_SAMPLE, voiced } from './voice-text.js';
-import { ttsDollarsPerChar, type VoiceUsage } from './voice-usage.js';
+import { ttsDollarsPerChar } from './tts-models.js';
+import type { VoiceUsage } from './voice-usage.js';
 
 const CLIP_BYTES = 5 * 1024 * 1024;
 /** Voice samples kept for the settings: about one per voice an account lists. */

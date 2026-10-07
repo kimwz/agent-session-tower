@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
+import { ttsDollarsPerChar } from './tts-models.js';
 
-/** Estimated prices: ElevenLabs realtime speech-to-text per second, text-to-speech per character by model. */
+/** Estimated price of ElevenLabs realtime speech-to-text per second (text-to-speech: `ttsDollarsPerChar`). */
 const STT_DOLLARS_PER_SECOND = 0.39 / 3600;
-export const ttsDollarsPerChar = (model: string) => (model === 'eleven_v3' ? 0.1 : 0.05) / 1000;
 /** GPT-Live's price, for voice time kept from 1.52–1.55. */
 const LIVE_DOLLARS_PER_SECOND = 0.05 / 60;
 /**

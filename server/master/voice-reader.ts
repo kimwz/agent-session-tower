@@ -6,7 +6,8 @@ import { CHUNK_PAUSE_MS, TextFollower } from './voice-stream.js';
 import { READ_CHARS, speakable, streamTone, VOICE_REST, voicedChunkPairs } from './voice-text.js';
 import type { VoiceTimings } from './voice-timings.js';
 import type { AudioHandle, VoiceSession, VoiceTiming } from './voice-types.js';
-import { ttsDollarsPerChar, type VoiceUsage } from './voice-usage.js';
+import { ttsDollarsPerChar } from './tts-models.js';
+import type { VoiceUsage } from './voice-usage.js';
 
 /** How long reading aloud may take a character, at most: the page gives up on a player later than this too. */
 export const MS_PER_CHAR = 200;
