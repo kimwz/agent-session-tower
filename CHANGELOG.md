@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.109.2] - 2026-10-07
+
+### Fixed
+- **Auto Prompt no longer blocks the execution worker while collecting candidate sessions.** Each routing snapshot now reads Slack coordinator session IDs once instead of rebuilding and copying the workflow and run lists for every native session. Direct requests for a new session also avoid this repeated work, and the worker remains available to serve session lists and history during submission.
+
 ## [1.109.1] - 2026-10-06
 
 ### Fixed
