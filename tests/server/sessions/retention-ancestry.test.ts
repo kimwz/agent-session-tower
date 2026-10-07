@@ -13,7 +13,7 @@ test('hot child expiry crosses a cold intermediate without adding the cold node 
 import { mkdtemp,mkdir,writeFile,readFile,rm,stat,realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { resolveRetentionLineage } from '../../../server/sessions/retention/ancestry.js';
+import { resolveRetentionLineage, retentionNodeMap } from '../../../server/sessions/retention/ancestry.js';
 import { RetentionObserver } from '../../../server/sessions/retention/observer.js';
 import { RetentionStore } from '../../../server/sessions/retention/store.js';
 import { RetentionArchive } from '../../../server/sessions/retention/archive.js';
@@ -31,6 +31,12 @@ test('policy-only durable proof restores lost exec linkage and normal parentless
  const mismatch=resolveRetentionLineage([A,{...lost,createdAt:new Date(now).toISOString()},normal],[member()]);assert.ok(mismatch.blockedIds.has(C.id));assert.equal(mismatch.blockedIds.has(normal.id),false);
  const contradictory=resolveRetentionLineage([A,{...C,isSubagent:false}],[member()]);assert.ok(contradictory.blockedIds.has(C.id),'explicit child parent with root role is inconsistent');
  const coldCollision=resolveRetentionLineage([A,{...session('claude:B','claude:A'),isSubagent:false}],[member()]);assert.ok(coldCollision.blockedIds.has('claude:B'));
+});
+test('node alias canonicalization copies frozen inputs and shares only its own mutable node',()=>{
+ const parent=Object.freeze({...A,id:'monitor-A'});const child=Object.freeze({...C,parentId:'claude:A'});const cold=Object.freeze({...member(),sessionId:'monitor-B'});
+ const ancestry=Object.freeze([{id:cold.sessionId,provider:cold.provider,nativeId:cold.nativeId,parentId:parent.id,isSubagent:true}]);
+ const map=retentionNodeMap({records:[{session:parent,kind:'parent'},{session:child,kind:'subagent'}],ancestry});
+ assert.equal(map.get(C.id)?.parentId,parent.id);assert.equal(child.parentId,'claude:A');assert.equal(map.get(parent.id),map.get('claude:A'));assert.notEqual(map.get(parent.id),parent);assert.equal(ancestry[0].parentId,parent.id);
 });
 test('native identity and incarnation preserve proofs when the local session alias changes',()=>{
  const current={...C,id:'monitor-current',isSubagent:false,parentId:undefined,parentLink:undefined};
@@ -66,6 +72,16 @@ test('manager reserves consecutive lost hot ancestors through separate cold proo
  manager.setRetentionLineage([Pmember,member(B)]);const release=manager.reserveRetention([C.id]);assert.ok(release);
  for(const id of [C.id,B.id,A.id,P.id,R.id])assert.ok(manager.retentionReservedIds().has(id),id+' must remain reserved across both lost hot edges');
  assert.equal(reads.has(unrelated.id),false,'reachable metadata lookup does not scan unrelated hot sessions');assert.equal(lostA.parentId,undefined);assert.equal(lostC.parentId,undefined);release();
+});
+test('native scanner launcher snapshot keeps interactive roots and restores only eligible cold-parent children',async t=>{
+ const root=await realpath(await mkdtemp(join(tmpdir(),'tower-retention-ancestry-')));const claudeHome=join(root,'claude'),codexHome=join(root,'codex'),native=join(claudeHome,'projects','fixture');await mkdir(native,{recursive:true});await mkdir(join(codexHome,'sessions'),{recursive:true});
+ const created=new Date(now-30*day).toISOString();
+ for(const [id,entrypoint] of [['B','sdk-cli'],['I','cli'],['E','sdk-cli']])await writeFile(join(native,id+'.jsonl'),JSON.stringify({type:'user',sessionId:id,cwd:root,entrypoint,timestamp:created,message:{role:'user',content:id}})+'\n');
+ const sessions=new SessionService({claudeHome,codexHome,inspectProcesses:async()=>({claude:new Map(),codex:new Set<string>(),providerRunning:{claude:false,codex:false},launchers:new Map([['claude:I',['claude:B']],['claude:E',['claude:B']]])})});t.after(async()=>{sessions.stop();await rm(root,{recursive:true,force:true});});
+ await sessions.refresh(true);let snapshot=sessions.retentionRecords();assert.equal(snapshot.launchers.has('claude:I'),false);assert.equal(snapshot.launchers.has('claude:E'),true);assert.equal(sessions.get('claude:I')?.isSubagent,false);
+ const cold={...member(session('claude:B',A.id)),createdAt:created,relationships:[]};sessions.setColdRegistry([join(native,'B.jsonl')],['claude:B']);await sessions.refresh(true);snapshot=sessions.retentionRecords();
+ assert.equal(sessions.get('claude:I')?.isSubagent,false);assert.equal(sessions.get('claude:E')?.isSubagent,false,'ordinary lost exec linkage is unchanged');
+ const resolved=resolveRetentionLineage(snapshot.records.map(value=>value.session),[cold],snapshot.launchers);assert.equal(resolved.sessions.find(value=>value.id==='claude:I')?.parentId,undefined);assert.equal(resolved.sessions.find(value=>value.id==='claude:I')?.isSubagent,false);assert.equal(resolved.sessions.find(value=>value.id==='claude:E')?.parentId,'claude:B');assert.equal(sessions.get('claude:E')?.parentId,undefined);
 });
 for(const mode of ['automatic','explicit'] as const)test(`actual Claude scan cold parent -> lost exec child -> ${mode} archive, restore and later expiry`,async t=>{
  const root=await realpath(await mkdtemp(join(tmpdir(),'tower-retention-ancestry-')));const claudeHome=join(root,'claude'),codexHome=join(root,'codex'),native=join(claudeHome,'projects','fixture');await mkdir(native,{recursive:true});await mkdir(join(codexHome,'sessions'),{recursive:true});

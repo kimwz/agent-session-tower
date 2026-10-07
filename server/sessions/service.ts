@@ -109,7 +109,7 @@ export class SessionService extends EventEmitter {
   retentionRecords(): { launchers: ReadonlyMap<string, readonly string[]>; complete: boolean; issues: string[]; records: { session: Session; internal: boolean; fingerprint: string; lastActivityAt?: string; latestTaskEndedAt?: string }[] } {
     const chosen = new Map(this.index);
     for (const state of this.records.values()) if (state.internal && !chosen.has(state.session.id)) chosen.set(state.session.id, state);
-    return { launchers:new Map([...this.launchers].map(([id, parents])=>[id,[...parents]])), complete: this.retentionComplete && !this.scanning && !this.quiesced && this.diagnostics.length === 0,
+    return { launchers:new Map([...this.launchers].filter(([id]) => { const child=chosen.get(id); return Boolean(child && (child.execOrigin || (child.session.provider === 'claude' && child.programmatic))); }).map(([id, parents])=>[id,[...parents]])), complete: this.retentionComplete && !this.scanning && !this.quiesced && this.diagnostics.length === 0,
       issues: [...new Set([...(this.scanning ? ['scan-in-progress'] : []), ...(this.quiesced ? ['observer-paused'] : []),
         ...this.retentionIssues, ...this.diagnostics.map(item => `native-record-read-error:${item.provider}`)])],
       records: [...chosen.values()].map(state => ({ session: { ...state.session }, internal: state.internal,

@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { channel } from 'node:diagnostics_channel';
 import type { Provider } from '../../../shared/types.js';
 import type { RetentionRecord } from './policy.js';
-import type { RetentionAdapter, RetentionMember, RetentionOperationContext, RetentionSourceFile } from './types.js';
+import type { RetentionAdapter, RetentionMember, RetentionNode, RetentionOperationContext, RetentionSourceFile } from './types.js';
 import { privateDirectory, validateOperationId } from './store.js';
 import { CodexMaintenanceClient, type CodexMaintenance } from './codex-maintenance.js';
 import { inspectNativeRetention, type NativeInspection } from './native-inspection.js';
@@ -52,7 +52,7 @@ export function createNativeRetentionAdapter(roots: Record<Provider, readonly st
     const current = retentionNodeMap(fresh);
     for (const record of records) { let id: string | undefined = record.session.id; const seen = new Set<string>();
       while (id) {
-        const native = current.get(id) || (id === record.session.id ? record.session : undefined);
+        const native: RetentionNode | undefined = current.get(id) || (id === record.session.id ? record.session : undefined);
         if (!native) return true;
         if (seen.has(native.id)) return true; seen.add(native.id);
         if (nodeAliases(native).some(alias => fresh.protectedIds.has(alias) || fresh.blockedIds?.has(alias) || processes.activeIds.has(alias))) return true;

@@ -4,7 +4,11 @@ import type { RetentionObservation } from './policy.js';
 
 export const nodeAliases = (node: RetentionNode): string[] => [node.id, `${node.provider}:${node.nativeId}`];
 export function retentionNodeMap(observation: Pick<RetentionObservation, 'records' | 'ancestry'>): Map<string, RetentionNode> {
-  const map=new Map([...observation.ancestry || [], ...observation.records.map(({session}) => session)].flatMap(node => nodeAliases(node).map(alias => [alias,{...node}] as const)));
+  const map = new Map<string, RetentionNode>();
+  for (const input of [...observation.ancestry || [], ...observation.records.map(({session}) => session)]) {
+    const node: RetentionNode = {...input};
+    for (const alias of nodeAliases(node)) map.set(alias, node);
+  }
   for(const node of map.values())if(node.parentId)node.parentId=map.get(node.parentId)?.id??map.get(`${node.provider}:${node.parentId}`)?.id??node.parentId;
   return map;
 }
