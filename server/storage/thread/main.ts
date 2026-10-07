@@ -1,0 +1,8 @@
+import { runStorageThread } from './runtime.js';
+
+/**
+ * The production thread entry, bundled into one script by thread-bundle.mjs. Domain schema owners add their
+ * StorageDomain here together with their schema in STORAGE_DOMAIN_SCHEMAS (schema.ts); the handshake refuses a
+ * thread whose domains differ from the worker's manifest.
+ */
+runStorageThread([]);

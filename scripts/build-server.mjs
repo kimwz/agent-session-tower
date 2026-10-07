@@ -7,6 +7,7 @@ import { mkdir, mkdtemp, readdir, rename, rm, rmdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writeStorageThreadArtifact } from '../server/storage/thread-bundle.mjs';
 
 const DIRECTORIES = ['shared', 'server'];
 
@@ -50,6 +51,12 @@ async function build() {
   if (result.status !== 0) {
     await rm(staging, { recursive: true, force: true });
     process.exit(result.status ?? 1);
+  }
+  // The storage thread as one script beside the compiled server; a worker captures it once when it starts.
+  try { await writeStorageThreadArtifact(staging); } catch (error) {
+    await rm(staging, { recursive: true, force: true });
+    console.error(error);
+    process.exit(1);
   }
   await swapInto(dist, staging);
 }

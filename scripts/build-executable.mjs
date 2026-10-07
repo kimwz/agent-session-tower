@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, realpath, writeFile, chmod, rename, access } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { storageThreadDefine } from '../server/storage/thread-bundle.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const staging = join(root, 'dist', 'executable');
@@ -18,8 +19,9 @@ await build({
   entryPoints: [join(root, 'server/index.ts')], outfile: main, bundle: true, platform: 'node', format: 'esm', target: 'node26', sourcemap: false,
   // Bundled CommonJS dependencies still require Node built-ins inside the SEA.
   banner: { js: "import { createRequire as monitorCreateRequire } from 'node:module'; const require = monitorCreateRequire(import.meta.url);" },
-  // Keep the single executable independent of optional native ws accelerators.
-  define: { 'process.env.WS_NO_BUFFER_UTIL': '"1"', 'process.env.WS_NO_UTF_8_VALIDATE': '"1"' },
+  // Keep the single executable independent of optional native ws accelerators. The storage thread is defined in as
+  // text: the executable has no JS files beside it to start a thread from.
+  define: { 'process.env.WS_NO_BUFFER_UTIL': '"1"', 'process.env.WS_NO_UTF_8_VALIDATE': '"1"', ...await storageThreadDefine() },
   // Playwright needs its own files and browsers; the executable offers no browser tools (see server/browser/tools.ts).
   external: ['@playwright/mcp', 'playwright', 'playwright-core'],
 });
