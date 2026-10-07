@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { Browser, BrowserContext } from 'playwright';
 import { newContext, startBrowser, type BrowserTier } from './launch.js';
 import { findBrowserPid, forgetBrowser, markerSwitch, recordBrowser, stillRunning, systemProbe, type ProcessProbe } from './live.js';
-import { EMPTY_STATE, LoginSaver, readState, type StorageState } from './logins.js';
+import { LoginSaver, readState, type StorageState } from './logins.js';
 
 export interface TurnBrowserOptions { tier: BrowserTier; stateDir: string; savedLogins: boolean }
 
@@ -23,7 +23,9 @@ export interface TurnBrowserHooks {
 
 const DEFAULT_HOOKS: TurnBrowserHooks = { startBrowser, newContext, findBrowserPid, probe: systemProbe };
 
-interface Live { browser: Browser; marker: string; browserPid?: number; context?: BrowserContext }
+/** One browser of the turn; each keeps its own saves, so a browser started after the agent closed one never takes the
+ * earlier one's unsaved state as its own starting point. */
+interface Live { browser: Browser; marker: string; browserPid?: number; context?: BrowserContext; logins?: LoginSaver }
 
 /**
  * The browser of one turn's tool server. It starts on first use; every browser it starts is tracked from the moment it
@@ -33,7 +35,8 @@ interface Live { browser: Browser; marker: string; browserPid?: number; context?
 export class TurnBrowser {
   private readonly hooks: TurnBrowserHooks;
   private readonly tracked = new Set<Live>();
-  private readonly logins: LoginSaver;
+  /** Every browser's saves, finished or not; a new browser reads the logins only after them. */
+  private readonly savers = new Set<LoginSaver>();
   private active: Live | undefined;
   private starting: Promise<BrowserContext> | undefined;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
@@ -41,7 +44,6 @@ export class TurnBrowser {
 
   constructor(private readonly options: TurnBrowserOptions, private readonly log: (error: unknown) => void, hooks: Partial<TurnBrowserHooks> = {}) {
     this.hooks = { ...DEFAULT_HOOKS, ...hooks };
-    this.logins = new LoginSaver(options.stateDir, log, { waitMs: this.hooks.saveWaitMs });
   }
 
   /** The context Playwright's tools work in; a new browser when there is none (or the agent closed it). */
@@ -61,10 +63,16 @@ export class TurnBrowser {
       live.browserPid = await this.hooks.findBrowserPid(marker);
       if (live.browserPid) await recordBrowser(this.options.stateDir, { serverPid: process.pid, browserPid: live.browserPid, marker, startedAt: new Date().toISOString() });
       if (this.finished) throw new Error('This turn has ended.');
-      const loaded = this.options.savedLogins ? await readState(this.options.stateDir) : undefined;
+      let loaded: StorageState | undefined;
+      if (this.options.savedLogins) {
+        await Promise.all([...this.savers].map(saver => saver.idle()));
+        loaded = await readState(this.options.stateDir);
+        live.logins = new LoginSaver(this.options.stateDir, this.log, { waitMs: this.hooks.saveWaitMs });
+        live.logins.started(loaded);
+        this.savers.add(live.logins);
+      }
       const context = await this.hooks.newContext(this.options.tier, browser, loaded);
       live.context = context;
-      this.logins.started(loaded ?? EMPTY_STATE);
       this.active = live;
       // The agent may close the browser itself; the next tool call starts a new one.
       context.on('close', () => { if (this.active === live) this.active = undefined; void this.close(live); });
@@ -80,9 +88,9 @@ export class TurnBrowser {
     if (!this.options.savedLogins || this.finished) return;
     clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
-      const context = this.active?.context;
+      const live = this.active;
       // best-effort: a context closed meanwhile is saved by the turn's shutdown, or was the agent's to close.
-      if (context) void context.storageState().then(state => this.logins.save(state as StorageState), () => {});
+      if (live?.context && live.logins) void live.context.storageState().then(state => live.logins!.save(state as StorageState), () => {});
     }, this.hooks.saveDelayMs ?? 2_000);
   }
 
@@ -98,14 +106,14 @@ export class TurnBrowser {
     // best-effort: a browser still setting up is closed below either way.
     if (this.starting) await timeout(this.starting).catch(() => undefined);
     let state: StorageState | undefined;
-    const context = this.active?.context;
-    if (context && this.options.savedLogins) {
-      try { state = await timeout(context.storageState() as Promise<StorageState>); }
+    const last = this.active;
+    if (last?.context && last.logins) {
+      try { state = await timeout(last.context.storageState() as Promise<StorageState>); }
       catch (error) { this.log(new Error(`This turn's logins could not be read before closing: ${error instanceof Error ? error.message : String(error)}`)); }
     }
     await Promise.all([...this.tracked].map(live => this.close(live)));
-    await this.logins.idle();
-    if (state) await this.logins.save(state);
+    if (state) void last!.logins!.save(state);
+    await Promise.all([...this.savers].map(saver => saver.idle()));
   }
 
   private async close(live: Live): Promise<void> {

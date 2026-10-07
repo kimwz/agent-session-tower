@@ -106,3 +106,27 @@ test('logins a failed save could not write go with the next save', async t => {
   await browser.shutdown();
   assert.deepEqual((await readState(dir)).cookies.map(c => c.name).sort(), ['a', 'b']);
 });
+
+test('a browser reopened after the agent closed one starts from the logins the closed one saved, and keeps them', async t => {
+  const dir = await stateDir(t);
+  const login = { cookies: [cookie('login', 'yes')], origins: [] };
+  const f = fakes({ state: () => login });
+  const seeded: (StorageState | undefined)[] = [];
+  const original = f.hooks.newContext!;
+  f.hooks.newContext = async (tier, b, storage) => { seeded.push(storage); return original(tier, b, storage); };
+  f.hooks.saveWaitMs = 5_000;
+  const browser = new TurnBrowser({ tier: 'general', stateDir: dir, savedLogins: true }, () => {}, f.hooks);
+  const first = await browser.context() as unknown as EventEmitter;
+  const lock = join(dir, 'browser', 'logins.lock');
+  await mkdir(lock, { recursive: true });
+  await writeFile(join(lock, 'owner'), `${process.pid}:0:another-turn`);
+  browser.scheduleSave();
+  await new Promise(resolve => setTimeout(resolve, 30));
+  first.emit('close');
+  const reopening = browser.context();
+  setTimeout(() => { void rm(lock, { recursive: true, force: true }); }, 100);
+  await reopening;
+  assert.deepEqual(seeded.at(-1)?.cookies.map(c => c.name), ['login'], 'the new browser waited for the earlier save');
+  await browser.shutdown();
+  assert.deepEqual((await readState(dir)).cookies.map(c => c.name), ['login']);
+});
