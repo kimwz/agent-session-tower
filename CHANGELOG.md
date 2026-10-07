@@ -9,15 +9,16 @@ format, and saved browser preferences are the compatibility surface.
 ### Added
 - **Every turn has browser tools.** Tower gives every Claude and Codex turn it starts two browsers, and names them in the turn's Tower instructions so agents use them for web pages before computer use:
   - `browser_light` for pages a project serves (localhost, preview deployments, UI checks and screenshots): a fresh headless browser each turn, with no logins.
-  - `browser` for outside sites: the installed Google Chrome (Playwright's Chromium otherwise, installed on first use) running headless without the switches and the user agent that mark an automated browser, so ordinary bot checks see a regular Chrome. Logins made there are kept in `<state-dir>/browser/logins.json` (owner-only); each turn adds only what it changed, so turns running at the same time do not undo each other's logins.
+  - `browser` for outside sites: the installed Google Chrome (Playwright's Chromium otherwise) running headless without the switches and the user agent that mark an automated browser, so ordinary bot checks see a regular Chrome. Logins made there are kept in `<state-dir>/browser/logins.json` (owner-only); each tool call saves what it changed, so turns running at the same time do not undo each other's logins. A file that cannot be read is set aside and reported, and the browser starts without it.
   - A strong browser for sites that block those: Aside when its CLI (`aside`) is installed, for Claude and Codex turns; otherwise Claude in Chrome for Claude turns when its extension is set up (`--chrome`). Every other Claude turn starts with `--no-chrome`.
 - Agents choose a browser from the uses each one lists; nothing asks for approval. When a site needs a login they look for the credentials in Tower's vault or ask the owner, and they never try to solve CAPTCHAs.
-- Each turn's browser closes when the turn ends. A browser left behind by a tool server that was killed outright is ended by the next one to start; only browsers carrying Tower's own marker are touched. Snapshots and screenshots go to the system temporary folder, never into the project.
+- Each turn's browser closes when the turn ends, and `browser_close` saves the logins, closes it and lets the next call start a new one. A browser left behind by a tool server that was killed outright is ended by the next one to start; only browsers carrying Tower's own marker are touched. Snapshots and screenshots go to an owner-only folder in the system temporary directory, kept for a week, never into the project.
+- A browser tool server loads Playwright only when the agent first uses it, so a turn that never browses costs about 60 MB per server.
 
 ### Safety limits
-- A conversation that holds outside content (Slack, GitHub issues, public agents) gets both browsers without the saved logins, and never the owner's own browser.
+- A conversation that holds outside content (Slack, GitHub issues, public agents) gets both browsers without the saved logins, cannot reach this computer's own addresses (localhost) through them, and is not offered `browser_run_code_unsafe`; it never gets the owner's own browser.
+- Tower installs no browser. A computer with neither Google Chrome nor Playwright's Chromium reports how to install one (`npx playwright install chromium`; on Linux also `sudo npx playwright install-deps chromium`).
 - The standalone executable has no browser tools. Aside is wired as its documented `aside mcp` server but was not tried, as it is not installed here.
-- On Linux, Chromium's system libraries need `sudo npx playwright install-deps chromium`; Tower never runs sudo.
 
 ## [1.112.0] - 2026-10-07
 

@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
 /** The `browser` tool's saved logins: a Playwright storage state that every turn using it adds its changes to. */
 export interface Cookie {
@@ -16,6 +16,7 @@ export interface StorageState { cookies: Cookie[]; origins: OriginState[] }
 
 export const EMPTY_STATE: StorageState = { cookies: [], origins: [] };
 const MAX_BYTES = 8_000_000;
+const SAVE_BUDGET_BYTES = 4_000_000;
 /** A lock folder still without its owner's name after this long was left by a process that died taking it. */
 const LOCK_UNNAMED_MS = 5_000;
 
@@ -42,10 +43,40 @@ export function applyChanges(saved: StorageState, baseline: StorageState, curren
   return { cookies: [...cookies.values()].filter(cookie => cookie.expires === -1 || cookie.expires > now), origins: [...origins.values()] };
 }
 
-/** The saved state, or an empty one when nothing was saved yet. An unreadable file is an error, never replaced silently. */
-export async function readState(stateDir: string): Promise<StorageState> {
-  try { return parseState(await readPrivateJson(loginsPath(stateDir), MAX_BYTES)); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return EMPTY_STATE; throw error; }
+/**
+ * The saved state, or an empty one when nothing was saved yet. A file this build cannot read (damaged, or grown past
+ * the limit) is set aside for inspection and reported, so the browser starts without logins instead of failing every
+ * turn from then on.
+ */
+export async function readState(stateDir: string, log: (error: unknown) => void = () => {}): Promise<StorageState> {
+  const path = loginsPath(stateDir);
+  let raw: unknown;
+  try { raw = await readPrivateJson(path, MAX_BYTES); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return EMPTY_STATE;
+    if (!(error instanceof SyntaxError) && !/invalid or too large/.test(String(error))) throw error;
+    raw = undefined;
+  }
+  try { return parseState(raw); }
+  catch {
+    const aside = await quarantineFile(path);
+    log(new Error(`The browser's saved logins could not be read and were set aside at ${aside}; the browser starts without them.`));
+    return EMPTY_STATE;
+  }
+}
+
+/**
+ * Keeps the saved logins well under the reading limit. Local storage goes first: that of origins without a cookie, then
+ * all of it. Cookies are what keeps a login.
+ */
+export function withinBudget(state: StorageState, budget = SAVE_BUDGET_BYTES): StorageState {
+  const size = (value: StorageState) => Buffer.byteLength(JSON.stringify(value));
+  if (size(state) <= budget) return state;
+  const hosts = state.cookies.map(cookie => cookie.domain.replace(/^\./, ''));
+  // best-effort: an origin that is not a URL has no cookie to keep it.
+  const withCookie = (origin: string) => { try { const host = new URL(origin).hostname; return hosts.some(domain => host === domain || host.endsWith(`.${domain}`)); } catch { return false; } };
+  const trimmed = { cookies: state.cookies, origins: state.origins.filter(origin => withCookie(origin.origin)) };
+  return size(trimmed) <= budget ? trimmed : { cookies: state.cookies, origins: [] };
 }
 
 export function parseState(value: unknown): StorageState {
@@ -74,7 +105,7 @@ const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catc
  * checking again that the same dead owner still holds it; a live owner is waited for, and the save fails rather than
  * write alongside it.
  */
-export async function saveChanges(stateDir: string, baseline: StorageState, current: StorageState, options: { waitMs?: number } = {}): Promise<void> {
+export async function saveChanges(stateDir: string, baseline: StorageState, current: StorageState, options: { waitMs?: number; log?: (error: unknown) => void } = {}): Promise<void> {
   const lock = join(stateDir, 'browser', 'logins.lock');
   const owner = join(lock, 'owner');
   const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
@@ -90,7 +121,7 @@ export async function saveChanges(stateDir: string, baseline: StorageState, curr
     }
   }
   try {
-    await writePrivateJson(loginsPath(stateDir), JSON.stringify(applyChanges(await readState(stateDir), baseline, current)));
+    await writePrivateJson(loginsPath(stateDir), JSON.stringify(withinBudget(applyChanges(await readState(stateDir, options.log), baseline, current))));
   } finally {
     // best-effort: a lock whose owner file is unreadable is not ours to remove.
     if (await readFile(owner, 'utf8').catch(() => '') === token) await rm(lock, { recursive: true, force: true });
@@ -139,7 +170,7 @@ export class LoginSaver {
 
   save(state: StorageState): Promise<void> {
     this.queue = this.queue.then(async () => {
-      await saveChanges(this.stateDir, this.baseline, state, this.options);
+      await saveChanges(this.stateDir, this.baseline, state, { ...this.options, log: this.log });
       this.baseline = state;
     }).catch(this.log);
     return this.queue;

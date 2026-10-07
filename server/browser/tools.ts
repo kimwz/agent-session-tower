@@ -1,7 +1,7 @@
 import { accessSync, constants, existsSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { isSea } from 'node:sea';
 import type { Provider } from '../../shared/types.js';
 import { providerDirectories } from '../providers/discovery.js';
@@ -28,8 +28,8 @@ export function browserTools(entry: { command: string; args: string[] }, stateDi
     : environment.aside ? 'aside' : provider === 'claude' && environment.claudeInChrome ? 'claude-in-chrome' : undefined;
   const servers: SessionMcpServers = {};
   if (environment.playwright) {
-    const server = (tier: 'light' | 'general'): SessionMcpServer => ({ command: entry.command, args: [...entry.args, '--browser-mcp', tier, stateDir,
-      ...(tier === 'general' && outsideContent ? ['--no-saved-logins'] : []), ...(strong ? ['--strong', strong] : [])] });
+    const server = (tier: 'light' | 'general'): SessionMcpServer => ({ command: entry.command, args: [...browserEntry(entry.args), tier, stateDir,
+      ...(outsideContent ? ['--outside-content'] : []), ...(strong ? ['--strong', strong] : [])] });
     servers.browser_light = server('light');
     servers.browser = server('general');
   }
@@ -50,6 +50,12 @@ export function browserNote(tools: BrowserTools): string | undefined {
   ].filter(Boolean);
   if (!uses.length) return undefined;
   return `Browser tools for this turn (use them for web pages rather than computer use; look them up with your tool search if they are not listed yet): ${uses.join('; ')}.`;
+}
+
+/** This build's browser entry beside its main entry (the last argument), with the same Node options. */
+function browserEntry(args: string[]): string[] {
+  const main = args.at(-1)!;
+  return [...args.slice(0, -1), join(dirname(main), 'browser', basename(main).replace(/^index\./, 'entry.'))];
 }
 
 /** Looked up at each turn: cheap file checks, so installing Aside or the extension takes effect on the next turn. */

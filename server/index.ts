@@ -43,7 +43,6 @@ import { RepositoryMonitor, watchedRepositoryPaths } from './repositories/monito
 import { installAgentGuidance } from './agent-guidance/install.js';
 import type { SkillBundle, SkillDetail, SkillImportPlan, SkillOverview, SkillSummary } from '../shared/skills.js';
 import { startSessionsMcp } from './api/session-tools.js';
-import { parseBrowserServerArgs, startBrowserMcp } from './browser/server.js';
 import { startSecretsMcp } from './secrets/runtime.js';
 import { runSecretsCommand } from './secrets/cli.js';
 import { SecretRelay } from './link/secret-relay.js';
@@ -129,11 +128,6 @@ async function main() {
     if (args.length !== 2) throw new Error('Tower MCP requires a state directory.');
     await startTowerMcp(resolve(args[1]));
     return;
-  }
-  if (args[0] === '--browser-mcp') {
-    const options = parseBrowserServerArgs(args.slice(1).map((arg, index) => index === 1 ? resolve(arg) : arg));
-    await startBrowserMcp(options);
-    process.exit(0);
   }
   if (args[0] === '--secrets-mcp') {
     if (args.length !== 2 || !args[1]) throw new Error('Secrets MCP requires a state directory.');

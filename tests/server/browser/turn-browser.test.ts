@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import type { Browser, BrowserContext } from 'playwright';
 import { liveDir, markerSwitch, type ProcessProbe } from '../../../server/browser/live.js';
-import { loginsPath, readState, type StorageState } from '../../../server/browser/logins.js';
+import { readState, type StorageState } from '../../../server/browser/logins.js';
 import { TurnBrowser, type TurnBrowserHooks } from '../../../server/browser/turn-browser.js';
 
 /** Fake browsers whose processes live in `processes` until closed (unless they refuse to close). */
@@ -16,7 +16,7 @@ function fakes(options: { refuseClose?: boolean; state?: () => StorageState; con
   let nextPid = 1000;
   const probe: ProcessProbe = { alive: () => true, command: async pid => processes.get(pid), kill: () => {} };
   const hooks: Partial<TurnBrowserHooks> = {
-    probe, closeTimeoutMs: 20, stateTimeoutMs: 50, saveDelayMs: 5, saveWaitMs: 200, goneWaitMs: 30,
+    probe, closeTimeoutMs: 20, stateTimeoutMs: 50, saveWaitMs: 200, goneWaitMs: 30,
     startBrowser: async (_tier, marker) => {
       const pid = nextPid++;
       processes.set(pid, `/chrome ${marker}`);
@@ -26,8 +26,9 @@ function fakes(options: { refuseClose?: boolean; state?: () => StorageState; con
     findBrowserPid: async marker => [...processes].find(([, command]) => command.includes(markerSwitch(marker)))?.[0],
     newContext: async () => {
       if (options.contextFails) throw new Error('context failed');
-      const context = new EventEmitter() as EventEmitter & { storageState(): Promise<StorageState> };
+      const context = new EventEmitter() as EventEmitter & { storageState(): Promise<StorageState>; close(): Promise<void> };
       context.storageState = async () => options.state?.() ?? { cookies: [], origins: [] };
+      context.close = async () => { context.emit('close'); };
       return context as unknown as BrowserContext;
     },
   };
@@ -44,9 +45,7 @@ const cookie = (name: string, value: string) => ({ name, value, domain: 'example
 
 test('a browser that fails to set up is closed at once, and its record goes', async t => {
   const dir = await stateDir(t);
-  await mkdir(join(dir, 'browser'), { recursive: true });
-  await writeFile(loginsPath(dir), 'not json');
-  const f = fakes();
+  const f = fakes({ contextFails: true });
   const browser = new TurnBrowser({ tier: 'general', stateDir: dir, savedLogins: true }, () => {}, f.hooks);
   await assert.rejects(browser.context());
   assert.deepEqual([f.closed.length, f.processes.size], [1, 0]);
@@ -98,7 +97,7 @@ test('logins a failed save could not write go with the next save', async t => {
   const lock = join(dir, 'browser', 'logins.lock');
   await mkdir(lock, { recursive: true });
   await writeFile(join(lock, 'owner'), `${process.pid}:0:another-turn`);
-  browser.scheduleSave();
+  browser.saveSoon();
   await new Promise(resolve => setTimeout(resolve, 400));
   assert.deepEqual((await readState(dir)).cookies, [], 'the first save waited for the lock and gave up');
   await rm(lock, { recursive: true, force: true });
@@ -113,14 +112,14 @@ test('a browser reopened after the agent closed one starts from the logins the c
   const f = fakes({ state: () => login });
   const seeded: (StorageState | undefined)[] = [];
   const original = f.hooks.newContext!;
-  f.hooks.newContext = async (tier, b, storage) => { seeded.push(storage); return original(tier, b, storage); };
+  f.hooks.newContext = async (tier, b, options) => { seeded.push(options.storageState); return original(tier, b, options); };
   f.hooks.saveWaitMs = 5_000;
   const browser = new TurnBrowser({ tier: 'general', stateDir: dir, savedLogins: true }, () => {}, f.hooks);
   const first = await browser.context() as unknown as EventEmitter;
   const lock = join(dir, 'browser', 'logins.lock');
   await mkdir(lock, { recursive: true });
   await writeFile(join(lock, 'owner'), `${process.pid}:0:another-turn`);
-  browser.scheduleSave();
+  browser.saveSoon();
   await new Promise(resolve => setTimeout(resolve, 30));
   first.emit('close');
   const reopening = browser.context();
@@ -129,4 +128,48 @@ test('a browser reopened after the agent closed one starts from the logins the c
   assert.deepEqual(seeded.at(-1)?.cookies.map(c => c.name), ['login'], 'the new browser waited for the earlier save');
   await browser.shutdown();
   assert.deepEqual((await readState(dir)).cookies.map(c => c.name), ['login']);
+});
+
+test('closing the browser on the agent\'s request saves its logins first, and the next call starts a new browser', async t => {
+  const dir = await stateDir(t);
+  const f = fakes({ state: () => ({ cookies: [cookie('fresh', 'login')], origins: [] }) });
+  const browser = new TurnBrowser({ tier: 'general', stateDir: dir, savedLogins: true }, () => {}, f.hooks);
+  const first = await browser.context();
+  await browser.closeActive();
+  assert.deepEqual((await readState(dir)).cookies.map(c => c.name), ['fresh']);
+  assert.deepEqual([f.closed.length, f.processes.size, await records(dir)], [1, 0, []]);
+  const second = await browser.context();
+  assert.notEqual(second, first);
+  await browser.closeActive();
+  await browser.closeActive();
+  await browser.shutdown();
+  assert.equal(f.processes.size, 0);
+});
+
+test('every tool call\'s login changes are saved at once, so a browser that dies later loses none of them', async t => {
+  const dir = await stateDir(t);
+  let current: StorageState = { cookies: [cookie('a', '1')], origins: [] };
+  const f = fakes({ state: () => current });
+  const browser = new TurnBrowser({ tier: 'general', stateDir: dir, savedLogins: true }, () => {}, f.hooks);
+  const context = await browser.context() as unknown as EventEmitter;
+  browser.saveSoon();
+  current = { cookies: [cookie('a', '1'), cookie('b', '2')], origins: [] };
+  browser.saveSoon();
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.deepEqual((await readState(dir)).cookies.map(c => c.name).sort(), ['a', 'b'], 'a call finishing during a save gets one more');
+  context.emit('close');
+  await browser.shutdown();
+  assert.deepEqual((await readState(dir)).cookies.map(c => c.name).sort(), ['a', 'b']);
+});
+
+test('a conversation with outside content gets a guarded context and no saved logins', async t => {
+  const dir = await stateDir(t);
+  const f = fakes();
+  const asked: unknown[] = [];
+  const original = f.hooks.newContext!;
+  f.hooks.newContext = async (tier, b, options) => { asked.push(options); return original(tier, b, options); };
+  const browser = new TurnBrowser({ tier: 'general', stateDir: dir, savedLogins: false, outsideContent: true }, () => {}, f.hooks);
+  await browser.context();
+  await browser.shutdown();
+  assert.deepEqual(asked, [{ storageState: undefined, outsideContent: true }]);
 });

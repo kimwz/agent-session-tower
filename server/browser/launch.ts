@@ -1,20 +1,30 @@
-import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
 import type { Browser, BrowserContext, BrowserContextOptions, LaunchOptions } from 'playwright';
+import { isLoopbackHostname } from '../auth/store.js';
 
 /**
- * How each browser tier starts. `light` checks pages this project serves: Playwright's defaults, nothing kept.
- * `general` visits outside sites: real Chrome when it is installed, without the switches and the user agent that mark an
- * automated or headless browser, so ordinary bot checks see a regular Chrome.
+ * How each browser tier starts. Both use the installed Chrome when there is one, Playwright's Chromium otherwise.
+ * `light` checks pages this project serves and keeps Playwright's other defaults. `general` visits outside sites
+ * without the switches and the user agent that mark an automated or headless browser, so ordinary bot checks see a
+ * regular Chrome.
  */
 export type BrowserTier = 'light' | 'general';
 
 type Playwright = typeof import('playwright');
-const require = createRequire(import.meta.url);
+type PlaywrightMcp = typeof import('@playwright/mcp');
+let mcp: PlaywrightMcp | undefined;
 let loaded: Playwright | undefined;
-/** Loaded on first use only, so no other part of Tower ever loads Playwright. */
-export function playwright(): Playwright { return loaded ??= require('playwright') as Playwright; }
+/**
+ * Loaded on first use only, so a turn that never browses never loads Playwright. Playwright comes from where
+ * `@playwright/mcp` finds it: the exact version it was built with.
+ */
+export function playwrightMcp(): PlaywrightMcp { return mcp ??= createRequire(import.meta.url)('@playwright/mcp') as PlaywrightMcp; }
+export function playwright(): Playwright {
+  return loaded ??= createRequire(createRequire(import.meta.url).resolve('@playwright/mcp'))('playwright') as Playwright;
+}
+export function playwrightMcpVersion(): string {
+  return (createRequire(import.meta.url)('@playwright/mcp/package.json') as { version: string }).version;
+}
 
 export function launchOptions(tier: BrowserTier, marker: string, channel: 'chrome' | undefined): LaunchOptions {
   // The tool server closes the browser itself, after reading the turn's logins; Playwright's own signal handlers would
@@ -27,46 +37,45 @@ export function launchOptions(tier: BrowserTier, marker: string, channel: 'chrom
 /** The browser's own user agent, minus the word that gives a headless browser away. */
 export function regularUserAgent(userAgent: string): string { return userAgent.replace(/HeadlessChrome\//g, 'Chrome/'); }
 
+/** Starts the tier's browser: the installed Chrome first, Playwright's Chromium otherwise. Tower installs neither. */
+export async function startBrowser(tier: BrowserTier, marker: string, chromium: Pick<Playwright['chromium'], 'launch'> = playwright().chromium): Promise<{ browser: Browser }> {
+  try { return { browser: await chromium.launch(launchOptions(tier, marker, 'chrome')) }; }
+  catch (error) { if (!missingBrowser(error)) throw error; }
+  try { return { browser: await chromium.launch(launchOptions(tier, marker, undefined)) }; }
+  catch (error) {
+    if (!missingBrowser(error)) throw error;
+    throw new Error('No browser is installed on this computer: neither Google Chrome nor Playwright\'s Chromium. '
+      + 'Install one if this computer may have it, for example `npx playwright install chromium` '
+      + '(on Linux, `sudo npx playwright install-deps chromium` adds the system libraries). Tower installs none itself.');
+  }
+}
+
 /**
- * Starts the tier's browser: installed Chrome first, Playwright's Chromium otherwise, installing it once when neither
- * is there. Answers which one started, for the agent's instructions and errors.
+ * The context a turn works in; `general` gets a regular user agent and the saved logins it is given. In a conversation
+ * that holds outside content, nothing reaches this computer's own addresses: Tower lets a direct localhost request in
+ * without signing in, and the agent there must not act as the owner (see isLoopbackHostname).
  */
-export async function startBrowser(tier: BrowserTier, marker: string, options: { install?: () => Promise<void> } = {}): Promise<{ browser: Browser; kind: 'chrome' | 'chromium' }> {
-  const { chromium } = playwright();
-  try { return { browser: await chromium.launch(launchOptions(tier, marker, 'chrome')), kind: 'chrome' }; }
-  catch (error) { if (!missingBrowser(error)) throw error; }
-  try { return { browser: await chromium.launch(launchOptions(tier, marker, undefined)), kind: 'chromium' }; }
-  catch (error) { if (!missingBrowser(error)) throw error; }
-  await (options.install ?? installChromium)();
-  return { browser: await chromium.launch(launchOptions(tier, marker, undefined)), kind: 'chromium' };
+export async function newContext(tier: BrowserTier, browser: Browser, options: { storageState?: BrowserContextOptions['storageState']; outsideContent?: boolean } = {}): Promise<BrowserContext> {
+  const guarded: BrowserContextOptions = options.outsideContent ? { serviceWorkers: 'block' } : {};
+  let context: BrowserContext;
+  if (tier === 'light') context = await browser.newContext(guarded);
+  else {
+    const session = await browser.newBrowserCDPSession();
+    const { userAgent } = await session.send('Browser.getVersion') as { userAgent: string };
+    // best-effort: the session was only needed for the version; the browser drops it with the context anyway.
+    await session.detach().catch(() => {});
+    context = await browser.newContext({ ...guarded, userAgent: regularUserAgent(userAgent), ...(options.storageState ? { storageState: options.storageState } : {}) });
+  }
+  if (options.outsideContent) {
+    // Answered rather than aborted: an aborted navigation's error page would cut into the agent's next navigation.
+    await context.route(url => isLoopbackHostname(url.hostname), route => route.fulfill({ status: 403, contentType: 'text/plain; charset=utf-8',
+      body: 'Tower blocks this computer\'s own addresses in a conversation that holds outside content.' }));
+    await context.routeWebSocket(url => isLoopbackHostname(url.hostname), socket => socket.close());
+  }
+  return context;
 }
 
-/** The context a turn works in; `general` gets a regular user agent and the saved logins it is given. */
-export async function newContext(tier: BrowserTier, browser: Browser, storageState?: BrowserContextOptions['storageState']): Promise<BrowserContext> {
-  if (tier === 'light') return browser.newContext();
-  const session = await browser.newBrowserCDPSession();
-  const { userAgent } = await session.send('Browser.getVersion') as { userAgent: string };
-  // best-effort: the session was only needed for the version; the browser drops it with the context anyway.
-  await session.detach().catch(() => {});
-  return browser.newContext({ userAgent: regularUserAgent(userAgent), ...(storageState ? { storageState } : {}) });
-}
-
-function missingBrowser(error: unknown): boolean {
+export function missingBrowser(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /is not found|Executable doesn't exist|Looks like Playwright|not installed/i.test(message);
-}
-
-/** Playwright's own installer for Chromium, as `npx playwright install chromium` would run it. */
-export async function installChromium(): Promise<void> {
-  const cli = join(dirname(require.resolve('playwright-core/package.json')), 'cli.js');
-  const output: string[] = [];
-  const code = await new Promise<number | null>((resolve, reject) => {
-    const child = spawn(process.execPath, [cli, 'install', 'chromium'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    child.stdout.on('data', chunk => output.push(String(chunk)));
-    child.stderr.on('data', chunk => output.push(String(chunk)));
-    child.on('error', reject);
-    child.on('exit', resolve);
-  });
-  if (code !== 0) throw new Error(`No browser is installed and installing Chromium failed: ${output.join('').trim().slice(-1500)}\n`
-    + 'On Linux, missing system libraries need `sudo npx playwright install-deps chromium`; Tower never runs sudo.');
 }

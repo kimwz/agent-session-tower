@@ -75,3 +75,13 @@ test('only Playwright\'s own profile folder directly in the temp folder is ever 
   assert.equal(playwrightProfile('/c --user-data-dir=/Users/me/Library/Chrome', '/tmp/x'), undefined);
   assert.equal(playwrightProfile('/c --no-profile', '/tmp/x'), undefined);
 });
+
+test('two servers starting together end a leftover browser once', async t => {
+  const f = await fixture(t);
+  await recordBrowser(f.stateDir, { serverPid: 100, browserPid: 200, marker: MARKER, startedAt: '' });
+  const { fake, signals } = probe(new Map([[200, `/chrome ${markerSwitch(MARKER)}`]]), new Set());
+  const results = await Promise.all([reapBrowsers(f.stateDir, fake, { graceMs: 5, tempDir: f.temp }), reapBrowsers(f.stateDir, fake, { graceMs: 5, tempDir: f.temp })]);
+  assert.deepEqual(results.sort(), [0, 1]);
+  assert.deepEqual(signals, [[200, 'SIGTERM']]);
+  assert.deepEqual(await readdir(liveDir(f.stateDir)), []);
+});

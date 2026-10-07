@@ -142,8 +142,8 @@ test('only owner turns in the owner’s own conversations receive Tower tools; e
   assert.equal(native.servers!.tower_sessions.env, undefined, 'its key stays in the state directory');
   const issue = resolve(owner, session('codex:issue'));
   assert.deepEqual([issue.towerTools, lookups(issue)], ['external-input', ['browser', 'browser_light', 'tower_sessions']]);
-  assert.ok(issue.servers!.browser.args.includes('--no-saved-logins'), 'outside content never reaches the saved logins');
-  assert.ok(!native.servers!.browser.args.includes('--no-saved-logins'));
+  assert.ok(issue.servers!.browser.args.includes('--outside-content'), 'outside content never reaches the saved logins or this computer\'s own addresses');
+  assert.ok(!native.servers!.browser.args.includes('--outside-content'));
   const scheduled = resolve(owner, session('codex:scheduled'));
   assert.deepEqual([scheduled.towerTools, lookups(scheduled)], ['not-owner-session', ['browser', 'browser_light', 'tower_sessions']]);
   assert.deepEqual(lookups(resolve({ kind: 'trigger', triggerId: 'daily' }, session('codex:native'))), ['browser', 'browser_light', 'tower_sessions']);
@@ -252,6 +252,17 @@ test('the owner\'s turns in the master\'s folder also get the master\'s page too
   assert.equal(resolver(turn('codex:native', { kind: 'owner' }), session('codex:native')).servers?.tower_master, undefined);
 });
 
+
+test('a trusted Claude conversation gets the owner\'s Chrome as its strong browser; one with outside content does not', async t => {
+  const f = await fixture(t);
+  const origins = new Map<string, SessionOrigin>([['claude:mine', { kind: 'owner', untrustedInput: false }], ['claude:slack', { kind: 'slack', untrustedInput: true }]]);
+  const resolver = runToolResolver({ stateDir: f.stateDir, capabilities: f.capabilities, runs: { sessionOrigin: id => origins.get(id) }, browsers: () => ({ playwright: true, claudeInChrome: true }) });
+  const turn = (id: string): Run => ({ id: randomUUID(), sessionId: id, prompt: '', status: 'queued', createdAt: '', output: '', origin: { kind: 'owner' } });
+  const claude = (id: string): Session => ({ ...session(id), provider: 'claude' });
+  assert.equal(resolver(turn('claude:mine'), claude('claude:mine')).claudeChrome, true);
+  assert.equal(resolver(turn('claude:slack'), claude('claude:slack')).claudeChrome, false);
+  assert.equal(resolver(turn('codex:mine'), session('codex:mine')).claudeChrome, false);
+});
 
 test('reporting credentials prove a live local caller but cannot grant owner tools', async t => {
   const f = await fixture(t);

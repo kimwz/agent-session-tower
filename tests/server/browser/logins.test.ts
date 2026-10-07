@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { applyChanges, EMPTY_STATE, loginsPath, readState, saveChanges, type Cookie, type StorageState } from '../../../server/browser/logins.js';
+import { applyChanges, EMPTY_STATE, loginsPath, readState, saveChanges, withinBudget, type Cookie, type StorageState } from '../../../server/browser/logins.js';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const cookie = (name: string, value: string, extra: Partial<Cookie> = {}): Cookie => ({ name, value, domain: 'example.com', path: '/', expires: -1, httpOnly: false, secure: true, sameSite: 'Lax', ...extra });
@@ -45,15 +45,32 @@ test('local storage is replaced per origin the turn changed and never deleted', 
   assert.deepEqual(changed.origins.map(o => o.localStorage[0].value), ['mine', 'b']);
 });
 
-test('saved logins start empty, stay owner-only and refuse to be silently replaced when unreadable', async t => {
+test('saved logins start empty and stay owner-only; an unreadable file is set aside and reported, not left to break every turn', async t => {
   const dir = await stateDir(t);
   assert.deepEqual(await readState(dir), EMPTY_STATE);
   await saveChanges(dir, EMPTY_STATE, state([cookie('sid', '1')]));
   assert.deepEqual(values(await readState(dir)), ['sid=1']);
   assert.equal((await stat(loginsPath(dir))).mode & 0o777, 0o600);
-  await writeFile(loginsPath(dir), '{"not":"a state"}');
-  await assert.rejects(readState(dir), /not a storage state/);
-  await assert.rejects(saveChanges(dir, EMPTY_STATE, state([cookie('x', '1')])), /not a storage state/);
+  for (const damaged of ['{"not":"a state"}', 'not json', 'x'.repeat(8_000_001)]) {
+    await writeFile(loginsPath(dir), damaged);
+    const logs: string[] = [];
+    assert.deepEqual(await readState(dir, error => logs.push(String(error))), EMPTY_STATE);
+    assert.match(logs.join(), /set aside at .*logins\.json\.unreadable-/);
+    const aside = (await readdir(join(dir, 'browser'))).filter(name => name.startsWith('logins.json.unreadable-'));
+    assert.ok(aside.length >= 1, 'kept for inspection');
+    await saveChanges(dir, EMPTY_STATE, state([cookie('after', '1')]));
+    assert.deepEqual(values(await readState(dir)), ['after=1']);
+  }
+});
+
+test('saved logins stay within their budget: local storage without a cookie goes first, then all local storage', () => {
+  const big = 'v'.repeat(1_000);
+  const origins = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => ({ origin: `https://${prefix}${i}.com`, localStorage: [{ name: 'k', value: big }] }));
+  const withLogin = state([cookie('sid', '1', { domain: '.keep0.com' })], [...origins('keep', 1), ...origins('drop', 20)]);
+  assert.deepEqual(withinBudget(withLogin, 10_000).origins.map(o => o.origin), ['https://keep0.com']);
+  assert.deepEqual(withinBudget(withLogin, 500).origins, []);
+  assert.equal(withinBudget(withLogin, 500).cookies.length, 1, 'cookies are what keeps a login');
+  assert.equal(withinBudget(withLogin), withLogin, 'unchanged under the budget');
 });
 
 test('concurrent saves from several turns all land', async t => {
