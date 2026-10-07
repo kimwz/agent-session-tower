@@ -164,17 +164,19 @@ export class TurnBrowser {
    */
   private async capture(context: BrowserContext, deadline = Infinity): Promise<StorageState> {
     const cookies = await within(context.cookies(), Math.min(1_000, deadline - Date.now())) as Cookie[];
-    const read = async (page: ReturnType<BrowserContext['pages']>[number]): Promise<OriginState | undefined> => {
+    const readPage = async (page: ReturnType<BrowserContext['pages']>[number]): Promise<OriginState | undefined> => {
       let origin: string;
       // best-effort: a page whose URL is not a web address has no local storage to keep.
       try { origin = new URL(page.url()).origin; } catch { return undefined; }
       if (!isWebOrigin(origin)) return undefined;
-      const items = await within(page.evaluate(() => Object.entries(localStorage).map(([name, value]) => ({ name, value }))), Math.min(500, deadline - Date.now()));
-      return Array.isArray(items) && items.every(item => typeof item?.name === 'string' && typeof item?.value === 'string') ? { origin, localStorage: items } : undefined;
+      // The page may have moved to another site since its URL was read: what it answers counts only for the same origin.
+      const read = await within(page.evaluate(() => ({ origin: location.origin, items: Object.entries(localStorage).map(([name, value]) => ({ name, value })) })), Math.min(500, deadline - Date.now()));
+      const items = read?.items;
+      return read?.origin === origin && Array.isArray(items) && items.every(item => typeof item?.name === 'string' && typeof item?.value === 'string') ? { origin, localStorage: items } : undefined;
     };
     const origins = new Map<string, OriginState>();
     // best-effort: a page that is navigating or closing has nothing to read now; the next save sees it.
-    for (const origin of await Promise.all(context.pages().map(page => read(page).catch(() => undefined)))) if (origin) origins.set(origin.origin, origin);
+    for (const origin of await Promise.all(context.pages().map(page => readPage(page).catch(() => undefined)))) if (origin) origins.set(origin.origin, origin);
     return { cookies, origins: [...origins.values()] };
   }
 

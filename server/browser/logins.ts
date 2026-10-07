@@ -45,6 +45,8 @@ export function applyChanges(saved: StorageState, baseline: StorageState, curren
   const startedWith = new Map(baseline.origins.map(origin => [origin.origin, origin]));
   for (const origin of current.origins) {
     if (same(startedWith.get(origin.origin), origin)) continue;
+    // Empty and never had: nothing this turn did, so another turn's login there stays (as with cookies above).
+    if (!origin.localStorage.length && !startedWith.has(origin.origin)) continue;
     origins.delete(origin.origin);
     if (origin.localStorage.length) origins.set(origin.origin, origin);
   }

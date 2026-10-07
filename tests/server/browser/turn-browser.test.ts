@@ -30,7 +30,7 @@ function fakes(options: { refuseClose?: boolean; state?: () => StorageState; con
       const current = () => options.state?.() ?? { cookies: [], origins: [] };
       context.cookies = async () => current().cookies;
       // One open page per origin in the state, answering what its local storage holds.
-      context.pages = () => current().origins.map(origin => ({ url: () => `${origin.origin}/page`, evaluate: async () => origin.localStorage }));
+      context.pages = () => current().origins.map(origin => ({ url: () => `${origin.origin}/page`, evaluate: async () => ({ origin: origin.origin, items: origin.localStorage }) }));
       context.close = async () => { context.emit('close'); };
       return context as unknown as BrowserContext;
     },
@@ -267,11 +267,13 @@ test('only web pages give local storage, under the origin of their URL, whatever
   f.hooks.newContext = async (...args) => {
     const context = await original(...args) as unknown as { pages(): unknown[] };
     context.pages = () => [
-      { url: () => 'about:blank', evaluate: async () => [{ name: 'poison', value: '1' }] },
-      { url: () => 'chrome-error://chromewebdata/', evaluate: async () => [{ name: 'x', value: '1' }] },
-      { url: () => 'https://real.com/app', evaluate: async () => [{ name: 'token', value: 't' }] },
-      { url: () => 'https://empty.com/', evaluate: async () => [] },
-      { url: () => 'https://liar.com/', evaluate: async () => ({ origin: 'null' }) },
+      { url: () => 'about:blank', evaluate: async () => ({ origin: 'null', items: [{ name: 'poison', value: '1' }] }) },
+      { url: () => 'chrome-error://chromewebdata/', evaluate: async () => ({ origin: 'null', items: [{ name: 'x', value: '1' }] }) },
+      { url: () => 'https://real.com/app', evaluate: async () => ({ origin: 'https://real.com', items: [{ name: 'token', value: 't' }] }) },
+      { url: () => 'https://empty.com/', evaluate: async () => ({ origin: 'https://empty.com', items: [] }) },
+      { url: () => 'https://liar.com/', evaluate: async () => ({ origin: 'null', items: [] }) },
+      // Moved to another site between reading its URL and its storage: the other site's token is not saved as this one's.
+      { url: () => 'https://app.com/', evaluate: async () => ({ origin: 'https://other.com', items: [{ name: 'other-token', value: 'x' }] }) },
     ];
     return context as never;
   };

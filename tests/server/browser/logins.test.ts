@@ -124,6 +124,14 @@ test('pages with empty local storage are never saved, so they cannot push a logi
   assert.deepEqual((await readState(dir)).origins, [], 'logging out empties it');
 });
 
+test('a turn that sees an origin empty, which it never had, leaves another turn\'s login there alone', () => {
+  const saved = state([], [{ origin: 'https://app.com', localStorage: [{ name: 'token', value: 'from-B' }] }]);
+  const merged = applyChanges(saved, EMPTY_STATE, state([], [{ origin: 'https://app.com', localStorage: [] }]));
+  assert.deepEqual(merged.origins, saved.origins);
+  const loggedOut = applyChanges(saved, saved, state([], [{ origin: 'https://app.com', localStorage: [] }]));
+  assert.deepEqual(loggedOut.origins, [], 'one it had and emptied goes');
+});
+
 test('a late read still adds the origins only it saw, without overwriting what a newer read saw', async t => {
   const dir = await stateDir(t);
   const saver = new LoginSaver(dir, () => {});
