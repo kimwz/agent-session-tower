@@ -97,3 +97,13 @@ test('the catalog scanner recognizes the camelCase operation matcher', () => {
   assert.deepEqual(sourceRoutes(String.raw`const operation = path.match(/^\/api\/v1\/([a-z][a-zA-Z]*\.[a-zA-Z]+)$/);`), ['/api/v1/{}']);
   assert.ok(catalogRoutes(apiCatalog()).has('/api/v1/autoPrompt.submit'));
 });
+
+test('retention routes describe their owner-only access and separate cold backup boundary', () => {
+  const catalog = apiCatalog();
+  assert.match(catalog, /Session retention \(owner pages only; master, local agents and run-capability callers are refused\)/);
+  assert.match(catalog, /GET \/api\/retention\/bundles\/\{bundleId\}\/files\/\{fileName\}/);
+  assert.match(catalog, /path a relative directory without traversal or symlinks/);
+  assert.match(catalog, /Cold bundles are not included in settings backups/);
+  assert.match(catalog, /Close session remains hide-only/);
+  assert.equal(isFileRoute('/api/retention/export'), false, 'cold exports return status for a directory operation, not a download body');
+});

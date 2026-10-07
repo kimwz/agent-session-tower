@@ -65,6 +65,11 @@ import { keepEndpoint } from './endpoint-keeper.js';
 import { FORCE_UPDATE_DEADLINE_MS, FORCE_UPDATE_GIVE_UP_MS, MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 import { TowerError, statusOf } from '../../shared/errors.js';
 import { sseSink } from '../http/sinks.js';
+import { RetentionService } from '../sessions/retention/service.js';
+import { RetentionArchive } from '../sessions/retention/archive.js';
+import { RetentionStore } from '../sessions/retention/store.js';
+import { RetentionObserver } from '../sessions/retention/observer.js';
+import { createNativeRetentionAdapter } from '../sessions/retention/provider.js';
 
 const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan', 'skillsBackup', 'secretCall']);
 
@@ -72,6 +77,9 @@ export interface RunnerHostOptions {
   stateDir: string;
   runs: RunManager;
   sessions: SessionService;
+  closedSessions?: ClosedSessionStore;
+  retention?: { service: RetentionService; archive: RetentionArchive };
+  retentionUnavailable?: string;
   autoPrompts?: AutoPromptManager;
   slack?: SlackService;
   /** Coordinator conversations for GitHub issue events. */
@@ -150,7 +158,9 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     return { instance, revision: ++revision, runs: options.runs.list(), sessions,
       nativeIds: Object.fromEntries(sessions.map(session => [session.id, options.runs.nativeSessionId(session.id)])),
       settled: [...options.runs.settledRunIds()], autoPrompts: options.autoPrompts?.list() ?? [], version: APP_VERSION,
-      capabilities: [...RUNNER_CAPABILITIES], ...(options.handoffNonce ? { handoff: options.handoffNonce } : {}),
+      capabilities: RUNNER_CAPABILITIES.filter(capability => capability !== 'workerClosed' || !!options.closedSessions).filter(capability => capability !== 'retention' || !!options.retention),
+      ...(options.closedSessions ? { closedIds: [...options.closedSessions.closedIds()] } : {}),
+      ...(options.handoffNonce ? { handoff: options.handoffNonce } : {}),
       ...(options.triggers ? { triggers: options.triggers.overview() } : {}),
       coordinators: [...new Set([...(options.slack?.coordinatorSessionIds() ?? []), ...(options.github?.coordinatorSessionIds() ?? [])])],
       ...(forced ? { updateDrain: options.runs.updateDrainStatus() } : {}) };
@@ -181,6 +191,31 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     }
     switch (method) {
       case 'snapshot': return undefined;
+      case 'retention': {
+        if (!options.retention) throw new TowerError('unavailable', options.retentionUnavailable || '세션 보관 정책은 실행 워커 업데이트 후 사용할 수 있습니다.');
+        const [action, value, extra] = args;
+        const service = options.retention.service;
+        if (action === 'overview') return { ...service.overview(), targets: options.runs.sessionList(options.sessions.list()).filter(session => !session.master && (session.isSubagent || session.launchedByAgent && session.parentId)).map(session => ({ id: session.id, title: session.customTitle || session.title })) };
+        if (action === 'check') return service.cycle();
+        if (typeof value !== 'string' || !value || value.length > 4096) throw new TowerError('invalid', 'Invalid retention target.');
+        if (action === 'archive') return service.archiveSession(value);
+        if (action === 'backup') return service.backup(value);
+        if (action === 'manifest') return options.retention.archive.manifest(value);
+        if (action === 'read' && typeof extra === 'string') return options.retention.archive.read(value, extra);
+        if (action === 'restore') { await service.restore(value); return service.overview(); }
+        if (action === 'export' && typeof extra === 'string') { await service.exportBundle(value, extra); return { exported: true }; }
+        if (action === 'import') { await service.importBundle(value); return service.overview(); }
+        throw new TowerError('invalid', 'Unknown retention operation.');
+      }
+      case 'setClosed': {
+        if (!options.closedSessions) throw new TowerError('unavailable', 'Session closure is unavailable.');
+        if (typeof args[0] !== 'string' || typeof args[1] !== 'boolean') throw new TowerError('invalid', 'Invalid session closure request.');
+        const session = options.runs.getSession(args[0]);
+        if (!session) return undefined;
+        const updated = await options.closedSessions.set(session, args[1]);
+        changed();
+        return updated;
+      }
       case 'requestHandoff': {
         // The latest web build wins; the worker leaves only at a moment when nothing is running.
         const patient = record(args[1]).patient === true && (!handoff || handoff.patient === true);
@@ -563,7 +598,10 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // npm replaces files as it goes: then no session of that CLI may be working anywhere, in Tower's terminals included.
     hold: (provider, quiet) => quiet && sessions.list().some(session => session.provider === provider && session.status === 'working') ? undefined : runs.holdProvider(provider) }) : undefined;
   let initializedAutoPrompts: AutoPromptManager | undefined;
+  let initializedRetention: RetentionService | undefined;
   try {
+    const closedSessions = new ClosedSessionStore(stateDir);
+    await closedSessions.start();
     await sessions.start();
     // Before any turn can start: a CLI still being replaced by an installer from before is held first.
     await tools?.start(autoUpdateEnabled());
@@ -838,22 +876,66 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         read: async (id, limit, before) => runs.getSession(id) ? (await sessions.detail(runs.nativeSessionId(id), before, limit)) ?? { messages: [], hasMore: false } : undefined,
         search: async (id, query) => runs.getSession(id) ? (await sessions.search(runs.nativeSessionId(id), query)) ?? { count: 0, matches: [], bytes: 0 } : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
+    const nativeRoots = { claude: [join(sessions.claudeHome, 'projects')], codex: [join(sessions.codexHome, 'sessions'), join(sessions.codexHome, 'archived_sessions')] };
+    const retentionStore = new RetentionStore(join(stateDir, 'retention'));
+    const retentionArchive = new RetentionArchive(join(stateDir, 'retention-cold'), [...nativeRoots.claude, ...nativeRoots.codex]);
+    const observer = new RetentionObserver({ stateDir, snapshot: () => sessions.retentionRecords(),
+      reconcile: native => runs.sessionList(native), runs: () => runs.list(), settled: () => runs.settledRunIds(),
+      protectedIds: () => {
+        const ids = new Set(coordinators());
+        const jobs = new Map(autoPrompts.list().map(job => [job.id, job]));
+        for (const job of jobs.values()) if (!['completed', 'error', 'cancelled'].includes(job.status)) {
+          if (job.sessionId) ids.add(job.sessionId); if (job.targetSessionId) ids.add(job.targetSessionId);
+        }
+        for (const workflow of [...slack.automation.list(), ...github.automation.list()]) {
+          const pending = !['completed', 'ignored', 'error'].includes(workflow.status);
+          if (pending && workflow.sessionId) ids.add(workflow.sessionId);
+          for (const task of workflow.delegatedTasks ?? []) if (!task.delegatedFinished || !task.notifiedRunId) {
+            const id = task.createdSessionId ?? jobs.get(task.requestId)?.sessionId; if (id) ids.add(id);
+          }
+        }
+        for (const id of sessionTargets(triggers.list().filter(trigger => trigger.enabled))) ids.add(id);
+        const triggerOverview = triggers.overview();
+        for (const event of [...triggerOverview.recent, ...triggerOverview.updated ?? []]) if (!['completed', 'error', 'cancelled', 'skipped', 'coalesced'].includes(event.status)) {
+          for (const id of [event.dispatch?.sessionId, event.dispatch?.createdSessionId,
+            event.input.target.mode === 'session' ? event.input.target.sessionId : undefined]) if (id) ids.add(id);
+        }
+
+        for (const request of permissions.overview().requests) if (request.status === 'pending' || request.notification?.state === 'pending') ids.add(request.sessionId);
+        return ids;
+      } });
+    const retentionService = new RetentionService({ store: retentionStore, archive: retentionArchive,
+      adapter: createNativeRetentionAdapter(nativeRoots), observe: () => observer.observe(),
+      onError: error => console.error(`Session retention: ${error instanceof Error ? error.message : String(error)}`) });
+    let retention: RunnerHostOptions['retention'];
+    let retentionUnavailable: string | undefined;
+    try {
+      await observer.start();
+      await retentionService.start();
+      initializedRetention = retentionService;
+      retention = { service: retentionService, archive: retentionArchive };
+    } catch (error) {
+      retentionService.stop();
+      retentionUnavailable = `세션 보관 정책 초기화가 보류되었습니다. 기존 세션은 유지됩니다: ${error instanceof Error ? error.message : String(error)}`;
+      console.error(retentionUnavailable);
+    }
     // A restore's skills are still being written (below): the worker hands over only after them.
     let restoringSkills = Boolean(restoring);
-    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, api, secrets, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce, handoffCarry: () => secrets.handoff(),
-      onIdle: async () => { await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); clearInterval(secretExpiry); secrets.close(); stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await tasks.close(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
+    await startRunnerHost({ stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, api, secrets, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce, handoffCarry: () => secrets.handoff(),
+      onIdle: async () => { await retention?.service.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); clearInterval(secretExpiry); secrets.close(); stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await tasks.close(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
       inFlight: () => secrets.inFlight() || restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       transient: () => secrets.inFlight() || restoringSkills || slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       // Work a Slack or GitHub coordinator delegated: its coordinator hears how it ended and decides what follows.
       delegated: run => Boolean(run.origin?.workflowId) && !coordinators().has(run.sessionId),
       releaseIntake: () => { slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); tasks.resume(); worktrees.resume(); reviewer.release(); },
       holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); publicAgents.hold(); skills.pause(); tasks.pause(); worktrees.pause(); reviewer.hold(); },
-      quiesce: async () => { await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); paused = true; secrets.pause(); tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); tasks.pause(); worktrees.pause(); reviewer.hold(); await reviewer.flush(); permissions.pause(); await Promise.all([secrets.flush(), worktrees.flush(), tasks.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
-      resume: () => { runs.resumeAttachmentCleanup(); autoPrompts.resumeAttachmentCleanup(); paused = false; secrets.resume(); tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); tasks.resume(); worktrees.resume(); permissions.resume(); reviewer.release(); sessions.resume(); },
+      quiesce: async () => { await retention?.service.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); paused = true; secrets.pause(); tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); tasks.pause(); worktrees.pause(); reviewer.hold(); await reviewer.flush(); permissions.pause(); await Promise.all([secrets.flush(), worktrees.flush(), tasks.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
+      resume: () => { retention?.service.resume(); runs.resumeAttachmentCleanup(); autoPrompts.resumeAttachmentCleanup(); paused = false; secrets.resume(); tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); tasks.resume(); worktrees.resume(); permissions.resume(); reviewer.release(); sessions.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
-      onHandedOff: () => { clearInterval(secretExpiry); secrets.close(); stopTelling(); void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); void tasks.close(); worktrees.close(); reviewer.close(); clearInterval(expiryTimer); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
+      onHandedOff: () => { retention?.service.stop(); clearInterval(secretExpiry); secrets.close(); stopTelling(); void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); void tasks.close(); worktrees.close(); reviewer.close(); clearInterval(expiryTimer); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     await permissions.reconcileNotifications().catch(error => console.error(`Permission decisions did not recover: ${error instanceof Error ? error.message : String(error)}`));
     runs.markReady();
+    void retention?.service.cycle().catch(error => console.error(`Session retention: ${error instanceof Error ? error.message : String(error)}`));
     // A restore's skills are written once the worker serves: linking into project folders (on a slow volume, say) never
     // keeps it from starting. The restore is recorded as done after them; a worker that stops first leaves it to the next.
     if (restoring) void (async () => {
@@ -863,7 +945,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // A parent terminal or Tower shutdown must not interrupt provider work.
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => {});
-  } catch (error) { await Promise.all([runs.pauseAttachmentCleanup(), initializedAutoPrompts?.pauseAttachmentCleanup()]); carry?.fill(0); void tools?.stop(); sessions.stop(); await release(); throw error; }
+  } catch (error) { await initializedRetention?.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), initializedAutoPrompts?.pauseAttachmentCleanup()]); carry?.fill(0); void tools?.stop(); sessions.stop(); await release(); throw error; }
 }
 
 /** Every `cwd` a setting names, at any depth: the folders triggers and their rules work in. */

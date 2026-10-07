@@ -71,7 +71,7 @@ import { LatestReleases } from './updates/latest.js';
 import { TowerAutoUpdate } from './updates/tower.js';
 import { autoUpdateEnabled, publicToolUpdates, readToolUpdates, unlessUpdating } from './updates/tools.js';
 import type { AutoUpdateStatus } from '../shared/link.js';
-import type { ComponentVersions, Snapshot, ProviderHealth, Run } from '../shared/types.js';
+import type { ComponentVersions, Snapshot, ProviderHealth, Run, Session } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { PublicListener } from './public-agents/listener.js';
 import { NotificationService } from './notifications/service.js';
@@ -332,7 +332,8 @@ async function main() {
   const decisions = new DecisionService(stateDir);
   await decisions.start().catch(error => console.error(`Fast judgment settings were not loaded: ${error instanceof Error ? error.message : String(error)}`));
   // Sessions as the page sees them, before the judged outcome of their last turn is added.
-  const sessionViews = (all = runs.sessionList(), managed = runs.list()) => projectSessionStates(all, managed, runs.settledRunIds()).map(session => closedSessions.apply(titles.apply(session)));
+  const applyClosed = (session: Session) => runs.supports('workerClosed') ? runs.applyClosed(session) : closedSessions.apply(session);
+  const sessionViews = (all = runs.sessionList(), managed = runs.list()) => projectSessionStates(all, managed, runs.settledRunIds()).map(session => applyClosed(titles.apply(session)));
   const outcomes = new SessionOutcomes({
     stateDir, engine: () => decisions.engine('sessionOutcomes'), sessions: () => sessionViews(),
     history: async session => (await history.read(runs.nativeSessionId(session.id), undefined, 60))?.messages,
@@ -378,7 +379,7 @@ async function main() {
     for (let depth = 0; depth < 20 && root.isSubagent && root.parentId; depth++) { const parent = runs.getSession(root.parentId); if (!parent) break; root = parent; }
     const over = closedSessions.closedIds().has(root.id) || Boolean(root.launchedBy);
     const worktrees = before === undefined ? (await worktreeCleanupFor(stateDir, [session.id]).catch(() => [])).filter(item => over || item.state === 'removed') : [];
-    return { ...(page || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)), ...(worktrees.length ? { worktrees } : {}) };
+    return { ...(page || { messages: [], hasMore: false }), session: applyClosed(titles.apply(session)), ...(worktrees.length ? { worktrees } : {}) };
   };
   // A retried request returns the message it already queued; that message is judged once only.
   const judgedMessages = { ids: new Set<string>(), claim(id: string) {
@@ -413,20 +414,22 @@ async function main() {
   const publicListener = new PublicListener({ stateDir, backend: runs, reservedPorts: () => [port] });
   const backend: Backend = {
     snapshot, detail,
-    session: id => { const found = runs.getSession(id); return found && closedSessions.apply(titles.apply(found)); },
+    retention: (action, value, extra) => runs.retention(action, value, extra),
+    session: id => { const found = runs.getSession(id); return found && applyClosed(titles.apply(found)); },
     coordinators: () => runs.coordinators(),
     setTitle: async (id, title) => {
       const session = runs.getSession(id);
       if (!session) return undefined;
       const updated = await titles.set(session, title);
       changed();
-      return closedSessions.apply(updated);
+      return applyClosed(updated);
     },
     setClosed: async (id, closed) => {
       const session = runs.getSession(id);
       if (!session) return undefined;
       if (closed && runs.supports('secrets')) await runs.secretCall('close-session', [session.id]);
-      const updated = await closedSessions.set(session, closed);
+      const updated = runs.supports('workerClosed') ? await runs.setClosed(session.id, closed) : await closedSessions.set(session, closed);
+      if (!updated) return undefined;
       // Closing a conversation also stops what its agent planned to do in it later.
       if (closed) for (const run of runs.list()) if (run.sessionId === session.id && run.status === 'queued' && run.scheduled) await runs.cancel(run.id).catch(() => {});
       // Its rules for this conversation go now. A worker busy handing off is asked again for a few minutes; one older

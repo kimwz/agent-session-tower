@@ -3,7 +3,7 @@ import { issueRequest } from '../../shared/issues.js';
 
 /**
  * The routes the owner's pages use, for the model. The master calls exactly these routes, so anything the pages can
- * do it can do; this list only tells it how. `/api/v1` operations are listed from their own definitions.
+ * do it can do unless a route below is explicitly owner-only. `/api/v1` operations are listed from their own definitions.
  */
 const ROUTES = `
 State
@@ -57,6 +57,14 @@ Master agent (not for the master itself)
 Backup (the owner and their local agents; never the master)
 - GET /api/backup · POST /api/backup/settings {remote:{endpoint, bucket, prefix, region?, accessKeyId, secretAccessKey?}, passphrase?, intervalHours, keep, ...} · POST /api/backup/(run|test|remote) {}
 - POST /api/backup/export {passphrase} · POST /api/backup/remote/download {key} — the encrypted file. POST /api/backup/restore/check {file, passphrase} → {id} · POST /api/backup/restore/(apply|cancel) {id}
+
+Session retention (owner pages only; master, local agents and run-capability callers are refused)
+- GET /api/retention — policy status, migration grace, provider safety gates, protected/deferred counts, journal entries and child choices. This read does not run a sweep or change files.
+- POST /api/retention/check {} — observe current records under the worker's policy. Blocked providers keep original files, listings and scan load; checking does not automatically create backups.
+- POST /api/retention/(archive|backup) {id:sessionId} — archive requests require a proven inactive child; backup explicitly copies an eligible retention candidate and retains originals. Close session remains hide-only. Active/pending work is protected, including descendants.
+- GET /api/retention/bundles/{bundleId} — a cold manifest. GET /api/retention/bundles/{bundleId}/files/{fileName} — bounded original JSONL preview with truncated status; fileName must be a manifest file named file-N.gz. Reading never restores a native session.
+- POST /api/retention/restore {id:bundleId} — explicit restore only when the provider's reservation/restore contract is supported; blocked providers never receive a restore command.
+- POST /api/retention/export {id:bundleId, cwd, path} · POST /api/retention/import {id:"import", cwd, path} — separate versioned cold directory export/import with manifest hashes and journal. cwd must be a registered workspace, path a relative directory without traversal or symlinks; export destination must be empty. Cold bundles are not included in settings backups. These return JSON status, not a file download.
 
 Account and Tower (this computer only)
 - GET /api/auth/overview · POST /api/auth/credentials {username, password} · POST /api/auth/unblock {ip}

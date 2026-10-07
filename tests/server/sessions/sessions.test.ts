@@ -52,6 +52,33 @@ test('Codex starts, completes and resumes a real turn using append-only updates'
   assert.equal(service.get(`codex:${rootId}`)?.messageCount, 4);
 });
 
+test('retention metadata includes internal guardians and follows the latest event rather than a stale completion', async t => {
+  const { service, codexHome, codex } = await fixture(t);
+  await mkdir(join(codexHome, 'archived_sessions'));
+  await writeFile(codex, lines([
+    row('session_meta', { id: rootId, cwd: '/work', thread_source: 'guardian_review', parent_thread_id: childId }),
+    row('event_msg', { type: 'task_complete' }, '2026-01-01T00:00:00Z'),
+  ]));
+  await service.refresh();
+  assert.equal(service.list().length, 0, 'guardian stays excluded from normal discovery');
+  const first = service.retentionRecords();
+  assert.equal(first.complete, true);
+  assert.equal(first.records.length, 1);
+  assert.equal(first.records[0].internal, true);
+  assert.equal(first.records[0].latestTaskEndedAt, '2026-01-01T00:00:00.000Z');
+  const fingerprint = first.records[0].fingerprint;
+  await appendFile(codex, lines([row('event_msg', { type: 'task_started' }, '2025-12-31T23:00:00Z')]));
+  await service.refresh();
+  const resumed = service.retentionRecords().records[0];
+  assert.equal(resumed.latestTaskEndedAt, undefined, 'later event ordinal cancels completion even with an older timestamp');
+  assert.notEqual(resumed.fingerprint, fingerprint);
+  resumed.session.title = 'not the stored title';
+  assert.notEqual(service.retentionRecords().records[0].session.title, resumed.session.title);
+  await rm(join(codexHome, 'sessions'), { recursive: true });
+  await service.refresh();
+  assert.equal(service.retentionRecords().complete, false, 'lost native history cannot establish inactivity');
+});
+
 for (const provider of ['claude', 'codex'] as const) {
   test(`${provider} keeps its originating project across directory changes and a fresh scan`, async t => {
     const f = await fixture(t);

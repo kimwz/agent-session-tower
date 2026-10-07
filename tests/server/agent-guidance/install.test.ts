@@ -39,6 +39,32 @@ test('the owner’s own instructions stay around Tower’s section, and an older
   assert.equal(text.match(/agent-session-tower:begin/g)?.length, 1);
 });
 
+test('both provider instruction paths deliver the one-shot helper policy when upgrading old guidance', async t => {
+  const paths = await homes(t);
+  const codexFile = join(paths.codexHome, 'AGENTS.md');
+  await writeFile(codexFile, '<!-- agent-session-tower:begin (managed by Agent Session Tower; replaced when it starts) -->\nold helper guidance\n<!-- agent-session-tower:end -->\n');
+  await installAgentGuidance(paths);
+
+  // Claude reads the imported state file; Codex reads its installed managed section directly.
+  const claudeFile = await readFile(join(paths.claudeHome, 'CLAUDE.md'), 'utf8');
+  assert.ok(claudeFile.includes(`@${join(paths.stateDir, GUIDANCE_FILE)}`));
+  const delivered = [await readFile(join(paths.stateDir, GUIDANCE_FILE), 'utf8'), await readFile(codexFile, 'utf8')];
+  for (const text of delivered) {
+    assert.match(text, /claude -p --no-session-persistence/);
+    assert.match(text, /codex exec --ephemeral/);
+    assert.match(text, /models_get/);
+    assert.match(text, /< \/dev\/null/);
+    assert.match(text, /Save the final result, success\/failure or partial-result status, reviewed commit/);
+    assert.match(text, /nonpersistent helper must not create its own worktree/);
+    assert.match(text, /do not invent a flag or assume a nonpersistent parent makes its children nonpersistent/);
+    assert.match(text, /Never detach/);
+    assert.match(text, /Close session` only hides a session and preserves native records/);
+    assert.match(text, /expire seven days after their last work ends/);
+    assert.doesNotMatch(text, /old helper guidance/);
+  }
+  assert.deepEqual(await installAgentGuidance(paths), { claude: 'unchanged', codex: 'unchanged' });
+});
+
 test('an opt-out marker, a missing provider home and Codex’s override file are respected', async t => {
   const paths = await homes(t);
   await writeFile(join(paths.claudeHome, 'CLAUDE.md'), `mine\n${OPT_OUT}\n`);

@@ -6,6 +6,7 @@ import { api, ApiError } from '../common/lib';
 import { locale, translateMessage, useI18n } from '../i18n/i18n';
 import { openSettings } from '../settings/settings-open';
 import { SettingsFrameContext, SettingsPane } from '../settings/SettingsPane';
+import { RetentionPanel } from './RetentionPanel';
 
 const headers = (token: string) => ({ 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token });
 const post = <T,>(path: string, token: string, body: unknown = {}) => api<T>(path, { method: 'POST', headers: headers(token), body: JSON.stringify(body) });
@@ -100,6 +101,7 @@ export function BackupPanel({ token }: { token: string }) {
   const spin = (name: string) => busy === name ? <LoaderCircle className="spin" size={14} /> : null;
 
   return <SettingsPane title={t('백업')} scope="auth-panel backup-scope" description={t('이 컴퓨터의 Tower 설정을 암호화한 파일로 내보내고 복원')}>
+    <RetentionPanel token={token} />
     <p className="auth-hint">{t('트리거, 권한 규칙, Slack, 공개 에이전트, 스킬과 지침, 빠른 판단, 폴더 그룹, 마스터 음성 설정을 한 파일에 담습니다. 세션과 대화 기록, 원격 컴퓨터 연결, 알림 기기, 원격 로그인 계정은 담지 않습니다. 파일에는 토큰과 API 키가 들어 있어 항상 암호화합니다.')}</p>
     {error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}
     {notice && <p className="notification-notice" role="status">{notice}</p>}

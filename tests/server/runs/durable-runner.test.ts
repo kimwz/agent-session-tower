@@ -26,9 +26,14 @@ import fsPromises from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { acquireStateLock, MonitorAlreadyRunning } from '../../../server/instance/state-lock.js';
 import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
+import { ClosedSessionStore } from '../../../server/stores/closed-sessions.js';
+import { RetentionService } from '../../../server/sessions/retention/service.js';
+import { RetentionStore } from '../../../server/sessions/retention/store.js';
+import { RetentionArchive } from '../../../server/sessions/retention/archive.js';
+import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
 
-async function fixture() {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-durable-fixture-'));
+async function fixture(workerClosed = false, withRetention = false) {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'tower-durable-fixture-')));
   const stateDir = join(directory, 'state');
   const id = '10000000-0000-4000-8000-000000000001';
   const session: Session = {
@@ -59,7 +64,13 @@ async function fixture() {
     },
   });
   await runs.start();
-  const host = await startRunnerHost({ stateDir, sessions, runs });
+  const closedSessions = workerClosed ? new ClosedSessionStore(stateDir) : undefined;
+  await closedSessions?.start();
+  const archive = new RetentionArchive(join(stateDir, 'cold'), []);
+  const retention = withRetention ? { archive, service: new RetentionService({ archive, store: new RetentionStore(join(stateDir, 'retention')),
+    adapter: createNativeRetentionAdapter({ claude: [], codex: [] }), observe: async () => ({ now: Date.now(), migratedAt: Date.now(), complete: true, records: [], protectedIds: new Set() }) }) } : undefined;
+  await retention?.service.start();
+  const host = await startRunnerHost({ stateDir, sessions, runs, closedSessions, retention });
   const paths = await runnerPaths(stateDir);
   const clients: DurableRunManager[] = [];
   const connect = async () => {
@@ -70,6 +81,7 @@ async function fixture() {
   };
   /** Closes the clients, the fixture's own host, sessions and runs; `remove` then deletes its folders. */
   const close = async () => {
+    await retention?.service.quiesce();
     await Promise.all(clients.map(client => client.close()));
     await host.close(); sessions.stop(); await runs.close();
   };
@@ -84,6 +96,41 @@ async function fixture() {
     close, remove,
   };
 }
+
+test('closure writes stay in the capable worker and a second UI sees its projection', async t => {
+  const f = await fixture(true); t.after(f.cleanup);
+  const first = await f.connect();
+  assert.equal(first.supports('workerClosed'), true);
+  assert.equal((await first.setClosed(f.session.id, true))?.closed, true);
+  const second = await f.connect();
+  assert.equal(second.applyClosed(f.session).closed, true);
+  assert.deepEqual(JSON.parse(await readFile(join(f.stateDir, 'closed-sessions.json'), 'utf8')), [f.session.id]);
+  await first.setClosed(f.session.id, false);
+  await until(() => !second.applyClosed(f.session).closed);
+  assert.equal(f.starts(), 0, 'closing only changes visibility, without launching or cancelling native work');
+});
+
+test('unsupported closure and retention operations fail before writing or dispatching', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const client = await f.connect();
+  assert.equal(client.supports('workerClosed'), false);
+  assert.equal(client.supports('retention'), false);
+  await assert.rejects(client.setClosed(f.session.id, true), { kind: 'unavailable' });
+  await assert.rejects(client.retention('check'), { kind: 'unavailable' });
+  assert.equal(existsSync(join(f.stateDir, 'closed-sessions.json')), false);
+});
+
+test('retention RPC is advertised only with its worker-owned service and reports native blocking', async t => {
+  const f = await fixture(true, true); t.after(f.cleanup);
+  const client = await f.connect();
+  assert.equal(client.supports('retention'), true);
+  const result = await client.retention('overview') as { providers: { codex: { status: string } }; archived: number };
+  assert.equal(result.providers.codex.status, 'blocked');
+  assert.equal(result.archived, 0);
+  await client.retention('check');
+  await assert.rejects(client.retention('unsupported'), /Invalid retention target/);
+  assert.equal(f.starts(), 0);
+});
 
 test('UI disconnect and reconnect preserve a running provider turn and its output', async t => {
   const f = await fixture(); t.after(f.cleanup);

@@ -36,8 +36,13 @@ When Claude Code or Codex refuses an action the task needs (a permission rule, t
 
 When you run another agent for part of your work (\`claude -p\`, \`codex exec\`, a review), Tower hides it from the owner's sessions because it can see that you started it.
 
+- Reviews and investigations that return one result are one-shot helpers by default. Use \`claude -p --no-session-persistence\` or \`codex exec --ephemeral\` for separate CLI runs, unless the owner or project explicitly needs a persistent helper for follow-up work. Query Tower's model roles (\`models_get\` or \`agent-session-tower models args <role>\`) and use the existing CLI login; do not inspect or copy authentication values or require a new login.
+- When passing a Codex prompt as a command argument, close stdin with \`< /dev/null\`. Disable unnecessary tools, MCP servers and child agents. Native Agent/spawn tools may not offer a nonpersistent option: do not invent a flag or assume a nonpersistent parent makes its children nonpersistent.
+- Save the final result, success/failure or partial-result status, reviewed commit and artifact references in the parent conversation or task record before releasing the helper. Preserve the result without copying the whole reasoning or tool transcript.
+- A nonpersistent helper must not create its own worktree. Have the persistent parent create it first and retain the creation/ownership evidence in the parent's record; use the supplied worktree and leave unrelated files alone.
 - Run it in the foreground, or with your tool's own background option. Never detach it from your command: no \`( … ) &\`, \`nohup\`, \`setsid\` or \`disown\`. A detached run can look like one the owner started.
 - A worktree made for such runs is removed as soon as they are done; Tower also removes it by itself once the runs are done and your conversation has been quiet for two hours, unless it holds changes or unpushed commits.
+- Residual persistent helper records follow Tower's separate retention policy: eligible inactive children expire seven days after their last work ends, or through an explicit retention archive request, with active/waiting work protected. \`Close session\` only hides a session and preserves native records; it is not an immediate retention archive request. Do not delete native records yourself.
 
 ## Keep git branches in sync
 
