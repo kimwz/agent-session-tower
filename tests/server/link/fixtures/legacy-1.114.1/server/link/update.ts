@@ -2,19 +2,13 @@ import { execFile, spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { link, readdir, readFile, realpath, rm, stat, statfs, utimes, writeFile } from 'node:fs/promises';
 import { isSea } from 'node:sea';
-import { sep } from 'node:path';
+import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { UpdateFailure, UpdateStage, UpdateStatus } from '../../shared/link.js';
-import { writePrivateJson } from '../stores/private-json.js';
+import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { processStart } from '../instance/process-start.js';
 import { currentVersion, entryPoint, installVersion, newerVersion, pointCurrent, RELEASE_WAIT_MS, restartService, runtimePaths, versionDirectory } from './service.js';
-import {
-  alive, pinnedVersion, preparationCheck, probeInstalledArtifact, readCurrentPointer, readHelperLock, readUpdateRecord, storageKeptVersions, updateActive, updatePaths,
-  type ArtifactRead, type SavedUpdate,
-} from './storage-update.js';
-
-export { updateActive, updatePaths, type SavedUpdate } from './storage-update.js';
 
 const run = promisify(execFile);
 /** A new version that does not answer by then is given up on, and the previous one is started again. */
@@ -31,23 +25,30 @@ const STABLE_MS = 60_000;
 /** Space an install needs, besides what the running work may still write. */
 const MIN_FREE_BYTES = 2 * 1024 ** 3;
 
+const ACTIVE: ReadonlySet<UpdateStage> = new Set(['installing', 'checking', 'switching', 'verifying', 'rolling-back']);
 /** A helper that has not taken its lock this long after it was asked for did not start. */
 const STARTING_MS = 30_000;
 const RELEASE = /^\d+\.\d+\.\d+$/;
 
-/**
- * The last update, when its record can be read and is one this build understands; undefined otherwise. Deciding
- * anything about storage takes readUpdateRecord instead, which tells a missing record from one that cannot be read.
- */
+export function updatePaths(stateDir: string) {
+  const { root, logs } = runtimePaths(stateDir);
+  return { status: join(root, 'update.json'), lock: join(root, 'update.lock'), hold: join(root, 'handoff-hold'), log: join(logs, 'update.log') };
+}
+
+/** What this computer keeps about its update; `controllers` (linked when it switched) stays here. */
+export interface SavedUpdate extends UpdateStatus { controllers?: string[] }
+
 export async function readUpdateStatus(stateDir: string): Promise<SavedUpdate | undefined> {
-  const read = await readUpdateRecord(stateDir);
-  return read.state === 'active' || read.state === 'terminal' ? read.update : undefined;
+  const value = await readPrivateJson(updatePaths(stateDir).status).catch(() => undefined) as Partial<SavedUpdate> | undefined;
+  if (!value || typeof value.version !== 'string' || !RELEASE.test(value.version) || typeof value.previous !== 'string' || typeof value.stage !== 'string') return undefined;
+  return value as SavedUpdate;
 }
 async function saveUpdateStatus(stateDir: string, status: SavedUpdate): Promise<void> {
   await writePrivateJson(updatePaths(stateDir).status, JSON.stringify(status));
 }
 /** The part of an update a controller is told. */
 export function publicUpdate({ controllers: _, ...status }: SavedUpdate): UpdateStatus { return status; }
+export const updateActive = (status: UpdateStatus | undefined): boolean => Boolean(status && ACTIVE.has(status.stage));
 
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT';
 /** The error last logged for each hold that could not be read, so a poll every second logs it once. */
@@ -95,15 +96,25 @@ export async function managedByService(stateDir: string, entry: string | undefin
   return Boolean(actual && versions && actual.startsWith(versions + sep));
 }
 
+/** Whether a process is still running. */
+function alive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
+}
 const startedAt = processStart;
 /**
- * Whether the lock's owner, its pid as the process that started then, still runs. However long the computer slept, a
- * live helper still owns it. No lock means no owner; a lock that cannot be read rejects, since a helper may still own it.
+ * The lock's owner: its pid and when it started. However long the computer slept, a live helper still owns it.
+ * No lock means no owner; a lock that cannot be read rejects, since a helper may still own it.
  */
+async function lockOwner(stateDir: string): Promise<{ pid: number; started?: string } | undefined> {
+  const [pid, ...started] = (await readFile(updatePaths(stateDir).lock, 'utf8').catch(error => { if (missing(error)) return ''; throw error; })).split(' ');
+  return Number(pid) > 0 && Number.isInteger(Number(pid)) ? { pid: Number(pid), ...(started.length ? { started: started.join(' ') } : {}) } : undefined;
+}
 async function helperRunning(stateDir: string): Promise<boolean> {
-  const owner = await readHelperLock(stateDir, startedAt);
-  if (owner.state === 'unreadable') throw owner.error;
-  return owner.state === 'running';
+  const owner = await lockOwner(stateDir);
+  if (!owner || !alive(owner.pid)) return false;
+  if (!owner.started) return true;
+  const now = await startedAt(owner.pid);
+  return now === undefined || now === owner.started;
 }
 /**
  * Takes the helper lock. It is published whole, with its owner's pid and start time in it, so another helper never
@@ -130,7 +141,7 @@ async function takeLock(stateDir: string): Promise<boolean> {
   } finally { await rm(temporary, { force: true }); }
 }
 
-export interface UpdateRequestResult { status: number; body: { update?: UpdateStatus; current?: true; error?: string; code?: string; prepare?: string } }
+export interface UpdateRequestResult { status: number; body: { update?: UpdateStatus; current?: true; error?: string; code?: string } }
 
 /**
  * This computer's side of updates: a controller asks for a newer version, and a separate helper process installs
@@ -149,12 +160,7 @@ export class Updates {
   get managed(): boolean { return this.options.managed; }
 
   request(version: unknown): Promise<UpdateRequestResult> {
-    return this.exclusive(() => this.start(version));
-  }
-
-  /** Runs `work` in turn with requests and pruning: the owner's rollback pins its target this way. */
-  exclusive<T>(work: () => Promise<T>): Promise<T> {
-    const next = this.queue.then(work);
+    const next = this.queue.then(() => this.start(version));
     this.queue = next.catch(() => {});
     return next;
   }
@@ -173,27 +179,9 @@ export class Updates {
 
   private async start(version: unknown): Promise<UpdateRequestResult> {
     if (typeof version !== 'string' || !RELEASE.test(version)) return { status: 400, body: { code: 'invalid-version', error: 'Not a released version.' } };
-    const { stateDir } = this.options;
-    const read = await readUpdateRecord(stateDir);
-    const current = read.state === 'active' || read.state === 'terminal' ? read.update : undefined;
+    const current = await readUpdateStatus(this.options.stateDir);
     if (!newerVersion(version, this.options.version)) return { status: 200, body: { current: true, ...(current ? { update: publicUpdate(current) } : {}) } };
     if (!this.options.managed) return { status: 409, body: { code: 'not-service', error: 'This computer does not run Tower as its background service.' } };
-    // The owner's pin keeps this version, whoever asks (the owner, the scheduler, a controller).
-    const pin = await pinnedVersion(stateDir);
-    if (pin.state === 'unknown') return { status: 409, body: { code: 'pin-unreadable', error: `The version pin cannot be read: ${pin.reason}` } };
-    if (pin.state === 'pinned' && pin.version !== version) return { status: 409, body: { code: 'pinned', error: `The owner pinned this computer to ${pin.version}; release the pin to update it.` } };
-    // A record that cannot be read may be an update under way; one this build does not understand is replaced only
-    // when no helper or hold is left that could belong to it.
-    if (read.state === 'unreadable') return { status: 409, body: { code: 'update-status-unreadable', error: `The last update cannot be read: ${read.reason}` } };
-    if (read.state === 'invalid' && (await helperRunning(stateDir).catch(() => true) || await stat(updatePaths(stateDir).hold).then(() => true, error => !missing(error)))) {
-      return { status: 409, body: { code: 'busy', error: 'The last update is not one this version understands, and its helper or hold is still there.' } };
-    }
-    // The target needs its preparation release first, and nothing here changed since it said so: asked again, it is
-    // not installed again. Installing that release (or a newer one) first is what moves on.
-    if (current?.stage === 'failed' && current.version === version && current.previous === this.options.version && current.storage?.code === 'prerequisite-required') {
-      return { status: 409, body: { code: 'prerequisite-required', ...(current.storage.prepare ? { prepare: current.storage.prepare } : {}), update: publicUpdate(current),
-        error: `${version} needs ${current.storage.prepare ?? 'its preparation release'} to run here first.` } };
-    }
     if (updateActive(current) && await this.busy(current!)) {
       // The newest version asked for wins; it is asked for again once this update has finished.
       return current!.version === version ? { status: 202, body: { update: publicUpdate(current!) } } : { status: 409, body: { code: 'busy', update: publicUpdate(current!) } };
@@ -245,23 +233,20 @@ export class Updates {
    * requests, and never while an update is under way, so it cannot remove what an update just installed.
    */
   prune(inUse: () => Promise<Array<string | null | undefined>>): Promise<void> {
-    return this.exclusive(async () => {
+    const next = this.queue.then(async () => {
       if (!this.options.managed) return;
       const { stateDir } = this.options;
-      // What the last update, the current link or the owner's pin and rollback keep must be known before anything goes.
-      const read = await readUpdateRecord(stateDir);
-      if (read.state === 'unreadable' || read.state === 'invalid') return;
-      const status = read.state === 'absent' ? undefined : read.update;
+      const status = await readUpdateStatus(stateDir);
       if (updateActive(status) || await helperRunning(stateDir)) return;
-      const [current, storage] = await Promise.all([readCurrentPointer(stateDir), storageKeptVersions(stateDir)]);
-      if (current.state === 'unreadable' || current.state === 'invalid' || 'unknown' in storage) return;
-      const keep = new Set([this.options.version, current.state === 'version' ? current.version : undefined, status?.previous, ...storage.keep, ...await inUse()].filter(Boolean));
+      const keep = new Set([this.options.version, await currentVersion(stateDir), status?.previous, ...await inUse()].filter(Boolean));
       const installed = await readdir(runtimePaths(stateDir).versions).catch(() => [] as string[]);
       // An install cut short leaves its staging folder behind; no helper runs now to finish it.
       // An install still under way (by a join or service command run by hand) keeps its staging folder.
       const staging = (name: string) => { const pid = Number(/^\d+\.\d+\.\d+\.installing-(\d+)$/.exec(name)?.[1]); return pid > 0 && !alive(pid); };
       for (const name of installed) if ((RELEASE.test(name) && !keep.has(name)) || staging(name)) await rm(versionDirectory(stateDir, name), { recursive: true, force: true });
     });
+    this.queue = next.catch(() => {});
+    return next;
   }
 }
 
@@ -292,11 +277,6 @@ export interface UpdateHelperSteps {
   install(version: string): Promise<string>;
   /** Runs the installed version enough to know it starts. */
   check(directory: string, version: string): Promise<void>;
-  /**
-   * The storage contract an installed version states (`--storage-contract`). With it the helper refuses a target
-   * whose storage the version it would go back to cannot take over, before anything switches.
-   */
-  contract?(directory: string, version: string): Promise<ArtifactRead>;
   point(version: string): Promise<void>;
   restart(): Promise<void>;
   health(): Promise<{ version: string; pid: number } | undefined>;
@@ -319,7 +299,6 @@ export function serviceSteps(stateDir: string, port: number): UpdateHelperSteps 
       const { stdout } = await run(process.execPath, [entryPoint(directory), '--version'], { timeout: 60_000 });
       if (stdout.trim() !== version) throw new Error(`The installed version reports ${stdout.trim().slice(0, 40) || 'nothing'}.`);
     },
-    contract: probeInstalledArtifact,
     point: version => pointCurrent(stateDir, version),
     restart: () => restartService(stateDir),
     health: () => read<{ version: string; pid: number }>('/api/health'),
@@ -425,26 +404,6 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
     await set('checking');
     try { await steps.check(directory, version); }
     catch (error) { steps.log((error as Error).message); await set('failed', { code: 'check-failed', failedStage: 'checking' }); return status; }
-    if (steps.contract) {
-      // A target that imports a domain needs the version it would go back to to read and write that domain first: it
-      // is refused here, before the hold, the switch and the restart, and says which release to install first.
-      const target = await steps.contract(directory, version).catch(error => ({ state: 'unverifiable' as const, reason: (error as Error).message }));
-      const refusal = async (storage: NonNullable<SavedUpdate['storage']>, line: string) => {
-        steps.log(line);
-        await set('failed', { code: 'check-failed', failedStage: 'checking', storage });
-        return status;
-      };
-      if (target.state === 'missing' || target.state === 'unverifiable') return await refusal({ code: 'contract-unverifiable' }, `storage contract: ${target.state === 'missing' ? 'the installed version has no entry point' : target.reason}`);
-      if (target.state === 'contract') {
-        if (!target.contract.supported) return await refusal({ code: 'target-runtime-unsupported' }, `storage runtime: ${target.contract.refusal?.message ?? 'unsupported'}`);
-        const back = await steps.contract(versionDirectory(stateDir, previous), previous).catch(error => ({ state: 'unverifiable' as const, reason: (error as Error).message }));
-        const check = preparationCheck(target.contract.manifest, back);
-        if (check.state === 'prerequisite-required' || check.state === 'missing') {
-          return await refusal({ code: 'prerequisite-required', ...(check.prepare ? { prepare: check.prepare } : {}), domains: check.domains }, `storage: ${check.reason}`);
-        }
-        if (check.state !== 'not-required' && check.state !== 'satisfied') return await refusal({ code: 'contract-unverifiable', domains: check.domains }, `storage: ${check.reason}`);
-      }
-    }
     const before = await steps.health();
     const linked = await steps.controllers() ?? [];
     await set('switching', { controllers: linked });

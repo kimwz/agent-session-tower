@@ -107,18 +107,6 @@ export async function pointCurrent(stateDir: string, version: string): Promise<v
 export async function currentVersion(stateDir: string): Promise<string | undefined> {
   try { return (await readlink(runtimePaths(stateDir).current)).split('/').at(-1); } catch { return undefined; }
 }
-/** The owner's pin: the version the service keeps while it is there (see storage-update.ts). */
-export function storagePinPath(stateDir: string): string { return join(runtimePaths(stateDir).root, 'storage-pin.json'); }
-/**
- * Points `current` at an older installed version for the owner's validated rollback, and for nothing else: only the
- * version the pin keeps, only once its entry point is installed. useVersion and updates never go back this way.
- */
-export async function pointRollbackTarget(stateDir: string, version: string): Promise<void> {
-  const pin = await readFile(storagePinPath(stateDir), 'utf8').then(text => JSON.parse(text) as { format?: unknown; pinned?: unknown }, () => undefined);
-  if (pin?.format !== 'tower-storage-pin' || pin.pinned !== version) throw new Error(`${version} is not the version the owner pinned for a rollback.`);
-  await access(entryPoint(versionDirectory(stateDir, version)), constants.R_OK);
-  await pointCurrent(stateDir, version);
-}
 
 /**
  * How this computer keeps Tower running in the background: launchd on macOS; systemd on Linux, for the whole computer
