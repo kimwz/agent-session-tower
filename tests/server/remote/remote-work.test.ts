@@ -40,9 +40,9 @@ test('remote work is inserted only into remote work from the same controller', (
 test('remote turns get Tower’s tools like the owner’s own, but never a coordinator’s, whatever conversation they reach', () => {
   const session = { id: 'codex:coordinator' } as Session;
   const slack = { sessionMcp: () => ({ tower_slack: { command: 'x', args: ['--slack-mcp', 'state', '10000000-0000-4000-8000-000000000001'], env: {} } }) } as unknown as Pick<SlackService, 'sessionMcp'>;
-  const resolve = runToolResolver({ stateDir: '/state', runs: { sessionOrigin: () => ({ kind: 'owner', untrustedInput: false }) }, slack, capabilities: new CapabilityRegistry(() => true) });
+  const resolve = runToolResolver({ stateDir: '/state', runs: { sessionOrigin: () => ({ kind: 'owner', untrustedInput: false }) }, slack, capabilities: new CapabilityRegistry(() => true), browsers: () => ({ playwright: true, claudeInChrome: false }) });
   const tools = resolve({ id: 'run', sessionId: session.id, origin: remote, prompt: 'x', status: 'queued', createdAt: '', output: '' }, session);
-  assert.deepEqual(tools, { required: false, towerTools: 'remote' });
+  assert.deepEqual([tools.required, tools.towerTools, Object.keys(tools.servers ?? {}).sort()], [false, 'remote', ['browser', 'browser_light']], 'browsers, never the coordinator\'s tools');
   const plain = runToolResolver({ stateDir: '/state', runs: { sessionOrigin: () => ({ kind: 'owner', untrustedInput: false, controllerId: CONTROLLER }) }, capabilities: new CapabilityRegistry(() => true) });
   const owned = plain({ id: 'run', sessionId: 'codex:plain', origin: remote, prompt: 'x', status: 'queued', createdAt: '', output: '' }, { id: 'codex:plain' } as Session);
   assert.equal(owned.towerTools, 'attached', 'the owner at a controlling computer is the owner; what the tools show is filtered');

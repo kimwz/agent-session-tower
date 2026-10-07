@@ -37,7 +37,8 @@ import { callerDelegation, CapabilityRegistry, handleMcpRequest } from '../api/m
 import { sessionToolsKey } from '../api/session-tools.js';
 import { DecisionService } from '../decisions/service.js';
 import { relatedSessionNotes } from '../sessions/related.js';
-import { runToolResolver } from '../api/run-tools.js';
+import { runToolResolver, sessionBrowsers } from '../api/run-tools.js';
+import { browserNote } from '../browser/tools.js';
 import { RemoteExclusionStore } from '../remote/exclusions.js';
 import { remoteTriggerLaunch } from '../remote/visibility.js';
 import { RemoteRequestLedger, type RemoteResult } from '../remote/request-ledger.js';
@@ -818,7 +819,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
 
     runs.setClaudeSettings((cwd, sessionId) => permissions.claudeSettings(cwd, sessionId));
     runs.setTurnNotes(async (_run, session) => {
-      const notes = await Promise.all([skills.turnNotes(session), modelRoleNotes(stateDir).catch(() => undefined)]);
+      const notes = await Promise.all([skills.turnNotes(session), modelRoleNotes(stateDir).catch(() => undefined), browserNote(sessionBrowsers(stateDir, runs, session))]);
       return notes.filter(Boolean).join('\n\n') || undefined;
     });
     runs.on('change', () => skills.recordRuns());

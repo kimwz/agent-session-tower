@@ -1,0 +1,31 @@
+import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
+import test from 'node:test';
+import { startBrowserMcp } from '../../../server/browser/server.js';
+
+test('the tool server answers with its instructions, passes Playwright\'s tools through and ends with its input, starting no browser', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-browser-server-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const input = new PassThrough(), output = new PassThrough();
+  const served = startBrowserMcp({ tier: 'general', stateDir, savedLogins: true, strong: 'aside' }, input, output);
+  const replies = new Map<number, any>();
+  let buffer = '';
+  output.on('data', chunk => { buffer += chunk; let end; while ((end = buffer.indexOf('\n')) >= 0) { const frame = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1); if (frame.id !== undefined) replies.set(frame.id, frame); } });
+  const reply = async (id: number) => { while (!replies.has(id)) await new Promise(resolve => setTimeout(resolve, 10)); return replies.get(id); };
+  input.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '0' } } }) + '\n');
+  const init = await reply(1);
+  assert.match(init.result.instructions, /outside sites/);
+  assert.match(init.result.instructions, /browser_strong/);
+  assert.ok(init.result.capabilities.tools);
+  input.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+  input.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }) + '\n');
+  const names = (await reply(2)).result.tools.map((tool: { name: string }) => tool.name);
+  for (const name of ['browser_navigate', 'browser_snapshot', 'browser_click', 'browser_take_screenshot', 'browser_tabs']) assert.ok(names.includes(name), name);
+  assert.equal(names.includes('browser_install'), false, 'Tower installs browsers itself');
+  input.write('not json\n');
+  input.end();
+  await served;
+});
