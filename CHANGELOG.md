@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.111.0] - 2026-10-07
+
+### Added
+- **Images, video and audio open in the workspace pane.** A conversation path or a file in the workspace file tree that names a png, jpg, gif, webp, avif or bmp image is shown fitted to the pane; mp4, m4v, webm, mov or ogv video and mp3, m4a, aac, wav, ogg, oga, opus or flac audio play in the browser's own player, with seeking. Files on joined computers play the same way once those computers run this version. Large files stream by byte range instead of loading whole, so seeking works and phones such as iPhone play video. A file the browser cannot decode, or one that is missing or not shared, names itself with the reason and a retry button. Text files still open in the editor, and other binary files keep the editor's refusal.
+- `GET /api/workspace/media?cwd=&path=` serves those files inside the same folder boundary as the text editor (folders listed in Tower, no symbolic links, the joined computer's sharing list).
+
+### Fixed
+- On a joined computer, a download that a sharing change cut off no longer keeps the next download or playback from being cut off by a later sharing change.
+- A download from a joined computer that is cancelled while its file is being opened now closes the file. Before, the file stayed open, and Node.js 26 could stop the Tower that served it when it later cleaned up the file.
+
 ## [1.110.0] - 2026-10-07
 
 ### Changed

@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Snapshot } from '../shared/types.js';
 import { TowerError, isTyped, type ErrorKind } from '../shared/errors.js';
+import { workspaceMedia } from '../shared/workspace-media.js';
 
 export const MAX_WORKSPACE_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_TREE_ENTRIES = 2000;
@@ -143,6 +144,27 @@ export async function readWorkspaceFile(cwd: unknown, path: unknown, snapshot: S
     const bytes = await readText(handle);
     await checkHandle(handle, root, local);
     return { path: local, content: decode(bytes), revision: revision(bytes) };
+  } catch (error) { return fsFailure(error); }
+  finally { await handle?.close(); }
+}
+
+export interface WorkspaceMediaFile { path: string; type: string; size: number; handle: FileHandle }
+
+/** Opens an image, video or audio file for streaming; the caller closes `handle`. Media has no size limit. */
+export async function openWorkspaceMedia(cwd: unknown, path: unknown, snapshot: Snapshot): Promise<WorkspaceMediaFile> {
+  let handle: FileHandle | undefined;
+  try {
+    const root = await assertWorkspace(cwd, snapshot);
+    const local = subpath(path);
+    const media = workspaceMedia(local);
+    if (!media) throw failure('Only image, video and audio files can be played in the workspace.', 'unsupported');
+    const target = await checkedPath(root, local);
+    handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    await checkHandle(handle, root, local);
+    const { size } = await handle.stat();
+    const opened = { path: local, type: media.type, size, handle };
+    handle = undefined;
+    return opened;
   } catch (error) { return fsFailure(error); }
   finally { await handle?.close(); }
 }

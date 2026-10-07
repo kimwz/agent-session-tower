@@ -25,7 +25,7 @@ Sessions and work
 Folders, git, files, terminals
 - POST /api/groups {cwd, title?, pinned?, hidden?} — folder name, pin, hide.
 - POST /api/repositories {cwd, action:"refresh"|"pull"|"push"}
-- GET /api/workspace/tree?cwd=&path= · GET /api/workspace/file?cwd=&path= · POST /api/workspace/file {cwd, path, content, revision|null} · POST /api/workspace/directory {cwd, path}
+- GET /api/workspace/tree?cwd=&path= · GET /api/workspace/file?cwd=&path= · GET /api/workspace/media?cwd=&path= (image, video or audio bytes; Range) · POST /api/workspace/file {cwd, path, content, revision|null} · POST /api/workspace/directory {cwd, path}
 - GET /api/workspace/terminals?cwd= · POST /api/workspace/terminals {cwd, cols, rows} · POST /api/workspace/terminals/{id}/input {data} · POST /api/workspace/terminals/{id}/resize {cols, rows} · POST /api/workspace/terminals/{id}/close {} (read a terminal's recent output with terminal_read)
 
 Skills and guidance
@@ -65,7 +65,7 @@ Account and Tower (this computer only)
 
 /** Routes whose answer or body is a whole file: an agent sends them with curl (see the local tools' guide), not through a tool result. */
 export const FILE_ROUTES: readonly string[] = ['/api/backup/export', '/api/backup/remote/download', '/api/backup/restore/check', '/api/skills/export', '/api/skills/import-plan', '/api/skills/import',
-  '/api/attachments/{id}', '/api/chat-images/{id}'];
+  '/api/attachments/{id}', '/api/chat-images/{id}', '/api/workspace/media'];
 /** Whether a route (without its query) is one of the file routes. */
 export function isFileRoute(route: string): boolean {
   return FILE_ROUTES.some(file => file.endsWith('/{id}') ? route.startsWith(file.slice(0, -'{id}'.length)) && !route.slice(file.length - '{id}'.length).includes('/') : route === file);
