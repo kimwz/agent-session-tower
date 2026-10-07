@@ -11,7 +11,7 @@ import { SnapshotStream } from '../http/snapshot-stream.js';
 import { SseClient } from '../http/sse-client.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
-import { assertWorkspace, createWorkspaceDirectory, listWorkspaceTree, MAX_WORKSPACE_FILE_BYTES, readWorkspaceFile, saveWorkspaceFile, wroteNothing } from '../workspace-files.js';
+import { assertWorkspace, createWorkspaceDirectory, listWorkspaceTree, MAX_WORKSPACE_FILE_BYTES, openWorkspaceMedia, readWorkspaceFile, saveWorkspaceFile, wroteNothing } from '../workspace-files.js';
 import type { WorkspaceTerminalBackend } from '../workspace-terminals.js';
 import { realpath, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
@@ -22,7 +22,7 @@ import type { RepositoryAction } from '../../shared/repositories.js';
 import { isOperationName, OPERATIONS, REMOTE_PAGE_OPERATIONS } from '../../shared/api/operations.js';
 import type { RemoteAction, RemoteChange } from '../../shared/link.js';
 import { TowerError } from '../../shared/errors.js';
-import { sendStoredAttachment, sseSink } from '../http/sinks.js';
+import { sendStoredAttachment, sendWorkspaceMedia, sseSink } from '../http/sinks.js';
 
 type Request = IncomingMessage | Http2ServerRequest;
 // The HTTP/2 compatibility response offers the same calls as an HTTP/1 response.
@@ -296,6 +296,22 @@ export function createRemoteRouter({ attachmentStores, attachmentUploads, backen
       const file = await readWorkspaceFile(cwd, url.searchParams.get('path'), backend.snapshot());
       await sharedPath(cwd, url.searchParams.get('path'));
       return json(res, 200, file);
+    }
+    if ((method === 'GET' || method === 'HEAD') && path === '/api/workspace/media') {
+      const cwd = await sharedPath(url.searchParams.get('cwd'), url.searchParams.get('path'));
+      const media = await openWorkspaceMedia(cwd, url.searchParams.get('path'), backend.snapshot());
+      // Registered before the second check, so a change to the sharing list from here on ends this answer.
+      const active = downloads.get(principal.controllerId) ?? new Set<Reply>();
+      active.add(res); downloads.set(principal.controllerId, active);
+      let sending = false;
+      try {
+        await sharedPath(cwd, url.searchParams.get('path'));
+        sending = true;
+        return await sendWorkspaceMedia(res, media, req.headers.range, method === 'HEAD');
+      } finally {
+        if (!sending) await media.handle.close();
+        active.delete(res); if (!active.size) downloads.delete(principal.controllerId);
+      }
     }
     const terminal = path.match(/^\/api\/workspace\/terminals\/([0-9a-f-]{36})\/(events|input|resize|close)$/);
     if (method === 'GET' && path === '/api/workspace/terminals') {

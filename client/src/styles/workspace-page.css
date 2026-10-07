@@ -81,6 +81,10 @@
 
 .workspace-editor-frame { display:flex; flex:1; min-height:0; }
 .workspace-editor-frame[aria-busy="true"] { opacity:.45; }
+.workspace-media { display:flex; flex:1; min-width:0; min-height:0; align-items:center; justify-content:center; padding:12px; overflow:auto; background:#0b131e; }
+.workspace-media img, .workspace-media video { display:block; max-width:100%; max-height:100%; object-fit:contain; }
+.workspace-media video { width:100%; background:#000; }
+.workspace-media audio { width:min(100%,520px); }
 
 .workspace-explorer[hidden] { display:none; }
 @media (max-width:680px) {

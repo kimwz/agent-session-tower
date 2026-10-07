@@ -4,7 +4,7 @@ import { chmod, mkdtemp, mkdir, open, readdir, readFile, rm, stat, symlink, writ
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Snapshot } from '../../shared/types.js';
-import { assertWorkspace, createWorkspaceDirectory, listWorkspaceTree, MAX_WORKSPACE_FILE_BYTES, readWorkspaceFile, saveWorkspaceFile } from '../../server/workspace-files.js';
+import { assertWorkspace, createWorkspaceDirectory, listWorkspaceTree, MAX_WORKSPACE_FILE_BYTES, openWorkspaceMedia, readWorkspaceFile, saveWorkspaceFile } from '../../server/workspace-files.js';
 import { statusOf } from '../../shared/errors.js';
 
 async function fixture(t: test.TestContext) {
@@ -176,4 +176,28 @@ test('a folder named as a file is refused as not a text file, and names with spa
   await writeFile(join(cwd, '영상 대본', '연출 대본.md'), '# 대본\n');
   await assert.rejects(readWorkspaceFile(cwd, '영상 대본', snapshot), { kind: 'invalid', message: 'Only regular text files can be opened.' });
   assert.equal((await readWorkspaceFile(cwd, '영상 대본/연출 대본.md', snapshot)).content, '# 대본\n');
+});
+
+test('media files open for streaming at any size, within the same folder boundary as text', async t => {
+  const { cwd, outside, snapshot } = await fixture(t);
+  await mkdir(join(cwd, '영상 결과'));
+  const large = Buffer.alloc(MAX_WORKSPACE_FILE_BYTES + 1, 1);
+  await writeFile(join(cwd, '영상 결과', '최종 편집.MP4'), large);
+  const media = await openWorkspaceMedia(cwd, '영상 결과/최종 편집.MP4', snapshot);
+  try {
+    assert.deepEqual({ path: media.path, type: media.type, size: media.size }, { path: '영상 결과/최종 편집.MP4', type: 'video/mp4', size: large.length });
+    assert.ok((await media.handle.readFile()).equals(large), 'the handle reads the file it was checked against');
+  } finally { await media.handle.close(); }
+  await writeFile(join(cwd, 'notes.txt'), 'text');
+  await assert.rejects(openWorkspaceMedia(cwd, 'notes.txt', snapshot), { kind: 'unsupported' });
+  await assert.rejects(openWorkspaceMedia(cwd, 'missing.mp3', snapshot), { kind: 'not-found' });
+  await assert.rejects(openWorkspaceMedia(cwd, '../outside/clip.mp4', snapshot), { kind: 'invalid' });
+  await assert.rejects(openWorkspaceMedia(outside, 'clip.mp4', snapshot), { kind: 'forbidden' });
+  await mkdir(join(cwd, 'folder.mp4'));
+  await assert.rejects(openWorkspaceMedia(cwd, 'folder.mp4', snapshot), { kind: 'invalid' });
+  await writeFile(join(outside, 'clip.mp4'), 'outside');
+  await symlink(join(outside, 'clip.mp4'), join(cwd, 'link.mp4'));
+  await symlink(outside, join(cwd, 'escape'));
+  await assert.rejects(openWorkspaceMedia(cwd, 'link.mp4', snapshot), { kind: 'forbidden' });
+  await assert.rejects(openWorkspaceMedia(cwd, 'escape/clip.mp4', snapshot), { kind: 'forbidden' });
 });

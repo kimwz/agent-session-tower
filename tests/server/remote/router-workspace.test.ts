@@ -164,3 +164,41 @@ test('a terminal host too old to list its shells opens none for a controller', a
   assert.equal(refused.json.disposition, 'not-admitted');
   assert.equal(f.ptys.length, 0);
 });
+
+test('a controller plays media in a shared folder by byte range, never from an excluded one', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.open, 'clip.webm'), '0123456789');
+  await writeFile(join(f.secret, 'private.mp3'), 'private');
+  const play = (path: string, range?: string) => fetch(`${f.base}${f.query('/api/workspace/media', { cwd: f.open, path })}`, range ? { headers: { range } } : {});
+  const part = await play('clip.webm', 'bytes=3-6');
+  assert.equal(part.status, 206);
+  assert.equal(part.headers.get('content-type'), 'video/webm');
+  assert.equal(part.headers.get('content-range'), 'bytes 3-6/10');
+  assert.equal(await part.text(), '3456');
+  for (const path of ['secret/private.mp3', 'SECRET/private.mp3', `${f.secret}/private.mp3`]) {
+    const answer = await play(path);
+    assert.ok([400, 403, 404].includes(answer.status), `${path} answered ${answer.status}`);
+    assert.notEqual(await answer.text(), 'private');
+  }
+  assert.equal((await fetch(`${f.base}${f.query('/api/workspace/media', { cwd: f.secret, path: 'private.mp3' })}`)).status, 404);
+});
+
+test('media being played stops when its folder stops being shared', async t => {
+  const f = await fixture(t);
+  await mkdir(join(f.open, 'clips'));
+  await writeFile(join(f.open, 'clips', 'long.mp4'), Buffer.alloc(32 * 1024 * 1024));
+  let received = 0;
+  const ended = new Promise<string>(resolve => get(`${f.base}${f.query('/api/workspace/media', { cwd: f.open, path: 'clips/long.mp4' })}`, res => {
+    assert.equal(res.statusCode, 200);
+    // Read nothing at first, like a paused player, so the answer is still open when the list changes.
+    res.pause();
+    res.on('data', chunk => { received += chunk.length; });
+    res.on('aborted', () => resolve('aborted'));
+    res.on('error', () => resolve('error'));
+    res.on('end', () => resolve('end'));
+    setTimeout(() => { void f.exclusions.add(join(f.open, 'clips')).then(() => res.resume()); }, 50);
+  }));
+  assert.notEqual(await ended, 'end');
+  assert.ok(received < 32 * 1024 * 1024, 'the file was not sent whole');
+  assert.equal((await fetch(`${f.base}${f.query('/api/workspace/media', { cwd: f.open, path: 'clips/long.mp4' })}`)).status, 404);
+});
