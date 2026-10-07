@@ -26,9 +26,11 @@ function fakes(options: { refuseClose?: boolean; state?: () => StorageState; con
     findBrowserPid: async marker => [...processes].find(([, command]) => command.includes(markerSwitch(marker)))?.[0],
     newContext: async () => {
       if (options.contextFails) throw new Error('context failed');
-      const context = new EventEmitter() as EventEmitter & { storageState(): Promise<StorageState>; cookies(): Promise<StorageState['cookies']>; close(): Promise<void> };
-      context.storageState = async () => options.state?.() ?? { cookies: [], origins: [] };
-      context.cookies = async () => (options.state?.() ?? { cookies: [], origins: [] }).cookies;
+      const context = new EventEmitter() as EventEmitter & { cookies(): Promise<StorageState['cookies']>; pages(): unknown[]; close(): Promise<void> };
+      const current = () => options.state?.() ?? { cookies: [], origins: [] };
+      context.cookies = async () => current().cookies;
+      // One open page per origin in the state, answering what its local storage holds.
+      context.pages = () => current().origins.map(origin => ({ evaluate: async () => origin }));
       context.close = async () => { context.emit('close'); };
       return context as unknown as BrowserContext;
     },
@@ -219,14 +221,40 @@ test('code that closes the browser itself saves what that call changed first, an
   void context;
 });
 
-test('when local storage cannot be read in time at close, the cookies are still saved', async t => {
+test('a page that does not answer in time is skipped; the cookies and the other pages are still saved', async t => {
   const dir = await stateDir(t);
-  const f = fakes({ state: () => ({ cookies: [cookie('kept', '1')], origins: [] }) });
+  const f = fakes({ state: () => ({ cookies: [cookie('kept', '1')], origins: [{ origin: 'https://ok.com', localStorage: [{ name: 'k', value: 'v' }] }] }) });
   const original = f.hooks.newContext!;
-  f.hooks.newContext = async (...args) => { const context = await original(...args) as unknown as { storageState(): Promise<unknown> }; context.storageState = () => new Promise(() => {}); return context as never; };
-  f.hooks.lastSaveMs = 100;
+  f.hooks.newContext = async (...args) => {
+    const context = await original(...args) as unknown as { pages(): unknown[] };
+    const pages = context.pages.bind(context);
+    context.pages = () => [{ evaluate: () => new Promise(() => {}) }, ...pages()];
+    return context as never;
+  };
   const browser = new TurnBrowser({ tier: 'general', stateDir: dir, savedLogins: true }, () => {}, f.hooks);
   await browser.context();
   await browser.shutdown();
-  assert.deepEqual((await readState(dir)).cookies.map(c => c.name), ['kept']);
+  const saved = await readState(dir);
+  assert.deepEqual([saved.cookies.map(c => c.name), saved.origins.map(o => o.origin)], [['kept'], ['https://ok.com']]);
+});
+
+test('a save already under way when the turn ends is waited for before the browser closes', async t => {
+  const dir = await stateDir(t);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const f = fakes({ state: () => ({ cookies: [cookie('mid-close', '1')], origins: [] }) });
+  const original = f.hooks.newContext!;
+  f.hooks.newContext = async (...args) => {
+    const context = await original(...args) as unknown as { cookies(): Promise<unknown> };
+    const cookies = context.cookies.bind(context);
+    context.cookies = async () => { await gate; return cookies(); };
+    return context as never;
+  };
+  const browser = new TurnBrowser({ tier: 'general', stateDir: dir, savedLogins: true }, () => {}, f.hooks);
+  const context = await browser.context();
+  const closing = context.close();
+  const ending = browser.shutdown();
+  setTimeout(release, 50);
+  await Promise.all([closing, ending]);
+  assert.deepEqual((await readState(dir)).cookies.map(c => c.name), ['mid-close']);
 });

@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { Browser, BrowserContext } from 'playwright';
 import { newContext, startBrowser, type BrowserTier } from './launch.js';
 import { findBrowserPid, forgetBrowser, markerSwitch, recordBrowser, stillRunning, systemProbe, type ProcessProbe } from './live.js';
-import { LoginSaver, readState, type Cookie, type StorageState } from './logins.js';
+import { LoginSaver, readState, type Cookie, type OriginState, type StorageState } from './logins.js';
 
 export interface TurnBrowserOptions { tier: BrowserTier; stateDir: string; savedLogins: boolean; outsideContent?: boolean }
 
@@ -34,16 +34,17 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
  * One browser of the turn. Each keeps its own saves, so a browser started after the agent closed one never takes the
  * earlier one's unsaved state as its own starting point. `end` is the browser's own close.
  */
-interface Live { browser: Browser; end: () => Promise<void>; marker: string; browserPid?: number; context?: BrowserContext; logins?: LoginSaver; reads: number; closing?: Promise<void> }
+interface Live { browser: Browser; end: () => Promise<void>; marker: string; browserPid?: number; context?: BrowserContext; logins?: LoginSaver; reads: number; retiring?: Promise<void>; closing?: Promise<void> }
 
 /**
  * The browser of one turn's tool server. It starts on first use; every browser it starts is tracked from the moment it
  * runs, closed when it fails to set up and when the turn ends, and its record is dropped only once it is confirmed gone,
  * so a browser that would not close is still found by the next server's reaper.
  *
- * Logins: after every tool call the cookies are saved (cheap); the whole state, local storage included, is read once
- * more whenever a browser stops being the turn's: the turn ends, the agent's browser_close, or code the agent runs
- * closing the context or the browser itself.
+ * Logins: after every tool call, and once more whenever a browser stops being the turn's (the turn ends, the agent's
+ * browser_close, or code the agent runs closing the context or the browser itself), the cookies and the local storage of
+ * the pages open then are saved. Playwright's own storageState() is not used: it visits every origin the browser ever
+ * saw, which takes seconds once there are dozens.
  */
 export class TurnBrowser {
   private readonly hooks: TurnBrowserHooks;
@@ -101,7 +102,7 @@ export class TurnBrowser {
     }
   }
 
-  /** After each tool call: its cookie changes are saved at once. Calls that finish while a save runs share one more. */
+  /** After each tool call: its login changes are saved at once. Calls that finish while a save runs share one more. */
   saveSoon(): void {
     if (!this.options.savedLogins || this.finished) return;
     if (this.saving) { this.saveAgain = true; return; }
@@ -111,7 +112,7 @@ export class TurnBrowser {
         const live = this.active;
         if (!live?.context || !live.logins) break;
         const read = ++live.reads;
-        try { await live.logins.saveCookies(await live.context.cookies() as Cookie[], read); }
+        try { await live.logins.save(await this.capture(live.context), read); }
         catch (error) { this.log(new Error(`This turn's logins could not be read: ${message(error)}`)); }
       } while (this.saveAgain && !this.finished);
     })().finally(() => { this.saving = undefined; });
@@ -129,7 +130,8 @@ export class TurnBrowser {
 
   /**
    * The turn ended: save the last logins and close every browser, within one short deadline (Codex follows its SIGTERM
-   * with SIGKILL two seconds later). A failed save never keeps a browser open.
+   * with SIGKILL two seconds later). A save already under way for a browser the agent closed is waited for too. A failed
+   * save never keeps a browser open.
    */
   async shutdown(): Promise<void> {
     if (this.finished) return;
@@ -137,29 +139,40 @@ export class TurnBrowser {
     const deadline = Date.now() + (this.hooks.lastSaveMs ?? 1_200);
     // best-effort: a browser still setting up is closed below either way.
     if (this.starting) await within(this.starting, deadline - Date.now()).catch(() => undefined);
-    if (this.active) await this.retire(this.active, deadline);
+    if (this.active) void this.retire(this.active, deadline);
+    // best-effort: what is not saved by the deadline is lost with the turn; the browsers close regardless.
+    await within(Promise.all([...this.tracked].map(live => live.retiring)), deadline - Date.now()).catch(() => undefined);
     await Promise.all([...this.tracked].map(live => this.close(live)));
     await Promise.all([...this.savers].map(saver => saver.idle()));
   }
 
+  /** A browser stops being the turn's: its logins are read once more and saved, by the deadline. Once per browser. */
+  private retire(live: Live, deadline = Date.now() + (this.hooks.lastSaveMs ?? 1_200)): Promise<void> {
+    if (this.active === live) this.active = undefined;
+    return live.retiring ??= (async () => {
+      if (!live.context || !live.logins) return;
+      const read = ++live.reads;
+      try { await within(live.logins.save(await this.capture(live.context, deadline), read), Math.max(200, deadline - Date.now())); }
+      catch (error) { this.log(new Error(`This turn's logins could not be saved before closing: ${message(error)}`)); }
+    })();
+  }
+
   /**
-   * A browser stops being the turn's: its whole state is read once more and saved, by the deadline. If local storage
-   * cannot be read in time (each saved origin costs the browser a page visit), its cookies are saved instead.
+   * The cookies, and the local storage of each open page (opaque and non-web pages have none). Cheap: no navigation.
+   * A page that does not answer by the deadline (or within half a second) is left out.
    */
-  private async retire(live: Live, deadline = Date.now() + (this.hooks.lastSaveMs ?? 1_200)): Promise<void> {
-    if (this.active !== live) return;
-    this.active = undefined;
-    if (!live.context || !live.logins) return;
-    const logins = live.logins;
-    const read = ++live.reads;
-    let state: StorageState | undefined;
-    try { state = await within(live.context.storageState() as Promise<StorageState>, deadline - Date.now()); }
-    catch (error) { if (message(error) !== 'timed out') { this.log(new Error(`This turn's logins could not be read before closing: ${message(error)}`)); return; } }
-    try {
-      const saved = state ? logins.save(state, read) : logins.saveCookies(await within(live.context.cookies(), Math.max(200, deadline - Date.now())) as Cookie[], read);
-      // best-effort: a save that waits longer for another turn's lock finishes by itself; shutdown waits for every saver.
-      await within(saved, Math.max(200, deadline - Date.now())).catch(() => undefined);
-    } catch (error) { this.log(new Error(`This turn's logins could not be saved before closing: ${message(error)}`)); }
+  private async capture(context: BrowserContext, deadline = Infinity): Promise<StorageState> {
+    const cookies = await within(context.cookies(), Math.min(1_000, deadline - Date.now())) as Cookie[];
+    const origins = new Map<string, OriginState>();
+    for (const page of context.pages()) {
+      try {
+        const origin = await within(page.evaluate(() => /^https?:$/.test(location.protocol)
+          ? { origin: location.origin, localStorage: Object.entries(localStorage).map(([name, value]) => ({ name, value })) } : undefined), Math.min(500, deadline - Date.now()));
+        if (origin) origins.set(origin.origin, origin);
+      // best-effort: a page that is navigating or closing has nothing to read now; the next save sees it.
+      } catch { /* See above. */ }
+    }
+    return { cookies, origins: [...origins.values()] };
   }
 
   /** Once per browser: closing it fires its context's `close`, which asks for this again. */
