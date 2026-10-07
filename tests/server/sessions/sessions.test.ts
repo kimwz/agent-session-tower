@@ -52,6 +52,90 @@ test('Codex starts, completes and resumes a real turn using append-only updates'
   assert.equal(service.get(`codex:${rootId}`)?.messageCount, 4);
 });
 
+test('retention metadata includes internal guardians and follows the latest event rather than a stale completion', async t => {
+  const { service, codexHome, codex } = await fixture(t);
+  await mkdir(join(codexHome, 'archived_sessions'));
+  await writeFile(codex, lines([
+    row('session_meta', { id: rootId, cwd: '/work', thread_source: 'guardian_review', parent_thread_id: childId }),
+    row('event_msg', { type: 'task_complete' }, '2026-01-01T00:00:00Z'),
+  ]));
+  await service.refresh();
+  assert.equal(service.list().length, 0, 'guardian stays excluded from normal discovery');
+  const first = service.retentionRecords();
+  assert.equal(first.complete, true);
+  assert.deepEqual(first.issues, []);
+  assert.equal(first.records.length, 1);
+  assert.equal(first.records[0].internal, true);
+  assert.equal(first.records[0].latestTaskEndedAt, '2026-01-01T00:00:00.000Z');
+  const fingerprint = first.records[0].fingerprint;
+  await appendFile(codex, lines([row('event_msg', { type: 'task_started' }, '2025-12-31T23:00:00Z')]));
+  await service.refresh();
+  const resumed = service.retentionRecords().records[0];
+  assert.equal(resumed.latestTaskEndedAt, undefined, 'later event ordinal cancels completion even with an older timestamp');
+  assert.notEqual(resumed.fingerprint, fingerprint);
+  resumed.session.title = 'not the stored title';
+  assert.notEqual(service.retentionRecords().records[0].session.title, resumed.session.title);
+  await rm(join(codexHome, 'sessions'), { recursive: true });
+  await service.refresh();
+  assert.equal(service.retentionRecords().complete, false, 'lost native history cannot establish inactivity');
+  assert.ok(service.retentionRecords().issues.includes('native-history-incomplete:codex'));
+});
+
+test('completed retention metadata waits for forced scans queued ahead of its Promise continuation', async t => {
+  const f = await fixture(t);
+  await mkdir(join(f.codexHome, 'archived_sessions'));
+  await writeFile(f.codex, lines([
+    row('session_meta', { id: rootId, cwd: '/work' }),
+    row('event_msg', { type: 'task_complete' }, old),
+  ]));
+  const gate = () => {
+    let finish!: () => void, entered!: () => void;
+    return { wait: new Promise<void>(resolve => { finish = resolve; }), ready: new Promise<void>(resolve => { entered = resolve; }),
+      finish: () => finish(), entered: () => entered() };
+  };
+  const gates = Array.from({ length: 4 }, gate);
+  let scans = 0;
+  const service = new SessionService({ codexHome: f.codexHome, claudeHome: f.claudeHome, inspectProcesses: async () => {
+    const pending = gates[scans++];
+    pending.entered(); await pending.wait;
+    return { claude: new Map(), codex: new Set(), providerRunning: { claude: false, codex: false } };
+  } });
+  t.after(() => { for (const pending of gates) pending.finish(); service.stop(); });
+  const first = service.refresh(true); await gates[0].ready;
+  // Each forced request's then is registered before the getter's await continuation.
+  const forced = [service.refresh(true), service.refresh(true), service.refresh(true)];
+  let finished = false;
+  const observation = service.completedRetentionRecords().then(value => { finished = true; return value; });
+  for (let index = 0; index < gates.length - 1; index++) {
+    gates[index].finish(); await gates[index + 1].ready;
+    await Promise.resolve();
+    assert.equal(finished, false, `scan ${index + 2} must finish before copying retention metadata`);
+    assert.equal(service.retentionRecords().complete, false, 'the synchronous getter alone still sees a scan in progress');
+  }
+  gates.at(-1)!.finish();
+  const snapshot = await observation;
+  await Promise.all([first, ...forced]);
+  assert.equal(scans, 4);
+  assert.equal(snapshot.complete, true);
+  assert.deepEqual(snapshot.issues, []);
+  assert.equal(snapshot.records[0].latestTaskEndedAt, old);
+});
+
+test('completed retention metadata returns real incomplete and paused states without retrying failed discovery', async t => {
+  const f = await fixture(t);
+  await mkdir(join(f.codexHome, 'archived_sessions'));
+  await writeFile(f.codex, lines([row('session_meta', { id: rootId, cwd: '/work' })]));
+  assert.equal((await f.service.completedRetentionRecords()).complete, true);
+  await rm(join(f.codexHome, 'sessions'), { recursive: true });
+  const incomplete = await f.service.completedRetentionRecords();
+  assert.equal(incomplete.complete, false);
+  assert.ok(incomplete.issues.includes('native-history-incomplete:codex'));
+  await f.service.quiesce();
+  const paused = await f.service.completedRetentionRecords();
+  assert.equal(paused.complete, false);
+  assert.ok(paused.issues.includes('observer-paused'));
+});
+
 for (const provider of ['claude', 'codex'] as const) {
   test(`${provider} keeps its originating project across directory changes and a fresh scan`, async t => {
     const f = await fixture(t);

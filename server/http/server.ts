@@ -24,7 +24,7 @@ import { scopeFromBody, scopeFromParams } from '../../shared/session-scope.js';
 import { sessionActivityAt } from '../../shared/session-activity.js';
 import { SnapshotStream, type FrameFormat } from './snapshot-stream.js';
 import { APP_VERSION, HEALTH_APPLICATION_ID, REQUEST_TOKEN_HEADER } from '../../shared/app-identity.js';
-import { assertWorkspace, listWorkspaceTree, readWorkspaceFile, saveWorkspaceFile, createWorkspaceDirectory, openWorkspaceMedia, MAX_WORKSPACE_FILE_BYTES } from '../workspace-files.js';
+import { assertWorkspace, listWorkspaceTree, readWorkspaceFile, saveWorkspaceFile, createWorkspaceDirectory, retentionWorkspacePath, openWorkspaceMedia, MAX_WORKSPACE_FILE_BYTES } from '../workspace-files.js';
 import { WorkspaceTerminals, type WorkspaceTerminalBackend } from '../workspace-terminals.js';
 import { sessionKey, type AuthStore } from '../auth/store.js';
 import { ownerIdentity, sessionCookie, setSessionCookie } from './auth.js';
@@ -67,6 +67,7 @@ export interface Backend {
   detail(id: string, before?: number, limit?: number): Promise<SessionDetail | undefined>;
   setTitle?(id: string, title: string): Promise<Session | undefined>;
   setClosed?(id: string, closed: boolean): Promise<Session | undefined>;
+  retention?(action: string, value?: string, extra?: string): Promise<unknown>;
   /** Marks the conversation's current last turn, judged as needing the owner or broken off, as done. */
   acknowledgeOutcome?(id: string): Promise<Session | undefined>;
   setGroup?(patch: ProjectGroupPatch): Promise<ProjectGroup>;
@@ -545,6 +546,40 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       if (req.method === 'GET' && path === '/api/snapshot') {
         const scope = scopeFromParams(url.searchParams);
         return json(res, 200, scope ? scopedViews(snapshot())(scope) : snapshot());
+      }
+      if ((path === '/api/retention' || path.startsWith('/api/retention/')) && (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()])) return json(res, 403, { error: '세션 보관 관리는 소유자만 할 수 있습니다.' });
+      if (req.method === 'GET' && path === '/api/retention') {
+        if (!backend.retention) return json(res, 503, { error: '세션 보관 정책을 사용할 수 없습니다.' });
+        return json(res, 200, await backend.retention('overview'));
+      }
+      const retentionManifest = path.match(/^\/api\/retention\/bundles\/([^/]+)$/);
+      if (req.method === 'GET' && retentionManifest) {
+        if (!backend.retention) return json(res, 503, { error: '세션 보관 정책을 사용할 수 없습니다.' });
+        return json(res, 200, await backend.retention('manifest', retentionManifest[1]));
+      }
+      const retentionContent = path.match(/^\/api\/retention\/bundles\/([^/]+)\/files\/([^/]+)$/);
+      if (req.method === 'GET' && retentionContent) {
+        if (!/^file-[0-9]+\.gz$/.test(retentionContent[2])) throw new TowerError('invalid', 'Invalid cold file name.');
+        if (!backend.retention) return json(res, 503, { error: '세션 보관 정책을 사용할 수 없습니다.' });
+        return json(res, 200, await backend.retention('read', retentionContent[1], retentionContent[2]));
+      }
+      const retentionAction = path.match(/^\/api\/retention\/(check|archive|backup|restore|export|import)$/);
+      if (req.method === 'POST' && retentionAction) {
+        if (!backend.retention) return json(res, 503, { error: '세션 보관 정책을 사용할 수 없습니다.' });
+        const action = retentionAction[1], body = await readJson(req);
+        if (action === 'check') {
+          if (Object.keys(body).length) throw new TowerError('invalid', 'Invalid retention check request.');
+          return json(res, 200, await backend.retention(action));
+        }
+        const value = body.id;
+        if (typeof value !== 'string' || !value || Object.keys(body).some(key => !['id', 'cwd', 'path'].includes(key))) throw new TowerError('invalid', 'Invalid retention request.');
+        if (action === 'export' || action === 'import') {
+          const workspace = await assertWorkspace(body.cwd, backend.snapshot());
+          // Export/import use the same owner-authorized workspace boundary as the editor.
+          const file = await retentionWorkspacePath(workspace, body.path, action === 'export');
+          return json(res, 200, await backend.retention(action, action === 'import' ? file : value, action === 'export' ? file : undefined));
+        }
+        return json(res, 200, await backend.retention(action, value));
       }
       if (req.method === 'GET' && path === '/api/workspace/tree') {
         return json(res, 200, await listWorkspaceTree(url.searchParams.get('cwd'), url.searchParams.get('path') ?? '', backend.snapshot()));

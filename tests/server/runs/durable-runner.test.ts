@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,9 +26,15 @@ import fsPromises from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { acquireStateLock, MonitorAlreadyRunning } from '../../../server/instance/state-lock.js';
 import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
+import { ClosedSessionStore } from '../../../server/stores/closed-sessions.js';
+import { RetentionService } from '../../../server/sessions/retention/service.js';
+import { RetentionStore } from '../../../server/sessions/retention/store.js';
+import { RetentionArchive } from '../../../server/sessions/retention/archive.js';
+import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
+import { worktreeCleanupVisible } from '../../../server/worktrees/janitor.js';
 
-async function fixture() {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-durable-fixture-'));
+async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string) {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'tower-durable-fixture-')));
   const stateDir = join(directory, 'state');
   const id = '10000000-0000-4000-8000-000000000001';
   const session: Session = {
@@ -59,17 +65,25 @@ async function fixture() {
     },
   });
   await runs.start();
-  const host = await startRunnerHost({ stateDir, sessions, runs });
+  const closedSessions = workerClosed ? new ClosedSessionStore(stateDir) : undefined;
+  await closedSessions?.start();
+  const archive = new RetentionArchive(join(stateDir, 'cold'), []);
+  const retentionStore = new RetentionStore(join(stateDir, 'retention'));
+  const retention = withRetention ? { archive, service: new RetentionService({ archive, store: retentionStore,
+    adapter: createNativeRetentionAdapter({ claude: [], codex: [] }), observe: async () => ({ now: Date.now(), migratedAt: Date.now(), complete: true, records: [], protectedIds: new Set() }) }) } : undefined;
+  await retention?.service.start();
+  const host = await startRunnerHost({ stateDir, sessions, runs, closedSessions, retention, retentionUnavailable });
   const paths = await runnerPaths(stateDir);
   const clients: DurableRunManager[] = [];
-  const connect = async () => {
-    const client = new DurableRunManager({ stateDir, pollMs: 10 });
+  const connect = async (pollMs = 10) => {
+    const client = new DurableRunManager({ stateDir, pollMs });
     clients.push(client);
     await client.start();
     return client;
   };
   /** Closes the clients, the fixture's own host, sessions and runs; `remove` then deletes its folders. */
   const close = async () => {
+    await retention?.service.quiesce();
     await Promise.all(clients.map(client => client.close()));
     await host.close(); sessions.stop(); await runs.close();
   };
@@ -77,13 +91,195 @@ async function fixture() {
     await rm(directory, { recursive: true, force: true });
     await rm(paths.directory, { recursive: true, force: true });
   };
-  return { directory, stateDir, session, sessions, runs, host, paths, connect, starts: () => starts, cancels: () => cancels,
+  return { directory, stateDir, session, sessions, runs, host, paths, connect, closedSessions, retention, retentionStore, starts: () => starts, cancels: () => cancels,
     output: (text: string) => { assert.ok(bridge); bridge.onOutput(text); },
     finish: () => { assert.ok(bridge); bridge.onFinished({ status: 'completed' }); resolveDone(); },
     cleanup: async () => { await close(); await remove(); },
     close, remove,
   };
 }
+
+test('closure writes stay in the capable worker and a second UI sees its projection', async t => {
+  const f = await fixture(true); t.after(f.cleanup);
+  const first = await f.connect();
+  assert.equal(first.supports('workerClosed'), true);
+  assert.equal((await first.setClosed(f.session.id, true))?.closed, true);
+  const second = await f.connect();
+  assert.equal(second.applyClosed(f.session).closed, true);
+  const child = { ...f.session, id: 'codex:fixture-child', isSubagent: true, parentId: f.session.id };
+  assert.equal(worktreeCleanupVisible(child, id => second.getSession(id), root => Boolean(second.applyClosed(root).closed)), true,
+    'detail visibility follows worker closure even though the native parent itself has no closed flag');
+  assert.deepEqual(JSON.parse(await readFile(join(f.stateDir, 'closed-sessions.json'), 'utf8')), [f.session.id]);
+  await first.setClosed(f.session.id, false);
+  await until(() => !second.applyClosed(f.session).closed);
+  assert.equal(worktreeCleanupVisible(child, id => second.getSession(id), root => Boolean(second.applyClosed(root).closed)), false);
+  assert.equal(f.starts(), 0, 'closing only changes visibility, without launching or cancelling native work');
+});
+
+test('worker closure adopts a legacy write during startup and preserves later legacy changes on its next write', async t => {
+  const f = await fixture(true); t.after(f.cleanup);
+  const legacy = new ClosedSessionStore(f.stateDir);
+  await legacy.start();
+  await legacy.set(f.session, true);
+  const client = await f.connect();
+  assert.equal(client.applyClosed(f.session).closed, true, 'first RPC reloads the web write made after worker startup');
+  const other = { ...f.session, id: 'codex:legacy-other' };
+  await legacy.set(other, true);
+  await client.setClosed(f.session.id, false);
+  assert.deepEqual(JSON.parse(await readFile(join(f.stateDir, 'closed-sessions.json'), 'utf8')), [other.id],
+    'new writer must preserve the predecessor web projection before saving');
+});
+
+test('closure projection uses constant-time lookups after snapshot adoption', async t => {
+  const f = await fixture(true); t.after(f.cleanup);
+  const client = await f.connect();
+  await client.setClosed(f.session.id, true);
+  const includes = Array.prototype.includes;
+  let linearLookups = 0;
+  Array.prototype.includes = function(value: unknown, ...rest: [number?]) {
+    if (value === f.session.id) linearLookups++;
+    return includes.call(this, value, ...rest);
+  };
+  try {
+    for (let index = 0; index < 3200; index++) assert.equal(client.applyClosed(f.session).closed, true);
+  } finally { Array.prototype.includes = includes; }
+  assert.equal(linearLookups, 0, 'session views must not scan the closed ID array once per session');
+});
+
+test('a failed initial closure reload does not block snapshot or cancel and the next RPC retries', async t => {
+  const f = await fixture(true); t.after(f.cleanup);
+  const logs: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => logs.push(args));
+  const original = f.closedSessions!.start.bind(f.closedSessions);
+  let attempts = 0;
+  t.mock.method(f.closedSessions!, 'start', async () => {
+    if (++attempts === 1) throw new Error('Fixture temporary closure read failure');
+    return original();
+  });
+  const run = await f.runs.enqueue(f.session.id, 'Fixture running turn');
+  await until(() => f.runs.list().some(item => item.id === run.id && item.status === 'running'));
+  const client = await f.connect(60_000);
+  assert.equal(client.list()[0].id, run.id, 'snapshot remains available after the failed first reload');
+  assert.equal(attempts, 1);
+  assert.match(String(logs[0]?.[0]), /closure reload failed; execution controls remain available/);
+
+  const legacy = new ClosedSessionStore(f.stateDir); await legacy.start(); await legacy.set(f.session, true);
+  await client.cancel(run.id);
+  assert.equal(f.cancels(), 1, 'the owner retains cancellation control');
+  assert.equal(attempts, 2, 'the rejected promise is not fixed as the readiness state');
+  assert.equal(client.applyClosed(f.session).closed, true, 'retry adopts the latest disk projection');
+
+  const path = join(f.stateDir, 'closed-sessions.json');
+  const saved = await readFile(path, 'utf8');
+  await writeFile(path, '{');
+  await assert.rejects(client.setClosed(f.session.id, false), { kind: 'unavailable' }, 'closure writes still surface a real storage failure');
+  await writeFile(path, saved);
+});
+
+test('snapshot polling alone publishes closure recovery after its initial reload failed', async t => {
+  const f = await fixture(true); t.after(f.cleanup);
+  t.mock.method(console, 'error', () => {});
+  const original = f.closedSessions!.start.bind(f.closedSessions);
+  let attempts = 0;
+  let allowRecovery!: () => void;
+  const recovery = new Promise<void>(resolve => { allowRecovery = resolve; });
+  t.mock.method(f.closedSessions!, 'start', async () => {
+    if (++attempts === 1) throw new Error('Fixture first reload failed');
+    await recovery;
+    return original();
+  });
+  const client = await f.connect(10);
+  assert.equal(client.applyClosed(f.session).closed, undefined);
+  const legacy = new ClosedSessionStore(f.stateDir); await legacy.start(); await legacy.set(f.session, true);
+  allowRecovery();
+  await until(() => client.applyClosed(f.session).closed === true);
+  assert.equal(attempts, 2, 'a recovered readiness check is retained after its revision is published');
+  assert.equal(f.starts(), 0, 'no run, cancellation or other mutation is needed to invalidate the snapshot');
+});
+
+test('unsupported closure and retention operations fail before writing or dispatching', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const client = await f.connect();
+  assert.equal(client.supports('workerClosed'), false);
+  assert.equal(client.supports('retention'), false);
+  await assert.rejects(client.setClosed(f.session.id, true), { kind: 'unavailable' });
+  await assert.rejects(client.retention('check'), { kind: 'unavailable' });
+  assert.equal(existsSync(join(f.stateDir, 'closed-sessions.json')), false);
+});
+
+test('retention RPC is advertised only with its worker-owned service and reports native blocking', async t => {
+  const f = await fixture(true, true); t.after(f.cleanup);
+  const client = await f.connect();
+  assert.equal(client.supports('retention'), true);
+  const result = await client.retention('overview') as { providers: { codex: { status: string } }; archived: number };
+  assert.equal(result.providers.codex.status, 'blocked');
+  assert.equal(result.archived, 0);
+  await client.retention('check');
+  await assert.rejects(client.retention('unsupported'), /Invalid retention target/);
+  assert.equal(f.starts(), 0);
+});
+
+test('reopening cancels the canonical archive request before visibility changes and preserves backup history', async t => {
+  const f = await fixture(true, true); t.after(f.cleanup);
+  const client = await f.connect();
+  const alias = 'codex:reopen-alias';
+  f.sessions.get = id => id === alias || id === f.session.id ? { ...f.session } : undefined;
+  const restoredAt = '2026-10-01T00:00:00.000Z';
+  await f.retentionStore.setPolicy({ id: f.session.id, archivedAt: '2026-10-02T00:00:00.000Z', archiveRevision: 4, restoredAt });
+  const entry = { id: 'retained-backup', candidate: { rootId: f.session.id, ids: [f.session.id], reason: 'explicit-archive' as const, revisions: { [f.session.id]: 4 } }, phase: 'backup-verified' as const, updatedAt: restoredAt };
+  await f.retentionStore.put(entry);
+  await client.setClosed(f.session.id, true);
+  await client.setClosed(alias, false);
+  assert.deepEqual(f.retentionStore.policy(f.session.id), { id: f.session.id, archivedAt: undefined, archiveRevision: 5, restoredAt });
+  assert.equal(f.retentionStore.policy(alias), undefined);
+  assert.deepEqual(f.retentionStore.get(entry.id), entry);
+  assert.equal(Boolean(client.applyClosed(f.session).closed), false);
+  assert.equal(f.starts(), 0);
+});
+
+test('reopening does not claim success or change visibility when archive cancellation fails or retention initialization is unavailable', async t => {
+  const f = await fixture(true, true); t.after(f.cleanup);
+  const client = await f.connect(); await client.setClosed(f.session.id, true);
+  t.mock.method(f.retention!.service, 'cancelArchiveRequest', async () => { throw new Error('fixture archive cancellation failed'); });
+  await assert.rejects(client.setClosed(f.session.id, false), /archive cancellation failed/);
+  assert.equal(client.applyClosed(f.session).closed, true);
+  const unavailable = await fixture(true, false, 'fixture retention initialization unavailable'); t.after(unavailable.cleanup);
+  const unavailableClient = await unavailable.connect(); await unavailableClient.setClosed(unavailable.session.id, true);
+  assert.equal(unavailableClient.supports('retention'), false);
+  await assert.rejects(unavailableClient.setClosed(unavailable.session.id, false), /retention initialization unavailable/);
+  assert.equal(unavailableClient.applyClosed(unavailable.session).closed, true);
+});
+
+test('reopening retries a real archive cancellation write failure and remains cancelled after state reload', async t => {
+  const f = await fixture(true, true); t.after(f.cleanup);
+  t.mock.method(console, 'error', () => {});
+  const client = await f.connect();
+  const restoredAt = '2026-10-01T00:00:00.000Z';
+  const archivedAt = '2026-10-02T00:00:00.000Z';
+  await f.retentionStore.setPolicy({ id: f.session.id, archivedAt, archiveRevision: 4, restoredAt });
+  const entry = { id: 'retained-backup', candidate: { rootId: f.session.id, ids: [f.session.id], reason: 'explicit-archive' as const, revisions: { [f.session.id]: 4 } }, phase: 'backup-verified' as const, updatedAt: restoredAt };
+  await f.retentionStore.put(entry);
+  await client.setClosed(f.session.id, true);
+  const root = f.retentionStore.root;
+  const displacedRoot = `${root}-displaced`;
+  await rename(root, displacedRoot);
+  await writeFile(root, 'fixture blocks retention directory writes');
+  try {
+    await assert.rejects(client.setClosed(f.session.id, false), /ENOTDIR/);
+    assert.equal(client.applyClosed(f.session).closed, true);
+  } finally {
+    await rm(root, { force: true });
+    await rename(displacedRoot, root);
+  }
+  await client.setClosed(f.session.id, false);
+  assert.equal(Boolean(client.applyClosed(f.session).closed), false);
+  const reloaded = new RetentionStore(root); await reloaded.start();
+  assert.equal(reloaded.policy(f.session.id)?.archivedAt, undefined, 'successful retry must persist cancellation rather than leave the archive request to revive after restart');
+  assert.equal(reloaded.policy(f.session.id)?.archiveRevision, 5);
+  assert.equal(reloaded.policy(f.session.id)?.restoredAt, restoredAt);
+  assert.deepEqual(reloaded.get(entry.id), entry);
+  assert.equal(f.starts(), 0);
+});
 
 test('UI disconnect and reconnect preserve a running provider turn and its output', async t => {
   const f = await fixture(); t.after(f.cleanup);

@@ -15,6 +15,10 @@ export class ClosedSessionStore {
 
   async start(): Promise<void> {
     await mkdir(this.stateDir, { recursive: true, mode: 0o700 });
+    await this.reload();
+  }
+
+  private async reload(): Promise<void> {
     let file;
     try { file = await open(this.path, constants.O_RDONLY | constants.O_NOFOLLOW); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
@@ -37,6 +41,10 @@ export class ClosedSessionStore {
 
   set(session: Session, closed: boolean): Promise<Session> {
     const write = this.writes.then(async () => {
+      // An upgrading web may finish its legacy write after this worker loaded the store.
+      // Reload within this writer's serial queue so its next write preserves that projection.
+      try { await this.reload(); }
+      catch (error) { throw new TowerError('unavailable', `세션 표시 상태를 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`); }
       if (this.ids.has(session.id) === closed) return this.apply(session);
       const next = new Set(this.ids);
       if (closed) next.add(session.id); else next.delete(session.id);

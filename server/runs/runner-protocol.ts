@@ -10,7 +10,7 @@ export const MAX_RPC_BYTES = 40 * 1024 * 1024;
  * Optional operations this worker build serves. A web process checks the attached worker's list
  * before calling one, because an older worker keeps running until it is idle.
  */
-export const RUNNER_CAPABILITIES = ['sessionHistory', 'origins', 'handoff', 'triggers', 'toolCapabilities', 'remoteOrigins', 'remoteTriggers', 'publicAgents', 'autoPromptTargets', 'steerTargets', 'subscriptionOnly', 'skills', 'towerSkills', 'skillTargets', 'forceUpdate', 'backup', 'models', 'delegation', 'masterWorker', 'secrets', 'attachmentReferences'] as const;
+export const RUNNER_CAPABILITIES = ['sessionHistory', 'origins', 'handoff', 'triggers', 'toolCapabilities', 'remoteOrigins', 'remoteTriggers', 'publicAgents', 'autoPromptTargets', 'steerTargets', 'subscriptionOnly', 'skills', 'towerSkills', 'skillTargets', 'forceUpdate', 'backup', 'models', 'delegation', 'masterWorker', 'secrets', 'attachmentReferences', 'workerClosed', 'retention'] as const;
 export type RunnerCapability = typeof RUNNER_CAPABILITIES[number];
 /** One page of a native conversation, read by the worker that already indexes native history. */
 export type SessionHistoryPage = Pick<SessionDetail, 'messages' | 'hasMore' | 'nextBefore' | 'previousUser'>;
@@ -20,6 +20,8 @@ export interface RunnerSnapshot {
   runs: Run[];
   sessions: Session[];
   nativeIds: Record<string, string>;
+  /** The execution worker owns closure writes when workerClosed is advertised. */
+  closedIds?: string[];
   settled: string[];
   autoPrompts: AutoPromptJob[];
   /** Absent from workers that predate version reporting. */

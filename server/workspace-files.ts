@@ -73,6 +73,11 @@ async function checkedPath(root: string, path: string, missingLeaf = false): Pro
   return current;
 }
 
+/** Cold bundle directories share the editor's traversal and symlink boundary. No directory is created here. */
+export async function retentionWorkspacePath(root: string, path: unknown, missingLeaf: boolean): Promise<string> {
+  return checkedPath(root, subpath(path), missingLeaf);
+}
+
 async function checkHandle(handle: FileHandle, root: string, path: string): Promise<void> {
   const target = await checkedPath(root, path);
   const [opened, current] = await Promise.all([handle.stat(), lstat(target)]);

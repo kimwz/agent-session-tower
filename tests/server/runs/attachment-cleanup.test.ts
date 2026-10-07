@@ -137,12 +137,14 @@ test('GC registers deletion first: enqueue waits for the actual deletion and ref
 async function lifecycle(f: Awaited<ReturnType<typeof fixture>>, toolsStop: () => Promise<void> = async () => {}) {
   const source = await readFile(new URL('../../../server/runs/worker.ts', import.meta.url), 'utf8');
   const noop = new Proxy({}, { get: () => async () => {} });
-  const context: Record<string, unknown> = { runs: f.runs, autoPrompts: f.auto, clearInterval, secretExpiry: undefined, expiryTimer: undefined, stopTelling: () => {}, paused: false,
+  const retentionCalls: string[] = [];
+  const retention = { service: { quiesce: async () => { retentionCalls.push('quiesce'); }, resume: () => { retentionCalls.push('resume'); } } };
+  const context: Record<string, unknown> = { runs: f.runs, autoPrompts: f.auto, retention, clearInterval, secretExpiry: undefined, expiryTimer: undefined, stopTelling: () => {}, paused: false,
     tools: { ...noop, stop: toolsStop, pause: () => {}, resume: () => {} } };
   for (const name of ['secrets', 'triggers', 'github', 'slack', 'publicAgents', 'skills', 'tasks', 'worktrees', 'reviewer', 'runner', 'permissions', 'sessions', 'terminals', 'ledger']) context[name] = noop;
   const lifecycleSource = source.slice(source.indexOf('      onIdle: async () =>'));
   const callback = (name: string) => { const match = lifecycleSource.match(new RegExp(`^      ${name}: (.+),$`, 'm')); assert.ok(match, name); return runInNewContext(`(${match[1]})`, context) as () => Promise<void>; };
-  return { onIdle: callback('onIdle'), quiesce: callback('quiesce'), resume: callback('resume') };
+  return { onIdle: callback('onIdle'), quiesce: callback('quiesce'), resume: callback('resume'), retentionCalls };
 }
 async function host(f: Awaited<ReturnType<typeof fixture>>, extra: Partial<Parameters<typeof startRunnerHost>[0]>) {
   const sessions = Object.assign(new EventEmitter(), { list: () => [f.session] }) as unknown as SessionService;
@@ -172,6 +174,7 @@ test('handoff holds the state lock and successor until both production manager s
   t.after(() => worker.close()); await requestHandoff(f.directory); await paused.promise;
   assert.equal(released, false); assert.equal(successor, false); runGC.resolve(); await Promise.resolve(); assert.equal(released, false);
   autoGC.resolve(); await until(() => successor); assert.equal(internals(f.runs).attachmentCleanupTimer, undefined); assert.equal(internals(f.auto).attachmentCleanupTimer, undefined);
+  assert.deepEqual(hooks.retentionCalls, ['quiesce']);
   await internals(f.runs).cleanupAttachments(); await internals(f.auto).cleanupAttachments();
 });
 
@@ -181,6 +184,7 @@ test('failed production quiesce resumes both manager cleanup timers without rele
   t.after(() => worker.close()); const log = console.error; console.error = () => {};
   try { await requestHandoff(f.directory); await resumed.promise; } finally { console.error = log; }
   assert.equal(released, false); assert.ok(internals(f.runs).attachmentCleanupTimer); assert.ok(internals(f.auto).attachmentCleanupTimer);
+  assert.deepEqual(hooks.retentionCalls, ['quiesce', 'resume']);
 });
 
 test('production onIdle drains both GCs before a later flush failure can release the state lock', { timeout: 10_000 }, async t => {
@@ -194,6 +198,7 @@ test('production onIdle drains both GCs before a later flush failure can release
   await new Promise(resolve => setTimeout(resolve, 15)); assert.equal(released, false); runGC.resolve(); await Promise.resolve(); assert.equal(released, false);
   autoGC.resolve(); await downstream.promise; await failed; assert.equal(released, true);
   assert.equal(internals(f.runs).attachmentCleanupTimer, undefined); assert.equal(internals(f.auto).attachmentCleanupTimer, undefined);
+  assert.deepEqual(hooks.retentionCalls, ['quiesce']);
 });
 
 for (const autoStarted of [false, true]) test(`production startup failure drains initialized managers before lock release (Auto ${autoStarted})`, async t => {
@@ -203,11 +208,14 @@ for (const autoStarted of [false, true]) test(`production startup failure drains
   const source = await readFile(new URL('../../../server/runs/worker.ts', import.meta.url), 'utf8');
   const line = source.split('\n').find(line => line.includes('initializedAutoPrompts?.pauseAttachmentCleanup()')); assert.ok(line);
   const body = line.slice(line.indexOf('{') + 1, line.lastIndexOf('}')); let released = false;
-  const cleanup = runInNewContext(`(async error => { ${body} })`, { runs: f.runs, initializedAutoPrompts: autoStarted ? f.auto : undefined, carry: undefined, tools: undefined, sessions: { stop() {} }, release: async () => { released = true; } }) as (error: Error) => Promise<void>;
+  let retentionPaused = false;
+  const cleanup = runInNewContext(`(async error => { ${body} })`, { runs: f.runs, initializedAutoPrompts: autoStarted ? f.auto : undefined,
+    initializedRetention: { quiesce: async () => { retentionPaused = true; } }, carry: undefined, tools: undefined, sessions: { stop() {} }, release: async () => { released = true; } }) as (error: Error) => Promise<void>;
   const failed = assert.rejects(cleanup(new Error('fixture startup failure')), /fixture startup failure/);
   await Promise.resolve(); assert.equal(released, false); runGC.resolve(); await Promise.resolve(); if (autoStarted) assert.equal(released, false);
   autoGC.resolve(); await failed; assert.equal(released, true); assert.equal(internals(f.runs).attachmentCleanupTimer, undefined);
   if (autoStarted) assert.equal(internals(f.auto).attachmentCleanupTimer, undefined);
+  assert.equal(retentionPaused, true);
 });
 
 test('a ready replacement host resumes both adopted engines once after host close paused cleanup', { timeout: 10_000 }, async t => {

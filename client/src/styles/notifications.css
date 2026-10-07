@@ -41,6 +41,12 @@
 .backup-form input:not([type=checkbox]) { min-height:36px; padding:8px 11px; border:1px solid #344255; border-radius:6px; color:#e4edf9; background:#0d131d; min-width:0; }
 .backup-form input[type=file] { padding:6px 8px; }
 .backup-form input:focus-visible { outline:2px solid #91baff; outline-offset:2px; }
+.retention-policy { min-width:0; overflow-wrap:anywhere; }
+.retention-policy label { display:flex; flex-direction:column; gap:5px; min-width:0; margin:10px 0; }
+.retention-policy input, .retention-policy select { width:100%; max-width:100%; min-width:0; min-height:36px; padding:8px 11px; box-sizing:border-box; border:1px solid #344255; border-radius:6px; color:#e4edf9; background:#0d131d; }
+.retention-policy button { max-width:100%; white-space:normal; overflow-wrap:anywhere; margin:3px; }
+.retention-policy ul { padding-left:18px; }
+.retention-policy li { min-width:0; margin:8px 0; }
 .backup-actions { display:flex; flex-wrap:wrap; gap:8px; }
 .backup-preview, .backup-report { display:flex; flex-direction:column; gap:6px; margin:0 0 16px; padding:12px 14px; border:1px solid var(--line); border-radius:8px; font-size:13px; }
 .backup-preview p { margin:0; color:#cfdcee; }

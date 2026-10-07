@@ -244,7 +244,6 @@ function consumeContext(session: Session, row: Json, timestamp: string): void {
 }
 
 function consume(state: RecordState, row: Json, offset: number, ordinal: number): void {
-  if (state.internal) return;
   const s = state.session;
   const timestamp = time(row.timestamp, s.updatedAt);
   const at = Date.parse(timestamp);
@@ -261,7 +260,6 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
     // Codex's permission assessor is runtime machinery, not a user coding agent.
     // Keep legitimate code-reviewer children; only exclude its exact native source.
     state.internal = value.thread_source === 'guardian_review' || value.source?.subagent?.other === 'guardian';
-    if (state.internal) return;
     s.nativeId = value.id || value.session_id || s.nativeId;
     s.id = `codex:${s.nativeId}`;
     s.createdAt = time(value.timestamp ?? row.timestamp, s.createdAt);
@@ -270,13 +268,31 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
     const spawned = value.source?.subagent?.thread_spawn;
     const parent = value.parent_thread_id || spawned?.parent_thread_id;
     // A user-created fork can also have a parent. Only native spawn metadata makes it a subagent.
-    s.isSubagent = Boolean(value.thread_source === 'subagent' || value.source?.subagent);
+    s.isSubagent = Boolean(state.internal || value.thread_source === 'subagent' || value.source?.subagent);
     s.parentId = parent ? `codex:${parent}` : undefined;
     if (s.isSubagent && Number.isSafeInteger(value.subagent_history_start_ordinal) && value.subagent_history_start_ordinal >= 0) {
       state.historyStartOrdinal = value.subagent_history_start_ordinal;
     }
     s.agentName = value.agent_nickname || spawned?.agent_nickname || value.agent_path?.split('/').pop();
     if (s.agentName) s.title = s.agentName;
+  }
+  if (state.internal) {
+    // Guardians remain absent from user history, but retention needs their identity and terminal ordering.
+    const value = row.payload ?? {};
+    const terminal = row.type === 'event_msg' && ['task_complete', 'task_completed', 'turn_complete', 'turn_completed', 'turn_aborted', 'task_aborted', 'turn_interrupted', 'task_interrupted'].includes(value.type)
+      || row.type === 'response_item' && value.type === 'message' && value.role === 'assistant' && ['final', 'final_answer'].includes(value.phase);
+    const working = row.type === 'event_msg' && ['task_started', 'task_start', 'turn_started'].includes(value.type)
+      || row.type === 'response_item' && value.type === 'message' && value.role === 'user';
+    const failed = row.type === 'event_msg' && value.type === 'error' && !value.will_retry && !value.willRetry;
+    if (terminal || failed || working) {
+      state.activity = working ? 'working' : failed ? 'error' : 'completed';
+      state.activityAt = validTime(row.timestamp) ? at : 0;
+      if (validTime(row.timestamp)) {
+        s.updatedAt = timestamp;
+        if (working) s.lastRequestAt = timestamp; else s.lastCompletedAt = timestamp;
+      }
+    }
+    return;
   }
   // Current Codex rewrites copied timestamps. Its explicit persisted-record boundary
   // is the source of truth for the child's own messages, events and history cursor.
