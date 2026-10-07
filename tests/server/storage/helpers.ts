@@ -1,50 +1,94 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { lstat, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { TestContext } from 'node:test';
-import { storageBundleFromArtifact, type CapturedStorageBundle, type StorageBundleCapture } from '../../../server/storage/bundle.js';
-import { openStorage, type StorageClient, type StorageClientOptions } from '../../../server/storage/client.js';
-import { StorageCommandError } from '../../../server/storage/contract.js';
+import { build } from 'esbuild';
+import type { CapturedStorageBundle, StorageBuildContext } from '../../../server/storage/bundle.js';
+import type { StorageClient, StorageClientOptions } from '../../../server/storage/client.js';
+import type { StorageBuildManifest } from '../../../server/storage/contract.js';
 import { storageManifest } from '../../../server/storage/schema.js';
-import { bundleStorageThread } from '../../../server/storage/thread-bundle.mjs';
+import { buildIdentityModule, buildIdentityPlugin, bundleStorageThread, STORAGE_THREAD_ENTRY, type StorageThreadArtifact } from '../../../server/storage/thread-bundle.mjs';
 import { fixtureSchema, fixtureSchemaA, plainSchema } from './fixtures/fixture-domain.js';
+import type * as Parent from './fixtures/parent.js';
 
-export const FIXTURE_ENTRY = fileURLToPath(new URL('./fixtures/fixture-thread.ts', import.meta.url));
+const here = (path: string) => fileURLToPath(new URL(path, import.meta.url));
+export const FIXTURE_ENTRY = here('./fixtures/fixture-thread.ts');
 /** Release A of the fixture domain (no cutover), with the same tables and contracts. */
-export const FIXTURE_A_ENTRY = fileURLToPath(new URL('./fixtures/fixture-thread-a.ts', import.meta.url));
+export const FIXTURE_A_ENTRY = here('./fixtures/fixture-thread-a.ts');
 export const fixtureManifest = storageManifest([fixtureSchema, plainSchema]);
 export const fixtureManifestA = storageManifest([fixtureSchemaA, plainSchema]);
+
+const FAULTS = ['protocol', 'app-version', 'forged-manifest', 'source-hash', 'no-sqlite', 'exit-on-check', 'exit-on-open', 'change-on-check', 'change-exit-on-check', 'stall-on-check', 'swap-on-open'] as const;
+export type FaultThread = typeof FAULTS[number];
+/** Every thread source the fixture build trusts, each with the contract its thread must declare. */
+const SOURCES: Record<'fixture' | 'fixture-a' | 'production' | FaultThread, [entry: string, manifest: StorageBuildManifest]> = {
+  fixture: [FIXTURE_ENTRY, fixtureManifest],
+  'fixture-a': [FIXTURE_A_ENTRY, fixtureManifestA],
+  production: [STORAGE_THREAD_ENTRY, storageManifest()],
+  ...Object.fromEntries(FAULTS.map(name => [name, [here(`./fixtures/faults/${name}.ts`), fixtureManifest]])) as Record<FaultThread, [string, StorageBuildManifest]>,
+};
+export type ThreadSource = keyof typeof SOURCES;
+
+/**
+ * The fixture parent: server/storage compiled (bundled) with build-identity.ts replaced by the fixed sources above,
+ * as a server build replaces it with its one source. It is a module instance of its own: the storage this test process
+ * imports from server/ directly still trusts nothing but a canonical capture. Built once per test process.
+ */
+async function fixtureParent(): Promise<{ storage: typeof Parent; artifacts: Record<ThreadSource, StorageThreadArtifact>; file: string }> {
+  const artifacts = Object.fromEntries(await Promise.all(Object.entries(SOURCES).map(async ([name, [entry]]) => [name, await bundleStorageThread(entry)]))) as Record<ThreadSource, StorageThreadArtifact>;
+  const contexts = (Object.keys(SOURCES) as ThreadSource[]).map(name => ({ sourceHash: artifacts[name].sourceHash, manifest: SOURCES[name][1] }));
+  const out = mkdtempSync(join(tmpdir(), 'tower-storage-parent-'));
+  process.once('exit', () => rmSync(out, { recursive: true, force: true }));
+  const outfile = join(out, 'parent.mjs');
+  await build({
+    entryPoints: [here('./fixtures/parent.ts')], outfile, bundle: true, platform: 'node', format: 'esm', target: 'node22', logLevel: 'silent',
+    plugins: [buildIdentityPlugin(buildIdentityModule({ contexts }))],
+  });
+  return { storage: await import(pathToFileURL(outfile).href) as typeof Parent, artifacts, file: outfile };
+}
+const parent = await fixtureParent();
+/** The storage of the fixture build: tests take every storage value (functions, classes, storageFs) from here. */
+export const storage = parent.storage;
+/** The compiled fixture parent, for a child process that must run as the same build. */
+export const fixtureParentFile = parent.file;
+export const artifactOf = (source: ThreadSource): StorageThreadArtifact => parent.artifacts[source];
+
+/** A thread source of the fixture build, read through its artifact parser like a build reads its own. */
+export function threadBundle(source: ThreadSource): CapturedStorageBundle {
+  const bundle = storage.storageBundleFromArtifact(JSON.stringify(artifactOf(source)), 'artifact');
+  assert.ok(bundle.ok, `${source}: ${!bundle.ok && bundle.failure.message}`);
+  return bundle;
+}
+/** The fixture thread (fixture and plain domains). */
+export const fixtureBundle = async () => threadBundle('fixture');
+export const fixtureBundleA = async () => threadBundle('fixture-a');
+/** The trusted context of a fixture build source, which recovery steps take. */
+export function contextOf(source: ThreadSource = 'fixture'): StorageBuildContext {
+  const context = storage.storageBuildContext(threadBundle(source));
+  assert.ok(context.ok);
+  return context;
+}
 
 /** The database files in a state directory. */
 export const DATABASE = 'state.sqlite';
 export const databasePath = (dir: string, suffix: '' | '-wal' | '-shm' = '') => join(dir, `${DATABASE}${suffix}`);
-
-const captureEntry = (entry: string) => bundleStorageThread(entry).then(artifact => storageBundleFromArtifact(JSON.stringify(artifact), 'artifact') as CapturedStorageBundle);
-let fixture: Promise<CapturedStorageBundle> | undefined;
-let fixtureA: Promise<CapturedStorageBundle> | undefined;
-/** The fixture thread (fixture and plain domains), bundled once per test process like a build would. */
-export function fixtureBundle(): Promise<CapturedStorageBundle> {
-  return fixture ??= captureEntry(FIXTURE_ENTRY);
-}
-export function fixtureBundleA(): Promise<CapturedStorageBundle> {
-  return fixtureA ??= captureEntry(FIXTURE_A_ENTRY);
-}
 
 /** A bundle text whose first line states the hash of the rest, as thread-bundle.mjs writes it. */
 export function statedSource(body: string): { source: string; sourceHash: string } {
   const sourceHash = createHash('sha256').update(body).digest('hex');
   return { source: `var __TOWER_STORAGE_SOURCE_HASH__ = ${JSON.stringify(sourceHash)};\n${body}`, sourceHash };
 }
-export const bundleBody = (bundle: CapturedStorageBundle) => bundle.source.slice(bundle.source.indexOf('\n') + 1);
-/** A bundle made from changed thread code, consistent with its own hash, as a mixed-up build would produce. */
-export function alteredBundle(bundle: CapturedStorageBundle, change: (body: string) => string): StorageBundleCapture {
+export const bundleBody = (bundle: { source: string }) => bundle.source.slice(bundle.source.indexOf('\n') + 1);
+/** The artifact of changed thread code, consistent with its own hash, as a mixed-up or foreign build would produce. No build trusts it. */
+export function rehashedArtifact(bundle: { source: string }, change: (body: string) => string): string {
   const body = change(bundleBody(bundle));
   if (body === bundleBody(bundle)) throw new Error('The change did not alter the bundle.');
-  return storageBundleFromArtifact(JSON.stringify({ format: 'tower-storage-thread-bundle/2', ...statedSource(body) }), 'artifact');
+  return JSON.stringify({ format: 'tower-storage-thread-bundle/2', ...statedSource(body) });
 }
 
 /** A fresh owner-only state directory, removed after the test. */
@@ -54,9 +98,9 @@ export async function stateDir(t: TestContext): Promise<string> {
   return dir;
 }
 
-/** Opens a fixture-thread client and closes it after the test. */
+/** Opens a client of the fixture build (the fixture thread unless `bundle` says otherwise) and closes it after the test. */
 export async function openFixture(t: TestContext, dir: string, options: Partial<StorageClientOptions> = {}): Promise<StorageClient> {
-  const client = await openStorage({ stateDir: dir, bundle: await fixtureBundle(), manifest: fixtureManifest, ...options });
+  const client = await storage.openStorage({ stateDir: dir, bundle: threadBundle('fixture'), ...options });
   t.after(() => client.close());
   return client;
 }
@@ -78,10 +122,10 @@ export async function filesUnder(dir: string): Promise<Record<string, FileFacts 
 
 export const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-/** Asserts a StorageCommandError with these fields. */
+/** Asserts a StorageCommandError of the fixture build with these fields. */
 export const rejectsWith = (promise: Promise<unknown>, expected: Partial<Record<'phase' | 'code' | 'disposition' | 'retryable' | 'commandId', unknown>>) =>
   assert.rejects(promise, (error: unknown) => {
-    assert.ok(error instanceof StorageCommandError, String(error));
+    assert.ok(error instanceof storage.StorageCommandError, String(error));
     for (const [key, value] of Object.entries(expected)) assert.equal((error as unknown as Record<string, unknown>)[key], value, `${key}: ${(error as Error).message}`);
     return true;
   });

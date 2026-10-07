@@ -3,10 +3,11 @@ import { isDeepStrictEqual } from 'node:util';
 import { constants } from 'node:fs';
 import { open, rm, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { isStorageBuildContext, type StorageBuildContext } from './bundle.js';
 import type { AppliedMigration, DomainAuthority, RecoveryHoldSummary, SnapshotThreadResult, StorageBuildIdentity, StorageBuildManifest, StorageErrorCode } from './contract.js';
 import { CORE_SCOPE } from './schema.js';
 import {
-  pathError, privateDirectory, privateFile, sameFile, sameGeneration, STORAGE_DATABASE_NAME, STORAGE_FILE_NAMES, storageFs, storageLayout, writePrivateDocument,
+  generationOf, pathError, privateDirectory, privateFile, proveDurable, sameFile, sameGeneration, STORAGE_DATABASE_NAME, STORAGE_FILE_NAMES, storageFs, storageLayout, writePrivateDocument,
   type FileGeneration, type StorageFileName, type StorageLayout,
 } from './paths.js';
 
@@ -19,7 +20,15 @@ import {
  * cancellations, revoked permissions) are not in it, so every scope stays held until the owner reconciles it by name
  * with independent evidence. The barrier is written and synced before the live files move. It holds every scope it
  * does not list as well, and a reconciliation names scopes this build supports, never "all", so an unknown or later
- * domain stays held. A barrier this build cannot read whole holds everything.
+ * domain stays held. A barrier this build cannot read whole holds everything, and so does one whose evidence names a
+ * scope or schema version beyond this build's own contract.
+ *
+ * A document that is there is not yet one that survives a crash: a publication whose rename landed and whose folder
+ * sync failed is visible. Nothing relies on an identity or barrier (no claim, no move, no open, no released gate)
+ * until its file and every folder link above it are proven durable again (proveDurable).
+ *
+ * Every step that writes here (record, activate, reconcile, an open that names the storage) runs under the worker's
+ * runtime lock, the one writer of the state directory; nothing here takes a lock of its own.
  */
 
 export class StorageRecoveryError extends Error {
@@ -33,14 +42,14 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const STORAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const newId = () => `${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')}-${randomBytes(6).toString('hex')}`;
 
-/** Reads an owner-only file without following a link or changing it. */
-async function readOwnerFile(path: string, maxBytes: number): Promise<Buffer | undefined> {
+/** Reads an owner-only file without following a link or changing it, with the generation it was read at. */
+async function readOwnerFile(path: string, maxBytes: number): Promise<{ bytes: Buffer; generation: FileGeneration } | undefined> {
   if (!(await privateFile(path))) return undefined;
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const info = await file.stat();
     if (info.size > maxBytes) throw new StorageRecoveryError('recovery-invalid', `${path} is too large.`);
-    return await file.readFile();
+    return { bytes: await file.readFile(), generation: generationOf(info) };
   } finally { await file.close(); }
 }
 async function fileSha256(path: string): Promise<string> {
@@ -88,9 +97,9 @@ const identityPath = (layout: StorageLayout) => join(layout.recoveryDir, 'identi
 export async function readStorageIdentity(layout: StorageLayout): Promise<StorageIdentityRead> {
   try {
     if (!(await privateDirectory(layout.recoveryDir, false))) return { state: 'absent' };
-    const bytes = await readOwnerFile(identityPath(layout), 64 * 1024);
-    if (!bytes) return { state: 'absent' };
-    const value: unknown = JSON.parse(bytes.toString('utf8'));
+    const read = await readOwnerFile(identityPath(layout), 64 * 1024);
+    if (!read) return { state: 'absent' };
+    const value: unknown = JSON.parse(read.bytes.toString('utf8'));
     if (!hasKeys(value, ['format', 'version', 'storageId', 'state', 'recordedAt']) || value.format !== 'tower-storage-identity' || value.version !== 1
       || !STORAGE_ID.test(String(value.storageId)) || (value.state !== 'creating' && value.state !== 'created') || !isTime(value.recordedAt)) {
       return { state: 'invalid', reason: 'The storage identity has an unknown format.' };
@@ -98,12 +107,20 @@ export async function readStorageIdentity(layout: StorageLayout): Promise<Storag
     return { state: 'present', identity: value as unknown as StorageIdentityRecord };
   } catch (error) { return { state: 'invalid', reason: error instanceof Error ? error.message : String(error) }; }
 }
-/** Records the identity, synced with its folder (and the folder with the state directory when it is new). Throws a StoragePathError. */
+/** Records the identity, synced with its folder and the folder with the state directory. Throws a StoragePathError. */
 export async function recordStorageIdentity(layout: StorageLayout, storageId: string, state: StorageIdentityRecord['state']): Promise<void> {
   if (!STORAGE_ID.test(storageId)) throw new StorageRecoveryError('invalid-command', 'The storage ID is invalid.');
   await privateDirectory(layout.recoveryDir, true);
   const record: StorageIdentityRecord = { format: 'tower-storage-identity', version: 1, storageId, state, recordedAt: new Date().toISOString() };
   await writeJson(identityPath(layout), record);
+}
+/**
+ * Proves the identity found beside the database durable before anything relies on it (a creation resumed, a claim):
+ * the identity file, the recovery folder, and the state directory, which also holds the database's own link. An
+ * earlier record that failed after its rename left a visible identity that may not survive a crash. Throws a StoragePathError.
+ */
+export async function proveStorageIdentity(layout: StorageLayout): Promise<void> {
+  await proveDurable([identityPath(layout), layout.recoveryDir, layout.stateDir]);
 }
 
 // ---- Snapshots ----
@@ -165,9 +182,9 @@ export async function readSnapshot(stateDir: string, id: string): Promise<Snapsh
   const layout = await storageLayout(stateDir);
   const dir = join(layout.snapshotsDir, id);
   if (!(await privateDirectory(layout.snapshotsDir, false)) || !(await privateDirectory(dir, false))) throw new StorageRecoveryError('snapshot-invalid', `There is no snapshot ${id}.`);
-  const bytes = await readOwnerFile(join(dir, 'manifest.json'), MAX_JSON_BYTES);
-  if (!bytes) throw new StorageRecoveryError('snapshot-invalid', `Snapshot ${id} has no manifest.`);
-  const manifest = JSON.parse(bytes.toString('utf8')) as SnapshotManifest;
+  const read = await readOwnerFile(join(dir, 'manifest.json'), MAX_JSON_BYTES);
+  if (!read) throw new StorageRecoveryError('snapshot-invalid', `Snapshot ${id} has no manifest.`);
+  const manifest = JSON.parse(read.bytes.toString('utf8')) as SnapshotManifest;
   if (manifest?.format !== 'tower-storage-snapshot' || manifest.version !== 1 || manifest.id !== id || manifest.file?.name !== 'snapshot.db') throw new StorageRecoveryError('snapshot-invalid', `Snapshot ${id} has an unknown manifest.`);
   const copy = join(dir, 'snapshot.db');
   const info = await privateFile(copy);
@@ -205,7 +222,9 @@ export interface RecoveryBarrier {
   /** Earlier barriers this one replaced, newest first. */
   previous: string[];
 }
-export type RecoveryBarrierRead = { state: 'absent' } | { state: 'present'; barrier: RecoveryBarrier } | { state: 'invalid'; reason: string };
+/** `file`: the generation barrier.json was read at, so a proof is known to cover the document that was read. */
+export type RecoveryBarrierRead = { state: 'absent' } | { state: 'present'; barrier: RecoveryBarrier; file: FileGeneration } | { state: 'invalid'; reason: string };
+type PresentBarrier = Extract<RecoveryBarrierRead, { state: 'present' }>;
 
 const barrierPath = (layout: StorageLayout) => join(layout.recoveryDir, 'barrier.json');
 
@@ -255,42 +274,106 @@ export async function readRecoveryBarrier(stateDir: string | StorageLayout): Pro
   try {
     const layout = typeof stateDir === 'string' ? await storageLayout(stateDir) : stateDir;
     if (!(await privateDirectory(layout.recoveryDir, false))) return { state: 'absent' };
-    const bytes = await readOwnerFile(barrierPath(layout), MAX_JSON_BYTES);
-    if (!bytes) return { state: 'absent' };
-    const value: unknown = JSON.parse(bytes.toString('utf8'));
+    const read = await readOwnerFile(barrierPath(layout), MAX_JSON_BYTES);
+    if (!read) return { state: 'absent' };
+    const value: unknown = JSON.parse(read.bytes.toString('utf8'));
     const problem = barrierProblem(value);
     if (problem) return { state: 'invalid', reason: `The recovery barrier cannot be used: ${problem}.` };
-    return { state: 'present', barrier: value as RecoveryBarrier };
+    return { state: 'present', barrier: value as RecoveryBarrier, file: read.generation };
   } catch (error) { return { state: 'invalid', reason: error instanceof Error ? error.message : String(error) }; }
 }
 
-/** Whether work of `scope` (`core` or a domain) must stay held. Absence of a barrier is the only state without holds. */
-export function recoveryHold(read: RecoveryBarrierRead, scope: string): { held: boolean; reason?: string } {
+/**
+ * Proves a barrier read from disk durable before anything relies on it: syncs, deepest first, its preserved folder
+ * and its own folder (when they exist), barrier.json, the recovery folder and the state directory. Deepest first, an
+ * original an interrupted activation already moved is durable in its new folder before the state directory forgets
+ * its old link. Throws when a sync fails (nothing counts the barrier then) or when the file is no longer the one read.
+ */
+export async function proveRecoveryBarrier(layout: StorageLayout, read: PresentBarrier): Promise<void> {
+  const own = join(layout.recoveryDir, read.barrier.id);
+  const preserved = join(layout.recoveryDir, read.barrier.source.preservedDir);
+  const chain: string[] = [];
+  if (await privateDirectory(preserved, false)) chain.push(preserved);
+  if (await privateDirectory(own, false)) chain.push(own);
+  await proveDurable([...chain, barrierPath(layout), layout.recoveryDir, layout.stateDir]);
+  const now = await privateFile(barrierPath(layout));
+  if (!now || !sameGeneration(now, read.file)) throw new StorageRecoveryError('recovery-in-progress', 'The recovery barrier changed while it was checked; read it again.', true);
+}
+
+/** The scopes a build supports: core and its domains, each with the schema version it knows. */
+const supportedVersions = (manifest: StorageBuildManifest) => new Map<string, number>([[manifest.core.scope, manifest.core.schemaVersion], ...manifest.domains.map(domain => [domain.scope, domain.schemaVersion] as const)]);
+
+/**
+ * What of a barrier's evidence `manifest` does not cover: a scope it does not support or a schema version above its
+ * own, in the snapshot's or the known live database's schema and authority rows and the scopes derived from them.
+ * Such a barrier may record facts this build cannot judge, so it holds every scope here, reconciled ones included.
+ * Builds are not compared: an older or newer build that covers all of it judges it as well. A reconciliation naming a
+ * scope this build does not support is not evidence; it is ignored, never a reason to hold.
+ */
+function beyondBuild(barrier: RecoveryBarrier, manifest: StorageBuildManifest): string[] {
+  const versions = supportedVersions(manifest);
+  const beyond = new Set<string>();
+  const { known } = barrier.source;
+  for (const row of [...barrier.snapshot.schema, ...(known?.schema ?? [])]) {
+    const version = versions.get(row.scope);
+    if (version === undefined) beyond.add(row.scope);
+    else if (row.version > version) beyond.add(`${row.scope} schema ${row.version}`);
+  }
+  for (const row of [...barrier.snapshot.authority, ...(known?.authority ?? [])]) if (!versions.has(row.domain)) beyond.add(row.domain);
+  for (const entry of barrier.scopes) if (!versions.has(entry.scope)) beyond.add(entry.scope);
+  return [...beyond].sort();
+}
+
+const untrustedContext = 'A recovery barrier is judged only against a storage contract this build trusts (storageBuildContext).';
+
+/**
+ * Whether work of `scope` (`core` or a domain) must stay held, judged by this build's trusted contract. Absence of a
+ * barrier is the only state without holds. This reads the content only: StorageClient.gate also proves the barrier
+ * durable before it opens.
+ */
+export function recoveryHold(read: RecoveryBarrierRead, scope: string, context: StorageBuildContext | undefined): { held: boolean; reason?: string } {
   if (read.state === 'absent') return { held: false };
   if (read.state === 'invalid') return { held: true, reason: read.reason };
+  if (!isStorageBuildContext(context)) return { held: true, reason: untrustedContext };
   const { barrier } = read;
+  const beyond = beyondBuild(barrier, context.manifest);
+  if (beyond.length) return { held: true, reason: `Snapshot recovery ${barrier.id} holds every scope: this build does not understand its evidence of ${beyond.join(', ')}.` };
   if (barrier.state !== 'activated') return { held: true, reason: `Snapshot recovery ${barrier.id} has not finished.` };
-  if (barrier.reconciled.some(entry => entry.scope === scope)) return { held: false };
+  if (supportedVersions(context.manifest).has(scope) && barrier.reconciled.some(entry => entry.scope === scope)) return { held: false };
   return { held: true, reason: `Snapshot recovery ${barrier.id} holds ${scope} until the owner reconciles it by name.` };
 }
 
-export function recoverySummary(read: RecoveryBarrierRead): RecoveryHoldSummary {
+/** `reconciled` lists the releases that take effect in this build; `unreconciled` the barrier's own scopes still held. */
+export function recoverySummary(read: RecoveryBarrierRead, context: StorageBuildContext | undefined): RecoveryHoldSummary {
   if (read.state === 'absent') return { state: 'clear' };
   if (read.state === 'invalid') return { state: 'held', reason: read.reason, reconciled: [], unreconciled: [] };
   const { barrier } = read;
-  const reconciled = [...new Set(barrier.reconciled.map(entry => entry.scope))].sort();
-  const unreconciled = barrier.scopes.map(entry => entry.scope).filter(scope => !reconciled.includes(scope));
+  const all = barrier.scopes.map(entry => entry.scope);
+  if (!isStorageBuildContext(context)) return { state: 'held', barrierId: barrier.id, reason: untrustedContext, reconciled: [], unreconciled: all };
+  const beyond = beyondBuild(barrier, context.manifest);
+  if (beyond.length) return { state: 'held', barrierId: barrier.id, reason: `Snapshot recovery holds every scope: this build does not understand its evidence of ${beyond.join(', ')}; reconciliations do not apply.`, reconciled: [], unreconciled: all };
+  const supported = supportedVersions(context.manifest);
+  const reconciled = [...new Set(barrier.reconciled.map(entry => entry.scope).filter(scope => supported.has(scope)))].sort();
+  const unreconciled = all.filter(scope => !reconciled.includes(scope));
   const reason = barrier.state !== 'activated' ? 'Snapshot recovery has not finished.'
     : `Snapshot recovery holds every scope not reconciled by name${unreconciled.length ? `, including ${unreconciled.join(', ')}` : ''}.`;
   return { state: 'held', barrierId: barrier.id, reason, reconciled, unreconciled };
 }
 
+/** What an owner's recovery step is asked, and the trusted build it runs as. */
+export interface RecoveryInput { snapshotId: string; reason: string; context: StorageBuildContext; known?: KnownStorageEvidence }
+const requireContext = (context: StorageBuildContext) => {
+  if (!isStorageBuildContext(context)) throw new StorageRecoveryError('bundle-untrusted', untrustedContext);
+};
+
 /**
- * Step one of adopting a snapshot: verifies it and records (synced) the barrier with the live files' generations.
- * Nothing moves yet. A barrier already recorded for the same snapshot is answered as is, so a failed adoption retries.
- * The storage must be closed under the runtime lock: no thread of this or another worker may hold it.
+ * Step one of adopting a snapshot: verifies it and records (synced) the barrier with the live files' generations,
+ * recorded by the trusted build `context`. Nothing moves yet. A barrier already recorded for the same snapshot is
+ * answered as is once proven durable, so a failed adoption retries. The storage must be closed under the runtime lock:
+ * no thread of this or another worker may hold it.
  */
-export async function recordRecoveryBarrier(stateDir: string, input: { snapshotId: string; reason: string; build: StorageBuildIdentity; known?: KnownStorageEvidence }): Promise<RecoveryBarrier> {
+export async function recordRecoveryBarrier(stateDir: string, input: RecoveryInput): Promise<RecoveryBarrier> {
+  requireContext(input.context);
   const layout = await storageLayout(stateDir);
   const snapshot = await readSnapshot(stateDir, input.snapshotId);
   const identity = await readStorageIdentity(layout);
@@ -307,7 +390,10 @@ export async function recordRecoveryBarrier(stateDir: string, input: { snapshotI
     const preserved = join(layout.recoveryDir, existing.barrier.source.preservedDir);
     for (const name of STORAGE_FILE_NAMES) {
       // best-effort: a preserved file that cannot be checked counts as moved, so the recorded sources stay.
-      if (await privateFile(join(preserved, name)).catch(() => true)) return existing.barrier;
+      if (await privateFile(join(preserved, name)).catch(() => true)) {
+        await proveRecoveryBarrier(layout, existing);
+        return existing.barrier;
+      }
     }
     ({ id, previous } = existing.barrier);
   }
@@ -323,7 +409,7 @@ export async function recordRecoveryBarrier(stateDir: string, input: { snapshotI
     schema: snapshot.schema.map(({ scope, version }) => ({ scope, version })), authority: snapshot.authority.map(({ domain, authority, generation }) => ({ domain, authority, generation })),
   };
   const barrier: RecoveryBarrier = {
-    format: 'tower-storage-recovery-barrier', version: 1, id, state: 'recorded', reason: input.reason.slice(0, 2000), recordedAt: new Date().toISOString(), recordedBy: input.build,
+    format: 'tower-storage-recovery-barrier', version: 1, id, state: 'recorded', reason: input.reason.slice(0, 2000), recordedAt: new Date().toISOString(), recordedBy: { ...input.context.identity },
     snapshot: snapshotFacts,
     source: { files, known: input.known ?? null, preservedDir: `${id}/source` },
     scopes: affectedScopes(snapshotFacts, input.known ?? null),
@@ -350,7 +436,11 @@ async function moveDurably(from: string, fromDir: string, to: string, toDir: str
  * snapshot copy as the database, then marks the barrier activated. Every step can be repeated after a crash: each
  * recorded file is found either live as recorded or preserved as recorded (generation and sha256), and a database
  * already in place counts as installed only when every original is preserved, it is the snapshot, and no sidecar is
- * live. Each new folder is linked durably before anything moves into it.
+ * live. Nothing is taken as durable for being there: before the first move of every attempt the recorded barrier and
+ * whatever an earlier attempt linked (an original it moved, the database it installed) are proven durable, deepest
+ * first; each folder is synced into its parent before anything moves into it; each move and the install sync as they
+ * go. So the barrier says activated only over durable links, and an activated barrier is answered only once it is
+ * proven durable itself.
  */
 export async function activateRecoveryBarrier(stateDir: string, barrierId: string): Promise<RecoveryBarrier> {
   const layout = await storageLayout(stateDir);
@@ -358,7 +448,10 @@ export async function activateRecoveryBarrier(stateDir: string, barrierId: strin
   if (read.state === 'invalid') throw new StorageRecoveryError('recovery-invalid', read.reason);
   if (read.state !== 'present' || read.barrier.id !== barrierId) throw new StorageRecoveryError('recovery-invalid', `There is no recovery barrier ${barrierId}.`);
   const barrier = read.barrier;
-  if (barrier.state === 'activated') return barrier;
+  if (barrier.state === 'activated') {
+    await proveRecoveryBarrier(layout, read);
+    return barrier;
+  }
   const snapshot = await readSnapshot(stateDir, barrier.snapshot.id);
   if (snapshot.file.sha256 !== barrier.snapshot.sha256) throw new StorageRecoveryError('snapshot-invalid', 'The snapshot changed after the barrier was recorded.');
   const preserved = join(layout.recoveryDir, barrier.source.preservedDir);
@@ -399,7 +492,9 @@ export async function activateRecoveryBarrier(stateDir: string, barrierId: strin
   };
   if (databaseInPlace) await inPlace();
 
-  await privateDirectory(join(layout.recoveryDir, barrier.id), true);
+  await proveRecoveryBarrier(layout, read);
+  const own = join(layout.recoveryDir, barrier.id);
+  await privateDirectory(own, true);
   await privateDirectory(preserved, true);
   for (const move of moves) {
     const live = await privateFile(move.livePath);
@@ -425,21 +520,24 @@ export async function activateRecoveryBarrier(stateDir: string, barrierId: strin
 }
 
 /** Records the barrier, then activates it. The result is a held recovery, never a finished one. */
-export async function adoptSnapshot(stateDir: string, input: { snapshotId: string; reason: string; build: StorageBuildIdentity; known?: KnownStorageEvidence }): Promise<RecoveryBarrier> {
+export async function adoptSnapshot(stateDir: string, input: RecoveryInput): Promise<RecoveryBarrier> {
   const barrier = await recordRecoveryBarrier(stateDir, input);
   return activateRecoveryBarrier(stateDir, barrier.id);
 }
 
 /**
- * The owner's reconciliation of the named scopes after checking independent evidence. Each scope must be one this
- * build supports (`core` or a domain of `manifest`); there is no "all", so a scope this build does not know, or a later
- * domain, stays held until a build that supports it reconciles it by name. It releases the hold on those scopes only;
- * it grants nothing and replays nothing. Owner-only callers.
+ * The owner's reconciliation of the named scopes after checking independent evidence, made by the trusted build
+ * `context`. Each scope must be one that build supports (`core` or one of its domains); there is no "all", so a scope
+ * it does not know, or a later domain, stays held until a build that supports it reconciles it by name. A barrier
+ * whose evidence that build does not understand is refused whole, and nothing is written. It releases the hold on the
+ * named scopes only; it grants nothing and replays nothing. Owner-only callers, under the runtime lock.
  */
-export async function reconcileRecovery(stateDir: string, input: { barrierId: string; scopes: string[]; by: string; evidence: string; manifest: StorageBuildManifest }): Promise<RecoveryBarrier> {
+export async function reconcileRecovery(stateDir: string, input: { barrierId: string; scopes: string[]; by: string; evidence: string; context: StorageBuildContext }): Promise<RecoveryBarrier> {
+  requireContext(input.context);
   if (!input.scopes.length || !distinct(input.scopes) || !input.scopes.every(scope => SCOPE.test(scope))) throw new StorageRecoveryError('invalid-command', 'Name each scope to reconcile once; there is no "all".');
   if (!isText(input.by, 200) || !isText(input.evidence, 4096)) throw new StorageRecoveryError('invalid-command', 'A reconciliation needs who made it and its evidence (at most 4096 characters).');
-  const supported = new Set([CORE_SCOPE, ...input.manifest.domains.map(domain => domain.scope)]);
+  const { manifest } = input.context;
+  const supported = supportedVersions(manifest);
   const unknown = input.scopes.filter(scope => !supported.has(scope));
   if (unknown.length) throw new StorageRecoveryError('unknown-scope', `This build does not support ${unknown.join(', ')}; such a scope stays held.`);
   const layout = await storageLayout(stateDir);
@@ -447,9 +545,13 @@ export async function reconcileRecovery(stateDir: string, input: { barrierId: st
   if (read.state === 'invalid') throw new StorageRecoveryError('recovery-invalid', read.reason);
   if (read.state !== 'present' || read.barrier.id !== input.barrierId) throw new StorageRecoveryError('recovery-invalid', `There is no recovery barrier ${input.barrierId}.`);
   if (read.barrier.state !== 'activated') throw new StorageRecoveryError('recovery-in-progress', 'The snapshot is not active yet; finish or retry the adoption first.');
+  const beyond = beyondBuild(read.barrier, manifest);
+  if (beyond.length) throw new StorageRecoveryError('unknown-scope', `This build does not understand the barrier's evidence of ${beyond.join(', ')}; nothing is reconciled until a build that does reconciles it.`);
   const at = new Date().toISOString();
-  const entries = input.scopes.map(scope => ({ scope, at, by: input.by, evidence: input.evidence, manifestDigest: input.manifest.digest }));
+  const entries = input.scopes.map(scope => ({ scope, at, by: input.by, evidence: input.evidence, manifestDigest: manifest.digest }));
   const reconciled: RecoveryBarrier = { ...read.barrier, reconciled: [...read.barrier.reconciled, ...entries] };
+  // The recovery folder's own link, synced into the state directory, then the document with its folder.
+  await privateDirectory(layout.recoveryDir, true);
   await writeJson(barrierPath(layout), reconciled);
   return reconciled;
 }

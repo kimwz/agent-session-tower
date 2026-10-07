@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { StorageCommandError, type StorageStatus } from '../../../server/storage/contract.js';
+import type { StorageCommandError, StorageStatus } from '../../../server/storage/contract.js';
 import { DatabaseSync } from 'node:sqlite';
-import { openStorage } from '../../../server/storage/client.js';
-import { databasePath, fixtureBundleA, fixtureManifest, fixtureManifestA, openFixture, sleep, stateDir } from './helpers.js';
+import { databasePath, fixtureBundleA, fixtureManifest, fixtureManifestA, openFixture, sleep, stateDir, storage } from './helpers.js';
 import { until } from '../../helpers/until.js';
 
+const { openStorage } = storage;
 const failsWith = (promise: Promise<unknown>, expected: Partial<StorageCommandError>) =>
   assert.rejects(promise, (error: unknown) => {
-    assert.ok(error instanceof StorageCommandError, String(error));
+    assert.ok(error instanceof storage.StorageCommandError, String(error));
     for (const [key, value] of Object.entries(expected)) assert.equal((error as unknown as Record<string, unknown>)[key], value, `${key}: ${(error as Error).message}`);
     return true;
   });
@@ -122,7 +122,7 @@ test('domain authority changes only through the owning domain\'s command, genera
 
 test('release A (same schema and reader/writer contract, no cutover) never imports, yet reads, writes and exports back what release B imported', async t => {
   const sha = (char: string) => char.repeat(64);
-  const a = (dir: string) => openStorage({ stateDir: dir, bundle: aBundle, manifest: fixtureManifestA });
+  const a = (dir: string) => openStorage({ stateDir: dir, bundle: aBundle });
   const aBundle = await fixtureBundleA();
   assert.notEqual(fixtureManifestA.digest, fixtureManifest.digest, 'A and B are different builds');
   assert.deepEqual(fixtureManifestA.domains.map(({ scope, schemaDigest, preparation }) => ({ scope, schemaDigest, preparation })), fixtureManifest.domains.map(({ scope, schemaDigest, preparation }) => ({ scope, schemaDigest, preparation })), 'with the same schema and contracts');

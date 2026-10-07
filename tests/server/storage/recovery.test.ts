@@ -4,17 +4,15 @@ import { appendFile, chmod, copyFile, mkdir, readFile, rename, stat, writeFile }
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { StorageCommandError } from '../../../server/storage/contract.js';
-import {
-  activateRecoveryBarrier, adoptSnapshot, readRecoveryBarrier, readSnapshot, reconcileRecovery, recordRecoveryBarrier, recoveryHold, recoverySummary, StorageRecoveryError,
-  type RecoveryBarrier,
-} from '../../../server/storage/recovery.js';
-import { storageManifest } from '../../../server/storage/schema.js';
-import { historyAfterSnapshot, recordedWithSidecars, sha } from './fixtures/history.js';
-import { DATABASE, databasePath, filesUnder, fixtureManifest, openFixture, stateDir } from './helpers.js';
+import type { StorageBuildContext } from '../../../server/storage/bundle.js';
+import type { KnownStorageEvidence, RecoveryBarrier } from '../../../server/storage/recovery.js';
+import { historyAfterSnapshot, recordedWithSidecars, sha, type History } from './fixtures/history.js';
+import { artifactOf, contextOf, DATABASE, databasePath, filesUnder, fixtureManifest, fixtureParentFile, openFixture, stateDir, storage } from './helpers.js';
 
+const {
+  activateRecoveryBarrier, adoptSnapshot, readRecoveryBarrier, readSnapshot, reconcileRecovery, recordRecoveryBarrier, recoveryHold, recoverySummary, StorageCommandError, StorageRecoveryError,
+} = storage;
 const run = promisify(execFile);
 const hash = (char: string) => char.repeat(64);
 const barrierFile = (dir: string) => join(dir, 'storage-recovery', 'barrier.json');
@@ -63,8 +61,9 @@ test('a snapshot holds the rows still in the WAL, is owner-only, checked and des
 });
 
 test('adopting a snapshot records the barrier first, preserves the originals, and holds every scope until the owner reconciles it by name', async t => {
-  const { dir, build, known, snapshotId, liveSha } = await historyAfterSnapshot(t);
-  const barrier = await adoptSnapshot(dir, { snapshotId, reason: 'fixture corruption', build, known });
+  const { dir, context, known, snapshotId, liveSha } = await historyAfterSnapshot(t);
+  const barrier = await adoptSnapshot(dir, { snapshotId, reason: 'fixture corruption', context, known });
+  assert.deepEqual(barrier.recordedBy, context.identity, 'recorded by the trusted build that ran it');
   assert.equal(barrier.state, 'activated');
   assert.equal(barrier.snapshot.id, snapshotId);
   assert.equal(barrier.source.preservedDir, `${barrier.id}/source`);
@@ -85,31 +84,34 @@ test('adopting a snapshot records the barrier first, preserves the originals, an
   assert.equal(await client.read('fixture', 'get', { key: 'late' }), null, 'the snapshot predates the late row');
   assert.deepEqual(await client.receipt('late-1'), { found: false }, 'an absent receipt is not evidence that the work never ran');
 
-  // A reboot: a new process reads the barrier from disk and still holds.
+  // A reboot: a new process of the same build reads the barrier from disk and still holds.
+  const artifact = join(await stateDir(t), 'fixture-artifact.json');
+  await writeFile(artifact, JSON.stringify(artifactOf('fixture')));
   const script = `
-    const { readRecoveryBarrier, recoveryHold } = await import(${JSON.stringify(fileURLToPath(new URL('../../../server/storage/recovery.ts', import.meta.url)))});
-    const read = await readRecoveryBarrier(${JSON.stringify(dir)});
-    console.log(JSON.stringify(['core', 'fixture', 'later-domain'].map(scope => recoveryHold(read, scope).held)));`;
-  const { stdout } = await run(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], { cwd: fileURLToPath(new URL('../../../', import.meta.url)) });
-  assert.deepEqual(JSON.parse(stdout.trim()), [true, true, true]);
+    const storage = await import(${JSON.stringify(fixtureParentFile)});
+    const context = storage.storageBuildContext(await storage.readStorageBundleArtifact(${JSON.stringify(artifact)}));
+    const read = await storage.readRecoveryBarrier(${JSON.stringify(dir)});
+    console.log(JSON.stringify([context.ok, ...['core', 'fixture', 'later-domain'].map(scope => storage.recoveryHold(read, scope, context).held)]));`;
+  const { stdout } = await run(process.execPath, ['--input-type=module', '-e', script]);
+  assert.deepEqual(JSON.parse(stdout.trim()), [true, true, true, true]);
 
   // Replacing the database again (here: with the preserved original) does not lift the barrier: it lives outside it.
   await client.close();
   await copyFile(join(dir, 'storage-recovery', barrier.source.preservedDir, DATABASE), databasePath(dir));
-  assert.equal(recoveryHold(await readRecoveryBarrier(dir), 'fixture').held, true);
+  assert.equal(recoveryHold(await readRecoveryBarrier(dir), 'fixture', context).held, true);
   await client.reopen();
   assert.equal((await client.gate('fixture')).open, false);
 
   // The owner reconciles named scopes this build supports, with evidence. There is no "all".
-  const reconcile = (scopes: string[], evidence = 'compared once-consumed IDs with the remote ledger') => reconcileRecovery(dir, { barrierId: barrier.id, scopes, by: 'owner', evidence, manifest: fixtureManifest });
+  const reconcile = (scopes: string[], evidence = 'compared once-consumed IDs with the remote ledger') => reconcileRecovery(dir, { barrierId: barrier.id, scopes, by: 'owner', evidence, context });
   await assert.rejects(reconcile(['fixture'], ' '), { code: 'invalid-command' });
-  await assert.rejects(reconcileRecovery(dir, { barrierId: 'other', scopes: ['fixture'], by: 'owner', evidence: 'x', manifest: fixtureManifest }), { code: 'recovery-invalid' });
+  await assert.rejects(reconcileRecovery(dir, { barrierId: 'other', scopes: ['fixture'], by: 'owner', evidence: 'x', context }), { code: 'recovery-invalid' });
   await assert.rejects(reconcile(['*']), { code: 'invalid-command' });
   await assert.rejects(reconcile([]), { code: 'invalid-command' });
   await assert.rejects(reconcile(['fixture', 'fixture']), { code: 'invalid-command' });
   const untouched = await readFile(barrierFile(dir), 'utf8');
   await assert.rejects(reconcile(['later-domain']), { code: 'unknown-scope' });
-  await assert.rejects(reconcileRecovery(dir, { barrierId: barrier.id, scopes: ['fixture'], by: 'owner', evidence: 'x', manifest: storageManifest() }), { code: 'unknown-scope' }, 'a build without the domain cannot release it');
+  await assert.rejects(reconcileRecovery(dir, { barrierId: barrier.id, scopes: ['fixture'], by: 'owner', evidence: 'x', context: contextOf('production') }), { code: 'unknown-scope' }, 'a build without the domain cannot release it');
   assert.equal(await readFile(barrierFile(dir), 'utf8'), untouched, 'refused reconciliations change nothing');
   await reconcile(['fixture']);
   await client.prepare({ allowMigration: false });
@@ -126,15 +128,15 @@ test('adopting a snapshot records the barrier first, preserves the originals, an
 });
 
 test('live files that changed after the barrier was recorded are not moved; the barrier keeps holding; a retry continues', async t => {
-  const { dir, build, known, snapshotId } = await historyAfterSnapshot(t);
-  const recorded = await recordRecoveryBarrier(dir, { snapshotId, reason: 'test', build, known });
+  const { dir, context, known, snapshotId } = await historyAfterSnapshot(t);
+  const recorded = await recordRecoveryBarrier(dir, { snapshotId, reason: 'test', context, known });
   assert.equal(recorded.state, 'recorded');
   // The worker opening the storage now is refused: activation has not finished.
   const before = await filesUnder(dir);
   const blocked = await openFixture(t, dir);
   assert.deepEqual([blocked.status().state, blocked.status().failure?.phase, blocked.status().failure?.code], ['unavailable', 'recovery', 'recovery-in-progress']);
   assert.deepEqual(await filesUnder(dir), before);
-  assert.equal(recoveryHold(await readRecoveryBarrier(dir), 'core').held, true);
+  assert.equal(recoveryHold(await readRecoveryBarrier(dir), 'core', context).held, true);
 
   // Someone writes to the live database between the steps.
   const live = new DatabaseSync(databasePath(dir));
@@ -148,8 +150,8 @@ test('live files that changed after the barrier was recorded are not moved; the 
   assert.ok(still.state === 'present' && still.barrier.state === 'recorded');
 
   // Another snapshot cannot start while this one is unfinished; the same one is re-recorded (nothing was moved yet).
-  await assert.rejects(recordRecoveryBarrier(dir, { snapshotId: '20000101T000000Z-000000000000', reason: 'x', build }), { code: 'snapshot-invalid' });
-  const again = await recordRecoveryBarrier(dir, { snapshotId, reason: 'retry', build, known });
+  await assert.rejects(recordRecoveryBarrier(dir, { snapshotId: '20000101T000000Z-000000000000', reason: 'x', context }), { code: 'snapshot-invalid' });
+  const again = await recordRecoveryBarrier(dir, { snapshotId, reason: 'retry', context, known });
   assert.equal(again.id, recorded.id);
   const activated = await activateRecoveryBarrier(dir, again.id);
   assert.equal(activated.state, 'activated');
@@ -157,8 +159,8 @@ test('live files that changed after the barrier was recorded are not moved; the 
 });
 
 test('a crash between moving the originals and installing the snapshot resumes from the preserved files', async t => {
-  const { dir, build, snapshotId, liveSha } = await historyAfterSnapshot(t);
-  const recorded = await recordRecoveryBarrier(dir, { snapshotId, reason: 'test', build });
+  const { dir, context, snapshotId, liveSha } = await historyAfterSnapshot(t);
+  const recorded = await recordRecoveryBarrier(dir, { snapshotId, reason: 'test', context });
   assert.ok(recorded.scopes.every(scope => scope.retreated), 'without evidence of the live database every scope counts as retreated');
   const preserved = join(dir, 'storage-recovery', recorded.source.preservedDir);
   await mkdir(preserved, { recursive: true, mode: 0o700 });
@@ -167,7 +169,7 @@ test('a crash between moving the originals and installing the snapshot resumes f
   assert.equal(activated.state, 'activated');
   assert.equal(sha(await readFile(join(preserved, DATABASE))), liveSha);
   // Once activated, recording again is a new adoption: a new barrier that names the one it replaces.
-  const next = await recordRecoveryBarrier(dir, { snapshotId, reason: 'second adoption', build });
+  const next = await recordRecoveryBarrier(dir, { snapshotId, reason: 'second adoption', context });
   assert.notEqual(next.id, recorded.id);
   assert.deepEqual(next.previous, [recorded.id]);
   assert.equal(next.state, 'recorded');
@@ -176,8 +178,8 @@ test('a crash between moving the originals and installing the snapshot resumes f
 test('activation counts the snapshot as installed only with every original preserved as recorded and no sidecar left live', async t => {
   // A database equal to the snapshot (new inode) where the originals went somewhere else: not installed by this recovery.
   {
-    const { dir, build, known, snapshotId } = await historyAfterSnapshot(t);
-    const barrier = await recordRecoveryBarrier(dir, { snapshotId, reason: 'lost originals', build, known });
+    const { dir, context, known, snapshotId } = await historyAfterSnapshot(t);
+    const barrier = await recordRecoveryBarrier(dir, { snapshotId, reason: 'lost originals', context, known });
     await rename(databasePath(dir), join(dir, 'lost.db'));
     await copyFile(join(dir, 'storage-snapshots', snapshotId, 'snapshot.db'), databasePath(dir));
     await chmod(databasePath(dir), 0o600);
@@ -222,8 +224,8 @@ test('activation counts the snapshot as installed only with every original prese
 });
 
 test('a barrier is used only when whole: anything incomplete, malformed, unknown or outside its folder holds everything and is left as found', async t => {
-  const { dir, build, known, snapshotId } = await historyAfterSnapshot(t);
-  const valid = await adoptSnapshot(dir, { snapshotId, reason: 'whole', build, known });
+  const { dir, context, known, snapshotId } = await historyAfterSnapshot(t);
+  const valid = await adoptSnapshot(dir, { snapshotId, reason: 'whole', context, known });
   const reconciledValid: RecoveryBarrier = { ...valid, reconciled: [{ scope: 'fixture', at: new Date().toISOString(), by: 'owner', evidence: 'checked', manifestDigest: fixtureManifest.digest }] };
   const without = (value: object, key: string) => Object.fromEntries(Object.entries(value).filter(([name]) => name !== key));
   const cases: [string, unknown][] = [
@@ -267,17 +269,17 @@ test('a barrier is used only when whole: anything incomplete, malformed, unknown
     await writeFile(barrierFile(dir), text);
     const read = await readRecoveryBarrier(dir);
     assert.equal(read.state, 'invalid', name);
-    for (const scope of ['core', 'fixture', 'plain', 'later-domain']) assert.equal(recoveryHold(read, scope).held, true, `${name}: ${scope}`);
-    assert.deepEqual(recoverySummary(read), { state: 'held', reason: (read as { reason: string }).reason, reconciled: [], unreconciled: [] }, name);
+    for (const scope of ['core', 'fixture', 'plain', 'later-domain']) assert.equal(recoveryHold(read, scope, context).held, true, `${name}: ${scope}`);
+    assert.deepEqual(recoverySummary(read, context), { state: 'held', reason: (read as { reason: string }).reason, reconciled: [], unreconciled: [] }, name);
     assert.equal((await client.gate('fixture')).open, false, name);
-    await assert.rejects(reconcileRecovery(dir, { barrierId: valid.id, scopes: ['fixture'], by: 'owner', evidence: 'x', manifest: fixtureManifest }), { code: 'recovery-invalid' }, name);
+    await assert.rejects(reconcileRecovery(dir, { barrierId: valid.id, scopes: ['fixture'], by: 'owner', evidence: 'x', context }), { code: 'recovery-invalid' }, name);
     await assert.rejects(activateRecoveryBarrier(dir, valid.id), { code: 'recovery-invalid' }, name);
-    await assert.rejects(recordRecoveryBarrier(dir, { snapshotId, reason: 'x', build }), { code: 'recovery-invalid' }, name);
+    await assert.rejects(recordRecoveryBarrier(dir, { snapshotId, reason: 'x', context }), { code: 'recovery-invalid' }, name);
     assert.equal(await readFile(barrierFile(dir), 'utf8'), text, `${name}: left as found`);
   }
   // Not JSON at all.
   await writeFile(barrierFile(dir), '{ not json');
-  assert.equal(recoveryHold(await readRecoveryBarrier(dir), 'core').held, true);
+  assert.equal(recoveryHold(await readRecoveryBarrier(dir), 'core', context).held, true);
   assert.equal(await readFile(barrierFile(dir), 'utf8'), '{ not json');
 });
 
@@ -285,6 +287,103 @@ test('a snapshot of another storage is refused', async t => {
   const mine = await historyAfterSnapshot(t);
   const theirs = await historyAfterSnapshot(t);
   await rename(join(theirs.dir, 'storage-snapshots', theirs.snapshotId), join(mine.dir, 'storage-snapshots', theirs.snapshotId));
-  await assert.rejects(recordRecoveryBarrier(mine.dir, { snapshotId: theirs.snapshotId, reason: 'x', build: mine.build }), { code: 'snapshot-foreign' });
+  await assert.rejects(recordRecoveryBarrier(mine.dir, { snapshotId: theirs.snapshotId, reason: 'x', context: mine.context }), { code: 'snapshot-foreign' });
   assert.equal((await readRecoveryBarrier(mine.dir)).state, 'absent');
+});
+
+/** The snapshot adopted with `known` as the evidence of the live database it replaced. */
+async function adoptedWith(t: Parameters<typeof historyAfterSnapshot>[0], change: (known: KnownStorageEvidence) => KnownStorageEvidence): Promise<History & { barrier: RecoveryBarrier }> {
+  const history = await historyAfterSnapshot(t);
+  const barrier = await adoptSnapshot(history.dir, { snapshotId: history.snapshotId, reason: 'evidence', context: history.context, known: change(history.known) });
+  return { ...history, barrier };
+}
+const release = (scope: string, manifestDigest = fixtureManifest.digest) => ({ scope, at: new Date().toISOString(), by: 'owner', evidence: 'checked by a build that understood it', manifestDigest });
+
+test('a barrier whose evidence names a scope or schema version beyond this build holds every scope, a reconciled core included, and refuses to reconcile without writing', async t => {
+  const cases: [string, (known: KnownStorageEvidence) => KnownStorageEvidence, string][] = [
+    ['an unknown domain\'s schema', known => ({ ...known, schema: [...known.schema, { scope: 'later', version: 1 }] }), 'later'],
+    ['a higher core schema', known => ({ ...known, schema: [...known.schema, { scope: 'core', version: 2 }] }), 'core schema 2'],
+    ['a higher domain schema', known => ({ ...known, schema: [...known.schema, { scope: 'fixture', version: 2 }] }), 'fixture schema 2'],
+    ['an unknown domain\'s authority', known => ({ ...known, authority: [...known.authority, { domain: 'later', authority: 'database', generation: 1 }] }), 'later'],
+  ];
+  for (const [name, change, named] of cases) {
+    const { dir, context, barrier } = await adoptedWith(t, change);
+    // As a build that understood the evidence would have left it: core reconciled.
+    await writeFile(barrierFile(dir), JSON.stringify({ ...barrier, reconciled: [release('core')] }));
+    const read = await readRecoveryBarrier(dir);
+    assert.equal(read.state, 'present', `${name}: a whole barrier`);
+    for (const scope of ['core', 'fixture', 'plain']) {
+      const hold = recoveryHold(read, scope, context);
+      assert.equal(hold.held, true, `${name}: ${scope}`);
+      assert.match(hold.reason!, /does not understand its evidence/, name);
+      assert.ok(hold.reason!.includes(named), `${name}: ${hold.reason}`);
+    }
+    const summary = recoverySummary(read, context);
+    assert.ok(summary.state === 'held' && !summary.reconciled.length && /reconciliations do not apply/.test(summary.reason), `${name}: ${JSON.stringify(summary)}`);
+    // The storage still opens and prepares, for diagnosis; its gate stays closed.
+    const client = await openFixture(t, dir);
+    await client.prepare({ allowMigration: false });
+    const gate = await client.gate('core');
+    assert.equal(gate.open, false, `${name}: core stays held though reconciled`);
+    assert.ok(gate.reasons.some(reason => reason.includes(named)));
+    await client.close();
+    const before = await readFile(barrierFile(dir), 'utf8');
+    await assert.rejects(reconcileRecovery(dir, { barrierId: barrier.id, scopes: ['core'], by: 'owner', evidence: 'x', context }), { code: 'unknown-scope' }, name);
+    assert.equal(await readFile(barrierFile(dir), 'utf8'), before, `${name}: nothing written`);
+  }
+});
+
+test('the same barrier is judged by what each build understands, not by which build recorded it', async t => {
+  const { dir, context, known, snapshotId } = await historyAfterSnapshot(t);
+  const barrier = await adoptSnapshot(dir, { snapshotId, reason: 'judged by its evidence', context, known });
+  await reconcileRecovery(dir, { barrierId: barrier.id, scopes: ['core'], by: 'owner', evidence: 'checked', context });
+  const read = await readRecoveryBarrier(dir);
+  // Control: the recording build understands every row and releases what was reconciled.
+  assert.equal(recoveryHold(read, 'core', context).held, false);
+  // Another source with the same contract (another build of the same release) is not asked to be the recorder.
+  assert.notEqual(contextOf('change-on-check').sourceHash, barrier.recordedBy.sourceHash);
+  assert.equal(recoveryHold(read, 'core', contextOf('change-on-check')).held, false);
+  // A build without the fixture domain (lower) does not understand the snapshot's own rows: it holds everything.
+  const lower = contextOf('production');
+  const hold = recoveryHold(read, 'core', lower);
+  assert.equal(hold.held, true);
+  assert.match(hold.reason!, /does not understand its evidence of fixture/);
+  const before = await readFile(barrierFile(dir), 'utf8');
+  await assert.rejects(reconcileRecovery(dir, { barrierId: barrier.id, scopes: ['core'], by: 'owner', evidence: 'x', context: lower }), { code: 'unknown-scope' });
+  assert.equal(await readFile(barrierFile(dir), 'utf8'), before);
+});
+
+test('a reconciliation naming a scope this build does not support has no effect, and holds nothing else', async t => {
+  const { dir, context, known, snapshotId } = await historyAfterSnapshot(t);
+  const barrier = await adoptSnapshot(dir, { snapshotId, reason: 'later release', context, known });
+  // As a later build that supports later-domain would leave it.
+  await writeFile(barrierFile(dir), JSON.stringify({ ...barrier, reconciled: [release('later-domain', 'a'.repeat(64))] }));
+  const read = await readRecoveryBarrier(dir);
+  assert.equal(read.state, 'present');
+  assert.equal(recoveryHold(read, 'later-domain', context).held, true, 'not a release in this build');
+  const summary = recoverySummary(read, context);
+  assert.ok(summary.state === 'held');
+  assert.deepEqual(summary.reconciled, []);
+  assert.doesNotMatch(summary.reason, /does not understand/);
+  await reconcileRecovery(dir, { barrierId: barrier.id, scopes: ['core'], by: 'owner', evidence: 'checked', context });
+  const client = await openFixture(t, dir);
+  await client.prepare({ allowMigration: false });
+  assert.deepEqual(await client.gate('core'), { open: true, reasons: [] });
+  assert.equal((await client.gate('later-domain')).open, false);
+});
+
+test('recovery steps take only a trusted build context: a hand-made one with more domains holds everything and is refused before anything is written', async t => {
+  const { dir, context, known, snapshotId } = await historyAfterSnapshot(t);
+  const barrier = await adoptSnapshot(dir, { snapshotId, reason: 'forged', context, known });
+  const forged = { ...context, manifest: { ...context.manifest, domains: [...context.manifest.domains, { ...context.manifest.domains[0], scope: 'later-domain' }] } } as StorageBuildContext;
+  assert.equal(storage.isStorageBuildContext(forged), false);
+  const read = await readRecoveryBarrier(dir);
+  for (const scope of ['core', 'later-domain']) assert.equal(recoveryHold(read, scope, forged).held, true, scope);
+  assert.equal(recoverySummary(read, forged).state, 'held');
+  const before = await filesUnder(dir);
+  await assert.rejects(reconcileRecovery(dir, { barrierId: barrier.id, scopes: ['later-domain'], by: 'owner', evidence: 'x', context: forged }), { code: 'bundle-untrusted' });
+  await assert.rejects(recordRecoveryBarrier(dir, { snapshotId, reason: 'x', context: forged }), { code: 'bundle-untrusted' });
+  assert.deepEqual(await filesUnder(dir), before);
+  // A trusted context cannot be widened in place either.
+  assert.throws(() => { (context.manifest.domains as unknown[]).push(forged.manifest.domains.at(-1)); }, TypeError);
 });

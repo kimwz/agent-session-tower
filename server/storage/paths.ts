@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
-import { copyFile, lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, open, realpath, rename, statfs, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
-import type { StorageErrorCode } from './contract.js';
+import type { StorageErrorCode, StorageSpace } from './contract.js';
 
 /**
  * Where the storage lives in the state directory, and the checks every path passes before SQLite sees it: the real
@@ -30,7 +30,7 @@ export const STORAGE_FILE_NAMES = [STORAGE_DATABASE_NAME, `${STORAGE_DATABASE_NA
 export type StorageFileName = typeof STORAGE_FILE_NAMES[number];
 
 export class StoragePathError extends Error {
-  constructor(readonly code: StorageErrorCode, message: string, readonly retryable = false) { super(message); this.name = 'StoragePathError'; }
+  constructor(readonly code: StorageErrorCode, message: string, readonly retryable = false, readonly space?: StorageSpace) { super(message); this.name = 'StoragePathError'; }
 }
 
 /** dev/ino name the file; size and mtime tell a rewrite. */
@@ -58,9 +58,19 @@ export const storageFs = {
     const file = await open(to, constants.O_RDONLY | constants.O_NOFOLLOW);
     await closing(file, async () => { await file.chmod(0o600); await file.sync(); });
   },
+  /** An existing file's data, synced again (never following a link). */
+  syncFile: async (path: string): Promise<void> => {
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    await closing(file, () => file.sync());
+  },
   syncDirectory: async (path: string): Promise<void> => {
     const directory = await open(path, constants.O_RDONLY);
     await closing(directory, () => directory.sync());
+  },
+  /** Bytes this user may still write on the file system that holds `path`. */
+  availableBytes: async (path: string): Promise<number> => {
+    const info = await statfs(path);
+    return info.bavail * info.bsize;
   },
 };
 
@@ -107,25 +117,51 @@ export async function storageLayout(stateDir: string): Promise<StorageLayout> {
 }
 
 /**
- * An owner-only directory. With `create`, a missing one is made (its parent must exist) and its parent synced, so the
- * new name survives a crash before anything is put in it. An existing one is never changed.
+ * An owner-only directory. With `create`, a missing one is made (its parent must exist), and the parent is synced
+ * whether this call made the directory or found it: an earlier call may have made it and failed before that sync, and
+ * a name that exists is not yet one that survives a crash. The caller puts things in it only after this answers. An
+ * existing directory is never changed.
  */
 export async function privateDirectory(path: string, create: boolean): Promise<boolean> {
   let info: Stats;
   try { info = await lstat(path); } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw pathError(error, path);
     if (!create) return false;
-    try {
-      await storageFs.mkdir(path);
-      await storageFs.syncDirectory(dirname(path));
-    } catch (made) { throw pathError(made, path); }
+    try { await storageFs.mkdir(path); } catch (made) { throw pathError(made, path); }
     info = await lstat(path);
   }
   if (info.isSymbolicLink()) throw new StoragePathError('symlink', `${path} is a symlink.`);
   if (!info.isDirectory()) throw new StoragePathError('not-regular', `${path} is not a directory.`);
   if (info.uid !== uid()) throw new StoragePathError('wrong-owner', `${path} belongs to another user.`);
   if (info.mode & 0o077) throw new StoragePathError('wrong-permissions', `${path} must be 0700, not ${(info.mode & 0o777).toString(8)}.`);
+  if (create) {
+    try { await storageFs.syncDirectory(dirname(path)); } catch (error) { throw pathError(error, dirname(path)); }
+  }
   return true;
+}
+
+/** Successful proofs, by the paths they covered, each with the generations it covered. */
+const proven = new Map<string, string>();
+
+/**
+ * Proves links durable: syncs each of `paths` in the order given (a file's data, a directory's entries), which callers
+ * give deepest first, up to the state directory. A directory is then synced only after every directory below it, so a
+ * link an earlier attempt moved out of it is dropped from its durable entries only once its new place is durable.
+ * Answers only after every sync succeeded. A success is remembered for exactly the generations it covered (any later
+ * change to one of them proves again); a failure is never remembered, and a file merely being there proves nothing.
+ */
+export async function proveDurable(paths: readonly string[]): Promise<void> {
+  const key = paths.join('\0');
+  const infos: Stats[] = [];
+  for (const path of paths) {
+    try { infos.push(await lstat(path)); } catch (error) { throw pathError(error, path); }
+  }
+  const stamp = JSON.stringify(infos.map(info => [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs]));
+  if (proven.get(key) === stamp) return;
+  for (const [index, path] of paths.entries()) {
+    try { await (infos[index].isDirectory() ? storageFs.syncDirectory(path) : storageFs.syncFile(path)); } catch (error) { throw pathError(error, path); }
+  }
+  proven.set(key, stamp);
 }
 
 /** An owner-only 0600 regular file, or undefined when absent. Nothing is followed or changed. */

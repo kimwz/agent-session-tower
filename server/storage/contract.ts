@@ -78,13 +78,23 @@ export interface StorageFailure {
   retryable: boolean;
   /**
    * Nothing was deleted, replaced or initialised, and SQLite wrote to the files only after they were checked as this
-   * build's storage. A database left with a WAL or shm is judged on a private copy; any refused open compares the
-   * live files with what it found and says false when they differ.
+   * build's storage. Every existing database is judged on a private copy before SQLite opens the live files; a refused
+   * open compares the live files with what it found (whatever failed: the copy, the check, the thread, a deadline) and
+   * says false when they differ, and always when it saw them change.
    */
   sourcePreserved: boolean;
   at: string;
   sqlite?: { errcode?: number; errstr?: string };
+  /** With `no-space`: what the refused step needed, so a full disk is told apart from a damaged source. */
+  space?: StorageSpace;
 }
+export interface StorageSpace { requiredBytes: number; availableBytes?: number }
+/**
+ * What the private check copy of the last open cost: every open of an existing database copies it with its WAL
+ * (a clone only where the file system clones), so it needs that much free space each time. `staleCopies` counts
+ * `.storage-check-*` folders an earlier process left in the state directory (they are not removed automatically).
+ */
+export interface StorageOpenCheck { copiedBytes: number; durationMs: number; staleCopies: number }
 
 /**
  * Whether a write is durable. `unknown` (a thread that exited or missed its deadline after receiving the command,
@@ -113,7 +123,7 @@ export interface StorageLimits {
   maxQueue: number;
   /** UTF-8 bytes of one command payload, serialized. */
   maxPayloadBytes: number;
-  /** UTF-8 bytes of one answer. */
+  /** UTF-8 bytes of one command's public answer as JSON (see jsonBytesWith). */
   maxResultBytes: number;
   /** PRAGMA busy_timeout. SQLite can wait several times this long (measured), so commandDeadlineMs is the real bound. */
   busyTimeoutMs: number;
@@ -183,8 +193,8 @@ export interface StorageInspection {
 }
 
 /**
- * A committed command. Its stored answer comes back only when it fits the connection's current maxResultBytes;
- * otherwise only its size and hash do, which still settle whether (and as what) the command committed.
+ * A committed command. Its stored answer comes back only when the whole ReceiptLookup with it fits the connection's
+ * current maxResultBytes; otherwise only its size and hash do, which still settle whether (and as what) it committed.
  */
 export interface ReceiptRecord {
   commandId: string;
@@ -205,9 +215,23 @@ export interface PrepareResult {
   created: boolean;
   /** The command ID had already committed; the answer is the stored one. */
   replayed: boolean;
+  /**
+   * This worker holds `ownerEpoch` now. A replayed prepare claims nothing when another prepare claimed since; either
+   * way only StorageClient.gate() says durable work may go ahead.
+   */
+  claimed: boolean;
 }
 export interface PrepareThreadResult { ownerEpoch: number; applied: { scope: string; version: number }[]; schema: SchemaState; created: boolean; replayed: boolean; claimed: boolean }
 export interface WriteResult<T = unknown> { disposition: 'committed'; result: T; replayed: boolean; commandId: string }
+/** The answer of a write or replay, the shape maxResultBytes bounds. */
+export const writeResult = <T>(result: T, replayed: boolean, commandId: string): WriteResult<T> => ({ disposition: 'committed', result, replayed, commandId });
+/**
+ * UTF-8 bytes of `envelope` as JSON with `valueBytes` of already serialized JSON in place of its one `null`.
+ * maxResultBytes bounds what a command answers this way: the WriteResult of a write or replay, the ReceiptLookup of
+ * a receipt, a read's value. Transport fields (message type, id, ok) and control answers (open, prepare, inspect,
+ * snapshot) are not counted. A stored answer is measured by its text, never parsed to be measured.
+ */
+export const jsonBytesWith = (envelope: unknown, valueBytes: number): number => Buffer.byteLength(JSON.stringify(envelope)) - 'null'.length + valueBytes;
 
 /**
  * Summary of the historical-recovery hold, for status and diagnostics. While a barrier exists the storage is never
@@ -229,6 +253,7 @@ export interface StorageStatus {
   /** Commands waiting or running. */
   pending: number;
   recovery?: RecoveryHoldSummary;
+  openCheck?: StorageOpenCheck;
 }
 
 // ---- Messages between the worker and the thread (structured clone). ----

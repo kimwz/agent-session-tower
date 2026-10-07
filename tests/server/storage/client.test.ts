@@ -4,22 +4,15 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { captureStorageBundle } from '../../../server/storage/bundle.js';
-import { openStorage } from '../../../server/storage/client.js';
-import { StorageCommandError, type StorageStatus } from '../../../server/storage/contract.js';
-import { databasePath, filesUnder, fixtureBundle, fixtureManifest, openFixture, sleep, stateDir } from './helpers.js';
+import type { StorageStatus } from '../../../server/storage/contract.js';
+import { databasePath, filesUnder, fixtureBundle, openFixture, rejectsWith, sleep, stateDir, storage, threadBundle } from './helpers.js';
 
-const rejectsWith = (promise: Promise<unknown>, expected: Partial<StorageCommandError>) =>
-  assert.rejects(promise, (error: unknown) => {
-    assert.ok(error instanceof StorageCommandError, String(error));
-    for (const [key, value] of Object.entries(expected)) assert.equal((error as unknown as Record<string, unknown>)[key], value, `${key}: ${(error as Error).message}`);
-    return true;
-  });
+const { openStorage } = storage;
 
 test('the production storage opens, needs an explicit prepare, and keeps WAL/FULL/foreign keys/untrusted schema as read back', async t => {
   const dir = await stateDir(t);
-  const bundle = await captureStorageBundle();
-  assert.ok(bundle.ok && bundle.origin === 'development');
+  // The production thread entry, as the fixture build trusts it (the checkout's own capture is checked in bundle.test.ts).
+  const bundle = threadBundle('production');
   const client = await openStorage({ stateDir: dir, bundle });
   t.after(() => client.close());
   assert.equal(client.status().state, 'ready');
@@ -29,6 +22,7 @@ test('the production storage opens, needs an explicit prepare, and keeps WAL/FUL
   await rejectsWith(client.prepare({ allowMigration: false }), { code: 'migration-required', disposition: 'not-committed', phase: 'prepare' });
   const prepared = await client.prepare({ allowMigration: true, commandId: 'prepare-1' });
   assert.equal(prepared.created, true);
+  assert.equal(prepared.claimed, true);
   assert.equal(prepared.ownerEpoch, 1);
   assert.deepEqual(prepared.applied, [{ scope: 'core', version: 1 }]);
   const identity = JSON.parse(await readFile(join(dir, 'storage-recovery', 'identity.json'), 'utf8'));
@@ -66,7 +60,7 @@ test('the production storage opens, needs an explicit prepare, and keeps WAL/FUL
 test('flush, close ack and an explicit reopen with the same captured bundle; nothing is sent while closed', async t => {
   const dir = await stateDir(t);
   const bundle = await fixtureBundle();
-  const client = await openStorage({ stateDir: dir, bundle, manifest: fixtureManifest });
+  const client = await openStorage({ stateDir: dir, bundle });
   t.after(() => client.close());
   await client.prepare({ allowMigration: true });
   const queued = [client.write('fixture', 'put', { key: 'a', value: '1' }, 'put-a'), client.write('fixture', 'put', { key: 'b', value: '2' }, 'put-b')];
@@ -220,4 +214,71 @@ test('receipts and replays answer within the current maxResultBytes and still sa
   await rejectsWith(tight.write('fixture', 'putLarge', { key: 'fresh', bytes: 2048 }, 'fresh-1'), { code: 'result-too-large', disposition: 'not-committed' });
   assert.deepEqual(await tight.receipt('fresh-1'), { found: false });
   assert.equal(tight.status().state, 'ready');
+});
+
+/** UTF-8 bytes of a value as JSON, the measure maxResultBytes is stated in. */
+const jsonBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+/** The length of a putLarge answer ('x' repeated) whose whole first WriteResult under `commandId` is exactly `bytes`. */
+const answerFor = (bytes: number, commandId: string) => bytes - jsonBytes({ disposition: 'committed', result: '', replayed: false, commandId });
+
+test('maxResultBytes 1024 bounds the whole public answer: a WriteResult of exactly 1024 bytes commits and replays, one byte more rolls back, and a read or receipt stays within it', async t => {
+  const dir = await stateDir(t);
+  const client = await openFixture(t, dir, { limits: { maxResultBytes: 1024 } });
+  await client.prepare({ allowMigration: true });
+  const length = answerFor(1024, 'edge-1');
+  const written = await client.write<string>('fixture', 'putLarge', { key: 'edge', bytes: length }, 'edge-1');
+  assert.equal(jsonBytes(written), 1024, 'the first answer is exactly the limit');
+  const replayed = await client.write('fixture', 'putLarge', { key: 'edge', bytes: length }, 'edge-1');
+  assert.deepEqual([replayed.replayed, jsonBytes(replayed)], [true, 1023], 'a replay is one byte shorter, so it fits too');
+  // One byte more: the domain command ran, its answer did not fit, and its transaction rolled back.
+  await rejectsWith(client.write('fixture', 'putLarge', { key: 'over', bytes: answerFor(1025, 'edge-2') }, 'edge-2'), { code: 'result-too-large', disposition: 'not-committed', commandId: 'edge-2' });
+  assert.deepEqual(await client.receipt('edge-2'), { found: false });
+  assert.equal(await client.read('fixture', 'count', null), 1, 'only the first command left its row');
+  // The receipt carries more than the answer, so here it says only how large the answer was.
+  const receipt = await client.receipt('edge-1');
+  assert.ok(receipt.found && receipt.receipt.result.state === 'omitted');
+  assert.ok(jsonBytes(receipt) <= 1024);
+  // A read's answer is its value: exactly the limit passes, one byte more is refused.
+  assert.equal(jsonBytes(await client.read('fixture', 'big', { bytes: 1022 })), 1024);
+  await rejectsWith(client.read('fixture', 'big', { bytes: 1023 }), { code: 'result-too-large', disposition: 'not-committed' });
+});
+
+test('an answer committed under a larger limit replays at 1024 as a small committed fact, and the command never runs again', async t => {
+  const dir = await stateDir(t);
+  const roomy = await openFixture(t, dir, { limits: { maxResultBytes: 4096 } });
+  await roomy.prepare({ allowMigration: true });
+  // Its text alone fits 1024; its WriteResult does not.
+  const length = answerFor(1100, 'large-1');
+  assert.ok(length + 2 <= 1024);
+  await roomy.write('fixture', 'putLarge', { key: 'large', bytes: length }, 'large-1');
+  // The longest command ID the storage accepts, with a large answer.
+  const longest = 'i'.repeat(128);
+  await roomy.write('fixture', 'putLarge', { key: 'long', bytes: 3000 }, longest);
+  await roomy.close();
+  const tight = await openFixture(t, dir, { limits: { maxResultBytes: 1024 } });
+  await tight.prepare({ allowMigration: false });
+  await rejectsWith(tight.write('fixture', 'putLarge', { key: 'large', bytes: length }, 'large-1'), { code: 'result-too-large', disposition: 'committed', commandId: 'large-1' });
+  await rejectsWith(tight.write('fixture', 'putLarge', { key: 'long', bytes: 3000 }, longest), { code: 'result-too-large', disposition: 'committed' });
+  assert.equal(await tight.read('fixture', 'count', null), 2, 'neither ran again');
+  const receipt = await tight.receipt('large-1');
+  assert.ok(receipt.found && receipt.receipt.result.state === 'omitted' && receipt.receipt.result.bytes === length + 2);
+  // What stands in for an answer is small: within the ID and name limits it fits the smallest maxResultBytes.
+  const long = await tight.receipt(longest);
+  assert.ok(long.found && long.receipt.result.state === 'omitted');
+  assert.ok(jsonBytes(long) <= 1024, `${jsonBytes(long)} bytes`);
+});
+
+test('control answers are not command results: a prepare with a fixed command ID replays at maxResultBytes 1024', async t => {
+  const dir = await stateDir(t);
+  const roomy = await openFixture(t, dir, { limits: { maxResultBytes: 4096 } });
+  await roomy.prepare({ allowMigration: true, commandId: 'prepare-fixed' });
+  await roomy.close();
+  const tight = await openFixture(t, dir, { limits: { maxResultBytes: 1024 } });
+  const replayed = await tight.prepare({ allowMigration: true, commandId: 'prepare-fixed' });
+  // The same commit answered again: it claims nothing new, so the worker gates on its own fresh prepare.
+  assert.deepEqual([replayed.replayed, replayed.ownerEpoch], [true, 1]);
+  assert.equal((await tight.gate('core')).open, replayed.claimed);
+  const fresh = await tight.prepare({ allowMigration: false });
+  assert.deepEqual([fresh.replayed, fresh.claimed, fresh.ownerEpoch], [false, true, 2]);
+  assert.equal((await tight.gate('core')).open, true);
 });

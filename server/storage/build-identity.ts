@@ -1,9 +1,16 @@
-declare const __TOWER_STORAGE_EXPECTED_SOURCE_HASH__: string | undefined;
+import type { StorageBuildManifest } from './contract.js';
 
 /**
- * The storage thread source hash this build's worker trusts, fixed when the build is made: the standalone executable
- * defines it (scripts/build-executable.mjs), and the server build replaces this compiled module with the hash of the
- * artifact it writes beside it (scripts/build-server.mjs). A checkout run by tsx has none; there the thread is
- * bundled from the same checkout at the process's first capture (see bundle.ts).
+ * The storage thread sources this build trusts, fixed when the build is made: each build replaces this module whole.
+ * The server build writes it beside the compiled server with the hash of the artifact it writes there
+ * (scripts/build-server.mjs); the standalone executable is bundled with it, the artifact text included
+ * (storageThreadPlugin in thread-bundle.mjs). A source listed without a manifest runs this build's own storage contract
+ * (storageManifest()). A checkout run by tsx keeps this module as it is: it trusts nothing until its first capture
+ * bundles the canonical thread entry from the same checkout (see bundle.ts).
  */
-export const BUILD_STORAGE_SOURCE_HASH: string | undefined = typeof __TOWER_STORAGE_EXPECTED_SOURCE_HASH__ === 'string' ? __TOWER_STORAGE_EXPECTED_SOURCE_HASH__ : undefined;
+export interface BuildStorageIdentity {
+  readonly contexts: readonly { readonly sourceHash: string; readonly manifest?: StorageBuildManifest }[];
+  /** The bundle artifact's JSON text, for a build without files beside it. */
+  readonly artifact?: string;
+}
+export const BUILD_STORAGE: BuildStorageIdentity | undefined = undefined;

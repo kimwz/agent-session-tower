@@ -56,7 +56,13 @@ export function storageManifest(domains: readonly StorageDomainSchema[] = STORAG
     return { ...scopeManifest(schema.domain, schema.migrations), preparation: { ...schema.preparation }, ...(schema.cutover ? { cutover: { ...schema.cutover } } : {}) };
   });
   const body = { protocol: STORAGE_PROTOCOL, appVersion, core: scopeManifest(CORE_SCOPE, CORE_MIGRATIONS), domains: domainManifests };
-  return { ...body, digest: sha256(JSON.stringify(body)) };
+  return { ...body, digest: manifestDigest(body) };
+}
+
+/** The digest of a manifest's body (everything but `digest`), recomputed: a stated digest alone vouches for nothing. */
+export function manifestDigest(manifest: Omit<StorageBuildManifest, 'digest'>): string {
+  const { protocol, appVersion, core, domains } = manifest;
+  return sha256(JSON.stringify({ protocol, appVersion, core, domains }));
 }
 
 /** Every scope's migrations, core first, in the order they are applied. */

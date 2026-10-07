@@ -3,7 +3,7 @@ import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import { parentPort } from 'node:worker_threads';
 import { APP_VERSION } from '../../../shared/app-identity.js';
 import {
-  STORAGE_DATABASE_FORMAT, STORAGE_PROTOCOL,
+  jsonBytesWith, STORAGE_DATABASE_FORMAT, STORAGE_PROTOCOL, writeResult,
   type AppliedMigration, type CheckRequest, type CommitDisposition, type OpenRequest, type OpenResult, type PrepareThreadResult, type ProbeResult, type ReceiptLookup,
   type SchemaState, type SnapshotThreadResult, type StorageBuildIdentity, type StorageErrorCode, type StorageExpectation, type StorageInspection, type StoragePragmas, type ThreadError,
   type ThreadHello, type ThreadRequest, type ThreadResponse,
@@ -157,29 +157,31 @@ export function runStorageThread(domains: readonly StorageDomain[]): void {
   const receiptRow = (db: DatabaseSync, commandId: string) => db.prepare('SELECT * FROM operation_receipts WHERE command_id = ?').get(commandId) as ReceiptRow | undefined;
   /**
    * A committed command as this connection may answer it now: the stored answer is included only when the whole
-   * receipt fits `limit` (the current maxResultBytes, which may be smaller than when it was stored); otherwise its
-   * size and hash stand in for it, never a refusal that could read as "not committed".
+   * ReceiptLookup with it fits `limit` (the current maxResultBytes, which may be smaller than when it was stored);
+   * otherwise its size and hash stand in for it, never a refusal that could read as "not committed". The omitted form
+   * is a few hundred bytes at most within the command ID, scope and command name limits, so it always fits.
    */
   function receiptOf(db: DatabaseSync, commandId: string, limit: number): ReceiptLookup {
     const row = receiptRow(db, commandId);
     if (!row) return { found: false };
     const base = { commandId: row.command_id, scope: row.scope, command: row.command, payloadSha256: row.payload_sha256, ownerEpoch: Number(row.owner_epoch), committedAt: row.committed_at };
-    const omitted: ReceiptLookup = { found: true, receipt: { ...base, result: { state: 'omitted', bytes: Buffer.byteLength(row.result), sha256: sha256(row.result), limit } } };
-    // The receipt with its answer is at least this long; the answer is parsed only when it may fit.
-    if (Buffer.byteLength(row.result) > limit) return omitted;
-    const included: ReceiptLookup = { found: true, receipt: { ...base, result: { state: 'included', value: JSON.parse(row.result) } } };
-    return Buffer.byteLength(JSON.stringify(included)) <= limit ? included : omitted;
+    const bytes = Buffer.byteLength(row.result);
+    if (jsonBytesWith({ found: true, receipt: { ...base, result: { state: 'included', value: null } } }, bytes) <= limit) {
+      return { found: true, receipt: { ...base, result: { state: 'included', value: JSON.parse(row.result) } } };
+    }
+    return { found: true, receipt: { ...base, result: { state: 'omitted', bytes, sha256: sha256(row.result), limit } } };
   }
   /**
-   * A command ID already committed: the same command again answers its stored result; anything else is refused. A
-   * stored answer larger than `limit` is refused as such, and the refusal says the command committed.
+   * A command ID already committed: the same command again answers its stored result; anything else is refused. With
+   * a `limit`, a replayed WriteResult larger than it is refused as such, and the refusal says the command committed;
+   * a control command (prepare) replays without one.
    */
-  function replay(db: DatabaseSync, commandId: string, scope: string, command: string, payloadSha256: string, limit: number): { result: unknown } | undefined {
+  function replay(db: DatabaseSync, commandId: string, scope: string, command: string, payloadSha256: string, limit?: number): { result: unknown } | undefined {
     const row = receiptRow(db, commandId);
     if (!row) return undefined;
     if (row.scope !== scope || row.command !== command || row.payload_sha256 !== payloadSha256) throw failure('command-id-conflict', `Command ${commandId} was already committed with another command or payload.`);
-    if (Buffer.byteLength(row.result) > limit) {
-      throw failure('result-too-large', `Command ${commandId} committed, but its stored answer is larger than ${limit} bytes; receipt() reports its size and hash.`, 'committed');
+    if (limit !== undefined && jsonBytesWith(writeResult(null, true, commandId), Buffer.byteLength(row.result)) > limit) {
+      throw failure('result-too-large', `Command ${commandId} committed, but its answer is larger than ${limit} bytes; receipt() reports its size and hash.`, 'committed');
     }
     return { result: JSON.parse(row.result) };
   }
@@ -187,9 +189,10 @@ export function runStorageThread(domains: readonly StorageDomain[]): void {
     db.prepare('INSERT INTO operation_receipts (command_id, scope, command, payload_sha256, owner_epoch, committed_at, result) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(row.commandId, row.scope, row.command, row.payloadSha256, row.ownerEpoch, row.now, row.result);
   }
-  function bounded(value: unknown, limit: number): string {
+  /** A command's answer as JSON text, refused when its public answer (`envelope` around it) is larger than `limit`. */
+  function bounded(value: unknown, limit: number, envelope: unknown = null): string {
     const text = JSON.stringify(value === undefined ? null : value);
-    if (Buffer.byteLength(text) > limit) throw failure('result-too-large', `The answer is larger than ${limit} bytes.`);
+    if (jsonBytesWith(envelope, Buffer.byteLength(text)) > limit) throw failure('result-too-large', `The answer is larger than ${limit} bytes.`);
     return text;
   }
 
@@ -276,7 +279,7 @@ export function runStorageThread(domains: readonly StorageDomain[]): void {
     const outcome = writing(db, () => {
       const before = readSchema(db);
       if (before.kind !== 'empty') {
-        const replayed = replay(db, commandId, CORE_SCOPE, 'prepare', payloadSha256, current.maxResultBytes);
+        const replayed = replay(db, commandId, CORE_SCOPE, 'prepare', payloadSha256);
         if (replayed) return { ...(replayed.result as { ownerEpoch: number; applied: { scope: string; version: number }[]; created: boolean }), replayed: true };
       }
       const pending = before.kind === 'empty'
@@ -356,7 +359,9 @@ export function runStorageThread(domains: readonly StorageDomain[]): void {
       const replayed = replay(current.db, commandId, domain, name, payloadSha256, current.maxResultBytes);
       if (replayed) return { result: replayed.result, replayed: true };
       const context: DomainWriteContext = { ...contextFor(current, domain), commandId, ownerEpoch, now, authority: authorityWriter(current.db, owner.schema, { ownerEpoch, now, identity: current.identity }) };
-      const result = bounded(synchronous(command.run(context, input)), current.maxResultBytes);
+      // Measured as the first answer (`replayed: false`, one byte longer than a replay), before the commit: an answer
+      // that does not fit rolls the command back, and one that fits now replays at the same limit.
+      const result = bounded(synchronous(command.run(context, input)), current.maxResultBytes, writeResult(null, false, commandId));
       insertReceipt(current.db, { commandId, scope: domain, command: name, payloadSha256, ownerEpoch, now, result });
       return { result: JSON.parse(result), replayed: false };
     });
