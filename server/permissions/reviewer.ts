@@ -1,9 +1,14 @@
-import type { AutoPromptModelRequest } from '../auto-prompt/native.js';
-import { autoReviewBlock, type PermissionRequest } from '../../shared/permissions.js';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import type { AutoPromptModelRequest, ReadTools } from '../auto-prompt/native.js';
+import { autoReviewBlock, MAX_REVIEW_REASON, MAX_REVIEWED_FILES, type PermissionRequest, type ReviewedFile } from '../../shared/permissions.js';
+import { writePrivateJson } from '../stores/private-json.js';
 import { REVIEW_SCHEMA, REVIEW_SYSTEM, ReviewSkip, reviewInput, type ReviewSources } from './context.js';
+import { changedFiles, deniedPaths, folderBinding, readLog, reviewedFiles, REVIEW_TOOL_NAMES, REVIEW_TOOLS_SERVER, reviewScope, type ReadEntry } from './inspect.js';
 import type { PermissionReviewResult, PermissionService } from './service.js';
 
-const REVIEW_TIMEOUT_MS = 3 * 60 * 1000;
+/** Long enough to read the scripts a command runs, and the ones they start, before deciding. */
+const REVIEW_TIMEOUT_MS = 6 * 60 * 1000;
 /** After Tower could not record a review (a full disk, say), it waits this long before trying again. */
 const RETRY_MS = 60 * 1000;
 /** Reviews started again because the owner's material changed meanwhile, before the owner decides instead. */
@@ -17,6 +22,8 @@ export interface PermissionReviewerOptions {
   notify(request: PermissionRequest, message: string): Promise<void>;
   /** Whether a message can reach the requesting conversation; a request sent back to an agent nobody can tell waits for the owner. */
   reachable(request: PermissionRequest): boolean;
+  /** The reviewer's read-only file tools: where their scratch files go, and how to start this build's tool server. */
+  files?: { stateDir: string; server(scopePath: string): { command: string; args: string[] } };
   timeoutMs?: number;
 }
 
@@ -72,20 +79,69 @@ export class PermissionReviewer {
     this.aborted = false;
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? REVIEW_TIMEOUT_MS);
     let result: PermissionReviewResult;
+    let scratch: string | undefined;
     try {
-      const prompt = await reviewInput(request, this.options.sources);
+      // Credential stores and Tower's state stay out of the input as they stay out of the reviewer's reach.
+      const denied = await deniedPaths(this.options.files?.stateDir);
+      const prompt = await reviewInput(request, this.options.sources, denied);
+      // What Tower read ahead for the reviewer: bound with its folders below, before the model reads anything.
+      const given = (JSON.parse(prompt).context.commandEvidence?.files ?? []) as { path: string; status: string; real?: string; sha256?: string; text?: string }[];
+      const pre = given.filter(file => file.status === 'read' && file.real && file.sha256);
+      // Folders bound by their entries (under the name they were reached by), by their absence, or failed (unbound).
+      const bindFolders = async (folders: { path: string; real: string | null }[]) => {
+        const bound = await Promise.all(folders.map(async folder => ({ folder, file: folder.real === null ? { path: folder.path, real: null, sha256: null } as ReviewedFile
+          : await folderBinding(folder.real, denied).then(file => file && file !== 'shared' ? { ...file, path: folder.path } : file) })));
+        return { files: bound.flatMap(item => item.file && item.file !== 'shared' ? [item.file] : []), failed: bound.flatMap(item => item.file ? [] : [item.folder.path]) };
+      };
+      const ownFolders = [...new Set(pre.map(file => dirname(file.real!)))].map(folder => ({ path: folder, real: folder }));
+      let watch: { path: string; real: string | null }[] = [];
       const material = (input: string) => { const value = JSON.parse(input); return JSON.stringify([value.authority, value.context.commandEvidence]); };
       const before = material(prompt);
       const model = await service.reviewModel();
-      const answer = await this.options.model({ ...model, systemPrompt: REVIEW_SYSTEM, prompt,
+      let readTools: ReadTools | undefined;
+      let log: string | undefined;
+      let places: ReviewedFile[] = [];
+      if (this.options.files) {
+        const tmp = join(this.options.files.stateDir, 'tmp');
+        await mkdir(tmp, { recursive: true, mode: 0o700 });
+        scratch = await mkdtemp(join(tmp, 'permission-review-'));
+        log = join(scratch, 'reads.jsonl');
+        const scope = join(scratch, 'scope.json');
+        const evidence = pre.flatMap(file => file.text !== undefined ? [{ path: file.real!, text: file.text }] : []);
+        const spec = await reviewScope({ cwd: request.cwd, ...(request.rule.kind === 'claude' ? {} : { command: request.rule.value }), stateDir: this.options.files.stateDir, log, evidence });
+        watch = spec.watch ?? [];
+        await writePrivateJson(scope, JSON.stringify(spec));
+        // The folders the command runs in lead where they led during the review (a `current` link moved meanwhile is a change).
+        places = (spec.places ?? []).map(place => ({ path: place.path, real: place.real, sha256: null }));
+        readTools = { server: REVIEW_TOOLS_SERVER, tools: REVIEW_TOOL_NAMES, ...this.options.files.server(scope) };
+      }
+      // The folders of the scripts Tower read ahead and of the module names they use, as they are before the model reads.
+      const preFolders = await bindFolders([...ownFolders, ...watch]);
+      const answer = await this.options.model({ ...model, systemPrompt: REVIEW_SYSTEM, prompt, ...(readTools ? { readTools } : {}),
         schema: REVIEW_SCHEMA as unknown as Record<string, unknown>, signal: controller.signal }, { timeoutMs: this.options.timeoutMs ?? REVIEW_TIMEOUT_MS });
       result = parse(answer, request, model.model ?? model.provider);
-      // The owner said more, or confirmed or changed something, while the model answered: review again with that.
-      if (material(await reviewInput(request, this.options.sources)) !== before) {
+      // What the decision rests on: the files Tower gave and the files the reviewer read, as they were then.
+      const reads = log ? await readLog(log) : [];
+      // Tower's own reads, with their folders as the reviewer's reads have.
+      const seen: ReviewedFile[] = [...places, ...pre.map(file => ({ path: file.path, real: file.real!, sha256: file.sha256! })), ...preFolders.files, ...reviewedFiles(reads)];
+      const unbound = [...new Set([...preFolders.failed, ...reads.filter(entry => entry.status === 'unbound').map(entry => entry.path)])];
+      // The owner said more, or confirmed or changed something, or a file changed, while the model answered: review again with that.
+      // Files bind only a run's approval; a rule is kept for good and checked against what it allows, not those files.
+      const changed = request.rule.kind === 'run' ? await changedFiles(seen, denied) : [];
+      if (material(await reviewInput(request, this.options.sources, denied)) !== before || changed.length) {
         const again = (this.requeued.get(request.id) ?? 0) + 1;
         this.requeued.set(request.id, again);
-        if (again <= MAX_REQUEUE) { await service.requeueReview(request.id); return; }
-        throw new ReviewSkip('검토하는 동안 지시 또는 참조 파일이 계속 바뀌어 소유자에게 넘깁니다.');
+        // Decided by the owner meanwhile: nothing to review again; the verdict is only recorded below.
+        if (again <= MAX_REQUEUE && await service.requeueReview(request.id)) return;
+        if (again > MAX_REQUEUE) throw new ReviewSkip(`검토하는 동안 지시 또는 참조 파일이 계속 바뀌어 소유자에게 넘깁니다${changed.length ? `: ${changed.slice(0, 5).join(', ')}` : ''}.`);
+      }
+      const files = [...new Map(seen.map(file => [`${file.path}\0${file.sha256 === null && file.real !== null ? 'place' : file.depth ?? 0}`, file])).values()];
+      if (result.verdict === 'owner') result = { ...result, reason: ownerReason(result.reason, result.missing ?? [], reads) };
+      else if (result.verdict === 'approve' && request.rule.kind === 'run') {
+        // The run starts only while these are still what was reviewed (checked again right before it starts).
+        if (files.length > MAX_REVIEWED_FILES) result = { ...result, verdict: 'owner', reason: `${result.reason} (검토한 파일이 너무 많아 실행 직전에 같은 내용인지 확인할 수 없어 소유자에게 넘깁니다)` };
+        else if (unbound.length) result = { ...result, verdict: 'owner', reason: `${result.reason} (검토한 코드가 있는 폴더의 목록을 확인할 수 없어 실행 직전에 같은 코드인지 확인할 수 없습니다: ${unbound.slice(0, 5).join(', ')})` };
+        else result = { ...result, files };
       }
       if (result.verdict === 'approve' && request.rule.kind === 'command') {
         const limit = autoReviewBlock({ kind: 'command', value: result.rule?.value ?? request.rule.value }, request.cwd);
@@ -103,7 +159,11 @@ export class PermissionReviewer {
       if (error instanceof ReviewSkip) { await service.failReview(request.id, error.message, 'skipped'); return; }
       await service.failReview(request.id, this.aborted ? '자동 검토가 꺼졌습니다.' : controller.signal.aborted ? '자동 검토가 시간 안에 끝나지 않았습니다.' : (error instanceof Error ? error.message : String(error)).replace(/^Auto Prompt: /, ''));
       return;
-    } finally { clearTimeout(timer); this.controller = undefined; }
+    } finally {
+      clearTimeout(timer); this.controller = undefined;
+      // best-effort: a leftover scratch folder under <state>/tmp holds only this review's scope and read log
+      if (scratch) await rm(scratch, { recursive: true, force: true }).catch(() => {});
+    }
     const outcome = await service.applyReview(request.id, result);
     this.requeued.delete(request.id);
     // The owner may have turned the notice off meanwhile: a request sent back that nobody tells returns to the owner.
@@ -116,12 +176,25 @@ export class PermissionReviewer {
   }
 }
 
+/** An owner verdict says what could not be confirmed: the reviewer's own list and the reads Tower refused or could not do. */
+function ownerReason(reason: string, missing: string[], reads: ReadEntry[]): string {
+  const refused = [...new Set(reads.filter(entry => !['read', 'listed', 'searched', 'place', 'folder', 'absent', 'unbound'].includes(entry.status)).map(entry => `${entry.path} (${READ_STATUS[entry.status] ?? entry.status})`))];
+  const clip = (text: string, max: number) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
+  // The evidence comes first in the budget: what could not be confirmed is what the owner needs to decide.
+  const facts = [missing.length ? `확인하지 못한 근거: ${missing.slice(0, 5).map(item => clip(item, 200)).join('; ')}${missing.length > 5 ? ` 외 ${missing.length - 5}개` : ''}` : '',
+    refused.length ? `읽지 못한 파일: ${refused.slice(0, 5).map(item => clip(item, 200)).join(', ')}${refused.length > 5 ? ` 외 ${refused.length - 5}개` : ''}` : ''].filter(Boolean).join(' / ');
+  return [clip(reason.trim(), Math.max(300, MAX_REVIEW_REASON - facts.length - 3)), facts].filter(Boolean).join(' / ').slice(0, MAX_REVIEW_REASON);
+}
+
+const READ_STATUS: Record<string, string> = { outside: '검토 범위 밖', denied: '비밀·Tower 상태라 읽지 않음', missing: '없음', unreadable: '열 수 없음(권한)', 'too-large': '너무 큼', 'not-text': '텍스트 아님', budget: '읽기 한도 초과', invalid: '잘못된 경로' };
+
 function parse(answer: unknown, request: PermissionRequest, model: string): PermissionReviewResult {
   if (!record(answer) || !['approve', 'narrow', 'owner'].includes(String(answer.verdict)) || typeof answer.reason !== 'string') throw new Error('검토 모델이 올바른 판단을 돌려주지 않았습니다.');
   const verdict = answer.verdict as PermissionReviewResult['verdict'];
   // A run is judged as asked: it is never rewritten.
   const value = request.rule.kind !== 'run' && typeof answer.rule === 'string' && answer.rule.trim() ? answer.rule.trim() : undefined;
   const scope = request.rule.kind !== 'run' && (answer.scope === 'conversation' || answer.scope === 'project') ? answer.scope : undefined;
-  return { verdict, reason: answer.reason, model, ...(value ? { rule: { kind: request.rule.kind, value } } : {}), ...(scope ? { scope } : {}),
+  const missing = Array.isArray(answer.missing) ? answer.missing.filter((item): item is string => typeof item === 'string' && Boolean(item.trim())).map(item => item.trim().slice(0, 300)).slice(0, 10) : [];
+  return { verdict, reason: answer.reason, model, ...(value ? { rule: { kind: request.rule.kind, value } } : {}), ...(scope ? { scope } : {}), ...(missing.length ? { missing } : {}),
     ...(typeof answer.suggestion === 'string' && answer.suggestion.trim() ? { suggestion: answer.suggestion.trim() } : {}) };
 }

@@ -20,8 +20,15 @@ export interface AutoPromptModelRequest {
   prompt: string;
   schema: Record<string, unknown>;
   imagePaths?: readonly string[];
+  /**
+   * Read-only tools Tower itself serves over MCP (only the permission reviewer sets this, to read the scripts it judges).
+   * They are the only tools the model gets: Claude keeps no built-in tool, Codex no shell.
+   */
+  readTools?: ReadTools;
   signal: AbortSignal;
 }
+
+export interface ReadTools { server: string; command: string; args: string[]; tools: readonly string[] }
 
 export interface AutoPromptNativeDependencies {
   stateDir?: string;
@@ -33,6 +40,11 @@ export interface AutoPromptNativeDependencies {
 }
 
 const MAX_OUTPUT = 1_000_000;
+/**
+ * File contents read through `readTools` flow through the event stream, escaped and (Claude) echoed twice: room for the
+ * reviewer's whole reading budget (3 MB, server/permissions/inspect.ts) several times over.
+ */
+const MAX_TOOLS_OUTPUT = 32_000_000;
 const MAX_ERROR_OUTPUT = 64_000;
 const MAX_PROMPT = 512_000;
 const CODE_MODE_DISABLED_WARNING = 'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.';
@@ -107,6 +119,10 @@ function codexArgs(options: AutoPromptModelRequest, directory: string, images: s
     'include_collaboration_mode_instructions': false,
     ...Object.fromEntries(CODEX_DISABLED_FEATURES.map(feature => [`features.${feature}`, false])),
     'features.skip_host_skill_discovery': true,
+    // Codex (0.160) makes every tool call, MCP included, through its code-mode host: without it the tools are offered
+    // but fail. The shell stays off, so the host can reach only these tools.
+    ...(options.readTools ? { 'features.code_mode': true, 'features.code_mode_host': true,
+      [`mcp_servers.${options.readTools.server}.command`]: options.readTools.command, [`mcp_servers.${options.readTools.server}.args`]: options.readTools.args } : {}),
   };
   return ['exec', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--strict-config',
     '--skip-git-repo-check', '-C', directory, '--sandbox', 'read-only', ...(options.model ? ['--model', options.model] : []),
@@ -149,6 +165,9 @@ export async function runAutoPromptModel(options: AutoPromptModelRequest, depend
   const schema = JSON.stringify(options.schema);
   if (!record(options.schema) || typeof options.prompt !== 'string' || typeof options.systemPrompt !== 'string'
     || Buffer.byteLength(options.prompt) > MAX_PROMPT || Buffer.byteLength(options.systemPrompt) > 64_000 || Buffer.byteLength(schema) > 64_000) throw failure('routing input is invalid or too large.');
+  const tools = options.readTools;
+  if (tools && (!/^[a-z][a-z_]{0,31}$/.test(tools.server) || !isAbsolute(tools.command) || !tools.tools.length
+    || tools.tools.some(tool => !/^[a-z][a-z_]{0,63}$/.test(tool)) || tools.args.some(arg => typeof arg !== 'string'))) throw failure('routing tools are invalid.');
   const env = { ...process.env, ...dependencies.env };
   env.PATH = providerDirectories(env).join(delimiter);
   delete env.CLAUDECODE;
@@ -172,9 +191,12 @@ async function routeWith(options: AutoPromptModelRequest, dependencies: AutoProm
     await writeFile(join(directory, 'instructions.txt'), options.systemPrompt, { mode: 0o600, flag: 'wx' });
     const images = await imagesForRequest(options.imagePaths ?? [], directory);
     if (options.signal.aborted) throw cancelled();
+    const tools = options.readTools;
     const args = options.provider === 'codex' ? codexArgs(options, directory, images.paths) : [
-      '-p', '--safe-mode', '--tools', '', '--disable-slash-commands', '--strict-mcp-config',
-      '--mcp-config', '{"mcpServers":{}}', '--no-session-persistence', '--no-chrome',
+      // Safe mode also turns off --mcp-config servers; restricted mode keeps them and ignores every settings file.
+      '-p', tools ? '--restricted' : '--safe-mode', '--tools', '', '--disable-slash-commands', '--strict-mcp-config',
+      '--mcp-config', JSON.stringify({ mcpServers: tools ? { [tools.server]: { command: tools.command, args: tools.args } } : {} }),
+      ...(tools ? ['--allowedTools', claudeToolNames(tools).join(',')] : []), '--no-session-persistence', '--no-chrome',
       '--permission-prompts', 'none', '--system-prompt', options.systemPrompt,
       ...(options.model ? ['--model', options.model] : []), ...(options.effort && options.effort !== EFFORT_OFF ? ['--effort', options.effort] : []),
       '--json-schema', schema, '--output-format', 'stream-json', '--verbose', '--input-format', 'stream-json',
@@ -185,6 +207,15 @@ async function routeWith(options: AutoPromptModelRequest, dependencies: AutoProm
     return await collect(options, dependencies, executable, args, directory, env, stdin);
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
+
+/**
+ * Claude Code (2.1.293) says the model's safeguards stopped a response: a notice, then a retry on another model. The
+ * routing stops there with that reason, rather than as an unknown event.
+ */
+const refused = (frame: Record<string, any>) => frame.type === 'system' && (frame.subtype === 'model_refusal_fallback'
+  || frame.subtype === 'informational' && typeof frame.content === 'string' && /safeguards stopped/i.test(frame.content));
+
+const claudeToolNames = (tools: ReadTools) => tools.tools.map(tool => `mcp__${tools.server}__${tool}`);
 
 function collect(options: AutoPromptModelRequest, dependencies: AutoPromptNativeDependencies, executable: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, stdin: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -200,6 +231,8 @@ function collect(options: AutoPromptModelRequest, dependencies: AutoPromptNative
     let completed = false;
     let closed = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const tools = options.readTools;
+    const claudeTools = tools ? claudeToolNames(tools) : [];
     let exitTimer: ReturnType<typeof setTimeout> | undefined;
     const signalGroup = (signal: NodeJS.Signals) => {
       try { if (child.pid && process.platform !== 'win32') process.kill(-child.pid, signal); else child.kill(signal); } catch { /* Already exited. */ }
@@ -234,12 +267,16 @@ function collect(options: AutoPromptModelRequest, dependencies: AutoPromptNative
           structuredOutput = frame.structured_output; completed = true;
         } else if (frame.type === 'system' && frame.subtype === 'init') {
           // StructuredOutput is the schema-response mechanism, not an execution tool.
-          if (!Array.isArray(frame.tools) || frame.tools.some((tool: unknown) => tool !== 'StructuredOutput')
-            || (Array.isArray(frame.mcp_servers) && frame.mcp_servers.length)) stop(failure('Claude Code exposed tools during routing.'));
+          if (!Array.isArray(frame.tools) || frame.tools.some((tool: unknown) => tool !== 'StructuredOutput' && !claudeTools.includes(tool as string))
+            || (Array.isArray(frame.mcp_servers) && frame.mcp_servers.some((server: unknown) => !tools || !record(server) || server.name !== tools.server))) stop(failure('Claude Code exposed tools during routing.'));
+          // Without its file tools the reviewer could only guess at what a script does.
+          else if (tools && !(Array.isArray(frame.mcp_servers) && frame.mcp_servers.some((server: unknown) => record(server) && server.name === tools.server && server.status === 'connected'))) stop(failure('the read-only file tools did not start.'));
         } else if (frame.type === 'assistant') {
           if (!record(frame.message) || !Array.isArray(frame.message.content)
             || frame.message.content.some((block: any) => !record(block) || !['text', 'thinking', 'redacted_thinking'].includes(block.type)
-              && !(block.type === 'tool_use' && block.name === 'StructuredOutput'))) stop(failure('Claude Code attempted a tool operation during routing.'));
+              && !(block.type === 'tool_use' && (block.name === 'StructuredOutput' || claudeTools.includes(block.name))))) stop(failure('Claude Code attempted a tool operation during routing.'));
+        } else if (refused(frame)) {
+          stop(failure('the model\'s safeguards stopped its answer (often because of what it was given to read), so nothing was decided.'));
         } else if (!['user', 'rate_limit_event'].includes(frame.type) && !isClaudeRoutingProgress(frame)) {
           const name = eventName(frame.type) + (frame.subtype === undefined ? '' : `/${eventName(frame.subtype)}`);
           stop(failure(`Claude Code returned an unsupported routing event (${name}).`));
@@ -253,14 +290,15 @@ function collect(options: AutoPromptModelRequest, dependencies: AutoPromptNative
           if (frame.item.message !== CODE_MODE_DISABLED_WARNING) stop(failure('Codex reported an unsupported routing configuration. Check CLI compatibility.'));
           return;
         }
-        if (!record(frame.item) || !['reasoning', 'agent_message'].includes(frame.item.type)) { stop(failure('Codex attempted a tool operation during routing.')); return; }
+        const readTool = tools && record(frame.item) && frame.item.type === 'mcp_tool_call' && frame.item.server === tools.server && tools.tools.includes(frame.item.tool);
+        if (!record(frame.item) || !(['reasoning', 'agent_message'].includes(frame.item.type) || readTool)) { stop(failure('Codex attempted a tool operation during routing.')); return; }
         if (frame.type === 'item.completed' && frame.item.type === 'agent_message' && typeof frame.item.text === 'string') finalText = frame.item.text;
       } else if (frame.type === 'turn.completed') completed = true;
       else if (!['thread.started', 'turn.started'].includes(frame.type)) stop(failure('Codex routing failed or returned an unsupported event. Check native sign-in and CLI compatibility.'));
     };
     child.stdout.on('data', (chunk: string) => {
       bytes += Buffer.byteLength(chunk);
-      if (bytes > MAX_OUTPUT) { stop(failure('native routing output exceeded its limit.')); return; }
+      if (bytes > (tools ? MAX_TOOLS_OUTPUT : MAX_OUTPUT)) { stop(failure('native routing output exceeded its limit.')); return; }
       stdout += chunk;
       let newline: number;
       while ((newline = stdout.indexOf('\n')) >= 0) { readLine(stdout.slice(0, newline)); stdout = stdout.slice(newline + 1); }
