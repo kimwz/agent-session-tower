@@ -27,11 +27,15 @@ async function harness(t: test.TestContext) {
   let modelName = 'fixture';
   let requests: Array<{sessionId: string; status: string; decidedBy?: string}> = [];
   let permissionFail = false;
+  let permissionFailureTarget: string | undefined;
+  let remoteProtection: boolean | undefined = false;
   let captured: AutoPromptModelRequest | undefined;
   let delivery: 'succeeded' | 'uncertain' | 'not-admitted' = 'succeeded';
   const snapshot = (): Snapshot => ({ sessions: [masterNative, target], runs, providers: [], hostname: 'fixture', version: 'fixture', scanning: false, updatedAt: new Date(now).toISOString() });
   const tower = { hasCredentials: () => online, call: async (method: string, path: string, body: { prompt: string } | undefined, options: { gate?: () => Promise<boolean>; headers?: Record<string,string> }) => {
-    if (path.endsWith('/permissions.overview') && permissionFail) return { state: 'failed', body: {} };
+    if (path.endsWith('/heartbeat-protection')) return remoteProtection === undefined ? { state: 'failed', body: {} } : { state: 'succeeded', body: { protected: remoteProtection } };
+    if (path.includes('/api/nodes/') && path.endsWith('/snapshot')) return { state: 'succeeded', body: structuredClone(snapshot()) };
+    if (path.endsWith('/permissions.overview') && (permissionFail || (permissionFailureTarget && (body as unknown as { cwd?: string })?.cwd === permissionFailureTarget))) return { state: 'failed', body: {} };
     if (path.endsWith('/runs.list')) return { state: 'succeeded', body: { result: { runs: structuredClone(runs) } } };
     if (path.endsWith('/permissions.overview')) return { state: 'succeeded', body: { result: { requests }  } };
     if (method === 'POST') {
@@ -48,7 +52,7 @@ async function harness(t: test.TestContext) {
   const options = { stateDir: dir, dataDir: dir, settings, tower, master, now: () => now, tickMs: 60_000, resolve: async () => ({ provider: 'codex' as const, model: modelName }), model: async (request: AutoPromptModelRequest) => { calls++; captured = request; return invoke ? invoke(request) : result; } };
   const heartbeat = new MasterHeartbeat(options); await heartbeat.start();
   t.after(async () => { await heartbeat.close(); await rm(dir, { recursive: true, force: true }); });
-  return { dir, heartbeat, options, model: (value: string) => { modelName = value; }, permissions: (value: typeof requests) => { requests = value; }, permissionFail: () => { permissionFail = true; }, settings, tasks, target, masterNative, runs, posts, accepted, advance: () => { now += 30 * 60_000; }, calls: () => calls, captured: () => captured, result: (value: unknown) => { result = value; }, invoke: (value: typeof invoke) => { invoke = value; }, stop: () => { stopped = true; }, offline: () => { online = false; }, delivery: (value: typeof delivery) => { delivery = value; } };
+  return { dir, heartbeat, options, model: (value: string) => { modelName = value; }, permissions: (value: typeof requests) => { requests = value; }, permissionFail: () => { permissionFail = true; }, failPermissionFor: (cwd: string) => { permissionFailureTarget = cwd; }, remoteProtection: (value: boolean | undefined) => { remoteProtection = value; }, settings, tasks, target, masterNative, runs, posts, accepted, advance: () => { now += 30 * 60_000; }, calls: () => calls, captured: () => captured, result: (value: unknown) => { result = value; }, invoke: (value: typeof invoke) => { invoke = value; }, stop: () => { stopped = true; }, offline: () => { online = false; }, delivery: (value: typeof delivery) => { delivery = value; } };
 }
 test('default enabled 30 minute inspection has no chat/run/voice effect on noop and bounds untrusted evidence', async t => {
   const h = await harness(t);
@@ -163,4 +167,23 @@ test('proven non-admission has no immediate retry; later normal cadence can reas
   const h = await harness(t); h.result(action); h.delivery('not-admitted'); h.advance(); await h.heartbeat.tick(); assert.equal(h.posts.length, 1);
   await h.heartbeat.tick(); assert.equal(h.posts.length, 1);
   h.delivery('succeeded'); h.advance(); await h.heartbeat.tick(); assert.equal(h.posts.length, 2); assert.equal(h.heartbeat.status().actions.at(-1)?.delivery, 'sent');
+});
+
+test('an unavailable remote candidate is excluded without preventing healthy local inspection or action', async t => {
+  const h = await harness(t); h.tasks.push({ ...h.tasks[0], id: 'remote-task', node: 'remote-node' }); h.remoteProtection(undefined); h.result(action);
+  h.advance(); await h.heartbeat.tick(); assert.equal(h.posts.length, 1); assert.equal(h.calls(), 1);
+  assert.deepEqual(JSON.parse(h.captured()!.prompt).candidates.map((item: { id: string }) => item.id), ['task-1']);
+  assert.match(h.heartbeat.status().lastCheck?.reason ?? '', /candidate protection states unavailable/);
+});
+test('remote session protection blocks pending or refused work and admits verified unprotected evidence', async t => {
+  for (const protection of [true, false]) {
+    const h = await harness(t); h.tasks[0].node = 'remote-node'; h.remoteProtection(protection); h.result(action); h.advance(); await h.heartbeat.tick();
+    assert.equal(h.posts.length, protection ? 0 : 1); assert.equal(h.calls(), protection ? 0 : 1);
+  }
+});
+test('unknown protection for one local candidate excludes that task without aborting another verified task', async t => {
+  const h = await harness(t); h.target.cwd = `${h.dir}/target`; h.failPermissionFor(h.target.cwd);
+  h.tasks.push({ ...h.tasks[0], id: 'verified-task', node: 'remote-node' }); h.remoteProtection(false);
+  h.result({ ...action, taskIds: ['verified-task'], evidenceIds: ['verified-task:transcript'] }); h.advance(); await h.heartbeat.tick();
+  assert.equal(h.posts.length, 1); assert.equal(h.calls(), 1); assert.match(h.heartbeat.status().lastCheck?.reason ?? '', /candidate protection states unavailable/);
 });

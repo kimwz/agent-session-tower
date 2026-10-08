@@ -550,7 +550,14 @@ export class RunManager extends EventEmitter {
     const session = this.getSession(sessionId);
     const turns = this.list().filter(run => run.sessionId === sessionId);
     const latest = [...turns].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
-    if (!session || !guard.sessionIds.includes(sessionId) || !prompt.startsWith(MASTER_HEARTBEAT_MARK) || !this.masterSession(session) || this.isWorking(session) || this.reservedSessions.has(sessionId)
+    const protectedTarget = guard.sessionIds.some(id => {
+      const target = this.getSession(id);
+      const targetTurns = this.list().filter(run => run.sessionId === this.monitorSessionId(id));
+      const targetLatest = [...targetTurns].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+      return !target || target.outcome === 'needsOwner' || targetLatest?.ownerStopped
+        || targetTurns.some(run => (run.status === 'running' || run.status === 'queued') && run.approvals?.length);
+    });
+    if (protectedTarget || !session || !guard.sessionIds.includes(sessionId) || !prompt.startsWith(MASTER_HEARTBEAT_MARK) || !this.masterSession(session) || this.isWorking(session) || this.reservedSessions.has(sessionId)
       || turns.some(run => run.status === 'running' || run.status === 'queued' || run.approvals?.length)
       || session.updatedAt !== guard.updatedAt || session.lastRequestAt !== guard.lastRequestAt || latest?.id !== guard.latestRunId
       || latest?.ownerStopped || turns.some(run => run.prompt.includes(`(check ${guard.checkId})`))) {

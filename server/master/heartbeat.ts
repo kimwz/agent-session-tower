@@ -1,3 +1,4 @@
+import { permissionProtected } from '../permissions/protection.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { MASTER_HEARTBEAT_HEADER, MASTER_HEARTBEAT_MARK, type HeartbeatAdmission, type MasterHeartbeatAction, type MasterHeartbeatCheck, type MasterHeartbeatStatus } from '../../shared/master.js';
@@ -68,6 +69,7 @@ export class MasterHeartbeat {
   private running?: Promise<void>;
   private closed = false;
   private epoch = 0;
+  private unavailableCandidates = 0;
   private readonly path: string;
   constructor(private readonly options: HeartbeatOptions) { this.path = join(options.dataDir, 'heartbeat.json'); }
   private now(): number { return this.options.now?.() ?? Date.now(); }
@@ -108,10 +110,16 @@ export class MasterHeartbeat {
     return messages.slice(-HISTORY_MESSAGES).map(item => `${item.role}: ${clip(item.text, 700)}`).join('\n').slice(-6000);
   }
   private async protectedSession(session: Session, signal: AbortSignal, node?: string): Promise<boolean> {
-    const response = await this.options.tower.call('POST', `${node ? `/api/nodes/${encodeURIComponent(node)}` : '/api'}/v1/permissions.overview`, { cwd: session.cwd }, { write: false, signal, singleAttempt: true });
+    if (node) {
+      const response = await this.options.tower.call('GET', `/api/nodes/${encodeURIComponent(node)}/sessions/${encodeURIComponent(session.id)}/heartbeat-protection`, undefined, { write: false, signal, singleAttempt: true });
+      const value = response.body as { protected?: unknown } | undefined;
+      if (response.state !== 'succeeded' || typeof value?.protected !== 'boolean') throw new Error('Remote session protection unavailable.');
+      return value.protected;
+    }
+    const response = await this.options.tower.call('POST', '/api/v1/permissions.overview', { cwd: session.cwd }, { write: false, signal, singleAttempt: true });
     const result = (response.body as { result?: { requests?: PermissionRequest[]; lost?: string } } | undefined)?.result;
     if (response.state !== 'succeeded' || !Array.isArray(result?.requests) || result.lost) throw new Error('Permission state unavailable; corrective action is disabled for this check.');
-    return result.requests.some(item => item.sessionId === session.id && (item.status === 'pending' || (item.status === 'denied' && item.decidedBy === 'owner')));
+    return permissionProtected(result.requests, [session.id]);
   }
   private async candidates(snapshot: Snapshot, signal: AbortSignal): Promise<Candidate[]> {
     const tracked = this.options.master.heartbeatTasks().filter(item => item.sessionId && (item.state === 'running' || item.report === 'failed' || item.report === 'uncertain' || Date.parse(item.createdAt) > this.now() - 24 * 60 * 60_000));
@@ -134,7 +142,11 @@ export class MasterHeartbeat {
       if (latest && (!run || (latest.id !== trackedRun?.id && latest.id !== run.id && latest.steering?.targetRunId !== run.id))) continue;
       if (session && run && session.lastRequestAt && Date.parse(session.lastRequestAt) > Date.parse(trackedRun!.createdAt) + 1000) continue;
       // A missing/incomplete or protected session is not a target for corrective instructions.
-      if (!detail || held(session, [...(latest ? [latest] : []), ...state.runs.filter(entry => entry.sessionId === item.sessionId && (entry.status === 'running' || entry.status === 'queued'))]) || await this.protectedSession(session!, signal, item.node)) continue;
+      if (!detail || held(session, [...(latest ? [latest] : []), ...state.runs.filter(entry => entry.sessionId === item.sessionId && (entry.status === 'running' || entry.status === 'queued'))]) || await this.protectedSession(session!, signal, item.node).catch(error => {
+        if (signal.aborted) throw error;
+        this.unavailableCandidates++;
+        return true;
+      })) continue;
       if (run) {
         const response = await this.options.tower.call('POST', `${item.node ? `/api/nodes/${encodeURIComponent(item.node)}` : '/api'}/v1/runs.list`, { sessionId: item.sessionId, limit: 6 }, { write: false, signal, singleAttempt: true });
         const result = (response.body as { result?: { runs?: Array<{ id: string; output?: string }> } } | undefined)?.result?.runs;
@@ -158,12 +170,18 @@ export class MasterHeartbeat {
     const controller = this.controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs ?? TIMEOUT);
     const epoch = this.epoch;
+    this.unavailableCandidates = 0;
     const settings = this.options.settings.current();
     const config = hash(settings);
     const check: MasterHeartbeatCheck = { id: randomUUID(), at: new Date(this.now()).toISOString(), state: 'checking', taskIds: [] };
     this.ledger.checks.push(check); this.ledger.checks = this.ledger.checks.slice(-RETAIN);
     this.ledger.nextDue = this.now() + this.interval();
-    const end = async (state: MasterHeartbeatCheck['state'], reason?: string) => { check.state = state; if (reason) check.reason = clip(reason, 500); await this.save(); };
+    const end = async (state: MasterHeartbeatCheck['state'], reason?: string) => {
+      check.state = state;
+      const omitted = this.unavailableCandidates ? `${this.unavailableCandidates} candidate protection states unavailable; those tasks were excluded.` : '';
+      if (reason || omitted) check.reason = clip([reason, omitted].filter(Boolean).join(' '), 500);
+      await this.save();
+    };
     try {
       await this.save();
       if (!settings.heartbeat.enabled || !settings.session || !this.options.tower.hasCredentials() || this.options.master.heartbeatStopped()) { await end('skipped', 'Disabled, unbound, offline or owner stopped.'); return; }
@@ -176,7 +194,7 @@ export class MasterHeartbeat {
       if (await this.protectedSession(master!, controller.signal)) { await end('skipped', 'Master awaiting a permission decision or owner refused.'); return; }
       const candidates = await this.candidates(snapshot, controller.signal);
       check.taskIds = candidates.map(item => item.id);
-      if (!candidates.length) { await end('noop', 'No eligible tracked work.'); return; }
+      if (!candidates.length) { await end(this.unavailableCandidates ? 'skipped' : 'noop', 'No eligible tracked work.'); return; }
       const resolved = await (this.options.resolve?.() ?? resolveModel(this.options.stateDir, 'master.heartbeat'));
       const modelFingerprint = hash(resolved);
       const input = () => JSON.stringify({ masterRequestAndConstraints: this.transcript(masterDetail!.messages ?? []), candidates,

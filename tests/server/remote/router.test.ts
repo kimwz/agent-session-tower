@@ -17,7 +17,7 @@ const REQUEST_ID = '0199a2b3-c4d5-7123-8abc-0123456789ab';
 const now = new Date().toISOString();
 
 async function fixture(t: TestContext, options: { coordinators?: string[] | null; beforeDetail?: () => Promise<void>; job?: (job: AutoPromptJob) => AutoPromptJob; beforeCancel?: () => Promise<void>; repositories?: boolean;
-  whileCreating?: () => Promise<void>; pull?: boolean } = {}) {
+  whileCreating?: () => Promise<void>; pull?: boolean; protection?: unknown; beforeProtection?: () => Promise<void> } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-remote-router-')));
   const open = join(root, 'open'), secret = join(root, 'secret');
   await mkdir(join(secret, 'deep'), { recursive: true });
@@ -75,6 +75,7 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
     steerRun: async (id, steerOptions) => { calls.push({ method: 'steerRun', args: [id, steerOptions] }); return { ...runs.find(run => run.id === id)!, steering: { targetRunId: 'turn', state: 'sending', requestedAt: now } }; },
     api: async (operation, input, context) => {
       calls.push({ method: 'api', args: [operation, input, context] });
+      if (operation === 'permissions.overview') { await options.beforeProtection?.(); return options.protection ?? { requests: [] }; }
       if (operation === 'triggers.get') throw Object.assign(new Error(`Cannot read properties of undefined (reading '${(input as { id: string }).id}')`), { statusCode: 500 });
       if (operation === 'triggers.run') throw Object.assign(new Error('GitHub coordinator triggers are created, changed and run on that computer itself.'), { statusCode: 403 });
       // Tower's own refusals as the domain makes them.
@@ -394,4 +395,34 @@ test('a controller compacts only a shared conversation, with its request ID, and
   const cancelled = await f.call('/api/sessions/codex:open/compaction/cancel', { body: {} });
   assert.equal(cancelled.json.compaction.state, 'cancelled');
   assert.deepEqual(f.changes().map(change => change.action), ['compact', 'compact-cancel']);
+});
+
+test('remote heartbeat protection exposes only one shared session boolean and keeps permission overview private', async t => {
+  const f = await fixture(t, { protection: { rules: [{ value: 'private permission rule' }], requests: [
+    { sessionId: 'codex:open', status: 'denied', decidedBy: 'owner', reason: 'private refusal reason' },
+    { sessionId: 'codex:private', status: 'pending', reason: 'private request' },
+  ] } });
+  const response = await f.call('/api/sessions/codex:open/heartbeat-protection');
+  assert.equal(response.status, 200); assert.deepEqual(response.json, { protected: true });
+  assert.doesNotMatch(response.text, /rule|reason|request|codex/);
+  assert.deepEqual(f.calls, [{ method: 'api', args: ['permissions.overview', { cwd: f.open }, undefined] }]);
+  for (const id of [f.secretSession.id, `codex:${f.secretSession.nativeId}`, 'codex:coordinator', 'codex:missing']) assert.equal((await f.call(`/api/sessions/${id}/heartbeat-protection`)).status, 404);
+  assert.equal(f.calls.length, 1, 'excluded, coordinator and missing sessions never reach permission state');
+  assert.equal((await f.call('/api/v1/permissions.overview', { body: {} })).status, 404, 'broad permission overview remains unavailable remotely');
+  assert.deepEqual(f.changes(), [], 'read-only checks do not record actions');
+});
+test('remote heartbeat protection is scoped to its session and fails closed on changed sharing or lost permission state', async t => {
+  const other = await fixture(t, { protection: { requests: [{ sessionId: 'codex:private', status: 'pending' }, { sessionId: 'codex:open', status: 'denied', decidedBy: 'auto' }] } });
+  assert.deepEqual((await other.call('/api/sessions/codex:open/heartbeat-protection')).json, { protected: false });
+  const lost = await fixture(t, { protection: { requests: [], lost: 'private file diagnostic' } });
+  const unavailable = await lost.call('/api/sessions/codex:open/heartbeat-protection'); assert.equal(unavailable.status, 503); assert.doesNotMatch(unavailable.text, /private file diagnostic/);
+  const changed = await fixture(t, { beforeProtection: async () => { await changed.exclusions.add(changed.open); } });
+  assert.equal((await changed.call('/api/sessions/codex:open/heartbeat-protection')).status, 404, 'sharing is rechecked after reading the protection decision');
+});
+test('remote REST run evidence uses the existing read-only operation with authenticated remote sharing context', async t => {
+  const f = await fixture(t);
+  const response = await f.call('/api/v1/runs.list', { body: { sessionId: 'codex:open', limit: 6 } });
+  assert.equal(response.status, 200);
+  assert.deepEqual(f.calls, [{ method: 'api', args: ['runs.list', { sessionId: 'codex:open', limit: 6 }, { origin: { kind: 'owner', controllerId: CONTROLLER } }] }]);
+  assert.deepEqual(f.changes(), []);
 });

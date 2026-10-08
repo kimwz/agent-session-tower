@@ -1,3 +1,4 @@
+import { permissionProtected } from '../permissions/protection.js';
 import { subscriptionOnly } from '../runs/subscription.js';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -67,8 +68,7 @@ export class TowerApi {
   /** Synchronous final heartbeat admission check against the permission domain's current state. */
   heartbeatBlocked(sessionIds: readonly string[]): boolean {
     const overview = this.permissions().overview();
-    return Boolean(overview.lost) || overview.requests.some(request => sessionIds.includes(request.sessionId)
-      && (request.status === 'pending' || (request.status === 'denied' && request.decidedBy === 'owner')));
+    return Boolean(overview.lost) || permissionProtected(overview.requests, sessionIds);
   }
 
   /**

@@ -1,3 +1,5 @@
+import type { PermissionOverview } from '../../shared/permissions.js';
+import { permissionProtected } from '../permissions/protection.js';
 import type { AttachmentStore } from '../stores/attachments.js';
 import type { AttachmentUploads } from '../stores/attachment-uploads.js';
 import { chatImageReference, readChatImage, sendChatImage, withChatImages } from '../http/chat-images.js';
@@ -237,6 +239,17 @@ export function createRemoteRouter({ attachmentStores, attachmentUploads, backen
     const method = req.method;
     if (method === 'GET' && path === '/api/snapshot') return json(res, 200, view(principal));
     if (method === 'GET' && path === '/api/events') return events(req, res, principal, url.searchParams.get('patch') === '1');
+    const protection = path.match(/^\/api\/sessions\/([^/]+)\/heartbeat-protection$/);
+    if (method === 'GET' && protection) {
+      const found = await confirm(protection[1]);
+      if (!backend.api) throw httpError(503, '세션 보호 상태를 확인할 수 없습니다.');
+      // A narrow local read after sharing admission: no rule, reason or request is exposed to the controller.
+      const overview = await backend.api('permissions.overview', { cwd: found.cwd }) as PermissionOverview;
+      if (!overview || !Array.isArray(overview.requests) || overview.lost) throw httpError(503, '세션 보호 상태를 확인할 수 없습니다.');
+      const protectedState = permissionProtected(overview.requests, [found.id]);
+      await stillVisible(found.id);
+      return json(res, 200, { protected: protectedState });
+    }
     const detail = path.match(/^\/api\/sessions\/([^/]+)$/);
     if (method === 'GET' && detail) {
       const found = await confirm(detail[1]);

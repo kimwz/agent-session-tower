@@ -11,15 +11,16 @@ async function fixture(t: test.TestContext, wait = false) {
   const root = await mkdtemp(join(tmpdir(), 'tower-heartbeat-admission-'));
   const id = 'codex:10000000-0000-4000-8000-000000000001';
   const native: Session = { id, nativeId: id.slice(6), provider: 'codex', title: 'master', cwd: join(root, MASTER_FOLDER), project: 'fixture', status: 'idle', statusReason: '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
+  const target: Session = { ...native, id: 'codex:10000000-0000-4000-8000-000000000002', nativeId: '10000000-0000-4000-8000-000000000002', cwd: join(root, 'work') };
   let release!: () => void, entered!: () => void;
   const preparing = new Promise<void>(resolve => { entered = resolve; });
   const held = new Promise<void>(resolve => { release = resolve; });
-  const manager = new RunManager({ stateDir: root, getSession: requested => requested === id ? native : undefined, refreshSessions: async () => {}, holdUntilReady: true, findExecutable: async () => { entered(); if (wait) await held; return '/fixture/codex'; } });
+  const manager = new RunManager({ stateDir: root, getSession: requested => requested === id ? native : requested === target.id ? target : undefined, refreshSessions: async () => {}, holdUntilReady: true, findExecutable: async () => { entered(); if (wait) await held; return '/fixture/codex'; } });
   await manager.start(); t.after(async () => { await manager.close(); await rm(root, { recursive: true, force: true }); });
   const checkId = randomUUID();
   const guard = { checkId, sessionIds: [id], updatedAt: native.updatedAt };
   const prompt = `${MASTER_HEARTBEAT_MARK} (check ${checkId}) recommendation`;
-  return { manager, native, guard, prompt, preparing, release };
+  return { manager, native, target, guard, prompt, preparing, release };
 }
 test('heartbeat final admission is idle-only and records an agent origin without creating sessions', async t => {
   const h = await fixture(t);
@@ -40,4 +41,25 @@ test('heartbeat cannot enter a working native master or a non-master conversatio
   h.native.status = 'idle'; h.native.cwd = tmpdir();
   await assert.rejects(h.manager.enqueue(h.native.id, h.prompt, {}, { origin: { kind: 'agent' }, heartbeat: h.guard }), /preconditions changed/);
   assert.equal(h.manager.list().length, 0);
+});
+test('local target stop, needsOwner, approval or disappearance during preparation blocks heartbeat final admission', async t => {
+  for (const protection of ['stop', 'needsOwner', 'approval', 'missing'] as const) {
+    const h = await fixture(t, true); h.guard.sessionIds.push(h.target.id);
+    const pending = h.manager.enqueue(h.native.id, h.prompt, {}, { origin: { kind: 'agent' }, heartbeat: h.guard });
+    await h.preparing;
+    const original = h.manager.list.bind(h.manager);
+    if (protection === 'stop' || protection === 'approval') h.manager.list = () => [...original(), {
+      id: 'target-run', sessionId: h.target.id, createdAt: new Date().toISOString(), prompt: 'target work', output: '',
+      status: protection === 'stop' ? 'cancelled' : 'running',
+      ...(protection === 'stop' ? { ownerStopped: true as const } : { approvals: [{ id: 'approval', toolName: 'native approval', input: {} }] }),
+    }];
+    if (protection === 'needsOwner') h.target.outcome = 'needsOwner';
+    if (protection === 'missing') h.guard.sessionIds.push('codex:missing');
+    h.release(); await assert.rejects(pending, /preconditions changed/, protection); assert.equal(original().length, 0);
+  }
+});
+test('normal working local target is eligible for master direction assessment', async t => {
+  const h = await fixture(t); h.target.status = 'working'; h.guard.sessionIds.push(h.target.id);
+  const run = await h.manager.enqueue(h.native.id, h.prompt, {}, { origin: { kind: 'agent' }, heartbeat: h.guard });
+  assert.equal(run.sessionId, h.native.id);
 });
