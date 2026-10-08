@@ -8,9 +8,15 @@ const MAX_TOTAL = 180_000;
 const MAX_FILES = 8;
 const SCRIPT = /\.(?:py|mjs|cjs|js|ts|tsx|sh|bash|zsh|rb|pl|php|lua|ps1)$/i;
 /** Credential stores and files by name, wherever they are. */
-const STORE = /(?:^|\/)(?:\.credentials(?:\.[^/]*)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials|\.kube|\.docker|\.env(?:\.[^/]*)?|\.dev\.vars(?:\.[^/]*)?|\.pgpass|\.vault-token|\.terraformrc|\.cloudflared|\.ssh|\.aws|\.gnupg|id_rsa|id_ed25519|id_ecdsa|id_dsa)(?:\/|$)/i;
+const STORE = /(?:^|\/)(?:\.credentials(?:\.[^/]*)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials|\.git\/config|\.kube|\.docker|\.env(?:\.[^/]*)?|\.envrc|\.dev\.vars(?:\.[^/]*)?|\.pgpass|\.vault-token|\.terraformrc|\.yarnrc\.yml|\.my\.cnf|\.s3cfg|\.boto|\.htpasswd|\.cloudflared|\.ssh|\.aws|\.gnupg|id_rsa|id_ed25519|id_ecdsa|id_dsa)(?:\/|$)/i;
+/** Key and state files that hold credentials whatever they are called. */
+const KEYS = /(?:\.(?:pem|key|p8|p12|pfx|jks|keystore|ppk|tfvars|tfvars\.json|tfstate|tfstate\.backup)|^(?:service[-_]?account[^/]*|client_secret[^/]*|[^/]*adminsdk[^/]*|token)\.json)$/i;
 /** Names that hold credentials when they are data (`auth.json`, `secrets/db.yaml`), not when they are code (`auth.ts`, `server/secrets/runtime.ts`). */
 const NAMED = /^(?:auth|credentials|secrets?)(?:\.[^/]*)?$/i;
+/** Folders whose data files are credentials (a folder named `auth` usually holds a service's code and config). */
+const HOLDS = /^(?:credentials|secrets?)$/i;
+/** `secrets.py` or `credentials.js` beside settings is where values live; TypeScript modules so named are code. */
+const VALUES = /^(?:credentials|secrets?)\.(?!(?:ts|tsx|mts|cts)$)[^.]+$/i;
 const CODE = /\.(?:py|mjs|cjs|js|jsx|ts|tsx|mts|cts|sh|bash|zsh|rb|pl|php|lua|ps1|go|rs|java|kt|swift|c|cc|cpp|h|hpp|cs|scala)$/i;
 
 type FileEvidence = { path: string; status: 'read' | 'unavailable' | 'too-large' | 'excluded' | 'not-text'; text?: string; real?: string; sha256?: string };
@@ -23,9 +29,9 @@ export interface CommandEvidence { files: FileEvidence[]; notes: string[] }
  */
 export function isPrivatePath(path: string, folder = false): boolean {
   const name = basename(path);
-  if (STORE.test(path) || !folder && /\.(?:pem|key|p12|pfx|tfvars|tfvars\.json)$/i.test(name)) return true;
+  if (STORE.test(path) || !folder && (KEYS.test(name) || VALUES.test(name))) return true;
   if (folder || CODE.test(name)) return false;
-  return NAMED.test(name) || path.split(sep).slice(0, -1).some(segment => NAMED.test(segment));
+  return NAMED.test(name) || path.split(sep).slice(0, -1).some(segment => HOLDS.test(segment));
 }
 
 /**

@@ -146,7 +146,8 @@ async function named(text: string, bases: string[], home: string, shell = false,
    * `__init__.py` created later would be what runs).
    */
   const resolveName = async (name: string, watching = true) => {
-    if (await add(name) === 'file') return;
+    const exact = await add(name);
+    if (exact === 'file' || exact === 'other') return;
     for (const probe of PROBES.slice(1)) await add(name + probe);
     // TypeScript sources are imported by the name they compile to (`./x.js` for `x.ts`).
     const compiled = /\.([cm]?)js(x?)$/.exec(name);
@@ -164,13 +165,14 @@ async function named(text: string, bases: string[], home: string, shell = false,
     await watched(parent, true);
     await watched(name, false);
   };
-  const add = async (path: string): Promise<'file' | 'dir' | undefined> => {
+  const add = async (path: string): Promise<'file' | 'dir' | 'other' | undefined> => {
     const canonical = await real(path);
     const info = canonical ? await absent(stat(canonical)) : undefined;
     if (!canonical || !info) return undefined;
     if (canonical !== resolve(path) || /(?:^|\/)\.\.(?:\/|$)/.test(path)) { if (!links.some(link => link.path === path)) links.push({ path, real: canonical }); }
     if (info.isDirectory()) { if (!folders.includes(canonical)) folders.push(canonical); return 'dir'; }
-    if (!info.isFile()) return undefined;
+    // A device, socket or pipe (`/dev/null`): not code, and nothing to look for beside it.
+    if (!info.isFile()) return 'other';
     roots.push({ path: canonical, kind: 'file' });
     if (SCRIPT.test(canonical) && await repositoryOf(dirname(canonical), home)) roots.push({ path: dirname(canonical), kind: 'folder' });
     return 'file';
@@ -300,7 +302,7 @@ async function expand(reach: Reach, file: string, text: string): Promise<{ place
   }
   for (const root of found.roots) {
     if (reach.roots.length >= MAX_ROOTS) break;
-    if (isDenied(root.path, reach.denied, root.kind !== 'file') || reach.roots.some(item => covers(item, root.path) && (item.kind !== 'file' || root.kind === 'file'))) continue;
+    if (isDenied(root.path, reach.denied, root.kind !== 'file') || reach.roots.some(item => covers(item, root.path) && (item.kind === 'tree' || root.kind === 'file' || item.path === root.path))) continue;
     reach.roots.push(root);
   }
   return { places: added, watch };
@@ -461,6 +463,8 @@ export class ReviewFiles {
     if (!needle || needle.length > 500) { await this.log({ tool: 'search_text', path: place.path, status: 'invalid' }); return { status: 'invalid', message: 'Give text (at most 500 characters) to look for.' }; }
     if (place.status) { await this.log({ tool: 'search_text', path: place.path, status: place.status }); return { path: place.path, status: place.status, message: explain(place.status) }; }
     const matches: { path: string; line: number; text: string }[] = [];
+    // Files a match came from are bound like files read: an approval may rest on the lines it saw.
+    const matched: ReadEntry[] = [];
     let files = 0;
     const insideSkipped = place.real!.split(sep).some(part => part === 'node_modules' || part === '.git');
     const visit = async (path: string): Promise<void> => {
@@ -474,17 +478,22 @@ export class ReviewFiles {
       }
       if (!info.isFile() || info.size > MAX_SEARCH_FILE_BYTES || !this.roots.some(root => covers(root, path))) return;
       files += 1;
-      const text = await absent(readFile(path, 'utf8')) ?? '';
+      const bytes = await absent(readFile(path));
+      const text = bytes?.toString('utf8') ?? '';
       if (text.includes('\0')) return;
       const lines = text.split('\n');
+      // Named under the folder as it was asked for, so reading a match keeps going through the same link.
+      const named = path === place.real ? place.path : at(place.path, relative(place.real!, path));
+      const before = matches.length;
       for (let index = 0; index < lines.length && matches.length < MAX_MATCHES; index++) {
-        // Named under the folder as it was asked for, so reading a match keeps going through the same link.
-        if (lines[index]!.toLowerCase().includes(needle)) matches.push({ path: path === place.real ? place.path : at(place.path, relative(place.real!, path)), line: index + 1, text: lines[index]!.slice(0, 300) });
+        if (lines[index]!.toLowerCase().includes(needle)) matches.push({ path: named, line: index + 1, text: lines[index]!.slice(0, 300) });
       }
+      if (bytes && matches.length > before) matched.push({ tool: 'search_text', path: named, status: 'read', real: path, sha256: sha256(bytes) });
     };
     await visit(place.real!);
     if (!this.take(JSON.stringify(matches))) { await this.log({ tool: 'search_text', path: place.real!, status: 'budget' }); return { status: 'budget', message: explain('budget') }; }
     await this.log({ tool: 'search_text', path: place.path, status: 'searched' });
+    for (const entry of matched) await this.log(entry);
     // A folder searched through a link is bound by where it led, like one a script names.
     if (place.real !== resolve(place.path)) await this.log({ tool: 'search_text', path: place.path, status: 'place', real: place.real });
     return { path: place.real, matches, filesSearched: files, ...(matches.length >= MAX_MATCHES || files >= MAX_SEARCH_FILES ? { cut: true } : {}),
@@ -500,7 +509,8 @@ export class ReviewFiles {
 async function collect(folder: string, depth: number, denied: readonly string[]): Promise<{ path: string; kind: string }[]> {
   const entries: { path: string; kind: string }[] = [];
   const walk = async (dir: string, level: number) => {
-    for (const item of (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+    // Sorted by code units: the digest is made in the tool server and compared in the worker, whatever their locales.
+    for (const item of (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
       const path = join(dir, item.name);
       if (isDenied(path, denied, item.isDirectory())) continue;
       if (entries.length >= MAX_BIND_ENTRIES) throw new Error(`more than ${MAX_BIND_ENTRIES} entries`);
@@ -527,10 +537,12 @@ export async function folderBinding(folder: string, denied: readonly string[]): 
 }
 
 /**
- * A folder every process writes to (`/tmp`, the system's temporary folder, any sticky one): its entries change all the
- * time, so it is not bound by them — only the files read in it are.
+ * A folder every process writes to (`/tmp`, the system's temporary folder, any sticky one, `/dev`): its entries change
+ * all the time, so it is not bound by them — only the files read in it are.
  */
 async function sharedFolder(folder: string): Promise<boolean> {
+  // Devices (`/dev/null`, `/dev/fd/3`) and process files change with every terminal and process.
+  if (['/dev', '/proc'].some(top => within(folder, top))) return true;
   const info = await absent(stat(folder));
   return Boolean(info && (info.mode & 0o1000)) || folder === await real(tmpdir());
 }

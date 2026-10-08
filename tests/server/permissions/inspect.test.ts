@@ -319,7 +319,8 @@ test('a linked name a script uses is bound however the reviewer reads the file; 
   assert.deepEqual(await changedFiles(reviewed, []), []);
   await rm(join(other, 'current'));
   await symlink(join(other, 'release-b'), join(other, 'current'));
-  assert.deepEqual(await changedFiles(reviewed, []), [join(other, 'current', 'child.mjs')]);
+  // Bound twice now (where the name leads, and the contents of the matched file): both read as changed.
+  assert.deepEqual([...new Set(await changedFiles(reviewed, []))], [join(other, 'current', 'child.mjs')]);
   // ~/task/link/../cleanup.sh
   await mkdir(join(f.home, 'task', 'releases', 'v1'), { recursive: true });
   await writeFile(join(f.home, 'task', 'releases', 'cleanup.sh'), 'rm -rf ~/data\n');
@@ -606,4 +607,26 @@ test('a missing candidate folder named like credentials stays unchanged while it
     await writeFile(join(f.project, name), 'TOKEN=x');
     assert.equal((await files.read({ path: name }) as { status: string }).status, 'denied', name);
   }
+});
+
+test('/dev is never bound; more credential names are refused, code named so in an auth folder is readable, settings secrets.py is not; matched search lines bind their file', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.project, 'scripts', 'quiet.sh'), 'lsof -ti :8000 2>/dev/null | xargs kill\n');
+  const quiet = await f.files('sh scripts/quiet.sh 2>/dev/null');
+  await quiet.read({ path: 'scripts/quiet.sh' });
+  assert.ok(!reviewedFiles(await readLog(f.log)).some(file => file.path.startsWith('/dev')));
+  for (const name of ['.envrc', 'terraform.tfstate', 'service-account-prod.json', 'client_secret_123.json', 'AuthKey_ABC.p8', 'settings/secrets.py', 'config/credentials.js', '.git/config']) {
+    await mkdir(join(f.project, dirname(name)), { recursive: true });
+    await writeFile(join(f.project, name), 'x');
+    assert.equal((await quiet.read({ path: name }) as { status: string }).status, 'denied', name);
+  }
+  await mkdir(join(f.project, 'services', 'auth'), { recursive: true });
+  await writeFile(join(f.project, 'services', 'auth', 'package.json'), '{}');
+  assert.equal((await quiet.read({ path: 'services/auth/package.json' }) as { text: string }).text, '{}', 'a service folder named auth holds config, not credentials');
+  await writeFile(join(f.project, 'scripts', 'report.mjs'), 'writeFileSync(out, data)\n');
+  await quiet.search({ text: 'writeFileSync', path: 'scripts' });
+  const reviewed = reviewedFiles(await readLog(f.log));
+  assert.ok(reviewed.some(file => file.path === join(f.project, 'scripts', 'report.mjs') && file.sha256));
+  await writeFile(join(f.project, 'scripts', 'report.mjs'), 'rmSync(out)\n');
+  assert.ok((await changedFiles(reviewed, [])).includes(join(f.project, 'scripts', 'report.mjs')));
 });

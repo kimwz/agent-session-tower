@@ -122,7 +122,8 @@ test('a child edited after the approval does not run under it: the request is re
   // The scripts by their contents, the run's folder by where it leads, and the scripts' folder by its entries.
   for (const expected of [[f.project, 'place'], [join(f.project, 'scripts'), 'entries'], [join(f.project, 'scripts', 'fixture.mjs'), 'contents'], [join(f.project, 'scripts', 'run-all.mjs'), 'contents']])
     assert.ok(kinds.some(kind => kind[0] === expected[0] && kind[1] === expected[1]), expected.join(' '));
-  await writeFile(join(f.project, 'scripts', 'fixture.mjs'), 'import { rmSync } from "node:fs"; rmSync(process.env.HOME, { recursive: true });\n');
+  // A harmless stand-in for a destructive edit: it would only leave a marker if it ever ran.
+  await writeFile(join(f.project, 'scripts', 'fixture.mjs'), 'import { writeFileSync } from "node:fs"; writeFileSync(new URL("./ran-after-edit", import.meta.url), "");\n');
   hold();
   await until(() => seen.length === 2);
   await f.settle();
@@ -130,7 +131,8 @@ test('a child edited after the approval does not run under it: the request is re
   assert.equal(after.status, 'pending');
   assert.equal(after.run, undefined, 'never started');
   assert.equal(after.review!.verdict, 'owner');
-  assert.match(seen[1]!, /rmSync/);
+  assert.match(seen[1]!, /ran-after-edit/);
+  assert.equal(await readFile(join(f.project, 'scripts', 'ran-after-edit'), 'utf8').catch(() => 'absent'), 'absent', 'never ran');
 });
 
 test('an owner verdict names the concrete risk, what could not be confirmed and the reads Tower refused', async t => {
@@ -193,14 +195,14 @@ test('a file the wrapper looked for and did not find, once it appears, sends the
   f.answer(async tools => {
     reviews += 1;
     const got = await tools.read({ path: 'scripts/override.mjs' }) as { status?: string; text?: string };
-    assert.deepEqual(reviews === 1 ? got.status : got.text, reviews === 1 ? 'missing' : 'process.kill(-1)\n');
+    assert.deepEqual(reviews === 1 ? got.status : got.text, reviews === 1 ? 'missing' : 'console.log("override")\n');
     return { verdict: reviews === 1 ? 'approve' : 'owner', reason: '-', rule: null, scope: null, suggestion: null, missing: [] };
   });
   const { request } = await f.service.requestRun({ command: 'node scripts/run-all.mjs', reason: 'check' }, agent('codex:sqlite'));
   f.reviewer.wake();
   await until(() => f.request(request.id!).status === 'approved');
   assert.ok(f.request(request.id!).review!.files!.some(file => file.path.endsWith('override.mjs') && file.sha256 === null));
-  await writeFile(join(f.project, 'scripts', 'override.mjs'), 'process.kill(-1)\n');
+  await writeFile(join(f.project, 'scripts', 'override.mjs'), 'console.log("override")\n');
   hold();
   await until(() => reviews === 2);
   await f.settle();
@@ -407,4 +409,22 @@ test('a later run of the conversation waits for an earlier one sent back to revi
   assert.equal(await confirm(first.id!), false);
   assert.equal(await confirm(second.id!), false, 'not ahead of the first');
   assert.match(f.request(second.id!).review!.reason!, /앞선 실행이 다시 검토되고 있어 순서대로/);
+});
+
+test('a review whose files keep changing goes to the owner after the requeue limit, naming them', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.project, 'scripts', 'run-all.mjs'), WRAPPER);
+  await writeFile(join(f.project, 'scripts', 'fixture.mjs'), 'console.log(0)\n');
+  let reviews = 0;
+  f.answer(async tools => {
+    reviews += 1;
+    await tools.read({ path: join(f.project, 'scripts', 'fixture.mjs') });
+    await writeFile(join(f.project, 'scripts', 'fixture.mjs'), `console.log(${reviews})\n`);
+    return { verdict: 'approve', reason: '확인함', rule: null, scope: null, suggestion: null, missing: [] };
+  });
+  const { request } = await f.service.requestRun({ command: 'node scripts/run-all.mjs', reason: 'r' }, agent('codex:sqlite'));
+  f.reviewer.wake(); await f.settle();
+  assert.equal(reviews, 4);
+  assert.equal(f.request(request.id!).review!.status, 'skipped');
+  assert.match(f.request(request.id!).review!.reason!, /계속 바뀌어 소유자에게 넘깁니다: .*fixture\.mjs/);
 });
