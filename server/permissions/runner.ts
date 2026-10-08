@@ -59,6 +59,8 @@ export interface RunnerOptions {
   now?: () => Date;
   /** Adds to a run's environment for its conversation (how the commands it starts are known as that conversation's). */
   env?(group: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
+  /** Asked right before a run starts; false leaves it unstarted (its request went back to review). */
+  beforeStart?(id: string): Promise<boolean>;
 }
 
 /**
@@ -120,6 +122,13 @@ export class PermissionRunner {
   async forget(id: string): Promise<void> { await rm(join(this.dir, `${id}.json`), { force: true }); }
 
   private async execute(id: string, command: string, cwd: string, timeoutSeconds: number, group: string): Promise<void> {
+    let proceed: boolean;
+    try { proceed = await this.options.beforeStart?.(id) ?? true; } catch (error) {
+      // best-effort: this save reports the failure; if it fails too there is nothing left to record it in
+      await this.options.update(id, { status: 'failed', finishedAt: this.now(), error: `Tower could not confirm what was reviewed: ${error instanceof Error ? error.message : String(error)}` }).catch(() => {});
+      return;
+    }
+    if (!proceed) return;
     const startedAt = this.now();
     // Saved before the command starts: a worker that stops from here on leaves a run whose result is unknown, never
     // one that would start again.
