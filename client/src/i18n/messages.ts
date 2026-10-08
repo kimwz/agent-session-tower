@@ -2514,4 +2514,9 @@ export const english: Record<string, string> = {
   "원래 세션을 찾을 수 없어 새 세션을 만들지 않았습니다.": "The original session could not be found, so no new session was created.",
   "압축 기록 파일이 너무 커서 새 세션을 만들지 않았습니다.": "The compaction record has grown too large, so no new session was created.",
   "세션을 찾을 수 없습니다.": "Session not found.",
+  "Tower가 실행 워커를 바꾸는 중입니다. 잠시 후 다시 시도하세요.": "Tower is replacing its execution worker. Try again in a moment.",
+  "대화 기록을 끝까지 읽지 못했습니다.": "The conversation history could not be read to its beginning.",
+  "요약이 너무 길어 하나로 합칠 수 없습니다.": "The notes are too long to merge into one summary.",
+  "압축으로 만든 새 세션을 이어서 쓸 수 없습니다(첫 응답이 실패했거나 세션이 없어짐). 다시 압축하면 새 세션을 만듭니다.": "The session the compaction made cannot carry the work (its first answer failed or it is gone). Compact again to make a new one.",
+  "압축 모델({0}) 호출이 실패했습니다: {1}": "The compaction model ({0}) call failed: {1}",
 };

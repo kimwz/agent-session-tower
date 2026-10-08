@@ -39,6 +39,8 @@ export function useSessionCompaction(sessionId: string, token: string, connected
   const [busy, setBusy] = useState<'' | 'start' | 'cancel'>('');
   const [watch, setWatch] = useState(0);
   const followed = useRef<string | undefined>(undefined);
+  /** Counts what this page asked: a read answered after a newer start says nothing about the compaction followed now. */
+  const generation = useRef(0);
   const current = useRef(sessionId);
   const navigate = useRef(onNavigate);
   navigate.current = onNavigate;
@@ -50,9 +52,10 @@ export function useSessionCompaction(sessionId: string, token: string, connected
     let timer: number | undefined;
     let stopped = false;
     const read = async () => {
+      const asked = generation.current;
       try {
         const { compaction } = await api<{ compaction: SessionCompaction | null }>(pathFor(sessionId, id => `/api/sessions/${encodeURIComponent(id)}/compaction`));
-        if (stopped) return;
+        if (stopped || asked !== generation.current) return;
         // A compaction followed here that the worker no longer knows ended with a worker replaced midway.
         if (followRead(followed.current, compaction) === 'lost') { followed.current = undefined; setJob(null); setError(t('실행 워커가 바뀌어 압축이 중단되었습니다. 새 세션은 만들지 않았습니다. 다시 시도하세요.')); return; }
         setJob(compaction);
@@ -79,6 +82,7 @@ export function useSessionCompaction(sessionId: string, token: string, connected
     const id = sessionId;
     if (!token || busy) return;
     setBusy('start'); setError('');
+    generation.current++;
     try {
       // Each click is a request of its own: the worker answers a second one with the compaction already running or done.
       const { compaction } = await api<{ compaction: SessionCompaction }>(pathFor(id, local => `/api/sessions/${encodeURIComponent(local)}/compaction`), {

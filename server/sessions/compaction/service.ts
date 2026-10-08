@@ -75,6 +75,7 @@ interface Entry { job: SessionCompaction; revision: string; controller: AbortCon
 interface Attempt { jobId: string; revision: string; at: string; state: 'creating' | 'done'; newSessionId?: string; prompt: string }
 
 const UNCERTAIN = '이전 압축이 새 세션을 만들었는지 확인할 수 없어(실행 워커가 중간에 멈춤) 다시 만들지 않았습니다. 세션 목록에서 「(이어서)」 세션을 확인하세요. 원래 세션에서 대화가 더 이어지면 다시 압축할 수 있습니다.';
+const UNUSABLE = '압축으로 만든 새 세션을 이어서 쓸 수 없습니다(첫 응답이 실패했거나 세션이 없어짐). 다시 압축하면 새 세션을 만듭니다.';
 const active = (entry: Entry | undefined) => !!entry && COMPACTION_ACTIVE.has(entry.job.state);
 /** What a conversation has said so far; a change while it is summarized means the summary is already behind. */
 const revision = outcomeMark;
@@ -130,8 +131,9 @@ export class SessionCompactions {
   private persist = true;
   private writes: Promise<void> = Promise.resolve();
   private closed = false;
-  /** A forced update is waiting for work to wrap up: nothing new starts. */
+  /** A forced update is waiting for work to wrap up (`hold`), or the worker is handing off (`pause`): nothing new starts. */
   private held = false;
+  private paused = false;
 
   constructor(private readonly dependencies: SessionCompactionDependencies) {
     this.path = join(dependencies.stateDir, FILE);
@@ -175,11 +177,14 @@ export class SessionCompactions {
    * A forced update is draining: nothing new starts, and a compaction still reading or summarizing stops now, so none
    * can begin creating a session while the worker hands off. One already creating is waited for (`creating`).
    */
-  hold(): void {
-    this.held = true;
+  hold(): void { this.held = true; this.stopUnderway(); }
+  release(): void { this.held = false; }
+  /** The worker is handing off: the same as a hold, undone by `resume` alone when the handoff does not happen. */
+  pause(): void { this.paused = true; this.stopUnderway(); }
+  resume(): void { this.paused = false; }
+  private stopUnderway(): void {
     for (const entry of this.jobs.values()) if (active(entry) && entry.job.state !== 'creating') entry.controller.abort('held' satisfies Stop);
   }
-  release(): void { this.held = false; }
   flush(): Promise<void> { return this.writes; }
 
   /** The conversation's latest compaction: one this worker ran, else the last one that began creating a session. */
@@ -188,7 +193,7 @@ export class SessionCompactions {
     const entry = this.jobs.get(id);
     const job = entry ? structuredClone(entry.job) : this.attempts.has(id) ? savedJob(id, this.attempts.get(id)!) : undefined;
     // A finished compaction whose session can no longer carry the work is not offered as the way on.
-    return job?.state === 'done' && !this.usable(job.newSessionId) ? undefined : job;
+    return job?.state === 'done' && !this.usable(job.newSessionId) ? { ...job, state: 'failed', error: UNUSABLE } : job;
   }
 
   /**
@@ -198,7 +203,7 @@ export class SessionCompactions {
   start(sessionId: string, options: { title?: string }, admission: RunAdmission): SessionCompaction {
     const refuse = (text: string) => new TowerError('unavailable', text, { disposition: 'not-admitted' });
     if (this.closed) throw refuse('Tower가 실행 워커를 바꾸는 중입니다. 잠시 후 다시 시도하세요.');
-    if (this.held) throw refuse('Tower가 실행 워커 업데이트를 준비하고 있어 지금은 압축을 시작하지 않습니다. 업데이트가 끝난 뒤 다시 시도하세요.');
+    if (this.held || this.paused) throw refuse('Tower가 실행 워커 업데이트를 준비하고 있어 지금은 압축을 시작하지 않습니다. 업데이트가 끝난 뒤 다시 시도하세요.');
     if (!this.persist) throw refuse('압축 기록 파일(session-compactions.json)을 읽지 못해 압축할 수 없습니다. 같은 압축이 두 번 만들어지지 않도록, 파일을 고친 뒤 Tower 실행 워커가 다시 시작되면 압축할 수 있습니다.');
     const session = this.dependencies.session(sessionId);
     if (!session) throw new TowerError('not-found', '세션을 찾을 수 없습니다.');
@@ -303,7 +308,7 @@ export class SessionCompactions {
       const early = this.lastLook(source.id, entry.revision, admission);
       if (early) throw new Error(early);
       // Nothing waits from here to `creating`: a hold or a close that came first has stopped the compaction.
-      if (this.held || this.closed) throw new Error('압축이 중단되었습니다.');
+      if (this.held || this.paused || this.closed) throw new Error('압축이 중단되었습니다.');
       const latest = this.dependencies.session(source.id)!;
       const continuation = continuationModel(latest, this.dependencies.runs());
       const prompt = visiblePrompt(title, entry.job.id);

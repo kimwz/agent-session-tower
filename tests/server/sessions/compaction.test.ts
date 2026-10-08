@@ -466,5 +466,18 @@ test("a finished compaction whose session cannot carry the work is not offered o
   const done = await f.settle();
   assert.equal(f.service.get('claude:src')?.id, done.id);
   f.sessions.delete(done.newSessionId!);
-  assert.equal(f.service.get('claude:src'), undefined);
+  const shown = f.service.get('claude:src');
+  assert.equal(shown?.state, 'failed', 'the page that follows it hears why, rather than nothing');
+  assert.match(shown!.error!, /이어서 쓸 수 없습니다/);
+});
+
+test('a handoff pause stops compactions underway and is undone by resume alone; an intake hold stays until released', async t => {
+  const f = await setup(t);
+  f.service.hold();
+  f.service.pause();
+  f.service.resume();
+  assert.throws(() => f.service.start('claude:src', {}, OWNER), /업데이트를 준비/, 'a failed handoff resumes the worker without lifting the forced update\'s hold');
+  f.service.release();
+  f.service.start('claude:src', {}, OWNER);
+  assert.equal((await f.settle()).state, 'done');
 });
