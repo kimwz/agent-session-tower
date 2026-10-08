@@ -7,14 +7,18 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { build } from 'esbuild';
-import { artifactOf, contextOf } from '../storage/helpers.js';
+import { artifactOf, contextOf, storage, threadBundle } from '../storage/helpers.js';
+import { createHash } from 'node:crypto';
+import { installArtifact } from '../link/fixtures/storage-builds.js';
+import { entryPoint, pointCurrent } from '../../../server/link/service.js';
+import { rollbackPorts, storageControl } from '../../../server/runs/storage-control.js';
 import { buildIdentityModule, buildIdentityPlugin } from '../../../server/storage/thread-bundle.mjs';
 import { fileURLToPath } from 'node:url';
 import test, { type TestContext } from 'node:test';
 import { writeHandoff } from '../../../server/runs/handoff.js';
 import { RetentionStore } from '../../../server/sessions/retention/store.js';
 import { runnerPaths, RUNNER_PROTOCOL, type RunnerReply } from '../../../server/runs/runner-protocol.js';
-import { storageUpdatePaths, type RollbackRecord } from '../../../server/link/storage-update.js';
+import { artifactStorageContract, completionProven, type ServingProof, resumeRollback, readRollbackRecord, evaluateStorageUpdate, type RunningBuild, storageUpdatePaths, type RollbackRecord } from '../../../server/link/storage-update.js';
 import { updatePaths } from '../../../server/link/storage-update.js';
 
 // Hosted disposable jobs only: this starts the actual product worker and its actual SQLite memory preflight,
@@ -87,7 +91,12 @@ test('actual product worker promotes update-held once in the same boot; a failed
   await mkdir(dirname(journal), { recursive: true, mode: 0o700 });
   await writeFile(journal, '{incomplete journal', { mode: 0o600 });
   const journalBytes = await readFile(journal);
-  const { child, call, stderr } = await launchDiagnostic(t, root, state, paths);
+  const context = contextOf('production');
+  const installed = await installArtifact(state, context.identity.appVersion, { manifest: context.manifest });
+  const managedEntry = join(dirname(entryPoint(installed)), 'diagnostic-worker.ts');
+  await writeFile(managedEntry, `import ${JSON.stringify(new URL('./fixtures/storage-diagnostic-worker.ts', import.meta.url).href)};\n`);
+  await pointCurrent(state, context.identity.appVersion);
+  const { child, call, stderr } = await launchDiagnostic(t, root, state, paths, managedEntry);
   let first: RunnerReply | undefined;
   const deadline = Date.now() + 60000;
   while (!first) {
@@ -98,21 +107,63 @@ test('actual product worker promotes update-held once in the same boot; a failed
   assert.equal(first.snapshot?.storage?.healthStatus, 200);
   assert.equal(first.snapshot?.storage?.sessionsAvailable, false);
   await assert.rejects(lstat(join(state, 'state.sqlite')), { code: 'ENOENT' });
-  // Release ACK must work in the initial diagnostic host, before retryNormal exists.
-  const at = new Date().toISOString(); const identity = contextOf('production').identity;
-  const rollback: RollbackRecord = { format: 'tower-storage-rollback', version: 1, id: 'initial-release', from: '99.0.0', target: identity.appVersion,
-    sourceHash: identity.sourceHash, manifestDigest: identity.manifestDigest, entrySha256: 'a'.repeat(64), updateSha256: null,
-    state: 'completed', by: 'fixture', reason: 'initial held release', held: true, switched: false,
-    attempt: { n: 1, pid: process.pid, start: 'fixture', nonce: 'a'.repeat(32), kind: 'run', at }, startedAt: at, updatedAt: at };
+  // Resume the actual managed producer from a durable, sent empty-storage handoff.
+  // Its serving proof comes from the real SDK consumer, never a successful proof callback.
+  const bundle = threadBundle('production');
+  const preflight = await storage.preflightStorage({ bundle, stateDir: state });
+  assert.equal(preflight.supported, true, 'the actual supported runtime floor must pass');
+  const client = await storage.openStorage({ stateDir: state, bundle });
+  t.after(() => client.close());
+  await assert.rejects(client.prepare({ allowMigration: false }), (error: unknown) =>
+    error instanceof storage.StorageCommandError && error.code === 'migration-required' && error.disposition === 'not-committed');
+  const inspection = await client.inspect();
+  assert.equal(inspection.schema.kind, 'empty'); assert.equal(inspection.ownerEpoch, 0);
+  const identity = client.identity!;
+  await writeFile(join(dirname(entryPoint(installed)), 'contract.json'), JSON.stringify(artifactStorageContract(context, preflight)));
+  await pointCurrent(state, identity.appVersion);
+  const at = new Date().toISOString();
+  const fence = { id: 'initial-release', attempt: 1 };
+  const rollback: RollbackRecord = { format: 'tower-storage-rollback', version: 1, id: fence.id, from: '99.0.0', target: identity.appVersion,
+    sourceHash: identity.sourceHash, manifestDigest: identity.manifestDigest,
+    entrySha256: createHash('sha256').update(await readFile(entryPoint(installed))).digest('hex'), updateSha256: null,
+    state: 'handing-off', by: 'fixture', reason: 'initial held release', held: true, switched: true,
+    storage: { kind: 'empty' },
+    handoff: { attempt: fence.attempt, state: 'sent', baseline: {
+      worker: { version: '99.0.0', sourceHash: 'b'.repeat(64), manifestDigest: 'c'.repeat(64), protocol: identity.protocol, pid: process.pid, start: 'previous-fixture-process' },
+      storage: { kind: 'empty' }, ownerEpoch: 0, at } },
+    attempt: { n: 1, pid: process.pid, start: 'fixture', nonce: 'a'.repeat(32), kind: 'run', at, ended: true }, startedAt: at, updatedAt: at };
   await writeFile(storageUpdatePaths(state).rollback, JSON.stringify(rollback), { mode: 0o600 });
-  const ack = await call('storageControl', ['release', { fence: { id: rollback.id, attempt: 1 } }]);
-  assert.equal(ack.error, undefined);
-  await new Promise(resolve => setTimeout(resolve, 1100));
-  assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, false);
-  await assert.rejects(lstat(join(state, 'state.sqlite')), { code: 'ENOENT' });
-  rollback.held = false;
-  await writeFile(storageUpdatePaths(state).rollback, JSON.stringify(rollback), { mode: 0o600 });
-  await rm(hold);
+  const sdkControl = storageControl({ stateDir: state, client: () => client, successorFence: fence,
+    prepareRefusal: { code: 'migration-required', disposition: 'not-committed' },
+    hold: async () => { assert.fail('sent handoff must settle without a second hold'); },
+    release: async () => { assert.fail('release must reach the actual diagnostic worker'); },
+    quiet: () => true, handoff: () => { assert.fail('sent handoff must not be replayed'); } });
+  let releaseAcks = 0;
+  const ports = rollbackPorts(async (action, input) => {
+    if (action !== 'release') return sdkControl(action, input);
+    const stale = await call('storageControl', [action, { fence }]);
+    assert.equal(stale.error?.statusCode, 409, 'the previous producer attempt cannot release the new attempt');
+    const ack = await call('storageControl', [action, input]);
+    assert.equal(ack.error, undefined); releaseAcks++;
+    const durable = await readRollbackRecord(state);
+    assert.ok(durable.state === 'present' && durable.record.state === 'completed' && durable.record.held);
+    await rm(hold); // Only the producer's still-held durable intent now keeps normal admission closed.
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, false);
+    assert.equal((await call('create')).error?.disposition, 'not-admitted');
+    await assert.rejects(lstat(join(state, 'state.sqlite')), { code: 'ENOENT' });
+    // The inspection owner exits before the producer publishes release and normal bootstrap claims storage.
+    await client.close();
+  }, async () => { assert.fail('completion must not restart the web'); });
+  const running: RunningBuild = { version: identity.appVersion, manifest: context.manifest, preflight };
+  const completed = await resumeRollback({ stateDir: state, running, managed: true, ports, serialize: work => work() });
+  assert.equal(completed.state, 'completed'); assert.equal(releaseAcks, 1);
+  const published = await readRollbackRecord(state);
+  assert.ok(published.state === 'present' && published.record.held === false && published.record.handoff?.state === 'done');
+  assert.ok(published.state === 'present' && published.record.worker?.sourceHash === identity.sourceHash);
+  const trusted = await evaluateStorageUpdate({ stateDir: state, build: running, managed: true });
+  assert.equal(trusted.verdict, 'ready');
+  assert.equal(trusted.code, 'owner-rollback', 'durable producer completion is the trusted startup authority');
   let parked: RunnerReply | undefined;
   while (parked?.snapshot?.storage?.code !== 'cold-journal-unavailable') {
     if (Date.now() > deadline) assert.fail(stderr());
@@ -135,6 +186,13 @@ test('actual product worker promotes update-held once in the same boot; a failed
   assert.equal(promoted.snapshot?.storage?.state, 'ready');
   assert.deepEqual(promoted.snapshot?.runs, []);
   assert.equal((await call('storageStatus')).instance, first.instance);
+  const serving = await call('storageControl', ['proof', { fence }]);
+  assert.equal(serving.error, undefined);
+  const proof = serving.result as ServingProof;
+  assert.equal(proof.inspection.schema.kind, 'current'); assert.equal(proof.gate.open, true);
+  assert.ok(proof.status.ownerEpoch! > 0); assert.equal(proof.bootstrap?.found, true);
+  if (published.state !== 'present') assert.fail('producer publication required');
+  assert.deepEqual(completionProven(published.record, proof), { ok: true }, 'the actual target bootstrap receipt, schema and claim prove the continued completion');
   const store = new RetentionStore(dirname(journal)); await store.start();
   assert.deepEqual(store.list(), []);
 });

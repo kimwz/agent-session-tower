@@ -306,11 +306,12 @@ export class DurableRunManager extends EventEmitter {
   }
   async enqueue(id: string, prompt: string, attachments: MessageAttachments = {}, internal: RunAdmission = {}): Promise<Run> {
     internal.validate?.();
+    if (internal.heartbeat && !this.supports('heartbeatAdmission')) throw new TowerError('unavailable', '실행 워커가 heartbeat 안전 검사를 지원할 때까지 조치하지 않습니다.', { disposition: 'not-admitted' });
     this.requireOrigins(internal);
     this.requireSubscription(this.getSession(id)?.cwd);
     await this.requireLegacyChatReferences(id, attachments, internal);
     internal.validate?.();
-    return this.call('enqueue', [id, prompt, attachments, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]) as Promise<Run>;
+    return this.call('enqueue', [id, prompt, attachments, { ...(internal.heartbeat ? { heartbeat: internal.heartbeat } : {}), autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]) as Promise<Run>;
   }
   /** An older worker would ignore `targetRunId` and insert into whatever turn runs, so it is never sent one. */
   async steer(id: string, options: { targetRunId?: string } = {}): Promise<Run> {

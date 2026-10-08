@@ -4,13 +4,21 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.118.0] - 2026-10-08
+## [1.119.0] - 2026-10-09
 
 ### Changed
 
 - Add the SQLite core foundation: captured storage-thread identity, bounded typed commands, WAL/FULL durability, explicit prepare/reopen and recovery gates. Domain JSON authority has not migrated; this is PR0 of #84, not completion of the SQLite migration.
 - Keep the execution worker in diagnostic mode when storage readiness is held, and expose storage status without giving web or remote consumers SQL access.
 - Verify candidate update artifacts against their own storage contract and runtime before allowing storage preparation. Align the documented Node support floors with the SDK's patched SQLite policy.
+
+## [1.118.0] - 2026-10-09
+
+### Added
+
+- **Master heartbeat checks tracked work every 30 minutes by default.** A bounded, tool-free one-shot inspector compares actual progress, recent results, task expectations and previous findings. Healthy work ends silently; a supported correction reaches the existing master conversation with its cause and evidence through the normal delegation authority. Owner stops, refusals, approval waits, busy masters and changed task evidence prevent corrective submissions.
+- Settings let the owner enable heartbeat, edit its interval and inspection prompt, and select the dedicated `master.heartbeat` Models role. Its default follows the entire saved `master.session` provider/model/effort; an explicit provider uses its own saved choices, with empty choices meaning that provider's CLI defaults. Recent checks and corrective delivery audits are visible separately from chat.
+- Checks and action claims have durable, bounded records. Overlapping ticks, restarts, settings changes and uncertain delivery do not replay actions; a proven non-admission can be assessed again on the next regular interval. Older execution workers refuse heartbeat actions until their normal safe handoff.
 
 ## [1.117.1] - 2026-10-08
 

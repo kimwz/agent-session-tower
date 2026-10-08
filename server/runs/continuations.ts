@@ -1,5 +1,27 @@
 import type { Run } from '../../shared/types.js';
 
+/** Heartbeat authority follows only this same-session managed work; incomplete ancestry is unknown. */
+export function heartbeatRunLineage(runs: readonly Run[], run: Run): Run[] | undefined {
+  const lineage: Run[] = [];
+  let current: Run | undefined = run;
+  while (current) {
+    if (lineage.length >= 32 || lineage.some(item => item.id === current!.id) || current.sessionId !== run.sessionId) return undefined;
+    lineage.push(current);
+    const parent: string | undefined = current.steering?.state === 'delivered' ? current.steering.targetRunId
+      : current.scheduled?.resume === 'update' || current.scheduled?.resume === 'permission' ? current.scheduled.afterRunId : undefined;
+    if (!parent) return lineage;
+    current = runs.find(item => item.id === parent);
+    if (!current) return undefined;
+  }
+  return lineage;
+}
+/** A latest continuation/steering must not hide an explicit stop in the work it carries on. */
+export function heartbeatRunProtected(runs: readonly Run[], run: Run | undefined): boolean {
+  if (!run) return false;
+  const lineage = heartbeatRunLineage(runs, run);
+  return !lineage || lineage.some(item => item.ownerStopped);
+}
+
 /**
  * The run that carries on `run`'s work: a turn a forced worker update ended goes on in Tower's continuation for it
  * (`scheduled.resume` is `update` or `permission`), possibly more than once. Watchers that follow one run ID follow this one.
@@ -34,8 +56,9 @@ export function continuedRunById(runs: readonly Run[], id: string | undefined): 
  * instructions it could not go without (a first turn's notes do not go on), unattended, model and effort. A permission
  * continuation also keeps the Codex reviewer its thread chose (`reviewer`).
  */
-export function inheritedRunFields(after: Run, options: { reviewer?: boolean } = {}): Pick<Run, 'origin' | 'delegation' | 'instructions' | 'codexApprovalsReviewer' | 'unattended' | 'model' | 'effort'> {
+export function inheritedRunFields(after: Run, options: { reviewer?: boolean } = {}): Pick<Run, 'origin' | 'delegation' | 'heartbeat' | 'heartbeatRootRunId' | 'instructions' | 'codexApprovalsReviewer' | 'unattended' | 'model' | 'effort'> {
   return { origin: after.origin ?? { kind: 'unknown' },
+    ...(after.heartbeat ? { heartbeat: structuredClone(after.heartbeat), heartbeatRootRunId: after.heartbeatRootRunId ?? after.id } : {}),
     ...(after.delegation ? { delegation: { ...after.delegation } } : {}),
     ...(after.instructions?.required ? { instructions: { ...after.instructions } } : {}),
     ...(options.reviewer && after.codexApprovalsReviewer ? { codexApprovalsReviewer: after.codexApprovalsReviewer } : {}),

@@ -70,7 +70,7 @@ export class TowerClient {
    * web, or before sending again what the server did not admit; a change already on its way is never cut off.
    * `gate` is asked right before each send, with the web it would go to known; false keeps the change unsent.
    */
-  async call(method: 'GET' | 'POST', path: string, body?: unknown, options: { write: boolean; headers?: Record<string, string>; signal?: AbortSignal; beforeSend?: AbortSignal; gate?: () => Promise<boolean> } = { write: method === 'POST' }): Promise<TowerResponse> {
+  async call(method: 'GET' | 'POST', path: string, body?: unknown, options: { write: boolean; headers?: Record<string, string>; signal?: AbortSignal; beforeSend?: AbortSignal; gate?: () => Promise<boolean>; singleAttempt?: boolean } = { write: method === 'POST' }): Promise<TowerResponse> {
     const deadline = Date.now() + this.waitForWebMs;
     const waiting = options.signal ?? options.beforeSend;
     const stopped = () => !options.signal?.aborted && Boolean(options.beforeSend?.aborted);
@@ -97,12 +97,12 @@ export class TowerClient {
         const response = await this.send(credentials, method, path, body, options.headers, options.signal);
         // A stale page token means this web never looked at the request: send it to the web that replaced it, whose
         // credentials may already be here.
-        if (response.status === 403 && isTokenRefusal(response.body)) {
+        if (!options.singleAttempt && response.status === 403 && isTokenRefusal(response.body)) {
           if (this.credentials === credentials) this.credentials = undefined;
           if (Date.now() < deadline) continue;
           return { ...response, state: 'not-admitted' };
         }
-        if (response.state === 'not-admitted' && !resentNotAdmitted && Date.now() < deadline) {
+        if (!options.singleAttempt && response.state === 'not-admitted' && !resentNotAdmitted && Date.now() < deadline) {
           resentNotAdmitted = true;
           try { await delay(3000, waiting); }
           catch (error) { if (stopped()) return response; throw error; }
@@ -114,7 +114,7 @@ export class TowerClient {
         if (options.signal?.aborted) throw error;
         if (error instanceof NotSent) {
           if (this.credentials === credentials) this.credentials = undefined;
-          if (Date.now() < deadline) continue;
+          if (!options.singleAttempt && Date.now() < deadline) continue;
           return unsent('Tower 웹 서버에 연결하지 못했습니다.');
         }
         if (!options.write && readRetries-- > 0) { await delay(1000, options.signal); continue; }

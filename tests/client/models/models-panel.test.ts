@@ -2,12 +2,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { PickRow, SettingsProblem } from '../../../client/src/models/ModelsPanel.tsx';
+import { PickRow, RoleRow, SettingsProblem } from '../../../client/src/models/ModelsPanel.tsx';
+import { builtinRole, initialModelSettings } from '../../../shared/models.ts';
 import { setLanguage } from '../../../client/src/i18n/i18n.ts';
 import { CLAUDE_MODELS } from '../../../server/providers/capabilities.ts';
 
 const claude = { provider: 'claude' as const, available: true, sessionCount: 0, models: CLAUDE_MODELS.map(model => ({ ...model })) };
 const render = (pick: { model?: string; effort?: string }) => renderToStaticMarkup(createElement(PickRow, { provider: 'claude', labelled: false, pick, health: claude, off: true, disabled: false, onChange() {} }));
+
+test('heartbeat inheritance hides unused picks; explicit provider offers a CLI default', () => {
+  setLanguage('ko');
+  const role = builtinRole('master.heartbeat')!;
+  const row = (provider: 'follow' | 'codex') => renderToStaticMarkup(createElement(RoleRow, { role, setting: { ...initialModelSettings().roles['master.heartbeat'], provider }, providers: [], disabled: false, onChange() {} }));
+  const inherited = row('follow');
+  assert.match(inherited, /마스터 모델 설정 전체 따라가기/);
+  assert.doesNotMatch(inherited, /Codex 모델|Claude 모델/);
+  assert.match(row('codex'), /Codex 기본값/);
+  assert.match(row('codex'), /aria-label="Codex 모델"/);
+});
 
 test('a role\'s model is chosen from the computer\'s whole list, whatever is selected now', () => {
   const html = render({ model: 'opus' });

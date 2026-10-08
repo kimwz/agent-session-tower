@@ -54,7 +54,15 @@
 .master-rates label:has(input:focus-visible) { outline:2px solid var(--teal); outline-offset:1px; }
 .master-rates label:has(input:disabled) { opacity:.6; cursor:default; }
 .master-rates-hint { display:block; color:var(--muted); font-size:11px; margin-top:4px; }
-.master-field select, .master-field input { border:1px solid var(--line); border-radius:7px; background:var(--bg); color:var(--bright); padding:7px 8px; }
+.master-field select, .master-field input, .master-field textarea { border:1px solid var(--line); border-radius:7px; background:var(--bg); color:var(--bright); padding:7px 8px; min-width:0; max-width:100%; }
+.master-heartbeat form { display:grid; gap:8px; }
+.master-heartbeat textarea { resize:vertical; font:inherit; line-height:1.5; }
+.master-heartbeat-model { display:grid; gap:8px; min-width:0; }
+.master-heartbeat-model .models-role { display:grid; gap:8px; min-width:0; }
+.master-heartbeat-model .models-role-controls { display:flex; flex-wrap:wrap; gap:6px; min-width:0; }
+.master-heartbeat-model .models-pick { display:flex; flex-wrap:wrap; gap:6px; }
+.master-heartbeat-model .model-picker { max-width:100%; min-width:0; }
+.master-heartbeat-action { display:grid; gap:4px; padding:8px 0; border-top:1px solid var(--line); overflow-wrap:anywhere; }
 
 @media (max-width:680px) {
   .master-panel { top:auto; left:0; right:0; bottom:0; width:100vw; height:min(88dvh, 100dvh - 40px); border-right:none; border-top:1px solid var(--line); border-radius:14px 14px 0 0; box-shadow:0 -8px 24px rgba(0,0,0,.4); }

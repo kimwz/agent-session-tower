@@ -1,3 +1,4 @@
+import { MASTER_HEARTBEAT_MARK, type HeartbeatAdmission } from '../../shared/master.js';
 import { resolveRetentionLineage } from '../sessions/retention/ancestry.js';
 import type { RetentionMember } from '../../shared/retention.js';
 import { MAX_ATTACHMENTS } from '../../shared/attachments.js';
@@ -33,7 +34,7 @@ import { ToolNotices } from './tool-notices.js';
 import { errorMessage, FINISHED, finishedTime, MAX_OUTPUT, MAX_PROMPT, notAdmitted, RunError, shown } from './run-records.js';
 import { MAX_RUNS, RunHistory, SCHEDULED_OUTPUT } from './run-history.js';
 import { PermissionContinuations, retainedReceipts } from './permission-continuation.js';
-import { inheritedRunFields } from './continuations.js';
+import { inheritedRunFields, heartbeatRunProtected } from './continuations.js';
 import { CreatedSessionRegistry } from './session-registry.js';
 import { UPDATE_WAIT, UpdateDrain } from './update-drain.js';
 import { prepareClaudeTurn } from './claude-turn.js';
@@ -92,6 +93,7 @@ interface RunnerOptions {
 }
 /** Internal admission data is never accepted from the public message endpoint. */
 export interface RunAdmission {
+  heartbeat?: HeartbeatAdmission;
   autoPromptId?: string;
   validate?: () => void;
   /** Recorded on the run; absent means unknown, which never gains owner privileges. */
@@ -453,6 +455,7 @@ export class RunManager extends EventEmitter {
   }
 
   async create(input: CreateSessionRequest, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
+    if (internal.heartbeat) throw notAdmitted(new RunError('Heartbeat cannot create sessions.', 'forbidden'));
     const incoming = Array.isArray(input.attachmentIds) ? input.attachmentIds.filter(id => typeof id === 'string') : [];
     this.incomingAttachments.add(incoming);
     try {
@@ -551,6 +554,25 @@ export class RunManager extends EventEmitter {
     if ([...this.runs.values()].some(run => run.autoPromptId === id)) throw new RunError('This Auto Prompt already has an execution task.', 'conflict');
   }
 
+  private validateHeartbeat(sessionId: string, prompt: string, guard: HeartbeatAdmission): void {
+    const session = this.getSession(sessionId);
+    const turns = this.list().filter(run => run.sessionId === sessionId);
+    const latest = [...turns].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+    const protectedTarget = guard.sessionIds.some(id => {
+      const target = this.getSession(id);
+      const targetTurns = this.list().filter(run => run.sessionId === this.monitorSessionId(id));
+      const targetLatest = [...targetTurns].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+      return !target || heartbeatRunProtected(targetTurns, targetLatest)
+        || targetTurns.some(run => (run.status === 'running' || run.status === 'queued') && run.approvals?.length);
+    });
+    if (protectedTarget || !session || !guard.sessionIds.includes(sessionId) || !prompt.startsWith(MASTER_HEARTBEAT_MARK) || !this.masterSession(session) || this.isWorking(session) || this.reservedSessions.has(sessionId)
+      || turns.some(run => run.status === 'running' || run.status === 'queued' || run.approvals?.length)
+      || session.updatedAt !== guard.updatedAt || session.lastRequestAt !== guard.lastRequestAt || latest?.id !== guard.latestRunId
+      || heartbeatRunProtected(turns, latest) || turns.some(run => run.prompt.includes(`(check ${guard.checkId})`))) {
+      throw notAdmitted(new RunError('Heartbeat preconditions changed; nothing was submitted.', 'conflict'));
+    }
+  }
+
   async enqueue(sessionId: string, prompt: string, request: MessageAttachments = {}, internal: RunAdmission = {}): Promise<Run> {
     const incoming = Array.isArray(request.attachmentIds) ? request.attachmentIds.filter(id => typeof id === 'string') : [];
     this.incomingAttachments.add(incoming);
@@ -572,17 +594,19 @@ export class RunManager extends EventEmitter {
       try {
         // Maintenance may have started while executable/attachment preparation yielded.
         while (this.retentionHeld(sessionId) || this.coldSessionIds.has(this.nativeSessionId(sessionId))) await this.awaitRetentionAdmission(sessionId);
-        this.assertRetentionAdmission(sessionId); this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.(); }
+        this.assertRetentionAdmission(sessionId); this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.();
+        if (internal.heartbeat) this.validateHeartbeat(sessionId, prompt, internal.heartbeat); }
       catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
       if (internal.untrustedInput) {
         // Recorded before the run exists: once external content is queued, the session stays marked.
         this.registry.markUntrusted(sessionId);
       }
-      const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
+      const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), ...(internal.heartbeat ? { heartbeat: structuredClone(internal.heartbeat) } : {}), prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
         ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
         ...(model ? { model } : {}), ...(effort ? { effort } : {}),
         ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),
         ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}) };
+      if (internal.heartbeat) run.heartbeatRootRunId = run.id;
       this.admissions.add(run.id);
       this.runs.set(run.id, run);
       this.prune();

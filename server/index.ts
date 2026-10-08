@@ -178,8 +178,10 @@ async function main() {
     return;
   }
   if (args[0] === '--master-mcp') {
-    if (args.length !== 2 || !args[1]) throw new Error('The master tools require a state directory.');
-    await startMasterMcp(resolve(args[1]));
+    if ((args.length !== 2 && !(args.length === 3 && args[2] === '--heartbeat')) || !args[1]) throw new Error('The master tools require a state directory.');
+    const capability = args[2] === '--heartbeat' ? process.env.TOWER_HEARTBEAT_CAPABILITY : undefined;
+    if (args[2] === '--heartbeat' && !capability) throw new Error('Heartbeat tools require a run capability.');
+    await startMasterMcp(resolve(args[1]), process.stdin, process.stdout, capability);
     return;
   }
   if (args[0] === '--master-host') {
@@ -304,7 +306,7 @@ async function main() {
       }
     }
   };
-  const admit = (context?: RequestContext) => ({ origin: context?.origin ?? OWNER, ...(context?.callerCapability ? { callerCapability: context.callerCapability } : {}), ...(context?.requestId ? { requestId: context.requestId } : {}), ...(context?.origin ? {} : { authored: true }) });
+  const admit = (context?: RequestContext) => ({ ...(context?.heartbeat ? { heartbeat: context.heartbeat } : {}), origin: context?.origin ?? OWNER, ...(context?.callerCapability ? { callerCapability: context.callerCapability } : {}), ...(context?.requestId ? { requestId: context.requestId } : {}), ...(context?.origin ? {} : { authored: true }) });
   // The worker has indexed native sessions before it answers, so the session list is complete here.
   const history = nativeHistory(runs);
   const listeners = new Set<() => void>();

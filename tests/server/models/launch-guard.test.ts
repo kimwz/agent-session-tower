@@ -41,7 +41,7 @@ test('only the known launchers pass a model to Claude or Codex, and they start p
 test('every one-shot judgment takes its provider and model from a role', async () => {
   const files = await sources();
   const callers = [...files].filter(([path, text]) => path !== 'server/auto-prompt/native.ts' && /runAutoPromptModel|AutoPromptModelRequest/.test(text) && /systemPrompt/.test(text));
-  assert.deepEqual(callers.map(([path]) => path).sort(), ['server/auto-prompt/manager.ts', 'server/permissions/reviewer.ts', 'server/public-agents/service.ts', 'server/sessions/compaction/service.ts', 'server/sessions/tasks.ts', 'server/skills/advisor.ts',
+  assert.deepEqual(callers.map(([path]) => path).sort(), ['server/auto-prompt/manager.ts', 'server/master/heartbeat.ts', 'server/permissions/reviewer.ts', 'server/public-agents/service.ts', 'server/sessions/compaction/service.ts', 'server/sessions/tasks.ts', 'server/skills/advisor.ts',
     'server/slack/service.ts', 'server/triggers/github-coordinator.ts']);
   for (const [path, text] of callers) {
     assert.match(text, /resolveModel\(|reviewModel\(/, `${relative(root, path)} resolves a role`);

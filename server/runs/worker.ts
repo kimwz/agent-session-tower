@@ -5,8 +5,10 @@ import type { WorkerStorageStatus } from '../../shared/storage.js';
 import { captureStorageBundle, storageBuildContext, preflightStorage, openStorage, adoptSnapshot, reconcileRecovery, readRecoveryBarrier, StorageCommandError, type StorageClient } from '../storage/index.js';
 import { evaluateStorageUpdate, storageHealth, bootstrapPrepareCommandId, readRollbackRecord, databaseSupported, recordPreparationEvidence } from '../link/storage-update.js';
 import { managedByService } from '../link/update.js';
+import type { HeartbeatAdmission } from '../../shared/master.js';
 import { newWorkerSession } from '../models/worker.js';
 import { latestNativeUserMessage } from './native-user-message.js';
+import { heartbeatRunProtected } from './continuations.js';
 import { installLaunchShims, launchMarksDir } from '../sessions/launch-marks.js';
 import { finishedAutomationSessionIds } from '../../shared/automation-sessions.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -205,13 +207,35 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     return overview && temporaryFailure ? { ...overview, failed: Math.max(overview.failed, 1), issues: [...overview.issues, temporaryFailure] } : overview;
   };
   let closureReady: Promise<void> | undefined;
-  const admit = (value: unknown): RunAdmission => {
+  const admit = (value: unknown, targetSessionId?: string): RunAdmission => {
     const admitted = admission(value);
     const token = record(value).callerCapability;
-    if (token === undefined) return admitted;
+    const heartbeatValidate = () => {
+      if (admitted.heartbeat && (!options.api || options.api.heartbeatBlocked(admitted.heartbeat.sessionIds))) throw new TowerError('conflict', 'Heartbeat permission preconditions changed.', { disposition: 'not-admitted' });
+    };
+    if (token === undefined) return { ...admitted, ...(admitted.heartbeat ? { validate: heartbeatValidate } : {}) };
     if (typeof token !== 'string' || admitted.origin?.controllerId) throw new TowerError('forbidden', 'Invalid local calling-turn credential.');
-    const validate = () => { callerDelegation(capabilities, findRun, token); };
-    return { ...admitted, delegation: callerDelegation(capabilities, findRun, token), validate };
+    const caller = capabilities.resolve(token);
+    const callingRun = caller?.kind === 'caller-run' ? findRun(caller.runId) : undefined;
+    const corrective = callingRun?.heartbeat;
+    const validate = () => {
+      heartbeatValidate(); callerDelegation(capabilities, findRun, token);
+      if (corrective) {
+        const current = findRun(callingRun!.id);
+        const target = targetSessionId && options.runs.getSession(targetSessionId);
+        const turns = target ? options.runs.list().filter(run => run.sessionId === target.id) : [];
+        const latest = [...turns].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+        const selected = corrective.targets?.find(item => !item.node && item.sessionId === targetSessionId);
+        if (!target || !current || current.origin?.kind !== 'agent' || current.origin.controllerId || current.ownerStopped || current.approvals?.length
+          || !selected || latest?.id !== selected.latestRunId || target.lastRequestAt !== selected.lastRequestAt
+          || heartbeatRunProtected(turns, latest) || turns.some(run => (run.status === 'running' || run.status === 'queued') && run.approvals?.length)
+          || !options.api || options.api.heartbeatBlocked([current.sessionId, target.id])) {
+          throw new TowerError('forbidden', 'Heartbeat corrective target is unavailable or protected.', { disposition: 'not-admitted' });
+        }
+      }
+    };
+    validate();
+    return { ...admitted, ...(corrective ? { origin: { kind: 'agent' as const } } : {}), delegation: callerDelegation(capabilities, findRun, token), validate };
   };
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
   const dispatch = async (method: string, args: unknown[]) => {
@@ -319,7 +343,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
           });
       }
       case 'enqueue': {
-        const admitted = admit(args[3]);
+        const admitted = admit(args[3], String(args[0]));
         if (admitted.origin?.controllerId) {
           return remote(admitted, 'enqueue', [args[0], args[1], args[2]], args[0] as string, () => options.runs.enqueue(args[0] as string, args[1] as string, args[2] as MessageAttachments, admitted),
             value => ({ kind: 'run', runId: value.id }), result => result.kind === 'run' ? findRun(result.runId) : undefined);
@@ -453,6 +477,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   } });
   const mcp = { api: mcpApi(), capabilities, secretTools: options.secrets ? SECRET_TOOLS : undefined, secretTool: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>) => options.secrets!.tool(capability, name, args) : undefined, slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
     githubTool: options.github ? (workflowId: string, name: string, args: Record<string, unknown>) => options.github!.tool(workflowId, name, args) : undefined,
+    heartbeatAllowed: (run: Run) => { const origin = options.runs.sessionOrigin(run.sessionId); return !origin?.untrustedInput && (!origin || origin.kind === 'owner'); },
     run: (runId: string) => options.runs.list().find(run => run.id === runId) };
   const server = createServer(async (req, res) => {
     // Tool servers attached to provider turns hold a capability, not the worker credential; it opens only /mcp.
@@ -658,7 +683,7 @@ async function sessionHistory(sessions: SessionService, [nativeId, before, limit
   const page = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
   const history = await sessions.detail(nativeId, page(before), page(limit));
   if (!history) return undefined;
-  return { messages: history.messages, hasMore: history.hasMore, ...(history.nextBefore !== undefined ? { nextBefore: history.nextBefore } : {}), ...(history.previousUser ? { previousUser: history.previousUser } : {}) };
+  return { messages: history.messages, hasMore: history.hasMore, ...(history.nextBefore !== undefined ? { nextBefore: history.nextBefore } : {}), ...(history.previousUser ? { previousUser: history.previousUser } : {}), ...(history.skipped !== undefined ? { skipped: history.skipped } : {}) };
 }
 
 /**
@@ -666,11 +691,30 @@ async function sessionHistory(sessions: SessionService, [nativeId, before, limit
  * turn's agent asked for. Trigger and Slack origins are assigned inside the worker, never over RPC.
  */
 function admission(value: unknown): RunAdmission {
-  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown; requestId?: unknown } : {};
+  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown; requestId?: unknown; heartbeat?: unknown } : {};
   const origin = input.origin === undefined ? { kind: 'owner' as const } : parseRunOrigin(input.origin);
   if (!origin || (origin.kind !== 'owner' && origin.kind !== 'agent')) throw new TowerError('invalid', 'The web connection can only admit owner or agent work.');
   if (input.requestId !== undefined && (typeof input.requestId !== 'string' || !/^[a-f\d-]{36}$/i.test(input.requestId))) throw new TowerError('invalid', 'Invalid request ID.');
-  return { ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin,
+  let heartbeat: HeartbeatAdmission | undefined;
+  if (input.heartbeat !== undefined) {
+    const value = record(input.heartbeat);
+    if (origin.kind !== 'agent' || origin.controllerId || Object.keys(value).some(key => !['targets', 'checkId', 'sessionIds', 'latestRunId', 'updatedAt', 'lastRequestAt'].includes(key))
+      || (value.targets !== undefined && (!Array.isArray(value.targets) || !value.targets.length || value.targets.length > 6 || value.targets.some(entry => {
+        const target = record(entry);
+        return Object.keys(target).some(key => !['taskId', 'sessionId', 'node', 'nativeRequestId', 'latestRunId', 'lastRequestAt'].includes(key)) || typeof target.taskId !== 'string' || !target.taskId || target.taskId.length > 200
+          || (target.nativeRequestId !== undefined && (typeof target.nativeRequestId !== 'string' || !target.nativeRequestId || target.nativeRequestId.length > 200))
+          || (target.latestRunId !== undefined && (typeof target.latestRunId !== 'string' || !target.latestRunId || target.latestRunId.length > 200))
+          || (target.lastRequestAt !== undefined && (typeof target.lastRequestAt !== 'string' || !Number.isFinite(Date.parse(target.lastRequestAt))))
+          || typeof target.sessionId !== 'string' || !target.sessionId || target.sessionId.length > 200 || (target.node !== undefined && (typeof target.node !== 'string' || !/^[a-f\d]{32}$/i.test(target.node)));
+      })))
+      || !Array.isArray(value.sessionIds) || !value.sessionIds.length || value.sessionIds.length > 7 || value.sessionIds.some(id => typeof id !== 'string' || id.length > 200)
+      || typeof value.checkId !== 'string' || !/^[a-f\d-]{36}$/i.test(value.checkId)
+      || typeof value.updatedAt !== 'string' || !Number.isFinite(Date.parse(value.updatedAt))
+      || (value.latestRunId !== undefined && (typeof value.latestRunId !== 'string' || value.latestRunId.length > 200))
+      || (value.lastRequestAt !== undefined && (typeof value.lastRequestAt !== 'string' || !Number.isFinite(Date.parse(value.lastRequestAt))))) throw new TowerError('invalid', 'Invalid heartbeat admission.');
+    heartbeat = value as unknown as HeartbeatAdmission;
+  }
+  return { ...(heartbeat ? { heartbeat } : {}), ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin,
     ...(typeof input.requestId === 'string' ? { requestId: input.requestId.toLowerCase() } : {}) };
 }
 
