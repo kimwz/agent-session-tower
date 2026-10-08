@@ -156,14 +156,18 @@ export async function readHold(stateDir: string, now = Date.now()): Promise<Hold
 export function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
 }
+/** The largest pid process.kill takes (an int32): a larger one fails before the system is asked. */
+const MAX_PID = 2 ** 31 - 1;
 /**
  * The helper lock's owner: `running` while its pid runs as the process that took it (a pid whose start cannot be told
- * counts as running), `gone` once it does not. `invalid`: a lock without an owner in it; `unreadable`: one that is
- * there and cannot be read (a link, even to nowhere, included: it is never followed), which may still belong to a helper.
+ * counts as running), `gone` once it does not: only the system saying no such process (ESRCH), or another start time,
+ * is gone. `invalid`: a lock without an owner in it, or with a pid no process can have here; `unreadable`: one that is
+ * there and cannot be read (a link, even to nowhere, included: it is never followed), or whose owner (`pid`) could not
+ * be observed (the error is the observation's own), which may still belong to a helper.
  */
 export type HelperRead =
   | { state: 'absent' } | { state: 'running'; pid: number } | { state: 'gone'; pid: number }
-  | { state: 'invalid'; reason: string } | { state: 'unreadable'; reason: string; error: unknown };
+  | { state: 'invalid'; reason: string } | { state: 'unreadable'; reason: string; error: unknown; pid?: number };
 export async function readHelperLock(stateDir: string, started: (pid: number) => Promise<string | undefined> = processStart): Promise<HelperRead> {
   let text: string;
   try {
@@ -176,9 +180,17 @@ export async function readHelperLock(stateDir: string, started: (pid: number) =>
   const [pidText, ...rest] = text.split(' ');
   const pid = Number(pidText);
   if (!(pid > 0) || !Number.isInteger(pid)) return { state: 'invalid', reason: 'The update helper lock names no process.' };
-  if (!alive(pid)) return { state: 'gone', pid };
+  if (pid > MAX_PID) return { state: 'invalid', reason: `The update helper lock names pid ${pidText.slice(0, 40)}, which no process here can have.` };
+  const unobserved = (error: unknown): HelperRead => ({ state: 'unreadable', reason: `Whether pid ${pid} still runs cannot be observed: ${messageOf(error)}`, error, pid });
+  try { process.kill(pid, 0); } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (code === 'ESRCH') return { state: 'gone', pid };
+    // EPERM: it runs, as another user.
+    if (code !== 'EPERM') return unobserved(error);
+  }
   if (!rest.length) return { state: 'running', pid };
-  const now = await started(pid);
+  let now: string | undefined;
+  try { now = await started(pid); } catch (error) { return unobserved(error); }
   return now === undefined || now === rest.join(' ') ? { state: 'running', pid } : { state: 'gone', pid };
 }
 

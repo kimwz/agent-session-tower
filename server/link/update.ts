@@ -146,9 +146,10 @@ export async function managedByService(stateDir: string, entry: string | undefin
 const startedAt = processStart;
 
 /**
- * A helper lock that names no process (`invalid`, code `helper-lock-invalid`) or cannot be read (`unreadable`, code
- * and cause the read's own error): a helper may still own it, so it is never taken for no helper. Nothing is written,
- * removed, taken over or started on it; the owner inspects the lock.
+ * A helper lock that names no process it can have (`invalid`, code `helper-lock-invalid`), cannot be read, or whose
+ * owner cannot be observed (`unreadable`, code and cause the read's or the observation's own error): a helper may
+ * still own it, so it is never taken for no helper. Nothing is written, removed, taken over or started on it; the
+ * owner inspects the lock.
  */
 export class HelperLockUnknownError extends Error {
   readonly code: string;
@@ -158,7 +159,8 @@ export class HelperLockUnknownError extends Error {
     const { lock } = updatePaths(stateDir);
     const code = read.state === 'invalid' ? 'helper-lock-invalid' : String((read.error as NodeJS.ErrnoException)?.code ?? 'EUNKNOWN');
     super(read.state === 'invalid' ? `${read.reason} A helper may still own ${lock}; the owner inspects it.`
-      : `The update helper lock ${lock} cannot be read (${code}: ${read.reason}); a helper may still own it.`, read.state === 'unreadable' ? { cause: read.error } : undefined);
+      : read.pid !== undefined ? `${read.reason} (${code}) A helper may still own ${lock}; the owner inspects it.`
+        : `The update helper lock ${lock} cannot be read (${code}: ${read.reason}); a helper may still own it.`, read.state === 'unreadable' ? { cause: read.error } : undefined);
     this.name = 'HelperLockUnknownError';
     this.code = code;
     this.helper = read.state;
@@ -169,7 +171,8 @@ export class HelperLockUnknownError extends Error {
 /**
  * Whether a helper may be at work, as every decision here takes it: the lock's owner, its pid as the process that
  * started then, still runs. However long the computer slept, a live helper still owns it. No lock, or one whose owner
- * is gone, means no helper; a lock that names no process or cannot be read rejects (HelperLockUnknownError).
+ * is gone, means no helper; a lock that names no process, cannot be read or whose owner cannot be observed rejects
+ * (HelperLockUnknownError).
  */
 export async function helperRunning(stateDir: string): Promise<boolean> {
   const owner = await readHelperLock(stateDir, startedAt);
