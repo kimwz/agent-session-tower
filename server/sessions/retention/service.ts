@@ -19,6 +19,7 @@ export interface RetentionServiceOptions {
 export class RetentionService {
   private timer?: ReturnType<typeof setTimeout>;
   private catchUp = false;
+  private cycleIncomplete = false;
   private nextCandidateId?: string;
   private checking?: Promise<RetentionOverview>;
   private stopped = true;
@@ -173,7 +174,7 @@ export class RetentionService {
     await this.countBytes(); this.verification = 'complete';
   }
   private async runCycle(): Promise<RetentionOverview> {
-    this.catchUp = false;
+    this.catchUp = false; this.cycleIncomplete = false;
     const archivedBefore = this.coldMembers().length;
     await this.verifyBackupsNow();
     if (this.verification !== 'complete') return this.overview();
@@ -216,7 +217,7 @@ export class RetentionService {
       await this.archiveCandidate(entry, records); count += candidate.ids.length;
     }
     if (blockedEntries.length) await this.options.store.putMany(blockedEntries);
-    this.catchUp = observation.complete && this.coldMembers().length > archivedBefore
+    this.catchUp = observation.complete && !this.cycleIncomplete && this.coldMembers().length > archivedBefore
       && Boolean(this.deferredReasons['time-budget'] || this.deferredReasons['session-budget']);
     this.lastCheckedAt = new Date().toISOString(); await this.countBytes(); return this.overview();
   }
@@ -361,8 +362,10 @@ export class RetentionService {
     const next = this.operations.then(work); this.operations = next.catch(error => this.report(error)); return next;
   }
   private async observe(): Promise<RetentionObservation> {
-    const observation = await this.options.observe();
-    this.observationComplete = observation.complete; this.observationIssues = observation.issues || [];
+    let observation: RetentionObservation;
+    try { observation = await this.options.observe(); }
+    catch (error) { this.cycleIncomplete = true; throw error; }
+    this.observationComplete = observation.complete; this.cycleIncomplete ||= !observation.complete; this.observationIssues = observation.issues || [];
     for (const record of observation.records) {
       const policy = this.options.store.policy(record.session.id); if (!policy) continue;
       const newer = policy.archivedAt && Date.parse(record.lastActivityAt || '') > Date.parse(policy.archivedAt);

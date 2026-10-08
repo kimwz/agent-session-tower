@@ -52,10 +52,10 @@ async function maintenanceFixture(t: TestContext, count: number, hook?: (id: str
   const file = join(native, 'fixture.jsonl'); await writeFile(file, 'fixture\n'); const info = await stat(file);
   const store = new RetentionStore(join(root, 'state')); await store.start(now - 10 * day);
   const records = [session('p0'), ...Array.from({ length: count }, (_, i) => session(`c${i}`, true))].map(s => ({session: s, kind: s.isSubagent ? 'subagent' as const : 'parent' as const, latestTaskEndedAt: new Date(now - 8 * day).toISOString()}));
-  const attempts: string[] = [];
+  const attempts: string[] = [], observation = {complete: true, calls: 0, fail: false};
   const service = new RetentionService({store, archive: new RetentionArchive(join(root, 'cold'), [native]),
-    observe: async () => { const cold = new Set(store.list().flatMap(e => e.members || []).filter(m => m.state === 'cold').map(m => m.sessionId));
-      return {now: Date.now(), migratedAt: now - 10 * day, complete: true, records: records.filter(r => !cold.has(r.session.id)), protectedIds: new Set()}; },
+    observe: async () => { observation.calls++; if (observation.fail) throw new Error('fixture observation failed'); const cold = new Set(store.list().flatMap(e => e.members || []).filter(m => m.state === 'cold').map(m => m.sessionId));
+      return {now: Date.now(), migratedAt: now - 10 * day, complete: observation.complete, records: records.filter(r => !cold.has(r.session.id)), protectedIds: new Set()}; },
     adapter: {capability: () => ({status: 'supported'}), files: async () => [], inspectCold: async members => ({complete: true, members, issues: []}),
       reserve: async (candidate, selected, context) => {
         attempts.push(candidate.rootId);
@@ -68,7 +68,7 @@ async function maintenanceFixture(t: TestContext, count: number, hook?: (id: str
           sources: async () => selected.map(({session: s}) => ({path: file, root: native, nativeId: s.nativeId, provider: s.provider})), release: async () => {}};
       }} });
   t.after(async () => {await service.quiesce(); await rm(root, {recursive: true, force: true});});
-  await service.start(); return {service, attempts, records};
+  await service.start(); return {service, attempts, records, observation};
 }
 
 test('budgeted progress continues after one second and shares an in-flight manual check', async t => {
@@ -118,6 +118,34 @@ test('session-budget cursor reaches a healthy provider behind one hundred fast f
   await service.cycle();
   assert.equal(attempts[100], 'claude:c100', 'first budget-deferred candidate starts the next chunk');
   assert.equal(service.overview().archivedMembers, 1);
+});
+
+for (const recovers of [false, true]) test(`incomplete fresh observation keeps the hourly delay even when it later recovers: ${recovers}`, async t => {
+  t.mock.timers.enable({apis: ['setTimeout', 'Date'], now});
+  const fixture = await maintenanceFixture(t, recovers ? 4 : 3, async id => {
+    if (id === 'codex:c1') { fixture.observation.complete = false; if (!recovers) t.mock.timers.tick(30_000); }
+    if (id === 'codex:c2' && recovers) { fixture.observation.complete = true; t.mock.timers.tick(30_000); }
+    return true;
+  });
+  await fixture.service.cycle();
+  assert.equal(fixture.service.overview().archivedMembers, recovers ? 2 : 1);
+  assert.equal(fixture.service.overview().observationComplete, recovers);
+  assert.equal(fixture.service.overview().deferredReasons?.['time-budget'], 1);
+  const calls = fixture.observation.calls;
+  t.mock.timers.tick(1000); await new Promise(setImmediate);
+  assert.equal(fixture.observation.calls, calls, 'any incomplete fresh observation prohibits a fast next chunk');
+});
+
+test('a failed fresh observation after partial progress also prevents a fast retry', async t => {
+  t.mock.timers.enable({apis: ['setTimeout', 'Date'], now});
+  const fixture = await maintenanceFixture(t, 3, async id => {
+    if (id === 'codex:c1') { fixture.observation.fail = true; t.mock.timers.tick(30_000); }
+    return true;
+  });
+  await fixture.service.cycle(); assert.equal(fixture.service.overview().archivedMembers, 1);
+  const calls = fixture.observation.calls;
+  t.mock.timers.tick(1000); await new Promise(setImmediate);
+  assert.equal(fixture.observation.calls, calls);
 });
 
 test('quiesce clears a scheduled catch-up and drains an in-flight original operation', async t => {
