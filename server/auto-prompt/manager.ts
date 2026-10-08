@@ -1,3 +1,4 @@
+import { TowerError } from '../../shared/errors.js';
 import { subscriptionOnly } from '../runs/subscription.js';
 import { requestedEffort, requestedModel, validEffort, validModelId } from '../providers/models.js';
 import { EventEmitter } from 'node:events';
@@ -108,6 +109,24 @@ export class AutoPromptManager extends EventEmitter {
   private processing?: Promise<void>;
   private started = false;
   private stopping = false;
+  private storageHeld = false;
+  private readonly storageWaiters = new Set<() => void>();
+
+  holdStorage(): void { this.storageHeld = true; }
+  releaseStorage(): void {
+    this.storageHeld = false;
+    for (const wake of this.storageWaiters) wake();
+    this.storageWaiters.clear();
+    this.pump();
+  }
+  private async storageGate(signal: AbortSignal): Promise<void> {
+    while (this.storageHeld && !signal.aborted && !this.stopping) {
+      await new Promise<void>(resolve => {
+        const wake = () => { this.storageWaiters.delete(wake); signal.removeEventListener('abort', wake); resolve(); };
+        this.storageWaiters.add(wake); signal.addEventListener('abort', wake, { once: true });
+      });
+    }
+  }
   private attachmentCleanupPaused = true;
   private attachmentCleanupTimer?: ReturnType<typeof setInterval>;
   private attachmentCleanup?: Promise<void>;
@@ -308,6 +327,7 @@ export class AutoPromptManager extends EventEmitter {
     await this.pauseAttachmentCleanup();
     if (this.stopping) { await this.processing; return; }
     this.stopping = true;
+    for (const wake of this.storageWaiters) wake();
     for (const entry of this.entries.values()) if (['queued', 'routing'].includes(entry.job.status)) {
       this.update(entry.job, { status: 'cancelled', error: 'Tower가 종료되어 라우팅을 중단했습니다. 작업을 자동으로 다시 보내지 않습니다.' });
       this.controllers.get(entry.job.id)?.abort();
@@ -319,10 +339,10 @@ export class AutoPromptManager extends EventEmitter {
   }
 
   private pump(): void {
-    if (this.processing || this.stopping) return;
+    if (this.processing || this.stopping || this.storageHeld) return;
     this.processing = this.drain().finally(() => {
       this.processing = undefined;
-      if (!this.stopping && [...this.entries.values()].some(entry => entry.job.status === 'queued' && !this.admissions.has(entry.job.id))) this.pump();
+      if (!this.stopping && !this.storageHeld && [...this.entries.values()].some(entry => entry.job.status === 'queued' && !this.admissions.has(entry.job.id))) this.pump();
     });
     // Each job owns its error state; a final storage failure must not create an
     // unhandled rejection or replay a job that might have crossed admission.
@@ -330,7 +350,7 @@ export class AutoPromptManager extends EventEmitter {
   }
 
   private async drain(): Promise<void> {
-    while (!this.stopping) {
+    while (!this.stopping && !this.storageHeld) {
       const entry = [...this.entries.values()].find(value => value.job.status === 'queued' && !this.admissions.has(value.job.id));
       if (!entry) return;
       const controller = new AbortController();
@@ -353,6 +373,7 @@ export class AutoPromptManager extends EventEmitter {
   private async route(entry: Entry, signal: AbortSignal): Promise<void> {
     const job = entry.job;
     const active = () => { if (signal.aborted || this.stopping || job.status === 'cancelled') throw new RunError('Auto Prompt 라우팅을 취소했습니다.', 'conflict'); };
+    await this.storageGate(signal); active();
     this.update(job, { status: 'routing', stage: job.cwd ? 'session' : 'directory' });
     await this.persist(); this.emit('change');
     await this.options.refresh(); active();
@@ -362,7 +383,8 @@ export class AutoPromptManager extends EventEmitter {
     const inventory = directories(snapshot);
     const staged = await this.attachments.resolve(job.id, entry.staged); active();
     const request = { prompt: job.prompt, attachments: attachmentContext(staged) };
-    const invoke = (prompt: string, schema: Record<string, unknown>, extra: string) => {
+    const invoke = async (prompt: string, schema: Record<string, unknown>, extra: string) => {
+      await this.storageGate(signal); active();
       const input = { ...routerOf(job), ...(job.routerEffort ? { effort: job.routerEffort } : {}), systemPrompt: `${SYSTEM}\n${extra}`, prompt, schema, signal,
         imagePaths: imagePaths(staged) };
       return this.options.model ? this.options.model(input) : runAutoPromptModel(input, { stateDir: this.options.stateDir });
@@ -451,6 +473,7 @@ export class AutoPromptManager extends EventEmitter {
         if (!session || session.nativeId !== expectedNativeId || !eligible(session, job.provider, cwd!) || (relation === 'adjacent' && !adjacentAllowed(session, current))) throw new RunError('라우팅 중 선택한 세션의 상태나 컨텍스트가 변경되었습니다. 실행하지 않았습니다. 다시 시도하세요.', 'conflict');
       }
     };
+    await this.storageGate(signal); active();
     validate(); active();
     // This synchronous status transition claims dispatch before any await. A
     // cancellation can no longer race persistence and the run's admission.
@@ -458,10 +481,19 @@ export class AutoPromptManager extends EventEmitter {
     await this.persist(); this.emit('change');
     const attachmentIds = entry.staged.map(item => item.id);
     const internal: RunAdmission = { autoPromptId: job.id, validate, origin: job.origin ?? { kind: 'unknown' }, ...(job.delegation ? { delegation: job.delegation } : {}), ...(job.untrustedInput ? { untrustedInput: true } : {}), ...(job.unattended ? { unattended: true } : {}) };
-    const run = decision.action === 'resume'
+    await this.storageGate(signal); active();
+    const dispatch = async () => decision.action === 'resume'
       ? await this.options.runs.enqueue(decision.sessionId!, job.prompt, { attachmentIds, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}) }, internal)
       : (await this.options.runs.create({ provider: job.provider, cwd, prompt: job.prompt, attachmentIds, ...job.newSessionModel, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}),
         ...(job.codexApprovalsReviewer ? { codexApprovalsReviewer: job.codexApprovalsReviewer } : {}) }, internal)).run;
+    let run: Run;
+    for (;;) {
+      await this.storageGate(signal); active();
+      try { run = await dispatch(); break; }
+      catch (error) {
+        if (!this.storageHeld || !(error instanceof TowerError) || error.kind !== 'unavailable' || error.disposition !== 'not-admitted') throw error;
+      }
+    }
     this.complete(entry, run);
     await this.persist(); this.emit('change');
   }

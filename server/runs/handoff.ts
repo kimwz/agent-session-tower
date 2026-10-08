@@ -9,7 +9,7 @@ import { TowerError } from '../../shared/errors.js';
 export interface SuccessorCommand { execPath: string; args: string[] }
 
 /** Written by a worker that stopped on its own after handing off; a web reattaches only with this proof. */
-export interface HandoffRecord { previous: string; successor: string; version: string; clean: true; at: string }
+export interface HandoffRecord { previous: string; successor: string; version: string; clean: true; at: string; storageTransition?: boolean; rollbackFence?: { id: string; attempt: number } }
 
 export function handoffPath(runtime: string): string { return join(runtime, 'handoff.json'); }
 
@@ -38,7 +38,7 @@ export async function readHandoff(runtime: string): Promise<HandoffRecord | unde
     const info = await file.stat();
     if (!info.isFile() || (info.mode & 0o077) || (process.getuid && info.uid !== process.getuid()) || info.size > 4096) return undefined;
     const value = JSON.parse(await file.readFile('utf8')) as Partial<HandoffRecord>;
-    return typeof value.previous === 'string' && typeof value.successor === 'string' && value.clean === true && typeof value.version === 'string' && typeof value.at === 'string' ? value as HandoffRecord : undefined;
+    return typeof value.previous === 'string' && typeof value.successor === 'string' && value.clean === true && typeof value.version === 'string' && typeof value.at === 'string' && (value.storageTransition === undefined || typeof value.storageTransition === 'boolean') && (value.rollbackFence === undefined || typeof value.rollbackFence.id === 'string' && value.rollbackFence.id.length > 0 && value.rollbackFence.id.length <= 64 && Number.isSafeInteger(value.rollbackFence.attempt) && value.rollbackFence.attempt >= 1) ? value as HandoffRecord : undefined;
   } catch { return undefined; } finally { await file.close(); }
 }
 

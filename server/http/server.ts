@@ -117,6 +117,7 @@ export interface HttpOptions {
   /** It runs as the background service's own install, which updates replace. */
   service?: boolean;
   /** Moves this Tower to a version (the latest release when none is given), when it runs as the background service. */
+  storageRollback?: (action: string, input: Record<string, unknown>) => Promise<unknown>;
   towerUpdate?: (version?: string) => Promise<{ status: number; body: unknown }>;
   /** The owner's "update now": running turns wrap up, the rest stop at a deadline, and the worker switches. */
   forceRunnerUpdate?: () => Promise<{ status: number; body: unknown }>;
@@ -180,7 +181,7 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ attachmentStores, attachmentUploads, port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, forceRunnerUpdate, service, notifications, decisions, master, backup, localMcp }: HttpOptions) {
+export function createMonitorServer({ attachmentStores, attachmentUploads, port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, storageRollback, forceRunnerUpdate, service, notifications, decisions, master, backup, localMcp }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   const unsubscribeAuth = auth?.onRevoke(id => {
@@ -549,8 +550,14 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         await auth!.unblock(body.ip);
         return json(res, 200, auth!.overview());
       }
-      if (path === '/api/storage/status' && req.method === 'GET') return json(res, 200, backend.storageStatus?.() ?? { state: 'unavailable', code: 'worker-contract-missing' });
       if (path.startsWith('/api/storage/') && req.method === 'POST' && (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()])) return json(res, 403, { error: '저장소 복구는 소유자만 할 수 있습니다.' });
+      const rollbackAction = /^\/api\/storage\/rollback\/(status|validate|run|retry|withdraw|release-pin)$/.exec(path);
+      if (rollbackAction && req.method === 'POST') {
+        if (!identity.local) throw new TowerError('forbidden', 'Storage rollback is a local owner operation.');
+        if (!storageRollback) throw new TowerError('unavailable', 'Storage rollback is unavailable.');
+        return json(res, 200, await storageRollback(rollbackAction[1], await readJson(req)));
+      }
+      if (path === '/api/storage/status' && req.method === 'GET') return json(res, 200, backend.storageStatus?.() ?? { state: 'unavailable', code: 'worker-contract-missing' });
       const storageRecovery = /^\/api\/storage\/(snapshot|adopt|reconcile)$/.exec(path);
       if (storageRecovery && req.method === 'POST') {
         if (!backend.storageRecovery) throw new TowerError('unavailable', 'Storage recovery is unavailable.');

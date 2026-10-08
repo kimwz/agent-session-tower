@@ -13,6 +13,7 @@ import { advertisedAddresses } from './addresses.js';
 import type { AutoUpdateStatus, HubStatus, NodeReport, NodeStatus, NodeSummary, ToolUpdate, UpdateStatus } from '../../shared/link.js';
 import { newerVersion } from './service.js';
 import { updateActive } from './update.js';
+import { nextChainStep, chainAsked, type ChainProgress } from './storage-update.js';
 import { failedAgain, parseRetry, retryDue, type RetryRecord } from '../updates/schedule.js';
 import { TowerError } from '../../shared/errors.js';
 
@@ -51,6 +52,7 @@ interface NodeRecord {
   counted?: string;
   /** The update the owner asked for last, by when it started: its failure does not move the schedule. */
   manual?: string;
+  chain?: ChainProgress;
 }
 interface InviteRecord { id: string; secret: string; expiresAt: number; claimedBy?: string }
 interface State { version: 1; settings: HubSettings; nodes: NodeRecord[]; removed: Array<{ pin: string; at: string }>; invites: InviteRecord[] }
@@ -63,6 +65,7 @@ interface Connected { session: ClientHttp2Session; ws: WebSocket; hello: Hello; 
  * session per joined computer. Nothing it learns from a joined computer is trusted beyond that computer.
  */
 export class ControllerLinks extends EventEmitter {
+  private readonly updateRequests = new Map<string, Promise<{ code?: string; update?: UpdateStatus }>>();
   private state: State = { version: 1, settings: { enabled: false, port: DEFAULT_LINK_PORT, bind: '0.0.0.0', custom: [] }, nodes: [], removed: [], invites: [] };
   private readonly path: string;
   private listener?: { server: Server; wss: WebSocketServer; port: number };
@@ -150,7 +153,9 @@ export class ControllerLinks extends EventEmitter {
     return this.state.nodes.map(node => {
       const live = this.connected.get(node.id);
       const status: NodeStatus = live ? (live.hello.protocol === LINK_PROTOCOL ? 'connected' : 'update-required') : node.left ? 'removed-by-node' : 'offline';
-      return { id: node.id, name: live?.hello.name ?? node.name, ...(node.label ? { label: node.label } : {}), fingerprint: displayFingerprint(node.pin), status,
+      const progress = node.chain;
+      const step = progress && validChain(progress) ? nextChainStep({ running: this.reports.get(node.id)?.versions.web ?? live?.hello.version ?? node.version ?? '', update: this.reports.get(node.id)?.update, progress }) : undefined;
+      return { ...(progress && step ? { updateChain: { ...progress, state: step.action, ...('code' in step ? { code: step.code } : {}), ...('reason' in step ? { reason: step.reason } : {}), ...('version' in step ? { version: step.version } : {}) } } : {}), id: node.id, name: live?.hello.name ?? node.name, ...(node.label ? { label: node.label } : {}), fingerprint: displayFingerprint(node.pin), status,
         ...(live?.hello.version ?? node.version ? { version: live?.hello.version ?? node.version } : {}), features: live?.hello.features ?? [],
         pairedAt: node.pairedAt, ...(node.lastSeenAt ? { lastSeenAt: node.lastSeenAt } : {}), ...(node.invite ? { invite: node.invite } : {}),
         ...(this.reports.has(node.id) ? { report: this.shownReport(node.id, Boolean(live)) } : {}),
@@ -407,7 +412,10 @@ export class ControllerLinks extends EventEmitter {
     if (!behind) await this.retries(id, node => node.retry || node.failedUpdates ? { retry: undefined, failedUpdates: undefined } : undefined);
     const node = this.state.nodes.find(item => item.id === id);
     const due = retryDue(node && retryOf(node, this.options.version), this.options.version, this.now());
-    if (live.hello.features.includes('update') && behind && !updateActive(update) && due) await this.askUpdate(id, live);
+    const progress = node?.chain?.target === this.options.version && validChain(node.chain) ? node.chain : { target: this.options.version, attempts: {} };
+    const step = nextChainStep({ running: report.versions.web, update, progress });
+    const preparing = step.action === 'request' && (step.version !== this.options.version || !!progress.prerequisite && update?.version === progress.prerequisite && update.stage === 'done');
+    if (live.hello.features.includes('update') && behind && !updateActive(update) && (due || preparing)) await this.askUpdate(id, live);
     this.watch(id, live);
   }
 
@@ -424,8 +432,29 @@ export class ControllerLinks extends EventEmitter {
   }
 
   /** Asks for this Tower's version; resolves to the refusal's code, if it was refused, and the update under way. */
-  private async askUpdate(id: string, live: Connected): Promise<{ code?: string; update?: UpdateStatus }> {
-    const answer = await linkRequest(live.session, 'POST', '/link/update', { version: this.options.version }, HELLO_MS).catch(() => undefined);
+  private askUpdate(id: string, live: Connected): Promise<{ code?: string; update?: UpdateStatus }> {
+    const existing = this.updateRequests.get(id);
+    if (existing) return existing;
+    const asked = this.askChainUpdate(id, live);
+    this.updateRequests.set(id, asked);
+    void asked.finally(() => { if (this.updateRequests.get(id) === asked) this.updateRequests.delete(id); }).catch(error => console.error('Controller preparation request failed:', error));
+    return asked;
+  }
+  private async askChainUpdate(id: string, live: Connected): Promise<{ code?: string; update?: UpdateStatus }> {
+    const node = this.state.nodes.find(item => item.id === id);
+    const knownReport = this.reports.get(id);
+    const progress = node?.chain?.target === this.options.version ? node.chain : { target: this.options.version, attempts: {} };
+    if (node?.chain && (node.chain.target !== this.options.version || !validChain(node.chain))) {
+      if (node.chain.target === this.options.version) return { code: 'invalid-chain' };
+    }
+    if (knownReport?.update?.hold) return { code: knownReport.update.hold.code };
+    if (knownReport?.update?.storage && ['contract-unverifiable', 'target-runtime-unsupported'].includes(knownReport.update.storage.code)) return { code: knownReport.update.storage.code };
+    const step = nextChainStep({ running: knownReport?.versions.web ?? live.hello.version, update: knownReport?.update, progress });
+    if (step.action !== 'request') return { ...(step.action === 'blocked' ? { code: step.code } : {}), ...(knownReport?.update ? { update: knownReport.update } : {}) };
+    // Persist the bounded attempt before sending: a lost reply must not trigger unlimited resends after restart.
+    if (!node) return { code: 'unknown-node' };
+    await this.save({ ...this.state, nodes: this.state.nodes.map(item => item.id === id ? { ...item, chain: chainAsked(progress, step.version, knownReport?.update) } : item) });
+    const answer = await linkRequest(live.session, 'POST', '/link/update', { version: step.version }, HELLO_MS).catch(() => undefined);
     const body = answer?.json as { update?: unknown; code?: unknown } | undefined;
     const update = parseUpdate(body?.update);
     const known = this.reports.get(id);
@@ -483,6 +512,12 @@ function retryOf(node: NodeRecord, version: string): RetryRecord | undefined {
 
 const FAILURES = new Set(['low-disk', 'install-failed', 'check-failed', 'switch-failed', 'start-failed', 'link-failed', 'rollback-failed', 'interrupted']);
 const RELEASE = /^\d+\.\d+\.\d+$/;
+function validChain(value: ChainProgress): boolean {
+  return !!value && typeof value.target === 'string' && RELEASE.test(value.target)
+    && (value.prerequisite === undefined || typeof value.prerequisite === 'string' && RELEASE.test(value.prerequisite))
+    && !!value.attempts && typeof value.attempts === 'object' && !Array.isArray(value.attempts)
+    && Object.entries(value.attempts).every(([version, count]) => RELEASE.test(version) && Number.isSafeInteger(count) && count >= 0);
+}
 const text = (value: unknown, pattern = /^[\w.:-]{1,40}$/) => typeof value === 'string' && pattern.test(value) ? value : undefined;
 
 /** Only the facts a report is made of get through; nothing a joined computer sends is shown as it came. */
@@ -490,9 +525,19 @@ function parseUpdate(value: unknown): UpdateStatus | undefined {
   const update = value as Partial<UpdateStatus> | undefined;
   if (!update || typeof update !== 'object' || !text(update.version, RELEASE) || !text(update.previous) || !STAGES.has(update.stage as string)) return undefined;
   const at = (item: unknown) => typeof item === 'string' && !Number.isNaN(Date.parse(item)) ? new Date(item).toISOString() : undefined;
+  const storage = update.storage;
+  const validStorage = storage && typeof storage === 'object' && !Array.isArray(storage)
+    && ['prerequisite-required', 'previous-incompatible', 'contract-unverifiable', 'target-runtime-unsupported'].includes(storage.code)
+    && (storage.prepare === undefined || text(storage.prepare, RELEASE))
+    && (storage.domains === undefined || Array.isArray(storage.domains) && storage.domains.every(domain => typeof domain === 'string' && /^[a-z][a-z0-9-]{0,47}$/.test(domain)));
+  const hold = update.hold;
+  const validHold = hold && typeof hold === 'object' && !Array.isArray(hold) && typeof hold.code === 'string' && hold.code.length <= 100 && typeof hold.reason === 'string' && hold.reason.length <= 2000 && at(hold.at);
   return { version: update.version!, previous: update.previous!, stage: update.stage!, startedAt: at(update.startedAt) ?? new Date(0).toISOString(), updatedAt: at(update.updatedAt) ?? new Date(0).toISOString(),
-    ...(FAILURES.has(update.code as string) ? { code: update.code } : {}), ...(STAGES.has(update.failedStage as string) ? { failedStage: update.failedStage } : {}) };
+    ...(FAILURES.has(update.code as string) ? { code: update.code } : {}), ...(STAGES.has(update.failedStage as string) ? { failedStage: update.failedStage } : {}),
+    ...(storage === undefined ? {} : { storage: validStorage ? structuredClone(storage) : { code: 'contract-unverifiable' as const } }),
+    ...(hold === undefined ? {} : { hold: validHold ? structuredClone(hold) : { code: 'invalid-hold', reason: 'The reported handoff hold cannot be verified.', at: at(update.updatedAt) ?? new Date(0).toISOString() } }) };
 }
+
 const TOOL_METHODS = new Set(['native', 'npm', 'unsupported']);
 const TOOL_STATES = new Set(['current', 'updating', 'waiting', 'failed', 'broken', 'unsupported']);
 const TOOL_REASONS = new Set(['not-updated', 'command-failed', 'stuck', 'install-method', 'not-root-only', 'no-npm', 'unreadable-version']);

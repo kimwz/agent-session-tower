@@ -823,3 +823,26 @@ test('a save writes the jobs as they were when it was asked for, not when its tu
   assert.deepEqual(f.dispatches[0].input.attachmentIds, [attachment.id]);
   await assert.rejects(f.manager.submit({ ...input, attachmentIds: [randomUUID()] }), { kind: 'conflict' });
 });
+
+
+test('storage hold preserves queued and in-flight router stages without abort, dispatch or model replay', async t => {
+  const f = await fixture(t);
+  f.manager.holdStorage();
+  const queued = await f.manager.submit(request(f.cwd));
+  assert.equal(f.manager.get(queued.id)?.status, 'queued');
+  assert.equal(f.calls.length, 0);
+  let answer!: (value: unknown) => void;
+  f.respond(() => new Promise(resolve => { answer = resolve; }));
+  f.manager.releaseStorage();
+  await until(() => f.calls.length === 1);
+  f.manager.holdStorage();
+  answer(resume(f.session.id));
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(f.calls[0].signal?.aborted, false);
+  assert.equal(f.dispatches.length, 0);
+  assert.equal(f.manager.get(queued.id)?.status, 'routing');
+  f.manager.releaseStorage();
+  assert.equal((await f.finished(queued.id)).status, 'completed');
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.dispatches.length, 1);
+});

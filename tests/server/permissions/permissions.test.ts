@@ -16,7 +16,7 @@ import type { Run } from '../../../shared/types.js';
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, effectGate?: () => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), 'tower-permissions-'));
   const stateDir = join(root, 'state');
   const codexHome = join(root, 'codex-home');
@@ -25,7 +25,7 @@ async function fixture(t: TestContext) {
   git(project, 'init', '-q');
   const sessions = new Map([['claude:one', { cwd: project, provider: 'claude' as const }], ['codex:two', { cwd: project, provider: 'codex' as const }]]);
   const resumed: Array<{ sessionId: string; prompt: string }> = [];
-  const make = () => new PermissionService({ stateDir, env: { CODEX_HOME: codexHome }, session: id => sessions.get(id),
+  const make = () => new PermissionService({ stateDir, effectGate, env: { CODEX_HOME: codexHome }, session: id => sessions.get(id),
     resume: async (sessionId, prompt) => { if (sessionId === 'gone') throw new Error('Session not found.'); resumed.push({ sessionId, prompt }); } });
   const service = make();
   await service.start();
@@ -257,4 +257,61 @@ test('decision opt-in is durable; recovery applies rules before recording a requ
   assert.deepEqual(notified, [first.id]);
   assert.equal(restored.overview().requests.find(item => item.id === first.id)?.notification?.state, 'recorded');
   await restored.reconcileNotifications(); assert.deepEqual(notified, [first.id]); restored.close();
+});
+
+
+test('permission writes queued before pause recheck the hold after the awaited effect gate', async t => {
+  let gate = async () => {};
+  const f = await fixture(t, () => gate());
+  await f.service.reconcileNotifications();
+  await f.service.save({ kind: 'command', value: 'git status', providers: ['codex'], scope: 'global' });
+  const paths = [join(f.stateDir, 'permissions.json'), join(f.codexHome, 'rules', 'tower.rules')];
+  const before = await Promise.all(paths.map(path => readFile(path)));
+  let reached!: () => void, release!: () => void;
+  const entered = new Promise<void>(resolve => { reached = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
+  gate = async () => { reached(); await held; };
+  const first = f.service.save({ kind: 'command', value: 'git diff', providers: ['codex'], scope: 'global' });
+  const second = f.service.save({ kind: 'command', value: 'git log', providers: ['codex'], scope: 'global' });
+  const rejected = [first, second].map(work => assert.rejects(work, { kind: 'unavailable' }));
+  await entered; f.service.pause(); release(); await Promise.all(rejected);
+  assert.deepEqual(await Promise.all(paths.map(path => readFile(path))), before);
+  f.service.resume(); gate = async () => {};
+  await f.service.save({ kind: 'command', value: 'git diff', providers: ['codex'], scope: 'global' });
+  assert.match(await readFile(paths[1], 'utf8'), /"diff"/);
+});
+
+test('a hold between permission commit and native apply leaves native rules untouched and can reconcile later', async t => {
+  let gate = async () => {};
+  const f = await fixture(t, () => gate());
+  await f.service.reconcileNotifications();
+  await f.service.save({ kind: 'command', value: 'git status', providers: ['codex'], scope: 'global' });
+  const native = join(f.codexHome, 'rules', 'tower.rules'); const before = await readFile(native);
+  let calls = 0;
+  gate = async () => { if (++calls === 2) f.service.pause(); };
+  await f.service.save({ kind: 'command', value: 'git diff', providers: ['codex'], scope: 'global' });
+  assert.deepEqual(await readFile(native), before);
+  assert.ok(f.service.overview().targets.some(target => target.error), 'native application reports the hold');
+  assert.ok(f.service.overview().rules.some(rule => rule.value === 'git diff'), 'the prior committed owner decision is preserved');
+  f.service.resume(); gate = async () => {};
+  await f.service.reconcileNotifications();
+  assert.match(await readFile(native, 'utf8'), /"diff"/);
+});
+
+
+test('held permission service preserves only an already running command completion and its notification', async t => {
+  const f = await fixture(t);
+  const asked = await f.service.requestRun({ command: 'echo fixture', reason: 'completion fixture' }, agent('claude:one'));
+  await f.service.decide(asked.request.id, true, undefined, true);
+  await f.service.updateRun(asked.request.id, { status: 'running', startedAt: '2026-09-30T00:00:00.000Z' });
+  f.service.pause();
+  await f.service.updateRun(asked.request.id, { status: 'done', exitCode: 7, finishedAt: '2026-09-30T00:00:01.000Z', preview: { stdout: 'out', stderr: 'err' }, stdoutBytes: 3, stderrBytes: 3 });
+  const result = f.service.overview().requests.find(item => item.id === asked.request.id)!.run!;
+  assert.equal(result.exitCode, 7); assert.deepEqual(result.preview, { stdout: 'out', stderr: 'err' });
+  assert.equal(result.notify, true); assert.equal(f.service.untoldRuns().length, 1);
+  await assert.rejects(f.service.updateRun(asked.request.id, { status: 'running' }), { kind: 'unavailable' });
+  await assert.rejects(f.service.requestRun({ command: 'echo new', reason: 'held' }, agent('claude:one')), { kind: 'unavailable' });
+  const persisted = JSON.parse(await readFile(join(f.stateDir, 'permissions.json'), 'utf8'));
+  assert.equal(persisted.requests.find((item: { id: string }) => item.id === asked.request.id).run.exitCode, 7);
 });

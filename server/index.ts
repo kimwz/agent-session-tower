@@ -1,4 +1,7 @@
-import { printArtifactStorageContract } from './link/storage-update.js';
+import { captureStorageBundle, storageBuildContext, preflightStorage } from './storage/index.js';
+import { rollbackPorts } from './runs/storage-control.js';
+import { restartService } from './link/service.js';
+import { runRollback, resumeRollback, withdrawRollback, releaseStoragePin, validateRollback, readRollbackRecord, printArtifactStorageContract } from './link/storage-update.js';
 import { AttachmentStore } from './stores/attachments.js';
 import { AttachmentUploads } from './stores/attachment-uploads.js';
 // First: Tower's processes never carry the identity of an agent turn that started them.
@@ -640,6 +643,22 @@ async function main() {
     forceRunnerUpdate: async () => {
       try { const answer = await runs.forceUpdate(); changed(); return { status: 202, body: answer }; }
       catch (error) { return { status: statusOf(error) ?? 500, body: { error: error instanceof Error ? error.message : 'The update could not start.' } }; }
+    },
+    storageRollback: async (action, input) => {
+      if (action === 'status') return readRollbackRecord(stateDir);
+      const bundle = await captureStorageBundle();
+      const contextBuild = storageBuildContext(bundle);
+      if (!contextBuild.ok) throw new TowerError('unavailable', contextBuild.failure.message);
+      const preflight = await preflightStorage({ bundle, stateDir });
+      const ports = rollbackPorts((operation, payload) => runs.storageControl(operation, payload), () => restartService(stateDir));
+      const context = { stateDir, managed: updates.managed, running: { version: APP_VERSION, manifest: contextBuild.manifest, preflight }, ports, serialize: <T>(work: () => Promise<T>) => updates.exclusive(work) };
+      if (action === 'retry') return resumeRollback(context);
+      if (action === 'withdraw') return withdrawRollback(context, { releasePin: input.releasePin === true });
+      if (typeof input.target !== 'string') throw new TowerError('invalid', 'A storage rollback needs a target version.');
+      if (action === 'validate') return validateRollback(context, { target: input.target });
+      if (action === 'release-pin') return releaseStoragePin(stateDir, { version: input.target }, { ports });
+      if (action === 'run' && typeof input.reason === 'string') return runRollback(context, { target: input.target, reason: input.reason, by: 'owner' });
+      throw new TowerError('invalid', 'Unknown storage rollback action.');
     },
     towerUpdate: async version => {
       if (!updates.managed) return { status: 409, body: { code: 'not-service', error: 'This Tower does not run as the background service, so it cannot replace itself.' } };

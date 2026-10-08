@@ -9,6 +9,8 @@ export interface UpdateStatus {
   version: string; previous: string; stage: UpdateStage; startedAt: string; updatedAt: string;
   /** Why it failed, and the stage it failed in. */
   code?: UpdateFailure; failedStage?: UpdateStage;
+  storage?: { code: 'prerequisite-required' | 'previous-incompatible' | 'contract-unverifiable' | 'target-runtime-unsupported'; prepare?: string; domains?: string[] };
+  hold?: { code: string; reason: string; at: string };
 }
 /**
  * How a Claude Code or Codex CLI is kept current. `native` is Claude Code's own installer; `npm` a global npm install.
@@ -55,7 +57,9 @@ export interface NodeReport {
   autoUpdate?: AutoUpdateStatus;
 }
 /** A computer this one controls. */
+export interface UpdateChainStatus { target: string; prerequisite?: string; attempts: Record<string, number>; state: 'done' | 'wait' | 'request' | 'blocked'; code?: string; reason?: string; version?: string }
 export interface NodeSummary {
+  updateChain?: UpdateChainStatus;
   id: string; name: string; label?: string; fingerprint: string; status: NodeStatus;
   version?: string; features: string[]; pairedAt: string; lastSeenAt?: string;
   /** The code it last joined with. */

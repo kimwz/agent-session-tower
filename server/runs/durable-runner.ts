@@ -203,6 +203,10 @@ export class DurableRunManager extends EventEmitter {
   }
 
   async close(): Promise<void> { this.closed = true; if (this.timer) clearInterval(this.timer); this.terminals.dispose(); }
+  async storageControl(action: string, input: Record<string, unknown>): Promise<unknown> {
+    if (!this.supports('storage')) throw new TowerError('unavailable', 'The worker has no storage control.');
+    return this.call('storageControl', [action, input]);
+  }
   storageStatus(): WorkerStorageStatus | undefined { return this.snapshot?.storage && structuredClone(this.snapshot.storage); }
   async storageRetry(): Promise<WorkerStorageStatus> {
     if (!this.supports('storage')) throw new TowerError('unavailable', 'The execution worker has no storage diagnosis.');

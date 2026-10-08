@@ -67,6 +67,8 @@ export interface PermissionReviewOutcome { request: PermissionRequest; message?:
 export interface PermissionCaller { kind: string; sessionId?: string; runId?: string; controllerId?: string }
 export interface PermissionServiceOptions {
   stateDir: string;
+  /** Rechecks storage admission immediately before permission effects; omitted outside the worker. */
+  effectGate?(): Promise<void>;
   env?: NodeJS.ProcessEnv;
   /** The folder and provider of a Tower session. */
   session(id: string): { cwd: string; provider: Provider } | undefined;
@@ -110,12 +112,14 @@ export class PermissionService {
   constructor(private readonly options: PermissionServiceOptions) { this.path = join(options.stateDir, 'permissions.json'); }
 
   async start(): Promise<void> {
+    await this.requireEffects();
     await mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
     try { this.state = normalize(await readPrivateJson(this.path, MAX_BYTES)); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         // A file this build cannot read is kept aside, never overwritten. The files it wrote keep their rules.
         const aside = `${this.path}.unreadable-${Date.now()}`;
+        await this.requireEffects();
         await rename(this.path, aside).catch(() => {});
         console.error(`Permission rules were set aside: ${error instanceof Error ? error.message : String(error)}`);
         this.state = { ...empty(), lost: aside };
@@ -244,6 +248,7 @@ export class PermissionService {
           item.review = review({ verdict: 'approve', ...(result.files?.length ? { files: result.files } : {}) });
         });
         const item = this.state.requests.find(entry => entry.id === id)!;
+        await this.requireEffects();
         this.options.startRun?.(item);
         return { request: item };
       }
@@ -457,6 +462,7 @@ export class PermissionService {
    * as they were reviewed. Otherwise it is reviewed again with what they are now, and false is returned.
    */
   async confirmReviewed(id: string): Promise<boolean> {
+    await this.requireEffects();
     const request = this.state.requests.find(item => item.id === id);
     if (request?.decidedBy !== 'auto') return true;
     // An earlier run of the conversation went back to review: this one waits its turn behind it, reviewed again too.
@@ -468,7 +474,7 @@ export class PermissionService {
     const stale = waited > MAX_APPROVAL_WAIT_MS || earlier;
     // The same places stay out of a folder's entries as when the reviewer listed it (see PermissionReviewer).
     const changed = stale || !request.review?.files?.length ? [] : await changedFiles(request.review.files, await deniedPaths(this.options.stateDir));
-    if (!stale && !changed.length) return true;
+    if (!stale && !changed.length) { await this.requireEffects(); return true; }
     const requeued = await this.serial(async () => {
       const item = this.state.requests.find(entry => entry.id === id);
       // Decided again, or started, meanwhile: left as it is.
@@ -496,14 +502,16 @@ export class PermissionService {
     return this.serial(async () => {
       const request = this.state.requests.find(item => item.id === id);
       if (!request) return;
+      const completion = finishedRun(run) && request.status === 'approved' && request.rule.kind === 'run' && request.run?.status === 'running';
+      if (!completion) this.requireOpen();
       await this.commit(state => {
         const item = state.requests.find(entry => entry.id === id)!;
         item.run = { ...run, ...(item.run?.delivered ? { delivered: true } : {}), ...(item.run?.notify ? { notify: true } : {}), ...(item.run?.toldAt ? { toldAt: item.run.toldAt } : {}) };
         // Needed only until the run starts; kept longer, many of them would outgrow the state file.
         if (run.status !== 'waiting' && item.review?.files) delete item.review.files;
-      });
+      }, completion);
       if (finishedRun(run)) this.options.onRunFinished?.(this.state.requests.find(item => item.id === id)!);
-    });
+    }, true);
   }
 
   /** Allowed runs a previous worker never started, and runs it left running (for the runner to recover). */
@@ -599,6 +607,7 @@ export class PermissionService {
       if (request.rule.kind === 'run') {
         // The owner allows the exact command: Tower runs it once, now. Its result reaches the conversation when it is done.
         await this.commit(state => { const item = state.requests.find(entry => entry.id === id)!; item.status = 'approved'; item.decidedAt = at; item.decidedBy = 'owner'; item.run = { status: 'waiting', ...(resume ? { notify: true } : {}) }; });
+        await this.requireEffects();
         this.options.startRun?.(this.state.requests.find(entry => entry.id === id)!);
         return { request, rule: undefined, run: true };
       }
@@ -621,7 +630,7 @@ export class PermissionService {
     // The decision stands whether or not the conversation can take a message now.
     // A run's own message comes with its result; a refused run is said now.
     if (run) return { ...this.overview(), ...extra };
-    const note = await (request.rule.kind === 'run' ? this.options.resume?.(request.sessionId, decisionMessage(request.rule, rule)) ?? Promise.resolve() : this.deliverNotification(request.id)).then(() => undefined, error => error instanceof Error ? error.message : String(error));
+    const note = await (request.rule.kind === 'run' ? this.requireEffects().then(() => this.options.resume?.(request.sessionId, decisionMessage(request.rule, rule))) : this.deliverNotification(request.id)).then(() => undefined, error => error instanceof Error ? error.message : String(error));
     return { ...this.overview(), ...extra, resumed: note ? { error: note } : { sent: true } };
   }
 
@@ -639,6 +648,7 @@ export class PermissionService {
       if (!request || request.notification?.state !== 'pending') return;
       if (request.status === 'approved' && this.targets(request.cwd).some(target => target.error)) throw failure('Permission rules could not be applied; continuation was not admitted.', 'unavailable');
       const notify = this.options.decision ?? fallback;
+      await this.requireEffects();
       if (notify) await notify(structuredClone(request), request.notification.message);
       else if (this.options.resume) await this.options.resume(request.sessionId, request.notification.message);
       else return;
@@ -657,22 +667,36 @@ export class PermissionService {
 
   private now(): string { return (this.options.now?.() ?? new Date()).toISOString(); }
 
-  private serial<T>(work: () => Promise<T>): Promise<T> {
-    if (this.closed) return Promise.reject(failure('권한 규칙을 지금은 바꿀 수 없습니다. 잠시 뒤 다시 시도하세요.', 'unavailable'));
-    const next = this.queue.catch(() => {}).then(work);
+  private serial<T>(work: () => Promise<T>, completionOnly = false): Promise<T> {
+    if (this.closed && !completionOnly) return Promise.reject(failure('권한 규칙을 지금은 바꿀 수 없습니다. 잠시 뒤 다시 시도하세요.', 'unavailable'));
+    const next = this.queue.catch(() => {}).then(async () => { if (!completionOnly) this.requireOpen(); return work(); });
     this.queue = next;
     return next;
   }
 
+  private requireOpen(): void {
+    if (this.closed) throw failure('권한 규칙을 지금은 바꿀 수 없습니다. 잠시 뒤 다시 시도하세요.', 'unavailable');
+  }
+
+  private async requireEffects(): Promise<void> {
+    this.requireOpen();
+    await this.options.effectGate?.();
+    // The gate itself may wait while handoff or a storage hold pauses this service.
+    this.requireOpen();
+  }
+
   /** A change becomes current only once it is saved. */
-  private async commit(change: (state: PermissionState) => void): Promise<void> {
+  private async commit(change: (state: PermissionState) => void, completionOnly = false): Promise<void> {
     const next = structuredClone(this.state);
     change(next);
-    trim(next, this.options.now?.() ?? new Date());
+    if (!completionOnly) {
+      trim(next, this.options.now?.() ?? new Date());
+      await this.requireEffects();
+    }
     await writePrivateJson(this.path, JSON.stringify(next, null, 2));
     // A run request that left the record takes its kept output with it.
     const kept = new Set(next.requests.map(request => request.id));
-    for (const request of this.state.requests) if (request.rule.kind === 'run' && !kept.has(request.id)) void this.options.forgetRun?.(request.id).catch(() => {});
+    for (const request of this.state.requests) if (request.rule.kind === 'run' && !kept.has(request.id)) void this.requireEffects().then(() => this.options.forgetRun?.(request.id)).catch(() => {});
     this.state = next;
   }
 
@@ -699,6 +723,7 @@ export class PermissionService {
     for (const file of this.state.codex) if (!files.has(file.path)) files.set(file.path, { scope: file.scope, ...(file.cwd ? { cwd: file.cwd } : {}), lines: [] });
     for (const [path, file] of files) {
       try {
+        await this.requireEffects();
         await syncCodex(path, file.lines, file.scope === 'project' ? file.cwd : undefined, codexRulesPath('global', undefined, this.options.env));
         const had = this.state.codex.some(item => item.path === path);
         if (had !== file.lines.length > 0) await this.commit(state => {
