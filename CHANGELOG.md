@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.114.2] - 2026-10-08
+
+### Changed
+- **The master reads with Eleven v4 Turbo without tone tags.** Eleven v4 acts `[cheerfully]` and `[excited]` out too strongly, so Tower no longer puts them in front of first replies, answers, news, read-again answers or voice samples on that model. Brackets the master writes are still read as words. v3 and v3 conversational keep their tone tags, and flash v2.5 is unchanged. An answer being read when the reading model changes is read to its end with the model it started with, so a part written with a tag never reaches Eleven v4; the new model applies from the next answer, or from sentences written after the change.
+
 ## [1.114.1] - 2026-10-08
 
 ### Changed

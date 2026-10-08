@@ -303,7 +303,7 @@ export class MasterVoice {
     const sent = voiced(reply.text, model, 'ack');
     // Judged against the limit as it is now (an answer may have spent meanwhile), and charged in the same step.
     if (this.usage.limited(Date.now(), sent.length * ttsDollarsPerChar(model))) return undefined;
-    const live = this.audio.synthesize(sent);
+    const live = this.audio.synthesize(sent, { model });
     this.audio.configure(live, { session });
     if (!await this.audio.complete(live, signal) || signal.aborted || this.session !== session || !this.alive(session) || this.answering(request)) { this.audio.abandon(live); return undefined; }
     return { id: randomUUID(), session: session.digest, kind: 'ack', text: reply.text, audio: `/api/master/voice/audio/${live.id}`, expiresAt: Date.now() + 60_000, request };
@@ -434,7 +434,8 @@ export class MasterVoice {
       const part = parts[index];
       const refuse = this.session !== session || !this.alive(session) ? this.gone(session) : this.usage.limited(Date.now(), part.speech.length * ttsDollarsPerChar(model)) ? 'limit' : undefined;
       if (refuse) { this.setSpeak(entry, unspoken(speakOf(this.options.room.get(entry.id)?.data) ?? speak, refuse, heard)); return; }
-      const live = this.audio.synthesize(part.speech, undefined, key);
+      // Made with the model its parts were written for, even if the setting changes while it is read.
+      const live = this.audio.synthesize(part.speech, { model }, key);
       this.audio.configure(live, { session, held: true, partIndex: index });
       try {
         if (!await this.audio.complete(live) || this.session !== session) {
@@ -532,8 +533,8 @@ export class MasterVoice {
   listeners(id: string): number { return this.audio.listeners(id); }
 
   /**
-   * A short sample in a voice, for the owner choosing one in the settings: read with the model and bright tone set
-   * now, made once per voice and model, and paid for like anything else read aloud. Needs only the key.
+   * A short sample in a voice, for the owner choosing one in the settings: read with the model set now and its tone
+   * (none on Eleven v4 Turbo), made once per voice and model, and paid for like anything else read aloud. Needs only the key.
    */
   async voicePreview(input: { voiceId: unknown }): Promise<{ audio: string }> { return this.clips.preview(input); }
 

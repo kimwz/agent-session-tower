@@ -20,7 +20,7 @@ export function isNoise(text: string): boolean {
  * ElevenLabs v3 audio tags that set how a sentence is read, never read aloud themselves. `[excited]` is one of
  * ElevenLabs' documented tags; `[cheerfully]` is a descriptive one, which v3 also follows. Measured on the owner's
  * voice with eleven_v3_conversational: `[excited]` raised the pitch about 1.6 semitones and read a little faster.
- * Eleven v4 Turbo follows the same tags (checked on the owner's voice: neither is read out).
+ * Eleven v4 Turbo follows them too but overacts them, so it gets none (`tone` in tts-models.ts).
  */
 export const VOICE_TONES = { bright: '[cheerfully]', excited: '[excited]' } as const;
 /** Failures, warnings, apologies, loss, health: said in the voice's own calm tone, never cheerfully. */
@@ -29,19 +29,21 @@ const SERIOUS = /실패|오류|에러|못\s?했|못\s?합|못\s?해|안\s?돼|�
 const GOOD_NEWS = /완료|끝났|끝냈|마쳤|성공|해결|통과|배포했|배포됐|올렸|반영됐|됐어요|됐습니다|축하|좋은 소식|잘 됐|잘 돼/;
 
 /**
- * The tone tag for something the master says, for models that follow tags: none before an irreversible change, for
- * a failure, or for anything serious; excited for clear good news; bright otherwise. Judged on the whole text.
+ * The tone of something the master says, whatever model reads it: none before an irreversible change, for a failure,
+ * or for anything serious; excited for clear good news; bright otherwise. Judged on the whole text.
  */
-function tone(plain: string, model: string, kind: VoiceKind): string {
-  if (!ttsModel(model).tags || kind === 'notice' || kind === 'error' || SERIOUS.test(plain)) return '';
+function mood(plain: string, kind: VoiceKind): string {
+  if (kind === 'notice' || kind === 'error' || SERIOUS.test(plain)) return '';
   return kind !== 'ack' && GOOD_NEWS.test(plain) ? VOICE_TONES.excited : VOICE_TONES.bright;
 }
+/** The tone tag put in front, only for models Tower tones (`tone` in tts-models.ts). */
+const tone = (plain: string, model: string, kind: VoiceKind) => ttsModel(model).tone ? mood(plain, kind) : '';
 export type VoiceKind = 'answer' | 'report' | 'error' | 'notice' | 'ack';
 /** Brackets already in the text become parentheses on tagged models, so they are read, not taken as directions. */
 const untagged = (text: string, model: string) => ttsModel(model).tags ? text.replace(/\[/g, '(').replace(/\]/g, ')') : text;
 
 /**
- * The text sent to speech for something the master says: a tone tag in front, for models that follow tags. The tag
+ * The text sent to speech for something the master says: a tone tag in front, for models Tower tones. The tag
  * sets how it is read, never how much of it is read, and is only in what is synthesized: what the page shows and the
  * conversation keep the text.
  */
@@ -127,7 +129,7 @@ function pieces(sentence: string, limit: number): string[] {
 export interface VoicePart { text: string; speech: string }
 const voicedPair = (text: string, model: string, tag: string): VoicePart => {
   const speech = untagged(text, model);
-  return { text, speech: tag ? `${tag} ${speech}` : speech };
+  return { text, speech: tag && ttsModel(model).tone ? `${tag} ${speech}` : speech };
 };
 
 export function voicedParts(text: string, model: string, kind: VoiceKind): string[] {
@@ -163,12 +165,13 @@ export function voicedPartPairs(text: string, model: string, kind: VoiceKind): V
 }
 
 /**
- * The tone tag of a chunk of an answer read while it is written: the first chunk sets it as `tone` does for a whole
- * answer; serious words in any later chunk make it calm, and calm stays for the rest of the answer (never brighter
- * again). `before` is the tag used so far, undefined for the first chunk.
+ * The tone of an answer read while it is written, chunk by chunk: the first chunk sets it as for a whole answer;
+ * serious words in any later chunk make it calm, and calm stays for the rest of the answer (never brighter again).
+ * `before` is the tone so far, undefined for the first chunk. It is kept whatever model reads the answer, so a change
+ * of model partway keeps it; only models Tower tones get it as a tag (`voicedChunkPairs`).
  */
-export function streamTone(plain: string, model: string, kind: VoiceKind, before?: string): string {
-  const now = tone(untagged(plain, model), model, kind);
+export function streamTone(plain: string, kind: VoiceKind, before?: string): string {
+  const now = mood(plain, kind);
   if (before === undefined) return now;
   return before === '' || now === '' ? '' : before;
 }

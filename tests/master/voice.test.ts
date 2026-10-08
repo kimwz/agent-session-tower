@@ -284,10 +284,10 @@ test('what the owner said is a request like a typed one, answered first with a r
   assert.equal(first.ack?.kind, 'ack');
   assert.match(first.ack!.audio, /^\/api\/master\/voice\/audio\/[0-9a-f-]{36}$/, 'made for this request, not a recording');
   assert.equal(first.ack!.session, digestOf(session));
-  assert.equal(h.labs.speeches[0].text, `[cheerfully] ${FIRST}`, 'read brightly');
+  assert.equal(h.labs.speeches[0].text, FIRST, 'no tone tag on Eleven v4 Turbo');
   // The default, Eleven v4 Turbo, is read through Text to Dialogue: one line in the chosen voice, nothing more.
   assert.equal(h.labs.speeches[0].request, 'dialogue');
-  assert.deepEqual(h.labs.speeches[0].body, { inputs: [{ text: `[cheerfully] ${FIRST}`, voice_id: 'cgSgspJ2msm6clMCkdW9' }], model_id: 'eleven_v4_turbo', language_code: 'ko' });
+  assert.deepEqual(h.labs.speeches[0].body, { inputs: [{ text: FIRST, voice_id: 'cgSgspJ2msm6clMCkdW9' }], model_id: 'eleven_v4_turbo', language_code: 'ko' });
   assert.equal(h.labs.speeches[0].query, '?output_format=mp3_44100_128&enable_logging=false');
   const owner = h.room.recent(20).find(entry => entry.data.kind === 'owner');
   assert.deepEqual(owner?.data, { kind: 'owner', text: '지금 작업 중인 세션 알려줘', voice: true });
@@ -342,7 +342,7 @@ test('a spoken request that runs long says nothing more on its own: no recorded 
   assert.deepEqual(h.says().filter(say => say.kind === 'working'), []);
 });
 
-test('a voice is heard before it is chosen: a Korean sample read brightly in that voice, made once, paid for, and served from disk', async t => {
+test('a voice is heard before it is chosen: a Korean sample read in that voice and the model\'s tone, made once, paid for, and served from disk', async t => {
   const h = await harness(t, { steps: [] });
   const { fetchAudio } = await audioServer(t, h.voice);
   const OTHER = 'bv62BmVlrpG0pQegOpuN';
@@ -351,7 +351,7 @@ test('a voice is heard before it is chosen: a Korean sample read brightly in tha
   assert.match(first.audio, /^\/api\/master\/voice\/audio\/preview-[a-f0-9]{64}$/);
   assert.equal(h.labs.speeches.length, 1);
   assert.equal(h.labs.speeches[0].voice, OTHER, 'read in the voice asked about, not the one chosen');
-  assert.deepEqual(h.labs.speeches[0].body, { inputs: [{ text: `[cheerfully] ${VOICE_SAMPLE}`, voice_id: OTHER }], model_id: 'eleven_v4_turbo', language_code: 'ko' });
+  assert.deepEqual(h.labs.speeches[0].body, { inputs: [{ text: VOICE_SAMPLE, voice_id: OTHER }], model_id: 'eleven_v4_turbo', language_code: 'ko' });
   assert.equal(h.settings.current().voice.voiceId, 'cgSgspJ2msm6clMCkdW9', 'hearing a voice does not choose it');
   assert.ok(h.voice.status().today.ttsChars >= VOICE_SAMPLE.length);
   const heard = await fetchAudio(first.audio.split('/').at(-1)!);
@@ -394,7 +394,7 @@ test('a voice heard and then chosen is the one Eleven v4 Turbo reads answers in'
   assert.equal(first.ack?.text, FIRST);
   await until(() => h.labs.speeches.find(item => item.text.includes('고른 목소리로')));
   assert.deepEqual(h.labs.speeches.map(item => [item.request, item.voice, item.text]), [
-    ['dialogue', OTHER, `[cheerfully] ${VOICE_SAMPLE}`], ['dialogue', OTHER, `[cheerfully] ${FIRST}`], ['dialogue', OTHER, '[cheerfully] 고른 목소리로 읽습니다.'],
+    ['dialogue', OTHER, VOICE_SAMPLE], ['dialogue', OTHER, FIRST], ['dialogue', OTHER, '고른 목소리로 읽습니다.'],
   ], 'sample, first reply and answer, each in the chosen voice');
 });
 
@@ -424,7 +424,7 @@ test('an answer to a spoken request is read aloud where voice is on and marked p
   const answer = await masterEntry(h, /두 개입니다/);
   const reading = await until(() => h.says().find(item => item.kind === 'answer'));
   assert.equal(reading.text, '작업 두 개입니다. 자세한 목록은 화면에.', 'the whole answer, not only its first paragraph');
-  assert.ok(h.labs.speeches.some(item => item.text === '[cheerfully] 작업 두 개입니다. 자세한 목록은 화면에.'), 'the tone tag goes only to speech');
+  assert.ok(h.labs.speeches.some(item => item.text === '작업 두 개입니다. 자세한 목록은 화면에.'), 'Eleven v4 Turbo is read without a tone tag');
   assert.equal(h.speakOf(answer.id)?.state, 'playing');
   assert.equal(h.voice.voicePlayed({ session, id: reading.id, result: 'played' }), true);
   await until(() => h.speakOf(answer.id)?.state === 'played');
@@ -531,7 +531,8 @@ async function playFiniteAnswer(h: Harness, session: string, entry: string, fetc
 test('a long answer to a spoken request is read whole: parts of whole sentences, in order, served as finite files with one tag per part', async t => {
   const long = Array.from({ length: 24 }, (_, index) => `${index + 1}번째 문장은 끝까지 읽혀야 하는 설명이고, 빠지거나 겹치지 않고 이어집니다.`);
   const answer = `좋아요, 하나씩 말씀드릴게요!\n\n${long.slice(0, 12).map(line => `- ${line}`).join('\n')}\n\n${long.slice(12).join(' ')}`;
-  const h = await harness(t, { steps: [answer] });
+  // A model Tower still tones (Eleven v4 Turbo gets no tag: tests/master/tts-models.test.ts).
+  const h = await harness(t, { steps: [answer], settings: { voice: { model: 'eleven_v3_conversational' } } });
   const { fetchAudio } = await audioServer(t, h.voice);
   const session = on(h);
   // Each part's stream starts with its own tag, split across chunks the way a network may split it.
@@ -587,6 +588,28 @@ test('a later part that fails before any sound is asked for once more; one that 
   const asked = () => h.labs.speeches.reduce((sum, item) => sum + item.text.length, 0);
   await until(() => h.voice.status().today.ttsChars === asked());
   assert.ok(h.labs.speeches.every(item => item.request === 'dialogue'));
+});
+
+test('an answer prepared for v3 is made with v3 to its end when the model changes to Eleven v4 Turbo; the next is untagged v4', async t => {
+  const long = Array.from({ length: 30 }, (_, index) => `${index + 1}번째 문장은 조금 길게 이어지는 설명입니다.`).join(' ');
+  const h = await harness(t, { steps: [long, '다음 답입니다.'], settings: { voice: { model: 'eleven_v3_conversational' } } });
+  const { fetchAudio } = await audioServer(t, h.voice);
+  const session = on(h);
+  h.labs.chunks = [mp3('a'), Buffer.from('b')];
+  await request(h, session, '길게');
+  const entry = await masterEntry(h, /30번째/);
+  await until(() => h.says().find(item => item.kind === 'answer'));
+  await h.settings.update({ voice: { model: 'eleven_v4_turbo' } });
+  await playFiniteAnswer(h, session, entry.id, fetchAudio);
+  await request(h, session, '하나 더');
+  const next = await masterEntry(h, /다음 답입니다/);
+  await playFiniteAnswer(h, session, next.id, fetchAudio, h.says().length);
+  const parts = h.labs.speeches.filter(item => item.text.includes('번째 문장'));
+  assert.ok(parts.length > 1);
+  assert.ok(parts.every(item => item.request === 'speech' && item.body.model_id === 'eleven_v3_conversational' && item.text.startsWith('[')), 'every part as prepared, with its tag');
+  const v4 = h.labs.speeches.filter(item => item.body.model_id === 'eleven_v4_turbo');
+  assert.ok(v4.some(item => item.text === '다음 답입니다.'));
+  assert.ok(v4.every(item => item.request === 'dialogue' && !item.text.startsWith('[')), 'nothing tagged is sent to v4');
 });
 
 test('a long answer skipped partway stops being made: the parts not yet asked for are not asked for, nor paid for', async t => {

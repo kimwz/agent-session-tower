@@ -3,31 +3,48 @@ import assert from 'node:assert/strict';
 import { DEFAULT_MASTER_SETTINGS, DEFAULT_MASTER_VOICE, MASTER_TTS_MODELS } from '../../shared/master.js';
 import { mergeSettings } from '../../server/master/settings.js';
 import { ttsDollarsPerChar, ttsModel } from '../../server/master/tts-models.js';
-import { speakable, voiced, voicedChunkPairs, voicedPartPairs } from '../../server/master/voice-text.js';
+import { speakable, streamTone, voiced, voicedChunkPairs, voicedPartPairs } from '../../server/master/voice-text.js';
 
-test('Eleven v4 Turbo is the default, read through Text to Dialogue, with tags, at v3 conversational\'s price', () => {
+test('Eleven v4 Turbo is the default, read through Text to Dialogue, without tone tags, at v3 conversational\'s price', () => {
   assert.equal(DEFAULT_MASTER_VOICE.model, 'eleven_v4_turbo');
   assert.equal(MASTER_TTS_MODELS[0], DEFAULT_MASTER_VOICE.model);
-  assert.deepEqual(ttsModel('eleven_v4_turbo'), { tags: true, dollarsPerChar: 0.05 / 1000, request: 'dialogue' });
+  assert.deepEqual(ttsModel('eleven_v4_turbo'), { tags: true, tone: false, dollarsPerChar: 0.05 / 1000, request: 'dialogue' });
   assert.equal(ttsDollarsPerChar('eleven_v4_turbo'), ttsDollarsPerChar('eleven_v3_conversational'));
-  // The models before it keep their request, tags and price.
-  assert.deepEqual(ttsModel('eleven_v3_conversational'), { tags: true, dollarsPerChar: 0.05 / 1000, request: 'speech' });
-  assert.deepEqual(ttsModel('eleven_v3'), { tags: true, dollarsPerChar: 0.1 / 1000, request: 'speech' });
-  assert.deepEqual(ttsModel('eleven_flash_v2_5'), { tags: false, dollarsPerChar: 0.05 / 1000, request: 'speech' });
+  // The models before it keep their request, tags, tone and price.
+  assert.deepEqual(ttsModel('eleven_v3_conversational'), { tags: true, tone: true, dollarsPerChar: 0.05 / 1000, request: 'speech' });
+  assert.deepEqual(ttsModel('eleven_v3'), { tags: true, tone: true, dollarsPerChar: 0.1 / 1000, request: 'speech' });
+  assert.deepEqual(ttsModel('eleven_flash_v2_5'), { tags: false, tone: false, dollarsPerChar: 0.05 / 1000, request: 'speech' });
   // A model an old usage record names, or none: the lower price, no tags.
-  assert.deepEqual(ttsModel('eleven_multilingual_v2'), { tags: false, dollarsPerChar: 0.05 / 1000, request: 'speech' });
+  assert.deepEqual(ttsModel('eleven_multilingual_v2'), { tags: false, tone: false, dollarsPerChar: 0.05 / 1000, request: 'speech' });
   assert.equal(ttsDollarsPerChar(''), 0.05 / 1000);
   assert.equal(ttsModel('toString').tags, false, 'only the models themselves');
 });
 
-test('Eleven v4 Turbo is told the tone as v3 was, short Korean included, and reads brackets in the text as words', () => {
-  const model = 'eleven_v4_turbo';
-  assert.equal(voiced('네.', model, 'ack'), '[cheerfully] 네.');
-  assert.equal(voiced('알겠어요.', model, 'answer'), '[cheerfully] 알겠어요.');
-  assert.equal(voiced('배포까지 끝났어요!', model, 'report'), '[excited] 배포까지 끝났어요!');
-  assert.equal(voiced('테스트가 실패했어요.', model, 'report'), '테스트가 실패했어요.');
-  assert.equal(voiced('세션을 닫습니다.', model, 'notice'), '세션을 닫습니다.');
-  assert.equal(voiced('[WIP] 브랜치 두 개예요.', model, 'answer'), '[cheerfully] (WIP) 브랜치 두 개예요.');
+test('Eleven v4 Turbo gets no tone tag on any path, yet still reads brackets in the text as words; v3 keeps its tags', () => {
+  const v4 = 'eleven_v4_turbo';
+  assert.equal(voiced('네.', v4, 'ack'), '네.');
+  assert.equal(voiced('알겠어요.', v4, 'answer'), '알겠어요.');
+  assert.equal(voiced('배포까지 끝났어요!', v4, 'report'), '배포까지 끝났어요!');
+  assert.equal(voiced('테스트가 실패했어요.', v4, 'report'), '테스트가 실패했어요.');
+  assert.equal(voiced('세션을 닫습니다.', v4, 'notice'), '세션을 닫습니다.');
+  assert.equal(voiced('[WIP] 브랜치 두 개예요.', v4, 'answer'), '(WIP) 브랜치 두 개예요.', 'v4 follows tags, so brackets in the text stay words');
+  // Whole answers in parts, and answers read while they are written.
+  const answer = Array.from({ length: 30 }, (_, index) => `${index + 1}번째 일은 잘 끝났어요.`).join(' ');
+  const parts = voicedPartPairs(answer, v4, 'answer');
+  assert.ok(parts.length > 1);
+  assert.ok(parts.every(part => part.speech === part.text), 'what is sent is exactly what is shown');
+  // Read while written: the answer keeps its tone, but v4 is never given it as a tag.
+  assert.equal(streamTone(answer, 'answer'), '[excited]');
+  assert.ok(voicedChunkPairs(answer, v4, '[excited]').every(part => part.speech === part.text));
+  // The models before it are told the tone as before.
+  for (const v3 of ['eleven_v3_conversational', 'eleven_v3']) {
+    assert.equal(voiced('네.', v3, 'ack'), '[cheerfully] 네.');
+    assert.equal(voiced('배포까지 끝났어요!', v3, 'report'), '[excited] 배포까지 끝났어요!');
+    assert.equal(voiced('[WIP] 브랜치 두 개예요.', v3, 'answer'), '[cheerfully] (WIP) 브랜치 두 개예요.');
+    assert.ok(voicedPartPairs(answer, v3, 'answer').every(part => part.speech.startsWith('[excited] ')));
+    assert.ok(voicedChunkPairs(answer, v3, streamTone(answer, 'answer')).every(part => part.speech.startsWith('[excited] ')));
+  }
+  assert.equal(voiced('[WIP] 네.', 'eleven_flash_v2_5', 'answer'), '[WIP] 네.', 'flash neither tags nor converts');
 });
 
 test('every part sent to Text to Dialogue stays within the 2,000 characters a request is reliable up to', () => {

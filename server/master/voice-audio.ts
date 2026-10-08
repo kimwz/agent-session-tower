@@ -69,9 +69,10 @@ export class VoiceAudio {
   /**
    * Starts making audio for text, given whole or in parts made one after another into one stream; the page can play
    * it while it is still being made. The caller has checked the limit in the same step: the characters are counted
-   * here, before anything is awaited.
+   * here, before anything is awaited. `voice` names the model the text was made for (its tags follow the model), and
+   * may name the voice; what it leaves out is as set now.
    */
-  synthesize(text: string | string[], voice?: { voiceId: string; model: string }, timing?: string): AudioHandle {
+  synthesize(text: string | string[], voice?: { voiceId?: string; model: string }, timing?: string): AudioHandle {
     const handle = this.openLive(voice, timing);
     const live = this.handles.get(handle)!;
     const parts = typeof text === 'string' ? [text] : text;
@@ -88,8 +89,8 @@ export class VoiceAudio {
   }
 
   /** Creates the retained byte stream; synthesize seals its known input before making proceeds. */
-  private openLive(voice?: { voiceId: string; model: string }, timing?: string): AudioHandle {
-    const settings = voice ?? this.voice();
+  private openLive(voice?: { voiceId?: string; model: string }, timing?: string): AudioHandle {
+    const settings = { ...this.voice(), ...voice };
     const live: Live = { id: randomUUID(), chunks: [], bytes: 0, done: false, failed: false, createdAt: Date.now(), waiters: new Set(), readers: new Set(),
       parts: [], sealed: false, sent: 0, charged: 0, voiceId: settings.voiceId, model: settings.model, held: false, ...(timing ? { timing } : {}) };
     const handle: AudioHandle = Object.freeze({ id: live.id });
