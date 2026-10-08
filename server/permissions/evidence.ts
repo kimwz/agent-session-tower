@@ -18,18 +18,23 @@ export interface CommandEvidence { files: FileEvidence[]; notes: string[] }
 
 /**
  * Credential files and stores by name (and private keys), wherever they are: never read for a review. A file named
- * like credentials, or a data file in a folder named so, counts too; source code by such a name does not.
+ * like credentials, or any file in a folder named so, counts too, unless it is source code (`auth.ts`,
+ * `server/secrets/runtime.ts`). A `folder` so named is not refused itself: listing it shows names, never values.
  */
-export function isPrivatePath(path: string): boolean {
+export function isPrivatePath(path: string, folder = false): boolean {
   const name = basename(path);
-  if (STORE.test(path) || /\.(?:pem|key|p12|pfx|tfvars)$/i.test(name)) return true;
-  if (CODE.test(name)) return false;
-  return NAMED.test(name) || /\.[^./]+$/.test(name) && path.split(sep).slice(0, -1).some(segment => NAMED.test(segment));
+  if (STORE.test(path) || !folder && /\.(?:pem|key|p12|pfx|tfvars)$/i.test(name)) return true;
+  if (folder || CODE.test(name)) return false;
+  return NAMED.test(name) || path.split(sep).slice(0, -1).some(segment => NAMED.test(segment));
 }
 
-/** A credential name, or a path in one of the `denied` places (credential stores, Tower's state; see `deniedPaths`). */
-export function isDenied(path: string, denied: readonly string[]): boolean {
-  return isPrivatePath(path) || denied.some(item => path === item || path.startsWith(item.endsWith(sep) ? item : item + sep));
+/**
+ * A credential name, or a path in one of the `denied` places (credential stores, Tower's state; see `deniedPaths`),
+ * unless a `!`-marked entry allows it again (Tower's own skills inside its state).
+ */
+export function isDenied(path: string, denied: readonly string[], folder = false): boolean {
+  const inside = (item: string) => path === item || path.startsWith(item.endsWith(sep) ? item : item + sep);
+  return isPrivatePath(path, folder) || denied.some(item => !item.startsWith('!') && inside(item)) && !denied.some(item => item.startsWith('!') && inside(item.slice(1)));
 }
 
 /** Lexes only literal shell words. It never expands variables, substitutions or shell code. */

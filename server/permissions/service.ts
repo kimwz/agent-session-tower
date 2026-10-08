@@ -459,10 +459,13 @@ export class PermissionService {
   async confirmReviewed(id: string): Promise<boolean> {
     const request = this.state.requests.find(item => item.id === id);
     if (request?.decidedBy !== 'auto') return true;
+    // An earlier run of the conversation went back to review: this one waits its turn behind it, reviewed again too.
+    const earlier = this.state.requests.some(item => item.rule.kind === 'run' && item.sessionId === request.sessionId && item.createdAt < request.createdAt
+      && item.status === 'pending' && (item.review?.status === 'queued' || item.review?.status === 'running'));
     // An approval that waited (behind another run of the conversation, across a worker handoff) is reviewed again with
     // what is there now: the file bindings below are a check for the moment between approval and start, not for that.
     const waited = request.decidedAt ? Date.parse(this.now()) - Date.parse(request.decidedAt) : 0;
-    const stale = waited > MAX_APPROVAL_WAIT_MS;
+    const stale = waited > MAX_APPROVAL_WAIT_MS || earlier;
     // The same places stay out of a folder's entries as when the reviewer listed it (see PermissionReviewer).
     const changed = stale || !request.review?.files?.length ? [] : await changedFiles(request.review.files, await deniedPaths(this.options.stateDir));
     if (!stale && !changed.length) return true;
@@ -477,7 +480,7 @@ export class PermissionService {
         delete entry.decidedAt; delete entry.decidedBy; delete entry.run;
         // Only files changing before the start count: a wait is reviewed again as often as it happens.
         if (!stale) entry.rechecks = (entry.rechecks ?? 0) + 1;
-        const why = stale ? `승인 뒤 실행까지 ${Math.round(waited / 1000)}초를 기다려` : `검토 뒤 실행 전에 파일이 바뀌어(${changed.slice(0, 5).join(', ')})`;
+        const why = earlier ? '같은 대화의 앞선 실행이 다시 검토되고 있어 순서대로' : stale ? `승인 뒤 실행까지 ${Math.round(waited / 1000)}초를 기다려` : `검토 뒤 실행 전에 파일이 바뀌어(${changed.slice(0, 5).join(', ')})`;
         // Files that keep changing before every start (something else writing there) are the owner's to judge.
         entry.review = again ? { status: 'queued', reason: `${why} 지금 내용으로 다시 검토합니다`.slice(0, 1000), at: this.now() }
           : { status: 'done', verdict: 'owner', reason: `${why} 다시 검토하기를 ${MAX_RECHECKS}번 했지만 실행 직전에 같은 내용인지 확인할 수 없어 소유자에게 넘깁니다`.slice(0, 1000), at: this.now() };

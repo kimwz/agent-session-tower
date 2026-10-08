@@ -864,6 +864,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       // The decision reaches the conversation as the work it already was: the requesting turn's origin and approvals.
       reachable: request => Boolean(request.runId && runs.list().find(item => item.id === request.runId)?.origin),
       notify: (request, message) => runs.permissionDecision(request, `${TOWER_NOTICE} ${message}`).then(() => undefined) });
+    // Nothing is reviewed before the triggers are in place (released below), not even a recovered run sent back to review.
+    reviewer.hold();
 
     runs.setClaudeSettings((cwd, sessionId) => permissions.claudeSettings(cwd, sessionId));
     runs.setTurnNotes(async (_run, session) => {
@@ -899,9 +901,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const restoredTriggers = await triggers.start(restoring?.restore.triggers ? { restore: restoring.restore.triggers } : {});
     await restoring?.applied({ parts: restoring.restore.triggers ? ['triggers'] : [], errors: restoredTriggers.errors })
       .catch(error => console.error(`The restore's progress was not recorded: ${error instanceof Error ? error.message : String(error)}`));
-    // Reviews waiting from before this worker started (or queued while the last one handed over) go on, once the
-    // triggers whose instructions they read are in place.
-    reviewer.wake();
+    // Reviews waiting from before this worker started (or queued while the last one handed over, or sent back by a run
+    // recovered above) go on, once the triggers whose instructions they read are in place.
+    reviewer.release();
     await github.start();
     // Slack and triggers share one limit on provider turns running at once.
     runs.setAutomationLimit(triggers.settings().maxConcurrentRuns);

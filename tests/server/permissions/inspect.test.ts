@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { commandEvidence } from '../../../server/permissions/evidence.js';
 import { changedFiles, deniedPaths, readLog, reviewedFiles, ReviewFiles, reviewScope } from '../../../server/permissions/inspect.js';
@@ -537,4 +537,55 @@ test('source code named like credentials is readable, data files so named are no
   const reviewed = reviewedFiles(await readLog(f.log));
   await writeFile(join(shared, 'someone-else.log'), '');
   assert.deepEqual(await changedFiles(reviewed, []), []);
+});
+
+test('a folder named like credentials is listed and bound, while every non-code file in it, with or without an extension, is refused', async t => {
+  const f = await fixture(t);
+  await mkdir(join(f.project, 'server', 'secrets'), { recursive: true });
+  await writeFile(join(f.project, 'server', 'secrets', 'runtime.ts'), 'export {}\n');
+  await mkdir(join(f.project, 'deploy', 'secrets'), { recursive: true });
+  await writeFile(join(f.project, 'deploy', 'secrets', 'db_password'), 'hunter2');
+  await mkdir(join(f.project, 'credentials'));
+  await writeFile(join(f.project, 'credentials', 'token'), 'x');
+  const files = await f.files('node run.mjs');
+  await files.read({ path: 'server/secrets/runtime.ts' });
+  for (const path of ['deploy/secrets/db_password', 'credentials/token']) assert.equal((await files.read({ path }) as { status: string }).status, 'denied', path);
+  const listed = await files.list({ path: 'server/secrets' }) as { entries: { path: string }[] };
+  assert.deepEqual(listed.entries.map(entry => entry.path), ['runtime.ts']);
+  const log = await readLog(f.log);
+  assert.ok(log.some(entry => entry.status === 'folder' && entry.path === join(f.project, 'server', 'secrets')), 'its folder is bound');
+  assert.ok(!log.some(entry => entry.status === 'unbound'));
+  const evidence = await commandEvidence('some-cli < deploy/secrets/db_password', f.project, await deniedPaths(f.stateDir, f.home, {}));
+  assert.equal(evidence.files[0]!.status, 'excluded');
+});
+
+test('Tower\'s own skills are readable inside its state; a ../ import resolved from the request folder never binds the folder above the repository', async t => {
+  const f = await fixture(t);
+  await mkdir(join(f.stateDir, 'skills', 'global', 'deploy', 'scripts'), { recursive: true });
+  await writeFile(join(f.stateDir, 'skills', 'global', 'deploy', 'scripts', 'run.sh'), 'echo deploy\n');
+  await writeFile(join(f.stateDir, 'secrets.json'), '{}');
+  const files = await f.files(`bash ${join(f.stateDir, 'skills', 'global', 'deploy', 'scripts', 'run.sh')}`);
+  assert.equal((await files.read({ path: join(f.stateDir, 'skills', 'global', 'deploy', 'scripts', 'run.sh') }) as { text: string }).text, 'echo deploy\n');
+  assert.equal((await files.read({ path: join(f.stateDir, 'runs.json') }) as { status: string }).status, 'denied');
+  await mkdir(join(f.project, 'server', 'runs'), { recursive: true });
+  await writeFile(join(f.project, 'server', 'state-dir.ts'), 'export {}\n');
+  await writeFile(join(f.project, 'server', 'runs', 'worker.ts'), "import '../state-dir.js';\n");
+  const more = await f.files('node server/runs/worker.ts');
+  await more.read({ path: 'server/runs/worker.ts' });
+  const reviewed = reviewedFiles(await readLog(f.log));
+  assert.ok(!reviewed.some(file => file.path === dirname(f.project) || file.real === dirname(f.project)), 'the folder holding the worktrees is not bound');
+});
+
+test('in a worktree nested in a repository, an import of ../x from a file binds only folders found from that file', async t => {
+  const f = await fixture(t);
+  const nested = join(f.project, 'tmp', 'job', 'worktree');
+  await mkdir(join(nested, 'server', 'runs'), { recursive: true });
+  await writeFile(join(nested, 'server', 'state-dir.ts'), 'export {}\n');
+  await writeFile(join(nested, 'server', 'runs', 'worker.ts'), "import '../state-dir.js';\n");
+  const files = new ReviewFiles(await reviewScope({ cwd: nested, command: 'node server/runs/worker.ts', stateDir: f.stateDir, log: f.log, home: f.home, env: {} }));
+  await files.read({ path: 'server/runs/worker.ts' });
+  const bound = reviewedFiles(await readLog(f.log)).filter(file => file.depth).map(file => file.real);
+  assert.ok(!bound.includes(join(f.project, 'tmp', 'job')), 'not the folder above the nested worktree');
+  assert.ok(bound.includes(join(nested, 'server')), 'the folder the import resolves in');
+  assert.equal((await files.read({ path: 'server/state-dir.ts' }) as { text: string }).text, 'export {}\n', './state-dir.js names state-dir.ts');
 });

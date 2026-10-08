@@ -352,10 +352,12 @@ test('a request whose folder is in Tower\'s state (a coordinator\'s) is reviewed
   await mkdir(coordinator, { recursive: true });
   f.sessions.set('claude:slack', { cwd: coordinator, provider: 'claude' });
   f.answer(async () => ({ verdict: 'approve', reason: '배포 단계입니다.', rule: null, scope: null, suggestion: null, missing: [] }));
-  const { request } = await f.service.request({ kind: 'command', value: 'gh pr view', scope: 'project', reason: 'r' }, agent('claude:slack'));
-  f.reviewer.wake(); await f.settle();
+  // A run, whose review binds what it read: the coordinator's own folder (in Tower's state) is not among it.
+  const { request } = await f.service.requestRun({ command: 'gh pr view 1', reason: 'r' }, agent('claude:slack'));
+  f.holdStarts(async () => false);
+  f.reviewer.wake();
+  await until(() => f.request(request.id!).status === 'approved');
   assert.equal(f.calls.length, 1, 'one review, no requeue');
-  assert.equal(f.request(request.id!).status, 'approved');
 });
 
 test('waits are reviewed again as often as they happen without using up the file-change limit', async t => {
@@ -374,4 +376,31 @@ test('waits are reviewed again as often as they happen without using up the file
     assert.equal(f.request(request.id!).review!.status, 'queued', `round ${round}`);
   }
   assert.equal(f.request(request.id!).rechecks, undefined);
+});
+
+test('a request whose folder is gone is reviewed once, not sent back as if it kept changing', async t => {
+  const f = await fixture(t);
+  const gone = join(f.root, 'work', 'removed-worktree');
+  f.sessions.set('codex:gone', { cwd: gone, provider: 'codex' });
+  f.answer(async () => ({ verdict: 'owner', reason: '작업 폴더가 없습니다.', rule: null, scope: null, suggestion: null, missing: [] }));
+  const { request } = await f.service.requestRun({ command: 'npm test', reason: 'r' }, agent('codex:gone'));
+  f.reviewer.wake(); await f.settle();
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.request(request.id!).review!.verdict, 'owner');
+});
+
+test('a later run of the conversation waits for an earlier one sent back to review, so they keep their order', async t => {
+  const clock = { now: new Date('2026-10-08T00:00:00.000Z') };
+  const f = await fixture(t, () => clock.now);
+  f.reviewer.hold();
+  const confirm = f.service.confirmReviewed.bind(f.service);
+  f.holdStarts(async () => false);
+  const first = (await f.service.requestRun({ command: 'echo build', reason: 'r', key: 'build' }, agent('codex:sqlite'))).request;
+  clock.now = new Date(clock.now.getTime() + 1_000);
+  const second = (await f.service.requestRun({ command: 'echo test', reason: 'r', key: 'test' }, agent('codex:sqlite'))).request;
+  for (const request of [first, second]) { assert.ok(await f.service.startReview(request.id!)); await f.service.applyReview(request.id!, { verdict: 'approve', reason: '확인함', files: [] }); }
+  clock.now = new Date(clock.now.getTime() + 90_000);
+  assert.equal(await confirm(first.id!), false, 'waited too long: reviewed again');
+  assert.equal(await confirm(second.id!), false, 'not ahead of the first');
+  assert.match(f.request(second.id!).review!.reason!, /앞선 실행이 다시 검토되고 있어 순서대로/);
 });

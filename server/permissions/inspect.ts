@@ -92,7 +92,10 @@ export async function deniedPaths(stateDir: string | undefined, home = homedir()
   const paths = [...(stateDir ? [stateDir] : []), join(codex, 'auth.json'), join(claude, '.credentials.json'), join(claude, '.claude.json'), join(home, '.claude.json'),
     env.GH_CONFIG_DIR || join(home, '.config', 'gh'), join(home, '.config', 'gcloud'), join(home, '.config', '.wrangler'), join(home, 'Library', 'Preferences', '.wrangler'),
     join(home, '.cloudflared'), join(home, 'Library', 'Keychains'), join(home, '.ssh'), join(home, '.aws'), join(home, '.gnupg'), join(home, '.docker'), join(home, '.kube')];
-  return [...new Set((await Promise.all(paths.map(async path => [resolve(path), await real(path)]))).flat().filter((path): path is string => Boolean(path)))];
+  const all = [...new Set((await Promise.all(paths.map(async path => [resolve(path), await real(path)]))).flat().filter((path): path is string => Boolean(path)))];
+  // Tower's skills are the owner's instructions and scripts, kept in its state: readable like any other script.
+  const skills = stateDir ? [join(stateDir, 'skills'), await real(join(stateDir, 'skills'))].filter((path): path is string => Boolean(path)) : [];
+  return [...all, ...skills.map(path => `!${path}`)];
 }
 
 /** The nearest folder at or above `folder` that holds `.git`, below the home folder and the top two levels. */
@@ -142,9 +145,13 @@ async function named(text: string, bases: string[], home: string, shell = false,
    * its candidates would live in are watched whether or not one is there now (a `plugins/foo.js` or a package's
    * `__init__.py` created later would be what runs).
    */
-  const resolveName = async (name: string) => {
+  const resolveName = async (name: string, watching = true) => {
     if (await add(name) === 'file') return;
     for (const probe of PROBES.slice(1)) await add(name + probe);
+    // TypeScript sources are imported by the name they compile to (`./x.js` for `x.ts`).
+    const compiled = /\.([cm]?)js(x?)$/.exec(name);
+    if (compiled) await add(`${name.slice(0, -compiled[0].length)}.${compiled[1]}ts${compiled[2]}`);
+    if (!watching) return;
     // Bound by the name as used (a link pointed elsewhere later is a change) and, when the parent is not there yet, by
     // its absence (a `new/` folder created later with a `new/foo.js` is a change).
     const parent = dirname(name);
@@ -221,8 +228,10 @@ async function named(text: string, bases: string[], home: string, shell = false,
     if (value.startsWith('/') || roots.length >= MAX_ROOTS) continue;
     // Every folder it may be found from: the same name can be a different child in each.
     // Which candidate wins at run time is not predicted (the order differs by language: Node skips `.ts`, a folder goes
-    // on to its index file); every one that is there is open, and the folders they live in are bound.
-    for (const base of [...bases, ...folders]) await resolveName(at(base, value));
+    // on to its index file); every one that is there is open, and the folders they live in are bound — only for the
+    // name as found from the first base (the file's own folder for imports, the working folder for a shell's words):
+    // the same text read from the other bases opens files but would bind unrelated folders.
+    for (const base of [...bases, ...folders]) await resolveName(at(base, value), base === bases[0]);
   }
   return { roots, folders, cds, links, shells, watch, pyroots };
 }
@@ -253,6 +262,13 @@ function pythonModules(text: string): string[] {
 /** A folder whose entries are bound for the run, by the name it was reached by and where it led (null: not there). */
 interface Watched { path: string; real: string | null }
 
+/**
+ * A candidate folder worth binding: not denied, and not above the scope trees (a name resolved from the request folder
+ * instead of its file, `../x.js`, would otherwise bind the folder holding all worktrees, which changes all the time).
+ */
+const watchable = (folder: Watched, roots: readonly ScopeRoot[], denied: readonly string[]) => !isDenied(folder.path, denied, true) && !(folder.real && isDenied(folder.real, denied, true))
+  && !roots.some(root => root.kind === 'tree' && [folder.real, folder.path].some(path => path && path !== root.path && within(root.path, path)));
+
 /** What a reading scope grows with as files are read; `expand` adds to it. */
 interface Reach { roots: ScopeRoot[]; workdirs: string[]; places: { path: string; real: string }[]; shells: string[]; watch: Watched[]; pyroots: string[]; denied: readonly string[]; home: string }
 
@@ -272,14 +288,14 @@ async function expand(reach: Reach, file: string, text: string): Promise<{ place
   // A Python script a file starts (a wrapper's spawn, a subprocess) may be an entry: its folder is where its imports
   // start. Taking every Python file's folder as such only adds places to look.
   for (const root of found.roots) if (root.kind === 'file' && /\.py$/.test(root.path) && !reach.pyroots.includes(dirname(root.path))) reach.pyroots.push(dirname(root.path));
-  const watch = found.watch.filter(folder => !reach.watch.some(item => item.path === folder.path) && !isDenied(folder.path, reach.denied) && !(folder.real && isDenied(folder.real, reach.denied)));
+  const watch = found.watch.filter(folder => !reach.watch.some(item => item.path === folder.path) && watchable(folder, reach.roots, reach.denied));
   reach.watch.push(...watch);
   for (const script of found.shells) if (!reach.shells.includes(script)) reach.shells.push(script);
   const added: { path: string; real: string }[] = [];
   for (const folder of found.cds) if (!reach.workdirs.includes(folder.real)) reach.workdirs.push(folder.real);
   for (const place of [...found.cds, ...found.links]) {
     // A name for a credential store or Tower's state is never read, so it is not bound either.
-    if (isDenied(place.path, reach.denied) || isDenied(place.real, reach.denied)) continue;
+    if (isDenied(place.path, reach.denied, true) || isDenied(place.real, reach.denied, true)) continue;
     if (!reach.places.some(item => item.path === place.path)) { reach.places.push(place); added.push(place); }
   }
   for (const root of found.roots) {
@@ -303,7 +319,7 @@ export async function reviewScope(input: { cwd: string; command?: string; stateD
   const roots: ScopeRoot[] = [];
   const realHome = await real(home) ?? home;
   const add = (root: ScopeRoot | undefined) => {
-    if (!root || roots.length >= MAX_ROOTS || denied.some(path => within(root.path, path)) || roots.some(item => covers(item, root.path) && (item.kind === 'tree' || root.kind === 'file'))) return;
+    if (!root || roots.length >= MAX_ROOTS || isDenied(root.path, denied, root.kind !== 'file') || roots.some(item => covers(item, root.path) && (item.kind === 'tree' || root.kind === 'file'))) return;
     // A tree is never the home folder, the top or a folder right under it.
     if (root.kind === 'tree' && (root.path === realHome || within(realHome, root.path) || root.path.split(sep).filter(Boolean).length < 3)) return;
     roots.push(root);
@@ -321,12 +337,13 @@ export async function reviewScope(input: { cwd: string; command?: string; stateD
   for (const folder of command.cds) add({ path: folder.real, kind: 'tree' });
   for (const root of command.roots) add(root);
   // The request folder too, unless it lies in a denied place (a Slack or GitHub coordinator's folder in Tower's state).
-  const places = [{ path: resolve(input.cwd), real: cwd }].filter(place => !isDenied(place.path, denied) && !isDenied(place.real, denied));
+  // A request folder that is gone binds nothing (the run fails on its own).
+  const places = await real(input.cwd) ? [{ path: resolve(input.cwd), real: cwd }].filter(place => !isDenied(place.path, denied, true) && !isDenied(place.real, denied, true)) : [];
   for (const place of [...command.cds, ...command.links]) {
-    if (!isDenied(place.path, denied) && !isDenied(place.real, denied) && !places.some(item => item.path === place.path)) places.push(place);
+    if (!isDenied(place.path, denied, true) && !isDenied(place.real, denied, true) && !places.some(item => item.path === place.path)) places.push(place);
   }
   const reach: Reach = { roots, workdirs: [cwd, ...new Set(command.cds.map(folder => folder.real))], places, shells: command.shells,
-    watch: command.watch.filter(folder => !isDenied(folder.path, denied) && !(folder.real && isDenied(folder.real, denied))), pyroots: command.pyroots, denied, home };
+    watch: command.watch.filter(folder => watchable(folder, roots, denied)), pyroots: command.pyroots, denied, home };
   for (const file of input.evidence ?? []) await expand(reach, file.path, file.text);
   return { cwd, home, roots, denied, log: input.log, workdirs: reach.workdirs.slice(1), places: reach.places, shells: reach.shells, watch: reach.watch, pyroots: reach.pyroots };
 }
@@ -352,11 +369,13 @@ export class ReviewFiles {
   private async place(value: unknown): Promise<{ path: string; real?: string; status?: ReadStatus }> {
     if (typeof value !== 'string' || !value.trim() || value.length > 4096 || value.includes('\0')) return { path: String(value).slice(0, 200), status: 'invalid' };
     const path = value === '~' ? this.spec.home : value.startsWith('~/') ? at(this.spec.home, value.slice(2)) : at(this.spec.cwd, value);
-    if (isDenied(path, this.spec.denied)) return { path, status: 'denied' };
+    // A folder named like credentials may be listed and searched (names only); a file in it is still refused.
     const canonical = await lookup(path);
+    const folder = Boolean(canonical && (await absent(stat(canonical)))?.isDirectory());
+    if (isDenied(path, this.spec.denied, folder)) return { path, status: 'denied' };
     if (canonical === null) return { path, status: 'missing' };
     if (canonical === undefined) return { path, status: 'unreadable' };
-    if (isDenied(canonical, this.spec.denied)) return { path, status: 'denied' };
+    if (isDenied(canonical, this.spec.denied, folder)) return { path, status: 'denied' };
     if (!this.roots.some(root => covers(root, canonical))) return { path, real: canonical, status: 'outside' };
     return { path, real: canonical };
   }
@@ -445,9 +464,8 @@ export class ReviewFiles {
     const insideSkipped = place.real!.split(sep).some(part => part === 'node_modules' || part === '.git');
     const visit = async (path: string): Promise<void> => {
       if (matches.length >= MAX_MATCHES || files >= MAX_SEARCH_FILES) return;
-      if (isDenied(path, this.spec.denied)) return;
       const info = await absent(lstat(path));
-      if (!info || info.isSymbolicLink()) return;
+      if (!info || info.isSymbolicLink() || isDenied(path, this.spec.denied, info.isDirectory())) return;
       if (info.isDirectory()) {
         if (!insideSkipped && ['node_modules', '.git'].includes(basename(path))) return;
         for (const name of (await absent(readdir(path)) ?? []).sort()) await visit(join(path, name));
@@ -483,7 +501,7 @@ async function collect(folder: string, depth: number, denied: readonly string[])
   const walk = async (dir: string, level: number) => {
     for (const item of (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
       const path = join(dir, item.name);
-      if (isDenied(path, denied)) continue;
+      if (isDenied(path, denied, item.isDirectory())) continue;
       if (entries.length >= MAX_BIND_ENTRIES) throw new Error(`more than ${MAX_BIND_ENTRIES} entries`);
       entries.push({ path: relative(folder, path), kind: item.isDirectory() ? 'dir' : item.isSymbolicLink() ? 'link' : item.isFile() ? 'file' : 'other' });
       if (item.isDirectory() && level < depth && item.name !== '.git' && item.name !== 'node_modules') await walk(path, level + 1);
@@ -501,7 +519,7 @@ const digestOf = (entries: { path: string; kind: string }[]) => sha256(JSON.stri
  * runs from it could change unseen.
  */
 export async function folderBinding(folder: string, denied: readonly string[]): Promise<ReviewedFile | 'shared' | undefined> {
-  if (isDenied(folder, denied)) return undefined;
+  if (isDenied(folder, denied, true)) return undefined;
   if (await sharedFolder(folder)) return 'shared';
   const entries = await absent(collect(folder, 1, denied));
   return entries && { path: folder, real: folder, sha256: digestOf(entries), depth: 1 };
@@ -585,8 +603,10 @@ export async function changedFiles(files: readonly ReviewedFile[], denied: reado
   const changed: string[] = [];
   for (const file of files) {
     // Denied, or where it leads cannot be told now: not confirmed, so a change.
-    const now = isDenied(file.path, denied) ? undefined : await lookup(file.path);
-    if (now === undefined || now !== file.real || (now && isDenied(now, denied))) { changed.push(file.path); continue; }
+    // Folders (listings, places) are judged as folders, files as files; nothing denied is read.
+    const folder = Boolean(file.depth) || file.sha256 === null && file.real !== null;
+    const now = isDenied(file.path, denied, folder) ? undefined : await lookup(file.path);
+    if (now === undefined || now !== file.real || (now && isDenied(now, denied, folder))) { changed.push(file.path); continue; }
     // Absent then and now, or a folder bound only by where it leads.
     if (now === null || file.sha256 === null) continue;
     // A folder that can no longer be listed (or is no folder) reads as changed.
