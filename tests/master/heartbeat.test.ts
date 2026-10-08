@@ -29,10 +29,13 @@ async function harness(t: test.TestContext) {
   let permissionFail = false;
   let permissionFailureTarget: string | undefined;
   let remoteProtection: boolean | undefined = false;
+  let readHook: ((path: string, signal: AbortSignal) => Promise<void>) | undefined;
+  let writeHook: (() => Promise<void>) | undefined;
   let captured: AutoPromptModelRequest | undefined;
   let delivery: 'succeeded' | 'uncertain' | 'not-admitted' = 'succeeded';
   const snapshot = (): Snapshot => ({ sessions: [masterNative, target], runs, providers: [], hostname: 'fixture', version: 'fixture', scanning: false, updatedAt: new Date(now).toISOString() });
-  const tower = { hasCredentials: () => online, call: async (method: string, path: string, body: { prompt: string } | undefined, options: { gate?: () => Promise<boolean>; headers?: Record<string,string> }) => {
+  const tower = { hasCredentials: () => online, call: async (method: string, path: string, body: { prompt: string } | undefined, options: { gate?: () => Promise<boolean>; headers?: Record<string,string>; signal?: AbortSignal }) => {
+    if (options.signal) await readHook?.(path, options.signal);
     if (path.endsWith('/heartbeat-protection')) return remoteProtection === undefined ? { state: 'failed', body: {} } : { state: 'succeeded', body: { protected: remoteProtection } };
     if (path.includes('/api/nodes/') && path.endsWith('/snapshot')) return { state: 'succeeded', body: structuredClone(snapshot()) };
     if (path.endsWith('/permissions.overview') && (permissionFail || (permissionFailureTarget && (body as unknown as { cwd?: string })?.cwd === permissionFailureTarget))) return { state: 'failed', body: {} };
@@ -41,18 +44,20 @@ async function harness(t: test.TestContext) {
     if (method === 'POST') {
       if (options.gate && !await options.gate()) return { state: 'not-admitted', status: 503 };
       posts.push({ prompt: body!.prompt, headers: options.headers! });
+      await writeHook?.();
       const run: Run = { id: 'heartbeat-run', sessionId: masterNative.id, status: 'queued', origin: { kind: 'agent' }, createdAt: new Date(now).toISOString(), prompt: body!.prompt, output: '' };
       return { state: delivery, status: delivery === 'succeeded' ? 202 : 503, body: delivery === 'succeeded' ? { run } : {} };
     }
     if (path.startsWith('/api/snapshot')) return { state: 'succeeded', body: structuredClone({ ...snapshot(), runs: runs.map(run => ({ ...run, output: '' })) }) };
     const session = path.includes('codex%3Amaster') ? masterNative : target;
-    return { state: 'succeeded', body: { session: structuredClone(session), messages: [{ id: '1', role: 'user', timestamp: session.createdAt, text: 'Finish implementation, verify CI, deploy. Respect approval waits.' }, { id: '2', role: 'assistant', timestamp: session.updatedAt, text: 'Review passed but deployment remains.' }] } };
+    const { outcome: _projection, ...nativeDetail } = session;
+    return { state: 'succeeded', body: { session: structuredClone(nativeDetail), messages: [{ id: '1', role: 'user', timestamp: session.createdAt, text: 'Finish implementation, verify CI, deploy. Respect approval waits.' }, { id: '2', role: 'assistant', timestamp: session.updatedAt, text: 'Review passed but deployment remains.' }] } };
   } } as unknown as TowerClient;
   const master = { heartbeatTasks: () => structuredClone(tasks), heartbeatStopped: () => stopped, heartbeatAccepted: async (run: Run) => { accepted.push(run); } } as unknown as MasterSession;
   const options = { stateDir: dir, dataDir: dir, settings, tower, master, now: () => now, tickMs: 60_000, resolve: async () => ({ provider: 'codex' as const, model: modelName }), model: async (request: AutoPromptModelRequest) => { calls++; captured = request; return invoke ? invoke(request) : result; } };
   const heartbeat = new MasterHeartbeat(options); await heartbeat.start();
   t.after(async () => { await heartbeat.close(); await rm(dir, { recursive: true, force: true }); });
-  return { dir, heartbeat, options, model: (value: string) => { modelName = value; }, permissions: (value: typeof requests) => { requests = value; }, permissionFail: () => { permissionFail = true; }, failPermissionFor: (cwd: string) => { permissionFailureTarget = cwd; }, remoteProtection: (value: boolean | undefined) => { remoteProtection = value; }, settings, tasks, target, masterNative, runs, posts, accepted, advance: () => { now += 30 * 60_000; }, calls: () => calls, captured: () => captured, result: (value: unknown) => { result = value; }, invoke: (value: typeof invoke) => { invoke = value; }, stop: () => { stopped = true; }, offline: () => { online = false; }, delivery: (value: typeof delivery) => { delivery = value; } };
+  return { dir, heartbeat, options, onWrite: (hook: typeof writeHook) => { writeHook = hook; }, onRead: (hook: typeof readHook) => { readHook = hook; }, model: (value: string) => { modelName = value; }, permissions: (value: typeof requests) => { requests = value; }, permissionFail: () => { permissionFail = true; }, failPermissionFor: (cwd: string) => { permissionFailureTarget = cwd; }, remoteProtection: (value: boolean | undefined) => { remoteProtection = value; }, settings, tasks, target, masterNative, runs, posts, accepted, advance: () => { now += 30 * 60_000; }, calls: () => calls, captured: () => captured, result: (value: unknown) => { result = value; }, invoke: (value: typeof invoke) => { invoke = value; }, stop: () => { stopped = true; }, offline: () => { online = false; }, delivery: (value: typeof delivery) => { delivery = value; } };
 }
 test('default enabled 30 minute inspection has no chat/run/voice effect on noop and bounds untrusted evidence', async t => {
   const h = await harness(t);
@@ -186,4 +191,74 @@ test('unknown protection for one local candidate excludes that task without abor
   h.tasks.push({ ...h.tasks[0], id: 'verified-task', node: 'remote-node' }); h.remoteProtection(false);
   h.result({ ...action, taskIds: ['verified-task'], evidenceIds: ['verified-task:transcript'] }); h.advance(); await h.heartbeat.tick();
   assert.equal(h.posts.length, 1); assert.equal(h.calls(), 1); assert.match(h.heartbeat.status().lastCheck?.reason ?? '', /candidate protection states unavailable/);
+});
+
+test('deadline reached during initial evidence reads records interrupted and never invokes model or submits a message', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const read of ['snapshot', 'master-detail', 'master-protection', 'target-detail', 'target-protection', 'target-output'] as const) {
+    const h = await harness(t); let reached = false; let permissions = 0;
+    h.onRead(async (path, signal) => {
+      if (path.endsWith('/permissions.overview')) permissions++;
+      const matches = read === 'snapshot' ? path === '/api/snapshot'
+        : read === 'master-detail' ? path.includes('/sessions/codex%3Amaster?')
+        : read === 'master-protection' ? path.endsWith('/permissions.overview') && permissions === 1
+        : read === 'target-detail' ? path.includes('/sessions/codex%3Aworker?')
+        : read === 'target-protection' ? path.endsWith('/permissions.overview') && permissions === 2
+        : path.endsWith('/runs.list');
+      if (matches && !reached) { reached = true; t.mock.timers.tick(90_000); assert.equal(signal.aborted, true); }
+    });
+    h.advance(); await h.heartbeat.tick();
+    assert.equal(reached, true, read); assert.equal(h.heartbeat.status().lastCheck?.state, 'interrupted', read);
+    assert.equal(h.calls(), 0, read); assert.deepEqual(h.posts, [], read); assert.deepEqual(h.accepted, [], read);
+    await h.heartbeat.close();
+  }
+});
+test('deadline reached while refreshing selected evidence records interrupted and prevents action delivery', async t => {
+  const h = await harness(t); h.result(action); let targetReads = 0;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  h.onRead(async (path, signal) => {
+    if (path.includes('/sessions/codex%3Aworker?') && ++targetReads === 2) { t.mock.timers.tick(90_000); assert.equal(signal.aborted, true); }
+  });
+  h.advance(); await h.heartbeat.tick(); assert.equal(targetReads, 2); assert.equal(h.calls(), 1);
+  assert.equal(h.heartbeat.status().lastCheck?.state, 'interrupted'); assert.deepEqual(h.posts, []); assert.deepEqual(h.accepted, []);
+});
+
+test('snapshot needsOwner projection is adopted only for matching native detail evidence', async t => {
+  const h = await harness(t); h.target.outcome = 'needsOwner';
+  h.onRead(async path => { if (path.includes('codex%3Aworker?')) { h.target.messageCount++; h.target.lastMessage = 'new native progress after projection'; } });
+  h.advance(); await h.heartbeat.tick(); assert.equal(h.calls(), 1); assert.equal(h.heartbeat.status().lastCheck?.state, 'noop');
+});
+test('latest snapshot model outcome is a pre-send heuristic; native changes and true stops also block', async t => {
+  for (const protection of ['needsOwner', 'stop', 'approval', 'progress'] as const) {
+    const h = await harness(t); h.result(action); let snapshots = 0;
+    h.onRead(async path => {
+      if (path === '/api/snapshot' && ++snapshots === 3) {
+        if (protection === 'needsOwner') h.target.outcome = 'needsOwner';
+        if (protection === 'stop') h.runs[0].ownerStopped = true;
+        if (protection === 'approval') h.runs[0].approvals = [{ id: 'pending', toolName: 'approval', input: {} }];
+        if (protection === 'progress') h.target.lastMessage = 'new native progress';
+      }
+    });
+    h.advance(); await h.heartbeat.tick(); assert.equal(h.posts.length, 0, protection);
+    assert.equal(h.heartbeat.status().actions[0].delivery, 'not-sent');
+  }
+});
+test('a read that ignores abort cannot outlive the inspection deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] }); const h = await harness(t);
+  h.onRead(async path => { if (path === '/api/snapshot') { t.mock.timers.tick(90_000); await new Promise(() => {}); } });
+  h.advance(); await h.heartbeat.tick(); assert.equal(h.heartbeat.status().lastCheck?.state, 'interrupted'); assert.equal(h.calls(), 0); assert.equal(h.posts.length, 0);
+});
+test('a pending write is bounded without cancelling or replaying it and retains uncertain evidence claims', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] }); const h = await harness(t); h.result(action);
+  h.onWrite(async () => { t.mock.timers.tick(90_000); await new Promise(() => {}); });
+  h.advance(); await h.heartbeat.tick();
+  assert.equal(h.posts.length, 1); assert.equal(h.heartbeat.status().lastCheck?.state, 'uncertain'); assert.equal(h.heartbeat.status().actions[0].delivery, 'uncertain');
+  const saved = JSON.parse(await readFile(join(h.dir, 'heartbeat.json'), 'utf8')); assert.equal(saved.actions[0].delivery, 'uncertain'); assert.ok(saved.acted['task-1']);
+  h.advance(); await h.heartbeat.tick(); assert.equal(h.posts.length, 1); assert.equal(h.accepted.length, 0);
+});
+
+test('remote final gate reuses each node snapshot and blocks its latest model outcome before sending', async t => {
+  const h = await harness(t); h.tasks[0].node = 'remote-node'; h.result(action); let snapshots = 0;
+  h.onRead(async path => { if (path === '/api/nodes/remote-node/snapshot' && ++snapshots === 3) h.target.outcome = 'needsOwner'; });
+  h.advance(); await h.heartbeat.tick(); assert.equal(snapshots, 3); assert.equal(h.posts.length, 0); assert.equal(h.heartbeat.status().actions[0].delivery, 'not-sent');
 });

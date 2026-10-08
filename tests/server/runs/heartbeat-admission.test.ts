@@ -42,8 +42,8 @@ test('heartbeat cannot enter a working native master or a non-master conversatio
   await assert.rejects(h.manager.enqueue(h.native.id, h.prompt, {}, { origin: { kind: 'agent' }, heartbeat: h.guard }), /preconditions changed/);
   assert.equal(h.manager.list().length, 0);
 });
-test('local target stop, needsOwner, approval or disappearance during preparation blocks heartbeat final admission', async t => {
-  for (const protection of ['stop', 'needsOwner', 'approval', 'missing'] as const) {
+test('local target stop, native approval or disappearance during preparation blocks heartbeat final admission', async t => {
+  for (const protection of ['stop', 'approval', 'missing'] as const) {
     const h = await fixture(t, true); h.guard.sessionIds.push(h.target.id);
     const pending = h.manager.enqueue(h.native.id, h.prompt, {}, { origin: { kind: 'agent' }, heartbeat: h.guard });
     await h.preparing;
@@ -53,7 +53,6 @@ test('local target stop, needsOwner, approval or disappearance during preparatio
       status: protection === 'stop' ? 'cancelled' : 'running',
       ...(protection === 'stop' ? { ownerStopped: true as const } : { approvals: [{ id: 'approval', toolName: 'native approval', input: {} }] }),
     }];
-    if (protection === 'needsOwner') h.target.outcome = 'needsOwner';
     if (protection === 'missing') h.guard.sessionIds.push('codex:missing');
     h.release(); await assert.rejects(pending, /preconditions changed/, protection); assert.equal(original().length, 0);
   }

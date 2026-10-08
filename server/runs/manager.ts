@@ -554,7 +554,7 @@ export class RunManager extends EventEmitter {
       const target = this.getSession(id);
       const targetTurns = this.list().filter(run => run.sessionId === this.monitorSessionId(id));
       const targetLatest = [...targetTurns].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
-      return !target || target.outcome === 'needsOwner' || targetLatest?.ownerStopped
+      return !target || targetLatest?.ownerStopped
         || targetTurns.some(run => (run.status === 'running' || run.status === 'queued') && run.approvals?.length);
     });
     if (protectedTarget || !session || !guard.sessionIds.includes(sessionId) || !prompt.startsWith(MASTER_HEARTBEAT_MARK) || !this.masterSession(session) || this.isWorking(session) || this.reservedSessions.has(sessionId)
