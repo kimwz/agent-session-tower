@@ -37,7 +37,7 @@ import { callerDelegation, CapabilityRegistry, handleMcpRequest } from '../api/m
 import { sessionToolsKey } from '../api/session-tools.js';
 import { DecisionService } from '../decisions/service.js';
 import { relatedSessionNotes } from '../sessions/related.js';
-import { runToolResolver, sessionBrowsers } from '../api/run-tools.js';
+import { runToolResolver, sessionBrowsers, thisBuild } from '../api/run-tools.js';
 import { browserNote } from '../browser/tools.js';
 import { RemoteExclusionStore } from '../remote/exclusions.js';
 import { remoteTriggerLaunch } from '../remote/visibility.js';
@@ -741,7 +741,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     let reviewer!: PermissionReviewer;
     // One-shot runs: the command runs in this worker; the conversation hears its end unless it already read the result.
     // A claude or codex a run starts counts as the requesting conversation's own run, never as one the owner started.
-    const runner: PermissionRunner = new PermissionRunner({ stateDir, update: (id, run): Promise<void> => permissions.updateRun(id, run), env: (sessionId, env) => runs.launchEnv(sessionId, env) });
+    const runner: PermissionRunner = new PermissionRunner({ stateDir, update: (id, run): Promise<void> => permissions.updateRun(id, run), env: (sessionId, env) => runs.launchEnv(sessionId, env),
+      beforeStart: id => permissions.confirmReviewed(id) });
     let stopping = false;
     let paused = false;
     // Read from the web's saved file each time: the owner may close a conversation at any moment.
@@ -825,6 +826,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     expiryTimer.unref();
     reviewer = new PermissionReviewer({ service: permissions,
       model: (request, options) => runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs }),
+      files: { stateDir, server: scope => { const build = thisBuild(); return { command: build.command, args: [...build.args, '--review-files-mcp', scope] }; } },
       sources: {
         runs: () => runs.list(),
         outsideInput: sessionId => runs.sessionOrigin(sessionId)?.untrustedInput === true,

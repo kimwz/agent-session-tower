@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
-import { basename, resolve } from 'node:path';
+import { basename, resolve, sep } from 'node:path';
 
 const MAX_BYTES = 120_000;
 const MAX_TOTAL = 180_000;
@@ -8,20 +9,30 @@ const MAX_FILES = 8;
 const SCRIPT = /\.(?:py|mjs|cjs|js|ts|tsx|sh|bash|zsh|rb|pl|php|lua|ps1)$/i;
 const PRIVATE = /(?:^|\/)(?:\.credentials(?:\.[^/]*)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials|\.kube|\.docker|\.env(?:\.[^/]*)?|\.ssh|\.aws|\.gnupg|auth(?:\.[^/]*)?|credentials(?:\.[^/]*)?|secrets?(?:\.[^/]*)?|id_rsa|id_ed25519|id_ecdsa|id_dsa)(?:\/|$)/i;
 
-type FileEvidence = { path: string; status: 'read' | 'unavailable' | 'too-large' | 'excluded' | 'not-text'; text?: string };
+type FileEvidence = { path: string; status: 'read' | 'unavailable' | 'too-large' | 'excluded' | 'not-text'; text?: string; real?: string; sha256?: string };
 export interface CommandEvidence { files: FileEvidence[]; notes: string[] }
 
+/** Credential files and folders by name (and private keys), wherever they are: never read for a review. */
+export function isPrivatePath(path: string): boolean {
+  return PRIVATE.test(path) || /\.(?:pem|key|p12|pfx)$/i.test(basename(path));
+}
+
+/** A credential name, or a path in one of the `denied` places (credential stores, Tower's state; see `deniedPaths`). */
+export function isDenied(path: string, denied: readonly string[]): boolean {
+  return isPrivatePath(path) || denied.some(item => path === item || path.startsWith(item.endsWith(sep) ? item : item + sep));
+}
+
 /** Lexes only literal shell words. It never expands variables, substitutions or shell code. */
-function tokens(command: string): string[] {
+export function tokens(command: string): string[] {
   return command.replace(/\\\r?\n/g, ' ').match(/\d*[<>]&[\d-]+|&>>?|<<<|<<-?|\d*[<>]{1,2}|(?:[^\s;&|<>(){}"'\\]+|"(?:\\.|[^"\\])*"|'[^']*'|\\.)+|&&|\|\||[;&|<>(){}\n]/g) ?? [];
 }
-function literal(token: string): string | undefined {
+export function literal(token: string): string | undefined {
   if (/[$`*?{}~]/.test(token)) return undefined;
   return token.replace(/"((?:\\.|[^"\\])*)"|'([^']*)'|\\(.)/g, (_, double: string | undefined, single: string | undefined, escaped: string | undefined) => single ?? escaped ?? double!.replace(/\\(["\\])/g, '$1'));
 }
 
 /** Direct local code and stdin evidence; contents are context, never instructions or authority. */
-export async function commandEvidence(command: string, cwd: string): Promise<CommandEvidence> {
+export async function commandEvidence(command: string, cwd: string, denied: readonly string[] = []): Promise<CommandEvidence> {
   const evidence: CommandEvidence = { files: [], notes: [] };
   const candidates = new Set<string>();
   const excludedInputs = new Set<string>();
@@ -112,7 +123,7 @@ export async function commandEvidence(command: string, cwd: string): Promise<Com
     let file: Awaited<ReturnType<typeof open>> | undefined;
     try {
       const canonical = await realpath(path);
-      if (PRIVATE.test(path) || PRIVATE.test(canonical) || /\.(?:pem|key|p12|pfx)$/i.test(basename(canonical))) {
+      if (isDenied(path, denied) || isDenied(canonical, denied)) {
         evidence.files.push({ path, status: 'excluded' }); continue;
       }
       file = await open(canonical, constants.O_RDONLY | constants.O_NONBLOCK);
@@ -134,7 +145,7 @@ export async function commandEvidence(command: string, cwd: string): Promise<Com
       catch { evidence.files.push({ path, status: 'not-text' }); continue; }
       if (text.includes('\0')) { evidence.files.push({ path, status: 'not-text' }); continue; }
       total += bytesRead;
-      evidence.files.push({ path, status: 'read', text });
+      evidence.files.push({ path, status: 'read', text, real: canonical, sha256: createHash('sha256').update(bytes).digest('hex') });
     } catch { evidence.files.push({ path, status: 'unavailable' }); }
     finally { await file?.close(); }
   }

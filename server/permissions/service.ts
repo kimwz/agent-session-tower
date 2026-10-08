@@ -6,8 +6,9 @@ import { join } from 'node:path';
 import {
   CONVERSATION_RULE_HOURS, DEFAULT_AUTO_REVIEW, MAX_RUN_COMMAND, MAX_RUN_SECONDS, autoReviewBlock, waitingForOwner, claudeRule, codexRule, normalizeCommand, ruleGuards, ruleIsNarrower, rulesOverlap, ruleProblem, sameRule,
   type PermissionAutoReview, type PermissionOverview, type PermissionProvider, type PermissionRequest, type PermissionReview, type PermissionReviewVerdict,
-  type PermissionRule, type PermissionRuleInput, type PermissionRun, type PermissionRunOutput, type PermissionTarget,
+  type PermissionRule, type PermissionRuleInput, type PermissionRun, type PermissionRunOutput, type PermissionTarget, type ReviewedFile, MAX_REVIEWED_FILES,
 } from '../../shared/permissions.js';
+import { changedFiles, deniedPaths } from './inspect.js';
 import type { Provider } from '../../shared/types.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { codexRulesPath, realLocation, syncCodex } from './native.js';
@@ -33,6 +34,12 @@ export const MAX_PENDING = 50;
 const MAX_DECIDED = 200;
 const DECIDED_DAYS = 30;
 const MAX_BYTES = 4_000_000;
+/** The reviewed files all waiting runs hold, together; a quarter of what the state file may be. */
+const MAX_HELD_REVIEWED = 1_000_000;
+/** Times a run goes back to review because its files changed right before it started, before the owner decides. */
+const MAX_RECHECKS = 3;
+/** An approval older than this when its run starts is reviewed again first. */
+const MAX_APPROVAL_WAIT_MS = 60_000;
 
 const failure = (message: string, kind: ErrorKind = 'invalid') => new TowerError(kind, message);
 const empty = (): PermissionState => ({ version: 1, rules: [], requests: [], codex: [] });
@@ -49,6 +56,10 @@ export interface PermissionReviewResult {
   suggestion?: string | null;
   reason: string;
   model?: string;
+  /** What the reviewer said it could not confirm. */
+  missing?: string[];
+  /** For an allowed run: the files the decision rests on, as they were reviewed. */
+  files?: ReviewedFile[];
 }
 /** What the requesting conversation is told after a review, when anything. */
 export interface PermissionReviewOutcome { request: PermissionRequest; message?: string }
@@ -220,10 +231,14 @@ export class PermissionService {
         // The exact command, as asked: the reviewer cannot change it. Tower runs it once, now.
         const block = autoReviewBlock(request.rule, request.cwd);
         if (block) return owner(block);
+        // Every waiting run's reviewed files stay in the state file until it starts: together they stay well within it.
+        const size = (files: ReviewedFile[]) => Buffer.byteLength(JSON.stringify(files, null, 2));
+        const held = this.state.requests.reduce((sum, item) => sum + (item.review?.files ? size(item.review.files) : 0), 0);
+        if (result.files?.length && held + size(result.files) > MAX_HELD_REVIEWED) return owner('실행을 기다리는 자동 승인이 많아 검토한 파일을 더 보관할 수 없습니다');
         await this.commit(state => {
           const item = state.requests.find(entry => entry.id === id)!;
           item.status = 'approved'; item.decidedAt = at; item.decidedBy = 'auto'; item.run = { status: 'waiting', ...(this.autoReview().resume ? { notify: true } : {}) };
-          item.review = review({ verdict: 'approve' });
+          item.review = review({ verdict: 'approve', ...(result.files?.length ? { files: result.files } : {}) });
         });
         const item = this.state.requests.find(entry => entry.id === id)!;
         this.options.startRun?.(item);
@@ -432,12 +447,52 @@ export class PermissionService {
     return { request: runView(request), ...(output ? { output } : {}) };
   }
 
+  /**
+   * Right before an allowed run starts: one the reviewer allowed starts only while the files its decision rests on are
+   * as they were reviewed. Otherwise it is reviewed again with what they are now, and false is returned.
+   */
+  async confirmReviewed(id: string): Promise<boolean> {
+    const request = this.state.requests.find(item => item.id === id);
+    if (request?.decidedBy !== 'auto') return true;
+    // An approval that waited (behind another run of the conversation, across a worker handoff) is reviewed again with
+    // what is there now: the file bindings below are a check for the moment between approval and start, not for that.
+    const waited = request.decidedAt ? Date.parse(this.now()) - Date.parse(request.decidedAt) : 0;
+    const stale = waited > MAX_APPROVAL_WAIT_MS;
+    // The same places stay out of a folder's entries as when the reviewer listed it (see PermissionReviewer).
+    const changed = stale || !request.review?.files?.length ? [] : await changedFiles(request.review.files, await deniedPaths(this.options.stateDir));
+    if (!stale && !changed.length) return true;
+    const requeued = await this.serial(async () => {
+      const item = this.state.requests.find(entry => entry.id === id);
+      // Decided again, or started, meanwhile: left as it is.
+      if (!item || item.status !== 'approved' || item.decidedBy !== 'auto' || item.run?.status !== 'waiting') return false;
+      const again = (item.rechecks ?? 0) < MAX_RECHECKS;
+      await this.commit(state => {
+        const entry = state.requests.find(value => value.id === id)!;
+        entry.status = 'pending';
+        delete entry.decidedAt; delete entry.decidedBy; delete entry.run;
+        entry.rechecks = (entry.rechecks ?? 0) + 1;
+        const why = stale ? `승인 뒤 실행까지 ${Math.round(waited / 1000)}초를 기다려` : `검토 뒤 실행 전에 파일이 바뀌어(${changed.slice(0, 5).join(', ')})`;
+        // Files that keep changing before every start (something else writing there) are the owner's to judge.
+        entry.review = again ? { status: 'queued', reason: `${why} 지금 내용으로 다시 검토합니다`.slice(0, 1000), at: this.now() }
+          : { status: 'done', verdict: 'owner', reason: `${why} 다시 검토하기를 ${MAX_RECHECKS}번 했지만 실행 직전에 같은 내용인지 확인할 수 없어 소유자에게 넘깁니다`.slice(0, 1000), at: this.now() };
+      });
+      return again;
+    });
+    if (requeued) this.options.onReviewQueued?.();
+    return false;
+  }
+
   /** The runner reports a run's progress. */
   updateRun(id: string, run: PermissionRun): Promise<void> {
     return this.serial(async () => {
       const request = this.state.requests.find(item => item.id === id);
       if (!request) return;
-      await this.commit(state => { const item = state.requests.find(entry => entry.id === id)!; item.run = { ...run, ...(item.run?.delivered ? { delivered: true } : {}), ...(item.run?.notify ? { notify: true } : {}), ...(item.run?.toldAt ? { toldAt: item.run.toldAt } : {}) }; });
+      await this.commit(state => {
+        const item = state.requests.find(entry => entry.id === id)!;
+        item.run = { ...run, ...(item.run?.delivered ? { delivered: true } : {}), ...(item.run?.notify ? { notify: true } : {}), ...(item.run?.toldAt ? { toldAt: item.run.toldAt } : {}) };
+        // Needed only until the run starts; kept longer, many of them would outgrow the state file.
+        if (run.status !== 'waiting' && item.review?.files) delete item.review.files;
+      });
       if (finishedRun(run)) this.options.onRunFinished?.(this.state.requests.find(item => item.id === id)!);
     });
   }
@@ -806,7 +861,7 @@ function normalize(value: unknown): PermissionState {
       createdAt: text(item.createdAt, 40), ...(typeof item.decidedAt === 'string' ? { decidedAt: item.decidedAt } : {}), ...(typeof item.ruleId === 'string' ? { ruleId: item.ruleId } : {}),
       ...(item.decidedBy === 'owner' || item.decidedBy === 'auto' ? { decidedBy: item.decidedBy } : {}), ...(reviewOf(item.review, item.status === 'pending' || item.status === undefined) ?? {}),
       ...(item.notification && (item.notification.state === 'pending' || item.notification.state === 'recorded') && typeof item.notification.message === 'string' ? { notification: { state: item.notification.state, message: text(item.notification.message, 4000) } } : {}),
-      ...(rule.kind === 'run' ? runFields(item) : {}) });
+      ...(rule.kind === 'run' ? runFields(item) : {}), ...(Number.isInteger(item.rechecks) && item.rechecks > 0 ? { rechecks: Math.min(item.rechecks, 100) } : {}) });
   }
   if (typeof input.lost === 'string') state.lost = input.lost;
   const review = input.autoReview as Partial<PermissionAutoReview> | undefined;
@@ -840,5 +895,13 @@ function reviewOf(value: any, pending: boolean): { review: PermissionReview } | 
   const status: PermissionReview['status'] = value.status === 'running' ? (pending ? 'queued' : 'failed') : value.status;
   return { review: { status, ...(['approve', 'narrow', 'owner'].includes(value.verdict) ? { verdict: value.verdict } : {}), ...(typeof value.reason === 'string' ? { reason: text(value.reason, 1000) } : {}),
     ...(typeof value.suggestion === 'string' ? { suggestion: text(value.suggestion, 500) } : {}), ...(typeof value.model === 'string' ? { model: text(value.model, 64) } : {}),
-    ...(typeof value.at === 'string' ? { at: text(value.at, 40) } : {}) } };
+    ...(typeof value.at === 'string' ? { at: text(value.at, 40) } : {}), ...(reviewedFiles(value.files) ? { files: reviewedFiles(value.files) } : {}) } };
+}
+
+function reviewedFiles(value: unknown): ReviewedFile[] | undefined {
+  if (!Array.isArray(value) || !value.length || value.length > MAX_REVIEWED_FILES) return undefined;
+  const files = value.filter((file: any) => file && typeof file.path === 'string' && file.path.length <= 4096
+      && (file.real === null && file.sha256 === null || typeof file.real === 'string' && file.real.length <= 4096 && (file.sha256 === null || typeof file.sha256 === 'string' && /^[a-f\d]{64}$/.test(file.sha256))))
+    .map((file: any): ReviewedFile => ({ path: file.path, real: file.real, sha256: file.sha256, ...(Number.isInteger(file.depth) && file.depth >= 1 && file.depth <= 3 ? { depth: file.depth } : {}) }));
+  return files.length ? files : undefined;
 }

@@ -56,7 +56,12 @@ else if (mode === 'stderr') process.stderr.write('private'.repeat(10000));
 else if (mode === 'malformed') process.stdout.write('not JSON');
 else if (provider === 'claude') {
   if (mode === 'status-before-init') for (const frame of JSON.parse(process.env.ROUTER_PROGRESS)) send(frame);
-  send({type:'system', subtype:'init', tools: mode === 'tools' ? ['Bash'] : ['StructuredOutput'], mcp_servers:[]});
+  const reviewTools = ['StructuredOutput', 'mcp__tower_review__read_file', 'mcp__tower_review__list_dir', 'mcp__tower_review__search_text'];
+  if (mode.startsWith('review-')) send({type:'system', subtype:'init', tools: mode === 'review-extra-tool' ? [...reviewTools, 'Read'] : reviewTools,
+    mcp_servers: mode === 'review-not-started' ? [{name:'tower_review', status:'failed'}] : mode === 'review-extra-server' ? [{name:'tower_review', status:'connected'}, {name:'other', status:'connected'}] : [{name:'tower_review', status:'connected'}]});
+  else send({type:'system', subtype:'init', tools: mode === 'tools' ? ['Bash'] : ['StructuredOutput'], mcp_servers:[]});
+  if (mode === 'review-read') { send({type:'assistant',message:{content:[{type:'tool_use',name:'mcp__tower_review__read_file',input:{path:'/x/child.mjs'}}]}}); send({type:'user',message:{content:[{type:'tool_result',content:[{type:'text',text:'{}'}]}]}}); }
+  if (mode === 'review-other-tool') send({type:'assistant',message:{content:[{type:'tool_use',name:'mcp__other__write',input:{}}]}});
   for (const frame of JSON.parse(process.env.ROUTER_PROGRESS)) send(frame);
   if (mode === 'unknown-system') send({type:'system',subtype:'fixture_unknown',content:'private response content'});
   if (mode === 'unsafe-event-name') send({type:'private event content',subtype:'x'.repeat(65),content:'private response content'});
@@ -75,6 +80,10 @@ else {
   if (mode === 'safe-warning') send({type:'item.completed',item:{type:'error',message:'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable \u0060features.code_mode_host\u0060 and install \u0060codex-code-mode-host\u0060.'}});
   if (mode === 'startup-error') send({type:'item.completed',item:{type:'error',message:'Unknown unsupported isolation setting.'}});
   if (mode === 'tools') send({type:'item.started',item:{type:'command_execution',command:'exit'}});
+  if (mode === 'review-read') { const item = {id:'item_0',type:'mcp_tool_call',server:'tower_review',tool:'read_file',arguments:{path:'/x/child.mjs'},result:null,error:null,status:'in_progress'};
+    send({type:'item.started',item}); send({type:'item.completed',item:{...item,result:{content:[{type:'text',text:'{}'}]},status:'completed'}}); }
+  if (mode === 'review-other-tool') send({type:'item.started',item:{id:'item_0',type:'mcp_tool_call',server:'other',tool:'read_file',arguments:{},status:'in_progress'}});
+  if (mode === 'review-unlisted-tool') send({type:'item.started',item:{id:'item_0',type:'mcp_tool_call',server:'tower_review',tool:'write_file',arguments:{},status:'in_progress'}});
   send({type:'item.completed',item:{type:'agent_message',text: mode === 'bad-decision' ? 'prefix '+JSON.stringify(decision) : JSON.stringify(decision)}});
   if (mode !== 'incomplete') send({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}},mode !== 'no-newline');
   if (mode === 'trailing') process.stdout.write('bad tail');
@@ -346,4 +355,54 @@ test('routing waits for an update of its CLI before it even looks the CLI up, th
   await rm(join(flags, 'codex.update'));
   assert.deepEqual(await routing, DECISION);
   assert.equal(lookups, 1);
+});
+
+const READ_TOOLS = { server: 'tower_review', command: '/fixture/node', args: ['/fixture/index.js', '--review-files-mcp', '/fixture/scope.json'], tools: ['read_file', 'list_dir', 'search_text'] };
+
+test('the permission reviewer gets only Tower\'s read-only file tools: Claude in restricted mode with that one MCP server', async t => {
+  const f = await fixture(t, 'claude', 'review-read');
+  assert.deepEqual(await runAutoPromptModel({ ...f.request, readTools: READ_TOOLS }, f.dependencies), DECISION);
+  const args = f.launched().args;
+  assert.ok(args.includes('--restricted') && !args.includes('--safe-mode'), 'safe mode would turn the MCP server off');
+  assert.equal(args[args.indexOf('--tools') + 1], '', 'no built-in tool');
+  assert.ok(args.includes('--strict-mcp-config'));
+  assert.deepEqual(JSON.parse(args[args.indexOf('--mcp-config') + 1]), { mcpServers: { tower_review: { command: '/fixture/node', args: READ_TOOLS.args } } });
+  assert.equal(args[args.indexOf('--allowedTools') + 1], 'mcp__tower_review__read_file,mcp__tower_review__list_dir,mcp__tower_review__search_text');
+  for (const mode of ['review-other-tool', 'review-extra-tool', 'review-extra-server']) {
+    const g = await fixture(t, 'claude', mode);
+    await assert.rejects(runAutoPromptModel({ ...g.request, readTools: READ_TOOLS }, g.dependencies), /tool/, mode);
+  }
+  const notStarted = await fixture(t, 'claude', 'review-not-started');
+  await assert.rejects(runAutoPromptModel({ ...notStarted.request, readTools: READ_TOOLS }, notStarted.dependencies), /file tools did not start/);
+  // Every other routing call keeps no tools at all.
+  const plain = await fixture(t, 'claude', 'review-read');
+  await assert.rejects(runAutoPromptModel(plain.request, plain.dependencies), /exposed tools/);
+});
+
+test('the permission reviewer gets only Tower\'s read-only file tools: Codex with its code-mode host and that MCP server, shell still off', async t => {
+  const f = await fixture(t, 'codex', 'review-read');
+  assert.deepEqual(await runAutoPromptModel({ ...f.request, readTools: READ_TOOLS }, f.dependencies), DECISION);
+  const args = f.launched().args;
+  for (const config of ['features.shell_tool=false', 'features.unified_exec=false', 'features.code_mode=true', 'features.code_mode_host=true',
+    'mcp_servers.tower_review.command="/fixture/node"', `mcp_servers.tower_review.args=${JSON.stringify(READ_TOOLS.args)}`]) assert.ok(args.includes(config), config);
+  assert.ok(!args.includes('features.code_mode=false') && !args.includes('features.code_mode_host=false'), 'a later false would win');
+  assert.equal(args[args.indexOf('--sandbox') + 1], 'read-only');
+  for (const mode of ['review-other-tool', 'review-unlisted-tool', 'tools']) {
+    const g = await fixture(t, 'codex', mode);
+    await assert.rejects(runAutoPromptModel({ ...g.request, readTools: READ_TOOLS }, g.dependencies), /tool operation/, mode);
+  }
+  const plain = await fixture(t, 'codex', 'review-read');
+  await assert.rejects(runAutoPromptModel(plain.request, plain.dependencies), /tool operation/);
+  const routing = await fixture(t, 'codex');
+  await runAutoPromptModel(routing.request, routing.dependencies);
+  assert.ok(routing.launched().args.includes('features.code_mode=false') && !routing.launched().args.some(arg => arg.startsWith('mcp_servers.')), 'other routing calls are unchanged');
+  await assert.rejects(runAutoPromptModel({ ...f.request, readTools: { ...READ_TOOLS, server: 'bad name' } }, f.dependencies), /tools are invalid/);
+});
+
+test('a review the model\'s safeguards stop fails with that reason, never as approval and never as an unknown event', async t => {
+  for (const frame of [{ type: 'system', subtype: 'informational', content: "Opus 5.5's safeguards stopped the response above · continuing once with that noted", level: 'notice' },
+    { type: 'system', subtype: 'model_refusal_fallback', trigger: 'refusal', direction: 'retry', original_model: 'claude-opus-5-5', fallback_model: 'claude-opus-4-8' }]) {
+    const f = await fixture(t, 'claude', 'success', [{ ...frame, uuid: '11111111-1111-4111-8111-111111111111', session_id: 'fixture-session' }]);
+    await assert.rejects(runAutoPromptModel(f.request, f.dependencies), /safeguards stopped its answer/);
+  }
 });

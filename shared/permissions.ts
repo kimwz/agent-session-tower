@@ -47,7 +47,17 @@ export interface PermissionReview {
   suggestion?: string;
   model?: string;
   at?: string;
+  /** For a run the reviewer allowed: the files its decision rests on; the run starts only while they are unchanged. */
+  files?: ReviewedFile[];
 }
+
+/**
+ * A path as reviewed: what it led to then (`real`) and that file's contents, or a folder's entries down to `depth`;
+ * `sha256` null with a `real`: a folder bound only by where it leads; both null: it was looked for and was not there.
+ */
+export interface ReviewedFile { path: string; real: string | null; sha256: string | null; depth?: number }
+/** More files than this cannot be confirmed before a run starts: the owner decides instead. */
+export const MAX_REVIEWED_FILES = 2_000;
 
 /** The owner's setting for reviewing agents' requests automatically, in every project. */
 export interface PermissionAutoReview {
@@ -84,6 +94,8 @@ export interface PermissionRequest {
   notification?: { state: 'pending' | 'recorded'; message: string };
   /** For a `run` request: the command's run, once allowed. */
   run?: PermissionRun;
+  /** For a `run` request: how many times it went back to review because reviewed files changed before it started. */
+  rechecks?: number;
   /** For a `run` request: what makes a retry the same request (the agent's key, or the conversation and command). */
   key?: string;
   keyExplicit?: boolean;
