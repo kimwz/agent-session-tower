@@ -9,6 +9,8 @@ import { RunManager } from '../../../server/runs/manager.js';
 import { parseRunOrigin, sameOrigin } from '../../../server/runs/origin.js';
 import { SessionService } from '../../../server/sessions/service.js';
 import { startRunnerHost } from '../../../server/runs/worker.js';
+import { SessionCompactions } from '../../../server/sessions/compaction/service.js';
+import { until } from '../../helpers/until.js';
 import { runnerPaths } from '../../../server/runs/runner-protocol.js';
 import { RemoteRequestLedger } from '../../../server/remote/request-ledger.js';
 import { RemoteExclusionStore } from '../../../server/remote/exclusions.js';
@@ -84,7 +86,10 @@ async function worker(t: TestContext, coordinators: string[] = []) {
   const ledger = new RemoteRequestLedger(stateDir);
   await ledger.start();
   const slack = { sessionMcp: () => undefined, coordinatorSessionIds: () => coordinators, ownerChat: async (_id: string, message: string) => message } as unknown as SlackService;
-  const host = await startRunnerHost({ stateDir, sessions, runs, ledger, slack });
+  const compactions = new SessionCompactions({ stateDir, session: value => runs.getSession(value), runs: () => runs.list(), history: async () => undefined,
+    model: async () => { throw new Error('No model runs in this fixture.'); }, create: async () => { throw new Error('Nothing is created in this fixture.'); },
+    refuse: value => coordinators.includes(value.id) ? 'coordinator' : undefined });
+  const host = await startRunnerHost({ stateDir, sessions, runs, ledger, slack, compactions });
   const client = new DurableRunManager({ stateDir, pollMs: 10 });
   await client.start();
   const paths = await runnerPaths(stateDir);
@@ -101,6 +106,25 @@ test('the worker runs a retried remote message once and answers the retry with t
   assert.equal(f.runs.list().filter(run => run.prompt === 'hello').length, 1);
   await assert.rejects(f.client.enqueue(f.session.id, 'hello', {}, { origin: remote }), /요청 ID/);
   assert.deepEqual(f.client.coordinators(), new Set());
+});
+
+test("the worker runs a controller's compaction once per request ID, and never one of a coordinator conversation", async t => {
+  const f = await worker(t);
+  const requestId = v7('000000000003');
+  await until(() => f.client.supports('compaction'));
+  const first = await f.client.compaction('start', f.session.id, {}, { origin: remote, requestId });
+  const again = await f.client.compaction('start', f.session.id, {}, { origin: remote, requestId });
+  assert.equal(again?.id, first?.id);
+  await assert.rejects(f.client.compaction('start', f.session.id, {}, { origin: remote }), /요청 ID/);
+  // The conversation went on and another request compacted it since: a late copy of the first request is not run again.
+  for (let tries = 0; (await f.client.compaction('get', f.session.id))?.state !== 'failed'; tries++) { assert.ok(tries < 200, 'the first compaction ends'); await new Promise(resolve => setTimeout(resolve, 10)); }
+  f.session.messageCount = 3; f.session.lastMessage = 'more';
+  const second = await f.client.compaction('start', f.session.id, {}, { origin: remote, requestId: v7('000000000005') });
+  assert.notEqual(second?.id, first?.id);
+  await assert.rejects(f.client.compaction('start', f.session.id, {}, { origin: remote, requestId }), (error: { disposition?: string }) => error.disposition === 'uncertain');
+  const coordinator = await worker(t, ['codex:10000000-0000-4000-8000-000000000001']);
+  await until(() => coordinator.client.supports('compaction'));
+  await assert.rejects(coordinator.client.compaction('start', coordinator.session.id, {}, { origin: remote, requestId: v7('000000000004') }), (error: unknown) => statusOf(error) === 404);
 });
 
 test('the worker refuses remote work in a coordinator conversation', async t => {

@@ -15,6 +15,7 @@ Sessions and work
 - POST /api/sessions {provider:"claude"|"codex", cwd, prompt, title?, model?, effort?, modelRole?:"master.worker"} — start a new session with a first request. With modelRole, provider may be omitted and missing model fields use that role; explicit fields win.
 - POST /api/sessions/{id}/messages {prompt, model?, effort?} — send a message to a session (queued if it is working).
 - POST /api/sessions/{id}/title {title} · POST /api/sessions/{id}/(close|reopen) {} · POST /api/sessions/{id}/acknowledge {} (mark a finished turn seen)
+- GET /api/sessions/{id}/compaction — the conversation's latest compaction (state, progress, newSessionId, the new session's model/effort) or null. POST /api/sessions/{id}/compaction {} and POST /api/sessions/{id}/compaction/cancel {} are the owner's compact button only; master, local agents and run-capability callers are refused.
 - POST /api/runs/{runId}/cancel {} — stop a running request. Only when the owner asked to stop it.
 - POST /api/runs/{runId}/steer {} — insert a queued message into the running turn now.
 - POST /api/runs/{runId}/dismiss {} — hide a failed run.

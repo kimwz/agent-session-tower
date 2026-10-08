@@ -9,7 +9,7 @@ import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
 import type { SlackPublicStatus } from '../../shared/slack.js';
 import type { PublicAgentOverview, PublicConversationView, PublicVisitorState } from '../../shared/public-agents.js';
-import type { Attachment, AutoPromptJob, AutoPromptInput, NewSessionInput, MessageAttachments, Run, RunApprovalResponse, Session } from '../../shared/types.js';
+import type { Attachment, AutoPromptJob, AutoPromptInput, NewSessionInput, MessageAttachments, Run, RunApprovalResponse, Session, SessionCompaction } from '../../shared/types.js';
 import type { RunAdmission } from './manager.js';
 import type { WorkspaceTerminalBackend } from '../workspace-terminals.js';
 import { markMaster, subscriptionOnly } from './subscription.js';
@@ -303,6 +303,16 @@ export class DurableRunManager extends EventEmitter {
     return this.call('steer', [id, { targetRunId: options.targetRunId }]) as Promise<Run>;
   }
   async cancel(id: string): Promise<void> { await this.call('cancel', [id]); }
+  /** The owner's compaction of a conversation into a new session (server/sessions/compaction/service.ts). */
+  async compaction(action: 'start' | 'get' | 'cancel', id: string, input: { title?: string } = {}, internal: RunAdmission = {}): Promise<SessionCompaction | null> {
+    if (!this.supports('compaction')) throw new TowerError('unavailable', '실행 워커가 아직 새 버전으로 바뀌지 않아 세션을 압축할 수 없습니다. 진행 중인 작업이 끝나면 바뀝니다.', { disposition: 'not-admitted' });
+    if (action === 'get') return await this.call('compactionGet', [id]) as SessionCompaction | null;
+    if (action === 'cancel') return await this.call('compactionCancel', [id]) as SessionCompaction;
+    internal.validate?.();
+    this.requireOrigins(internal);
+    // The owner's button: no calling turn's credential is passed on.
+    return await this.call('compactionStart', [id, input, { ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}) }]) as SessionCompaction;
+  }
   async respondToApproval(id: string, approvalId: string, decision: RunApprovalResponse): Promise<Run> {
     return this.call('respondToApproval', [id, approvalId, decision]) as Promise<Run>;
   }

@@ -68,6 +68,10 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
     setGroup: async patch => { calls.push({ method: 'setGroup', args: [patch] }); return { cwd: patch.cwd, title: patch.title ?? '', pinned: true, hidden: true }; },
     attachment: async id => ({ metadata: { id, name: 'shot.png', mimeType: 'image/png', size: 4 }, content: Buffer.from('png!'), sessionId: id === '11111111-1111-4111-8111-111111111111' ? 'codex:open' : sessions[1].id }),
     cancel: async id => { calls.push({ method: 'cancel', args: [id] }); },
+    compaction: async (action, id, context) => {
+      calls.push({ method: 'compaction', args: [action, id, ...(context ? [context] : [])] });
+      return { id: 'compaction-1', sessionId: id, state: action === 'cancel' ? 'cancelled' : 'reading', createdAt: now, updatedAt: now };
+    },
     steerRun: async (id, steerOptions) => { calls.push({ method: 'steerRun', args: [id, steerOptions] }); return { ...runs.find(run => run.id === id)!, steering: { targetRunId: 'turn', state: 'sending', requestedAt: now } }; },
     api: async (operation, input, context) => {
       calls.push({ method: 'api', args: [operation, input, context] });
@@ -368,4 +372,26 @@ test('a domain refusal reaches a controlling computer as before: 403 as a confli
   assert.deepEqual(await answer('triggers.delete'), [409, { error: 'Only on that computer.' }]);
   assert.deepEqual(await answer('triggers.revert'), [503, { error: 'Maybe changed.', disposition: 'uncertain' }]);
   assert.deepEqual(await answer('triggers.restore'), [500, { error: '요청을 처리하지 못했습니다.' }], 'a 500 is not described');
+});
+
+test('a controller compacts only a shared conversation, with its request ID, and each start or cancel is recorded', async t => {
+  const f = await fixture(t);
+  const headers = { 'x-tower-request-id': REQUEST_ID };
+  assert.equal((await f.call(`/api/sessions/${f.secretSession.id}/compaction`, { body: {}, headers })).status, 404);
+  assert.equal((await f.call(`/api/sessions/codex:${f.secretSession.nativeId}/compaction`, { body: {}, headers })).status, 404);
+  assert.equal((await f.call('/api/sessions/codex:coordinator/compaction', { body: {}, headers })).status, 404);
+  assert.equal((await f.call(`/api/sessions/${f.secretSession.id}/compaction`)).status, 404);
+  assert.equal(f.calls.length, 0, 'nothing about an excluded or coordinator conversation reached the backend');
+  assert.equal((await f.call('/api/sessions/codex:open/compaction', { body: {} })).status, 400, 'a start needs a request ID');
+  assert.equal((await f.call('/api/sessions/codex:open/compaction', { body: { model: 'other' }, headers })).status, 400, 'a controller chooses nothing about it');
+  const started = await f.call('/api/sessions/codex:open/compaction', { body: {}, headers });
+  assert.equal(started.status, 202);
+  assert.equal(started.json.compaction.state, 'reading');
+  assert.deepEqual(f.calls.at(-1)!.args, ['start', 'codex:open', { origin: { kind: 'owner', controllerId: CONTROLLER }, requestId: REQUEST_ID }]);
+  const read = await f.call('/api/sessions/codex:open/compaction');
+  assert.equal(read.status, 200);
+  assert.equal(read.json.compaction.sessionId, 'codex:open');
+  const cancelled = await f.call('/api/sessions/codex:open/compaction/cancel', { body: {} });
+  assert.equal(cancelled.json.compaction.state, 'cancelled');
+  assert.deepEqual(f.changes().map(change => change.action), ['compact', 'compact-cancel']);
 });

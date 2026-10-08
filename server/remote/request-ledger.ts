@@ -14,7 +14,8 @@ const UUID_V7 = /^[a-f\d]{8}-[a-f\d]{4}-7[a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}
 export type RemoteResult =
   | { kind: 'session'; sessionId: string; runId: string }
   | { kind: 'run'; runId: string }
-  | { kind: 'autoPrompt'; jobId: string };
+  | { kind: 'autoPrompt'; jobId: string }
+  | { kind: 'compaction'; sessionId: string; jobId: string };
 /** `at` is when this machine received it; `issued` is the controller's time inside the ID. */
 interface Entry { key: string; fingerprint: string; at: number; issued: number; result?: RemoteResult }
 

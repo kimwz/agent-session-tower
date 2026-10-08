@@ -27,6 +27,7 @@ const sourceMessages = new Map(Object.entries(english).map(([ko, en]) => [en, ko
 // Captured file names, provider methods, and technical details remain verbatim.
 const errorTemplates = [
   '가져오지 못한 스킬이 있습니다. 지침은 가져오지 않았습니다. {0}',
+  '압축 모델({0}) 호출이 실패했습니다: {1}',
   '{0}가 API 키를 거부했습니다. 키를 확인하세요.',
   '{0} 요청 한도에 걸렸습니다. 잠시 후 다시 확인하세요.',
   '{0}에 연결하지 못했습니다. 잠시 후 다시 확인하세요.',

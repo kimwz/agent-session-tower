@@ -4,7 +4,7 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.115.0] - 2026-10-08
+## [1.116.0] - 2026-10-08
 
 ### Changed
 
@@ -13,6 +13,17 @@ format, and saved browser preferences are the compatibility surface.
 - When the reviewer leaves a request to the owner, the reason names the concrete risk or what could not be confirmed, and which files Tower refused, could not find or could not open.
 - A run the reviewer allowed starts only while what its decision rests on is as reviewed: the files read and where their names lead, the entries of the folders they sit in, and the folders where the modules they use would be found. A changed script, a link pointed elsewhere, or a new file that could change what runs (a `lib.js`, a `package.json`, a package's `__init__.py`) sends the run back to the reviewer with the current contents, as does a change while the reviewer reads. An approval whose run had to wait more than a minute is reviewed again first. After three returns for changed files the owner decides. Shared temporary folders such as `/tmp` are not bound by their entries, only the files read there. The owner's own approvals are not affected.
 - Claude stopping a review with its safeguards now fails that review with that reason (the owner decides), instead of an unknown-event error.
+
+## [1.115.0] - 2026-10-08
+
+### Added
+- **Compact a conversation into a new session.** A compact button sits left of the archive button in an open chat. It has the new **Session compaction** model role (Settings › Models, `sessions.compactor`; Claude Haiku 5.5 by its pinned ID `claude-haiku-5-5`) read the conversation's whole history without tools or a saved session, sub-sessions excluded, and keep what the work needs: the goal, where it stands, open work, the owner's standing preferences, approvals, refusals and stops, decisions with their reasons, files, commits, pull requests and links, and next steps. A conversation larger than one call is summarized part by part and merged in order; its beginning is never dropped. Tower then opens one new session in the same folder and on the same computer with the provider, model and reasoning effort the original's latest answer ran with (from its native record, else Tower's last request, else the CLI default; never the new-chat defaults). The summary reaches the new session as Tower's hidden instructions on its first message, so later turns keep it, and that first turn only takes the work over and waits for the owner. The page moves to the new session when it is ready; the original stays as it is, and its header links to the continuation.
+- A compaction is refused while the conversation works or has queued or scheduled requests, and is abandoned (nothing created) when the conversation changes before the session is created, when it is cancelled, or when the model call fails. A second click, a retried request or a worker handoff returns the same new session (a new one only when that session can no longer carry the work); compacting a compacted session again reads the summary it started with from its own first message. A joined computer's conversation is compacted on that computer under its sharing rules, and agents and the master cannot start or cancel one. An ordinary worker update waits for a compaction; **Update now** does not start new ones and stops one still reading or summarizing.
+
+### Changed
+- **The chat header shows context usage like the canvas.** The top-left icon is the round provider orb with the conversation's context ring; unknown usage shows only the track.
+- Sessions report the reasoning effort their latest answer ran with (Claude answers, Codex turn context), and controllers receive it.
+- The `haiku` model choice is labelled Haiku 5.5 and offers reasoning levels, as Claude Code 2.1.293 selects claude-haiku-5-5 for it.
 
 ## [1.114.2] - 2026-10-08
 

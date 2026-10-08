@@ -83,7 +83,7 @@ export interface LinkOverview {
 }
 /** A change a controlling computer made on this one, as this computer's owner reads it. */
 export type RemoteAction = 'joined' | 'update' | 'session' | 'message' | 'title' | 'close' | 'reopen' | 'acknowledge' | 'approval' | 'steer' | 'cancel' | 'dismiss' | 'auto-prompt'
-  | 'auto-prompt-cancel' | 'repository' | 'folder-name' | 'file' | 'directory' | 'terminal-open' | 'terminal-close' | 'trigger';
+  | 'auto-prompt-cancel' | 'compact' | 'compact-cancel' | 'repository' | 'folder-name' | 'file' | 'directory' | 'terminal-open' | 'terminal-close' | 'trigger';
 export interface RemoteChange {
   at: string; controllerId: string; action: RemoteAction;
   /** The controlling computer's name: now, or when it made the change if it has been released since. */

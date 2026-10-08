@@ -15,7 +15,7 @@ import { handleLinkRoute, type LinkRoutes } from '../link/routes.js';
 import type { RemoteNodes } from '../link/nodes.js';
 import { proxyToNode } from '../link/proxy.js';
 import { normalizeProjectGroupPatch } from '../stores/project-groups.js';
-import type { Attachment, AutoPromptJob, AutoPromptInput, NewSessionInput, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionDetail, Run, RunApprovalResponse } from '../../shared/types.js';
+import type { Attachment, AutoPromptJob, AutoPromptInput, NewSessionInput, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionCompaction, SessionDetail, Run, RunApprovalResponse } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { acceptedEncoding, compressedEventStream, isBuildAsset, sendBody, StaticCompression } from './compression.js';
 import { SseClient } from './sse-client.js';
@@ -73,6 +73,8 @@ export interface Backend {
   setGroup?(patch: ProjectGroupPatch): Promise<ProjectGroup>;
   repositoryAction?(cwd: string, action: RepositoryAction): Promise<RepositoryStatus>;
   createSession?(input: NewSessionInput, context?: RequestContext): Promise<{ session: Session; run: Run }>;
+  /** The conversation compacted into a new session of the same model and effort; `get` is its latest compaction. */
+  compaction?(action: 'start' | 'get' | 'cancel', id: string, context?: RequestContext): Promise<SessionCompaction | null>;
   startAutoPrompt?(input: AutoPromptInput, context?: RequestContext): Promise<AutoPromptJob>;
   getAutoPrompt?(id: string): AutoPromptJob | undefined;
   cancelAutoPrompt?(id: string): Promise<AutoPromptJob>;
@@ -547,6 +549,10 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         const scope = scopeFromParams(url.searchParams);
         return json(res, 200, scope ? scopedViews(snapshot())(scope) : snapshot());
       }
+      // The owner's compact button, here or for a joined computer's conversation: an agent's turn or the master never
+      // starts or stops one (checked before a joined computer's request is passed on, which would carry no caller).
+      if (req.method === 'POST' && /^\/api\/(nodes\/[a-f0-9]{32}\/)?sessions\/[^/]+\/compaction(\/cancel)?$/.test(path)
+        && (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()])) return json(res, 403, { error: '세션 압축은 소유자만 할 수 있습니다.' });
       if ((path === '/api/retention' || path.startsWith('/api/retention/')) && (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()])) return json(res, 403, { error: '세션 보관 관리는 소유자만 할 수 있습니다.' });
       if (req.method === 'GET' && path === '/api/retention') {
         if (!backend.retention) return json(res, 503, { error: '세션 보관 정책을 사용할 수 없습니다.' });
@@ -771,6 +777,14 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         if (!backend.createSession) return json(res, 503, { error: '새 세션을 생성할 수 없습니다.' });
         const result = await backend.createSession(input, callerContext());
         return json(res, 202, { ...result, session: publicSession(result.session) });
+      }
+      const compactionMatch = path.match(/^\/api\/sessions\/([^/]+)\/compaction(\/cancel)?$/);
+      if (compactionMatch && (req.method === 'POST' || (req.method === 'GET' && !compactionMatch[2]))) {
+        if (!backend.compaction) return json(res, 503, { error: '세션을 압축할 수 없습니다.' });
+        if (req.method === 'GET') return json(res, 200, { compaction: await backend.compaction('get', compactionMatch[1]) });
+        if (Object.keys(await readJson(req)).length) return json(res, 400, { error: '압축 요청의 본문은 비워 두세요.' });
+        const compaction = await backend.compaction(compactionMatch[2] ? 'cancel' : 'start', compactionMatch[1]);
+        return json(res, compactionMatch[2] ? 200 : 202, { compaction });
       }
       const detailMatch = path.match(/^\/api\/sessions\/([^/]+)$/);
       if (req.method === 'GET' && detailMatch) {
