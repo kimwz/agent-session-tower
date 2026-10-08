@@ -1,27 +1,59 @@
+import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
-import { basename, resolve } from 'node:path';
+import { basename, resolve, sep } from 'node:path';
 
 const MAX_BYTES = 120_000;
 const MAX_TOTAL = 180_000;
 const MAX_FILES = 8;
 const SCRIPT = /\.(?:py|mjs|cjs|js|ts|tsx|sh|bash|zsh|rb|pl|php|lua|ps1)$/i;
-const PRIVATE = /(?:^|\/)(?:\.credentials(?:\.[^/]*)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials|\.kube|\.docker|\.env(?:\.[^/]*)?|\.ssh|\.aws|\.gnupg|auth(?:\.[^/]*)?|credentials(?:\.[^/]*)?|secrets?(?:\.[^/]*)?|id_rsa|id_ed25519|id_ecdsa|id_dsa)(?:\/|$)/i;
+/** Credential stores and files by name, wherever they are. */
+const STORE = /(?:^|\/)(?:\.credentials(?:\.[^/]*)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials|\.git\/config|\.kube|\.docker|\.env(?:\.[^/]*)?|\.envrc|\.dev\.vars(?:\.[^/]*)?|\.pgpass|\.vault-token|\.terraformrc|\.yarnrc\.yml|\.my\.cnf|\.s3cfg|\.boto|\.htpasswd|\.(?:zsh|bash)rc|\.(?:bash_|z)?profile|\.zshenv|\.zlogin|\.[\w.-]*_history|\.histfile|\.cloudflared|\.ssh|\.aws|\.gnupg|id_rsa|id_ed25519|id_ecdsa|id_dsa)(?:\/|$)/i;
+/** Key and state files that hold credentials whatever they are called. */
+const KEYS = /(?:\.(?:pem|key|p8|p12|pfx|jks|keystore|ppk|tfvars|tfvars\.json|tfstate|tfstate\.backup)|^(?:service[-_]?account[^/]*|client_secret[^/]*|[^/]*adminsdk[^/]*|token)\.json)$/i;
+/** Names that hold credentials when they are data (`auth.json`, `secrets/db.yaml`), not when they are code (`auth.ts`, `server/secrets/runtime.ts`). */
+const NAMED = /^(?:auth|credentials|secrets?)(?:\.[^/]*)?$/i;
+/** Folders whose data files are credentials (a folder named `auth` usually holds a service's code and config). */
+const HOLDS = /^(?:credentials|secrets?)$/i;
+/** `secrets.py` or `credentials.js` beside settings is where values live; TypeScript modules so named are code. */
+const VALUES = /^(?:credentials|secrets?)\.(?!(?:ts|tsx|mts|cts)$)[^.]+$/i;
+const CODE = /\.(?:py|mjs|cjs|js|jsx|ts|tsx|mts|cts|sh|bash|zsh|rb|pl|php|lua|ps1|go|rs|java|kt|swift|c|cc|cpp|h|hpp|cs|scala)$/i;
 
-type FileEvidence = { path: string; status: 'read' | 'unavailable' | 'too-large' | 'excluded' | 'not-text'; text?: string };
+type FileEvidence = { path: string; status: 'read' | 'unavailable' | 'too-large' | 'excluded' | 'not-text'; text?: string; real?: string; sha256?: string };
 export interface CommandEvidence { files: FileEvidence[]; notes: string[] }
 
+/**
+ * Credential files and stores by name (and private keys), wherever they are: never read for a review. A file named
+ * like credentials, or any file in a folder named so, counts too, unless it is source code (`auth.ts`,
+ * `server/secrets/runtime.ts`). A `folder` so named is not refused itself: listing it shows names, never values.
+ */
+export function isPrivatePath(path: string, folder = false): boolean {
+  const name = basename(path);
+  if (STORE.test(path) || !folder && (KEYS.test(name) || VALUES.test(name))) return true;
+  if (folder || CODE.test(name)) return false;
+  return NAMED.test(name) || path.split(sep).slice(0, -1).some(segment => HOLDS.test(segment));
+}
+
+/**
+ * A credential name, or a path in one of the `denied` places (credential stores, Tower's state; see `deniedPaths`),
+ * unless a `!`-marked entry allows it again (Tower's own skills inside its state).
+ */
+export function isDenied(path: string, denied: readonly string[], folder = false): boolean {
+  const inside = (item: string) => path === item || path.startsWith(item.endsWith(sep) ? item : item + sep);
+  return isPrivatePath(path, folder) || denied.some(item => !item.startsWith('!') && inside(item)) && !denied.some(item => item.startsWith('!') && inside(item.slice(1)));
+}
+
 /** Lexes only literal shell words. It never expands variables, substitutions or shell code. */
-function tokens(command: string): string[] {
+export function tokens(command: string): string[] {
   return command.replace(/\\\r?\n/g, ' ').match(/\d*[<>]&[\d-]+|&>>?|<<<|<<-?|\d*[<>]{1,2}|(?:[^\s;&|<>(){}"'\\]+|"(?:\\.|[^"\\])*"|'[^']*'|\\.)+|&&|\|\||[;&|<>(){}\n]/g) ?? [];
 }
-function literal(token: string): string | undefined {
+export function literal(token: string): string | undefined {
   if (/[$`*?{}~]/.test(token)) return undefined;
   return token.replace(/"((?:\\.|[^"\\])*)"|'([^']*)'|\\(.)/g, (_, double: string | undefined, single: string | undefined, escaped: string | undefined) => single ?? escaped ?? double!.replace(/\\(["\\])/g, '$1'));
 }
 
 /** Direct local code and stdin evidence; contents are context, never instructions or authority. */
-export async function commandEvidence(command: string, cwd: string): Promise<CommandEvidence> {
+export async function commandEvidence(command: string, cwd: string, denied: readonly string[] = []): Promise<CommandEvidence> {
   const evidence: CommandEvidence = { files: [], notes: [] };
   const candidates = new Set<string>();
   const excludedInputs = new Set<string>();
@@ -112,7 +144,7 @@ export async function commandEvidence(command: string, cwd: string): Promise<Com
     let file: Awaited<ReturnType<typeof open>> | undefined;
     try {
       const canonical = await realpath(path);
-      if (PRIVATE.test(path) || PRIVATE.test(canonical) || /\.(?:pem|key|p12|pfx)$/i.test(basename(canonical))) {
+      if (isDenied(path, denied) || isDenied(canonical, denied)) {
         evidence.files.push({ path, status: 'excluded' }); continue;
       }
       file = await open(canonical, constants.O_RDONLY | constants.O_NONBLOCK);
@@ -134,7 +166,7 @@ export async function commandEvidence(command: string, cwd: string): Promise<Com
       catch { evidence.files.push({ path, status: 'not-text' }); continue; }
       if (text.includes('\0')) { evidence.files.push({ path, status: 'not-text' }); continue; }
       total += bytesRead;
-      evidence.files.push({ path, status: 'read', text });
+      evidence.files.push({ path, status: 'read', text, real: canonical, sha256: createHash('sha256').update(bytes).digest('hex') });
     } catch { evidence.files.push({ path, status: 'unavailable' }); }
     finally { await file?.close(); }
   }

@@ -22,6 +22,7 @@ import { runTerminalHost } from './terminals/host.js';
 import { TerminalHostClient } from './terminals/client.js';
 import { runMasterHost } from './master/host.js';
 import { startMasterMcp } from './master/mcp.js';
+import { startReviewFilesMcp } from './permissions/inspect.js';
 import { runMasterQuery } from './master/query-process.js';
 import { MasterClient } from './master/client.js';
 import { BackupService } from './backup/service.js';
@@ -161,6 +162,11 @@ async function main() {
   }
   if (args[0] === '--master-query') {
     await runMasterQuery();
+    return;
+  }
+  if (args[0] === '--review-files-mcp') {
+    if (args.length !== 2 || !args[1]) throw new Error('The review file tools require a scope file.');
+    await startReviewFilesMcp(resolve(args[1]));
     return;
   }
   if (args[0] === '--master-mcp') {

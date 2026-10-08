@@ -37,7 +37,7 @@ import { callerDelegation, CapabilityRegistry, handleMcpRequest } from '../api/m
 import { sessionToolsKey } from '../api/session-tools.js';
 import { DecisionService } from '../decisions/service.js';
 import { relatedSessionNotes } from '../sessions/related.js';
-import { runToolResolver, sessionBrowsers } from '../api/run-tools.js';
+import { runToolResolver, sessionBrowsers, thisBuild } from '../api/run-tools.js';
 import { browserNote } from '../browser/tools.js';
 import { RemoteExclusionStore } from '../remote/exclusions.js';
 import { remoteSessionIds, remoteTriggerLaunch } from '../remote/visibility.js';
@@ -782,7 +782,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     let reviewer!: PermissionReviewer;
     // One-shot runs: the command runs in this worker; the conversation hears its end unless it already read the result.
     // A claude or codex a run starts counts as the requesting conversation's own run, never as one the owner started.
-    const runner: PermissionRunner = new PermissionRunner({ stateDir, update: (id, run): Promise<void> => permissions.updateRun(id, run), env: (sessionId, env) => runs.launchEnv(sessionId, env) });
+    const runner: PermissionRunner = new PermissionRunner({ stateDir, update: (id, run): Promise<void> => permissions.updateRun(id, run), env: (sessionId, env) => runs.launchEnv(sessionId, env),
+      beforeStart: id => permissions.confirmReviewed(id) });
     let stopping = false;
     let paused = false;
     // Read from the web's saved file each time: the owner may close a conversation at any moment.
@@ -866,6 +867,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     expiryTimer.unref();
     reviewer = new PermissionReviewer({ service: permissions,
       model: (request, options) => runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs }),
+      files: { stateDir, server: scope => { const build = thisBuild(); return { command: build.command, args: [...build.args, '--review-files-mcp', scope] }; } },
       sources: {
         runs: () => runs.list(),
         outsideInput: sessionId => runs.sessionOrigin(sessionId)?.untrustedInput === true,
@@ -903,6 +905,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       // The decision reaches the conversation as the work it already was: the requesting turn's origin and approvals.
       reachable: request => Boolean(request.runId && runs.list().find(item => item.id === request.runId)?.origin),
       notify: (request, message) => runs.permissionDecision(request, `${TOWER_NOTICE} ${message}`).then(() => undefined) });
+    // Nothing is reviewed before the triggers are in place (released below), not even a recovered run sent back to review.
+    reviewer.hold();
 
     runs.setClaudeSettings((cwd, sessionId) => permissions.claudeSettings(cwd, sessionId));
     runs.setTurnNotes(async (_run, session) => {
@@ -938,9 +942,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const restoredTriggers = await triggers.start(restoring?.restore.triggers ? { restore: restoring.restore.triggers } : {});
     await restoring?.applied({ parts: restoring.restore.triggers ? ['triggers'] : [], errors: restoredTriggers.errors })
       .catch(error => console.error(`The restore's progress was not recorded: ${error instanceof Error ? error.message : String(error)}`));
-    // Reviews waiting from before this worker started (or queued while the last one handed over) go on, once the
-    // triggers whose instructions they read are in place.
-    reviewer.wake();
+    // Reviews waiting from before this worker started (or queued while the last one handed over, or sent back by a run
+    // recovered above) go on, once the triggers whose instructions they read are in place.
+    reviewer.release();
     await github.start();
     // Slack and triggers share one limit on provider turns running at once.
     runs.setAutomationLimit(triggers.settings().maxConcurrentRuns);
