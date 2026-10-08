@@ -82,3 +82,14 @@ test('a background task notice keeps its whole result in the full-text read', as
   const full = await f.service.detail(`claude:${id}`, undefined, 50, { fullText: true });
   assert.ok(full?.messages.some(message => message.role === 'system' && message.text.includes('pull/9')), JSON.stringify(full?.messages.map(message => message.text.slice(-80))));
 });
+
+test("Tower's hidden instructions come back only in the full read, as a message of their own", async t => {
+  const f = await fixture(t);
+  await writeFile(f.claude, lines({ type: 'user', sessionId: id, cwd: '/work', timestamp, message: { role: 'user', content: [{ type: 'text', text: 'Continue the work' },
+    { type: 'text', text: '<tower-instructions>\nHidden note\n</tower-instructions>' }] } }));
+  await f.service.refresh();
+  const shown = await f.service.detail(`claude:${id}`, undefined, 50);
+  assert.deepEqual(shown?.messages.map(message => message.text), ['Continue the work']);
+  const full = await f.service.detail(`claude:${id}`, undefined, 50, { fullText: true });
+  assert.deepEqual(full?.messages.map(message => [message.role, message.toolName, message.text]), [['user', undefined, 'Continue the work'], ['system', 'tower-instructions', 'Hidden note']]);
+});

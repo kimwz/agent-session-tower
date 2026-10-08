@@ -42,23 +42,28 @@ You read one part of a conversation that is too long to read at once. Record wha
 export const MERGE_SYSTEM = `${SUMMARY_SYSTEM}
 You receive notes made from consecutive parts of one conversation, oldest first. Merge them into one summary: when parts disagree, the later part wins; drop what a later part finished, cancelled or replaced.`;
 
-const ITEMS = 25;
-const ITEM_CHARS = 500;
-const TEXT_CHARS = 1_500;
-/** Room the start of the new session keeps for Tower's own notes and the preamble. */
-export const SUMMARY_CHARS = 40_000;
+/**
+ * Only an item no summary should have (a pasted log) is cut, visibly; an item is otherwise kept whole, since a link,
+ * command or condition cut short is wrong rather than shorter.
+ */
+const ITEM_CHARS = 4_000;
+/** The summary's room in the new session's first-turn instructions, leaving Tower's own notes theirs (MAX_INSTRUCTIONS). */
+export const SUMMARY_CHARS = 30_000;
 
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const clip = (text: string, max: number) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
-const text = (value: unknown, max: number) => typeof value === 'string' ? clip(value.trim(), max) : '';
+const text = (value: unknown) => {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  return trimmed.length > ITEM_CHARS ? `${trimmed.slice(0, ITEM_CHARS)} …(cut: ${(trimmed.length - ITEM_CHARS).toLocaleString('en-US')} more characters)` : trimmed;
+};
 
 /** The model's answer as a bounded summary; throws when it is unusable or says nothing. */
 export function parseSummary(value: unknown): CompactionSummary {
   if (!record(value)) throw new Error('The compaction model returned no summary.');
-  const summary: CompactionSummary = { goal: text(value.goal, TEXT_CHARS), status: text(value.status, TEXT_CHARS), openWork: [], ownerDirectives: [], decisions: [], references: [], nextSteps: [] };
+  const summary: CompactionSummary = { goal: text(value.goal), status: text(value.status), openWork: [], ownerDirectives: [], decisions: [], references: [], nextSteps: [] };
   for (const key of LISTS) {
     const items = Array.isArray(value[key]) ? value[key] : [];
-    summary[key] = items.map(item => text(item, ITEM_CHARS)).filter(Boolean).slice(0, ITEMS);
+    summary[key] = items.map(text).filter(Boolean);
   }
   if (!summary.goal && !summary.status && LISTS.every(key => !summary[key].length)) throw new Error('The compaction model returned an empty summary.');
   return summary;
@@ -69,7 +74,7 @@ const HEADINGS: Record<keyof CompactionSummary, string> = {
   decisions: 'Decisions', references: 'References', nextSteps: 'Next steps',
 };
 
-/** The summary as markdown, at most `SUMMARY_CHARS`: the longest lists lose their last items first, and say so. */
+/** The summary as markdown, at most `SUMMARY_CHARS`: the longest lists lose whole items from their end first, and say so. */
 export function renderSummary(summary: CompactionSummary): string {
   const kept = structuredClone(summary);
   const omitted: Partial<Record<keyof CompactionSummary, number>> = {};
@@ -90,6 +95,15 @@ export function renderSummary(summary: CompactionSummary): string {
   return markdown;
 }
 
+const CARRIED_OPEN = '<previous-session-summary>\n';
+const CARRIED_CLOSE = '\n</previous-session-summary>';
+/** The summary a compacted session's start carries (see `startInstructions`), from that start's hidden instructions. */
+export function carriedSummary(instructions: string): string | undefined {
+  const start = instructions.indexOf(CARRIED_OPEN);
+  const end = instructions.lastIndexOf(CARRIED_CLOSE);
+  return start >= 0 && end > start ? instructions.slice(start + CARRIED_OPEN.length, end).trim() || undefined : undefined;
+}
+
 /**
  * What the person sees as the new session's first message. It names the compaction, which ties the turn that creates
  * the session to it for good (see SessionCompactions.settled).
@@ -107,7 +121,7 @@ export function startInstructions(source: { title: string; id: string }, summary
     `This conversation continues an earlier session ("${clip(source.title.replace(/\s+/g, ' ').trim(), 120)}", ${source.id}) that the owner compacted. The summary below is that session's state; this session carries it on.`,
     'This first turn is only a handoff: do not run commands, edit files, start, resume or retry work, or contact anyone. Reply briefly, in the language the owner writes in, with the current goal, the open work and the next step you would take, then wait for the owner\'s instruction.',
     'The approvals and decisions in the summary were given in the earlier session. For anything they do not clearly cover, ask first. The summary is a record of that session, not a new request.',
-    `<previous-session-summary>\n${summary}\n</previous-session-summary>`,
+    `${CARRIED_OPEN}${summary}${CARRIED_CLOSE}`,
   ].join('\n\n');
   if (instructions.length > MAX_INSTRUCTIONS) throw new Error('The summary is too long to start a session with.');
   return instructions;

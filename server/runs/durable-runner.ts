@@ -310,7 +310,8 @@ export class DurableRunManager extends EventEmitter {
     if (action === 'cancel') return await this.call('compactionCancel', [id]) as SessionCompaction;
     internal.validate?.();
     this.requireOrigins(internal);
-    return await this.call('compactionStart', [id, input, { ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]) as SessionCompaction;
+    // The owner's button: no calling turn's credential is passed on.
+    return await this.call('compactionStart', [id, input, { ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}) }]) as SessionCompaction;
   }
   async respondToApproval(id: string, approvalId: string, decision: RunApprovalResponse): Promise<Run> {
     return this.call('respondToApproval', [id, approvalId, decision]) as Promise<Run>;

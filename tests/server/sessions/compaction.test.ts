@@ -6,7 +6,9 @@ import { join } from 'node:path';
 import { until } from '../../helpers/until.js';
 import { SessionCompactions, continuationModel, continuedTitle, type SessionCompactionDependencies } from '../../../server/sessions/compaction/service.js';
 import { PART_BYTES, excerpt, transcriptLines, transcriptParts } from '../../../server/sessions/compaction/transcript.js';
-import { SUMMARY_CHARS, SUMMARY_SCHEMA, parseSummary, renderSummary, startInstructions, visiblePrompt } from '../../../server/sessions/compaction/summary.js';
+import { SUMMARY_CHARS, SUMMARY_SCHEMA, carriedSummary, parseSummary, renderSummary, startInstructions, visiblePrompt } from '../../../server/sessions/compaction/summary.js';
+import { TOWER_INSTRUCTIONS } from '../../../server/sessions/parser.js';
+import { outcomeMark } from '../../../server/sessions/outcomes.js';
 import type { AutoPromptModelRequest } from '../../../server/auto-prompt/native.js';
 import type { RunAdmission } from '../../../server/runs/manager.js';
 import { saveModelSettings } from '../../../server/models/settings.js';
@@ -29,11 +31,14 @@ interface Setup {
   answer?: (request: AutoPromptModelRequest, index: number) => unknown;
   deps?: Partial<SessionCompactionDependencies>;
   stateDir?: string;
+  /** Conversations and turns there before the service loads. */
+  seed?: { sessions?: Session[]; runs?: Run[] };
 }
 async function setup(t: test.TestContext, options: Setup = {}) {
   const stateDir = options.stateDir ?? await mkdtemp(join(tmpdir(), 'tower-compaction-'));
   const sessions = new Map<string, Session>([['claude:src', session('claude:src')]]);
-  const runs: Run[] = [];
+  const runs: Run[] = [...options.seed?.runs ?? []];
+  for (const item of options.seed?.sessions ?? []) sessions.set(item.id, item);
   const created: { input: CreateSessionRequest; admission: RunAdmission }[] = [];
   const requests: AutoPromptModelRequest[] = [];
   const reads: (number | undefined)[] = [];
@@ -77,9 +82,12 @@ test('the transcript keeps what the person and the agent said whole and excerpts
   const [call] = transcriptLines(message('tool', 'c'.repeat(3_000), { toolName: 'Bash' }));
   assert.ok(call.length < 2_100 && /omitted\]…$/.test(call), 'a call keeps only its start (no tail)');
   assert.equal(excerpt('short', { head: 10, tail: 0 }), 'short');
-  const [cut] = transcriptLines(message('user', `${'y'.repeat(10)}\n… [truncated]`));
-  assert.match(cut, /The end of this message is missing/);
   assert.deepEqual(transcriptLines(message('assistant', '   ')), []);
+  // Of Tower's hidden instructions only a compacted session's carried summary is read.
+  const start = startInstructions({ title: 'Voice fix', id: 'claude:old' }, '## Goal\nCarried goal');
+  assert.match(transcriptLines(message('system', start, { toolName: TOWER_INSTRUCTIONS })).join(''), /Summary carried from the session this conversation continues[^]*## Goal\nCarried goal$/);
+  assert.deepEqual(transcriptLines(message('system', 'Browser tools for this turn …', { toolName: TOWER_INSTRUCTIONS })), []);
+  assert.equal(carriedSummary(start), '## Goal\nCarried goal');
 });
 
 test('parts split between lines, keep the order, start with the first message and stay within the budget', () => {
@@ -96,12 +104,14 @@ test('parts split between lines, keep the order, start with the first message an
 test('a summary is checked and bounded, and the start of the new session carries it as a handoff', () => {
   assert.throws(() => parseSummary({ goal: '', status: '', openWork: [], ownerDirectives: [], decisions: [], references: [], nextSteps: [] }), /empty/);
   assert.throws(() => parseSummary('text'), /no summary/);
-  const big = parseSummary({ ...SUMMARY, references: Array.from({ length: 100 }, (_, index) => `${index} ${'r'.repeat(800)}`) });
-  assert.equal(big.references.length, 25);
-  assert.ok(big.references.every(item => item.length <= 500));
+  const big = parseSummary({ ...SUMMARY, references: Array.from({ length: 100 }, (_, index) => `${index} https://example.com/${'r'.repeat(800)}`) });
+  assert.equal(big.references.length, 100);
+  assert.ok(big.references.every(item => item.endsWith('r'.repeat(10))), 'a long link is kept whole');
+  assert.match(parseSummary({ ...SUMMARY, status: 's'.repeat(5_000) }).status, /…\(cut: 1,000 more characters\)$/, 'only a pasted wall of text is cut, visibly');
   const huge = renderSummary({ ...big, openWork: big.references, decisions: big.references, nextSteps: big.references, ownerDirectives: big.references });
   assert.ok(huge.length <= SUMMARY_CHARS);
   assert.match(huge, /more not kept/);
+  assert.ok(huge.split('\n').filter(line => line.startsWith('- ') && !line.includes('more not kept')).every(line => line.endsWith('r'.repeat(10))), 'items are dropped whole, never cut');
   const markdown = renderSummary(parseSummary(SUMMARY));
   for (const text of ['## Goal', 'PR #42', 'Always answer in Korean', '## Next steps']) assert.ok(markdown.includes(text), text);
   const start = startInstructions({ title: 'Voice fix', id: 'claude:src' }, markdown);
@@ -114,7 +124,7 @@ test('a summary is checked and bounded, and the start of the new session carries
 });
 
 test('the new session runs with what the latest answer ran with: the native record, then the last request, then the CLI default', () => {
-  const run = (patch: Partial<Run>): Run => ({ id: 'r', sessionId: 'claude:src', prompt: 'x', status: 'completed', createdAt: at(5), output: '', ...patch });
+  const run = (patch: Partial<Run>): Run => ({ id: 'r', sessionId: 'claude:src', prompt: 'x', status: 'completed', createdAt: at(5), finishedAt: at(9), output: '', ...patch });
   assert.deepEqual(continuationModel(session('claude:src'), [run({ model: 'sonnet', effort: 'low' })]),
     { provider: 'claude', model: 'claude-opus-5-5', effort: 'high', modelSource: 'observed', effortSource: 'observed' });
   assert.deepEqual(continuationModel(session('claude:src', { model: undefined, effort: undefined }), [run({ model: 'sonnet', effort: 'low', createdAt: at(1) }), run({ model: 'opus', effort: 'max', createdAt: at(3) })]),
@@ -122,6 +132,12 @@ test('the new session runs with what the latest answer ran with: the native reco
   assert.deepEqual(continuationModel(session('claude:src', { model: undefined, effort: 'auto' }), []), { provider: 'claude', modelSource: 'default', effortSource: 'default' }, 'an effort Claude Code cannot take is not passed on');
   assert.deepEqual(continuationModel(session('codex:src', { provider: 'codex', model: 'gpt-6.1-sol', effort: 'xhigh' }), []),
     { provider: 'codex', model: 'gpt-6.1-sol', effort: 'xhigh', modelSource: 'observed', effortSource: 'observed' });
+  // Tower's request counts only while it is the conversation's latest: not after the owner went on elsewhere.
+  const unknown = session('claude:src', { model: undefined, effort: undefined, lastRequestAt: at(10) });
+  assert.deepEqual(continuationModel(unknown, [run({ model: 'opus', effort: 'max', finishedAt: at(6) })]), { provider: 'claude', modelSource: 'default', effortSource: 'default' });
+  assert.deepEqual(continuationModel(unknown, [run({ model: 'opus', effort: 'max', finishedAt: at(11) })]), { provider: 'claude', model: 'opus', effort: 'max', modelSource: 'lastRun', effortSource: 'lastRun' });
+  // The context variant the request named is kept with the observed model.
+  assert.equal(continuationModel(session('claude:src', { lastRequestAt: at(10) }), [run({ model: 'claude-opus-5-5[1m]', finishedAt: at(11) })]).model, 'claude-opus-5-5[1m]');
 });
 
 test('compacting reads every page with the compactor role and no tools, then creates one session of the same model and effort', async t => {
@@ -198,7 +214,7 @@ test('a second click, a retried request and a finished compaction of the same co
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const f = await setup(t, { answer: async () => { await gate; return SUMMARY; } });
-  const first = f.service.start('claude:src', { requestId: 'r1' }, OWNER);
+  const first = f.service.start('claude:src', {}, OWNER);
   assert.equal(f.service.start('claude:src', {}, OWNER).id, first.id, 'while it runs');
   release();
   const done = await f.settle();
@@ -223,43 +239,106 @@ test('the finished compaction is remembered across workers, so a retry after a h
   await first.service.close();
   const saved = JSON.parse(await readFile(join(stateDir, 'session-compactions.json'), 'utf8'));
   assert.equal(saved.sources['claude:src'].state, 'done');
-  assert.equal(saved.sources['claude:src'].summary, undefined, 'the summary moves to the carried record once settled');
-  assert.match(saved.sessions['claude:new-0'].summary, /PR #42/);
-  const second = await setup(t, { stateDir });
+  assert.deepEqual(Object.keys(saved), ['version', 'sources'], 'no summary is kept here: it travels with the new session');
+  const second = await setup(t, { stateDir, seed: { sessions: [session('claude:new-0')] } });
   assert.deepEqual(second.service.get('claude:src'), { id: done.id, sessionId: 'claude:src', state: 'done', createdAt: saved.sources['claude:src'].at, updatedAt: saved.sources['claude:src'].at, newSessionId: 'claude:new-0' });
   assert.equal(second.service.start('claude:src', {}, OWNER).newSessionId, 'claude:new-0');
   assert.equal(second.created.length, 0);
 });
 
-test('an attempt a crash left unsettled is adopted by its own turn, and never made again when that turn is not found', async t => {
+test('an attempt a crash left unsettled is settled by its own turn when the worker starts, and never made again without it', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-compaction-'));
   t.after(() => rm(stateDir, { recursive: true, force: true }));
-  const probe = await setup(t, { stateDir: await mkdtemp(join(tmpdir(), 'tower-probe-')) });
-  const revision = (probe.service as unknown as { jobs: Map<string, { revision: string }> }).jobs;
-  probe.service.start('claude:src', {}, OWNER);
-  await probe.settle();
-  const sameRevision = revision.get('claude:src')!.revision;
-  const attempt = { jobId: 'abcdef0123', revision: sameRevision, at: at(20), state: 'creating', prompt: visiblePrompt('Voice fix', 'abcdef0123'), cwd: '/work/app', provider: 'claude', summary: '## Goal\nCarried' };
-  await writeFile(join(stateDir, 'session-compactions.json'), JSON.stringify({ version: 1, sessions: {}, sources: { 'claude:src': attempt } }));
-  // Not found: unknown whether a session was made, so none is made again.
+  const attempt = { jobId: 'abcdef0123', revision: outcomeMark(session('claude:src')), at: at(20), state: 'creating', prompt: visiblePrompt('Voice fix', 'abcdef0123') };
+  await writeFile(join(stateDir, 'session-compactions.json'), JSON.stringify({ version: 1, sources: { 'claude:src': attempt } }));
+  // Not found: unknown whether a session was made, so none is made again for what the conversation says.
   const lost = await setup(t, { stateDir });
-  assert.throws(() => lost.service.start('claude:src', {}, OWNER), /확인할 수 없어/);
+  assert.throws(() => lost.service.start('claude:src', {}, OWNER), (error: unknown) => error instanceof TowerError && error.disposition === 'not-admitted' && /확인할 수 없어/.test(error.message));
   assert.equal(lost.service.get('claude:src')?.state, 'failed');
   assert.equal(lost.created.length, 0);
   await lost.service.close();
-  // Found: the turn that names this compaction made that session.
-  const found = await setup(t, { stateDir });
-  found.sessions.set('claude:made', session('claude:made'));
-  found.runs.push({ id: 'run-made', sessionId: 'claude:made', prompt: attempt.prompt, status: 'completed', createdAt: at(21), output: '' });
+  // Found when the next worker loads: the turn that names this compaction made that session.
+  const found = await setup(t, { stateDir, seed: { sessions: [session('claude:made')], runs: [{ id: 'run-made', sessionId: 'claude:made', prompt: attempt.prompt, status: 'completed', createdAt: at(21), output: '' }] } });
+  assert.equal(found.service.get('claude:src')?.newSessionId, 'claude:made');
   assert.equal(found.service.start('claude:src', {}, OWNER).newSessionId, 'claude:made');
   assert.equal(found.created.length, 0);
   await found.service.close();
-  // The adopted session carries its summary into its own compaction.
-  const again = await setup(t, { stateDir });
-  again.sessions.set('claude:made', session('claude:made', { title: 'Voice fix (이어서)' }));
-  again.service.start('claude:made', {}, OWNER);
-  await again.settle('claude:made');
-  assert.match(again.requests[0].prompt, /Summary carried from the session this conversation continues[^]*## Goal\nCarried/);
+  assert.equal(JSON.parse(await readFile(join(stateDir, 'session-compactions.json'), 'utf8')).sources['claude:src'].state, 'done', 'settled once, on disk');
+});
+
+test('a compacted session compacted again reads the summary it started with from its own first message', async t => {
+  const start = startInstructions({ title: 'Voice fix', id: 'claude:old' }, '## Goal\nCarried goal\n\n## The person\'s standing instructions\n- Never deploy on Fridays');
+  const f = await setup(t, { history: [message('user', '이전 세션의 요약을 이어받아…'), message('system', start, { toolName: TOWER_INSTRUCTIONS }), message('assistant', 'Taken over.')] });
+  f.service.start('claude:src', {}, OWNER);
+  await f.settle();
+  assert.match(f.requests[0].prompt, /Summary carried from the session this conversation continues[^]*Never deploy on Fridays/);
+  assert.doesNotMatch(f.requests[0].prompt, /only a handoff/, 'only the summary, not the rest of Tower\'s instructions');
+});
+
+test('a finished compaction whose session can no longer carry the work does not stop a new one', async t => {
+  const f = await setup(t);
+  f.service.start('claude:src', {}, OWNER);
+  const first = await f.settle();
+  f.sessions.set(first.newSessionId!, session(first.newSessionId!, { resumable: false }));
+  const next = f.service.start('claude:src', {}, OWNER);
+  assert.notEqual(next.id, first.id);
+  await f.settle();
+  assert.equal(f.created.length, 2);
+});
+
+test('a creation that fails after saving its session still ends with that session, and refusals say nothing was admitted', async t => {
+  const made = await setup(t, { deps: { create: async (input, admission) => {
+    admission.validate?.();
+    made.sessions.set('claude:half', session('claude:half', { creationPending: true }));
+    made.runs.push({ id: 'run-half', sessionId: 'claude:half', prompt: input.prompt, status: 'error', createdAt: new Date().toISOString(), output: '' });
+    throw new Error('state could not be flushed');
+  } } });
+  made.service.start('claude:src', {}, OWNER);
+  const job = await made.settle();
+  assert.equal(job.state, 'done');
+  assert.equal(job.newSessionId, 'claude:half');
+  assert.equal(made.service.start('claude:src', {}, OWNER).id, job.id);
+
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-compaction-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  await writeFile(join(stateDir, 'session-compactions.json'), '{not json');
+  const unreadable = await setup(t, { stateDir });
+  assert.throws(() => unreadable.service.start('claude:src', {}, OWNER), (error: unknown) => error instanceof TowerError && error.kind === 'unavailable' && error.disposition === 'not-admitted');
+  assert.equal(await readFile(join(stateDir, 'session-compactions.json'), 'utf8'), '{not json', 'the unreadable file is left as it is');
+
+  const held = await setup(t);
+  held.service.hold();
+  assert.throws(() => held.service.start('claude:src', {}, OWNER), (error: unknown) => error instanceof TowerError && error.disposition === 'not-admitted');
+  held.service.release();
+  held.service.start('claude:src', {}, OWNER);
+  assert.equal((await held.settle()).state, 'done');
+
+  const full = await setup(t, { deps: { maxFileBytes: 10 } });
+  full.service.start('claude:src', {}, OWNER);
+  const refused = await full.settle();
+  assert.equal(refused.state, 'failed');
+  assert.match(refused.error!, /너무 커서/);
+  assert.equal(full.created.length, 0);
+});
+
+test('only a compaction creating its session holds a forced update', async t => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const f = await setup(t, { deps: { create: async (input, admission) => {
+    await gate;
+    admission.validate?.();
+    const made = session('claude:late', { creationPending: true });
+    f.sessions.set(made.id, made);
+    f.runs.push({ id: 'run-late', sessionId: made.id, prompt: input.prompt, status: 'queued', createdAt: new Date().toISOString(), output: '' });
+    return { session: made };
+  } } });
+  f.service.start('claude:src', {}, OWNER);
+  assert.equal(f.service.creating(), false);
+  assert.equal(f.service.inFlight(), true);
+  await until(() => f.service.creating());
+  release();
+  await f.settle();
+  assert.equal(f.service.creating(), false);
 });
 
 test('the conversation changing while it is summarized, or right before creation, makes no session', async t => {

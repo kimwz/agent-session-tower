@@ -82,6 +82,12 @@ const TOWER_INSTRUCTIONS_CLOSE = '\n</tower-instructions>';
  * always part of the request's own block.
  */
 export function towerInstructionsBlock(text: string): string { return `${TOWER_INSTRUCTIONS_OPEN}${text}${TOWER_INSTRUCTIONS_CLOSE}`; }
+/** A message of Tower's own instructions, which only a full read returns (see parseMessages). */
+export const TOWER_INSTRUCTIONS = 'tower-instructions';
+function hiddenInstructions(blocks: unknown[], id: string, timestamp: string): ChatMessage[] {
+  return blocks.filter(isTowerInstructions).map((block, index) => ({ id: `${id}:instructions:${index}`, role: 'system' as const, toolName: TOWER_INSTRUCTIONS, timestamp,
+    text: ((block as { text: string }).text).slice(TOWER_INSTRUCTIONS_OPEN.length, -TOWER_INSTRUCTIONS_CLOSE.length) }));
+}
 function isTowerInstructions(block: unknown): boolean {
   const value = block && typeof block === 'object' ? (block as { text?: unknown }).text : undefined;
   return typeof value === 'string' && value.startsWith(TOWER_INSTRUCTIONS_OPEN) && value.endsWith(TOWER_INSTRUCTIONS_CLOSE);
@@ -101,11 +107,13 @@ function printJson(value: unknown): string {
 }
 
 /**
- * Parse only messages people can see, excluding internal reasoning and prompt scaffolding. `limit` caps what the person,
- * the agent and notices said; a reader that must not lose any of it (compaction) lifts it. Tool output keeps the cap.
+ * Parse only messages people can see, excluding internal reasoning and prompt scaffolding. A `full` read (compaction)
+ * keeps all of what the person, the agent and notices said, where pages cap it, and also returns Tower's hidden
+ * instructions on a message as their own `TOWER_INSTRUCTIONS` message. Tool output keeps the cap either way.
  */
-export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fallbackTime = new Date(0).toISOString(), limit = MAX_TEXT): ChatMessage[] {
+export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fallbackTime = new Date(0).toISOString(), full = false): ChatMessage[] {
   const timestamp = time(row.timestamp, fallbackTime);
+  const limit = full ? Infinity : MAX_TEXT;
   if (provider === 'codex') {
     if (row.type !== 'response_item') return [];
     const value = row.payload ?? {};
@@ -120,8 +128,9 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
       const parts = Array.isArray(value.content) ? value.content.filter((_: unknown, index: number) =>
         value.role !== 'user' || !kinds[index] || /^(user\.|unknown)/.test(kinds[index]!)) : value.content;
       const content = text(value.role === 'user' && Array.isArray(parts) ? parts.filter((part: unknown) => !isTowerInstructions(part)) : parts, limit);
-      if (!content || (value.role === 'user' && isInjectedUser(content))) return [];
-      return [{ id, role: value.role, text: content, timestamp }];
+      const hidden = full && value.role === 'user' && Array.isArray(parts) ? hiddenInstructions(parts, id, timestamp) : [];
+      if (!content || (value.role === 'user' && isInjectedUser(content))) return hidden;
+      return [{ id, role: value.role, text: content, timestamp }, ...hidden];
     }
     if (['function_call', 'custom_tool_call', 'local_shell_call'].includes(value.type)) {
       const name = value.name || (value.type === 'local_shell_call' ? 'shell' : 'tool');
@@ -168,6 +177,7 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
     }
   }
   flush();
+  if (full && value.role === 'user') messages.push(...hiddenInstructions(blocks, id, timestamp));
   return messages;
 }
 

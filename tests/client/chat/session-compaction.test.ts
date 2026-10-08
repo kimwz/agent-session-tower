@@ -44,6 +44,8 @@ test('the compact button says why it is off, and the worker refusals it mirrors'
     [compactBlock(undefined, [], ok), /불러오는 중/],
     [compactBlock(session({ isSubagent: true }), [], ok), /하위 세션/],
     [compactBlock(session({ resumable: false }), [], ok), /이어서 작업할 수 없는/],
+    [compactBlock(session({ creationPending: true }), [], ok), /첫 응답이 끝난 뒤/],
+    [compactBlock(session({ master: true }), [], ok), /하위 세션/],
     [compactBlock(session({ messageCount: 0 }), [], ok), /압축할 대화가 없습니다/],
     [compactBlock(session({ status: 'working' }), [], ok), /끝난 뒤/],
     [compactBlock(session(), [running], ok), /끝난 뒤/],

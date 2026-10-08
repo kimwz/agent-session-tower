@@ -4,6 +4,8 @@
  * intermediate work, keep their start and end with a marker for what was left out.
  */
 import type { ChatMessage } from '../../../shared/types.js';
+import { TOWER_INSTRUCTIONS } from '../parser.js';
+import { carriedSummary } from './summary.js';
 
 /** The most one part may hold, in UTF-8 bytes; the native call accepts prompts up to 512 KB. */
 export const PART_BYTES = 300_000;
@@ -12,8 +14,6 @@ const SEGMENT = 60_000;
 const CALL = 2_000;
 const RESULT = { head: 1_200, tail: 1_200 };
 const ERROR = { head: 2_000, tail: 1_000 };
-/** How the session parser ends a message longer than it reads (server/sessions/parser.ts). */
-const PARSER_CUT = '… [truncated]';
 
 const omitted = (count: number) => `…[${count.toLocaleString('en-US')} characters omitted]…`;
 const flat = (text: string) => text.replace(/\s+/g, ' ').trim();
@@ -25,23 +25,26 @@ export function excerpt(text: string, keep: { head: number; tail: number }): str
   return `${text.slice(0, keep.head)} ${omitted(text.length - keep.head - keep.tail)}${tail}`;
 }
 
-/** One message as lines: several when it is long, none when it says nothing. */
+/**
+ * One message as lines: several when it is long, none when it says nothing. Of Tower's hidden instructions only the
+ * summary a compacted session started with is read: the earlier session's state this conversation carries on.
+ */
 export function transcriptLines(message: ChatMessage): string[] {
-  let text = message.text.trim();
+  const text = message.text.trim();
   if (!text) return [];
   const at = `[${message.timestamp.slice(0, 16).replace('T', ' ')}]`;
+  if (message.toolName === TOWER_INSTRUCTIONS) {
+    const carried = carriedSummary(text);
+    return carried ? [`${at} Summary carried from the session this conversation continues (what that session had established):\n${carried}`] : [];
+  }
   if (message.role === 'tool') {
     if (message.toolName === 'result') return [`${at} Tool result${message.isError ? ' (error)' : ''}: ${excerpt(flat(text), message.isError ? ERROR : RESULT)}`];
     return [`${at} Tool ${message.toolName || 'call'}: ${excerpt(flat(text), { head: CALL, tail: 0 })}`];
   }
-  const cut = text.endsWith(PARSER_CUT);
-  if (cut) text = text.slice(0, -PARSER_CUT.length).trimEnd();
   const who = message.role === 'user' ? 'User' : message.role === 'assistant' ? 'Agent' : 'Notice';
   const segments: string[] = [];
   for (let start = 0; start < text.length; start += SEGMENT) segments.push(text.slice(start, start + SEGMENT));
-  const lines = segments.map((segment, index) => `${at} ${who}${segments.length > 1 ? ` (message part ${index + 1}/${segments.length})` : ''}: ${segment}`);
-  if (cut) lines[lines.length - 1] += '\n(The end of this message is missing from the record Tower reads.)';
-  return lines;
+  return segments.map((segment, index) => `${at} ${who}${segments.length > 1 ? ` (message part ${index + 1}/${segments.length})` : ''}: ${segment}`);
 }
 
 /** Lines in order, cut between lines into parts of at most `maxBytes`. */

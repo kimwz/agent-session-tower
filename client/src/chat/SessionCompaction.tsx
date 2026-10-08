@@ -1,28 +1,30 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowRight, LoaderCircle, Shrink, Square, TriangleAlert, X } from 'lucide-react';
 import type { ContinuationSource, Run, Session, SessionCompaction } from '../../../shared/types';
+import { COMPACTION_ACTIVE, compactionRefusal, type CompactionRefusal } from '../../../shared/compaction';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { api } from '../common/lib';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 import { nodeHeaders, nodeOf, pathFor, scopedId, settleRequest } from '../remote/scope';
 
 const POLL_MS = 1_500;
-const ACTIVE: ReadonlySet<SessionCompaction['state']> = new Set(['reading', 'summarizing', 'creating']);
+const ACTIVE = COMPACTION_ACTIVE;
 export const compactionActive = (job: SessionCompaction | null | undefined) => !!job && ACTIVE.has(job.state);
+const REFUSALS: Record<CompactionRefusal, string> = {
+  helper: '하위 세션은 압축할 수 없습니다.',
+  creating: '세션을 만드는 중입니다. 첫 응답이 끝난 뒤 압축할 수 있습니다.',
+  notResumable: '이어서 작업할 수 없는 세션은 압축할 수 없습니다.',
+  empty: '압축할 대화가 없습니다.',
+  busy: '작업 중이거나 대기·예약된 요청이 있는 세션은 끝난 뒤 압축할 수 있습니다.',
+};
 
-/**
- * Why compacting cannot start now, or undefined. The worker decides; this only lets the button say why it is off
- * (the same conditions as SessionCompactions' refusals).
- */
+/** Why compacting cannot start now, or undefined: the worker's own rule (shared/compaction.ts), said on the button. */
 export function compactBlock(session: Session | undefined, runs: readonly Run[], options: { reachable: boolean; token: string; supported: boolean }): string | undefined {
   if (!options.supported) return t('이 컴퓨터의 Tower를 업데이트하면 세션을 압축할 수 있습니다.');
   if (!options.reachable || !options.token) return t('Tower에 연결되면 압축할 수 있습니다.');
   if (!session) return t('대화를 불러오는 중입니다.');
-  if (session.isSubagent || session.launchedByAgent || session.master) return t('하위 세션은 압축할 수 없습니다.');
-  if (!session.resumable || session.creationPending) return t('이어서 작업할 수 없는 세션은 압축할 수 없습니다.');
-  if (!session.messageCount) return t('압축할 대화가 없습니다.');
-  if (session.status === 'working' || runs.some(run => run.status === 'running' || run.status === 'queued')) return t('작업 중이거나 대기·예약된 요청이 있는 세션은 끝난 뒤 압축할 수 있습니다.');
-  return undefined;
+  const refusal = compactionRefusal(session, runs);
+  return refusal && t(REFUSALS[refusal]);
 }
 
 /**
@@ -49,6 +51,8 @@ export function useSessionCompaction(sessionId: string, token: string, connected
       try {
         const { compaction } = await api<{ compaction: SessionCompaction | null }>(pathFor(sessionId, id => `/api/sessions/${encodeURIComponent(id)}/compaction`));
         if (stopped) return;
+        // A compaction followed here that the worker no longer knows ended with a worker replaced midway.
+        if (!compaction && followed.current) { followed.current = undefined; setJob(null); setError(t('실행 워커가 바뀌어 압축이 중단되었습니다. 새 세션은 만들지 않았습니다. 다시 시도하세요.')); return; }
         setJob(compaction);
         // A read that failed while following is over once one succeeds again.
         if (followed.current) setError('');

@@ -34,11 +34,13 @@ import { RemoteContent } from '../remote/remote-content';
 
 const emptyMessages: readonly ChatMessage[] = [];
 
-export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = [], provider, host, runs, token, connected, onClose, onNavigate, onSnapshotRefresh, onSessionUpdate, onSessionClose, onAcknowledgeOutcome, sessionClosed = false, changingClosed = false, readRevision = '', onRead, contextBanner }: { contextBanner?: ReactNode; sessionId: string; session?: Session; allSessions: Session[];
+export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = [], provider, host, compactionReady = true, runs, token, connected, onClose, onNavigate, onSnapshotRefresh, onSessionUpdate, onSessionClose, onAcknowledgeOutcome, sessionClosed = false, changingClosed = false, readRevision = '', onRead, contextBanner }: { contextBanner?: ReactNode; sessionId: string; session?: Session; allSessions: Session[];
   /** Folders Tower lists on every computer (scoped keys): the files a conversation names are opened from these. */
   workspaceFolders?: readonly string[]; provider?: ProviderHealth;
   /** The joined computer this conversation lives on; absent for this computer. */
-  host?: { name: string; live: boolean; canWork: boolean; problem?: string; workspace: boolean; workspaceNote?: string; compaction?: boolean }; runs: Run[]; token: string; connected: boolean; onClose: () => void; onNavigate: (id: string) => void; onSnapshotRefresh: () => void; onSessionUpdate: (session: Session) => void; onSessionClose?: () => void; onAcknowledgeOutcome?: () => Promise<void>; sessionClosed?: boolean; changingClosed?: boolean; readRevision?: string; onRead?: (id: string, revision: string) => void }) {
+  host?: { name: string; live: boolean; canWork: boolean; problem?: string; workspace: boolean; workspaceNote?: string; compaction?: boolean };
+  /** This computer's execution worker serves compaction (it is not waiting to be replaced by a newer build). */
+  compactionReady?: boolean; runs: Run[]; token: string; connected: boolean; onClose: () => void; onNavigate: (id: string) => void; onSnapshotRefresh: () => void; onSessionUpdate: (session: Session) => void; onSessionClose?: () => void; onAcknowledgeOutcome?: () => Promise<void>; sessionClosed?: boolean; changingClosed?: boolean; readRevision?: string; onRead?: (id: string, revision: string) => void }) {
   useI18n();
   // Changes to a joined computer's conversation need that computer reachable, not only this Tower.
   const reachable = connected && (!host || host.canWork);
@@ -143,7 +145,7 @@ export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = 
   const runProjection = useMemo(() => matchChatRuns(detail?.messages || emptyMessages, currentRuns, sessionId), [detail?.messages, currentRuns, sessionId]);
   const contextDescription = useId();
   const compaction = useSessionCompaction(sessionId, token, reachable, onNavigate);
-  const compactBlocked = compactBlock(current, currentRuns, { reachable, token, supported: !host || !!host.compaction });
+  const compactBlocked = compactBlock(current, currentRuns, { reachable, token, supported: host ? !!host.compaction : compactionReady });
   const scrollToBottom = useCallback(() => { followRef.current = true; setFollowing(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'smooth' }); }, []);
 
   async function loadOlder() {

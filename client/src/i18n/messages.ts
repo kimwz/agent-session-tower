@@ -2498,4 +2498,9 @@ export const english: Record<string, string> = {
   "새 세션을 만드는 중이라 취소할 수 없습니다.": "The new session is being created, so this cannot be cancelled.",
   "이전 압축이 새 세션을 만들었는지 확인할 수 없어(실행 워커가 중간에 멈춤) 다시 만들지 않았습니다. 세션 목록에서 「(이어서)」 세션을 확인하세요. 원래 세션에서 대화가 더 이어지면 다시 압축할 수 있습니다.": "It cannot be confirmed whether the previous compaction created a new session (the execution worker stopped midway), so none was created again. Look for the “(이어서)” session in the list. Once the original conversation continues, it can be compacted again.",
   "대화를 불러오는 중입니다.": "Loading the conversation.",
+  "세션을 만드는 중입니다. 첫 응답이 끝난 뒤 압축할 수 있습니다.": "The session is still being created. It can be compacted after its first answer.",
+  "실행 워커가 바뀌어 압축이 중단되었습니다. 새 세션은 만들지 않았습니다. 다시 시도하세요.": "The execution worker was replaced and the compaction stopped. No new session was created. Try again.",
+  "Tower 실행 워커가 바뀌어 압축을 멈췄습니다. 새 세션은 만들지 않았습니다. 다시 시도하세요.": "Tower's execution worker changed and the compaction stopped. No new session was created. Try again.",
+  "Tower가 실행 워커 업데이트를 준비하고 있어 지금은 압축을 시작하지 않습니다. 업데이트가 끝난 뒤 다시 시도하세요.": "Tower is preparing an execution worker update, so compaction does not start now. Try again once the update is done.",
+  "세션 압축은 소유자만 할 수 있습니다.": "Only the owner can compact a session.",
 };
