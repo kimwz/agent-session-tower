@@ -94,6 +94,7 @@ async function syncDirectory(path: string): Promise<void> {
 }
 /** Whether `path` names, right now, the very file `generation` is (no link: lstat). */
 async function stillThere(path: string, generation: HoldGeneration): Promise<boolean> {
+  // best-effort: An unreadable path cannot prove ownership; writeHold reports hold-replaced.
   const info = await lstat(path, { bigint: true }).catch(() => undefined);
   return !!info && info.isFile() && String(info.ino) === generation.ino && String(info.dev) === generation.dev;
 }
@@ -168,6 +169,7 @@ export function removeHold(stateDir: string, owner: { version: string; update?: 
     // may change its change time), or it goes back.
     const aside = `${path}.removing.${process.pid}.${randomBytes(6).toString('hex')}`;
     try { await rename(path, aside); } catch (error) { if (missing(error)) return false; throw error; }
+    // best-effort: If the moved hold cannot be verified, restore it or report the preserved aside path.
     const moved = await observe(aside).catch(() => undefined);
     if (!moved || !sameFile(moved.generation, judged)) {
       if (!await putBack(aside, path)) throw new HoldError('hold-replaced', `${path} changed while it was removed; what stood there is kept at ${aside}, and the path is left as it is.`);
@@ -186,13 +188,16 @@ const sameFile = (a: HoldGeneration, b: HoldGeneration) => a.dev === b.dev && a.
  * nothing stands there. False when it could not go back; it is then kept aside.
  */
 async function putBack(aside: string, path: string): Promise<boolean> {
+  // best-effort: If the aside cannot be inspected, leave it in place and report restoration failure.
   const info = await lstat(aside).catch(() => undefined);
   if (!info) return false;
   if (info.isFile()) {
+    // best-effort: A failed restore link leaves the aside intact; removeHold reports its preserved path.
     try { await link(aside, path); } catch { return false; }
     await rm(aside, { force: true });
     return true;
   }
   if (await lstat(path).then(() => true, error => !missing(error))) return false;
+  // best-effort: A failed restore rename leaves the aside intact; removeHold reports its preserved path.
   try { await rename(aside, path); return true; } catch { return false; }
 }

@@ -316,6 +316,7 @@ export const probeInstalledArtifact: ArtifactProbe = async (directory, version) 
     const failure = error as { code?: unknown; stderr?: unknown; killed?: boolean };
     const unknownOption = typeof failure.code === 'number' && !failure.killed && String(failure.stderr ?? '').includes('Unknown option: --storage-contract');
     if (!unknownOption) return { state: 'unverifiable', reason: `The artifact's storage contract could not be read: ${messageOf(error).split('\n')[0]}` };
+    // best-effort: A failed version probe is unverifiable, never accepted as a legacy artifact.
     const answered = await run(process.execPath, [entry, '--version'], { timeout: ARTIFACT_TIMEOUT_MS }).then(result => result.stdout.trim(), () => undefined);
     read = answered === version ? { state: 'legacy', version } : { state: 'unverifiable', reason: `The artifact reports ${answered?.slice(0, 40) || 'no version'}, not ${version}.` };
   }
@@ -825,6 +826,7 @@ export async function evaluateStorageUpdate(input: StorageUpdateInput): Promise<
       if (rollbackKept(target, identity, pin)) {
         const unsettled = await settled();
         if (unsettled) return unsettled;
+        // best-effort: An unreadable entry cannot match the validated hash; require recovery instead of readiness.
         if (await entryHash(entryPoint(versionDirectory(stateDir, build.version))).catch(() => '') !== target.entrySha256) {
           return answer('recovery-required', 'current-artifact', `The installed ${build.version} is not the one the rollback validated.`);
         }
@@ -1274,6 +1276,7 @@ async function endAttempt(context: { stateDir: string }, own: Claim): Promise<vo
   await withStorageTransition(context.stateDir, async () => {
     const read = await readRollbackRecord(context.stateDir);
     if (read.state === 'present' && read.record.attempt?.nonce === own.nonce) await saveRollback(context.stateDir, { ...read.record, attempt: { ...read.record.attempt, ended: true } });
+  // best-effort: If ending cannot be recorded, local ownership ends and other processes wait for this process to exit.
   }).catch(() => { /* Unwritten, it ends with this process: another process waits for that. */ });
 }
 
@@ -1297,6 +1300,7 @@ function oneAtATime(stateDir: string, target: string, work: () => Promise<Rollba
   })();
   const entry = { target, promise };
   inflight.set(key, entry);
+  // best-effort: Only the finally-derived rejection is discarded; callers receive the original work promise.
   promise.finally(() => { if (inflight.get(key) === entry) inflight.delete(key); }).catch(() => {});
   return promise;
 }
@@ -1420,6 +1424,7 @@ async function recheckTarget(context: RollbackContext, record: RollbackRecord): 
     return { ok: false, reason: `${record.target}'s installed build is no longer the one validated (${artifact.state}).` };
   }
   if (!artifact.contract.supported) return { ok: false, reason: `${record.target}'s storage no longer runs here.` };
+  // best-effort: An unreadable entry cannot match the validated hash; refuse the target recheck.
   if (await entryHash(entryPoint(directory)).catch(() => '') !== record.entrySha256) return { ok: false, reason: `${record.target}'s installed files changed after they were validated.` };
   let inspection: Pick<StorageInspection, 'schema' | 'authority' | 'ownerEpoch'>;
   try { inspection = await context.ports.inspectStorage(); } catch (error) { return { ok: false, reason: `The database could not be read to compare again: ${messageOf(error)}` }; }
@@ -1445,6 +1450,7 @@ async function verifyOperation(context: { stateDir: string; probe?: ArtifactProb
   if (artifact.state !== 'contract' || artifact.contract.identity.sourceHash !== record.sourceHash || artifact.contract.identity.manifestDigest !== record.manifestDigest) {
     return { ok: false, reason: `${record.target}'s installed build is no longer the one validated (${artifact.state}).` };
   }
+  // best-effort: An unreadable entry cannot match the validated hash; refuse operation verification.
   if (await entryHash(entryPoint(directory)).catch(() => '') !== record.entrySha256) return { ok: false, reason: `${record.target}'s installed files changed after they were validated.` };
   return { ok: true };
 }
@@ -1577,6 +1583,7 @@ async function reserve(context: RollbackContext, request: { target: string; by: 
   const manifestDigest = target.contract.identity.manifestDigest;
   const again = await (context.probe ?? probeInstalledArtifact)(target.directory, target.version);
   if (again.state !== 'contract' || again.contract.identity.sourceHash !== sourceHash || again.contract.identity.manifestDigest !== manifestDigest
+    // best-effort: An unreadable entry cannot match the validated hash; reject reservation before pinning.
     || await entryHash(target.entry).catch(() => '') !== target.entrySha256) throw new RollbackConflict('target-changed', `${target.version} changed while the rollback was validated; nothing was pinned.`);
   if (pin.state === 'unreadable' || pin.state === 'invalid') throw new RollbackConflict('pin', `The version pin is ${pin.state}; the owner inspects it first.`);
   if (pin.state === 'present' && pin.pin.pinned !== target.version) throw new RollbackConflict('pinned-elsewhere', `The service is pinned to ${pin.pin.pinned}; the owner releases that pin first.`);
@@ -1654,6 +1661,7 @@ const describePointer = (pointer: PointerRead) => pointer.state === 'version' ? 
  */
 async function failWith(context: Pick<RollbackContext, 'stateDir' | 'ports' | 'now'>, record: RollbackRecord, own: Claim, phase: string, error: unknown): Promise<RollbackOutcome> {
   let failed = await transition(context, record.id, [record.state], { state: 'failed', pending: undefined, failure: failureOf(phase, error) }, own);
+  // best-effort: A failed admission release keeps held true in the failed record, preserving the hold and pin.
   if (failed.held && await context.ports.releaseAdmission(own.fence).then(() => true, () => false)) failed = await transition(context, record.id, ['failed'], { held: false }, own);
   return { state: 'failed', record: failed };
 }
@@ -1988,6 +1996,7 @@ export async function withdrawRollback(context: Pick<RollbackContext, 'stateDir'
   let record = taken.record;
   try {
     if (record.held) {
+      // best-effort: A failed admission release keeps the hold recorded and returns a refusal so withdrawal can retry.
       if (!await context.ports.releaseAdmission(taken.claim.fence).then(() => true, () => false)) return refusal('hold-not-released', 'The rollback is withdrawn, but its admission hold could not be released; ask again.');
       record = await transition(context, record.id, ['withdrawn'], { held: false }, taken.claim);
     }

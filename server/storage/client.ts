@@ -464,6 +464,7 @@ export class StorageClient {
     if (this.#lost) return this.#refuse(this.#lost, layout, before);
     this.#schema = opened.schema;
     this.#state = 'ready';
+    thread.worker.unref();
     return this.status();
   }
 
@@ -544,8 +545,8 @@ export class StorageClient {
   #spawn(source: string): ThreadHandle {
     // Eval: the thread runs the captured text, never a file that a later build may have replaced.
     const worker = new Worker(source, threadOptions());
-    // Referenced only while a command waits, so an idle open storage does not keep the process alive by itself.
-    worker.unref();
+    // Keep opening alive through live-file checks and durable identity recording, even between command answers.
+    // #open releases this reference on ready; later commands reference the otherwise idle thread while they wait.
     let greet!: (hello: ThreadHello | undefined) => void;
     const handle: ThreadHandle = { worker, expected: false, hello: new Promise(resolve => { greet = resolve; }), exited: undefined! };
     handle.exited = new Promise(resolve => worker.once('exit', code => {
@@ -615,7 +616,7 @@ export class StorageClient {
     }
     clearTimeout(pending.timer);
     this.#inflight = undefined;
-    if (!this.#queue.length) handle.worker.unref();
+    if (this.#state !== 'opening' && !this.#queue.length) handle.worker.unref();
     if (response.ok) pending.resolve(response.value);
     else {
       const { error } = response;
