@@ -4,7 +4,7 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.118.0] - 2026-10-08
+## [1.118.0] - 2026-10-09
 
 ### Added
 
