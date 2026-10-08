@@ -80,6 +80,7 @@ export interface McpContext {
   capabilities: CapabilityRegistry;
   /** The run a credential was issued for, as the run registry knows it now. */
   run(runId: string): Run | undefined;
+  heartbeatAllowed?(run: Run): boolean;
   slackTool?(workflowId: string, name: string, args: Record<string, unknown>): Promise<unknown>;
   githubTool?(workflowId: string, name: string, args: Record<string, unknown>): Promise<unknown>;
   secretTools?: unknown[];
@@ -90,7 +91,14 @@ export interface McpContext {
 export async function handleMcpRequest(context: McpContext, token: string, body: { method?: unknown; name?: unknown; arguments?: unknown }): Promise<unknown> {
   const capability = context.capabilities.resolve(token);
   if (!capability) throw new TowerError('forbidden', 'This tool credential is not valid.');
-  if (capability.kind === 'caller-run') throw new TowerError('forbidden', 'A reporting credential cannot call Tower tools.');
+  if (capability.kind === 'caller-run') {
+    const run = context.run(capability.runId);
+    if (body.method !== 'heartbeat/context' || !run || run.id !== capability.runId || run.sessionId !== capability.sessionId
+      || context.heartbeatAllowed?.(run) === false || run.status !== 'running' || run.origin?.kind !== 'agent' || run.origin.controllerId || run.ownerStopped || run.approvals?.length || !run.heartbeat?.targets?.length) {
+      throw new TowerError('forbidden', 'A reporting credential cannot call Tower tools.');
+    }
+    return { runId: run.id, sessionId: run.sessionId, heartbeat: structuredClone(run.heartbeat) };
+  }
   if (capability.kind === 'session-reader') {
     if (body.method === 'tools/list') return { tools: towerTools(SESSION_TOOL_OPERATIONS) };
     const operation = typeof body.name === 'string' ? operationOf(body.name) : undefined;

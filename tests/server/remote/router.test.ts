@@ -426,3 +426,13 @@ test('remote REST run evidence uses the existing read-only operation with authen
   assert.deepEqual(f.calls, [{ method: 'api', args: ['runs.list', { sessionId: 'codex:open', limit: 6 }, { origin: { kind: 'owner', controllerId: CONTROLLER } }] }]);
   assert.deepEqual(f.changes(), []);
 });
+
+test('the corrective marker only reduces a remote message to agent authority; ordinary controller messages remain owner input', async t => {
+  const f = await fixture(t);
+  const headers = { 'x-tower-request-id': REQUEST_ID, 'x-tower-heartbeat-corrective': '1' };
+  assert.equal((await f.call('/api/sessions/codex:open/messages', { body: { prompt: 'Continue the existing task' }, headers })).status, 202);
+  assert.deepEqual((f.calls.find(item => item.method === 'enqueue')!.args[3] as { origin: unknown }).origin, { kind: 'agent', controllerId: CONTROLLER });
+  f.calls.length = 0;
+  assert.equal((await f.call('/api/sessions/codex:open/messages', { body: { prompt: 'Owner request' }, headers: { 'x-tower-request-id': '0199a2b3-c4d5-7123-8abc-0123456789ff' } })).status, 202);
+  assert.deepEqual((f.calls.find(item => item.method === 'enqueue')!.args[3] as { origin: unknown }).origin, { kind: 'owner', controllerId: CONTROLLER });
+});

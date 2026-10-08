@@ -32,6 +32,7 @@ async function harness(t: test.TestContext) {
   let readHook: ((path: string, signal: AbortSignal) => Promise<void>) | undefined;
   let writeHook: (() => Promise<void>) | undefined;
   let captured: AutoPromptModelRequest | undefined;
+  let userId = '1', userText = 'Ship feature', skipped = 0, previousUserOnly = false;
   let delivery: 'succeeded' | 'uncertain' | 'not-admitted' = 'succeeded';
   const snapshot = (): Snapshot => ({ sessions: [masterNative, target], runs, providers: [], hostname: 'fixture', version: 'fixture', scanning: false, updatedAt: new Date(now).toISOString() });
   const tower = { hasCredentials: () => online, call: async (method: string, path: string, body: { prompt: string } | undefined, options: { gate?: () => Promise<boolean>; headers?: Record<string,string>; signal?: AbortSignal }) => {
@@ -51,13 +52,15 @@ async function harness(t: test.TestContext) {
     if (path.startsWith('/api/snapshot')) return { state: 'succeeded', body: structuredClone({ ...snapshot(), runs: runs.map(run => ({ ...run, output: '' })) }) };
     const session = path.includes('codex%3Amaster') ? masterNative : target;
     const { outcome: _projection, ...nativeDetail } = session;
-    return { state: 'succeeded', body: { session: structuredClone(nativeDetail), messages: [{ id: '1', role: 'user', timestamp: session.createdAt, text: 'Finish implementation, verify CI, deploy. Respect approval waits.' }, { id: '2', role: 'assistant', timestamp: session.updatedAt, text: 'Review passed but deployment remains.' }] } };
+    const user = { id: session.id === target.id ? userId : 'master-user', role: 'user', timestamp: session.lastRequestAt ?? session.createdAt, text: session.id === target.id ? userText : 'Finish implementation, verify CI, deploy. Respect approval waits.' };
+    const previous = previousUserOnly && session.id === target.id;
+    return { state: 'succeeded', body: { session: structuredClone(nativeDetail), skipped, ...(previous ? { previousUser: user } : {}), messages: [...(previous ? [] : [user]), { id: '2', role: 'assistant', timestamp: session.updatedAt, text: 'Review passed but deployment remains.' }] } };
   } } as unknown as TowerClient;
   const master = { heartbeatTasks: () => structuredClone(tasks), heartbeatStopped: () => stopped, heartbeatAccepted: async (run: Run) => { accepted.push(run); } } as unknown as MasterSession;
   const options = { stateDir: dir, dataDir: dir, settings, tower, master, now: () => now, tickMs: 60_000, resolve: async () => ({ provider: 'codex' as const, model: modelName }), model: async (request: AutoPromptModelRequest) => { calls++; captured = request; return invoke ? invoke(request) : result; } };
   const heartbeat = new MasterHeartbeat(options); await heartbeat.start();
   t.after(async () => { await heartbeat.close(); await rm(dir, { recursive: true, force: true }); });
-  return { dir, heartbeat, options, onWrite: (hook: typeof writeHook) => { writeHook = hook; }, onRead: (hook: typeof readHook) => { readHook = hook; }, model: (value: string) => { modelName = value; }, permissions: (value: typeof requests) => { requests = value; }, permissionFail: () => { permissionFail = true; }, failPermissionFor: (cwd: string) => { permissionFailureTarget = cwd; }, remoteProtection: (value: boolean | undefined) => { remoteProtection = value; }, settings, tasks, target, masterNative, runs, posts, accepted, advance: () => { now += 30 * 60_000; }, calls: () => calls, captured: () => captured, result: (value: unknown) => { result = value; }, invoke: (value: typeof invoke) => { invoke = value; }, stop: () => { stopped = true; }, offline: () => { online = false; }, delivery: (value: typeof delivery) => { delivery = value; } };
+  return { dir, heartbeat, options, nativeUser: (id: string, text: string, unread = 0, previous = false) => { userId = id; userText = text; skipped = unread; previousUserOnly = previous; }, onWrite: (hook: typeof writeHook) => { writeHook = hook; }, onRead: (hook: typeof readHook) => { readHook = hook; }, model: (value: string) => { modelName = value; }, permissions: (value: typeof requests) => { requests = value; }, permissionFail: () => { permissionFail = true; }, failPermissionFor: (cwd: string) => { permissionFailureTarget = cwd; }, remoteProtection: (value: boolean | undefined) => { remoteProtection = value; }, settings, tasks, target, masterNative, runs, posts, accepted, advance: () => { now += 30 * 60_000; }, calls: () => calls, captured: () => captured, result: (value: unknown) => { result = value; }, invoke: (value: typeof invoke) => { invoke = value; }, stop: () => { stopped = true; }, offline: () => { online = false; }, delivery: (value: typeof delivery) => { delivery = value; } };
 }
 test('default enabled 30 minute inspection has no chat/run/voice effect on noop and bounds untrusted evidence', async t => {
   const h = await harness(t);
@@ -178,7 +181,7 @@ test('an unavailable remote candidate is excluded without preventing healthy loc
   const h = await harness(t); h.tasks.push({ ...h.tasks[0], id: 'remote-task', node: 'remote-node' }); h.remoteProtection(undefined); h.result(action);
   h.advance(); await h.heartbeat.tick(); assert.equal(h.posts.length, 1); assert.equal(h.calls(), 1);
   assert.deepEqual(JSON.parse(h.captured()!.prompt).candidates.map((item: { id: string }) => item.id), ['task-1']);
-  assert.match(h.heartbeat.status().lastCheck?.reason ?? '', /candidate protection states unavailable/);
+  assert.match(h.heartbeat.status().lastCheck?.reason ?? '', /candidate identity or protection states unavailable/);
 });
 test('remote session protection blocks pending or refused work and admits verified unprotected evidence', async t => {
   for (const protection of [true, false]) {
@@ -190,7 +193,7 @@ test('unknown protection for one local candidate excludes that task without abor
   const h = await harness(t); h.target.cwd = `${h.dir}/target`; h.failPermissionFor(h.target.cwd);
   h.tasks.push({ ...h.tasks[0], id: 'verified-task', node: 'remote-node' }); h.remoteProtection(false);
   h.result({ ...action, taskIds: ['verified-task'], evidenceIds: ['verified-task:transcript'] }); h.advance(); await h.heartbeat.tick();
-  assert.equal(h.posts.length, 1); assert.equal(h.calls(), 1); assert.match(h.heartbeat.status().lastCheck?.reason ?? '', /candidate protection states unavailable/);
+  assert.equal(h.posts.length, 1); assert.equal(h.calls(), 1); assert.match(h.heartbeat.status().lastCheck?.reason ?? '', /candidate identity or protection states unavailable/);
 });
 
 test('deadline reached during initial evidence reads records interrupted and never invokes model or submits a message', async t => {
@@ -261,4 +264,55 @@ test('remote final gate reuses each node snapshot and blocks its latest model ou
   const h = await harness(t); h.tasks[0].node = 'remote-node'; h.result(action); let snapshots = 0;
   h.onRead(async path => { if (path === '/api/nodes/remote-node/snapshot' && ++snapshots === 3) h.target.outcome = 'needsOwner'; });
   h.advance(); await h.heartbeat.tick(); assert.equal(snapshots, 3); assert.equal(h.posts.length, 0); assert.equal(h.heartbeat.status().actions[0].delivery, 'not-sent');
+});
+
+
+test('native request identity survives queue and CLI startup delay, but excludes a separate native follow-up', async t => {
+  const h = await harness(t);
+  h.target.lastRequestAt = new Date(Date.parse(h.runs[0].createdAt) + 30_000).toISOString();
+  h.runs[0].startedAt = new Date(Date.parse(h.runs[0].createdAt) + 25_000).toISOString();
+  h.advance(); await h.heartbeat.tick(); assert.equal(h.calls(), 1);
+  h.target.lastMessage = 'new progress'; h.advance(); await h.heartbeat.tick(); assert.equal(h.calls(), 2);
+  h.nativeUser('new-turn', 'Ship feature'); h.advance(); await h.heartbeat.tick();
+  assert.equal(h.calls(), 2, 'a newly observed identical prompt is still a separate native request');
+  h.nativeUser('other-turn', 'Ship feature with a different goal'); h.advance(); await h.heartbeat.tick(); assert.equal(h.calls(), 2);
+});
+test('bounded previousUser and delivered steering identify the tracked native request; unread identity fails closed', async t => {
+  const h = await harness(t);
+  h.advance(); await h.heartbeat.tick(); assert.equal(h.calls(), 1);
+  h.runs.push({ ...h.runs[0], id: 'steering-run', createdAt: new Date(Date.now() + 10_000).toISOString(), prompt: 'Use hosted CI', steering: { state: 'delivered', targetRunId: 'worker-run', requestedAt: new Date().toISOString() } });
+  h.target.lastRequestAt = new Date(Date.parse(h.runs.at(-1)!.createdAt) + 5000).toISOString();
+  h.nativeUser('steered-user', 'Use hosted CI', 0, true); h.advance(); await h.heartbeat.tick(); assert.equal(h.calls(), 2);
+  h.nativeUser('steered-user', 'Use hosted CI', 1); h.advance(); await h.heartbeat.tick(); assert.equal(h.calls(), 2);
+});
+test('model role resolution shares the inspection deadline even if its local read never completes', async t => {
+  const h = await harness(t); await h.heartbeat.close(); t.mock.timers.enable({ apis: ['setTimeout'] });
+  const heartbeat = new MasterHeartbeat({ ...h.options, resolve: async () => { t.mock.timers.tick(90_000); return new Promise(() => {}); } });
+  await heartbeat.start(); t.after(() => heartbeat.close()); h.advance(); await heartbeat.tick();
+  assert.equal(heartbeat.status().lastCheck?.state, 'interrupted'); assert.equal(h.calls(), 0); assert.deepEqual(h.posts, []);
+});
+test('a durable ledger write drains serially after expiry; overlapping tick and close cannot race it or dispatch', async t => {
+  const h = await harness(t); await h.heartbeat.close(); t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { writePrivateJson } = await import('../../server/stores/private-json.js');
+  let hold = false, active = 0, maximum = 0, entered!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const heartbeat = new MasterHeartbeat({ ...h.options, write: async (path, data) => {
+    active++; maximum = Math.max(maximum, active);
+    if (hold) { hold = false; entered(); await blocked; }
+    await writePrivateJson(path, data); active--;
+  } });
+  await heartbeat.start(); t.after(() => heartbeat.close()); hold = true; h.advance();
+  const first = heartbeat.tick(); await started; const overlap = heartbeat.tick(); let closed = false;
+  t.mock.timers.tick(90_000); const closing = heartbeat.close().then(() => { closed = true; });
+  await Promise.resolve(); assert.equal(closed, false); assert.equal(active, 1); assert.equal(h.calls(), 0);
+  release(); await Promise.all([first, overlap, closing]);
+  assert.equal(maximum, 1); assert.equal(heartbeat.status().lastCheck?.state, 'interrupted'); assert.deepEqual(h.posts, []);
+  const saved = JSON.parse(await readFile(join(h.dir, 'heartbeat.json'), 'utf8')); assert.equal(saved.checks.at(-1).state, 'interrupted');
+});
+
+
+test('an older identical native request is not attached to a newly queued tracked run', async t => {
+  const h = await harness(t); h.target.lastRequestAt = new Date(Date.parse(h.runs[0].createdAt) - 30_000).toISOString();
+  h.advance(); await h.heartbeat.tick(); assert.equal(h.calls(), 0); assert.deepEqual(h.posts, []);
 });

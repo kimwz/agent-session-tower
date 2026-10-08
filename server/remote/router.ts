@@ -454,7 +454,10 @@ export function createRemoteRouter({ attachmentStores, attachmentUploads, backen
     if (message) {
       const found = await confirm(message[1]);
       const body = parseMessage(await readJson(req, ATTACHMENT_BODY_BYTES));
-      const created = await backend.enqueue(found.id, body.prompt, body.attachments, context(principal, requestId(req)));
+      const admitted = context(principal, requestId(req));
+      // This marker only reduces authority: an automated correction is never an owner instruction.
+      if (req.headers['x-tower-heartbeat-corrective'] === '1') admitted.origin = { kind: 'agent', controllerId: principal.controllerId };
+      const created = await backend.enqueue(found.id, body.prompt, body.attachments, admitted);
       note('message', about(found));
       await stillVisible(found.id);
       return json(res, 202, { run: remoteRun(created) });

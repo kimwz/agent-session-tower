@@ -449,6 +449,7 @@ export class RunManager extends EventEmitter {
   }
 
   async create(input: CreateSessionRequest, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
+    if (internal.heartbeat) throw notAdmitted(new RunError('Heartbeat cannot create sessions.', 'forbidden'));
     const incoming = Array.isArray(input.attachmentIds) ? input.attachmentIds.filter(id => typeof id === 'string') : [];
     this.incomingAttachments.add(incoming);
     try {
@@ -593,7 +594,7 @@ export class RunManager extends EventEmitter {
         // Recorded before the run exists: once external content is queued, the session stays marked.
         this.registry.markUntrusted(sessionId);
       }
-      const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
+      const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), ...(internal.heartbeat ? { heartbeat: structuredClone(internal.heartbeat) } : {}), prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
         ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
         ...(model ? { model } : {}), ...(effort ? { effort } : {}),
         ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),

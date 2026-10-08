@@ -829,7 +829,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         let context = callerContext();
         const heartbeatHeader = req.headers[MASTER_HEARTBEAT_HEADER.toLowerCase()];
         if (heartbeatHeader !== undefined) {
-          if (!masterCall || typeof heartbeatHeader !== 'string' || heartbeatHeader.length > 2000) throw new TowerError('forbidden', 'Heartbeat admission requires the authenticated master.');
+          if (!masterCall || typeof heartbeatHeader !== 'string' || Buffer.byteLength(heartbeatHeader) > 8192) throw new TowerError('forbidden', 'Heartbeat admission requires the authenticated master.');
           let heartbeat: HeartbeatAdmission;
           try { heartbeat = JSON.parse(heartbeatHeader); } catch { throw new TowerError('invalid', 'Invalid heartbeat admission.'); }
           context = { ...context, origin: { kind: 'agent' }, heartbeat };

@@ -188,7 +188,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     return overview && temporaryFailure ? { ...overview, failed: Math.max(overview.failed, 1), issues: [...overview.issues, temporaryFailure] } : overview;
   };
   let closureReady: Promise<void> | undefined;
-  const admit = (value: unknown): RunAdmission => {
+  const admit = (value: unknown, targetSessionId?: string): RunAdmission => {
     const admitted = admission(value);
     const token = record(value).callerCapability;
     const heartbeatValidate = () => {
@@ -196,8 +196,26 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     };
     if (token === undefined) return { ...admitted, ...(admitted.heartbeat ? { validate: heartbeatValidate } : {}) };
     if (typeof token !== 'string' || admitted.origin?.controllerId) throw new TowerError('forbidden', 'Invalid local calling-turn credential.');
-    const validate = () => { heartbeatValidate(); callerDelegation(capabilities, findRun, token); };
-    return { ...admitted, delegation: callerDelegation(capabilities, findRun, token), validate };
+    const caller = capabilities.resolve(token);
+    const callingRun = caller?.kind === 'caller-run' ? findRun(caller.runId) : undefined;
+    const corrective = callingRun?.heartbeat;
+    const validate = () => {
+      heartbeatValidate(); callerDelegation(capabilities, findRun, token);
+      if (corrective) {
+        const current = findRun(callingRun!.id);
+        const target = targetSessionId && options.runs.getSession(targetSessionId);
+        const turns = target ? options.runs.list().filter(run => run.sessionId === target.id) : [];
+        const latest = [...turns].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+        if (!target || !current || current.origin?.kind !== 'agent' || current.origin.controllerId || current.ownerStopped || current.approvals?.length
+          || !corrective.targets?.some(item => !item.node && item.sessionId === targetSessionId)
+          || latest?.ownerStopped || turns.some(run => (run.status === 'running' || run.status === 'queued') && run.approvals?.length)
+          || !options.api || options.api.heartbeatBlocked([current.sessionId, target.id])) {
+          throw new TowerError('forbidden', 'Heartbeat corrective target is unavailable or protected.', { disposition: 'not-admitted' });
+        }
+      }
+    };
+    validate();
+    return { ...admitted, ...(corrective ? { origin: { kind: 'agent' as const } } : {}), delegation: callerDelegation(capabilities, findRun, token), validate };
   };
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
   const dispatch = async (method: string, args: unknown[]) => {
@@ -285,7 +303,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
           });
       }
       case 'enqueue': {
-        const admitted = admit(args[3]);
+        const admitted = admit(args[3], String(args[0]));
         if (admitted.origin?.controllerId) {
           return remote(admitted, 'enqueue', [args[0], args[1], args[2]], args[0] as string, () => options.runs.enqueue(args[0] as string, args[1] as string, args[2] as MessageAttachments, admitted),
             value => ({ kind: 'run', runId: value.id }), result => result.kind === 'run' ? findRun(result.runId) : undefined);
@@ -404,6 +422,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   };
   const mcp = { api: options.api, capabilities, secretTools: options.secrets ? SECRET_TOOLS : undefined, secretTool: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>) => options.secrets!.tool(capability, name, args) : undefined, slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
     githubTool: options.github ? (workflowId: string, name: string, args: Record<string, unknown>) => options.github!.tool(workflowId, name, args) : undefined,
+    heartbeatAllowed: (run: Run) => { const origin = options.runs.sessionOrigin(run.sessionId); return !origin?.untrustedInput && (!origin || origin.kind === 'owner'); },
     run: (runId: string) => options.runs.list().find(run => run.id === runId) };
   const server = createServer(async (req, res) => {
     // Tool servers attached to provider turns hold a capability, not the worker credential; it opens only /mcp.
@@ -594,7 +613,13 @@ function admission(value: unknown): RunAdmission {
   let heartbeat: HeartbeatAdmission | undefined;
   if (input.heartbeat !== undefined) {
     const value = record(input.heartbeat);
-    if (origin.kind !== 'agent' || origin.controllerId || Object.keys(value).some(key => !['checkId', 'sessionIds', 'latestRunId', 'updatedAt', 'lastRequestAt'].includes(key))
+    if (origin.kind !== 'agent' || origin.controllerId || Object.keys(value).some(key => !['targets', 'checkId', 'sessionIds', 'latestRunId', 'updatedAt', 'lastRequestAt'].includes(key))
+      || (value.targets !== undefined && (!Array.isArray(value.targets) || !value.targets.length || value.targets.length > 6 || value.targets.some(entry => {
+        const target = record(entry);
+        return Object.keys(target).some(key => !['taskId', 'sessionId', 'node', 'nativeRequestId'].includes(key)) || typeof target.taskId !== 'string' || !target.taskId || target.taskId.length > 200
+          || (target.nativeRequestId !== undefined && (typeof target.nativeRequestId !== 'string' || !target.nativeRequestId || target.nativeRequestId.length > 200))
+          || typeof target.sessionId !== 'string' || !target.sessionId || target.sessionId.length > 200 || (target.node !== undefined && (typeof target.node !== 'string' || !/^[a-f\d]{32}$/i.test(target.node)));
+      })))
       || !Array.isArray(value.sessionIds) || !value.sessionIds.length || value.sessionIds.length > 7 || value.sessionIds.some(id => typeof id !== 'string' || id.length > 200)
       || typeof value.checkId !== 'string' || !/^[a-f\d-]{36}$/i.test(value.checkId)
       || typeof value.updatedAt !== 'string' || !Number.isFinite(Date.parse(value.updatedAt))

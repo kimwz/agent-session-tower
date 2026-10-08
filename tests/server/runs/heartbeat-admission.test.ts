@@ -25,6 +25,7 @@ async function fixture(t: test.TestContext, wait = false) {
 test('heartbeat final admission is idle-only and records an agent origin without creating sessions', async t => {
   const h = await fixture(t);
   const run = await h.manager.enqueue(h.native.id, h.prompt, {}, { origin: { kind: 'agent' }, heartbeat: h.guard });
+  assert.deepEqual(run.heartbeat, h.guard); assert.notEqual(run.heartbeat, h.guard);
   assert.equal(run.origin?.kind, 'agent'); assert.equal(run.sessionId, h.native.id); assert.equal(h.manager.list().length, 1);
   await assert.rejects(h.manager.enqueue(h.native.id, h.prompt, {}, { origin: { kind: 'agent' }, heartbeat: h.guard }), /preconditions changed/);
   assert.equal(h.manager.list().length, 1);
@@ -61,4 +62,10 @@ test('normal working local target is eligible for master direction assessment', 
   const h = await fixture(t); h.target.status = 'working'; h.guard.sessionIds.push(h.target.id);
   const run = await h.manager.enqueue(h.native.id, h.prompt, {}, { origin: { kind: 'agent' }, heartbeat: h.guard });
   assert.equal(run.sessionId, h.native.id);
+});
+
+test('heartbeat provenance is refused by create and is preserved only by validated existing-master enqueue', async t => {
+  const h = await fixture(t);
+  await assert.rejects(h.manager.create({ provider: 'codex', cwd: h.native.cwd, prompt: h.prompt }, { origin: { kind: 'agent' }, heartbeat: h.guard }), /cannot create/);
+  assert.equal(h.manager.list().length, 0);
 });

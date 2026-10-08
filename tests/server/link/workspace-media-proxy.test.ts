@@ -83,3 +83,10 @@ test('joined media plays past the 64 MiB answer cap', async t => {
   for (;;) { const next = await reader.read(); if (next.done) break; size += next.value.length; }
   assert.equal(size, chunk.length * count);
 });
+
+test('the remote message proxy preserves only the authority-reducing corrective marker without local capability credentials', async t => {
+  let seen: http2.IncomingHttpHeaders | undefined;
+  const base = await link(t, (headers, stream) => { seen = headers; stream.respond({ ':status': 200, 'content-type': 'application/json' }); stream.end('{}'); });
+  await fetch(`${base}/api/sessions/codex:worker/messages`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-tower-heartbeat-corrective': '1', 'x-tower-run-capability': 'a'.repeat(64) }, body: JSON.stringify({ prompt: 'Continue' }) });
+  assert.equal(seen!['x-tower-heartbeat-corrective'], '1'); assert.equal(seen!['x-tower-run-capability'], undefined);
+});
