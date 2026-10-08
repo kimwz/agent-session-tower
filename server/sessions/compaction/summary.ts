@@ -106,7 +106,7 @@ export function carriedSummary(instructions: string): string | undefined {
 
 /**
  * What the person sees as the new session's first message. It names the compaction, which ties the turn that creates
- * the session to it for good (see SessionCompactions.settled).
+ * the session to it for good (see SessionCompactions.settle).
  */
 export function visiblePrompt(title: string, compactionId: string): string {
   return `이전 세션 「${clip(title.replace(/\s+/g, ' ').trim() || '제목 없음', 80)}」의 요약을 이어받아 이 세션에서 이어서 진행합니다. (압축 ${compactionId.slice(0, 8)})`;

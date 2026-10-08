@@ -355,6 +355,7 @@ async function main() {
       providers: capabilities.list().map(provider => ({ ...provider, sessionCount: all.filter(session => session.provider === provider.provider && !session.master).length })),
       runs: dismissedRuns.visible(managed), autoPrompts: runs.autoPromptList(), scanning: history.indexing, hostname: hostname(), version: APP_VERSION,
       ...(runs.triggerOverview() ? { triggers: runs.triggerOverview() } : {}),
+      ...(runs.supports('compaction') ? { compaction: true as const } : {}),
       ...(runs.runnerVersion() ? { runnerVersion: runs.runnerVersion() } : {}),
       ...(componentVersions ? { componentVersions } : {}),
       // Only an older worker is waiting to be replaced; a newer one left by an update that was undone stays as it is.

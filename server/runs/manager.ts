@@ -112,6 +112,11 @@ export interface RunAdmission {
   requestId?: string;
   /** Hidden instructions for this turn (see Run.instructions). */
   instructions?: RunInstructions;
+  /**
+   * Reads again what `validate` judges, right before it: `create` awaits it after its own preparation, so nothing
+   * waits between it, `validate` and registering the conversation.
+   */
+  refresh?: () => Promise<void>;
 }
 
 type SteerableAdapter = CodexStdioRun | CodexBridgeRun | ClaudeControl;
@@ -469,6 +474,7 @@ export class RunManager extends EventEmitter {
       const id = `${input.provider}:${input.provider === 'codex' ? 'monitor-' : ''}${uuid}`;
       const prepared = await this.prepareAttachments(id, input, internal.autoPromptId);
       try {
+        await internal.refresh?.();
         this.validateAdmission(input.prompt, prepared.attachments.length > 0);
         this.validateCorrelation(internal.autoPromptId);
         internal.validate?.();

@@ -91,7 +91,7 @@ function RoleRow({ role, setting, providers, disabled, onChange }: { role: Built
       <ProviderSelect value={setting.provider} follow={!!role.follow} providers={role.providers} disabled={disabled} onChange={provider => onChange({ ...setting, provider })} />
       {(setting.provider === 'follow' ? ['claude', 'codex'] as const : [setting.provider]).map(provider => <PickRow key={provider} provider={provider} labelled={setting.provider === 'follow'}
         pick={setting[provider]} health={providers.find(item => item.provider === provider)} off={role.kind === 'auto' && provider === 'claude'} disabled={disabled}
-        verified={initial[provider].model} onChange={pick => onChange({ ...setting, [provider]: pick })} />)}
+        verified={role.verifiedClaudeModel && provider === 'claude' ? initial.claude.model : undefined} onChange={pick => onChange({ ...setting, [provider]: pick })} />)}
       {changed && <button type="button" className="icon-button" title={t('초기값으로')} aria-label={t('초기값으로')} disabled={disabled} onClick={() => onChange(structuredClone(initial))}><RotateCcw size={14} /></button>}
     </div>
   </div>;

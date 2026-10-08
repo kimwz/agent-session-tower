@@ -10,10 +10,10 @@
  * A compacted session's own summary is read back from its first message (parseMessages' full read), so compacting it
  * again carries everything on without a copy kept here.
  */
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { ChatMessage, CreateSessionRequest, Run, Session, SessionCompaction } from '../../../shared/types.js';
-import { COMPACTION_ACTIVE, compactionRefusal, type CompactionRefusal } from '../../../shared/compaction.js';
+import { COMPACTION_ACTIVE, REFUSAL_MESSAGES, compactionRefusal } from '../../../shared/compaction.js';
 import { TowerError } from '../../../shared/errors.js';
 import type { ResolvedModel } from '../../../shared/models.js';
 import type { AutoPromptModelRequest } from '../../auto-prompt/native.js';
@@ -33,7 +33,8 @@ const MAX_PARTS = 80;
 /** One model call; the whole call, a wait for a CLI update included, gives up a minute later. */
 const CALL_MS = 5 * 60_000;
 const CALL_LIMIT_MS = CALL_MS + 60_000;
-const JOB_MS = 30 * 60_000;
+/** A whole compaction: a little for reading and creating, plus a minute per part; never more than 90 minutes. */
+const jobMs = (parts: number) => Math.min(90, 10 + parts) * 60_000;
 const CONCURRENT_CALLS = 2;
 const ACTIVE_JOBS = 2;
 const KEPT_JOBS = 200;
@@ -64,8 +65,8 @@ export interface SessionCompactionDependencies {
 }
 
 type Continuation = NonNullable<SessionCompaction['continuation']>;
-/** Why a compaction was stopped from outside: the owner cancelled it, the worker closed, or it ran out of time. */
-type Stop = 'cancelled' | 'closed' | 'timeout';
+/** Why a compaction was stopped from outside: the owner cancelled it, the worker closed or is updating, or it ran out of time. */
+type Stop = 'cancelled' | 'closed' | 'held' | 'timeout';
 interface Entry { job: SessionCompaction; revision: string; controller: AbortController; running?: Promise<void> }
 /**
  * One record per compacted conversation: its last compaction that began creating a session. `prompt` names the
@@ -73,13 +74,6 @@ interface Entry { job: SessionCompaction; revision: string; controller: AbortCon
  */
 interface Attempt { jobId: string; revision: string; at: string; state: 'creating' | 'done'; newSessionId?: string; prompt: string }
 
-const REFUSALS: Record<CompactionRefusal, string> = {
-  helper: '이 대화는 압축할 수 없습니다. 소유자가 이어서 작업하는 세션만 압축합니다.',
-  creating: '세션을 만드는 중입니다. 첫 응답이 끝난 뒤 다시 시도하세요.',
-  notResumable: '이어서 작업할 수 없는 세션은 압축할 수 없습니다.',
-  empty: '압축할 대화가 없습니다.',
-  busy: '작업 중이거나 대기·예약된 요청이 있는 세션은 압축할 수 없습니다. 끝나거나 취소된 뒤 다시 시도하세요.',
-};
 const UNCERTAIN = '이전 압축이 새 세션을 만들었는지 확인할 수 없어(실행 워커가 중간에 멈춤) 다시 만들지 않았습니다. 세션 목록에서 「(이어서)」 세션을 확인하세요. 원래 세션에서 대화가 더 이어지면 다시 압축할 수 있습니다.';
 const active = (entry: Entry | undefined) => !!entry && COMPACTION_ACTIVE.has(entry.job.state);
 /** What a conversation has said so far; a change while it is summarized means the summary is already behind. */
@@ -97,12 +91,13 @@ export function continuedTitle(title: string): string {
 
 /**
  * The model and effort the conversation's latest answer actually ran with: the native record first, then Tower's latest
- * request for it while that request is the conversation's latest (it ended after the last request the record shows),
+ * turn for it while that turn is the conversation's latest (it completed after the last request the record shows),
  * else the CLI's own default (unset). A context variant the request named (`claude-opus-5-5[1m]`) is kept. Tower's
  * defaults for new chats never apply here.
  */
 export function continuationModel(session: Session, runs: readonly Run[]): Continuation {
-  const last = runs.filter(run => run.sessionId === session.id).reduce<Run | undefined>((latest, run) => !latest || run.createdAt > latest.createdAt ? run : latest, undefined);
+  // Only a turn that ran to its end answered: a cancelled or failed request says nothing about what ran.
+  const last = runs.filter(run => run.sessionId === session.id && run.status === 'completed').reduce<Run | undefined>((latest, run) => !latest || run.createdAt > latest.createdAt ? run : latest, undefined);
   const current = last?.finishedAt && (!session.lastRequestAt || last.finishedAt >= session.lastRequestAt) ? last : undefined;
   const effortOk = (value: unknown): value is string => validEffort(value) && (session.provider !== 'claude' || CLAUDE_EFFORT_LEVELS.includes(value));
   const observed = validModelId(session.model) ? session.model : undefined;
@@ -117,7 +112,7 @@ export function continuationModel(session: Session, runs: readonly Run[]): Conti
 /** Why the conversation cannot be compacted now, or undefined. */
 function blocked(session: Session, runs: readonly Run[]): string | undefined {
   const refusal = compactionRefusal(session, runs);
-  return refusal && REFUSALS[refusal];
+  return refusal && REFUSAL_MESSAGES[refusal];
 }
 
 /** A compaction known only from its saved attempt (an earlier worker ran it). */
@@ -176,7 +171,14 @@ export class SessionCompactions {
   inFlight(): boolean { return [...this.jobs.values()].some(active); }
   /** A compaction is creating its session this instant: even a forced update waits for that, never longer. */
   creating(): boolean { return [...this.jobs.values()].some(entry => entry.job.state === 'creating'); }
-  hold(): void { this.held = true; }
+  /**
+   * A forced update is draining: nothing new starts, and a compaction still reading or summarizing stops now, so none
+   * can begin creating a session while the worker hands off. One already creating is waited for (`creating`).
+   */
+  hold(): void {
+    this.held = true;
+    for (const entry of this.jobs.values()) if (active(entry) && entry.job.state !== 'creating') entry.controller.abort('held' satisfies Stop);
+  }
   release(): void { this.held = false; }
   flush(): Promise<void> { return this.writes; }
 
@@ -184,9 +186,9 @@ export class SessionCompactions {
   get(sessionId: string): SessionCompaction | undefined {
     const id = this.dependencies.session(sessionId)?.id ?? sessionId;
     const entry = this.jobs.get(id);
-    if (entry) return structuredClone(entry.job);
-    const attempt = this.attempts.get(id);
-    return attempt && savedJob(id, attempt);
+    const job = entry ? structuredClone(entry.job) : this.attempts.has(id) ? savedJob(id, this.attempts.get(id)!) : undefined;
+    // A finished compaction whose session can no longer carry the work is not offered as the way on.
+    return job?.state === 'done' && !this.usable(job.newSessionId) ? undefined : job;
   }
 
   /**
@@ -197,7 +199,7 @@ export class SessionCompactions {
     const refuse = (text: string) => new TowerError('unavailable', text, { disposition: 'not-admitted' });
     if (this.closed) throw refuse('Tower가 실행 워커를 바꾸는 중입니다. 잠시 후 다시 시도하세요.');
     if (this.held) throw refuse('Tower가 실행 워커 업데이트를 준비하고 있어 지금은 압축을 시작하지 않습니다. 업데이트가 끝난 뒤 다시 시도하세요.');
-    if (!this.persist) throw refuse('압축 기록 파일(session-compactions.json)을 읽지 못해 압축할 수 없습니다. 같은 압축이 두 번 만들어지지 않도록 파일을 확인할 때까지 멈춥니다.');
+    if (!this.persist) throw refuse('압축 기록 파일(session-compactions.json)을 읽지 못해 압축할 수 없습니다. 같은 압축이 두 번 만들어지지 않도록, 파일을 고친 뒤 Tower 실행 워커가 다시 시작되면 압축할 수 있습니다.');
     const session = this.dependencies.session(sessionId);
     if (!session) throw new TowerError('not-found', '세션을 찾을 수 없습니다.');
     const now = revision(session);
@@ -254,7 +256,7 @@ export class SessionCompactions {
   private settle(sourceId: string, dropMissing = false): boolean {
     const attempt = this.attempts.get(sourceId);
     if (attempt?.state !== 'creating') return false;
-    const run = this.dependencies.runs().find(item => item.prompt === attempt.prompt && item.createdAt >= attempt.at);
+    const run = this.dependencies.runs().find(item => item.prompt === attempt.prompt);
     if (run) { this.attempts.set(sourceId, { ...attempt, state: 'done', newSessionId: this.dependencies.session(run.sessionId)?.id ?? run.sessionId }); return true; }
     if (dropMissing) { this.attempts.delete(sourceId); return true; }
     return false;
@@ -280,8 +282,9 @@ export class SessionCompactions {
 
   private async run(entry: Entry, source: Session, title: string, admission: RunAdmission): Promise<void> {
     const signal = entry.controller.signal;
-    const timer = setTimeout(() => entry.controller.abort('timeout' satisfies Stop), JOB_MS);
-    timer.unref?.();
+    const limit = (ms: number) => { const next = setTimeout(() => entry.controller.abort('timeout' satisfies Stop), ms); next.unref?.(); return next; };
+    // Until the parts are counted, the limit of a conversation that fits one call.
+    let timer = limit(jobMs(1));
     let recorded = false;
     try {
       const read = await this.read(source, signal);
@@ -290,15 +293,17 @@ export class SessionCompactions {
       const parts = packParts(read.lines);
       if (!parts.length) throw new Error('압축할 대화 내용이 없습니다.');
       if (parts.length > MAX_PARTS) throw new Error('대화가 너무 길어 압축할 수 없습니다. 앞부분을 버리지 않고는 정해진 호출 수 안에 읽을 수 없습니다.');
+      clearTimeout(timer);
+      timer = limit(jobMs(parts.length) - (this.now() - Date.parse(entry.job.createdAt)));
       this.update(entry, { state: 'summarizing', progress: { done: 0, total: parts.length > 1 ? parts.length + 1 : 1 } });
       const header = [`Conversation "${clip(title, 200)}" in ${source.cwd} (${source.provider === 'claude' ? 'Claude Code' : 'Codex'}).`,
         ...(read.skipped ? [`${read.skipped} records of it could not be read and are missing below.`] : [])].join(' ');
       const summary = renderSummary(await this.summarize(entry, compactor, header, parts));
       signal.throwIfAborted();
-      if (admission.origin?.controllerId) await this.dependencies.remote?.prepare(source);
       const early = this.lastLook(source.id, entry.revision, admission);
       if (early) throw new Error(early);
-      signal.throwIfAborted();
+      // Nothing waits from here to `creating`: a hold or a close that came first has stopped the compaction.
+      if (this.held || this.closed) throw new Error('압축이 중단되었습니다.');
       const latest = this.dependencies.session(source.id)!;
       const continuation = continuationModel(latest, this.dependencies.runs());
       const prompt = visiblePrompt(title, entry.job.id);
@@ -315,6 +320,8 @@ export class SessionCompactions {
         ...(continuation.model ? { model: continuation.model } : {}), ...(continuation.effort ? { effort: continuation.effort } : {}),
       }, { ...admission, instructions: { text: startInstructions({ title, id: latest.id }, summary), required: true }, createFolder: false,
         ...(this.dependencies.untrusted?.(latest) ? { untrustedInput: true } : {}),
+        // A controller's sharing is read again as the very last wait before `validate` judges it.
+        ...(admission.origin?.controllerId && this.dependencies.remote ? { refresh: () => this.dependencies.remote!.prepare(latest) } : {}),
         // Runs right before the session is registered, after every wait in creating it.
         validate: () => {
           admission.validate?.();
@@ -334,10 +341,12 @@ export class SessionCompactions {
         this.settle(source.id, true);
         await this.save();
         const made = this.attempts.get(source.id);
-        if (made?.state === 'done' && made.newSessionId) { this.update(entry, { state: 'done', newSessionId: made.newSessionId }); return; }
+        // One that cannot carry the work (its first turn failed) is no result; a new compaction may replace it.
+        if (made?.state === 'done' && made.newSessionId && this.usable(made.newSessionId)) { this.update(entry, { state: 'done', newSessionId: made.newSessionId }); return; }
       }
       const reason = stop === 'closed' ? 'Tower 실행 워커가 바뀌어 압축을 멈췄습니다. 새 세션은 만들지 않았습니다. 다시 시도하세요.'
-        : stop === 'timeout' ? '압축이 제한 시간(30분) 안에 끝나지 않아 중단했습니다. 새 세션은 만들지 않았습니다.' : message(error);
+        : stop === 'held' ? 'Tower 실행 워커 업데이트로 압축을 멈췄습니다. 새 세션은 만들지 않았습니다. 업데이트가 끝난 뒤 다시 시도하세요.'
+        : stop === 'timeout' ? '압축이 제한 시간 안에 끝나지 않아 중단했습니다. 새 세션은 만들지 않았습니다.' : message(error);
       this.update(entry, { state: 'failed', error: reason, progress: undefined });
     } finally { clearTimeout(timer); }
   }

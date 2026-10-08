@@ -439,6 +439,8 @@ export interface Snapshot {
   autoPrompts?: AutoPromptJob[];
   /** Absent while the execution worker predates triggers. */
   triggers?: TriggerOverview;
+  /** This computer's execution worker compacts conversations (absent while an older one awaits replacement). */
+  compaction?: true;
   /** While the worker runs another build: whether it will hand over by itself. */
   runnerUpdate?: 'automatic' | 'manual';
   /** The owner asked to update now: running turns are wrapping up until `deadline`, then the worker switches. */

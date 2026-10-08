@@ -4,7 +4,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Run, Session, SessionCompaction } from '../../../shared/types.js';
 import { SessionContextIcon } from '../../../client/src/sessions/SessionContextIcon.js';
-import { CompactButton, CompactionStatus, compactBlock } from '../../../client/src/chat/SessionCompaction.js';
+import { CompactButton, CompactionStatus, compactBlock, followRead } from '../../../client/src/chat/SessionCompaction.js';
 import { getLanguage, setLanguage } from '../../../client/src/i18n/i18n.js';
 
 const originalLanguage = getLanguage();
@@ -47,8 +47,8 @@ test('the compact button says why it is off, and the worker refusals it mirrors'
     [compactBlock(session({ creationPending: true }), [], ok), /첫 응답이 끝난 뒤/],
     [compactBlock(session({ master: true }), [], ok), /하위 세션/],
     [compactBlock(session({ messageCount: 0 }), [], ok), /압축할 대화가 없습니다/],
-    [compactBlock(session({ status: 'working' }), [], ok), /끝난 뒤/],
-    [compactBlock(session(), [running], ok), /끝난 뒤/],
+    [compactBlock(session({ status: 'working' }), [], ok), /끝나거나 취소된 뒤/],
+    [compactBlock(session(), [running], ok), /끝나거나 취소된 뒤/],
   ] as const) assert.match(blocked ?? '', expected);
   const off = renderToStaticMarkup(createElement(CompactButton, { job: null, busy: false, blocked: '압축할 대화가 없습니다.', onStart() {} }));
   assert.match(off, /disabled=""/);
@@ -77,4 +77,12 @@ test('the status line follows a compaction: progress with cancel, the result wit
   assert.match(status({ error: '실행 워커가 아직 새 버전으로 바뀌지 않아 세션을 압축할 수 없습니다. 진행 중인 작업이 끝나면 바뀝니다.' }), /role="alert"/);
   setLanguage('en');
   assert.match(status({ job: job({ state: 'reading' }), followed: true }), /Compact session · Reading the conversation/);
+});
+
+test('a compaction this page follows is lost when the worker answers with none or another', () => {
+  assert.equal(followRead(undefined, null), 'none');
+  assert.equal(followRead(undefined, job({ id: 'old', state: 'done' })), 'none');
+  assert.equal(followRead('j1', job({ id: 'j1', state: 'summarizing' })), 'same');
+  assert.equal(followRead('j1', null), 'lost');
+  assert.equal(followRead('j1', job({ id: 'earlier', state: 'done' })), 'lost', 'a replaced worker knows only the earlier compaction');
 });

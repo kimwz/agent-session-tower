@@ -23,7 +23,7 @@ import { SessionTitleStore } from '../stores/session-titles.js';
 import { WorktreeJanitor } from '../worktrees/janitor.js';
 import { openCodexBridgeRun } from './codex-bridge.js';
 import { RunManager, type RunAdmission } from './manager.js';
-import { withoutMasterFolder } from './subscription.js';
+import { inMasterFolder, withoutMasterFolder } from './subscription.js';
 import { parseRunOrigin } from './origin.js';
 import { autoUpdateEnabled, ToolUpdates } from '../updates/tools.js';
 import { defaultStateDir } from '../state-dir.js';
@@ -759,7 +759,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     sessions.on('change', () => tasks.changed());
     tasks.changed();
     // A conversation compacted on the owner's request into a new session of the same model and effort.
-    const compactions = new SessionCompactions({ stateDir, session: id => runs.getSession(id), runs: () => runs.list(),
+    // The master's conversation is looked up here without its mark; marked, the shared rule refuses it.
+    const compactions = new SessionCompactions({ stateDir, session: id => { const found = runs.getSession(id); return found && inMasterFolder(stateDir, found.cwd) ? { ...found, master: true } : found; }, runs: () => runs.list(),
       history: (session, before, limit) => sessions.detail(runs.nativeSessionId(session.id), before, limit, { previousUser: false, fullText: true }),
       model: (request, options) => runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs }),
       create: (input, admission) => runs.create(input, admission),
@@ -1033,8 +1034,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       delegated: run => Boolean(run.origin?.workflowId) && !coordinators().has(run.sessionId),
       releaseIntake: () => { slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); tasks.resume(); compactions.release(); worktrees.resume(); reviewer.release(); },
       holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); publicAgents.hold(); skills.pause(); tasks.pause(); compactions.hold(); worktrees.pause(); reviewer.hold(); },
-      quiesce: async () => { await retention?.service.quiesce(); await temporary.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); paused = true; secrets.pause(); tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); tasks.pause(); worktrees.pause(); reviewer.hold(); await reviewer.flush(); permissions.pause(); await Promise.all([secrets.flush(), worktrees.flush(), tasks.flush(), compactions.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
-      resume: () => { retention?.service.resume(); temporary.resume(); runs.resumeAttachmentCleanup(); autoPrompts.resumeAttachmentCleanup(); paused = false; secrets.resume(); tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); tasks.resume(); worktrees.resume(); permissions.resume(); reviewer.release(); sessions.resume(); },
+      quiesce: async () => { compactions.hold(); await retention?.service.quiesce(); await temporary.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); paused = true; secrets.pause(); tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); tasks.pause(); worktrees.pause(); reviewer.hold(); await reviewer.flush(); permissions.pause(); await Promise.all([secrets.flush(), worktrees.flush(), tasks.flush(), compactions.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
+      resume: () => { compactions.release(); retention?.service.resume(); temporary.resume(); runs.resumeAttachmentCleanup(); autoPrompts.resumeAttachmentCleanup(); paused = false; secrets.resume(); tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); tasks.resume(); worktrees.resume(); permissions.resume(); reviewer.release(); sessions.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
       onHandedOff: () => { retention?.service.stop(); void temporary.close(); clearInterval(secretExpiry); secrets.close(); stopTelling(); void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); void tasks.close(); void compactions.close(); worktrees.close(); reviewer.close(); clearInterval(expiryTimer); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     await permissions.reconcileNotifications().catch(error => console.error(`Permission decisions did not recover: ${error instanceof Error ? error.message : String(error)}`));

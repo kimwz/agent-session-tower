@@ -53,6 +53,7 @@ async function setup(t: test.TestContext, options: Setup = {}) {
     },
     model: async request => { requests.push(request); return options.answer ? options.answer(request, requests.length - 1) : SUMMARY; },
     create: async (input, admission) => {
+      await admission.refresh?.();
       admission.validate?.();
       const id = `claude:new-${created.length}`;
       created.push({ input, admission });
@@ -136,6 +137,7 @@ test('the new session runs with what the latest answer ran with: the native reco
   const unknown = session('claude:src', { model: undefined, effort: undefined, lastRequestAt: at(10) });
   assert.deepEqual(continuationModel(unknown, [run({ model: 'opus', effort: 'max', finishedAt: at(6) })]), { provider: 'claude', modelSource: 'default', effortSource: 'default' });
   assert.deepEqual(continuationModel(unknown, [run({ model: 'opus', effort: 'max', finishedAt: at(11) })]), { provider: 'claude', model: 'opus', effort: 'max', modelSource: 'lastRun', effortSource: 'lastRun' });
+  assert.deepEqual(continuationModel(unknown, [run({ model: 'opus', effort: 'max', finishedAt: at(11), status: 'cancelled' })]), { provider: 'claude', modelSource: 'default', effortSource: 'default' }, 'a request that never answered says nothing');
   // The context variant the request named is kept with the observed model.
   assert.equal(continuationModel(session('claude:src', { lastRequestAt: at(10) }), [run({ model: 'claude-opus-5-5[1m]', finishedAt: at(11) })]).model, 'claude-opus-5-5[1m]');
 });
@@ -430,4 +432,39 @@ test('a worker closing mid-compaction ends it without creating anything', async 
   assert.match(job.error!, /실행 워커가 바뀌어/);
   assert.equal(f.created.length, 0);
   assert.throws(() => f.service.start('claude:src', {}, OWNER), /실행 워커를 바꾸는 중/);
+});
+
+test('a forced update stops a compaction still summarizing, and none can begin creating its session after', async t => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const f = await setup(t, { answer: async () => { await gate; return SUMMARY; } });
+  f.service.start('claude:src', {}, OWNER);
+  await until(() => f.requests.length === 1);
+  f.service.hold();
+  release();
+  const job = await f.settle();
+  assert.equal(job.state, 'failed');
+  assert.match(job.error!, /업데이트로 압축을 멈췄습니다/);
+  assert.equal(f.created.length, 0);
+  assert.equal(f.service.creating(), false);
+});
+
+test("a controller's sharing is read again as the last wait before the session is registered", async t => {
+  const order: string[] = [];
+  const f = await setup(t, { deps: {
+    remote: { prepare: async () => { order.push('prepare'); }, visible: () => { order.push('visible'); return true; } },
+    create: async (input, admission) => { order.push('create'); await admission.refresh?.(); order.push('validate'); admission.validate?.(); const made = session('claude:ok'); f.sessions.set(made.id, made); return { session: made }; },
+  } });
+  f.service.start('claude:src', {}, { origin: { kind: 'owner', controllerId: 'ctrl' }, requestId: 'r' });
+  assert.equal((await f.settle()).state, 'done');
+  assert.deepEqual(order.slice(order.indexOf('create')), ['create', 'prepare', 'validate', 'visible']);
+});
+
+test("a finished compaction whose session cannot carry the work is not offered on the original's page", async t => {
+  const f = await setup(t);
+  f.service.start('claude:src', {}, OWNER);
+  const done = await f.settle();
+  assert.equal(f.service.get('claude:src')?.id, done.id);
+  f.sessions.delete(done.newSessionId!);
+  assert.equal(f.service.get('claude:src'), undefined);
 });

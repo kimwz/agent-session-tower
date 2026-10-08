@@ -144,8 +144,9 @@ export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = 
   useLayoutEffect(() => { if (approvalKey && runControls.current) runControls.current.scrollTop = 0; }, [approvalKey]);
   const runProjection = useMemo(() => matchChatRuns(detail?.messages || emptyMessages, currentRuns, sessionId), [detail?.messages, currentRuns, sessionId]);
   const contextDescription = useId();
-  const compaction = useSessionCompaction(sessionId, token, reachable, onNavigate);
-  const compactBlocked = compactBlock(current, currentRuns, { reachable, token, supported: host ? !!host.compaction : compactionReady });
+  const compactionSupported = host ? !!host.compaction : compactionReady;
+  const compaction = useSessionCompaction(sessionId, token, reachable, compactionSupported, onNavigate);
+  const compactBlocked = compactBlock(current, currentRuns, { reachable, token, supported: compactionSupported });
   const scrollToBottom = useCallback(() => { followRef.current = true; setFollowing(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'smooth' }); }, []);
 
   async function loadOlder() {

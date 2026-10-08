@@ -31,6 +31,8 @@ export interface BuiltinRole {
   follow?: boolean;
   /** Providers the call can run on; both when absent. */
   providers?: readonly ModelProvider[];
+  /** The initial Claude model is a full ID checked against Claude Code, which lists only aliases. */
+  verifiedClaudeModel?: true;
   initial: RoleSetting;
 }
 
@@ -53,7 +55,7 @@ export const BUILTIN_ROLES = [
   { id: 'publicAgents.judge', kind: 'auto', label: '공개 에이전트 판단', description: '방문자 대화 접수, 요약, 요청·결과 검토를 합니다.', follow: true, initial: follow() },
   { id: 'sessions.summarizer', kind: 'auto', label: '세션 작업 요약', description: '턴이 끝날 때마다 세션의 작업 제목과 단계를 요약합니다.', initial: { provider: 'claude', claude: { model: 'haiku', effort: EFFORT_OFF }, codex: { model: 'gpt-5.6-terra' } } },
   // Claude Haiku 5.5 by its pinned ID, so a later move of the `haiku` alias never changes it unasked.
-  { id: 'sessions.compactor', kind: 'auto', label: '세션 압축', description: '압축 버튼을 누르면 세션 전체를 읽고 이어갈 내용을 요약해 새 세션을 엽니다.', initial: { provider: 'claude', claude: { model: 'claude-haiku-5-5' }, codex: { model: 'gpt-5.6-terra' } } },
+  { id: 'sessions.compactor', kind: 'auto', label: '세션 압축', description: '압축 버튼을 누르면 세션 전체를 읽고 이어갈 내용을 요약해 새 세션을 엽니다.', verifiedClaudeModel: true, initial: { provider: 'claude', claude: { model: 'claude-haiku-5-5' }, codex: { model: 'gpt-5.6-terra' } } },
   { id: 'voice.firstReply', kind: 'auto', label: '음성 첫 답변', description: '음성으로 말하면 바로 짧게 답합니다.', providers: ['claude'], initial: { provider: 'claude', claude: { model: 'haiku', effort: EFFORT_OFF }, codex: {} } },
   { id: 'master.session', kind: 'start', label: '마스터 에이전트', description: '마스터 에이전트를 시작할 때 씁니다.', initial: cliDefault('claude') },
   { id: 'master.worker', kind: 'start', label: '마스터 작업 에이전트', description: '마스터가 새 작업 세션을 열 때 생략한 모델 선택에 적용됩니다. 기존 세션은 유지합니다.', initial: { provider: 'codex', claude: {}, codex: { model: 'gpt-6.1-sol' } } },

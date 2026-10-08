@@ -1,22 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowRight, LoaderCircle, Shrink, Square, TriangleAlert, X } from 'lucide-react';
 import type { ContinuationSource, Run, Session, SessionCompaction } from '../../../shared/types';
-import { COMPACTION_ACTIVE, compactionRefusal, type CompactionRefusal } from '../../../shared/compaction';
+import { COMPACTION_ACTIVE, REFUSAL_MESSAGES, compactionRefusal } from '../../../shared/compaction';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { api } from '../common/lib';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
-import { nodeHeaders, nodeOf, pathFor, scopedId, settleRequest } from '../remote/scope';
+import { nodeHeaders, nodeOf, pathFor, scopedId } from '../remote/scope';
 
 const POLL_MS = 1_500;
 const ACTIVE = COMPACTION_ACTIVE;
 export const compactionActive = (job: SessionCompaction | null | undefined) => !!job && ACTIVE.has(job.state);
-const REFUSALS: Record<CompactionRefusal, string> = {
-  helper: '하위 세션은 압축할 수 없습니다.',
-  creating: '세션을 만드는 중입니다. 첫 응답이 끝난 뒤 압축할 수 있습니다.',
-  notResumable: '이어서 작업할 수 없는 세션은 압축할 수 없습니다.',
-  empty: '압축할 대화가 없습니다.',
-  busy: '작업 중이거나 대기·예약된 요청이 있는 세션은 끝난 뒤 압축할 수 있습니다.',
-};
+
+/**
+ * Whether a read still shows the compaction this page follows: `lost` when the worker answers with none or another
+ * (a worker replaced midway knows only the conversation's earlier compaction, if any).
+ */
+export function followRead(followed: string | undefined, compaction: SessionCompaction | null): 'none' | 'same' | 'lost' {
+  if (!followed) return 'none';
+  return compaction?.id === followed ? 'same' : 'lost';
+}
 
 /** Why compacting cannot start now, or undefined: the worker's own rule (shared/compaction.ts), said on the button. */
 export function compactBlock(session: Session | undefined, runs: readonly Run[], options: { reachable: boolean; token: string; supported: boolean }): string | undefined {
@@ -24,14 +26,14 @@ export function compactBlock(session: Session | undefined, runs: readonly Run[],
   if (!options.reachable || !options.token) return t('Tower에 연결되면 압축할 수 있습니다.');
   if (!session) return t('대화를 불러오는 중입니다.');
   const refusal = compactionRefusal(session, runs);
-  return refusal && t(REFUSALS[refusal]);
+  return refusal && t(REFUSAL_MESSAGES[refusal]);
 }
 
 /**
  * The conversation's compaction as the page follows it: read when the conversation opens and while one runs. Only a
  * compaction this page started (or saw running) moves the page to the new session when it is made.
  */
-export function useSessionCompaction(sessionId: string, token: string, connected: boolean, onNavigate: (id: string) => void) {
+export function useSessionCompaction(sessionId: string, token: string, connected: boolean, supported: boolean, onNavigate: (id: string) => void) {
   const [job, setJob] = useState<SessionCompaction | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState<'' | 'start' | 'cancel'>('');
@@ -44,7 +46,7 @@ export function useSessionCompaction(sessionId: string, token: string, connected
   useEffect(() => { current.current = sessionId; setJob(null); setError(''); setBusy(''); followed.current = undefined; }, [sessionId]);
 
   useEffect(() => {
-    if (!connected) return;
+    if (!connected || !supported) return;
     let timer: number | undefined;
     let stopped = false;
     const read = async () => {
@@ -52,7 +54,7 @@ export function useSessionCompaction(sessionId: string, token: string, connected
         const { compaction } = await api<{ compaction: SessionCompaction | null }>(pathFor(sessionId, id => `/api/sessions/${encodeURIComponent(id)}/compaction`));
         if (stopped) return;
         // A compaction followed here that the worker no longer knows ended with a worker replaced midway.
-        if (!compaction && followed.current) { followed.current = undefined; setJob(null); setError(t('실행 워커가 바뀌어 압축이 중단되었습니다. 새 세션은 만들지 않았습니다. 다시 시도하세요.')); return; }
+        if (followRead(followed.current, compaction) === 'lost') { followed.current = undefined; setJob(null); setError(t('실행 워커가 바뀌어 압축이 중단되었습니다. 새 세션은 만들지 않았습니다. 다시 시도하세요.')); return; }
         setJob(compaction);
         // A read that failed while following is over once one succeeds again.
         if (followed.current) setError('');
@@ -65,7 +67,7 @@ export function useSessionCompaction(sessionId: string, token: string, connected
     };
     void read();
     return () => { stopped = true; window.clearTimeout(timer); };
-  }, [sessionId, connected, watch]);
+  }, [sessionId, connected, supported, watch]);
 
   useEffect(() => {
     if (job?.state !== 'done' || !job.newSessionId || followed.current !== job.id) return;
@@ -77,12 +79,11 @@ export function useSessionCompaction(sessionId: string, token: string, connected
     const id = sessionId;
     if (!token || busy) return;
     setBusy('start'); setError('');
-    const body = '{}';
     try {
+      // Each click is a request of its own: the worker answers a second one with the compaction already running or done.
       const { compaction } = await api<{ compaction: SessionCompaction }>(pathFor(id, local => `/api/sessions/${encodeURIComponent(local)}/compaction`), {
-        method: 'POST', headers: nodeHeaders(nodeOf(id), { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, `compaction:${id}`, body), body,
-      }).catch(cause => { settleRequest(nodeOf(id), `compaction:${id}`, cause); throw cause; });
-      settleRequest(nodeOf(id), `compaction:${id}`);
+        method: 'POST', headers: nodeHeaders(nodeOf(id), { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }), body: '{}',
+      });
       if (current.current !== id) return;
       followed.current = compaction.id;
       setJob(compaction);
