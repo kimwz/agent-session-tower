@@ -228,7 +228,7 @@ export class VoiceReader {
       stream.full = true;
     }
     const model = this.host.model();
-    stream.tag = streamTone(plain, model, stream.kind, stream.tag);
+    stream.tag = streamTone(plain, stream.kind, stream.tag);
     this.timings.mark(stream.key, 'sentence');
     segment.parts.push(...voicedChunkPairs(plain, model, stream.tag).map(part => ({ ...part, model })));
     segment.text = `${segment.text} ${plain}`.trim();

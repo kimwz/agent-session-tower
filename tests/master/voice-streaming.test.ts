@@ -71,11 +71,11 @@ test('words are taken whole as they are written: after a sentence or a line, nev
 
 test('a streamed answer keeps one tone: set by its first words, calm once serious words come, and never brighter again', () => {
   const model = 'eleven_v3_conversational';
-  assert.equal(streamTone('배포가 끝났어요.', model, 'answer'), VOICE_TONES.excited);
-  assert.equal(streamTone('다음 작업도 볼게요.', model, 'answer', VOICE_TONES.excited), VOICE_TONES.excited);
-  assert.equal(streamTone('그런데 테스트 하나가 실패했어요.', model, 'answer', VOICE_TONES.excited), '');
-  assert.equal(streamTone('좋은 소식도 있어요.', model, 'answer', ''), '', 'calm stays');
-  assert.equal(streamTone('안녕하세요.', 'eleven_flash_v2_5', 'answer'), '', 'no tags for models that would read them');
+  assert.equal(streamTone('배포가 끝났어요.', 'answer'), VOICE_TONES.excited);
+  assert.equal(streamTone('다음 작업도 볼게요.', 'answer', VOICE_TONES.excited), VOICE_TONES.excited);
+  assert.equal(streamTone('그런데 테스트 하나가 실패했어요.', 'answer', VOICE_TONES.excited), '');
+  assert.equal(streamTone('좋은 소식도 있어요.', 'answer', ''), '', 'calm stays');
+  assert.deepEqual(voicedChunk('안녕하세요.', 'eleven_flash_v2_5', VOICE_TONES.bright), ['안녕하세요.'], 'no tags for models that would read them');
   assert.deepEqual(voicedChunk('첫 문장입니다. [주의] 둘째.', model, VOICE_TONES.bright), ['[cheerfully] 첫 문장입니다. (주의) 둘째.']);
   const parts = voicedChunk(`${'가'.repeat(300)}. ${'나'.repeat(300)}.`, model, '');
   assert.equal(parts.length, 2, 'parts stay within their size, split between sentences');
@@ -469,6 +469,23 @@ test('a part written for v3 keeps v3 when the model changes to Eleven v4 Turbo w
   const v4 = sent.filter(item => item.model === 'eleven_v4_turbo');
   assert.ok(v4.some(item => item.text === '바꾼 뒤에 쓴 문장입니다.'));
   assert.ok(v4.every(item => !/^\[/.test(item.text)), 'nothing tagged is sent to v4');
+});
+
+test('an answer that starts on Eleven v4 Turbo and goes on in v3 gets v3\'s tone for what is written after the change', async t => {
+  const h = await harness(t, { page: { answer: () => undefined } });
+  h.on();
+  const heard = new Set<string>();
+  const play = () => { for (const say of h.says()) if (say.kind === 'answer' && !heard.has(say.id)) { heard.add(say.id); h.voice.voicePlayed({ session: h.current(), id: say.id, result: 'played', startedMs: 5 }); } };
+  const { run } = await h.ask('알려줘');
+  h.write(run, 'm1:0', '먼저 쓴 설명입니다.', true);
+  await until(() => h.says().find(say => say.kind === 'answer'));
+  await h.settings.update({ voice: { model: 'eleven_v3_conversational' } });
+  h.write(run, 'm2:0', '바꾼 뒤에 쓴 설명입니다.', true);
+  h.finish(run);
+  await until(() => { play(); const entry = h.room.recent(50).find(item => item.data.kind === 'master' && /바꾼 뒤에 쓴/.test(item.data.text)); return entry && h.speakOf(entry)?.state === 'played' || undefined; }, 20_000);
+  const sent = h.labs.speeches.map((text, index) => ({ text, model: h.labs.models[index] }));
+  assert.ok(sent.some(item => item.model === 'eleven_v4_turbo' && item.text === '먼저 쓴 설명입니다.'));
+  assert.ok(sent.some(item => item.model === 'eleven_v3_conversational' && item.text === '[cheerfully] 바꾼 뒤에 쓴 설명입니다.'), 'v3 keeps the tone the answer had');
 });
 
 test('a long streamed answer ends at the limit with a pointer to the screen', async t => {
@@ -1195,14 +1212,16 @@ test('paired voice parts keep original brackets, existing speech partitions and 
     assert.ok(pairs.every(part => part.text.includes('[') || part.text === VOICE_REST));
     assert.ok(pairs.at(-1)!.text.endsWith(VOICE_REST));
     const chunk = original.slice(0, 950);
-    const tag = streamTone(chunk, model, 'answer');
+    const tag = streamTone(chunk, 'answer');
     const chunks = voicedChunkPairs(chunk, model, tag);
     assert.deepEqual(chunks.map(part => part.speech), voicedChunk(chunk, model, tag));
     assert.equal(chunks.map(part => part.text).join(' '), chunk.trim());
     assert.ok(chunks.every(part => part.text.length <= 500));
     for (const part of chunks) {
       const expected = model === 'eleven_flash_v2_5' ? part.text : part.text.replaceAll('[', '(').replaceAll(']', ')');
-      assert.equal(part.speech, tag ? `${tag} ${expected}` : expected);
+      // The answer's tone is kept for every model, but only a model Tower tones is given it.
+      const applied = model === 'eleven_flash_v2_5' ? '' : tag;
+      assert.equal(part.speech, applied ? `${applied} ${expected}` : expected);
     }
   }
 });

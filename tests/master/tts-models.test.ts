@@ -33,15 +33,16 @@ test('Eleven v4 Turbo gets no tone tag on any path, yet still reads brackets in 
   const parts = voicedPartPairs(answer, v4, 'answer');
   assert.ok(parts.length > 1);
   assert.ok(parts.every(part => part.speech === part.text), 'what is sent is exactly what is shown');
-  assert.equal(streamTone(answer, v4, 'answer'), '');
-  assert.equal(streamTone('다음도 끝났어요.', v4, 'answer', '[cheerfully]'), '', 'a tone carried over from before is dropped on v4');
+  // Read while written: the answer keeps its tone, but v4 is never given it as a tag.
+  assert.equal(streamTone(answer, 'answer'), '[excited]');
+  assert.ok(voicedChunkPairs(answer, v4, '[excited]').every(part => part.speech === part.text));
   // The models before it are told the tone as before.
   for (const v3 of ['eleven_v3_conversational', 'eleven_v3']) {
     assert.equal(voiced('네.', v3, 'ack'), '[cheerfully] 네.');
     assert.equal(voiced('배포까지 끝났어요!', v3, 'report'), '[excited] 배포까지 끝났어요!');
     assert.equal(voiced('[WIP] 브랜치 두 개예요.', v3, 'answer'), '[cheerfully] (WIP) 브랜치 두 개예요.');
     assert.ok(voicedPartPairs(answer, v3, 'answer').every(part => part.speech.startsWith('[excited] ')));
-    assert.equal(streamTone(answer, v3, 'answer'), '[excited]');
+    assert.ok(voicedChunkPairs(answer, v3, streamTone(answer, 'answer')).every(part => part.speech.startsWith('[excited] ')));
   }
   assert.equal(voiced('[WIP] 네.', 'eleven_flash_v2_5', 'answer'), '[WIP] 네.', 'flash neither tags nor converts');
 });
