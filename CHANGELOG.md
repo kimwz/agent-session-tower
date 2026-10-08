@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.116.1] - 2026-10-08
+
+### Fixed
+- The context ring on the chat header's icon is thinner and no longer cut off at its top, bottom and sides.
+
 ## [1.116.0] - 2026-10-08
 
 ### Changed
