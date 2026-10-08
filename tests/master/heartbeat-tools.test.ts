@@ -24,6 +24,7 @@ async function fixture(t: test.TestContext) {
   const targetRun: Run = { id: 'worker-run', sessionId: target.id, createdAt: at, status: 'running', prompt: 'old work', output: '' };
   let denied = false, stopped = false, untrusted = false;
   let newer = false, nativeRequest: string | undefined, uncertain = false, nativeId = 'u';
+  const extraRuns: Run[] = [];
   let remote: string | undefined;
   let readHook: ((path: string) => Promise<void>) | undefined;
   const posts: Array<Record<string, unknown>> = [], followed: unknown[] = [];
@@ -31,7 +32,7 @@ async function fixture(t: test.TestContext) {
   const context = async (token: string) => await handleMcpRequest({ capabilities: registry, run: id => id === run.id ? run : undefined, heartbeatAllowed: () => !untrusted }, token, { method: 'heartbeat/context' }) as HeartbeatToolContext;
   const tower = { call: async (method: string, path: string, body: unknown, options: { gate?: () => Promise<boolean>; headers?: Record<string, string> }) => {
     if (method === 'GET' || path.endsWith('/permissions.overview')) await readHook?.(path);
-    if (path.endsWith('/snapshot')) return { state: 'succeeded', body: { sessions: [target], runs: [targetRun, ...(newer ? [{ ...targetRun, id: 'unrelated-new-run', createdAt: new Date(Date.parse(at) + 5000).toISOString() }] : [])] } };
+    if (path.endsWith('/snapshot')) return { state: 'succeeded', body: { sessions: [target], runs: [targetRun, ...extraRuns, ...(newer ? [{ ...targetRun, id: 'unrelated-new-run', createdAt: new Date(Date.parse(at) + 5000).toISOString() }] : [])] } };
     if (path.includes('?limit=')) return { state: 'succeeded', body: { session: target, messages: [{ id: nativeId, role: 'user', timestamp: at, text: nativeRequest ?? targetRun.prompt }, { id: 'a', role: 'assistant', timestamp: at, text: 'x'.repeat(2000) }] } };
     if (path.endsWith('/heartbeat-protection')) return { state: 'succeeded', body: { protected: denied } };
     if (path.endsWith('/permissions.overview')) return { state: 'succeeded', body: { result: { requests: denied ? [{ sessionId: target.id, status: 'denied', decidedBy: 'owner' }] : [] } } };
@@ -41,7 +42,7 @@ async function fixture(t: test.TestContext) {
   const master = { heartbeatTasks: () => [{ id: 'task', runId: targetRun.id, sessionId: target.id, node: remote }], heartbeatStopped: () => stopped, started: async (...args: unknown[]) => { followed.push(args); } } as unknown as MasterSession;
   const options = { stateDir: dir, dataDir: dir, tower, settings, master, context, status: () => ({ actions: [{ checkId: heartbeat.checkId, runId: 'master-run', taskIds: ['task'], delivery: 'sent' as const, at, cause: '', evidence: '', recommendation: '' }] }) };
   const tools = new HeartbeatTools(options); await tools.start(); t.after(() => tools.close());
-  return { dir, run, onRead: (hook: typeof readHook) => { readHook = hook; }, target, targetRun, newer: () => { newer = true; }, native: () => { nativeRequest = 'Owner has started another task'; }, nativeId: () => { nativeId = 'new-u'; }, uncertain: () => { uncertain = true; }, registry, capability, context, settings, tools, options, posts, followed, denied: () => { denied = true; }, stopped: () => { stopped = true; }, untrusted: () => { untrusted = true; }, remote: () => { remote = 'a'.repeat(32); heartbeat.targets![0].node = remote; } };
+  return { dir, run, extraRuns, onRead: (hook: typeof readHook) => { readHook = hook; }, target, targetRun, newer: () => { newer = true; }, native: () => { nativeRequest = 'Owner has started another task'; }, nativeId: () => { nativeId = 'new-u'; }, uncertain: () => { uncertain = true; }, registry, capability, context, settings, tools, options, posts, followed, denied: () => { denied = true; }, stopped: () => { stopped = true; }, untrusted: () => { untrusted = true; }, remote: () => { remote = 'a'.repeat(32); heartbeat.targets![0].node = remote; } };
 }
 test('only verified running local heartbeat provenance grants two narrow tools; generic agent, forged prompt, remote and untrusted turns do not', async t => {
   const h = await fixture(t); const session = { ...h.target, id: h.run.sessionId, cwd: join(h.dir, MASTER_FOLDER) };
@@ -130,4 +131,12 @@ test('managed update and permission continuations retain narrow heartbeat author
   h.run.heartbeatRootRunId = 'forged-root';
   const capability = h.registry.issue({ kind: 'caller-run', runId: h.run.id, sessionId: h.run.sessionId });
   await assert.rejects(h.tools.call('heartbeat_read', { taskId: 'task' }, capability), /authority/);
+});
+
+test('a cancelled continuation cannot hide its stopped assignee ancestor from narrow corrective tools', async t => {
+  const h = await fixture(t); h.targetRun.ownerStopped = true; h.targetRun.status = 'cancelled';
+  const resumed: Run = { ...h.targetRun, id: 'cancelled-resume', ownerStopped: undefined, createdAt: new Date(Date.parse(h.targetRun.createdAt) + 1000).toISOString(), scheduled: { at: h.targetRun.createdAt, afterRunId: h.targetRun.id, resume: 'permission' } };
+  h.extraRuns.push(resumed);
+  await assert.rejects(h.tools.call('heartbeat_correct', { taskId: 'task', prompt: 'Resume despite the stop' }, h.capability), /stopped/);
+  assert.equal(h.posts.length, 0);
 });

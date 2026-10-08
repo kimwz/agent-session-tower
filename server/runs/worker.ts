@@ -1,6 +1,7 @@
 import type { HeartbeatAdmission } from '../../shared/master.js';
 import { newWorkerSession } from '../models/worker.js';
 import { latestNativeUserMessage } from './native-user-message.js';
+import { heartbeatRunProtected } from './continuations.js';
 import { installLaunchShims, launchMarksDir } from '../sessions/launch-marks.js';
 import { finishedAutomationSessionIds } from '../../shared/automation-sessions.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -209,7 +210,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         const selected = corrective.targets?.find(item => !item.node && item.sessionId === targetSessionId);
         if (!target || !current || current.origin?.kind !== 'agent' || current.origin.controllerId || current.ownerStopped || current.approvals?.length
           || !selected || latest?.id !== selected.latestRunId || target.lastRequestAt !== selected.lastRequestAt
-          || latest?.ownerStopped || turns.some(run => (run.status === 'running' || run.status === 'queued') && run.approvals?.length)
+          || heartbeatRunProtected(turns, latest) || turns.some(run => (run.status === 'running' || run.status === 'queued') && run.approvals?.length)
           || !options.api || options.api.heartbeatBlocked([current.sessionId, target.id])) {
           throw new TowerError('forbidden', 'Heartbeat corrective target is unavailable or protected.', { disposition: 'not-admitted' });
         }

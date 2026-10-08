@@ -11,7 +11,7 @@ import type { TowerClient } from '../tower-tools/tower-client.js';
 import { apiTarget } from '../tower-tools/api-target.js';
 import type { MasterSession } from './session.js';
 import { heartbeatRequest } from './heartbeat-request.js';
-import { continuedRunById } from '../runs/continuations.js';
+import { continuedRunById, heartbeatRunProtected } from '../runs/continuations.js';
 import type { MasterSettingsStore } from './settings.js';
 
 /** A heartbeat recommendation grants exactly these operations on its selected existing assignments. */
@@ -70,11 +70,11 @@ export class HeartbeatTools {
     const trackedRun = tracked && continuedRunById(state.runs, tracked.currentRunId ?? tracked.runId);
     const effective = trackedRun?.steering?.state === 'delivered' ? state.runs.find(run => run.id === trackedRun.steering!.targetRunId) ?? trackedRun : trackedRun;
     if (!effective || (latest && latest.id !== trackedRun?.id && latest.id !== effective.id && latest.steering?.targetRunId !== effective.id)) throw new Error('A newer unrelated task owns this assignee.');
-    const request = await heartbeatRequest(state.runs, effective, history);
-    if (!request || (target.nativeRequestId && request.nativeRequestId !== target.nativeRequestId)) throw new Error('The current native request does not belong to the tracked assignment.');
-    if (!session || !history.session || session.closed || latest?.ownerStopped
+    if (!session || !history.session || session.closed || heartbeatRunProtected(state.runs, latest)
       || turns.some(run => (run.status === 'running' || run.status === 'queued') && run.approvals?.length)
       || (session.outcome === 'needsOwner' && session.messageCount === history.session.messageCount && session.lastMessage === history.session.lastMessage)) throw new Error('The selected assignee is stopped, unavailable or awaiting an owner decision.');
+    const request = await heartbeatRequest(state.runs, effective, history);
+    if (!request || (target.nativeRequestId && request.nativeRequestId !== target.nativeRequestId)) throw new Error('The current native request does not belong to the tracked assignment.');
     const protection = target.node
       ? await this.options.tower.call('GET', `${base}/sessions/${encodeURIComponent(target.sessionId)}/heartbeat-protection`, undefined, { write: false, signal, singleAttempt: true })
       : await this.options.tower.call('POST', '/api/v1/permissions.overview', { cwd: history.session.cwd }, { write: false, signal, singleAttempt: true });

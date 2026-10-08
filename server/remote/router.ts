@@ -1,5 +1,6 @@
 import type { PermissionOverview } from '../../shared/permissions.js';
 import { permissionProtected } from '../permissions/protection.js';
+import { heartbeatRunProtected } from '../runs/continuations.js';
 import type { AttachmentStore } from '../stores/attachments.js';
 import type { AttachmentUploads } from '../stores/attachment-uploads.js';
 import { chatImageReference, readChatImage, sendChatImage, withChatImages } from '../http/chat-images.js';
@@ -248,7 +249,7 @@ export function createRemoteRouter({ attachmentStores, attachmentUploads, backen
       if (!overview || !Array.isArray(overview.requests) || overview.lost) throw httpError(503, '세션 보호 상태를 확인할 수 없습니다.');
       const turns = backend.snapshot().runs.filter(run => run.sessionId === found.id);
       const latest = [...turns].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
-      const protectedState = Boolean(latest?.ownerStopped) || turns.some(run => (run.status === 'running' || run.status === 'queued') && Boolean(run.approvals?.length)) || permissionProtected(overview.requests, [found.id]);
+      const protectedState = heartbeatRunProtected(turns, latest) || turns.some(run => (run.status === 'running' || run.status === 'queued') && Boolean(run.approvals?.length)) || permissionProtected(overview.requests, [found.id]);
       await stillVisible(found.id);
       return json(res, 200, { protected: protectedState });
     }

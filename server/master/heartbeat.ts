@@ -5,7 +5,7 @@ import { MASTER_HEARTBEAT_HEADER, MASTER_HEARTBEAT_MARK, type HeartbeatAdmission
 import type { ResolvedModel } from '../../shared/models.js';
 import type { ChatMessage, Run, Session, SessionDetail, Snapshot } from '../../shared/types.js';
 import { runAutoPromptModel, type AutoPromptModelRequest } from '../auto-prompt/native.js';
-import { continuedRunById } from '../runs/continuations.js';
+import { continuedRunById, heartbeatRunProtected } from '../runs/continuations.js';
 import type { PermissionRequest } from '../../shared/permissions.js';
 import { resolveModel } from '../models/settings.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
@@ -58,8 +58,8 @@ function decision(value: unknown, candidates: Candidate[]): Decision {
 function latestRun(snapshot: Snapshot, id: string): Run | undefined {
   return snapshot.runs.filter(run => run.sessionId === id).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
 }
-function held(session: Session | undefined, runs: Run[]): boolean {
-  return !session || session.outcome === 'needsOwner' || runs.some(run => run.ownerStopped || run.approvals?.length);
+function held(session: Session | undefined, runs: Run[], allRuns: readonly Run[]): boolean {
+  return !session || session.outcome === 'needsOwner' || runs.some(run => heartbeatRunProtected(allRuns, run) || run.approvals?.length);
 }
 // Outcome is a web projection; detail and worker sessions do not contain it.
 function projectedSession(snapshot: Snapshot, session: Session): Session {
@@ -178,7 +178,7 @@ export class MasterHeartbeat {
         nativeRequestId = request.nativeRequestId;
       }
       // A missing/incomplete or protected session is not a target for corrective instructions.
-      if (!detail || held(session, [...(latest ? [latest] : []), ...state.runs.filter(entry => entry.sessionId === item.sessionId && (entry.status === 'running' || entry.status === 'queued'))]) || await this.protectedSession(session!, signal, item.node).catch(error => {
+      if (!detail || held(session, [...(latest ? [latest] : []), ...state.runs.filter(entry => entry.sessionId === item.sessionId && (entry.status === 'running' || entry.status === 'queued'))], state.runs) || await this.protectedSession(session!, signal, item.node).catch(error => {
         if (signal.aborted) throw error;
         this.unavailableCandidates++;
         return true;
@@ -209,7 +209,7 @@ export class MasterHeartbeat {
       if (!nodes.has(key)) nodes.set(key, await this.snapshot(signal, candidate.node));
       const snapshot = nodes.get(key);
       const session = snapshot?.sessions.find(item => item.id === candidate.sessionId);
-      if (!snapshot || held(session, snapshot.runs.filter(run => run.sessionId === candidate.sessionId && (run.id === latestRun(snapshot, candidate.sessionId!)?.id || run.status === 'running' || run.status === 'queued')))
+      if (!snapshot || held(session, snapshot.runs.filter(run => run.sessionId === candidate.sessionId && (run.id === latestRun(snapshot, candidate.sessionId!)?.id || run.status === 'running' || run.status === 'queued')), snapshot.runs)
         || nativeFingerprint(snapshot, candidate.sessionId!) !== candidate.nativeFingerprint
         || await this.protectedSession(session!, signal, candidate.node)) return false;
     }
@@ -243,7 +243,7 @@ export class MasterHeartbeat {
       const master = snapshot && masterDetail && projectedSession(snapshot, masterDetail.session);
       const runs = snapshot?.runs.filter(run => run.sessionId === settings.session!.sessionId) ?? [];
       const latest = snapshot && latestRun(snapshot, settings.session.sessionId);
-      if (!snapshot || held(master, latest ? [latest] : []) || master?.status === 'working' || runs.some(run => run.status === 'running' || run.status === 'queued' || run.approvals?.length)) { await end('skipped', 'Master busy, unavailable or awaiting approval.'); return; }
+      if (!snapshot || held(master, latest ? [latest] : [], snapshot.runs) || master?.status === 'working' || runs.some(run => run.status === 'running' || run.status === 'queued' || run.approvals?.length)) { await end('skipped', 'Master busy, unavailable or awaiting approval.'); return; }
       if (await this.protectedSession(master!, controller.signal)) { await end('skipped', 'Master awaiting a permission decision or owner refused.'); return; }
       const candidates = await this.candidates(snapshot, controller.signal);
       controller.signal.throwIfAborted();
@@ -276,7 +276,7 @@ export class MasterHeartbeat {
       controller.signal.throwIfAborted();
       const watermark: HeartbeatAdmission = { checkId: check.id, targets: selected.map(item => ({ taskId: item.id, sessionId: item.sessionId!, nativeRequestId: item.nativeRequestId, latestRunId: item.latestRunId, lastRequestAt: item.lastRequestAt, ...(item.node ? { node: item.node } : {}) })), sessionIds: [settings.session.sessionId, ...this.options.master.heartbeatTasks().filter(item => result.taskIds.includes(item.id) && !item.node).map(item => item.sessionId!).filter(Boolean)], updatedAt: master!.updatedAt, ...(master!.lastRequestAt ? { lastRequestAt: master!.lastRequestAt } : {}), ...(latest ? { latestRunId: latest.id } : {}) };
       if (!fresh || !currentMaster || hash([currentMaster.session.updatedAt, currentMaster.session.lastRequestAt, latestRun(fresh, settings.session.sessionId)?.id]) !== hash([watermark.updatedAt, watermark.lastRequestAt, watermark.latestRunId])
-        || held(projectedSession(fresh, currentMaster.session), fresh.runs.filter(run => run.sessionId === settings.session!.sessionId && (run.id === latestRun(fresh, settings.session!.sessionId)?.id || run.status === 'running' || run.status === 'queued')))
+        || held(projectedSession(fresh, currentMaster.session), fresh.runs.filter(run => run.sessionId === settings.session!.sessionId && (run.id === latestRun(fresh, settings.session!.sessionId)?.id || run.status === 'running' || run.status === 'queued')), fresh.runs)
         || currentMaster.session.status === 'working' || this.options.master.heartbeatStopped() || await this.protectedSession(currentMaster.session, controller.signal)) { await end('skipped', 'Master changed during inspection.'); return; }
       const freshCandidates = await this.candidates(fresh, controller.signal);
       controller.signal.throwIfAborted();

@@ -77,7 +77,7 @@ test('heartbeat provenance is refused by create and is preserved only by validat
 });
 
 test('actual worker RPC rechecks a corrective target watermark after async preparation', async t => {
-  for (const change of ['native request', 'latest run'] as const) {
+  for (const change of ['native request', 'latest run', 'ancestor stop'] as const) {
     const h = await fixture(t, true);
     const sessions = new SessionService({ codexHome: join(h.native.cwd, 'fixture-codex'), claudeHome: join(h.native.cwd, 'fixture-claude') });
     sessions.list = () => [h.native, h.target];
@@ -85,7 +85,10 @@ test('actual worker RPC rechecks a corrective target watermark after async prepa
     const parent: Run = { id: 'heartbeat-root', sessionId: h.native.id, prompt: h.prompt, output: '', status: 'running', createdAt: new Date().toISOString(),
       origin: { kind: 'agent' }, heartbeatRootRunId: 'heartbeat-root', heartbeat: { ...h.guard, targets: [{ taskId: 'task', sessionId: h.target.id }] } };
     const actual = h.manager.list.bind(h.manager);
-    const exposed = [parent];
+    const original: Run = { id: 'target-original', sessionId: h.target.id, prompt: 'target work', output: '', createdAt: new Date(Date.now() - 2000).toISOString(), status: 'cancelled' };
+    const continuation: Run = { ...original, id: 'target-continuation', createdAt: new Date(Date.now() - 1000).toISOString(), scheduled: { at: original.createdAt, afterRunId: original.id, resume: 'permission' } };
+    const exposed = [parent, ...(change === 'ancestor stop' ? [original, continuation] : [])];
+    if (change === 'ancestor stop') parent.heartbeat!.targets![0].latestRunId = continuation.id;
     h.manager.list = () => [...actual(), ...exposed];
     const capabilities = new CapabilityRegistry();
     const host = await startRunnerHost({ stateDir: h.native.cwd, sessions, runs: h.manager, capabilities, api: { heartbeatBlocked: () => false } as unknown as TowerApi });
@@ -97,8 +100,18 @@ test('actual worker RPC rechecks a corrective target watermark after async prepa
     const rejected = assert.rejects(pending, /protected/);
     await h.preparing;
     if (change === 'native request') h.target.lastRequestAt = new Date().toISOString();
+    else if (change === 'ancestor stop') original.ownerStopped = true;
     else exposed.push({ id: 'new-owner-task', sessionId: h.target.id, prompt: 'A different task', output: '', status: 'completed', createdAt: new Date().toISOString() });
     h.release(); await rejected;
     assert.equal(actual().length, 0, change);
   }
+});
+
+test('master heartbeat admission rejects a cancelled continuation hiding its stopped ancestor', async t => {
+  const h = await fixture(t);
+  const original: Run = { id: 'master-original', sessionId: h.native.id, prompt: 'owner work', output: '', createdAt: h.native.createdAt, status: 'cancelled', ownerStopped: true };
+  const continuation: Run = { ...original, id: 'master-resume', ownerStopped: undefined, createdAt: new Date(Date.parse(original.createdAt) + 1000).toISOString(), scheduled: { at: original.createdAt, afterRunId: original.id, resume: 'permission' } };
+  const actual = h.manager.list.bind(h.manager); h.manager.list = () => [...actual(), original, continuation];
+  await assert.rejects(h.manager.enqueue(h.native.id, h.prompt, {}, { origin: { kind: 'agent' }, heartbeat: { ...h.guard, latestRunId: continuation.id } }), /preconditions changed/);
+  assert.equal(actual().length, 0);
 });

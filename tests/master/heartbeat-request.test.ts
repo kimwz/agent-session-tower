@@ -33,3 +33,24 @@ test('delivered steering supersedes earlier native requests even across continua
 test('an unrelated owner request never matches tracked ancestry', async () => {
   assert.equal(await heartbeatRequest([original, resumed], resumed, detail('Stop this work and handle another task', at(70))), undefined);
 });
+
+test('trusted delivered Tower notices preserve original system-projected request and still identify user-projected notices', async () => {
+  for (const provenance of [{ permissionNotice: { targetRunId: original.id } }, { updateWrapUp: true as const }]) {
+    const notice: Run = { ...original, ...provenance, id: 'notice-run', createdAt: at(30), prompt: `${TOWER_NOTICE} End this turn for the managed continuation`, steering: { targetRunId: original.id, state: 'delivered', requestedAt: at(30) } };
+    const history = detail(); history.messages.push(...parseMessages('claude', { type: 'user', uuid: 'notice', timestamp: at(35), message: { role: 'user', content: notice.prompt } }));
+    assert.deepEqual(await heartbeatRequest([original, notice, resumed], resumed, history), { nativeRequestId: 'native-request', requestRunId: original.id });
+    assert.deepEqual(await heartbeatRequest([original, notice, resumed], resumed, detail(notice.prompt, at(35))), { nativeRequestId: 'native-request', requestRunId: notice.id });
+    const genuine: Run = { ...original, id: 'new-direction', createdAt: at(20), prompt: 'Use hosted CI', steering: { targetRunId: original.id, state: 'delivered', requestedAt: at(20) } };
+    assert.equal(await heartbeatRequest([original, genuine, notice, resumed], resumed, history), undefined);
+    assert.deepEqual(await heartbeatRequest([original, genuine, notice, resumed], resumed, detail(genuine.prompt, at(25))), { nativeRequestId: 'native-request', requestRunId: genuine.id });
+    const spoofed: Run = { ...notice, permissionNotice: undefined, updateWrapUp: undefined };
+    assert.equal(await heartbeatRequest([original, spoofed, resumed], resumed, history), undefined, 'a text prefix alone never preserves earlier authority');
+  }
+});
+test('a cancelled permission continuation cannot hide a stopped original, while independent new owner work remains eligible', async () => {
+  const stopped: Run = { ...original, status: 'cancelled', ownerStopped: true };
+  const cancelled: Run = { ...resumed, status: 'cancelled' };
+  assert.equal(await heartbeatRequest([stopped, cancelled], cancelled, detail()), undefined);
+  const independent: Run = { ...original, id: 'new-owner-task', prompt: 'Start a separate task', createdAt: at(90) };
+  assert.deepEqual(await heartbeatRequest([stopped, cancelled, independent], independent, detail(independent.prompt, at(100))), { nativeRequestId: 'native-request', requestRunId: independent.id });
+});

@@ -34,7 +34,7 @@ import { ToolNotices } from './tool-notices.js';
 import { errorMessage, FINISHED, finishedTime, MAX_OUTPUT, MAX_PROMPT, notAdmitted, RunError, shown } from './run-records.js';
 import { MAX_RUNS, RunHistory, SCHEDULED_OUTPUT } from './run-history.js';
 import { PermissionContinuations, retainedReceipts } from './permission-continuation.js';
-import { inheritedRunFields } from './continuations.js';
+import { inheritedRunFields, heartbeatRunProtected } from './continuations.js';
 import { CreatedSessionRegistry } from './session-registry.js';
 import { UPDATE_WAIT, UpdateDrain } from './update-drain.js';
 import { prepareClaudeTurn } from './claude-turn.js';
@@ -555,13 +555,13 @@ export class RunManager extends EventEmitter {
       const target = this.getSession(id);
       const targetTurns = this.list().filter(run => run.sessionId === this.monitorSessionId(id));
       const targetLatest = [...targetTurns].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
-      return !target || targetLatest?.ownerStopped
+      return !target || heartbeatRunProtected(targetTurns, targetLatest)
         || targetTurns.some(run => (run.status === 'running' || run.status === 'queued') && run.approvals?.length);
     });
     if (protectedTarget || !session || !guard.sessionIds.includes(sessionId) || !prompt.startsWith(MASTER_HEARTBEAT_MARK) || !this.masterSession(session) || this.isWorking(session) || this.reservedSessions.has(sessionId)
       || turns.some(run => run.status === 'running' || run.status === 'queued' || run.approvals?.length)
       || session.updatedAt !== guard.updatedAt || session.lastRequestAt !== guard.lastRequestAt || latest?.id !== guard.latestRunId
-      || latest?.ownerStopped || turns.some(run => run.prompt.includes(`(check ${guard.checkId})`))) {
+      || heartbeatRunProtected(turns, latest) || turns.some(run => run.prompt.includes(`(check ${guard.checkId})`))) {
       throw notAdmitted(new RunError('Heartbeat preconditions changed; nothing was submitted.', 'conflict'));
     }
   }

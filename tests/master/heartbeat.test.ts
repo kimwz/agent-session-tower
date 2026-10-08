@@ -329,3 +329,15 @@ test('inspection follows a system-notice continuation and includes final target 
   assert.equal(guard.targets[0].nativeRequestId, '1');
   assert.equal(guard.targets[0].lastRequestAt, h.target.lastRequestAt);
 });
+
+test('a stopped ancestor behind a cancelled continuation is excluded; new independent work in that session is inspected', async t => {
+  const h = await harness(t);
+  h.runs[0].ownerStopped = true; h.runs[0].status = 'cancelled';
+  const resumed: Run = { ...h.runs[0], id: 'cancelled-resume', ownerStopped: undefined, createdAt: new Date(Date.parse(h.target.createdAt) + 1000).toISOString(), scheduled: { at: h.target.createdAt, afterRunId: h.runs[0].id, resume: 'permission' } };
+  h.runs.push(resumed); h.tasks[0].currentRunId = resumed.id;
+  h.advance(); await h.heartbeat.tick(); assert.equal(h.calls(), 0); assert.equal(h.posts.length, 0);
+  const newRun: Run = { ...h.runs[0], id: 'independent', status: 'running', ownerStopped: undefined, prompt: 'New independent work', createdAt: new Date(Date.parse(resumed.createdAt) + 1000).toISOString() };
+  h.runs.push(newRun); h.tasks[0].runId = newRun.id; h.tasks[0].currentRunId = newRun.id;
+  h.target.lastRequestAt = newRun.createdAt; h.nativeUser('independent-user', newRun.prompt);
+  h.advance(); await h.heartbeat.tick(); assert.equal(h.calls(), 1); assert.equal(h.posts.length, 0);
+});

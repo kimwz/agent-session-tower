@@ -449,3 +449,22 @@ test('remote conversation pages preserve unread skipped count for bounded reques
   const f = await fixture(t, { historySkipped: 4 });
   const response = await f.call('/api/sessions/codex:open?limit=12'); assert.equal(response.status, 200); assert.equal(response.json.skipped, 4);
 });
+
+test('remote heartbeat protection follows a stopped managed ancestor but permits a new independent owner task', async t => {
+  const f = await fixture(t); const original = f.runs[0]; original.ownerStopped = true; original.status = 'cancelled';
+  const continuation: Run = { ...original, id: 'cancelled-permission-resume', ownerStopped: undefined, createdAt: new Date(Date.parse(original.createdAt) + 1000).toISOString(), scheduled: { at: original.createdAt, afterRunId: original.id, resume: 'permission' } };
+  f.runs.push(continuation);
+  assert.deepEqual((await f.call('/api/sessions/codex:open/heartbeat-protection')).json, { protected: true });
+  f.runs.push({ ...original, id: 'new-owner-task', ownerStopped: undefined, status: 'running', createdAt: new Date(Date.parse(original.createdAt) + 2000).toISOString(), prompt: 'A new independent task' });
+  assert.deepEqual((await f.call('/api/sessions/codex:open/heartbeat-protection')).json, { protected: false });
+});
+test('shared run projection preserves minimal trusted notice provenance for request matching', async t => {
+  const f = await fixture(t); const original = f.runs[0];
+  f.runs.push({ ...original, id: 'permission-notice', permissionNotice: { targetRunId: original.id }, steering: { targetRunId: original.id, state: 'delivered', requestedAt: original.createdAt } });
+  f.runs.push({ ...original, id: 'update-notice', updateWrapUp: true, steering: { targetRunId: original.id, state: 'delivered', requestedAt: original.createdAt } });
+  const response = await f.call('/api/snapshot'); assert.equal(response.status, 200);
+  const runs = (response.json as Snapshot).runs;
+  assert.deepEqual(runs.find(run => run.id === 'permission-notice')?.permissionNotice, { targetRunId: original.id });
+  assert.equal(runs.find(run => run.id === 'update-notice')?.updateWrapUp, true);
+  assert.equal(runs.some(run => run.sessionId === f.secretSession.id), false);
+});
