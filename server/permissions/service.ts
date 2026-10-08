@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import {
   CONVERSATION_RULE_HOURS, DEFAULT_AUTO_REVIEW, MAX_RUN_COMMAND, MAX_RUN_SECONDS, autoReviewBlock, waitingForOwner, claudeRule, codexRule, normalizeCommand, ruleGuards, ruleIsNarrower, rulesOverlap, ruleProblem, sameRule,
   type PermissionAutoReview, type PermissionOverview, type PermissionProvider, type PermissionRequest, type PermissionReview, type PermissionReviewVerdict,
-  type PermissionRule, type PermissionRuleInput, type PermissionRun, type PermissionRunOutput, type PermissionTarget, type ReviewedFile, MAX_REVIEWED_FILES,
+  type PermissionRule, type PermissionRuleInput, type PermissionRun, type PermissionRunOutput, type PermissionTarget, type ReviewedFile, MAX_REVIEWED_FILES, MAX_REVIEW_REASON,
 } from '../../shared/permissions.js';
 import { changedFiles, deniedPaths } from './inspect.js';
 import type { Provider } from '../../shared/types.js';
@@ -217,7 +217,7 @@ export class PermissionService {
       const at = this.now();
       // Turned off while the model answered: its answer is not used.
       if (!this.autoReview().enabled) { await this.setReview(id, { status: 'skipped', reason: '자동 검토가 꺼졌습니다.', at }); return undefined; }
-      const reason = result.reason.trim().slice(0, 1000) || '이유 없음';
+      const reason = result.reason.trim().slice(0, MAX_REVIEW_REASON) || '이유 없음';
       const review = (extra: Partial<PermissionReview>): PermissionReview => ({ status: 'done', reason, ...(result.model ? { model: result.model } : {}), at, ...extra });
       if (request.status !== 'pending') {
         await this.setReview(id, review({ verdict: result.verdict }));
@@ -482,8 +482,8 @@ export class PermissionService {
         if (!stale) entry.rechecks = (entry.rechecks ?? 0) + 1;
         const why = earlier ? '같은 대화의 앞선 실행이 다시 검토되고 있어 순서대로' : stale ? `승인 뒤 실행까지 ${Math.round(waited / 1000)}초를 기다려` : `검토 뒤 실행 전에 파일이 바뀌어(${changed.slice(0, 5).join(', ')})`;
         // Files that keep changing before every start (something else writing there) are the owner's to judge.
-        entry.review = again ? { status: 'queued', reason: `${why} 지금 내용으로 다시 검토합니다`.slice(0, 1000), at: this.now() }
-          : { status: 'done', verdict: 'owner', reason: `${why} 다시 검토하기를 ${MAX_RECHECKS}번 했지만 실행 직전에 같은 내용인지 확인할 수 없어 소유자에게 넘깁니다`.slice(0, 1000), at: this.now() };
+        entry.review = again ? { status: 'queued', reason: `${why} 지금 내용으로 다시 검토합니다`.slice(0, MAX_REVIEW_REASON), at: this.now() }
+          : { status: 'done', verdict: 'owner', reason: `${why} 다시 검토하기를 ${MAX_RECHECKS}번 했지만 실행 직전에 같은 내용인지 확인할 수 없어 소유자에게 넘깁니다`.slice(0, MAX_REVIEW_REASON), at: this.now() };
       });
       return again;
     });
@@ -902,7 +902,7 @@ function runFields(item: any): Partial<PermissionRequest> {
 function reviewOf(value: any, pending: boolean): { review: PermissionReview } | undefined {
   if (!value || typeof value !== 'object' || !['queued', 'running', 'done', 'skipped', 'failed'].includes(value.status)) return undefined;
   const status: PermissionReview['status'] = value.status === 'running' ? (pending ? 'queued' : 'failed') : value.status;
-  return { review: { status, ...(['approve', 'narrow', 'owner'].includes(value.verdict) ? { verdict: value.verdict } : {}), ...(typeof value.reason === 'string' ? { reason: text(value.reason, 1000) } : {}),
+  return { review: { status, ...(['approve', 'narrow', 'owner'].includes(value.verdict) ? { verdict: value.verdict } : {}), ...(typeof value.reason === 'string' ? { reason: text(value.reason, MAX_REVIEW_REASON) } : {}),
     ...(typeof value.suggestion === 'string' ? { suggestion: text(value.suggestion, 500) } : {}), ...(typeof value.model === 'string' ? { model: text(value.model, 64) } : {}),
     ...(typeof value.at === 'string' ? { at: text(value.at, 40) } : {}), ...(reviewedFiles(value.files) ? { files: reviewedFiles(value.files) } : {}) } };
 }

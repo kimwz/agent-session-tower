@@ -56,6 +56,8 @@ export interface PermissionReview {
  * `sha256` null with a `real`: a folder bound only by where it leads; both null: it was looked for and was not there.
  */
 export interface ReviewedFile { path: string; real: string | null; sha256: string | null; depth?: number }
+/** How long a review's stored reason may be: room for the model's reason and the evidence it could not confirm. */
+export const MAX_REVIEW_REASON = 2_000;
 /** More files than this cannot be confirmed before a run starts: the owner decides instead. */
 export const MAX_REVIEWED_FILES = 2_000;
 

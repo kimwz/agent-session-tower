@@ -8,7 +8,7 @@ const MAX_TOTAL = 180_000;
 const MAX_FILES = 8;
 const SCRIPT = /\.(?:py|mjs|cjs|js|ts|tsx|sh|bash|zsh|rb|pl|php|lua|ps1)$/i;
 /** Credential stores and files by name, wherever they are. */
-const STORE = /(?:^|\/)(?:\.credentials(?:\.[^/]*)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials|\.git\/config|\.kube|\.docker|\.env(?:\.[^/]*)?|\.envrc|\.dev\.vars(?:\.[^/]*)?|\.pgpass|\.vault-token|\.terraformrc|\.yarnrc\.yml|\.my\.cnf|\.s3cfg|\.boto|\.htpasswd|\.cloudflared|\.ssh|\.aws|\.gnupg|id_rsa|id_ed25519|id_ecdsa|id_dsa)(?:\/|$)/i;
+const STORE = /(?:^|\/)(?:\.credentials(?:\.[^/]*)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials|\.git\/config|\.kube|\.docker|\.env(?:\.[^/]*)?|\.envrc|\.dev\.vars(?:\.[^/]*)?|\.pgpass|\.vault-token|\.terraformrc|\.yarnrc\.yml|\.my\.cnf|\.s3cfg|\.boto|\.htpasswd|\.(?:zsh|bash)rc|\.(?:bash_|z)?profile|\.zshenv|\.zlogin|\.[\w.-]*_history|\.histfile|\.cloudflared|\.ssh|\.aws|\.gnupg|id_rsa|id_ed25519|id_ecdsa|id_dsa)(?:\/|$)/i;
 /** Key and state files that hold credentials whatever they are called. */
 const KEYS = /(?:\.(?:pem|key|p8|p12|pfx|jks|keystore|ppk|tfvars|tfvars\.json|tfstate|tfstate\.backup)|^(?:service[-_]?account[^/]*|client_secret[^/]*|[^/]*adminsdk[^/]*|token)\.json)$/i;
 /** Names that hold credentials when they are data (`auth.json`, `secrets/db.yaml`), not when they are code (`auth.ts`, `server/secrets/runtime.ts`). */

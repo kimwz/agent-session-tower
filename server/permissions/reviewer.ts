@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { AutoPromptModelRequest, ReadTools } from '../auto-prompt/native.js';
-import { autoReviewBlock, MAX_REVIEWED_FILES, type PermissionRequest, type ReviewedFile } from '../../shared/permissions.js';
+import { autoReviewBlock, MAX_REVIEW_REASON, MAX_REVIEWED_FILES, type PermissionRequest, type ReviewedFile } from '../../shared/permissions.js';
 import { writePrivateJson } from '../stores/private-json.js';
 import { REVIEW_SCHEMA, REVIEW_SYSTEM, ReviewSkip, reviewInput, type ReviewSources } from './context.js';
 import { changedFiles, deniedPaths, folderBinding, readLog, reviewedFiles, REVIEW_TOOL_NAMES, REVIEW_TOOLS_SERVER, reviewScope, type ReadEntry } from './inspect.js';
@@ -179,8 +179,11 @@ export class PermissionReviewer {
 /** An owner verdict says what could not be confirmed: the reviewer's own list and the reads Tower refused or could not do. */
 function ownerReason(reason: string, missing: string[], reads: ReadEntry[]): string {
   const refused = [...new Set(reads.filter(entry => !['read', 'listed', 'searched', 'place', 'folder', 'absent', 'unbound'].includes(entry.status)).map(entry => `${entry.path} (${READ_STATUS[entry.status] ?? entry.status})`))];
-  return [reason.trim(), missing.length ? `확인하지 못한 근거: ${missing.join('; ')}` : '', refused.length ? `읽지 못한 파일: ${refused.slice(0, 10).join(', ')}${refused.length > 10 ? ` 외 ${refused.length - 10}개` : ''}` : '']
-    .filter(Boolean).join(' / ');
+  const clip = (text: string, max: number) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
+  // The evidence comes first in the budget: what could not be confirmed is what the owner needs to decide.
+  const facts = [missing.length ? `확인하지 못한 근거: ${missing.slice(0, 5).map(item => clip(item, 200)).join('; ')}${missing.length > 5 ? ` 외 ${missing.length - 5}개` : ''}` : '',
+    refused.length ? `읽지 못한 파일: ${refused.slice(0, 5).map(item => clip(item, 200)).join(', ')}${refused.length > 5 ? ` 외 ${refused.length - 5}개` : ''}` : ''].filter(Boolean).join(' / ');
+  return [clip(reason.trim(), Math.max(300, MAX_REVIEW_REASON - facts.length - 3)), facts].filter(Boolean).join(' / ').slice(0, MAX_REVIEW_REASON);
 }
 
 const READ_STATUS: Record<string, string> = { outside: '검토 범위 밖', denied: '비밀·Tower 상태라 읽지 않음', missing: '없음', unreadable: '열 수 없음(권한)', 'too-large': '너무 큼', 'not-text': '텍스트 아님', budget: '읽기 한도 초과', invalid: '잘못된 경로' };
