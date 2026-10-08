@@ -589,3 +589,21 @@ test('in a worktree nested in a repository, an import of ../x from a file binds 
   assert.ok(bound.includes(join(nested, 'server')), 'the folder the import resolves in');
   assert.equal((await files.read({ path: 'server/state-dir.ts' }) as { text: string }).text, 'export {}\n', './state-dir.js names state-dir.ts');
 });
+
+test('a missing candidate folder named like credentials stays unchanged while it stays missing; credential file variants are refused', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.project, 'scripts', 'e2e.mjs'), "fetch(base + '/api/auth/login');\ntry { require('./auth/optional'); } catch {}\n");
+  await writeFile(join(f.project, 'scripts', 'check.py'), 'from secrets import token_hex\n');
+  const files = await f.files('node scripts/e2e.mjs');
+  await files.read({ path: 'scripts/e2e.mjs' });
+  await files.read({ path: 'scripts/check.py' });
+  const reviewed = reviewedFiles(await readLog(f.log));
+  assert.ok(reviewed.some(file => file.real === null && /auth$/.test(file.path)), 'bound as absent');
+  assert.deepEqual(await changedFiles(reviewed, await deniedPaths(f.stateDir, f.home, {})), []);
+  await mkdir(join(f.project, 'scripts', 'auth'));
+  assert.ok((await changedFiles(reviewed, [])).some(path => path.endsWith('scripts/auth')), 'and a change once it appears');
+  for (const name of ['.dev.vars.production', 'prod.tfvars.json']) {
+    await writeFile(join(f.project, name), 'TOKEN=x');
+    assert.equal((await files.read({ path: name }) as { status: string }).status, 'denied', name);
+  }
+});

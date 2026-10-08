@@ -8,7 +8,7 @@ const MAX_TOTAL = 180_000;
 const MAX_FILES = 8;
 const SCRIPT = /\.(?:py|mjs|cjs|js|ts|tsx|sh|bash|zsh|rb|pl|php|lua|ps1)$/i;
 /** Credential stores and files by name, wherever they are. */
-const STORE = /(?:^|\/)(?:\.credentials(?:\.[^/]*)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials|\.kube|\.docker|\.env(?:\.[^/]*)?|\.dev\.vars|\.pgpass|\.vault-token|\.terraformrc|\.cloudflared|\.ssh|\.aws|\.gnupg|id_rsa|id_ed25519|id_ecdsa|id_dsa)(?:\/|$)/i;
+const STORE = /(?:^|\/)(?:\.credentials(?:\.[^/]*)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials|\.kube|\.docker|\.env(?:\.[^/]*)?|\.dev\.vars(?:\.[^/]*)?|\.pgpass|\.vault-token|\.terraformrc|\.cloudflared|\.ssh|\.aws|\.gnupg|id_rsa|id_ed25519|id_ecdsa|id_dsa)(?:\/|$)/i;
 /** Names that hold credentials when they are data (`auth.json`, `secrets/db.yaml`), not when they are code (`auth.ts`, `server/secrets/runtime.ts`). */
 const NAMED = /^(?:auth|credentials|secrets?)(?:\.[^/]*)?$/i;
 const CODE = /\.(?:py|mjs|cjs|js|jsx|ts|tsx|mts|cts|sh|bash|zsh|rb|pl|php|lua|ps1|go|rs|java|kt|swift|c|cc|cpp|h|hpp|cs|scala)$/i;
@@ -23,7 +23,7 @@ export interface CommandEvidence { files: FileEvidence[]; notes: string[] }
  */
 export function isPrivatePath(path: string, folder = false): boolean {
   const name = basename(path);
-  if (STORE.test(path) || !folder && /\.(?:pem|key|p12|pfx|tfvars)$/i.test(name)) return true;
+  if (STORE.test(path) || !folder && /\.(?:pem|key|p12|pfx|tfvars|tfvars\.json)$/i.test(name)) return true;
   if (folder || CODE.test(name)) return false;
   return NAMED.test(name) || path.split(sep).slice(0, -1).some(segment => NAMED.test(segment));
 }

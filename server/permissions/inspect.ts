@@ -21,8 +21,8 @@ export const REVIEW_TOOL_NAMES = ['read_file', 'list_dir', 'search_text'] as con
 const MAX_FILE_BYTES = 2_000_000;
 const MAX_RETURN_CHARS = 200_000;
 const DEFAULT_LINES = 2_000;
-/** Everything the tools give back during one review. */
-const BUDGET_CHARS = 3_000_000;
+/** Everything the tools give back during one review, in bytes (well within the event stream's limit, see native.ts). */
+const BUDGET_BYTES = 3_000_000;
 const MAX_ROOTS = 300;
 const MAX_LIST = 1_000;
 /** A folder bound for a run is hashed whole; past this many entries it cannot be, and the owner decides. */
@@ -300,7 +300,7 @@ async function expand(reach: Reach, file: string, text: string): Promise<{ place
   }
   for (const root of found.roots) {
     if (reach.roots.length >= MAX_ROOTS) break;
-    if (isDenied(root.path, reach.denied) || reach.roots.some(item => covers(item, root.path) && (item.kind !== 'file' || root.kind === 'file'))) continue;
+    if (isDenied(root.path, reach.denied, root.kind !== 'file') || reach.roots.some(item => covers(item, root.path) && (item.kind !== 'file' || root.kind === 'file'))) continue;
     reach.roots.push(root);
   }
   return { places: added, watch };
@@ -395,9 +395,10 @@ export class ReviewFiles {
     await this.log(bound ? { tool: 'read_file', path: folder.path, status: 'folder', real: folder.real, sha256: bound.sha256!, depth: 1 } : { tool: 'read_file', path: folder.path, status: 'unbound' });
   }
 
-  private take(chars: number): boolean {
-    if (this.spent + chars > BUDGET_CHARS) return false;
-    this.spent += chars;
+  private take(text: string): boolean {
+    const bytes = Buffer.byteLength(text);
+    if (this.spent + bytes > BUDGET_BYTES) return false;
+    this.spent += bytes;
     return true;
   }
 
@@ -425,7 +426,7 @@ export class ReviewFiles {
     let shown = lines.slice(offset - 1, offset - 1 + limit).join('\n');
     const cut = shown.length > MAX_RETURN_CHARS;
     if (cut) shown = shown.slice(0, MAX_RETURN_CHARS);
-    if (!this.take(shown.length)) return refuse('budget', explain('budget'));
+    if (!this.take(shown)) return refuse('budget', explain('budget'));
     const hash = sha256(bytes);
     // Bound by the path it was asked by: a link pointed elsewhere later reads as a change.
     await this.log({ tool: 'read_file', path: place.path, status: 'read', real: place.real, sha256: hash });
@@ -448,7 +449,7 @@ export class ReviewFiles {
     const all = await absent(collect(place.real!, depth, this.spec.denied));
     if (!all) { await this.log({ tool: 'list_dir', path: place.path, status: 'unreadable' }); return { path: place.path, status: 'unreadable', message: 'The folder (or one inside it) could not be read, or it is too large.' }; }
     const entries = await Promise.all(all.slice(0, MAX_LIST).map(async entry => ({ ...entry, ...(entry.kind === 'file' ? { size: (await absent(stat(join(place.real!, entry.path))))?.size } : {}) })));
-    if (!this.take(JSON.stringify(entries).length)) { await this.log({ tool: 'list_dir', path: place.real!, status: 'budget' }); return { path: place.real, status: 'budget', message: explain('budget') }; }
+    if (!this.take(JSON.stringify(entries))) { await this.log({ tool: 'list_dir', path: place.real!, status: 'budget' }); return { path: place.real, status: 'budget', message: explain('budget') }; }
     // Bound by everything listed, as shown (the shown part is the start of the same collection); a shared folder is not.
     await this.log({ tool: 'list_dir', path: place.path, status: 'listed', ...(await sharedFolder(place.real!) ? {} : { real: place.real, sha256: digestOf(all), depth }) });
     return { path: place.real, entries, ...(all.length > MAX_LIST ? { cut: true, total: all.length } : {}) };
@@ -482,7 +483,7 @@ export class ReviewFiles {
       }
     };
     await visit(place.real!);
-    if (!this.take(JSON.stringify(matches).length)) { await this.log({ tool: 'search_text', path: place.real!, status: 'budget' }); return { status: 'budget', message: explain('budget') }; }
+    if (!this.take(JSON.stringify(matches))) { await this.log({ tool: 'search_text', path: place.real!, status: 'budget' }); return { status: 'budget', message: explain('budget') }; }
     await this.log({ tool: 'search_text', path: place.path, status: 'searched' });
     // A folder searched through a link is bound by where it led, like one a script names.
     if (place.real !== resolve(place.path)) await this.log({ tool: 'search_text', path: place.path, status: 'place', real: place.real });
@@ -603,8 +604,9 @@ export async function changedFiles(files: readonly ReviewedFile[], denied: reado
   const changed: string[] = [];
   for (const file of files) {
     // Denied, or where it leads cannot be told now: not confirmed, so a change.
-    // Folders (listings, places) are judged as folders, files as files; nothing denied is read.
-    const folder = Boolean(file.depth) || file.sha256 === null && file.real !== null;
+    // Listings and places are folders. An absence is only looked up, never read: judged like a folder too, so a missing
+    // `auth/` candidate folder is not taken for a credential file and reported as changed every time.
+    const folder = Boolean(file.depth) || file.sha256 === null;
     const now = isDenied(file.path, denied, folder) ? undefined : await lookup(file.path);
     if (now === undefined || now !== file.real || (now && isDenied(now, denied, folder))) { changed.push(file.path); continue; }
     // Absent then and now, or a folder bound only by where it leads.

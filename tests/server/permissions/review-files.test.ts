@@ -395,12 +395,16 @@ test('a later run of the conversation waits for an earlier one sent back to revi
   f.reviewer.hold();
   const confirm = f.service.confirmReviewed.bind(f.service);
   f.holdStarts(async () => false);
-  const first = (await f.service.requestRun({ command: 'echo build', reason: 'r', key: 'build' }, agent('codex:sqlite'))).request;
+  const script = join(f.project, 'scripts', 'build.mjs');
+  await writeFile(script, 'console.log(1)\n');
+  const first = (await f.service.requestRun({ command: 'node scripts/build.mjs', reason: 'r', key: 'build' }, agent('codex:sqlite'))).request;
   clock.now = new Date(clock.now.getTime() + 1_000);
   const second = (await f.service.requestRun({ command: 'echo test', reason: 'r', key: 'test' }, agent('codex:sqlite'))).request;
-  for (const request of [first, second]) { assert.ok(await f.service.startReview(request.id!)); await f.service.applyReview(request.id!, { verdict: 'approve', reason: '확인함', files: [] }); }
-  clock.now = new Date(clock.now.getTime() + 90_000);
-  assert.equal(await confirm(first.id!), false, 'waited too long: reviewed again');
+  const bound = { path: script, real: script, sha256: createHash('sha256').update('console.log(1)\n').digest('hex') };
+  for (const [request, files] of [[first, [bound]], [second, []]] as const) { assert.ok(await f.service.startReview(request.id!)); await f.service.applyReview(request.id!, { verdict: 'approve', reason: '확인함', files: [...files] }); }
+  // The first goes back to review because its script changed (no wait); the second, which waited no time, stays behind it.
+  await writeFile(script, 'console.log(2)\n');
+  assert.equal(await confirm(first.id!), false);
   assert.equal(await confirm(second.id!), false, 'not ahead of the first');
   assert.match(f.request(second.id!).review!.reason!, /앞선 실행이 다시 검토되고 있어 순서대로/);
 });

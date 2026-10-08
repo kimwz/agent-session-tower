@@ -40,8 +40,11 @@ export interface AutoPromptNativeDependencies {
 }
 
 const MAX_OUTPUT = 1_000_000;
-/** File contents read through `readTools` flow through the event stream. */
-const MAX_TOOLS_OUTPUT = 8_000_000;
+/**
+ * File contents read through `readTools` flow through the event stream, escaped and (Claude) echoed twice: room for the
+ * reviewer's whole reading budget (3 MB, server/permissions/inspect.ts) several times over.
+ */
+const MAX_TOOLS_OUTPUT = 32_000_000;
 const MAX_ERROR_OUTPUT = 64_000;
 const MAX_PROMPT = 512_000;
 const CODE_MODE_DISABLED_WARNING = 'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.';

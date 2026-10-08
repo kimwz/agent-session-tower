@@ -84,7 +84,7 @@ export class PermissionReviewer {
       // Credential stores and Tower's state stay out of the input as they stay out of the reviewer's reach.
       const denied = await deniedPaths(this.options.files?.stateDir);
       const prompt = await reviewInput(request, this.options.sources, denied);
-      // The folders of the scripts Tower read ahead, as they are now, before the model reads anything.
+      // What Tower read ahead for the reviewer: bound with its folders below, before the model reads anything.
       const given = (JSON.parse(prompt).context.commandEvidence?.files ?? []) as { path: string; status: string; real?: string; sha256?: string; text?: string }[];
       const pre = given.filter(file => file.status === 'read' && file.real && file.sha256);
       // Folders bound by their entries (under the name they were reached by), by their absence, or failed (unbound).
@@ -93,8 +93,8 @@ export class PermissionReviewer {
           : await folderBinding(folder.real, denied).then(file => file && file !== 'shared' ? { ...file, path: folder.path } : file) })));
         return { files: bound.flatMap(item => item.file && item.file !== 'shared' ? [item.file] : []), failed: bound.flatMap(item => item.file ? [] : [item.folder.path]) };
       };
-      const ownFolders = () => [...new Set(pre.map(file => dirname(file.real!)))].map(folder => ({ path: folder, real: folder }));
-      let preFolders = await bindFolders(ownFolders());
+      const ownFolders = [...new Set(pre.map(file => dirname(file.real!)))].map(folder => ({ path: folder, real: folder }));
+      let watch: { path: string; real: string | null }[] = [];
       const material = (input: string) => { const value = JSON.parse(input); return JSON.stringify([value.authority, value.context.commandEvidence]); };
       const before = material(prompt);
       const model = await service.reviewModel();
@@ -109,13 +109,14 @@ export class PermissionReviewer {
         const scope = join(scratch, 'scope.json');
         const evidence = pre.flatMap(file => file.text !== undefined ? [{ path: file.real!, text: file.text }] : []);
         const spec = await reviewScope({ cwd: request.cwd, ...(request.rule.kind === 'claude' ? {} : { command: request.rule.value }), stateDir: this.options.files.stateDir, log, evidence });
-        // With the scope known, the folders the module names they use live in too (still before the model).
-        preFolders = await bindFolders([...ownFolders(), ...(spec.watch ?? [])]);
+        watch = spec.watch ?? [];
         await writePrivateJson(scope, JSON.stringify(spec));
         // The folders the command runs in lead where they led during the review (a `current` link moved meanwhile is a change).
         places = (spec.places ?? []).map(place => ({ path: place.path, real: place.real, sha256: null }));
         readTools = { server: REVIEW_TOOLS_SERVER, tools: REVIEW_TOOL_NAMES, ...this.options.files.server(scope) };
       }
+      // The folders of the scripts Tower read ahead and of the module names they use, as they are before the model reads.
+      const preFolders = await bindFolders([...ownFolders, ...watch]);
       const answer = await this.options.model({ ...model, systemPrompt: REVIEW_SYSTEM, prompt, ...(readTools ? { readTools } : {}),
         schema: REVIEW_SCHEMA as unknown as Record<string, unknown>, signal: controller.signal }, { timeoutMs: this.options.timeoutMs ?? REVIEW_TIMEOUT_MS });
       result = parse(answer, request, model.model ?? model.provider);
