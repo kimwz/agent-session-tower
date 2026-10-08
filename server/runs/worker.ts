@@ -206,8 +206,9 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         const target = targetSessionId && options.runs.getSession(targetSessionId);
         const turns = target ? options.runs.list().filter(run => run.sessionId === target.id) : [];
         const latest = [...turns].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+        const selected = corrective.targets?.find(item => !item.node && item.sessionId === targetSessionId);
         if (!target || !current || current.origin?.kind !== 'agent' || current.origin.controllerId || current.ownerStopped || current.approvals?.length
-          || !corrective.targets?.some(item => !item.node && item.sessionId === targetSessionId)
+          || !selected || latest?.id !== selected.latestRunId || target.lastRequestAt !== selected.lastRequestAt
           || latest?.ownerStopped || turns.some(run => (run.status === 'running' || run.status === 'queued') && run.approvals?.length)
           || !options.api || options.api.heartbeatBlocked([current.sessionId, target.id])) {
           throw new TowerError('forbidden', 'Heartbeat corrective target is unavailable or protected.', { disposition: 'not-admitted' });
@@ -598,7 +599,7 @@ async function sessionHistory(sessions: SessionService, [nativeId, before, limit
   const page = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
   const history = await sessions.detail(nativeId, page(before), page(limit));
   if (!history) return undefined;
-  return { messages: history.messages, hasMore: history.hasMore, ...(history.nextBefore !== undefined ? { nextBefore: history.nextBefore } : {}), ...(history.previousUser ? { previousUser: history.previousUser } : {}) };
+  return { messages: history.messages, hasMore: history.hasMore, ...(history.nextBefore !== undefined ? { nextBefore: history.nextBefore } : {}), ...(history.previousUser ? { previousUser: history.previousUser } : {}), ...(history.skipped !== undefined ? { skipped: history.skipped } : {}) };
 }
 
 /**
@@ -616,8 +617,10 @@ function admission(value: unknown): RunAdmission {
     if (origin.kind !== 'agent' || origin.controllerId || Object.keys(value).some(key => !['targets', 'checkId', 'sessionIds', 'latestRunId', 'updatedAt', 'lastRequestAt'].includes(key))
       || (value.targets !== undefined && (!Array.isArray(value.targets) || !value.targets.length || value.targets.length > 6 || value.targets.some(entry => {
         const target = record(entry);
-        return Object.keys(target).some(key => !['taskId', 'sessionId', 'node', 'nativeRequestId'].includes(key)) || typeof target.taskId !== 'string' || !target.taskId || target.taskId.length > 200
+        return Object.keys(target).some(key => !['taskId', 'sessionId', 'node', 'nativeRequestId', 'latestRunId', 'lastRequestAt'].includes(key)) || typeof target.taskId !== 'string' || !target.taskId || target.taskId.length > 200
           || (target.nativeRequestId !== undefined && (typeof target.nativeRequestId !== 'string' || !target.nativeRequestId || target.nativeRequestId.length > 200))
+          || (target.latestRunId !== undefined && (typeof target.latestRunId !== 'string' || !target.latestRunId || target.latestRunId.length > 200))
+          || (target.lastRequestAt !== undefined && (typeof target.lastRequestAt !== 'string' || !Number.isFinite(Date.parse(target.lastRequestAt))))
           || typeof target.sessionId !== 'string' || !target.sessionId || target.sessionId.length > 200 || (target.node !== undefined && (typeof target.node !== 'string' || !/^[a-f\d]{32}$/i.test(target.node)));
       })))
       || !Array.isArray(value.sessionIds) || !value.sessionIds.length || value.sessionIds.length > 7 || value.sessionIds.some(id => typeof id !== 'string' || id.length > 200)

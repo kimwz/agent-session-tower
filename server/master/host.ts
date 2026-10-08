@@ -218,6 +218,9 @@ export async function startMasterHost(options: MasterHostOptions) {
   const close = async (idle = false) => {
     if (closing) return;
     closing = true;
+    // Invalidate unsent heartbeat work before the first awaited host cleanup. Sent requests and saves drain later.
+    const heartbeatDrain = heartbeat?.close();
+    const toolsDrain = heartbeatTools?.close();
     await stopKeeping?.();
     if (idleTimer) clearInterval(idleTimer);
     for (const stream of streams) stream.end();
@@ -225,7 +228,7 @@ export async function startMasterHost(options: MasterHostOptions) {
     await new Promise<void>(resolve => server.close(() => resolve()));
     await unlink(paths.socket).catch(() => {});
     await unlink(paths.token).catch(() => {});
-    try { await heartbeatTools?.close(); await heartbeat?.close(); await voice?.close(); await session?.close(); await room.flush(); } finally {
+    try { await toolsDrain; await heartbeatDrain; await voice?.close(); await session?.close(); await room.flush(); } finally {
       live.close();
       readDb?.close();
       await release();

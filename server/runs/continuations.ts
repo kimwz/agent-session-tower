@@ -34,8 +34,9 @@ export function continuedRunById(runs: readonly Run[], id: string | undefined): 
  * instructions it could not go without (a first turn's notes do not go on), unattended, model and effort. A permission
  * continuation also keeps the Codex reviewer its thread chose (`reviewer`).
  */
-export function inheritedRunFields(after: Run, options: { reviewer?: boolean } = {}): Pick<Run, 'origin' | 'delegation' | 'instructions' | 'codexApprovalsReviewer' | 'unattended' | 'model' | 'effort'> {
+export function inheritedRunFields(after: Run, options: { reviewer?: boolean } = {}): Pick<Run, 'origin' | 'delegation' | 'heartbeat' | 'heartbeatRootRunId' | 'instructions' | 'codexApprovalsReviewer' | 'unattended' | 'model' | 'effort'> {
   return { origin: after.origin ?? { kind: 'unknown' },
+    ...(after.heartbeat ? { heartbeat: structuredClone(after.heartbeat), heartbeatRootRunId: after.heartbeatRootRunId ?? after.id } : {}),
     ...(after.delegation ? { delegation: { ...after.delegation } } : {}),
     ...(after.instructions?.required ? { instructions: { ...after.instructions } } : {}),
     ...(options.reviewer && after.codexApprovalsReviewer ? { codexApprovalsReviewer: after.codexApprovalsReviewer } : {}),

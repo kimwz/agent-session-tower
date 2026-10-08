@@ -95,7 +95,7 @@ function HeartbeatSettings({ token, overview, busy, save }: { token: string; ove
       <button className="master-primary" disabled={busy || !valid || !dirty}>{words('점검 설정 저장', 'Save check settings')}</button>
     </form>
     <HeartbeatModel token={token} />
-    <p>{words('중지·승인대기·마스터 실행 중에는 조치하지 않습니다. 점검은 최대 90초이며 실패를 즉시 재시도하지 않습니다.', 'No action during stops, approval waits or a busy master. Checks take at most 90 seconds, with no immediate retries on failure.')}</p>
+    <p>{words('중지·승인대기·마스터 실행 중에는 조치하지 않습니다. 검사·제안 전송은 90초로 제한하고 실패를 즉시 재시도하지 않습니다. 내부 기록 저장을 마칠 때까지 다음 점검은 기다립니다.', 'No action during stops, approval waits or a busy master. Inspection and recommendation dispatch have a 90-second budget, with no immediate retry. The next check waits for internal records to finish saving.')}</p>
     {status?.nextDueAt && current.enabled ? <p>{words('다음 점검', 'Next check')}: <time dateTime={status.nextDueAt}>{new Date(status.nextDueAt).toLocaleString()}</time></p> : null}
     {status?.lastCheck ? <p>{words('최근 내부 점검', 'Latest internal check')}: {states[status.lastCheck.state]} · <time dateTime={status.lastCheck.at}>{new Date(status.lastCheck.at).toLocaleString()}</time>{status.lastCheck.reason ? ` · ${status.lastCheck.reason}` : ''}</p> : <p>{words('아직 점검 기록이 없습니다.', 'No checks recorded yet.')}</p>}
     {status?.problem ? <p role="alert" className="master-error">{status.problem}</p> : null}

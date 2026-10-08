@@ -97,7 +97,7 @@ export async function handleMcpRequest(context: McpContext, token: string, body:
       || context.heartbeatAllowed?.(run) === false || run.status !== 'running' || run.origin?.kind !== 'agent' || run.origin.controllerId || run.ownerStopped || run.approvals?.length || !run.heartbeat?.targets?.length) {
       throw new TowerError('forbidden', 'A reporting credential cannot call Tower tools.');
     }
-    return { runId: run.id, sessionId: run.sessionId, heartbeat: structuredClone(run.heartbeat) };
+    return { runId: run.id, rootRunId: run.heartbeatRootRunId ?? run.id, sessionId: run.sessionId, heartbeat: structuredClone(run.heartbeat) };
   }
   if (capability.kind === 'session-reader') {
     if (body.method === 'tools/list') return { tools: towerTools(SESSION_TOOL_OPERATIONS) };

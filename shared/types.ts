@@ -200,6 +200,8 @@ export interface Run {
   delegation?: RunDelegation;
   /** Authenticated internal heartbeat admission, never selectable in a public message body. */
   heartbeat?: import('./master.js').HeartbeatAdmission;
+  /** Original admitted heartbeat run; retained only through managed continuations. */
+  heartbeatRootRunId?: string;
   /**
    * Trigger work set to approve automatically. Tower's own turns always run in the provider's automatic approval
    * mode; this marks the automated work that does too.

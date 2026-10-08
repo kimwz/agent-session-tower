@@ -599,6 +599,7 @@ export class RunManager extends EventEmitter {
         ...(model ? { model } : {}), ...(effort ? { effort } : {}),
         ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),
         ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}) };
+      if (internal.heartbeat) run.heartbeatRootRunId = run.id;
       this.admissions.add(run.id);
       this.runs.set(run.id, run);
       this.prune();

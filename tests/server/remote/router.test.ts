@@ -17,7 +17,7 @@ const REQUEST_ID = '0199a2b3-c4d5-7123-8abc-0123456789ab';
 const now = new Date().toISOString();
 
 async function fixture(t: TestContext, options: { coordinators?: string[] | null; beforeDetail?: () => Promise<void>; job?: (job: AutoPromptJob) => AutoPromptJob; beforeCancel?: () => Promise<void>; repositories?: boolean;
-  whileCreating?: () => Promise<void>; pull?: boolean; protection?: unknown; beforeProtection?: () => Promise<void> } = {}) {
+  whileCreating?: () => Promise<void>; pull?: boolean; protection?: unknown; beforeProtection?: () => Promise<void>; historySkipped?: number } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-remote-router-')));
   const open = join(root, 'open'), secret = join(root, 'secret');
   await mkdir(join(secret, 'deep'), { recursive: true });
@@ -46,7 +46,7 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
   const lookup = (id: string) => sessions.find(item => item.id === id || `${item.provider}:${item.nativeId}` === id);
   const backend: Backend = {
     snapshot, subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    detail: async id => { await options.beforeDetail?.(); const found = lookup(id); return found ? { session: found, messages: [{ id: 'm', role: 'user', text: `hello from ${found.cwd}`, timestamp: now }], hasMore: false } : undefined; },
+    detail: async id => { await options.beforeDetail?.(); const found = lookup(id); return found ? { session: found, messages: [{ id: 'm', role: 'user', text: `hello from ${found.cwd}`, timestamp: now }], hasMore: false, ...(options.historySkipped !== undefined ? { skipped: options.historySkipped } : {}) } : undefined; },
     session: lookup,
     coordinators: () => coordinatorIds === null ? undefined : new Set(coordinatorIds ?? ['codex:coordinator']),
     enqueue: async (id, prompt, attachments, context) => { calls.push({ method: 'enqueue', args: [id, prompt, attachments, context] }); return { ...runs[0], id: 'run-new', sessionId: id, prompt }; },
@@ -106,7 +106,7 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
     let json: any; try { json = JSON.parse(text); } catch { json = undefined; }
     return { status: response.status, json, text, headers: response.headers };
   };
-  return { root, open, secret, exclusions, calls, changes, listeners, base, call, secretSession: sessions[1], setCoordinators: (value: string[] | null) => { coordinatorIds = value; } };
+  return { root, open, secret, runs, exclusions, calls, changes, listeners, base, call, secretSession: sessions[1], setCoordinators: (value: string[] | null) => { coordinatorIds = value; } };
 }
 
 test('a remote controller reads sessions, conversations and attachments only outside excluded folders', async t => {
@@ -435,4 +435,17 @@ test('the corrective marker only reduces a remote message to agent authority; or
   f.calls.length = 0;
   assert.equal((await f.call('/api/sessions/codex:open/messages', { body: { prompt: 'Owner request' }, headers: { 'x-tower-request-id': '0199a2b3-c4d5-7123-8abc-0123456789ff' } })).status, 202);
   assert.deepEqual((f.calls.find(item => item.method === 'enqueue')!.args[3] as { origin: unknown }).origin, { kind: 'owner', controllerId: CONTROLLER });
+});
+
+test('remote heartbeat protection includes current native approval and latest owner stop without exposing raw run fields', async t => {
+  for (const protection of ['stop', 'approval'] as const) {
+    const f = await fixture(t); const run = f.runs[0];
+    if (protection === 'stop') { run.status = 'cancelled'; run.ownerStopped = true; } else run.approvals = [{ id: 'private-approval', toolName: 'private-tool', input: { secret: 'private-input' } }];
+    const response = await f.call('/api/sessions/codex:open/heartbeat-protection'); assert.deepEqual(response.json, { protected: true });
+    assert.doesNotMatch(response.text, /private|ownerStopped|approval|input/);
+  }
+});
+test('remote conversation pages preserve unread skipped count for bounded request matching', async t => {
+  const f = await fixture(t, { historySkipped: 4 });
+  const response = await f.call('/api/sessions/codex:open?limit=12'); assert.equal(response.status, 200); assert.equal(response.json.skipped, 4);
 });

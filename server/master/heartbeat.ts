@@ -10,8 +10,8 @@ import type { PermissionRequest } from '../../shared/permissions.js';
 import { resolveModel } from '../models/settings.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { TowerClient, TowerResponse } from '../tower-tools/tower-client.js';
-import { sameRequest, type Followed, type MasterSession } from './session.js';
-import { latestNativeUserMessage } from '../runs/native-user-message.js';
+import type { Followed, MasterSession } from './session.js';
+import { heartbeatRequest } from './heartbeat-request.js';
 import type { MasterSettingsStore } from './settings.js';
 
 const TASKS = 6;
@@ -23,7 +23,7 @@ const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(valu
 const clip = (value: string | undefined, size = TEXT) => (value ?? '').slice(-size);
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === 'object' && !Array.isArray(value));
 interface Evidence { id: string; text: string }
-interface Candidate { id: string; sessionId?: string; node?: string; nativeRequestId?: string; runId?: string; nativeFingerprint: string; state: string; evidence: Evidence[]; fingerprint: string }
+interface Candidate { id: string; sessionId?: string; node?: string; nativeRequestId?: string; runId?: string; latestRunId?: string; lastRequestAt?: string; nativeFingerprint: string; state: string; evidence: Evidence[]; fingerprint: string }
 interface Ledger { version: 1; acted: Record<string, string>; nextDue: number; checks: MasterHeartbeatCheck[]; actions: Array<MasterHeartbeatAction & { fingerprint: string }>; observations: Array<{ id: string; fingerprint: string; at: string; summary?: string; nativeRequestId?: string; runId?: string }> }
 interface Decision { kind: 'noop' | 'action'; taskIds: string[]; evidenceIds: string[]; cause: string; recommendation: string }
 export interface HeartbeatOptions {
@@ -170,16 +170,12 @@ export class MasterHeartbeat {
         // Native timestamps are recorded after queue/CLI startup, not at admission.
         // Read only this bounded page and its previousUser; incomplete identity fails closed.
         if ((detail.skipped ?? 0) > 0) { this.unavailableCandidates++; continue; }
-        const latestUser = await latestNativeUserMessage({ nativeSessionId: id => id }, item.sessionId!, async () => detail);
-        const steering = state.runs.filter(entry => entry.steering?.state === 'delivered' && entry.steering.targetRunId === run.id)
-          .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
-        const expected = (steering?.prompt ?? run.prompt).replace(/\s+/g, ' ').trim();
-        if (!latestUser || !expected || !sameRequest(latestUser.text, expected)
-          || Date.parse(latestUser.timestamp) < Date.parse((steering ?? run).createdAt)) continue;
-        requestRunId = steering?.id ?? run.id;
+        const request = await heartbeatRequest(state.runs, run, detail);
+        if (!request) continue;
+        requestRunId = request.requestRunId;
         const previous = this.ledger.observations.find(observation => observation.id === item.id);
-        if (previous?.runId === requestRunId && previous.nativeRequestId && previous.nativeRequestId !== latestUser.id) continue;
-        nativeRequestId = latestUser.id;
+        if (previous?.runId === requestRunId && previous.nativeRequestId && previous.nativeRequestId !== request.nativeRequestId) continue;
+        nativeRequestId = request.nativeRequestId;
       }
       // A missing/incomplete or protected session is not a target for corrective instructions.
       if (!detail || held(session, [...(latest ? [latest] : []), ...state.runs.filter(entry => entry.sessionId === item.sessionId && (entry.status === 'running' || entry.status === 'queued'))]) || await this.protectedSession(session!, signal, item.node).catch(error => {
@@ -204,7 +200,7 @@ export class MasterHeartbeat {
       { id: `${item.id}:result`, text: clip(item.answer) },
       { id: `${item.id}:transcript`, text: this.transcript(detail.messages ?? []).slice(-2800) },
     ];
-    return { id: item.id, sessionId: item.sessionId, node: item.node, nativeRequestId, runId: requestRunId, nativeFingerprint: nativeFingerprint(snapshot, session.id), state: item.state, evidence, fingerprint: hash(evidence) };
+    return { id: item.id, sessionId: item.sessionId, node: item.node, nativeRequestId, runId: requestRunId, latestRunId: latestRun(snapshot, session.id)?.id, lastRequestAt: detail.session.lastRequestAt, nativeFingerprint: nativeFingerprint(snapshot, session.id), state: item.state, evidence, fingerprint: hash(evidence) };
   }
   private async targetsUnchanged(selected: Candidate[], signal: AbortSignal): Promise<boolean> {
     const nodes = new Map<string, Snapshot | undefined>();
@@ -278,7 +274,7 @@ export class MasterHeartbeat {
       controller.signal.throwIfAborted();
       const currentMaster = await this.detail(settings.session.sessionId, controller.signal);
       controller.signal.throwIfAborted();
-      const watermark: HeartbeatAdmission = { checkId: check.id, targets: selected.map(item => ({ taskId: item.id, sessionId: item.sessionId!, nativeRequestId: item.nativeRequestId, ...(item.node ? { node: item.node } : {}) })), sessionIds: [settings.session.sessionId, ...this.options.master.heartbeatTasks().filter(item => result.taskIds.includes(item.id) && !item.node).map(item => item.sessionId!).filter(Boolean)], updatedAt: master!.updatedAt, ...(master!.lastRequestAt ? { lastRequestAt: master!.lastRequestAt } : {}), ...(latest ? { latestRunId: latest.id } : {}) };
+      const watermark: HeartbeatAdmission = { checkId: check.id, targets: selected.map(item => ({ taskId: item.id, sessionId: item.sessionId!, nativeRequestId: item.nativeRequestId, latestRunId: item.latestRunId, lastRequestAt: item.lastRequestAt, ...(item.node ? { node: item.node } : {}) })), sessionIds: [settings.session.sessionId, ...this.options.master.heartbeatTasks().filter(item => result.taskIds.includes(item.id) && !item.node).map(item => item.sessionId!).filter(Boolean)], updatedAt: master!.updatedAt, ...(master!.lastRequestAt ? { lastRequestAt: master!.lastRequestAt } : {}), ...(latest ? { latestRunId: latest.id } : {}) };
       if (!fresh || !currentMaster || hash([currentMaster.session.updatedAt, currentMaster.session.lastRequestAt, latestRun(fresh, settings.session.sessionId)?.id]) !== hash([watermark.updatedAt, watermark.lastRequestAt, watermark.latestRunId])
         || held(projectedSession(fresh, currentMaster.session), fresh.runs.filter(run => run.sessionId === settings.session!.sessionId && (run.id === latestRun(fresh, settings.session!.sessionId)?.id || run.status === 'running' || run.status === 'queued')))
         || currentMaster.session.status === 'working' || this.options.master.heartbeatStopped() || await this.protectedSession(currentMaster.session, controller.signal)) { await end('skipped', 'Master changed during inspection.'); return; }

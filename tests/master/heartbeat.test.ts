@@ -316,3 +316,16 @@ test('an older identical native request is not attached to a newly queued tracke
   const h = await harness(t); h.target.lastRequestAt = new Date(Date.parse(h.runs[0].createdAt) - 30_000).toISOString();
   h.advance(); await h.heartbeat.tick(); assert.equal(h.calls(), 0); assert.deepEqual(h.posts, []);
 });
+
+test('inspection follows a system-notice continuation and includes final target admission watermark', async t => {
+  const h = await harness(t); h.result(action);
+  h.target.lastRequestAt = h.target.createdAt;
+  const resumed: Run = { ...h.runs[0], id: 'worker-resumed', createdAt: new Date(Date.parse(h.target.createdAt) + 1000).toISOString(), prompt: '[Tower notice] Continue after approval', scheduled: { at: h.target.createdAt, afterRunId: h.runs[0].id, resume: 'permission' } };
+  h.runs[0].status = 'completed'; h.runs.push(resumed); h.tasks[0].currentRunId = resumed.id;
+  h.advance(); await h.heartbeat.tick();
+  assert.equal(h.posts.length, 1);
+  const guard = JSON.parse(h.posts[0].headers[MASTER_HEARTBEAT_HEADER]);
+  assert.equal(guard.targets[0].latestRunId, resumed.id);
+  assert.equal(guard.targets[0].nativeRequestId, '1');
+  assert.equal(guard.targets[0].lastRequestAt, h.target.lastRequestAt);
+});

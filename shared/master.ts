@@ -48,7 +48,7 @@ export interface MasterHeartbeatCheck { id: string; at: string; state: MasterHea
 export interface MasterHeartbeatAction { checkId: string; at: string; taskIds: string[]; cause: string; evidence: string; recommendation: string; delivery: 'sending' | 'sent' | 'not-sent' | 'uncertain'; runId?: string }
 export interface MasterHeartbeatStatus { nextDueAt?: string; lastCheck?: MasterHeartbeatCheck; actions: MasterHeartbeatAction[]; problem?: string }
 /** Internal authenticated admission guard. The public message body cannot select it. */
-export interface HeartbeatTarget { taskId: string; sessionId: string; node?: string; nativeRequestId?: string }
+export interface HeartbeatTarget { taskId: string; sessionId: string; node?: string; nativeRequestId?: string; latestRunId?: string; lastRequestAt?: string }
 export interface HeartbeatAdmission { targets?: HeartbeatTarget[]; checkId: string; sessionIds: string[]; latestRunId?: string; updatedAt: string; lastRequestAt?: string }
 
 /** The session the master talks through, and the ones it replaced (kept as ordinary sessions). */

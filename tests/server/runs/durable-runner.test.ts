@@ -534,13 +534,13 @@ test('the worker serves native conversation pages without the native file path o
   const messages = [{ id: 'm1', role: 'assistant' as const, text: 'From the native file', timestamp: new Date().toISOString() }];
   f.sessions.detail = async (id, before, limit) => {
     calls.push([id, before, limit]);
-    return { session: { ...f.session, filePath: '/private/native.jsonl' }, messages, hasMore: true, nextBefore: 42 };
+    return { session: { ...f.session, filePath: '/private/native.jsonl' }, messages, hasMore: true, nextBefore: 42, skipped: 2 };
   };
   const client = await f.connect();
   assert.equal(client.supports('sessionHistory'), true);
   const history = nativeHistory(client, () => { throw new Error('A current worker must not need a web-side index.'); });
   assert.equal(history.indexing, false);
-  assert.deepEqual(await history.read(f.session.nativeId, 100, 50), { messages, hasMore: true, nextBefore: 42 });
+  assert.deepEqual(await history.read(f.session.nativeId, 100, 50), { messages, hasMore: true, nextBefore: 42, skipped: 2 });
   assert.deepEqual(calls, [[f.session.nativeId, 100, 50]]);
   await assert.rejects(client.sessionHistory(''), { kind: 'invalid' });
   const token = await readFile(f.paths.token, 'utf8');
@@ -564,7 +564,7 @@ test('a web process attached to a 1.12 worker reads conversations from its own i
   assert.equal(client.supports('sessionHistory'), false);
   const messages = [{ id: 'm1', role: 'user' as const, text: 'Indexed by the web process', timestamp: new Date().toISOString() }];
   let indexes = 0, started = 0, stopped = 0;
-  const index = { detail: async () => ({ session: { ...session, filePath: '/private/legacy.jsonl' }, messages, hasMore: false }),
+  const index = { detail: async () => ({ session: { ...session, filePath: '/private/legacy.jsonl' }, messages, hasMore: false, skipped: 3 }),
     start: async () => { started++; }, stop: () => { stopped++; } } as unknown as SessionService;
   const history = nativeHistory(client, () => { indexes++; return index; });
   assert.equal(indexes, 1);
@@ -572,7 +572,7 @@ test('a web process attached to a 1.12 worker reads conversations from its own i
   await history.start();
   assert.equal(started, 1);
   assert.equal(history.indexing, false);
-  assert.deepEqual(await history.read(session.nativeId, undefined, 60), { messages, hasMore: false });
+  assert.deepEqual(await history.read(session.nativeId, undefined, 60), { messages, hasMore: false, skipped: 3 });
   history.stop();
   assert.equal(stopped, 1);
   assert.ok(!legacy.methods.includes('sessionHistory'), `sent: ${legacy.methods.join(', ')}`);
