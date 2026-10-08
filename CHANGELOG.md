@@ -11,6 +11,11 @@ format, and saved browser preferences are the compatibility surface.
 - Fresh retention observations resolve logical Git projects only for user parents, avoiding repeated Git processes for one-shot child and helper workspaces. Parent project proofs are still refreshed on every observation, and native ownership, file identity, writer reservations and activity protections remain unchanged.
 - Maintenance resumes at the next candidate after a time limit and at the first processable candidate deferred by the session limit, so failures near the front do not repeatedly starve later candidates. Oversized families stay deferred. Native originals, history databases and cold backups remain recoverable; this does not physically delete native history or reclaim its disk space.
 
+## [1.116.1] - 2026-10-08
+
+### Fixed
+- The context ring on the chat header's icon is thinner and no longer cut off at its top, bottom and sides.
+
 ## [1.116.0] - 2026-10-08
 
 ### Changed
