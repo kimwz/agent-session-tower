@@ -443,6 +443,12 @@ async function main() {
       return outcomes.apply(session);
     },
     createSession: async (input, context) => { await repositories.prepareRun(input.cwd); return runs.create(input, admit(context)); },
+    compaction: async (action, id, context) => {
+      // The title the owner sees, which may be one only this web process keeps.
+      const session = runs.getSession(id);
+      const title = session && titles.apply(session);
+      return runs.compaction(action, id, title ? { title: title.customTitle || title.title } : {}, admit(context));
+    },
     startAutoPrompt: (input, context) => runs.submitAutoPrompt(input, admit(context)),
     getAutoPrompt: id => runs.getAutoPrompt(id),
     cancelAutoPrompt: id => runs.cancelAutoPrompt(id),
@@ -510,7 +516,7 @@ async function main() {
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
     // and updating do not.
-    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : []), ...(runs.supports('secrets') ? ['secrets'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
+    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : []), ...(runs.supports('secrets') ? ['secrets'] : []), ...(runs.supports('compaction') ? ['compaction'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
     handle: async (req, res, principal) => {
       if (await handleSecretLink(req, res, principal.controllerId, runs)) return;
       return remoteRouter.handle(req, res, principal);

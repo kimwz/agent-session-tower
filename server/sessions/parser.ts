@@ -4,6 +4,7 @@ import { open, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { ChatMessage, Provider, Session } from '../../shared/types.js';
 import type { ProcessSnapshot } from './processes.js';
+import { validEffort } from '../providers/models.js';
 import { claudeContextUsage, claudeInputTokens, contextCapacity as contextWindow, contextTokens as tokenCount, modelContextWindow } from './context.js';
 
 // Reading a session means replaying an append-only JSONL rollout written by
@@ -37,6 +38,8 @@ export interface RecordState {
   historyStartOffset?: number;
   /** The latest user requests, newest first and shortened; they say what a session is working on. */
   recentRequests?: string[];
+  /** The Claude answer whose rows stated the session's effort. */
+  effortAnswer?: string;
 }
 
 export const CHUNK = 128 * 1024;
@@ -87,9 +90,9 @@ function isInjectedUser(value: string): boolean {
   return /^(?:# AGENTS\.md instructions|<environment_context>|<recommended_plugins>|<INSTRUCTIONS>|<system-reminder>|<in-app-browser-context|\[Request interrupted by user)/.test(value.trim());
 }
 /** A background task's notice: a user row of text alone, marked by Claude Code or tagged. Undefined for anything else. */
-function taskNotification(row: Json, blocks: Json[]): { text: string; failed: boolean } | undefined {
+function taskNotification(row: Json, blocks: Json[], limit = MAX_TEXT): { text: string; failed: boolean } | undefined {
   if (!blocks.length || !blocks.every(block => block?.type === 'text')) return undefined;
-  const raw = blocks.map(block => text(block.text)).join('\n').trim();
+  const raw = blocks.map(block => text(block.text, limit)).join('\n').trim();
   return row.origin?.kind === 'task-notification' || isTaskNotification(raw) ? taskNotice(raw) : undefined;
 }
 function printJson(value: unknown): string {
@@ -97,15 +100,18 @@ function printJson(value: unknown): string {
   return text(JSON.stringify(value ?? {}, null, 2));
 }
 
-/** Parse only messages people can see, excluding internal reasoning and prompt scaffolding. */
-export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fallbackTime = new Date(0).toISOString()): ChatMessage[] {
+/**
+ * Parse only messages people can see, excluding internal reasoning and prompt scaffolding. `limit` caps what the person,
+ * the agent and notices said; a reader that must not lose any of it (compaction) lifts it. Tool output keeps the cap.
+ */
+export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fallbackTime = new Date(0).toISOString(), limit = MAX_TEXT): ChatMessage[] {
   const timestamp = time(row.timestamp, fallbackTime);
   if (provider === 'codex') {
     if (row.type !== 'response_item') return [];
     const value = row.payload ?? {};
     const id = String(value.id || value.call_id || byteOffset);
     if (value.type === 'agent_message') {
-      const content = text(value.content);
+      const content = text(value.content, limit);
       return content ? [{ id, role: 'system', text: content, timestamp }] : [];
     }
     if (value.type === 'message' && ['user', 'assistant'].includes(value.role)) {
@@ -113,7 +119,7 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
       const kinds: string[] = value.internal_chat_message_metadata_passthrough?.content_item_kinds ?? [];
       const parts = Array.isArray(value.content) ? value.content.filter((_: unknown, index: number) =>
         value.role !== 'user' || !kinds[index] || /^(user\.|unknown)/.test(kinds[index]!)) : value.content;
-      const content = text(value.role === 'user' && Array.isArray(parts) ? parts.filter((part: unknown) => !isTowerInstructions(part)) : parts);
+      const content = text(value.role === 'user' && Array.isArray(parts) ? parts.filter((part: unknown) => !isTowerInstructions(part)) : parts, limit);
       if (!content || (value.role === 'user' && isInjectedUser(content))) return [];
       return [{ id, role: value.role, text: content, timestamp }];
     }
@@ -131,7 +137,7 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
   if (queued) {
     if (queued.isMeta || (queued.commandMode !== undefined && queued.commandMode !== 'prompt')) return [];
     const blocks: Json[] = (Array.isArray(queued.prompt) ? queued.prompt : [{ type: 'text', text: queued.prompt }]).filter((block: Json) => !isTowerInstructions(block));
-    const content = blocks.map(block => block?.type === 'text' ? text(block.text) : block?.type === 'image' ? '[Image attachment]' : '').filter(Boolean).join('\n').trim();
+    const content = blocks.map(block => block?.type === 'text' ? text(block.text, limit) : block?.type === 'image' ? '[Image attachment]' : '').filter(Boolean).join('\n').trim();
     return content && !isInjectedUser(content) ? [{ id: `${String(row.uuid || byteOffset)}:0`, role: 'user', text: content, timestamp }] : [];
   }
   if (!['user', 'assistant'].includes(row.type) || !row.message || row.isMeta) return [];
@@ -139,19 +145,19 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
   const id = String(row.uuid || value.id || byteOffset);
   const blocks: Json[] = Array.isArray(value.content) ? value.content : [{ type: 'text', text: value.content }];
   // Claude Code writes a background task's end into the conversation as a user turn; it is Claude Code's own notice.
-  const notice = value.role === 'user' ? taskNotification(row, blocks) : undefined;
-  if (notice) return notice.text ? [{ id: `${id}:0`, role: 'system', toolName: TASK_NOTICE, text: text(notice.text), timestamp, ...(notice.failed ? { isError: true } : {}) }] : [];
+  const notice = value.role === 'user' ? taskNotification(row, blocks, limit) : undefined;
+  if (notice) return notice.text ? [{ id: `${id}:0`, role: 'system', toolName: TASK_NOTICE, text: text(notice.text, limit), timestamp, ...(notice.failed ? { isError: true } : {}) }] : [];
   const messages: ChatMessage[] = [];
   let prose = '';
   const flush = () => {
     if (prose.trim() && !(value.role === 'user' && isInjectedUser(prose))) {
-      messages.push({ id: `${id}:${messages.length}`, role: value.role === 'assistant' ? 'assistant' : 'user', text: text(prose.trim()), timestamp });
+      messages.push({ id: `${id}:${messages.length}`, role: value.role === 'assistant' ? 'assistant' : 'user', text: text(prose.trim(), limit), timestamp });
     }
     prose = '';
   };
   for (const block of blocks) {
     if (block.type === 'text' && value.role === 'user' && isTowerInstructions(block)) continue;
-    if (block.type === 'text') prose += `${text(block.text)}\n`;
+    if (block.type === 'text') prose += `${text(block.text, limit)}\n`;
     else if (block.type === 'image') prose += '[Image attachment]\n';
     else if (block.type === 'tool_use') {
       flush();
@@ -311,10 +317,18 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
     // Project membership follows the originating folder, not later shell `cd`s.
     if (!s.cwd && validCwd(row.cwd)) s.cwd = row.cwd;
     if (row.message?.model && !String(row.message.model).includes('synthetic')) s.model = row.message.model;
+    // Claude Code records on each row of an answer the effort it ran with: the session's effort is the latest answer's,
+    // and a newer answer that states none leaves it unknown. API error rows (`<synthetic>`) are no answer.
+    if (row.type === 'assistant' && !row.isMeta && !String(row.message?.model || '').includes('synthetic')) {
+      const answer = typeof row.message?.id === 'string' ? row.message.id : undefined;
+      if (validEffort(row.effort)) { s.effort = row.effort; state.effortAnswer = answer; }
+      else if (!answer || answer !== state.effortAnswer) { delete s.effort; delete state.effortAnswer; }
+    }
     const title = row.customTitle || row.aiTitle;
     if (typeof title === 'string' && title.trim()) { s.title = compact(title, 120); state.titleSet = true; }
   } else if (row.type === 'turn_context') {
     if (typeof row.payload?.model === 'string') s.model = row.payload.model;
+    if (validEffort(row.payload?.effort)) s.effort = row.payload.effort; else delete s.effort;
     if (!s.cwd && validCwd(row.payload?.cwd)) s.cwd = row.payload.cwd;
   }
   if (previousModel && s.model !== previousModel) delete s.contextUsage;

@@ -22,13 +22,15 @@ const unavailable = (reason: Reason): ProviderUsage => ({ status: reason === 'un
 // `claude --effort` levels. Claude Code silently lowers a level the resolved model cannot use.
 export const CLAUDE_EFFORTS: readonly EffortOption[] = CLAUDE_EFFORT_LEVELS.map(id => ({ id }));
 // Native aliases resolve through Claude Code's own defaults and environment remaps.
-// Labels name the model each alias selects in Claude Code 2.1.285 (`claude --help` lists fable, opus and sonnet).
-// Default efforts are the catalog defaults of the models these aliases select in Claude Code 2.1.280; Fable's is not known.
+// Labels name the model each alias selects in Claude Code 2.1.285 (`claude --help` lists fable, opus and sonnet); in
+// 2.1.293 `haiku` selects claude-haiku-5-5, which takes --effort.
+// Default efforts are the catalog defaults of the models these aliases select in Claude Code 2.1.280 (Haiku 5.5's from the
+// Claude models overview); Fable's is not known.
 export const CLAUDE_MODELS: readonly ModelOption[] = [
   { id: 'fable', label: 'Fable 5.1', efforts: [...CLAUDE_EFFORTS] },
   { id: 'opus', label: 'Opus 5.5', efforts: [...CLAUDE_EFFORTS], defaultEffort: 'medium' },
   { id: 'sonnet', label: 'Sonnet 5.5', efforts: [...CLAUDE_EFFORTS], defaultEffort: 'high' },
-  { id: 'haiku', label: 'Haiku 4.5', efforts: [] },
+  { id: 'haiku', label: 'Haiku 5.5', efforts: [...CLAUDE_EFFORTS], defaultEffort: 'medium' },
 ];
 const copyModel = (model: ModelOption): ModelOption => ({ ...model, ...(model.efforts ? { efforts: model.efforts.map(effort => ({ ...effort })) } : {}) });
 

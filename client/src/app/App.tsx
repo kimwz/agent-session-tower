@@ -413,7 +413,7 @@ function TowerApp() {
     computers: triggerComputers, targets: triggerTargets, controlledBy: snapshot?.controlledBy || [], showHidden, onShowHiddenChange: setShowHidden, onOpenSession: selectSession }),
   [token, snapshot?.triggers, snapshot?.providers, localProjects, triggerComputers, triggerTargets, snapshot?.controlledBy, showHidden, selectSession]);
   const chatHostEntry = activeChatId ? hostOf(hosts, nodeOf(activeChatId)) : undefined;
-  const chatHost = chatHostEntry?.node ? { name: chatHostEntry.name, live: chatHostEntry.live, canWork: chatHostEntry.canWork, problem: hostProblem(chatHostEntry), workspace: chatHostEntry.workspace, workspaceNote: workspaceNote(chatHostEntry) }
+  const chatHost = chatHostEntry?.node ? { name: chatHostEntry.name, live: chatHostEntry.live, canWork: chatHostEntry.canWork, problem: hostProblem(chatHostEntry), workspace: chatHostEntry.workspace, workspaceNote: workspaceNote(chatHostEntry), ...(chatHostEntry.compaction ? { compaction: true } : {}) }
     : activeChatId && nodeOf(activeChatId) ? { name: t("더 이상 연결되지 않은 컴퓨터"), live: false, canWork: false, workspace: false, problem: t("그 컴퓨터는 더 이상 연결되어 있지 않습니다.") } : undefined;
   const hasCanvasHistory = summary.canvasHistory || canvasVisibleSessions(summary.uncounted.filter(session => !finishedSlackIds.has(session.id)), [], true).length > 0;
   const canvasEmptyState = !canvasSessions.length && !visiblePins.length && <div className="graph-empty canvas-empty">

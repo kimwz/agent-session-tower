@@ -23,25 +23,6 @@
   font-size:11px;
   color:#a3b6cf
 }
-.provider-square {
-  width:27px;
-  height:27px;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  border-radius:7px
-}
-.provider-square.claude {
-  color:#ddb185;
-  background:#392e25
-}
-.provider-square.codex {
-  color:#85c4b5;
-  background:#203832
-}
-.provider-square:not(.working) {
-  filter:grayscale(1)
-}
 .close-chat {
   margin-left:auto
 }

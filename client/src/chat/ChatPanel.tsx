@@ -1,8 +1,7 @@
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react';
 import { Archive, ArchiveRestore, ArrowDown, ArrowUp, Check, ChevronDown, Copy, Folder, GitBranch, LoaderCircle, MessageSquare, Paperclip, RefreshCw, Send, Terminal, TriangleAlert, X } from 'lucide-react';
 import type { ChatMessage, ProviderHealth, Run, Session, SessionDetail } from '../../../shared/types';
-import { ProviderIcon } from '../common/Icons';
 import { WorkspaceActions } from '../workspace/WorkspaceActions';
 import { useOpenWorkspace } from '../workspace/WorkspaceOverlay';
 import { resolveWorkspaceFile, workspaceRoots } from '../workspace/workspace-paths';
@@ -10,6 +9,8 @@ import { WorkspaceFilesContext, type WorkspaceFiles } from './WorkspacePath';
 import { SessionTitleEditor } from '../sessions/SessionTitleEditor';
 import { SessionFamilyNav } from '../sessions/SessionFamilyNav';
 import { SessionOutcomeBadge } from '../sessions/SessionOutcomeBadge';
+import { SessionContextIcon } from '../sessions/SessionContextIcon';
+import { CompactButton, CompactionStatus, compactBlock, useSessionCompaction } from './SessionCompaction';
 import { ResumeCommandButton } from '../sessions/ResumeCommandButton';
 import { resumeCommand } from '../sessions/resume-command';
 import { absoluteTime, api, copyText, providerLabels, statusLabels } from '../common/lib';
@@ -27,7 +28,7 @@ import { matchChatRuns } from './chat-runs';
 import { EffortPicker, ModelPicker, supportedEffort } from './ModelPicker';
 import { useChatAppearance } from './chat-appearance';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
-import { localPart, nodeHeaders, nodeOf, pathFor, scopeDetail, settleRequest } from '../remote/scope';
+import { localPart, nodeHeaders, nodeOf, pathFor, scopeDetail, scopedId, settleRequest } from '../remote/scope';
 import { SecretComposer, SecretChips, SecretComposerProvider } from '../secrets/SecretsPanel';
 import { RemoteContent } from '../remote/remote-content';
 
@@ -37,7 +38,7 @@ export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = 
   /** Folders Tower lists on every computer (scoped keys): the files a conversation names are opened from these. */
   workspaceFolders?: readonly string[]; provider?: ProviderHealth;
   /** The joined computer this conversation lives on; absent for this computer. */
-  host?: { name: string; live: boolean; canWork: boolean; problem?: string; workspace: boolean; workspaceNote?: string }; runs: Run[]; token: string; connected: boolean; onClose: () => void; onNavigate: (id: string) => void; onSnapshotRefresh: () => void; onSessionUpdate: (session: Session) => void; onSessionClose?: () => void; onAcknowledgeOutcome?: () => Promise<void>; sessionClosed?: boolean; changingClosed?: boolean; readRevision?: string; onRead?: (id: string, revision: string) => void }) {
+  host?: { name: string; live: boolean; canWork: boolean; problem?: string; workspace: boolean; workspaceNote?: string; compaction?: boolean }; runs: Run[]; token: string; connected: boolean; onClose: () => void; onNavigate: (id: string) => void; onSnapshotRefresh: () => void; onSessionUpdate: (session: Session) => void; onSessionClose?: () => void; onAcknowledgeOutcome?: () => Promise<void>; sessionClosed?: boolean; changingClosed?: boolean; readRevision?: string; onRead?: (id: string, revision: string) => void }) {
   useI18n();
   // Changes to a joined computer's conversation need that computer reachable, not only this Tower.
   const reachable = connected && (!host || host.canWork);
@@ -140,6 +141,9 @@ export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = 
   const approvalKey = controlRuns.flatMap(run => run.status === 'error' ? [] : run.approvals?.map(approval => `${run.id}:${approval.id}`) || []).join('|');
   useLayoutEffect(() => { if (approvalKey && runControls.current) runControls.current.scrollTop = 0; }, [approvalKey]);
   const runProjection = useMemo(() => matchChatRuns(detail?.messages || emptyMessages, currentRuns, sessionId), [detail?.messages, currentRuns, sessionId]);
+  const contextDescription = useId();
+  const compaction = useSessionCompaction(sessionId, token, reachable, onNavigate);
+  const compactBlocked = compactBlock(current, currentRuns, { reachable, token, supported: !host || !!host.compaction });
   const scrollToBottom = useCallback(() => { followRef.current = true; setFollowing(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'smooth' }); }, []);
 
   async function loadOlder() {
@@ -245,9 +249,10 @@ export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = 
       onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); appearance.changeWidth(appearance.width + (event.key === 'ArrowLeft' ? 20 : -20)); } }} />
     <header className="chat-header">
       <div className="chat-heading-line">
-        {current && <span className={`provider-square ${current.provider} ${current.status}`} role="img" aria-label={providerLabels[current.provider]} title={providerLabels[current.provider]}><ProviderIcon provider={current.provider} /></span>}
+        {current && <span className={`chat-context-icon ${current.status}`}><SessionContextIcon provider={current.provider} usage={current.contextUsage} descriptionId={contextDescription} compact label={providerLabels[current.provider]} /></span>}
         {current ? <SessionTitleEditor key={current.id} session={current} token={token} connected={reachable} onSaved={updated => { onSessionUpdate(updated); setDetail(previous => previous ? { ...previous, session: { ...previous.session, customTitle: updated.customTitle } } : previous); onSnapshotRefresh(); }} /> : <h2 className="chat-loading-title">{t("대화 불러오는 중")}</h2>}
         <div className="chat-header-actions">
+          {current && <CompactButton job={compaction.job} busy={compaction.busy === 'start'} blocked={compactBlocked} onStart={() => { void compaction.start(); }} />}
           {onSessionClose && <button className="icon-button session-close-button" aria-label={sessionClosed ? t("세션 다시 열기") : t("세션 종료")} title={sessionClosed ? t("그래프에 다시 표시") : t("그래프에서 숨기기 · 실행 중인 작업은 계속되고, 작업이 끝나면 이 세션이 만든 워크트리를 정리합니다")} disabled={changingClosed || !reachable || !token} onClick={() => { setSendError(''); void Promise.resolve(onSessionClose()).catch(error => setSendError(error instanceof Error ? error.message : t("세션 상태를 저장하지 못했습니다."))); }}>{changingClosed ? <LoaderCircle className="spin" size={15} /> : sessionClosed ? <ArchiveRestore size={16} /> : <Archive size={16} />}</button>}
           <button className="icon-button close-chat" onClick={onClose} aria-label={t("대화 닫기")} title={t("닫기 (Esc)")}><X size={18} /></button>
         </div>
@@ -261,6 +266,8 @@ export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = 
         <SessionFamilyNav sessions={allSessions} selectedId={sessionId} onNavigate={onNavigate} />
       </div>
       {showMetadata && current && <dl className="session-metadata">{host && <div><dt>{t("컴퓨터")}</dt><dd>{host.name}</dd></div>}<div><dt>{t("작업 폴더")}</dt><dd>{(current.cwd && localPart(current.cwd)) || t("정보 없음")}</dd></div>{current.model && <div><dt>{t("모델")}</dt><dd>{current.model}</dd></div>}<div><dt>{t("세션 ID")}</dt><dd>{current.nativeId}<button className="icon-button" title={t("세션 ID 복사")} aria-label={t("세션 ID 복사")} onClick={() => { void copyText(current.nativeId).then(success => { setCopied(success); window.setTimeout(() => setCopied(false), 1500); }); }}>{copied ? <Check size={12} /> : <Copy size={12} />}</button></dd></div>{resumeCommand(current) && !host && <div><dt>{t("터미널")}</dt><dd><code className="resume-command">{resumeCommand(current)}</code><ResumeCommandButton session={current} size={12} /></dd></div>}<div><dt>{t("상태 판단")}</dt><dd>{translateMessage(current.statusReason)}</dd></div><div><dt>{t("시작")}</dt><dd>{absoluteTime(current.createdAt)}</dd></div></dl>}
+      <CompactionStatus job={compaction.job} error={compaction.error} followed={compaction.followed} busy={!!compaction.busy} lastRequestAt={current?.lastRequestAt}
+        onCancel={() => { void compaction.cancel(); }} onOpen={id => onNavigate(scopedId(nodeOf(sessionId), id))} onDismiss={compaction.dismiss} />
       {contextBanner}
     </header>
     <div className="chat-scroll" ref={scroller} onScroll={() => { const el = scroller.current; if (!el) return; const near = el.scrollHeight - el.scrollTop - el.clientHeight < 100; followRef.current = near; setFollowing(near); }}>

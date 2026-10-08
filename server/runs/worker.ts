@@ -44,6 +44,7 @@ import { remoteTriggerLaunch } from '../remote/visibility.js';
 import { RemoteRequestLedger, type RemoteResult } from '../remote/request-ledger.js';
 import { SkillService } from '../skills/service.js';
 import { SessionTasks } from '../sessions/tasks.js';
+import { SessionCompactions } from '../sessions/compaction/service.js';
 import { SecretService } from '../secrets/service.js';
 import { SecretRuntime, SECRET_TOOLS } from '../secrets/runtime.js';
 import { SECRET_CONNECTION_INSTRUCTIONS } from '../secrets/notices.js';
@@ -73,7 +74,7 @@ import { permissionRetentionPending, RetentionObserver } from '../sessions/reten
 import { createNativeRetentionAdapter } from '../sessions/retention/provider.js';
 import { TemporaryCollector, inspectTemporaryProtection } from '../temporary/directories.js';
 
-const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan', 'skillsBackup', 'secretCall']);
+const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan', 'skillsBackup', 'secretCall', 'compactionGet']);
 
 export interface RunnerHostOptions {
   stateDir: string;
@@ -93,6 +94,8 @@ export interface RunnerHostOptions {
   skills?: SkillService;
   /** Task summaries put on the listed sessions; a new summary is a new snapshot. */
   sessionTasks?: SessionTasks;
+  /** Compactions the owner asked for: a conversation summarized into a new session. */
+  compactions?: SessionCompactions;
   api?: TowerApi;
   secrets?: SecretRuntime;
   terminals?: WorkspaceTerminals;
@@ -131,7 +134,7 @@ export interface RunnerHostOptions {
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
 /** Only these read state; every other request is refused while the worker hands off, never half-accepted. */
-const READS_DURING_HANDOFF = new Set(['snapshot', 'sessionHistory', 'attachment', 'slackOverview', 'skillsOverview', 'skillsDetail', 'skillsSummary']);
+const READS_DURING_HANDOFF = new Set(['snapshot', 'sessionHistory', 'attachment', 'slackOverview', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'compactionGet']);
 
 /** Hosts an already-started engine, including one adopted during an in-place upgrade. */
 export async function startRunnerHost(options: RunnerHostOptions) {
@@ -300,6 +303,20 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'cancel': return options.runs.cancel(args[0] as string);
       case 'respondToApproval': return options.runs.respondToApproval(args[0] as string, args[1] as string, args[2] as RunApprovalResponse);
       case 'sessionHistory': return sessionHistory(options.sessions, args);
+      case 'compactionStart': case 'compactionGet': case 'compactionCancel': {
+        const compactions = options.compactions;
+        if (!compactions) break;
+        if (typeof args[0] !== 'string' || !args[0] || args[0].length > 512) throw new TowerError('invalid', 'Invalid session.');
+        if (method === 'compactionGet') return compactions.get(args[0]) ?? null;
+        if (method === 'compactionCancel') return compactions.cancel(args[0]);
+        const admitted = admit(args[2]);
+        const session = options.runs.getSession(args[0]);
+        // A controller never reaches a coordinator conversation, as with every other request about it.
+        if (admitted.origin?.controllerId && session && coordinator(session.id)) throw new TowerError('not-found', 'Not found.');
+        const input = record(args[1]);
+        const title = typeof input.title === 'string' && input.title.length <= 200 ? input.title : undefined;
+        return compactions.start(args[0], { ...(title ? { title } : {}), ...(admitted.requestId ? { requestId: admitted.requestId } : {}) }, admitted);
+      }
       case 'attachment': {
         const attachment = await options.runs.attachment(args[0] as string);
         return { metadata: attachment.metadata, content: attachment.content.toString('base64'), sessionId: attachment.sessionId };
@@ -737,6 +754,16 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     runs.on('change', () => tasks.changed());
     sessions.on('change', () => tasks.changed());
     tasks.changed();
+    // A conversation compacted on the owner's request into a new session of the same model and effort.
+    const compactions = new SessionCompactions({ stateDir, session: id => runs.getSession(id), runs: () => runs.list(),
+      history: (session, before, limit) => sessions.detail(runs.nativeSessionId(session.id), before, limit, { previousUser: false, fullText: true }),
+      model: (request, options) => runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs }),
+      create: (input, admission) => runs.create(input, admission),
+      refuse: session => coordinators().has(session.id) ? 'Slack·GitHub 코디네이터 대화는 압축할 수 없습니다.' : undefined,
+      untrusted: session => runs.sessionOrigin(session.id)?.untrustedInput === true,
+      // The list as the web saved it now, its folders looked at again; as Auto Prompt does before a controller's work.
+      remote: { prepare: async cwd => { await exclusions.reload(); await exclusions.prepare([cwd], { fresh: true }); }, excludes: cwd => exclusions.matcher().excludes(cwd) } });
+    await compactions.load();
     // Made just below; the permission service only calls it once requests arrive.
     let reviewer!: PermissionReviewer;
     // One-shot runs: the command runs in this worker; the conversation hears its end unless it already read the result.
@@ -984,10 +1011,10 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     }
     // A restore's skills are still being written (below): the worker hands over only after them.
     let restoringSkills = Boolean(restoring);
-    await startRunnerHost({ stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, api, secrets, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce, handoffCarry: () => secrets.handoff(),
-      onIdle: async () => { await retention?.service.quiesce(); await temporary.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); clearInterval(secretExpiry); secrets.close(); stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await tasks.close(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
-      inFlight: () => secrets.inFlight() || restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
-      transient: () => secrets.inFlight() || restoringSkills || slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
+    await startRunnerHost({ stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, compactions, api, secrets, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce, handoffCarry: () => secrets.handoff(),
+      onIdle: async () => { await retention?.service.quiesce(); await temporary.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); clearInterval(secretExpiry); secrets.close(); stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await tasks.close(); await compactions.close(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
+      inFlight: () => secrets.inFlight() || restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || compactions.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
+      transient: () => secrets.inFlight() || restoringSkills || slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || compactions.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       // Work a Slack or GitHub coordinator delegated: its coordinator hears how it ended and decides what follows.
       delegated: run => Boolean(run.origin?.workflowId) && !coordinators().has(run.sessionId),
       releaseIntake: () => { slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); tasks.resume(); worktrees.resume(); reviewer.release(); },
@@ -995,7 +1022,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       quiesce: async () => { await retention?.service.quiesce(); await temporary.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); paused = true; secrets.pause(); tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); tasks.pause(); worktrees.pause(); reviewer.hold(); await reviewer.flush(); permissions.pause(); await Promise.all([secrets.flush(), worktrees.flush(), tasks.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
       resume: () => { retention?.service.resume(); temporary.resume(); runs.resumeAttachmentCleanup(); autoPrompts.resumeAttachmentCleanup(); paused = false; secrets.resume(); tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); tasks.resume(); worktrees.resume(); permissions.resume(); reviewer.release(); sessions.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
-      onHandedOff: () => { retention?.service.stop(); void temporary.close(); clearInterval(secretExpiry); secrets.close(); stopTelling(); void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); void tasks.close(); worktrees.close(); reviewer.close(); clearInterval(expiryTimer); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
+      onHandedOff: () => { retention?.service.stop(); void temporary.close(); clearInterval(secretExpiry); secrets.close(); stopTelling(); void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); void tasks.close(); void compactions.close(); worktrees.close(); reviewer.close(); clearInterval(expiryTimer); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     await permissions.reconcileNotifications().catch(error => console.error(`Permission decisions did not recover: ${error instanceof Error ? error.message : String(error)}`));
     runs.markReady();
     void retention?.service.cycle().catch(error => console.error(`Session retention: ${error instanceof Error ? error.message : String(error)}`));

@@ -11,7 +11,7 @@ const render = (pick: { model?: string; effort?: string }) => renderToStaticMark
 
 test('a role\'s model is chosen from the computer\'s whole list, whatever is selected now', () => {
   const html = render({ model: 'opus' });
-  for (const label of ['Claude 기본값', 'Fable 5.1 (fable)', 'Opus 5.5 (opus)', 'Sonnet 5.5 (sonnet)', 'Haiku 4.5 (haiku)', '직접 입력…']) assert.ok(html.includes(label), label);
+  for (const label of ['Claude 기본값', 'Fable 5.1 (fable)', 'Opus 5.5 (opus)', 'Sonnet 5.5 (sonnet)', 'Haiku 5.5 (haiku)', '직접 입력…']) assert.ok(html.includes(label), label);
   assert.match(html, /<option value="opus" selected="">/);
   assert.doesNotMatch(html, /<input/, 'no text field for a listed model');
 });

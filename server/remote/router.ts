@@ -347,6 +347,14 @@ export function createRemoteRouter({ attachmentStores, attachmentUploads, backen
       if (!job || !current) throw notFound();
       return json(res, 200, { job: remoteJob(job, principal.controllerId, current.matcher.revision) });
     }
+    const compaction = path.match(/^\/api\/sessions\/([^/]+)\/compaction(\/cancel)?$/);
+    if (method === 'GET' && compaction && !compaction[2]) {
+      const found = await confirm(compaction[1]);
+      if (!backend.compaction) throw notFound();
+      const job = await backend.compaction('get', found.id);
+      await stillVisible(found.id);
+      return json(res, 200, { compaction: job });
+    }
     if (method !== 'POST') throw notFound();
     // Tower operations a controlling computer may use; the worker answers with only what this computer shares.
     const operation = path.match(/^\/api\/v1\/([a-z][a-zA-Z]*\.[a-zA-Z]+)$/)?.[1];
@@ -459,6 +467,22 @@ export function createRemoteRouter({ attachmentStores, attachmentUploads, backen
       note(closed[2] === 'close' ? 'close' : 'reopen', about(updated));
       await stillVisible(found.id);
       return json(res, 200, { session: remoteSession(updated) });
+    }
+    if (compaction) {
+      const found = await confirm(compaction[1]);
+      if (Object.keys(await readJson(req)).length) throw httpError(400, '압축 요청의 본문은 비워 두세요.');
+      if (!backend.compaction) throw httpError(503, '세션을 압축할 수 없습니다.');
+      if (compaction[2]) {
+        const job = await backend.compaction('cancel', found.id, context(principal));
+        note('compact-cancel', about(found));
+        return json(res, 200, { compaction: job });
+      }
+      // The new session opens in the conversation's folder, which must still be shared; the worker looks again before creating it.
+      await folderAllowed(found.cwd);
+      const job = await backend.compaction('start', found.id, context(principal, requestId(req)));
+      note('compact', about(found));
+      await stillVisible(found.id);
+      return json(res, 202, { compaction: job });
     }
     const acknowledge = path.match(/^\/api\/sessions\/([^/]+)\/acknowledge$/);
     if (acknowledge) {

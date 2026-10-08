@@ -38,6 +38,8 @@ export interface Session {
   launchedBy?: { kind: 'trigger'; triggerId: string };
   agentName?: string;
   model?: string;
+  /** The reasoning effort the latest answer ran with, as the native record states it (Claude answers, Codex turn context). */
+  effort?: string;
   contextUsage?: SessionContextUsage;
   status: SessionStatus;
   statusReason: string;
@@ -65,6 +67,28 @@ export interface Session {
    */
   familyActive?: boolean;
 }
+/**
+ * The owner's request to compact a conversation: its whole history is summarized and a new session of the same provider,
+ * model and effort carries the work on. The original is never changed.
+ */
+export interface SessionCompaction {
+  id: string;
+  sessionId: string;
+  state: 'reading' | 'summarizing' | 'creating' | 'done' | 'failed' | 'cancelled';
+  createdAt: string;
+  updatedAt: string;
+  /** While summarizing: model calls finished of those planned. */
+  progress?: { done: number; total: number };
+  /** The new conversation, once created. */
+  newSessionId?: string;
+  error?: string;
+  /** What the new session runs with, and where each value came from. */
+  continuation?: { provider: Provider; model?: string; effort?: string; modelSource: ContinuationSource; effortSource: ContinuationSource };
+  /** The compaction model that read the conversation. */
+  compactor?: { provider: Provider; model?: string; effort?: string };
+}
+/** `observed`: the native record of the latest answer; `lastRun`: Tower's latest turn request; `default`: the CLI's own. */
+export type ContinuationSource = 'observed' | 'lastRun' | 'default';
 /** A feature-level unit of work in a conversation and the stage it reached. The current one is the latest updated. */
 export interface SessionTask { id: string; title: string; stage: string; startedAt: string; updatedAt: string }
 export interface SessionContextUsage {
