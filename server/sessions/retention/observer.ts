@@ -37,6 +37,7 @@ const exec = promisify(execFile);
 export async function gitProjectIdentity(cwd: string): Promise<string | undefined> {
   if (!isAbsolute(cwd)) return undefined;
   try {
+    await realpath(cwd);
     const result = await exec('git', ['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
       timeout: 2000, maxBuffer: 8192, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
     });
@@ -45,7 +46,7 @@ export async function gitProjectIdentity(cwd: string): Promise<string | undefine
   } catch (error) {
     const failure = error as NodeJS.ErrnoException & { killed?: boolean; code?: number | string };
     // Missing/not-repository/timeout never become an invented project identity.
-    if (failure.code === 'ENOENT' || typeof failure.code === 'number' || failure.killed) return undefined;
+    if (failure.code === 'ENOENT' || failure.code === 'ENOTDIR' || typeof failure.code === 'number' || failure.killed) return undefined;
     throw error;
   }
 }
@@ -121,10 +122,12 @@ export class RetentionObserver {
           : { fingerprint: raw.fingerprint, since: new Date(now).toISOString(), observedAt: now };
         current.set(session.id, observation);
       }
-      if (!projects.has(session.cwd)) projects.set(session.cwd, Date.now() < projectDeadline
+      const kind = raw.internal ? 'guardian' : session.isSubagent ? 'subagent' : session.launchedByAgent ? 'helper' : 'parent';
+      const needsProject = kind === 'parent' && !session.master;
+      if (needsProject && !projects.has(session.cwd)) projects.set(session.cwd, Date.now() < projectDeadline
         ? await (this.options.projectIdentity ?? gitProjectIdentity)(session.cwd) : undefined);
-      records.push({ session, kind: raw.internal ? 'guardian' : session.isSubagent ? 'subagent' : session.launchedByAgent ? 'helper' : 'parent',
-        projectKey: projects.get(session.cwd), lastActivityAt: raw.lastActivityAt,
+      records.push({ session, kind,
+        projectKey: needsProject ? projects.get(session.cwd) : undefined, lastActivityAt: raw.lastActivityAt,
         latestTaskEndedAt: raw.latestTaskEndedAt, inactiveSince: observation?.since });
     }
     try { await writePrivateJson(this.path, JSON.stringify({ version: 1, entries: [...current] }), { syncDirectory: true }); }
