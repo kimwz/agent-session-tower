@@ -135,6 +135,8 @@ test('successor storage transition markers and rollback fences are strictly read
 });
 
 import { join } from 'node:path';
+import { storageManifest } from '../../../server/storage/schema.js';
+import type { RollbackFence } from '../../../server/link/storage-update.js';
 import { SessionService } from '../../../server/sessions/service.js';
 import { LaunchProofFile } from '../../../server/sessions/launch-proofs.js';
 
@@ -183,20 +185,34 @@ test('real SDK failure leaves childless helper proof and the last cold registry 
 for (const accept of [false, true]) test(`predecessor proof reflects callback acceptance rather than persisted handoff intent (accept=${accept})`, async t => {
   const dir = await stateDir(t); const bundle = threadBundle('production');
   const preflight = await storage.preflightStorage({ bundle, stateDir: dir });
+  assert.equal(preflight.supported, true, 'actual supported Node/SQLite is required; no mocked runtime pass');
   const client = await storage.openStorage({ stateDir: dir, bundle }); t.after(() => client.close());
   await client.prepare({ allowMigration: true });
-  const target = client.identity!.appVersion;
-  const installed = await installArtifact(dir, target, { manifest: contextOf('production').manifest });
-  await writeFile(dirname(entryPoint(installed)) + '/contract.json', JSON.stringify(artifactStorageContract(contextOf('production'), preflight)));
-  await installArtifact(dir, '99.0.0'); await pointCurrent(dir, '99.0.0');
-  let quietCalls = 0; let handoffs = 0;
+  const source = contextOf('production');
+  assert.deepEqual(client.identity, source.identity, 'the predecessor is the actual SDK build');
+  const target = '1.0.0';
+  const targetManifest = storageManifest([], target);
+  const targetBuild = runningBuild(target, { manifest: targetManifest });
+  const installed = await installArtifact(dir, target, { manifest: targetManifest });
+  await writeFile(dirname(entryPoint(installed)) + '/contract.json', JSON.stringify(artifactStorageContract(
+    { identity: targetBuild.preflight.identity!, manifest: targetManifest }, { ...preflight, identity: targetBuild.preflight.identity! })));
+  const predecessor = await installArtifact(dir, source.identity.appVersion, { manifest: source.manifest });
+  await writeFile(dirname(entryPoint(predecessor)) + '/contract.json', JSON.stringify(artifactStorageContract(source, preflight)));
+  await pointCurrent(dir, source.identity.appVersion);
+  let quietCalls = 0; let handoffs = 0; let acceptedFence: RollbackFence | undefined;
   const call = storageControl({ stateDir: dir, client: () => client, hold: async () => {}, release: async () => {},
-    quiet: () => ++quietCalls === 1 || accept, handoff: () => { handoffs++; } });
+    quiet: () => ++quietCalls === 1 || accept,
+    handoff: (_command, fence) => { handoffs++; acceptedFence = { ...fence }; }, acceptedFence: () => acceptedFence });
   const ports = rollbackPorts(call, async () => {});
-  const outcome = await runRollback({ stateDir: dir, running: runningBuild('99.0.0'), managed: true, ports, serialize: async <T>(work: () => Promise<T>) => work() }, { target, by: 'owner', reason: 'acceptance race' });
+  const outcome = await runRollback({ stateDir: dir, running: { version: source.identity.appVersion, manifest: source.manifest, preflight }, managed: true, ports, serialize: async <T>(work: () => Promise<T>) => work() }, { target, by: 'owner', reason: 'acceptance race' });
   const read = await readRollbackRecord(dir); if (read.state !== 'present') assert.fail('intent required');
+  assert.ok(read.record.handoff, 'producer reached the durable sent handoff stage');
+  assert.equal(read.record.handoff.state, accept ? 'pending' : 'no-effect', 'the actual consumer settles the sent handoff');
+  assert.equal(quietCalls, 2, 'the actual consumer rechecks quiet after the producer wait');
   assert.equal(handoffs, accept ? 1 : 0);
-  const proof = await ports.servingProof({ id: read.record.id, attempt: read.record.handoff!.attempt });
+  const proof = await ports.servingProof({ id: read.record.id, attempt: read.record.handoff.attempt });
   assert.equal(proof.handoff, accept ? 'pending' : 'none');
+  assert.deepEqual(acceptedFence, accept ? { id: read.record.id, attempt: read.record.handoff.attempt } : undefined);
+  if (accept) assert.equal(outcome.state, 'handing-off');
   if (!accept) assert.equal(outcome.state, 'failed', 'refused predecessor must not settle forever as pending');
 });

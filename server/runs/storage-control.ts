@@ -69,7 +69,7 @@ export function storageControl(options: {
     if (!['hold', 'release', 'handoff'].includes(action)) throw new TowerError('invalid', 'Unknown storage control operation.');
     const { fence, record } = await fenced(input.fence, action as 'hold' | 'release' | 'handoff');
     if (action === 'hold') { await options.hold(record.reason); return; }
-    if (action === 'release') { if (record.held) await options.release(); return; }
+    if (action === 'release') { await options.release(); return; }
     const target = input.target as { version?: unknown; entry?: unknown; sourceHash?: unknown } | undefined;
     const directory = versionDirectory(options.stateDir, record.target);
     const entry = await entryPoint(directory);

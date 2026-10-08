@@ -14,7 +14,7 @@ import { test } from 'node:test';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
 import { RunManager } from '../../../server/runs/manager.js';
 import { SessionService } from '../../../server/sessions/service.js';
-import { startRunnerHost } from '../../../server/runs/worker.js';
+import { startRunnerHost, type RunnerHostOptions } from '../../../server/runs/worker.js';
 import type { SlackService } from '../../../server/slack/service.js';
 import { RUNNER_PROTOCOL, runnerPaths } from '../../../server/runs/runner-protocol.js';
 import type { CodexBridgeOptions } from '../../../server/runs/codex-bridge.js';
@@ -37,7 +37,7 @@ import { RetentionArchive } from '../../../server/sessions/retention/archive.js'
 import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
 import { worktreeCleanupVisible } from '../../../server/worktrees/janitor.js';
 
-async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector) {
+async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector, hostOptions?: (parts: { stateDir: string; sessions: SessionService; runs: RunManager }) => Promise<Partial<RunnerHostOptions>>) {
   const directory = await realpath(await temporaryFixture('tower-durable-fixture-'));
   const stateDir = join(directory, 'state');
   const id = '10000000-0000-4000-8000-000000000001';
@@ -76,7 +76,7 @@ async function fixture(workerClosed = false, withRetention = false, retentionUna
   const retention = withRetention ? { archive, temporary, service: new RetentionService({ archive, store: retentionStore,
     adapter: createNativeRetentionAdapter({ claude: [], codex: [] }), observe: async () => ({ now: Date.now(), migratedAt: Date.now(), complete: true, records: [], protectedIds: new Set() }) }) } : undefined;
   await retention?.service.start();
-  const host = await startRunnerHost({ stateDir, sessions, runs, closedSessions, retention, retentionUnavailable });
+  const host = await startRunnerHost({ stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, ...await hostOptions?.({ stateDir, sessions, runs }) });
   const paths = await runnerPaths(stateDir);
   const clients: DurableRunManager[] = [];
   const connect = async (pollMs = 10) => {
@@ -1918,19 +1918,22 @@ test('temporary cleanup failure remains visible without blocking native retentio
 
 
 test('actual SDK thread exit holds new work while the active fake provider and diagnostic RPC survive; explicit failed reopen never resends', async t => {
-  const f = await fixture(); t.after(f.cleanup);
   let diagnosis: WorkerStorageStatus = { state: 'ready', code: 'ready', reason: 'ready', admissionOpen: true, sessionsAvailable: true, healthStatus: 200 };
-  const database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle(), onUnavailable: status => {
+  let database: Awaited<ReturnType<typeof storage.openStorage>>;
+  const f = await fixture(false, false, undefined, undefined, async ({ runs }) => {
+    return { storage: () => diagnosis, retryStorage: async () => {
+      try { await database.reopen(); await database.prepare({ allowMigration: false }); if ((await database.gate('core')).open) { diagnosis = { ...diagnosis, state: 'ready', admissionOpen: true }; runs.releaseStorage(); } }
+      catch { /* The SDK's typed failure stays in its unavailable callback. */ }
+      return diagnosis;
+    }, closeStorage: async () => { await database?.close(); } };
+  }); t.after(f.cleanup);
+  database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle(), onUnavailable: status => {
     f.runs.holdStorage();
     diagnosis = { ...diagnosis, state: 'unavailable', code: status.failure?.code ?? 'unknown', reason: status.failure?.message ?? 'unknown', admissionOpen: false, healthStatus: 503, failure: status.failure };
+    f.runs.emit('change');
   } });
   t.after(() => database.close());
   await database.prepare({ allowMigration: true });
-  f.host.activate({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, storage: () => diagnosis, retryStorage: async () => {
-    try { await database.reopen(); await database.prepare({ allowMigration: false }); if ((await database.gate('core')).open) { diagnosis = { ...diagnosis, state: 'ready', admissionOpen: true }; f.runs.releaseStorage(); } }
-    catch { /* The SDK's typed failure stays in its unavailable callback. */ }
-    return diagnosis;
-  }, closeStorage: async () => { await database.close(); } });
   const client = await f.connect();
   const run = await client.enqueue(f.session.id, 'accepted exactly once', {}, { origin: { kind: 'owner' } });
   await until(() => f.starts() === 1);
@@ -1962,23 +1965,27 @@ test('actual SDK thread exit holds new work while the active fake provider and d
 
 
 test('storage-held queued work and paused workflow references hand off patiently only after active provider ends, with DB close ACK before lock release', async t => {
-  const f = await fixture(); t.after(f.cleanup);
+  const order: string[] = [];
+  const f = await fixture(false, false, undefined, undefined, async ({ stateDir }) => {
+    const paths = await runnerPaths(stateDir);
+    const release = await acquireStateLock(paths.runtime, 0);
+    return { releaseStateLock: async () => { await release(); order.push('lock-release'); } };
+  }); t.after(f.cleanup);
   const database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle() });
   t.after(() => database.close());
   await database.prepare({ allowMigration: true });
-  const order: string[] = [];
   let handed = false;
   const client = await f.connect();
   const first = await client.enqueue(f.session.id, 'accepted', {}, { origin: { kind: 'owner' } });
   await until(() => f.starts() === 1);
-  const queued = await client.enqueue(f.session.id, 'patient queued workflow', {}, { origin: { kind: 'trigger', triggerId: 'fixture-trigger', workflowId: 'paused-workflow' } });
+  const queued = await f.runs.enqueue(f.session.id, 'patient queued workflow', {}, { origin: { kind: 'trigger', triggerId: 'fixture-trigger', workflowId: 'paused-workflow' } });
   f.runs.holdStorage();
   const storageStatus: WorkerStorageStatus = { state: 'unavailable', code: 'thread-exited', reason: 'held', admissionOpen: false, sessionsAvailable: true, healthStatus: 503 };
   f.host.activate({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, storage: () => storageStatus,
     inFlight: () => true, transient: () => false,
     quiesce: async () => { await f.sessions.quiesce(); await f.runs.flushState(); order.push('durable-flush'); },
     closeStorage: async () => { const result = await database.close(); assert.ok(['closed', 'already-closed'].includes(result.ack)); order.push('db-close-ack'); },
-    releaseStateLock: async () => { order.push('lock-release'); }, startSuccessor: () => { order.push('successor'); handed = true; } });
+    startSuccessor: () => { order.push('successor'); handed = true; } });
   assert.equal(await client.requestHandoff(true, { patient: true }), true);
   await new Promise(resolve => setTimeout(resolve, 1200));
   assert.equal(handed, false); assert.equal(f.cancels(), 0);
@@ -2022,14 +2029,29 @@ test('a handoff record ENOSPC leaves the existing record, diagnostic endpoint, p
 
 
 test('idle close keeps diagnosis and the runtime lock when close ACK is refused; an explicit second close releases only after ACK', async t => {
-  const f = await fixture(); t.after(f.cleanup);
+  let database: Awaited<ReturnType<typeof storage.openStorage>>;
   let fail = true; let released = 0; let diagnosed = 0;
+  const f = await fixture(false, false, undefined, undefined, async ({ stateDir }) => {
+    const paths = await runnerPaths(stateDir);
+    const release = await acquireStateLock(paths.runtime, 0);
+    return {
+      closeStorage: async () => {
+        if (fail) throw new Error('fixture close ACK unavailable');
+        if (database) {
+          const result = await database.close();
+          assert.ok(['closed', 'already-closed'].includes(result.ack));
+        }
+      },
+      onCloseFailure: () => { diagnosed++; }, releaseStateLock: async () => { await release(); released++; } };
+  }); t.after(f.cleanup);
+  database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle() });
+  t.after(() => database.close());
+  await database.prepare({ allowMigration: true });
   const client = await f.connect();
-  f.host.activate({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs,
-    closeStorage: async () => { if (fail) throw new Error('fixture close ACK unavailable'); },
-    onCloseFailure: () => { diagnosed++; }, releaseStateLock: async () => { released++; } });
   await assert.rejects(f.host.close(true), /close ACK unavailable/);
   assert.equal(released, 0); assert.equal(diagnosed, 1);
+  assert.equal((await database.gate('core')).open, true, 'refused close preserves the actual SDK owner');
+  await assert.rejects(acquireStateLock(f.paths.runtime, 0), MonitorAlreadyRunning);
   const second = await f.connect();
   assert.equal(second.runnerVersion(), client.runnerVersion());
   fail = false;

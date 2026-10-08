@@ -438,7 +438,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         const admitted = args[2] === undefined ? undefined : admit(args[2]);
         const controllerId = admitted?.origin?.controllerId;
         const operation = args[0] as OperationName;
-        if (!Object.hasOwn(OPERATIONS, operation)) throw new TowerError('invalid', 'Unknown API operation.');
+        if (!Object.hasOwn(OPERATIONS, operation)) throw new TowerError('not-found', 'Unknown API operation.');
         const validate = () => { admitted?.validate?.(); const storage = options.storage?.(); if (OPERATIONS[operation].write && storage && !storage.admissionOpen) throw new TowerError('unavailable', storage.reason, { disposition: 'not-admitted' }); };
         validate();
         return options.api.call(args[0], args[1], controllerId ? { kind: 'owner', via: 'remote', controllerId } : { kind: 'owner', via: 'ui' }, admitted?.requestId, { delegation: admitted?.delegation, validate });
@@ -1033,7 +1033,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     let coordinators = (): ReadonlySet<string> => new Set();
     const autoPrompts = new AutoPromptManager({ stateDir, runs, remote: { prepare: (paths, options) => exclusions.prepare(paths, options), matcher: () => exclusions.matcher(), coordinators: () => coordinators() }, ...context });
     initializedAutoPrompts = autoPrompts;
-    registerStorageHold(() => autoPrompts.holdStorage(), () => autoPrompts.releaseStorage());
+    autoPrompts.holdStorage();
+    registerStorageHold(() => autoPrompts.holdStorage(), () => { if (storageStatus.admissionOpen) autoPrompts.releaseStorage(); });
     await startupGate();
     await autoPrompts.start();
     // The owner's fast-judgment settings are read again each time, so a change on the settings page applies at once.
@@ -1434,6 +1435,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     await startupGate();
     storageStatus.admissionOpen = true;
     runs.releaseStorage();
+    autoPrompts.releaseStorage();
     runs.markReady();
     void retention?.service.cycle().catch(error => console.error(`Session retention: ${error instanceof Error ? error.message : String(error)}`));
     // A restore's skills are written once the worker serves: linking into project folders (on a slow volume, say) never

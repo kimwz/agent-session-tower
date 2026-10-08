@@ -80,6 +80,7 @@ export async function installArtifact(stateDir: string, version: string, options
   const directory = versionDirectory(stateDir, version);
   const entry = entryPoint(directory);
   await mkdir(join(entry, '..'), { recursive: true });
+  await writeFile(join(directory, 'package.json'), JSON.stringify({ type: 'module' }));
   if (!options.legacy) {
     const build = runningBuild(version, { supported: options.supported, salt: options.salt, manifest: options.manifest });
     const contract = artifactStorageContract({ identity: build.preflight.identity!, manifest: build.manifest! }, build.preflight);
