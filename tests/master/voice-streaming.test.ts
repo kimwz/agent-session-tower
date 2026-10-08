@@ -476,6 +476,7 @@ test('a long streamed answer ends at the limit with a pointer to the screen', as
   await until(() => h.speakOf(done)?.state === 'played', 20_000);
   const heard = await until(() => { const all = h.spoken().join(' '); return all.endsWith(VOICE_REST) && all; });
   assert.ok(heard.length <= 5_000 + VOICE_REST.length + 60);
+  assert.ok(h.labs.speeches.every(text => !text.startsWith('[')), 'as sent: no tone tag on the default model (Eleven v4 Turbo)');
 });
 
 test('audio asked for again partway starts at a whole frame near that place', async t => {
@@ -696,6 +697,7 @@ test('an answer kept shorter than it was ends, read aloud, saying the rest is on
   await until(() => h.speakOf(entry)?.state === 'played' || undefined);
   await until(() => h.spoken().length >= 2 || undefined);
   assert.deepEqual(h.spoken(), ['앞부분만 남은 긴 답이에요.', VOICE_REST]);
+  assert.deepEqual(h.labs.speeches, ['앞부분만 남은 긴 답이에요.', VOICE_REST], 'as sent: no tone tag on the default model (Eleven v4 Turbo)');
 });
 
 test('a page that never tells how it went, or kept it waiting too long, ends the answer told of; voice the owner turned off does not', async t => {
