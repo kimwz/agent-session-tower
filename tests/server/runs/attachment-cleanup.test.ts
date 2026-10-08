@@ -144,7 +144,7 @@ async function lifecycle(f: Awaited<ReturnType<typeof fixture>>, toolsStop: () =
   const retention = { service: { quiesce: async () => { retentionCalls.push('quiesce'); }, resume: () => { retentionCalls.push('resume'); } } };
   const context: Record<string, unknown> = { runs: f.runs, autoPrompts: f.auto, retention, temporary, clearInterval, secretExpiry: undefined, expiryTimer: undefined, stopTelling: () => {}, paused: false,
     tools: { ...noop, stop: toolsStop, pause: () => {}, resume: () => {} } };
-  for (const name of ['secrets', 'triggers', 'github', 'slack', 'publicAgents', 'skills', 'tasks', 'worktrees', 'reviewer', 'runner', 'permissions', 'sessions', 'terminals', 'ledger']) context[name] = noop;
+  for (const name of ['secrets', 'triggers', 'github', 'slack', 'publicAgents', 'skills', 'tasks', 'compactions', 'worktrees', 'reviewer', 'runner', 'permissions', 'sessions', 'terminals', 'ledger']) context[name] = noop;
   const lifecycleSource = source.slice(source.indexOf('      onIdle: async () =>'));
   const callback = (name: string) => { const match = lifecycleSource.match(new RegExp(`^      ${name}: (.+),$`, 'm')); assert.ok(match, name); return runInNewContext(`(${match[1]})`, context) as () => Promise<void>; };
   return { onIdle: callback('onIdle'), quiesce: callback('quiesce'), resume: callback('resume'), retentionCalls, temporaryCalls };

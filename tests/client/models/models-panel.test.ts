@@ -11,7 +11,7 @@ const render = (pick: { model?: string; effort?: string }) => renderToStaticMark
 
 test('a role\'s model is chosen from the computer\'s whole list, whatever is selected now', () => {
   const html = render({ model: 'opus' });
-  for (const label of ['Claude 기본값', 'Fable 5.1 (fable)', 'Opus 5.5 (opus)', 'Sonnet 5.5 (sonnet)', 'Haiku 4.5 (haiku)', '직접 입력…']) assert.ok(html.includes(label), label);
+  for (const label of ['Claude 기본값', 'Fable 5.1 (fable)', 'Opus 5.5 (opus)', 'Sonnet 5.5 (sonnet)', 'Haiku 5.5 (haiku)', '직접 입력…']) assert.ok(html.includes(label), label);
   assert.match(html, /<option value="opus" selected="">/);
   assert.doesNotMatch(html, /<input/, 'no text field for a listed model');
 });
@@ -21,6 +21,12 @@ test('a model the list does not have is shown in a text field beside the list', 
   assert.match(html, /<option value="__custom__" selected="">/);
   assert.match(html, /<input[^>]*value="claude-opus-5-5"/);
   assert.match(html, /목록에 없는 모델/);
+});
+
+test("a role's verified initial model is not flagged although the list names only aliases", () => {
+  const html = renderToStaticMarkup(createElement(PickRow, { provider: 'claude', labelled: false, pick: { model: 'claude-haiku-5-5' }, health: claude, off: true, disabled: false, verified: 'claude-haiku-5-5', onChange() {} }));
+  assert.match(html, /<input[^>]*value="claude-haiku-5-5"/);
+  assert.doesNotMatch(html, /목록에 없는 모델/);
 });
 
 test('the settings problem is shown, and nothing when the computer sends none', () => {

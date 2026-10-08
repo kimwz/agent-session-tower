@@ -4,6 +4,17 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.115.0] - 2026-10-08
+
+### Added
+- **Compact a conversation into a new session.** A compact button sits left of the archive button in an open chat. It has the new **Session compaction** model role (Settings › Models, `sessions.compactor`; Claude Haiku 5.5 by its pinned ID `claude-haiku-5-5`) read the conversation's whole history without tools or a saved session, sub-sessions excluded, and keep what the work needs: the goal, where it stands, open work, the owner's standing preferences, approvals, refusals and stops, decisions with their reasons, files, commits, pull requests and links, and next steps. A conversation larger than one call is summarized part by part and merged in order; its beginning is never dropped. Tower then opens one new session in the same folder and on the same computer with the provider, model and reasoning effort the original's latest answer ran with (from its native record, else Tower's last request, else the CLI default; never the new-chat defaults). The summary reaches the new session as Tower's hidden instructions on its first message, so later turns keep it, and that first turn only takes the work over and waits for the owner. The page moves to the new session when it is ready; the original stays as it is, and its header links to the continuation.
+- A compaction is refused while the conversation works or has queued or scheduled requests, and is abandoned (nothing created) when the conversation changes before the session is created, when it is cancelled, or when the model call fails. A second click, a retried request or a worker handoff returns the same new session (a new one only when that session can no longer carry the work); compacting a compacted session again reads the summary it started with from its own first message. A joined computer's conversation is compacted on that computer under its sharing rules, and agents and the master cannot start or cancel one. An ordinary worker update waits for a compaction; **Update now** does not start new ones and stops one still reading or summarizing.
+
+### Changed
+- **The chat header shows context usage like the canvas.** The top-left icon is the round provider orb with the conversation's context ring; unknown usage shows only the track.
+- Sessions report the reasoning effort their latest answer ran with (Claude answers, Codex turn context), and controllers receive it.
+- The `haiku` model choice is labelled Haiku 5.5 and offers reasoning levels, as Claude Code 2.1.293 selects claude-haiku-5-5 for it.
+
 ## [1.114.2] - 2026-10-08
 
 ### Changed

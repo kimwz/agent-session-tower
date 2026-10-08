@@ -251,7 +251,8 @@ export class SessionService extends EventEmitter {
 
   /** `before` is an opaque byte cursor, stable when new messages are appended. */
   /** `previousUser: false` skips looking back for the user message before the page (a reader going through every page has it). */
-  async detail(id: string, before?: number, limit = 60, options: { previousUser?: boolean } = {}): Promise<SessionDetail | undefined> {
+  /** `fullText`: the full read compaction makes (see parseMessages). */
+  async detail(id: string, before?: number, limit = 60, options: { previousUser?: boolean; fullText?: boolean } = {}): Promise<SessionDetail | undefined> {
     const state = this.index.get(id);
     if (!state) return undefined;
     if (state.historyStartOrdinal !== undefined && state.historyStartOffset === undefined) {
@@ -281,7 +282,7 @@ export class SessionService extends EventEmitter {
         try {
           const line = Buffer.concat(fragments.reverse(), pendingBytes).toString('utf8');
           const row = JSON.parse(line);
-          const messages = ownHistory(state, row, start) ? parseMessages(state.session.provider, row, start, state.session.createdAt) : [];
+          const messages = ownHistory(state, row, start) ? parseMessages(state.session.provider, row, start, state.session.createdAt, options.fullText === true) : [];
           if (messages.length) { collected.push(messages); messageCount += messages.length; }
         } catch { skipped += 1; /* Malformed or oversized lines are left out, and counted. */ }
       }
