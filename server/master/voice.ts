@@ -533,8 +533,8 @@ export class MasterVoice {
   listeners(id: string): number { return this.audio.listeners(id); }
 
   /**
-   * A short sample in a voice, for the owner choosing one in the settings: read with the model and bright tone set
-   * now, made once per voice and model, and paid for like anything else read aloud. Needs only the key.
+   * A short sample in a voice, for the owner choosing one in the settings: read with the model set now and its tone
+   * (none on Eleven v4 Turbo), made once per voice and model, and paid for like anything else read aloud. Needs only the key.
    */
   async voicePreview(input: { voiceId: unknown }): Promise<{ audio: string }> { return this.clips.preview(input); }
 

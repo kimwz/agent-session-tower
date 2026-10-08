@@ -34,7 +34,7 @@ test('Eleven v4 Turbo gets no tone tag on any path, yet still reads brackets in 
   assert.ok(parts.length > 1);
   assert.ok(parts.every(part => part.speech === part.text), 'what is sent is exactly what is shown');
   assert.equal(streamTone(answer, v4, 'answer'), '');
-  assert.equal(streamTone('다음도 끝났어요.', v4, 'answer', ''), '');
+  assert.equal(streamTone('다음도 끝났어요.', v4, 'answer', '[cheerfully]'), '', 'a tone carried over from before is dropped on v4');
   // The models before it are told the tone as before.
   for (const v3 of ['eleven_v3_conversational', 'eleven_v3']) {
     assert.equal(voiced('네.', v3, 'ack'), '[cheerfully] 네.');

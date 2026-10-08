@@ -146,7 +146,7 @@ test('the page\'s place in the audio reaches the host through the web', async ()
 
 async function fakeElevenLabs() {
   // Each reading starts with an empty ID3 tag, as ElevenLabs' mp3 does; later parts of one audio lose theirs.
-  const state = { speeches: [] as string[], requests: [] as Array<'speech' | 'dialogue'>, models: [] as string[], chunks: [Buffer.from([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 0]), Buffer.from('sound')], gapMs: 10, completed: [] as Array<{ speech: number; at: number }> };
+  const state = { speeches: [] as string[], requests: [] as Array<'speech' | 'dialogue'>, models: [] as string[], v4Tagged: [] as string[], chunks: [Buffer.from([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 0]), Buffer.from('sound')], gapMs: 10, completed: [] as Array<{ speech: number; at: number }> };
   const server = createServer(async (req: IncomingMessage, res) => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
@@ -157,6 +157,8 @@ async function fakeElevenLabs() {
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { text?: string; inputs?: Array<{ text: string }>; model_id: string };
       state.models.push(body.model_id);
       state.speeches.push(String(body.inputs?.[0]?.text ?? body.text));
+      // Eleven v4 Turbo is never sent a bracket: Tower adds no tag and turns the text's own brackets into parentheses.
+      if (body.model_id === 'eleven_v4_turbo' && state.speeches.at(-1)!.includes('[')) state.v4Tagged.push(state.speeches.at(-1)!);
       state.requests.push(url.pathname === '/v1/text-to-dialogue/stream' ? 'dialogue' : 'speech');
       const speech = state.speeches.length;
       res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'history-item-id': `h${speech}` });
@@ -184,6 +186,8 @@ async function harness(t: test.TestContext, options: { settings?: Record<string,
   t.after(async () => { for (const step of cleanup.reverse()) await step(); await removeTemporaryFixture(dir); });
   const labs = await fakeElevenLabs();
   cleanup.push(() => labs.close());
+  // Checked last, once everything else is closed, so a failure here never leaves servers running.
+  cleanup.unshift(() => assert.deepEqual(labs.v4Tagged, [], 'no tag reached Eleven v4 Turbo'));
   const runs: Run[] = [];
   let clock = Date.now();
   const tick = () => new Date(clock += 1000).toISOString();
@@ -444,17 +448,20 @@ test('the timing of the first response and the first sound is kept', async t => 
 });
 
 test('a part written for v3 keeps v3 when the model changes to Eleven v4 Turbo while it waits; v4 parts have no tag', async t => {
-  const h = await harness(t, { settings: { voice: { model: 'eleven_v3_conversational' } }, page: { delayMs: 300 } });
+  // The page reports playing only when the test says so, so the second part waits until after the change.
+  const h = await harness(t, { settings: { voice: { model: 'eleven_v3_conversational' } }, page: { answer: () => undefined } });
   h.on();
+  const heard = new Set<string>();
+  const play = () => { for (const say of h.says()) if (say.kind === 'answer' && !heard.has(say.id)) { heard.add(say.id); h.voice.voicePlayed({ session: h.current(), id: say.id, result: 'played', startedMs: 5 }); } };
   const { run } = await h.ask('길게 알려줘');
   // Two parts made now under v3 (tagged); the second waits for the first to be heard.
   h.write(run, 'm1:0', Array.from({ length: 30 }, (_, index) => `${index + 1}번째 설명은 조금 길게 이어지는 문장입니다.`).join(' '), true);
   await until(() => h.says().find(say => say.kind === 'answer'));
+  assert.equal(h.labs.speeches.filter(text => text.includes('번째 설명')).length, 1, 'the second part is not made yet');
   await h.settings.update({ voice: { model: 'eleven_v4_turbo' } });
   h.write(run, 'm2:0', '바꾼 뒤에 쓴 문장입니다.', true);
   h.finish(run);
-  const done = await h.entry(/바꾼 뒤에 쓴/);
-  await until(() => h.speakOf(done)?.state === 'played', 20_000);
+  await until(() => { play(); const entry = h.room.recent(50).find(item => item.data.kind === 'master' && /바꾼 뒤에 쓴/.test(item.data.text)); return entry && h.speakOf(entry)?.state === 'played' || undefined; }, 20_000);
   const sent = h.labs.speeches.map((text, index) => ({ text, model: h.labs.models[index] }));
   const v3 = sent.filter(item => item.model === 'eleven_v3_conversational');
   assert.ok(v3.filter(item => item.text.includes('번째 설명')).length >= 2, 'the parts written before the change');

@@ -76,8 +76,8 @@ export class VoiceClips {
   }
 
   /**
-   * A short sample in a voice, for the owner choosing one in the settings: read with the model and bright tone set
-   * now, made once per voice and model, and paid for like anything else read aloud. Needs only the key.
+   * A short sample in a voice, for the owner choosing one in the settings: read with the model set now and its tone
+   * (none on Eleven v4 Turbo), made once per voice and model, and paid for like anything else read aloud. Needs only the key.
    */
   async preview(input: { voiceId: unknown }): Promise<{ audio: string }> {
     if (!this.settings.voiceKey()) throw fail('ElevenLabs API 키가 없습니다. 마스터 설정에서 넣어 주세요.', 'conflict');

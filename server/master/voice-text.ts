@@ -41,7 +41,7 @@ export type VoiceKind = 'answer' | 'report' | 'error' | 'notice' | 'ack';
 const untagged = (text: string, model: string) => ttsModel(model).tags ? text.replace(/\[/g, '(').replace(/\]/g, ')') : text;
 
 /**
- * The text sent to speech for something the master says: a tone tag in front, for models that follow tags. The tag
+ * The text sent to speech for something the master says: a tone tag in front, for models Tower tones. The tag
  * sets how it is read, never how much of it is read, and is only in what is synthesized: what the page shows and the
  * conversation keep the text.
  */
