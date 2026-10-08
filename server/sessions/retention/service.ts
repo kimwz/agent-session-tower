@@ -17,7 +17,9 @@ export interface RetentionServiceOptions {
   now?: () => number;
 }
 export class RetentionService {
-  private timer?: ReturnType<typeof setInterval>;
+  private timer?: ReturnType<typeof setTimeout>;
+  private catchUp = false;
+  private nextCandidateId?: string;
   private checking?: Promise<RetentionOverview>;
   private stopped = true;
   private lastCheckedAt?: string;
@@ -120,10 +122,16 @@ export class RetentionService {
     } };
   }
   resume(): void {
-    if (this.timer) return; this.stopped = false;
-    this.timer = setInterval(() => { void this.cycle().catch(error => this.report(error)); }, 3_600_000); this.timer.unref();
+    if (!this.stopped) return; this.stopped = false;
+    this.schedule(3_600_000);
   }
-  stop(): void { this.stopped = true; if (this.timer) clearInterval(this.timer); this.timer = undefined; }
+  private schedule(delay: number): void {
+    if (this.stopped) return;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => { this.timer = undefined; void this.cycle().catch(error => this.report(error)); }, delay);
+    this.timer.unref();
+  }
+  stop(): void { this.stopped = true; if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
   async quiesce(): Promise<void> {
     this.stop();
     // Queued errors are already reported by serial/cycle; maintenance failures must not strand the worker lock.
@@ -144,7 +152,7 @@ export class RetentionService {
   cycle(): Promise<RetentionOverview> {
     if (this.checking) return this.checking;
     const task = this.serial(() => this.runCycle()); this.checking = task;
-    void task.finally(() => { this.checking = undefined; }).catch(error => this.report(error));
+    void task.finally(() => { this.checking = undefined; this.schedule(this.catchUp ? 1000 : 3_600_000); }).catch(error => this.report(error));
     return task;
   }
   verifyBackups(): Promise<void> { return this.serial(() => this.verifyBackupsNow()); }
@@ -165,6 +173,8 @@ export class RetentionService {
     await this.countBytes(); this.verification = 'complete';
   }
   private async runCycle(): Promise<RetentionOverview> {
+    this.catchUp = false;
+    const archivedBefore = this.coldMembers().length;
     await this.verifyBackupsNow();
     if (this.verification !== 'complete') return this.overview();
     const observation = await this.observe(); observation.migratedAt = this.options.store.migratedAt;
@@ -178,11 +188,15 @@ export class RetentionService {
       if (stale.length) await this.options.store.removeMetadata(stale);
     }
     this.candidates = selected.candidates.length;
+    const offset = selected.candidates.findIndex(candidate => candidate.rootId === this.nextCandidateId);
+    const candidates = offset > 0 ? [...selected.candidates.slice(offset), ...selected.candidates.slice(0, offset)] : selected.candidates;
+    if (!candidates.length) this.nextCandidateId = undefined;
 
     const started = Date.now(); let count = 0; const blockedEntries: RetentionJournalEntry[] = [];
-    for (const [index, candidate] of selected.candidates.entries()) {
-      if (this.stopped) { this.addDeferred('maintenance-paused', selected.candidates.length - index); break; }
-      if (Date.now() - started >= 30_000) { this.addDeferred('time-budget', selected.candidates.length - index); break; }
+    for (const [index, candidate] of candidates.entries()) {
+      if (this.stopped) { this.addDeferred('maintenance-paused', candidates.length - index); break; }
+      if (Date.now() - started >= 30_000) { this.addDeferred('time-budget', candidates.length - index); break; }
+      this.nextCandidateId = candidates[(index + 1) % candidates.length]?.rootId;
       const records = this.records(candidate, observation);
       const id = this.operationId(candidate, records); const existing = this.options.store.get(id);
       if (existing && ((existing.members?.length && existing.members.every(member => member.state === 'cold')) || existing.phase === 'archived' || (existing.phase === 'restored-awaiting-start' && existing.restoredAt))) continue;
@@ -198,6 +212,8 @@ export class RetentionService {
       await this.archiveCandidate(entry, records); count += candidate.ids.length;
     }
     if (blockedEntries.length) await this.options.store.putMany(blockedEntries);
+    this.catchUp = observation.complete && this.coldMembers().length > archivedBefore
+      && Boolean(this.deferredReasons['time-budget'] || this.deferredReasons['session-budget']);
     this.lastCheckedAt = new Date().toISOString(); await this.countBytes(); return this.overview();
   }
   cancelArchiveRequest(id: string): Promise<void> {
