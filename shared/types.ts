@@ -422,6 +422,7 @@ export interface SystemStatus {
 export interface ComponentVersions { terminalHost?: string | null; master?: string | null }
 
 export interface Snapshot {
+  storage?: import('./storage.js').WorkerStorageStatus;
   sessions: Session[];
   /** Branch sync state of recently used project folders that are git repositories. */
   repositories?: RepositoryStatus[];

@@ -47,6 +47,14 @@ export async function runLinkCommand(args: string[]): Promise<void> {
     else positional.push(arg);
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Port must be between 1 and 65535.');
+  if (command === 'storage') {
+    if (!['status', 'retry'].includes(positional[0] ?? '') || positional.length !== 1) throw new Error('Usage: agent-session-tower storage status|retry [--state-dir <path>]');
+    const running = await runningTower(stateDir);
+    if (!running) throw new Error('진단 가능한 Tower가 실행 중이지 않습니다.');
+    if (positional[0] === 'retry') await post(running.base, '/api/storage/retry', {});
+    console.log(JSON.stringify(await get(running.base, '/api/storage/status')));
+    return;
+  }
   if (command === 'service') return runService(positional[0], stateDir, port);
   if (positional.length !== 1) throw new Error(USAGE);
   const code = decodeJoinCode(positional[0]);
@@ -153,8 +161,8 @@ async function runningTower(stateDir: string): Promise<{ base: string; port: num
   for (const owner of await lockOwners(stateDir)) {
     const base = `http://127.0.0.1:${owner.port}`;
     const health = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(1500) })
-      .then(response => response.json() as Promise<{ ok?: boolean; application?: string; pid?: number; version?: string; service?: boolean; bindHost?: string }>).catch(() => undefined);
-    if (health?.ok && health.application === HEALTH_APPLICATION_ID && health.pid === owner.pid && health.version) {
+      .then(response => response.json() as Promise<{ ok?: boolean; diagnostic?: boolean; application?: string; pid?: number; version?: string; service?: boolean; bindHost?: string }>).catch(() => undefined);
+    if ((health?.ok || health?.diagnostic === true) && health.application === HEALTH_APPLICATION_ID && health.pid === owner.pid && health.version) {
       return { base, port: owner.port, version: health.version, pid: owner.pid, service: health.service === true, ...(typeof health.bindHost === 'string' ? { bindHost: health.bindHost } : {}), ...(owner.command ? { command: owner.command } : {}) };
     }
   }

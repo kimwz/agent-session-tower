@@ -80,7 +80,7 @@ function getJson(port: number, path: string): Promise<unknown> {
       const chunks: Buffer[] = [];
       res.on('data', (chunk: Buffer) => chunks.push(chunk));
       res.on('end', () => {
-        if (res.statusCode !== 200) { reject(new Error(`${path} answered ${res.statusCode}`)); return; }
+        if (res.statusCode !== 200 && !(path === '/api/health' && res.statusCode === 503)) { reject(new Error(`${path} answered ${res.statusCode}`)); return; }
         try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (error) { reject(error); }
       });
       res.on('error', reject);

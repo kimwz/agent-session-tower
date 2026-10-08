@@ -1,3 +1,4 @@
+import type { WorkerStorageStatus } from '../../shared/storage.js';
 import { AttachmentStore } from '../stores/attachments.js';
 import { isImageAttachment, MAX_ATTACHMENT_BYTES, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../../shared/attachments.js';
 import { EventEmitter } from 'node:events';
@@ -93,7 +94,9 @@ export class DurableRunManager extends EventEmitter {
   }
 
   private async spawnWorker(): Promise<void> {
-    const held = await this.options.heldWorkerEntry?.().catch(() => undefined);
+    let held: string | undefined;
+    try { held = await this.options.heldWorkerEntry?.(); }
+    catch (error) { console.error('Previous worker could not be verified; current worker must start behind its storage gate:', error); }
     const command = held ? { execPath: process.execPath, args: [held, '--runner-worker', this.paths!.stateDir] } : this.workerCommand();
     let spawnError: Error | undefined;
     if (this.options.spawn) this.options.spawn(command);
@@ -200,6 +203,15 @@ export class DurableRunManager extends EventEmitter {
   }
 
   async close(): Promise<void> { this.closed = true; if (this.timer) clearInterval(this.timer); this.terminals.dispose(); }
+  storageStatus(): WorkerStorageStatus | undefined { return this.snapshot?.storage && structuredClone(this.snapshot.storage); }
+  async storageRetry(): Promise<WorkerStorageStatus> {
+    if (!this.supports('storage')) throw new TowerError('unavailable', 'The execution worker has no storage diagnosis.');
+    return this.call('storageRetry') as Promise<WorkerStorageStatus>;
+  }
+  async storageRecovery(action: string, input: Record<string, unknown>): Promise<unknown> {
+    if (!this.supports('storage')) throw new TowerError('unavailable', 'The execution worker has no storage recovery.');
+    return this.call('storageRecovery', [action, input]);
+  }
   list(): Run[] { return structuredClone(this.snapshot?.runs ?? []); }
   /** The attached worker keeps its own code until it is idle, so it can lag behind the web version. */
   runnerVersion(): string | undefined { return this.snapshot ? this.snapshot.version ?? 'legacy' : undefined; }

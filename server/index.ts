@@ -1,3 +1,4 @@
+import { printArtifactStorageContract } from './link/storage-update.js';
 import { AttachmentStore } from './stores/attachments.js';
 import { AttachmentUploads } from './stores/attachment-uploads.js';
 // First: Tower's processes never carry the identity of an agent turn that started them.
@@ -135,6 +136,10 @@ async function main() {
     await startSecretsMcp(resolve(args[1])); return;
   }
   if (args[0] === 'secrets') { await runSecretsCommand(args.slice(1)); return; }
+  if (args[0] === '--storage-contract') {
+    if (args.length !== 1) throw new Error('Usage: agent-session-tower --storage-contract');
+    await printArtifactStorageContract(); return;
+  }
   if (args[0] === '--runner-worker') {
     if (args.length !== 2 || !args[1]) throw new Error('Runner worker requires a state directory.');
     await runRunnerWorker(resolve(args[1]));
@@ -151,7 +156,7 @@ async function main() {
     await startOwnerMcp(args.length === 3 ? resolve(args[2]) : defaultStateDir());
     process.exit(0);
   }
-  if (args[0] === 'join' || args[0] === 'service') {
+  if (args[0] === 'join' || args[0] === 'service' || args[0] === 'storage') {
     await runLinkCommand(args);
     return;
   }
@@ -355,6 +360,7 @@ async function main() {
     const nodes = remoteNodes?.list() ?? [];
     const managed = runs.list();
     return {
+      ...(runs.storageStatus() ? { storage: runs.storageStatus() } : {}),
       sessions: sessionViews(all, managed).map(session => outcomes.apply(session)),
       groups: withoutMasterFolder(groups.list(), stateDir),
       repositories: repositories.list(),
@@ -418,6 +424,7 @@ async function main() {
   // Visitor pages of public agents, on their own port bound to this computer only; a tunnel publishes them.
   const publicListener = new PublicListener({ stateDir, backend: runs, reservedPorts: () => [port] });
   const backend: Backend = {
+    storageStatus: () => runs.storageStatus(), storageRetry: () => runs.storageRetry(), storageRecovery: (action, input) => runs.storageRecovery(action, input),
     snapshot, detail,
     retention: (action, value, extra) => runs.retention(action, value, extra),
     session: id => { const found = runs.getSession(id); return found && applyClosed(titles.apply(found)); },

@@ -1,3 +1,4 @@
+import type { WorkerStorageStatus } from '../../shared/storage.js';
 import type { AttachmentStore } from '../stores/attachments.js';
 import type { AttachmentUploads } from '../stores/attachment-uploads.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -41,6 +42,9 @@ import { TowerError, statusOf } from '../../shared/errors.js';
 import { sendStoredAttachment, sendWorkspaceMedia, sseSink } from './sinks.js';
 
 export interface Backend {
+  storageStatus?(): WorkerStorageStatus | undefined;
+  storageRetry?(): Promise<WorkerStorageStatus>;
+  storageRecovery?(action: string, input: Record<string, unknown>): Promise<unknown>;
   /** Dedicated owner input channel; never included in agent operations or their request ledger. */
   secrets?(action: string, input: Record<string, unknown>): Promise<unknown>;
   /** Tower operations (see shared/api/operations.ts), run by the worker as the owner. */
@@ -277,8 +281,9 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
     try {
       const url = new URL(req.url || '/', `http://${req.headers.host}`);
       const path = decodeURIComponent(url.pathname);
-      if (req.method === 'GET' && path === '/api/health') return json(res, 200, {
-        ok: true, application: HEALTH_APPLICATION_ID, pid: process.pid, version: APP_VERSION,
+      if (req.method === 'GET' && path === '/api/health') return json(res, backend.storageStatus?.()?.healthStatus ?? 200, {
+        ok: (backend.storageStatus?.()?.healthStatus ?? 200) === 200, diagnostic: Boolean(backend.storageStatus?.() && !backend.storageStatus?.()?.admissionOpen),
+        ...(backend.storageStatus?.() ? { storage: backend.storageStatus() } : {}), application: HEALTH_APPLICATION_ID, pid: process.pid, version: APP_VERSION,
         bindHost: address && typeof address === 'object' ? address.address : undefined,
         remoteAccess: Boolean(remote), service: Boolean(service),
       });
@@ -544,6 +549,19 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         await auth!.unblock(body.ip);
         return json(res, 200, auth!.overview());
       }
+      if (path === '/api/storage/status' && req.method === 'GET') return json(res, 200, backend.storageStatus?.() ?? { state: 'unavailable', code: 'worker-contract-missing' });
+      if (path.startsWith('/api/storage/') && req.method === 'POST' && (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()])) return json(res, 403, { error: '저장소 복구는 소유자만 할 수 있습니다.' });
+      const storageRecovery = /^\/api\/storage\/(snapshot|adopt|reconcile)$/.exec(path);
+      if (storageRecovery && req.method === 'POST') {
+        if (!backend.storageRecovery) throw new TowerError('unavailable', 'Storage recovery is unavailable.');
+        return json(res, 200, await backend.storageRecovery(storageRecovery[1], await readJson(req)));
+      }
+      if (path === '/api/storage/retry' && req.method === 'POST') {
+        if (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()]) return json(res, 403, { error: '저장소 복구는 소유자만 할 수 있습니다.' });
+        if (!backend.storageRetry) throw new TowerError('unavailable', 'Storage recovery is unavailable.');
+        return json(res, 200, await backend.storageRetry());
+      }
+      if (req.method === 'GET' && (path === '/api/snapshot' || path.startsWith('/api/sessions/')) && backend.storageStatus?.()?.sessionsAvailable === false) throw new TowerError('unavailable', backend.storageStatus?.()?.reason ?? 'Sessions are unavailable.');
       if (req.method === 'GET' && path === '/api/bootstrap') return json(res, 200, { token });
       if (req.method === 'GET' && path === '/api/snapshot') {
         const scope = scopeFromParams(url.searchParams);
