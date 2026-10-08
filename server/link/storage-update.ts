@@ -5,16 +5,17 @@ import { lstat, open, readlink, rm, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { UpdateFailure, UpdateStage, UpdateStatus } from '../../shared/link.js';
-import type { DomainManifest, RuntimeInfo, StorageBuildIdentity, StorageBuildManifest, StorageInspection } from '../storage/contract.js';
+import type { AppliedMigration, DomainManifest, PrepareResult, RuntimeInfo, ScopeManifest, StorageBuildIdentity, StorageBuildManifest, StorageInspection, StorageState } from '../storage/contract.js';
+import type { StorageGate } from '../storage/client.js';
 import type { StoragePreflight } from '../storage/preflight.js';
 import { manifestDigest } from '../storage/schema.js';
 import { privateDirectory, privateFile, storageLayout, writePrivateDocument } from '../storage/paths.js';
 import { writePrivateJson } from '../stores/private-json.js';
 import { processStart } from '../instance/process-start.js';
 import { entryPoint, newerVersion, pointRollbackTarget, runtimePaths, versionDirectory } from './service.js';
-import { readExact as readExactly, readStoragePin, storagePinPath, withStorageTransition, type PinRead, type StoragePin } from './storage-transition-lock.js';
+import { liveness, readExact as readExactly, readStoragePin, storagePinPath, thisProcess, withStorageTransition, type PinRead, type StoragePin } from './storage-transition-lock.js';
 
-export { readStoragePin, withStorageTransition, type PinRead, type StoragePin } from './storage-transition-lock.js';
+export { inspectStorageTransition, readStoragePin, TransitionLockError, withStorageTransition, type PinRead, type StoragePin, type TransitionDiagnostic } from './storage-transition-lock.js';
 
 /**
  * How updates, direct starts and the owner's rollback decide whether this build may change its storage (import a
@@ -120,11 +121,14 @@ export async function readUpdateRecord(stateDir: string): Promise<UpdateRecordRe
   const update = value as SavedUpdate;
   return { state: ACTIVE.has(update.stage) ? 'active' : 'terminal', update, sha256: sha256(bytes) };
 }
+/** The sha256 a rollback is reserved over: the record's bytes, null for none; undefined when it cannot be told. */
+const updateShaOf = (update: UpdateRecordRead): string | null | undefined => update.state === 'active' || update.state === 'terminal' ? update.sha256 : update.state === 'absent' ? null : undefined;
 
 /**
  * The handoff hold, without removing it however old it is. Only a plain file there is a hold: a link (even one to
  * nowhere, which looking through it would take for a missing hold) or anything else is `unreadable`, never absent or
  * present. A hold written just after the look found none is answered absent, as it was then; the next look sees it.
+ * Its only writer and remover is storage-hold.ts.
  */
 export type HoldRead = { state: 'absent' } | { state: 'present'; ageMs: number } | { state: 'unreadable'; reason: string; error: unknown };
 export async function readHold(stateDir: string, now = Date.now()): Promise<HoldRead> {
@@ -250,6 +254,16 @@ function domainProblem(domain: unknown): boolean {
   const cutover = domain.cutover;
   return cutover !== undefined && !(isObject(cutover) && typeof cutover.artifactVersion === 'string' && isCount(cutover.importContract, 1));
 }
+/** Whether `manifest` is a whole manifest of `version` whose digest is its own, recomputed. */
+function manifestWhole(manifest: unknown, version: string): manifest is StorageBuildManifest {
+  if (!isObject(manifest)) return false;
+  const core = manifest.core;
+  const coreValid = isObject(core) && core.scope === 'core' && isCount(core.schemaVersion, 1) && SHA256.test(String(core.schemaDigest));
+  if (manifest.appVersion !== version || typeof manifest.protocol !== 'string' || !coreValid || !Array.isArray(manifest.domains) || manifest.domains.some(domainProblem)) return false;
+  let digest: string | undefined;
+  try { digest = manifestDigest(manifest as unknown as StorageBuildManifest); } catch { digest = undefined; }
+  return !!digest && digest === manifest.digest;
+}
 
 /** Checks a printed contract whole: of `version`, its manifest's digest recomputed, its identity bound to that manifest. */
 export function parseArtifactStorageContract(text: string, version: string): ArtifactRead {
@@ -263,9 +277,7 @@ export function parseArtifactStorageContract(text: string, version: string): Art
   if (manifest.appVersion !== version || identity.appVersion !== version || !coreValid || !Array.isArray(manifest.domains) || manifest.domains.some(domainProblem)) {
     return { state: 'unverifiable', reason: 'The artifact\'s storage manifest is malformed.' };
   }
-  let digest: string | undefined;
-  try { digest = manifestDigest(manifest as unknown as StorageBuildManifest); } catch { digest = undefined; }
-  if (!digest || digest !== manifest.digest || identity.manifestDigest !== digest || identity.protocol !== manifest.protocol || !SHA256.test(String(identity.sourceHash))) {
+  if (!manifestWhole(manifest, version) || identity.manifestDigest !== manifest.digest || identity.protocol !== manifest.protocol || !SHA256.test(String(identity.sourceHash))) {
     return { state: 'unverifiable', reason: 'The artifact\'s storage identity does not match its manifest.' };
   }
   return { state: 'contract', contract: value as unknown as ArtifactStorageContract };
@@ -308,13 +320,6 @@ export const probeInstalledArtifact: ArtifactProbe = async (directory, version) 
 /** Domains `manifest` imports (its release B), each needing its release A's reader/writer first. */
 const cutoverDomains = (manifest: StorageBuildManifest) => manifest.domains.filter(domain => domain.cutover);
 
-/** Whether one preparation build's domain contract reads and writes `domain` as the cutover build declares it. */
-function preparesDomain(domain: DomainManifest, prepared: { appVersion: string; schemaVersion: number; schemaDigest: string; readerContract: number; writerContract: number } | undefined): boolean {
-  return !!prepared && prepared.schemaVersion === domain.schemaVersion && prepared.schemaDigest === domain.schemaDigest
-    && prepared.readerContract >= domain.preparation.readerContract && prepared.writerContract >= domain.preparation.writerContract
-    && atLeast(prepared.appVersion, domain.preparation.requiredArtifactVersion);
-}
-
 export interface PreparationCheck {
   /**
    * `not-required`: the build imports no domain. Only `not-required` and `satisfied` let it go ahead.
@@ -333,7 +338,8 @@ export interface PreparationCheck {
  * it imports: the same storage protocol, the same core schema, and every scope target declares (cutover or not: its
  * thread applies them all) at exactly target's version and digest, with at least target's reader and writer contracts;
  * for a domain target imports, `previous` must also be that domain's preparation release or later. A gap names the
- * release that prepares it when that release lies strictly between the two versions.
+ * release that prepares it when that release lies strictly between the two versions. The one rule an update (the
+ * version it goes back to) and a direct start (its preparation evidence) are both judged by.
  */
 function takeoverGaps(target: StorageBuildManifest, previous: StorageBuildManifest, previousVersion: string): { scope: string; reason: string; prepare?: string }[] {
   const between = (version: string) => RELEASE.test(version) && newerVersion(version, previousVersion) && newerVersion(target.appVersion, version) ? version : undefined;
@@ -383,38 +389,76 @@ export function preparationCheck(target: StorageBuildManifest, artifact: Artifac
   return { state: 'satisfied', domains: names };
 }
 
+/** Applied schema rows per scope, as a database states them. */
+const rowsByScope = (applied: readonly AppliedMigration[]) => {
+  const byScope = new Map<string, AppliedMigration[]>();
+  for (const row of applied) byScope.set(row.scope, [...(byScope.get(row.scope) ?? []), row]);
+  return byScope;
+};
+/** Why `rows` are not exactly `declared` (1..n, the same migrations), or undefined when they are. */
+function scopeProblem(declared: ScopeManifest, rows: readonly AppliedMigration[], owner: string): string | undefined {
+  const ordered = [...rows].sort((a, b) => a.version - b.version);
+  if (ordered.some((row, index) => row.version !== index + 1)) return `The database's ${declared.scope} migrations are not 1..n.`;
+  if (ordered.length !== declared.schemaVersion || sha256(ordered.map(row => row.checksum).join('\n')) !== declared.schemaDigest) {
+    return `${owner} declares ${declared.scope} at version ${declared.schemaVersion} with other migrations than the database's ${ordered.length}.`;
+  }
+  return undefined;
+}
+
 /**
- * A preparation release's evidence for one domain, written by its worker under the runtime lock once its storage
- * contract was checked: the bootstrap fact a later direct start compares with its own manifest. Not business state,
- * not an import authority, not part of the settings backup.
+ * A preparation release's evidence, one file per domain its manifest declares, written by its worker once its storage
+ * was prepared (a claimed prepare that left every scope of its manifest applied) and its gate opened: the bootstrap
+ * fact a later direct start compares with its own manifest, by the same whole-contract rule an update uses
+ * (takeoverGaps). It names the whole A contract (protocol, core, every scope with its reader and writer and its
+ * preparation release) and the storage it prepared. Not business state, not an import authority, not part of the
+ * settings backup. A version 1 file (one domain's schema alone) is read as `legacy`: it proves nothing of the rest.
  */
 export interface PreparationEvidence {
   format: 'tower-storage-preparation';
-  version: 1;
+  version: 2;
   domain: string;
   build: StorageBuildIdentity;
+  /** The preparation build's whole manifest; its digest is the build's. */
+  manifest: StorageBuildManifest;
   preparationVersion: string;
   readerContract: number;
   writerContract: number;
   schema: { version: number; digest: string };
+  /** The storage the worker had prepared and claimed when it recorded this. */
+  prepared: { storageId: string; ownerEpoch: number };
   runtime: Pick<RuntimeInfo, 'node' | 'sqlite' | 'platform' | 'arch' | 'execPath'>;
   recordedAt: string;
 }
-export type EvidenceRead = { state: 'absent' } | { state: 'present'; evidence: PreparationEvidence } | { state: 'invalid'; reason: string } | { state: 'unreadable'; reason: string };
+export type EvidenceRead =
+  | { state: 'absent' } | { state: 'present'; evidence: PreparationEvidence } | { state: 'legacy'; reason: string }
+  | { state: 'invalid'; reason: string } | { state: 'unreadable'; reason: string };
 
 /**
  * Records this build's evidence for every domain its manifest declares (none in a build without domains). The caller
- * is the execution worker, after it took the runtime lock and checked its captured bundle: `context` is the trusted
- * StorageBuildContext's identity and manifest, `preflight` that bundle's runtime preflight on this execPath.
+ * is the execution worker, after it took the runtime lock, checked its captured bundle, prepared its storage and found
+ * its gate open: `context` is the trusted StorageBuildContext's identity and manifest, `preflight` that bundle's
+ * runtime preflight on this execPath, `prepared` what StorageClient.prepare answered and `gate` what StorageClient.gate
+ * answered after it. Nothing is recorded unless the prepare claimed the storage and left exactly this manifest's
+ * schema applied (every scope at its version and digest, no other scope), and the gate is open.
  */
-export async function recordPreparationEvidence(stateDir: string, input: { context: { identity: StorageBuildIdentity; manifest: StorageBuildManifest }; preflight: StoragePreflight; now?: () => Date }): Promise<PreparationEvidence[]> {
+export async function recordPreparationEvidence(stateDir: string, input: { context: { identity: StorageBuildIdentity; manifest: StorageBuildManifest }; preflight: StoragePreflight; prepared: PrepareResult; gate: StorageGate; now?: () => Date }): Promise<PreparationEvidence[]> {
   const { identity, manifest } = input.context;
-  const { preflight } = input;
-  if (manifestDigest(manifest) !== manifest.digest || identity.manifestDigest !== manifest.digest) throw new Error('The storage contract to record does not match its own manifest.');
+  const { preflight, prepared } = input;
+  if (manifestDigest(manifest) !== manifest.digest || identity.manifestDigest !== manifest.digest || identity.protocol !== manifest.protocol || identity.appVersion !== manifest.appVersion) throw new Error('The storage contract to record does not match its own manifest.');
   if (!preflight.supported || !preflight.runtime || preflight.identity?.sourceHash !== identity.sourceHash || preflight.identity.manifestDigest !== identity.manifestDigest) {
     throw new Error('Preparation evidence is recorded only for a storage runtime that passed its preflight as this build.');
   }
   if (!manifest.domains.length) return [];
+  if (!prepared?.claimed || prepared.schema?.kind !== 'current' || !isText(prepared.schema.storageId, 200) || !isCount(prepared.ownerEpoch, 1) || input.gate?.open !== true) {
+    throw new Error('Preparation evidence is recorded only once this build prepared and claimed its storage and its gate is open.');
+  }
+  const rows = rowsByScope(prepared.schema.applied);
+  for (const declared of [manifest.core, ...manifest.domains]) {
+    const problem = scopeProblem(declared, rows.get(declared.scope) ?? [], manifest.appVersion);
+    if (problem) throw new Error(`The prepared storage is not this build's schema: ${problem}`);
+  }
+  const extra = [...rows.keys()].find(scope => scope !== manifest.core.scope && !manifest.domains.some(domain => domain.scope === scope));
+  if (extra) throw new Error(`The prepared storage holds ${extra} tables this build does not declare.`);
   const layout = await storageLayout(stateDir);
   const folder = join(layout.stateDir, 'storage-contracts');
   await privateDirectory(folder, true);
@@ -422,9 +466,9 @@ export async function recordPreparationEvidence(stateDir: string, input: { conte
   const recorded: PreparationEvidence[] = [];
   for (const domain of manifest.domains) {
     const evidence: PreparationEvidence = {
-      format: 'tower-storage-preparation', version: 1, domain: domain.scope, build: { ...identity }, preparationVersion: manifest.appVersion,
+      format: 'tower-storage-preparation', version: 2, domain: domain.scope, build: { ...identity }, manifest: structuredClone(manifest), preparationVersion: manifest.appVersion,
       readerContract: domain.preparation.readerContract, writerContract: domain.preparation.writerContract,
-      schema: { version: domain.schemaVersion, digest: domain.schemaDigest },
+      schema: { version: domain.schemaVersion, digest: domain.schemaDigest }, prepared: { storageId: prepared.schema.storageId, ownerEpoch: prepared.ownerEpoch },
       runtime: { node, ...(sqlite ? { sqlite } : {}), platform, arch, execPath }, recordedAt: (input.now?.() ?? new Date()).toISOString(),
     };
     await writePrivateDocument(join(folder, `${domain.scope}.json`), JSON.stringify(evidence, null, 2));
@@ -441,15 +485,28 @@ export async function readPreparationEvidence(stateDir: string, domain: string):
     if (!(await privateDirectory(join(layout.stateDir, 'storage-contracts'), false))) return { state: 'absent' };
     const path = preparationEvidencePath(layout.stateDir, domain);
     if (!(await privateFile(path))) return { state: 'absent' };
-    bytes = await readExact(path, 64 * 1024);
+    bytes = await readExact(path, 256 * 1024);
   } catch (error) { return { state: 'unreadable', reason: messageOf(error) }; }
   if (!bytes) return { state: 'absent' };
   let value: unknown;
   try { value = JSON.parse(bytes.toString('utf8')); } catch { return { state: 'invalid', reason: 'The preparation evidence is not JSON.' }; }
-  if (!isObject(value) || value.format !== 'tower-storage-preparation' || value.version !== 1 || value.domain !== domain || !isObject(value.build) || !SHA256.test(String(value.build.sourceHash))
+  if (isObject(value) && value.format === 'tower-storage-preparation' && value.version === 1 && value.domain === domain) {
+    return { state: 'legacy', reason: 'The preparation evidence names one domain\'s schema only, not its build\'s whole contract.' };
+  }
+  const invalid = { state: 'invalid' as const, reason: 'The preparation evidence has an unknown format.' };
+  if (!isObject(value) || value.format !== 'tower-storage-preparation' || value.version !== 2 || value.domain !== domain || !isObject(value.build) || !SHA256.test(String(value.build.sourceHash))
     || typeof value.preparationVersion !== 'string' || !RELEASE.test(value.preparationVersion) || !isCount(value.readerContract, 1) || !isCount(value.writerContract, 1)
-    || !isObject(value.schema) || !isCount(value.schema.version, 1) || !SHA256.test(String(value.schema.digest)) || !isObject(value.runtime) || !isTime(value.recordedAt)) {
-    return { state: 'invalid', reason: 'The preparation evidence has an unknown format.' };
+    || !isObject(value.schema) || !isCount(value.schema.version, 1) || !SHA256.test(String(value.schema.digest)) || !isObject(value.runtime) || !isTime(value.recordedAt)
+    || !isObject(value.prepared) || !isText(value.prepared.storageId, 200) || !isCount(value.prepared.ownerEpoch, 1)) return invalid;
+  // The whole contract it names is its own: the manifest's digest recomputed, the build bound to it, and this domain as the manifest declares it.
+  const { manifest, build } = value;
+  if (!manifestWhole(manifest, value.preparationVersion) || build.manifestDigest !== manifest.digest || build.protocol !== manifest.protocol || build.appVersion !== value.preparationVersion) {
+    return { state: 'invalid', reason: 'The preparation evidence\'s contract does not match its own manifest.' };
+  }
+  const declared = manifest.domains.find(item => item.scope === domain);
+  if (!declared || declared.schemaVersion !== value.schema.version || declared.schemaDigest !== value.schema.digest
+    || declared.preparation.readerContract !== value.readerContract || declared.preparation.writerContract !== value.writerContract) {
+    return { state: 'invalid', reason: `The preparation evidence's ${domain} is not the one its manifest declares.` };
   }
   return { state: 'present', evidence: value as unknown as PreparationEvidence };
 }
@@ -507,24 +564,50 @@ export async function pinnedVersion(stateDir: string): Promise<{ state: 'none' }
   return { state: 'unknown', reason: read.reason };
 }
 
+/** Whether `pin` is the rollback's own, whole: its ID, and the very build (version, storage identity, entry point) it validated. */
+const pinMatches = (pin: StoragePin, record: RollbackRecord) => pin.rollbackId === record.id && pin.pinned === record.target && pin.sourceHash === record.sourceHash
+  && pin.manifestDigest === record.manifestDigest && pin.entrySha256 === record.entrySha256;
+
+export interface PinRelease { released: boolean; code?: string; reason?: string }
 /**
  * The owner releases the pin on `version` (and only that pin). Nothing else changes: the service stays where it is.
- * Only once the rollback that wrote it is over (its record readable, ended, with its admission hold confirmed released)
- * and in the computer's transition turn, so no rollback step or install sees the pin half gone.
+ * Only once the rollback that wrote it is over (its record readable, the pin its own whole, ended, its admission hold
+ * confirmed released, no attempt of it running) and in the computer's transition turn, so no rollback step or install
+ * sees the pin half gone. A rollback that switched the service must have completed, with `current`, its artifact and
+ * entry point the target as validated, and the worker serving now (asked through `ports`, before the turn) the one
+ * its completion proved; anything else refuses and the pin stays as it is.
  */
-export async function releaseStoragePin(stateDir: string, input: { version: string }): Promise<{ released: boolean; reason?: string }> {
-  if (inflight.has(resolve(stateDir))) return { released: false, reason: 'A rollback is being carried out right now; ask again once it answers.' };
+export async function releaseStoragePin(stateDir: string, input: { version: string }, options: { ports?: Pick<RollbackPorts, 'servingProof'>; probe?: ArtifactProbe } = {}): Promise<PinRelease> {
+  const refuse = (code: string, reason: string): PinRelease => ({ released: false, code, reason });
+  if (inflight.has(resolve(stateDir))) return refuse('rollback-busy', 'A rollback is being carried out right now; ask again once it answers.');
+  // The serving worker is asked first: no call to a worker runs in the transition turn.
+  const before = await readRollbackRecord(stateDir);
+  let proof: ServingProof | undefined;
+  let unproven = 'The serving worker was not asked.';
+  if (before.state === 'present' && switchEvidence(before.record) && options.ports) {
+    try { proof = await options.ports.servingProof({ id: before.record.id, attempt: before.record.handoff?.attempt ?? 0 }); } catch (error) { unproven = `The serving worker could not be asked: ${messageOf(error)}`; }
+  }
   return withStorageTransition(stateDir, async () => {
     const read = await readStoragePin(stateDir);
-    if (read.state === 'absent') return { released: false, reason: 'No version is pinned.' };
-    if (read.state !== 'present') return { released: false, reason: `The pin is left for the owner to inspect: ${read.reason}` };
-    if (read.pin.pinned !== input.version) return { released: false, reason: `The pin keeps ${read.pin.pinned}, not ${input.version}.` };
+    if (read.state === 'absent') return refuse('no-pin', 'No version is pinned.');
+    if (read.state !== 'present') return refuse('pin-unreadable', `The pin is left for the owner to inspect: ${read.reason}`);
+    if (read.pin.pinned !== input.version) return refuse('pinned-elsewhere', `The pin keeps ${read.pin.pinned}, not ${input.version}.`);
     const rollback = await readRollbackRecord(stateDir);
-    if (rollback.state !== 'present') return { released: false, reason: `The rollback record that wrote the pin is ${rollback.state}; the owner inspects it first.` };
+    if (rollback.state !== 'present') return refuse('rollback-record', `The rollback record that wrote the pin is ${rollback.state}; the owner inspects it first.`);
     const record = rollback.record;
-    if (record.id !== read.pin.rollbackId) return { released: false, reason: `The pin belongs to rollback ${read.pin.rollbackId}, but the record is ${record.id}; the owner inspects them first.` };
-    if (rollbackActive(record)) return { released: false, reason: `Rollback ${record.id} to ${record.target} is still under way.` };
-    if (record.held) return { released: false, reason: `Rollback ${record.id}'s admission hold was not confirmed released; withdraw it again first.` };
+    if (record.id !== read.pin.rollbackId) return refuse('pin-mismatch', `The pin belongs to rollback ${read.pin.rollbackId}, but the record is ${record.id}; the owner inspects them first.`);
+    if (!pinMatches(read.pin, record)) return refuse('pin-mismatch', `The pin on ${read.pin.pinned} stands over another build than rollback ${record.id} validated; the owner inspects them first.`);
+    if (rollbackActive(record)) return refuse('rollback-under-way', `Rollback ${record.id} to ${record.target} is still under way.`);
+    if (record.held) return refuse('hold-not-released', `Rollback ${record.id}'s admission hold was not confirmed released; withdraw it again first.`);
+    if (await attemptLive(record.attempt)) return refuse('rollback-busy', `Rollback ${record.id} is being carried out right now; ask again once it answers.`);
+    if (switchEvidence(record)) {
+      if (before.state !== 'present' || !sameRecord(before.record, record)) return refuse('rollback-changed', 'The rollback record changed while the serving worker was asked; ask again.');
+      if (record.state !== 'completed') return refuse('rollback-not-completed', `Rollback ${record.id} switched the service and ended ${record.state}; the owner decides how it goes on.`);
+      const verified = await verifyOperation({ stateDir, probe: options.probe }, record, { pin: 'required' });
+      if (!verified.ok) return refuse('rollback-unproven', verified.reason);
+      const serving = proof ? completionHolds(record, proof) : { ok: false as const, reason: unproven };
+      if (!serving.ok) return refuse('serving-unproven', serving.reason);
+    }
     await rm(storagePinPath(stateDir));
     await syncDirectory(dirname(storagePinPath(stateDir)));
     return { released: true };
@@ -604,6 +687,19 @@ function receiptCovers(receipt: ReceiptRead, kind: RecoveryReceiptKind, update: 
     && value.pointer === (current.state === 'version' ? current.version : null);
 }
 
+/** A rollback whose record says the service was (or may have been) pointed at its target: switched, or switching. */
+const switchEvidence = (record: Pick<RollbackRecord, 'switched' | 'state'>) => record.switched || record.state === 'switching';
+/**
+ * Whether a rollback that switched the service no longer decides what runs: its pin is gone and a later update record
+ * replaced the one it was reserved over. Until then the service is its target's, whatever else starts.
+ */
+const superseded = (record: RollbackRecord, pin: PinRead, update: UpdateRecordRead) => {
+  const sha = updateShaOf(update);
+  return pin.state === 'absent' && sha !== undefined && sha !== record.updateSha256;
+};
+const isTargetBuild = (record: RollbackRecord, build: { version: string; identity: StorageBuildIdentity }) =>
+  record.target === build.version && record.sourceHash === build.identity.sourceHash && record.manifestDigest === build.identity.manifestDigest;
+
 /**
  * The owner's rollback to `build`, when its record is about this very build and the update record it was reserved
  * over: the durable authority a rollback target starts on. Undefined when the record is about another build.
@@ -611,13 +707,18 @@ function receiptCovers(receipt: ReceiptRead, kind: RecoveryReceiptKind, update: 
 function rollbackTo(rollback: RollbackRead, update: UpdateRecordRead, build: { version: string; identity: StorageBuildIdentity }): RollbackRecord | undefined {
   if (rollback.state !== 'present') return undefined;
   const record = rollback.record;
-  const updateSha256 = update.state === 'active' || update.state === 'terminal' ? update.sha256 : update.state === 'absent' ? null : undefined;
-  return record.target === build.version && record.sourceHash === build.identity.sourceHash && record.manifestDigest === build.identity.manifestDigest
-    && updateSha256 !== undefined && record.updateSha256 === updateSha256 && (record.switched || record.state === 'switching') ? record : undefined;
+  const updateSha256 = updateShaOf(update);
+  return isTargetBuild(record, build) && updateSha256 !== undefined && record.updateSha256 === updateSha256 && switchEvidence(record) ? record : undefined;
 }
-/** A rollback to `build` that its worker answered as the pinned build and whose admission hold is released. */
-const rollbackKept = (record: RollbackRecord | undefined, identity: StorageBuildIdentity): boolean =>
-  record?.state === 'completed' && !record.held && record.worker?.version === record.target && record.worker.sourceHash === identity.sourceHash;
+/**
+ * A rollback to `build` that its worker answered as the pinned build, whose admission hold is released, and whose pin
+ * (while there is one) is its own whole: once the owner released it, the completed record alone keeps the authority.
+ */
+const rollbackKept = (record: RollbackRecord | undefined, identity: StorageBuildIdentity, pin: PinRead): boolean =>
+  record?.state === 'completed' && !record.held && record.worker?.version === record.target && record.worker.sourceHash === identity.sourceHash
+  && (pin.state === 'absent' || (pin.state === 'present' && pinMatches(pin.pin, record)));
+
+const entryHash = async (entry: string) => sha256((await readExact(entry, 64 * 1024 * 1024))!);
 
 /**
  * Evaluates, read-only, whether this build may change its storage, and what its health answers. One evaluation reads
@@ -683,14 +784,26 @@ export async function evaluateStorageUpdate(input: StorageUpdateInput): Promise<
     if (rollback.state === 'present' && rollback.record.from === build.version && !rollback.record.switched && rollbackActive(rollback.record)) {
       return answer('update-held', 'rollback-under-way', `The owner's rollback to ${rollback.record.target} is under way; storage changes wait.`);
     }
+    // A rollback that switched the service decides what runs until it is superseded: any other build is not ready,
+    // whatever its own update record (done, a receipt, a direct start) would say.
+    if (rollback.state === 'present' && switchEvidence(rollback.record) && !superseded(rollback.record, pin, update) && !isTargetBuild(rollback.record, { version: build.version, identity })) {
+      return answer('recovery-required', 'rollback-not-target', `The owner's rollback ${rollback.record.id} switched the service to ${rollback.record.target}; this build is not it, and the owner decides how it goes on.`);
+    }
     // The rollback target: its record is the durable authority this build starts on. It boots and answers while the
     // worker is handed over (no import, no migration), and is kept only once its worker answered as the pinned build.
     const target = rollbackTo(rollback, update, { version: build.version, identity });
     if (target) {
-      if (rollbackKept(target, identity)) return await settled() ?? answer('ready', 'owner-rollback', `The owner rolled the service back to ${build.version}, and its worker answered as this build.`);
+      if (pin.state === 'present' && !pinMatches(pin.pin, target)) return answer('recovery-required', 'rollback-pin', 'The pin is not the rollback\'s own; the owner inspects it first.');
+      if (rollbackKept(target, identity, pin)) {
+        const unsettled = await settled();
+        if (unsettled) return unsettled;
+        if (await entryHash(entryPoint(versionDirectory(stateDir, build.version))).catch(() => '') !== target.entrySha256) {
+          return answer('recovery-required', 'current-artifact', `The installed ${build.version} is not the one the rollback validated.`);
+        }
+        return answer('ready', 'owner-rollback', `The owner rolled the service back to ${build.version}, and its worker answered as this build.`);
+      }
       if (target.state === 'failed') return answer('recovery-required', 'rollback-failed', `The owner's rollback to ${build.version} stopped (${target.failure?.phase ?? 'unknown'}); the owner decides how it goes on.`);
-      const pinned = pin.state === 'present' && pin.pin.pinned === build.version && pin.pin.rollbackId === target.id;
-      if (target.state !== 'completed' && !pinned) return answer('recovery-required', 'rollback-pin', 'The pin of the rollback under way is not there; the owner inspects it first.');
+      if (target.state !== 'completed' && pin.state !== 'present') return answer('recovery-required', 'rollback-pin', 'The pin of the rollback under way is not there; the owner inspects it first.');
       return await settled() ?? answer('update-held', target.state === 'completed' ? 'rollback-hold-release' : 'rollback-handoff', target.state === 'completed'
         ? `The rollback to ${build.version} is done; its admission hold is released before storage changes.` : `The worker is being handed over to ${build.version}; storage changes wait until the rollback is kept.`);
     }
@@ -734,20 +847,21 @@ export async function evaluateStorageUpdate(input: StorageUpdateInput): Promise<
   if (!cutover.length) return answer('ready', 'no-cutover', 'This build imports no domain; its own storage may be prepared.');
   const preparation = await Promise.all(cutover.map(async domain => ({ domain: domain.scope, read: await readPreparationEvidence(stateDir, domain.scope) })));
   evidence.preparation = preparation;
-  const unproven = preparation.filter(({ domain, read }) => {
-    const declared = cutover.find(item => item.scope === domain)!;
-    return read.state !== 'present' || !preparesDomain(declared, { appVersion: read.evidence.preparationVersion, schemaVersion: read.evidence.schema.version, schemaDigest: read.evidence.schema.digest, readerContract: read.evidence.readerContract, writerContract: read.evidence.writerContract });
-  });
-  if (!unproven.length) return answer('ready', 'direct-evidence', 'A preparation release recorded evidence for every domain this build imports.');
-  const unreadable = unproven.find(item => item.read.state === 'unreadable' || item.read.state === 'invalid');
+  const unreadable = preparation.find(item => item.read.state === 'unreadable' || item.read.state === 'invalid');
   if (unreadable) return answer('recovery-required', 'preparation-evidence-unreadable', `The preparation evidence of ${unreadable.domain} cannot be used.`);
+  // Each domain's evidence names its preparation build's whole contract: it proves the preparation only when that build
+  // takes over everything this one applies (protocol, core, every scope), by the rule an update's previous version meets.
+  const unproven = preparation.filter(({ read }) => read.state !== 'present' || takeoverGaps(manifest, read.evidence.manifest, read.evidence.preparationVersion).length > 0);
+  if (!unproven.length) return answer('ready', 'direct-evidence', 'A preparation release recorded evidence of its whole contract for every domain this build imports.');
   const state = build.preflight.state;
-  const fresh = state && !state.problem && state.database === 'absent' && !state.sidecars.length && state.identity === 'absent' && input.legacyFiles
+  // Evidence that is there and proves too little (an older format, another contract) is history: not a new state directory.
+  const recorded = preparation.some(item => item.read.state !== 'absent');
+  const fresh = !recorded && state && !state.problem && state.database === 'absent' && !state.sidecars.length && state.identity === 'absent' && input.legacyFiles
     && (await Promise.all(unproven.map(item => input.legacyFiles!(item.domain).catch(() => 'present' as const)))).every(found => found === 'absent');
   if (fresh) return answer('ready', 'new-state', 'A new state directory: there is nothing to import.');
-  if (state && state.database === 'absent' && state.identity !== 'absent') return answer('recovery-required', 'known-storage-missing', 'The storage this state directory records is missing; it is not replaced by a new one.');
+  if (state && state.database === 'absent' && (state.identity !== 'absent' || recorded)) return answer('recovery-required', 'known-storage-missing', 'The storage this state directory records is missing; it is not replaced by a new one.');
   const prepare = unproven.map(item => cutover.find(domain => domain.scope === item.domain)!.preparation.requiredArtifactVersion).reduce((a, b) => newerVersion(b, a) ? b : a);
-  return answer('refused', 'prerequisite-required', `Run ${prepare} here first: no preparation evidence covers ${unproven.map(item => item.domain).join(', ')}.`, { prepare });
+  return answer('refused', 'prerequisite-required', `Run ${prepare} here first: no preparation evidence of a contract that takes this build over covers ${unproven.map(item => item.domain).join(', ')}.`, { prepare });
 }
 
 /** What `/api/health` adds, and its status: 503 only for a refusal, with the identity kept beside it. */
@@ -867,22 +981,53 @@ export function chainAsked(progress: ChainProgress, version: string, update?: Sa
 // ---- The owner's validated rollback. ----
 
 /**
+ * One attempt at a rollback: every mutating call to the worker names the rollback and the attempt it is made under.
+ * Attempts of one rollback only grow; the worker's actuator applies a hold, release or handoff only for the newest
+ * attempt of that ID it has seen, and refuses an older one (one delayed from an attempt whose process stopped).
+ */
+export interface RollbackFence { id: string; attempt: number }
+
+/**
+ * What the serving worker says about itself, read-only and in one answer from its own trusted StorageClient: its build
+ * and process; its claim (status().ownerEpoch, absent before it claimed); the database as inspect() reads it; its fresh
+ * gate; and the handoff of this rollback attempt as it knows it (`done` only from the durable operation state a handoff
+ * gave the successor, never an echo of the question). A target on an empty storage that does not claim it reports the
+ * refusal of its prepare({ allowMigration: false }) in `prepare`. Asking changes nothing: no prepare, handoff, hold or
+ * release is made by it. Whatever is inconsistent in it (a claim that is not the storage's owner) counts as unknown.
+ */
+export interface ServingProof {
+  worker: { version: string; sourceHash: string; manifestDigest: string; protocol: string; pid: number; start: string };
+  status: { state: StorageState; ownerEpoch?: number };
+  inspection: Pick<StorageInspection, 'schema' | 'authority' | 'ownerEpoch'>;
+  gate: { open: boolean };
+  prepare?: { code: 'migration-required'; disposition: 'not-committed' };
+  handoff: 'none' | 'pending' | 'done';
+}
+/**
+ * What the lower worker answered to a handoff. `refused`: it refused before anything took effect. Neither answer is
+ * taken for the outcome: what serves afterwards (ServingProof) decides it. A throw (a timeout, an answer lost) is
+ * neither: the effect is unknown until the serving proof tells it.
+ */
+export type HandoffAnswer = { state: 'accepted' } | { state: 'refused'; reason: string };
+
+/**
  * What the rollback needs from the worker and the service. None of these cancels a provider, a turn or a shell.
  * W0I implements them for the real web/worker; each must keep the contract written here.
  */
 export interface RollbackPorts {
   /**
-   * The live database as its worker sees it (StorageClient.inspect): its whole schema and domain authority. Throws when
-   * it cannot be read: never an empty one.
+   * The live database as its worker sees it (StorageClient.inspect): its storage (empty, or its storageId), whole
+   * schema, domain authority and owner epoch. Throws when it cannot be read: never an empty one.
    */
-  inspectStorage(): Promise<Pick<StorageInspection, 'schema' | 'authority'>>;
+  inspectStorage(): Promise<Pick<StorageInspection, 'schema' | 'authority' | 'ownerEpoch'>>;
   /**
-   * Holds new admissions and automation pumps (no cancel, no force deadline). Durable and keyed by `id`: asking again
-   * with the same ID is the same one hold, and it survives a worker handoff until released by that ID.
+   * Holds new admissions and automation pumps (no cancel, no force deadline). Durable and keyed by the rollback ID:
+   * asking again is the same one hold, and it survives a worker handoff until released by that ID. Applied only for the
+   * newest attempt of the ID (an older fence is refused) while the rollback's record asks for it.
    */
-  holdAdmission(id: string, reason: string): Promise<void>;
-  /** Releases the hold `id`, whichever worker serves now; releasing one that is not there succeeds. */
-  releaseAdmission(id: string): Promise<void>;
+  holdAdmission(fence: RollbackFence, reason: string): Promise<void>;
+  /** Releases the hold of `fence.id`, whichever worker serves now; releasing one that is not there succeeds. Fenced like holdAdmission. */
+  releaseAdmission(fence: RollbackFence): Promise<void>;
   /**
    * Waits for running providers and transient calls to end by themselves. `pending` while a legacy worker's terminal
    * lives (its input and attach go on) or work still runs: the rollback waits and is asked again later. Asked anew
@@ -892,10 +1037,12 @@ export interface RollbackPorts {
   /** Restarts the service's web, which then starts from `current`. */
   restartWeb(): Promise<void>;
   /**
-   * The lower-version patient handoff to the target's worker; answers the worker that runs afterwards, with the
-   * storage identity (source hash) it actually runs. Asked again when the target's worker already runs, it answers it.
+   * The lower-version patient handoff to the target's worker (no provider or legacy terminal is cancelled or killed),
+   * fenced like holdAdmission; the successor keeps the rollback ID and attempt as a durable operation state (`done`).
    */
-  handoff(target: { version: string; entry: string; sourceHash: string }): Promise<{ version: string; sourceHash?: string; pid: number }>;
+  handoff(target: { version: string; entry: string; sourceHash: string }, fence: RollbackFence): Promise<HandoffAnswer>;
+  /** The serving worker's read-only proof (ServingProof), about `fence`'s handoff. */
+  servingProof(fence: RollbackFence): Promise<ServingProof>;
 }
 export interface RollbackContext {
   stateDir: string;
@@ -911,14 +1058,29 @@ export interface RollbackContext {
 
 /**
  * Where a rollback stands. Every step records its intent before it acts (`pinning` before the pin, `holding` before the
- * hold, `switching` before the pointer, `handing-off` before the handoff), so whatever stops it in between leaves a
- * record that names what may have happened; the next attempt compares that with what is actually there.
+ * hold, `switching` before the pointer, `handing-off` with its baseline before the handoff), so whatever stops it in
+ * between leaves a record that names what may have happened; the next attempt compares that with what is actually there.
  */
 export type RollbackState = 'pinning' | 'pinned' | 'holding' | 'held' | 'waiting' | 'switching' | 'switched' | 'handing-off' | 'completed' | 'failed' | 'withdrawn';
 const ROLLBACK_ENDED: ReadonlySet<string> = new Set(['completed', 'failed', 'withdrawn']);
-const ROLLBACK_STATES: ReadonlySet<string> = new Set(['pinning', 'pinned', 'holding', 'held', 'waiting', 'switching', 'switched', 'handing-off', ...ROLLBACK_ENDED]);
+const ROLLBACK_STATES: readonly RollbackState[] = ['pinning', 'pinned', 'holding', 'held', 'waiting', 'switching', 'switched', 'handing-off', 'completed', 'failed', 'withdrawn'];
 /** A rollback that has not ended: it holds update requests back, and its pin is not released. */
 export const rollbackActive = (record: Pick<RollbackRecord, 'state'>) => !ROLLBACK_ENDED.has(record.state);
+/**
+ * The attempt that owns a rollback: its process (pid and start time) and a nonce. Only it changes the record or asks the
+ * worker for anything until it has ended; another process's attempt that still runs (or cannot be told) makes every
+ * other step busy, one whose process is gone is taken over by the next attempt (its number one higher).
+ */
+export interface RollbackAttempt { n: number; pid: number; start: string; nonce: string; kind: 'run' | 'resume' | 'withdraw'; at: string; ended?: boolean }
+/** The serving worker and storage a handoff started from, recorded before it was asked for; never replaced by what came after. */
+export interface HandoffBaseline { worker: ServingProof['worker']; storage: { kind: 'empty' } | { kind: 'current'; storageId: string }; ownerEpoch: number; at: string }
+/**
+ * The last handoff asked for, under `attempt`: `sent` until what serves was read; `pending` while the target has not
+ * taken over yet; `unknown` while what serves cannot be told (the hold stays, nothing is sent again); `no-effect` once
+ * the worker handed over from was found serving without it (a new attempt may ask again); `done` once the target
+ * took over as the proof requires.
+ */
+export interface HandoffRecord { attempt: number; state: 'sent' | 'pending' | 'unknown' | 'no-effect' | 'done'; baseline: HandoffBaseline; note?: string }
 export interface RollbackRecord {
   format: 'tower-storage-rollback';
   version: 1;
@@ -932,6 +1094,8 @@ export interface RollbackRecord {
   entrySha256: string;
   /** sha256 of update.json when the rollback was reserved (null: there was none). The target starts on exactly that record. */
   updateSha256: string | null;
+  /** The live storage the rollback was validated on: the target must take over this very one. */
+  storage?: { kind: 'empty' } | { kind: 'current'; storageId: string };
   state: RollbackState;
   by: string;
   reason: string;
@@ -941,51 +1105,116 @@ export interface RollbackRecord {
   switched: boolean;
   pending?: string;
   failure?: { phase: string; message: string };
-  worker?: { version: string; sourceHash: string; pid: number };
+  attempt?: RollbackAttempt;
+  handoff?: HandoffRecord;
+  /** The worker that took over, as the serving proof showed it when the rollback completed. */
+  worker?: { version: string; sourceHash: string; pid: number; start?: string; ownerEpoch?: number };
   startedAt: string;
   updatedAt: string;
 }
 export type RollbackRead = { state: 'absent' } | { state: 'present'; record: RollbackRecord } | { state: 'invalid'; reason: string } | { state: 'unreadable'; reason: string };
+
+const storageShape = (value: unknown) => isObject(value) && (value.kind === 'empty' || (value.kind === 'current' && isText(value.storageId, 200)));
+const workerShape = (value: unknown) => isObject(value) && RELEASE.test(String(value.version)) && SHA256.test(String(value.sourceHash)) && SHA256.test(String(value.manifestDigest))
+  && isText(value.protocol, 100) && isCount(value.pid, 1) && isText(value.start, 120);
+function rollbackProblem(value: unknown): boolean {
+  if (!isObject(value)) return true;
+  const { worker, failure, attempt, handoff } = value;
+  return value.format !== 'tower-storage-rollback' || value.version !== 1 || !isText(value.id, 64) || !RELEASE.test(String(value.from)) || !RELEASE.test(String(value.target))
+    || !SHA256.test(String(value.sourceHash)) || !SHA256.test(String(value.manifestDigest)) || !SHA256.test(String(value.entrySha256))
+    || !(value.updateSha256 === null || SHA256.test(String(value.updateSha256))) || !ROLLBACK_STATES.includes(String(value.state) as RollbackState)
+    || typeof value.held !== 'boolean' || typeof value.switched !== 'boolean' || !isText(value.by, 200) || typeof value.reason !== 'string' || value.reason.length > 2000
+    || (value.storage !== undefined && !storageShape(value.storage))
+    || (worker !== undefined && !(isObject(worker) && typeof worker.version === 'string' && SHA256.test(String(worker.sourceHash)) && isCount(worker.pid, 1)
+      && (worker.start === undefined || typeof worker.start === 'string') && (worker.ownerEpoch === undefined || isCount(worker.ownerEpoch))))
+    || (failure !== undefined && !(isObject(failure) && typeof failure.phase === 'string' && typeof failure.message === 'string'))
+    || (attempt !== undefined && !(isObject(attempt) && isCount(attempt.n, 1) && isCount(attempt.pid, 1) && typeof attempt.start === 'string' && /^[0-9a-f]{16,64}$/.test(String(attempt.nonce))
+      && ['run', 'resume', 'withdraw'].includes(String(attempt.kind)) && isTime(attempt.at) && (attempt.ended === undefined || attempt.ended === true)))
+    || (handoff !== undefined && !(isObject(handoff) && isCount(handoff.attempt, 1) && ['sent', 'pending', 'unknown', 'no-effect', 'done'].includes(String(handoff.state))
+      && isObject(handoff.baseline) && workerShape(handoff.baseline.worker) && storageShape(handoff.baseline.storage) && isCount(handoff.baseline.ownerEpoch) && isTime(handoff.baseline.at)
+      && (handoff.note === undefined || typeof handoff.note === 'string')))
+    || !isTime(value.startedAt) || !isTime(value.updatedAt);
+}
 export async function readRollbackRecord(stateDir: string): Promise<RollbackRead> {
   let bytes: Buffer | undefined;
   try { bytes = await readExact(storageUpdatePaths(stateDir).rollback); } catch (error) { return { state: 'unreadable', reason: messageOf(error) }; }
   if (!bytes) return { state: 'absent' };
   let value: unknown;
   try { value = JSON.parse(bytes.toString('utf8')); } catch { return { state: 'invalid', reason: 'The rollback record is not JSON.' }; }
-  const worker = isObject(value) ? value.worker : undefined;
-  const failure = isObject(value) ? value.failure : undefined;
-  if (!isObject(value) || value.format !== 'tower-storage-rollback' || value.version !== 1 || !isText(value.id, 64) || !RELEASE.test(String(value.from)) || !RELEASE.test(String(value.target))
-    || !SHA256.test(String(value.sourceHash)) || !SHA256.test(String(value.manifestDigest)) || !SHA256.test(String(value.entrySha256))
-    || !(value.updateSha256 === null || SHA256.test(String(value.updateSha256))) || !ROLLBACK_STATES.has(String(value.state))
-    || typeof value.held !== 'boolean' || typeof value.switched !== 'boolean' || !isText(value.by, 200) || typeof value.reason !== 'string' || value.reason.length > 2000
-    || (worker !== undefined && !(isObject(worker) && typeof worker.version === 'string' && SHA256.test(String(worker.sourceHash)) && isCount(worker.pid, 1)))
-    || (failure !== undefined && !(isObject(failure) && typeof failure.phase === 'string' && typeof failure.message === 'string'))
-    || !isTime(value.startedAt) || !isTime(value.updatedAt)) {
-    return { state: 'invalid', reason: 'The rollback record has an unknown format.' };
-  }
+  if (rollbackProblem(value)) return { state: 'invalid', reason: 'The rollback record has an unknown format.' };
   return { state: 'present', record: value as unknown as RollbackRecord };
 }
 const saveRollback = (stateDir: string, record: RollbackRecord) => writePrivateJson(storageUpdatePaths(stateDir).rollback, JSON.stringify(record, null, 2), { syncDirectory: true });
 const stamp = (context: { now?: () => number }) => new Date(context.now?.() ?? Date.now()).toISOString();
+const sameRecord = (a: RollbackRecord, b: RollbackRecord) => a.id === b.id && a.state === b.state && a.updatedAt === b.updatedAt;
 
 /** A rollback step found the record (or what it stands on) other than it expected: nothing more is done this time. */
 class RollbackConflict extends Error {
   constructor(readonly code: string, message: string) { super(message); }
 }
+
+/** This process's attempts while their step runs. An attempt of this process that is not here has ended, or its step stopped. */
+const ownAttempts = new Set<string>();
+/** Whether `attempt` may still act: this process's own while its step runs; another process's while it runs or cannot be told. */
+async function attemptLive(attempt: RollbackAttempt | undefined): Promise<boolean> {
+  if (!attempt || attempt.ended) return false;
+  const me = await thisProcess();
+  if (attempt.pid === me.pid && attempt.start === me.start) return ownAttempts.has(attempt.nonce);
+  return await liveness(attempt) !== 'gone';
+}
+async function nextAttempt(context: { now?: () => number }, kind: RollbackAttempt['kind'], previous: RollbackAttempt | undefined): Promise<RollbackAttempt> {
+  const me = await thisProcess();
+  return { n: (previous?.n ?? 0) + 1, pid: me.pid, start: me.start, nonce: randomBytes(12).toString('hex'), kind, at: stamp(context) };
+}
+/** The attempt a step acts under: the fence its worker calls carry, and the nonce its record writes are conditional on. */
+interface Claim { fence: RollbackFence; nonce: string }
+const claimOf = (record: RollbackRecord): Claim => ({ fence: { id: record.id, attempt: record.attempt!.n }, nonce: record.attempt!.nonce });
+
 /**
- * Writes `next` over the record only while it is still rollback `id` in one of `states`, in the computer's transition
- * turn: a step never overwrites what another attempt, a withdrawal or another process recorded meanwhile.
+ * Writes `next` over the record only while it is still rollback `id` in one of `states` (and, with `claim`, still owned
+ * by that attempt), in the computer's transition turn: a step never overwrites what another attempt, a withdrawal or
+ * another process recorded meanwhile.
  */
-async function transition(context: { stateDir: string; now?: () => number }, id: string, states: readonly RollbackState[], next: Partial<RollbackRecord>): Promise<RollbackRecord> {
+async function transition(context: { stateDir: string; now?: () => number }, id: string, states: readonly RollbackState[], next: Partial<RollbackRecord>, claim?: Claim): Promise<RollbackRecord> {
   return withStorageTransition(context.stateDir, async () => {
     const read = await readRollbackRecord(context.stateDir);
-    if (read.state !== 'present' || read.record.id !== id || !states.includes(read.record.state)) {
+    if (read.state !== 'present' || read.record.id !== id || !states.includes(read.record.state) || (claim && read.record.attempt?.nonce !== claim.nonce)) {
       throw new RollbackConflict('rollback-changed', `The rollback record changed meanwhile (${read.state === 'present' ? `${read.record.id} is ${read.record.state}` : read.state}).`);
     }
     const record: RollbackRecord = { ...read.record, ...next, updatedAt: stamp(context) };
     await saveRollback(context.stateDir, record);
     return record;
   });
+}
+
+/**
+ * Takes the next attempt of rollback `id` (in one of `states`, and passing `guard`), writing `next` with it in the
+ * same turn: refused (`rollback-busy`) while another attempt still runs or cannot be told.
+ */
+async function claim(context: { stateDir: string; now?: () => number }, id: string, states: readonly RollbackState[], kind: RollbackAttempt['kind'],
+  next: Partial<RollbackRecord> = {}, guard?: (record: RollbackRecord) => RollbackConflict | undefined): Promise<{ record: RollbackRecord; claim: Claim }> {
+  return withStorageTransition(context.stateDir, async () => {
+    const read = await readRollbackRecord(context.stateDir);
+    if (read.state !== 'present' || read.record.id !== id || !states.includes(read.record.state)) {
+      throw new RollbackConflict('rollback-changed', `The rollback record changed meanwhile (${read.state === 'present' ? `${read.record.id} is ${read.record.state}` : read.state}).`);
+    }
+    const refused = guard?.(read.record);
+    if (refused) throw refused;
+    if (await attemptLive(read.record.attempt)) throw new RollbackConflict('rollback-busy', `Rollback ${id} is being carried out (process ${read.record.attempt!.pid}); ask again once it answers.`);
+    const attempt = await nextAttempt(context, kind, read.record.attempt);
+    const record: RollbackRecord = { ...read.record, ...next, attempt, updatedAt: stamp(context) };
+    await saveRollback(context.stateDir, record);
+    ownAttempts.add(attempt.nonce);
+    return { record, claim: claimOf(record) };
+  });
+}
+/** Ends this attempt: from now on another may take the rollback over. Its record says so when it can be written. */
+async function endAttempt(context: { stateDir: string }, own: Claim): Promise<void> {
+  ownAttempts.delete(own.nonce);
+  await withStorageTransition(context.stateDir, async () => {
+    const read = await readRollbackRecord(context.stateDir);
+    if (read.state === 'present' && read.record.attempt?.nonce === own.nonce) await saveRollback(context.stateDir, { ...read.record, attempt: { ...read.record.attempt, ended: true } });
+  }).catch(() => { /* Unwritten, it ends with this process: another process waits for that. */ });
 }
 
 /**
@@ -1013,10 +1242,12 @@ function oneAtATime(stateDir: string, target: string, work: () => Promise<Rollba
 }
 
 export type RollbackValidation =
-  | { ok: true; target: { version: string; directory: string; entry: string; entrySha256: string; contract: ArtifactStorageContract }; updateSha256: string | null }
+  | { ok: true; target: { version: string; directory: string; entry: string; entrySha256: string; contract: ArtifactStorageContract }; updateSha256: string | null; storage: NonNullable<RollbackRecord['storage']> }
   | { ok: false; code: string; reason: string };
 
-const entryHash = async (entry: string) => sha256((await readExact(entry, 64 * 1024 * 1024))!);
+/** The storage an inspection names: empty, or the storage with its ID. */
+const storageOf = (schema: StorageInspection['schema']): NonNullable<RollbackRecord['storage']> => schema.kind === 'empty' ? { kind: 'empty' } : { kind: 'current', storageId: schema.storageId };
+const sameStorage = (a: NonNullable<RollbackRecord['storage']>, b: NonNullable<RollbackRecord['storage']>) => a.kind === b.kind && (a.kind === 'empty' || a.storageId === (b as { storageId: string }).storageId);
 
 /**
  * Whether the live database's whole schema and authority are within what `contract` reads and writes, without
@@ -1027,16 +1258,11 @@ export function databaseSupported(contract: ArtifactStorageContract, inspection:
   const scopes = new Map([[contract.manifest.core.scope, contract.manifest.core] as const, ...contract.manifest.domains.map(domain => [domain.scope, domain] as const)]);
   const applied = inspection.schema.kind === 'empty' ? [] : inspection.schema.applied;
   if (inspection.schema.kind === 'behind') return { ok: false, reason: 'The database has migrations pending; it is not rolled back mid-migration.' };
-  const byScope = new Map<string, typeof applied>();
-  for (const row of applied) byScope.set(row.scope, [...(byScope.get(row.scope) ?? []), row]);
-  for (const [scope, rows] of byScope) {
+  for (const [scope, rows] of rowsByScope(applied)) {
     const declared = scopes.get(scope);
     if (!declared) return { ok: false, reason: `${contract.appVersion} does not know the database's ${scope} tables.` };
-    const ordered = [...rows].sort((a, b) => a.version - b.version);
-    if (ordered.some((row, index) => row.version !== index + 1)) return { ok: false, reason: `The database's ${scope} migrations are not 1..n.` };
-    if (ordered.length !== declared.schemaVersion || sha256(ordered.map(row => row.checksum).join('\n')) !== declared.schemaDigest) {
-      return { ok: false, reason: `${contract.appVersion} declares ${scope} at version ${declared.schemaVersion} with other migrations than the database's ${ordered.length}.` };
-    }
+    const problem = scopeProblem(declared, rows, contract.appVersion);
+    if (problem) return { ok: false, reason: problem };
   }
   for (const row of inspection.authority) {
     const declared = contract.manifest.domains.find(domain => domain.scope === row.domain);
@@ -1053,8 +1279,9 @@ export function databaseSupported(contract: ArtifactStorageContract, inspection:
  * running build's runtime and contract passed; no snapshot recovery holds the storage; the update record is readable,
  * not under way, and proves this build (its own `done`, or the owner's verification where it does not: an own failed
  * update or a later one that went back here need the owner's receipt, a later update kept and then rolled back here
- * needs that rollback completed); no hold and no live helper; and `current` with its installed artifact is this very
- * build. Inspecting the target and the database never stands in for any of these.
+ * needs that rollback completed); no earlier rollback that switched the service to another build still decides it; no
+ * hold and no live helper; and `current` with its installed artifact is this very build. Inspecting the target and the
+ * database never stands in for any of these.
  */
 async function serviceReadiness(context: RollbackContext): Promise<{ ok: true; updateSha256: string | null } | { ok: false; code: string; reason: string }> {
   const { stateDir, running } = context;
@@ -1064,7 +1291,7 @@ async function serviceReadiness(context: RollbackContext): Promise<{ ok: true; u
     return refuse('runtime-unsupported', 'This build\'s storage runtime and contract did not pass their preflight; its database cannot be compared.');
   }
   if (running.preflight.state?.recovery && running.preflight.state.recovery.state !== 'clear') return refuse('recovery-held', 'A snapshot recovery holds the storage; it is finished first.');
-  const [update, hold, helper, current, receipt, rollback] = await Promise.all([readUpdateRecord(stateDir), readHold(stateDir), readHelperLock(stateDir), readCurrentPointer(stateDir), readRecoveryReceipt(stateDir), readRollbackRecord(stateDir)]);
+  const [update, hold, helper, current, receipt, rollback, pin] = await Promise.all([readUpdateRecord(stateDir), readHold(stateDir), readHelperLock(stateDir), readCurrentPointer(stateDir), readRecoveryReceipt(stateDir), readRollbackRecord(stateDir), readStoragePin(stateDir)]);
   if (update.state === 'unreadable' || update.state === 'invalid') return refuse('update-status', `The update record is ${update.state}; recover it first.`);
   if (update.state === 'active') return refuse('update-active', `An update to ${update.update.version} is under way; it is settled first.`);
   if (helper.state === 'running' || helper.state === 'unreadable' || helper.state === 'invalid') return refuse('update-helper', `The update helper is ${helper.state}; it is settled first.`);
@@ -1074,15 +1301,18 @@ async function serviceReadiness(context: RollbackContext): Promise<{ ok: true; u
   if (artifact.state !== 'contract' || artifact.contract.identity.sourceHash !== identity.sourceHash || artifact.contract.identity.manifestDigest !== identity.manifestDigest) {
     return refuse('current-artifact', 'The installed current version is not the build running here.');
   }
+  const build = { version: running.version, identity };
+  if (rollback.state === 'present' && switchEvidence(rollback.record) && !superseded(rollback.record, pin, update) && !isTargetBuild(rollback.record, build)) {
+    return refuse('rollback-not-target', `Rollback ${rollback.record.id} switched the service to ${rollback.record.target}, not this build; the owner settles it first.`);
+  }
   if (update.state === 'terminal') {
     const record = update.update;
-    const build = { version: running.version, identity };
     const covers = (kind: RecoveryReceiptKind) => receiptCovers(receipt, kind, update, build, current);
     const ownRecovered = record.version === running.version && record.stage === 'failed' && covers('own-failed');
     if (record.stage === 'failed' && record.code === 'rollback-failed' && !ownRecovered) return refuse('update-uncertain', `The update to ${record.version} could not go back; the owner verifies the service first.`);
     if (record.version === running.version && record.stage === 'failed' && !ownRecovered) return refuse('own-update-failed', 'This build\'s own update failed; the owner verifies it first.');
     if (record.version !== running.version && record.previous === running.version) {
-      const verified = record.stage === 'failed' ? covers('overwritten-done') : rollbackKept(rollbackTo(rollback, update, build), identity);
+      const verified = record.stage === 'failed' ? covers('overwritten-done') : rollbackKept(rollbackTo(rollback, update, build), identity, pin);
       if (!verified) return refuse('owner-verification-required', `The last update (${record.version}) started from this build; the owner verifies this build first.`);
     }
   }
@@ -1108,19 +1338,20 @@ export async function validateRollback(context: RollbackContext, request: { targ
   if (artifact.state === 'legacy') return refuse('target-no-contract', `${request.target} keeps its state in JSON only and cannot read this storage.`);
   if (artifact.state === 'unverifiable') return refuse('target-unverifiable', artifact.reason);
   if (!artifact.contract.supported) return refuse('target-runtime-unsupported', `${request.target}'s storage does not run here${artifact.contract.refusal ? `: ${artifact.contract.refusal.message}` : '.'}`);
-  let inspection: Pick<StorageInspection, 'schema' | 'authority'>;
+  let inspection: Pick<StorageInspection, 'schema' | 'authority' | 'ownerEpoch'>;
   try { inspection = await context.ports.inspectStorage(); } catch (error) { return refuse('storage-uninspectable', `The database could not be read to compare: ${messageOf(error)}`); }
+  if (!isObject(inspection) || !isObject(inspection.schema) || !isCount(inspection.ownerEpoch)) return refuse('storage-uninspectable', 'The database inspection does not name its storage and owner.');
   const supported = databaseSupported(artifact.contract, inspection);
   if (!supported.ok) return refuse('target-incompatible', supported.reason);
   const entry = entryPoint(directory);
   let entrySha256: string;
   try { entrySha256 = await entryHash(entry); } catch (error) { return refuse('target-unverifiable', messageOf(error)); }
-  return { ok: true, target: { version: request.target, directory, entry, entrySha256, contract: artifact.contract }, updateSha256: readiness.updateSha256 };
+  return { ok: true, target: { version: request.target, directory, entry, entrySha256, contract: artifact.contract }, updateSha256: readiness.updateSha256, storage: storageOf(inspection.schema) };
 }
 
 /**
  * The target as the rollback validated it, checked again after a wait: the same build installed with the same entry
- * point, still running here, and the live database (inspected again) still within its contract.
+ * point, still running here, and the live database (inspected again) still the same storage and within its contract.
  */
 async function recheckTarget(context: RollbackContext, record: RollbackRecord): Promise<{ ok: true } | { ok: false; reason: string }> {
   const directory = versionDirectory(context.stateDir, record.target);
@@ -1130,18 +1361,51 @@ async function recheckTarget(context: RollbackContext, record: RollbackRecord): 
   }
   if (!artifact.contract.supported) return { ok: false, reason: `${record.target}'s storage no longer runs here.` };
   if (await entryHash(entryPoint(directory)).catch(() => '') !== record.entrySha256) return { ok: false, reason: `${record.target}'s installed files changed after they were validated.` };
-  let inspection: Pick<StorageInspection, 'schema' | 'authority'>;
+  let inspection: Pick<StorageInspection, 'schema' | 'authority' | 'ownerEpoch'>;
   try { inspection = await context.ports.inspectStorage(); } catch (error) { return { ok: false, reason: `The database could not be read to compare again: ${messageOf(error)}` }; }
+  if (!isObject(inspection) || !isObject(inspection.schema) || !isCount(inspection.ownerEpoch)) return { ok: false, reason: 'The database inspection does not name its storage and owner.' };
+  if (record.storage && !sameStorage(storageOf(inspection.schema), record.storage)) return { ok: false, reason: 'The database is not the storage the rollback was validated on.' };
   const supported = databaseSupported(artifact.contract, inspection);
   return supported.ok ? { ok: true } : { ok: false, reason: supported.reason };
 }
 
+/**
+ * Everything the operation stands on, as it is now: update.json as reserved, the pin (`required`, or `optional` once
+ * the operation completed: the owner may have released it) its own whole, `current` at the target, and the target's
+ * installed build and entry point the very ones validated. Read in the caller's transition turn.
+ */
+async function verifyOperation(context: { stateDir: string; probe?: ArtifactProbe }, record: RollbackRecord, options: { pin: 'required' | 'optional' }): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const { stateDir } = context;
+  const [update, pin, pointer] = await Promise.all([readUpdateRecord(stateDir), readStoragePin(stateDir), readCurrentPointer(stateDir)]);
+  if (updateShaOf(update) !== record.updateSha256) return { ok: false, reason: 'The update record changed since the rollback was reserved.' };
+  if (pin.state === 'present' ? !pinMatches(pin.pin, record) : pin.state !== 'absent' || options.pin === 'required') return { ok: false, reason: 'The pin no longer keeps this rollback\'s target.' };
+  if (!(pointer.state === 'version' && pointer.version === record.target)) return { ok: false, reason: `current is ${describePointer(pointer)}, not ${record.target}.` };
+  const directory = versionDirectory(stateDir, record.target);
+  const artifact = await (context.probe ?? probeInstalledArtifact)(directory, record.target);
+  if (artifact.state !== 'contract' || artifact.contract.identity.sourceHash !== record.sourceHash || artifact.contract.identity.manifestDigest !== record.manifestDigest) {
+    return { ok: false, reason: `${record.target}'s installed build is no longer the one validated (${artifact.state}).` };
+  }
+  if (await entryHash(entryPoint(directory)).catch(() => '') !== record.entrySha256) return { ok: false, reason: `${record.target}'s installed files changed after they were validated.` };
+  return { ok: true };
+}
+
 /** Where a rollback stands, or why nothing was done. A withdrawal that could not release the pin says so in `pin`. */
 export type RollbackOutcome =
-  | { state: RollbackState; record: RollbackRecord; pin?: { released: boolean; reason?: string } }
+  | { state: RollbackState; record: RollbackRecord; pin?: PinRelease }
   | { state: 'refused'; code: string; reason: string };
 const refusal = (code: string, reason: string): RollbackOutcome => ({ state: 'refused', code, reason });
 const failureOf = (phase: string, error: unknown) => ({ phase, message: messageOf(error).slice(0, 2000) });
+
+/**
+ * A completed or past rollback that no longer decides anything: completed, its hold released, no attempt of it running,
+ * its pin released and a later update recorded since. A new rollback then gets its own ID; anything else (under way,
+ * held, uncertain, failed after its switch, a pin still there) is never covered by a new one.
+ */
+async function operationClosed(stateDir: string, record: RollbackRecord): Promise<boolean> {
+  if (record.state !== 'completed' || record.held || !record.worker || await attemptLive(record.attempt)) return false;
+  const [pin, update] = await Promise.all([readStoragePin(stateDir), readUpdateRecord(stateDir)]);
+  return superseded(record, pin, update);
+}
 
 /**
  * The owner's rollback, one shared executor: validate (read-only), reserve it (one record and one ID, and the pin over
@@ -1150,9 +1414,11 @@ const failureOf = (phase: string, error: unknown) => ({ phase, message: messageO
  * hands the worker over (resumeRollback). Reserving and switching are taken in turn with update requests and pruning
  * (`serialize`) and in the computer's transition turn; waiting is not, so a long wait holds no request back.
  *
- * A failure releases the admission hold it took; the pin stays until the owner releases it, so nothing reinstalls the
- * newer version meanwhile. Asking again continues the same rollback from where its record and the actual state stand.
- * Two requests for the same target at once are one rollback; one for another target is refused while it runs.
+ * Each call is one attempt: it owns the record until it answers (another process's step meanwhile is busy), and every
+ * call it makes to the worker carries its fence. A failure releases the admission hold it took (recorded failed first,
+ * so nothing goes on from it); the pin stays until the owner releases it, so nothing reinstalls the newer version
+ * meanwhile. Asking again continues the same rollback from where its record and the actual state stand. Two requests
+ * for the same target at once are one rollback; one for another target is refused while it runs.
  */
 export function runRollback(context: RollbackContext, request: { target: string; by: string; reason: string }): Promise<RollbackOutcome> {
   if (!isText(request.by, 200) || typeof request.reason !== 'string' || request.reason.length > 2000) return Promise.resolve(refusal('invalid-request', 'A rollback names who asked for it.'));
@@ -1165,12 +1431,13 @@ async function carryOut(context: RollbackContext, request: { target: string; by:
   let seen = await readRollbackRecord(stateDir);
   if (seen.state === 'unreadable' || seen.state === 'invalid') return refusal('rollback-record', `The rollback record is ${seen.state}; the owner inspects it first.`);
   let continuing: RollbackRecord | undefined;
-  if (seen.state === 'present') {
+  // A rollback that is over for good (operationClosed) is the past: this one gets its own ID.
+  if (seen.state === 'present' && !await operationClosed(stateDir, seen.record)) {
     const record = seen.record;
     if (record.target !== request.target) {
       if (rollbackActive(record)) return refusal('rollback-in-progress', `Rollback ${record.id} to ${record.target} is under way.`);
       if (record.held) return refusal('hold-not-released', `Rollback ${record.id}'s admission hold was not confirmed released; withdraw it again first.`);
-    } else if (record.switched || record.state === 'switching') {
+    } else if (switchEvidence(record)) {
       if (running.version === record.target) return continueOnTarget(context, record);
       if (running.version !== record.from || !rollbackActive(record)) return refusal('not-target', `Rollback ${record.id} switched to ${record.target}; it goes on from ${record.target}'s web.`);
       const settled = await settleSwitching(context, record);
@@ -1192,51 +1459,58 @@ async function carryOut(context: RollbackContext, request: { target: string; by:
   const validation = await validateRollback(context, request);
   if (!validation.ok) {
     // A rollback already holding admissions is not left holding them on a target it can no longer take.
-    if (continuing?.held) return failWith(context, continuing, 'validate', validation.reason);
+    if (continuing?.held) {
+      const taken = await claim(context, continuing.id, [continuing.state], 'run');
+      try { return await failWith(context, taken.record, taken.claim, 'validate', validation.reason); } finally { await endAttempt(context, taken.claim); }
+    }
     return refusal(validation.code, validation.reason);
   }
-  let record = await context.serialize(() => withStorageTransition(stateDir, () => reserve(context, request, validation, seen, continuing)));
+  const reserved = await context.serialize(() => withStorageTransition(stateDir, () => reserve(context, request, validation, seen, continuing)));
+  const own = reserved.claim;
+  try {
+    let record = reserved.record;
+    // Hold new admissions and automation: the intent is durable first, so a hold asked for is never unaccounted for.
+    record = await transition(context, record.id, ['pinned', 'holding', 'held', 'waiting', 'failed'], { state: 'holding', held: true, failure: undefined, pending: undefined }, own);
+    try { await context.ports.holdAdmission(own.fence, `Rolling back to ${record.target}`); } catch (error) { return await failWith(context, record, own, 'hold', error); }
+    record = await transition(context, record.id, ['holding'], { state: 'held' }, own);
+    // Running work ends by itself; nothing is cancelled, and nothing else waits in turn meanwhile.
+    let quiet: Awaited<ReturnType<RollbackPorts['waitQuiet']>>;
+    try { quiet = await context.ports.waitQuiet(record.id); } catch (error) { return await failWith(context, record, own, 'quiet', error); }
+    if (quiet.state === 'pending') {
+      record = await transition(context, record.id, ['held'], { state: 'waiting', pending: quiet.reason.slice(0, 500) }, own);
+      return { state: 'waiting', record };
+    }
+    const recheck = await recheckTarget(context, record);
+    if (!recheck.ok) return await failWith(context, record, own, 'revalidate', recheck.reason);
 
-  // Hold new admissions and automation: the intent is durable first, so a hold asked for is never unaccounted for.
-  record = await transition(context, record.id, ['pinned', 'holding', 'held', 'waiting', 'failed'], { state: 'holding', held: true, failure: undefined, pending: undefined });
-  try { await context.ports.holdAdmission(record.id, `Rolling back to ${record.target}`); } catch (error) { return failWith(context, record, 'hold', error); }
-  record = await transition(context, record.id, ['holding'], { state: 'held' });
-  // Running work ends by itself; nothing is cancelled, and nothing else waits in turn meanwhile.
-  let quiet: Awaited<ReturnType<RollbackPorts['waitQuiet']>>;
-  try { quiet = await context.ports.waitQuiet(record.id); } catch (error) { return failWith(context, record, 'quiet', error); }
-  if (quiet.state === 'pending') {
-    record = await transition(context, record.id, ['held'], { state: 'waiting', pending: quiet.reason.slice(0, 500) });
-    return { state: 'waiting', record };
-  }
-  const recheck = await recheckTarget(context, record);
-  if (!recheck.ok) return failWith(context, record, 'revalidate', recheck.reason);
-
-  const switched = await context.serialize(() => withStorageTransition(stateDir, () => switchTo(context, record)));
-  if (!switched.ok) return switched.uncertain ? { state: 'failed', record: switched.record } : failWith(context, switched.record, switched.phase, switched.reason);
-  record = switched.record;
-  try { await context.ports.restartWeb(); } catch (error) {
-    // launchd starts the web again by itself; whether the target's web goes on decides.
-    record = await transition(context, record.id, ['switched'], { failure: failureOf('restart', error) }).catch(() => record);
-  }
-  return { state: 'switched', record };
+    const switched = await context.serialize(() => withStorageTransition(stateDir, () => switchTo(context, record, own)));
+    if (!switched.ok) return switched.uncertain ? { state: 'failed', record: switched.record } : await failWith(context, switched.record, own, switched.phase, switched.reason);
+    record = switched.record;
+    try { await context.ports.restartWeb(); } catch (error) {
+      // launchd starts the web again by itself; whether the target's web goes on decides.
+      record = await transition(context, record.id, ['switched'], { failure: failureOf('restart', error) }, own).catch(() => record);
+    }
+    return { state: 'switched', record };
+  } finally { await endAttempt(context, own); }
 }
 
 const sameRead = (a: RollbackRead, b: RollbackRead) => a.state === b.state
-  && (a.state !== 'present' || (b.state === 'present' && a.record.id === b.record.id && a.record.state === b.record.state && a.record.updatedAt === b.record.updatedAt));
+  && (a.state !== 'present' || (b.state === 'present' && sameRecord(a.record, b.record)));
 
 /**
  * Reserves the rollback, in turn with update requests and pruning and in the transition turn: nothing it was validated
- * on moved meanwhile (the rollback record, update.json, the hold and helper, `current`, the target's build and entry
- * point), and the pin is this rollback's own (written now, after the record names it: `pinning` first). Throws a
- * conflict for anything else: no pin, no record change.
+ * on moved meanwhile (the rollback record and no attempt of it running, update.json, the hold and helper, `current`,
+ * the target's build and entry point), and the pin is this rollback's own (written now, after the record names it:
+ * `pinning` first). Takes the attempt the rest of this run acts under. Throws a conflict for anything else: no pin, no
+ * record change.
  */
-async function reserve(context: RollbackContext, request: { target: string; by: string; reason: string }, validation: Extract<RollbackValidation, { ok: true }>, seen: RollbackRead, continuing?: RollbackRecord): Promise<RollbackRecord> {
+async function reserve(context: RollbackContext, request: { target: string; by: string; reason: string }, validation: Extract<RollbackValidation, { ok: true }>, seen: RollbackRead, continuing?: RollbackRecord): Promise<{ record: RollbackRecord; claim: Claim }> {
   const { stateDir, running } = context;
   const { target } = validation;
   if (!sameRead(seen, await readRollbackRecord(stateDir))) throw new RollbackConflict('rollback-changed', 'Another rollback request changed the record meanwhile.');
+  if (seen.state === 'present' && await attemptLive(seen.record.attempt)) throw new RollbackConflict('rollback-busy', `Rollback ${seen.record.id} is being carried out (process ${seen.record.attempt!.pid}); ask again once it answers.`);
   const [update, hold, helper, current, pin] = await Promise.all([readUpdateRecord(stateDir), readHold(stateDir), readHelperLock(stateDir), readCurrentPointer(stateDir), readStoragePin(stateDir)]);
-  const updateSha256 = update.state === 'active' || update.state === 'terminal' ? update.sha256 : update.state === 'absent' ? null : undefined;
-  if (updateSha256 !== validation.updateSha256) throw new RollbackConflict('update-changed', 'An update was asked for while the rollback was validated; it is settled first.');
+  if (updateShaOf(update) !== validation.updateSha256) throw new RollbackConflict('update-changed', 'An update was asked for while the rollback was validated; it is settled first.');
   if (hold.state !== 'absent' || helper.state === 'running' || helper.state === 'unreadable' || helper.state === 'invalid') throw new RollbackConflict('update-hold', 'An update hold or helper appeared while the rollback was validated.');
   if (current.state !== 'version' || current.version !== running.version) throw new RollbackConflict('current-pointer', 'The service\'s current version changed while the rollback was validated.');
   const sourceHash = target.contract.identity.sourceHash;
@@ -1251,73 +1525,76 @@ async function reserve(context: RollbackContext, request: { target: string; by: 
     throw new RollbackConflict('target-changed', `The pin on ${target.version} stands over another build than the one installed now.`);
   }
   const at = stamp(context);
-  let record: RollbackRecord = continuing && continuing.sourceHash === sourceHash && continuing.entrySha256 === target.entrySha256
-    ? { ...continuing, updateSha256: validation.updateSha256, failure: undefined, pending: undefined, updatedAt: at }
+  const same = continuing && continuing.sourceHash === sourceHash && continuing.entrySha256 === target.entrySha256;
+  if (continuing && !same && continuing.held) throw new RollbackConflict('target-changed', `${target.version} was reinstalled while rollback ${continuing.id} still holds admissions; withdraw it first.`);
+  const attempt = await nextAttempt(context, 'run', same ? continuing!.attempt : undefined);
+  let record: RollbackRecord = same
+    ? { ...continuing!, updateSha256: validation.updateSha256, storage: validation.storage, failure: undefined, pending: undefined, attempt, updatedAt: at }
     : {
       format: 'tower-storage-rollback', version: 1, id: `${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`, from: running.version, target: target.version,
-      sourceHash, manifestDigest, entrySha256: target.entrySha256, updateSha256: validation.updateSha256, state: 'pinning', by: request.by, reason: request.reason,
-      held: continuing?.held ?? false, switched: false, startedAt: at, updatedAt: at,
+      sourceHash, manifestDigest, entrySha256: target.entrySha256, updateSha256: validation.updateSha256, storage: validation.storage, state: 'pinning', by: request.by, reason: request.reason,
+      held: false, switched: false, attempt, startedAt: at, updatedAt: at,
     };
-  if (continuing && record.id !== continuing.id && continuing.held) throw new RollbackConflict('target-changed', `${target.version} was reinstalled while rollback ${continuing.id} still holds admissions; withdraw it first.`);
-  if (pin.state !== 'present' || pin.pin.rollbackId !== record.id) {
-    record = { ...record, state: 'pinning' };
+  ownAttempts.add(attempt.nonce);
+  try {
+    if (pin.state !== 'present' || pin.pin.rollbackId !== record.id) {
+      record = { ...record, state: 'pinning' };
+      await saveRollback(stateDir, record);
+      const value: StoragePin = { format: 'tower-storage-pin', version: 1, pinned: target.version, sourceHash, manifestDigest, entrySha256: target.entrySha256,
+        rollbackId: record.id, by: request.by, reason: request.reason.slice(0, 2000), at };
+      await writePrivateJson(storagePinPath(stateDir), JSON.stringify(value, null, 2), { syncDirectory: true });
+    }
+    record = { ...record, state: record.state === 'pinning' ? 'pinned' : record.state, updatedAt: stamp(context) };
     await saveRollback(stateDir, record);
-    const value: StoragePin = { format: 'tower-storage-pin', version: 1, pinned: target.version, sourceHash, manifestDigest, entrySha256: target.entrySha256,
-      rollbackId: record.id, by: request.by, reason: request.reason.slice(0, 2000), at };
-    await writePrivateJson(storagePinPath(stateDir), JSON.stringify(value, null, 2), { syncDirectory: true });
-  }
-  record = { ...record, state: record.state === 'pinning' ? 'pinned' : record.state, updatedAt: stamp(context) };
-  await saveRollback(stateDir, record);
-  return record;
+  } catch (error) { ownAttempts.delete(attempt.nonce); throw error; }
+  return { record, claim: claimOf(record) };
 }
 
 type SwitchResult = { ok: true; record: RollbackRecord } | { ok: false; uncertain: boolean; phase: string; reason: string; record: RollbackRecord };
 /**
  * Points `current` at the target, in turn with requests and pruning and in the transition turn: once more over the
- * facts the switch stands on (the record held, the pin this rollback's, update.json as reserved, no hold or helper,
- * `current` still the version rolled back from); `switching` is recorded before the pointer moves and `switched` after.
- * A pointer that answers neither version after a failed switch is uncertain: the record fails and its hold stays.
+ * facts the switch stands on (the record held by this attempt, the pin this rollback's whole, update.json as reserved,
+ * no hold or helper, `current` still the version rolled back from); `switching` is recorded before the pointer moves
+ * and `switched` after. A pointer that answers neither version after a failed switch is uncertain: the record fails and
+ * its hold stays.
  */
-async function switchTo(context: RollbackContext, held: RollbackRecord): Promise<SwitchResult> {
+async function switchTo(context: RollbackContext, held: RollbackRecord, own: Claim): Promise<SwitchResult> {
   const { stateDir } = context;
   const read = await readRollbackRecord(stateDir);
-  if (read.state !== 'present' || read.record.id !== held.id || read.record.state !== 'held') throw new RollbackConflict('rollback-changed', 'The rollback record changed while running work ended.');
+  if (read.state !== 'present' || read.record.id !== held.id || read.record.state !== 'held' || read.record.attempt?.nonce !== own.nonce) throw new RollbackConflict('rollback-changed', 'The rollback record changed while running work ended.');
   let record = read.record;
   const stop = (phase: string, reason: string): SwitchResult => ({ ok: false, uncertain: false, phase, reason, record });
   const [pin, update, hold, helper, current] = await Promise.all([readStoragePin(stateDir), readUpdateRecord(stateDir), readHold(stateDir), readHelperLock(stateDir), readCurrentPointer(stateDir)]);
-  if (pin.state !== 'present' || pin.pin.rollbackId !== record.id || pin.pin.pinned !== record.target || pin.pin.sourceHash !== record.sourceHash || pin.pin.entrySha256 !== record.entrySha256) {
-    return stop('pin', 'The pin no longer keeps this rollback\'s target.');
-  }
-  const updateSha256 = update.state === 'active' || update.state === 'terminal' ? update.sha256 : update.state === 'absent' ? null : undefined;
-  if (updateSha256 !== record.updateSha256) return stop('update-changed', 'The update record changed while running work ended.');
+  if (pin.state !== 'present' || !pinMatches(pin.pin, record)) return stop('pin', 'The pin no longer keeps this rollback\'s target.');
+  if (updateShaOf(update) !== record.updateSha256) return stop('update-changed', 'The update record changed while running work ended.');
   if (hold.state !== 'absent' || helper.state === 'running' || helper.state === 'unreadable' || helper.state === 'invalid') return stop('update-hold', 'An update hold or helper appeared while running work ended.');
   if (current.state !== 'version' || current.version !== record.from) return stop('pointer', `The service starts ${current.state === 'version' ? current.version : current.state}, not ${record.from}, before the switch.`);
-  record = await transition(context, record.id, ['held'], { state: 'switching' });
+  record = await transition(context, record.id, ['held'], { state: 'switching' }, own);
   try { await pointRollbackTarget(stateDir, record.target, record.id); } catch (error) {
     const pointer = await readCurrentPointer(stateDir);
     if (pointer.state === 'version' && pointer.version === record.from) {
-      record = await transition(context, record.id, ['switching'], { state: 'held' });
+      record = await transition(context, record.id, ['switching'], { state: 'held' }, own);
       return stop('switch', messageOf(error));
     }
     if (!(pointer.state === 'version' && pointer.version === record.target)) {
-      record = await transition(context, record.id, ['switching'], { state: 'failed', failure: failureOf('switch', `current is ${describePointer(pointer)} after a failed switch (${messageOf(error)}); the owner inspects it`) });
+      record = await transition(context, record.id, ['switching'], { state: 'failed', failure: failureOf('switch', `current is ${describePointer(pointer)} after a failed switch (${messageOf(error)}); the owner inspects it`) }, own);
       return { ok: false, uncertain: true, phase: 'switch', reason: record.failure!.message, record };
     }
     // The pointer moved although the call failed: the switch took.
   }
-  record = await transition(context, record.id, ['switching'], { state: 'switched', switched: true });
+  record = await transition(context, record.id, ['switching'], { state: 'switched', switched: true }, own);
   return { ok: true, record };
 }
 const describePointer = (pointer: PointerRead) => pointer.state === 'version' ? pointer.version : pointer.state;
 
 /**
- * Ends a step that failed with nothing uncertain: the admission hold is released (and recorded as released only when
- * that succeeded), the pin stays, and the record says where it stopped. Asking again continues the same rollback.
+ * Ends a step that failed with nothing uncertain: the failure is recorded first (its hold still counted, so nothing goes
+ * on from this attempt), then the admission hold is released under this attempt's fence and recorded released only
+ * once that succeeded. The pin stays. Asking again continues the same rollback.
  */
-async function failWith(context: Pick<RollbackContext, 'stateDir' | 'ports' | 'now'>, record: RollbackRecord, phase: string, error: unknown): Promise<RollbackOutcome> {
-  let held = record.held;
-  if (held) held = !await context.ports.releaseAdmission(record.id).then(() => true, () => false);
-  const failed = await transition(context, record.id, [record.state], { state: 'failed', held, pending: undefined, failure: failureOf(phase, error) });
+async function failWith(context: Pick<RollbackContext, 'stateDir' | 'ports' | 'now'>, record: RollbackRecord, own: Claim, phase: string, error: unknown): Promise<RollbackOutcome> {
+  let failed = await transition(context, record.id, [record.state], { state: 'failed', pending: undefined, failure: failureOf(phase, error) }, own);
+  if (failed.held && await context.ports.releaseAdmission(own.fence).then(() => true, () => false)) failed = await transition(context, record.id, ['failed'], { held: false }, own);
   return { state: 'failed', record: failed };
 }
 
@@ -1330,19 +1607,23 @@ export async function resumeRollback(context: RollbackContext): Promise<Rollback
   const read = await readRollbackRecord(context.stateDir);
   if (read.state !== 'present') return refusal('rollback-record', `There is no rollback to continue (${read.state}).`);
   const record = read.record;
-  if (context.running.version === record.target && (record.switched || record.state === 'switching')) {
+  if (context.running.version === record.target && switchEvidence(record)) {
     return oneAtATime(context.stateDir, record.target, () => continueOnTarget(context, record));
   }
   if (context.running.version === record.from && rollbackActive(record)) return runRollback(context, { target: record.target, by: record.by, reason: record.reason });
   return refusal('nothing-to-continue', `Rollback ${record.id} (${record.from} → ${record.target}) is ${record.state}; there is nothing for ${context.running.version} to continue.`);
 }
 
+/** The states the target's web goes on from: switched (or maybe), and after. */
+const ON_TARGET: readonly RollbackState[] = ['switching', 'switched', 'holding', 'held', 'waiting', 'handing-off', 'completed', 'failed'];
+
 /**
- * The rollback after the switch, on the target's web: `switching` is settled by the actual pointer; then the pointer,
- * the pin and the target's artifact are verified as they are now (a mismatch fails it and keeps its hold: what serves
- * cannot be told); admissions are held and running work ended again (whatever an earlier attempt saw); the database is
- * checked again; the worker is handed over; and the rollback is kept only when the worker that answers is the pinned
- * build, with its storage identity, while `current` still starts it. Its admission hold is released last.
+ * The rollback after the switch, on the target's web, as one attempt: `switching` is settled by the actual pointer; a
+ * completed rollback only cleans up (cleanUp); a handoff asked for earlier is settled from what actually serves before
+ * anything else (it is never asked for again while its effect is not known to be none); then the operation is verified
+ * as it is now (a mismatch fails it and keeps its hold: what serves cannot be told); admissions are held and running
+ * work ended again (whatever an earlier attempt saw); the database is checked again; the serving worker and storage are
+ * recorded as the handoff's baseline; the worker is handed over; and what serves afterwards decides (settleHandoff).
  */
 async function continueOnTarget(context: RollbackContext, seen: RollbackRecord): Promise<RollbackOutcome> {
   const { stateDir, running } = context;
@@ -1350,104 +1631,263 @@ async function continueOnTarget(context: RollbackContext, seen: RollbackRecord):
   if (running.version !== seen.target || identity?.sourceHash !== seen.sourceHash || identity.manifestDigest !== seen.manifestDigest) {
     return refusal('not-target', `Rollback ${seen.id} goes on from ${seen.target}'s web (${seen.sourceHash.slice(0, 12)}…), not this build.`);
   }
-  let record = await settleSwitching(context, seen);
-  if (record.state === 'failed' && !seen.switched) return { state: 'failed', record };
-  if (!record.switched) return refusal('not-switched', 'The switch did not happen; the rollback goes on from the web it was asked on.');
-  if (record.state === 'completed') return releaseCompleted(context, record);
-  const verified = await withStorageTransition(stateDir, () => verifyTarget(context, record));
-  if (!verified.ok) {
-    record = await transition(context, record.id, [record.state], { state: 'failed', pending: undefined, failure: failureOf('verify', verified.reason) });
-    return { state: 'failed', record };
+  const taken = await claim(context, seen.id, ON_TARGET, 'resume');
+  const own = taken.claim;
+  try {
+    let record = await settleSwitching(context, taken.record, own);
+    if (record.state === 'failed' && !seen.switched) return { state: 'failed', record };
+    if (!record.switched) return refusal('not-switched', 'The switch did not happen; the rollback goes on from the web it was asked on.');
+    if (record.state === 'completed') return await cleanUp(context, record, own);
+    if (record.handoff && record.handoff.state !== 'no-effect') {
+      const settled = await settleHandoff(context, record, own);
+      if ('outcome' in settled) return settled.outcome;
+      record = settled.record;
+    }
+    const verified = await withStorageTransition(stateDir, () => verifyOperation(context, record, { pin: 'required' }));
+    if (!verified.ok) {
+      record = await transition(context, record.id, [record.state], { state: 'failed', pending: undefined, failure: failureOf('verify', verified.reason) }, own);
+      return { state: 'failed', record };
+    }
+    record = await transition(context, record.id, ['switched', 'holding', 'held', 'waiting', 'handing-off', 'failed'], { state: 'holding', held: true, failure: undefined, pending: undefined }, own);
+    try { await context.ports.holdAdmission(own.fence, `Rolling back to ${record.target}`); } catch (error) { return await failWith(context, record, own, 'hold', error); }
+    record = await transition(context, record.id, ['holding'], { state: 'held' }, own);
+    let quiet: Awaited<ReturnType<RollbackPorts['waitQuiet']>>;
+    try { quiet = await context.ports.waitQuiet(record.id); } catch (error) { return await failWith(context, record, own, 'quiet', error); }
+    if (quiet.state === 'pending') {
+      record = await transition(context, record.id, ['held'], { state: 'waiting', pending: quiet.reason.slice(0, 500) }, own);
+      return { state: 'waiting', record };
+    }
+    const recheck = await recheckTarget(context, record);
+    if (!recheck.ok) return await failWith(context, record, own, 'revalidate', recheck.reason);
+    // What serves now, before anything is sent: the baseline the handoff's effect is judged against, never rewritten.
+    let before: ServingProof;
+    try { before = await context.ports.servingProof(own.fence); } catch (error) { return await failWith(context, record, own, 'baseline', error); }
+    if (isObject(before?.worker) && before.worker.version === record.target && before.worker.sourceHash === record.sourceHash) {
+      // Something other than this rollback already put the target's worker in place: whose takeover it was cannot be told.
+      record = await transition(context, record.id, ['held'], { state: 'failed', failure: failureOf('baseline', 'The target\'s worker already serves before this rollback handed it over; the owner settles it.') }, own);
+      return { state: 'failed', record };
+    }
+    let baseline: HandoffBaseline;
+    try { baseline = baselineOf(before, record, stamp(context)); } catch (error) { return await failWith(context, record, own, 'baseline', error); }
+    record = await transition(context, record.id, ['held'], { state: 'handing-off', handoff: { attempt: own.fence.attempt, state: 'sent', baseline } }, own);
+    const entry = entryPoint(versionDirectory(stateDir, record.target));
+    let answer: HandoffAnswer | { state: 'lost'; reason: string };
+    try { answer = await context.ports.handoff({ version: record.target, entry, sourceHash: record.sourceHash }, own.fence); } catch (error) { answer = { state: 'lost', reason: messageOf(error) }; }
+    const settled = await settleHandoff(context, record, own, answer);
+    return 'outcome' in settled ? settled.outcome : { state: settled.record.state, record: settled.record };
+  } finally { await endAttempt(context, own); }
+}
+
+/** Why a serving proof cannot be used as it is, or undefined. */
+function proofProblem(proof: unknown): string | undefined {
+  if (!isObject(proof) || !isObject(proof.worker) || !isObject(proof.status) || !isObject(proof.inspection) || !isObject(proof.gate)) return 'The serving proof is incomplete.';
+  if (!workerShape(proof.worker)) return 'The serving worker is not told whole.';
+  const schema = proof.inspection.schema;
+  if (!isObject(schema) || !(schema.kind === 'empty' || ((schema.kind === 'current' || schema.kind === 'behind') && isText(schema.storageId, 200)))) return 'The serving worker\'s storage is not told.';
+  const claimed = proof.status.ownerEpoch;
+  if (!isCount(proof.inspection.ownerEpoch) || (claimed !== undefined && !isCount(claimed, 1)) || typeof proof.gate.open !== 'boolean' || !['none', 'pending', 'done'].includes(String(proof.handoff))) return 'The serving proof is not one this build reads.';
+  // The worker's claim must be the storage's owner now: a later claim by someone else leaves it a former owner.
+  if (claimed !== undefined && claimed !== proof.inspection.ownerEpoch) return 'Another worker claimed the storage after the serving worker did.';
+  if (schema.kind === 'empty' && (proof.inspection.ownerEpoch !== 0 || claimed !== undefined)) return 'An empty storage answers an owner.';
+  return undefined;
+}
+/** The handoff's baseline from what serves before it: a proof whose worker knows no handoff of this attempt, on the storage the rollback was validated on. */
+function baselineOf(proof: ServingProof, record: RollbackRecord, at: string): HandoffBaseline {
+  const problem = proofProblem(proof);
+  if (problem) throw new Error(problem);
+  if (proof.handoff !== 'none') throw new Error('The serving worker already knows a handoff of this attempt.');
+  const storage = storageOf(proof.inspection.schema);
+  if (record.storage && !sameStorage(storage, record.storage)) throw new Error('The serving worker serves another storage than the rollback was validated on.');
+  return { worker: { ...proof.worker }, storage, ownerEpoch: proof.inspection.ownerEpoch, at };
+}
+
+type HandoffVerdict = { state: 'completed' } | { state: 'pending' | 'unknown' | 'no-effect'; reason: string };
+/**
+ * What a handoff did, from what serves now, against the baseline recorded before it was asked for:
+ * - `completed`: the target serves as a new process and holds the storage. On a storage that was there: the same
+ *   storageId, the target's claim the storage's owner and newer than the baseline's, and its gate open. On an empty
+ *   storage: still empty, epoch 0, unclaimed, the target's prepare refused as migration-required, and this attempt done.
+ * - `pending`: the handoff is under way, or the target serves and has not claimed (or opened its gate) yet.
+ * - `no-effect`: the very worker handed over from still serves, on the same storage, knowing no handoff of this
+ *   attempt (a reopen of its own that raised the epoch included).
+ * - `unknown`: anything else (another claimant, another storage, empty becoming current, a worker that is neither).
+ */
+function classifyHandoff(record: RollbackRecord, handoff: HandoffRecord, proof: ServingProof): HandoffVerdict {
+  const unknown = (reason: string): HandoffVerdict => ({ state: 'unknown', reason });
+  const problem = proofProblem(proof);
+  if (problem) return unknown(problem);
+  const { worker } = proof;
+  const base = handoff.baseline;
+  const storage = storageOf(proof.inspection.schema);
+  const claimed = proof.status.ownerEpoch;
+  const sameProcess = worker.pid === base.worker.pid && worker.start === base.worker.start;
+  if (proof.handoff === 'pending') return { state: 'pending', reason: 'The handoff is still under way.' };
+  if (sameProcess && worker.sourceHash === base.worker.sourceHash) {
+    if (proof.handoff !== 'none') return unknown('The worker handed over from still serves, and answers this handoff as done.');
+    if (!sameStorage(storage, base.storage)) return unknown('The worker handed over from still serves, on another storage than before the handoff.');
+    return { state: 'no-effect', reason: 'The worker handed over from still serves, with no handoff of this attempt.' };
   }
-  record = await transition(context, record.id, ['switched', 'holding', 'held', 'waiting', 'handing-off', 'failed'], { state: 'holding', held: true, failure: undefined, pending: undefined });
-  try { await context.ports.holdAdmission(record.id, `Rolling back to ${record.target}`); } catch (error) { return failWith(context, record, 'hold', error); }
-  record = await transition(context, record.id, ['holding'], { state: 'held' });
-  let quiet: Awaited<ReturnType<RollbackPorts['waitQuiet']>>;
-  try { quiet = await context.ports.waitQuiet(record.id); } catch (error) { return failWith(context, record, 'quiet', error); }
-  if (quiet.state === 'pending') {
-    record = await transition(context, record.id, ['held'], { state: 'waiting', pending: quiet.reason.slice(0, 500) });
-    return { state: 'waiting', record };
+  const isTarget = worker.version === record.target && worker.sourceHash === record.sourceHash && worker.manifestDigest === record.manifestDigest;
+  if (!isTarget || sameProcess) return unknown(`${worker.version} (process ${worker.pid}) serves: neither the worker handed over from nor the target as a new process.`);
+  if (proof.handoff !== 'done') return unknown('The target serves without this handoff as done.');
+  if (base.storage.kind === 'current') {
+    if (storage.kind !== 'current' || storage.storageId !== base.storage.storageId) return unknown('The target serves another storage than the one handed over.');
+    if (claimed === undefined) return { state: 'pending', reason: 'The target serves and has not claimed the storage yet.' };
+    if (claimed <= base.ownerEpoch) return unknown('The target answers a claim no newer than the worker handed over from.');
+    if (!proof.gate.open) return { state: 'pending', reason: 'The target claimed the storage; its gate is not open yet.' };
+    return { state: 'completed' };
   }
-  const recheck = await recheckTarget(context, record);
-  if (!recheck.ok) return failWith(context, record, 'revalidate', recheck.reason);
-  record = await transition(context, record.id, ['held'], { state: 'handing-off' });
-  const entry = entryPoint(versionDirectory(stateDir, record.target));
-  let worker: Awaited<ReturnType<RollbackPorts['handoff']>>;
-  try { worker = await context.ports.handoff({ version: record.target, entry, sourceHash: record.sourceHash }); } catch (error) { return failWith(context, record, 'handoff', error); }
-  const pointer = await readCurrentPointer(stateDir);
-  if (worker.version !== record.target || worker.sourceHash !== record.sourceHash || !(pointer.state === 'version' && pointer.version === record.target)) {
-    // Which worker serves, or what the service starts, cannot be told: nothing is kept, and the hold stays.
-    const message = worker.version !== record.target || worker.sourceHash !== record.sourceHash
-      ? `The worker answers as ${worker.version}${worker.sourceHash ? ` (${worker.sourceHash.slice(0, 12)}…)` : ' without a storage identity'}, not the pinned build.`
-      : `current is ${describePointer(pointer)} after the handoff, not ${record.target}.`;
-    record = await transition(context, record.id, ['handing-off'], { state: 'failed', failure: failureOf('worker', message) });
-    return { state: 'failed', record };
+  if (storage.kind !== 'empty') return unknown('The storage was empty when the handoff was asked for, and is not now.');
+  if (proof.prepare?.code !== 'migration-required' || proof.prepare.disposition !== 'not-committed') return { state: 'pending', reason: 'The target has not reported its refused prepare on the empty storage yet.' };
+  return { state: 'completed' };
+}
+
+/**
+ * Whether what serves now still holds the completion this record proved, for its cleanup and the pin's release: the
+ * target serving, this handoff done, and the storage the baseline names held by it (on an empty storage: still empty
+ * and unclaimed while the hold stays, or bootstrapped by the target itself, its claim the owner and its gate open).
+ */
+function completionHolds(record: RollbackRecord, proof: ServingProof): { ok: true } | { ok: false; reason: string } {
+  const handoff = record.handoff;
+  if (!handoff || handoff.state !== 'done') return { ok: false, reason: 'The rollback\'s record holds no completed handoff to compare with.' };
+  const problem = proofProblem(proof);
+  if (problem) return { ok: false, reason: problem };
+  const { worker } = proof;
+  if (worker.version !== record.target || worker.sourceHash !== record.sourceHash || worker.manifestDigest !== record.manifestDigest) return { ok: false, reason: `${worker.version} serves, not the target.` };
+  if (proof.handoff !== 'done') return { ok: false, reason: 'The serving target does not know this handoff as done.' };
+  const storage = storageOf(proof.inspection.schema);
+  const claimed = proof.status.ownerEpoch;
+  if (handoff.baseline.storage.kind === 'current') {
+    if (storage.kind !== 'current' || storage.storageId !== handoff.baseline.storage.storageId) return { ok: false, reason: 'The target serves another storage than the one handed over.' };
+    if (claimed === undefined || claimed <= handoff.baseline.ownerEpoch || !proof.gate.open) return { ok: false, reason: 'The target does not hold the storage as its owner, with its gate open.' };
+    return { ok: true };
   }
-  record = await transition(context, record.id, ['handing-off'], { state: 'completed', worker: { version: worker.version, sourceHash: worker.sourceHash, pid: worker.pid } });
-  return releaseCompleted(context, record);
+  if (storage.kind === 'empty') return { ok: true };
+  return claimed !== undefined && proof.gate.open ? { ok: true } : { ok: false, reason: 'The storage is no longer empty, and the target does not hold it with its gate open.' };
+}
+
+/**
+ * Settles a handoff from what serves now (servingProof about the attempt that sent it), never by sending it again:
+ * completed → complete(); pending or unknown → the record says so, its hold and pin stay, and it is asked again later;
+ * no effect → right after an answer that it was refused or lost, the attempt fails and releases its hold (a retry asks
+ * again under a new attempt); on a later look, the caller goes on with a new attempt. An `accepted` answer with the
+ * worker handed over from still serving without it is not taken for no effect: it is unknown.
+ */
+async function settleHandoff(context: RollbackContext, record: RollbackRecord, own: Claim, answer?: HandoffAnswer | { state: 'lost'; reason: string }): Promise<{ outcome: RollbackOutcome } | { record: RollbackRecord }> {
+  const handoff = record.handoff!;
+  let verdict: HandoffVerdict;
+  let proof: ServingProof | undefined;
+  try {
+    proof = await context.ports.servingProof({ id: record.id, attempt: handoff.attempt });
+    verdict = classifyHandoff(record, handoff, proof);
+  } catch (error) { verdict = { state: 'unknown', reason: `The serving worker could not be asked: ${messageOf(error)}` }; }
+  if (verdict.state === 'no-effect' && answer?.state === 'accepted') verdict = { state: 'unknown', reason: 'The handoff was accepted, yet the worker handed over from serves without it.' };
+  if (verdict.state === 'completed') return { outcome: await complete(context, record, own, proof!) };
+  if (verdict.state === 'no-effect') {
+    const next = await transition(context, record.id, [record.state], { handoff: { ...handoff, state: 'no-effect', note: verdict.reason }, pending: undefined }, own);
+    if (answer) return { outcome: await failWith(context, next, own, 'handoff', answer.state === 'accepted' ? verdict.reason : answer.reason) };
+    return { record: next };
+  }
+  const next = await transition(context, record.id, [record.state], { handoff: { ...handoff, state: verdict.state, note: verdict.reason.slice(0, 500) }, pending: verdict.reason.slice(0, 500) }, own);
+  return { outcome: { state: next.state, record: next } };
+}
+
+/**
+ * Completes the rollback once the target took over: in the transition turn, the record still this attempt's and the
+ * operation it stands on unchanged (update.json as reserved, the pin its own whole, `current` at the target, the
+ * validated build and entry point). A change fails it with its hold kept: the worker took over on something that
+ * moved, and the owner decides. Then its admission hold is released (cleanUp).
+ */
+async function complete(context: RollbackContext, record: RollbackRecord, own: Claim, proof: ServingProof): Promise<RollbackOutcome> {
+  const decided = await withStorageTransition(context.stateDir, async (): Promise<RollbackOutcome> => {
+    const read = await readRollbackRecord(context.stateDir);
+    if (read.state !== 'present' || read.record.id !== record.id || read.record.attempt?.nonce !== own.nonce || !read.record.handoff) throw new RollbackConflict('rollback-changed', 'The rollback record changed while the handoff was settled.');
+    const current = read.record;
+    const verified = await verifyOperation(context, current, { pin: 'required' });
+    const handoff: HandoffRecord = { ...current.handoff!, state: 'done', note: undefined };
+    if (!verified.ok) {
+      const failed: RollbackRecord = { ...current, state: 'failed', handoff, pending: undefined, failure: failureOf('complete', `The target took over, but ${verified.reason}`), updatedAt: stamp(context) };
+      await saveRollback(context.stateDir, failed);
+      return { state: 'failed', record: failed };
+    }
+    const { worker } = proof;
+    const completed: RollbackRecord = { ...current, state: 'completed', handoff, pending: undefined, failure: undefined, updatedAt: stamp(context),
+      worker: { version: worker.version, sourceHash: worker.sourceHash, pid: worker.pid, start: worker.start, ownerEpoch: proof.status.ownerEpoch ?? proof.inspection.ownerEpoch } };
+    await saveRollback(context.stateDir, completed);
+    return { state: 'completed', record: completed };
+  });
+  return decided.state === 'completed' ? cleanUp(context, (decided as { record: RollbackRecord }).record, own) : decided;
+}
+
+/**
+ * Releases a completed rollback's admission hold, once what it releases is checked as it is now: the serving worker
+ * still the completion's (completionHolds), and, in the transition turn, the operation's files (update.json as
+ * reserved, the pin if it is there, `current`, the validated build and entry point). Nothing is released otherwise
+ * (`cleanup-unproven`). The record says `held` until the release succeeded.
+ */
+async function cleanUp(context: RollbackContext, record: RollbackRecord, own: Claim): Promise<RollbackOutcome> {
+  if (!record.held) return { state: 'completed', record };
+  let proof: ServingProof;
+  try { proof = await context.ports.servingProof({ id: record.id, attempt: record.handoff?.attempt ?? own.fence.attempt }); } catch (error) {
+    return refusal('cleanup-unproven', `The serving worker could not be asked before the hold is released: ${messageOf(error)}`);
+  }
+  const serving = completionHolds(record, proof);
+  if (!serving.ok) return refusal('cleanup-unproven', serving.reason);
+  const verified = await withStorageTransition(context.stateDir, async () => {
+    const read = await readRollbackRecord(context.stateDir);
+    if (read.state !== 'present' || !sameRecord(read.record, record) || read.record.attempt?.nonce !== own.nonce) return { ok: false as const, reason: 'The rollback record changed meanwhile.' };
+    return verifyOperation(context, read.record, { pin: 'optional' });
+  });
+  if (!verified.ok) return refusal('cleanup-unproven', verified.reason);
+  try { await context.ports.releaseAdmission(own.fence); } catch { return { state: 'completed', record }; }
+  record = await transition(context, record.id, ['completed'], { held: false }, own);
+  return { state: 'completed', record };
 }
 
 /**
  * A switch that was asked for and whose outcome was not recorded (`switching`) is settled by the pointer itself: at the
  * target it switched, at the version rolled back from it did not (the rollback is `held` again: its hold may be in
- * place), anywhere else it is uncertain and fails with its hold kept. Any other record is answered as it is.
+ * place), anywhere else it is uncertain and fails with its hold kept. Any other record is answered as it is. The
+ * switch itself runs in the transition turn, so this never sees one half done by a step still running.
  */
-async function settleSwitching(context: Pick<RollbackContext, 'stateDir' | 'now'>, record: RollbackRecord): Promise<RollbackRecord> {
+async function settleSwitching(context: Pick<RollbackContext, 'stateDir' | 'now'>, record: RollbackRecord, own?: Claim): Promise<RollbackRecord> {
   if (record.state !== 'switching') return record;
   return withStorageTransition(context.stateDir, async () => {
     const pointer = await readCurrentPointer(context.stateDir);
-    if (pointer.state === 'version' && pointer.version === record.target) return transition(context, record.id, ['switching'], { state: 'switched', switched: true });
-    if (pointer.state === 'version' && pointer.version === record.from) return transition(context, record.id, ['switching'], { state: 'held' });
-    return transition(context, record.id, ['switching'], { state: 'failed', failure: failureOf('switch', `current is ${describePointer(pointer)} after a switch whose outcome was not recorded; the owner inspects it`) });
+    if (pointer.state === 'version' && pointer.version === record.target) return transition(context, record.id, ['switching'], { state: 'switched', switched: true }, own);
+    if (pointer.state === 'version' && pointer.version === record.from) return transition(context, record.id, ['switching'], { state: 'held' }, own);
+    return transition(context, record.id, ['switching'], { state: 'failed', failure: failureOf('switch', `current is ${describePointer(pointer)} after a switch whose outcome was not recorded; the owner inspects it`) }, own);
   });
 }
 
-/** Everything the switch stood on, as it is now: `current` at the target, this rollback's pin, the very build validated. */
-async function verifyTarget(context: RollbackContext, record: RollbackRecord): Promise<{ ok: true } | { ok: false; reason: string }> {
-  const { stateDir } = context;
-  const [pointer, pin] = await Promise.all([readCurrentPointer(stateDir), readStoragePin(stateDir)]);
-  if (!(pointer.state === 'version' && pointer.version === record.target)) return { ok: false, reason: `current is ${describePointer(pointer)}, not ${record.target}.` };
-  if (pin.state !== 'present' || pin.pin.rollbackId !== record.id || pin.pin.pinned !== record.target || pin.pin.sourceHash !== record.sourceHash
-    || pin.pin.manifestDigest !== record.manifestDigest || pin.pin.entrySha256 !== record.entrySha256) return { ok: false, reason: 'The pin no longer keeps this rollback\'s target.' };
-  const directory = versionDirectory(stateDir, record.target);
-  const artifact = await (context.probe ?? probeInstalledArtifact)(directory, record.target);
-  if (artifact.state !== 'contract' || artifact.contract.identity.sourceHash !== record.sourceHash || artifact.contract.identity.manifestDigest !== record.manifestDigest) {
-    return { ok: false, reason: `${record.target}'s installed build is no longer the one validated (${artifact.state}).` };
-  }
-  if (await entryHash(entryPoint(directory)).catch(() => '') !== record.entrySha256) return { ok: false, reason: `${record.target}'s installed files changed after they were validated.` };
-  return { ok: true };
-}
-
-/** Releases a completed rollback's admission hold; the record says `held` until the release succeeded. */
-async function releaseCompleted(context: Pick<RollbackContext, 'stateDir' | 'ports' | 'now'>, record: RollbackRecord): Promise<RollbackOutcome> {
-  if (!record.held) return { state: 'completed', record };
-  try { await context.ports.releaseAdmission(record.id); } catch { return { state: 'completed', record }; }
-  record = await transition(context, record.id, ['completed'], { held: false });
-  return { state: 'completed', record };
-}
-
 /**
- * The owner withdraws a rollback that has not switched the service (one that stopped included): its admission hold is
- * released, and the withdrawal is reported only once that succeeded; asked again, the release is retried, whatever
- * the record says already. The pin stays unless the owner releases it too, as a separate explicit step (`releasePin`).
+ * The owner withdraws a rollback that has not switched the service (one that stopped included). The withdrawal is
+ * recorded first, as one attempt that owns the rollback (refused while another attempt runs), so no retry, resume or
+ * switch goes on meanwhile; then its admission hold is released under that attempt's fence, and the withdrawal is
+ * reported only once that succeeded; asked again, the release is retried, whatever the record says already. The pin
+ * stays unless the owner releases it too, as a separate explicit step (`releasePin`).
  */
-export async function withdrawRollback(context: Pick<RollbackContext, 'stateDir' | 'ports' | 'now'>, input: { releasePin?: boolean } = {}): Promise<RollbackOutcome> {
+export async function withdrawRollback(context: Pick<RollbackContext, 'stateDir' | 'ports' | 'now' | 'probe'>, input: { releasePin?: boolean } = {}): Promise<RollbackOutcome> {
   if (inflight.has(resolve(context.stateDir))) return refusal('rollback-busy', 'The rollback is being carried out right now; ask again once it answers.');
   const read = await readRollbackRecord(context.stateDir);
   if (read.state !== 'present') return refusal('rollback-record', `There is no rollback to withdraw (${read.state}).`);
-  let record = read.record;
-  if (record.switched || record.state === 'switching') return refusal('rollback-switched', 'The service already starts the rollback target (or may); moving on is an update once the owner releases the pin.');
-  let held = record.held;
-  if (held) held = !await context.ports.releaseAdmission(record.id).then(() => true, () => false);
+  let taken: Awaited<ReturnType<typeof claim>>;
   try {
-    record = await transition(context, record.id, [record.state], { state: 'withdrawn', held, pending: undefined });
+    taken = await claim(context, read.record.id, ROLLBACK_STATES, 'withdraw', { state: 'withdrawn', pending: undefined },
+      record => switchEvidence(record) ? new RollbackConflict('rollback-switched', 'The service already starts the rollback target (or may); moving on is an update once the owner releases the pin.') : undefined);
   } catch (error) {
     if (error instanceof RollbackConflict) return refusal(error.code, error.message);
     throw error;
   }
-  if (held) return refusal('hold-not-released', 'The rollback is withdrawn, but its admission hold could not be released; ask again.');
+  let record = taken.record;
+  try {
+    if (record.held) {
+      if (!await context.ports.releaseAdmission(taken.claim.fence).then(() => true, () => false)) return refusal('hold-not-released', 'The rollback is withdrawn, but its admission hold could not be released; ask again.');
+      record = await transition(context, record.id, ['withdrawn'], { held: false }, taken.claim);
+    }
+  } finally { await endAttempt(context, taken.claim); }
   if (!input.releasePin) return { state: 'withdrawn', record };
-  return { state: 'withdrawn', record, pin: await releaseStoragePin(context.stateDir, { version: record.target }) };
+  return { state: 'withdrawn', record, pin: await releaseStoragePin(context.stateDir, { version: record.target }, { probe: context.probe }) };
 }
 
 /** Versions pruning keeps for the storage: the pinned one, and the target of a rollback that has not ended. A pin or rollback that cannot be read keeps everything. */

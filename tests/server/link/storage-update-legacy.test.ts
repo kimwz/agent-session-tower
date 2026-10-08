@@ -11,7 +11,7 @@ import { currentVersion, pointCurrent, runtimePaths, versionDirectory } from '..
 import { evaluateStorageUpdate, readPreparationEvidence, recordPreparationEvidence, storageHealth, type RunningBuild, type StorageUpdateVerdict } from '../../../server/link/storage-update.js';
 import { runUpdateHelper, serviceSteps, updatePaths, Updates, type UpdateHelperSteps } from '../../../server/link/update.js';
 import * as legacy from './fixtures/legacy-1.114.1/server/link/update.js';
-import { A, B, L, installArtifact, runningBuild } from './fixtures/storage-builds.js';
+import { A, B, L, installArtifact, openGate, preparedStorage, runningBuild } from './fixtures/storage-builds.js';
 
 /** The JSON-only updater as every release before the preparation releases runs it (commit 3ac344e, unchanged since 226ae49). */
 const LEGACY_SHA256 = {
@@ -138,9 +138,9 @@ test('the JSON-only updater asked for B goes back on B\'s 503 and leaves the sta
   assert.equal(prepared?.stage, 'done');
   assert.equal(await currentVersion(state), A);
   assert.ok(web.answers.filter(answer => answer.version === A).every(answer => answer.status === 200), 'A answers while its update is verified');
-  // A's worker records its evidence once its storage contract is checked.
+  // A's worker records its evidence once its storage contract is checked, its storage prepared and its gate open.
   const a = runningBuild(A);
-  await recordPreparationEvidence(state, { context: { identity: a.preflight.identity!, manifest: a.manifest! }, preflight: a.preflight });
+  await recordPreparationEvidence(state, { context: { identity: a.preflight.identity!, manifest: a.manifest! }, preflight: a.preflight, prepared: preparedStorage(), gate: openGate });
   assert.equal((await readPreparationEvidence(state, 'retention')).state, 'present');
   assert.equal((await evaluateStorageUpdate({ stateDir: state, build: a, managed: true })).verdict, 'ready', 'A was kept and runs');
 

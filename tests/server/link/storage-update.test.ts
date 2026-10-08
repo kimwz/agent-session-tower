@@ -15,9 +15,9 @@ import {
 } from '../../../server/link/storage-update.js';
 import { readUpdateStatus, runUpdateHelper, updatePaths, Updates, type UpdateHelperSteps } from '../../../server/link/update.js';
 import { TowerAutoUpdate } from '../../../server/updates/tower.js';
-import type { StorageInspection } from '../../../server/storage/contract.js';
-import { CORE_MIGRATIONS, migrationChecksum } from '../../../server/storage/schema.js';
-import { A, A0, B, C, L, identityOf, installArtifact, manifests, retentionA, runningBuild } from './fixtures/storage-builds.js';
+import { CORE_MIGRATIONS } from '../../../server/storage/schema.js';
+import { A, A0, B, C, L, identityOf, installArtifact, manifests, openGate, preparedStorage, runningBuild } from './fixtures/storage-builds.js';
+import { appliedFor, databaseOfB, rollbackWorld } from './fixtures/rollback-world.js';
 
 async function stateDir(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-storage-update-'));
@@ -370,9 +370,10 @@ test('a direct start needs no record or another build\'s verified terminal one, 
 
   // A's worker records its evidence once its storage contract was checked; B's direct start compares it.
   const a = runningBuild(A);
-  assert.deepEqual(await recordPreparationEvidence(state, { context: { identity: a.preflight.identity!, manifest: a.manifest! }, preflight: runningBuild(A0).preflight }).catch(error => error.message), 'Preparation evidence is recorded only for a storage runtime that passed its preflight as this build.');
-  assert.deepEqual(await recordPreparationEvidence(state, { context: { identity: identityOf(A0), manifest: manifests[A0] }, preflight: runningBuild(A0).preflight }), [], 'a build without domains has nothing to record');
-  const written = await recordPreparationEvidence(state, { context: { identity: a.preflight.identity!, manifest: a.manifest! }, preflight: a.preflight });
+  const prepared = { prepared: preparedStorage(), gate: openGate };
+  assert.deepEqual(await recordPreparationEvidence(state, { context: { identity: a.preflight.identity!, manifest: a.manifest! }, preflight: runningBuild(A0).preflight, ...prepared }).catch(error => error.message), 'Preparation evidence is recorded only for a storage runtime that passed its preflight as this build.');
+  assert.deepEqual(await recordPreparationEvidence(state, { context: { identity: identityOf(A0), manifest: manifests[A0] }, preflight: runningBuild(A0).preflight, ...prepared }), [], 'a build without domains has nothing to record');
+  const written = await recordPreparationEvidence(state, { context: { identity: a.preflight.identity!, manifest: a.manifest! }, preflight: a.preflight, ...prepared });
   assert.deepEqual(written.map(item => item.domain), ['retention']);
   const evidencePath = join(state, 'storage-contracts', 'retention.json');
   assert.equal((await stat(evidencePath)).mode & 0o777, 0o600);
@@ -403,7 +404,12 @@ test('a direct start needs no record or another build\'s verified terminal one, 
   await writeFile(evidencePath, JSON.stringify(weaker), { mode: 0o600 });
   assert.equal((await direct(B)).code, 'preparation-evidence-unreadable');
   await writeFile(evidencePath, JSON.stringify({ ...written[0], schema: { ...written[0].schema, digest: 'e'.repeat(64) } }), { mode: 0o600 });
-  assert.equal((await direct(B, { legacyFiles: async () => 'present' })).code, 'prerequisite-required', 'evidence of another schema prepares nothing');
+  assert.equal((await direct(B, { legacyFiles: async () => 'present' })).code, 'preparation-evidence-unreadable', 'evidence whose domain is not the one its own manifest declares is not used');
+  await writeFile(evidencePath, JSON.stringify({ ...written[0], version: 1 }), { mode: 0o600 });
+  assert.equal((await readPreparationEvidence(state, 'retention')).state, 'legacy');
+  const withDatabase = runningBuild(B, { state: { database: 'present', sidecars: [], identity: 'created', recovery: { state: 'clear' } } });
+  assert.equal((await evaluateStorageUpdate({ stateDir: state, build: withDatabase, managed: false, legacyFiles: async () => 'present' })).code, 'prerequisite-required', 'evidence of one domain\'s schema alone prepares nothing');
+  assert.equal((await direct(B, { legacyFiles: async () => 'absent' })).code, 'known-storage-missing', 'and with it there, a state directory without its database is not a new one');
   await chmod(evidencePath, 0o644);
   assert.equal((await readPreparationEvidence(state, 'retention')).state, 'unreadable', 'a file others can read is refused as it is');
 });
@@ -546,7 +552,7 @@ test('update requests from the owner, the scheduler and controllers respect the 
   assert.equal((await updates.request(B)).body.code, 'pin-unreadable');
   await rm(storagePinPath(state), { recursive: true });
   await pin(state, A);
-  assert.deepEqual(await releaseStoragePin(state, { version: B }), { released: false, reason: `The pin keeps ${A}, not ${B}.` });
+  assert.deepEqual(await releaseStoragePin(state, { version: B }), { released: false, code: 'pinned-elsewhere', reason: `The pin keeps ${A}, not ${B}.` });
   assert.deepEqual(await releaseStoragePin(state, { version: A }), { released: true });
   assert.equal((await updates.request(B)).status, 202, 'once the owner releases it');
   assert.deepEqual(spawned, [B]);
@@ -602,27 +608,11 @@ test('pruning keeps the pinned version and a rollback\'s versions, and removes n
 
 // ---- The owner's rollback ----
 
-const appliedFor = (scopes: Array<[string, string[]]>): StorageInspection['schema'] => ({
-  kind: 'current', storageId: '00000000-0000-4000-8000-000000000000',
-  applied: scopes.flatMap(([scope, sqls]) => sqls.map((sql, index) => ({ scope, version: index + 1, checksum: migrationChecksum(scope, { version: index + 1, sql }), appliedAt: at, appVersion: B, sourceHash: 'b'.repeat(64), ownerEpoch: 1 }))),
-});
-const databaseOfB = (): Pick<StorageInspection, 'schema' | 'authority'> => ({
-  schema: appliedFor([['core', CORE_MIGRATIONS.map(migration => migration.sql)], ['retention', retentionA.migrations.map(migration => migration.sql)]]),
-  authority: [{ domain: 'retention', authority: 'database', generation: 1, manifestSha256: 'c'.repeat(64), readerContract: 1, writerContract: 1, committedAt: at, appVersion: B, sourceHash: 'b'.repeat(64), ownerEpoch: 1 }],
-});
-
+/** The worker side (fixtures/rollback-world.ts), with some of its ports replaced. */
 function ports(overrides: Partial<RollbackPorts> = {}) {
-  const calls: string[] = [];
-  const value: RollbackPorts = {
-    inspectStorage: async () => { calls.push('inspect'); return databaseOfB(); },
-    holdAdmission: async id => { calls.push(`hold:${id.length > 0}`); },
-    releaseAdmission: async () => { calls.push('release'); },
-    waitQuiet: async () => { calls.push('quiet'); return { state: 'quiet' }; },
-    restartWeb: async () => { calls.push('restart'); },
-    handoff: async target => { calls.push(`handoff:${target.version}`); return { version: target.version, sourceHash: target.sourceHash, pid: 4242 }; },
-    ...overrides,
-  };
-  return { value, calls };
+  const world = rollbackWorld();
+  Object.assign(world.ports, overrides);
+  return { value: world.ports, calls: world.calls, world };
 }
 async function rollbackState(t: TestContext) {
   const state = await stateDir(t);
@@ -655,7 +645,8 @@ test('a rollback is validated without changing anything, and refused for every t
   await expectCode(check(A, ports({ inspectStorage: async () => ({ ...databaseOfB(), schema: appliedFor([['core', CORE_MIGRATIONS.map(migration => migration.sql)], ['retention', ['CREATE TABLE x (y TEXT) STRICT;']]]) }) }).value), 'target-incompatible');
   await expectCode(check(A, ports({ inspectStorage: async () => ({ ...databaseOfB(), schema: appliedFor([['core', CORE_MIGRATIONS.map(migration => migration.sql)], ['triggers', ['CREATE TABLE t (y TEXT) STRICT;']]]) }) }).value), 'target-incompatible');
   await expectCode(check(A, ports({ inspectStorage: async () => ({ ...databaseOfB(), authority: [{ ...databaseOfB().authority[0], writerContract: 2 }] }) }).value), 'target-incompatible');
-  await expectCode(check(A, ports({ inspectStorage: async () => ({ schema: { kind: 'behind', storageId: 'x', applied: [], pending: [{ scope: 'core', version: 1 }] }, authority: [] }) }).value), 'target-incompatible');
+  await expectCode(check(A, ports({ inspectStorage: async () => ({ schema: { kind: 'behind', storageId: 'x', applied: [], pending: [{ scope: 'core', version: 1 }] }, authority: [], ownerEpoch: 1 }) }).value), 'target-incompatible');
+  await expectCode(check(A, ports({ inspectStorage: async () => ({ ...databaseOfB(), ownerEpoch: undefined as never }) }).value), 'storage-uninspectable');
   await expectCode(check(A, ports().value, { running: runningBuild(B, { state: { database: 'present', sidecars: [], identity: 'created', recovery: { state: 'held', reason: 'snapshot', reconciled: [], unreconciled: ['core'] } } }) }), 'recovery-held');
   await save(state, record(C, B, 'verifying'));
   await expectCode(check(A), 'update-active');
@@ -681,7 +672,7 @@ test('the owner\'s rollback pins, holds, waits for running work, switches, and k
   const updates = new Updates({ stateDir: state, version: B, port: 1, managed: true, spawnHelper: () => {} });
   const switched = await runRollback(contextFor(state, port.value, updates), { target: A, by: 'owner', reason: 'B misbehaves' });
   assert.equal(switched.state, 'switched');
-  assert.deepEqual(port.calls, ['inspect', 'hold:true', 'quiet', 'inspect', 'restart'], 'pinned before the hold, the database compared again after the quiet, no provider cancelled');
+  assert.deepEqual(port.calls, ['inspect', 'hold', 'quiet', 'inspect', 'restart'], 'pinned before the hold, the database compared again after the quiet, no provider cancelled');
   assert.equal(await currentVersion(state), A);
   const pinned = await readStoragePin(state);
   assert.ok(pinned.state === 'present' && pinned.pin.pinned === A && pinned.pin.sourceHash === identityOf(A).sourceHash);
@@ -694,13 +685,14 @@ test('the owner\'s rollback pins, holds, waits for running work, switches, and k
   // The target's web resumes it: admissions held and running work ended again, the database compared, then the handoff.
   const resumed = await resumeRollback(onTarget(state, port.value));
   assert.equal(resumed.state, 'completed');
-  assert.deepEqual(port.calls.slice(-5), ['hold:true', 'quiet', 'inspect', `handoff:${A}`, 'release'], 'the hold is released once the worker answered as the pinned build');
+  assert.deepEqual(port.calls.slice(-5), ['hold', 'quiet', 'inspect', 'handoff', 'release'], 'the hold is released once the serving worker proved the pinned build took over');
   const done = await readRollbackRecord(state);
   assert.ok(done.state === 'present' && done.record.state === 'completed' && done.record.worker?.version === A && done.record.held === false);
   const onA = new Updates({ stateDir: state, version: A, port: 1, managed: true, spawnHelper: () => {} });
   assert.equal((await onA.request(B)).body.code, 'pinned', 'always-latest cannot reinstall B while the pin stays');
   assert.equal((await runRollback(contextFor(state, port.value, onA, { running: runningBuild(A) }), { target: A, by: 'owner', reason: 'again' })).state, 'completed', 'asked again, it is done');
-  assert.equal((await releaseStoragePin(state, { version: A })).released, true);
+  assert.equal((await releaseStoragePin(state, { version: A })).code, 'serving-unproven', 'a switched rollback\'s pin goes only over the worker that serves now');
+  assert.equal((await releaseStoragePin(state, { version: A }, { ports: port.value })).released, true);
   assert.equal((await onA.request(B)).status, 202, 'moving on is the owner\'s explicit step');
 });
 
@@ -720,7 +712,10 @@ test('a living legacy terminal keeps the rollback waiting; a failure releases th
   assert.equal((await withdrawRollback(context)).state, 'refused', 'a switched rollback is not withdrawn');
 
   let fails = true;
-  const handoffPorts = ports({ handoff: async target => { if (fails) throw new Error('worker busy'); return { version: target.version, sourceHash: target.sourceHash, pid: 7 }; } });
+  const handoffPorts = ports();
+  const take = handoffPorts.value.handoff;
+  // Refused before anything happened, as the serving worker (still B's, knowing no handoff) proves.
+  handoffPorts.value.handoff = async (target, fence) => { if (!fails) return take(target, fence); handoffPorts.calls.push('handoff'); throw new Error('worker busy'); };
   const failed = await resumeRollback(onTarget(state, handoffPorts.value));
   assert.equal(failed.state, 'failed');
   assert.ok(handoffPorts.calls.includes('release'), 'the admission hold is released');
@@ -729,11 +724,15 @@ test('a living legacy terminal keeps the rollback waiting; a failure releases th
   assert.equal((await runRollback(contextFor(state, handoffPorts.value, undefined, { running: runningBuild(A) }), { target: A, by: 'owner', reason: 'retry' })).state, 'completed', 'asked again on the target, it goes on');
 
   const other = await rollbackState(t);
-  const wrong = await runRollback(contextFor(other, ports({ handoff: async () => ({ version: A, pid: 1 }) }).value), { target: A, by: 'owner', reason: 'r' });
-  assert.equal(wrong.state, 'switched');
-  const mismatch = await resumeRollback(onTarget(other, ports({ handoff: async () => ({ version: A, pid: 1 }) }).value));
-  assert.ok(mismatch.state === 'failed' && mismatch.record.failure?.phase === 'worker', 'a worker without the pinned identity is not taken for it');
-  assert.equal(mismatch.state === 'failed' && mismatch.record.held, true, 'and its hold stays: which worker serves cannot be told');
+  const wrong = ports();
+  const handOver = wrong.value.handoff;
+  // The worker that serves afterwards is another build of A than the one pinned.
+  wrong.value.handoff = async (target, fence) => { const answer = await handOver(target, fence); wrong.world.state.serving = { ...wrong.world.state.serving, sourceHash: 'f'.repeat(64) }; return answer; };
+  assert.equal((await runRollback(contextFor(other, wrong.value), { target: A, by: 'owner', reason: 'r' })).state, 'switched');
+  const mismatch = await resumeRollback(onTarget(other, wrong.value));
+  assert.ok(mismatch.state === 'handing-off' && mismatch.record.handoff?.state === 'unknown', 'a worker without the pinned identity is not taken for it');
+  assert.equal(mismatch.state === 'handing-off' && mismatch.record.held, true, 'and its hold stays: which worker serves cannot be told');
+  assert.ok(!wrong.calls.slice(wrong.calls.indexOf('handoff')).includes('release'));
 });
 
 test('a hold that fails or a withdrawal releases admissions; the pin goes only when the owner releases it too', async t => {

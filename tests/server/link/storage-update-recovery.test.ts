@@ -15,9 +15,8 @@ import {
 } from '../../../server/link/storage-update.js';
 import { transitionLockPath } from '../../../server/link/storage-transition-lock.js';
 import { handoffHeld, runUpdateHelper, updatePaths, Updates, type UpdateHelperSteps } from '../../../server/link/update.js';
-import type { StorageInspection } from '../../../server/storage/contract.js';
-import { CORE_MIGRATIONS, migrationChecksum } from '../../../server/storage/schema.js';
-import { A, A0, B, C, L, changedManifest, installArtifact, manifests, retentionA, runningBuild } from './fixtures/storage-builds.js';
+import { A, A0, B, C, L, changedManifest, installArtifact, manifests, runningBuild } from './fixtures/storage-builds.js';
+import { databaseOfB, rollbackWorld } from './fixtures/rollback-world.js';
 
 /**
  * The corrections of the W0U review (w0-update-review.txt, required 1–11), each against the real producer: strict
@@ -50,31 +49,14 @@ async function rollbackState(t: TestContext) {
   await save(state, record(B, A, 'done'));
   return state;
 }
-const appliedFor = (scopes: Array<[string, string[]]>): StorageInspection['schema'] => ({
-  kind: 'current', storageId: '00000000-0000-4000-8000-000000000000',
-  applied: scopes.flatMap(([scope, sqls]) => sqls.map((sql, index) => ({ scope, version: index + 1, checksum: migrationChecksum(scope, { version: index + 1, sql }), appliedAt: at, appVersion: B, sourceHash: 'b'.repeat(64), ownerEpoch: 1 }))),
-});
-const databaseOfB = (): Pick<StorageInspection, 'schema' | 'authority'> => ({
-  schema: appliedFor([['core', CORE_MIGRATIONS.map(migration => migration.sql)], ['retention', retentionA.migrations.map(migration => migration.sql)]]),
-  authority: [{ domain: 'retention', authority: 'database', generation: 1, manifestSha256: 'c'.repeat(64), readerContract: 1, writerContract: 1, committedAt: at, appVersion: B, sourceHash: 'b'.repeat(64), ownerEpoch: 1 }],
-});
-
-/** The worker and service as the rollback sees them: admission holds kept by ID (asking again is one hold), calls in order. */
+/** The worker and service as the rollback sees them (fixtures/rollback-world.ts): holds kept by ID, calls in order, some ports replaced. */
 function ports(overrides: Partial<RollbackPorts> = {}) {
-  const calls: string[] = [];
-  const holds = new Set<string>();
-  const holdIds: string[] = [];
-  const value: RollbackPorts = {
-    inspectStorage: async () => { calls.push('inspect'); return databaseOfB(); },
-    holdAdmission: async id => { calls.push('hold'); holds.add(id); holdIds.push(id); },
-    releaseAdmission: async id => { calls.push('release'); holds.delete(id); },
-    waitQuiet: async () => { calls.push('quiet'); return { state: 'quiet' }; },
-    restartWeb: async () => { calls.push('restart'); },
-    handoff: async target => { calls.push('handoff'); return { version: target.version, sourceHash: target.sourceHash, pid: 4242 }; },
-    ...overrides,
-  };
-  return { value, calls, holds, holdIds };
+  const world = rollbackWorld();
+  Object.assign(world.ports, overrides);
+  return { value: world.ports, calls: world.calls, holds: world.holds, holdIds: world.holdIds, world };
 }
+/** A transition lock (or breaker) as this build writes it, owned by `pid` started at `start`. */
+const ownerFile = (role: 'lock' | 'breaker', pid: number, start: string) => JSON.stringify({ format: 'tower-transition-owner', version: 1, role, pid, start, nonce: '0123456789abcdef0123' });
 const updatesOn = (state: string, version = B) => new Updates({ stateDir: state, version, port: 1, managed: true, spawnHelper: () => {} });
 const onFrom = (state: string, port: RollbackPorts, extra: Partial<RollbackContext> = {}, updates = updatesOn(state)): RollbackContext =>
   ({ stateDir: state, running: runningBuild(B), managed: true, ports: port, serialize: work => updates.exclusive(work), ...extra });
@@ -241,7 +223,7 @@ test('3. a transition lock left by a stopped process is broken; one that is not 
   await installArtifact(state, C);
   const dead = spawn(process.execPath, ['-e', '']);
   await new Promise(resolve => dead.on('close', resolve));
-  await writeFile(transitionLockPath(state), `${dead.pid} Thu Jan  1 00:00:00 1970`, { mode: 0o600 });
+  await writeFile(transitionLockPath(state), ownerFile('lock', dead.pid!, 'Thu Jan  1 00:00:00 1970'), { mode: 0o600 });
   await useVersion(state, C);
   assert.equal(await currentVersion(state), C);
   assert.equal(existsSync(transitionLockPath(state)), false, 'broken, then released');
@@ -434,16 +416,18 @@ test('6. the switch checks its facts once more: a pin that changed during the wa
   assert.equal((await ask(onFrom(state, ports().value))).state, 'switched', 'with its own pin back, the same rollback goes on');
 });
 
-test('6. a stop after the worker answered and before the record said so: the handoff is asked again and the rollback is kept', async t => {
+test('6. a stop after the handoff took effect and before the record said so: it is settled from what serves, never sent again', async t => {
   const state = await rollbackState(t);
   const port = ports();
   assert.equal((await ask(onFrom(state, port.value))).state, 'switched');
   const crashed = await resumeRollback(onTarget(state, port.value, { now: failingWhen(() => port.calls.includes('handoff') && onDisk(state)?.state === 'handing-off') })).catch(error => error as Error);
   assert.ok(crashed instanceof Error);
-  assert.equal(onDisk(state)?.state, 'handing-off');
+  const stopped = onDisk(state)!;
+  assert.deepEqual([stopped.state, stopped.handoff?.state], ['handing-off', 'sent']);
   port.calls.length = 0;
   assert.equal((await resumeRollback(onTarget(state, port.value))).state, 'completed');
-  assert.deepEqual(port.calls, ['hold', 'quiet', 'inspect', 'handoff', 'release']);
+  assert.deepEqual(port.calls, ['release'], 'no new hold, wait or handoff: the serving worker proves the target took over');
+  assert.deepEqual(onDisk(state)!.handoff?.baseline, stopped.handoff?.baseline, 'judged against the baseline recorded before the handoff');
 });
 
 // ---- 7. Continuing on the target verifies what is actually there ----
@@ -464,11 +448,12 @@ test('7. continuing verifies the pointer, the pin, the build and the web that co
   }
 });
 
-test('7. after a failed handoff the hold is released; a retry holds and waits again before it hands over', async t => {
+test('7. after a handoff that had no effect the hold is released; a retry holds and waits again before it hands over', async t => {
   const state = await rollbackState(t);
   let fails = true;
   const port = ports();
-  port.value.handoff = async target => { port.calls.push('handoff'); if (fails) throw new Error('worker busy'); return { version: target.version, sourceHash: target.sourceHash, pid: 7 }; };
+  const take = port.value.handoff;
+  port.value.handoff = async (target, fence) => { if (!fails) return take(target, fence); port.calls.push('handoff'); throw new Error('worker busy'); };
   assert.equal((await ask(onFrom(state, port.value))).state, 'switched');
   const failed = await resumeRollback(onTarget(state, port.value));
   assert.ok(failed.state === 'failed' && failed.record.failure?.phase === 'handoff' && !failed.record.held);
@@ -558,7 +543,7 @@ test('10. the target boots held while the worker is handed over, is ready once k
   const kept = await evaluate(state, A);
   assert.deepEqual([kept.verdict, kept.code], ['ready', 'owner-rollback']);
   assert.equal(sha(updatePaths(state).status), updateSha, 'B\'s update record is left exactly as it was');
-  assert.equal((await releaseStoragePin(state, { version: A })).released, true);
+  assert.equal((await releaseStoragePin(state, { version: A }, { ports: port.value })).released, true);
   assert.equal((await evaluate(state, A)).code, 'owner-rollback', 'releasing the pin does not undo the rollback');
   assert.notEqual((await evaluateStorageUpdate({ stateDir: state, build: runningBuild(A, { salt: 'another build' }), managed: true })).verdict, 'ready', 'only the build rolled back to');
   // A later update replaces the record the rollback stood on: from then on that update decides.

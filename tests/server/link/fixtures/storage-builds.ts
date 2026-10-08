@@ -3,9 +3,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { entryPoint, versionDirectory } from '../../../../server/link/service.js';
 import { artifactStorageContract, type RunningBuild } from '../../../../server/link/storage-update.js';
-import type { StorageBuildIdentity, StorageBuildManifest, StorageDomainSchema } from '../../../../server/storage/contract.js';
+import type { PrepareResult, StorageBuildIdentity, StorageBuildManifest, StorageDomainSchema } from '../../../../server/storage/contract.js';
 import type { StoragePreflight } from '../../../../server/storage/preflight.js';
-import { manifestDigest, storageManifest } from '../../../../server/storage/schema.js';
+import { CORE_MIGRATIONS, manifestDigest, migrationChecksum, storageManifest } from '../../../../server/storage/schema.js';
 
 /**
  * Three releases of a staged domain, as their manifests say: L keeps everything in JSON (no storage contract at all),
@@ -43,6 +43,17 @@ export function changedManifest(version: string, change: (body: Omit<StorageBuil
   const next = change(body);
   return { ...next, digest: manifestDigest(next) };
 }
+/**
+ * What StorageClient.prepare answers once a build with `domains` prepared and claimed its storage: core and every
+ * domain's migrations applied as declared. With openGate (what gate() answers then), the worker records its evidence.
+ */
+export function preparedStorage(domains: readonly StorageDomainSchema[] = [retentionA], storageId = '00000000-0000-4000-8000-0000000000aa'): PrepareResult {
+  const scopes: Array<[string, readonly { version: number; sql: string }[]]> = [['core', CORE_MIGRATIONS], ...domains.map(domain => [domain.domain, domain.migrations] as [string, readonly { version: number; sql: string }[]])];
+  const applied = scopes.flatMap(([scope, migrations]) => migrations.map(migration => ({ scope, version: migration.version, checksum: migrationChecksum(scope, migration), appliedAt: '2026-10-08T00:00:00.000Z', appVersion: A, sourceHash: 'a'.repeat(64), ownerEpoch: 1 })));
+  return { ownerEpoch: 1, applied: [], schema: { kind: 'current', storageId, applied }, created: false, replayed: false, claimed: true };
+}
+export const openGate = { open: true, reasons: [] as string[] };
+
 const runtime = { node: 'v24.15.0', sqlite: '3.51.3', platform: process.platform, arch: process.arch, execPath: process.execPath, apis: { DatabaseSync: true, StatementSync: true } };
 
 /** What the running build's worker saw: its trusted manifest and a passing runtime preflight, with the state as given. */

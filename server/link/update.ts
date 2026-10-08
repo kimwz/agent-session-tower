@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import type { UpdateFailure, UpdateStage, UpdateStatus } from '../../shared/link.js';
 import { writePrivateJson } from '../stores/private-json.js';
 import { processStart } from '../instance/process-start.js';
+import { HoldError, removeHold, writeHold } from './storage-hold.js';
 import { currentVersion, entryPoint, installVersion, newerVersion, pointUpdate, RELEASE_WAIT_MS, restartService, runtimePaths, versionDirectory } from './service.js';
 import {
   alive, pinnedVersion, preparationCheck, probeInstalledArtifact, readCurrentPointer, readHelperLock, readHold, readRollbackRecord, readUpdateRecord, rollbackActive, storageKeptVersions,
@@ -75,7 +76,8 @@ export async function handoffHeld(stateDir: string, now = Date.now()): Promise<b
   if (unreadableHolds.delete(hold)) console.log('The update hold can be read again.');
   if (held === undefined) return false;
   if (held) return true;
-  await rm(hold, { force: true });
+  // Only the plain file judged old goes: whatever stands there instead is left, and holds.
+  try { await removeHold(stateDir, { expired: true }); } catch (error) { if (error instanceof HoldError) return true; throw error; }
   return false;
 }
 
@@ -115,7 +117,9 @@ async function takeLock(stateDir: string): Promise<boolean> {
   const { lock } = updatePaths(stateDir);
   const temporary = `${lock}.${process.pid}`;
   const mine = `${process.pid} ${await startedAt(process.pid) ?? ''}`.trim();
-  await writeFile(temporary, mine, { mode: 0o600 });
+  // Created new, never through whatever a link left at that name points to.
+  await rm(temporary, { force: true });
+  await writeFile(temporary, mine, { mode: 0o600, flag: 'wx' });
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -228,18 +232,19 @@ export class Updates {
     const resumes = updateActive(status) && status.version === version;
     const running = await helperRunning(stateDir).catch(async error => {
       // Whether a helper still runs cannot be told: hold the worker, but start no helper and settle nothing.
-      if (resumes) await writeFile(updatePaths(stateDir).hold, JSON.stringify({ version }), { mode: 0o600 });
+      if (resumes) await writeHold(stateDir, version).catch(failure => console.error(`The update hold could not be written: ${(failure as Error).message}`));
       throw error;
     });
     if (running) return;
     if (resumes) {
-      // Held anew before the helper starts: however long the computer was off, this web must not take the worker.
-      await writeFile(updatePaths(stateDir).hold, JSON.stringify({ version }), { mode: 0o600 });
+      // Held anew before the helper starts: however long the computer was off, this web must not take the worker. A
+      // hold that is not this update's own plain file is left as it is, and no helper starts (writeHold rejects).
+      await writeHold(stateDir, version);
       this.spawn(version, true);
       return;
     }
-    // The previous version runs again: a hold left for an update is not needed by it.
-    if (status.previous === version) await rm(updatePaths(stateDir).hold, { force: true });
+    // The previous version runs again: the hold its update left is not needed by it (anything else there is left).
+    if (status.previous === version) await removeHold(stateDir, { version: status.version }).catch(error => { if (!(error instanceof HoldError)) throw error; console.error(error.message); });
     if (!updateActive(status)) return;
     const at = new Date(this.options.now?.() ?? Date.now()).toISOString();
     // Going back had brought the previous version up: the update failed for the reason already found.
@@ -372,6 +377,8 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
     // launchd starts the service again by itself when it stops unexpectedly, so a restart command that fails
     // (as it can while the service is failing to start) is not the end: whether it comes up decides.
     const restart = () => steps.restart().catch(error => steps.log(`restart: ${(error as Error).message.split('\n')[0]}`));
+    /** Removes this update's own hold; anything else there is left as it is (and keeps holding). */
+    const release = () => removeHold(stateDir, { version }).catch(error => { if (!(error instanceof HoldError)) throw error; steps.log(`hold: ${error.message}`); return false; });
     // The hold stays until the previous version answers again: until then the new web may still be running, and it
     // must not hand the worker over. A previous version that never comes back releases it itself when it starts.
     const back = async (code: UpdateFailure, failedStage: UpdateStage) => {
@@ -380,7 +387,7 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
         await steps.point(previous);
         await restart();
         const up = await wait(async () => (await steps.health())?.version === previous, START_MS);
-        if (up) await rm(paths.hold, { force: true });
+        if (up) await release();
         await set('failed', up ? { code, failedStage } : { code: 'rollback-failed', failedStage });
       } catch (error) {
         steps.log(`rolling back failed: ${(error as Error).message}`);
@@ -411,7 +418,7 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
       if (final !== true) return await back('start-failed', 'verifying');
       // Kept before the hold goes: stopped in between, the hold only runs out, and nothing is checked again unheld.
       await set('done');
-      await rm(paths.hold, { force: true });
+      await release();
       return status;
     };
     // Started again by the new version after the helper was stopped: carry on from where it was.
@@ -419,7 +426,7 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
       if (status.stage === 'rolling-back') return await back(status.code ?? 'interrupted', status.failedStage ?? 'verifying');
       if (status.stage === 'switching' || status.stage === 'verifying') return await verify(undefined, status.controllers ?? []);
       await set('failed', { code: 'interrupted', failedStage: status.stage });
-      await rm(paths.hold, { force: true });
+      await release();
       return status;
     }
     await set('installing');
@@ -456,13 +463,18 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
     const before = await steps.health();
     const linked = await steps.controllers() ?? [];
     await set('switching', { controllers: linked });
-    try {
-      await writeFile(paths.hold, JSON.stringify({ version }), { mode: 0o600 });
-      await steps.point(version);
-    } catch (error) {
+    try { await writeHold(stateDir, version); } catch (error) {
+      // A hold that is not this update's own plain file (a link, a folder, another version's) is left as it is, and
+      // nothing switches: the previous version keeps running untouched.
+      steps.log((error as Error).message);
+      if (!(error instanceof HoldError)) await release();
+      await set('failed', { code: 'switch-failed', failedStage: 'switching' });
+      return status;
+    }
+    try { await steps.point(version); } catch (error) {
       steps.log((error as Error).message);
       // Nothing changed if the service still starts the previous version: it keeps running untouched.
-      if (await currentVersion(stateDir) === previous) { await rm(paths.hold, { force: true }); await set('failed', { code: 'switch-failed', failedStage: 'switching' }); return status; }
+      if (await currentVersion(stateDir) === previous) { await release(); await set('failed', { code: 'switch-failed', failedStage: 'switching' }); return status; }
       return await back('switch-failed', 'switching');
     }
     await restart();
