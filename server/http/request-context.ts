@@ -1,3 +1,4 @@
+import type { HeartbeatAdmission } from '../../shared/master.js';
 import type { RunOrigin } from '../../shared/types.js';
 
 /**
@@ -5,6 +6,7 @@ import type { RunOrigin } from '../../shared/types.js';
  * A remote controller's requests carry its origin and a request ID that makes a retry run only once.
  */
 export interface RequestContext {
+  heartbeat?: HeartbeatAdmission;
   origin?: RunOrigin;
   requestId?: string;
   /** Unverified local reporting credential. Only the execution worker may resolve it. */

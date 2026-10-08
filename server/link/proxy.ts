@@ -5,7 +5,7 @@ import { isWorkspaceMediaType } from '../../shared/workspace-media.js';
 import { ATTACHMENT_BODY_BYTES } from '../http/requests.js';
 
 /** Only what the other computer's routes read; cookies, tokens and this browser's origin stay here. */
-const REQUEST_HEADERS = ['content-type', 'content-length', 'accept', 'last-event-id', 'x-tower-request-id', 'range'] as const;
+const REQUEST_HEADERS = ['content-type', 'content-length', 'accept', 'last-event-id', 'x-tower-request-id', 'x-tower-heartbeat-corrective', 'range'] as const;
 const ANSWER_TYPES = /^(application\/json|text\/event-stream|application\/octet-stream|image\/(png|jpeg|gif|webp))(\s*;|$)/i;
 /** Conversation pages and attachments; a larger answer is not one Tower sends. */
 const MAX_ANSWER_BYTES = 64 * 1024 * 1024;

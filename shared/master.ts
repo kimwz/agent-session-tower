@@ -37,14 +37,29 @@ export interface MasterVoiceSettings {
 export const MASTER_PLAYBACK_RATES = [1, 1.2, 1.4, 1.6, 1.8, 2] as const;
 export const DEFAULT_MASTER_VOICE: MasterVoiceSettings = { voiceId: DEFAULT_MASTER_VOICE_ID, model: 'eleven_v4_turbo', endSilenceMs: 1000, listenMinutes: 5, readReports: true, dailyDollars: 0, playbackRate: 1 };
 
+/** Only an actionable heartbeat recommendation enters the master's conversation. */
+export const MASTER_HEARTBEAT_MARK = '[Tower heartbeat]';
+export const MASTER_HEARTBEAT_HEADER = 'X-Tower-Heartbeat';
+export const DEFAULT_HEARTBEAT_PROMPT = '현재 위임 작업의 실제 진행 증거와 최근 결과를 확인하세요. 요청한 단계·예상 결과·지난 점검 및 조치와 비교하여 누락, 정체, 반복 리뷰, 중단, 미회수 결과를 판단하세요. 정상 긴 작업과 진짜 승인대기는 존중하고, 필요한 경우 기존 담당의 실행 방향을 개선할 제안을 하세요. 이미 진행 중인 작업을 재생성하거나 재배정하지 마세요.';
+export interface MasterHeartbeatSettings { enabled: boolean; intervalMinutes: number; prompt: string }
+export const DEFAULT_MASTER_HEARTBEAT: MasterHeartbeatSettings = { enabled: true, intervalMinutes: 30, prompt: DEFAULT_HEARTBEAT_PROMPT };
+export type MasterHeartbeatState = 'checking' | 'noop' | 'action' | 'skipped' | 'failed' | 'interrupted' | 'uncertain';
+export interface MasterHeartbeatCheck { id: string; at: string; state: MasterHeartbeatState; reason?: string; taskIds: string[] }
+export interface MasterHeartbeatAction { checkId: string; at: string; taskIds: string[]; cause: string; evidence: string; recommendation: string; delivery: 'sending' | 'sent' | 'not-sent' | 'uncertain'; runId?: string }
+export interface MasterHeartbeatStatus { nextDueAt?: string; lastCheck?: MasterHeartbeatCheck; actions: MasterHeartbeatAction[]; problem?: string }
+/** Internal authenticated admission guard. The public message body cannot select it. */
+export interface HeartbeatTarget { taskId: string; sessionId: string; node?: string; nativeRequestId?: string; latestRunId?: string; lastRequestAt?: string }
+export interface HeartbeatAdmission { targets?: HeartbeatTarget[]; checkId: string; sessionIds: string[]; latestRunId?: string; updatedAt: string; lastRequestAt?: string }
+
 /** The session the master talks through, and the ones it replaced (kept as ordinary sessions). */
 export interface MasterBinding { sessionId: string; provider: Provider; startedAt: string }
 export interface MasterSettings {
   voice: MasterVoiceSettings;
+  heartbeat: MasterHeartbeatSettings;
   /** The master session; none until the owner starts one. */
   session?: MasterBinding;
 }
-export const DEFAULT_MASTER_SETTINGS: MasterSettings = { voice: DEFAULT_MASTER_VOICE };
+export const DEFAULT_MASTER_SETTINGS: MasterSettings = { voice: DEFAULT_MASTER_VOICE, heartbeat: DEFAULT_MASTER_HEARTBEAT };
 
 export type MasterFollowState = 'moved-aside' | 'not-saved';
 export interface MasterOverview {
@@ -58,6 +73,7 @@ export interface MasterOverview {
   voiceKeyHint?: string;
   /** Work the master handed out that has not been reported yet. */
   activeTasks: number;
+  heartbeat?: MasterHeartbeatStatus;
   /** Reports of finished work Tower could not give the master session, after trying for a while. */
   failedReports?: number;
   /** The followed work saved for the master could not be read: moved aside, or left as it is and not saved. Absent from older hosts. */

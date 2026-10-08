@@ -2,6 +2,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BUILTIN_ROLES, masterWorkerModel, customRoleLines, initialModelSettings, modelArgs, parseModelSettings, resolveRole, type ModelSettings } from '../../shared/models.js';
 
+test('heartbeat inherits the whole master role dynamically; explicit empty picks are CLI defaults', () => {
+  const settings = parseModelSettings({ version: 1, roles: {}, custom: [] });
+  settings.roles['master.session'] = { provider: 'codex', claude: { model: 'opus' }, codex: { model: 'gpt-6.1-sol', effort: 'high' } };
+  assert.deepEqual(resolveRole(settings, 'master.heartbeat', { provider: 'claude' }), { provider: 'codex', model: 'gpt-6.1-sol', effort: 'high' });
+  settings.roles['master.session'].codex.effort = 'low';
+  assert.equal(resolveRole(settings, 'master.heartbeat').effort, 'low');
+  settings.roles['master.heartbeat'] = { provider: 'codex', claude: {}, codex: {} };
+  const saved = parseModelSettings(settings, true);
+  assert.deepEqual(resolveRole(saved, 'master.heartbeat'), { provider: 'codex' });
+  assert.deepEqual(modelArgs(resolveRole(saved, 'master.heartbeat')), []);
+  const { 'master.heartbeat': _omitted, ...oldRoles } = saved.roles;
+  assert.deepEqual(parseModelSettings({ roles: oldRoles, custom: [] }, true, saved).roles['master.heartbeat'], saved.roles['master.heartbeat']);
+});
+
 test('every role starts with what its call used before the roles existed', () => {
   const settings = initialModelSettings();
   const table = (provider?: 'claude' | 'codex') => Object.fromEntries(BUILTIN_ROLES.map(role => [role.id, resolveRole(settings, role.id, { provider })]));
@@ -23,7 +37,8 @@ test('every role starts with what its call used before the roles existed', () =>
   // Forms and starts that passed no model keep the CLI's default, on the provider each form preselected.
   for (const id of ['master.session', 'issues.register', 'chat.new', 'autoPrompt.new', 'publicAgents.new']) assert.deepEqual(table()[id], { provider: 'claude' }, id);
   for (const id of ['triggers.new', 'slack.newRule', 'github.newRule']) assert.deepEqual(table()[id], { provider: 'codex' }, id);
-  assert.equal(BUILTIN_ROLES.length, follow.length + 14, 'a new role gets a line here');
+  assert.deepEqual(table()['master.heartbeat'], table()['master.session']);
+  assert.equal(BUILTIN_ROLES.length, follow.length + 15, 'a new role gets a line here');
 });
 
 test('saved settings are read leniently, submitted ones strictly', () => {

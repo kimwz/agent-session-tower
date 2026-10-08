@@ -16,9 +16,9 @@ export function thisBuild(): { command: string; args: string[] } {
   return { command: process.execPath, args: isSea() ? [] : [...process.execArgv.filter(arg => !/^--inspect(?:-brk|-port|-publish-uid)?(?:=|$)/.test(arg)), entry] };
 }
 /** The master session's page tools; they reach the master host, which only the owner's own processes can. */
-function masterToolServer(stateDir: string): SessionMcpServer {
+function masterToolServer(stateDir: string, capability?: string): SessionMcpServer {
   const build = thisBuild();
-  return { command: build.command, args: [...build.args, '--master-mcp', stateDir] };
+  return { command: build.command, args: [...build.args, '--master-mcp', stateDir, ...(capability ? ['--heartbeat'] : [])], ...(capability ? { env: { TOWER_HEARTBEAT_CAPABILITY: capability } } : {}) };
 }
 function toolServer(stateDir: string, mode: '--tower-mcp' | '--slack-mcp', extra: string[], capability: string): SessionMcpServer {
   const build = thisBuild();
@@ -34,9 +34,10 @@ export function sessionBrowsers(stateDir: string, runs: Pick<RunManager, 'sessio
  * Which tools a turn receives. Slack coordinator turns get their conversation tools. A turn the owner started
  * from Tower, here or from a controlling computer, gets Tower's tools, unless its conversation holds outside content
  * or its origin cannot be proven; a controlling computer's turn then sees only what that computer may see.
- * Trigger, Slack and agent-started turns never get Tower's tools. Every turn started here also gets the read-only session
+ * Trigger, Slack and ordinary agent-started turns never get Tower's tools. A trusted local heartbeat run receives only
+ * two scoped master tools, without the generic lookups, browsers, secrets or owner capability below. Other turns started here get the read-only session
  * lookups, which Claude Code and Codex elsewhere on this computer get from their user configuration. The owner's turns in
- * the master's folder also get the master's page tools. Every turn, whoever started it, gets the browsers
+ * the master's folder also get the master's page tools. Those other turns, whoever started them, get the browsers
  * (see browser/tools.ts).
  */
 export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp'>; github?: Pick<GitHubCoordinator, 'sessionWorkflow'>; capabilities: CapabilityRegistry; secrets?: { initialized(): boolean }; browsers?: () => BrowserEnvironment }) {
@@ -46,6 +47,12 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
     return { ...tools, servers: { ...tools.servers, ...browsers.servers }, claudeChrome: browsers.claudeChrome };
   };
   return (run: Run, session: Session): RunTools => {
+    const provenance = options.runs.sessionOrigin(session.id);
+    if (run.heartbeat?.targets?.length && run.sessionId === session.id && !run.ownerStopped && run.origin?.kind === 'agent' && !run.origin.controllerId
+      && !provenance?.untrustedInput && (!provenance || provenance.kind === 'owner') && subscriptionOnly(options.stateDir, session.cwd)) {
+      const capability = options.capabilities.issue({ kind: 'caller-run', runId: run.id, sessionId: run.sessionId });
+      return { servers: { tower_master: masterToolServer(options.stateDir, capability) }, required: true };
+    }
     const tools = resolve(run, session);
     if (run.origin?.controllerId) return withBrowsers(session, tools);
     const env = { [CALLER_CAPABILITY_ENV]: options.capabilities.issue({ kind: 'caller-run', runId: run.id, sessionId: run.sessionId }) };

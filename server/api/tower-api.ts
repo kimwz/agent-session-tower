@@ -1,3 +1,4 @@
+import { permissionProtected } from '../permissions/protection.js';
 import { subscriptionOnly } from '../runs/subscription.js';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -64,6 +65,11 @@ export class TowerApi {
   private requests?: Map<string, RequestRecord>;
   private writes: Promise<unknown> = Promise.resolve();
   constructor(private readonly services: TowerServices) {}
+  /** Synchronous final heartbeat admission check against the permission domain's current state. */
+  heartbeatBlocked(sessionIds: readonly string[]): boolean {
+    const overview = this.permissions().overview();
+    return Boolean(overview.lost) || permissionProtected(overview.requests, sessionIds);
+  }
 
   /**
    * An agent names each creating call with a `requestKey`. The same key with the same input returns the

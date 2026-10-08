@@ -1,3 +1,4 @@
+import { MASTER_HEARTBEAT_HEADER, type HeartbeatAdmission } from '../../shared/master.js';
 import type { AttachmentStore } from '../stores/attachments.js';
 import type { AttachmentUploads } from '../stores/attachment-uploads.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -825,7 +826,15 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       const messageMatch = path.match(/^\/api\/sessions\/([^/]+)\/messages$/);
       if (req.method === 'POST' && messageMatch) {
         const message = parseMessage(await readJson(req, ATTACHMENT_BODY_BYTES));
-        const run = await backend.enqueue(messageMatch[1], message.prompt, message.attachments, callerContext());
+        let context = callerContext();
+        const heartbeatHeader = req.headers[MASTER_HEARTBEAT_HEADER.toLowerCase()];
+        if (heartbeatHeader !== undefined) {
+          if (!masterCall || typeof heartbeatHeader !== 'string' || Buffer.byteLength(heartbeatHeader) > 8192) throw new TowerError('forbidden', 'Heartbeat admission requires the authenticated master.');
+          let heartbeat: HeartbeatAdmission;
+          try { heartbeat = JSON.parse(heartbeatHeader); } catch { throw new TowerError('invalid', 'Invalid heartbeat admission.'); }
+          context = { ...context, origin: { kind: 'agent' }, heartbeat };
+        }
+        const run = await backend.enqueue(messageMatch[1], message.prompt, message.attachments, context);
         return json(res, 202, { run });
       }
       // Provider request IDs are opaque and may contain an encoded slash.

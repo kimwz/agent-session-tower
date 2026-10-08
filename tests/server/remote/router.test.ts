@@ -17,7 +17,7 @@ const REQUEST_ID = '0199a2b3-c4d5-7123-8abc-0123456789ab';
 const now = new Date().toISOString();
 
 async function fixture(t: TestContext, options: { coordinators?: string[] | null; beforeDetail?: () => Promise<void>; job?: (job: AutoPromptJob) => AutoPromptJob; beforeCancel?: () => Promise<void>; repositories?: boolean;
-  whileCreating?: () => Promise<void>; pull?: boolean } = {}) {
+  whileCreating?: () => Promise<void>; pull?: boolean; protection?: unknown; beforeProtection?: () => Promise<void>; historySkipped?: number } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-remote-router-')));
   const open = join(root, 'open'), secret = join(root, 'secret');
   await mkdir(join(secret, 'deep'), { recursive: true });
@@ -46,7 +46,7 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
   const lookup = (id: string) => sessions.find(item => item.id === id || `${item.provider}:${item.nativeId}` === id);
   const backend: Backend = {
     snapshot, subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    detail: async id => { await options.beforeDetail?.(); const found = lookup(id); return found ? { session: found, messages: [{ id: 'm', role: 'user', text: `hello from ${found.cwd}`, timestamp: now }], hasMore: false } : undefined; },
+    detail: async id => { await options.beforeDetail?.(); const found = lookup(id); return found ? { session: found, messages: [{ id: 'm', role: 'user', text: `hello from ${found.cwd}`, timestamp: now }], hasMore: false, ...(options.historySkipped !== undefined ? { skipped: options.historySkipped } : {}) } : undefined; },
     session: lookup,
     coordinators: () => coordinatorIds === null ? undefined : new Set(coordinatorIds ?? ['codex:coordinator']),
     enqueue: async (id, prompt, attachments, context) => { calls.push({ method: 'enqueue', args: [id, prompt, attachments, context] }); return { ...runs[0], id: 'run-new', sessionId: id, prompt }; },
@@ -75,6 +75,7 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
     steerRun: async (id, steerOptions) => { calls.push({ method: 'steerRun', args: [id, steerOptions] }); return { ...runs.find(run => run.id === id)!, steering: { targetRunId: 'turn', state: 'sending', requestedAt: now } }; },
     api: async (operation, input, context) => {
       calls.push({ method: 'api', args: [operation, input, context] });
+      if (operation === 'permissions.overview') { await options.beforeProtection?.(); return options.protection ?? { requests: [] }; }
       if (operation === 'triggers.get') throw Object.assign(new Error(`Cannot read properties of undefined (reading '${(input as { id: string }).id}')`), { statusCode: 500 });
       if (operation === 'triggers.run') throw Object.assign(new Error('GitHub coordinator triggers are created, changed and run on that computer itself.'), { statusCode: 403 });
       // Tower's own refusals as the domain makes them.
@@ -105,7 +106,7 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
     let json: any; try { json = JSON.parse(text); } catch { json = undefined; }
     return { status: response.status, json, text, headers: response.headers };
   };
-  return { root, open, secret, exclusions, calls, changes, listeners, base, call, secretSession: sessions[1], setCoordinators: (value: string[] | null) => { coordinatorIds = value; } };
+  return { root, open, secret, runs, exclusions, calls, changes, listeners, base, call, secretSession: sessions[1], setCoordinators: (value: string[] | null) => { coordinatorIds = value; } };
 }
 
 test('a remote controller reads sessions, conversations and attachments only outside excluded folders', async t => {
@@ -394,4 +395,76 @@ test('a controller compacts only a shared conversation, with its request ID, and
   const cancelled = await f.call('/api/sessions/codex:open/compaction/cancel', { body: {} });
   assert.equal(cancelled.json.compaction.state, 'cancelled');
   assert.deepEqual(f.changes().map(change => change.action), ['compact', 'compact-cancel']);
+});
+
+test('remote heartbeat protection exposes only one shared session boolean and keeps permission overview private', async t => {
+  const f = await fixture(t, { protection: { rules: [{ value: 'private permission rule' }], requests: [
+    { sessionId: 'codex:open', status: 'denied', decidedBy: 'owner', reason: 'private refusal reason' },
+    { sessionId: 'codex:private', status: 'pending', reason: 'private request' },
+  ] } });
+  const response = await f.call('/api/sessions/codex:open/heartbeat-protection');
+  assert.equal(response.status, 200); assert.deepEqual(response.json, { protected: true });
+  assert.doesNotMatch(response.text, /rule|reason|request|codex/);
+  assert.deepEqual(f.calls, [{ method: 'api', args: ['permissions.overview', { cwd: f.open }, undefined] }]);
+  for (const id of [f.secretSession.id, `codex:${f.secretSession.nativeId}`, 'codex:coordinator', 'codex:missing']) assert.equal((await f.call(`/api/sessions/${id}/heartbeat-protection`)).status, 404);
+  assert.equal(f.calls.length, 1, 'excluded, coordinator and missing sessions never reach permission state');
+  assert.equal((await f.call('/api/v1/permissions.overview', { body: {} })).status, 404, 'broad permission overview remains unavailable remotely');
+  assert.deepEqual(f.changes(), [], 'read-only checks do not record actions');
+});
+test('remote heartbeat protection is scoped to its session and fails closed on changed sharing or lost permission state', async t => {
+  const other = await fixture(t, { protection: { requests: [{ sessionId: 'codex:private', status: 'pending' }, { sessionId: 'codex:open', status: 'denied', decidedBy: 'auto' }] } });
+  assert.deepEqual((await other.call('/api/sessions/codex:open/heartbeat-protection')).json, { protected: false });
+  const lost = await fixture(t, { protection: { requests: [], lost: 'private file diagnostic' } });
+  const unavailable = await lost.call('/api/sessions/codex:open/heartbeat-protection'); assert.equal(unavailable.status, 503); assert.doesNotMatch(unavailable.text, /private file diagnostic/);
+  const changed = await fixture(t, { beforeProtection: async () => { await changed.exclusions.add(changed.open); } });
+  assert.equal((await changed.call('/api/sessions/codex:open/heartbeat-protection')).status, 404, 'sharing is rechecked after reading the protection decision');
+});
+test('remote REST run evidence uses the existing read-only operation with authenticated remote sharing context', async t => {
+  const f = await fixture(t);
+  const response = await f.call('/api/v1/runs.list', { body: { sessionId: 'codex:open', limit: 6 } });
+  assert.equal(response.status, 200);
+  assert.deepEqual(f.calls, [{ method: 'api', args: ['runs.list', { sessionId: 'codex:open', limit: 6 }, { origin: { kind: 'owner', controllerId: CONTROLLER } }] }]);
+  assert.deepEqual(f.changes(), []);
+});
+
+test('the corrective marker only reduces a remote message to agent authority; ordinary controller messages remain owner input', async t => {
+  const f = await fixture(t);
+  const headers = { 'x-tower-request-id': REQUEST_ID, 'x-tower-heartbeat-corrective': '1' };
+  assert.equal((await f.call('/api/sessions/codex:open/messages', { body: { prompt: 'Continue the existing task' }, headers })).status, 202);
+  assert.deepEqual((f.calls.find(item => item.method === 'enqueue')!.args[3] as { origin: unknown }).origin, { kind: 'agent', controllerId: CONTROLLER });
+  f.calls.length = 0;
+  assert.equal((await f.call('/api/sessions/codex:open/messages', { body: { prompt: 'Owner request' }, headers: { 'x-tower-request-id': '0199a2b3-c4d5-7123-8abc-0123456789ff' } })).status, 202);
+  assert.deepEqual((f.calls.find(item => item.method === 'enqueue')!.args[3] as { origin: unknown }).origin, { kind: 'owner', controllerId: CONTROLLER });
+});
+
+test('remote heartbeat protection includes current native approval and latest owner stop without exposing raw run fields', async t => {
+  for (const protection of ['stop', 'approval'] as const) {
+    const f = await fixture(t); const run = f.runs[0];
+    if (protection === 'stop') { run.status = 'cancelled'; run.ownerStopped = true; } else run.approvals = [{ id: 'private-approval', toolName: 'private-tool', input: { secret: 'private-input' } }];
+    const response = await f.call('/api/sessions/codex:open/heartbeat-protection'); assert.deepEqual(response.json, { protected: true });
+    assert.doesNotMatch(response.text, /private|ownerStopped|approval|input/);
+  }
+});
+test('remote conversation pages preserve unread skipped count for bounded request matching', async t => {
+  const f = await fixture(t, { historySkipped: 4 });
+  const response = await f.call('/api/sessions/codex:open?limit=12'); assert.equal(response.status, 200); assert.equal(response.json.skipped, 4);
+});
+
+test('remote heartbeat protection follows a stopped managed ancestor but permits a new independent owner task', async t => {
+  const f = await fixture(t); const original = f.runs[0]; original.ownerStopped = true; original.status = 'cancelled';
+  const continuation: Run = { ...original, id: 'cancelled-permission-resume', ownerStopped: undefined, createdAt: new Date(Date.parse(original.createdAt) + 1000).toISOString(), scheduled: { at: original.createdAt, afterRunId: original.id, resume: 'permission' } };
+  f.runs.push(continuation);
+  assert.deepEqual((await f.call('/api/sessions/codex:open/heartbeat-protection')).json, { protected: true });
+  f.runs.push({ ...original, id: 'new-owner-task', ownerStopped: undefined, status: 'running', createdAt: new Date(Date.parse(original.createdAt) + 2000).toISOString(), prompt: 'A new independent task' });
+  assert.deepEqual((await f.call('/api/sessions/codex:open/heartbeat-protection')).json, { protected: false });
+});
+test('shared run projection preserves minimal trusted notice provenance for request matching', async t => {
+  const f = await fixture(t); const original = f.runs[0];
+  f.runs.push({ ...original, id: 'permission-notice', permissionNotice: { targetRunId: original.id }, steering: { targetRunId: original.id, state: 'delivered', requestedAt: original.createdAt } });
+  f.runs.push({ ...original, id: 'update-notice', updateWrapUp: true, steering: { targetRunId: original.id, state: 'delivered', requestedAt: original.createdAt } });
+  const response = await f.call('/api/snapshot'); assert.equal(response.status, 200);
+  const runs = (response.json as Snapshot).runs;
+  assert.deepEqual(runs.find(run => run.id === 'permission-notice')?.permissionNotice, { targetRunId: original.id });
+  assert.equal(runs.find(run => run.id === 'update-notice')?.updateWrapUp, true);
+  assert.equal(runs.some(run => run.sessionId === f.secretSession.id), false);
 });

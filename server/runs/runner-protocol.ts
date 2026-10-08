@@ -10,10 +10,10 @@ export const MAX_RPC_BYTES = 40 * 1024 * 1024;
  * Optional operations this worker build serves. A web process checks the attached worker's list
  * before calling one, because an older worker keeps running until it is idle.
  */
-export const RUNNER_CAPABILITIES = ['sessionHistory', 'origins', 'handoff', 'triggers', 'toolCapabilities', 'remoteOrigins', 'remoteTriggers', 'publicAgents', 'autoPromptTargets', 'steerTargets', 'subscriptionOnly', 'skills', 'towerSkills', 'skillTargets', 'forceUpdate', 'backup', 'models', 'delegation', 'masterWorker', 'secrets', 'attachmentReferences', 'workerClosed', 'retention', 'compaction'] as const;
+export const RUNNER_CAPABILITIES = ['heartbeatAdmission', 'sessionHistory', 'origins', 'handoff', 'triggers', 'toolCapabilities', 'remoteOrigins', 'remoteTriggers', 'publicAgents', 'autoPromptTargets', 'steerTargets', 'subscriptionOnly', 'skills', 'towerSkills', 'skillTargets', 'forceUpdate', 'backup', 'models', 'delegation', 'masterWorker', 'secrets', 'attachmentReferences', 'workerClosed', 'retention', 'compaction'] as const;
 export type RunnerCapability = typeof RUNNER_CAPABILITIES[number];
 /** One page of a native conversation, read by the worker that already indexes native history. */
-export type SessionHistoryPage = Pick<SessionDetail, 'messages' | 'hasMore' | 'nextBefore' | 'previousUser'>;
+export type SessionHistoryPage = Pick<SessionDetail, 'messages' | 'hasMore' | 'nextBefore' | 'previousUser' | 'skipped'>;
 export interface RunnerSnapshot {
   instance: string;
   revision: number;

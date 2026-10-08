@@ -14,6 +14,22 @@ import { writePrivateJson } from '../../server/stores/private-json.js';
 import type { MasterCheckpoint, MasterOverview } from '../../shared/master.js';
 import { until } from '../helpers/until.js';
 
+test('master overview preserves inspector and corrective audit corruption diagnostics across actual RPC', async t => {
+  const stateDir = await temporaryFixture('tower-master-heartbeat-corrupt-rpc-');
+  const paths = await masterPaths(stateDir);
+  await mkdir(paths.data, { recursive: true, mode: 0o700 });
+  await writePrivateJson(join(paths.data, 'heartbeat.json'), '{ corrupt');
+  await writePrivateJson(join(paths.data, 'heartbeat-corrections.json'), '{ corrupt');
+  const host = await startMasterHost({ stateDir, idleMs: 60_000 });
+  const client = new MasterClient({ stateDir, credentials: () => undefined });
+  t.after(async () => { client.dispose(); await host.close(); await removeTemporaryFixture(stateDir); });
+  const overview = await client.call('overview') as MasterOverview;
+  assert.match(overview.heartbeat?.problem ?? '', /Heartbeat 기록을 읽지 못해/);
+  assert.match(overview.heartbeat?.problem ?? '', /교정 기록을 읽지 못해/);
+  assert.equal(overview.heartbeat?.lastCheck, undefined); assert.deepEqual(overview.heartbeat?.actions, []);
+  assert.equal(await readFile(join(paths.data, 'heartbeat-corrections.json'), 'utf8'), '{ corrupt');
+});
+
 test('playback diagnostics survive the web to master-host RPC boundary', async t => {
   const stateDir = await temporaryFixture('tower-master-playback-rpc-');
   const host = await startMasterHost({ stateDir, idleMs: 60_000 });
@@ -47,7 +63,7 @@ test('the master host keeps its folder private, relays its live stream through t
   const before = await client.call('overview') as MasterOverview;
   assert.equal(before.session, undefined, 'no master session until the owner starts one');
   assert.equal(before.activeTasks, 0);
-  assert.deepEqual(Object.keys(before.settings).sort(), ['voice']);
+  assert.deepEqual(Object.keys(before.settings).sort(), ['heartbeat', 'voice']);
   await assert.rejects(client.call('settings', { body: { apiKey: 'sk-test-0123456789abcdef' } }), { kind: 'invalid' }, 'the master takes no model key');
 
   // A page's live stream goes through the web to the host.
@@ -95,7 +111,7 @@ test('settings of the master that talked through a model API are dropped, its ke
   const overview = await client.call('overview') as MasterOverview;
   assert.equal(overview.settings.voice.endSilenceMs, 1300, 'voice settings are kept');
   assert.equal(overview.voiceConfigured, true, 'the ElevenLabs key is kept');
-  assert.deepEqual(JSON.parse(await readFile(join(paths.data, 'settings.json'), 'utf8')), { voice: overview.settings.voice });
+  assert.deepEqual(JSON.parse(await readFile(join(paths.data, 'settings.json'), 'utf8')), { voice: overview.settings.voice, heartbeat: overview.settings.heartbeat });
   assert.equal(existsSync(join(paths.data, 'openai-key.json')), false);
   assert.equal(existsSync(join(paths.data, 'anthropic-key.json')), false);
   assert.equal(await readFile(join(paths.data, 'room', '000000.json'), 'utf8'), archived, 'the old conversation stays as it was');
@@ -160,7 +176,9 @@ test('the host answers a page\'s voice requests, refusing what is not its call, 
 test('the master stays removable: only these existing files reach into it', async () => {
   const root = join(import.meta.dirname, '..', '..');
   // The worker knows the master's folder, to give its turns their tools and keep them to a subscription sign-in.
-  const allowed = new Set(['server/index.ts', 'client/src/app/App.tsx', 'server/api/run-tools.ts', 'server/runs/subscription.ts']);
+  // Heartbeat's shared admission contract crosses HTTP and worker boundaries; no runtime master module enters them.
+  const allowed = new Set(['server/index.ts', 'client/src/app/App.tsx', 'server/api/run-tools.ts', 'server/runs/subscription.ts',
+    'server/http/request-context.ts', 'server/http/server.ts', 'server/runs/manager.ts', 'server/runs/worker.ts']);
   const offenders: string[] = [];
   const walk = async (directory: string): Promise<void> => {
     for (const entry of await readdir(directory, { withFileTypes: true })) {

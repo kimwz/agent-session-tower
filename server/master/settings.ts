@@ -1,6 +1,6 @@
 import { mkdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { DEFAULT_MASTER_SETTINGS, DEFAULT_MASTER_VOICE, MASTER_PLAYBACK_RATES, MASTER_TTS_MODELS, type MasterBinding, type MasterSettings, type MasterTtsModel, type MasterVoiceSettings } from '../../shared/master.js';
+import { DEFAULT_MASTER_SETTINGS, DEFAULT_MASTER_HEARTBEAT, DEFAULT_MASTER_VOICE, MASTER_PLAYBACK_RATES, MASTER_TTS_MODELS, type MasterBinding, type MasterSettings, type MasterTtsModel, type MasterVoiceSettings } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { TowerError } from '../../shared/errors.js';
 
@@ -50,9 +50,18 @@ function readVoice(value: unknown, fallback: MasterVoiceSettings, saved: boolean
 /** Parses a settings change against the current settings; unknown fields are refused (saved legacy ones are dropped). */
 export function mergeSettings(current: MasterSettings, value: unknown, saved = false): MasterSettings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid('마스터 설정이 올바르지 않습니다.');
-  const next: MasterSettings = { ...current, voice: { ...(current.voice ?? DEFAULT_MASTER_VOICE) } };
+  const next: MasterSettings = { ...current, voice: { ...(current.voice ?? DEFAULT_MASTER_VOICE) }, heartbeat: { ...(current.heartbeat ?? DEFAULT_MASTER_HEARTBEAT) } };
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-    if (key === 'voice') next.voice = readVoice(item, next.voice, saved);
+    if (key === 'heartbeat') {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) throw invalid('Heartbeat 설정이 올바르지 않습니다.');
+      for (const [field, value] of Object.entries(item)) {
+        if (field === 'enabled' && typeof value === 'boolean') next.heartbeat.enabled = value;
+        else if (field === 'intervalMinutes' && typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 1440) next.heartbeat.intervalMinutes = value;
+        else if (field === 'prompt' && typeof value === 'string' && value.trim() && value.length <= 8000) next.heartbeat.prompt = value;
+        else throw invalid('Heartbeat 설정이 올바르지 않습니다.');
+      }
+    }
+    else if (key === 'voice') next.voice = readVoice(item, next.voice, saved);
     else if (key === 'session' && saved) { const binding = readBinding(item); if (binding) next.session = binding; }
     else if (saved && LEGACY_KEYS.has(key)) continue;
     else throw invalid('마스터 설정이 올바르지 않습니다.');
@@ -70,6 +79,8 @@ function readBinding(value: unknown): MasterBinding | undefined {
 export class MasterSettingsStore {
   private settings: MasterSettings = structuredClone(DEFAULT_MASTER_SETTINGS);
   private voiceApiKey?: string;
+  private readonly listeners = new Set<() => void>();
+  subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   private changes: Promise<unknown> = Promise.resolve();
   private readonly settingsPath: string;
   private readonly voiceKeyPath: string;
@@ -121,6 +132,7 @@ export class MasterSettingsStore {
   private async save(settings: MasterSettings): Promise<void> {
     await writePrivateJson(this.settingsPath, JSON.stringify(settings));
     this.settings = settings;
+    for (const listener of this.listeners) listener();
   }
 
   private change(work: () => Promise<void>): Promise<MasterSettings> {

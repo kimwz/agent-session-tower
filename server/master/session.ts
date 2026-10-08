@@ -230,6 +230,11 @@ export class MasterSession {
 
   setVoice(voice: VoiceSide): void { this.voice = voice; }
 
+  /** A detached read of tracked work, shared with the heartbeat inspector. */
+  heartbeatTasks(): Followed[] { return structuredClone(this.file.followed.filter(item => item.kind === 'delegated')); }
+  heartbeatStopped(): boolean { return Boolean(this.file.stoppedAt) || !this.persist; }
+  async heartbeatAccepted(run: Run): Promise<void> { this.remember(run.id); await this.save(); }
+
   binding(): MasterBinding | undefined { return this.options.settings.current().session; }
 
   /** Work handed out and not reported yet. */
@@ -767,7 +772,7 @@ const normalize = (text: string) => text.replace(/\s+/g, ' ').trim();
  * A history message is the run's request when it is the request's whole text, or that text followed by the list of
  * attached files Tower adds. A longer request that merely starts the same way is another request.
  */
-function sameRequest(message: string, prompt: string): boolean {
+export function sameRequest(message: string, prompt: string): boolean {
   const text = normalize(message);
   return text === prompt || text.startsWith(`${prompt}${ATTACHED}`);
 }
