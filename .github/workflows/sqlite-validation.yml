@@ -1,0 +1,80 @@
+name: SQLite validation
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  sqlite:
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        node: ['22.22.3', '24.15.0', '26.0.0']
+        mode: [supported-floor]
+        include:
+          - os: ubuntu-latest
+            node: '22.13.0'
+            mode: legacy-loader
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install and validate inside a private environment
+        shell: bash
+        env:
+          VALIDATION_ROOT: ${{ runner.temp }}/sqlite-validation
+          VALIDATION_MODE: ${{ matrix.mode }}
+          VALIDATION_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$VALIDATION_ROOT"/{home,codex,claude,config,cache,state,data,runtime,tmp,npm,reports}
+          # No Actions credentials or provider authentication enter npm, tests or children.
+          env -i PATH="$PATH" HOME="$VALIDATION_ROOT/home" \
+            CODEX_HOME="$VALIDATION_ROOT/codex" CLAUDE_CONFIG_DIR="$VALIDATION_ROOT/claude" \
+            XDG_CONFIG_HOME="$VALIDATION_ROOT/config" XDG_CACHE_HOME="$VALIDATION_ROOT/cache" \
+            XDG_STATE_HOME="$VALIDATION_ROOT/state" XDG_DATA_HOME="$VALIDATION_ROOT/data" \
+            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$VALIDATION_ROOT/tmp" \
+            TMP="$VALIDATION_ROOT/tmp" TEMP="$VALIDATION_ROOT/tmp" \
+            npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
+            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
+            VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
+            VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
+          set -euo pipefail
+          report="$VALIDATION_ROOT/reports"
+          trap 'result=$?; printf "%s\n" "$result" > "$report/exit-code.txt"' EXIT
+          exec > >(tee "$report/stdout.log") 2> >(tee "$report/stderr.log" >&2)
+          printf '%s\n' "$VALIDATION_SHA" > "$report/source-sha.txt"
+          node --version > "$report/node-version.txt"
+          npm ci
+          node --import tsx scripts/sqlite-runtime-check.mjs "$VALIDATION_MODE" | tee "$report/runtime.json"
+          if [[ "$VALIDATION_MODE" == legacy-loader ]]; then
+            exit 0
+          fi
+          node --import tsx --test --test-reporter=tap \
+            --test-name-pattern='^(flush, close ack and an explicit reopen with the same captured bundle; nothing is sent while closed|a full queue still drains on flush and close: the accepted write commits, close acks, the thread exits 0, intake is refused meanwhile)$' \
+            tests/server/storage/client.test.ts
+          node --input-type=module <<'FILES'
+          import { globSync, writeFileSync } from 'node:fs';
+          import assert from 'node:assert/strict';
+          const storage = globSync('tests/server/storage/**/*.test.ts').sort();
+          const link = globSync('tests/server/link/**/*.test.ts').sort();
+          assert.ok(storage.length && link.length, 'suite globs must match');
+          const files = [...storage, ...link, 'tests/server/runs/durable-runner.test.ts', 'tests/server/runs/locked-state-handoff.test.ts'];
+          writeFileSync(`${process.env.VALIDATION_ROOT}/reports/test-files.txt`, files.join('\n') + '\n');
+          FILES
+          files=()
+          while IFS= read -r file; do files+=("$file"); done < "$report/test-files.txt"
+          node --import tsx --test --test-reporter=tap "${files[@]}"
+          VALIDATE
+      - name: Preserve validation logs, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-${{ matrix.os }}-${{ matrix.node }}-${{ matrix.mode }}
+          path: ${{ runner.temp }}/sqlite-validation/reports/
+          if-no-files-found: error
