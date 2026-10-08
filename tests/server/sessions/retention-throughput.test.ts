@@ -107,6 +107,19 @@ test('time-budget cursor reaches later candidates after a slow failure at the fr
   assert.deepEqual(attempts, ['codex:c0', 'claude:c1', 'codex:c2']);
 });
 
+test('session-budget cursor reaches a healthy provider behind one hundred fast failures', async t => {
+  t.mock.timers.enable({apis: ['setTimeout', 'Date'], now});
+  const {service, attempts, records} = await maintenanceFixture(t, 101, async id => id === 'claude:c100');
+  records.push({session: {...session('p0'), id: 'claude:p0', provider: 'claude'}, kind: 'parent', latestTaskEndedAt: new Date(now - 8 * day).toISOString()});
+  const later = records.find(r => r.session.nativeId === 'c100')!;
+  later.session.id = 'claude:c100'; later.session.provider = 'claude'; later.session.parentId = 'claude:p0';
+  await service.cycle(); assert.equal(attempts.length, 100);
+  assert.equal(service.overview().archivedMembers, 0);
+  await service.cycle();
+  assert.equal(attempts[100], 'claude:c100', 'first budget-deferred candidate starts the next chunk');
+  assert.equal(service.overview().archivedMembers, 1);
+});
+
 test('quiesce clears a scheduled catch-up and drains an in-flight original operation', async t => {
   t.mock.timers.enable({apis: ['setTimeout', 'Date'], now});
   let entered!: () => void, finish!: () => void;

@@ -208,7 +208,11 @@ export class RetentionService {
         if (entry.phase !== 'blocked-provider' || entry.error !== error) blockedEntries.push({ ...entry, phase: 'blocked-provider', error, updatedAt: new Date().toISOString() });
         continue;
       }
-      if (count + candidate.ids.length > 100) { this.addDeferred('session-budget'); continue; }
+      if (count + candidate.ids.length > 100) {
+        if (candidate.ids.length > 100) { this.addDeferred('session-budget'); continue; }
+        this.nextCandidateId = candidate.rootId;
+        this.addDeferred('session-budget', candidates.length - index); break;
+      }
       await this.archiveCandidate(entry, records); count += candidate.ids.length;
     }
     if (blockedEntries.length) await this.options.store.putMany(blockedEntries);
