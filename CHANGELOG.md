@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.117.0] - 2026-10-08
+
+### Changed
+- **Clear eligible session backlogs in bounded consecutive batches.** When maintenance confirms cold records and leaves candidates deferred by its time or session budget, the next batch starts one second after completion rather than waiting an hour. Batches retain the existing 30-second start budget and 100-session limit, share in-flight checks, and drain without cancelling work during worker handoff. No-progress and incomplete checks keep the hourly interval.
+- Fresh retention observations resolve logical Git projects only for user parents, avoiding repeated Git processes for one-shot child and helper workspaces. Parent project proofs are still refreshed on every observation, and native ownership, file identity, writer reservations and activity protections remain unchanged.
+- Maintenance resumes at the next candidate after a time limit and at the first processable candidate deferred by the session limit, so failures near the front do not repeatedly starve later candidates. Oversized families stay deferred. Native originals, history databases and cold backups remain recoverable; this does not physically delete native history or reclaim its disk space.
+
 ## [1.116.0] - 2026-10-08
 
 ### Changed
