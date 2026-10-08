@@ -590,6 +590,28 @@ test('a later part that fails before any sound is asked for once more; one that 
   assert.ok(h.labs.speeches.every(item => item.request === 'dialogue'));
 });
 
+test('an answer prepared for v3 is made with v3 to its end when the model changes to Eleven v4 Turbo; the next is untagged v4', async t => {
+  const long = Array.from({ length: 30 }, (_, index) => `${index + 1}번째 문장은 조금 길게 이어지는 설명입니다.`).join(' ');
+  const h = await harness(t, { steps: [long, '다음 답입니다.'], settings: { voice: { model: 'eleven_v3_conversational' } } });
+  const { fetchAudio } = await audioServer(t, h.voice);
+  const session = on(h);
+  h.labs.chunks = [mp3('a'), Buffer.from('b')];
+  await request(h, session, '길게');
+  const entry = await masterEntry(h, /30번째/);
+  await until(() => h.says().find(item => item.kind === 'answer'));
+  await h.settings.update({ voice: { model: 'eleven_v4_turbo' } });
+  await playFiniteAnswer(h, session, entry.id, fetchAudio);
+  await request(h, session, '하나 더');
+  const next = await masterEntry(h, /다음 답입니다/);
+  await playFiniteAnswer(h, session, next.id, fetchAudio, h.says().length);
+  const parts = h.labs.speeches.filter(item => item.text.includes('번째 문장'));
+  assert.ok(parts.length > 1);
+  assert.ok(parts.every(item => item.request === 'speech' && item.body.model_id === 'eleven_v3_conversational' && item.text.startsWith('[')), 'every part as prepared, with its tag');
+  const v4 = h.labs.speeches.filter(item => item.body.model_id === 'eleven_v4_turbo');
+  assert.ok(v4.some(item => item.text === '다음 답입니다.'));
+  assert.ok(v4.every(item => item.request === 'dialogue' && !item.text.startsWith('[')), 'nothing tagged is sent to v4');
+});
+
 test('a long answer skipped partway stops being made: the parts not yet asked for are not asked for, nor paid for', async t => {
   const answer = Array.from({ length: 60 }, (_, index) => `${index + 1}번째 문장은 조금 길게 이어지는 설명입니다.`).join(' ');
   const h = await harness(t, { steps: [answer], timing: { playMs: 60_000 } });

@@ -43,8 +43,8 @@ export interface StreamInput {
 interface Segment {
   reply: string;
   follower: TextFollower;
-  /** What is sent to speech, and how many of those parts went into its audio. */
-  parts: Array<{ speech: string; text: string }>;
+  /** What is sent to speech (and the model it was written for), and how many of those parts went into its audio. */
+  parts: Array<{ speech: string; text: string; model: string }>;
   fed: number;
   wake?: () => void;
   /** What the page shows while it plays. */
@@ -230,7 +230,7 @@ export class VoiceReader {
     const model = this.host.model();
     stream.tag = streamTone(plain, model, stream.kind, stream.tag);
     this.timings.mark(stream.key, 'sentence');
-    segment.parts.push(...voicedChunkPairs(plain, model, stream.tag));
+    segment.parts.push(...voicedChunkPairs(plain, model, stream.tag).map(part => ({ ...part, model })));
     segment.text = `${segment.text} ${plain}`.trim();
     stream.read += plain.length;
     stream.lastChunkAt = Date.now();
@@ -262,9 +262,9 @@ export class VoiceReader {
         continue;
       }
       const part = segment.parts[segment.fed];
-      const model = this.host.model();
-      if (this.usage.limited(Date.now(), part.speech.length * ttsDollarsPerChar(model))) { this.stopStream(stream, 'limit'); return; }
-      const live = this.audio.synthesize(part.speech, undefined, stream.key);
+      if (this.usage.limited(Date.now(), part.speech.length * ttsDollarsPerChar(part.model))) { this.stopStream(stream, 'limit'); return; }
+      // Made with the model the part was written for, even if the setting changed since.
+      const live = this.audio.synthesize(part.speech, { model: part.model }, stream.key);
       this.audio.configure(live, { held: true, session, queuedAt: segment.queuedAt, partIndex: segment.fed });
       segment.live = live;
       try {

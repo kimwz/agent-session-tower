@@ -146,7 +146,7 @@ test('the page\'s place in the audio reaches the host through the web', async ()
 
 async function fakeElevenLabs() {
   // Each reading starts with an empty ID3 tag, as ElevenLabs' mp3 does; later parts of one audio lose theirs.
-  const state = { speeches: [] as string[], requests: [] as Array<'speech' | 'dialogue'>, chunks: [Buffer.from([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 0]), Buffer.from('sound')], gapMs: 10, completed: [] as Array<{ speech: number; at: number }> };
+  const state = { speeches: [] as string[], requests: [] as Array<'speech' | 'dialogue'>, models: [] as string[], chunks: [Buffer.from([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 0]), Buffer.from('sound')], gapMs: 10, completed: [] as Array<{ speech: number; at: number }> };
   const server = createServer(async (req: IncomingMessage, res) => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
@@ -154,7 +154,8 @@ async function fakeElevenLabs() {
     if (req.method === 'DELETE') { res.writeHead(200).end(); return; }
     // Text to Speech (models before v4) or Text to Dialogue (Eleven v4: one line in the one voice).
     if (req.method === 'POST' && (/^\/v1\/text-to-speech\/[^/]+\/stream$/.test(url.pathname) || url.pathname === '/v1/text-to-dialogue/stream')) {
-      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { text?: string; inputs?: Array<{ text: string }> };
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { text?: string; inputs?: Array<{ text: string }>; model_id: string };
+      state.models.push(body.model_id);
       state.speeches.push(String(body.inputs?.[0]?.text ?? body.text));
       state.requests.push(url.pathname === '/v1/text-to-dialogue/stream' ? 'dialogue' : 'speech');
       const speech = state.speeches.length;
@@ -440,6 +441,27 @@ test('the timing of the first response and the first sound is kept', async t => 
   await h.voice.timings.flush();
   const saved = JSON.parse(await readFile(join(h.dir, 'voice-timings.json'), 'utf8')) as { records: Array<{ key: string }> };
   assert.ok(saved.records.some(item => item.key === key));
+});
+
+test('a part written for v3 keeps v3 when the model changes to Eleven v4 Turbo while it waits; v4 parts have no tag', async t => {
+  const h = await harness(t, { settings: { voice: { model: 'eleven_v3_conversational' } }, page: { delayMs: 300 } });
+  h.on();
+  const { run } = await h.ask('길게 알려줘');
+  // Two parts made now under v3 (tagged); the second waits for the first to be heard.
+  h.write(run, 'm1:0', Array.from({ length: 30 }, (_, index) => `${index + 1}번째 설명은 조금 길게 이어지는 문장입니다.`).join(' '), true);
+  await until(() => h.says().find(say => say.kind === 'answer'));
+  await h.settings.update({ voice: { model: 'eleven_v4_turbo' } });
+  h.write(run, 'm2:0', '바꾼 뒤에 쓴 문장입니다.', true);
+  h.finish(run);
+  const done = await h.entry(/바꾼 뒤에 쓴/);
+  await until(() => h.speakOf(done)?.state === 'played', 20_000);
+  const sent = h.labs.speeches.map((text, index) => ({ text, model: h.labs.models[index] }));
+  const v3 = sent.filter(item => item.model === 'eleven_v3_conversational');
+  assert.ok(v3.filter(item => item.text.includes('번째 설명')).length >= 2, 'the parts written before the change');
+  assert.ok(v3.every(item => item.text.startsWith('[')), 'v3 keeps its tone tag');
+  const v4 = sent.filter(item => item.model === 'eleven_v4_turbo');
+  assert.ok(v4.some(item => item.text === '바꾼 뒤에 쓴 문장입니다.'));
+  assert.ok(v4.every(item => !/^\[/.test(item.text)), 'nothing tagged is sent to v4');
 });
 
 test('a long streamed answer ends at the limit with a pointer to the screen', async t => {
