@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.117.1] - 2026-10-08
+
+### Fixed
+
+- The permission reviewer reads long files in parts small enough to reach the model whole, and is told where each next part starts. Codex cut longer tool results, so the reviewer saw files of 40 KB and more only partly and sent test runs to the owner as unverifiable.
+- Running a project's own tests counts as routine work: the reviewer checks the runner script and that the tests use temporary or fixture state, without reading every test file they load.
+
 ## [1.117.0] - 2026-10-08
 
 ### Changed
