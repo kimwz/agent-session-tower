@@ -6,7 +6,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { homedir, hostname } from 'node:os';
-import type { AutoPromptInput, ChatMessage, NewSessionInput, MessageAttachments, Run, RunApprovalResponse, Snapshot } from '../../shared/types.js';
+import type { AutoPromptInput, ChatMessage, NewSessionInput, MessageAttachments, Run, RunApprovalResponse, Session, Snapshot } from '../../shared/types.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { AutoPromptManager } from '../auto-prompt/manager.js';
 import { SlackService } from '../slack/service.js';
@@ -40,7 +40,7 @@ import { relatedSessionNotes } from '../sessions/related.js';
 import { runToolResolver, sessionBrowsers } from '../api/run-tools.js';
 import { browserNote } from '../browser/tools.js';
 import { RemoteExclusionStore } from '../remote/exclusions.js';
-import { remoteTriggerLaunch } from '../remote/visibility.js';
+import { remoteSessionIds, remoteTriggerLaunch } from '../remote/visibility.js';
 import { RemoteRequestLedger, type RemoteResult } from '../remote/request-ledger.js';
 import { SkillService } from '../skills/service.js';
 import { SessionTasks } from '../sessions/tasks.js';
@@ -310,12 +310,14 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (method === 'compactionGet') return compactions.get(args[0]) ?? null;
         if (method === 'compactionCancel') return compactions.cancel(args[0]);
         const admitted = admit(args[2]);
-        const session = options.runs.getSession(args[0]);
-        // A controller never reaches a coordinator conversation, as with every other request about it.
-        if (admitted.origin?.controllerId && session && coordinator(session.id)) throw new TowerError('not-found', 'Not found.');
+        const id = args[0];
         const input = record(args[1]);
         const title = typeof input.title === 'string' && input.title.length <= 200 ? input.title : undefined;
-        return compactions.start(args[0], { ...(title ? { title } : {}), ...(admitted.requestId ? { requestId: admitted.requestId } : {}) }, admitted);
+        // A controller's request runs once per request ID, however late it is sent again (and never for a coordinator
+        // conversation); a retry answers with that compaction while it is still the conversation's latest.
+        return remote(admitted, 'compaction', { sessionId: id }, id, async () => compactions.start(id, { ...(title ? { title } : {}), ...(admitted.requestId ? { requestId: admitted.requestId } : {}) }, admitted),
+          value => ({ kind: 'compaction', sessionId: value.sessionId, jobId: value.id }),
+          result => { if (result.kind !== 'compaction') return undefined; const job = compactions.get(result.sessionId); return job?.id === result.jobId ? job : undefined; });
       }
       case 'attachment': {
         const attachment = await options.runs.attachment(args[0] as string);
@@ -761,8 +763,17 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       create: (input, admission) => runs.create(input, admission),
       refuse: session => coordinators().has(session.id) ? 'Slack·GitHub 코디네이터 대화는 압축할 수 없습니다.' : undefined,
       untrusted: session => runs.sessionOrigin(session.id)?.untrustedInput === true,
-      // The list as the web saved it now, its folders looked at again; as Auto Prompt does before a controller's work.
-      remote: { prepare: async cwd => { await exclusions.reload(); await exclusions.prepare([cwd], { fresh: true }); }, excludes: cwd => exclusions.matcher().excludes(cwd) } });
+      // The list as the web saved it now, the folders of the conversation and its parents looked at again (as Auto Prompt
+      // and the remote router do), and the one sharing rule for a controller's view.
+      remote: {
+        prepare: async session => {
+          await exclusions.reload();
+          const chain: string[] = [];
+          for (let current: Session | undefined = session, depth = 0; current && depth < 32; current = current.parentId ? runs.getSession(current.parentId) : undefined, depth++) chain.push(current.cwd);
+          await exclusions.prepare(chain, { fresh: true });
+        },
+        visible: session => remoteSessionIds(visible.allSessions(), { matcher: exclusions.matcher(), coordinators: coordinators() }).has(session.id),
+      } });
     await compactions.load();
     // Made just below; the permission service only calls it once requests arrive.
     let reviewer!: PermissionReviewer;

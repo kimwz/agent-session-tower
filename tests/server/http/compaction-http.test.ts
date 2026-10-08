@@ -42,6 +42,9 @@ test('the owner starts, reads and cancels a compaction; agents and odd bodies ar
   assert.equal((await f.post('/api/sessions/claude:s/compaction', { model: 'x' })).status, 400);
   assert.equal((await f.post('/api/sessions/claude:s/compaction', {}, { 'X-Agent-Monitor-Token': '' })).status, 403);
   assert.equal((await f.post('/api/sessions/claude:s/compaction', {}, { 'X-Tower-Run-Capability': 'a'.repeat(64) })).status, 403);
+  // A joined computer's conversation: refused here, before the request would reach it without its caller.
+  assert.equal((await f.post(`/api/nodes/${'a'.repeat(32)}/sessions/claude:s/compaction`, {}, { 'X-Tower-Run-Capability': 'a'.repeat(64) })).status, 403);
+  assert.equal((await f.post(`/api/nodes/${'a'.repeat(32)}/sessions/claude:s/compaction/cancel`, {}, { 'X-Tower-Run-Capability': 'a'.repeat(64) })).status, 403);
   assert.deepEqual(calls, [['start', 'claude:s'], ['get', 'claude:none'], ['cancel', 'claude:s'], ['start', 'claude:busy']]);
 });
 

@@ -308,7 +308,7 @@ test('cancelling stops before anything is created; a model failure leaves the or
 test("a controller's compaction looks at the sharing again before creating, and outside content stays marked", async t => {
   let excluded = false;
   const prepared: string[] = [];
-  const remote = await setup(t, { deps: { remote: { prepare: async cwd => { prepared.push(cwd); excluded = true; }, excludes: () => excluded } } });
+  const remote = await setup(t, { deps: { remote: { prepare: async session => { prepared.push(session.cwd); excluded = true; }, visible: () => !excluded } } });
   remote.service.start('claude:src', {}, { origin: { kind: 'owner', controllerId: 'ctrl' }, requestId: 'r' });
   const job = await remote.settle();
   assert.equal(job.state, 'failed');
@@ -316,10 +316,39 @@ test("a controller's compaction looks at the sharing again before creating, and 
   assert.deepEqual(prepared, ['/work/app']);
   assert.equal(remote.created.length, 0);
 
+  const shared = await setup(t, { deps: { remote: { prepare: async () => {}, visible: () => true } } });
+  shared.service.start('claude:src', {}, { origin: { kind: 'owner', controllerId: 'ctrl' }, requestId: 'r' });
+  assert.equal((await shared.settle()).state, 'done', 'a conversation still shared is compacted for a controller');
+  const unknown = await setup(t);
+  unknown.service.start('claude:src', {}, { origin: { kind: 'owner', controllerId: 'ctrl' }, requestId: 'r' });
+  assert.equal((await unknown.settle()).state, 'failed', 'without a sharing rule nothing is created for a controller');
   const untrusted = await setup(t, { deps: { untrusted: () => true, refuse: () => undefined } });
   untrusted.service.start('claude:src', {}, OWNER);
   await untrusted.settle();
   assert.equal(untrusted.created[0].admission.untrustedInput, true);
   const coordinator = await setup(t, { deps: { refuse: () => 'Slack·GitHub 코디네이터 대화는 압축할 수 없습니다.' } });
   assert.throws(() => coordinator.service.start('claude:src', {}, OWNER), /코디네이터/);
+});
+
+test('reading stops as soon as the conversation outgrows the calls, before the rest is read', async t => {
+  const big = Array.from({ length: 2_000 }, (_, index) => message(index % 2 ? 'assistant' : 'user', `${index} ${'z'.repeat(20_000)}`));
+  const f = await setup(t, { history: big });
+  f.service.start('claude:src', {}, OWNER);
+  const job = await f.settle();
+  assert.equal(job.state, 'failed');
+  assert.match(job.error!, /너무 길어/);
+  assert.ok(f.reads.length < 10, `stopped after ${f.reads.length} pages`);
+  assert.equal(f.requests.length, 0);
+});
+
+test('a worker closing mid-compaction ends it without creating anything', async t => {
+  const f = await setup(t, { answer: request => new Promise((_, reject) => request.signal.addEventListener('abort', () => reject(new Error('aborted')))) });
+  f.service.start('claude:src', {}, OWNER);
+  await until(() => f.requests.length === 1);
+  await f.service.close();
+  const job = f.service.get('claude:src')!;
+  assert.equal(job.state, 'failed');
+  assert.match(job.error!, /실행 워커가 바뀌어/);
+  assert.equal(f.created.length, 0);
+  assert.throws(() => f.service.start('claude:src', {}, OWNER), /실행 워커를 바꾸는 중/);
 });

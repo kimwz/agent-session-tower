@@ -19,7 +19,7 @@ import { CLAUDE_EFFORT_LEVELS, validEffort, validModelId } from '../../providers
 import type { RunAdmission } from '../../runs/manager.js';
 import { readPrivateJson, writePrivateJson } from '../../stores/private-json.js';
 import { MERGE_SYSTEM, NOTES_SYSTEM, SUMMARY_SCHEMA, SUMMARY_SYSTEM, parseSummary, renderSummary, startInstructions, visiblePrompt, type CompactionSummary } from './summary.js';
-import { PART_BYTES, transcriptParts } from './transcript.js';
+import { PART_BYTES, packParts, transcriptLines } from './transcript.js';
 
 const FILE = 'session-compactions.json';
 const PAGE = 200;
@@ -54,8 +54,11 @@ export interface SessionCompactionDependencies {
   refuse?(session: Session): string | undefined;
   /** The conversation holds outside content (Slack, GitHub, HTTP), which its continuation must stay marked for. */
   untrusted?(session: Session): boolean;
-  /** The folders this computer shares with controllers: read again before a controller's compaction creates anything. */
-  remote?: { prepare(cwd: string): Promise<void>; excludes(cwd: string): boolean };
+  /**
+   * What this computer shares with controllers: read again (the conversation's folders and its parents') before a
+   * controller's compaction creates anything; `visible` is the sharing rule every controller request follows.
+   */
+  remote?: { prepare(session: Session): Promise<void>; visible(session: Session): boolean };
   now?(): number;
 }
 
@@ -257,7 +260,7 @@ export class SessionCompactions {
     const problem = blocked(latest, this.dependencies.runs()) ?? this.dependencies.refuse?.(latest);
     if (problem) return problem;
     if (revision(latest) !== expected) return '압축하는 동안 원래 세션에 새 대화가 생겨 새 세션을 만들지 않았습니다. 다시 압축하세요.';
-    if (admission.origin?.controllerId && (!this.dependencies.remote || this.dependencies.remote.excludes(latest.cwd))) return '이 폴더는 이제 공유되지 않아 새 세션을 만들지 않았습니다.';
+    if (admission.origin?.controllerId && (!this.dependencies.remote || !this.dependencies.remote.visible(latest))) return '이 폴더는 이제 공유되지 않아 새 세션을 만들지 않았습니다.';
     return undefined;
   }
 
@@ -270,7 +273,7 @@ export class SessionCompactions {
       const compactor = await resolveModel(this.dependencies.stateDir, 'sessions.compactor');
       this.update(entry, { compactor: { provider: compactor.provider, ...(compactor.model ? { model: compactor.model } : {}), ...(compactor.effort ? { effort: compactor.effort } : {}) } });
       const carried = this.carried.get(source.id)?.summary;
-      const parts = transcriptParts(read.messages);
+      const parts = packParts(read.lines);
       if (!parts.length && !carried) throw new Error('압축할 대화 내용이 없습니다.');
       if (parts.length > MAX_PARTS) throw new Error('대화가 너무 길어 압축할 수 없습니다. 앞부분을 버리지 않고는 정해진 호출 수 안에 읽을 수 없습니다.');
       this.update(entry, { state: 'summarizing', progress: { done: 0, total: parts.length > 1 ? parts.length + 1 : 1 } });
@@ -278,7 +281,7 @@ export class SessionCompactions {
         ...(read.skipped ? [`${read.skipped} records of it could not be read and are missing below.`] : [])].join(' ');
       const summary = renderSummary(await this.summarize(entry, compactor, header, parts, carried));
       if (entry.controller.signal.aborted) throw new Error('압축이 중단되었습니다.');
-      if (admission.origin?.controllerId) await this.dependencies.remote?.prepare(source.cwd);
+      if (admission.origin?.controllerId) await this.dependencies.remote?.prepare(source);
       const early = this.lastLook(source.id, entry.revision, admission);
       if (early) throw new Error(early);
       if (entry.controller.signal.aborted) throw new Error('압축이 중단되었습니다.');
@@ -327,26 +330,32 @@ export class SessionCompactions {
     } finally { clearTimeout(timer); }
   }
 
-  /** Every page of the conversation's own history, oldest first. */
-  private async read(session: Session, signal: AbortSignal): Promise<{ messages: ChatMessage[]; skipped: number }> {
-    const pages: (readonly ChatMessage[])[] = [];
+  /**
+   * Every page of the conversation's own history as transcript lines, oldest first. Each page becomes lines as it is
+   * read (tool output already excerpted), and reading stops as soon as the lines outgrow what the calls may take.
+   */
+  private async read(session: Session, signal: AbortSignal): Promise<{ lines: string[]; skipped: number }> {
+    const pages: string[][] = [];
     let count = 0;
+    let bytes = 0;
     let skipped = 0;
     let before: number | undefined;
     for (;;) {
       if (signal.aborted) throw new Error('압축이 중단되었습니다.');
       const page = await this.dependencies.history(session, before, PAGE);
       if (!page) throw new Error('대화 기록을 읽지 못했습니다. 원본 기록이 이동되었을 수 있습니다.');
-      pages.unshift(page.messages);
+      const lines = page.messages.flatMap(transcriptLines);
+      pages.unshift(lines);
       count += page.messages.length;
+      for (const line of lines) bytes += Buffer.byteLength(line) + 2;
       skipped += page.skipped ?? 0;
-      if (count > MAX_MESSAGES) throw new Error('대화가 너무 길어 압축할 수 없습니다. 앞부분을 버리지 않고는 읽을 수 없습니다.');
+      if (count > MAX_MESSAGES || bytes > MAX_PARTS * PART_BYTES) throw new Error('대화가 너무 길어 압축할 수 없습니다. 앞부분을 버리지 않고는 정해진 호출 수 안에 읽을 수 없습니다.');
       if (!page.hasMore || page.nextBefore === undefined) break;
       // Each page must lie before the last one, or the reading would never end.
       if (before !== undefined && page.nextBefore >= before) throw new Error('대화 기록을 끝까지 읽지 못했습니다.');
       before = page.nextBefore;
     }
-    return { messages: pages.flat(), skipped };
+    return { lines: pages.flat(), skipped };
   }
 
   /**

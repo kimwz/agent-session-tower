@@ -91,7 +91,7 @@ function RoleRow({ role, setting, providers, disabled, onChange }: { role: Built
       <ProviderSelect value={setting.provider} follow={!!role.follow} providers={role.providers} disabled={disabled} onChange={provider => onChange({ ...setting, provider })} />
       {(setting.provider === 'follow' ? ['claude', 'codex'] as const : [setting.provider]).map(provider => <PickRow key={provider} provider={provider} labelled={setting.provider === 'follow'}
         pick={setting[provider]} health={providers.find(item => item.provider === provider)} off={role.kind === 'auto' && provider === 'claude'} disabled={disabled}
-        onChange={pick => onChange({ ...setting, [provider]: pick })} />)}
+        verified={initial[provider].model} onChange={pick => onChange({ ...setting, [provider]: pick })} />)}
       {changed && <button type="button" className="icon-button" title={t('초기값으로')} aria-label={t('초기값으로')} disabled={disabled} onClick={() => onChange(structuredClone(initial))}><RotateCcw size={14} /></button>}
     </div>
   </div>;
@@ -129,7 +129,8 @@ export function SettingsProblem({ problem }: { problem?: string }) {
   return problem ? <p role="alert" className="slack-error">{translateMessage(problem)}</p> : null;
 }
 
-export function PickRow({ provider, labelled, pick, health, off, disabled, onChange }: { provider: ModelProvider; labelled: boolean; pick: ModelPick; health?: ProviderHealth; off: boolean; disabled: boolean; onChange: (pick: ModelPick) => void }) {
+/** `verified`: the role's initial model, which Tower ships as one the CLI takes even when its list names only aliases. */
+export function PickRow({ provider, labelled, pick, health, off, disabled, verified, onChange }: { provider: ModelProvider; labelled: boolean; pick: ModelPick; health?: ProviderHealth; off: boolean; disabled: boolean; verified?: string; onChange: (pick: ModelPick) => void }) {
   const { t } = useI18n();
   const models = health?.models ?? [];
   const listed = !pick.model || models.some(model => model.id === pick.model);
@@ -137,7 +138,7 @@ export function PickRow({ provider, labelled, pick, health, off, disabled, onCha
   const [typing, setTyping] = useState(!listed);
   const { efforts, defaultEffort } = modelEfforts(health, pick.model);
   const choices = [...(off ? [{ id: EFFORT_OFF }] : []), ...efforts];
-  const unknownModel = !!pick.model && models.length > 0 && !models.some(model => model.id === pick.model);
+  const unknownModel = !!pick.model && pick.model !== verified && models.length > 0 && !models.some(model => model.id === pick.model);
   const unknownEffort = !!pick.effort && !choices.some(effort => effort.id === pick.effort);
   const set = (next: ModelPick) => onChange({ ...(next.model ? { model: next.model } : {}), ...(next.effort ? { effort: next.effort } : {}) });
   const name = PROVIDER_LABEL[provider];

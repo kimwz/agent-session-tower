@@ -50,6 +50,8 @@ export function useSessionCompaction(sessionId: string, token: string, connected
         const { compaction } = await api<{ compaction: SessionCompaction | null }>(pathFor(sessionId, id => `/api/sessions/${encodeURIComponent(id)}/compaction`));
         if (stopped) return;
         setJob(compaction);
+        // A read that failed while following is over once one succeeds again.
+        if (followed.current) setError('');
         if (compaction && ACTIVE.has(compaction.state)) { followed.current = compaction.id; timer = window.setTimeout(() => { void read(); }, POLL_MS); }
       } catch (cause) {
         if (stopped) return;

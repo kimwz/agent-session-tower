@@ -549,6 +549,10 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         const scope = scopeFromParams(url.searchParams);
         return json(res, 200, scope ? scopedViews(snapshot())(scope) : snapshot());
       }
+      // The owner's compact button, here or for a joined computer's conversation: an agent's turn or the master never
+      // starts or stops one (checked before a joined computer's request is passed on, which would carry no caller).
+      if (req.method === 'POST' && /^\/api\/(?:nodes\/[a-f0-9]{32}\/)?sessions\/[^/]+\/compaction(?:\/cancel)?$/.test(path)
+        && (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()])) return json(res, 403, { error: '세션 압축은 소유자만 할 수 있습니다.' });
       if ((path === '/api/retention' || path.startsWith('/api/retention/')) && (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()])) return json(res, 403, { error: '세션 보관 관리는 소유자만 할 수 있습니다.' });
       if (req.method === 'GET' && path === '/api/retention') {
         if (!backend.retention) return json(res, 503, { error: '세션 보관 정책을 사용할 수 없습니다.' });
@@ -776,8 +780,6 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       }
       const compactionMatch = path.match(/^\/api\/sessions\/([^/]+)\/compaction(\/cancel)?$/);
       if (compactionMatch && (req.method === 'POST' || (req.method === 'GET' && !compactionMatch[2]))) {
-        // The owner's button: an agent's turn or the master never starts or stops one.
-        if (req.method === 'POST' && (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()])) return json(res, 403, { error: '세션 압축은 소유자만 할 수 있습니다.' });
         if (!backend.compaction) return json(res, 503, { error: '세션을 압축할 수 없습니다.' });
         if (req.method === 'GET') return json(res, 200, { compaction: await backend.compaction('get', compactionMatch[1]) });
         if (Object.keys(await readJson(req)).length) return json(res, 400, { error: '압축 요청의 본문은 비워 두세요.' });

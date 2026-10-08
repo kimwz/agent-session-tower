@@ -44,19 +44,22 @@ export function transcriptLines(message: ChatMessage): string[] {
   return lines;
 }
 
-/** The lines in order, cut between lines into parts of at most `maxBytes`. */
-export function transcriptParts(messages: readonly ChatMessage[], maxBytes = PART_BYTES): string[] {
+/** Lines in order, cut between lines into parts of at most `maxBytes`. */
+export function packParts(lines: readonly string[], maxBytes = PART_BYTES): string[] {
   const parts: string[] = [];
   let current: string[] = [];
   let size = 0;
-  for (const message of messages) {
-    for (const line of transcriptLines(message)) {
-      const bytes = Buffer.byteLength(line) + 2;
-      if (current.length && size + bytes > maxBytes) { parts.push(current.join('\n\n')); current = []; size = 0; }
-      current.push(line);
-      size += bytes;
-    }
+  for (const line of lines) {
+    const bytes = Buffer.byteLength(line) + 2;
+    if (current.length && size + bytes > maxBytes) { parts.push(current.join('\n\n')); current = []; size = 0; }
+    current.push(line);
+    size += bytes;
   }
   if (current.length) parts.push(current.join('\n\n'));
   return parts;
+}
+
+/** The messages' lines in order, cut into parts (see `packParts`). */
+export function transcriptParts(messages: readonly ChatMessage[], maxBytes = PART_BYTES): string[] {
+  return packParts(messages.flatMap(transcriptLines), maxBytes);
 }

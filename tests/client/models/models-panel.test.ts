@@ -23,6 +23,12 @@ test('a model the list does not have is shown in a text field beside the list', 
   assert.match(html, /목록에 없는 모델/);
 });
 
+test("a role's verified initial model is not flagged although the list names only aliases", () => {
+  const html = renderToStaticMarkup(createElement(PickRow, { provider: 'claude', labelled: false, pick: { model: 'claude-haiku-5-5' }, health: claude, off: true, disabled: false, verified: 'claude-haiku-5-5', onChange() {} }));
+  assert.match(html, /<input[^>]*value="claude-haiku-5-5"/);
+  assert.doesNotMatch(html, /목록에 없는 모델/);
+});
+
 test('the settings problem is shown, and nothing when the computer sends none', () => {
   setLanguage('ko');
   const problem = '모델 설정 파일(models.json)을 읽을 수 없어 기본값을 쓰고 있습니다. 원래 파일은 그대로 두고 /state/models.json.unreadable-0123456789abcdef에 복사해 두었습니다. 저장하면 이 화면의 설정으로 바뀝니다.';
