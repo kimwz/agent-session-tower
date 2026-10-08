@@ -19,3 +19,13 @@ test('settings saved before reading speed existed read at the speed as made, and
   await again.start();
   assert.equal(again.current().voice.playbackRate, 1.6);
 });
+
+test('heartbeat defaults migrate old settings and validated partial edits preserve voice and binding', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-heartbeat-settings-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, 'settings.json'), JSON.stringify({ voice: { playbackRate: 1.4 } }));
+  const store = new MasterSettingsStore(dir); await store.start(); assert.equal(store.current().heartbeat.intervalMinutes, 30); assert.equal(store.current().heartbeat.enabled, true);
+  await store.update({ heartbeat: { enabled: false, intervalMinutes: 45, prompt: 'Inspect actual recent task evidence' } });
+  assert.equal(store.current().voice.playbackRate, 1.4); assert.equal(store.current().heartbeat.enabled, false);
+  for (const invalid of [{ intervalMinutes: 0 }, { intervalMinutes: 1.2 }, { prompt: '' }, { unknown: true }, { enabled: 'yes' }]) await assert.rejects(store.update({ heartbeat: invalid }), /Heartbeat/);
+  const again = new MasterSettingsStore(dir); await again.start(); assert.deepEqual(again.current().heartbeat, store.current().heartbeat);
+});

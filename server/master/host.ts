@@ -10,6 +10,7 @@ import { LiveState } from '../tower-tools/live-state.js';
 import { lookupsSupported, ReadDatabase } from '../tower-tools/read-db.js';
 import { masterPaths } from './paths.js';
 import { MasterRoom } from './room.js';
+import { MasterHeartbeat } from './heartbeat.js';
 import { MasterSession } from './session.js';
 import { MasterSettingsStore } from './settings.js';
 import { MASTER_TOOLS, MasterTools } from './tools.js';
@@ -57,6 +58,7 @@ export async function startMasterHost(options: MasterHostOptions) {
   const live = new LiveState((path, signal) => tower.stream(path, signal));
   const readDb = lookupsSupported() ? new ReadDatabase() : undefined;
   let session: MasterSession | undefined;
+  let heartbeat: MasterHeartbeat | undefined;
   let tools: MasterTools | undefined;
   let voice: MasterVoice | undefined;
   let lastRequest = Date.now();
@@ -80,6 +82,7 @@ export async function startMasterHost(options: MasterHostOptions) {
       ...(binding ? { session: { id: binding.sessionId, provider: binding.provider, ...(shown ? { status: shown.status, title: shown.customTitle || shown.title } : {}) } } : {}),
       voiceConfigured, ...(voiceConfigured ? { voiceKeyHint: settings.voiceKeyHint() } : {}),
       activeTasks: session?.activeTasks() ?? 0,
+      ...(heartbeat ? { heartbeat: heartbeat.status() } : {}),
       ...(session?.failedReports() ? { failedReports: session.failedReports() } : {}),
       ...(session?.stateProblem() ? { followState: session.stateProblem() } : {}),
       ...(voice ? { voice: voice.status() } : {}),
@@ -215,7 +218,7 @@ export async function startMasterHost(options: MasterHostOptions) {
     await new Promise<void>(resolve => server.close(() => resolve()));
     await unlink(paths.socket).catch(() => {});
     await unlink(paths.token).catch(() => {});
-    try { await voice?.close(); await session?.close(); await room.flush(); } finally {
+    try { await heartbeat?.close(); await voice?.close(); await session?.close(); await room.flush(); } finally {
       live.close();
       readDb?.close();
       await release();
@@ -235,6 +238,8 @@ export async function startMasterHost(options: MasterHostOptions) {
     session.setVoice(voice);
     await voice.start();
     await session.start();
+    heartbeat = new MasterHeartbeat({ stateDir: paths.stateDir, dataDir: paths.data, settings, master: session, tower, onChange: broadcastOverview });
+    await heartbeat.start();
     await unlink(paths.socket).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
     await unlink(paths.token).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(paths.socket, () => { server.off('error', reject); resolve(); }); });

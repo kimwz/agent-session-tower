@@ -296,7 +296,7 @@ async function main() {
       }
     }
   };
-  const admit = (context?: RequestContext) => ({ origin: context?.origin ?? OWNER, ...(context?.callerCapability ? { callerCapability: context.callerCapability } : {}), ...(context?.requestId ? { requestId: context.requestId } : {}), ...(context?.origin ? {} : { authored: true }) });
+  const admit = (context?: RequestContext) => ({ ...(context?.heartbeat ? { heartbeat: context.heartbeat } : {}), origin: context?.origin ?? OWNER, ...(context?.callerCapability ? { callerCapability: context.callerCapability } : {}), ...(context?.requestId ? { requestId: context.requestId } : {}), ...(context?.origin ? {} : { authored: true }) });
   // The worker has indexed native sessions before it answers, so the session list is complete here.
   const history = nativeHistory(runs);
   const listeners = new Set<() => void>();

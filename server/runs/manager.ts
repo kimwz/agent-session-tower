@@ -1,3 +1,4 @@
+import { MASTER_HEARTBEAT_MARK, type HeartbeatAdmission } from '../../shared/master.js';
 import { resolveRetentionLineage } from '../sessions/retention/ancestry.js';
 import type { RetentionMember } from '../../shared/retention.js';
 import { MAX_ATTACHMENTS } from '../../shared/attachments.js';
@@ -92,6 +93,7 @@ interface RunnerOptions {
 }
 /** Internal admission data is never accepted from the public message endpoint. */
 export interface RunAdmission {
+  heartbeat?: HeartbeatAdmission;
   autoPromptId?: string;
   validate?: () => void;
   /** Recorded on the run; absent means unknown, which never gains owner privileges. */
@@ -544,6 +546,18 @@ export class RunManager extends EventEmitter {
     if ([...this.runs.values()].some(run => run.autoPromptId === id)) throw new RunError('This Auto Prompt already has an execution task.', 'conflict');
   }
 
+  private validateHeartbeat(sessionId: string, prompt: string, guard: HeartbeatAdmission): void {
+    const session = this.getSession(sessionId);
+    const turns = this.list().filter(run => run.sessionId === sessionId);
+    const latest = [...turns].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+    if (!session || !guard.sessionIds.includes(sessionId) || !prompt.startsWith(MASTER_HEARTBEAT_MARK) || !this.masterSession(session) || this.isWorking(session) || this.reservedSessions.has(sessionId)
+      || turns.some(run => run.status === 'running' || run.status === 'queued' || run.approvals?.length)
+      || session.updatedAt !== guard.updatedAt || session.lastRequestAt !== guard.lastRequestAt || latest?.id !== guard.latestRunId
+      || latest?.ownerStopped || turns.some(run => run.prompt.includes(`(check ${guard.checkId})`))) {
+      throw notAdmitted(new RunError('Heartbeat preconditions changed; nothing was submitted.', 'conflict'));
+    }
+  }
+
   async enqueue(sessionId: string, prompt: string, request: MessageAttachments = {}, internal: RunAdmission = {}): Promise<Run> {
     const incoming = Array.isArray(request.attachmentIds) ? request.attachmentIds.filter(id => typeof id === 'string') : [];
     this.incomingAttachments.add(incoming);
@@ -565,7 +579,8 @@ export class RunManager extends EventEmitter {
       try {
         // Maintenance may have started while executable/attachment preparation yielded.
         while (this.retentionHeld(sessionId) || this.coldSessionIds.has(this.nativeSessionId(sessionId))) await this.awaitRetentionAdmission(sessionId);
-        this.assertRetentionAdmission(sessionId); this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.(); }
+        this.assertRetentionAdmission(sessionId); this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.();
+        if (internal.heartbeat) this.validateHeartbeat(sessionId, prompt, internal.heartbeat); }
       catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
       if (internal.untrustedInput) {
         // Recorded before the run exists: once external content is queued, the session stays marked.

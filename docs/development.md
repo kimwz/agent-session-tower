@@ -120,6 +120,16 @@ Project editor/terminal controls open a resizable workspace overlay on the same 
 
 `node-pty` uses native bindings. Platforms without a matching prebuild need a C++ build toolchain and Python during dependency installation. Standalone builds embed the matching bindings and extract them into a private temporary directory when the first terminal starts. The PTY smoke test uses `/bin/sh` with an isolated HOME and never launches a native agent provider.
 
+## Master heartbeat
+
+`server/master/heartbeat.ts` owns the master's periodic inspection and private `master/heartbeat.json` ledger. It runs inside the singleton master host, independently of the web connection. The existing master follower remains responsible for ordinary delegated-result delivery. Heartbeat uses the same followed work, with selected current progress and bounded transcripts, and calls `runAutoPromptModel` without tools or persistent native sessions. It does not diagnose a stall from `working` or elapsed time alone.
+
+Master settings contain enablement, interval and inspection guidance. Models' `master.heartbeat` role uses `provider: "follow"` to dynamically inherit the **whole** `master.session` role; this role's stored provider picks are inactive while following. Choosing an explicit provider uses its dedicated pick; empty model/effort means the CLI's default. This does not copy the model selected in the current master conversation.
+
+Checks and sending intents are saved before their effects. Overlapping ticks join one inspection, restart abandons interrupted checks without catch-up, and settings changes invalidate an in-flight result. Model failures remain internal until the next regular interval. No-op changes only the internal inspection status. Action recommendations are evidence-bound data sent once to the existing master, which assesses them under its existing authority and delegation paths. The settings UI shows recent inspection status and action audit; no-op produces no chat, voice or notification.
+
+The authenticated master heartbeat header is internal admission data, never a public message-body privilege. The execution worker rechecks master idleness and the native/run watermark immediately before inserting an action run, marks its origin as agent input, and refuses stale or duplicate checks. A worker without `heartbeatAdmission` support refuses these submissions. Uncertain delivery is not automatically resent, and heartbeat input never releases an owner-stop hold or acts as owner approval. Regression fixtures live in `tests/master/heartbeat.test.ts` and the relevant master, model, HTTP and runner tests.
+
 ## Releasing
 
 Every change reaches `main` through a reviewed pull request. A pull request that changes what Tower does carries its release; one that changes only documentation, agent instructions, tests, or CI has none and ships with the next release.

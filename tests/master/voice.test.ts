@@ -700,7 +700,7 @@ test('voice records from GPT-Live calls become dollars once, counted and not yet
   const restarted = new MasterSettingsStore(h.dir);
   await restarted.start();
   const settings = restarted.current();
-  assert.deepEqual(Object.keys(settings), ['voice'], 'what the API master kept is dropped');
+  assert.deepEqual(Object.keys(settings).sort(), ['heartbeat', 'voice'], 'what the API master kept is dropped');
   assert.equal(settings.voice.model, 'eleven_v4_turbo');
   assert.equal(h.voice.status().today.dollars, Math.round(95 * (0.05 / 60) * 100) / 100);
   const saved = JSON.parse(await readFile(join(h.dir, 'voice.json'), 'utf8')) as Record<string, unknown>;

@@ -1,3 +1,4 @@
+import type { HeartbeatAdmission } from '../../shared/master.js';
 import { newWorkerSession } from '../models/worker.js';
 import { latestNativeUserMessage } from './native-user-message.js';
 import { installLaunchShims, launchMarksDir } from '../sessions/launch-marks.js';
@@ -190,9 +191,12 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   const admit = (value: unknown): RunAdmission => {
     const admitted = admission(value);
     const token = record(value).callerCapability;
-    if (token === undefined) return admitted;
+    const heartbeatValidate = () => {
+      if (admitted.heartbeat && (!options.api || options.api.heartbeatBlocked(admitted.heartbeat.sessionIds))) throw new TowerError('conflict', 'Heartbeat permission preconditions changed.', { disposition: 'not-admitted' });
+    };
+    if (token === undefined) return { ...admitted, ...(admitted.heartbeat ? { validate: heartbeatValidate } : {}) };
     if (typeof token !== 'string' || admitted.origin?.controllerId) throw new TowerError('forbidden', 'Invalid local calling-turn credential.');
-    const validate = () => { callerDelegation(capabilities, findRun, token); };
+    const validate = () => { heartbeatValidate(); callerDelegation(capabilities, findRun, token); };
     return { ...admitted, delegation: callerDelegation(capabilities, findRun, token), validate };
   };
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
@@ -583,11 +587,22 @@ async function sessionHistory(sessions: SessionService, [nativeId, before, limit
  * turn's agent asked for. Trigger and Slack origins are assigned inside the worker, never over RPC.
  */
 function admission(value: unknown): RunAdmission {
-  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown; requestId?: unknown } : {};
+  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown; requestId?: unknown; heartbeat?: unknown } : {};
   const origin = input.origin === undefined ? { kind: 'owner' as const } : parseRunOrigin(input.origin);
   if (!origin || (origin.kind !== 'owner' && origin.kind !== 'agent')) throw new TowerError('invalid', 'The web connection can only admit owner or agent work.');
   if (input.requestId !== undefined && (typeof input.requestId !== 'string' || !/^[a-f\d-]{36}$/i.test(input.requestId))) throw new TowerError('invalid', 'Invalid request ID.');
-  return { ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin,
+  let heartbeat: HeartbeatAdmission | undefined;
+  if (input.heartbeat !== undefined) {
+    const value = record(input.heartbeat);
+    if (origin.kind !== 'agent' || origin.controllerId || Object.keys(value).some(key => !['checkId', 'sessionIds', 'latestRunId', 'updatedAt', 'lastRequestAt'].includes(key))
+      || !Array.isArray(value.sessionIds) || !value.sessionIds.length || value.sessionIds.length > 7 || value.sessionIds.some(id => typeof id !== 'string' || id.length > 200)
+      || typeof value.checkId !== 'string' || !/^[a-f\d-]{36}$/i.test(value.checkId)
+      || typeof value.updatedAt !== 'string' || !Number.isFinite(Date.parse(value.updatedAt))
+      || (value.latestRunId !== undefined && (typeof value.latestRunId !== 'string' || value.latestRunId.length > 200))
+      || (value.lastRequestAt !== undefined && (typeof value.lastRequestAt !== 'string' || !Number.isFinite(Date.parse(value.lastRequestAt))))) throw new TowerError('invalid', 'Invalid heartbeat admission.');
+    heartbeat = value as unknown as HeartbeatAdmission;
+  }
+  return { ...(heartbeat ? { heartbeat } : {}), ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin,
     ...(typeof input.requestId === 'string' ? { requestId: input.requestId.toLowerCase() } : {}) };
 }
 

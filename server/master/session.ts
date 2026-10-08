@@ -230,6 +230,11 @@ export class MasterSession {
 
   setVoice(voice: VoiceSide): void { this.voice = voice; }
 
+  /** A detached read of tracked work, shared with the heartbeat inspector. */
+  heartbeatTasks(): Followed[] { return structuredClone(this.file.followed.filter(item => item.kind === 'delegated')); }
+  heartbeatStopped(): boolean { return Boolean(this.file.stoppedAt) || !this.persist; }
+  async heartbeatAccepted(run: Run): Promise<void> { this.remember(run.id); await this.save(); }
+
   binding(): MasterBinding | undefined { return this.options.settings.current().session; }
 
   /** Work handed out and not reported yet. */

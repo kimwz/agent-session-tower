@@ -64,6 +64,12 @@ export class TowerApi {
   private requests?: Map<string, RequestRecord>;
   private writes: Promise<unknown> = Promise.resolve();
   constructor(private readonly services: TowerServices) {}
+  /** Synchronous final heartbeat admission check against the permission domain's current state. */
+  heartbeatBlocked(sessionIds: readonly string[]): boolean {
+    const overview = this.permissions().overview();
+    return Boolean(overview.lost) || overview.requests.some(request => sessionIds.includes(request.sessionId)
+      && (request.status === 'pending' || (request.status === 'denied' && request.decidedBy === 'owner')));
+  }
 
   /**
    * An agent names each creating call with a `requestKey`. The same key with the same input returns the

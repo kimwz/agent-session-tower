@@ -81,15 +81,15 @@ export function ModelsPanel({ token, providers: ownProviders, computers }: { tok
   </SettingsPane>;
 }
 
-function RoleRow({ role, setting, providers, disabled, onChange }: { role: BuiltinRole; setting: RoleSetting; providers: ProviderHealth[]; disabled: boolean; onChange: (setting: RoleSetting) => void }) {
+export function RoleRow({ role, setting, providers, disabled, onChange }: { role: BuiltinRole; setting: RoleSetting; providers: ProviderHealth[]; disabled: boolean; onChange: (setting: RoleSetting) => void }) {
   const { t } = useI18n();
   const initial = initialModelSettings().roles[role.id as keyof ModelSettings['roles']];
   const changed = JSON.stringify(initial) !== JSON.stringify(setting);
   return <div className="models-role">
     <div className="models-role-text"><strong>{t(role.label)}</strong><small>{t(role.description)}</small><code>{role.id}</code></div>
     <div className="models-role-controls">
-      <ProviderSelect value={setting.provider} follow={!!role.follow} providers={role.providers} disabled={disabled} onChange={provider => onChange({ ...setting, provider })} />
-      {(setting.provider === 'follow' ? ['claude', 'codex'] as const : [setting.provider]).map(provider => <PickRow key={provider} provider={provider} labelled={setting.provider === 'follow'}
+      <ProviderSelect value={setting.provider} follow={!!role.follow} inheritMaster={role.id === 'master.heartbeat'} providers={role.providers} disabled={disabled} onChange={provider => onChange({ ...setting, provider })} />
+      {(setting.provider === 'follow' ? role.id === 'master.heartbeat' ? [] : ['claude', 'codex'] as const : [setting.provider]).map(provider => <PickRow key={provider} provider={provider} labelled={setting.provider === 'follow'}
         pick={setting[provider]} health={providers.find(item => item.provider === provider)} off={role.kind === 'auto' && provider === 'claude'} disabled={disabled}
         verified={role.verifiedClaudeModel && provider === 'claude' ? initial.claude.model : undefined} onChange={pick => onChange({ ...setting, [provider]: pick })} />)}
       {changed && <button type="button" className="icon-button" title={t('초기값으로')} aria-label={t('초기값으로')} disabled={disabled} onClick={() => onChange(structuredClone(initial))}><RotateCcw size={14} /></button>}
@@ -115,10 +115,10 @@ function CustomRow({ role, providers, disabled, onChange }: { role: CustomRole; 
   </div>;
 }
 
-function ProviderSelect({ value, follow, providers = ['claude', 'codex'], disabled, onChange }: { value: RoleSetting['provider']; follow: boolean; providers?: readonly ModelProvider[]; disabled: boolean; onChange: (provider: RoleSetting['provider']) => void }) {
+function ProviderSelect({ value, follow, inheritMaster, providers = ['claude', 'codex'], disabled, onChange }: { value: RoleSetting['provider']; follow: boolean; inheritMaster?: boolean; providers?: readonly ModelProvider[]; disabled: boolean; onChange: (provider: RoleSetting['provider']) => void }) {
   const { t } = useI18n();
   return <select className="model-picker" value={value} disabled={disabled} aria-label={t('제공자')} onChange={event => onChange(event.target.value as RoleSetting['provider'])}>
-    {follow && <option value="follow">{t('작업과 같은 제공자')}</option>}
+    {follow && <option value="follow">{t(inheritMaster ? '마스터 모델 설정 전체 따라가기' : '작업과 같은 제공자')}</option>}
     {providers.map(provider => <option key={provider} value={provider}>{PROVIDER_LABEL[provider]}</option>)}
   </select>;
 }

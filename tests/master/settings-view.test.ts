@@ -22,6 +22,20 @@ test('followed work that could not be read is shown, in either language; an olde
   assert.match(render({ followState: 'not-saved' }), /role="alert"[^>]*>The master’s record of followed work could not be read and was left as it is/);
 });
 
+test('heartbeat settings expose the 30-minute default and separate internal no-op from action audit', () => {
+  setLanguage('ko');
+  const html = render({ heartbeat: { nextDueAt: '2026-10-08T13:00:00Z', lastCheck: { id: 'check-noop', at: '2026-10-08T12:30:00Z', state: 'noop', taskIds: ['task-a'] }, actions: [] } });
+  assert.match(html, /heartbeat 활성화/);
+  assert.match(html, /type="checkbox"[^>]*checked/);
+  assert.match(html, /min="1" max="1440" step="1" value="30"/);
+  assert.match(html, /점검 지시 프롬프트/);
+  assert.match(html.replace(/<[^>]*>/g, ''), /최근 내부 점검: 조치 없음/);
+  assert.match(html, /실제 조치 감사 기록/);
+  assert.match(html, /master\.heartbeat/);
+  const action = render({ heartbeat: { actions: [{ checkId: 'check-action', at: '2026-10-08T12:30:00Z', taskIds: ['task-a'], cause: 'Repeated review', evidence: 'same result twice', recommendation: 'Use existing hosted CI', delivery: 'sent', runId: 'run-action' }] } });
+  for (const text of ['Repeated review', 'same result twice', 'Use existing hosted CI', 'run-action', 'task-a']) assert.ok(action.includes(text));
+});
+
 test('the reading models are offered with Eleven v4 Turbo first and chosen by default, in either language', () => {
   setLanguage('ko');
   const options = [...render().matchAll(/<option value="([^"]+)"[^>]*>([^<]+)<\/option>/g)].map(match => [match[1], match[2]]);
