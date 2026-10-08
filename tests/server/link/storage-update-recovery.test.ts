@@ -34,7 +34,9 @@ async function stateDir(t: TestContext) {
 const at = '2026-10-08T00:00:00.000Z';
 const record = (version: string, previous: string, stage: SavedUpdate['stage'], extra: Partial<SavedUpdate> = {}): SavedUpdate => ({ version, previous, stage, startedAt: at, updatedAt: at, ...extra });
 const save = (state: string, value: unknown) => writeFile(updatePaths(state).status, typeof value === 'string' ? value : JSON.stringify(value));
-const evaluate = (state: string, version: string, extra: Partial<StorageUpdateInput> = {}) => evaluateStorageUpdate({ stateDir: state, build: runningBuild(version), managed: true, ...extra });
+/** A managed start whose preflight sees the database these worlds hold (B's storage). */
+const evaluate = (state: string, version: string, extra: Partial<StorageUpdateInput> = {}) =>
+  evaluateStorageUpdate({ stateDir: state, build: runningBuild(version, { state: { database: 'present', sidecars: [], identity: 'created', recovery: { state: 'clear' } } }), managed: true, ...extra });
 const sha = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');
 const onDisk = (state: string): RollbackRecord | undefined => existsSync(storageUpdatePaths(state).rollback) ? JSON.parse(readFileSync(storageUpdatePaths(state).rollback, 'utf8')) : undefined;
 const pointer = (state: string) => readlinkSync(runtimePaths(state).current);

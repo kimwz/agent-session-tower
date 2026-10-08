@@ -142,7 +142,10 @@ test('the JSON-only updater asked for B goes back on B\'s 503 and leaves the sta
   const a = runningBuild(A);
   await recordPreparationEvidence(state, { context: { identity: a.preflight.identity!, manifest: a.manifest! }, preflight: a.preflight, prepared: preparedStorage(), gate: openGate });
   assert.equal((await readPreparationEvidence(state, 'retention')).state, 'present');
-  assert.equal((await evaluateStorageUpdate({ stateDir: state, build: a, managed: true })).verdict, 'ready', 'A was kept and runs');
+  // From here the state directory records the storage A prepared: a start is ready only where its preflight sees it.
+  const seenDatabase = { database: 'present' as const, sidecars: [], identity: 'created' as const, recovery: { state: 'clear' as const } };
+  assert.equal((await evaluateStorageUpdate({ stateDir: state, build: runningBuild(A, { state: seenDatabase }), managed: true })).verdict, 'ready', 'A was kept and runs');
+  assert.equal((await evaluateStorageUpdate({ stateDir: state, build: a, managed: true })).code, 'known-storage-missing', 'not where its database is missing');
 
   // 3. From A, B is asked for again (A's updater checks B's contract first), verified while its import waits, and kept.
   const answered = web.answers.length;
@@ -153,7 +156,7 @@ test('the JSON-only updater asked for B goes back on B\'s 503 and leaves the sta
   const verifying = web.answers.slice(answered).filter(answer => answer.version === B);
   assert.ok(verifying.length > 0 && verifying.every(answer => answer.status === 200 && answer.verdict === 'update-held' && answer.importAllowed === false), 'B answers 200 and holds its import while it is verified');
   t.diagnostic(`health answers: B refused ${fromB.length}×503, A ${web.answers.filter(answer => answer.version === A).length}×200, B verified ${verifying.length}×200 update-held`);
-  const after = await evaluateStorageUpdate({ stateDir: state, build: runningBuild(B), managed: true });
+  const after = await evaluateStorageUpdate({ stateDir: state, build: runningBuild(B, { state: seenDatabase }), managed: true });
   assert.equal(after.verdict, 'ready');
   assert.equal(after.code, 'service-update-done');
   assert.equal(after.importAllowed, true, 'once kept, with no hold or helper left, B may import');

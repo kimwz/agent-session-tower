@@ -8,7 +8,8 @@ import { promisify } from 'node:util';
 import type { UpdateFailure, UpdateStage, UpdateStatus } from '../../shared/link.js';
 import { writePrivateJson } from '../stores/private-json.js';
 import { processStart } from '../instance/process-start.js';
-import { HoldError, removeHold, writeHold } from './storage-hold.js';
+import { HoldError, observeHold, removeHold, writeHold, type HoldGeneration } from './storage-hold.js';
+import { TransitionLockError } from './storage-transition-lock.js';
 import { currentVersion, entryPoint, installVersion, newerVersion, pointUpdate, RELEASE_WAIT_MS, restartService, runtimePaths, versionDirectory } from './service.js';
 import {
   alive, pinnedVersion, preparationCheck, probeInstalledArtifact, readCurrentPointer, readHelperLock, readHold, readRollbackRecord, readUpdateRecord, rollbackActive, storageKeptVersions,
@@ -53,20 +54,45 @@ export function publicUpdate({ controllers: _, ...status }: SavedUpdate): Update
 /** The error last logged for each hold that could not be read, so a poll every second logs it once. */
 const unreadableHolds = new Map<string, string>();
 
+/** What last kept an expired hold in place, per hold, so a poll every second logs it once. */
+const keptHolds = new Map<string, string>();
+const keep = (hold: string, reason: string) => {
+  if (keptHolds.get(hold) !== reason) console.error(`The update hold is kept: ${reason}`);
+  keptHolds.set(hold, reason);
+  return true;
+};
+
 /**
  * While an update is being tried, the new web must not hand the worker over: until the update is kept, going back
- * to the previous version has to find the previous worker. A hold nobody released in time holds nothing. Rejects
- * when the hold or the helper lock cannot be read: whether to hold cannot be told then, and nothing is removed.
+ * to the previous version has to find the previous worker. A hold nobody released in time holds nothing: once it is
+ * that old and no helper can be running (the helper lock gone or absent; one that runs, names no process or cannot be
+ * read keeps holding, whichever release wrote it), the very generation judged old is removed, in the transition turn.
+ * A hold refreshed or replaced meanwhile is another generation: it stays, and holds. Rejects when the hold or the
+ * helper lock cannot be read, or the turn cannot be taken: whether to hold cannot be told then, and nothing is removed.
+ * The web calls this while it holds the state directory's instance lock, so no other web (a JSON-only one, which
+ * removes holds without the turn, included) runs on it meanwhile.
  */
 export async function handoffHeld(stateDir: string, now = Date.now()): Promise<boolean> {
   const { hold } = updatePaths(stateDir);
-  let held: boolean | undefined;
+  let present = false;
+  /** The generation judged expired: the only one removed. */
+  let expired: HoldGeneration | undefined;
+  let helper: Awaited<ReturnType<typeof readHelperLock>> | undefined;
   try {
     // Read as it is: a link (even one to nowhere) or anything but a file is not a missing hold.
-    const read = await readHold(stateDir, now);
-    if (read.state === 'unreadable') throw read.error;
+    const found = await readHold(stateDir, now);
+    if (found.state === 'unreadable') throw found.error;
     // No hold: nothing to remove, and one a helper writes meanwhile must stay.
-    held = read.state === 'present' ? read.ageMs < HOLD_MS || await helperRunning(stateDir) : undefined;
+    present = found.state === 'present';
+    if (found.state === 'present' && found.ageMs >= HOLD_MS) {
+      const observed = await observeHold(stateDir, now);
+      present = observed.state === 'present';
+      if (observed.state === 'present' && observed.ageMs >= HOLD_MS) {
+        expired = observed.generation;
+        helper = await readHelperLock(stateDir, startedAt);
+        if (helper.state === 'unreadable') throw helper.error;
+      }
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (unreadableHolds.get(hold) !== message) console.error(`The update hold could not be read (${message}); the worker is not handed over until it can.`);
@@ -74,10 +100,14 @@ export async function handoffHeld(stateDir: string, now = Date.now()): Promise<b
     throw error;
   }
   if (unreadableHolds.delete(hold)) console.log('The update hold can be read again.');
-  if (held === undefined) return false;
-  if (held) return true;
-  // Only the plain file judged old goes: whatever stands there instead is left, and holds.
-  try { await removeHold(stateDir, { expired: true }); } catch (error) { if (error instanceof HoldError) return true; throw error; }
+  if (!present) return false;
+  if (!expired || !helper || helper.state === 'running') return true;
+  if (helper.state === 'invalid') return keep(hold, `${helper.reason} A helper may still own the hold; the owner inspects ${updatePaths(stateDir).lock}.`);
+  try { await removeHold(stateDir, { generation: expired }); } catch (error) {
+    if (error instanceof HoldError) return keep(hold, error.message);
+    throw error;
+  }
+  keptHolds.delete(hold);
   return false;
 }
 
@@ -227,8 +257,9 @@ export class Updates {
    */
   async recover(): Promise<void> {
     const { stateDir, version } = this.options;
-    const status = await readUpdateStatus(stateDir);
-    if (!this.options.managed || !status) return;
+    const read = await readUpdateRecord(stateDir);
+    if (!this.options.managed || (read.state !== 'active' && read.state !== 'terminal')) return;
+    const status = read.update;
     const resumes = updateActive(status) && status.version === version;
     const running = await helperRunning(stateDir).catch(async error => {
       // Whether a helper still runs cannot be told: hold the worker, but start no helper and settle nothing.
@@ -243,8 +274,14 @@ export class Updates {
       this.spawn(version, true);
       return;
     }
-    // The previous version runs again: the hold its update left is not needed by it (anything else there is left).
-    if (status.previous === version) await removeHold(stateDir, { version: status.version }).catch(error => { if (!(error instanceof HoldError)) throw error; console.error(error.message); });
+    // The previous version runs again: the hold its update left is not needed by it. Anything else there is left, and
+    // so is the hold once another update is recorded than the one judged here (it may be that update's own).
+    if (status.previous === version) {
+      await removeHold(stateDir, { version: status.version, update: read.sha256 }).catch(error => {
+        if (!(error instanceof HoldError) && !(error instanceof TransitionLockError)) throw error;
+        console.error(`The update hold is kept: ${error.message}`);
+      });
+    }
     if (!updateActive(status)) return;
     const at = new Date(this.options.now?.() ?? Date.now()).toISOString();
     // Going back had brought the previous version up: the update failed for the reason already found.
@@ -377,8 +414,18 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
     // launchd starts the service again by itself when it stops unexpectedly, so a restart command that fails
     // (as it can while the service is failing to start) is not the end: whether it comes up decides.
     const restart = () => steps.restart().catch(error => steps.log(`restart: ${(error as Error).message.split('\n')[0]}`));
-    /** Removes this update's own hold; anything else there is left as it is (and keeps holding). */
-    const release = () => removeHold(stateDir, { version }).catch(error => { if (!(error instanceof HoldError)) throw error; steps.log(`hold: ${error.message}`); return false; });
+    /**
+     * Removes this update's own hold, in the transition turn; anything else there is left as it is (and keeps holding).
+     * A release that did not happen is not taken for one: the update record says why (`hold`), for the owner.
+     */
+    let kept: SavedUpdate['hold'];
+    const release = async () => {
+      try { await removeHold(stateDir, { version }); kept = undefined; } catch (error) {
+        if (!(error instanceof HoldError) && !(error instanceof TransitionLockError)) throw error;
+        steps.log(`hold: ${error.message}`);
+        kept = { code: error.code, reason: error.message.slice(0, 2000), at: new Date(steps.now()).toISOString() };
+      }
+    };
     // The hold stays until the previous version answers again: until then the new web may still be running, and it
     // must not hand the worker over. A previous version that never comes back releases it itself when it starts.
     const back = async (code: UpdateFailure, failedStage: UpdateStage) => {
@@ -388,7 +435,7 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
         await restart();
         const up = await wait(async () => (await steps.health())?.version === previous, START_MS);
         if (up) await release();
-        await set('failed', up ? { code, failedStage } : { code: 'rollback-failed', failedStage });
+        await set('failed', up ? { code, failedStage, hold: kept } : { code: 'rollback-failed', failedStage });
       } catch (error) {
         steps.log(`rolling back failed: ${(error as Error).message}`);
         await set('failed', { code: 'rollback-failed', failedStage });
@@ -419,6 +466,7 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
       // Kept before the hold goes: stopped in between, the hold only runs out, and nothing is checked again unheld.
       await set('done');
       await release();
+      if (kept) await set('done', { hold: kept });
       return status;
     };
     // Started again by the new version after the helper was stopped: carry on from where it was.
@@ -427,6 +475,7 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
       if (status.stage === 'switching' || status.stage === 'verifying') return await verify(undefined, status.controllers ?? []);
       await set('failed', { code: 'interrupted', failedStage: status.stage });
       await release();
+      if (kept) await set('failed', { hold: kept });
       return status;
     }
     await set('installing');
@@ -468,13 +517,13 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
       // nothing switches: the previous version keeps running untouched.
       steps.log((error as Error).message);
       if (!(error instanceof HoldError)) await release();
-      await set('failed', { code: 'switch-failed', failedStage: 'switching' });
+      await set('failed', { code: 'switch-failed', failedStage: 'switching', hold: kept });
       return status;
     }
     try { await steps.point(version); } catch (error) {
       steps.log((error as Error).message);
       // Nothing changed if the service still starts the previous version: it keeps running untouched.
-      if (await currentVersion(stateDir) === previous) { await release(); await set('failed', { code: 'switch-failed', failedStage: 'switching' }); return status; }
+      if (await currentVersion(stateDir) === previous) { await release(); await set('failed', { code: 'switch-failed', failedStage: 'switching', hold: kept }); return status; }
       return await back('switch-failed', 'switching');
     }
     await restart();

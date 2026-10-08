@@ -1,5 +1,6 @@
+import { createHash, randomUUID } from 'node:crypto';
 import type { RollbackFence, RollbackPorts, ServingProof } from '../../../../server/link/storage-update.js';
-import type { StorageInspection } from '../../../../server/storage/contract.js';
+import type { AppliedMigration, ReceiptLookup, ReceiptRecord, StorageInspection } from '../../../../server/storage/contract.js';
 import { CORE_MIGRATIONS, migrationChecksum } from '../../../../server/storage/schema.js';
 import { B, identityOf, retentionA } from './storage-builds.js';
 
@@ -13,6 +14,7 @@ import { B, identityOf, retentionA } from './storage-builds.js';
 
 export const STORAGE_ID = '00000000-0000-4000-8000-000000000000';
 const at = '2026-10-08T00:00:00.000Z';
+const hash = (text: string) => createHash('sha256').update(text).digest('hex');
 export const appliedFor = (scopes: Array<[string, string[]]>, storageId = STORAGE_ID): StorageInspection['schema'] => ({
   kind: 'current', storageId,
   applied: scopes.flatMap(([scope, sqls]) => sqls.map((sql, index) => ({ scope, version: index + 1, checksum: migrationChecksum(scope, { version: index + 1, sql }), appliedAt: at, appVersion: B, sourceHash: 'b'.repeat(64), ownerEpoch: 1 }))),
@@ -38,6 +40,11 @@ export interface WorldOptions {
   handoff?: 'take' | 'refuse' | 'lose' | 'before' | 'pending' | 'ignore';
   /** The target claims an existing storage at once (default), or only once claim() is called. */
   claim?: 'at-once' | 'later';
+  /**
+   * The command ID the serving proof looks the bootstrap receipt up by (the producer's rollbackBootstrapCommandId), as
+   * W0I asks StorageClient.receipt() whenever the storage is not empty. Without it the proof carries no receipt.
+   */
+  bootstrapId?: (fence: RollbackFence) => string;
 }
 
 export function rollbackWorld(options: WorldOptions = {}) {
@@ -59,15 +66,25 @@ export function rollbackWorld(options: WorldOptions = {}) {
     gate: !empty,
     prepareRefused: false,
     handoffs: new Map<string, 'pending' | 'done'>(),
+    /** operation_receipts as S keeps them (prepareEmpty, prepareAgain); a receipt lookup is read-only. */
+    receipts: new Map<string, ReceiptRecord>(),
+    /** The schema rows of a storage created by prepareEmpty (otherwise B's database). */
+    rows: undefined as AppliedMigration[] | undefined,
   };
   const key = (fence: RollbackFence) => `${fence.id}#${fence.attempt}`;
+  const lookup = (commandId: string): ReceiptLookup => {
+    const receipt = state.storage.kind === 'empty' ? undefined : state.receipts.get(commandId);
+    return receipt ? { found: true, receipt: structuredClone(receipt) } : { found: false };
+  };
   const fenced = (name: string, fence: RollbackFence) => {
     fences.push(`${name}#${fence.attempt}`);
     if (fence.attempt < (newest.get(fence.id) ?? 0)) { stale.push(`${name}#${fence.attempt}`); throw new Error(`The actuator refused ${name} for attempt ${fence.attempt}: a newer attempt of ${fence.id} acts.`); }
     newest.set(fence.id, fence.attempt);
   };
   const inspection = (): Pick<StorageInspection, 'schema' | 'authority' | 'ownerEpoch'> => state.storage.kind === 'empty'
-    ? { schema: { kind: 'empty' }, authority: [], ownerEpoch: state.epoch } : databaseOfB(state.epoch, state.storage.storageId);
+    ? { schema: { kind: 'empty' }, authority: [], ownerEpoch: state.epoch }
+    : state.rows ? { schema: { kind: 'current', storageId: state.storage.storageId, applied: structuredClone(state.rows) }, authority: [], ownerEpoch: state.epoch }
+      : databaseOfB(state.epoch, state.storage.storageId);
   /** The target's worker runs as a new process: on an existing storage it claims it (now or later); on an empty one it does not, and says why. */
   const takeOver = (target: { version: string }) => {
     state.serving = workerOf(target.version, state.serving.pid + 100);
@@ -104,8 +121,31 @@ export function rollbackWorld(options: WorldOptions = {}) {
         worker: { ...state.serving }, status: { state: 'ready', ...(state.claim !== undefined ? { ownerEpoch: state.claim } : {}) }, inspection: inspection(), gate: { open: state.gate },
         ...(state.prepareRefused ? { prepare: { code: 'migration-required' as const, disposition: 'not-committed' as const } } : {}),
         handoff: state.handoffs.get(key(fence)) ?? 'none',
+        ...(options.bootstrapId && state.storage.kind !== 'empty' ? { bootstrap: lookup(options.bootstrapId(fence)) } : {}),
       };
     },
+  };
+  /**
+   * A prepare({ allowMigration: true, commandId }) by `build`'s worker, as S's runtime commits it in one transaction: on
+   * an empty storage it creates every scope of A's schema (core and retention) as epoch 1 rows of that build, the
+   * storage ID, the claim, and the receipt (created, epoch 1, every scope applied, the payload bound to the new ID).
+   */
+  const prepareEmpty = (commandId: string, build: { appVersion: string; sourceHash: string }) => {
+    if (state.storage.kind !== 'empty') throw new Error('The storage is not empty.');
+    const storageId = randomUUID();
+    const scopes: Array<[string, readonly { version: number; sql: string }[]]> = [['core', CORE_MIGRATIONS], ['retention', retentionA.migrations]];
+    state.rows = scopes.flatMap(([scope, migrations]) => migrations.map(migration => ({ scope, version: migration.version, checksum: migrationChecksum(scope, migration), appliedAt: at, appVersion: build.appVersion, sourceHash: build.sourceHash, ownerEpoch: 1 })));
+    const result = { ownerEpoch: 1, applied: state.rows.map(row => ({ scope: row.scope, version: row.version })), created: true };
+    state.receipts.set(commandId, { commandId, scope: 'core', command: 'prepare', payloadSha256: hash(JSON.stringify({ allowMigration: true, storageId })), ownerEpoch: 1, committedAt: at, result: { state: 'included', value: result } });
+    state.storage = { kind: 'current', storageId };
+    state.epoch = 1; state.claim = 1; state.gate = true; state.prepareRefused = false;
+  };
+  /** A later prepare on the storage that is there (a cold restart), with a new command ID: a new claim and its own receipt. */
+  const prepareAgain = (commandId: string, build: { appVersion: string; sourceHash: string }) => {
+    if (state.storage.kind === 'empty') throw new Error('The storage is empty.');
+    state.epoch += 1; state.claim = state.epoch; state.gate = true;
+    state.receipts.set(commandId, { commandId, scope: 'core', command: 'prepare', payloadSha256: hash(JSON.stringify({ allowMigration: false, storageId: state.storage.storageId })), ownerEpoch: state.epoch, committedAt: at,
+      result: { state: 'included', value: { ownerEpoch: state.epoch, applied: [], created: false, by: build.appVersion } } });
   };
   return {
     ports, calls, holds, holdIds, fences, stale, state, proofs: () => proofs,
@@ -119,7 +159,10 @@ export function rollbackWorld(options: WorldOptions = {}) {
     otherClaim: () => { state.epoch += 1; },
     /** The storage is another one than before (replaced, or created where it was empty). */
     replaceStorage: (storageId = 'another-storage') => { state.storage = { kind: 'current', storageId }; if (state.epoch === 0) state.epoch = 1; },
-    /** The target's normal bootstrap on an empty storage once its hold went: it creates the storage and claims it. */
+    /** A storage created and claimed on the empty one with no receipt this world can show (who created it cannot be told). */
     bootstrap: () => { state.storage = { kind: 'current', storageId: 'created-by-target' }; state.epoch = 1; state.claim = 1; state.gate = true; state.prepareRefused = false; },
+    prepareEmpty, prepareAgain,
+    /** StorageClient.receipt(commandId), read-only. */
+    lookup,
   };
 }

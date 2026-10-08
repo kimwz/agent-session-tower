@@ -41,7 +41,9 @@ async function stateDir(t: TestContext) {
 const at = '2026-10-08T00:00:00.000Z';
 const record = (version: string, previous: string, stage: SavedUpdate['stage'], extra: Partial<SavedUpdate> = {}): SavedUpdate => ({ version, previous, stage, startedAt: at, updatedAt: at, ...extra });
 const save = (state: string, value: unknown) => writeFile(updatePaths(state).status, JSON.stringify(value));
-const evaluate = (state: string, version: string, extra: Partial<StorageUpdateInput> = {}) => evaluateStorageUpdate({ stateDir: state, build: runningBuild(version), managed: true, ...extra });
+/** A managed start whose preflight sees the database file the world's worker opened (empty or not). */
+const evaluate = (state: string, version: string, extra: Partial<StorageUpdateInput> = {}) =>
+  evaluateStorageUpdate({ stateDir: state, build: runningBuild(version, { state: { database: 'present', sidecars: [], identity: 'created', recovery: { state: 'clear' } } }), managed: true, ...extra });
 const onDisk = (state: string): RollbackRecord => JSON.parse(readFileSync(storageUpdatePaths(state).rollback, 'utf8'));
 const rewrite = (state: string, change: Partial<RollbackRecord>) => writeFile(storageUpdatePaths(state).rollback, JSON.stringify({ ...onDisk(state), ...change }), { mode: 0o600 });
 const bytes = (path: string) => readFileSync(path);
@@ -565,22 +567,25 @@ test('F4. an empty storage that became current during the handoff is unknown; on
   assert.ok(failed.state === 'failed' && failed.record.handoff?.state === 'no-effect' && world.holds.size === 0);
 });
 
-test('F4. a release that did not answer, then the target\'s normal bootstrap on the empty storage: cleanup converges on the same baseline', async t => {
+test('F4. a release that did not answer on the empty storage: released again while it is still empty, never once it is not', async t => {
   const { state, world, answer } = await completedHeld(t, { storage: 'empty' });
   const baseline = onDisk(state).handoff!.baseline;
-  // The release had reached the worker after all: the target bootstrapped the storage and claimed it.
+  // The release had reached the worker after all; the target, still held by its record, has not bootstrapped.
   world.holds.clear();
-  world.bootstrap();
   answer();
   const outcome = await resumeRollback(onTarget(state, world.ports));
   assert.ok(outcome.state === 'completed' && !outcome.record.held, JSON.stringify(outcome).slice(0, 300));
   assert.deepEqual([count(world.calls, 'handoff'), onDisk(state).handoff!.baseline], [1, baseline], 'no new handoff, the baseline as it was');
-  // An unclear change instead (another storage, nobody's claim) is not released.
-  const other = await completedHeld(t, { storage: 'empty' });
-  other.world.replaceStorage();
-  other.answer();
-  const refused = await resumeRollback(onTarget(other.state, other.world.ports));
-  assert.ok(refused.state === 'refused' && refused.code === 'cleanup-unproven' && other.world.holds.size === 1);
+  // A storage that is no longer empty while the hold is still counted (bootstrapped, or another storage) is not released.
+  for (const change of ['bootstrap', 'another-storage'] as const) {
+    const other = await completedHeld(t, { storage: 'empty' });
+    if (change === 'bootstrap') other.world.bootstrap(); else other.world.replaceStorage();
+    other.answer();
+    const releases = count(other.world.calls, 'release');
+    const refused = await resumeRollback(onTarget(other.state, other.world.ports));
+    assert.ok(refused.state === 'refused' && refused.code === 'cleanup-unproven' && other.world.holds.size === 1, change);
+    assert.equal(count(other.world.calls, 'release'), releases, change);
+  }
 });
 
 // ---- F5. One durable attempt: withdrawal and retry never overlap ----
@@ -705,7 +710,7 @@ test('F6. writeHold creates and refreshes only its own plain file; links, folder
     if (shape === 'dangling') await symlink(target, path);
     if (shape === 'folder') await mkdir(path);
     await assert.rejects(writeHold(state, '1.1.0'), { code: 'hold-not-a-file' }, shape);
-    await assert.rejects(removeHold(state, { expired: true }), { code: 'hold-not-a-file' }, shape);
+    await assert.rejects(removeHold(state, { version: '1.1.0' }), { code: 'hold-not-a-file' }, shape);
     if (shape === 'file-link') assert.equal(await readFile(target, 'utf8'), 'ORIGINAL');
     if (shape === 'dangling') assert.equal(existsSync(target), false);
     await rm(path, { recursive: true });
@@ -724,12 +729,14 @@ test('F6. a hold replaced by a link between its check and its write or removal i
     await writeHold(state, '1.1.0');
     const target = join(state, 'target');
     await writeFile(target, 'ORIGINAL');
-    // Test-only: right before the writer checks the path again, something replaces the hold with a link.
-    const original = fsPromises.lstat;
+    // Test-only: right before the writer checks the path again (a refresh) or moves it aside (a removal), something
+    // replaces the hold with a link.
     let swapped = 0;
-    t.mock.method(fsPromises, 'lstat', async (...args: Parameters<typeof original>) => {
-      if (args[0] === path && !swapped) { swapped++; unlinkSync(path); symlinkSync(target, path); }
-      return original(...args);
+    const swap = (name: unknown) => { if (name === path && !swapped) { swapped++; unlinkSync(path); symlinkSync(target, path); } };
+    const original = { lstat: fsPromises.lstat, rename: fsPromises.rename };
+    t.mock.method(fsPromises, step === 'refresh' ? 'lstat' : 'rename', async (...args: [string, ...unknown[]]) => {
+      swap(args[0]);
+      return (original[step === 'refresh' ? 'lstat' : 'rename'] as (...rest: unknown[]) => Promise<unknown>)(...args);
     });
     syncBuiltinESMExports();
     try {

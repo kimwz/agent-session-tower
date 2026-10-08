@@ -352,7 +352,9 @@ test('a kept build whose record a later failed update overwrote is ready again o
 
 test('a direct start needs no record or another build\'s verified terminal one, and its preparation evidence or a new state', async t => {
   const state = await stateDir(t);
-  const direct = (version: string, extra: Partial<StorageUpdateInput> = {}) => evaluateStorageUpdate({ stateDir: state, build: runningBuild(version), managed: false, ...extra });
+  /** What the start's preflight sees of the storage files: none at first, then the database A prepared. */
+  let seen: ReturnType<typeof runningBuild>['preflight']['state'];
+  const direct = (version: string, extra: Partial<StorageUpdateInput> = {}) => evaluateStorageUpdate({ stateDir: state, build: runningBuild(version, seen ? { state: seen } : {}), managed: false, ...extra });
   assert.equal((await direct(A0)).code, 'no-cutover');
   await writeFile(updatePaths(state).hold, '{}');
   assert.equal((await direct(A0)).verdict, 'update-held');
@@ -379,6 +381,8 @@ test('a direct start needs no record or another build\'s verified terminal one, 
   assert.equal((await stat(evidencePath)).mode & 0o777, 0o600);
   assert.equal((await stat(join(state, 'storage-contracts'))).mode & 0o777, 0o700);
   assert.equal((await readPreparationEvidence(state, 'retention')).state, 'present');
+  assert.equal((await direct(B, { legacyFiles: async () => 'present' })).code, 'known-storage-missing', 'the evidence names a storage the preflight does not see');
+  seen = { database: 'present', sidecars: [], identity: 'created', recovery: { state: 'clear' } };
   const ready = await direct(B, { legacyFiles: async () => 'present' });
   assert.equal(ready.code, 'direct-evidence');
   assert.equal(ready.importAllowed, true);
@@ -409,6 +413,7 @@ test('a direct start needs no record or another build\'s verified terminal one, 
   assert.equal((await readPreparationEvidence(state, 'retention')).state, 'legacy');
   const withDatabase = runningBuild(B, { state: { database: 'present', sidecars: [], identity: 'created', recovery: { state: 'clear' } } });
   assert.equal((await evaluateStorageUpdate({ stateDir: state, build: withDatabase, managed: false, legacyFiles: async () => 'present' })).code, 'prerequisite-required', 'evidence of one domain\'s schema alone prepares nothing');
+  seen = undefined;
   assert.equal((await direct(B, { legacyFiles: async () => 'absent' })).code, 'known-storage-missing', 'and with it there, a state directory without its database is not a new one');
   await chmod(evidencePath, 0o644);
   assert.equal((await readPreparationEvidence(state, 'retention')).state, 'unreadable', 'a file others can read is refused as it is');
