@@ -7,14 +7,24 @@ const MAX_BYTES = 120_000;
 const MAX_TOTAL = 180_000;
 const MAX_FILES = 8;
 const SCRIPT = /\.(?:py|mjs|cjs|js|ts|tsx|sh|bash|zsh|rb|pl|php|lua|ps1)$/i;
-const PRIVATE = /(?:^|\/)(?:\.credentials(?:\.[^/]*)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials|\.kube|\.docker|\.env(?:\.[^/]*)?|\.ssh|\.aws|\.gnupg|auth(?:\.[^/]*)?|credentials(?:\.[^/]*)?|secrets?(?:\.[^/]*)?|id_rsa|id_ed25519|id_ecdsa|id_dsa)(?:\/|$)/i;
+/** Credential stores and files by name, wherever they are. */
+const STORE = /(?:^|\/)(?:\.credentials(?:\.[^/]*)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials|\.kube|\.docker|\.env(?:\.[^/]*)?|\.dev\.vars|\.pgpass|\.vault-token|\.terraformrc|\.cloudflared|\.ssh|\.aws|\.gnupg|id_rsa|id_ed25519|id_ecdsa|id_dsa)(?:\/|$)/i;
+/** Names that hold credentials when they are data (`auth.json`, `secrets/db.yaml`), not when they are code (`auth.ts`, `server/secrets/runtime.ts`). */
+const NAMED = /^(?:auth|credentials|secrets?)(?:\.[^/]*)?$/i;
+const CODE = /\.(?:py|mjs|cjs|js|jsx|ts|tsx|mts|cts|sh|bash|zsh|rb|pl|php|lua|ps1|go|rs|java|kt|swift|c|cc|cpp|h|hpp|cs|scala)$/i;
 
 type FileEvidence = { path: string; status: 'read' | 'unavailable' | 'too-large' | 'excluded' | 'not-text'; text?: string; real?: string; sha256?: string };
 export interface CommandEvidence { files: FileEvidence[]; notes: string[] }
 
-/** Credential files and folders by name (and private keys), wherever they are: never read for a review. */
+/**
+ * Credential files and stores by name (and private keys), wherever they are: never read for a review. A file named
+ * like credentials, or a data file in a folder named so, counts too; source code by such a name does not.
+ */
 export function isPrivatePath(path: string): boolean {
-  return PRIVATE.test(path) || /\.(?:pem|key|p12|pfx)$/i.test(basename(path));
+  const name = basename(path);
+  if (STORE.test(path) || /\.(?:pem|key|p12|pfx|tfvars)$/i.test(name)) return true;
+  if (CODE.test(name)) return false;
+  return NAMED.test(name) || /\.[^./]+$/.test(name) && path.split(sep).slice(0, -1).some(segment => NAMED.test(segment));
 }
 
 /** A credential name, or a path in one of the `denied` places (credential stores, Tower's state; see `deniedPaths`). */

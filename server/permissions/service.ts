@@ -232,9 +232,12 @@ export class PermissionService {
         const block = autoReviewBlock(request.rule, request.cwd);
         if (block) return owner(block);
         // Every waiting run's reviewed files stay in the state file until it starts: together they stay well within it.
-        const size = (files: ReviewedFile[]) => Buffer.byteLength(JSON.stringify(files, null, 2));
+        const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value, null, 2));
         const held = this.state.requests.reduce((sum, item) => sum + (item.review?.files ? size(item.review.files) : 0), 0);
-        if (result.files?.length && held + size(result.files) > MAX_HELD_REVIEWED) return owner('실행을 기다리는 자동 승인이 많아 검토한 파일을 더 보관할 수 없습니다');
+        // Together with everything else saved, the state file must stay readable (MAX_BYTES) after a restart.
+        if (result.files?.length && (held + size(result.files) > MAX_HELD_REVIEWED || size(this.state) + size(result.files) > MAX_BYTES * 0.9)) {
+          return owner('실행을 기다리는 자동 승인이 많아 검토한 파일을 더 보관할 수 없습니다');
+        }
         await this.commit(state => {
           const item = state.requests.find(entry => entry.id === id)!;
           item.status = 'approved'; item.decidedAt = at; item.decidedBy = 'auto'; item.run = { status: 'waiting', ...(this.autoReview().resume ? { notify: true } : {}) };
@@ -300,11 +303,13 @@ export class PermissionService {
   }
 
   /** A review whose material changed while it ran: it is done again. */
-  requeueReview(id: string): Promise<void> {
+  /** Whether it went back to the reviewer (not when it was decided meanwhile). */
+  requeueReview(id: string): Promise<boolean> {
     return this.serial(async () => {
       const request = this.state.requests.find(item => item.id === id);
-      if (!request || request.status !== 'pending' || request.review?.status !== 'running') return;
+      if (!request || request.status !== 'pending' || request.review?.status !== 'running') return false;
       await this.setReview(id, { status: 'queued', at: this.now() });
+      return true;
     });
   }
 
@@ -465,12 +470,13 @@ export class PermissionService {
       const item = this.state.requests.find(entry => entry.id === id);
       // Decided again, or started, meanwhile: left as it is.
       if (!item || item.status !== 'approved' || item.decidedBy !== 'auto' || item.run?.status !== 'waiting') return false;
-      const again = (item.rechecks ?? 0) < MAX_RECHECKS;
+      const again = stale || (item.rechecks ?? 0) < MAX_RECHECKS;
       await this.commit(state => {
         const entry = state.requests.find(value => value.id === id)!;
         entry.status = 'pending';
         delete entry.decidedAt; delete entry.decidedBy; delete entry.run;
-        entry.rechecks = (entry.rechecks ?? 0) + 1;
+        // Only files changing before the start count: a wait is reviewed again as often as it happens.
+        if (!stale) entry.rechecks = (entry.rechecks ?? 0) + 1;
         const why = stale ? `승인 뒤 실행까지 ${Math.round(waited / 1000)}초를 기다려` : `검토 뒤 실행 전에 파일이 바뀌어(${changed.slice(0, 5).join(', ')})`;
         // Files that keep changing before every start (something else writing there) are the owner's to judge.
         entry.review = again ? { status: 'queued', reason: `${why} 지금 내용으로 다시 검토합니다`.slice(0, 1000), at: this.now() }

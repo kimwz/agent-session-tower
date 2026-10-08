@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { appendFile, lstat, open, readdir, readFile, realpath, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { promisify } from 'node:util';
@@ -89,8 +89,9 @@ const covers = (root: ScopeRoot, path: string) => root.kind === 'tree' ? within(
 export async function deniedPaths(stateDir: string | undefined, home = homedir(), env: NodeJS.ProcessEnv = process.env): Promise<string[]> {
   const codex = env.CODEX_HOME || join(home, '.codex');
   const claude = env.CLAUDE_CONFIG_DIR || join(home, '.claude');
-  const paths = [...(stateDir ? [stateDir] : []), join(codex, 'auth.json'), join(claude, '.credentials.json'), join(home, '.claude.json'), join(home, '.config', 'gh'),
-    join(home, '.config', 'gcloud'), join(home, 'Library', 'Keychains'), join(home, '.ssh'), join(home, '.aws'), join(home, '.gnupg'), join(home, '.docker'), join(home, '.kube')];
+  const paths = [...(stateDir ? [stateDir] : []), join(codex, 'auth.json'), join(claude, '.credentials.json'), join(claude, '.claude.json'), join(home, '.claude.json'),
+    env.GH_CONFIG_DIR || join(home, '.config', 'gh'), join(home, '.config', 'gcloud'), join(home, '.config', '.wrangler'), join(home, 'Library', 'Preferences', '.wrangler'),
+    join(home, '.cloudflared'), join(home, 'Library', 'Keychains'), join(home, '.ssh'), join(home, '.aws'), join(home, '.gnupg'), join(home, '.docker'), join(home, '.kube')];
   return [...new Set((await Promise.all(paths.map(async path => [resolve(path), await real(path)]))).flat().filter((path): path is string => Boolean(path)))];
 }
 
@@ -319,7 +320,8 @@ export async function reviewScope(input: { cwd: string; command?: string; stateD
   const command = await named(input.command ?? '', [cwd], home, true);
   for (const folder of command.cds) add({ path: folder.real, kind: 'tree' });
   for (const root of command.roots) add(root);
-  const places = [{ path: resolve(input.cwd), real: cwd }];
+  // The request folder too, unless it lies in a denied place (a Slack or GitHub coordinator's folder in Tower's state).
+  const places = [{ path: resolve(input.cwd), real: cwd }].filter(place => !isDenied(place.path, denied) && !isDenied(place.real, denied));
   for (const place of [...command.cds, ...command.links]) {
     if (!isDenied(place.path, denied) && !isDenied(place.real, denied) && !places.some(item => item.path === place.path)) places.push(place);
   }
@@ -370,6 +372,7 @@ export class ReviewFiles {
   private async bindFolder(folder: Watched): Promise<void> {
     if (folder.real === null) { await this.log({ tool: 'read_file', path: folder.path, status: 'absent' }); return; }
     const bound = await folderBinding(folder.real, this.spec.denied);
+    if (bound === 'shared') return;
     await this.log(bound ? { tool: 'read_file', path: folder.path, status: 'folder', real: folder.real, sha256: bound.sha256!, depth: 1 } : { tool: 'read_file', path: folder.path, status: 'unbound' });
   }
 
@@ -424,11 +427,11 @@ export class ReviewFiles {
     // A folder that is in scope only for the files right in it is listed one level deep.
     const depth = this.roots.some(root => root.kind === 'tree' && within(place.real!, root.path)) ? asked : 1;
     const all = await absent(collect(place.real!, depth, this.spec.denied));
-    if (!all) { await this.log({ tool: 'list_dir', path: place.path, status: 'unbound' }); return { path: place.path, status: 'unreadable', message: 'The folder (or one inside it) could not be read, or it is too large.' }; }
+    if (!all) { await this.log({ tool: 'list_dir', path: place.path, status: 'unreadable' }); return { path: place.path, status: 'unreadable', message: 'The folder (or one inside it) could not be read, or it is too large.' }; }
     const entries = await Promise.all(all.slice(0, MAX_LIST).map(async entry => ({ ...entry, ...(entry.kind === 'file' ? { size: (await absent(stat(join(place.real!, entry.path))))?.size } : {}) })));
     if (!this.take(JSON.stringify(entries).length)) { await this.log({ tool: 'list_dir', path: place.real!, status: 'budget' }); return { path: place.real, status: 'budget', message: explain('budget') }; }
-    // Bound by everything listed, as shown (the shown part is the start of the same collection).
-    await this.log({ tool: 'list_dir', path: place.path, status: 'listed', real: place.real, sha256: digestOf(all), depth });
+    // Bound by everything listed, as shown (the shown part is the start of the same collection); a shared folder is not.
+    await this.log({ tool: 'list_dir', path: place.path, status: 'listed', ...(await sharedFolder(place.real!) ? {} : { real: place.real, sha256: digestOf(all), depth }) });
     return { path: place.real, entries, ...(all.length > MAX_LIST ? { cut: true, total: all.length } : {}) };
   }
 
@@ -497,10 +500,20 @@ const digestOf = (entries: { path: string; kind: string }[]) => sha256(JSON.stri
  * looked up) or one a module name's candidates live in. Undefined when it cannot be listed (or is too large): what
  * runs from it could change unseen.
  */
-export async function folderBinding(folder: string, denied: readonly string[]): Promise<ReviewedFile | undefined> {
+export async function folderBinding(folder: string, denied: readonly string[]): Promise<ReviewedFile | 'shared' | undefined> {
   if (isDenied(folder, denied)) return undefined;
+  if (await sharedFolder(folder)) return 'shared';
   const entries = await absent(collect(folder, 1, denied));
   return entries && { path: folder, real: folder, sha256: digestOf(entries), depth: 1 };
+}
+
+/**
+ * A folder every process writes to (`/tmp`, the system's temporary folder, any sticky one): its entries change all the
+ * time, so it is not bound by them — only the files read in it are.
+ */
+async function sharedFolder(folder: string): Promise<boolean> {
+  const info = await absent(stat(folder));
+  return Boolean(info && (info.mode & 0o1000)) || folder === await real(tmpdir());
 }
 
 function explain(status: ReadStatus): string {

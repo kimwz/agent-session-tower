@@ -90,8 +90,8 @@ export class PermissionReviewer {
       // Folders bound by their entries (under the name they were reached by), by their absence, or failed (unbound).
       const bindFolders = async (folders: { path: string; real: string | null }[]) => {
         const bound = await Promise.all(folders.map(async folder => ({ folder, file: folder.real === null ? { path: folder.path, real: null, sha256: null } as ReviewedFile
-          : await folderBinding(folder.real, denied).then(file => file && { ...file, path: folder.path }) })));
-        return { files: bound.flatMap(item => item.file ? [item.file] : []), failed: bound.flatMap(item => item.file ? [] : [item.folder.path]) };
+          : await folderBinding(folder.real, denied).then(file => file && file !== 'shared' ? { ...file, path: folder.path } : file) })));
+        return { files: bound.flatMap(item => item.file && item.file !== 'shared' ? [item.file] : []), failed: bound.flatMap(item => item.file ? [] : [item.folder.path]) };
       };
       const ownFolders = () => [...new Set(pre.map(file => dirname(file.real!)))].map(folder => ({ path: folder, real: folder }));
       let preFolders = await bindFolders(ownFolders());
@@ -125,11 +125,14 @@ export class PermissionReviewer {
       const seen: ReviewedFile[] = [...places, ...pre.map(file => ({ path: file.path, real: file.real!, sha256: file.sha256! })), ...preFolders.files, ...reviewedFiles(reads)];
       const unbound = [...new Set([...preFolders.failed, ...reads.filter(entry => entry.status === 'unbound').map(entry => entry.path)])];
       // The owner said more, or confirmed or changed something, or a file changed, while the model answered: review again with that.
-      if (material(await reviewInput(request, this.options.sources, denied)) !== before || (await changedFiles(seen, denied)).length) {
+      // Files bind only a run's approval; a rule is kept for good and checked against what it allows, not those files.
+      const changed = request.rule.kind === 'run' ? await changedFiles(seen, denied) : [];
+      if (material(await reviewInput(request, this.options.sources, denied)) !== before || changed.length) {
         const again = (this.requeued.get(request.id) ?? 0) + 1;
         this.requeued.set(request.id, again);
-        if (again <= MAX_REQUEUE) { await service.requeueReview(request.id); return; }
-        throw new ReviewSkip('검토하는 동안 지시 또는 참조 파일이 계속 바뀌어 소유자에게 넘깁니다.');
+        // Decided by the owner meanwhile: nothing to review again; the verdict is only recorded below.
+        if (again <= MAX_REQUEUE && await service.requeueReview(request.id)) return;
+        if (again > MAX_REQUEUE) throw new ReviewSkip(`검토하는 동안 지시 또는 참조 파일이 계속 바뀌어 소유자에게 넘깁니다${changed.length ? `: ${changed.slice(0, 5).join(', ')}` : ''}.`);
       }
       const files = [...new Map(seen.map(file => [`${file.path}\0${file.sha256 === null && file.real !== null ? 'place' : file.depth ?? 0}`, file])).values()];
       if (result.verdict === 'owner') result = { ...result, reason: ownerReason(result.reason, result.missing ?? [], reads) };

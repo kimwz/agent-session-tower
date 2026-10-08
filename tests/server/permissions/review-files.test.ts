@@ -30,7 +30,7 @@ async function fixture(t: TestContext, now?: () => Date) {
   const project = join(root, 'work', 'shop');
   await mkdir(join(project, 'scripts'), { recursive: true });
   execFileSync('git', ['-C', project, 'init', '-q']);
-  const sessions = new Map([['codex:sqlite', { cwd: project, provider: 'codex' as const }]]);
+  const sessions = new Map<string, { cwd: string; provider: 'claude' | 'codex' }>([['codex:sqlite', { cwd: project, provider: 'codex' }]]);
   let service!: PermissionService;
   const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 200, beforeStart: id => service.confirmReviewed(id) });
   let reviewer: PermissionReviewer | undefined;
@@ -70,7 +70,7 @@ async function fixture(t: TestContext, now?: () => Date) {
   };
   t.after(async () => { for (const release of releases) release(); await reviewer!.flush(); await runner.flush(); service.close(); await rm(root, { recursive: true, force: true }); });
   const settle = async () => { while (reviewer!.inFlight()) await reviewer!.flush(); await runner.flush(); };
-  return { root, stateDir, project, service, runner, reviewer, calls, settle, holdStarts, answer: (value: typeof answer) => { answer = value; },
+  return { root, stateDir, project, sessions, service, runner, reviewer, calls, settle, holdStarts, answer: (value: typeof answer) => { answer = value; },
     request: (id: string) => service.overview().requests.find(item => item.id === id)! };
 }
 
@@ -344,4 +344,34 @@ test('an approved waiting run keeps what it was bound to across a restart', asyn
   const after = again.overview().requests.find(item => item.id === request.id)!;
   assert.equal(after.status, 'pending');
   assert.equal(after.rechecks, 1);
+});
+
+test('a request whose folder is in Tower\'s state (a coordinator\'s) is reviewed normally, not sent back as if files kept changing', async t => {
+  const f = await fixture(t);
+  const coordinator = join(f.stateDir, 'slack-sessions', 'w1');
+  await mkdir(coordinator, { recursive: true });
+  f.sessions.set('claude:slack', { cwd: coordinator, provider: 'claude' });
+  f.answer(async () => ({ verdict: 'approve', reason: '배포 단계입니다.', rule: null, scope: null, suggestion: null, missing: [] }));
+  const { request } = await f.service.request({ kind: 'command', value: 'gh pr view', scope: 'project', reason: 'r' }, agent('claude:slack'));
+  f.reviewer.wake(); await f.settle();
+  assert.equal(f.calls.length, 1, 'one review, no requeue');
+  assert.equal(f.request(request.id!).status, 'approved');
+});
+
+test('waits are reviewed again as often as they happen without using up the file-change limit', async t => {
+  const clock = { now: new Date('2026-10-08T00:00:00.000Z') };
+  const f = await fixture(t, () => clock.now);
+  await writeFile(join(f.project, 'scripts', 'run.mjs'), 'console.log(1)\n');
+  f.reviewer.hold();
+  const { request } = await f.service.requestRun({ command: 'node scripts/run.mjs', reason: 'r' }, agent('codex:sqlite'));
+  const confirm = f.service.confirmReviewed.bind(f.service);
+  f.holdStarts(async () => false);
+  for (let round = 0; round < 5; round++) {
+    assert.ok(await f.service.startReview(request.id!));
+    await f.service.applyReview(request.id!, { verdict: 'approve', reason: '확인함', files: [] });
+    clock.now = new Date(clock.now.getTime() + 90_000);
+    assert.equal(await confirm(request.id!), false);
+    assert.equal(f.request(request.id!).review!.status, 'queued', `round ${round}`);
+  }
+  assert.equal(f.request(request.id!).rechecks, undefined);
 });

@@ -413,7 +413,7 @@ test('a Python script in another repository opens the local packages it imports'
   for (const name of [join('pkg', '__init__.py'), join('pkg', 'util.py'), 'helpers.py']) assert.equal(typeof (await files.read({ path: join(f.other, name) }) as { text?: string }).text, 'string', name);
 });
 
-test('a folder listing is one collection: what is shown and what is bound are the same, and a subfolder that cannot be read leaves it unbound', async t => {
+test('a folder listing is one collection: what is shown and what is bound are the same, and a subfolder that cannot be read is reported', async t => {
   const f = await fixture(t);
   await mkdir(join(f.project, 'plugins', 'group'), { recursive: true });
   await writeFile(join(f.project, 'plugins', 'a.cjs'), '');
@@ -424,7 +424,7 @@ test('a folder listing is one collection: what is shown and what is bound are th
   await chmod(join(f.project, 'plugins', 'group'), 0o311);
   try {
     assert.equal((await files.list({ path: 'plugins', depth: 2 }) as { status: string }).status, 'unreadable');
-    assert.equal((await readLog(f.log)).at(-1)!.status, 'unbound');
+    assert.equal((await readLog(f.log)).at(-1)!.status, 'unreadable', 'reported as unreadable, never as a folder of reviewed code');
     assert.deepEqual(await changedFiles(reviewedFiles([listed]), []), [listed.path], 'at the check, a subfolder that cannot be read is a change');
   } finally { await chmod(join(f.project, 'plugins', 'group'), 0o755); }
 });
@@ -512,4 +512,29 @@ test('a credential file a script names through .. or a link is not bound, so che
   const reviewed = reviewedFiles(await readLog(f.log));
   assert.ok(!reviewed.some(file => file.path.includes('.env') || file.path.includes('env-link') || file.real?.includes('.env')));
   assert.deepEqual(await changedFiles(reviewed, await deniedPaths(f.stateDir, f.home, {})), []);
+});
+
+test('source code named like credentials is readable, data files so named are not; a shared temporary folder is never bound by its entries', async t => {
+  const f = await fixture(t);
+  await mkdir(join(f.project, 'server', 'secrets'), { recursive: true });
+  await writeFile(join(f.project, 'server', 'secrets', 'runtime.ts'), 'export {}\n');
+  await writeFile(join(f.project, 'server', 'secrets', 'store.json'), '{"key":"x"}');
+  await writeFile(join(f.project, 'shared-auth.ts'), 'export {}\n');
+  await mkdir(join(f.project, 'shared'));
+  await writeFile(join(f.project, 'shared', 'auth.ts'), 'export {}\n');
+  await writeFile(join(f.project, 'auth.json'), '{}');
+  await writeFile(join(f.project, 'prod.tfvars'), 'x=1');
+  await writeFile(join(f.project, '.dev.vars'), 'X=1');
+  const files = await f.files('node run.mjs');
+  for (const path of ['server/secrets/runtime.ts', 'shared/auth.ts']) assert.equal(typeof (await files.read({ path }) as { text?: string }).text, 'string', path);
+  for (const path of ['server/secrets/store.json', 'auth.json', 'prod.tfvars', '.dev.vars']) assert.equal((await files.read({ path }) as { status: string }).status, 'denied', path);
+  // A sticky folder (like /tmp): the file read is bound, its folder's entries are not.
+  const shared = join(f.root, 'shared-tmp');
+  await mkdir(shared); await chmod(shared, 0o1777);
+  await writeFile(join(shared, 'helper.mjs'), 'console.log(1)\n');
+  const tmp = await f.files(`node ${join(shared, 'helper.mjs')}`);
+  await tmp.read({ path: join(shared, 'helper.mjs') });
+  const reviewed = reviewedFiles(await readLog(f.log));
+  await writeFile(join(shared, 'someone-else.log'), '');
+  assert.deepEqual(await changedFiles(reviewed, []), []);
 });
