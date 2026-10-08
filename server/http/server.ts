@@ -551,7 +551,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       }
       // The owner's compact button, here or for a joined computer's conversation: an agent's turn or the master never
       // starts or stops one (checked before a joined computer's request is passed on, which would carry no caller).
-      if (req.method === 'POST' && /^\/api\/(?:nodes\/[a-f0-9]{32}\/)?sessions\/[^/]+\/compaction(?:\/cancel)?$/.test(path)
+      if (req.method === 'POST' && /^\/api\/(nodes\/[a-f0-9]{32}\/)?sessions\/[^/]+\/compaction(\/cancel)?$/.test(path)
         && (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()])) return json(res, 403, { error: '세션 압축은 소유자만 할 수 있습니다.' });
       if ((path === '/api/retention' || path.startsWith('/api/retention/')) && (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()])) return json(res, 403, { error: '세션 보관 관리는 소유자만 할 수 있습니다.' });
       if (req.method === 'GET' && path === '/api/retention') {
