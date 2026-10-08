@@ -59,7 +59,7 @@
   "server/link/nodes.ts": 1,
   "server/link/proxy.ts": 1,
   "server/link/service.ts": 27,
-  "server/link/update.ts": 13,
+  "server/link/update.ts": 10,
   "server/link/views.ts": 1,
   "server/master/client.ts": 3,
   "server/master/elevenlabs.ts": 4,

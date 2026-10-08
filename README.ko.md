@@ -27,7 +27,7 @@ npm start
 
 ![Claude Code와 Codex 세션을 프로젝트별 노드로 보여주는 Agent Session Tower 그래프 캔버스](docs/images/session-graph.png)
 
-**Node.js 22.13 이상**, **npm**, **Git**이 필요합니다. 설치하고 로그인해 둔 Claude Code 또는 Codex를 사용합니다. 처음 실행할 때 앱을 내려받아 빌드하며, 이후에는 npm 캐시를 활용합니다. macOS와 Linux에서 검증했으며, 웹 UI는 **한국어와 영어**를 지원합니다.
+**Node.js 22.x의 22.22.3 이상, 24.x의 24.15.0 이상 또는 26.x의 26.0.0 이상**, **npm**, **Git**이 필요합니다. 설치하고 로그인해 둔 Claude Code 또는 Codex를 사용합니다. 처음 실행할 때 앱을 내려받아 빌드하며, 이후에는 npm 캐시를 활용합니다. SQLite 지원 하한은 macOS arm64와 Linux x64에서 검증했습니다. Windows, macOS x64, 다른 아키텍처와 새 Node major는 미검증입니다. Storage SDK는 실제 SQLite의 WAL-reset 수정도 확인합니다(3.51.3 이상 또는 공식 3.44.6/3.50.7 백포트). 웹 UI는 **한국어와 영어**를 지원합니다.
 
 ## 브라우저 에디터와 터미널
 

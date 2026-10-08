@@ -27,7 +27,7 @@ Your browser opens at **http://localhost:8000** with a canvas like this:
 
 ![Claude Code and Codex sessions grouped by project on the Agent Session Tower graph canvas](docs/images/session-graph.png)
 
-Requires **Node.js 22.13+**, **npm**, and **Git**. Use your existing Claude Code or Codex installation and sign-in. The first run downloads and builds the app; later runs reuse npm's cache. Tested on macOS and Linux. The web UI supports **English and Korean**.
+Requires **Node.js 22.22.3+ (22.x), 24.15.0+ (24.x), or 26.0.0+ (26.x)**, **npm**, and **Git**. Use your existing Claude Code or Codex installation and sign-in. The first run downloads and builds the app; later runs reuse npm's cache. SQLite support floors were verified on macOS arm64 and Linux x64; Windows, macOS x64, other architectures and new Node majors remain unverified. The storage SDK also checks the actual SQLite runtime for the WAL-reset fix (3.51.3+ or official 3.44.6/3.50.7 backports). The web UI supports **English and Korean**.
 
 ## Browser editor and terminal
 

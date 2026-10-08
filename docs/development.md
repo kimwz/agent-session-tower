@@ -2,7 +2,7 @@
 
 ## Run from source
 
-Node.js 22.13+, npm, and Git are required. macOS and Linux are verified; CI runs the checks on both.
+Node.js 22.x >=22.22.3, 24.x >=24.15.0 or 26.x >=26.0.0, npm, and Git are required. The supported-floor SQLite matrix verifies macOS arm64 and Linux x64. Windows, macOS x64, other architectures and new Node majors remain unverified. `server/storage/runtime.ts` owns the final actual SQLite/API verdict; engines alone cannot grant support.
 
 ```sh
 git clone https://github.com/kimwz/agent-session-tower.git
@@ -89,7 +89,7 @@ The package includes the CLI, compiled server, web assets, documentation, and li
 
 ## Standalone executable
 
-Building a standalone executable requires **Node.js 26+**. It produces a binary for the current operating system and architecture, with the Node runtime, server, and web assets included.
+Building a standalone executable requires **Node.js 26.x >=26.0.0**. It produces a binary for the current operating system and architecture, with the Node runtime, server, and web assets included.
 
 ```sh
 npm run build:executable
@@ -196,3 +196,13 @@ Fixtures live in `tests/server/secrets/` and `tests/server/backup/secrets.test.t
 ### Conversation image previews
 
 Conversation pages include signed image URLs for local Markdown image/file links and saved Codex generated-image paths in tool results. The web process serves PNG, JPEG, GIF, and WebP up to 20 MiB after checking authentication, the current session, canonical project/generated-image roots, and file signatures. Joined-computer requests additionally recheck session visibility and excluded folders. No external URL is fetched by the server. Image URLs are renewed when a conversation is fetched after web restart; native history is unchanged. An image link opened from another site (a link in another app or page, or back from a login such as Cloudflare Access) arrives without the `SameSite=Strict` session, so the web answers that top-level navigation with a page that opens the same link again from Tower (`sendChatImageReopen`); embeds, reads and other API routes from other sites stay refused.
+
+### SQLite foundation validation and diagnostics
+
+PR0 adds the core storage foundation, not domain JSON migration. Domain JSON remains authoritative until its own cutover. The execution worker owns storage; web/RPC consumers receive status and readiness only. A held gate keeps durable intake in diagnostic mode. Inspect `agent-session-tower storage status` and preserve the reported failure, identity and recovery evidence before any update or recovery action. Do not delete a database, sidecar, identity or recovery barrier to make a gate open; do not start a second writer against the same state. `--storage-contract` probes an artifact's captured thread with an in-memory database and does not establish live database readiness. The installed CLI's legacy diagnostic loader stays available; Node 22.13.0 / SQLite 3.47.2 loading is compatibility evidence only, not SQLite support.
+
+`.github/workflows/sqlite-validation.yml` keeps the six real supported-floor jobs plus the legacy loader job. It collects SDK and storage consumer tests, worker/web lifecycle fixtures, source SHA, runtime JSON, raw logs and exits. Node 26 jobs also run `npm run build:executable`, `npm run test:executable`, and the actual binary's `--storage-contract`; no substitute binary or file-based probe grants SEA support.
+
+Hosted-only foundation timing command: `node --import tsx scripts/sqlite-foundation-benchmark.mjs 20` (inside the workflow's private environment, with `VALIDATION_ROOT` and `SQLITE_VALIDATION_CI=1`). It uses the checkout's captured bundle and public StorageClient, a newly allocated private state directory, WAL/FULL readback and real prepare/inspect/close/reopen IPC. JSON reports p50/p95 in milliseconds. This is a foundation baseline, not a JSON migration comparison or a performance improvement claim. Only reports are uploaded, never database files. The job owns its private root until runner disposal; existing fixture smokes stop only their own children. No provider authentication or operational mount is supplied.
+
+The workflow's `release-prepare` job runs `npm version 1.118.0 --no-git-tag-version` in a disposable hosted checkout using the same private environment. It preserves preversion/check, version/identity and postversion/build hooks. If the input already has that version, it verifies through check, release prepare, identity test and build without a duplicate npm version. The job uploads the four release sources, SHA-256 hashes, input SHA, original logs and exit; it never commits, pushes, tags, publishes or updates Tower. The parent must inspect the raw result, recheck current main and today's UTC date, apply only those four sources, then follow Releasing and final review. Source preparation is not a completed version bump or release.
