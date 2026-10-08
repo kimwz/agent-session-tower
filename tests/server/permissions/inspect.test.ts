@@ -633,14 +633,14 @@ test('/dev is never bound; more credential names are refused, code named so in a
 
 test('a long file is read in parts small enough for the provider to pass whole, each saying where the next starts', async t => {
   const f = await fixture(t);
-  const text = Array.from({ length: 2_000 }, (_, index) => `const line${index} = ${'x'.repeat(60)};`).join('\n');
+  const text = Array.from({ length: 2_000 }, (_, index) => `const line${index} = '${'한'.repeat(60)}';`).join('\n');
   await writeFile(join(f.project, 'big.mjs'), text);
   const files = await f.files('node big.mjs');
   const parts: string[] = [];
   let offset = 1;
   for (let round = 0; round < 50; round++) {
-    const part = await files.read({ path: 'big.mjs', offset }) as { text: string; toLine: number; totalLines: number; next?: string };
-    assert.ok(part.text.length <= 20_000);
+    const part = await files.read({ path: 'big.mjs', offset, limit: 5_000 }) as { text: string; toLine: number; totalLines: number; next?: string };
+    assert.ok(Buffer.byteLength(part.text) <= 20_000);
     parts.push(part.text);
     if (!part.next) break;
     assert.match(part.next, new RegExp(`offset ${part.toLine + 1}`));
