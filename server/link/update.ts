@@ -7,12 +7,13 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { UpdateFailure, UpdateStage, UpdateStatus } from '../../shared/link.js';
 import { writePrivateJson } from '../stores/private-json.js';
+import { observeProcess } from './process-owner.js';
 import { processStart } from '../instance/process-start.js';
 import { HoldError, observeHold, removeHold, writeHold, type HoldGeneration } from './storage-hold.js';
 import { TransitionLockError } from './storage-transition-lock.js';
 import { currentVersion, entryPoint, installVersion, newerVersion, pointUpdate, RELEASE_WAIT_MS, restartService, runtimePaths, versionDirectory } from './service.js';
 import {
-  alive, pinnedVersion, preparationCheck, probeInstalledArtifact, readCurrentPointer, readHelperLock, readHold, readRollbackRecord, readUpdateRecord, rollbackActive, storageKeptVersions,
+  pinnedVersion, preparationCheck, probeInstalledArtifact, readCurrentPointer, readHelperLock, readHold, readRollbackRecord, readUpdateRecord, rollbackActive, storageKeptVersions,
   updateActive, updatePaths, type ArtifactRead, type HelperRead, type SavedUpdate,
 } from './storage-update.js';
 
@@ -356,7 +357,18 @@ export class Updates {
       const installed = await readdir(runtimePaths(stateDir).versions).catch(() => [] as string[]);
       // An install cut short leaves its staging folder behind; no helper runs now to finish it.
       // An install still under way (by a join or service command run by hand) keeps its staging folder.
-      const staging = (name: string) => { const pid = Number(/^\d+\.\d+\.\d+\.installing-(\d+)$/.exec(name)?.[1]); return pid > 0 && !alive(pid); };
+      const staging = (name: string) => {
+        const match = /^\d+\.\d+\.\d+\.installing-(\d+)$/.exec(name);
+        if (!match) return false;
+        const pid = Number(match[1]);
+        const observed = observeProcess(pid);
+        if (observed.state === 'unobserved' || observed.state === 'out-of-range') {
+          const reason = observed.state === 'out-of-range' ? 'pid is outside the signal-zero range' : `${(observed.error as NodeJS.ErrnoException | undefined)?.code ?? 'unknown'}: ${observed.error instanceof Error ? observed.error.message : String(observed.error)}`;
+          console.error(`The staging folder ${name} is kept: ${reason}`);
+        }
+        if (observed.state === 'present' && observed.code === 'EPERM') console.error(`The staging folder ${name} is kept: EPERM (the process is present).`);
+        return observed.state === 'gone';
+      };
       for (const name of installed) if ((RELEASE.test(name) && !keep.has(name)) || staging(name)) await rm(versionDirectory(stateDir, name), { recursive: true, force: true });
     });
   }

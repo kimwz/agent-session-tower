@@ -11,6 +11,7 @@ import type { StoragePreflight } from '../storage/preflight.js';
 import { CORE_SCOPE, manifestDigest } from '../storage/schema.js';
 import { privateDirectory, privateFile, storageLayout, writePrivateDocument } from '../storage/paths.js';
 import { writePrivateJson } from '../stores/private-json.js';
+import { observeProcess } from './process-owner.js';
 import { processStart } from '../instance/process-start.js';
 import { entryPoint, newerVersion, pointRollbackTarget, runtimePaths, versionDirectory } from './service.js';
 import { liveness, readExact as readExactly, readStoragePin, storagePinPath, thisProcess, withStorageTransition, type PinRead, type StoragePin } from './storage-transition-lock.js';
@@ -152,12 +153,6 @@ export async function readHold(stateDir: string, now = Date.now()): Promise<Hold
   return { state: 'present', ageMs: Math.max(0, now - info.mtimeMs) };
 }
 
-/** Whether a process is still running. */
-export function alive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
-}
-/** The largest pid process.kill takes (an int32): a larger one fails before the system is asked. */
-const MAX_PID = 2 ** 31 - 1;
 /**
  * The helper lock's owner: `running` while its pid runs as the process that took it (a pid whose start cannot be told
  * counts as running), `gone` once it does not: only the system saying no such process (ESRCH), or another start time,
@@ -180,14 +175,11 @@ export async function readHelperLock(stateDir: string, started: (pid: number) =>
   const [pidText, ...rest] = text.split(' ');
   const pid = Number(pidText);
   if (!(pid > 0) || !Number.isInteger(pid)) return { state: 'invalid', reason: 'The update helper lock names no process.' };
-  if (pid > MAX_PID) return { state: 'invalid', reason: `The update helper lock names pid ${pidText.slice(0, 40)}, which no process here can have.` };
   const unobserved = (error: unknown): HelperRead => ({ state: 'unreadable', reason: `Whether pid ${pid} still runs cannot be observed: ${messageOf(error)}`, error, pid });
-  try { process.kill(pid, 0); } catch (error) {
-    const code = (error as NodeJS.ErrnoException | undefined)?.code;
-    if (code === 'ESRCH') return { state: 'gone', pid };
-    // EPERM: it runs, as another user.
-    if (code !== 'EPERM') return unobserved(error);
-  }
+  const observed = observeProcess(pid);
+  if (observed.state === 'out-of-range') return { state: 'invalid', reason: `The update helper lock names pid ${pidText.slice(0, 40)}, which no process here can have.` };
+  if (observed.state === 'gone') return { state: 'gone', pid };
+  if (observed.state === 'unobserved') return unobserved(observed.error);
   if (!rest.length) return { state: 'running', pid };
   let now: string | undefined;
   try { now = await started(pid); } catch (error) { return unobserved(error); }

@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { link, mkdir, open, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { observeProcess } from './process-owner.js';
 import { processStart } from '../instance/process-start.js';
 
 /**
@@ -91,11 +92,19 @@ export interface ProcessIdentity { pid: number; start: string }
 export type Liveness = 'running' | 'gone' | 'unknown';
 
 /** Whether `owner` still runs: its pid, as the process that started at `start`. */
+async function observeOwner(owner: ProcessIdentity): Promise<{ liveness: Liveness; reason?: string }> {
+  const observed = observeProcess(owner.pid);
+  if (observed.state === 'gone') return { liveness: 'gone' };
+  if (observed.state === 'out-of-range') return { liveness: 'unknown', reason: `Pid ${owner.pid} is outside the signal-zero range.` };
+  const failed = (error: unknown) => ({ liveness: 'unknown' as const, reason: `${(error as NodeJS.ErrnoException | undefined)?.code ?? 'unknown'}: ${messageOf(error)}` });
+  if (observed.state === 'unobserved') return failed(observed.error);
+  let now: string | undefined;
+  try { now = await processStart(owner.pid); } catch (error) { return failed(error); }
+  if (now === undefined || !owner.start) return { liveness: 'unknown', reason: 'The owner start time cannot be established.' };
+  return { liveness: now === owner.start ? 'running' : 'gone' };
+}
 export async function liveness(owner: ProcessIdentity): Promise<Liveness> {
-  try { process.kill(owner.pid, 0); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EPERM') return 'gone'; }
-  const now = await processStart(owner.pid);
-  if (now === undefined || !owner.start) return 'unknown';
-  return now === owner.start ? 'running' : 'gone';
+  return (await observeOwner(owner)).liveness;
 }
 
 let ownStart: Promise<string> | undefined;
@@ -151,7 +160,7 @@ async function removeOwn(path: string, role: OwnerFile['role'], text: string): P
 
 export type OwnerReport =
   | { path: string; state: 'absent' }
-  | { path: string; state: 'held'; pid: number; start: string; liveness: Liveness }
+  | { path: string; state: 'held'; pid: number; start: string; liveness: Liveness; reason?: string }
   | { path: string; state: 'unreadable'; reason: string };
 /** What holds the transition turn, as it is: the lock and the breaker, each with its owner's pid, start and liveness. Changes nothing. */
 export interface TransitionDiagnostic { lock: OwnerReport; breaker: OwnerReport }
@@ -159,7 +168,7 @@ async function report(path: string, role: OwnerFile['role']): Promise<OwnerRepor
   const owner = await readOwner(path, role);
   if (owner.state === 'absent') return { path, state: 'absent' };
   if (owner.state === 'unreadable') return { path, state: 'unreadable', reason: owner.reason };
-  return { path, state: 'held', pid: owner.owner.pid, start: owner.owner.start, liveness: await liveness(owner.owner) };
+  return { path, state: 'held', pid: owner.owner.pid, start: owner.owner.start, ...await observeOwner(owner.owner) };
 }
 export async function inspectStorageTransition(stateDir: string): Promise<TransitionDiagnostic> {
   const [lock, breaker] = await Promise.all([report(transitionLockPath(stateDir), 'lock'), report(transitionBreakerPath(stateDir), 'breaker')]);
@@ -201,7 +210,7 @@ export async function withStorageTransition<T>(stateDir: string, work: () => Pro
       const broken = await breakStale(stateDir, owner);
       if (broken === 'broken') continue;
     }
-    if (Date.now() >= deadline) throw new TransitionLockError('transition-busy', 'Another Tower process is changing which version the service starts; try again in a moment.');
+    if (Date.now() >= deadline) throw new TransitionLockError('transition-busy', 'Another Tower process is changing which version the service starts; try again in a moment.', await inspectStorageTransition(stateDir));
     await new Promise(done => setTimeout(done, POLL_MS));
   }
   const turn: Turn = { key, open: true };

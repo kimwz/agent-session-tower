@@ -775,3 +775,47 @@ test('F6. recovery and the helper do not write through a hold that is a link: no
   const status = await runUpdateHelper(state, '1.1.0', steps);
   assert.deepEqual([status?.stage, status?.code, points, await readFile(target, 'utf8'), readlinkSync(updatePaths(state).hold)], ['failed', 'switch-failed', [], 'ORIGINAL', target]);
 });
+
+test('process observation unknown keeps rollback attempt, record, pin and hold unchanged at all busy gates', async t => {
+  for (const input of ['EIO', 'EINVAL', 'generic', 2 ** 31, Number.MAX_SAFE_INTEGER] as const) {
+    const state = await rollbackState(t);
+    const world = rollbackWorld(); world.ports.waitQuiet = pending;
+    assert.equal((await ask(onFrom(state, world.ports))).state, 'waiting');
+    const pid = typeof input === 'number' ? input : process.ppid;
+    await rewrite(state, { state: 'holding', held: true, attempt: { n: 2, pid, start: 'owner-start', nonce: randomBytes(10).toString('hex'), kind: 'run', at } });
+    const before = bytes(storageUpdatePaths(state).rollback); const pin = bytes(storagePinPath(state)); const calls = [...world.calls]; const holds = [...world.holds];
+    const original = process.kill; let observed = 0;
+    process.kill = ((p: number, s: any) => {
+      if (p === pid && s === 0) { observed++; throw typeof input === 'number' ? new Error('range must not reach syscall') : Object.assign(new Error(`injected ${input}`), input === 'generic' ? {} : { code: input }); }
+      return original(p, s);
+    }) as typeof process.kill;
+    try {
+      const withdrawn = await withdrawRollback(onFrom(state, world.ports));
+      assert.ok(withdrawn.state === 'refused' && withdrawn.code === 'rollback-busy', JSON.stringify(withdrawn));
+      const retry = await ask(onFrom(state, world.ports)); assert.ok(retry.state === 'refused' && retry.code === 'rollback-busy', JSON.stringify(retry));
+      const resume = await resumeRollback(onFrom(state, world.ports)); assert.ok(resume.state === 'refused' && resume.code === 'rollback-busy', JSON.stringify(resume));
+      assert.equal((await releaseStoragePin(state, { version: A })).code, 'rollback-under-way');
+      assert.deepEqual(bytes(storageUpdatePaths(state).rollback), before); assert.deepEqual(bytes(storagePinPath(state)), pin);
+      assert.deepEqual(world.calls.filter(call => call !== 'inspect'), calls.filter(call => call !== 'inspect')); assert.deepEqual([...world.holds], holds); assert.equal(onDisk(state).attempt!.n, 2);
+      await rewrite(state, { state: 'failed', held: false });
+      const releaseBefore = bytes(storageUpdatePaths(state).rollback);
+      assert.equal((await releaseStoragePin(state, { version: A })).code, 'rollback-busy');
+      assert.deepEqual(bytes(storageUpdatePaths(state).rollback), releaseBefore);
+      assert.deepEqual(bytes(storagePinPath(state)), pin);
+      assert.deepEqual(world.calls.filter(call => call !== 'inspect'), calls.filter(call => call !== 'inspect')); assert.deepEqual([...world.holds], holds);
+      if (typeof input === 'number') assert.equal(observed, 0);
+    } finally { process.kill = original; }
+  }
+});
+
+test('unknown attempt prevents completed operationClosed from creating a new operation or reporting past', async t => {
+  const { state, world, answer } = await completedHeld(t); answer();
+  assert.equal((await resumeRollback(onTarget(state, world.ports))).state, 'completed');
+  const attempt = onDisk(state).attempt!;
+  await rewrite(state, { attempt: { ...attempt, pid: Number.MAX_SAFE_INTEGER, start: 'unknown', ended: undefined } });
+  const before = bytes(storageUpdatePaths(state).rollback); const calls = [...world.calls];
+  const result = await resumeRollback(onTarget(state, world.ports));
+  assert.ok(result.state === 'refused' && result.code === 'rollback-busy', JSON.stringify(result));
+  assert.deepEqual(bytes(storageUpdatePaths(state).rollback), before);
+  assert.deepEqual(world.calls.filter(call => call !== 'inspect'), calls.filter(call => call !== 'inspect'));
+});
