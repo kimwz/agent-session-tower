@@ -34,6 +34,8 @@ test('heartbeat settings expose the 30-minute default and separate internal no-o
   assert.match(html, /master\.heartbeat/);
   const action = render({ heartbeat: { actions: [{ checkId: 'check-action', at: '2026-10-08T12:30:00Z', taskIds: ['task-a'], cause: 'Repeated review', evidence: 'same result twice', recommendation: 'Use existing hosted CI', delivery: 'sent', runId: 'run-action' }] } });
   for (const text of ['Repeated review', 'same result twice', 'Use existing hosted CI', 'run-action', 'task-a']) assert.ok(action.includes(text));
+  const broken = render({ heartbeat: { actions: [], problem: 'Heartbeat 기록을 읽지 못했습니다. 교정 기록을 읽지 못해 교정 조치를 중지했습니다.' } });
+  assert.match(broken, /role="alert"[^>]*>Heartbeat 기록을 읽지 못했습니다\. 교정 기록을 읽지 못해/);
 });
 
 test('the reading models are offered with Eleven v4 Turbo first and chosen by default, in either language', () => {

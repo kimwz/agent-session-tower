@@ -79,12 +79,14 @@ export async function startMasterHost(options: MasterHostOptions) {
     const binding = current.session;
     const shown = binding ? live.snapshot()?.sessions.find(item => item.id === binding.sessionId) : undefined;
     const voiceConfigured = Boolean(settings.voiceKey());
+    const heartbeatStatus = heartbeat?.status();
+    const heartbeatProblem = [heartbeatStatus?.problem, heartbeatTools?.diagnostic()].filter(Boolean).join(' ');
     return {
       available: true, version: APP_VERSION, settings: current,
       ...(binding ? { session: { id: binding.sessionId, provider: binding.provider, ...(shown ? { status: shown.status, title: shown.customTitle || shown.title } : {}) } } : {}),
       voiceConfigured, ...(voiceConfigured ? { voiceKeyHint: settings.voiceKeyHint() } : {}),
       activeTasks: session?.activeTasks() ?? 0,
-      ...(heartbeat ? { heartbeat: heartbeat.status() } : {}),
+      ...(heartbeatStatus ? { heartbeat: { ...heartbeatStatus, ...(heartbeatProblem ? { problem: heartbeatProblem } : {}) } } : {}),
       ...(session?.failedReports() ? { failedReports: session.failedReports() } : {}),
       ...(session?.stateProblem() ? { followState: session.stateProblem() } : {}),
       ...(voice ? { voice: voice.status() } : {}),

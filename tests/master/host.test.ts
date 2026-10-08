@@ -14,6 +14,22 @@ import { writePrivateJson } from '../../server/stores/private-json.js';
 import type { MasterCheckpoint, MasterOverview } from '../../shared/master.js';
 import { until } from '../helpers/until.js';
 
+test('master overview preserves inspector and corrective audit corruption diagnostics across actual RPC', async t => {
+  const stateDir = await temporaryFixture('tower-master-heartbeat-corrupt-rpc-');
+  const paths = await masterPaths(stateDir);
+  await mkdir(paths.data, { recursive: true, mode: 0o700 });
+  await writePrivateJson(join(paths.data, 'heartbeat.json'), '{ corrupt');
+  await writePrivateJson(join(paths.data, 'heartbeat-corrections.json'), '{ corrupt');
+  const host = await startMasterHost({ stateDir, idleMs: 60_000 });
+  const client = new MasterClient({ stateDir, credentials: () => undefined });
+  t.after(async () => { client.dispose(); await host.close(); await removeTemporaryFixture(stateDir); });
+  const overview = await client.call('overview') as MasterOverview;
+  assert.match(overview.heartbeat?.problem ?? '', /Heartbeat 기록을 읽지 못해/);
+  assert.match(overview.heartbeat?.problem ?? '', /교정 기록을 읽지 못해/);
+  assert.equal(overview.heartbeat?.lastCheck, undefined); assert.deepEqual(overview.heartbeat?.actions, []);
+  assert.equal(await readFile(join(paths.data, 'heartbeat-corrections.json'), 'utf8'), '{ corrupt');
+});
+
 test('playback diagnostics survive the web to master-host RPC boundary', async t => {
   const stateDir = await temporaryFixture('tower-master-playback-rpc-');
   const host = await startMasterHost({ stateDir, idleMs: 60_000 });

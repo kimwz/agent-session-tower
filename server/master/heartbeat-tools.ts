@@ -37,6 +37,7 @@ export class HeartbeatTools {
   private queue: Promise<unknown> = Promise.resolve();
   private readonly path: string;
   constructor(private readonly options: Options) { this.path = join(options.dataDir, 'heartbeat-corrections.json'); }
+  diagnostic(): string | undefined { return this.problem ? '교정 기록을 읽지 못해 교정 조치를 중지했습니다.' : undefined; }
   async start(): Promise<void> {
     this.unsubscribe = this.options.settings.subscribe(() => { this.epoch++; this.controller?.abort(); });
     try {

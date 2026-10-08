@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -139,4 +139,13 @@ test('a cancelled continuation cannot hide its stopped assignee ancestor from na
   h.extraRuns.push(resumed);
   await assert.rejects(h.tools.call('heartbeat_correct', { taskId: 'task', prompt: 'Resume despite the stop' }, h.capability), /stopped/);
   assert.equal(h.posts.length, 0);
+});
+
+test('corrupt corrective audit exposes a diagnostic and blocks an otherwise authorized correction without resetting records', async t => {
+  const h = await fixture(t); await h.tools.close();
+  const path = join(h.dir, 'heartbeat-corrections.json'); await writeFile(path, '{ corrupt');
+  const restarted = new HeartbeatTools(h.options); await restarted.start(); t.after(() => restarted.close());
+  assert.match(restarted.diagnostic() ?? '', /교정 기록을 읽지 못해/);
+  await assert.rejects(restarted.call('heartbeat_correct', { taskId: 'task', prompt: 'Continue existing work' }, h.capability), /authority/);
+  assert.equal(h.posts.length, 0); assert.equal(await readFile(path, 'utf8'), '{ corrupt');
 });
