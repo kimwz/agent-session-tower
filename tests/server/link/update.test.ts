@@ -423,13 +423,16 @@ test('an update whose helper lock cannot be read is not reported interrupted, an
 });
 
 test('recovery with an unreadable helper lock holds the worker but starts no helper', async t => {
+  t.mock.method(console, 'error', () => {});
   const state = await stateDir(t);
   await activeUpdate(state);
   const before = await readFile(updatePaths(state).status, 'utf8');
   await unreadableLock(state);
   const resumed: string[] = [];
   await assert.rejects(new Updates({ stateDir: state, version: '1.1.0', port: 1, managed: true, spawnHelper: version => resumed.push(version) }).recover(), { code: 'EISDIR' });
-  assert.equal(existsSync(updatePaths(state).hold), true);
+  // Held by the judgment itself, not by a hold written for it: no hold is written, and the handoff is still refused.
+  assert.equal(existsSync(updatePaths(state).hold), false, 'recovery writes no hold');
+  await assert.rejects(handoffHeld(state), { code: 'EISDIR' });
   assert.deepEqual(resumed, []);
   assert.equal(await readFile(updatePaths(state).status, 'utf8'), before);
   await assert.rejects(new Updates({ stateDir: state, version: '1.0.0', port: 1, managed: true }).recover(), { code: 'EISDIR' });
