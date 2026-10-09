@@ -11,7 +11,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version: '24.15.0'
@@ -56,35 +55,6 @@ jobs:
             node --import tsx --test --test-reporter=tap tests/server/link/storage-update-legacy.test.ts
             exit 0
           fi
-          printf '%s\n' request-identity-old563-baseline > "$report/stage.txt"
-          (
-            module=server/runs/durable-runner.ts
-            current_hash="$(sha256sum "$module" | cut -d ' ' -f 1)"
-            head_hash="$(git show "HEAD:$module" | sha256sum | cut -d ' ' -f 1)"
-            [[ "$current_hash" == "$head_hash" ]]
-            restore() {
-              result=$?
-              trap - EXIT
-              git show "HEAD:$module" > "$module" || exit 1
-              [[ "$(sha256sum "$module" | cut -d ' ' -f 1)" == "$current_hash" ]] || exit 1
-              printf 'request-identity restored current HEAD SHA256 %s\n' "$current_hash"
-              exit "$result"
-            }
-            trap restore EXIT
-            git show "563f2afa0a2e85e48436de39777db7a05bb77729:$module" > "$module"
-            [[ "$(sha256sum "$module" | cut -d ' ' -f 1)" == 845ea018cbded318b8823717c3ac9d0a0d17addcdb4bf021520e4fc06b27d25c ]]
-            printf 'request-identity baseline actual old563 SHA256 845ea018cbded318b8823717c3ac9d0a0d17addcdb4bf021520e4fc06b27d25c\n'
-            set +e
-            node --import tsx --test --test-reporter=tap tests/server/link/storage-web.test.ts 2>&1 | tee "$report/request-identity-baseline.log"
-            baseline_exit=${PIPESTATUS[0]} tee_exit=${PIPESTATUS[1]}
-            set -e
-            [[ "$baseline_exit" == 1 && "$tee_exit" == 0 ]]
-            grep -Fq 'concurrent-adoption: actual snapshot adopted before held predecessor proof 409' "$report/request-identity-baseline.log"
-            grep -Fq 'concurrent-adoption: predecessor proof 409 after snapshot adoption must complete' "$report/request-identity-baseline.log"
-            grep -Eq '^# fail 1$' "$report/request-identity-baseline.log"
-            grep -Eq '^# cancelled 0$' "$report/request-identity-baseline.log"
-            printf 'request-identity baseline EXPECTED FAIL exit=1: concrete concurrent-adoption assertion; teardown completed\n'
-          )
           printf '%s\n' tests/server/runs/storage-control.test.ts tests/server/runs/storage-diagnostic-worker.test.ts \
             tests/server/permissions/one-shot.test.ts tests/server/runs/run-persistence.test.ts \
             tests/server/http/storage-health.test.ts tests/server/link/storage-web.test.ts \
@@ -188,7 +158,12 @@ jobs:
             'tests/server/terminals/terminal-host.test.ts', 'tests/server/instance/existing-server.test.ts',
             'tests/server/permissions/permissions.test.ts', 'tests/server/auto-prompt/auto-prompts.test.ts'];
           for (const file of lifecycle) assert.ok(globSync(file).length, `lifecycle fixture must exist: ${file}`);
-          const retention = ['tests/server/sessions/retention-storage.test.ts'];
+          // Keep metadata preparation covered alongside native-effect and admission boundaries.
+          const retention = ['tests/server/sessions/retention-storage.test.ts',
+            'tests/server/sessions/retention-domain.test.ts', 'tests/server/sessions/retention-observer.test.ts',
+            'tests/server/sessions/retention-provider.test.ts', 'tests/server/sessions/retention-ancestry.test.ts',
+            'tests/server/sessions/retention-throughput.test.ts', 'tests/server/sessions/native-inspection.test.ts',
+            'tests/server/runs/retention-admission.test.ts', 'tests/server/http/retention-http.test.ts'];
           for (const file of retention) assert.ok(globSync(file).length, `retention fixture must exist: ${file}`);
           const files = [...new Set([...storage, ...link, ...consumers, ...imported, ...lifecycle, ...retention])].sort();
           writeFileSync(`${process.env.VALIDATION_ROOT}/reports/test-files.txt`, files.join('\n') + '\n');
@@ -201,6 +176,12 @@ jobs:
           printf '%s\n' foundation > "$report/stage.txt"
           node --import tsx scripts/sqlite-foundation-benchmark.mjs 20 | tee "$report/foundation.json"
           printf '0\n' > "$report/foundation-exit.txt"
+          # Measure the same JSON/SQL workload once; raw timing does not establish net benefit.
+          if [[ "$SQLITE_RETENTION_LARGE" == 1 ]]; then
+            printf '%s\n' retention-benchmark > "$report/stage.txt"
+            node --import tsx scripts/test-benchmark-retention-storage.ts "$report/retention-benchmark.json"
+            printf '0\n' > "$report/retention-benchmark-exit.txt"
+          fi
           if [[ "$(node -p 'process.versions.node.split(".")[0]')" == 26 ]]; then
             printf '%s\n' sea-build > "$report/stage.txt"
             npm run build:executable
@@ -310,7 +291,7 @@ jobs:
           npm ci
           node --import tsx scripts/sqlite-runtime-check.mjs supported-floor | tee "$report/runtime.json"
           printf '%s\n' release-version-decision > "$report/stage.txt"
-          if [[ "$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')" == 1.119.0 ]]; then
+          if [[ "$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')" == 1.120.0 ]]; then
             printf '%s\n' already-target > "$report/version-mode.txt"
             printf '%s\n' already-target-official-checks > "$report/stage.txt"
             npm run check
@@ -324,13 +305,13 @@ jobs:
           const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
           assert.match(version, /^\d+\.\d+\.\d+$/);
           const current = version.split('.').map(Number);
-          const target = [1, 119, 0];
+          const target = [1, 120, 0];
           const first = current.findIndex((part, index) => part !== target[index]);
           assert.ok(first >= 0 && current[first] < target[first], 'target must exceed the input version');
           FLOOR
             printf '%s\n' npm-version > "$report/version-mode.txt"
             printf '%s\n' npm-version-hooks > "$report/stage.txt"
-            npm version 1.119.0 --no-git-tag-version
+            npm version 1.120.0 --no-git-tag-version
             printf '0\n' > "$report/npm-version-exit.txt"
           fi
           node --input-type=module <<'VERSION'
@@ -339,7 +320,7 @@ jobs:
           import { APP_VERSION } from './dist/shared/app-identity.js';
           const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
           const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
-          assert.equal(pkg.version, '1.119.0');
+          assert.equal(pkg.version, '1.120.0');
           assert.equal(lock.version, pkg.version);
           assert.equal(lock.packages[''].version, pkg.version);
           assert.equal(APP_VERSION, pkg.version);

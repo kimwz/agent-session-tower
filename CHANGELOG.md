@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.120.0] - 2026-10-09
+
+### Changed
+
+- Prepare retention metadata storage with guarded readers and writers, current-generation export and restore, and atomic operation receipts. This release does not enable the first production import; existing JSON remains authoritative until retention cutover.
+
 ## [1.119.0] - 2026-10-09
 
 ### Changed
