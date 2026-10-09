@@ -391,6 +391,8 @@ for (const outcome of ['saved','unknown','known-failure'] as const) test(`actual
   const manager = new RunManager({ stateDir: f.stateDir,storage: client,holdUntilReady: true,getSession: () => undefined,refreshSessions: async () => {},
     findExecutable: async () => '/fixture/codex',spawnProcess: () => { throw new Error('Fixture forbids native launch'); },openCodexStdio: async config => {
       identify = async () => {
+        // The response-loss adapter matches the current row, not Q's already committed row.
+        if (outcome === 'unknown') config.onOutput('native-hold-response-lost');
         try { await config.onSession(nativeId); }
         catch (error) { config.onFinished({ status: 'error',error: String(error) }); finish(); throw error; }
         if (cancelled) return;
@@ -446,6 +448,7 @@ for (const outcome of ['saved','unknown','known-failure'] as const) test(`actual
   retention.mock.restore(); client.write = write;
   if (outcome === 'saved') {
     assert.equal(failure,undefined); assert.equal(await identified,undefined); assert.equal(submissions,1);
+    await manager.flushState(); // onStarted queued a new running-state revision.
     const current = await new RunsRepository(client).exportCurrent();
     const identity = current.documents.created.find(row => row.runId === rId)!;
     assert.equal(identity.confirmed,true); assert.equal(identity.session.nativeId,nativeId);
