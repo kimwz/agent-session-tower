@@ -416,10 +416,6 @@ export class RunManager extends EventEmitter {
   async resolveAdmission(commandId: string): Promise<{ disposition: 'committed' | 'not-committed'; runIds: string[] }> {
     if (this.history.pendingAdmission()?.commandId !== commandId) throw new RunError('Unknown admission receipt identity.', 'conflict');
     const resolved = await this.history.resolveAdmission(), runIds = [...new Set([...resolved.newRunIds, ...this.uncertainAdmissions])];
-    for (const waiter of [...this.nativeIdentityWaiters.values()]) if (waiter.commandId === commandId) {
-      waiter.settle(resolved.disposition === 'committed', resolved.disposition === 'not-committed'
-        ? new Error('The new conversation identity was not saved. No receipt authorized delivery.') : undefined);
-    }
     for (const id of runIds) {
       const prepared = this.uncertainPrepared.get(id), run = resolved.newRuns.get(id) ?? this.runs.get(id);
       const unsentTarget = this.unsentSteering.get(id);
@@ -440,7 +436,13 @@ export class RunManager extends EventEmitter {
       this.uncertainPrepared.delete(id); this.uncertainAdmissions.delete(id); this.admissions.delete(id);
       this.unsentSteering.delete(id);
     }
-    this.changed(); await this.flush();
+    this.changed();
+    // Queue the current identity before waking waiters: this receipt may cover an older projection.
+    for (const waiter of [...this.nativeIdentityWaiters.values()]) if (waiter.commandId === commandId) {
+      waiter.settle(resolved.disposition === 'committed', resolved.disposition === 'not-committed'
+        ? new Error('The new conversation identity was not saved. No receipt authorized delivery.') : undefined);
+    }
+    await this.flush();
     return { disposition: resolved.disposition, runIds };
   }
 

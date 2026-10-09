@@ -313,6 +313,7 @@ test('actual admission loss reaches coordinator trigger event once without a new
   await new RunsRepository(client).importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'github-empty');
   let native = 0;
   const manager = new RunManager({ stateDir,storage: client,getSession: () => undefined,refreshSessions: async () => {},
+    findExecutable: async () => '/fixture/codex',
     spawnProcess: () => { native++; throw new Error('No native provider allowed'); } });
   await manager.start();
   const f = await fixture(t,{ create: (input,internal) => manager.create({ ...input,cwd: stateDir,prompt: 'native-hold-response-lost' },internal) });

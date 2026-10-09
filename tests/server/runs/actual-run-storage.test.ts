@@ -18,6 +18,7 @@ import { RemoteRequestLedger } from '../../../server/remote/request-ledger.js';
 import type { Run, Session } from '../../../shared/types.js';
 import type { PermissionRequest } from '../../../shared/permissions.js';
 import { until } from '../../helpers/until.ts';
+import { AttachmentStore } from '../../../server/stores/attachments.js';
 
 async function folder(t: TestContext) {
   const path = await realpath(await mkdtemp(join(tmpdir(),'tower-runs-fixture-')));
@@ -371,6 +372,92 @@ test('sealed B import before commit holds A JSON restoration on the same actual 
   await assert.rejects(manager.start(),/evidence exists without authority/);
   assert.equal(manager.list().length,0); assert.equal(native,0);
   assert.deepEqual(await Promise.all(names.map(name => readFile(join(f.stateDir,name)))),before);
+});
+
+for (const outcome of ['saved','unknown','known-failure'] as const) test(`actual Q receipt cannot authorize R identity before its current save: ${outcome}`, async t => {
+  const f = await prepared(t), initial = await f.open(f.b), data = documents(f.stateDir);
+  const rId = data.runs[0].id, qId = '10000000-0000-4000-8000-000000000003';
+  const nativeId = '10000000-0000-4000-8000-000000000099';
+  await new RunsRepository(initial).importPrepared(data,'a'.repeat(64),'ordered-identity-seed'); await initial.close();
+  const client = await f.open(f.a,'after-native-hold'), write = client.write.bind(client);
+  let identify!: () => Promise<void>, finish!: () => void, submissions = 0, cancelled = false;
+  const done = new Promise<void>(resolve => { finish = resolve; });
+  const manager = new RunManager({ stateDir: f.stateDir,storage: client,holdUntilReady: true,getSession: () => undefined,refreshSessions: async () => {},
+    findExecutable: async () => '/fixture/codex',spawnProcess: () => { throw new Error('Fixture forbids native launch'); },openCodexStdio: async config => {
+      identify = async () => {
+        try { await config.onSession(nativeId); }
+        catch (error) { config.onFinished({ status: 'error',error: String(error) }); finish(); throw error; }
+        if (cancelled) return;
+        submissions++; config.onStarted?.('fixture');
+      };
+      return { start: async () => {},done,close: finish,cancel: async () => { cancelled = true; config.onFinished({ status: 'cancelled' }); finish(); },respondToApproval: async () => {} };
+    } });
+  await manager.start(); manager.markReady(); await until(() => !!identify);
+  const request: PermissionRequest = { id: qId,sessionId: data.created[0].session.id,runId: rId,status: 'approved',
+    rule: { kind: 'command',value: 'fixture',providers: ['codex'],scope: 'project',cwd: f.stateDir },reason: 'Fixture',cwd: f.stateDir,createdAt: data.runs[0].createdAt };
+  await assert.rejects(manager.permissionDecision(request,'native-hold-response-lost'),(error: { disposition?: string }) => error.disposition === 'uncertain');
+  const qReceipt = manager.pendingAdmission()!;
+  const identified = identify().then(() => undefined,error => error);
+  await until(() => manager['nativeIdentityWaiters'].get(rId)?.commandId === qReceipt.commandId);
+  await client.reopen(); await client.prepare({ allowMigration: false }); manager.holdStorage();
+  let entered!: () => void, release!: () => void;
+  const retaining = new Promise<void>(resolve => { entered = resolve; }), attachmentGate = new Promise<void>(resolve => { release = resolve; });
+  const retain = AttachmentStore.prototype.retain;
+  const retention = t.mock.method(AttachmentStore.prototype,'retain',async function(this: AttachmentStore, ids: readonly string[]) {
+    entered(); await attachmentGate; return retain.call(this,ids);
+  });
+  const resolution = manager.resolveAdmission(qReceipt.commandId);
+  const resolved = resolution.then(() => undefined,error => error);
+  await retaining;
+  assert.equal(submissions,0,'Q attachment bookkeeping cannot authorize R delivery');
+  const before = await new RunsRepository(client).exportCurrent();
+  assert.equal(before.documents.created.find(row => row.runId === rId)!.confirmed,false);
+  assert.equal(before.documents.runs.some(run => run.id === qId),true);
+  assert.equal(submissions,0,'R stays unsent throughout the explicit Q retention gate');
+  if (outcome === 'unknown') {
+    // Re-arm the existing one-shot response-loss marker for the current identity write.
+    await rm(join(f.a.directory,'after-native-hold-consumed'));
+  }
+  let staged = false, conflicted = false, savedIdentity!: () => void, releaseSave!: () => void;
+  const saving = new Promise<void>(resolve => { savedIdentity = resolve; }), saveGate = new Promise<void>(resolve => { releaseSave = resolve; });
+  client.write = async <T>(...args: Parameters<typeof client.write>) => {
+    if (args[0] === 'runs' && args[1] === 'stage') {
+      if (Buffer.from((args[2] as { data: string }).data,'base64').toString('utf8').includes(nativeId)) staged = true;
+    }
+    if (staged && args[0] === 'runs' && args[1] === 'commit') {
+      savedIdentity(); await saveGate;
+      if (outcome === 'known-failure' && !conflicted) {
+        conflicted = true;
+        const repository = new RunsRepository(client), current = await repository.exportCurrent();
+        await repository.output(current.documents.runs.find(run => run.id === rId)!,'competing revision','ordered-identity-known-conflict');
+      }
+    }
+    return write<T>(...args);
+  };
+  release(); await saving;
+  assert.equal(submissions,0,'R waits for the current identity commit, even after Q receipt resolution');
+  releaseSave(); const failure = await resolved;
+  retention.mock.restore(); client.write = write;
+  if (outcome === 'saved') {
+    assert.equal(failure,undefined); assert.equal(await identified,undefined); assert.equal(submissions,1);
+    const current = await new RunsRepository(client).exportCurrent();
+    const identity = current.documents.created.find(row => row.runId === rId)!;
+    assert.equal(identity.confirmed,true); assert.equal(identity.session.nativeId,nativeId);
+    await manager.close();
+  } else if (outcome === 'unknown') {
+    assert.equal((failure as { disposition?: string }).disposition,'uncertain');
+    const rReceipt = manager.pendingAdmission()!;
+    assert.notEqual(rReceipt.commandId,qReceipt.commandId);
+    await until(() => manager['nativeIdentityWaiters'].get(rId)?.commandId === rReceipt.commandId);
+    assert.equal(submissions,0);
+    await assert.rejects(manager.close()); await identified;
+    assert.equal(manager['nativeIdentityWaiters'].size,0); assert.equal(submissions,0);
+  } else {
+    assert.ok(failure); assert.ok(await identified); assert.equal(conflicted,true);
+    assert.equal(manager.pendingAdmission(),undefined); assert.equal(submissions,0);
+    assert.equal(manager['nativeIdentityWaiters'].size,0);
+    await assert.rejects(manager.close());
+  }
 });
 
 for (const provider of ['codex','claude'] as const) for (const outcome of ['receipt','owner-stop','known-failure'] as const) {
