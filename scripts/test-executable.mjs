@@ -28,8 +28,23 @@ const failedRun = {
   id: 'standalone-dismiss-fixture', sessionId, prompt: 'Standalone failure dismissal fixture',
   status: 'error', createdAt: timestamp, finishedAt: timestamp, output: '', error: 'EXPECTED_TEST_FAILURE',
 };
-await mkdir(join(dir, 'state'));
-await writeFile(join(dir, 'state', 'runs.json'), JSON.stringify([failedRun]));
+const stateDir = join(dir, 'state');
+await mkdir(stateDir, { mode: 0o700 });
+await writeFile(join(stateDir, 'runs.json'), JSON.stringify([failedRun]), { mode: 0o600 });
+await writeFile(join(stateDir, 'created-sessions.json'), '[]', { mode: 0o600 });
+await writeFile(join(stateDir, 'run-instructions.json'), '{}', { mode: 0o600 });
+// This existing-history fixture needs the real prior artifact's preparation before B can import it.
+// The helper verifies the protected public A122 bytes; its SQLite owner closes before the SEA starts.
+const { tsImport } = await import('tsx/esm/api');
+const { retentionBuild } = await tsImport('../tests/server/storage/fixtures/retention-build.ts', import.meta.url);
+const { recordPreparationEvidence } = await tsImport('../server/link/storage-update.ts', import.meta.url);
+const a = await retentionBuild('1.122.0', join(dir, 'preparation-a122'));
+const preparation = await a.storage.openStorage({ stateDir, bundle: a.bundle() });
+try {
+  const prepared = await preparation.prepare({ allowMigration: true });
+  const preflight = await a.storage.preflightStorage({ stateDir, bundle: a.bundle() });
+  await recordPreparationEvidence(stateDir, { context: preparation.context, prepared, preflight, gate: await preparation.gate('core') });
+} finally { await preparation.close(); }
 const portProbe = createServer();
 await new Promise(resolve => portProbe.listen(0, '127.0.0.1', resolve));
 const port = portProbe.address().port;
@@ -64,13 +79,17 @@ async function ready() {
   throw new Error(`Executable did not become ready: ${output}`);
 }
 async function discovered() {
+  let last;
   for (let attempt = 0; attempt < 100; attempt++) {
-    const snapshot = await (await fetch(`${base}/api/snapshot`)).json();
-    const session = snapshot.sessions.find(session => session.id === sessionId);
+    const response = await fetch(`${base}/api/snapshot`);
+    const snapshot = await response.json();
+    last = { status: response.status, error: snapshot.error, storage: snapshot.storage };
+    const session = response.status === 200 && Array.isArray(snapshot.sessions)
+      ? snapshot.sessions.find(session => session.id === sessionId) : undefined;
     if (session) return session;
     await setTimeout(100);
   }
-  throw new Error('Executable did not discover title fixture.');
+  throw new Error(`Executable did not discover title fixture: ${JSON.stringify(last)}; ${output}`);
 }
 async function setTitle(title, token) {
   const response = await fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}/title`, {
