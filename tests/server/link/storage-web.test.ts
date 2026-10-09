@@ -37,7 +37,7 @@ test('serving target web resumes only the durable owner rollback through the rea
   const body = thread.outputFiles[0].text;
   const sourceHash = createHash('sha256').update(body).digest('hex');
   const artifact = { format: 'tower-storage-thread-bundle/2', sourceHash, source: `var __TOWER_STORAGE_SOURCE_HASH__ = "${sourceHash}";\n${body}` };
-  const manifest = storageManifest([], version);
+  const manifest = storageManifest(undefined, version);
   const parentFile = join(root, 'predecessor.mjs');
   await build({ entryPoints: [fileURLToPath(new URL('../storage/fixtures/parent.ts', import.meta.url))], outfile: parentFile, bundle: true, platform: 'node', format: 'esm', target: 'node22', logLevel: 'silent',
     plugins: [versionPlugin, buildIdentityPlugin(buildIdentityModule({ contexts: [{ sourceHash, manifest }] }))] });

@@ -194,7 +194,7 @@ for (const accept of [false, true]) test(`predecessor proof reflects callback ac
   const source = contextOf('production');
   assert.deepEqual(client.identity, source.identity, 'the predecessor is the actual SDK build');
   const target = '1.0.0';
-  const targetManifest = storageManifest([], target);
+  const targetManifest = storageManifest(undefined, target);
   const targetBuild = runningBuild(target, { manifest: targetManifest });
   const installed = await installArtifact(dir, target, { manifest: targetManifest });
   await writeFile(dirname(entryPoint(installed)) + '/contract.json', JSON.stringify(artifactStorageContract(
