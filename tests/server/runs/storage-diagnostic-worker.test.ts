@@ -121,6 +121,10 @@ test('actual product worker promotes update-held once in the same boot; a failed
     error instanceof storage.StorageCommandError && error.code === 'migration-required' && error.disposition === 'not-committed');
   const inspection = await client.inspect();
   assert.equal(inspection.schema.kind, 'empty'); assert.equal(inspection.ownerEpoch, 0);
+  // The inspector's real SDK open creates this private database before normal bootstrap is allowed.
+  const databasePath = join(state, 'state.sqlite');
+  const databaseBaseline = { bytes: await readFile(databasePath), info: await lstat(databasePath) };
+  assert.equal(databaseBaseline.info.mode & 0o777, 0o600);
   const identity = client.identity!;
   await writeFile(join(dirname(entryPoint(installed)), 'contract.json'), JSON.stringify(artifactStorageContract(context, preflight)));
   await pointCurrent(state, identity.appVersion);
@@ -145,24 +149,46 @@ test('actual product worker promotes update-held once in the same boot; a failed
     release: async () => { assert.fail('release must reach the actual diagnostic worker'); },
     quiet: () => true, handoff: () => { assert.fail('sent handoff must not be replayed'); } });
   let releaseAcks = 0;
+  let releaseFailed = false;
+  let releaseError: unknown;
   const ports = rollbackPorts(async (action, input) => {
     if (action !== 'release') return sdkControl(action, input);
-    const stale = await call('storageControl', [action, { fence }]);
-    assert.equal(stale.error?.statusCode, 409, 'the previous producer attempt cannot release the new attempt');
-    const ack = await call('storageControl', [action, input]);
-    assert.equal(ack.error, undefined); releaseAcks++;
-    const durable = await readRollbackRecord(state);
-    assert.ok(durable.state === 'present' && durable.record.state === 'completed' && durable.record.held);
-    await rm(hold); // Only the producer's still-held durable intent now keeps normal admission closed.
-    await new Promise(resolve => setTimeout(resolve, 1100));
-    assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, false);
-    assert.equal((await call('create')).error?.disposition, 'not-admitted');
-    await assert.rejects(lstat(join(state, 'state.sqlite')), { code: 'ENOENT' });
-    // The inspection owner exits before the producer publishes release and normal bootstrap claims storage.
-    await client.close();
+    try {
+      const stale = await call('storageControl', [action, { fence }]);
+      assert.equal(stale.error?.statusCode, 409, 'the previous producer attempt cannot release the new attempt');
+      const ack = await call('storageControl', [action, input]);
+      assert.equal(ack.error, undefined); releaseAcks++;
+      const durable = await readRollbackRecord(state);
+      assert.ok(durable.state === 'present' && durable.record.state === 'completed' && durable.record.held);
+      await rm(hold); // Only the producer's still-held durable intent now keeps normal admission closed.
+      await new Promise(resolve => setTimeout(resolve, 1100));
+      assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, false);
+      assert.equal((await call('create')).error?.disposition, 'not-admitted');
+      await assert.rejects(client.prepare({ allowMigration: false }), (error: unknown) =>
+        error instanceof storage.StorageCommandError && error.code === 'migration-required' && error.disposition === 'not-committed');
+      assert.deepEqual(await client.inspect(), inspection, 'held startup neither creates schema nor claims the inspector database');
+      const heldProof = await sdkControl('proof', { fence }) as ServingProof;
+      assert.equal(heldProof.inspection.schema.kind, 'empty');
+      assert.equal(heldProof.inspection.ownerEpoch, 0);
+      assert.equal(heldProof.gate.open, false);
+      assert.equal(heldProof.bootstrap, undefined, 'held startup has no normal bootstrap receipt');
+      assert.deepEqual(await readFile(databasePath), databaseBaseline.bytes);
+      const databaseInfo = await lstat(databasePath);
+      assert.equal(databaseInfo.dev, databaseBaseline.info.dev);
+      assert.equal(databaseInfo.ino, databaseBaseline.info.ino);
+      assert.equal(databaseInfo.mode, databaseBaseline.info.mode);
+      assert.equal(databaseInfo.mtimeMs, databaseBaseline.info.mtimeMs);
+      // The inspection owner exits before the producer publishes release and normal bootstrap claims storage.
+      await client.close();
+    } catch (error) {
+      // cleanUp preserves held completion on release failure; keep the original assertion and callsite visible.
+      if (!releaseFailed) { releaseFailed = true; releaseError = error; }
+      throw error;
+    }
   }, async () => { assert.fail('completion must not restart the web'); });
   const running: RunningBuild = { version: identity.appVersion, manifest: context.manifest, preflight };
   const completed = await resumeRollback({ stateDir: state, running, managed: true, ports, serialize: work => work() });
+  if (releaseFailed) throw releaseError;
   assert.equal(completed.state, 'completed', JSON.stringify(completed)); assert.equal(releaseAcks, 1);
   const published = await readRollbackRecord(state);
   assert.ok(published.state === 'present' && published.record.held === false && published.record.handoff?.state === 'done');
