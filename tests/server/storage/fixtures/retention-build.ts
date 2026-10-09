@@ -40,7 +40,7 @@ export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' 
   }
   const manifest = storageManifest(runsRelease ? [schema, version === '1.123.0' ? { ...runsSchema, cutover: { artifactVersion: '1.123.0', importContract: 1 } } : runsSchema] : [schema], version);
   const artifacts: Record<string, StorageThreadArtifact> = {};
-  for (const fault of preparation ? ['normal', 'after-native-hold'] : ['normal', 'before', 'after', 'after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss', 'after-unsent-compensation', 'refuse-once', 'corrupt', 'io']) {
+  for (const fault of preparation ? ['normal', 'after-native-hold'] : ['normal', 'before', 'after', 'after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss', ...(runsRelease ? ['after-unsent-compensation'] : []), 'refuse-once', 'corrupt', 'io']) {
     const entry = `
 import { parentPort } from 'node:worker_threads';
 import { existsSync, writeFileSync } from 'node:fs';
