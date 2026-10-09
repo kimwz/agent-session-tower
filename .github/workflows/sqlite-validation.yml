@@ -251,7 +251,7 @@ jobs:
             npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
             TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
             VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
-            VALIDATION_SHA="$VALIDATION_SHA" SQLITE_RETENTION_LARGE="$SQLITE_RETENTION_LARGE" /bin/bash --noprofile --norc <<'VALIDATE'
+            VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
           set -euo pipefail
           # Private 0700 parents isolate fixtures; retain the usual user file-creation mask.
           umask 022
