@@ -85,7 +85,7 @@ test('serving target web resumes only the durable owner rollback through the rea
     if (proofTrace.length < 32) proofTrace.push({ event, at: Date.now(), details });
   };
   const traceError = (error: unknown) => error instanceof Error
-    ? { name: error.name, message: error.message, stack: error.stack, ...error } : String(error);
+    ? { ...error, name: error.name, message: error.message, stack: error.stack } : String(error);
   t.after(() => { if (!snapshotAdoptedBeforeProof || responseOrderError) console.error('snapshot-proof-trace', JSON.stringify(proofTrace)); });
   let responseOrderError: unknown;
   let launchError: unknown;
