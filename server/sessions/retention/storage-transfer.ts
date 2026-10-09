@@ -1,11 +1,23 @@
 import { constants } from 'node:fs';
-import { lstat, mkdir, open } from 'node:fs/promises';
+import { lstat, mkdir, open, opendir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { StorageClient } from '../../storage/client.js';
+import { storageFs } from '../../storage/paths.js';
 import { evaluateStorageUpdate, type StorageUpdateInput } from '../../link/storage-update.js';
 import { journalDocument, observationDocument, retentionHash, JOURNAL_BYTES, OBSERVATION_BYTES, CANONICAL_JOURNAL_BYTES, CANONICAL_OBSERVATION_BYTES, type RetentionDocuments } from './storage-codec.js';
 import { RetentionRepository } from './storage-repository.js';
+import { privateDirectory } from './store.js';
+
+/** Only exact absence is fresh. Directories, backups and inaccessible paths are history/unknown. */
+export async function retentionLegacyFiles(stateDir: string, domain: string): Promise<'absent' | 'present'> {
+  if (domain !== 'retention') return 'present';
+  for (const name of ['retention', 'retention-observations.json', 'retention-cold', 'retention-originals', 'storage-migrations']) {
+    try { await lstat(join(stateDir, name)); return 'present'; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return 'present'; }
+  }
+  return 'absent';
+}
 
 /** Raw migration/export evidence is private, immutable and outside settings backup. Never opens native/cold objects. */
 async function raw(path: string, budget: number): Promise<Buffer> {
@@ -53,10 +65,13 @@ export interface RetentionImportInput {
   storage: StorageClient; stateDir: string; evidenceParent: string; commandId?: string;
   /** The actual shared evaluator input, using this client's captured build/preflight and existing artifact probe. */
   update: StorageUpdateInput;
+  /** Same bootstrap owner retains uncertain writes across explicit startup retries. */
+  repository?: RetentionRepository;
 }
 /** Prepared only: production A's actual manifest refuses before any raw source backup or staging. */
 export async function importRetention(input: RetentionImportInput): Promise<{ directory: string; manifestSha256: string }> {
-  const repository = new RetentionRepository(input.storage);
+  const repository = input.repository ?? new RetentionRepository(input.storage);
+  if (repository.storage !== input.storage) throw new Error('Retention import repository belongs to another SDK owner.');
   if ((await repository.head()).authority) throw new Error('Retention marker exists; source JSON must never be reimported.');
   const context = input.storage.context;
   const domain = context?.manifest.domains.find(domain => domain.scope === 'retention');
@@ -81,6 +96,58 @@ export async function importRetention(input: RetentionImportInput): Promise<{ di
     await check();
   });
   return evidence;
+}
+
+/** One worker-owned continuation, shared by startup and journal retry. No lost intent is replayed. */
+export function retentionBootstrap(storage: StorageClient, stateDir: string, update: () => Promise<StorageUpdateInput>, fresh: boolean): () => Promise<void> {
+  const repository = new RetentionRepository(storage);
+  let failedIntent: unknown;
+  let pending: Promise<void> | undefined;
+  const start = async () => {
+    await repository.gate(); // SDK reopen alone cannot settle this owner's unknown result.
+    if (await repository.databaseAuthority()) return;
+    if (failedIntent) throw failedIntent;
+    const current = await update();
+    const context = storage.context;
+    if (!context || current.stateDir !== stateDir || current.build.version !== context.identity.appVersion || current.build.preflight.identity?.sourceHash !== context.identity.sourceHash || current.build.manifest?.digest !== context.manifest.digest) throw new Error('Retention bootstrap evidence is for another captured build.');
+    const evaluation = await evaluateStorageUpdate(current);
+    if (!evaluation.importAllowed || evaluation.verdict !== 'ready') throw new Error(`Retention bootstrap held: ${evaluation.code}: ${evaluation.reason}`);
+    const domain = storage.context?.manifest.domains.find(domain => domain.scope === 'retention');
+    if (!domain?.cutover) return;
+    if (fresh && await retentionLegacyFiles(stateDir, 'retention') !== 'absent') throw new Error('Fresh retention state gained source history; initialization held.');
+    const evidenceParent = join(stateDir, 'storage-migrations');
+    await privateDirectory(evidenceParent);
+    await storageFs.syncDirectory(stateDir);
+    // A sealed attempt survives a worker crash even when no final receipt/marker exists.
+    // Absence of a commit is never evidence that it is safe to repeat the raw import.
+    const evidenceDirectory = await opendir(evidenceParent);
+    try { if (await evidenceDirectory.read()) throw new Error('Retention import evidence exists without authority; explicit owner recovery required.'); }
+    finally { await evidenceDirectory.close(); }
+    try {
+      if (!fresh) await importRetention({ storage, stateDir, evidenceParent, update: current, repository });
+      else {
+        const documents: RetentionDocuments = {
+          journal: journalDocument({ version: 1, migratedAt: Date.now(), entries: [], policies: [] }),
+          observations: observationDocument({ version: 1, entries: [] }),
+        };
+        const id = `retention-${randomUUID()}`;
+        const evidence = await seal(evidenceParent, id, {}, { kind: 'fresh-initialization', build: storage.identity, canonicalSha256: retentionHash(JSON.stringify(documents)) });
+        await repository.importPrepared(documents, evidence.manifestSha256, id, async () => {
+          // The evidence folder is ours; source paths must still be absent before final commit.
+          for (const name of ['retention', 'retention-observations.json', 'retention-cold', 'retention-originals']) {
+            try { await lstat(join(stateDir, name)); throw new Error('Fresh retention source appeared during initialization.'); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          }
+          const checked = await evaluateStorageUpdate(await update());
+          if (!checked.importAllowed || checked.verdict !== 'ready') throw new Error(`Fresh retention initialization held: ${checked.code}`);
+        });
+      }
+    } catch (error) {
+      if (repository.lastIntent) failedIntent = error;
+      throw error;
+    }
+  };
+  return () => pending ??= start().finally(() => { pending = undefined; });
 }
 /** Current generation only. Seals private legacy files and manifest without changing authority or starting an old writer. */
 export async function exportRetention(storage: StorageClient, evidenceParent: string, id = `retention-export-${randomUUID()}`): Promise<{ directory: string; manifestSha256: string }> {

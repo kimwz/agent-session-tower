@@ -18,6 +18,8 @@ import { fileURLToPath } from 'node:url';
 import test, { type TestContext } from 'node:test';
 import { writeHandoff } from '../../../server/runs/handoff.js';
 import { RetentionStore } from '../../../server/sessions/retention/store.js';
+import { retentionBuild } from '../storage/fixtures/retention-build.js';
+import { recordPreparationEvidence } from '../../../server/link/storage-update.js';
 import { runnerPaths, RUNNER_PROTOCOL, type RunnerReply } from '../../../server/runs/runner-protocol.js';
 import { artifactStorageContract, completionProven, type ServingProof, resumeRollback, withdrawRollback, readRollbackRecord, evaluateStorageUpdate, type RunningBuild, storageUpdatePaths, type RollbackRecord } from '../../../server/link/storage-update.js';
 import { updatePaths } from '../../../server/link/storage-update.js';
@@ -67,6 +69,17 @@ const diagnosticRoots = new WeakMap<TestContext, Map<string, {
   children: { child: ChildProcess; closed: Promise<unknown> }[];
 }>>();
 
+async function prepareRetentionA(root: string, stateDir: string): Promise<void> {
+  // Actual pre-cutover source capture, not released package/SHA proof (owned by the parent).
+  const a = await retentionBuild('1.120.2', join(root, 'preparation-artifact'));
+  const client = await a.storage.openStorage({ stateDir, bundle: a.bundle() });
+  try {
+    const prepared = await client.prepare({ allowMigration: true });
+    const preflight = await a.storage.preflightStorage({ bundle: a.bundle(), stateDir });
+    await recordPreparationEvidence(stateDir, { context: client.context!, preflight, prepared, gate: await client.gate('core') });
+  } finally { await client.close(); }
+}
+
 async function launchDiagnostic(t: TestContext, root: string, state: string, paths: Awaited<ReturnType<typeof runnerPaths>>, entry = fileURLToPath(new URL('./fixtures/storage-diagnostic-worker.ts', import.meta.url)), extraEnv: Record<string, string> = {}) {
   assert.equal(state, join(root, 'state'), 'diagnostic state must belong to the exact fixture root');
   let roots = diagnosticRoots.get(t);
@@ -108,6 +121,7 @@ test('actual product worker promotes update-held once in the same boot; a failed
   const journal = join(state, 'retention', 'journal.json');
   await mkdir(dirname(journal), { recursive: true, mode: 0o700 });
   await writeFile(journal, '{incomplete journal', { mode: 0o600 });
+  await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
   const journalBytes = await readFile(journal);
   const context = contextOf('production');
   const installed = await installArtifact(state, context.identity.appVersion, { manifest: context.manifest });
@@ -286,6 +300,8 @@ for (const matching of [true, false]) test(`actual successor holds an unknown co
   const nonce = 'a'.repeat(32);
   await writeHandoff(paths.runtime, { previous: 'fixture-predecessor', successor: matching ? nonce : 'b'.repeat(32), version: '1.0.0', clean: true, at: new Date().toISOString(), storageTransition: true });
   const journal = join(state, 'retention', 'journal.json'); await mkdir(dirname(journal), { recursive: true, mode: 0o700 }); await writeFile(journal, '{broken fixture journal', { mode: 0o600 });
+  await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
+  await prepareRetentionA(root, state);
   const entry = fileURLToPath(new URL('./fixtures/storage-diagnostic-worker.ts', import.meta.url));
   const { child, call, stderr } = await launchDiagnostic(t, root, state, paths, entry, { TOWER_HANDOFF: nonce });
   let snapshot: RunnerReply | undefined;
@@ -461,11 +477,18 @@ test('normal ready worker accepts withdrawal release but resumes only after the 
 test('actual recovery RPC verifies an own failed update, preserves refusal guards, and leaves retry explicit', { timeout: 90000 }, async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tw-receipt-')));
   const state = join(root, 'state'); const paths = await runnerPaths(state);
+  const journal = join(state, 'retention', 'journal.json');
+  await mkdir(dirname(journal), { recursive: true, mode: 0o700 });
+  await writeFile(journal, '{unknown journal', { mode: 0o600 });
+  await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
+  await prepareRetentionA(root, state);
   const { call } = await launchDiagnostic(t, root, state, paths);
   const deadline = Date.now() + 60000;
-  const first = await waitForStorage(call, true, deadline);
+  const first = await waitForStorage(call, false, deadline);
+  assert.equal(first.snapshot?.storage?.code, 'cold-journal-unavailable');
   const version = first.snapshot!.storage!.identity!.appVersion;
   const at = new Date().toISOString();
+  await mkdir(dirname(updatePaths(state).status), { recursive: true, mode: 0o700 });
   await writeFile(updatePaths(state).status, JSON.stringify({ version, previous: '0.0.1', stage: 'failed', code: 'check-failed', startedAt: at, updatedAt: at }), { mode: 0o600 });
   await call('storageRetry');
   assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, false);
@@ -481,8 +504,11 @@ test('actual recovery RPC verifies an own failed update, preserves refusal guard
   assert.equal((receipt.result as { recorded: boolean }).recorded, true);
   const saved = JSON.parse(await readFile(storageUpdatePaths(state).receipt, 'utf8'));
   assert.equal(saved.build.sourceHash, first.snapshot!.storage!.identity!.sourceHash);
-  assert.equal(saved.cutoverMarkers, 'not-applicable');
+  assert.equal(saved.cutoverMarkers, 'absent', 'the actual RPC inspects the marker-free database, independently of request body hints');
   assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, false, 'receipt alone grants no runtime resume');
+  await call('storageRetry');
+  assert.equal((await call('snapshot')).snapshot?.storage?.code, 'cold-journal-unavailable', 'the receipt cannot bypass an unrepaired source');
+  await writeFile(journal, JSON.stringify({ version: 1, migratedAt: 1234, entries: [] }), { mode: 0o600 });
   await call('storageRetry');
   assert.equal((await waitForStorage(call, true, deadline)).instance, first.instance);
 });
@@ -659,26 +685,31 @@ test('a newer actual rollback hold wins while the matching withdrawal retry awai
 });
 
 
-for (const damage of ['malformed', 'missing-wrapper', 'missing-state', 'physical'] as const) test(`normal boot holds cold journal ${damage} and repeated failed retry in the same actual worker`, { timeout: 90000 }, async t => {
+for (const damage of ['malformed', 'missing-source', 'missing-wrapper', 'missing-state', 'physical'] as const) test(`normal boot holds cold journal ${damage} and repeated failed retry in the same actual worker`, { timeout: 90000 }, async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-cold-boot-')));
   const state = join(root, 'state'), paths = await runnerPaths(state);
   const deadline = Date.now() + 60000;
-  if (damage !== 'malformed') {
+  if (damage !== 'malformed' && damage !== 'missing-source') {
     const seed = await launchDiagnostic(t, root, state, paths);
     const serving = await waitForStorage(seed.call, true, deadline);
-    assert.equal(serving.snapshot?.storage?.state, 'ready', 'fresh install ENOENT initializes without a DB authority marker');
+    assert.equal(serving.snapshot?.storage?.state, 'ready', 'proven fresh install initializes DB authority');
     const exit = once(seed.child, 'exit'); seed.child.kill('SIGKILL'); await exit;
     const db = new DatabaseSync(join(state, 'state.sqlite'));
     try {
-      db.prepare('INSERT INTO domain_imports VALUES (?,?,?,?,?,?,?,?,?,?)').run('retention', 'database', 1, 'a'.repeat(64), 1, 1, new Date().toISOString(), '1.121.0', 'b'.repeat(64), 1);
-      if (damage !== 'missing-state') db.prepare('INSERT INTO retention_state VALUES (1,1)').run();
-      if (damage !== 'missing-wrapper') db.prepare('INSERT INTO retention_metadata (kind,id,ordinal,json) VALUES (?,?,?,?)').run('journal', '', 0, JSON.stringify({ version: 1, migratedAt: 1234, entries: [] }));
+      assert.ok(db.prepare('SELECT * FROM domain_imports WHERE domain = ?').get('retention'));
+      if (damage === 'missing-state') db.prepare('DELETE FROM retention_state').run();
+      if (damage === 'missing-wrapper') db.prepare("DELETE FROM retention_metadata WHERE kind = 'journal'").run();
     } finally { db.close(); }
     if (damage === 'physical') await writeFile(join(state, 'state.sqlite'), 'fixture physical SQLite corruption', { mode: 0o600 });
   }
   const journal = join(state, 'retention', 'journal.json');
   await mkdir(dirname(journal), { recursive: true, mode: 0o700 });
   await writeFile(journal, '{unknown journal', { mode: 0o600 });
+  if (damage === 'malformed' || damage === 'missing-source') {
+    await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
+    await prepareRetentionA(root, state);
+    if (damage === 'missing-source') await rm(journal);
+  }
   const proof = join(state, 'launch-marks', 'cold-proof.json'); await mkdir(dirname(proof), { recursive: true, mode: 0o700 }); await writeFile(proof, 'preserve proof', { mode: 0o600 });
   const launcher = join(state, 'agent-launches.json'), native = join(root, 'claude', 'projects', 'fixture', 'known-cold.jsonl');
   await mkdir(dirname(native), { recursive: true, mode: 0o700 });
@@ -698,7 +729,8 @@ for (const damage of ['malformed', 'missing-wrapper', 'missing-state', 'physical
     assert.equal((await live.call('create')).error?.disposition, 'not-admitted');
     assert.deepEqual(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')), { scanner: 0, temporary: 0, native: 0 });
     assert.equal(await readFile(proof, 'utf8'), 'preserve proof'); assert.equal((await lstat(proof)).mtimeMs, before.mtimeMs);
-    assert.equal(await readFile(journal, 'utf8'), '{unknown journal');
+    if (damage === 'missing-source') await assert.rejects(lstat(journal), { code: 'ENOENT' });
+    else assert.equal(await readFile(journal, 'utf8'), '{unknown journal');
     assert.deepEqual(await Promise.all([launcher, native].map(path => readFile(path))), protectedBytes, 'unknown cold state never prunes launcher proof or changes native transcript');
     if (attempt < 2) await live.call('storageRetry');
   }
@@ -708,7 +740,7 @@ for (const damage of ['malformed', 'missing-wrapper', 'missing-state', 'physical
     originalPath: join(root, 'claude', 'projects', 'fixture', 'known-cold.jsonl'),
     coldPath: join(state, 'retention-originals', 'known-cold.jsonl'), identity: { dev: 1, ino: 2, size: 3, mtimeMs: 4 } };
   const knownEntry = { id: 'known-operation', phase: 'archived', archiveRevision: 1, candidate: { ids: ['claude:known-cold'] }, members: [knownMember] };
-  if (damage === 'malformed') await writeFile(journal, JSON.stringify({ version: 1, migratedAt: 1234, entries: [knownEntry] }), { mode: 0o600 });
+  if (damage === 'malformed' || damage === 'missing-source') await writeFile(journal, JSON.stringify({ version: 1, migratedAt: 1234, entries: [knownEntry] }), { mode: 0o600 });
   else {
     const db = new DatabaseSync(join(state, 'state.sqlite'));
     try {

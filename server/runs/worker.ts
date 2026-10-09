@@ -4,6 +4,7 @@ import type { RollbackFence } from '../link/storage-update.js';
 import type { WorkerStorageStatus } from '../../shared/storage.js';
 import { captureStorageBundle, storageBuildContext, preflightStorage, openStorage, adoptSnapshot, reconcileRecovery, readRecoveryBarrier, StorageCommandError, type StorageClient } from '../storage/index.js';
 import { evaluateStorageUpdate, storageHealth, bootstrapPrepareCommandId, readRollbackRecord, databaseSupported, recordPreparationEvidence, recordUpdateRecoveryReceipt, type RecoveryReceiptKind } from '../link/storage-update.js';
+import { retentionBootstrap, retentionLegacyFiles } from '../sessions/retention/storage-transfer.js';
 import { managedByService } from '../link/update.js';
 import type { HeartbeatAdmission } from '../../shared/master.js';
 import { newWorkerSession } from '../models/worker.js';
@@ -767,12 +768,14 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   const build = storageBuildContext(bundle);
   let preflight = await preflightStorage({ bundle, stateDir });
   const managed = await managedByService(stateDir, process.argv[1], true);
-  const evaluate = () => evaluateStorageUpdate({ stateDir, managed,
+  const updateInput = () => ({ stateDir, managed, legacyFiles: (domain: string) => retentionLegacyFiles(stateDir, domain),
     build: { version: APP_VERSION, preflight, ...(build.ok ? { manifest: build.manifest } : {}) } });
+  const evaluate = () => evaluateStorageUpdate(updateInput());
   let evaluation = await evaluate();
   let storageStatus: WorkerStorageStatus = { state: 'starting', code: 'starting', reason: 'Storage is starting.', admissionOpen: false, sessionsAvailable: false, healthStatus: 200,
     ...(build.ok ? { identity: build.identity } : {}) };
   let database: StorageClient | undefined;
+  let retentionFresh = false;
   let storageEffects: (() => Promise<void>) | undefined;
   let maintenanceHeld: Promise<void> = Promise.resolve();
   let storageHoldGeneration = 0;
@@ -838,6 +841,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       return false;
     }
     try {
+      // Preserve the evaluator's proof before opening/creating the DB or writing B evidence.
+      if (!database && evaluation.code === 'new-state') retentionFresh = true;
       if (!database) database = await openStorage({ stateDir, bundle, onUnavailable: unavailable });
       else if (reopen && database.status().state !== 'ready') await database.reopen();
       if (generation !== storageHoldGeneration) return false;
@@ -1013,6 +1018,11 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   let retentionBootstrapIssues: string[] = [];
   const nativeRoots = { claude: [join(sessions.claudeHome, 'projects')], codex: [join(sessions.codexHome, 'sessions'), join(sessions.codexHome, 'archived_sessions')] };
   const retentionStore = new RetentionStore(join(stateDir, 'retention'), { storage: database });
+  const bootstrapRetention = database ? retentionBootstrap(database, stateDir, async () => {
+    preflight = await preflightStorage({ bundle, stateDir });
+    return updateInput();
+  }, retentionFresh) : async () => { throw new Error('Shared retention storage is unavailable.'); };
+  const startRetention = async () => { await bootstrapRetention(); await retentionStore.start(); };
   const retentionArchive = new RetentionArchive(join(stateDir, 'retention-cold'), [...nativeRoots.claude, ...nativeRoots.codex], [join(stateDir, 'retention-originals')]);
   const nativeRetention = createNativeRetentionAdapter(nativeRoots, { coldRoot: join(stateDir, 'retention-originals'), codexHome: sessions.codexHome, claudeHome: sessions.claudeHome });
   let publishedMembers: ReturnType<RetentionStore['list']>[number]['members'] = [];
@@ -1040,7 +1050,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const closedSessions = new ClosedSessionStore(stateDir);
     await closedSessions.start();
     try {
-      await retentionStore.start();
+      await startRetention();
     } catch (error) {
       retentionBootstrapError = error;
       // The SDK routes physical SQLite failures through onUnavailable. Only a
@@ -1071,7 +1081,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         retryNormal = async () => {
           try {
             if (!await attempt(Boolean(database))) return storageStatus;
-            await retentionStore.start(); retentionBootstrapError = undefined; resolve();
+            await startRetention(); retentionBootstrapError = undefined; resolve();
           }
           catch (error) { holdColdJournal(error); }
           return storageStatus;

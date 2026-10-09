@@ -73,10 +73,16 @@ test('candidate HTTP health independently preflights a captured web attached to 
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
   const response = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/api/health`);
-  const health = await response.json() as { application: string; pid: number; version: string; candidateStorage: { code: string } };
-  assert.equal(response.status, candidate.preflight.supported ? 200 : 503);
+  const health = await response.json() as { application: string; pid: number; version: string; candidateStorage: { code: string; importAllowed: boolean; prepare?: string } };
+  const cutover = candidate.manifest?.domains.some(domain => domain.cutover) ?? false;
+  assert.equal(response.status, candidate.preflight.supported && !cutover ? 200 : 503);
   assert.equal(health.application, HEALTH_APPLICATION_ID); assert.equal(health.pid, process.pid); assert.equal(health.version, APP_VERSION);
   if (!candidate.preflight.supported) assert.equal(health.candidateStorage.code, 'runtime-unsupported');
+  else if (cutover) {
+    assert.equal(health.candidateStorage.code, 'prerequisite-required');
+    assert.equal(health.candidateStorage.importAllowed, false);
+    assert.equal(health.candidateStorage.prepare, '1.120.2');
+  }
   mismatched = true;
   const mismatch = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/api/health`);
   assert.equal(mismatch.status, 503, 'an independently captured contract cannot be presented as another web build');
