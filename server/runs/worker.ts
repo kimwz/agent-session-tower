@@ -240,6 +240,12 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
   const dispatch = async (method: string, args: unknown[]) => {
     if (method === 'storageControl') {
+      const fence = record(record(args[1]).fence);
+      if (draining && args[0] === 'proof' && handoff?.rollbackFence
+        && fence.id === handoff.rollbackFence.id && fence.attempt === handoff.rollbackFence.attempt) {
+        throw Object.assign(new TowerError('unavailable', 'The accepted rollback worker is draining.'),
+          { proofTransition: { reason: 'draining', fence: handoff.rollbackFence } });
+      }
       if (draining || !options.storageControl || typeof args[0] !== 'string') throw new TowerError('unavailable', 'Storage control is unavailable.');
       return options.storageControl(args[0], record(args[1]), {
         quiet: () => quiet(1),
@@ -534,8 +540,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       // Keep their replies small; the regular snapshot poll publishes engine changes.
       if (input.method !== 'slackTool' && (input.instance !== instance || (input.method === 'snapshot' ? input.revision !== revision : !SNAPSHOT_FREE_OPERATIONS.has(input.method)))) reply.snapshot = snapshot();
     } catch (error) {
-      const value = error as { message?: string; disposition?: string };
-      reply.error = { message: value.message ?? 'Runner operation failed.', statusCode: statusOf(error) ?? 500, ...(value.disposition ? { disposition: value.disposition } : {}) };
+      const value = error as { message?: string; disposition?: string; proofTransition?: NonNullable<RunnerReply['error']>['proofTransition'] };
+      reply.error = { message: value.message ?? 'Runner operation failed.', statusCode: statusOf(error) ?? 500, ...(value.disposition ? { disposition: value.disposition } : {}), ...(value.proofTransition ? { proofTransition: value.proofTransition } : {}) };
       reply.snapshot = snapshot();
     } finally { pending--; }
     if (!res.destroyed) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(reply)); }

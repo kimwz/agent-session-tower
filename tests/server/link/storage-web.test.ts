@@ -4,12 +4,18 @@ import { build } from 'esbuild';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
+import { DurableRunManager } from '../../../server/runs/durable-runner.js';
+import { startRunnerHost } from '../../../server/runs/worker.js';
+import { RunManager } from '../../../server/runs/manager.js';
+import { SessionService } from '../../../server/sessions/service.js';
+import { runnerPaths } from '../../../server/runs/runner-protocol.js';
 import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { storageWebHealth, storageWebServing } from '../../../server/link/storage-web.js';
-import { artifactStorageContract, readRollbackRecord, runRollback, type RollbackFence } from '../../../server/link/storage-update.js';
+import { artifactStorageContract, storageUpdatePaths, readRollbackRecord, runRollback, type RollbackFence, type ServingProof } from '../../../server/link/storage-update.js';
 import { rollbackPorts, storageControl } from '../../../server/runs/storage-control.js';
 import { entryPoint, pointCurrent } from '../../../server/link/service.js';
 import { Updates } from '../../../server/link/update.js';
@@ -53,12 +59,48 @@ test('serving target web resumes only the durable owner rollback through the rea
   }
   await pointCurrent(state, version);
   let held = false; let handoffs = 0; let successorFence: RollbackFence | undefined; let evidenceLost = false;
+  let hostDispatch: Parameters<NonNullable<import('../../../server/runs/worker.js').RunnerHostOptions['storageControl']>>[2] | undefined;
   const control = storageControl({ stateDir: state, client: () => client, hold: async () => { held = true; }, release: async () => { held = false; }, quiet: () => true,
     acceptedFence: () => evidenceLost ? { id: 'other-operation', attempt: 1 } : successorFence,
-    handoff: (_command, fence) => { handoffs++; successorFence = fence; } });
+    handoff: (command, fence) => { handoffs++; successorFence = fence; hostDispatch!.handoff(command, fence); } });
   const updates = new Updates({ stateDir: state, version, port: 1, managed: true, spawnHelper: () => {} });
   const serialize = <T>(work: () => Promise<T>) => updates.exclusive(work);
-  const ports = rollbackPorts(control, async () => {});
+  const sessions = new SessionService({ codexHome: join(root, 'codex'), claudeHome: join(root, 'claude'),
+    inspectProcesses: async () => ({ claude: new Map(), codex: new Set(), providerRunning: { claude: false, codex: false } }) });
+  sessions.list = () => [];
+  const runs = new RunManager({ stateDir: state, getSession: () => undefined, refreshSessions: async () => {},
+    spawnProcess: () => { throw new Error('Native providers forbidden'); } });
+  await runs.start();
+  let child: ReturnType<typeof spawn> | undefined;
+  let successorReady = false;
+  let launchError: unknown;
+  let launchTimer: ReturnType<typeof setTimeout> | undefined;
+  let drains = 0;
+  let allowHandoff = false;
+  const script = join(root, 'successor.mjs');
+  const host = await startRunnerHost({ stateDir: state, sessions, runs, inFlight: () => !allowHandoff,
+    storageControl: (action, input, dispatch) => { hostDispatch = dispatch; return control(action, input); },
+    quiesce: async () => { await delay(400); }, closeStorage: async () => { await client.close(); },
+    startSuccessor: (_command, nonce) => {
+      launchTimer = setTimeout(() => {
+        void (async () => {
+          const { artifactOf } = await import('../storage/helpers.js');
+          child = spawn(process.execPath, ['--import', 'tsx', script, state, JSON.stringify(successorFence), JSON.stringify(artifactOf('production')), nonce], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+          let stderr = '';
+          child.stderr!.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-16000); });
+          const ended = once(child, 'exit');
+          t.after(async () => { if (child!.exitCode === null && child!.signalCode === null) child!.send({ close: true }); await ended; });
+          child.on('message', message => { if ((message as { ready?: boolean }).ready) successorReady = true; });
+          child.once('exit', code => { if (!successorReady) launchError = new Error(`successor exited ${code}: ${stderr}`); });
+        })().catch(error => { launchError = error; });
+      }, 400);
+    } });
+  const manager = new DurableRunManager({ stateDir: state, pollMs: 60_000, handoffHeld: async () => true,
+    spawn: () => { throw new Error('Only the owned successor may start'); } });
+  await manager.start();
+  const paths = await runnerPaths(state);
+  t.after(async () => { clearTimeout(launchTimer); await manager.close(); await host.close(); sessions.stop(); await runs.close(); await rm(paths.directory, { recursive: true, force: true }); });
+  const ports = rollbackPorts((action, input) => manager.storageControl(action, input), async () => {});
   const switched = await runRollback({ stateDir: state, managed: true, running: { version, manifest, preflight }, ports, serialize }, { target, by: 'owner', reason: 'existing owned operation' });
   assert.equal(switched.state, 'switched'); assert.equal(held, true); assert.equal(handoffs, 0);
   const running = { version: target, manifest: targetContext.manifest, preflight: targetPreflight };
@@ -72,61 +114,48 @@ test('serving target web resumes only the durable owner rollback through the rea
   // Unknown target build must not dispatch a successor; the executor retains the durable hold.
   const refused = await storageWebServing({ stateDir: state, managed: true, running: { ...running, preflight: { ...targetPreflight, identity: { ...targetContext.identity, sourceHash: 'f'.repeat(64) } } }, ports, serialize });
   assert.equal(refused?.state, 'refused'); assert.equal(handoffs, 0); assert.equal(held, true);
-  // The fixture successor is an owned child using the existing SDK build and the actual storageControl consumer.
-  const script = join(root, 'successor.mjs');
+  // The captured source SDK successor owns its own process and actual RPC endpoint.
   await writeFile(script, `import * as sdk from ${JSON.stringify(pathToFileURL(fixtureParentFile).href)};
 import { storageControl } from ${JSON.stringify(new URL('../../../server/runs/storage-control.ts', import.meta.url).href)};
+import { startRunnerHost } from ${JSON.stringify(new URL('../../../server/runs/worker.ts', import.meta.url).href)};
+import { RunManager } from ${JSON.stringify(new URL('../../../server/runs/manager.ts', import.meta.url).href)};
+import { SessionService } from ${JSON.stringify(new URL('../../../server/sessions/service.ts', import.meta.url).href)};
+import { join } from 'node:path';
 const stateDir = process.argv[2]; const fence = JSON.parse(process.argv[3]);
 const client = await sdk.openStorage({stateDir, bundle: sdk.storageBundleFromArtifact(process.argv[4], 'artifact')});
 await client.prepare({allowMigration:false});
+const sessions = new SessionService({codexHome:join(stateDir,'fixture-codex'),claudeHome:join(stateDir,'fixture-claude'),inspectProcesses:async()=>({claude:new Map(),codex:new Set(),providerRunning:{claude:false,codex:false}})});
+sessions.list = () => [];
+const runs = new RunManager({stateDir,getSession:()=>undefined,refreshSessions:async()=>{},spawnProcess:()=>{throw new Error('native provider forbidden');}});
+await runs.start();
 const call = storageControl({stateDir, client:()=>client, successorFence:fence, hold:async()=>{}, release:async()=>{}, quiet:()=>true, handoff:()=>{throw new Error('duplicate successor');}});
-process.on('message', async message => { try { process.send({id:message.id, result:await call(message.action, message.input)}); } catch(error) { process.send({id:message.id, error:String(error)}); } });
+const host = await startRunnerHost({stateDir,sessions,runs,handoffNonce:process.argv[5],storageControl:call,closeStorage:()=>client.close()});
+process.on('message', async message => { if(message.close){await host.close();await runs.close();sessions.stop();process.disconnect();} });
 process.send({ready:true});`);
-  let child: ReturnType<typeof spawn> | undefined;
-  let successorReady = false;
   let pendingProofs = 0;
-  let launchTimer: ReturnType<typeof setTimeout> | undefined;
-  t.after(() => clearTimeout(launchTimer));
-  let sequence = 0;
   let unknownProof = false;
-  let launchError: unknown;
+  const transitions = new Set<string>();
+  let heldUnknownReads = 0;
   const targetPorts = rollbackPorts(async (action, input) => {
     if (launchError) throw launchError;
     if (action === 'proof' && unknownProof) throw new Error('Owned predecessor proof unavailable');
-    if (!successorReady) {
-      const answer = await control(action, input);
-      if (action === 'proof' && successorFence) {
-        if (!evidenceLost) {
-          assert.equal((answer as { handoff: string }).handoff, 'pending');
-          pendingProofs++;
-        }
-      }
-      if (action === 'handoff' && successorFence) {
-        const acceptedFence = successorFence;
-        launchTimer = setTimeout(() => {
-          void (async () => {
-            const { artifactOf } = await import('../storage/helpers.js');
-            child = spawn(process.execPath, ['--import', 'tsx', script, state, JSON.stringify(acceptedFence), JSON.stringify(artifactOf('production'))], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
-            let stderr = '';
-            child.stderr!.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-16000); });
-            const ended = once(child, 'exit');
-            t.after(async () => { if (child!.exitCode === null && child!.signalCode === null) child!.kill('SIGKILL'); await ended; });
-            child!.on('message', message => { if ((message as { ready?: boolean }).ready) successorReady = true; });
-            child!.once('exit', code => { if (!successorReady) launchError = new Error(`successor exited ${code}: ${stderr}`); });
-          })().catch(error => { launchError = error; });
-        }, 1000);
-      }
-      return answer;
+    if (action === 'proof' && drains) {
+      const record = await readRollbackRecord(state);
+      if (record.state === 'present' && record.record.held && record.record.handoff?.state === 'unknown') heldUnknownReads++;
     }
-    const id = ++sequence;
-    return new Promise((resolve, reject) => {
-      const listener = (message: unknown) => { const reply = message as { id: number; result?: unknown; error?: string }; if (reply.id !== id) return; child!.off('message', listener); if (reply.error) reject(new Error(reply.error)); else resolve(reply.result); };
-      child!.on('message', listener); child!.send({ id, action, input });
-    });
+    try {
+      const answer = await manager.storageControl(action, input);
+      if (action === 'proof' && (answer as { handoff: string }).handoff === 'pending') pendingProofs++;
+      return answer;
+    } catch (error) {
+      const transition = (error as { proofTransition?: { reason: string } }).proofTransition;
+      if (transition) { transitions.add(transition.reason); if (transition.reason === 'draining') drains++; }
+      throw error;
+    }
   }, async () => { assert.fail('target web does not restart for continuation'); });
   const context = { stateDir: state, managed: true, running, ports: targetPorts, serialize };
-  const timedOut = await storageWebServing(context, { intervalMs: 5, timeoutMs: 10 });
-  assert.ok(timedOut && 'record' in timedOut && timedOut.record.handoff?.state === 'pending');
+  const timedOut = await storageWebServing(context, { intervalMs: 5, timeoutMs: 1000 });
+  assert.ok(timedOut && 'record' in timedOut && timedOut.record.held && ['pending', 'unknown'].includes(timedOut.record.handoff?.state ?? ''));
   assert.equal(handoffs, 1); assert.equal(held, true);
   const abort = new AbortController();
   const aborted = await storageWebServing({ ...context, serialize: async work => {
@@ -134,7 +163,7 @@ process.send({ready:true});`);
     abort.abort();
     return result;
   } }, { signal: abort.signal });
-  assert.ok(aborted && 'record' in aborted && aborted.record.handoff?.state === 'pending');
+  assert.ok(aborted && 'record' in aborted && aborted.record.held && ['pending', 'unknown'].includes(aborted.record.handoff?.state ?? ''));
   assert.equal(handoffs, 1); assert.equal(held, true);
   const unknown = await storageWebServing({ ...context, serialize: async work => {
     const result = await serialize(work);
@@ -144,6 +173,11 @@ process.send({ready:true});`);
   assert.ok(unknown && 'record' in unknown && unknown.record.handoff?.state === 'unknown');
   assert.equal(handoffs, 1); assert.equal(held, true);
   unknownProof = false;
+  // Restore only the fixture's pending state; a new session still needs a fresh actual proof.
+  const unknownRecord = await readRollbackRecord(state);
+  assert.ok(unknownRecord.state === 'present');
+  if (unknownRecord.state !== 'present') assert.fail('record required');
+  await writeFile(storageUpdatePaths(state).rollback, JSON.stringify({ ...unknownRecord.record, handoff: { ...unknownRecord.record.handoff, state: 'pending' } }));
   const lostEvidence = await storageWebServing({ ...context, serialize: async work => {
     const result = await serialize(work);
     evidenceLost = true;
@@ -152,10 +186,59 @@ process.send({ready:true});`);
   assert.ok(lostEvidence && 'record' in lostEvidence && lostEvidence.record.handoff?.state === 'unknown');
   assert.equal(handoffs, 1); assert.equal(held, true);
   evidenceLost = false;
-  const outcome = await storageWebServing(context);
+  const lostRecord = await readRollbackRecord(state);
+  assert.ok(lostRecord.state === 'present');
+  if (lostRecord.state !== 'present') assert.fail('record required');
+  await writeFile(storageUpdatePaths(state).rollback, JSON.stringify({ ...lostRecord.record, handoff: { ...lostRecord.record.handoff, state: 'pending' } }));
+  const saved = await readRollbackRecord(state);
+  if (saved.state !== 'present') assert.fail('fixture record required');
+  const restorePending = () => writeFile(storageUpdatePaths(state).rollback, JSON.stringify(saved.record));
+  for (const failure of ['foreign', 'database', 'stale', 'late', 'abort-return'] as const) {
+    await restorePending();
+    let observed = false;
+    let calls = 0;
+    const cancelled = new AbortController();
+    const failing = { ...context, serialize: async <T>(work: () => Promise<T>) => {
+      const result = await serialize(work); observed = true; return result;
+    }, ports: { ...targetPorts, servingProof: async (fence: RollbackFence): Promise<ServingProof> => {
+      calls++;
+      const proof = await targetPorts.servingProof(fence);
+      if (!observed) return proof;
+      if (failure === 'foreign') return { ...proof, worker: { ...proof.worker, sourceHash: 'f'.repeat(64) } };
+      if (failure === 'database') throw new Error('Database closed/corrupt/barrier');
+      if (failure === 'stale') throw Object.assign(new Error('Stale rollback fence'), { statusCode: 409 });
+      if (failure === 'late') await delay(250);
+      if (failure === 'abort-return') cancelled.abort();
+      return proof;
+    } } };
+    const result = await storageWebServing(failing, { intervalMs: 5, timeoutMs: failure === 'late' ? 200 : 1000, signal: cancelled.signal });
+    assert.ok(result && 'record' in result && result.record.handoff?.state === 'unknown', failure);
+    assert.equal(calls, 2, `${failure} stops observation`);
+    const retained = await readRollbackRecord(state);
+    assert.ok(retained.state === 'present' && retained.record.held, failure);
+    assert.equal(handoffs, 1, `${failure}: additional effects=0`);
+  }
+  for (const initial of ['pending', 'unknown'] as const) {
+    await writeFile(storageUpdatePaths(state).rollback, JSON.stringify({ ...saved.record, handoff: { ...saved.record.handoff, state: initial } }));
+    let calls = 0;
+    const result = await storageWebServing({ ...context, ports: { ...targetPorts, servingProof: async fence => {
+      calls++;
+      throw Object.assign(new Error('Drain before any positive proof'), { proofTransition: { reason: 'draining', fence } });
+    } } }, { intervalMs: 5 });
+    assert.ok(result && 'record' in result && result.record.held && result.record.handoff?.state === 'unknown');
+    assert.equal(calls, 1, `initial ${initial} has no observation eligibility`);
+    assert.equal(handoffs, 1, 'unproven initial state: additional effects=0');
+  }
+  await restorePending();
+  allowHandoff = true;
+  const outcome = await storageWebServing(context, { intervalMs: 25 });
   assert.equal(outcome?.state, 'completed', JSON.stringify(outcome)); assert.equal(handoffs, 1);
   assert.equal((await targetPorts.servingProof(successorFence!)).gate.open, true);
   assert.ok(pendingProofs > 0, 'accepted returns before the actual successor is ready');
+  assert.ok(drains > 0, 'actual worker RPC refuses proof during slow quiesce');
+  assert.ok(heldUnknownReads > 0, 'transient failure remains durable unknown/held while successor is observed');
+  assert.deepEqual([...transitions].sort(), ['adopted', 'draining', 'socket']);
+  assert.equal(successorReady, true);
   const durable = await readRollbackRecord(state);
   assert.ok(durable.state === 'present' && !durable.record.held && durable.record.handoff?.state === 'done');
   if (durable.state !== 'present') assert.fail('durable completion required');

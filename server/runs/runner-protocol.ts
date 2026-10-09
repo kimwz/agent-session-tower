@@ -43,13 +43,18 @@ export interface UpdateDrainStatus { startedAt: string; deadline: string; runnin
 export const FORCE_UPDATE_DEADLINE_MS = 10 * 60 * 1000;
 /** How long after the deadline a forced update may still wait to hand off before new turns start here again. */
 export const FORCE_UPDATE_GIVE_UP_MS = 10 * 60 * 1000;
+export interface ProofTransition {
+  reason: 'draining' | 'socket' | 'adopted';
+  fence: { id: string; attempt: number };
+}
+
 export interface RunnerReply {
   protocol: number;
   stateDir: string;
   instance: string;
   snapshot?: RunnerSnapshot;
   result?: unknown;
-  error?: { message: string; statusCode: number; disposition?: string };
+  error?: { message: string; statusCode: number; disposition?: string; proofTransition?: ProofTransition };
 }
 
 /** Pure calculation for fixture teardown: never recreates a deleted state directory. */

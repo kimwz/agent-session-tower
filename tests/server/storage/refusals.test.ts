@@ -276,7 +276,13 @@ test('a thread that ends right after it opened the live files: the refusal waits
     let recorded = 0;
     // The open's identity record waits until the thread that answered the open has ended.
     replaceCall(t, storage.storageFs, 'createFile', async (original, path, data) => {
-      if (path.startsWith(join(recoveryDir, '.identity.json.'))) { recorded++; await requests.find(request => request.op === 'open')!.exited; }
+      if (path.startsWith(join(recoveryDir, '.identity.json.'))) {
+        recorded++;
+        const opened = requests.find(request => request.op === 'open')!;
+        // Identity creation follows the parent's proof of the actual live paths.
+        opened.worker.postMessage({ type: 'fixture-exit-after-open' });
+        await opened.exited;
+      }
       return original(path, data);
     });
     await refused(t, { stateDir: dir, ...fault('exit-after-open') }, { phase: 'thread-exit', code: 'thread-exited', sourcePreserved: !crashed });
