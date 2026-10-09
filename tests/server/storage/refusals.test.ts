@@ -409,7 +409,7 @@ test('the default manifest declares retention preparation without cutover', () =
   const [domain] = storageManifest().domains;
   assert.equal(storageManifest().domains.length, 1);
   assert.equal(domain.scope, 'retention');
-  assert.equal(domain.schemaVersion, 1);
-  assert.deepEqual(domain.preparation, { requiredArtifactVersion: '1.120.0', readerContract: 1, writerContract: 1 });
+  assert.equal(domain.schemaVersion, 2);
+  assert.deepEqual(domain.preparation, { requiredArtifactVersion: '1.120.1', readerContract: 1, writerContract: 1 });
   assert.equal(domain.cutover, undefined);
 });
