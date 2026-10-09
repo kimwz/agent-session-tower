@@ -35,8 +35,8 @@ export class RetentionStore {
   async start(now = Date.now()): Promise<void> {
     if (this.options && !this.repository) throw new Error('Shared retention storage is unavailable.');
     if (this.repository && await this.repository.databaseAuthority()) {
-      const { documents } = await this.repository.exportCurrent();
-      this.load(documents.journal); this.database = true; return;
+      const { journal } = await this.repository.readCurrentJournal();
+      this.load(journal); this.database = true; return;
     }
     await privateDirectory(this.root);
     try {

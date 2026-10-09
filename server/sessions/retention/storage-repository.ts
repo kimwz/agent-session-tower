@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { StorageClient } from '../../storage/client.js';
 import type { StorageCommandError } from '../../storage/contract.js';
-import { documentsOf, retentionHash, RETENTION_CHUNK_BYTES, RETENTION_INTENT_BYTES, rowsOf, type RetentionChange, type RetentionDocuments, type RetentionRow, type RetentionRowKind } from './storage-codec.js';
+import { documentsOf, journalOf, retentionHash, RETENTION_CHUNK_BYTES, RETENTION_INTENT_BYTES, rowsOf, type JournalDocument, type RetentionChange, type RetentionDocuments, type RetentionRow, type RetentionRowKind } from './storage-codec.js';
 import type { RetentionHead, RetentionWriteIntent } from './storage-commands.js';
 
 /** One shared worker SDK; no domain connection, thread, SQL channel or unknown replay. */
@@ -23,11 +23,21 @@ export class RetentionRepository {
   }
   async databaseAuthority(): Promise<boolean> { return (await this.head()).authority?.authority === 'database'; }
   async exportCurrent(): Promise<{ documents: RetentionDocuments; head: RetentionHead; sha256: string }> {
+    const { rows, head } = await this.readCurrentRows(['journal', 'observations', 'entry', 'policy', 'observation']);
+    const documents = documentsOf(rows);
+    return { documents, head, sha256: retentionHash(JSON.stringify(documents)) };
+  }
+  /** Cold membership must remain available when only observation metadata is malformed. */
+  async readCurrentJournal(): Promise<{ journal: JournalDocument; head: RetentionHead }> {
+    const { rows, head } = await this.readCurrentRows(['journal', 'entry', 'policy']);
+    return { journal: journalOf(rows), head };
+  }
+  private async readCurrentRows(kinds: RetentionRowKind[]): Promise<{ rows: RetentionRow[]; head: RetentionHead }> {
     const head = await this.head();
     if (!head.authority || head.revision === null) throw new Error('No imported retention authority to export.');
     const fence = { revision: head.revision, generation: head.authority.generation };
     const rows: RetentionRow[] = [];
-    for (const kind of ['journal', 'observations', 'entry', 'policy', 'observation'] as RetentionRowKind[]) {
+    for (const kind of kinds) {
       let after = 0;
       while (true) {
         const page = await this.storage.read<{ ordinal: number; idBytes: number; bytes: number }[]>('retention', 'keys', { ...fence, kind, after });
@@ -50,8 +60,7 @@ export class RetentionRepository {
     }
     const last = await this.head();
     if (last.revision !== head.revision || last.authority?.generation !== head.authority.generation) throw new Error('Current retention export changed while paging.');
-    const documents = documentsOf(rows);
-    return { documents, head, sha256: retentionHash(JSON.stringify(documents)) };
+    return { rows, head };
   }
   async update(changes: RetentionChange[]): Promise<void> {
     if (!changes.length) { await this.head(); return; }

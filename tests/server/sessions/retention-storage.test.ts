@@ -17,6 +17,7 @@ import { exportRetention, importRetention, restoreRetention } from '../../../ser
 import { journalDocument, observationDocument, retentionHash, type RetentionDocuments } from '../../../server/sessions/retention/storage-codec.js';
 import { RetentionService } from '../../../server/sessions/retention/service.js';
 import { RetentionArchive } from '../../../server/sessions/retention/archive.js';
+import { SessionService } from '../../../server/sessions/service.js';
 import type { RetentionRecord } from '../../../server/sessions/retention/policy.js';
 
 async function folder(t: TestContext) { const path = await mkdtemp(join(tmpdir(), 'tower-retention-fixture-')); t.after(() => rm(path, { recursive: true, force: true })); return path; }
@@ -109,6 +110,62 @@ test('actual A refuses first import; actual B source backup/marker/receipt; A re
   await new RetentionRepository(currentA).restore(original, 'restore-original-again');
   await assert.rejects(store.removeMetadata(['operation']), /changed/);
   // The externally restored row differs from the store's cached row; guarded deletion must refuse, not delete a newer phase.
+});
+
+test('actual B to A journal loads despite observation damage and the real cold scan preserves launcher proof bytes', async t => {
+  const stateDir = await folder(t), { a, b } = await builds(t), data = documents();
+  const claudeHome = join(stateDir, 'fixture-claude'), codexHome = join(stateDir, 'fixture-codex');
+  const hot = join(claudeHome, 'projects', 'fixture'), coldPath = join(stateDir, 'fixture-cold', 'B.jsonl');
+  await mkdir(hot, { recursive: true });
+  await mkdir(join(codexHome, 'sessions'), { recursive: true });
+  await mkdir(join(codexHome, 'archived_sessions'));
+  await mkdir(join(stateDir, 'fixture-cold'));
+  const createdAt = '2026-09-01T00:00:00.000Z';
+  const transcript = (id: string) => JSON.stringify({ type: 'user', sessionId: id, cwd: stateDir, entrypoint: 'cli', timestamp: createdAt, message: { role: 'user', content: id } }) + '\n';
+  await writeFile(join(hot, 'A.jsonl'), transcript('A'));
+  await writeFile(coldPath, transcript('B'));
+  data.journal.entries[0] = { ...data.journal.entries[0], phase: 'archived', candidate: { ...data.journal.entries[0].candidate, ids: ['claude:B'] }, members: [{
+    sessionId: 'claude:B', provider: 'claude', nativeId: 'B', parentId: 'claude:A', isSubagent: true, parentLink: 'exec', createdAt,
+    operationId: 'operation', state: 'cold', originalPath: join(hot, 'B.jsonl'), coldPath,
+    identity: { dev: 1, ino: 2, size: 3, mtimeMs: 4 },
+  }] };
+  const proofPath = join(stateDir, 'agent-launches.json');
+  const proofBytes = Buffer.from('{ "version": 1, "launches": { "claude:B": ["claude:A"] } }\n');
+  await writeFile(proofPath, proofBytes, { mode: 0o600 });
+  const evidenceParent = await sources(stateDir, data); await prepareA(stateDir, a);
+  const { client: bc, update } = await openB(t, stateDir, b);
+  await importRetention({ storage: bc, update, stateDir, evidenceParent, commandId: 'cold-journal-import' });
+  await bc.close();
+  const db = new DatabaseSync(join(stateDir, 'state.sqlite'));
+  try {
+    assert.equal(db.prepare("UPDATE retention_metadata SET json = ? WHERE kind = 'observations' AND id = ''").run(JSON.stringify({ ...data.observations, version: 2, entries: undefined })).changes, 1);
+  } finally { db.close(); }
+  await writeFile(join(stateDir, 'retention', 'journal.json'), '{invalid legacy journal');
+  await writeFile(join(stateDir, 'retention-observations.json'), '{invalid legacy observations');
+  const currentA = await a.storage.openStorage({ stateDir, bundle: a.bundle() }); t.after(() => currentA.close());
+  await currentA.prepare({ allowMigration: false });
+  const repository = new RetentionRepository(currentA);
+  assert.deepEqual((await repository.readCurrentJournal()).journal, data.journal, 'root and nested metadata survive independently');
+  await assert.rejects(repository.exportCurrent(), /Invalid retention observations/);
+  const store = new RetentionStore(join(stateDir, 'retention'), { storage: currentA }); await store.start();
+  assert.deepEqual(store.list(), data.journal.entries);
+  assert.deepEqual(store.policy('policy'), data.journal.policies && data.journal.policies[0]);
+  assert.equal(store.migratedAt, data.journal.migratedAt);
+  const members = store.list().flatMap(entry => entry.members || []).filter(member => member.state !== 'restored');
+  assert.deepEqual(members.map(member => `${member.provider}:${member.nativeId}`), ['claude:B']);
+  const sessions = new SessionService({ claudeHome, codexHome, launchProofs: proofPath,
+    inspectProcesses: async () => ({ claude: new Map(), codex: new Set<string>(), providerRunning: { claude: false, codex: false } }) });
+  t.after(() => sessions.stop());
+  sessions.setColdRegistry(members.flatMap(member => [member.originalPath, ...(member.coldPath ? [member.coldPath] : [])]), members.map(member => `${member.provider}:${member.nativeId}`));
+  const observer = new RetentionObserver({ stateDir, storage: currentA, snapshot: () => sessions.completedRetentionRecords(),
+    reconcile: value => value, journalMembers: () => members, runs: () => [], settled: () => new Set(), protectedIds: () => [] });
+  await assert.rejects(observer.start(), /Invalid retention observations/);
+  assert.equal(currentA.status().state, 'ready');
+  assert.equal((await currentA.gate('core')).open, true, 'observation format failure remains domain-local');
+  await sessions.refresh(); await sessions.quiesce();
+  assert.ok(sessions.get('claude:A'), 'accessible hot Claude history exercises proof pruning');
+  assert.equal(sessions.get('claude:B'), undefined, 'cold original is outside the native scan');
+  assert.deepEqual(await readFile(proofPath), proofBytes, 'real scanner retains exact launcher proof bytes');
 });
 
 test('actual evaluator requires A; malformed/missing sources refuse while core stays healthy', async t => {

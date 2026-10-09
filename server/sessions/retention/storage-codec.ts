@@ -73,11 +73,19 @@ export function rowsOf(documents: RetentionDocuments): RetentionRow[] {
   for (const tuple of inactive) put('observation', tuple[0], tuple);
   return [...rows.values()];
 }
+function wrapperOf(rows: RetentionRow[], kind: 'journal' | 'observations'): Record<string, unknown> {
+  const row = rows.find(row => row.kind === kind);
+  if (!row) throw new Error(`Missing retention ${kind} metadata.`);
+  return object(JSON.parse(row.json));
+}
+export function journalOf(rows: RetentionRow[]): JournalDocument {
+  const journal = wrapperOf(rows, 'journal');
+  return journalDocument({ ...journal, entries: rows.filter(row => row.kind === 'entry').map(row => JSON.parse(row.json)), ...(rows.some(row => row.kind === 'policy') || Array.isArray(journal.policies) ? { policies: rows.filter(row => row.kind === 'policy').map(row => JSON.parse(row.json)) } : {}) });
+}
 export function documentsOf(rows: RetentionRow[]): RetentionDocuments {
-  const wrapper = (kind: RetentionRowKind) => { const row = rows.find(row => row.kind === kind); if (!row) throw new Error(`Missing retention ${kind} metadata.`); return object(JSON.parse(row.json)); };
-  const journal = wrapper('journal'), observations = wrapper('observations');
+  const observations = wrapperOf(rows, 'observations');
   return {
-    journal: journalDocument({ ...journal, entries: rows.filter(row => row.kind === 'entry').map(row => JSON.parse(row.json)), ...(rows.some(row => row.kind === 'policy') || Array.isArray(journal.policies) ? { policies: rows.filter(row => row.kind === 'policy').map(row => JSON.parse(row.json)) } : {}) }),
+    journal: journalOf(rows),
     observations: observationDocument({ ...observations, entries: rows.filter(row => row.kind === 'observation').map(row => JSON.parse(row.json)) }),
   };
 }
