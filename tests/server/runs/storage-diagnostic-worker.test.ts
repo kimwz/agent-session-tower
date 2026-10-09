@@ -72,7 +72,7 @@ const diagnosticRoots = new WeakMap<TestContext, Map<string, {
 
 async function prepareRetentionA(root: string, stateDir: string): Promise<void> {
   // Actual pre-cutover source capture, not released package/SHA proof (owned by the parent).
-  const a = await retentionBuild('1.120.2', join(root, 'preparation-artifact'));
+  const a = await retentionBuild('1.122.0', join(root, 'preparation-artifact'));
   const client = await a.storage.openStorage({ stateDir, bundle: a.bundle() });
   try {
     const prepared = await client.prepare({ allowMigration: true });
@@ -775,4 +775,44 @@ for (const damage of ['malformed', 'missing-source', 'missing-wrapper', 'missing
   assert.deepEqual(JSON.parse(await readFile(join(state, 'fixture-firstscan-registry.json'), 'utf8')), registry, 'known registry precedes the actual first scan');
   assert.ok(registry.ids.includes('claude:known-cold')); assert.ok(registry.paths.includes(knownMember.originalPath));
   assert.equal(resumed.snapshot?.sessions.some(session => session.id === 'claude:known-cold'), false);
+});
+
+
+test('actual B runs bootstrap parks before scans and admits once after explicit source repair', { timeout: 90000 }, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-runs-bootstrap-retry-'))), state = join(root, 'state');
+  const paths = await runnerPaths(state);
+  await mkdir(state, { recursive: true, mode: 0o700 });
+  await mkdir(join(state, 'retention'), { mode: 0o700 });
+  await writeFile(join(state, 'retention', 'journal.json'), JSON.stringify({ version: 1, migratedAt: 1, entries: [], policies: [] }), { mode: 0o600 });
+  await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
+  await writeFile(join(state, 'runs.json'), '[]', { mode: 0o600 });
+  await prepareRetentionA(root, state);
+  const { child, call, stderr } = await launchDiagnostic(t, root, state, paths, undefined, { TOWER_FIXTURE_COLD_COUNTS: '1' });
+  const deadline = Date.now() + 60000;
+  let snapshot: RunnerReply | undefined;
+  while (snapshot?.snapshot?.storage?.code !== 'runs-bootstrap-held') {
+    assert.equal(child.exitCode, null, stderr()); if (Date.now() > deadline) assert.fail(stderr());
+    try { snapshot = await call('snapshot'); } catch { /* Diagnostic endpoint is still starting. */ }
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  const heldCounts = JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8'));
+  assert.deepEqual(heldCounts, { scanner: 0, temporary: 0, native: 0 });
+  assert.equal(snapshot.snapshot?.storage?.sessionsAvailable, false);
+  assert.equal(snapshot.snapshot?.storage?.admissionOpen, false);
+  assert.equal((await call('create')).error?.disposition, 'not-admitted');
+  await call('storageRetry');
+  assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, false);
+  assert.deepEqual(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')), heldCounts);
+  await writeFile(join(state, 'created-sessions.json'), '[]', { mode: 0o600 });
+  await writeFile(join(state, 'run-instructions.json'), '{}', { mode: 0o600 });
+  await call('storageRetry');
+  let ready = await call('snapshot');
+  while (!ready.snapshot?.storage?.admissionOpen) {
+    assert.equal(child.exitCode, null, stderr()); if (Date.now() > deadline) assert.fail(stderr());
+    await new Promise(resolve => setTimeout(resolve, 25)); ready = await call('snapshot');
+  }
+  assert.equal(ready.instance, snapshot.instance);
+  assert.equal(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')).scanner, 1);
+  await call('storageRetry');
+  assert.equal(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')).scanner, 1);
 });

@@ -388,6 +388,7 @@ export class RunManager extends EventEmitter {
     return this.registry.backfill(links, id => this.runs.get(id));
   }
 
+  bootstrapStorage(update: Parameters<RunHistory['bootstrapStorage']>[0]): Promise<void> { return this.history.bootstrapStorage(update); }
   useStorage(storage: StorageClient): void { this.history.useStorage(storage); }
   pendingAdmission(): { commandId: string; sha256: string } | undefined { return this.history.pendingAdmission(); }
   private async persistNativeIdentity(run: Run): Promise<boolean> {

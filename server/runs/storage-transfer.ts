@@ -69,7 +69,7 @@ async function seal(parent: string, id: string, files: Record<string, Buffer>, f
   const handle = await open(join(directory, 'manifest.json'), 'wx', 0o600);
   try { await handle.writeFile(manifest); await handle.sync(); } finally { await handle.close(); }
   if (!(await raw(join(directory, 'manifest.json'), RUN_SOURCE_BYTES)).equals(manifest)) throw new Error('Runs manifest readback mismatch.');
-  for (const path of [directory, parent]) { const folder = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW); try { await folder.sync(); } finally { await folder.close(); } }
+  for (const path of [directory, parent, dirname(parent)]) { const folder = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW); try { await folder.sync(); } finally { await folder.close(); } }
   return { directory, manifestSha256: runHash(manifest) };
 }
 export interface RunsImportInput {
@@ -140,4 +140,50 @@ export async function restoreRunsStorage(repository: RunsRepository, directory: 
   const documents = parseRunDocuments({ runs: await read('runs.json',RUN_SOURCE_BYTES), created: await read('created-sessions.json',RUN_DEPENDENCY_BYTES), instructions: await read('run-instructions.json',RUN_DEPENDENCY_BYTES) },true);
   if (documentsHash(documents) !== manifest.canonicalSha256) throw new Error('Runs restore canonical digest mismatch.');
   await repository.restore(documents,commandId,head.authority.generation);
+}
+
+/** Worker-owned bootstrap; failed staging is never retried under a new identity. */
+export function bootstrapRuns(repository: RunsRepository, stateDir: string, update: () => Promise<StorageUpdateInput>): () => Promise<void> {
+  let pending: Promise<void> | undefined;
+  let failedIntent: unknown;
+  const start = async () => {
+    await repository.gate();
+    if (await repository.databaseAuthority()) return;
+    if (failedIntent) throw failedIntent;
+    await holdRunsEvidence(stateDir);
+    const storage = repository.storage;
+    const history = await storage.read<{ stages: number }>('runs', 'bootstrapHistory', {});
+    if (history.stages !== 0) throw new Error('Runs staged history exists without authority; explicit owner recovery required.');
+    const current = await update(), context = storage.context;
+    if (!context || current.stateDir !== stateDir || current.build.version !== context.identity.appVersion || current.build.preflight.identity?.sourceHash !== context.identity.sourceHash || current.build.manifest?.digest !== context.manifest.digest) throw new Error('Runs bootstrap evidence belongs to another captured build.');
+    const check = async () => {
+      const evaluation = await evaluateStorageUpdate(await update());
+      if (!evaluation.importAllowed || evaluation.verdict !== 'ready') throw new Error(`Runs bootstrap held: ${evaluation.code}: ${evaluation.reason}`);
+      await repository.gate();
+    };
+    await check();
+    if (!context.manifest.domains.find(domain => domain.scope === 'runs')?.cutover) throw new Error('Runs preparation has no cutover contract.');
+    // Decide before creating evidence: our own directory must not masquerade as old history.
+    const fresh = await runsLegacyFiles(stateDir) === 'absent';
+    const evidenceParent = join(stateDir, 'runs-storage-migrations');
+    await privateFolder(stateDir);
+    await mkdir(evidenceParent, { mode: 0o700, recursive: true });
+    await privateFolder(evidenceParent);
+    try {
+      if (!fresh) await importRuns({ storage, repository, stateDir, evidenceParent, commandId: `runs-${randomUUID()}`, update: current });
+      else {
+        const documents = { runs: [], created: [], instructions: {} };
+        const id = `runs-${randomUUID()}`;
+        const evidence = await seal(evidenceParent, id, {}, { kind: 'fresh-initialization', build: context.identity, canonicalSha256: documentsHash(documents) });
+        await repository.importPrepared(documents, evidence.manifestSha256, id, async () => {
+          for (const name of ['runs.json', 'created-sessions.json', 'run-instructions.json']) {
+            try { await lstat(join(stateDir, name)); throw new Error('Fresh runs source appeared during initialization.'); }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          }
+          await check();
+        });
+      }
+    } catch (error) { if (repository.lastIntent) failedIntent = error; throw error; }
+  };
+  return () => pending ??= start().finally(() => { pending = undefined; });
 }

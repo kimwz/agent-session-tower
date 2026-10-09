@@ -1015,6 +1015,19 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   // Gate(core), not prepare's claim, precedes every restore and startup effect.
   await startupGate();
   runs.useStorage(database!);
+  const bootstrapRuns = async () => runs.bootstrapStorage(async () => {
+    preflight = await preflightStorage({ bundle, stateDir });
+    return updateInput();
+  });
+  // Park this continuation before restore, scanning or native effects. Retry uses the same repository.
+  while (true) {
+    try { await bootstrapRuns(); break; }
+    catch (error) {
+      unavailable(); storageStatus.reason = String(error); storageStatus.code = 'runs-bootstrap-held';
+      storageStatus.sessionsAvailable = false;
+      await startupGate();
+    }
+  }
   const restoring = await takeWorkerRestore(stateDir).catch(error => { console.error(`A waiting restore was not applied: ${error instanceof Error ? error.message : String(error)}`); return undefined; });
   // Only the Tower on the account's own state folder keeps its Claude Code and Codex current, so two never update one install.
   // It is there even with automatic updates off: an install a previous worker left running is still waited for.

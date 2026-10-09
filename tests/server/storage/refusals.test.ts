@@ -405,15 +405,15 @@ test('a missing or replaced database is not replaced by a new empty one', async 
   }
 });
 
-test('the default manifest declares retention and runs preparation only', () => {
+test('the default manifest declares retention and runs published cutovers', () => {
   const [domain] = storageManifest().domains;
   assert.equal(storageManifest().domains.length, 2);
   assert.equal(domain.scope, 'retention');
   assert.equal(domain.schemaVersion, 2);
   assert.deepEqual(domain.preparation, { requiredArtifactVersion: '1.120.2', readerContract: 1, writerContract: 1 });
-  assert.equal(domain.cutover, undefined);
+  assert.deepEqual(domain.cutover, { artifactVersion: '1.121.0', importContract: 1 });
   const runs = storageManifest().domains[1];
   assert.equal(runs.scope, 'runs');
-  assert.equal(runs.cutover, undefined);
+  assert.deepEqual(runs.cutover, { artifactVersion: '1.123.0', importContract: 1 });
   assert.deepEqual(runs.preparation, { requiredArtifactVersion: '1.122.0', readerContract: 1, writerContract: 1 });
 });

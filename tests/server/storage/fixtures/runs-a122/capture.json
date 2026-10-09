@@ -1,0 +1,28 @@
+{
+  "publicCommit": "1544951f5b6abfeb238e1e8f155085a6dd22c6b6",
+  "version": "1.122.0",
+  "officialRelease": "https://github.com/kimwz/agent-session-tower/releases/tag/v1.122.0",
+  "officialAssetId": 625897302,
+  "officialPackageSHA256": "438767a17b42db5c021b8d9f91f650b9b6c24eeaf7272ea90e9992feaf85a2fd",
+  "threadArtifactFile": "thread-bundle.json",
+  "threadArtifactSHA256": "bc4e8dda2a0e1cd8abb2d889b810a47edc3548df2a06f7bf52a36c19d8efb660",
+  "threadArtifactBytes": 72980,
+  "identity": {
+    "appVersion": "1.122.0",
+    "protocol": "tower-storage/1",
+    "sourceHash": "7c5ffc9947cb27e8f21b158d3136f6ea22cc971552c51327f64d6c297673be58",
+    "manifestDigest": "abd94a8900c786e97d28ec9a9dee59f86f1c8dfb133906ecbea538e39560f038"
+  },
+  "files": {
+    "server/runs/storage-schema.ts": {
+      "captureFile": "runs-storage-schema.ts.txt",
+      "sha256": "4dd8db5941b994fe6846ea3b13bfcf9929fe623ec40d0c5a01d5e6776bf3c788"
+    },
+    "server/sessions/retention/storage-schema.ts": {
+      "captureFile": "retention-storage-schema.ts.txt",
+      "sha256": "0987f51832534e664033d2d36e4773c2dc14fca414b9f8b6ce6bcb0338628d80"
+    }
+  },
+  "capturedBy": "persistent-parent from protected official release tar member, no execution/extraction/install",
+  "capturedAt": "2026-10-09T19:44:43.394688+00:00"
+}

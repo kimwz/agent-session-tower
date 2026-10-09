@@ -35,18 +35,18 @@ test('limits are chosen within their ranges and refused outside them', () => {
   assert.throws(() => storageLimits({ maxPayloadBytes: 64 * 1024 * 1024 }), RangeError);
 });
 
-test('the production manifest registers actual retention schema/handler with two preparation-only domains; schema text changes alter it', () => {
+test('the production manifest registers actual retention schema/handler with published cutover declarations; schema text changes alter it', () => {
   assert.deepEqual(STORAGE_DOMAIN_SCHEMAS, [retentionSchema, runsSchema]);
   assert.strictEqual(retentionDomain.schema, retentionSchema);
   assert.strictEqual(runsDomain.schema, runsSchema);
-  assert.equal(retentionSchema.cutover, undefined);
-  assert.equal(runsSchema.cutover, undefined);
+  assert.deepEqual(retentionSchema.cutover, { artifactVersion: '1.121.0', importContract: 1 });
+  assert.deepEqual(runsSchema.cutover, { artifactVersion: '1.123.0', importContract: 1 });
   assert.deepEqual(runsSchema.preparation, { requiredArtifactVersion: '1.122.0', readerContract: 1, writerContract: 1 });
   const manifest = storageManifest();
   assert.equal(manifest.core.schemaVersion, CORE_MIGRATIONS.length);
   assert.equal(manifest.domains.length, 2);
   assert.equal(manifest.domains[0].scope, 'retention');
-  assert.equal(manifest.domains[0].cutover, undefined);
+  assert.deepEqual(manifest.domains[0].cutover, retentionSchema.cutover);
   assert.deepEqual(manifest.domains[0].preparation, { requiredArtifactVersion: '1.120.2', readerContract: 1, writerContract: 1 });
   assert.equal(storageManifest().digest, manifest.digest, 'the same declarations give the same digest');
   assert.notEqual(storageManifest([], '0.0.1').digest, manifest.digest);

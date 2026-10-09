@@ -20,6 +20,16 @@ export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' 
   const preparation = !runsRelease && version !== '1.121.0';
   const captureRoot = fileURLToPath(new URL(old ? './retention-a120/' : './retention-a1201/', import.meta.url));
   const capture = preparation ? JSON.parse(await readFile(join(captureRoot, 'capture.json'), 'utf8')) : undefined;
+  const actualARoot = fileURLToPath(new URL('./runs-a122/', import.meta.url));
+  const actualACapture = version === '1.122.0' && !retentionCutover ? JSON.parse(await readFile(join(actualARoot, 'capture.json'), 'utf8')) : undefined;
+  const actualABytes = actualACapture ? await readFile(join(actualARoot, 'thread-bundle.json')) : undefined;
+  if (actualACapture) {
+    if (actualACapture.publicCommit !== '1544951f5b6abfeb238e1e8f155085a6dd22c6b6' || actualACapture.officialAssetId !== 625897302 || actualACapture.officialPackageSHA256 !== '438767a17b42db5c021b8d9f91f650b9b6c24eeaf7272ea90e9992feaf85a2fd' || actualACapture.identity.sourceHash !== '7c5ffc9947cb27e8f21b158d3136f6ea22cc971552c51327f64d6c297673be58' || actualACapture.identity.manifestDigest !== 'abd94a8900c786e97d28ec9a9dee59f86f1c8dfb133906ecbea538e39560f038') throw new Error('Actual A122 release provenance mismatch.');
+    if (actualACapture.threadArtifactSHA256 !== 'bc4e8dda2a0e1cd8abb2d889b810a47edc3548df2a06f7bf52a36c19d8efb660' || actualABytes!.length !== 72980 || createHash('sha256').update(actualABytes!).digest('hex') !== actualACapture.threadArtifactSHA256) throw new Error('Actual A122 artifact bytes/hash mismatch.');
+    for (const fact of Object.values(actualACapture.files) as { captureFile: string; sha256: string }[]) {
+      if (createHash('sha256').update(await readFile(join(actualARoot, fact.captureFile))).digest('hex') !== fact.sha256) throw new Error('Actual A122 schema capture mismatch.');
+    }
+  }
   const versionPlugin: Plugin = { name: 'retention-fixture-release', setup(builder) {
     if (preparation) builder.onLoad({ filter: /[\\/]server[\\/]sessions[\\/]retention[\\/]storage-(schema|commands)\.ts$/ }, async args => {
       const name = args.path.split(/[\\/]/).at(-1)!;
@@ -27,7 +37,11 @@ export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' 
       if (createHash('sha256').update(contents).digest('hex') !== capture.files[`server/sessions/retention/${name}`]) throw new Error('Old A capture hash mismatch.');
       return { contents, loader: 'ts' };
     });
-    if (version === '1.123.0') builder.onLoad({ filter: /[\\/]server[\\/]runs[\\/]storage-schema\.ts$/ }, async args => ({ contents: (await readFile(args.path, 'utf8')).replace("domain: 'runs', preparation:", "domain: 'runs', cutover: { artifactVersion: '1.123.0', importContract: 1 }, preparation:"), loader: 'ts' }));
+    if (version === '1.122.0') builder.onLoad({ filter: /[\\/]server[\\/](runs|sessions[\\/]retention)[\\/]storage-schema\.ts$/ }, async args => {
+      const domain = args.path.includes('/runs/') ? 'runs' : 'retention';
+      return { contents: await readFile(join(actualARoot, `${domain}-storage-schema.ts.txt`), 'utf8'), loader: 'ts' };
+    });
+    if (!runsRelease && !preparation) builder.onLoad({ filter: /[\\/]server[\\/]runs[\\/]storage-schema\.ts$/ }, async args => ({ contents: (await readFile(args.path, 'utf8')).replace(/cutover: \{ artifactVersion: '1.123.0', importContract: 1 \}, /, ''), loader: 'ts' }));
     builder.onLoad({ filter: /[\\/]shared[\\/]app-identity\.ts$/ }, async args => ({ contents: (await readFile(args.path, 'utf8')).replace(/export const APP_VERSION = '[^']+';/, `export const APP_VERSION = '${version}';`), loader: 'ts' }));
   } };
   const { cutover: _cutover, ...preparedSchema } = retentionSchema;
@@ -38,7 +52,8 @@ export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' 
     const firstSql = (source: string) => source.split('version: 1, sql: `')[1]?.split('`.trim() }')[0];
     if (!firstSql(capturedSchema) || firstSql(capturedSchema) !== firstSql(currentSchema)) throw new Error('Old A migration1 changed.');
   }
-  const manifest = storageManifest(runsRelease ? [schema, version === '1.123.0' ? { ...runsSchema, cutover: { artifactVersion: '1.123.0', importContract: 1 } } : runsSchema] : [schema], version);
+  const manifest = storageManifest(runsRelease ? [schema, version === '1.123.0' ? { ...runsSchema, cutover: { artifactVersion: '1.123.0', importContract: 1 } } : (({ cutover: _runsCutover, ...preparedRuns }) => preparedRuns)(runsSchema)] : [schema], version);
+  if (actualACapture && manifest.digest !== actualACapture.identity.manifestDigest) throw new Error('Actual A122 manifest mismatch.');
   const artifacts: Record<string, StorageThreadArtifact> = {};
   for (const fault of preparation ? ['normal', 'after-native-hold'] : ['normal', 'before', 'after', 'after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss', ...(runsRelease ? ['after-unsent-compensation'] : []), 'refuse-once', 'corrupt', 'io']) {
     const entry = `
@@ -101,6 +116,11 @@ runStorageThread([domain${runsRelease ? ', runsDomain' : ''}]);`;
     const result = await build({ stdin: { contents: entry, resolveDir: root, sourcefile: 'retention-fixture-thread.ts', loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'cjs', target: 'node22', plugins: [versionPlugin], logLevel: 'silent' });
     const body = result.outputFiles[0].text, sourceHash = createHash('sha256').update(body).digest('hex');
     artifacts[fault] = { format: STORAGE_BUNDLE_FORMAT, sourceHash, source: `var __TOWER_STORAGE_SOURCE_HASH__ = "${sourceHash}";\n${body}` };
+  }
+  if (actualACapture) {
+    const actual = JSON.parse(actualABytes!.toString('utf8')) as StorageThreadArtifact;
+    if (actual.sourceHash !== actualACapture.identity.sourceHash) throw new Error('Actual A122 source identity mismatch.');
+    artifacts.normal = actual;
   }
   const parentPath = join(directory, 'parent.mjs');
   await build({ entryPoints: [join(root, 'tests/server/storage/fixtures/parent.ts')], outfile: parentPath, bundle: true, platform: 'node', format: 'esm', target: 'node22', logLevel: 'silent', plugins: [versionPlugin, buildIdentityPlugin(buildIdentityModule({ contexts: Object.values(artifacts).map(artifact => ({ sourceHash: artifact.sourceHash, manifest })) }))] });
