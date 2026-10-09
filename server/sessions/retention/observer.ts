@@ -7,6 +7,9 @@ import { readPrivateJson, writePrivateJson } from '../../stores/private-json.js'
 import { resolveRetentionLineage } from './ancestry.js';
 import type { RetentionMember } from '../../../shared/retention.js';
 import type { RetentionObservation, RetentionRecord } from './policy.js';
+import type { StorageClient } from '../../storage/client.js';
+import { RetentionRepository } from './storage-repository.js';
+import { observationDocument, type InactiveObservation, type RetentionChange } from './storage-codec.js';
 
 /** An execution result stays protected until delivered, even if no notification was requested. */
 export function permissionRetentionPending(request: { status: string; notification?: { state: string }; run?: { status: string; delivered?: boolean } }): boolean {
@@ -19,9 +22,9 @@ export interface NativeRetentionObservation {
   records: { session: Session; internal: boolean; fingerprint: string; lastActivityAt?: string; latestTaskEndedAt?: string }[];
   launchers?: ReadonlyMap<string, readonly string[]>;
 }
-interface InactiveObservation { fingerprint: string; since: string; observedAt: number }
 export interface RetentionObserverOptions {
   stateDir: string;
+  storage?: StorageClient;
   snapshot: () => NativeRetentionObservation | Promise<NativeRetentionObservation>;
   reconcile: (sessions: Session[]) => Session[];
   runs: () => Run[];
@@ -56,12 +59,24 @@ export class RetentionObserver {
   private restarted = true;
   private observing?: Promise<RetentionObservation>;
   private readonly path: string;
-  constructor(private readonly options: RetentionObserverOptions) { this.path = join(options.stateDir, 'retention-observations.json'); }
+  private repository?: RetentionRepository;
+  private database = false;
+  private tupleTails = new Map<string, unknown[]>();
+  private metadata: Record<string, unknown> = { version: 1 };
+  constructor(private readonly options: RetentionObserverOptions) { this.path = join(options.stateDir, 'retention-observations.json'); if (options.storage) this.repository = new RetentionRepository(options.storage); }
   async start(): Promise<void> {
+    if (Object.hasOwn(this.options, 'storage') && !this.repository) throw new Error('Shared retention storage is unavailable.');
+    if (this.repository && await this.repository.databaseAuthority()) {
+      const { documents } = await this.repository.exportCurrent();
+      const { entries, ...metadata } = documents.observations;
+      this.metadata = metadata; this.inactive = new Map(entries.map(([id, value]) => [id, value])); this.tupleTails = new Map(entries.map(([id, _value, ...tail]) => [id, tail])); this.database = true; return;
+    }
     try {
-      const data = await readPrivateJson(this.path, 8_000_000) as { version: number; entries: [string, InactiveObservation][] };
+      const data = observationDocument(await readPrivateJson(this.path, 8_000_000));
+      const { entries: _entries, ...metadata } = data; this.metadata = metadata;
       if (data.version !== 1 || !Array.isArray(data.entries)) throw new Error('Invalid retention observations.');
-      for (const [id, entry] of data.entries) {
+      for (const [id, entry, ...tail] of data.entries) {
+        this.tupleTails.set(id, tail);
         if (typeof id !== 'string' || !entry || typeof entry.fingerprint !== 'string' || !Number.isFinite(entry.observedAt) || !Number.isFinite(Date.parse(entry.since))) throw new Error('Invalid inactive observation.');
         this.inactive.set(id, entry);
       }
@@ -119,7 +134,7 @@ export class RetentionObserver {
       if (inactive) {
         observation = previous && !this.restarted && previous.fingerprint === raw.fingerprint && now >= previous.observedAt && now - previous.observedAt <= 7_200_000
           ? { ...previous, observedAt: now }
-          : { fingerprint: raw.fingerprint, since: new Date(now).toISOString(), observedAt: now };
+          : { ...previous, fingerprint: raw.fingerprint, since: new Date(now).toISOString(), observedAt: now };
         current.set(session.id, observation);
       }
       const kind = raw.internal ? 'guardian' : session.isSubagent ? 'subagent' : session.launchedByAgent ? 'helper' : 'parent';
@@ -130,7 +145,20 @@ export class RetentionObserver {
         projectKey: needsProject ? projects.get(session.cwd) : undefined, lastActivityAt: raw.lastActivityAt,
         latestTaskEndedAt: raw.latestTaskEndedAt, inactiveSince: observation?.since });
     }
-    try { await writePrivateJson(this.path, JSON.stringify({ version: 1, entries: [...current] }), { syncDirectory: true }); }
+    try {
+      if (this.database) {
+        const changes: RetentionChange[] = [];
+        for (const [id, value] of current) {
+          const json = JSON.stringify([id, value, ...(this.tupleTails.get(id) ?? [])]), previous = this.inactive.has(id) ? JSON.stringify([id, this.inactive.get(id), ...(this.tupleTails.get(id) ?? [])]) : null;
+          if (json !== previous) changes.push({ kind: 'observation', id, json, previous });
+        }
+        for (const [id, value] of this.inactive) if (!current.has(id)) changes.push({ kind: 'observation', id, json: JSON.stringify([id, value, ...(this.tupleTails.get(id) ?? [])]), previous: JSON.stringify([id, value, ...(this.tupleTails.get(id) ?? [])]), remove: true });
+        await this.repository!.update(changes);
+      } else {
+        if (this.repository && await this.repository.databaseAuthority()) throw new Error('Retention authority changed; restart the owner before writing.');
+        await writePrivateJson(this.path, JSON.stringify({ ...this.metadata, version: 1, entries: [...current].map(([id, value]) => [id, value, ...(this.tupleTails.get(id) ?? [])]) }), { syncDirectory: true });
+      }
+    }
     catch (error) { this.inactive.clear(); this.restarted = true; throw error; }
     this.inactive = current; this.restarted = false;
     return { now, migratedAt: 0, complete: snapshot.complete, issues: snapshot.issues, records, protectedIds, ancestry:lineage.ancestry, blockedIds:lineage.blockedIds };

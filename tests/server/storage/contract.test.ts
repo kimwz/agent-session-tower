@@ -4,6 +4,8 @@ import { DEFAULT_STORAGE_LIMITS, storageLimits } from '../../../server/storage/c
 import { evaluateRuntime, nodeVerified, sqlitePatched } from '../../../server/storage/runtime.js';
 import { CORE_MIGRATIONS, STORAGE_DOMAIN_SCHEMAS, storageManifest } from '../../../server/storage/schema.js';
 import { WORKER_FILES } from '../../../server/backup/payload.js';
+import { retentionSchema } from '../../../server/sessions/retention/storage-schema.js';
+import { retentionDomain } from '../../../server/sessions/retention/storage-commands.js';
 import { fixtureSchema } from './fixtures/fixture-domain.js';
 
 test('only SQLite with the WAL-reset fix passes: 3.51.3+, or the official 3.44.6 / 3.50.7 backport lines', () => {
@@ -31,11 +33,15 @@ test('limits are chosen within their ranges and refused outside them', () => {
   assert.throws(() => storageLimits({ maxPayloadBytes: 64 * 1024 * 1024 }), RangeError);
 });
 
-test('the manifest names the contract: core only in this build, and any schema text or domain change alters it', () => {
-  assert.deepEqual(STORAGE_DOMAIN_SCHEMAS, [], 'no domain is claimed before its preparation release');
+test('the preparation manifest registers actual retention schema/handler without cutover; schema text changes alter it', () => {
+  assert.deepEqual(STORAGE_DOMAIN_SCHEMAS, [retentionSchema]);
+  assert.strictEqual(retentionDomain.schema, retentionSchema);
   const manifest = storageManifest();
   assert.equal(manifest.core.schemaVersion, CORE_MIGRATIONS.length);
-  assert.deepEqual(manifest.domains, []);
+  assert.equal(manifest.domains.length, 1);
+  assert.equal(manifest.domains[0].scope, 'retention');
+  assert.equal(manifest.domains[0].cutover, undefined);
+  assert.deepEqual(manifest.domains[0].preparation, { requiredArtifactVersion: '1.120.0', readerContract: 1, writerContract: 1 });
   assert.equal(storageManifest().digest, manifest.digest, 'the same declarations give the same digest');
   assert.notEqual(storageManifest([], '0.0.1').digest, manifest.digest);
   const withFixture = storageManifest([fixtureSchema]);
