@@ -1013,7 +1013,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   let retentionBootstrapError: unknown;
   let retentionBootstrapIssues: string[] = [];
   const nativeRoots = { claude: [join(sessions.claudeHome, 'projects')], codex: [join(sessions.codexHome, 'sessions'), join(sessions.codexHome, 'archived_sessions')] };
-  const retentionStore = new RetentionStore(join(stateDir, 'retention'));
+  const retentionStore = new RetentionStore(join(stateDir, 'retention'), { storage: database });
   const retentionArchive = new RetentionArchive(join(stateDir, 'retention-cold'), [...nativeRoots.claude, ...nativeRoots.codex], [join(stateDir, 'retention-originals')]);
   const nativeRetention = createNativeRetentionAdapter(nativeRoots, { coldRoot: join(stateDir, 'retention-originals'), codexHome: sessions.codexHome, claudeHome: sessions.claudeHome });
   let publishedMembers: ReturnType<RetentionStore['list']>[number]['members'] = [];
@@ -1042,7 +1042,13 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     await closedSessions.start();
     try {
       await retentionStore.start();
-    } catch (error) { retentionBootstrapError = error; console.error(`Cold journal unavailable: ${String(error)}`); }
+    } catch (error) {
+      retentionBootstrapError = error;
+      // The SDK routes physical SQLite failures through onUnavailable. Only a
+      // healthy shared core may quarantine malformed retention metadata alone.
+      if (database?.status().state === 'unavailable') unavailable(database.status());
+      console.error(`Cold journal unavailable: ${String(error)}`);
+    }
     if (!retentionBootstrapError) try {
       const entries = retentionStore.list();
       const members = entries.flatMap(entry => entry.members || []).filter(member => member.state !== 'restored');
@@ -1415,7 +1421,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         read: async (id, limit, before) => runs.getSession(id) ? (await sessions.detail(runs.nativeSessionId(id), before, limit)) ?? { messages: [], hasMore: false } : undefined,
         search: async (id, query) => runs.getSession(id) ? (await sessions.search(runs.nativeSessionId(id), query)) ?? { count: 0, matches: [], bytes: 0 } : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
-    const observer = new RetentionObserver({ stateDir, journalMembers: () => retentionStore.list().flatMap(entry=>entry.members || []), snapshot: () => sessions.completedRetentionRecords(),
+    const observer = new RetentionObserver({ stateDir, storage: database, journalMembers: () => retentionStore.list().flatMap(entry=>entry.members || []), snapshot: () => sessions.completedRetentionRecords(),
       reconcile: native => runs.sessionList(native), runs: () => runs.list(), settled: () => runs.settledRunIds(),
       protectedIds: () => {
         const ids = new Set(coordinators());

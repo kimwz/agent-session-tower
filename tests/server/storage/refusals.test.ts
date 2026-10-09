@@ -141,9 +141,9 @@ test('an unknown schema, another program\'s database, a damaged file or a schema
   before = await filesUnder(damaged);
   await refused(t, { stateDir: damaged, bundle: productionBundle }, { phase: 'open', code: 'not-a-database', retryable: false });
   assert.deepEqual(await filesUnder(damaged), before);
-  // A production storage opened by a build with one more domain is behind: it waits for an allowed migration.
+  // A pre-domain storage opened by a build with more domains is behind: it waits for an allowed migration.
   const behind = await stateDir(t);
-  const plain = await openStorage({ stateDir: behind, bundle: productionBundle });
+  const plain = await openStorage({ stateDir: behind, bundle: threadBundle('core') });
   await plain.prepare({ allowMigration: true });
   await plain.close();
   const upgraded = await openFixture(t, behind);
@@ -405,6 +405,11 @@ test('a missing or replaced database is not replaced by a new empty one', async 
   }
 });
 
-test('the default manifest is this build\'s: core only', () => {
-  assert.deepEqual(storageManifest().domains, []);
+test('the default manifest declares retention preparation without cutover', () => {
+  const [domain] = storageManifest().domains;
+  assert.equal(storageManifest().domains.length, 1);
+  assert.equal(domain.scope, 'retention');
+  assert.equal(domain.schemaVersion, 1);
+  assert.deepEqual(domain.preparation, { requiredArtifactVersion: '1.120.0', readerContract: 1, writerContract: 1 });
+  assert.equal(domain.cutover, undefined);
 });

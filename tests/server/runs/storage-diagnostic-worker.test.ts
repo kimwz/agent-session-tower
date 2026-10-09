@@ -375,8 +375,18 @@ for (const stage of ['1', 'late']) test(`actual SDK startup failure parks its co
   }
   const counts = join(state, 'fixture-startup-counts.json');
   assert.deepEqual(JSON.parse(await readFile(counts, 'utf8')), { permissions: 1, autoPrompts: 1 });
-  const failure = JSON.parse(await readFile(join(state, 'fixture-startup-failure.json'), 'utf8'));
-  assert.equal(failure.code, 'not-ready'); assert.equal(failure.disposition, 'not-committed');
+  // sessionsAvailable can publish while the fixture is still awaiting its failure write.
+  let failure: { code: string; phase: string; disposition: string } | undefined;
+  while (!failure) {
+    assert.equal(child.exitCode, null, stderr());
+    if (Date.now() > deadline) assert.fail('Fixture startup failure file did not finish: ' + stderr());
+    try { failure = JSON.parse(await readFile(join(state, 'fixture-startup-failure.json'), 'utf8')); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+    }
+    if (!failure) await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.equal(failure.code, 'not-ready'); assert.equal(failure.phase, 'prepare'); assert.equal(failure.disposition, 'not-committed');
   assert.equal((await call('create')).error?.disposition, 'not-admitted');
   // Refuse one explicit retry using the existing update hold, without replacing the DB or its claim.
   const hold = updatePaths(state).hold;

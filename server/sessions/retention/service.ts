@@ -85,7 +85,9 @@ export class RetentionService {
   private context(entry: RetentionJournalEntry, selectedRecords?: readonly RetentionRecord[]): RetentionOperationContext {
     const baseline = new Map((selectedRecords || []).map(record => [record.session.id, this.policyRevision(record)]));
     const fresh = async () => {
+      await this.options.store.gateNativeEffects();
       const observation = await this.observe(); observation.migratedAt = this.options.store.migratedAt;
+      await this.options.store.gateNativeEffects();
       if (!selectedRecords) return observation; // Restoration validates native ownership, not archive eligibility.
       if (!observation.complete) throw new Error('Latest retention policy observation incomplete.');
       const current = new Map(observation.records.map(record => [record.session.id, record]));
@@ -300,6 +302,7 @@ export class RetentionService {
     const entry = this.options.store.get(id);
     if (!entry || !entry.members?.some(member => member.coldPath && ['cold', 'intent', 'conflict'].includes(member.state))) throw new Error('Bundle has no archived original to restore.');
     if (!this.options.adapter.restore) throw new Error('Provider restore contract unavailable.');
+    await this.options.store.gateNativeEffects();
     const members = entry.members.filter(member => member.coldPath && ['cold', 'intent', 'conflict'].includes(member.state));
     const releaseAdmission = this.options.reserveAdmission?.(members.flatMap(member => [member.sessionId, ...(member.provider === 'claude' && member.parentId ? [member.parentId] : [])]));
     if (this.options.reserveAdmission && !releaseAdmission) throw new Error('Session has active or pending work.');
