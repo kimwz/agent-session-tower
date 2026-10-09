@@ -143,7 +143,7 @@ async function lifecycle(f: Awaited<ReturnType<typeof fixture>>, toolsStop: () =
   const temporaryCalls: string[] = [];
   const temporary = { quiesce: async () => { temporaryCalls.push("quiesce"); await temporaryStop(); }, resume: () => { temporaryCalls.push("resume"); } };
   const retention = { service: { quiesce: async () => { retentionCalls.push('quiesce'); }, resume: () => { retentionCalls.push('resume'); } } };
-  const context: Record<string, unknown> = { runs: f.runs, autoPrompts: f.auto, retention, temporary, clearInterval, secretExpiry: undefined, expiryTimer: undefined, stopTelling: () => {}, paused: false, publishCold: () => {}, storageStatus: { admissionOpen: true },
+  const context: Record<string, unknown> = { runs: f.runs, autoPrompts: f.auto, retention, temporary, clearInterval, secretExpiry: undefined, expiryTimer: undefined, releaseTimer: undefined, stopTelling: () => {}, paused: false, publishCold: () => {}, storageStatus: { admissionOpen: true },
     tools: { ...noop, stop: toolsStop, pause: () => {}, resume: () => {} } };
   for (const name of ['secrets', 'triggers', 'github', 'slack', 'publicAgents', 'skills', 'tasks', 'compactions', 'worktrees', 'reviewer', 'runner', 'permissions', 'sessions', 'terminals', 'ledger']) context[name] = noop;
   const lifecycleSource = source.slice(source.indexOf('      onIdle: async () =>'));

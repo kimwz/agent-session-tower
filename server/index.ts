@@ -682,7 +682,9 @@ async function main() {
     if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') throw new Error(`Port ${port} is already in use. Open http://localhost:${port} if Agent Session Tower is already running, or choose --port 8001.`);
     throw error;
   });
-  void rollbackContext().then(storageWebServing).catch(error => console.error(`Storage rollback continuation is unavailable: ${error instanceof Error ? error.message : String(error)}`));
+  const rollbackObservation = new AbortController();
+  server.once('close', () => rollbackObservation.abort());
+  void rollbackContext().then(context => storageWebServing(context, { signal: rollbackObservation.signal })).catch(error => console.error(`Storage rollback continuation is unavailable: ${error instanceof Error ? error.message : String(error)}`));
   const listening = server.address();
   webCredentials = { port: listening && typeof listening === 'object' ? listening.port : port, token: pageToken, callerSecret: masterCallerSecret };
   master.start();
@@ -724,6 +726,7 @@ async function main() {
   const shutdown = async () => {
     if (closing) return;
     closing = true;
+    rollbackObservation.abort();
     for (const timer of pruning) clearTimeout(timer);
     system.close();
     towerUpdates.stop();

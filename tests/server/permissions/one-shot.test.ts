@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
+import { createHash } from 'node:crypto';
+import { TowerError } from '../../../shared/errors.js';
 import { spawn } from 'node:child_process';
 import { statSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -19,7 +23,7 @@ const until = async (check: () => boolean, ms = 10_000) => {
 };
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart']) {
+async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'], effectGate?: () => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), 'tower-one-shot-'));
   const stateDir = join(root, 'state');
   const project = join(root, 'project');
@@ -29,7 +33,7 @@ async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'
   const finished: string[] = [];
   let service!: PermissionService;
   const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 300, now: () => clock, beforeStart });
-  const make = () => new PermissionService({ stateDir, env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), now: () => clock,
+  const make = () => new PermissionService({ stateDir, effectGate, env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), now: () => clock,
     startRun: request => runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600, request.sessionId),
     onRunFinished: request => finished.push(request.id), runOutput: id => runner.output(id), forgetRun: id => runner.forget(id) });
   service = make();
@@ -489,7 +493,7 @@ test('a conversation rule allowed again after a reopen survives the late clean-u
   assert.equal(f.service.overview().rules.length, 1, 'the new approval stays');
 });
 
-for (const defer of [false, true]) for (const revoked of [false, true]) test(`storage hold during asynchronous approval preserves only unstarted work (defer=${defer}, revoked=${revoked})`, async t => {
+for (const defer of [false, true]) for (const stale of [false, true]) test(`storage hold during asynchronous approval preserves only unstarted work (defer=${defer}, stale=${stale})`, async t => {
   let service!: PermissionService;
   let db!: Awaited<ReturnType<typeof storage.openStorage>>;
   let checking!: () => void, releaseCheck!: () => void;
@@ -507,8 +511,12 @@ for (const defer of [false, true]) for (const revoked of [false, true]) test(`st
   db = await storage.openStorage({ stateDir: f.stateDir, bundle: threadBundle('production') });
   await db.prepare({ allowMigration: true });
   t.after(() => db.close());
+  if (stale) await service.saveAutoReview(ON);
   const asked = await service.requestRun({ command: 'echo once >> executions', reason: 'fixture' }, agent('claude:one'));
-  await service.decide(asked.request.id!, true);
+  if (stale) {
+    await service.startReview(asked.request.id!);
+    await service.applyReview(asked.request.id!, { verdict: 'approve', reason: 'fixture approval' });
+  } else await service.decide(asked.request.id!, true);
   await reached;
   f.runner.holdStorage();
   releaseCheck();
@@ -517,12 +525,12 @@ for (const defer of [false, true]) for (const revoked of [false, true]) test(`st
   assert.equal(f.runner.inFlight(), true);
   assert.equal(service.overview().requests.find(r => r.id === asked.request.id)!.run!.status, 'waiting');
   assert.equal(checks, 1, 'no hot retries while held');
-  if (revoked) await service.forgetConversation('claude:one');
+  if (stale) f.tick(60 * 60 * 1000);
   assert.equal((await db.gate('core')).open, true);
   f.runner.releaseStorage();
   await f.runner.flush();
   assert.equal(checks, 2, 'approval is checked again after resume');
-  if (revoked) await assert.rejects(readFile(join(f.project, 'executions')), { code: 'ENOENT' });
+  if (stale) await assert.rejects(readFile(join(f.project, 'executions')), { code: 'ENOENT' });
   else {
     assert.equal(await readFile(join(f.project, 'executions'), 'utf8'), 'once\n');
     assert.equal(service.overview().requests.find(r => r.id === asked.request.id)!.run!.status, 'done');
@@ -547,4 +555,89 @@ test('storage hold keeps a same-conversation slot waiter while the owned command
   assert.equal((await db.gate('core')).open, true);
   f.runner.releaseStorage(); await f.runner.flush();
   assert.equal(await readFile(join(f.project, 'executions'), 'utf8'), 'once\n');
+});
+
+for (const changed of [false, true]) test(`actual confirmReviewed file await preserves storage-paused approval (changed=${changed})`, async t => {
+  let service!: PermissionService;
+  const f = await fixture(t, id => service.confirmReviewed(id)); service = f.service;
+  const path = join(f.project, 'reviewed.txt'); await writeFile(path, 'reviewed');
+  const canonical = await realpath(path);
+  await service.saveAutoReview(ON);
+  const asked = await service.requestRun({ command: 'echo once >> executions', reason: 'fixture' }, agent('claude:one'));
+  let reached!: () => void, release!: () => void;
+  const checking = new Promise<void>(resolve => { reached = resolve; });
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const original = fsPromises.realpath;
+  let first = true;
+  const mocked = t.mock.method(fsPromises, 'realpath', async (file: Parameters<typeof original>[0]) => {
+    if (String(file) === path && first) { first = false; reached(); await blocked; }
+    return original(file);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { mocked.mock.restore(); syncBuiltinESMExports(); });
+  assert.ok(await service.startReview(asked.request.id!));
+  await service.applyReview(asked.request.id!, { verdict: 'approve', reason: 'fixture', files: [{ path, real: canonical, sha256: createHash('sha256').update('reviewed').digest('hex') }] });
+  await checking;
+  service.pauseForStorage(); f.runner.holdStorage();
+  if (changed) await writeFile(path, 'changed');
+  release(); await f.runner.flush();
+  assert.equal(service.overview().requests.find(r => r.id === asked.request.id)!.run!.status, 'waiting');
+  assert.equal(f.runner.inFlight(), true);
+  service.resume(); f.runner.releaseStorage(); await f.runner.flush();
+  if (changed) {
+    await assert.rejects(readFile(join(f.project, 'executions')), { code: 'ENOENT' });
+    assert.equal(service.overview().requests.find(r => r.id === asked.request.id)!.status, 'pending');
+  } else assert.equal(await readFile(join(f.project, 'executions'), 'utf8'), 'once\n');
+});
+
+for (const stale of [false, true]) test(`actual first running record gate preserves only current approval (stale=${stale})`, async t => {
+  let service!: PermissionService, armed = false, reached!: () => void, release!: () => void;
+  const checking = new Promise<void>(resolve => { reached = resolve; });
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const f = await fixture(t, async id => { const ok = await service.confirmReviewed(id); armed = ok; return ok; }, async () => {
+    if (armed) { armed = false; reached(); await blocked; }
+  }); service = f.service;
+  if (stale) await service.saveAutoReview(ON);
+  const asked = await service.requestRun({ command: 'echo once >> executions', reason: 'fixture' }, agent('claude:one'));
+  if (stale) { await service.startReview(asked.request.id!); await service.applyReview(asked.request.id!, { verdict: 'approve', reason: 'fixture' }); }
+  else await service.decide(asked.request.id!, true);
+  await checking; service.pauseForStorage(); f.runner.holdStorage(); release(); await f.runner.flush();
+  assert.equal(f.runner.inFlight(), true);
+  assert.equal(service.overview().requests.find(r => r.id === asked.request.id)!.run!.status, 'waiting');
+  if (stale) f.tick(60 * 60 * 1000);
+  service.resume(); f.runner.releaseStorage(); await f.runner.flush();
+  if (stale) await assert.rejects(readFile(join(f.project, 'executions')), { code: 'ENOENT' });
+  else assert.equal(await readFile(join(f.project, 'executions'), 'utf8'), 'once\n');
+});
+
+test('actual initial record unknown write followed by storage refusal never requeues', async t => {
+  let service!: PermissionService, armed = false;
+  const f = await fixture(t, async id => { const ok = await service.confirmReviewed(id); armed = ok; return ok; }); service = f.service;
+  const original = fsPromises.rename;
+  const mocked = t.mock.method(fsPromises, 'rename', async (...args: Parameters<typeof original>) => {
+    if (armed && String(args[1]) === join(f.stateDir, 'permissions.json')) {
+      armed = false;
+      // The real rename took effect, but its acknowledgement is lost. This is not a prewrite refusal.
+      await original(...args); service.pauseForStorage(); f.runner.holdStorage();
+      throw new TowerError('unavailable', 'fixture lost write acknowledgement', { disposition: 'uncertain' });
+    }
+    return original(...args);
+  });
+  syncBuiltinESMExports(); t.after(() => { mocked.mock.restore(); syncBuiltinESMExports(); });
+  const asked = await service.requestRun({ command: 'echo forbidden >> executions', reason: 'fixture' }, agent('claude:one'));
+  await service.decide(asked.request.id!, true); await f.runner.flush();
+  assert.equal(f.runner.inFlight(), false, 'unknown write disables storage requeue');
+  service.resume(); f.runner.releaseStorage(); await f.runner.flush();
+  await assert.rejects(readFile(join(f.project, 'executions')), { code: 'ENOENT' });
+  const durable = JSON.parse(await readFile(join(f.stateDir, 'permissions.json'), 'utf8'));
+  assert.equal(durable.requests.find((r: { id: string }) => r.id === asked.request.id).run.status, 'running');
+});
+
+test('ordinary permission pause and close never claim storage prewrite deferral', async t => {
+  const f = await fixture(t);
+  for (const close of [false, true]) {
+    f.service.resume(); if (close) f.service.close(); else f.service.pause();
+    f.service.pauseForStorage();
+    await assert.rejects(f.service.confirmReviewed('missing'), (error: unknown) => error instanceof TowerError && error.disposition === undefined);
+  }
 });
