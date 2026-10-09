@@ -1,5 +1,6 @@
 import { cp, mkdir, readdir, rename, rm, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { TriggerBackup } from '../triggers/backup.js';
 import type { BackupPart, RestoreReport } from '../../shared/backup.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { listPendingSecretImports, stageVaultImport } from '../secrets/imports.js';
@@ -75,7 +76,7 @@ export async function removePendingWorker(stateDir: string): Promise<boolean> {
  * Copies every file a restore may replace into `restore/before-<stamp>/`, so the owner can put them back by hand.
  * Only the newest few copies are kept.
  */
-export async function keepBefore(stateDir: string, files: string[], now = new Date()): Promise<string> {
+export async function keepBefore(stateDir: string, files: string[], now = new Date(), triggers?: TriggerBackup): Promise<string> {
   const root = restoreDir(stateDir);
   const target = join(root, `before-${now.toISOString().replace(/[:.]/g, '-')}`);
   await mkdir(target, { recursive: true, mode: 0o700 });
@@ -84,6 +85,7 @@ export async function keepBefore(stateDir: string, files: string[], now = new Da
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     });
   }
+  if (triggers !== undefined) await writePrivateJson(join(target, 'trigger-backup.json'), JSON.stringify(triggers));
   const earlier = (await readdir(root)).filter(name => name.startsWith('before-')).sort();
   for (const name of earlier.slice(0, Math.max(0, earlier.length - BEFORE_KEPT))) await rm(join(root, name), { recursive: true, force: true });
   return target;

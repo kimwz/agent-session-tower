@@ -89,7 +89,11 @@ export class TriggerService extends EventEmitter {
     await mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
     await this.store.load(loaded => TriggerDispatch.recoverLoaded(loaded, this.options.executor));
     await this.secrets.load();
-    const errors = options.restore ? await restoreFrom(options.restore, this.restoreContext()).catch(error => [`트리거를 복원하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`]) : [];
+    const errors = options.restore ? await restoreFrom(options.restore, this.restoreContext()).catch(error => {
+      // A failed restore save must hold admission; a later settle cannot stand in for its receipt.
+      if (this.store.problem) throw error;
+      return [`트리거를 복원하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`];
+    }) : [];
     await this.store.commit(() => undefined, 'settle');
     this.engine.markStarted();
     this.resume();

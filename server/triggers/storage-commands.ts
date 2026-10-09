@@ -96,6 +96,7 @@ export function triggersDomainFor(schema: StorageDomainSchema): StorageDomain {
       } else current(context, header);
       if (!['grow','settle','import','restore'].includes(String(header.mode))) fail('Unknown triggers write mode.');
       const replacing = header.mode === 'import' || header.mode === 'restore';
+      const evidence = header.mode === 'restore' ? context.prepare("SELECT kind,id,ordinal,json FROM triggers_rows WHERE kind IN ('onceConsumed','fired','events','cursors','recentFires')").all() as unknown as TriggerRow[] : [];
       if (replacing) context.prepare('DELETE FROM triggers_rows').run();
       const keys = new Set<string>();
       const changed: TriggerRow[] = []; const consumed = new Set<string>();
@@ -120,6 +121,19 @@ export function triggersDomainFor(schema: StorageDomainSchema): StorageDomain {
           context.prepare('DELETE FROM triggers_rows WHERE kind = ? AND id = ?').run(kind,id);
         } else { put(context,row); changed.push(row); }
         offset = end + 1;
+      }
+      // The SDK owns this transaction: refusal rolls back the replacement and its receipt together.
+      for (const previous of evidence) {
+        const row = context.prepare('SELECT json FROM triggers_rows WHERE kind = ? AND id = ?').get(previous.kind,previous.id) as { json: string } | undefined;
+        const old = JSON.parse(previous.json), next = row ? JSON.parse(row.json) : undefined;
+        const same = (a: unknown, b: unknown) => canonical(a ?? null) === canonical(b ?? null);
+        if (previous.kind === 'onceConsumed' || previous.kind === 'fired' || previous.kind === 'recentFires') {
+          if (!row || !same(old,next)) fail('Restore would retreat trigger execution evidence.');
+        } else if (previous.kind === 'events') {
+          if (!next || ['requestId','dedupKey','triggerId','status','claimedAt','dispatch','issueActions'].some(key => !same(old[key],next[key])))
+            fail('Restore would retreat trigger dispatch or cancellation evidence.');
+        } else if (['polling','github','lastSlot','turnedOffAt'].some(key => old[key] !== undefined && !same(old[key],next?.[key])))
+          fail('Restore would retreat trigger cursor execution evidence.');
       }
       const requestSha256 = request.digest('hex');
       if (requestSha256 !== header.requestSha256) fail('Triggers canonical request hash mismatch.');

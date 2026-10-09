@@ -209,10 +209,13 @@ test('a 1.105.0 state file loads and is written back as the base writes it', asy
 test('wrong shapes and parse failures preserve state and hold startup', async t => {
   t.mock.method(console, 'error', () => {});
   const legacy = await goldenState();
-  for (const broken of [{ ...legacy, version: 2 }, { ...legacy, cursors: [] }, { ...legacy, triggers: [{ id: 'x' }] }, { ...legacy, events: [{ id: 1 }] }]) {
+  for (const broken of [{ ...legacy, version: 2 }, { ...legacy, cursors: [] }, { ...legacy, triggers: [{ id: 'x' }] }, { ...legacy, events: [{ id: 1 }] }, ...['triggers','revisions','tombstones','cursors','events','fired','audit','trustedFolders','recentFires','secretGrants','onceConsumed'].flatMap(key => [null, 'broken', 1].map(value => ({ ...legacy, [key]: value }))), ...[{ triggers: {} }, { tombstones: {} }, { events: {} }, { audit: {} }, { trustedFolders: {} }, { recentFires: {} }, { revisions: [] }, { fired: [] }, { secretGrants: [] }, { onceConsumed: [] }, { trustedFolders: [1] }, { recentFires: [null] }, { audit: [null] }, { fired: { x: 1 } }, { secretGrants: { x: [1] } }].map(fields => ({ ...legacy, ...fields }))]) {
     const f = await engine(t);
     await writeFile(join(f.directory, 'trigger-engine.json'), JSON.stringify(broken), { mode: 0o600 });
+    const original = await readFile(join(f.directory,'trigger-engine.json'));
     await assert.rejects(f.open(),{ kind: 'unavailable' });
+    assert.deepEqual(await readFile(join(f.directory,'trigger-engine.json')),original);
+    assert.equal(f.runs.length,0,'damaged collections dispatch no work');
     assert.deepEqual(JSON.parse(await readFile(join(f.directory,'trigger-engine.json'),'utf8')),broken);
     assert.equal((await readdir(f.directory)).filter(name => name.startsWith('trigger-engine.json.unreadable-')).length,0,'original is preserved without quarantine');
   }

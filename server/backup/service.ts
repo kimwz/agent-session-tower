@@ -49,7 +49,7 @@ const RETRY_AFTER = 30 * 60 * 1000;
 const CHECKED_KEPT_MS = 10 * 60 * 1000;
 const FILE = 'backup-settings.json';
 /** Files a restore may replace, copied aside first. Skills replaced go to Tower's skill trash as usual. */
-const REPLACED = [...Object.keys(WORKER_FILES), 'trigger-engine.json', 'skills.json', 'guidance', 'project-groups.json', 'remote-exclusions.json', 'decisions.json', FILE, join('master', 'settings.json'), join('master', 'elevenlabs-key.json')];
+const REPLACED = [...Object.keys(WORKER_FILES), 'skills.json', 'guidance', 'project-groups.json', 'remote-exclusions.json', 'decisions.json', FILE, join('master', 'settings.json'), join('master', 'elevenlabs-key.json')];
 
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const text = (value: unknown, max: number) => typeof value === 'string' && value.length <= max ? value.trim() : undefined;
@@ -309,8 +309,9 @@ export class BackupService {
     const { header, passphrase } = item;
     const payload = structuredClone(item.payload);
     const stateDir = this.options.stateDir;
+    const triggersBefore = await collectTriggers(this.options.triggers);
     const targetHasVault = Boolean(await encryptedVaultOf(stateDir));
-    const before = await keepBefore(stateDir, targetHasVault ? REPLACED.filter(name => name !== 'trigger-secrets.json') : REPLACED, new Date(this.now()));
+    const before = await keepBefore(stateDir, targetHasVault ? REPLACED.filter(name => name !== 'trigger-secrets.json') : REPLACED, new Date(this.now()), triggersBefore);
     // A worker part still waiting from an earlier restore is replaced by this one.
     await removePendingWorker(stateDir);
     const restoreId = randomUUID(); const pendingSecretImports: string[] = [];

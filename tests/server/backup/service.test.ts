@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { BackupService } from '../../../server/backup/service.js';
+import type { TriggerBackup } from '../../../server/triggers/backup.js';
 import type { SkillBackup } from '../../../server/backup/payload.js';
 import { readPendingWorker, readReport, takeWorkerRestore } from '../../../server/backup/restore-files.js';
 import { ProjectGroupStore } from '../../../server/stores/project-groups.js';
@@ -15,13 +16,13 @@ import { fakeBucket } from '../../helpers/s3.js';
 const PASS = 'correct horse battery';
 const skills: SkillBackup = { bundle: { format: 'agent-session-tower.skills', version: 1, exportedAt: '', from: 'a', skills: [] }, guidance: 'Be brief.', settings: { enabled: true, provider: 'claude' } };
 
-async function computer(t: TestContext, options: { now?: () => number; host?: string } = {}) {
+async function computer(t: TestContext, options: { now?: () => number; host?: string; triggers?: () => Promise<TriggerBackup | undefined> } = {}) {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-backup-'));
   t.after(() => rm(stateDir, { recursive: true, force: true }));
   const groups = new ProjectGroupStore(stateDir), exclusions = new RemoteExclusionStore(stateDir), decisions = new DecisionService(stateDir);
   await groups.start(); await exclusions.start(); await decisions.start();
   const handoffs: number[] = [], master: Record<string, unknown>[] = [];
-  const service = new BackupService({ stateDir, triggers: () => collectTriggers(stateDir), version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => { handoffs.push(Date.now()); return true; },
+  const service = new BackupService({ stateDir, triggers: options.triggers ?? (() => collectTriggers(stateDir)), version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => { handoffs.push(Date.now()); return true; },
     stores: { groups, exclusions, decisions }, master: async body => { master.push(body); }, ...(options.now ? { now: options.now } : {}), host: options.host ?? 'studio' });
   await service.start();
   return { stateDir, groups, exclusions, decisions, service, handoffs, master };
@@ -295,7 +296,7 @@ test('an upload stopped because Tower shuts down is not a failure, and the next 
   t.after(() => rm(stateDir, { recursive: true, force: true }));
   const groups = new ProjectGroupStore(stateDir), exclusions = new RemoteExclusionStore(stateDir), decisions = new DecisionService(stateDir);
   await groups.start(); await exclusions.start(); await decisions.start();
-  const service = new BackupService({ stateDir, triggers: () => collectTriggers(stateDir), version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => true, stores: { groups, exclusions, decisions }, fetcher, host: 'studio' });
+  const service = new BackupService({ stateDir, triggers: options.triggers ?? (() => collectTriggers(stateDir)), version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => true, stores: { groups, exclusions, decisions }, fetcher, host: 'studio' });
   await service.start();
   await service.saveSettings({ enabled: true, intervalHours: 24, keep: 3, passphrase: PASS, remote: { endpoint: bucket.endpoint, bucket: 'bucket', prefix: '', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret-key' } });
   const upload = service.upload();
@@ -372,4 +373,25 @@ test("a computer keeps its mark across restarts, so its own backups are its own 
     stores: { groups: a.groups, exclusions: a.exclusions, decisions: a.decisions }, host: 'renamed' });
   await restarted.start();
   assert.equal((await restarted.check(text, PASS)).otherComputer, false);
+});
+
+
+test('restore before uses owner DTO and aborts before changing pending or settings when owner fails', async t => {
+  const a = await computer(t), text = (await a.service.export(PASS)).text;
+  const dto: TriggerBackup = { triggers: [],settings: { maxConcurrentRuns: 4 },trustedFolders: ['/owner'],secretGrants: {},fired: {},github: {},onceConsumed: {} };
+  let failed = false;
+  const b = await computer(t,{ triggers: async () => { if (failed) throw new Error('owner unavailable'); return structuredClone(dto); } });
+  await writeFile(join(b.stateDir,'trigger-engine.json'),'stale JSON',{ mode: 0o600 });
+  const first = await b.service.apply((await b.service.check(text,PASS)).id);
+  assert.deepEqual(JSON.parse(await readFile(join(first.before!,'trigger-backup.json'),'utf8')),dto);
+  await assert.rejects(readFile(join(first.before!,'trigger-engine.json')),{ code: 'ENOENT' });
+  const pending = await readFile(join(b.stateDir,'restore','pending-worker.json'));
+  const settings = await readFile(join(b.stateDir,'backup-settings.json'));
+  const before = (await readdir(join(b.stateDir,'restore'))).filter(name => name.startsWith('before-'));
+  const checked = await b.service.check(text,PASS); failed = true;
+  await assert.rejects(b.service.apply(checked.id),/owner unavailable/);
+  assert.deepEqual(await readFile(join(b.stateDir,'restore','pending-worker.json')),pending);
+  assert.deepEqual(await readFile(join(b.stateDir,'backup-settings.json')),settings);
+  assert.equal(await readFile(join(b.stateDir,'trigger-engine.json'),'utf8'),'stale JSON');
+  assert.deepEqual((await readdir(join(b.stateDir,'restore'))).filter(name => name.startsWith('before-')),before);
 });

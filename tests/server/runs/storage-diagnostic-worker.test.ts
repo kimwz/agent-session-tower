@@ -848,7 +848,7 @@ test('a durable owner hold accepted at the actual bootstrap success response par
   await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
   // The initial partial source failure opens the existing diagnostic RPC before retry imports all three files.
   await writeFile(join(state, 'runs.json'), '[]', { mode: 0o600 });
-  await prepareRetentionA(root, state);
+  await prepareTriggersA124(root, state);
   const pending = join(state, 'restore', 'pending-worker.json'), applying = join(state, 'restore', 'applying-worker.json');
   const settings = join(state, 'models.json');
   const oldSettings = JSON.stringify({ version: 1, roles: {}, custom: [] });
@@ -859,7 +859,7 @@ test('a durable owner hold accepted at the actual bootstrap success response par
   await writeFile(settings, oldSettings, { mode: 0o600 });
   await writeFile(pending, JSON.stringify({ id: restoreId, files: { 'models.json': incoming }, encryptedVault }), { mode: 0o600 });
   const pendingBytes = await readFile(pending), pendingInfo = await lstat(pending), settingsInfo = await lstat(settings);
-  const { child, call, stderr } = await launchDiagnostic(t, root, state, paths, undefined, { TOWER_FIXTURE_COLD_COUNTS: '1', TOWER_FIXTURE_RUNS_BOOTSTRAP: 'new-hold' });
+  const { child, call, stderr } = await launchDiagnostic(t, root, state, paths, await futureBWorker(t,root), { TOWER_FIXTURE_COLD_COUNTS: '1', TOWER_FIXTURE_RUNS_BOOTSTRAP: 'new-hold' });
   const first = await waitForStorage(call, false, deadline);
   assert.equal(first.snapshot?.storage?.code, 'runs-bootstrap-held');
   await writeFile(join(state, 'created-sessions.json'), '[]', { mode: 0o600 });
@@ -875,7 +875,7 @@ test('a durable owner hold accepted at the actual bootstrap success response par
   assert.equal(committed.error, undefined);
   const runsAuthority = (committed.result as { authority: { domain: string; authority: string; generation: number; appVersion: string }[] }).authority.find(domain => domain.domain === 'runs');
   assert.ok(runsAuthority);
-  assert.equal(runsAuthority.authority, 'database'); assert.equal(runsAuthority.generation, 1); assert.equal(runsAuthority.appVersion, '1.123.0');
+  assert.equal(runsAuthority.authority, 'database'); assert.equal(runsAuthority.generation, 1); assert.equal(runsAuthority.appVersion, '1.125.0');
   const at = new Date().toISOString(), identity = first.snapshot!.storage!.identity!;
   const fence = { id: 'bootstrap-new-owner-hold', attempt: 1 };
   const record: RollbackRecord = { format: 'tower-storage-rollback', version: 1, id: fence.id,

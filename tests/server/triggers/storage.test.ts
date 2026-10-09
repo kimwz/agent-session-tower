@@ -17,6 +17,9 @@ import { TriggerService, type TriggerExecutor } from '../../../server/triggers/s
 import { empty, pruneState, serializeState, type EngineState } from '../../../server/triggers/state.js';
 import { ACCEPT_TRIGGER_BYTES, MAX_TRIGGER_BYTES, changesOf, documentsHash, logicalBytes, rowsOf, stateOf } from '../../../server/triggers/storage-codec.js';
 import { collectTriggers } from '../../../server/backup/payload.js';
+import { keepBefore, takeWorkerRestore, writePendingWorker } from '../../../server/backup/restore-files.js';
+import { MAX_AUDIT } from '../../../server/triggers/limits.js';
+import { triggerHash } from '../../../server/triggers/storage-codec.js';
 import { triggerBackupOf } from '../../../server/triggers/backup.js';
 import type { Trigger, TriggerEvent } from '../../../shared/triggers.js';
 
@@ -206,6 +209,13 @@ test('SQL authority settings backup uses the worker owner DTO when trigger JSON 
   assert.deepEqual(await collectTriggers(() => service.backup()),triggerBackupOf(JSON.parse(serializeState(state))));
   await service.updateSettings({ ...state.settings,maxConcurrentRuns: 4 },{ kind: 'owner',via: 'ui' });
   assert.equal(((await collectTriggers(() => service.backup()))!.settings as { maxConcurrentRuns: number }).maxConcurrentRuns,4);
+  for (const stale of [false,true]) {
+    if (stale) await writeFile(join(f.stateDir,'trigger-engine.json'),'stale JSON',{ mode: 0o600 });
+    const dto = await service.backup();
+    const before = await keepBefore(f.stateDir,[],new Date(now() + Number(stale)),dto);
+    assert.deepEqual(JSON.parse(await readFile(join(before,'trigger-backup.json'),'utf8')),dto);
+    await assert.rejects(readFile(join(before,'trigger-engine.json')),{ code: 'ENOENT' });
+  }
 });
 
 test('typed trigger commands respect common SDK owner fences and leave state and receipts unchanged on failure', async t => {
@@ -223,7 +233,7 @@ test('typed trigger commands respect common SDK owner fences and leave state and
 test('SQL startup restore disables/deletes recovered queued coordinator before receipt completes: new coordinator/workflow zero', async t => {
   for (const remove of [false,true]) {
     const f = await fixture(t), state = empty(), trigger = definition();
-    trigger.enabled = true; trigger.source = { kind: 'github',schedule: { type: 'interval',everySeconds: 300 },auth: { type: 'gh' },account: 'fixture',watch: { type: 'issues',repos: ['octo/app'],assignee: 'fixture',start: 'existing' } };
+    trigger.enabled = true; trigger.source = { kind: 'github',schedule: { type: 'interval',everySeconds: 300 },auth: { type: 'gh' },account: 'fixture',watch: { type: 'issues',repos: ['octo/app'],assignee: 'any',start: 'existing' } };
     state.triggers = [trigger]; state.cursors[id] = { anchorAt: now(),nextAt: now() + 300_000 };
     const event = documents().events[0]; event.input.handler = 'coordinator'; event.status = 'claimed'; event.triggerRevision = trigger.revision; state.events = [event];
     await f.repository.importPrepared(state,'b'.repeat(64),`restore-seed-${remove}`);
@@ -275,4 +285,96 @@ test('prepared raw importer seals exact original before receipt and does not pru
   assert.equal(current.triggers[0].enabled,true,'import is format decoding, not startup normalization');
   assert.deepEqual(current.recentFires,[{ at: 1,triggerId: id }],'import never prunes'); assert.deepEqual(current.onceConsumed,state.onceConsumed);
   await assert.rejects(importTriggers({ repository: f.repository,stateDir: f.stateDir,evidenceParent: parent,commandId: 'reimport',update,now }),/authority exists/);
+});
+
+test('SQL restore rejects lost once, fired, dispatch and cancellation evidence atomically', async t => {
+  for (const evidence of ['onceConsumed','fired','dispatch','cancelled'] as const) {
+    const f = await fixture(t), original = empty();
+    original.triggers = [definition()]; original.events = [documents().events[0]];
+    await f.repository.importPrepared(original,'b'.repeat(64),`boundary-seed-${evidence}`);
+    const exported = await exportTriggers(f.repository,f.stateDir,`boundary-export-${evidence}`);
+    const consumed = structuredClone(original);
+    if (evidence === 'onceConsumed') consumed.onceConsumed[id] = { at: new Date(now()).toISOString() };
+    if (evidence === 'fired') consumed.fired['manual once'] = new Date(now()).toISOString();
+    if (evidence === 'dispatch') { consumed.events[0].status = 'running'; consumed.events[0].dispatch = { workflowId: 'existing-workflow' }; }
+    if (evidence === 'cancelled') consumed.events[0].status = 'cancelled';
+    await f.repository.update(changesOf(rowsOf(original),rowsOf(consumed)),'settle',`boundary-consume-${evidence}`);
+    const before = await f.repository.exportCurrent();
+    await assert.rejects(restoreTriggers(f.repository,exported.directory,`boundary-restore-${evidence}`),/execution evidence|dispatch or cancellation evidence/);
+    assert.deepEqual(await f.repository.exportCurrent(),before);
+    assert.equal((await f.client.receipt(`boundary-restore-${evidence}-commit`)).found,false);
+    await f.client.close();
+    const reopened = new TriggersRepository(await f.open());
+    assert.deepEqual((await reopened.exportCurrent()).documents,consumed);
+  }
+});
+
+test('not-committed SQL busy pending restore holds coordinator recovery until retry cancels it', async t => {
+  for (const remove of [false,true]) {
+    const f = await fixture(t), state = empty(), trigger = definition(); trigger.enabled = true;
+    state.triggers = [trigger]; state.cursors[id] = { anchorAt: now(),nextAt: now() + 300_000 };
+    const event = documents().events[0]; event.status = 'claimed'; event.input.handler = 'coordinator'; state.events = [event];
+    await f.repository.importPrepared(state,'b'.repeat(64),`busy-seed-${remove}`);
+    const backup = { triggers: remove ? [] : [{ ...trigger,enabled: false }],settings: state.settings,trustedFolders: [],secretGrants: {},fired: {},github: {} };
+    const pending = join(f.stateDir,'restore','applying-worker.json');
+    await writePendingWorker(f.stateDir,{ id: '11111111-1111-4111-8111-111111111111',files: {},triggers: backup });
+    const taken = await takeWorkerRestore(f.stateDir); assert.ok(taken); assert.ok(taken.restore.triggers);
+    const bytes = await readFile(pending);
+    let coordinators = 0, workflows = 0;
+    const executor = { runs: () => [],session: () => undefined,getAutoPrompt: () => undefined,coordinate: async () => { coordinators++; workflows++; return { workflowId: 'forbidden' }; } } as unknown as TriggerExecutor;
+    const service = new TriggerService({ stateDir: f.stateDir,storage: f.client,now,tickMs: 3_600_000,executor }); t.after(() => service.close());
+    const lock = new DatabaseSync(join(f.stateDir,'state.sqlite')); lock.exec('BEGIN IMMEDIATE');
+    try { await assert.rejects(service.start({ restore: backup }),/Cannot save triggers/); }
+    finally { lock.exec('ROLLBACK'); lock.close(); }
+    await service.tick(); assert.equal(coordinators,0); assert.equal(workflows,0);
+    assert.deepEqual(await readFile(pending),bytes); assert.deepEqual((await f.repository.exportCurrent()).documents,state);
+    await service.start({ restore: backup }); await service.tick();
+    assert.equal(service.event(event.id).status,'cancelled'); assert.equal(coordinators,0); assert.equal(workflows,0);
+    assert.equal((await f.repository.exportCurrent()).documents.events[0].status,'cancelled');
+    const db = new DatabaseSync(join(f.stateDir,'state.sqlite'),{ readOnly: true });
+    try { assert.equal(Number((db.prepare("SELECT count(*) AS n FROM operation_receipts WHERE scope = 'triggers' AND command = 'commit'").get() as { n: number }).n) >= 2,true); }
+    finally { db.close(); }
+    await taken.applied({ parts: ['triggers'],errors: [] });
+    assert.equal(JSON.parse(await readFile(pending,'utf8')).triggers,undefined);
+    await taken.finish({ parts: [],errors: [] }); await assert.rejects(readFile(pending),{ code: 'ENOENT' });
+  }
+});
+
+test('raw import keeps MAX_AUDIT and larger audit bytes and ordering during old once decoding', async t => {
+  for (const count of [MAX_AUDIT,MAX_AUDIT + 1]) {
+    const f = await fixture(t), state = empty(), trigger = definition(); state.triggers = [trigger];
+    state.audit = Array.from({ length: count },(_,n) => ({ id: `audit-${n}`,at: '2026-10-01T00:00:00Z',actor: { kind: 'owner' as const,via: 'ui' as const },action: 'create' as const,triggerId: id,triggerName: '한 번',summary: `원본 ${n}\\"` }));
+    const raw = JSON.parse(serializeState(state)); raw.triggers[0].revision++;
+    const source = Buffer.from(JSON.stringify(raw) + '\n'), path = join(f.stateDir,'trigger-engine.json'); await writeFile(path,source,{ mode: 0o600 });
+    const update = { stateDir: f.stateDir,managed: false,build: { version: f.b.version,manifest: f.b.manifest,preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.b.bundle() }) } };
+    const sealed = await importTriggers({ repository: f.repository,stateDir: f.stateDir,evidenceParent: f.stateDir,commandId: `audit-import-${count}`,update,now: () => { throw new Error('raw importer must not read the execution clock'); } });
+    assert.deepEqual(await readFile(path),source); assert.deepEqual(await readFile(join(sealed.directory,'trigger-engine.json')),source);
+    const manifest = JSON.parse(await readFile(join(sealed.directory,'manifest.json'),'utf8'));
+    assert.equal(manifest.files['trigger-engine.json'].sha256,triggerHash(source)); assert.equal(manifest.files['trigger-engine.json'].bytes,source.length);
+    const imported = await f.repository.exportCurrent(); assert.equal(imported.sha256,documentsHash(imported.documents)); assert.deepEqual(imported.documents.audit,state.audit);
+    assert.equal(JSON.stringify(imported.documents.audit),JSON.stringify(raw.audit)); assert.equal(imported.documents.triggers[0].enabled,false);
+    const db = new DatabaseSync(join(f.stateDir,'state.sqlite'),{ readOnly: true });
+    try { assert.deepEqual(db.prepare("SELECT json FROM triggers_rows WHERE kind = 'audit' ORDER BY ordinal").all().map(row => JSON.parse(String(row.json))),raw.audit); }
+    finally { db.close(); }
+  }
+});
+
+
+test('old export cannot replay a manually consumed once after SQL reopen', async t => {
+  const f = await fixture(t), state = empty(), trigger = definition(); trigger.enabled = true; state.triggers = [trigger];
+  state.cursors[id] = { anchorAt: now(),nextAt: Date.parse('2026-12-01T00:00:00Z') };
+  await f.repository.importPrepared(state,'b'.repeat(64),'manual-boundary-seed');
+  const exported = await exportTriggers(f.repository,f.stateDir,'manual-boundary-export');
+  let dispatches = 0;
+  const executor = { runs: () => [],session: () => undefined,getAutoPrompt: () => undefined,create: async () => { dispatches++; throw new Error('fixture submitted once'); } } as unknown as TriggerExecutor;
+  const service = new TriggerService({ stateDir: f.stateDir,storage: f.client,now,tickMs: 3_600_000,executor }); t.after(() => service.close());
+  await service.start(); await service.run(id,{ kind: 'owner',via: 'ui' }); await service.tick();
+  const before = await f.repository.exportCurrent(), submitted = dispatches;
+  assert.ok(before.documents.onceConsumed[id]);
+  await assert.rejects(restoreTriggers(f.repository,exported.directory,'manual-boundary-restore'),/execution evidence|dispatch or cancellation evidence/);
+  assert.deepEqual(await f.repository.exportCurrent(),before); assert.equal((await f.client.receipt('manual-boundary-restore-commit')).found,false);
+  service.close(); await service.settle(); await f.client.close();
+  const client = await f.open(), reopened = new TriggerService({ stateDir: f.stateDir,storage: client,now,tickMs: 3_600_000,executor }); t.after(() => reopened.close());
+  await reopened.start(); await assert.rejects(reopened.run(id,{ kind: 'owner',via: 'ui' }),/consumed|archiv/); await reopened.tick();
+  assert.equal(dispatches,submitted,'restore/reopen/manual run submits zero additional work');
 });
