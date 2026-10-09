@@ -4,6 +4,7 @@ import { channel } from 'node:diagnostics_channel';
 import { writeFileSync, readFileSync } from 'node:fs';
 import { runRunnerWorker } from '../../../../server/runs/worker.js';
 import { StorageClient, StorageCommandError } from '../../../../server/storage/index.js';
+import { TriggerService } from '../../../../server/triggers/service.js';
 import { PermissionService } from '../../../../server/permissions/service.js';
 import { AutoPromptManager } from '../../../../server/auto-prompt/manager.js';
 import { WorktreeJanitor } from '../../../../server/worktrees/janitor.js';
@@ -138,6 +139,60 @@ if (process.env.TOWER_FIXTURE_STORAGE_RETRY === 'new-hold') {
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     }
     return prepare.call(this, options);
+  };
+}
+// The disposable diagnostic adapter keeps actual services and SDK runtime. Only the provider model
+// is replaced by this test's compile profile, and the second real start waits on an owned file barrier.
+if (process.env.TOWER_FIXTURE_TRIGGER_RETRY === '1') {
+  const state = process.argv.at(-1)!;
+  const countsPath = join(state, 'fixture-trigger-counts.json');
+  const bump = (key: 'start' | 'review' | 'apply') => {
+    const counts = JSON.parse(readFileSync(countsPath, 'utf8')); counts[key]++;
+    writeFileSync(countsPath, JSON.stringify(counts), { mode: 0o600 });
+  };
+  writeFileSync(countsPath, JSON.stringify({ start: 0, review: 0, model: 0, apply: 0, settled: false }), { mode: 0o600 });
+  const at = '2026-10-01T00:00:00.000Z';
+  const session: Session = { id: 'codex:fixture-trigger-review', nativeId: 'fixture-trigger-review', provider: 'codex', title: 'Trigger review',
+    cwd: join(state, 'project'), project: 'fixture', status: 'completed', statusReason: 'Fixture', createdAt: at, updatedAt: at,
+    lastMessage: '', messageCount: 1, isSubagent: false, resumable: false };
+  const getSession = RunManager.prototype.getSession;
+  RunManager.prototype.getSession = function (id) { return id === session.id ? session : getSession.call(this, id); };
+  const origin = RunManager.prototype.sessionOrigin;
+  RunManager.prototype.sessionOrigin = function (id) { return id === session.id
+    ? { kind: 'trigger', triggerId: '10000000-0000-4000-8000-000000000001', untrustedInput: false } : origin.call(this, id); };
+  const native = RunManager.prototype.nativeSessionId;
+  RunManager.prototype.nativeSessionId = function (id) { return id === session.id ? session.nativeId : native.call(this, id); };
+  const detail = SessionService.prototype.detail;
+  SessionService.prototype.detail = async function (id, before, limit, options) { return id === session.nativeId
+    ? { session, messages: [{ id: 'fixture-word', role: 'user', text: 'Use the restored trigger instructions.', timestamp: at }], hasMore: false }
+    : detail.call(this, id, before, limit, options); };
+  PermissionService.prototype.reviewModel = async () => ({ provider: 'codex', model: 'fixture-model' });
+  const permissionsStart = PermissionService.prototype.start;
+  PermissionService.prototype.start = async function () {
+    await permissionsStart.call(this);
+    await this.saveAutoReview({ enabled: true, resume: false });
+    await this.request({ kind: 'command', value: 'printf fixture', scope: 'project', providers: ['codex'], reason: 'queued before trigger restoration' }, { kind: 'agent', sessionId: session.id });
+  };
+  const review = PermissionService.prototype.startReview;
+  PermissionService.prototype.startReview = function (id) { bump('review'); return review.call(this, id); };
+  const apply = PermissionService.prototype.applyReview;
+  PermissionService.prototype.applyReview = function (id, result) { bump('apply'); return apply.call(this, id, result); };
+  const start = TriggerService.prototype.start;
+  let attempts = 0;
+  TriggerService.prototype.start = async function (options) {
+    bump('start');
+    if (++attempts === 1) throw new Error('fixture trigger start failure');
+    await writeFile(join(state, 'fixture-trigger-waiting'), 'second start before actual restore', { mode: 0o600 });
+    const deadline = Date.now() + 15000;
+    for (;;) {
+      try { await readFile(join(state, 'fixture-trigger-release')); break; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || Date.now() > deadline) throw error; }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    const result = await start.call(this, options);
+    const counts = JSON.parse(readFileSync(countsPath, 'utf8')); counts.settled = true;
+    writeFileSync(countsPath, JSON.stringify(counts), { mode: 0o600 });
+    return result;
   };
 }
 await runRunnerWorker(process.argv.at(-1)!);

@@ -85,7 +85,7 @@ import { permissionRetentionPending, RetentionObserver } from '../sessions/reten
 import { createNativeRetentionAdapter } from '../sessions/retention/provider.js';
 import { TemporaryCollector, inspectTemporaryProtection } from '../temporary/directories.js';
 
-const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan', 'skillsBackup', 'secretCall', 'compactionGet']);
+const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan', 'skillsBackup', 'triggersBackup', 'secretCall', 'compactionGet']);
 
 export interface RunnerHostOptions {
   storage?: () => WorkerStorageStatus;
@@ -458,6 +458,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'skillsMutate': if (options.skills) return options.skills.mutate(String(args[0]), record(args[1])); break;
       case 'skillsExport': if (options.skills) return options.skills.exportBundle(record(args[0])); break;
       case 'skillsImportPlan': if (options.skills) return options.skills.importPlan(args[0]); break;
+      case 'triggersBackup': if (options.triggers) return options.triggers.backup(); break;
       case 'skillsBackup': if (options.skills) return options.skills.backup(); break;
       case 'publicAgentsOverview': if (options.publicAgents) return options.publicAgents.overview(); break;
       case 'publicAgentsConversation': if (options.publicAgents) return options.publicAgents.conversation(args[0] as string, args[1] as string); break;
@@ -1375,7 +1376,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       // The decision reaches the conversation as the work it already was: the requesting turn's origin and approvals.
       reachable: request => Boolean(request.runId && runs.list().find(item => item.id === request.runId)?.origin),
       notify: (request, message) => runs.permissionDecision(request, `${TOWER_NOTICE} ${message}`).then(() => undefined) });
-    registerStorageHold(() => { reviewer.hold(); }, () => { reviewer.release(); }, () => reviewer.inFlight());
+    let triggersPrepared = false;
+    registerStorageHold(() => { reviewer.hold(); }, () => { if (triggersPrepared) reviewer.release(); }, () => reviewer.inFlight());
     // Nothing is reviewed before the triggers are in place (released below), not even a recovered run sent back to review.
     reviewer.hold();
 
@@ -1399,7 +1401,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     await startupGate();
     registerStorageHold(() => { worktrees.pause(); }, () => { worktrees.resume(); }, () => worktrees.inFlight());
     await worktrees.start().catch(error => console.error(`Worktree cleanup did not start: ${error instanceof Error ? error.message : String(error)}`));
-    const triggers = new TriggerService({ stateDir, secretStore, slack: () => slack.projection(), publicAgents: () => publicAgents.projection(), ownPorts,
+    const triggers = new TriggerService({ stateDir, storage: database!, secretStore, slack: () => slack.projection(), publicAgents: () => publicAgents.projection(), ownPorts,
       // A trigger set up from a controlling computer checks the sharing list as it is when it runs.
       sharing: { check: async path => { await exclusions.reload(); return exclusions.excludesNow(path); }, now: path => exclusions.matcher().excludes(path) }, executor: {
       submitAutoPrompt: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); },
@@ -1414,12 +1416,17 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     registerStorageHold(() => { triggers.hold(); }, () => { triggers.release(); }, () => triggers.inFlight());
     triggerEngine = triggers;
     await startupGate();
-    const restoredTriggers = await triggers.start(restoring?.restore.triggers ? { restore: restoring.restore.triggers } : {});
+    let restoredTriggers: { errors: string[] };
+    while (true) {
+      try { restoredTriggers = await triggers.start(restoring?.restore.triggers ? { restore: restoring.restore.triggers } : {}); break; }
+      catch (error) { unavailable(); storageStatus.reason = String(error); storageStatus.code = 'triggers-bootstrap-held'; await startupGate(); }
+    }
     await restoring?.applied({ parts: restoring.restore.triggers ? ['triggers'] : [], errors: restoredTriggers.errors })
       .catch(error => console.error(`The restore's progress was not recorded: ${error instanceof Error ? error.message : String(error)}`));
     // Reviews waiting from before this worker started (or queued while the last one handed over, or sent back by a run
     // recovered above) go on, once the triggers whose instructions they read are in place.
     await startupGate();
+    triggersPrepared = true;
     reviewer.release();
     await startupGate();
     await github.start();

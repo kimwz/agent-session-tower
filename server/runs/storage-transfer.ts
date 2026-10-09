@@ -1,3 +1,4 @@
+import { triggersLegacyFiles } from '../triggers/storage-transfer.js';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, opendir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -16,6 +17,7 @@ export async function runsLegacyFiles(stateDir: string): Promise<'absent' | 'pre
   return 'absent';
 }
 export async function workerLegacyFiles(stateDir: string, domain: string): Promise<'absent' | 'present'> {
+  if (domain === 'triggers') return triggersLegacyFiles(stateDir);
   if (domain === 'runs') return runsLegacyFiles(stateDir);
   if (domain === 'retention') return retentionLegacyFiles(stateDir,domain);
   return 'present';
@@ -156,13 +158,13 @@ export function bootstrapRuns(repository: RunsRepository, stateDir: string, upda
     if (history.stages !== 0) throw new Error('Runs staged history exists without authority; explicit owner recovery required.');
     const current = await update(), context = storage.context;
     if (!context || current.stateDir !== stateDir || current.build.version !== context.identity.appVersion || current.build.preflight.identity?.sourceHash !== context.identity.sourceHash || current.build.manifest?.digest !== context.manifest.digest) throw new Error('Runs bootstrap evidence belongs to another captured build.');
+    if (!context.manifest.domains.find(domain => domain.scope === 'runs')?.cutover) return;
     const check = async () => {
       const evaluation = await evaluateStorageUpdate(await update());
       if (!evaluation.importAllowed || evaluation.verdict !== 'ready') throw new Error(`Runs bootstrap held: ${evaluation.code}: ${evaluation.reason}`);
       await repository.gate();
     };
     await check();
-    if (!context.manifest.domains.find(domain => domain.scope === 'runs')?.cutover) throw new Error('Runs preparation has no cutover contract.');
     // Decide before creating evidence: our own directory must not masquerade as old history.
     const fresh = await runsLegacyFiles(stateDir) === 'absent';
     const evidenceParent = join(stateDir, 'runs-storage-migrations');

@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.124.0] - 2026-10-10
+
+- 트리거 SQLite 준비 스키마와 typed 행 저장·내보내기·복원 경계를 추가했습니다. 이번 릴리스는 모든 도메인의 preparation-only이며 기존 SQL authority는 유지합니다.
+- 손상된 트리거 상태를 원형 보존하며 실행을 보류하고, 트리거 설정 백업을 실행 워커의 authoritative DTO로 가져옵니다.
+
 ## [1.123.0] - 2026-10-10
 
 ### Changed

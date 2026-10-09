@@ -1,5 +1,10 @@
 import { join } from 'node:path';
-import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { readPrivateBytes, writePrivateJson } from '../stores/private-json.js';
+import type { StorageClient } from '../storage/client.js';
+import { TriggersRepository } from './storage-repository.js';
+import { bootstrapTriggers, holdTriggersEvidence } from './storage-transfer.js';
+import { changesOf, logicalBytes, rowsOf, type TriggerRow } from './storage-codec.js';
+import { normalizeOnce } from './once.js';
 import { failure } from './errors.js';
 import { empty, parseState, pruneState, serializeState, type EngineState } from './state.js';
 
@@ -13,17 +18,21 @@ const FULL = 'Trigger history is full; scheduled times pass without running unti
  * current; commits run one at a time. Nothing else writes the engine file.
  */
 export class TriggerStore {
+  private repository?: TriggersRepository;
+  private database = false;
+  private rows: TriggerRow[] = [];
   private current: EngineState = empty();
   private writes: Promise<unknown> = Promise.resolve();
   private pendingCommits = 0;
   private storageError?: string;
-  /** Set when unreadable state could not be moved aside: nothing is saved over it until Tower restarts. */
+  /** Failed startup preserves original state and prevents every subsequent save. */
   private locked?: string;
   private stateBytes = 0;
   private capacityError?: string;
   private readonly path: string;
 
-  constructor(private readonly options: { stateDir: string; now: () => number; limits: () => { acceptBytes?: number; maxBytes?: number } | undefined; changed: () => void }) {
+  constructor(private readonly options: { stateDir: string; storage?: StorageClient; now: () => number; limits: () => { acceptBytes?: number; maxBytes?: number } | undefined; changed: () => void }) {
+    if (options.storage) this.repository = new TriggersRepository(options.storage);
     this.path = join(options.stateDir, 'trigger-engine.json');
   }
 
@@ -44,22 +53,32 @@ export class TriggerStore {
   noteCapacity(message: string | undefined): void { this.capacityError = message; }
 
   /**
-   * Reads the saved state. An unreadable one is kept aside for inspection and the engine starts empty; one that cannot
-   * be moved aside locks the engine. `prepare` changes the loaded state before it becomes current (recovering claims
+   * Reads the authoritative saved state. Unreadable state holds startup and stays untouched. `prepare` changes the loaded state before it becomes current (recovering claims
    * and cut-off polls); nothing is saved until the first commit.
    */
   async load(prepare: (loaded: EngineState) => void): Promise<void> {
-    let saved: unknown;
-    try { saved = await readPrivateJson(this.path); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { await this.quarantine(error); saved = undefined; } }
-    let loaded = this.current;
-    if (saved !== undefined) {
-      const restored = parseState(saved, this.options.now);
-      if (!restored) await this.quarantine(new Error('Saved trigger state is invalid.'));
-      else loaded = restored;
+    let loaded: EngineState;
+    try {
+      this.database = this.repository ? await bootstrapTriggers(this.repository,this.options.stateDir) : false;
+      if (this.database) {
+        const current = await this.repository!.exportCurrent(); loaded = current.documents; this.rows = current.rows; normalizeOnce(loaded,this.options.now);
+      } else {
+        // Standalone owners keep the same seal guard even without an injected SDK.
+        if (!this.repository) await holdTriggersEvidence(this.options.stateDir);
+        let saved: unknown;
+        try { const bytes = await readPrivateBytes(this.path); if (!Buffer.from(bytes.toString('utf8')).equals(bytes)) throw new Error('Trigger state is not lossless UTF-8.'); saved = JSON.parse(bytes.toString('utf8')); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        loaded = saved === undefined ? empty() : parseState(saved,this.options.now)!;
+        if (!loaded) throw new Error('Saved trigger state is invalid.');
+      }
+      this.stateBytes = this.database ? logicalBytes(this.rows) : Buffer.byteLength(serializeState(loaded));
+      this.locked = undefined; this.storageError = undefined;
+      prepare(loaded); this.current = loaded;
+    } catch (error) {
+      this.locked = `Trigger state is held; original data is preserved: ${error instanceof Error ? error.message : String(error)}`;
+      this.storageError = this.locked; this.options.changed();
+      throw failure(this.locked,'unavailable');
     }
-    prepare(loaded);
-    this.current = loaded;
   }
 
   /**
@@ -74,17 +93,28 @@ export class TriggerStore {
       if (kind === 'grow') this.capacityError = undefined;
       const result = change(draft);
       pruneState(draft, this.options.now);
-      const data = serializeState(draft);
-      const bytes = Buffer.byteLength(data);
+      // R6 debt: callback drafts become typed row diffs only at this owner boundary.
+      const rows = this.database ? rowsOf(draft) : undefined;
+      const data = this.database ? undefined : serializeState(draft);
+      const bytes = rows ? logicalBytes(rows) : Buffer.byteLength(data!);
       if (bytes > (kind === 'settle' ? this.maxBytes : this.acceptBytes) && bytes > this.stateBytes) {
         if (kind === 'settle') { this.storageError = 'Trigger state is full even after trimming finished history. New runs are not accepted.'; this.options.changed(); }
         throw failure('Trigger history is full. Delete old triggers or wait for finished runs to expire.', 'storage-full');
       }
       if (this.locked) { this.storageError = this.locked; this.options.changed(); throw failure(this.storageError, 'unavailable'); }
-      try { await writePrivateJson(this.path, data); }
-      catch (error) { this.storageError = `Cannot save triggers: ${error instanceof Error ? error.message : String(error)}`; this.options.changed(); throw failure(this.storageError, 'unavailable'); }
+      try {
+        if (this.database) await this.repository!.update(changesOf(this.rows,rows!),kind);
+        else await writePrivateJson(this.path,data!);
+      }
+      catch (error) {
+        this.storageError = `Cannot save triggers: ${error instanceof Error ? error.message : String(error)}`; this.options.changed();
+        const refused = failure(this.storageError,'unavailable');
+        if (this.repository?.pending()) Object.assign(refused,{ disposition: 'uncertain',commitDisposition: 'unknown' });
+        throw refused;
+      }
       this.storageError = undefined;
       this.stateBytes = bytes;
+      if (rows) this.rows = rows;
       this.current = draft;
       this.options.changed();
       return result;
@@ -102,17 +132,4 @@ export class TriggerStore {
   /** Waits for every queued save, whatever it answered. */
   idle(): Promise<unknown> { return this.writes.catch(() => {}); }
 
-  /**
-   * Unreadable state is kept aside for inspection; triggers start empty rather than guess. When it cannot be moved,
-   * the engine locks before anything can fire or save, so the file is never written over.
-   */
-  private async quarantine(error: unknown): Promise<void> {
-    console.error('Trigger state could not be read and was moved aside:', error);
-    try { await quarantineFile(this.path); }
-    catch (moveError) {
-      this.locked = 'Trigger state could not be read or moved aside; nothing is saved until Tower restarts.';
-      this.storageError = this.locked;
-      console.error(this.locked, moveError);
-    }
-  }
 }

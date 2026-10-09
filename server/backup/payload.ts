@@ -2,7 +2,7 @@ import { encryptedVaultOf } from '../secrets/imports.js';
 import { parseModelSettings } from '../../shared/models.js';
 import { join } from 'node:path';
 import type { BackupPart } from '../../shared/backup.js';
-import { mergeTriggerSecrets, secretsBackupOf, triggerBackupOf, type TriggerBackup } from '../triggers/backup.js';
+import { mergeTriggerSecrets, secretsBackupOf, type TriggerBackup } from '../triggers/backup.js';
 import type { SkillBackup } from '../skills/backup.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { automationBackupOf, hasUnfinishedSlackWork, mergeAutomation, restoreSlackConnection, slackAccountKey } from '../slack/backup.js';
@@ -76,9 +76,9 @@ export async function collectWorkerFiles(stateDir: string): Promise<WorkerRestor
   return files;
 }
 
-/** The trigger engine's settings, from its saved state. */
-export async function collectTriggers(stateDir: string): Promise<TriggerBackup | undefined> {
-  return triggerBackupOf(await readOptional(join(stateDir, 'trigger-engine.json')));
+/** Worker owner DTO; the web process never reads trigger JSON or opens a second DB. */
+export async function collectTriggers(owner: () => Promise<TriggerBackup | undefined>): Promise<TriggerBackup | undefined> {
+  return owner();
 }
 
 /**

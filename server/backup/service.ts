@@ -8,6 +8,7 @@ import { BackupError, checkPassphrase, decryptBackup, encryptBackup, readBackupH
 import { stageLegacyImport } from './secrets.js';
 import { deferredSecretParts, encryptedVaultOf, stageVaultImport } from '../secrets/imports.js';
 import { collectTriggers, collectWorkerFiles, parsePayload, payloadParts, WORKER_FILES, type BackupPayload } from './payload.js';
+import type { TriggerBackup } from '../triggers/backup.js';
 import type { SkillBackup } from '../skills/backup.js';
 import { keepBefore, readReport, removePendingWorker, writePendingWorker, writeReport } from './restore-files.js';
 import { S3Client, endpointUrl, unsafeKey } from './s3.js';
@@ -23,6 +24,7 @@ export interface BackupServiceOptions {
   version: string;
   /** The worker's skills, guidance and their confirmations; throws while the worker cannot make them. */
   skills(): Promise<SkillBackup>;
+  triggers(): Promise<TriggerBackup | undefined>;
   /** Why no backup can be made right now, if so. */
   unavailable?: () => string | undefined;
   /** Asks the worker to hand over to a new worker at its next quiet moment; false when it cannot. */
@@ -47,7 +49,7 @@ const RETRY_AFTER = 30 * 60 * 1000;
 const CHECKED_KEPT_MS = 10 * 60 * 1000;
 const FILE = 'backup-settings.json';
 /** Files a restore may replace, copied aside first. Skills replaced go to Tower's skill trash as usual. */
-const REPLACED = [...Object.keys(WORKER_FILES), 'trigger-engine.json', 'skills.json', 'guidance', 'project-groups.json', 'remote-exclusions.json', 'decisions.json', FILE, join('master', 'settings.json'), join('master', 'elevenlabs-key.json')];
+const REPLACED = [...Object.keys(WORKER_FILES), 'skills.json', 'guidance', 'project-groups.json', 'remote-exclusions.json', 'decisions.json', FILE, join('master', 'settings.json'), join('master', 'elevenlabs-key.json')];
 
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const text = (value: unknown, max: number) => typeof value === 'string' && value.length <= max ? value.trim() : undefined;
@@ -149,7 +151,7 @@ export class BackupService {
   private async payload(): Promise<BackupPayload> {
     const stateDir = this.options.stateDir;
     const skills = await this.options.skills();
-    const triggers = await collectTriggers(stateDir);
+    const triggers = await collectTriggers(this.options.triggers);
     // Missing is "none"; unreadable fails the backup rather than record a key as absent (a restore would remove it).
     const optional = (path: string) => readPrivateJson(path).catch(error => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
@@ -307,8 +309,9 @@ export class BackupService {
     const { header, passphrase } = item;
     const payload = structuredClone(item.payload);
     const stateDir = this.options.stateDir;
+    const triggersBefore = await collectTriggers(this.options.triggers);
     const targetHasVault = Boolean(await encryptedVaultOf(stateDir));
-    const before = await keepBefore(stateDir, targetHasVault ? REPLACED.filter(name => name !== 'trigger-secrets.json') : REPLACED, new Date(this.now()));
+    const before = await keepBefore(stateDir, targetHasVault ? REPLACED.filter(name => name !== 'trigger-secrets.json') : REPLACED, new Date(this.now()), triggersBefore);
     // A worker part still waiting from an earlier restore is replaced by this one.
     await removePendingWorker(stateDir);
     const restoreId = randomUUID(); const pendingSecretImports: string[] = [];

@@ -80,12 +80,20 @@ test('serving target web resumes only the durable owner rollback through the rea
   let releasedProofSha256: string | undefined;
   let proofReleased!: () => void;
   const proofRelease = new Promise<void>(resolve => { proofReleased = resolve; });
+  const proofTrace: { event: string; at: number; details?: unknown }[] = [];
+  const traceProof = (event: string, details?: unknown) => {
+    if (proofTrace.length < 32) proofTrace.push({ event, at: Date.now(), details });
+  };
+  const traceError = (error: unknown) => error instanceof Error
+    ? { ...error, name: error.name, message: error.message, stack: error.stack } : String(error);
+  t.after(() => { if (!snapshotAdoptedBeforeProof || responseOrderError) console.error('snapshot-proof-trace', JSON.stringify(proofTrace)); });
   let responseOrderError: unknown;
   let launchError: unknown;
   let launchTimer: ReturnType<typeof setTimeout> | undefined;
   let drains = 0;
   let allowHandoff = false;
   const script = join(root, 'successor.mjs');
+  const successorArtifactFile = join(root, 'successor-artifact.json');
   const host = await startRunnerHost({ stateDir: state, sessions, runs, inFlight: () => !allowHandoff,
     storageControl: (action, input, dispatch) => { hostDispatch = dispatch; return control(action, input); },
     quiesce: async () => { await delay(400); }, closeStorage: async () => { await client.close(); },
@@ -93,7 +101,8 @@ test('serving target web resumes only the durable owner rollback through the rea
       launchTimer = setTimeout(() => {
         void (async () => {
           const { artifactOf } = await import('../storage/helpers.js');
-          child = spawn(process.execPath, ['--import', 'tsx', script, state, JSON.stringify(successorFence), JSON.stringify(artifactOf('production')), nonce, host.instance], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+          await writeFile(successorArtifactFile, JSON.stringify(artifactOf('production')), { mode: 0o600 });
+          child = spawn(process.execPath, ['--import', 'tsx', script, state, JSON.stringify(successorFence), successorArtifactFile, nonce, host.instance], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
           let stderr = '';
           child.stderr!.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-16000); });
           const ended = once(child, 'exit');
@@ -101,6 +110,7 @@ test('serving target web resumes only the durable owner rollback through the rea
           child.on('message', message => {
             const event = message as { ready?: boolean; proofHeld?: boolean; proofReleased?: boolean; requestInstance?: string; replyInstance?: string; fence?: RollbackFence; sha256?: string };
             if (event.ready) {
+              traceProof('ready', { runnerVersion: manager.runnerVersion(), predecessor: host.instance });
               successorReady = true;
               // Do not rely on the next timed continuation poll to produce the stale addressed proof.
               if (!proofOrderingStarted) adoptionProbe = targetPorts.servingProof(successorFence!).then(proof => {
@@ -110,6 +120,7 @@ test('serving target web resumes only the durable owner rollback through the rea
               });
             }
             if (event.proofHeld) {
+              traceProof('proofHeld', event);
               proofOrderingStarted = true;
               heldProofSha256 = event.sha256;
               // The fixture holds bytes before call() can read the real handoff nonce and adopt.
@@ -117,17 +128,21 @@ test('serving target web resumes only the durable owner rollback through the rea
                 assert.equal(event.requestInstance, host.instance);
                 assert.notEqual(event.replyInstance, host.instance);
                 assert.deepEqual(event.fence, successorFence);
+                traceProof('snapshotRequested');
                 await (manager as unknown as { call(method: string): Promise<unknown> }).call('snapshot').catch(error => {
+                  traceProof('snapshotError', { error: traceError(error), runnerVersion: manager.runnerVersion() });
                   if (manager.runnerVersion() !== target) throw error;
                 });
+                traceProof('snapshotResponse', { runnerVersion: manager.runnerVersion() });
                 assert.equal(manager.runnerVersion(), target, 'actual snapshot adopted nonce-verified successor');
                 snapshotAdoptedBeforeProof = true;
-              })().catch(error => { responseOrderError = error; }).finally(() => child!.send({ releaseProof: true }));
+                traceProof('snapshotAdopted');
+              })().catch(error => { responseOrderError = error; traceProof('adoptionError', traceError(error)); }).finally(() => { traceProof('releaseProofSent'); child!.send({ releaseProof: true }); });
             }
-            if (event.proofReleased) { releasedProofSha256 = event.sha256; proofReleased(); }
+            if (event.proofReleased) { traceProof('proofReleased', event); releasedProofSha256 = event.sha256; proofReleased(); }
           });
           child.once('exit', code => { if (!successorReady) launchError = new Error(`successor exited ${code}: ${stderr}`); });
-        })().catch(error => { launchError = error; });
+        })().catch(error => { launchError = error; traceProof('launchError', traceError(error)); });
       }, 400);
     } });
   const manager = new DurableRunManager({ stateDir: state, pollMs: 60_000, handoffHeld: async () => true,
@@ -158,6 +173,7 @@ import { SessionService } from ${JSON.stringify(new URL('../../../server/session
 import { join } from 'node:path';
 import { Server } from 'node:http';
 import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 // Hold original predecessor responses before any caller can read the nonce and adopt.
 // Concurrent stale replies must not overtake the proof/snapshot exchange.
 const emit = Server.prototype.emit; const heldReplies = []; let latched = false; let released = false; let proofSha256; let proofValues; let releasedSha256;
@@ -191,7 +207,7 @@ Server.prototype.emit = function(event, ...args) {
   return emit.call(this, event, ...args);
 };
 const stateDir = process.argv[2]; const fence = JSON.parse(process.argv[3]);
-const client = await sdk.openStorage({stateDir, bundle: sdk.storageBundleFromArtifact(process.argv[4], 'artifact')});
+const client = await sdk.openStorage({stateDir, bundle: sdk.storageBundleFromArtifact(await readFile(process.argv[4], 'utf8'), 'artifact')});
 await client.prepare({allowMigration:false});
 const sessions = new SessionService({codexHome:join(stateDir,'fixture-codex'),claudeHome:join(stateDir,'fixture-claude'),inspectProcesses:async()=>({claude:new Map(),codex:new Set(),providerRunning:{claude:false,codex:false}})});
 sessions.list = () => [];
@@ -304,7 +320,7 @@ process.send({ready:true});`);
   const outcome = await storageWebServing(context, { intervalMs: 25 });
   await adoptionProbe;
   assert.equal(responseOrderError, undefined);
-  assert.equal(snapshotAdoptedBeforeProof, true, 'actual snapshot response precedes held proof 409');
+  assert.equal(snapshotAdoptedBeforeProof, true, `actual snapshot response precedes held proof 409: ${JSON.stringify(proofTrace)}`);
   await proofRelease;
   assert.match(heldProofSha256!, /^[0-9a-f]{64}$/);
   assert.equal(releasedProofSha256, heldProofSha256, 'held production proof reply retains exact bytes');

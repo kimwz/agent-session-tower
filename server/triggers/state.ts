@@ -91,11 +91,24 @@ export function pruneState(state: EngineState, now: () => number): void {
 }
 
 /** A saved state as the engine takes it over, or undefined when it cannot be read. */
-export function parseState(value: unknown, now: () => number): EngineState | undefined {
+export function parseState(value: unknown, now: () => number, reconcile = true): EngineState | undefined {
   if (!value || typeof value !== 'object' || (value as EngineState).version !== 1) return undefined;
-  const saved = upgradeState(value as EngineState, now());
-  const state = empty();
   const record = (item: unknown): item is Record<string, any> => !!item && typeof item === 'object' && !Array.isArray(item);
+  const raw = value as Record<string, unknown>;
+  // Absence keeps the existing legacy defaults; a present damaged collection cannot become empty.
+  for (const key of ['triggers', 'tombstones', 'events', 'audit', 'trustedFolders', 'recentFires'])
+    if (key in raw && !Array.isArray(raw[key])) return undefined;
+  for (const key of ['onceConsumed', 'revisions', 'cursors', 'fired', 'secretGrants'])
+    if (key in raw && !record(raw[key])) return undefined;
+  if (Array.isArray(raw.trustedFolders) && !raw.trustedFolders.every(item => typeof item === 'string')) return undefined;
+  if (Array.isArray(raw.recentFires) && !raw.recentFires.every(item => record(item) && typeof item.at === 'number' && typeof item.triggerId === 'string')) return undefined;
+  if (record(raw.fired) && !Object.values(raw.fired).every(item => typeof item === 'string')) return undefined;
+  if (record(raw.secretGrants) && !Object.values(raw.secretGrants).every(item => Array.isArray(item) && item.every(id => typeof id === 'string'))) return undefined;
+  if (Array.isArray(raw.audit) && !raw.audit.every(item => record(item) && typeof item.id === 'string' && typeof item.at === 'string'
+    && record(item.actor) && typeof item.actor.kind === 'string' && typeof item.action === 'string' && typeof item.triggerId === 'string'
+    && typeof item.triggerName === 'string' && typeof item.summary === 'string')) return undefined;
+  const saved = upgradeState(value as EngineState, reconcile ? now() : 0, reconcile);
+  const state = empty();
   try {
     state.settings = TriggerSettingsSchema.parse(saved.settings ?? {});
     if (!readLedger(saved.onceConsumed, state)) return undefined;
@@ -125,12 +138,12 @@ export function parseState(value: unknown, now: () => number): EngineState | und
       if (Array.isArray(triggerIds)) state.secretGrants[secretId] = triggerIds.filter(item => typeof item === 'string');
     }
   } catch { return undefined; }
-  if (saved.onceConsumed === undefined) {
+  if (reconcile && saved.onceConsumed === undefined) {
     const projection = [...state.triggers, ...state.tombstones, ...Object.values(state.revisions).flat()].find(trigger => OnceConsumptionSchema.safeParse(trigger.consumed).success);
     if (projection) logTrigger(state, now, { kind: 'system', via: 'migration' }, 'consume', projection, projection.revision, projection.revision,
       'The once consumption ledger was absent after a downgrade; retained snapshots were recovered. Deleted IDs beyond legacy retention cannot be recovered.');
   }
-  normalizeOnce(state, now);
+  if (reconcile) normalizeOnce(state, now);
   return state;
 }
 
@@ -139,13 +152,13 @@ export function parseState(value: unknown, now: () => number): EngineState | und
  * that does the same (`upgradeWatch`), in triggers, their revisions and deleted ones, and what it had seen goes
  * with it, so no issue it had already seen starts a run.
  */
-export function upgradeState(saved: EngineState, now: number): EngineState {
+export function upgradeState(saved: EngineState, now: number, startup = true): EngineState {
   const record = (item: unknown): item is Record<string, any> => !!item && typeof item === 'object' && !Array.isArray(item);
   const audit = Array.isArray(saved.audit) ? [...saved.audit] : [];
   const upgrade = (value: unknown) => {
     const decoded = decodeOnceTrigger(value);
     const trigger = decoded.trigger;
-    if (decoded.changed && record(trigger)) audit.push({ id: randomUUID(), at: new Date(now).toISOString(), actor: { kind: 'system', via: 'migration' }, action: 'disable',
+    if (startup && decoded.changed && record(trigger)) audit.push({ id: randomUUID(), at: new Date(now).toISOString(), actor: { kind: 'system', via: 'migration' }, action: 'disable',
       triggerId: trigger.id, triggerName: trigger.name, summary: trigger.enabled ? 'An obsolete once marker was removed after a source change by an older engine; inspect the definition.' : 'A reservation changed by an older engine was loaded turned off or its obsolete marker removed; inspect it before rescheduling.' });
     return record(trigger) && record(trigger.source) && trigger.source.kind === 'github'
       ? { ...trigger, source: { ...trigger.source, watch: upgradeWatch(trigger.source.watch, record(trigger.policy) ? trigger.policy.overlap : undefined) } } : trigger;
@@ -156,14 +169,14 @@ export function upgradeState(saved: EngineState, now: number): EngineState {
     // The new-issue watch knew the highest number seen per repository; the issues up to it are noted, not run.
     if (record(old.repos)) {
       const watermarks = Object.fromEntries(Object.entries(old.repos).flatMap(([repo, seen]) => record(seen) && Number.isInteger(seen.watermark) ? [[repo.toLowerCase(), seen.watermark as number]] : []));
-      return [id, { ...cursor, github: { handled: [], checkedAt: now, baseline: { watermarks } } }];
+      return [id, { ...cursor, github: { handled: [], ...(startup ? { checkedAt: now } : {}), baseline: { watermarks } } }];
     }
-    if (Array.isArray(old.assigned)) return [id, { ...cursor, github: { handled: old.assigned.filter((key: unknown) => typeof key === 'string'), checkedAt: now } }];
-    if (Array.isArray(old.handled) && old.checkedAt === undefined) return [id, { ...cursor, github: { ...old, checkedAt: now } }];
+    if (Array.isArray(old.assigned)) return [id, { ...cursor, github: { handled: old.assigned.filter((key: unknown) => typeof key === 'string'), ...(startup ? { checkedAt: now } : {}) } }];
+    if (startup && Array.isArray(old.handled) && old.checkedAt === undefined) return [id, { ...cursor, github: { ...old, checkedAt: now } }];
     return [id, cursor];
   })) : saved.cursors;
   return { ...saved, triggers: Array.isArray(saved.triggers) ? saved.triggers.map(upgrade) as Trigger[] : saved.triggers,
     revisions: record(saved.revisions) ? Object.fromEntries(Object.entries(saved.revisions).map(([id, list]) => [id, Array.isArray(list) ? list.map(upgrade) : list])) as EngineState['revisions'] : saved.revisions,
-    tombstones: Array.isArray(saved.tombstones) ? saved.tombstones.map(upgrade) as Trigger[] : saved.tombstones, cursors: cursors as EngineState['cursors'], audit: audit.slice(-MAX_AUDIT) };
+    tombstones: Array.isArray(saved.tombstones) ? saved.tombstones.map(upgrade) as Trigger[] : saved.tombstones, cursors: cursors as EngineState['cursors'], audit: startup ? audit.slice(-MAX_AUDIT) : audit };
 }
 

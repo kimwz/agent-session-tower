@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { cp, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -26,6 +26,13 @@ const runsStorageSources = [
   'server/runs/saved-state.ts', 'server/runs/turn-notes.ts', 'server/runs/run-records.ts',
   'server/stores/attachments.ts', 'server/providers/models.ts', 'server/providers/discovery.ts',
   'shared/attachments.ts', 'shared/errors.ts',
+];
+
+// Actual transitive runtime sources of trigger preparation, copied without bundling.
+const triggerStorageSources = [
+  'server/triggers/storage-schema.ts', 'server/triggers/storage-codec.ts', 'server/triggers/storage-commands.ts',
+  'server/triggers/state.ts', 'server/triggers/once.ts', 'server/triggers/once-storage.ts',
+  'server/triggers/audit.ts', 'server/triggers/errors.ts', 'server/triggers/limits.ts', 'shared/triggers.ts',
 ];
 
 test('a checkout trusts only the thread its own first capture bundles from its canonical entry: before it nothing, after it nothing else (a tsx process without the fixture build)', async t => {
@@ -90,11 +97,14 @@ test('a checkout whose own thread entry changes after its capture reopens with t
   for (const name of ['storage-schema.ts', 'storage-codec.ts', 'storage-commands.ts']) {
     await cp(join(root, 'server/sessions/retention', name), join(checkout, 'server/sessions/retention', name));
   }
-  for (const name of runsStorageSources) await cp(join(root, name), join(checkout, name));
+  for (const name of [...runsStorageSources, ...triggerStorageSources]) await cp(join(root, name), join(checkout, name));
   await cp(join(root, 'shared/app-identity.ts'), join(checkout, 'shared/app-identity.ts'));
   await cp(join(root, 'tsconfig.json'), join(checkout, 'tsconfig.json'));
   await writeFile(join(checkout, 'package.json'), '{"type":"module"}');
-  await symlink(join(root, 'node_modules'), join(checkout, 'node_modules'));
+  await mkdir(join(checkout, 'node_modules'));
+  // Bundle the root dependency's actual bytes at the same checkout-relative path; loader/build tools stay shared.
+  await cp(join(root, 'node_modules/zod'), join(checkout, 'node_modules/zod'), { recursive: true, dereference: true });
+  for (const name of ['tsx', 'esbuild']) await symlink(join(root, 'node_modules', name), join(checkout, 'node_modules', name));
   const state = await stateDir(t);
   const fresh = await stateDir(t);
   const module = (path: string) => JSON.stringify(join(checkout, path));
@@ -179,11 +189,14 @@ async function compileStorage(out: string): Promise<void> {
   const sources = [
     ...(await readdir(join(root, 'server/storage'), { recursive: true })).filter(name => name.endsWith('.ts') && !name.endsWith('.d.ts')).map(name => join(root, 'server/storage', name)),
     ...['storage-schema.ts', 'storage-codec.ts', 'storage-commands.ts'].map(name => join(root, 'server/sessions/retention', name)),
-    ...runsStorageSources.map(name => join(root, name)),
+    ...[...runsStorageSources, ...triggerStorageSources].map(name => join(root, name)),
     join(root, 'shared/app-identity.ts'),
   ];
   await build({ entryPoints: sources, outbase: root, outdir: out, format: 'esm', platform: 'node', target: 'node22', logLevel: 'silent' });
   await writeFile(join(out, 'package.json'), '{"type":"module"}');
+  // Unbundled trigger validation imports zod; no compiler or loader is needed at runtime.
+  await mkdir(join(out, 'node_modules'));
+  await symlink(join(root, 'node_modules/zod'), join(out, 'node_modules/zod'));
 }
 
 test('compiled server modules run the generated artifact without tsx, esbuild or a checkout thread entry', async t => {
@@ -231,7 +244,9 @@ test('a compiled build trusts only the one source its build fixed: a valid re-ha
     }
     const preflight = await storage.preflightStorage({ bundle: forged });
     console.log(JSON.stringify({ own: own.ok ? own.sourceHash : own.failure.code, rehashed: rehashed.ok || rehashed.failure.code, opened, preflight: preflight.refusal?.code }));`;
-  const runProbe = async () => lastJson((await run(process.execPath, ['--input-type=module', '-e', probe], { cwd: out, env: { ...process.env, NODE_OPTIONS: '' } })).stdout);
+  const probeFile = join(out, 'exact-source-probe.mjs');
+  await writeFile(probeFile, probe, { mode: 0o600, flag: 'wx' });
+  const runProbe = async () => lastJson((await run(process.execPath, [probeFile], { cwd: out, env: { ...process.env, NODE_OPTIONS: '' } })).stdout);
   assert.deepEqual(await runProbe(), {
     own: artifact.sourceHash, rehashed: 'bundle-untrusted', preflight: 'bundle-untrusted',
     opened: [['unavailable', 'bundle', 'bundle-untrusted'], ['unavailable', 'bundle', 'bundle-untrusted']],

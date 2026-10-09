@@ -1,3 +1,4 @@
+import { collectTriggers } from '../../helpers/legacy-trigger-backup.js';
 /**
  * What a backup keeps of each part of Tower, how a restore merges it with this computer's, and the files a restore
  * stages, pinned before those rules move to the parts that own them. Fixtures under fixtures/ were made by the released
@@ -8,7 +9,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { applyWorkerFiles, collectTriggers, collectWorkerFiles, parsePayload, payloadParts } from '../../../server/backup/payload.js';
+import { applyWorkerFiles, collectWorkerFiles, parsePayload, payloadParts } from '../../../server/backup/payload.js';
 import { collectEncryptedVault, importPendingSecret, listPendingSecretImports, stageLegacyImport, stageVaultImport } from '../../../server/backup/secrets.js';
 import { readPendingWorker, takeWorkerRestore, writePendingWorker } from '../../../server/backup/restore-files.js';
 import { BackupService } from '../../../server/backup/service.js';
@@ -41,7 +42,7 @@ async function vault(stateDir: string) { const service = new SecretService({ sta
 
 async function backupService(t: TestContext, stateDir: string) {
   const store = (value: unknown) => ({ backupValue: () => structuredClone(value), restore: async () => undefined });
-  const service = new BackupService({ stateDir, version: 'fixture', restartWorker: async () => true,
+  const service = new BackupService({ stateDir, triggers: () => collectTriggers(stateDir), version: 'fixture', restartWorker: async () => true,
     skills: async () => ({ bundle: { format: 'agent-session-tower.skills', version: 1, exportedAt: '', from: 'fixture', skills: [] }, guidance: '', settings: { enabled: true, provider: 'claude' } }),
     stores: { groups: store({ groups: [] }), exclusions: store({ folders: [] }), decisions: store({}) } });
   await service.start();

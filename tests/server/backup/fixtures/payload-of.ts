@@ -1,3 +1,4 @@
+import { collectTriggers } from '../../../helpers/legacy-trigger-backup.js';
 /**
  * The payload one Tower release backs up from a fixture state folder, as compact JSON (key order kept), so a test can
  * show this build backs up the same state exactly as that release did:
@@ -19,7 +20,7 @@ export async function payloadOf(tree: string, files: Record<string, string>): Pr
     await writeState(stateDir, files);
     const skills = { bundle: { format: 'agent-session-tower.skills', version: 1, exportedAt: '', from: 'fixture', skills: [] }, guidance: 'Be brief.', settings: { enabled: true, provider: 'claude' } };
     const store = (value: unknown) => ({ backupValue: () => structuredClone(value), restore: async () => undefined });
-    const backup = new BackupService({ stateDir, version: 'fixture', skills: async () => structuredClone(skills), restartWorker: async () => true,
+    const backup = new BackupService({ stateDir, triggers: () => collectTriggers(stateDir), version: 'fixture', skills: async () => structuredClone(skills), restartWorker: async () => true,
       stores: { groups: store({ groups: [] }), exclusions: store({ folders: [] }), decisions: store({}) }, host: 'fixture' });
     await backup.start();
     const { payload } = await decryptBackup((await backup.export('fixture backup passphrase')).text, 'fixture backup passphrase');

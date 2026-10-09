@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { collectTriggers } from '../../../server/backup/payload.js';
+import { collectTriggers } from '../../helpers/legacy-trigger-backup.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { TriggerService, triggerRequestId, type TriggerExecutor } from '../../../server/triggers/service.js';
 import type { RunAdmission } from '../../../server/runs/manager.js';
@@ -258,58 +258,42 @@ test('a state file that cannot be saved stops new runs and says why', async t =>
   assert.equal(f.calls.length, 1, 'the due time runs once the state can be saved');
 });
 
-test('unreadable trigger state is moved aside instead of guessed', async t => {
-  const f = await fixture(t);
-  await writeFile(join(f.directory, 'trigger-engine.json'), '{ not json', { mode: 0o600 });
-  const service = await f.open();
-  assert.equal(service.list().length, 0);
-  assert.ok((await readdir(f.directory)).some(name => name.startsWith('trigger-engine.json.unreadable-')));
+test('unreadable trigger state holds startup and preserves exact original bytes', async t => {
+  const f = await fixture(t), path = join(f.directory,'trigger-engine.json');
+  await writeFile(path,'{ not json',{ mode: 0o600 });
+  await assert.rejects(f.open(),{ kind: 'unavailable',message: /original data is preserved/ });
+  assert.equal(await readFile(path,'utf8'),'{ not json');
+  assert.deepEqual(await asideNames(path),[]);
+  assert.equal(f.calls.length,0);
 });
 
-test('trigger state of the wrong shape is moved aside and triggers start empty', async t => {
-  const f = await fixture(t);
-  const path = join(f.directory, 'trigger-engine.json');
-  await writeFile(path, '[]', { mode: 0o600 });
-  const logged = captureErrors(t, path);
-  const service = await f.open();
-  assert.equal(service.list().length, 0);
-  const [aside] = await asideNames(path);
-  assert.equal(await readFile(join(f.directory, aside), 'utf8'), '[]');
-  assert.equal(logged[0].args[0], 'Trigger state could not be read and was moved aside:');
-  assert.equal((logged[0].args[1] as Error).message, 'Saved trigger state is invalid.');
-  assert.equal(logged[0].present, true, 'logged before the move');
+test('wrong shape holds startup instead of treating once history as empty', async t => {
+  const f = await fixture(t), path = join(f.directory,'trigger-engine.json');
+  await writeFile(path,'[]',{ mode: 0o600 });
+  await assert.rejects(f.open(),{ kind: 'unavailable',message: /Saved trigger state is invalid/ });
+  assert.equal(await readFile(path,'utf8'),'[]');
+  assert.deepEqual(await asideNames(path),[]);
+  assert.equal(f.calls.length,0);
 });
 
-test('trigger state with an invalid once ledger is moved aside', async t => {
-  for (const onceConsumed of [[], { id: { bad: 1 } }]) {
-    const f = await fixture(t);
-    let service = await f.open();
-    await service.create(hourly(f.project), OWNER);
-    service.close(); await service.settle();
-    const path = join(f.directory, 'trigger-engine.json');
-    const saved = JSON.parse(await readFile(path, 'utf8'));
-    saved.onceConsumed = onceConsumed;
-    const text = JSON.stringify(saved);
-    await writeFile(path, text);
-    service = await f.open();
-    assert.equal(service.list().length, 0, JSON.stringify(onceConsumed));
-    const [aside] = await asideNames(path);
-    assert.equal(await readFile(join(f.directory, aside), 'utf8'), text);
+test('invalid independent once ledger holds startup without quarantine', async t => {
+  for (const onceConsumed of [[],{ id: { bad: 1 } }]) {
+    const f = await fixture(t), service = await f.open();
+    await service.create(hourly(f.project),OWNER); service.close(); await service.settle();
+    const path = join(f.directory,'trigger-engine.json'), saved = JSON.parse(await readFile(path,'utf8'));
+    saved.onceConsumed = onceConsumed; const text = JSON.stringify(saved); await writeFile(path,text);
+    await assert.rejects(f.open(),{ kind: 'unavailable' });
+    assert.equal(await readFile(path,'utf8'),text); assert.deepEqual(await asideNames(path),[]); assert.equal(f.calls.length,0);
   }
 });
 
-test('trigger state that cannot be moved aside is logged and triggers still start', async t => {
-  const f = await fixture(t);
-  const path = join(f.directory, 'trigger-engine.json');
-  await writeFile(path, '{ not json', { mode: 0o600 });
-  const blocked = await blockQuarantine(t, path);
-  const logged = captureErrors(t, path);
-  const service = await f.open();
-  blocked.release();
-  assert.equal(service.list().length, 0);
-  assert.equal(logged[0].args[0], 'Trigger state could not be read and was moved aside:');
-  assert.ok(logged[0].args[1] instanceof SyntaxError);
-  assert.deepEqual(await readdir(blocked.aside), ['occupied'], 'the move failed');
+test('occupied quarantine destination does not alter data-preserving startup hold', async t => {
+  const f = await fixture(t), path = join(f.directory,'trigger-engine.json');
+  await writeFile(path,'{ not json',{ mode: 0o600 });
+  const blocked = await blockQuarantine(t,path);
+  await assert.rejects(f.open(),{ kind: 'unavailable' }); blocked.release();
+  assert.deepEqual(await readdir(blocked.aside),['occupied']);
+  assert.equal(await readFile(path,'utf8'),'{ not json'); assert.equal(f.calls.length,0);
 });
 
 test('trigger secrets that were moved aside are shown on the triggers page', async t => {
@@ -320,29 +304,18 @@ test('trigger secrets that were moved aside are shown on the triggers page', asy
   assert.match(service.overview().storageError ?? '', /^Trigger secrets could not be read and were kept as .*trigger-secrets\.json\.unreadable-\d+; triggers that use them fail until they are entered again\.$/);
 });
 
-test('trigger state that cannot be moved aside is never written over', async t => {
-  const f = await fixture(t);
-  const path = join(f.directory, 'trigger-engine.json');
-  const original = '{ "version": 1, "triggers": [ not json';
-  await writeFile(path, original, { mode: 0o600 });
-  const blocked = await blockQuarantine(t, path);
-  captureErrors(t, path);
-  const service = await f.open();
-  blocked.release();
-  const locked = /Trigger state could not be read or moved aside; nothing is saved until Tower restarts\./;
-  assert.match(service.overview().storageError ?? '', locked);
-  f.clock.now += 2 * HOUR;
-  await service.tick();
-  await assert.rejects(service.create(hourly(f.project), OWNER), { kind: 'unavailable', message: locked });
-  const backup = { triggers: [{ ...hourly(f.project), id: randomUUID(), revision: 1, createdAt: '', updatedAt: '', updatedBy: OWNER }], settings: service.settings(), trustedFolders: [f.project], secretGrants: {}, fired: {}, github: {} };
-  await assert.rejects(service.restoreBackup(backup as any), { kind: 'unavailable' });
-  await service.flush();
-  assert.equal(service.inFlight(), false);
-  await service.settle();
-  assert.equal(f.calls.length, 0);
-  assert.equal(await readFile(path, 'utf8'), original);
-  assert.deepEqual((await readdir(f.directory)).filter(name => name.startsWith('trigger-engine.json')).sort(), ['trigger-engine.json', basename(blocked.aside)].sort(), 'no other state file is written');
-  assert.match(service.overview().storageError ?? '', locked);
+test('held malformed state cannot dispatch, restore or overwrite once evidence', async t => {
+  const f = await fixture(t), path = join(f.directory,'trigger-engine.json'), original = '{ "version": 1, "onceConsumed": [ not json';
+  await writeFile(path,original,{ mode: 0o600 });
+  const service = new TriggerService({ stateDir: f.directory,executor: f.executor,now: () => f.clock.now,tickMs: 60_000 });
+  await assert.rejects(service.start(),{ kind: 'unavailable' });
+  f.clock.now += 2 * HOUR; await service.tick();
+  await assert.rejects(service.create(hourly(f.project),OWNER),{ kind: 'unavailable' });
+  const backup = { triggers: [],settings: service.settings(),trustedFolders: [],secretGrants: {},fired: {},github: {} };
+  await assert.rejects(service.restoreBackup(backup),{ kind: 'unavailable' });
+  await service.flush(); await service.settle(); service.close();
+  assert.equal(service.inFlight(),false); assert.equal(f.calls.length,0); assert.equal(await readFile(path,'utf8'),original);
+  assert.deepEqual((await readdir(f.directory)).filter(name => name.startsWith('trigger-engine.json')),['trigger-engine.json']);
 });
 
 test('schedules refuse second-level cron and unknown time zones', async t => {

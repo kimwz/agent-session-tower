@@ -105,7 +105,8 @@ test('locked state does not stop a handoff and is never written over; the turn e
     return lines(join(root, 'workers.jsonl')).length === 1;
   }, 20_000);
   const faults = lines(join(root, 'rename-faults.jsonl'));
-  for (const name of Object.keys(corrupt)) assert.ok(faults.some(fault => fault.from === join(stateDir, name) && fault.pid === first.pid), `moving ${name} aside failed in the first worker`);
+  assert.equal(faults.some(fault => fault.from === join(stateDir, 'trigger-engine.json')), false, 'held trigger state is never moved aside');
+  for (const name of ['session-tasks.json', 'skills.json']) assert.ok(faults.some(fault => fault.from === join(stateDir, name) && fault.pid === first.pid), `moving ${name} aside failed in the first worker`);
   await unchanged();
 
   let web = new DurableRunManager({ stateDir, workerEntry: entry, pollMs: 10 });
@@ -154,10 +155,16 @@ test('locked state does not stop a handoff and is never written over; the turn e
   await until(() => (web as unknown as { snapshot?: { instance: string } }).snapshot?.instance === successor.instance && web.list().find(item => item.id === run.id), 15_000);
   assert.equal(web.list().find(item => item.id === run.id)?.status, 'completed', 'the turn finished normally');
 
-  // The successor, with no fault, moves each unreadable file aside with its original bytes.
+  // The successor keeps held trigger state in place and quarantines the other unreadable stores.
   assert.equal(lines(join(root, 'rename-faults.jsonl')).every(fault => fault.pid === first.pid), true, 'the successor inherits no fault');
+  assert.equal(lines(join(root, 'rename-faults.jsonl')).some(fault => fault.from === join(stateDir, 'trigger-engine.json')), false, 'neither worker attempts to move held trigger state aside');
   for (const [name, text] of Object.entries(corrupt)) {
     const kept = (await readdir(stateDir)).filter(item => item.startsWith(`${name}.unreadable-`));
+    if (name === 'trigger-engine.json') {
+      assert.equal(kept.length, 0, 'held trigger state has no quarantine copy');
+      assert.equal(await readFile(join(stateDir, name), 'utf8'), text, `${name} remains in place with its original bytes`);
+      continue;
+    }
     assert.equal(kept.length, 1, name);
     assert.equal(await readFile(join(stateDir, kept[0]), 'utf8'), text, `${name} was kept as it was`);
   }

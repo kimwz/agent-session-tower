@@ -1,3 +1,4 @@
+import { collectTriggers } from '../../helpers/legacy-trigger-backup.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
@@ -5,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
-import { applyWorkerFiles, collectTriggers, type TriggerBackup } from '../../../server/backup/payload.js';
+import { applyWorkerFiles, type TriggerBackup } from '../../../server/backup/payload.js';
 import type { Run } from '../../../shared/types.js';
 import type { Trigger, TriggerActor, TriggerInput } from '../../../shared/triggers.js';
 

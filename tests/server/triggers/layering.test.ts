@@ -335,8 +335,9 @@ test('limits.ts is a leaf, and state, once and audit refer back to each other on
 
 test('the store writes the engine file only through serializeState', async () => {
   const text = (await sourceFiles([TRIGGERS])).get(`${TRIGGERS}/store.ts`)!;
-  assert.match(text, /writePrivateJson\(this\.path, data\)/);
-  assert.match(text, /const data = serializeState\(draft\);/);
+  assert.match(text, /else await writePrivateJson\(this\.path,data!\)/);
+  assert.match(text, /const data = this\.database \? undefined : serializeState\(draft\);/);
+  assert.match(text, /if \(this\.database\) await this\.repository!\.update\(changesOf\(this\.rows,rows!\),kind\);/, 'SQL transport remains separate from the legacy file serializer');
   assert.doesNotMatch(text, /JSON\.stringify\(/, 'no other encoding of the state');
 });
 

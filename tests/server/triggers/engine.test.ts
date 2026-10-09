@@ -40,9 +40,13 @@ async function engine(t: TestContext) {
     session: () => undefined,
   };
   const services: TriggerService[] = [];
-  const open = async () => {
+  const make = () => {
     const service = new TriggerService({ stateDir: directory, executor, now: () => clock.now, tickMs: 3_600_000 });
     services.push(service);
+    return service;
+  };
+  const open = async () => {
+    const service = make();
     await service.start();
     return service;
   };
@@ -53,7 +57,7 @@ async function engine(t: TestContext) {
     await rm(directory, { recursive: true, force: true });
   });
   const file = () => readFile(join(directory, 'trigger-engine.json'), 'utf8');
-  return { directory, project, clock, runs, jobs, calls, order, open, file, executor, hold: (barrier: Promise<void> | undefined) => { gate = barrier; } };
+  return { directory, project, clock, runs, jobs, calls, order, open, make, file, executor, hold: (barrier: Promise<void> | undefined) => { gate = barrier; } };
 }
 
 const task = (project: string, name: string, values: Partial<TriggerInput> = {}): TriggerInput => ({ name, enabled: true,
@@ -129,7 +133,7 @@ test('recovered claims and cut-off polls are saved by the first commit at start'
   assert.match(saved.cursors[s.post.id].lastError, /POST was being sent/);
 });
 
-test('when the first commit at start cannot be written, the recovered state is used but the file keeps the claims', async t => {
+test('when the first commit at start cannot be written, startup rejects and explicit retry preserves recovery without dispatch', async t => {
   const f = await engine(t);
   const s = await seeded(f);
   const before = await f.file();
@@ -139,12 +143,18 @@ test('when the first commit at start cannot be written, the recovered state is u
     return original(...args);
   });
   syncBuiltinESMExports();
-  const service = await f.open();
+  const service = f.make();
+  Object.assign(f.calls, { create: 0, enqueue: 0, auto: 0 });
+  await assert.rejects(service.start(), /Cannot save triggers/);
+  assert.deepEqual([f.calls.create, f.calls.enqueue, f.calls.auto], [0, 0, 0]);
   assert.equal(service.event(s.listed.id).status, 'running');
   assert.equal(service.event(s.lost.id).status, 'uncertain');
+  await service.tick();
+  assert.deepEqual([f.calls.create, f.calls.enqueue, f.calls.auto], [0, 0, 0], 'held engine tick cannot dispatch recovered work');
   assert.equal(await f.file(), before, 'the claims stay on disk');
   t.mock.restoreAll(); syncBuiltinESMExports();
-  await service.flush();
+  await service.start();
+  assert.deepEqual([f.calls.create, f.calls.enqueue, f.calls.auto], [0, 0, 0], 'explicit retry recovers without dispatch');
   const saved = JSON.parse(await f.file());
   assert.equal(saved.events.find((event: TriggerEvent) => event.id === s.lost.id).status, 'uncertain', 'the next successful commit saves them');
 });
