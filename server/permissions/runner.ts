@@ -4,6 +4,7 @@ import { delimiter, join } from 'node:path';
 import { providerDirectories } from '../providers/discovery.js';
 import { promisify } from 'node:util';
 import type { PermissionRun, PermissionRunOutput } from '../../shared/permissions.js';
+import { TowerError } from '../../shared/errors.js';
 import { writePrivateJson } from '../stores/private-json.js';
 
 const exec = promisify(execFile);
@@ -138,6 +139,7 @@ export class PermissionRunner {
   private async execute(id: string, command: string, cwd: string, timeoutSeconds: number, group: string): Promise<void | 'defer'> {
     let proceed: boolean | 'defer';
     try { proceed = await this.options.beforeStart?.(id) ?? true; } catch (error) {
+      if (error instanceof TowerError && error.disposition === 'not-admitted') return 'defer';
       // best-effort: this save reports the failure; if it fails too there is nothing left to record it in
       await this.options.update(id, { status: 'failed', finishedAt: this.now(), error: `Tower could not confirm what was reviewed: ${error instanceof Error ? error.message : String(error)}` }).catch(() => {});
       return;
@@ -148,8 +150,20 @@ export class PermissionRunner {
     const startedAt = this.now();
     // Saved before the command starts: a worker that stops from here on leaves a run whose result is unknown, never
     // one that would start again.
-    try { await this.retry(() => this.options.update(id, { status: 'running', startedAt })); } catch (error) {
-      // Not started: said so, if that can be saved at all.
+    let uncertainWrite = false;
+    try {
+      for (let attempt = 1; ; attempt += 1) {
+        try { await this.options.update(id, { status: 'running', startedAt }); break; }
+        catch (error) {
+          if (error instanceof TowerError && error.disposition === 'not-admitted') throw error;
+          uncertainWrite = true;
+          if (attempt >= 3) throw error;
+          await new Promise(resolve => setTimeout(resolve, 1_000 * attempt));
+        }
+      }
+    } catch (error) {
+      if (!uncertainWrite && error instanceof TowerError && error.disposition === 'not-admitted') return 'defer';
+      // No process started, but an earlier uncertain write must never be replayed.
       await this.options.update(id, { status: 'failed', startedAt, finishedAt: this.now(), error: `Tower could not record the start: ${error instanceof Error ? error.message : String(error)}` }).catch(() => {});
       return;
     }

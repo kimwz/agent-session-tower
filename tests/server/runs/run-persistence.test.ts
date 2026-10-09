@@ -258,7 +258,7 @@ test('storage-held predecessor carries accepted private instructions and workflo
   const db = await storage.openStorage({ stateDir: f.stateDir, bundle: threadBundle('production') });
   await db.prepare({ allowMigration: true });
   const instructions = { text: 'Required private workflow policy', required: true };
-  const origin = { kind: 'owner' as const, workflowId: 'workflow-storage-carry' };
+  const origin = { kind: 'owner' as const, workflowId: '90000000-0000-4000-8000-000000000093' };
   const accepted = await f.manager.enqueue(f.session.id, 'Accepted before hold', {}, { instructions, origin });
   f.manager.holdStorage();
   await f.manager.flushState();

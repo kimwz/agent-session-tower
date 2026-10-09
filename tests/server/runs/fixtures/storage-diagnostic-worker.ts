@@ -74,4 +74,26 @@ if (startupFault === '1' || startupFault === 'late' || startupFault === 'command
     return gate.call(this, scope);
   };
 }
+// Pause a real retry prepare await; the parent fixture can submit a newer durable hold over RPC.
+if (process.env.TOWER_FIXTURE_STORAGE_RETRY === 'new-hold') {
+  const state = process.argv.at(-1)!;
+  const prepare = StorageClient.prototype.prepare;
+  let blocked = false;
+  StorageClient.prototype.prepare = async function (options) {
+    if (!blocked) {
+      try {
+        await readFile(join(state, 'fixture-retry-arm'));
+        blocked = true;
+        await writeFile(join(state, 'fixture-retry-waiting'), 'waiting', { mode: 0o600 });
+        const deadline = Date.now() + 15000;
+        for (;;) {
+          try { await readFile(join(state, 'fixture-retry-release')); break; }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || Date.now() > deadline) throw error; }
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    }
+    return prepare.call(this, options);
+  };
+}
 await runRunnerWorker(process.argv.at(-1)!);

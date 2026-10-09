@@ -581,3 +581,51 @@ test('managed B worker exposes overwritten-done owner recovery after a later C f
   const saved = JSON.parse(await readFile(storageUpdatePaths(state).receipt, 'utf8'));
   assert.equal(saved.kind, 'overwritten-done'); assert.deepEqual(saved.build, identity);
 });
+
+
+test('a newer actual rollback hold wins while the matching withdrawal retry awaits prepare', { timeout: 90000 }, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tw-new-hold-')));
+  const state = join(root, 'state'); const paths = await runnerPaths(state);
+  const { call } = await launchDiagnostic(t, root, state, paths, undefined, { TOWER_FIXTURE_STORAGE_RETRY: 'new-hold' });
+  const deadline = Date.now() + 60000;
+  const first = await waitForStorage(call, true, deadline);
+  const identity = first.snapshot!.storage!.identity!; const at = new Date().toISOString();
+  const record: RollbackRecord = { format: 'tower-storage-rollback', version: 1, id: 'old-withdrawal',
+    from: identity.appVersion, target: '0.0.1', sourceHash: 'b'.repeat(64), manifestDigest: 'c'.repeat(64),
+    entrySha256: 'd'.repeat(64), updateSha256: null, state: 'waiting', by: 'fixture-owner', reason: 'old hold', held: true, switched: false,
+    attempt: { n: 1, pid: process.pid, start: 'fixture-parent', nonce: 'a'.repeat(32), kind: 'run', at }, startedAt: at, updatedAt: at };
+  const publish = () => writeFile(storageUpdatePaths(state).rollback, JSON.stringify(record), { mode: 0o600 });
+  await publish();
+  assert.equal((await call('storageControl', ['hold', { fence: { id: record.id, attempt: 1 } }])).error, undefined);
+  const ports = rollbackPorts(async (action, input) => {
+    const reply = await call('storageControl', [action, input]); assert.equal(reply.error, undefined);
+    if (action === 'release') await writeFile(join(state, 'fixture-retry-arm'), 'arm', { mode: 0o600 });
+    return reply.result;
+  }, async () => assert.fail('withdrawal must not restart the web'));
+  assert.equal((await withdrawRollback({ stateDir: state, ports })).state, 'withdrawn');
+  const withdrawn = await readRollbackRecord(state);
+  assert.ok(withdrawn.state === 'present' && !withdrawn.record.held && withdrawn.record.attempt?.ended);
+  const retry = call('storageRetry');
+  try {
+    for (;;) {
+      try { await readFile(join(state, 'fixture-retry-waiting')); break; }
+      catch { if (Date.now() > deadline) assert.fail('The real retry prepare await was not reached.'); }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    record.id = 'new-rollback'; record.state = 'waiting'; record.held = true; record.reason = 'newest owner hold';
+    record.attempt = { n: 1, pid: process.pid, start: 'fixture-parent', nonce: 'e'.repeat(32), kind: 'run', at };
+    await publish();
+    assert.equal((await call('storageControl', ['hold', { fence: { id: record.id, attempt: 1 } }])).error, undefined, 'new durable rollback is actually accepted');
+  } finally { await writeFile(join(state, 'fixture-retry-release'), 'release old await', { mode: 0o600 }); }
+  assert.equal((await retry).error, undefined);
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  const held = await call('snapshot');
+  assert.equal(held.snapshot?.storage?.admissionOpen, false);
+  assert.equal(held.snapshot?.storage?.code, 'rollback-held');
+  assert.equal(held.snapshot?.storage?.reason, 'newest owner hold');
+  assert.equal((await call('create')).error?.disposition, 'not-admitted');
+  assert.equal(held.snapshot?.runs.length, 0, 'no dispatch after the old retry resumes');
+  assert.deepEqual(held.snapshot?.autoPrompts, [], 'no automation dispatch after the old retry resumes');
+  const durable = await readRollbackRecord(state);
+  assert.ok(durable.state === 'present' && durable.record.id === record.id && durable.record.held);
+});

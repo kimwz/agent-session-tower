@@ -108,6 +108,7 @@ export class PermissionService {
   private queue: Promise<unknown> = Promise.resolve();
   private errors = new Map<string, string>();
   private closed = false;
+  private storagePaused = false;
 
   constructor(private readonly options: PermissionServiceOptions) { this.path = join(options.stateDir, 'permissions.json'); }
 
@@ -132,10 +133,12 @@ export class PermissionService {
 
   /** Waits for changes under way; later calls are refused once closed. */
   async flush(): Promise<void> { await this.queue.catch(() => {}); }
-  close(): void { this.closed = true; }
+  close(): void { this.storagePaused = false; this.closed = true; }
   /** While the worker hands over, nothing changes; a handover that does not happen resumes. */
-  pause(): void { this.closed = true; }
-  resume(): void { this.closed = false; }
+  pause(): void { this.storagePaused = false; this.closed = true; }
+  /** A known storage hold refuses admission before any permission write. */
+  pauseForStorage(): void { if (!this.closed) { this.storagePaused = true; this.closed = true; } }
+  resume(): void { this.storagePaused = false; this.closed = false; }
 
   /**
    * The settings a Claude Code turn Tower starts in `cwd` gets: every project's rules, and those of the project the
@@ -668,14 +671,14 @@ export class PermissionService {
   private now(): string { return (this.options.now?.() ?? new Date()).toISOString(); }
 
   private serial<T>(work: () => Promise<T>, completionOnly = false): Promise<T> {
-    if (this.closed && !completionOnly) return Promise.reject(failure('권한 규칙을 지금은 바꿀 수 없습니다. 잠시 뒤 다시 시도하세요.', 'unavailable'));
+    try { if (!completionOnly) this.requireOpen(); } catch (error) { return Promise.reject(error); }
     const next = this.queue.catch(() => {}).then(async () => { if (!completionOnly) this.requireOpen(); return work(); });
     this.queue = next;
     return next;
   }
 
   private requireOpen(): void {
-    if (this.closed) throw failure('권한 규칙을 지금은 바꿀 수 없습니다. 잠시 뒤 다시 시도하세요.', 'unavailable');
+    if (this.closed) throw new TowerError('unavailable', '권한 규칙을 지금은 바꿀 수 없습니다. 잠시 뒤 다시 시도하세요.', this.storagePaused ? { disposition: 'not-admitted' } : undefined);
   }
 
   private async requireEffects(): Promise<void> {

@@ -52,8 +52,9 @@ test('serving target web resumes only the durable owner rollback through the rea
     await writeFile(join(dirname(entryPoint(installed)), 'contract.json'), JSON.stringify(artifactStorageContract(context, checked)));
   }
   await pointCurrent(state, version);
-  let held = false; let handoffs = 0; let successorFence: RollbackFence | undefined;
+  let held = false; let handoffs = 0; let successorFence: RollbackFence | undefined; let evidenceLost = false;
   const control = storageControl({ stateDir: state, client: () => client, hold: async () => { held = true; }, release: async () => { held = false; }, quiet: () => true,
+    acceptedFence: () => evidenceLost ? { id: 'other-operation', attempt: 1 } : successorFence,
     handoff: (_command, fence) => { handoffs++; successorFence = fence; } });
   const updates = new Updates({ stateDir: state, version, port: 1, managed: true, spawnHelper: () => {} });
   const serialize = <T>(work: () => Promise<T>) => updates.exclusive(work);
@@ -82,32 +83,79 @@ const call = storageControl({stateDir, client:()=>client, successorFence:fence, 
 process.on('message', async message => { try { process.send({id:message.id, result:await call(message.action, message.input)}); } catch(error) { process.send({id:message.id, error:String(error)}); } });
 process.send({ready:true});`);
   let child: ReturnType<typeof spawn> | undefined;
-  let childReady: Promise<void> | undefined;
+  let successorReady = false;
+  let pendingProofs = 0;
+  let launchTimer: ReturnType<typeof setTimeout> | undefined;
+  t.after(() => clearTimeout(launchTimer));
   let sequence = 0;
+  let unknownProof = false;
+  let launchError: unknown;
   const targetPorts = rollbackPorts(async (action, input) => {
-    if (!successorFence) {
+    if (launchError) throw launchError;
+    if (action === 'proof' && unknownProof) throw new Error('Owned predecessor proof unavailable');
+    if (!successorReady) {
       const answer = await control(action, input);
+      if (action === 'proof' && successorFence) {
+        if (!evidenceLost) {
+          assert.equal((answer as { handoff: string }).handoff, 'pending');
+          pendingProofs++;
+        }
+      }
       if (action === 'handoff' && successorFence) {
-        await client.close();
-        const { artifactOf } = await import('../storage/helpers.js');
-        child = spawn(process.execPath, ['--import', 'tsx', script, state, JSON.stringify(successorFence), JSON.stringify(artifactOf('production'))], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
-        let stderr = '';
-        child.stderr!.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-16000); });
-        const ended = once(child, 'exit');
-        t.after(async () => { if (child!.exitCode === null && child!.signalCode === null) child!.kill('SIGKILL'); await ended; });
-        childReady = new Promise((resolve, reject) => { child!.on('message', message => { if ((message as { ready?: boolean }).ready) resolve(); }); child!.once('exit', code => reject(new Error(`successor exited ${code}: ${stderr}`))); });
+        const acceptedFence = successorFence;
+        launchTimer = setTimeout(() => {
+          void (async () => {
+            const { artifactOf } = await import('../storage/helpers.js');
+            child = spawn(process.execPath, ['--import', 'tsx', script, state, JSON.stringify(acceptedFence), JSON.stringify(artifactOf('production'))], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+            let stderr = '';
+            child.stderr!.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-16000); });
+            const ended = once(child, 'exit');
+            t.after(async () => { if (child!.exitCode === null && child!.signalCode === null) child!.kill('SIGKILL'); await ended; });
+            child!.on('message', message => { if ((message as { ready?: boolean }).ready) successorReady = true; });
+            child!.once('exit', code => { if (!successorReady) launchError = new Error(`successor exited ${code}: ${stderr}`); });
+          })().catch(error => { launchError = error; });
+        }, 1000);
       }
       return answer;
     }
-    await childReady;
     const id = ++sequence;
     return new Promise((resolve, reject) => {
       const listener = (message: unknown) => { const reply = message as { id: number; result?: unknown; error?: string }; if (reply.id !== id) return; child!.off('message', listener); if (reply.error) reject(new Error(reply.error)); else resolve(reply.result); };
       child!.on('message', listener); child!.send({ id, action, input });
     });
   }, async () => { assert.fail('target web does not restart for continuation'); });
-  const outcome = await storageWebServing({ stateDir: state, managed: true, running, ports: targetPorts, serialize });
+  const context = { stateDir: state, managed: true, running, ports: targetPorts, serialize };
+  const timedOut = await storageWebServing(context, { intervalMs: 5, timeoutMs: 10 });
+  assert.ok(timedOut && 'record' in timedOut && timedOut.record.handoff?.state === 'pending');
+  assert.equal(handoffs, 1); assert.equal(held, true);
+  const abort = new AbortController();
+  const aborted = await storageWebServing({ ...context, serialize: async work => {
+    const result = await serialize(work);
+    abort.abort();
+    return result;
+  } }, { signal: abort.signal });
+  assert.ok(aborted && 'record' in aborted && aborted.record.handoff?.state === 'pending');
+  assert.equal(handoffs, 1); assert.equal(held, true);
+  const unknown = await storageWebServing({ ...context, serialize: async work => {
+    const result = await serialize(work);
+    unknownProof = true;
+    return result;
+  } }, { intervalMs: 5 });
+  assert.ok(unknown && 'record' in unknown && unknown.record.handoff?.state === 'unknown');
+  assert.equal(handoffs, 1); assert.equal(held, true);
+  unknownProof = false;
+  const lostEvidence = await storageWebServing({ ...context, serialize: async work => {
+    const result = await serialize(work);
+    evidenceLost = true;
+    return result;
+  } }, { intervalMs: 5 });
+  assert.ok(lostEvidence && 'record' in lostEvidence && lostEvidence.record.handoff?.state === 'unknown');
+  assert.equal(handoffs, 1); assert.equal(held, true);
+  evidenceLost = false;
+  const outcome = await storageWebServing(context);
   assert.equal(outcome?.state, 'completed', JSON.stringify(outcome)); assert.equal(handoffs, 1);
+  assert.equal((await targetPorts.servingProof(successorFence!)).gate.open, true);
+  assert.ok(pendingProofs > 0, 'accepted returns before the actual successor is ready');
   const durable = await readRollbackRecord(state);
   assert.ok(durable.state === 'present' && !durable.record.held && durable.record.handoff?.state === 'done');
   if (durable.state !== 'present') assert.fail('durable completion required');
