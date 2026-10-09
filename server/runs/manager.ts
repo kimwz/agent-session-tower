@@ -388,6 +388,7 @@ export class RunManager extends EventEmitter {
     return this.registry.backfill(links, id => this.runs.get(id));
   }
 
+  bootstrapStorage(update: Parameters<RunHistory['bootstrapStorage']>[0]): Promise<void> { return this.history.bootstrapStorage(update); }
   useStorage(storage: StorageClient): void { this.history.useStorage(storage); }
   pendingAdmission(): { commandId: string; sha256: string } | undefined { return this.history.pendingAdmission(); }
   private async persistNativeIdentity(run: Run): Promise<boolean> {
@@ -1340,7 +1341,9 @@ export class RunManager extends EventEmitter {
 
   /** Waits for every accepted change to reach disk, without stopping or cancelling anything. */
   async flushState(): Promise<void> {
-    this.persist(); await this.flush();
+    // Before restore completes, the empty live maps do not represent the saved source.
+    if (this.started) this.persist();
+    await this.flush();
     this.history.checkInstructionsSaved();
   }
 

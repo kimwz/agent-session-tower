@@ -31,6 +31,27 @@ if (process.env.TOWER_FIXTURE_COLD_COUNTS === '1') {
   channel('tower.retention.codex-metadata-open').subscribe(() => { counts.native++; save(); });
 }
 
+// Pause only the successful product bootstrap response, after its real SDK import/commit completed.
+if (process.env.TOWER_FIXTURE_RUNS_BOOTSTRAP === 'new-hold') {
+  const state = process.argv.at(-1)!;
+  const bootstrap = RunManager.prototype.bootstrapStorage;
+  let successes = 0;
+  RunManager.prototype.bootstrapStorage = async function (update) {
+    await bootstrap.call(this, update);
+    successes++;
+    await writeFile(join(state, 'fixture-bootstrap-successes.json'), JSON.stringify(successes), { mode: 0o600 });
+    if (successes === 1) {
+      await writeFile(join(state, 'fixture-bootstrap-waiting'), 'actual bootstrap committed', { mode: 0o600 });
+      const deadline = Date.now() + 15000;
+      for (;;) {
+        try { await readFile(join(state, 'fixture-bootstrap-release')); break; }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || Date.now() > deadline) throw error; }
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+    }
+  };
+}
+
 // Existing disposable worker fixture only: real SDK commands fail at a later startup gate,
 // after permissions and auto prompts have started. No storage result is mocked as successful.
 const startupFault = process.env.TOWER_FIXTURE_STORAGE_STARTUP;

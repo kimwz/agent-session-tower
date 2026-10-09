@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { StorageClient } from '../storage/client.js';
+import { bootstrapRuns, holdRunsEvidence } from './storage-transfer.js';
+import type { StorageUpdateInput } from '../link/storage-update.js';
 import { RunsRepository } from './storage-repository.js';
-import { holdRunsEvidence } from './storage-transfer.js';
 import { canonical, rowsOf, RUN_SOURCE_BYTES, type RunDocuments, type RunRow, type RunChange } from './storage-codec.js';
 import { readFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -47,6 +48,12 @@ export class RunHistory {
   /** The last content each file holds. Updated only inside the write queue, after a successful write. */
   private readonly saved: { runs?: string; created?: string; instructions?: string } = {};
   private repository?: RunsRepository;
+  private bootstrap?: () => Promise<void>;
+  bootstrapStorage(update: () => Promise<StorageUpdateInput>): Promise<void> {
+    if (!this.repository) throw new Error('Runs storage is unavailable.');
+    this.bootstrap ??= bootstrapRuns(this.repository, dirname(this.runsFile), update);
+    return this.bootstrap();
+  }
   private database = false;
   private current?: RunDocuments;
   private rows: RunRow[] = [];

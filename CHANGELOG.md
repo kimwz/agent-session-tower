@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.123.0] - 2026-10-10
+
+### Changed
+
+- Bootstrap runs into SQLite before worker restoration and admission, preserving sealed raw sources and holding incomplete or uncertain imports without replay. Existing database authority remains usable independently of legacy JSON.
+- Activate the runs 1.123 cutover after actual 1.122 preparation and restore retention's published 1.121 cutover contract. This release does not complete the full #84 migration.
+
 ## [1.122.0] - 2026-10-10
 
 ### Changed

@@ -2,9 +2,9 @@ import type { StorageDomainSchema } from '../storage/contract.js';
 import { RUN_CHUNK_BYTES, RUN_INTENT_BYTES } from './storage-codec.js';
 export const RUN_STAGE_COUNT = 16;
 export const RUN_STAGE_BYTES = 2 * RUN_INTENT_BYTES;
-/** Released preparation and migration bytes remain stable across cutover. */
+/** A preparation only. B adds cutover without editing this released migration. */
 export const runsSchema: StorageDomainSchema = {
-  domain: 'runs', cutover: { artifactVersion: '1.123.0', importContract: 1 }, preparation: { requiredArtifactVersion: '1.122.0', readerContract: 1, writerContract: 1 },
+  domain: 'runs', preparation: { requiredArtifactVersion: '1.122.0', readerContract: 1, writerContract: 1 },
   migrations: [{ version: 1, sql: `
 CREATE TABLE runs_state (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), revision INTEGER NOT NULL CHECK (revision > 0)) STRICT;
 CREATE TABLE runs_rows (

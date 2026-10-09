@@ -3,7 +3,7 @@ import { PassThrough, Writable } from 'node:stream';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, chmod, lstat, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -13,7 +13,7 @@ import { RunsRepository } from '../../../server/runs/storage-repository.js';
 import { RunHistory } from '../../../server/runs/run-history.js';
 import { RunManager } from '../../../server/runs/manager.js';
 import { canonical, documentsHash, parseRunDocuments, rowsOf, RUN_SOURCE_BYTES, type RunDocuments } from '../../../server/runs/storage-codec.js';
-import { importRuns, exportRuns, restoreRunsStorage, workerLegacyFiles } from '../../../server/runs/storage-transfer.js';
+import { bootstrapRuns, importRuns, exportRuns, restoreRunsStorage, workerLegacyFiles } from '../../../server/runs/storage-transfer.js';
 import { RemoteRequestLedger } from '../../../server/remote/request-ledger.js';
 import type { Run, Session } from '../../../shared/types.js';
 import type { PermissionRequest } from '../../../shared/permissions.js';
@@ -27,7 +27,7 @@ async function folder(t: TestContext) {
 function documents(cwd: string): RunDocuments {
   const id = '10000000-0000-4000-8000-000000000001', sessionId = 'codex:monitor-10000000-0000-4000-8000-000000000002';
   const session: Session = { id: sessionId, nativeId: '', provider: 'codex', title: 'Fixture', cwd, project: 'fixture', status: 'idle', statusReason: '', createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-01T00:00:00Z', lastMessage: '', messageCount: 0, isSubagent: false, resumable: false, creationPending: true };
-  return { runs: [{ id,sessionId,prompt: 'fixture',status: 'queued',createdAt: session.createdAt,output: '', needsInstructions: true, keepQueued: true, extra: { raw: ['preserved'] } } as unknown as Run], created: [{ session,runId: id,confirmed: false,origin: { kind: 'owner', untrustedInput: false } }], instructions: { [id]: { text: 'Required fixture instructions', required: true } } };
+  return { runs: [{ id,sessionId,prompt: 'fixture',status: 'queued',createdAt: session.createdAt,output: '', needsInstructions: true, keepQueued: true, retain: true, extra: { raw: ['preserved'] } } as unknown as Run], created: [{ session,runId: id,confirmed: false,origin: { kind: 'owner', untrustedInput: false } }], instructions: { [id]: { text: 'Required fixture instructions', required: true } } };
 }
 async function sources(stateDir: string, data: RunDocuments) {
   for (const [key,name] of [['runs','runs.json'],['created','created-sessions.json'],['instructions','run-instructions.json']] as const) await writeFile(join(stateDir,name),JSON.stringify(data[key]),{ mode: 0o600 });
@@ -57,15 +57,26 @@ test('actual runs A refuses first import; B authority survives absent/stale JSON
   await ac.close();
   const bc = await f.open(f.b), br = new RunsRepository(bc);
   const update = { stateDir: f.stateDir,managed: false,build: { version: f.b.version,manifest: f.b.manifest,preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.b.bundle() }) } };
-  const evidence = await importRuns({ storage: bc,repository: br,stateDir: f.stateDir,evidenceParent,commandId: 'b-import',update });
+  await bootstrapRuns(br, f.stateDir, async () => update)();
+  const evidenceNames = await readdir(evidenceParent);
+  const evidence = { directory: join(evidenceParent, evidenceNames[0]) };
+  assert.equal(evidenceNames.length, 1);
   assert.deepEqual((await br.exportCurrent()).documents,data);
-  assert.equal((await bc.receipt('b-import-commit')).found,true);
+  assert.equal((await bc.receipt(`${evidenceNames[0]}-commit`)).found,true);
   const manifest = JSON.parse(await readFile(join(evidence.directory,'manifest.json'),'utf8'));
   assert.equal(manifest.canonicalSha256,documentsHash(data));
+  for (const [kind, name] of [['runs', 'runs.json'], ['created', 'created-sessions.json'], ['instructions', 'run-instructions.json']] as const) {
+    const sealed = await readFile(join(evidence.directory, name));
+    assert.deepEqual(sealed, await readFile(join(f.stateDir, name)));
+    assert.equal((await lstat(join(evidence.directory, name))).mode & 0o777, 0o600);
+    assert.equal(manifest.files[name].bytes, sealed.length);
+    assert.deepEqual(JSON.parse(sealed.toString('utf8')), data[kind]);
+  }
   await bc.close();
   await rm(join(f.stateDir,'runs.json')); await writeFile(join(f.stateDir,'run-instructions.json'),'{bad');
   const current = await f.open(f.a), repository = new RunsRepository(current), history = new RunHistory(f.stateDir,current);
   assert.deepEqual(await history.readCreated(),data.created);
+  await bootstrapRuns(repository, f.stateDir, async () => { throw new Error('SQL authority must not probe JSON/update evidence'); })();
   const restored = await history.restore(); assert.equal(restored[0].status,'queued'); assert.equal(restored[0].instructions?.text,data.instructions[data.runs[0].id].text);
   const run = data.runs[0], required = { text: 'Only instructions changed',required: true };
   await repository.markers(run,{ needsInstructions: true,keepQueued: true },required,data.instructions[run.id],'instructions-only');
@@ -85,6 +96,10 @@ test('actual runs A refuses first import; B authority survives absent/stale JSON
   const saved = await exportRuns(repository,evidenceParent,'current-export');
   await repository.output(compatibleData.runs[0],'new output','output-change');
   await restoreRunsStorage(repository,saved.directory,'restore-current');
+  const originalExport = await readFile(join(saved.directory, 'runs.json'));
+  await writeFile(join(saved.directory, 'runs.json'), '[]');
+  await assert.rejects(restoreRunsStorage(repository,saved.directory,'restore-damaged'), /hash mismatch/);
+  await writeFile(join(saved.directory, 'runs.json'), originalExport);
   assert.equal((await repository.exportCurrent()).documents.runs[0].output,'');
   await restoreRunsStorage(repository,saved.directory,'restore-current');
   await assert.rejects(repository.restore({ ...data,runs: [] },'restore-current'),/conflicts/);
@@ -605,4 +620,48 @@ test('actual target termination before handover and compensation loss never laun
   await (manager as unknown as { pump(): Promise<void> }).pump(); await manager.flushState();
   assert.equal(starts,1); assert.equal(inserts,0);
   await manager.close();
+});
+
+
+test('B bootstrap initializes only absent history and holds missing dependencies, prior seals and stages', async t => {
+  for (const kind of ['fresh', 'missing', 'unsafe', 'sealed', 'stage'] as const) {
+    const f = await prepared(t), client = await f.open(f.b), repository = new RunsRepository(client);
+    const update = { stateDir: f.stateDir, managed: false, legacyFiles: (domain: string) => workerLegacyFiles(f.stateDir, domain), build: { version: f.b.version, manifest: f.b.manifest, preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir, bundle: f.b.bundle() }) } };
+    if (kind === 'unsafe') { await sources(f.stateDir, documents(f.stateDir)); await chmod(join(f.stateDir, 'created-sessions.json'), 0o644); }
+    if (kind === 'missing') await writeFile(join(f.stateDir, 'runs.json'), '[]', { mode: 0o600 });
+    if (kind === 'sealed') { const parent = join(f.stateDir, 'runs-storage-migrations'); await mkdir(parent, { mode: 0o700 }); await mkdir(join(parent, 'prior'), { mode: 0o700 }); }
+    if (kind === 'stage') await client.write('runs', 'begin', { intent: 'prior', bytes: 1, sha256: 'a'.repeat(64), chunks: 1 }, 'prior-begin');
+    const bootstrap = bootstrapRuns(repository, f.stateDir, async () => update);
+    if (kind === 'fresh') {
+      await bootstrap(); await bootstrap();
+      assert.deepEqual((await repository.exportCurrent()).documents, { runs: [], created: [], instructions: {} });
+      assert.equal((await readdir(join(f.stateDir, 'runs-storage-migrations'))).length, 1);
+    } else {
+      await assert.rejects(bootstrap()); await assert.rejects(bootstrap());
+      assert.equal(await repository.databaseAuthority(), false);
+    }
+  }
+});
+
+for (const fault of ['before', 'after'] as const) test(`B bootstrap ${fault} loss never replays an uncertain import`, async t => {
+  const f = await prepared(t), data = documents(f.stateDir), evidenceParent = await sources(f.stateDir, data);
+  const client = await f.open(f.b, fault), repository = new RunsRepository(client);
+  const update = { stateDir: f.stateDir, managed: false, build: { version: f.b.version, manifest: f.b.manifest, preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir, bundle: f.b.bundle(fault) }) } };
+  const bootstrap = bootstrapRuns(repository, f.stateDir, async () => update);
+  await assert.rejects(bootstrap());
+  const identity = repository.lastIntent!; assert.ok(identity);
+  await client.reopen(); await client.prepare({ allowMigration: false });
+  await assert.rejects(bootstrap());
+  assert.deepEqual(repository.lastIntent, identity);
+  assert.equal((await readdir(evidenceParent)).length, 1);
+  assert.equal(await repository.resolvePending(), fault === 'after' ? 'committed' : 'not-committed');
+  if (fault === 'after') { await bootstrap(); assert.deepEqual((await repository.exportCurrent()).documents, data); }
+  else await assert.rejects(bootstrap());
+  await client.close();
+  const successor = await f.open(f.b), nextRepository = new RunsRepository(successor);
+  const nextUpdate = { ...update, build: { ...update.build, preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir, bundle: f.b.bundle() }) } };
+  const next = bootstrapRuns(nextRepository, f.stateDir, async () => nextUpdate);
+  if (fault === 'before') await assert.rejects(next(), /evidence exists without authority/);
+  else { await next(); assert.deepEqual((await nextRepository.exportCurrent()).documents, data); }
+  assert.equal((await readdir(evidenceParent)).length, 1);
 });

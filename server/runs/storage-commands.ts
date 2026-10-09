@@ -38,6 +38,7 @@ export function runsDomainFor(schema: StorageDomainSchema): StorageDomain {
   if (schema.domain !== runsSchema.domain || canonical(schema.migrations) !== canonical(runsSchema.migrations) || canonical(schema.preparation) !== canonical(runsSchema.preparation)) throw new Error('Runs schema/contract mismatch.');
   return defineStorageDomain({ schema, commands: {
     head: { kind: 'read', run: context => head(context) },
+    bootstrapHistory: { kind: 'read', run: context => ({ stages: Number((context.prepare('SELECT count(*) AS n FROM runs_stages').get() as { n: number }).n) }) },
     keys: { kind: 'read', run(context, payload) {
       const input = object(payload); current(context, input);
       return context.prepare('SELECT ordinal,length(CAST(id AS BLOB)) AS idBytes,length(CAST(json AS BLOB)) AS bytes FROM runs_rows WHERE kind = ? AND ordinal >= ? ORDER BY ordinal LIMIT 32').all(String(input.kind), integer(input.after, Number.MAX_SAFE_INTEGER));

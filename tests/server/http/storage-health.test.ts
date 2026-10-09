@@ -81,7 +81,7 @@ test('candidate HTTP health independently preflights a captured web attached to 
   else if (cutover) {
     assert.equal(health.candidateStorage.code, 'prerequisite-required');
     assert.equal(health.candidateStorage.importAllowed, false);
-    assert.equal(health.candidateStorage.prepare, '1.120.2');
+    assert.equal(health.candidateStorage.prepare, '1.122.0');
   }
   mismatched = true;
   const mismatch = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/api/health`);
