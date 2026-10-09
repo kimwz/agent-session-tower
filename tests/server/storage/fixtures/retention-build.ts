@@ -11,7 +11,7 @@ import { buildIdentityModule, buildIdentityPlugin, STORAGE_BUNDLE_FORMAT, type S
 import type * as Parent from './parent.js';
 
 /** Actual A/B domain handlers and captured SDK compiled as future artifact versions; no mocked import support. */
-export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0' | '1.122.0' | '1.123.0', output?: string) {
+export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0' | '1.122.0' | '1.123.0', output?: string, retentionCutover = version === '1.121.0' || version === '1.123.0') {
   const directory = output ?? await mkdtemp(join(tmpdir(), 'tower-retention-artifact-'));
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const root = fileURLToPath(new URL('../../../../', import.meta.url));
@@ -31,7 +31,7 @@ export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' 
     builder.onLoad({ filter: /[\\/]shared[\\/]app-identity\.ts$/ }, async args => ({ contents: (await readFile(args.path, 'utf8')).replace(/export const APP_VERSION = '[^']+';/, `export const APP_VERSION = '${version}';`), loader: 'ts' }));
   } };
   const { cutover: _cutover, ...preparedSchema } = retentionSchema;
-  const schema = old ? { ...preparedSchema, preparation: { ...preparedSchema.preparation!, requiredArtifactVersion: '1.120.0' }, migrations: preparedSchema.migrations.slice(0, 1) } : preparation ? { ...preparedSchema, preparation: { ...preparedSchema.preparation!, requiredArtifactVersion: capture.preparationMinimum } } : retentionSchema;
+  const schema = old ? { ...preparedSchema, preparation: { ...preparedSchema.preparation!, requiredArtifactVersion: '1.120.0' }, migrations: preparedSchema.migrations.slice(0, 1) } : preparation ? { ...preparedSchema, preparation: { ...preparedSchema.preparation!, requiredArtifactVersion: capture.preparationMinimum } } : !retentionCutover ? preparedSchema : { ...retentionSchema, cutover: { artifactVersion: '1.121.0', importContract: 1 } };
   if (old) {
     const capturedSchema = await readFile(join(captureRoot, 'storage-schema.ts.txt'), 'utf8');
     const currentSchema = await readFile(join(root, 'server/sessions/retention/storage-schema.ts'), 'utf8');
@@ -47,7 +47,7 @@ import { runStorageThread } from './server/storage/thread/runtime.js';
 import { retentionDomainFor } from './server/sessions/retention/storage-commands.js';
 import { retentionSchema } from './server/sessions/retention/storage-schema.js';
 ${runsRelease ? `import { runsDomain } from './server/runs/storage-commands.js';` : ''}
-const schema = ${version !== '1.121.0' || runsRelease ? 'retentionSchema' : `{ ...retentionSchema, cutover: { artifactVersion: '${version}', importContract: 1 } }`};
+const schema = ${retentionCutover ? `{ ...retentionSchema, cutover: { artifactVersion: '1.121.0', importContract: 1 } }` : 'retentionSchema'};
 ${!['before', 'after'].includes(fault) ? '' : `let commitId = -1;
 parentPort.on('message', message => { if (message.op === 'write' && message.command === 'commit') { commitId = message.id; ${fault === 'before' ? 'process.exit(9);' : ''} } });
 const post = parentPort.postMessage.bind(parentPort);

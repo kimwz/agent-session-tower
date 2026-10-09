@@ -10,7 +10,7 @@ export function newerAutoPromptJob(current: AutoPromptJob | undefined, incoming:
   if (!current || current.id !== incoming.id) return incoming;
   if (!autoPromptPending(current)) return current;
   if (incoming.updatedAt < current.updatedAt) return current;
-  const order = { queued: 0, routing: 1, dispatching: 2, completed: 3, error: 3, cancelled: 3 };
+  const order = { queued: 0, routing: 1, dispatching: 2, completed: 3, error: 3, cancelled: 3, uncertain: 3 };
   if (order[incoming.status] < order[current.status]) return current;
   if (current.status === 'routing' && incoming.status === 'routing' && current.stage === 'session' && incoming.stage === 'directory') return current;
   return incoming;

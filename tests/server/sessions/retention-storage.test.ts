@@ -1,6 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, realpath, rm, stat, rename, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, realpath, rm, stat, rename, readdir, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -9,6 +9,8 @@ import type { StorageStatus } from '../../../server/storage/contract.js';
 import { storageFs } from '../../../server/storage/paths.js';
 import type { WorkerStorageStatus } from '../../../shared/storage.js';
 import { createMonitorServer } from '../../../server/http/server.js';
+import { pointCurrent, runtimePaths } from '../../../server/link/service.js';
+import { updatePaths } from '../../../server/link/storage-update.js';
 import { retentionBuild } from '../storage/fixtures/retention-build.js';
 import { artifactStorageContract, preparationCheck, recordPreparationEvidence, evaluateStorageUpdate, type StorageUpdateInput } from '../../../server/link/storage-update.js';
 import { RetentionStore } from '../../../server/sessions/retention/store.js';
@@ -55,6 +57,57 @@ async function openB(t: TestContext, stateDir: string, b: Awaited<ReturnType<typ
   const update: StorageUpdateInput = { stateDir, managed: false, build: { version: b.version, manifest: b.manifest, preflight } };
   return { client, update };
 }
+
+test('old A2/B121 authority admits preparation-only new A before SDK prepare and whole evidence admits B123', async t => {
+  const stateDir = await folder(t), { a, b } = await builds(t), evidenceParent = await sources(stateDir);
+  await prepareA(stateDir, a);
+  const oldB = await openB(t, stateDir, b);
+  await importRetention({ storage: oldB.client, stateDir, evidenceParent, update: oldB.update, commandId: 'old-b-import' });
+  await oldB.client.close();
+  const badA = await retentionBuild('1.122.0', await folder(t), true);
+  const newA = await retentionBuild('1.122.0', await folder(t));
+  const newB = await retentionBuild('1.123.0', await folder(t));
+  const input = async (build: typeof newA): Promise<StorageUpdateInput> => ({ stateDir, managed: false, build: {
+    version: build.version, manifest: build.manifest,
+    preflight: await build.storage.preflightStorage({ stateDir, bundle: build.bundle() }),
+  } });
+  const bad = await input(badA), next = await input(newA);
+  assert.equal((await evaluateStorageUpdate(bad)).code, 'prerequisite-required');
+  assert.equal((await evaluateStorageUpdate(next)).code, 'no-cutover', 'evaluate before SDK prepare');
+  const managed = async (target: StorageUpdateInput, previous: StorageUpdateInput) => {
+    await mkdir(runtimePaths(stateDir).versions, { recursive: true, mode: 0o700 });
+    await pointCurrent(stateDir, target.build.version);
+    const at = '2026-10-10T00:00:00.000Z';
+    await writeFile(updatePaths(stateDir).status, JSON.stringify({ version: target.build.version, previous: previous.build.version, stage: 'done', startedAt: at, updatedAt: at }), { mode: 0o600 });
+    const result = await evaluateStorageUpdate({ ...target, managed: true, probe: async (_directory, version) => {
+      const build = version === target.build.version ? target.build : previous.build;
+      return { state: 'contract', contract: artifactStorageContract({ identity: build.preflight.identity!, manifest: build.manifest! }, build.preflight) };
+    } });
+    await rm(updatePaths(stateDir).status);
+    return result;
+  };
+  assert.equal((await managed(bad, oldB.update)).code, 'previous-incompatible');
+  const admitted = await managed(next, oldB.update);
+  assert.equal(admitted.importAllowed, true);
+  assert.equal(admitted.evidence.previous?.check.state, 'not-required');
+  const client = await newA.storage.openStorage({ stateDir, bundle: newA.bundle() }); t.after(() => client.close());
+  const prepared = await client.prepare({ allowMigration: true });
+  await retentionBootstrap(client, stateDir, async () => next, false)();
+  const store = new RetentionStore(join(stateDir, 'retention'), { storage: client }); await store.start();
+  assert.equal(store.get('operation')!.error, documents().journal.entries[0].error);
+  await store.put({ ...store.get('operation')!, error: 'new A SQL write' });
+  assert.equal((await new RetentionRepository(client).exportCurrent()).documents.journal.entries[0].error, 'new A SQL write');
+  const preparedInput = await input(newA);
+  const evidence = await recordPreparationEvidence(stateDir, { context: client.context!, preflight: preparedInput.build.preflight, prepared, gate: await client.gate('core') });
+  assert.deepEqual(evidence.map(item => item.domain), ['retention', 'runs']);
+  for (const item of evidence) assert.deepEqual(item.manifest, newA.manifest);
+  await client.close();
+  const takeover = await input(newB);
+  assert.equal((await evaluateStorageUpdate(takeover)).code, 'direct-evidence');
+  const kept = await managed(takeover, preparedInput);
+  assert.equal(kept.importAllowed, true);
+  assert.equal(kept.evidence.previous?.check.state, 'satisfied');
+});
 
 test('actual A refuses first import; actual B source backup/marker/receipt; A reads and writes current DB without JSON fallback', async t => {
   const stateDir = await folder(t), { a, b } = await builds(t), original = documents(), evidenceParent = await sources(stateDir, original);
@@ -305,10 +358,44 @@ test('actual before/after commit crash receipts separate unknown from absent aut
     const bootstrap = retentionBootstrap(reopened.client, stateDir, async () => reopened.update, false);
     if (fault === 'before') await assert.rejects(bootstrap(), /evidence exists without authority/);
     else await bootstrap();
-    if (fault === 'after') {
-      assert.deepEqual((await new RetentionRepository(reopened.client).exportCurrent()).documents, documents());
-      await assert.rejects(importRetention({ storage: reopened.client, update: reopened.update, stateDir, evidenceParent }), /marker exists/);
+    await reopened.client.close();
+    const newA = await retentionBuild('1.122.0', await folder(t));
+    const ac = await newA.storage.openStorage({ stateDir, bundle: newA.bundle() }); t.after(() => ac.close());
+    await ac.prepare({ allowMigration: true });
+    const aUpdate: StorageUpdateInput = { stateDir, managed: false, build: { version: newA.version, manifest: newA.manifest, preflight: await newA.storage.preflightStorage({ stateDir, bundle: newA.bundle() }) } };
+    const aBootstrap = retentionBootstrap(ac, stateDir, async () => aUpdate, false);
+    if (fault === 'before') await assert.rejects(aBootstrap(), /evidence exists without authority/);
+    else {
+      await aBootstrap();
+      assert.deepEqual((await new RetentionRepository(ac).exportCurrent()).documents, documents());
     }
+    assert.deepEqual(await readdir(evidenceParent), attempts, 'new A preserves sealed attempt without replay');
+    assert.equal((await ac.receipt(`${attempts[0]}-commit`)).found, fault === 'after');
+    if (fault === 'after') await assert.rejects(importRetention({ storage: ac, update: aUpdate, stateDir, evidenceParent }), /marker exists/);
+    await ac.close();
+  }
+});
+
+test('preparation-only bootstrap holds unsafe prior evidence and keeps fresh history absent', async t => {
+  const a = await retentionBuild('1.122.0', await folder(t));
+  for (const prior of ['absent', 'file', 'unsafe', 'sealed'] as const) {
+    const stateDir = await folder(t), path = join(stateDir, 'storage-migrations');
+    if (prior === 'file') await writeFile(path, 'unreadable evidence directory', { mode: 0o600 });
+    if (prior === 'unsafe') { await mkdir(path, { mode: 0o700 }); await chmod(path, 0o755); }
+    if (prior === 'sealed') { await mkdir(path, { mode: 0o700 }); await mkdir(join(path, 'prior-attempt'), { mode: 0o700 }); }
+    const client = await a.storage.openStorage({ stateDir, bundle: a.bundle() }); t.after(() => client.close());
+    await client.prepare({ allowMigration: true });
+    const update: StorageUpdateInput = { stateDir, managed: false, build: { version: a.version, manifest: a.manifest, preflight: await a.storage.preflightStorage({ stateDir, bundle: a.bundle() }) } };
+    const bootstrap = retentionBootstrap(client, stateDir, async () => update, prior === 'absent');
+    if (prior === 'absent') {
+      await bootstrap();
+      await assert.rejects(stat(path), { code: 'ENOENT' });
+      assert.equal(await retentionLegacyFiles(stateDir, 'retention'), 'absent');
+    } else {
+      await assert.rejects(bootstrap(), /Unsafe retention evidence parent|owner-only|evidence exists without authority/);
+      assert.equal((await new RetentionRepository(client).head()).authority, null);
+    }
+    await client.close();
   }
 });
 

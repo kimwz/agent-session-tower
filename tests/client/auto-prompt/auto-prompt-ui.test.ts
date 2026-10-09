@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { AutoPromptJob, AutoPromptRequest } from '../../../shared/types.js';
-import { createAutoPromptAttempt, newerAutoPromptJob } from '../../../client/src/auto-prompt/auto-prompt-request.js';
+import { autoPromptPending, createAutoPromptAttempt, newerAutoPromptJob } from '../../../client/src/auto-prompt/auto-prompt-request.js';
 import { ApiError, type api } from '../../../client/src/common/lib.js';
 
 const request = (): AutoPromptRequest => ({ requestId: 'request-1', provider: 'claude', prompt: '  Keep this request exactly.\n', attachments: [{ name: 'diagram.png', mimeType: 'image/png', data: 'aGVsbG8=' }] });
@@ -132,4 +132,14 @@ test('navigation consumption happens before a callback can reenter with duplicat
   }
   receive();
   assert.deepEqual(navigations, ['claude:chosen']);
+});
+
+test('uncertain jobs become stable and cannot return to pending or invite resend', () => {
+  const pending = job({ status: 'dispatching' });
+  const uncertain = job({ status: 'uncertain', updatedAt: '2026-10-10T00:00:00Z' });
+  assert.equal(newerAutoPromptJob(pending, uncertain), uncertain);
+  assert.equal(autoPromptPending(uncertain), false);
+  for (const status of ['queued', 'routing', 'dispatching', 'error', 'completed'] as const) {
+    assert.equal(newerAutoPromptJob(uncertain, job({ status, updatedAt: '2026-10-11T00:00:00Z' })), uncertain);
+  }
 });

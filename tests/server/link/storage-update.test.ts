@@ -140,7 +140,7 @@ test('an installed artifact states its storage contract; a JSON-only release is 
   assert.equal(parseArtifactStorageContract(JSON.stringify(rebound), A).state, 'unverifiable', 'an identity bound to another manifest');
 });
 
-test('this build prints its own contract: trusted bundle, runtime probe, retention B cutover', async t => {
+test('this build prints its own contract: trusted bundle, runtime probe, two preparation-only domains', async t => {
   const answer = await describeArtifactStorageContract();
   assert.ok('contract' in answer, 'error' in answer ? answer.error : '');
   const { supported, identity, runtime, refusal } = answer.contract;
@@ -150,7 +150,8 @@ test('this build prints its own contract: trusted bundle, runtime probe, retenti
   assert.ok(parsed.state === 'contract');
   assert.deepEqual(parsed.contract.manifest.domains, storageManifest().domains);
   assert.equal(parsed.contract.manifest.domains[0].scope, 'retention');
-  assert.deepEqual(parsed.contract.manifest.domains[0].cutover, { artifactVersion: '1.121.0', importContract: 1 });
+  assert.equal(parsed.contract.manifest.domains.length, 2);
+  assert.ok(parsed.contract.manifest.domains.every(domain => !domain.cutover));
   assert.equal(parsed.contract.identity.manifestDigest, parsed.contract.manifest.digest);
   assert.equal(typeof parsed.contract.supported, 'boolean');
   if (!parsed.contract.supported) assert.ok(parsed.contract.refusal, 'an unsupported runtime says why');
