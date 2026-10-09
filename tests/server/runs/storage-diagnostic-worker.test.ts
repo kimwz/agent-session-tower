@@ -61,20 +61,37 @@ test('actual diagnostic worker holds restore, journal, proofs and launches befor
   assert.equal((await call('snapshot')).instance, snapshot.instance, 'diagnosis keeps its live runtime lock and RPC identity');
 });
 
+const diagnosticRoots = new WeakMap<TestContext, Map<string, {
+  directory: string;
+  children: { child: ChildProcess; closed: Promise<unknown> }[];
+}>>();
+
 async function launchDiagnostic(t: TestContext, root: string, state: string, paths: Awaited<ReturnType<typeof runnerPaths>>, entry = fileURLToPath(new URL('./fixtures/storage-diagnostic-worker.ts', import.meta.url)), extraEnv: Record<string, string> = {}) {
+  assert.equal(state, join(root, 'state'), 'diagnostic state must belong to the exact fixture root');
+  let roots = diagnosticRoots.get(t);
+  if (!roots) { roots = new Map(); diagnosticRoots.set(t, roots); }
+  let owned = roots.get(root);
+  if (!owned) {
+    const fixture = { directory: paths.directory, children: [] as { child: ChildProcess; closed: Promise<unknown> }[] };
+    roots.set(root, fixture); owned = fixture;
+    t.after(async () => {
+      for (const { child } of fixture.children) {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      }
+      // close also drains child stdio; the seed and its successor must both finish before removal.
+      await Promise.all(fixture.children.map(({ closed }) => closed));
+      // Both directories are exact fixture-owned paths, recorded before any child was launched.
+      await rm(fixture.directory, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    });
+  }
+  assert.equal(paths.directory, owned.directory, 'diagnostic runner directory must match the owned root');
   const child = spawn(process.execPath, ['--import', 'tsx', entry, state], {
     env: { ...process.env, CODEX_HOME: join(root, 'codex'), CLAUDE_CONFIG_DIR: join(root, 'claude'), ...extraEnv }, stdio: ['ignore', 'ignore', 'pipe'],
   });
-  const ended = once(child, 'exit');
+  owned.children.push({ child, closed: once(child, 'close') });
   let stderr = '';
   child.stderr.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-16000); });
-  t.after(async () => {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-    await ended;
-    // Both directories are exact fixture-owned paths, recorded before the child was launched.
-    await rm(paths.directory, { recursive: true, force: true });
-    await rm(root, { recursive: true, force: true });
-  });
   const call = (method: string, args: unknown[] = []) => fixtureCall(paths, method, args);
   return { child, call, stderr: () => stderr };
 }
