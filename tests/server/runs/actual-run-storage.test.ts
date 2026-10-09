@@ -1,3 +1,6 @@
+import { EventEmitter } from 'node:events';
+import { PassThrough, Writable } from 'node:stream';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, realpath, rm } from 'node:fs/promises';
@@ -346,4 +349,161 @@ test('actual B raw importer refuses missing dependency without creating empty au
   await assert.rejects(importRuns({ storage: client,repository,stateDir: f.stateDir,evidenceParent,commandId: 'missing-source',update }),/ENOENT/);
   assert.equal((await repository.head()).authority,null);
   assert.equal((await client.receipt('missing-source-commit')).found,false);
+});
+
+
+test('sealed B import before commit holds A JSON restoration on the same actual database', async t => {
+  const f = await prepared(t), data = documents(f.stateDir), evidenceParent = await sources(f.stateDir,data);
+  const names = ['runs.json','created-sessions.json','run-instructions.json'];
+  const before = await Promise.all(names.map(name => readFile(join(f.stateDir,name))));
+  const bc = await f.open(f.b,'before');
+  const update = { stateDir: f.stateDir,managed: false,build: { version: f.b.version,manifest: f.b.manifest,preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.b.bundle('before') }) } };
+  await assert.rejects(importRuns({ storage: bc,stateDir: f.stateDir,evidenceParent,commandId: 'sealed-before-commit',update }));
+  await bc.close();
+  const ac = await f.open(f.a), repository = new RunsRepository(ac);
+  assert.equal(await repository.databaseAuthority(),false);
+  const history = new RunHistory(f.stateDir,ac);
+  await assert.rejects(history.readCreated(),/evidence exists without authority/);
+  await assert.rejects(history.restore(),/evidence exists without authority/);
+  let native = 0;
+  const manager = new RunManager({ stateDir: f.stateDir,storage: ac,getSession: () => undefined,refreshSessions: async () => {},
+    spawnProcess: () => { native++; throw new Error('No native fixture process'); } });
+  await assert.rejects(manager.start(),/evidence exists without authority/);
+  assert.equal(manager.list().length,0); assert.equal(native,0);
+  assert.deepEqual(await Promise.all(names.map(name => readFile(join(f.stateDir,name)))),before);
+});
+
+for (const provider of ['codex','claude'] as const) for (const outcome of ['receipt','owner-stop','known-failure'] as const) {
+  test(`actual identity persistence preserves ${provider} lifetime; outcome=${outcome}`, async t => {
+    const ownerStop = outcome === 'owner-stop', knownFailure = outcome === 'known-failure';
+    const f = await prepared(t), initial = await f.open(f.b);
+    await new RunsRepository(initial).importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'identity-empty'); await initial.close();
+    const client = await f.open(f.a,knownFailure ? 'normal' : 'after-native-hold');
+    const originalWrite = client.write.bind(client);
+    let identityStaged = false, conflicted = false;
+    if (knownFailure) client.write = async <T>(...args: Parameters<typeof client.write>) => {
+      if (args[0] === 'runs' && args[1] === 'stage') {
+        const payload = args[2] as { data: string };
+        if (Buffer.from(payload.data,'base64').toString('utf8').includes('native-hold-response-lost')) identityStaged = true;
+      }
+      if (identityStaged && !conflicted && args[0] === 'runs' && args[1] === 'commit') {
+        conflicted = true;
+        const repository = new RunsRepository(client), current = await repository.exportCurrent();
+        // A real competing SQLite revision makes this identity commit a known refusal.
+        await repository.output(current.documents.runs[0],'competing revision','identity-known-conflict');
+      }
+      return originalWrite<T>(...args);
+    };
+    let starts = 0, cancels = 0, submissions = 0, finish!: () => void;
+    let identify!: () => Promise<void>, end!: () => void;
+    const done = new Promise<void>(resolve => { finish = resolve; });
+    const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+    Object.assign(child,{ stdout: new PassThrough(),stderr: new PassThrough(),exitCode: null });
+    const emit = (frame: Record<string,unknown>) => child.stdout.push(JSON.stringify(frame) + '\n');
+    const childEnd = () => { if (child.exitCode !== null) return; Object.assign(child,{ exitCode: 0 }); child.emit('close',0,null); };
+    Object.assign(child,{ stdin: new Writable({ write(chunk,_encoding,next) {
+      const frame = JSON.parse(String(chunk));
+      if (frame.type === 'control_request') setImmediate(() => emit({ type: 'control_response',response: { subtype: 'success',request_id: frame.request_id } }));
+      else if (!frame.uuid) {
+        submissions++;
+        identify = async () => {
+          emit({ type: 'assistant',message: { content: [{ type: 'text',text: 'native-hold-response-lost' }] } });
+          emit({ type: 'system',subtype: 'init',session_id: frame.session_id });
+        };
+        end = () => { emit({ type: 'result',session_id: frame.session_id,is_error: false }); childEnd(); };
+      }
+      next();
+    } }),kill: () => { cancels++; childEnd(); return true; } });
+    const manager = new RunManager({ stateDir: f.stateDir,storage: client,getSession: () => undefined,refreshSessions: async () => {},findExecutable: async () => '/fixture/provider',pollMs: 10,
+      spawnProcess: () => { starts++; return child; },openCodexStdio: async config => {
+        starts++;
+        identify = async () => {
+          config.onOutput('native-hold-response-lost');
+          try { await config.onSession('10000000-0000-4000-8000-000000000099'); }
+          catch (error) { config.onFinished({ status: 'error',error: String(error) }); finish(); throw error; }
+          if (cancels) return;
+          submissions++; config.onStarted?.('fixture');
+        };
+        end = () => { config.onOutput(' final output'); config.onFinished({ status: 'completed' }); finish(); };
+        return { start: async () => {},done,close: finish,cancel: async () => { cancels++; config.onFinished({ status: 'cancelled' }); finish(); },respondToApproval: async () => {} };
+      } });
+    await manager.start();
+    const created = await manager.create({ provider,cwd: f.stateDir,prompt: 'Identity fixture' },{ trustWorkspace: false });
+    await until(() => !!identify);
+    const identification = identify();
+    // Keep a rejection handler attached while the fixed receipt is unresolved.
+    const identified = identification.then(() => undefined,error => error);
+    if (knownFailure) {
+      await identified;
+      await until(() => manager.list().find(run => run.id === created.run.id)?.status === 'error');
+      assert.equal(conflicted,true); assert.equal(manager.pendingAdmission(),undefined);
+      assert.equal(starts,1); assert.equal(submissions,provider === 'claude' ? 1 : 0);
+      assert.equal(cancels,provider === 'claude' ? 1 : 0);
+      client.write = originalWrite;
+      // The conflicting fixture intentionally retains a known failed history write.
+      await assert.rejects(manager.close());
+      return;
+    }
+    await until(() => !!manager.pendingAdmission());
+    const pending = manager.pendingAdmission()!;
+    assert.equal(starts,1); assert.equal(cancels,0); assert.equal(submissions,provider === 'claude' ? 1 : 0);
+    if (provider === 'claude' && !ownerStop) {
+      end();
+      assert.equal(manager.list().find(run => run.id === created.run.id)?.status,'running');
+    }
+    if (ownerStop) await assert.rejects(manager.cancel(created.run.id));
+    await client.reopen(); await client.prepare({ allowMigration: false });
+    assert.deepEqual(manager.pendingAdmission(),pending);
+    assert.equal((await client.receipt(pending.commandId)).found,true);
+    await manager.resolveAdmission(pending.commandId);
+    await identified;
+    if (!ownerStop && provider === 'codex') end();
+    await until(() => manager.list().find(run => run.id === created.run.id)?.status === (ownerStop ? 'cancelled' : 'completed'));
+    const run = manager.list().find(run => run.id === created.run.id)!;
+    assert.match(run.output,/native-hold-response-lost/);
+    assert.equal(starts,1); assert.equal(cancels,ownerStop ? 1 : 0);
+    assert.equal(submissions,provider === 'claude' ? 1 : ownerStop ? 0 : 1);
+    if (!ownerStop) assert.equal(run.error,undefined);
+    await manager.flushState(); await manager.close();
+  });
+}
+
+test('actual target termination before handover and compensation loss never launches the unsent request', async t => {
+  const f = await prepared(t), initial = await f.open(f.b);
+  await new RunsRepository(initial).importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'compensation-empty'); await initial.close();
+  const client = await f.open(f.a,'after-unsent-compensation');
+  const session = { ...documents(f.stateDir).created[0].session,nativeId: '10000000-0000-4000-8000-000000000002',creationPending: false,resumable: true,status: 'completed' as const };
+  let starts = 0, inserts = 0, finish!: () => void, end!: () => void;
+  const done = new Promise<void>(resolve => { finish = resolve; });
+  const manager = new RunManager({ stateDir: f.stateDir,storage: client,getSession: () => session,refreshSessions: async () => {},findExecutable: async () => '/fixture/codex',
+    spawnProcess: () => { throw new Error('Native launch forbidden'); },openCodexStdio: async config => {
+      starts++; end = () => { config.onFinished({ status: 'completed' }); finish(); };
+      return { start: async () => { config.onStarted?.('fixture'); },done,close: finish,cancel: async () => { config.onFinished({ status: 'cancelled' }); finish(); },
+        respondToApproval: async () => {},canSteer: () => true,steer: async () => { inserts++; } };
+    } });
+  await manager.start();
+  const target = await manager.enqueue(session.id,'Target');
+  await until(() => manager.list().find(run => run.id === target.id)?.status === 'running');
+  const queued = await manager.enqueue(session.id,'Unsent instruction');
+  manager.beginUpdateDrain(Date.now() + 60_000,() => false);
+  const write = client.write.bind(client);
+  let terminated = false;
+  client.write = async <T>(...args: Parameters<typeof client.write>) => {
+    const result = await write<T>(...args);
+    if (!terminated && args[0] === 'runs' && args[1] === 'commit' && manager.list().find(run => run.id === queued.id)?.steering?.state === 'sending') { terminated = true; end(); }
+    return result;
+  };
+  await assert.rejects(manager.steer(queued.id,{ targetRunId: target.id }),(error: { disposition?: string }) => error.disposition === 'uncertain');
+  const pending = manager.pendingAdmission()!; assert.ok(pending);
+  client.write = write;
+  await client.reopen(); await client.prepare({ allowMigration: false }); manager.holdStorage();
+  assert.equal((await client.receipt(pending.commandId)).found,true);
+  await manager.resolveAdmission(pending.commandId);
+  const unsent = manager.list().find(run => run.id === queued.id)!;
+  assert.equal(unsent.status,'error'); assert.equal(unsent.steering?.targetRunId,target.id); assert.equal(unsent.id,queued.id);
+  assert.match(unsent.error!,/not sent/);
+  manager.releaseStorage(); manager.endUpdateDrain();
+  await (manager as unknown as { pump(): Promise<void> }).pump(); await manager.flushState();
+  assert.equal(starts,1); assert.equal(inserts,0);
+  await manager.close();
 });

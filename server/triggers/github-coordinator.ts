@@ -227,10 +227,10 @@ export class GitHubCoordinator extends EventEmitter {
     void this.automation.tick().catch(() => {});
     return { workflowId: workflow.id };
   }
-  coordination(workflowId: string): { status: 'running' | 'completed' | 'error'; sessionId?: string; runId?: string; error?: string } | undefined {
+  coordination(workflowId: string): { status: 'running' | 'completed' | 'error' | 'uncertain'; sessionId?: string; runId?: string; error?: string } | undefined {
     const workflow = this.automation.list().find(item => item.id === workflowId);
     if (!workflow) return undefined;
-    const status = workflow.status === 'completed' || workflow.status === 'ignored' ? 'completed' : workflow.status === 'error' || workflow.status === 'reply-uncertain' ? 'error' : 'running';
+    const status = workflow.status === 'admission-uncertain' ? 'uncertain' : workflow.status === 'completed' || workflow.status === 'ignored' ? 'completed' : workflow.status === 'error' || workflow.status === 'reply-uncertain' ? 'error' : 'running';
     return { status, ...(workflow.sessionId ? { sessionId: workflow.sessionId } : {}), ...(workflow.runId ? { runId: workflow.runId } : {}), ...(workflow.error ? { error: workflow.error } : {}) };
   }
   /** Every coordinator conversation, including those still waiting for their first session. */

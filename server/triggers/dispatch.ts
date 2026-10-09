@@ -212,6 +212,7 @@ export class TriggerDispatch {
           patch.dispatch = { ...event.dispatch, sessionId: conversation.sessionId, createdSessionId: conversation.sessionId, ...(conversation.runId ? { runId: conversation.runId } : {}) };
         }
         if (!conversation) Object.assign(patch, { status: 'uncertain', error: 'The coordinator conversation record is no longer available.' });
+        else if (conversation.status === 'uncertain') Object.assign(patch, { status: 'uncertain', error: conversation.error ?? 'Run admission receipt is unresolved; this event was not resent.' });
         else if (conversation.status === 'completed') patch.status = 'completed';
         else if (conversation.status === 'error') Object.assign(patch, { status: 'error', ...(conversation.error ? { error: conversation.error.slice(0, 1500) } : {}) });
         if (Object.keys(patch).length) updates.set(event.id, patch);

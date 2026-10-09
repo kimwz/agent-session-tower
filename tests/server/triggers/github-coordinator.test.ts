@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -9,6 +9,9 @@ import { GitHubError, type GitHubFetch } from '../../../server/triggers/github.j
 import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
 import { CapabilityRegistry, handleMcpRequest } from '../../../server/api/mcp.js';
 import { runToolResolver } from '../../../server/api/run-tools.js';
+import { RunManager } from '../../../server/runs/manager.js';
+import { RunsRepository } from '../../../server/runs/storage-repository.js';
+import { retentionBuild } from '../storage/fixtures/retention-build.js';
 import type { RunAdmission } from '../../../server/runs/manager.js';
 const AGENT: TriggerActor = { kind: 'agent', via: 'mcp', sessionId: 'codex:agent', runId: randomUUID() };
 import type { AutoPromptJob, AutoPromptRequest, CreateSessionRequest, Run, Session } from '../../../shared/types.js';
@@ -17,7 +20,7 @@ import { GitHubSourceSchema, type TriggerActor, type TriggerInput } from '../../
 const OWNER: TriggerActor = { kind: 'owner', via: 'ui' };
 const rule = { id: 'triage', name: 'Bug triage', enabled: true, condition: 'A bug report', instructions: 'Reproduce and fix the bug', replyInstructions: 'Summarize the fix for the reporter', provider: 'codex' as const };
 
-async function fixture(t: TestContext, options: { login?: string; postStatus?: number; postFails?: boolean } = {}) {
+async function fixture(t: TestContext, options: { login?: string; postStatus?: number; postFails?: boolean; create?: (input: CreateSessionRequest, internal: RunAdmission) => Promise<{ run: Run; session: Session }> } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-github-coordinator-'));
   const project = join(directory, 'project');
   await mkdir(project);
@@ -61,6 +64,7 @@ async function fixture(t: TestContext, options: { login?: string; postStatus?: n
     list: () => structuredClone(runs),
     create: async (input: CreateSessionRequest, internal: RunAdmission) => {
       created.push({ input, internal });
+      if (options.create) return options.create(input,internal);
       const id = `codex:${randomUUID()}`;
       const run = record(id, input.prompt, internal);
       return { run, session: { id, nativeId: 'n', provider: input.provider, title: '', cwd: input.cwd!, project: 'p', status: 'idle', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true } as Session };
@@ -297,4 +301,36 @@ test('a trigger that allows comment reviews only posts no verdict, and says so b
   await f.coordinator.tool(workflowId, 'github_reply', { requestKey: 'comment', text: 'Two small notes on naming.' });
   await f.coordinator.approveReply(workflowId, 'comment', 'Two small notes on naming.');
   assert.deepEqual(f.posts, [{ path: '/repos/octo/app/pulls/12/reviews', body: { event: 'COMMENT', body: 'Two small notes on naming.' } }]);
+});
+
+
+test('actual admission loss reaches coordinator trigger event once without a new workflow or retry', async t => {
+  const stateDir = await realpath(await mkdtemp(join(tmpdir(),'tower-github-sql-receipt-')));
+  const buildDir = await realpath(await mkdtemp(join(tmpdir(),'tower-github-sql-build-')));
+  const b = await retentionBuild('1.123.0',buildDir);
+  const client = await b.storage.openStorage({ stateDir,bundle: b.bundle('after-native-hold') });
+  await client.prepare({ allowMigration: true });
+  await new RunsRepository(client).importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'github-empty');
+  let native = 0;
+  const manager = new RunManager({ stateDir,storage: client,getSession: () => undefined,refreshSessions: async () => {},
+    spawnProcess: () => { native++; throw new Error('No native provider allowed'); } });
+  await manager.start();
+  const f = await fixture(t,{ create: (input,internal) => manager.create({ ...input,cwd: stateDir,prompt: 'native-hold-response-lost' },internal) });
+  const trigger = await f.service.create(coordinatorTrigger(),OWNER);
+  f.issues.push({ number: 2 });
+  const event = await f.service.run(trigger.id,OWNER);
+  await f.settle();
+  const stored = f.service.events().find(item => item.id === event.id)!;
+  assert.equal(stored.status,'uncertain'); assert.ok(stored.dispatch?.workflowId);
+  assert.equal(f.coordinator.coordination(stored.dispatch!.workflowId!)?.status,'uncertain');
+  assert.equal((await f.coordinator.coordinate(event)).workflowId,stored.dispatch!.workflowId);
+  await f.settle();
+  assert.equal(f.created.length,1); assert.equal(manager.list().length,1); assert.equal(native,0);
+  assert.equal(f.service.events().filter(item => item.id === event.id).length,1);
+  const pending = manager.pendingAdmission()!;
+  await client.reopen(); await client.prepare({ allowMigration: false });
+  await manager.resolveAdmission(pending.commandId);
+  manager.holdStorage();
+  await manager.close(); await client.close();
+  await rm(stateDir,{ recursive: true,force: true }); await rm(buildDir,{ recursive: true,force: true });
 });

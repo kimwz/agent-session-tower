@@ -63,7 +63,7 @@ export async function prepareCodexTurn(host: TurnHost, run: Run, session: Sessio
         if (!host.registry.confirm(session.id, id)) throw new Error('The new conversation identity changed. No message was submitted.');
         session.nativeId = id;
         host.changed();
-        try { await host.flush(); }
+        try { if (!await host.persistNativeIdentity(run)) return; }
         catch (error) { throw new Error(`Cannot save the new conversation identity: ${errorMessage(error)}`); }
       }
     },

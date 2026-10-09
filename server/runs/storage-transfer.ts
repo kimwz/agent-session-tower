@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { lstat, mkdir, open } from 'node:fs/promises';
+import { lstat, mkdir, open, opendir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { StorageClient } from '../storage/client.js';
@@ -41,6 +41,16 @@ async function privateFolder(path: string): Promise<void> {
   }
   const info = await lstat(absolute);
   if (info.uid !== process.getuid?.() || info.mode & 0o077) throw new Error('Runs evidence directory must be owner-only.');
+}
+/** A prior seal holds JSON fallback even when the final SQL transaction never committed. */
+export async function holdRunsEvidence(stateDir: string): Promise<void> {
+  const parent = join(stateDir, 'runs-storage-migrations');
+  try { await lstat(parent); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  await privateFolder(parent);
+  const directory = await opendir(parent);
+  try { if (await directory.read()) throw new Error('Runs import evidence exists without authority; explicit owner recovery required.'); }
+  finally { await directory.close(); }
 }
 async function seal(parent: string, id: string, files: Record<string, Buffer>, facts: Record<string, unknown>): Promise<{ directory: string; manifestSha256: string }> {
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw new Error('Invalid runs evidence ID.');

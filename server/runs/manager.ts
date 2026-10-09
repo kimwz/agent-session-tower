@@ -235,6 +235,7 @@ export class RunManager extends EventEmitter {
   private readonly heldProviders = new Set<Provider>();
   private readonly admissions = new Set<string>();
   private readonly uncertainAdmissions = new Set<string>();
+  private readonly nativeIdentityWaiters = new Map<string, { commandId: string; settle(saved: boolean, error?: Error): void }>();
   private readonly unsentSteering = new Map<string, string>();
   private readonly steeringAdmissions = new Map<string, Promise<Run>>();
   private readonly uncertainPrepared = new Map<string, { createdIds: string[]; sessionId?: string }>();
@@ -281,7 +282,7 @@ export class RunManager extends EventEmitter {
     const manager = this;
     this.turnHost = {
       get options() { return manager.options; }, registry: this.registry, attachments: this.attachments, notes: this.notes,
-      changed: () => this.changed(), append: (run, text) => this.append(run, text), notifyOutput: () => this.notifyOutput(), flush: () => this.flush(),
+      changed: () => this.changed(), append: (run, text) => this.append(run, text), notifyOutput: () => this.notifyOutput(), flush: () => this.flush(), persistNativeIdentity: run => this.persistNativeIdentity(run),
       stopping: () => this.stopping, updating: () => this.updating, stop: (id, owned) => this.stopOwned(id, owned),
       prepareLaunch: run => this.prepareLaunch(run), refusedAtLaunch: (run, session) => this.refusedAtLaunch(run, session),
       release: sessionId => { this.reservedSessions.delete(sessionId); }, exited: exit => this.exited(exit),
@@ -389,10 +390,36 @@ export class RunManager extends EventEmitter {
 
   useStorage(storage: StorageClient): void { this.history.useStorage(storage); }
   pendingAdmission(): { commandId: string; sha256: string } | undefined { return this.history.pendingAdmission(); }
+  private async persistNativeIdentity(run: Run): Promise<boolean> {
+    for (;;) {
+      try { await this.flush(); return true; }
+      catch (error) {
+        if (!admissionUncertain(error)) throw error;
+        const pending = this.history.pendingAdmission();
+        if (!pending) throw error;
+        if (this.stopping || this.ownerStopped.has(run.id) || run.status === 'cancelled' || FINISHED.has(run.status)) return false;
+        // Only explicit receipt resolution wakes this wait. No polling or provider replay.
+        const saved = await new Promise<boolean>((resolve, reject) => {
+          this.nativeIdentityWaiters.set(run.id, { commandId: pending.commandId, settle: (saved, failure) => {
+            this.nativeIdentityWaiters.delete(run.id);
+            if (failure) reject(failure); else resolve(saved);
+          } });
+        }).finally(() => { this.nativeIdentityWaiters.delete(run.id); });
+        if (!saved) return false;
+        // Resolution saves the live identity/output again: the lost receipt may belong
+        // to an earlier write that blocked this identity's queued save.
+      }
+    }
+  }
+
   /** Receipt inspection settles durability only; it never starts a provider or resends work. */
   async resolveAdmission(commandId: string): Promise<{ disposition: 'committed' | 'not-committed'; runIds: string[] }> {
     if (this.history.pendingAdmission()?.commandId !== commandId) throw new RunError('Unknown admission receipt identity.', 'conflict');
     const resolved = await this.history.resolveAdmission(), runIds = [...new Set([...resolved.newRunIds, ...this.uncertainAdmissions])];
+    for (const waiter of [...this.nativeIdentityWaiters.values()]) if (waiter.commandId === commandId) {
+      waiter.settle(resolved.disposition === 'committed', resolved.disposition === 'not-committed'
+        ? new Error('The new conversation identity was not saved. No receipt authorized delivery.') : undefined);
+    }
     for (const id of runIds) {
       const prepared = this.uncertainPrepared.get(id), run = resolved.newRuns.get(id) ?? this.runs.get(id);
       const unsentTarget = this.unsentSteering.get(id);
@@ -758,7 +785,13 @@ export class RunManager extends EventEmitter {
       return this.list().find(item => item.id === runId)!;
     } catch (error) {
       if (!submitted && admissionUncertain(error)) { this.unsentSteering.set(run.id, selected.target.id); this.uncertainAdmissions.add(run.id); throw error; }
-      await this.settleSteer(run, selected.target.id, error, !submitted);
+      try { await this.settleSteer(run, selected.target.id, error, !submitted); }
+      catch (settlementError) {
+        if (!submitted && admissionUncertain(settlementError)) {
+          this.unsentSteering.set(run.id, selected.target.id); this.uncertainAdmissions.add(run.id);
+        }
+        throw settlementError;
+      }
       throw error;
     }
   }
@@ -786,6 +819,7 @@ export class RunManager extends EventEmitter {
     const noted = () => { if (reason && run.status === 'cancelled' && run.error !== reason) { run.error = reason; this.changed(); } };
     // Stopped by the owner, not by the update's deadline: the update does not bring the work back.
     if (!reason) { this.ownerStopped.add(runId); run.ownerStopped = true; this.changed(); }
+    this.nativeIdentityWaiters.get(runId)?.settle(false);
     const bridge = this.bridged.get(runId);
     if (bridge) {
       // The shared server owns the process. Interrupt only our correlated turn.
@@ -862,6 +896,7 @@ export class RunManager extends EventEmitter {
     await this.pauseAttachmentCleanup();
     if (this.stopping) return;
     this.stopping = true;
+    for (const waiter of [...this.nativeIdentityWaiters.values()]) waiter.settle(false);
     this.toolNotices.clear();
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.notifyTimer) { clearTimeout(this.notifyTimer); this.notifyTimer = undefined; }
@@ -1091,6 +1126,7 @@ export class RunManager extends EventEmitter {
   /** The only place a turn's end is decided: it leaves the live turns, frees its conversation, and gets its outcome. */
   private exited(exit: TurnExit): void {
     const { run, session } = exit;
+    this.nativeIdentityWaiters.get(run.id)?.settle(false);
     if (exit.kind === 'claude') {
       const { owned, summary } = exit;
       if (owned.killTimer) clearTimeout(owned.killTimer);

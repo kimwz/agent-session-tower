@@ -22,7 +22,7 @@ export interface TriggerExecutor {
    */
   coordinate?(event: TriggerEvent): Promise<{ workflowId: string }>;
   /** Where a coordinator conversation stands. */
-  coordination?(workflowId: string): { status: 'running' | 'completed' | 'error'; sessionId?: string; runId?: string; error?: string } | undefined;
+  coordination?(workflowId: string): { status: 'running' | 'completed' | 'error' | 'uncertain'; sessionId?: string; runId?: string; error?: string } | undefined;
 }
 
 

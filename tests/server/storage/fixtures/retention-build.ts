@@ -40,7 +40,7 @@ export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' 
   }
   const manifest = storageManifest(runsRelease ? [schema, version === '1.123.0' ? { ...runsSchema, cutover: { artifactVersion: '1.123.0', importContract: 1 } } : runsSchema] : [schema], version);
   const artifacts: Record<string, StorageThreadArtifact> = {};
-  for (const fault of preparation ? ['normal', 'after-native-hold'] : ['normal', 'before', 'after', 'after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss', 'refuse-once', 'corrupt', 'io']) {
+  for (const fault of preparation ? ['normal', 'after-native-hold'] : ['normal', 'before', 'after', 'after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss', 'after-unsent-compensation', 'refuse-once', 'corrupt', 'io']) {
     const entry = `
 import { parentPort } from 'node:worker_threads';
 import { existsSync, writeFileSync } from 'node:fs';
@@ -62,6 +62,20 @@ parentPort.on('message', message => {
 });
 const post = parentPort.postMessage.bind(parentPort);
 parentPort.postMessage = message => { if (message.id === lostCommitId && message.ok) { writeFileSync(lossMarker, 'consumed', { flag: 'wx', mode: 0o600 }); process.exit(9); } post(message); };` : ''}
+${fault === 'after-unsent-compensation' && runsRelease ? `let armed = false, compensationIntent, compensationCommit = -1;
+const compensationMarker = ${JSON.stringify(join(directory, 'after-unsent-compensation-consumed'))};
+parentPort.on('message', message => {
+  if (existsSync(compensationMarker) || message.domain !== 'runs' || message.op !== 'write') return;
+  const payload = JSON.parse(message.payload);
+  if (message.command === 'stage') {
+    const text = Buffer.from(payload.data, 'base64').toString('utf8');
+    if (text.includes('sending')) armed = true;
+    else if (armed && text.includes('queued')) compensationIntent = payload.intent;
+  }
+  if (message.command === 'commit' && payload.intent === compensationIntent) compensationCommit = message.id;
+});
+const post = parentPort.postMessage.bind(parentPort);
+parentPort.postMessage = message => { if (message.id === compensationCommit && message.ok) { writeFileSync(compensationMarker, 'consumed', { flag: 'wx', mode: 0o600 }); process.exit(9); } post(message); };` : ''}
 ${fault === 'runs-refuse-compensation-loss' && runsRelease ? `const commit = runsDomain.commands.commit;
 let refused = false;
 runsDomain.commands.commit = { ...commit, run(context, payload) {

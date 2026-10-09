@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { StorageClient } from '../storage/client.js';
 import { RunsRepository } from './storage-repository.js';
+import { holdRunsEvidence } from './storage-transfer.js';
 import { canonical, rowsOf, RUN_SOURCE_BYTES, type RunDocuments, type RunRow, type RunChange } from './storage-codec.js';
 import { readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { Run, RunInstructions } from '../../shared/types.js';
 import { nativeContextObservation } from '../sessions/context.js';
 import { attachmentMetadata } from '../stores/attachments.js';
@@ -74,8 +75,9 @@ export class RunHistory {
     this.repository ??= new RunsRepository(storage);
   }
   private async readDatabase(): Promise<void> {
-    if (!this.repository) return;
+    if (!this.repository) { await holdRunsEvidence(dirname(this.runsFile)); return; }
     this.database = await this.repository.databaseAuthority();
+    if (!this.database) await holdRunsEvidence(dirname(this.runsFile));
     if (this.database && !this.current) {
       const current = await this.repository.exportCurrent();
       this.current = current.documents; this.rows = current.rows;
