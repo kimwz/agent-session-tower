@@ -33,6 +33,10 @@ await mkdir(stateDir, { mode: 0o700 });
 await writeFile(join(stateDir, 'runs.json'), JSON.stringify([failedRun]), { mode: 0o600 });
 await writeFile(join(stateDir, 'created-sessions.json'), '[]', { mode: 0o600 });
 await writeFile(join(stateDir, 'run-instructions.json'), '{}', { mode: 0o600 });
+// A prepared existing installation has complete retention sources as well as run history.
+await mkdir(join(stateDir, 'retention'), { mode: 0o700 });
+await writeFile(join(stateDir, 'retention', 'journal.json'), JSON.stringify({ version: 1, migratedAt: Date.parse(timestamp), entries: [], policies: [] }), { mode: 0o600 });
+await writeFile(join(stateDir, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
 // This existing-history fixture needs the real prior artifact's preparation before B can import it.
 // The helper verifies the protected public A122 bytes; its SQLite owner closes before the SEA starts.
 const { tsImport } = await import('tsx/esm/api');
