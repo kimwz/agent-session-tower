@@ -21,7 +21,7 @@ import { keepBefore, takeWorkerRestore, writePendingWorker } from '../../../serv
 import { MAX_AUDIT } from '../../../server/triggers/limits.js';
 import { triggerHash } from '../../../server/triggers/storage-codec.js';
 import { triggerBackupOf } from '../../../server/triggers/backup.js';
-import type { Trigger, TriggerEvent } from '../../../shared/triggers.js';
+import { TriggerSourceSchema, type Trigger, type TriggerEvent } from '../../../shared/triggers.js';
 
 async function folder(t: TestContext) {
   const directory = await realpath(await mkdtemp(join(tmpdir(),'tower-triggers-sql-')));
@@ -233,7 +233,7 @@ test('typed trigger commands respect common SDK owner fences and leave state and
 test('SQL startup restore disables/deletes recovered queued coordinator before receipt completes: new coordinator/workflow zero', async t => {
   for (const remove of [false,true]) {
     const f = await fixture(t), state = empty(), trigger = definition();
-    trigger.enabled = true; trigger.source = { kind: 'github',schedule: { type: 'interval',everySeconds: 300 },auth: { type: 'gh' },account: 'fixture',watch: { type: 'issues',repos: ['octo/app'],assignee: 'any',start: 'existing' } };
+    trigger.enabled = true; trigger.source = TriggerSourceSchema.parse({ kind: 'github',schedule: { type: 'interval',everySeconds: 300 },auth: { type: 'gh' },account: 'fixture',watch: { type: 'issues',repos: ['octo/app'],assignee: 'any',start: 'existing' } });
     state.triggers = [trigger]; state.cursors[id] = { anchorAt: now(),nextAt: now() + 300_000 };
     const event = documents().events[0]; event.input.handler = 'coordinator'; event.status = 'claimed'; event.triggerRevision = trigger.revision; state.events = [event];
     await f.repository.importPrepared(state,'b'.repeat(64),`restore-seed-${remove}`);

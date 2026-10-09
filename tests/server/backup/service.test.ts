@@ -296,7 +296,7 @@ test('an upload stopped because Tower shuts down is not a failure, and the next 
   t.after(() => rm(stateDir, { recursive: true, force: true }));
   const groups = new ProjectGroupStore(stateDir), exclusions = new RemoteExclusionStore(stateDir), decisions = new DecisionService(stateDir);
   await groups.start(); await exclusions.start(); await decisions.start();
-  const service = new BackupService({ stateDir, triggers: options.triggers ?? (() => collectTriggers(stateDir)), version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => true, stores: { groups, exclusions, decisions }, fetcher, host: 'studio' });
+  const service = new BackupService({ stateDir, triggers: () => collectTriggers(stateDir), version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => true, stores: { groups, exclusions, decisions }, fetcher, host: 'studio' });
   await service.start();
   await service.saveSettings({ enabled: true, intervalHours: 24, keep: 3, passphrase: PASS, remote: { endpoint: bucket.endpoint, bucket: 'bucket', prefix: '', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret-key' } });
   const upload = service.upload();
