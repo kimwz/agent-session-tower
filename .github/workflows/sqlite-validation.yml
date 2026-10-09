@@ -305,7 +305,7 @@ jobs:
           const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
           assert.match(version, /^\d+\.\d+\.\d+$/);
           const current = version.split('.').map(Number);
-          const target = [1, 120, 1];
+          const target = [1, 120, 2];
           const first = current.findIndex((part, index) => part !== target[index]);
           assert.ok(first >= 0 && current[first] < target[first], 'target must exceed the input version');
           FLOOR
