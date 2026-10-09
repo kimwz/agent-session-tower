@@ -4,11 +4,10 @@ import { RETENTION_INTENT_BYTES, RETENTION_CHUNK_BYTES } from './storage-codec.j
 export const RETENTION_STAGE_COUNT = 16;
 export const RETENTION_STAGE_BYTES = 2 * RETENTION_INTENT_BYTES;
 
-/** B source contract; public release metadata and activation belong to the parent. */
+/** Preparation profile: existing SQL authority continues; first import belongs to B. */
 export const retentionSchema: StorageDomainSchema = {
   domain: 'retention',
   preparation: { requiredArtifactVersion: '1.120.2', readerContract: 1, writerContract: 1 },
-  cutover: { artifactVersion: '1.121.0', importContract: 1 },
   migrations: [{ version: 1, sql: `
 CREATE TABLE retention_state (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), revision INTEGER NOT NULL CHECK (revision > 0)) STRICT;
 CREATE TABLE retention_metadata (

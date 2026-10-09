@@ -17,6 +17,7 @@ import { buildIdentityModule, buildIdentityPlugin } from '../../../server/storag
 import { fileURLToPath } from 'node:url';
 import test, { type TestContext } from 'node:test';
 import { writeHandoff } from '../../../server/runs/handoff.js';
+import { retentionBootstrap, retentionLegacyFiles } from '../../../server/sessions/retention/storage-transfer.js';
 import { RetentionStore } from '../../../server/sessions/retention/store.js';
 import { retentionBuild } from '../storage/fixtures/retention-build.js';
 import { recordPreparationEvidence } from '../../../server/link/storage-update.js';
@@ -504,7 +505,7 @@ test('actual recovery RPC verifies an own failed update, preserves refusal guard
   assert.equal((receipt.result as { recorded: boolean }).recorded, true);
   const saved = JSON.parse(await readFile(storageUpdatePaths(state).receipt, 'utf8'));
   assert.equal(saved.build.sourceHash, first.snapshot!.storage!.identity!.sourceHash);
-  assert.equal(saved.cutoverMarkers, 'absent', 'the actual RPC inspects the marker-free database, independently of request body hints');
+  assert.equal(saved.cutoverMarkers, 'not-applicable', 'the actual preparation-only RPC derives applicability from its captured build, independently of request body hints');
   assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, false, 'receipt alone grants no runtime resume');
   await call('storageRetry');
   assert.equal((await call('snapshot')).snapshot?.storage?.code, 'cold-journal-unavailable', 'the receipt cannot bypass an unrepaired source');
@@ -690,10 +691,19 @@ for (const damage of ['malformed', 'missing-source', 'missing-wrapper', 'missing
   const state = join(root, 'state'), paths = await runnerPaths(state);
   const deadline = Date.now() + 60000;
   if (damage !== 'malformed' && damage !== 'missing-source') {
-    const seed = await launchDiagnostic(t, root, state, paths);
-    const serving = await waitForStorage(seed.call, true, deadline);
-    assert.equal(serving.snapshot?.storage?.state, 'ready', 'proven fresh install initializes DB authority');
-    const exit = once(seed.child, 'exit'); seed.child.kill('SIGKILL'); await exit;
+    // Actual source-built B121 SDK/handler seeds authority, not released-package proof; the successor is current A.
+    const b = await retentionBuild('1.121.0', join(root, 'authority-artifact'));
+    const before = await b.storage.preflightStorage({ bundle: b.bundle(), stateDir: state });
+    const initial = { stateDir: state, managed: false, legacyFiles: (domain: string) => retentionLegacyFiles(state, domain),
+      build: { version: b.version, manifest: b.manifest, preflight: before } };
+    assert.equal((await evaluateStorageUpdate(initial)).code, 'new-state');
+    const client = await b.storage.openStorage({ stateDir: state, bundle: b.bundle() });
+    try {
+      const prepared = await client.prepare({ allowMigration: true });
+      const update = async () => ({ ...initial, build: { ...initial.build, preflight: await b.storage.preflightStorage({ bundle: b.bundle(), stateDir: state }) } });
+      await recordPreparationEvidence(state, { context: client.context!, preflight: (await update()).build.preflight, prepared, gate: await client.gate('core') });
+      await retentionBootstrap(client, state, update, true)();
+    } finally { await client.close(); }
     const db = new DatabaseSync(join(state, 'state.sqlite'));
     try {
       assert.ok(db.prepare('SELECT * FROM domain_imports WHERE domain = ?').get('retention'));
@@ -716,6 +726,9 @@ for (const damage of ['malformed', 'missing-source', 'missing-wrapper', 'missing
   await writeFile(native, JSON.stringify({ type: 'user', sessionId: 'known-cold', cwd: state, timestamp: '2026-10-01T00:00:00.000Z', message: { role: 'user', content: 'fixture cold transcript' } }) + '\n', { mode: 0o600 });
   await writeFile(launcher, JSON.stringify({ version: 1, launches: { 'claude:known-cold': ['claude:parent'] } }), { mode: 0o600 });
   const protectedBytes = await Promise.all([launcher, native].map(path => readFile(path)));
+  const coldSources = damage === 'missing-source' ? [join(state, 'retention-originals', 'preserved.jsonl'), join(state, 'retention-cold', 'preserved.jsonl')] : [];
+  for (const path of coldSources) { await mkdir(dirname(path), { recursive: true, mode: 0o700 }); await writeFile(path, 'preserve cold source', { mode: 0o600 }); }
+  const coldBefore = await Promise.all(coldSources.map(async path => ({ bytes: await readFile(path), info: await lstat(path) })));
   const before = await lstat(proof);
   const live = await launchDiagnostic(t, root, state, paths, undefined, { TOWER_FIXTURE_COLD_COUNTS: '1' });
   const held = await waitForStorage(live.call, false, deadline);
@@ -729,8 +742,13 @@ for (const damage of ['malformed', 'missing-source', 'missing-wrapper', 'missing
     assert.equal((await live.call('create')).error?.disposition, 'not-admitted');
     assert.deepEqual(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')), { scanner: 0, temporary: 0, native: 0 });
     assert.equal(await readFile(proof, 'utf8'), 'preserve proof'); assert.equal((await lstat(proof)).mtimeMs, before.mtimeMs);
-    if (damage === 'missing-source') await assert.rejects(lstat(journal), { code: 'ENOENT' });
-    else assert.equal(await readFile(journal, 'utf8'), '{unknown journal');
+    if (damage === 'missing-source') {
+      await assert.rejects(lstat(journal), { code: 'ENOENT' });
+      for (const [index, path] of coldSources.entries()) {
+        assert.deepEqual(await readFile(path), coldBefore[index].bytes);
+        const info = await lstat(path); assert.equal(info.ino, coldBefore[index].info.ino); assert.equal(info.mtimeMs, coldBefore[index].info.mtimeMs);
+      }
+    } else assert.equal(await readFile(journal, 'utf8'), '{unknown journal');
     assert.deepEqual(await Promise.all([launcher, native].map(path => readFile(path))), protectedBytes, 'unknown cold state never prunes launcher proof or changes native transcript');
     if (attempt < 2) await live.call('storageRetry');
   }

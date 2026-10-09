@@ -24,7 +24,7 @@ test('the production storage opens, needs an explicit prepare, and keeps WAL/FUL
   assert.equal(prepared.created, true);
   assert.equal(prepared.claimed, true);
   assert.equal(prepared.ownerEpoch, 1);
-  assert.deepEqual(prepared.applied, [{ scope: 'core', version: 1 }, { scope: 'retention', version: 1 }, { scope: 'retention', version: 2 }]);
+  assert.deepEqual(prepared.applied, [{ scope: 'core', version: 1 }, { scope: 'retention', version: 1 }, { scope: 'retention', version: 2 }, { scope: 'runs', version: 1 }]);
   const identity = JSON.parse(await readFile(join(dir, 'storage-recovery', 'identity.json'), 'utf8'));
   assert.deepEqual([identity.state, identity.storageId], ['created', prepared.schema.kind !== 'empty' && prepared.schema.storageId], 'the claim comes after the identity says created');
   assert.ok(!Object.keys(await filesUnder(dir)).some(name => name.startsWith('storage/') || name === 'storage'), 'the database is <state-dir>/state.sqlite, with no storage/ folder');
@@ -52,9 +52,11 @@ test('the production storage opens, needs an explicit prepare, and keeps WAL/FUL
   assert.equal(replayed.ownerEpoch, 1);
   await rejectsWith(client.prepare({ allowMigration: false, commandId: 'prepare-1' }), { code: 'command-id-conflict', disposition: 'not-committed' });
 
-  // No production domain exists yet: a domain command is refused by the thread's fixed registry.
-  await rejectsWith(client.write('runs', 'admit', {}, 'w-1'), { code: 'unknown-domain', disposition: 'not-committed' });
-  await rejectsWith(client.read('runs', 'list', {}), { code: 'unknown-domain' });
+  // The fixed registry rejects absent domains and absent commands in the installed runs domain.
+  await rejectsWith(client.write('missing-domain', 'admit', {}, 'w-1'), { code: 'unknown-domain', disposition: 'not-committed' });
+  await rejectsWith(client.read('missing-domain', 'list', {}), { code: 'unknown-domain' });
+  await rejectsWith(client.write('runs', 'missing-command', {}, 'w-2'), { code: 'unknown-command', disposition: 'not-committed' });
+  await rejectsWith(client.read('runs', 'missing-command', {}), { code: 'unknown-command' });
 });
 
 test('flush, close ack and an explicit reopen with the same captured bundle; nothing is sent while closed', async t => {

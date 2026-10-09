@@ -88,6 +88,8 @@ test('an unacknowledged private notice releases completed input after delivery s
   f.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, SESSION);
   const done = await settled(f.manager, run.id);
   assert.equal(done.status, 'completed');
+  // Completion is observable before asynchronous notice/pump bookkeeping has fully settled.
+  await until(() => !f.manager.busy());
   assert.equal(f.manager.busy(), false);
   assert.equal(f.manager.list().length, 1);
   assert.equal((await f.entries()).filter(entry => entry.user).length, 2);

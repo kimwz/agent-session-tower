@@ -1,3 +1,4 @@
+import { RunAdmissionUncertain } from '../../../server/runs/run-records.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -57,7 +58,7 @@ async function fixture(t: TestContext, answers: Partial<Record<'intake' | 'revie
   await service.start();
   const agent: PublicAgentInput = { name: 'Content desk', description: 'Ask for new posts.', scope: 'Only publish new blog posts about tea.', workInstructions: 'Use content/posts.', cwd: project,
     provider: 'claude', intakeProvider: 'claude', conversation: 'visitor', enabled: true };
-  return { directory, project, runs, created, calls, service, agent, make };
+  return { directory, project, runs, created, calls, service, agent, make, runManager };
 }
 
 async function publish(service: PublicAgentService, agent: PublicAgentInput, extra: Record<string, unknown> = {}) {
@@ -299,4 +300,18 @@ test('a missing agent data file starts empty without a note', async t => {
   await service.start();
   assert.equal(service.overview().storageError, undefined);
   assert.equal(service.launchAllowed(published.id), true);
+});
+
+test('public agent unknown admission never claims a memory run as accepted and keeps the request across restart', async t => {
+  const f = await fixture(t,{ intake: () => ({ reply: 'Checking.',submitRequest: 'Publish a tea post.' }) });
+  const original = f.runManager.create;
+  f.runManager.create = async (input,internal) => { await original(input,internal); throw new RunAdmissionUncertain('receipt unresolved',{ commandId: 'public-fixed-commit',sha256: 'a'.repeat(64) }); };
+  const agent = await publish(f.service,f.agent), first = await f.service.visit('state',agent.slug,{ ip: '203.0.113.7' });
+  await f.service.visit('message',agent.slug,{ ip: '203.0.113.7',token: first.token,text: 'Publish it.' });
+  await until(() => f.service.overview().agents[0].requests[0]?.status === 'uncertain' && !f.service.inFlight());
+  f.service.close(); await f.service.flush();
+  const restarted = f.make(); await restarted.start();
+  await until(() => !restarted.inFlight());
+  const state = await restarted.visit('state',agent.slug,{ ip: '203.0.113.7',token: first.token });
+  assert.equal(state.state.conversation!.requests[0].status,'uncertain'); assert.equal(f.created.length,1);
 });

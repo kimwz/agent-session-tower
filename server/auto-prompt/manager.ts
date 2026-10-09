@@ -1,3 +1,4 @@
+import { admissionUncertain } from '../runs/run-records.js';
 import { TowerError } from '../../shared/errors.js';
 import { subscriptionOnly } from '../runs/subscription.js';
 import { requestedEffort, requestedModel, validEffort, validModelId } from '../providers/models.js';
@@ -38,7 +39,7 @@ interface Entry {
 const STORAGE_PAUSED = Symbol('Auto Prompt storage pause');
 type Relation = 'continuation' | 'adjacent' | 'new';
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
-const TERMINAL = new Set<AutoPromptJob['status']>(['completed', 'error', 'cancelled']);
+const TERMINAL = new Set<AutoPromptJob['status']>(['completed', 'error', 'cancelled', 'uncertain']);
 const MAX_PENDING = 8;
 const MAX_HISTORY = 100;
 const MAX_INPUT = 160_000;
@@ -324,7 +325,7 @@ export class AutoPromptManager extends EventEmitter {
 
   private sweepAttachments(): Promise<void> {
     return this.attachments.sweepPending(new Set(), new Set(), { isProtected: (_id, scope) =>
-      this.admissions.has(scope) || Boolean(this.entries.get(scope) && !TERMINAL.has(this.entries.get(scope)!.job.status)) });
+      this.admissions.has(scope) || Boolean(this.entries.get(scope) && (this.entries.get(scope)!.job.status === 'uncertain' || !TERMINAL.has(this.entries.get(scope)!.job.status))) });
   }
 
   async close(): Promise<void> {
@@ -361,6 +362,11 @@ export class AutoPromptManager extends EventEmitter {
       try { await this.route(entry, controller.signal); }
       catch (error) {
         if (error === STORAGE_PAUSED) continue;
+        if (admissionUncertain(error)) {
+          delete entry.resumable; delete entry.selection;
+          this.update(entry.job, { status: 'uncertain', error: errorText(error) });
+          await this.persist(); this.emit('change'); continue;
+        }
         delete entry.resumable;
         const run = this.options.runs.list().find(run => run.autoPromptId === entry.job.id);
         if (run && !TERMINAL.has(entry.job.status)) this.complete(entry, run);
@@ -551,11 +557,14 @@ export class AutoPromptManager extends EventEmitter {
     try { if (!(await stat(cwd)).isDirectory()) throw new Error(); }
     catch { throw new RunError('선택한 작업 폴더가 더 이상 존재하지 않습니다.'); }
   }
-  private async cleanup(entry: Entry): Promise<void> { await this.attachments.rollback(entry.staged.map(item => item.id)); entry.staged = []; }
+  private async cleanup(entry: Entry): Promise<void> {
+    if (entry.job.status === 'uncertain') return;
+    await this.attachments.rollback(entry.staged.map(item => item.id)); entry.staged = [];
+  }
   private prune(): void {
     for (const [id, entry] of this.entries) {
       if (this.entries.size <= MAX_HISTORY) break;
-      if (TERMINAL.has(entry.job.status) && !entry.staged.length) this.entries.delete(id);
+      if (entry.job.status !== 'uncertain' && TERMINAL.has(entry.job.status) && !entry.staged.length) this.entries.delete(id);
     }
   }
   /** Saves the current routing state again and reports failure, without cancelling anything. */
@@ -596,7 +605,7 @@ function validEntry(value: unknown): value is Entry {
     && typeof job.prompt === 'string' && job.prompt.length <= 32_000 && typeof job.routerModel === 'string'
     && (job.routerProvider === undefined || ['claude', 'codex'].includes(String(job.routerProvider))) && (job.routerEffort === undefined || validEffort(job.routerEffort))
     && typeof job.createdAt === 'string' && typeof job.updatedAt === 'string'
-    && ['queued', 'routing', 'dispatching', 'completed', 'error', 'cancelled'].includes(String(job.status))
+    && ['queued', 'routing', 'dispatching', 'completed', 'error', 'cancelled', 'uncertain'].includes(String(job.status))
     && (job.cwd === undefined || typeof job.cwd === 'string' && isAbsolute(job.cwd) && job.cwd.length <= 4096)
     && (job.codexApprovalsReviewer === undefined || ['user', 'auto_review'].includes(String(job.codexApprovalsReviewer)))
     && (job.exclusionRevision === undefined || Number.isSafeInteger(job.exclusionRevision));

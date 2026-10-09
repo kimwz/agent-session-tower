@@ -126,7 +126,7 @@ export class TowerApi {
     // the failure says something may already have happened outside Tower (a sent POST): then the key stays taken.
     try { result = await this.perform(name, parsed.data as Record<string, any>, actor, context); }
     catch (error) {
-      if (!(error as { uncertain?: boolean }).uncertain) { requests.delete(key); await this.save().catch(() => {}); }
+      if (!(error as { uncertain?: boolean }).uncertain && (error as { disposition?: string }).disposition !== 'uncertain') { requests.delete(key); await this.save().catch(() => {}); }
       throw error;
     }
     // A large result is not kept whole; a retry then learns the request succeeded, and what it made or changed.

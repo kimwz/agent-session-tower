@@ -22,7 +22,7 @@ export interface TriggerExecutor {
    */
   coordinate?(event: TriggerEvent): Promise<{ workflowId: string }>;
   /** Where a coordinator conversation stands. */
-  coordination?(workflowId: string): { status: 'running' | 'completed' | 'error'; sessionId?: string; runId?: string; error?: string } | undefined;
+  coordination?(workflowId: string): { status: 'running' | 'completed' | 'error' | 'uncertain'; sessionId?: string; runId?: string; error?: string } | undefined;
 }
 
 
@@ -58,6 +58,7 @@ export async function handEvent(event: TriggerEvent, context: HandoverContext): 
   if (input.target.mode === 'auto') {
     const job = await executor.submitAutoPrompt({ requestId: event.requestId, provider: input.provider, prompt, routingContext: input.instructions, ...common, ...reviewer,
       ...(input.untrustedInput ? { sessionMode: 'new' as const } : {}) }, { origin, untrustedInput: input.untrustedInput, unattended });
+    if (job.status === 'uncertain') return { status: 'uncertain',error: job.error ?? 'Run admission receipt is unresolved; this request was not resent.' };
     if (job.status === 'error' || job.status === 'cancelled') return { status: 'error', error: job.error ?? 'Auto Prompt could not route this run.' };
     return { status: 'running', dispatch: { ...(job.runId ? { runId: job.runId } : {}), ...(job.sessionId ? { sessionId: job.sessionId } : {}) } };
   }

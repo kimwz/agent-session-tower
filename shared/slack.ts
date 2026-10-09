@@ -35,7 +35,7 @@ export interface SlackFollowUp {
   text: string;
   mentioned?: boolean;
   /** received: waiting for a judgment; pending: waiting to reach the conversation; delivering: claimed before handing it over. */
-  status: 'received' | 'pending' | 'delivering' | 'delivered' | 'skipped' | 'error';
+  status: 'received' | 'pending' | 'delivering' | 'delivered' | 'skipped' | 'error' | 'uncertain';
   receivedAt: string;
   /** How likely the judgment found it is for the owner, 0–1. */
   addressed?: number;
@@ -44,7 +44,7 @@ export interface SlackFollowUp {
   runId?: string;
   deliveredAt?: string;
 }
-export type SlackWorkflowState = 'received' | 'matching' | 'ignored' | 'dispatching' | 'running' | 'composing' | 'sending' | 'completed' | 'error' | 'reply-uncertain';
+export type SlackWorkflowState = 'received' | 'matching' | 'ignored' | 'dispatching' | 'running' | 'composing' | 'sending' | 'completed' | 'error' | 'admission-uncertain' | 'reply-uncertain';
 export interface SlackWorkflow {
   id: string;
   mode?: 'conversation';

@@ -1,3 +1,4 @@
+import { RunAdmissionUncertain } from '../../../server/runs/run-records.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -480,4 +481,16 @@ test('a handoff pause stops compactions underway and is undone by resume alone; 
   f.service.release();
   f.service.start('claude:src', {}, OWNER);
   assert.equal((await f.settle()).state, 'done');
+});
+
+test('unknown creation receipt preserves the compaction attempt and never infers success from a memory placeholder', async t => {
+  const f = await setup(t), original = f.dependencies.create;
+  f.dependencies.create = async (input,admission) => { await original(input,admission); throw new RunAdmissionUncertain('receipt unresolved',{ commandId: 'compaction-fixed-commit',sha256: 'a'.repeat(64) }); };
+  f.service.start('claude:src',{},OWNER);
+  assert.equal((await f.settle()).state,'failed');
+  const saved = JSON.parse(await readFile(join(f.stateDir,'session-compactions.json'),'utf8'));
+  assert.equal(saved.sources['claude:src'].state,'creating'); assert.equal(saved.sources['claude:src'].uncertain,true);
+  const restarted = new SessionCompactions(f.dependencies); await restarted.load();
+  assert.throws(() => restarted.start('claude:src',{},OWNER));
+  assert.equal(restarted.get('claude:src')?.state,'failed'); assert.equal(f.created.length,1); await restarted.close();
 });

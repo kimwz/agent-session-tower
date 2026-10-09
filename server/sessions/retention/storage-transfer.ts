@@ -113,16 +113,28 @@ export function retentionBootstrap(storage: StorageClient, stateDir: string, upd
     const evaluation = await evaluateStorageUpdate(current);
     if (!evaluation.importAllowed || evaluation.verdict !== 'ready') throw new Error(`Retention bootstrap held: ${evaluation.code}: ${evaluation.reason}`);
     const domain = storage.context?.manifest.domains.find(domain => domain.scope === 'retention');
-    if (!domain?.cutover) return;
     if (fresh && await retentionLegacyFiles(stateDir, 'retention') !== 'absent') throw new Error('Fresh retention state gained source history; initialization held.');
     const evidenceParent = join(stateDir, 'storage-migrations');
+    // A sealed attempt survives a worker crash even without a final receipt/marker.
+    // Preparation-only builds must keep the same recovery hold before JSON fallback.
+    let evidenceExists = false;
+    try { await lstat(evidenceParent); evidenceExists = true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    if (evidenceExists) {
+      await privateFolder(evidenceParent);
+      const evidenceDirectory = await opendir(evidenceParent);
+      try { if (await evidenceDirectory.read()) throw new Error('Retention import evidence exists without authority; explicit owner recovery required.'); }
+      finally { await evidenceDirectory.close(); }
+    }
+    if (!domain?.cutover) {
+      // Known legacy history cannot become an empty journal through ENOENT fallback.
+      if (await retentionLegacyFiles(stateDir, 'retention') === 'present') {
+        journalDocument(JSON.parse((await raw(join(stateDir, 'retention', 'journal.json'), JOURNAL_BYTES)).toString('utf8')));
+      }
+      return;
+    }
     await privateDirectory(evidenceParent);
     await storageFs.syncDirectory(stateDir);
-    // A sealed attempt survives a worker crash even when no final receipt/marker exists.
-    // Absence of a commit is never evidence that it is safe to repeat the raw import.
-    const evidenceDirectory = await opendir(evidenceParent);
-    try { if (await evidenceDirectory.read()) throw new Error('Retention import evidence exists without authority; explicit owner recovery required.'); }
-    finally { await evidenceDirectory.close(); }
     try {
       if (!fresh) await importRetention({ storage, stateDir, evidenceParent, update: current, repository });
       else {

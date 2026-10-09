@@ -18,7 +18,7 @@ export function mergeAutomation(incoming: unknown, existing: unknown): Record<st
 }
 
 /** Slack work not yet finished belongs to the account that received it. */
-export const UNFINISHED_SLACK = new Set(['received', 'matching', 'dispatching', 'running', 'composing', 'sending', 'reply-uncertain']);
+export const UNFINISHED_SLACK = new Set(['received', 'matching', 'dispatching', 'running', 'composing', 'sending', 'reply-uncertain', 'admission-uncertain']);
 export const slackAccountKey = (value: unknown) => record(value) && record(value.account) ? `${value.account.teamId}:${value.account.userId}` : '';
 /** Whether this computer's Slack automation file still has work under way. */
 export function hasUnfinishedSlackWork(automation: unknown): boolean {

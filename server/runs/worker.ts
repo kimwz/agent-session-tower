@@ -1,10 +1,11 @@
+import { workerLegacyFiles } from './storage-transfer.js';
 import { OPERATIONS, type OperationName } from '../../shared/api/operations.js';
 import { storageControl } from './storage-control.js';
 import type { RollbackFence } from '../link/storage-update.js';
 import type { WorkerStorageStatus } from '../../shared/storage.js';
 import { captureStorageBundle, storageBuildContext, preflightStorage, openStorage, adoptSnapshot, reconcileRecovery, readRecoveryBarrier, StorageCommandError, type StorageClient } from '../storage/index.js';
 import { evaluateStorageUpdate, storageHealth, bootstrapPrepareCommandId, readRollbackRecord, databaseSupported, recordPreparationEvidence, recordUpdateRecoveryReceipt, type RecoveryReceiptKind } from '../link/storage-update.js';
-import { retentionBootstrap, retentionLegacyFiles } from '../sessions/retention/storage-transfer.js';
+import { retentionBootstrap } from '../sessions/retention/storage-transfer.js';
 import { managedByService } from '../link/update.js';
 import type { HeartbeatAdmission } from '../../shared/master.js';
 import { newWorkerSession } from '../models/worker.js';
@@ -541,8 +542,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       // Keep their replies small; the regular snapshot poll publishes engine changes.
       if (input.method !== 'slackTool' && (input.instance !== instance || (input.method === 'snapshot' ? input.revision !== revision : !SNAPSHOT_FREE_OPERATIONS.has(input.method)))) reply.snapshot = snapshot();
     } catch (error) {
-      const value = error as { message?: string; disposition?: string; proofTransition?: NonNullable<RunnerReply['error']>['proofTransition'] };
-      reply.error = { message: value.message ?? 'Runner operation failed.', statusCode: statusOf(error) ?? 500, ...(value.disposition ? { disposition: value.disposition } : {}), ...(value.proofTransition ? { proofTransition: value.proofTransition } : {}) };
+      const value = error as { message?: string; disposition?: string; commitDisposition?: 'committed' | 'not-committed' | 'unknown'; identity?: { commandId: string; sha256: string }; proofTransition?: NonNullable<RunnerReply['error']>['proofTransition'] };
+      reply.error = { message: value.message ?? 'Runner operation failed.', statusCode: statusOf(error) ?? 500, ...(value.disposition ? { disposition: value.disposition } : {}), ...(value.identity ? { admission: value.identity } : {}), ...(value.commitDisposition ? { commitDisposition: value.commitDisposition } : {}), ...(value.proofTransition ? { proofTransition: value.proofTransition } : {}) };
       reply.snapshot = snapshot();
     } finally { pending--; }
     if (!res.destroyed) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(reply)); }
@@ -768,7 +769,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   const build = storageBuildContext(bundle);
   let preflight = await preflightStorage({ bundle, stateDir });
   const managed = await managedByService(stateDir, process.argv[1], true);
-  const updateInput = () => ({ stateDir, managed, legacyFiles: (domain: string) => retentionLegacyFiles(stateDir, domain),
+  const updateInput = () => ({ stateDir, managed, legacyFiles: (domain: string) => workerLegacyFiles(stateDir, domain),
     build: { version: APP_VERSION, preflight, ...(build.ok ? { manifest: build.manifest } : {}) } });
   const evaluate = () => evaluateStorageUpdate(updateInput());
   let evaluation = await evaluate();
@@ -878,6 +879,12 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   const storageRecovery: NonNullable<RunnerHostOptions['storageRecovery']> = async (action, input) => {
     if (!build.ok) throw new TowerError('unavailable', build.failure.message);
     if (action === 'barrier') return readRecoveryBarrier(stateDir);
+    if (action === 'runs-receipt') {
+      if (typeof input.commandId !== 'string') throw new TowerError('invalid', 'Run receipt resolution needs its fixed command ID.');
+      if (recoveryBusy) throw new TowerError('conflict', 'A storage recovery command is underway.');
+      recoveryBusy = true;
+      try { return await runs.resolveAdmission(input.commandId); } finally { recoveryBusy = false; }
+    }
     if (recoveryBusy) throw new TowerError('conflict', 'A storage recovery command is underway.');
     if (!['snapshot', 'adopt', 'reconcile', 'verify-update'].includes(action)) throw new TowerError('invalid', 'Unknown storage recovery action.');
     recoveryBusy = true;
@@ -966,8 +973,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     try {
       if (storageStatus.state === 'ready' && database) {
         const gate = await database.gate('core');
-        if (gate.open && storageStatus.state === 'ready' && generation === storageHoldGeneration) return;
-        if (storageStatus.state === 'ready') storageStatus = { ...storageStatus, state: 'recovery-required', code: 'storage-gate-held', reason: gate.reasons.join(', '), admissionOpen: false };
+        const pendingAdmission = runs.pendingAdmission();
+        if (gate.open && !pendingAdmission && storageStatus.state === 'ready' && generation === storageHoldGeneration) return;
+        if (storageStatus.state === 'ready') storageStatus = { ...storageStatus, state: 'recovery-required', code: 'storage-gate-held', reason: pendingAdmission ? `Run admission receipt ${pendingAdmission.commandId} remains unresolved.` : gate.reasons.join(', '), admissionOpen: false };
       }
     } catch (error) {
       // This catch covers only the actual storage await, never unrelated service initialization.
@@ -1006,6 +1014,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   };
   // Gate(core), not prepare's claim, precedes every restore and startup effect.
   await startupGate();
+  runs.useStorage(database!);
   const restoring = await takeWorkerRestore(stateDir).catch(error => { console.error(`A waiting restore was not applied: ${error instanceof Error ? error.message : String(error)}`); return undefined; });
   // Only the Tower on the account's own state folder keeps its Claude Code and Codex current, so two never update one install.
   // It is there even with automatic updates off: an install a previous worker left running is still waited for.
@@ -1508,6 +1517,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         if (releaseRequested && !await releaseCommitted()) return storageStatus;
         if (!await attempt(true)) return storageStatus;
         await requireEffects();
+        const pendingAdmission = runs.pendingAdmission();
+        if (pendingAdmission) await runs.resolveAdmission(pendingAdmission.commandId);
+        if (runs.pendingAdmission()) return storageStatus;
         if (!await releaseAllowed(generation, fence) || generation !== storageHoldGeneration) return storageStatus;
         storageStatus.admissionOpen = true; runs.releaseStorage(); autoPrompts.releaseStorage();
         paused = false; initializedRetention?.resume(); temporary.resume(); runs.resumeAttachmentCleanup(); autoPrompts.resumeAttachmentCleanup();

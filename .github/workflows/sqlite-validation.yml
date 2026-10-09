@@ -156,7 +156,10 @@ jobs:
           const lifecycle = ['tests/server/runs/durable-runner.test.ts', 'tests/server/runs/locked-state-handoff.test.ts',
             'tests/server/runs/worker-restore-order.test.ts', 'tests/server/http/master-worker-http.test.ts',
             'tests/server/terminals/terminal-host.test.ts', 'tests/server/instance/existing-server.test.ts',
-            'tests/server/permissions/permissions.test.ts', 'tests/server/auto-prompt/auto-prompts.test.ts'];
+            'tests/server/permissions/permissions.test.ts', 'tests/server/auto-prompt/auto-prompts.test.ts', 'tests/client/auto-prompt/auto-prompt-ui.test.ts',
+            'tests/server/slack/service.test.ts', 'tests/server/slack/automation.test.ts',
+            'tests/server/public-agents/service.test.ts', 'tests/server/sessions/compaction.test.ts',
+            'tests/server/triggers/service.test.ts'];
           for (const file of lifecycle) assert.ok(globSync(file).length, `lifecycle fixture must exist: ${file}`);
           // Keep metadata preparation covered alongside native-effect and admission boundaries.
           const retention = ['tests/server/sessions/retention-storage.test.ts',
@@ -291,10 +294,10 @@ jobs:
           npm ci
           node --import tsx scripts/sqlite-runtime-check.mjs supported-floor | tee "$report/runtime.json"
           printf '%s\n' release-version-decision > "$report/stage.txt"
-          if [[ "$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')" == 1.121.0 ]]; then
+          if [[ "$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')" == 1.122.0 ]]; then
             printf '%s\n' already-target > "$report/version-mode.txt"
             printf '%s\n' already-target-official-hooks > "$report/stage.txt"
-            npm version 1.121.0 --allow-same-version --no-git-tag-version
+            npm version 1.122.0 --allow-same-version --no-git-tag-version
             printf '0\n' > "$report/npm-version-exit.txt"
           else
             node --input-type=module <<'FLOOR'
@@ -303,13 +306,13 @@ jobs:
           const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
           assert.match(version, /^\d+\.\d+\.\d+$/);
           const current = version.split('.').map(Number);
-          const target = [1, 121, 0];
+          const target = [1, 122, 0];
           const first = current.findIndex((part, index) => part !== target[index]);
           assert.ok(first >= 0 && current[first] < target[first], 'target must exceed the input version');
           FLOOR
             printf '%s\n' npm-version > "$report/version-mode.txt"
             printf '%s\n' npm-version-hooks > "$report/stage.txt"
-            npm version 1.121.0 --no-git-tag-version
+            npm version 1.122.0 --no-git-tag-version
             printf '0\n' > "$report/npm-version-exit.txt"
           fi
           node --input-type=module <<'VERSION'
@@ -318,7 +321,7 @@ jobs:
           import { APP_VERSION } from './dist/shared/app-identity.js';
           const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
           const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
-          assert.equal(pkg.version, '1.121.0');
+          assert.equal(pkg.version, '1.122.0');
           assert.equal(lock.version, pkg.version);
           assert.equal(lock.packages[''].version, pkg.version);
           assert.equal(APP_VERSION, pkg.version);

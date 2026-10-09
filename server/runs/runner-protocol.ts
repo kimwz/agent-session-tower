@@ -54,7 +54,7 @@ export interface RunnerReply {
   instance: string;
   snapshot?: RunnerSnapshot;
   result?: unknown;
-  error?: { message: string; statusCode: number; disposition?: string; proofTransition?: ProofTransition };
+  error?: { message: string; statusCode: number; disposition?: string; commitDisposition?: 'committed' | 'not-committed' | 'unknown'; admission?: { commandId: string; sha256: string }; proofTransition?: ProofTransition };
 }
 
 /** Pure calculation for fixture teardown: never recreates a deleted state directory. */

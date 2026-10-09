@@ -1,3 +1,4 @@
+import { admissionUncertain } from '../runs/run-records.js';
 import { EventEmitter } from 'node:events';
 import { continuedRun, continuedRunById } from '../runs/continuations.js';
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
@@ -586,6 +587,7 @@ export class PublicAgentService extends EventEmitter {
         { autoPromptId: request.id, origin, untrustedInput: true, unattended: true, createFolder: false, trustWorkspace: true });
         Object.assign(request, { status: 'running', runId: run.id, sessionId: session.id, updatedAt: this.iso() });
       } catch (error) {
+        if (admissionUncertain(error)) { Object.assign(request, { status: 'uncertain', error: 'Run admission receipt is unresolved. This request was not resubmitted.',updatedAt: this.iso() }); return; }
         const run = this.options.runs.list().find(item => item.autoPromptId === request.id);
         if (run) Object.assign(request, { status: 'running', runId: run.id, sessionId: run.sessionId, updatedAt: this.iso() });
         else this.finish(data, request, { status: 'failed', error: (error instanceof Error ? error.message : String(error)).slice(0, 1000), result: 'This request could not be started.' });

@@ -255,7 +255,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         host.registry.confirm(session.id, actualId);
         session.nativeId = actualId;
         host.changed();
-        identitySaved = host.flush().catch(error => {
+        identitySaved = host.persistNativeIdentity(run).then(() => {}).catch(error => {
           streamError = `Cannot save the new conversation identity: ${errorMessage(error)}`;
           host.stop(run.id, owned);
         });

@@ -135,7 +135,7 @@ export function AutoPromptDialog({ visible, initialCwd, initialNode, providers: 
     const element = dialog.current;
     if (!visible || !element) return;
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    if (currentJob.current && !autoPromptPending(currentJob.current) && seenTerminalId.current === currentJob.current.id && !sending.current) {
+    if (currentJob.current && currentJob.current.status !== 'uncertain' && !autoPromptPending(currentJob.current) && seenTerminalId.current === currentJob.current.id && !sending.current) {
       generation.current++;
       uploadRequest.current = undefined;
       attempt.current = undefined; currentJob.current = undefined;
@@ -327,9 +327,10 @@ export function AutoPromptDialog({ visible, initialCwd, initialNode, providers: 
     {!job && suggestion && <SuggestionRow state={suggestion} accepted={acceptSuggestion} disabled={locked} machine={machine} projects={choices} sessions={sessions} onChange={setAcceptSuggestion} />}
     {statusLabel && <div className="auto-prompt-progress" role="status"><LoaderCircle size={18} className="spin" aria-hidden="true" /><div><strong>{statusLabel}</strong>{job?.status === 'routing' && !directed(job) && <small title={job.routerModel}>{t('{0}가 요청을 살펴보고 있습니다.', { 0: job.routerModel || providerLabels[job.routerProvider ?? job.provider] })}</small>}<small>{t('창을 닫아도 요청은 계속됩니다.')}</small></div>{job && ['queued', 'routing'].includes(job.status) && <button type="button" className="auto-prompt-cancel" disabled={cancelling || !connected || !token} onClick={() => { void cancel(); }}>{cancelling ? <LoaderCircle size={12} className="spin" /> : <Square size={11} />}{t('취소')}</button>}</div>}
     {requestError && <div className="auto-prompt-error" role="alert"><TriangleAlert size={16} aria-hidden="true" /><p>{translateMessage(requestError)}</p>{uncertain && <button type="button" disabled={submitting || unavailable} onClick={() => { void submit(); }}>{t('같은 요청 다시 확인')}</button>}</div>}
+    {job?.status === 'uncertain' && <p role="alert">{t('작업 접수 결과를 확인할 수 없습니다. 확인 전에는 다시 보내지 않습니다.')}</p>}
     {job?.status === 'cancelled' && <p className="auto-prompt-cancelled" role="status">{t('요청을 취소했습니다. 세션에 보내지 않았습니다.')}</p>}
     {job?.status === 'completed' && <section className="auto-prompt-result" aria-label={t('요청을 보낸 세션')}><div className="auto-prompt-result-heading"><Check size={19} aria-hidden="true" /><h3>{job.decision?.action === 'create' ? t('새 세션에 요청을 보냈습니다') : t('기존 세션에 요청을 보냈습니다')}</h3></div><p className="auto-prompt-result-path"><Folder size={14} aria-hidden="true" /><bdi dir="ltr">{job.decision?.cwd || target?.cwd || cwd}</bdi></p><strong className="auto-prompt-result-session">{target ? sessionTitle(target) : job.sessionId}</strong>{job.decision?.reason && <p className="auto-prompt-result-reason">{job.decision.reason}</p>}</section>}
-    <footer className="auto-prompt-footer"><p>{!locked && connectionMessage}</p>{job && !pending && <button type="button" className="secondary-button" disabled={submitting || cancelling} onClick={() => resetRequest(job.status === 'completed')}>{job.status === 'completed' ? t('새 요청') : t('요청 다시 작성')}</button>}</footer>
+    <footer className="auto-prompt-footer"><p>{!locked && connectionMessage}</p>{job && !pending && job.status !== 'uncertain' && <button type="button" className="secondary-button" disabled={submitting || cancelling} onClick={() => resetRequest(job.status === 'completed')}>{job.status === 'completed' ? t('새 요청') : t('요청 다시 작성')}</button>}</footer>
   </dialog>, document.body);
 }
 

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { runsSchema } from '../runs/storage-schema.js';
 import { retentionSchema } from '../sessions/retention/storage-schema.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { STORAGE_PROTOCOL, type DomainManifest, type ScopeManifest, type StorageBuildManifest, type StorageDomainSchema, type StorageMigration } from './contract.js';
@@ -34,7 +35,7 @@ CREATE TABLE operation_receipts (
  * The domains this build stores in SQLite. Empty until a domain's preparation release (A) adds its schema owner here;
  * listing a domain is the claim that this build reads and writes its tables.
  */
-export const STORAGE_DOMAIN_SCHEMAS: readonly StorageDomainSchema[] = [retentionSchema];
+export const STORAGE_DOMAIN_SCHEMAS: readonly StorageDomainSchema[] = [retentionSchema, runsSchema];
 
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 export const migrationChecksum = (scope: string, migration: StorageMigration) => sha256(`${scope}\n${migration.version}\n${migration.sql}`);

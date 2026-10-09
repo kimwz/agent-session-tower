@@ -20,6 +20,13 @@ import {
 const run = promisify(execFile);
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const lastJson = (stdout: string) => JSON.parse(stdout.trim().split('\n').at(-1)!);
+// Include runtime imports of the runs codec when copying or compiling modules without bundling.
+const runsStorageSources = [
+  'server/runs/storage-schema.ts', 'server/runs/storage-codec.ts', 'server/runs/storage-commands.ts',
+  'server/runs/saved-state.ts', 'server/runs/turn-notes.ts', 'server/runs/run-records.ts',
+  'server/stores/attachments.ts', 'server/providers/models.ts', 'server/providers/discovery.ts',
+  'shared/attachments.ts', 'shared/errors.ts',
+];
 
 test('a checkout trusts only the thread its own first capture bundles from its canonical entry: before it nothing, after it nothing else (a tsx process without the fixture build)', async t => {
   const state = await stateDir(t);
@@ -66,7 +73,7 @@ test('a checkout trusts only the thread its own first capture bundles from its c
     // Before: nothing is trusted, not even the canonical text when a caller hands it in.
     before: { refusals: untrusted, own: 'bundle-untrusted', ownContext: 'bundle-untrusted' },
     files: 0,
-    capture: { code: 'ok', origin: 'development', same: true, once: true, requires: ['node:crypto', 'node:worker_threads'], sqliteRequired: false },
+    capture: { code: 'ok', origin: 'development', same: true, once: true, requires: ['node:crypto', 'node:path', 'node:worker_threads'], sqliteRequired: false },
     // After: the same canonical source is the one trusted; foreign and re-hashed sources still are not.
     after: { refusals: untrusted, own: 'ok' },
     open: [true, 'closed', 'ready', true, true],
@@ -83,6 +90,7 @@ test('a checkout whose own thread entry changes after its capture reopens with t
   for (const name of ['storage-schema.ts', 'storage-codec.ts', 'storage-commands.ts']) {
     await cp(join(root, 'server/sessions/retention', name), join(checkout, 'server/sessions/retention', name));
   }
+  for (const name of runsStorageSources) await cp(join(root, name), join(checkout, name));
   await cp(join(root, 'shared/app-identity.ts'), join(checkout, 'shared/app-identity.ts'));
   await cp(join(root, 'tsconfig.json'), join(checkout, 'tsconfig.json'));
   await writeFile(join(checkout, 'package.json'), '{"type":"module"}');
@@ -171,6 +179,7 @@ async function compileStorage(out: string): Promise<void> {
   const sources = [
     ...(await readdir(join(root, 'server/storage'), { recursive: true })).filter(name => name.endsWith('.ts') && !name.endsWith('.d.ts')).map(name => join(root, 'server/storage', name)),
     ...['storage-schema.ts', 'storage-codec.ts', 'storage-commands.ts'].map(name => join(root, 'server/sessions/retention', name)),
+    ...runsStorageSources.map(name => join(root, name)),
     join(root, 'shared/app-identity.ts'),
   ];
   await build({ entryPoints: sources, outbase: root, outdir: out, format: 'esm', platform: 'node', target: 'node22', logLevel: 'silent' });

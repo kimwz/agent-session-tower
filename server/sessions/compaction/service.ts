@@ -1,3 +1,4 @@
+import { admissionUncertain } from '../../runs/run-records.js';
 /**
  * Compaction of a conversation on the owner's request (the chat's compact button). The worker owns it, so a web restart
  * never cuts one short and a worker handoff waits for it: it reads the conversation's own history, every page and never
@@ -72,7 +73,7 @@ interface Entry { job: SessionCompaction; revision: string; controller: AbortCon
  * One record per compacted conversation: its last compaction that began creating a session. `prompt` names the
  * compaction, so the turn that creates the session is recognized by it alone.
  */
-interface Attempt { jobId: string; revision: string; at: string; state: 'creating' | 'done'; newSessionId?: string; prompt: string }
+interface Attempt { uncertain?: true; jobId: string; revision: string; at: string; state: 'creating' | 'done'; newSessionId?: string; prompt: string }
 
 const UNCERTAIN = '이전 압축이 새 세션을 만들었는지 확인할 수 없어(실행 워커가 중간에 멈춤) 다시 만들지 않았습니다. 세션 목록에서 「(이어서)」 세션을 확인하세요. 원래 세션에서 대화가 더 이어지면 다시 압축할 수 있습니다.';
 const UNUSABLE = '압축으로 만든 새 세션을 이어서 쓸 수 없습니다(첫 응답이 실패했거나 세션이 없어짐). 다시 압축하면 새 세션을 만듭니다.';
@@ -161,7 +162,7 @@ export class SessionCompactions {
     for (const [id, value] of Object.entries(sources)) {
       if (record(value) && typeof value.jobId === 'string' && typeof value.revision === 'string' && typeof value.at === 'string' && (value.state === 'creating' || value.state === 'done')
         && typeof value.prompt === 'string' && (value.newSessionId === undefined || typeof value.newSessionId === 'string')) {
-        this.attempts.set(id, { jobId: value.jobId, revision: value.revision, at: value.at, state: value.state, prompt: value.prompt, ...(value.newSessionId ? { newSessionId: value.newSessionId } : {}) });
+        this.attempts.set(id, { jobId: value.jobId, revision: value.revision, at: value.at, state: value.state, prompt: value.prompt, ...(value.newSessionId ? { newSessionId: value.newSessionId } : {}), ...(value.uncertain === true ? { uncertain: true } : {}) });
       }
     }
     let settled = false;
@@ -260,7 +261,7 @@ export class SessionCompactions {
    */
   private settle(sourceId: string, dropMissing = false): boolean {
     const attempt = this.attempts.get(sourceId);
-    if (attempt?.state !== 'creating') return false;
+    if (attempt?.state !== 'creating' || attempt.uncertain) return false;
     const run = this.dependencies.runs().find(item => item.prompt === attempt.prompt);
     if (run) { this.attempts.set(sourceId, { ...attempt, state: 'done', newSessionId: this.dependencies.session(run.sessionId)?.id ?? run.sessionId }); return true; }
     if (dropMissing) { this.attempts.delete(sourceId); return true; }
@@ -341,6 +342,11 @@ export class SessionCompactions {
       // A part still being summarized beside the one that failed is not needed any more.
       entry.controller.abort();
       if (stop === 'cancelled') return;
+      if (admissionUncertain(error) && recorded) {
+        const attempt = this.attempts.get(source.id);
+        if (attempt) attempt.uncertain = true;
+        await this.save(); this.update(entry, { state: 'failed', error: UNCERTAIN,progress: undefined }); return;
+      }
       // A creation that failed after saving its session still made it: that session is the compaction's result.
       if (recorded) {
         this.settle(source.id, true);

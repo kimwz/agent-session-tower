@@ -22,7 +22,7 @@ const blank = (projects: [string, string][]): PublicAgentInput => {
 };
 
 export function requestStatusLabel(status: PublicRequestStatus, t: Translate): string {
-  return t(({ reviewing: '검토 중', rejected: '거절됨', queued: '대기 중', dispatching: '시작 중', running: '진행 중', summarizing: '결과 검토 중', completed: '완료', failed: '실패' } as const)[status]);
+  return t(({ reviewing: '검토 중', rejected: '거절됨', queued: '대기 중', dispatching: '시작 중', running: '진행 중', summarizing: '결과 검토 중', completed: '완료', failed: '실패', uncertain: '작업 접수 확인 필요' } as const)[status]);
 }
 
 /** Where visitors open an agent: the public address when one is set, else this computer's own port. */

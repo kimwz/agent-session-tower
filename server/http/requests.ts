@@ -139,7 +139,7 @@ export type Disposition = 'not-admitted' | 'uncertain';
 export function errorDisposition(error: unknown): Disposition | undefined {
   const value = (error as { disposition?: unknown })?.disposition;
   if (value === 'handoff' || value === 'not-admitted') return 'not-admitted';
-  if (value === 'uncertain') return 'uncertain';
+  if (value === 'uncertain' || value === 'unknown' || value === 'committed') return 'uncertain';
   return undefined;
 }
 

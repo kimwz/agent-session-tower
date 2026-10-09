@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.122.0] - 2026-10-10
+
+### Changed
+
+- Prepare runs SQLite schemas and reader/writer contracts, preserving uncertain admission receipts and preventing automatic resend before their outcome is known. Production runs first import remains disabled.
+- Use a preparation-only retention profile while existing retention SQL authority continues reading and writing. Preserve recovery holds for prior sealed attempts without authority. This preparation release does not complete #84; retention and runs first-import activation belongs to the later B release.
+
 ## [1.121.0] - 2026-10-09
 
 ### Changed

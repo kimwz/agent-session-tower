@@ -46,6 +46,8 @@ export interface TurnHost {
   append(run: Run, text: string): void;
   notifyOutput(): void;
   flush(): Promise<void>;
+  /** Native identity only: wait for its fixed receipt; false means explicit cancellation. */
+  persistNativeIdentity(run: Run): Promise<boolean>;
   stopping(): boolean;
   updating(): boolean;
   /** Signals a Claude process to stop (then kills it if it does not). */

@@ -56,7 +56,7 @@ export interface PublicMessage {
  * `reviewing`: the request reviewer is checking it. `queued`: approved, waiting for a free slot. `running`: the project
  * agent works on it. `summarizing`: the result is being reviewed before visitors see it.
  */
-export type PublicRequestStatus = 'reviewing' | 'rejected' | 'queued' | 'dispatching' | 'running' | 'summarizing' | 'completed' | 'failed';
+export type PublicRequestStatus = 'reviewing' | 'rejected' | 'queued' | 'dispatching' | 'running' | 'summarizing' | 'completed' | 'failed' | 'uncertain';
 export interface PublicRequestView {
   id: string;
   request: string;

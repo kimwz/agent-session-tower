@@ -10,7 +10,7 @@ import { useI18n, translateMessage } from '../i18n/i18n';
 import { SlackReplyProposals } from './SlackReplyProposals';
 import { slackMentionTitle, slackWorkflowLabel, slackWorkflowWorking } from './slack-monitor';
 
-const FOLLOW_UP_LABELS: Record<NonNullable<SlackWorkflow['followUps']>[number]['status'], string> = { received: '판단 대기', pending: '대화에 전달 대기', delivering: '대화에 전달 중', delivered: '대화에 전달함', skipped: '전달하지 않음', error: '오류' };
+const FOLLOW_UP_LABELS: Record<NonNullable<SlackWorkflow['followUps']>[number]['status'], string> = { received: '판단 대기', pending: '대화에 전달 대기', delivering: '대화에 전달 중', delivered: '대화에 전달함', skipped: '전달하지 않음', error: '오류', uncertain: '작업 접수 확인 필요' };
 
 /** Slack's part of the trigger monitor: the connection, reply tone and received mentions. */
 export function SlackOverview({ slack, token, unreadIds, onSelectMention }: { slack: SlackPublicStatus | null; token: string; unreadIds?: ReadonlySet<string>; onSelectMention: (id: string) => void }) {
@@ -41,7 +41,7 @@ export function SlackMentionDetail({ workflow, job, token, onRead, onNavigate }:
 
 export function SlackWorkflowSummary({ workflow, job, token = '' }: { workflow: SlackWorkflow; job?: AutoPromptJob; token?: string }) {
   const { t } = useI18n();
-  const routeLabels: Record<AutoPromptJob['status'], string> = { queued: t('대기 중'), routing: t('라우팅 중'), dispatching: t('작업 준비 중'), completed: t('라우팅 완료'), error: t('오류'), cancelled: t('취소됨') };
+  const routeLabels: Record<AutoPromptJob['status'], string> = { queued: t('대기 중'), routing: t('라우팅 중'), dispatching: t('작업 준비 중'), completed: t('라우팅 완료'), error: t('오류'), cancelled: t('취소됨'), uncertain: t('작업 접수 확인 필요') };
   return <>
     <div className={`slack-monitor-state ${slackWorkflowWorking(workflow.status) ? 'working' : ''}`} role="status">{slackWorkflowLabel(workflow.status)}</div>
     <section><h3>{t('받은 멘션')}</h3><p className="slack-monitor-muted">{workflow.mention.user} · {workflow.mention.channel} · {new Date(workflow.createdAt).toLocaleString()}</p><p className="slack-monitor-text">{workflow.mention.text}</p>{workflow.thread && <details><summary>{t('원본 스레드')} ({workflow.thread.length})</summary>{workflow.thread.map(message => <div key={message.ts} className="slack-monitor-thread-message"><small>{message.user}</small><p className="slack-monitor-text">{message.text}</p></div>)}</details>}</section>

@@ -1,3 +1,4 @@
+import { RunAdmissionUncertain } from '../../../server/runs/run-records.js';
 /** An owner turn as the agent receives it: the message, then Tower's instructions. */
 const chatText = (turn: { prompt: string; instructions?: string }) => `${turn.prompt}\n\n${turn.instructions ?? ''}`;
 import assert from 'node:assert/strict';
@@ -1290,4 +1291,14 @@ test('nothing is marked while clearing, and nothing goes back on before the acco
   assert.equal(changed, true);
   assert.deepEqual(calls, ['add:loading:1.1', 'remove:loading:1.1'], 'the request that came in meanwhile is not marked');
   assert.equal(f.manager.list()[1].workingMarks, undefined);
+});
+
+test('unknown admission keeps the Slack claim without a retry or a confirmed error after restart', async t => {
+  const f = await fixture(t); let submissions = 0;
+  f.options.submitAutoPrompt = async () => { submissions++; throw new RunAdmissionUncertain('receipt unresolved',{ commandId: 'slack-fixed-commit',sha256: 'a'.repeat(64) }); };
+  await f.manager.ingest(mention); await f.manager.tick();
+  assert.equal(f.manager.list()[0].status,'admission-uncertain');
+  await f.manager.tick();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick();
+  assert.equal(restarted.list()[0].status,'admission-uncertain'); assert.equal(submissions,1); assert.equal(f.counts().sends,0);
 });
