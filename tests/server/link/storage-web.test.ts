@@ -73,6 +73,8 @@ test('serving target web resumes only the durable owner rollback through the rea
   await runs.start();
   let child: ReturnType<typeof spawn> | undefined;
   let successorReady = false;
+  let snapshotAdoptedBeforeProof = false;
+  let responseOrderError: unknown;
   let launchError: unknown;
   let launchTimer: ReturnType<typeof setTimeout> | undefined;
   let drains = 0;
@@ -90,7 +92,18 @@ test('serving target web resumes only the durable owner rollback through the rea
           child.stderr!.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-16000); });
           const ended = once(child, 'exit');
           t.after(async () => { if (child!.exitCode === null && child!.signalCode === null) child!.send({ close: true }); await ended; });
-          child.on('message', message => { if ((message as { ready?: boolean }).ready) successorReady = true; });
+          child.on('message', message => {
+            if ((message as { ready?: boolean }).ready) successorReady = true;
+            if ((message as { proofHeld?: boolean }).proofHeld) {
+              // Exercise the ordinary read-only poll RPC on this same connection before releasing its proof reply.
+              void (manager as unknown as { call(method: string): Promise<unknown> }).call('snapshot').catch(error => {
+                if (manager.runnerVersion() !== target) throw error;
+              }).then(() => {
+                assert.equal(manager.runnerVersion(), target, 'actual snapshot adopted nonce-verified successor');
+                snapshotAdoptedBeforeProof = true;
+              }).catch(error => { responseOrderError = error; }).finally(() => child!.send({ releaseProof: true }));
+            }
+          });
           child.once('exit', code => { if (!successorReady) launchError = new Error(`successor exited ${code}: ${stderr}`); });
         })().catch(error => { launchError = error; });
       }, 400);
@@ -121,6 +134,25 @@ import { startRunnerHost } from ${JSON.stringify(new URL('../../../server/runs/w
 import { RunManager } from ${JSON.stringify(new URL('../../../server/runs/manager.ts', import.meta.url).href)};
 import { SessionService } from ${JSON.stringify(new URL('../../../server/sessions/service.ts', import.meta.url).href)};
 import { join } from 'node:path';
+import { Server } from 'node:http';
+// Hold one actual predecessor-addressed proof 409; never alter the request or production reply bytes.
+const emit = Server.prototype.emit; let heldReply; let latched = false;
+Server.prototype.emit = function(event, ...args) {
+  if(event === 'request' && args[0].url === '/rpc') {
+    const [req, res] = args; const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    const end = res.end;
+    res.end = function(...values) {
+      const input = JSON.parse(Buffer.concat(chunks).toString());
+      const reply = JSON.parse(String(values[0]));
+      if(!latched && input.method === 'storageControl' && input.args[0] === 'proof' && input.instance !== reply.instance && reply.error?.statusCode === 409) {
+        latched = true; heldReply = () => end.apply(this, values); process.send({proofHeld:true}); return this;
+      }
+      return end.apply(this, values);
+    };
+  }
+  return emit.call(this, event, ...args);
+};
 const stateDir = process.argv[2]; const fence = JSON.parse(process.argv[3]);
 const client = await sdk.openStorage({stateDir, bundle: sdk.storageBundleFromArtifact(process.argv[4], 'artifact')});
 await client.prepare({allowMigration:false});
@@ -130,7 +162,7 @@ const runs = new RunManager({stateDir,getSession:()=>undefined,refreshSessions:a
 await runs.start();
 const call = storageControl({stateDir, client:()=>client, successorFence:fence, hold:async()=>{}, release:async()=>{}, quiet:()=>true, handoff:()=>{throw new Error('duplicate successor');}});
 const host = await startRunnerHost({stateDir,sessions,runs,handoffNonce:process.argv[5],storageControl:call,closeStorage:()=>client.close()});
-process.on('message', async message => { if(message.close){await host.close();await runs.close();sessions.stop();process.disconnect();} });
+process.on('message', async message => { if(message.releaseProof){heldReply?.();heldReply=undefined;} if(message.close){heldReply?.();await host.close();await runs.close();sessions.stop();process.disconnect();} });
 process.send({ready:true});`);
   let pendingProofs = 0;
   let unknownProof = false;
@@ -232,7 +264,10 @@ process.send({ready:true});`);
   await restorePending();
   allowHandoff = true;
   const outcome = await storageWebServing(context, { intervalMs: 25 });
-  assert.equal(outcome?.state, 'completed', JSON.stringify(outcome)); assert.equal(handoffs, 1);
+  assert.equal(responseOrderError, undefined);
+  assert.equal(snapshotAdoptedBeforeProof, true, 'actual snapshot response precedes held proof 409');
+  console.log('concurrent-adoption: actual snapshot adopted before held predecessor proof 409');
+  assert.equal(outcome?.state, 'completed', 'concurrent-adoption: predecessor proof 409 after snapshot adoption must complete'); assert.equal(handoffs, 1);
   assert.equal((await targetPorts.servingProof(successorFence!)).gate.open, true);
   assert.ok(pendingProofs > 0, 'accepted returns before the actual successor is ready');
   assert.ok(drains > 0, 'actual worker RPC refuses proof during slow quiesce');

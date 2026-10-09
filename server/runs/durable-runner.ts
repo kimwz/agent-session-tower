@@ -454,7 +454,7 @@ export class DurableRunManager extends EventEmitter {
       }
       throw error;
     });
-    const body = JSON.stringify({ protocol: RUNNER_PROTOCOL, method, args, instance: this.snapshot?.instance, revision: this.snapshot?.revision });
+    const body = JSON.stringify({ protocol: RUNNER_PROTOCOL, method, args, instance: proofFence ? addressedInstance : this.snapshot?.instance, revision: this.snapshot?.revision });
     const reply = await new Promise<RunnerReply>((resolve, reject) => {
       const req = request({ socketPath: this.paths!.socket, method: 'POST', path: '/rpc', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, res => {
         const chunks: Buffer[] = []; let size = 0;
@@ -492,10 +492,14 @@ export class DurableRunManager extends EventEmitter {
       this.closedIds = new Set(reply.snapshot.closedIds ?? []);
       this.emit('change');
     }
+    const proofHandoff = proofFence && reply.error?.statusCode === 409 && reply.instance !== addressedInstance
+      ? await matchingHandoff() : undefined;
+    const proofAdopted = !!proofHandoff && !!reply.snapshot && reply.snapshot.instance === reply.instance
+      && reply.snapshot.handoff === proofHandoff.successor;
     // The successor refused a request addressed to its predecessor; it never ran.
-    if (adopted && reply.error?.statusCode === 409) {
+    if ((adopted || proofAdopted) && reply.error?.statusCode === 409) {
       const error = new TowerError('unavailable', 'Tower just updated its execution worker. The request was not submitted; send it again.', { disposition: 'not-admitted' });
-      if (proofFence && await matchingHandoff()) Object.assign(error, { proofTransition: { reason: 'adopted', fence: proofFence } });
+      if (proofAdopted) Object.assign(error, { proofTransition: { reason: 'adopted', fence: proofFence } });
       throw error;
     }
     if (reply.error) {
