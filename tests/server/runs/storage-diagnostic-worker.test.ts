@@ -136,6 +136,9 @@ test('actual product worker promotes update-held once in the same boot; a failed
       storage: { kind: 'empty' }, ownerEpoch: 0, at } },
     attempt: { n: 1, pid: process.pid, start: 'fixture', nonce: 'a'.repeat(32), kind: 'run', at, ended: true }, startedAt: at, updatedAt: at };
   await writeFile(storageUpdatePaths(state).rollback, JSON.stringify(rollback), { mode: 0o600 });
+  await writeFile(storageUpdatePaths(state).pin, JSON.stringify({ format: 'tower-storage-pin', version: 1,
+    pinned: rollback.target, sourceHash: rollback.sourceHash, manifestDigest: rollback.manifestDigest,
+    entrySha256: rollback.entrySha256, rollbackId: rollback.id, by: rollback.by, reason: rollback.reason, at }), { mode: 0o600 });
   const sdkControl = storageControl({ stateDir: state, client: () => client, successorFence: fence,
     prepareRefusal: { code: 'migration-required', disposition: 'not-committed' },
     hold: async () => { assert.fail('sent handoff must settle without a second hold'); },
@@ -160,7 +163,7 @@ test('actual product worker promotes update-held once in the same boot; a failed
   }, async () => { assert.fail('completion must not restart the web'); });
   const running: RunningBuild = { version: identity.appVersion, manifest: context.manifest, preflight };
   const completed = await resumeRollback({ stateDir: state, running, managed: true, ports, serialize: work => work() });
-  assert.equal(completed.state, 'completed'); assert.equal(releaseAcks, 1);
+  assert.equal(completed.state, 'completed', JSON.stringify(completed)); assert.equal(releaseAcks, 1);
   const published = await readRollbackRecord(state);
   assert.ok(published.state === 'present' && published.record.held === false && published.record.handoff?.state === 'done');
   assert.ok(published.state === 'present' && published.record.worker?.sourceHash === identity.sourceHash);

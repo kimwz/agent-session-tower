@@ -206,8 +206,9 @@ test('production onIdle drains both GCs before a later flush failure can release
   const worker = await host(f, { onIdle: hooks.onIdle, onCloseFailure: () => { diagnosed++; },
     closeStorage: async () => { const ack = await database.close(); assert.equal(ack.ack, 'closed'); closeAcks++; },
     releaseStateLock: async () => { assert.equal(closeAcks, 1); released++; } });
+  const closing = worker.close(true);
   try {
-    const closing = worker.close(true); const failed = assert.rejects(closing, /fixture tool flush failure/);
+    const failed = assert.rejects(closing, /fixture tool flush failure/);
     await new Promise(resolve => setTimeout(resolve, 15)); assert.equal(released, 0); runGC.resolve(); await Promise.resolve(); assert.equal(released, 0);
     autoGC.resolve(); await downstream.promise; await failed; assert.equal(released, 0); assert.equal(diagnosed, 1); assert.equal(closeAcks, 0);
     assert.equal((await database.gate('core')).open, true);
@@ -215,7 +216,7 @@ test('production onIdle drains both GCs before a later flush failure can release
     await worker.close(); assert.equal(released, 1); assert.equal(closeAcks, 1);
     assert.equal(internals(f.runs).attachmentCleanupTimer, undefined); assert.equal(internals(f.auto).attachmentCleanupTimer, undefined);
     assert.deepEqual(hooks.retentionCalls, ['quiesce']); assert.deepEqual(hooks.temporaryCalls, ['quiesce']);
-  } finally { runGC.resolve(); autoGC.resolve(); await worker.close(); await database.close(); }
+  } finally { runGC.resolve(); autoGC.resolve(); await closing.catch(() => {}); await worker.close(); await database.close(); }
 });
 
 for (const autoStarted of [false, true]) test(`production startup failure drains initialized managers before lock release (Auto ${autoStarted})`, async t => {
