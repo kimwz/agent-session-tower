@@ -912,7 +912,6 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   let ready = await attempt();
   let diagnosticHost: Awaited<ReturnType<typeof startRunnerHost>> | undefined;
   const previousHandoff = handoffNonce ? await readHandoff(paths.runtime) : undefined;
-  const diagnosticTransition = !ready || (previousHandoff?.successor === handoffNonce && previousHandoff?.storageTransition === true);
   let retryNormal: (() => Promise<WorkerStorageStatus>) | undefined;
   let retryRuntime: (() => Promise<WorkerStorageStatus>) | undefined;
   let releaseRequested: RollbackFence | undefined;
@@ -1060,8 +1059,13 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         if (changed.length) { await startupGate(); await retentionStore.putMany(changed); }
       }
     } catch (error) { retentionBootstrapIssues = ['cold-inspection-failed']; console.error(`Cold inspection unavailable: ${String(error)}`); }
-    if (diagnosticTransition && retentionBootstrapError) {
-      storageStatus = { ...storageStatus, state: 'unavailable', code: 'cold-journal-unavailable', reason: String(retentionBootstrapError), healthStatus: 503 };
+    if (retentionBootstrapError) {
+      const holdColdJournal = (error: unknown) => {
+        retentionBootstrapError = error;
+        if (database?.status().state === 'unavailable') { unavailable(database.status()); return; }
+        storageStatus = { ...storageStatus, state: 'unavailable', code: 'cold-journal-unavailable', reason: String(error), healthStatus: 503, admissionOpen: false, sessionsAvailable: false };
+      };
+      holdColdJournal(retentionBootstrapError);
       if (!diagnosticHost) diagnosticHost = await startRunnerHost({ stateDir, sessions, runs, terminals, releaseStateLock: release, handoffNonce, storageBusy: () => recoveryBusy || startupBusy.some(busy => busy()), storage: () => storageStatus, retryStorage: () => retryNormal!(), storageRecovery, storageControl: control, closeStorage, onCloseFailure: () => unavailable(), quiesce: () => sessions.quiesce(), onHandedOff: () => { carry?.fill(0); sessions.stop(); setTimeout(() => process.exit(0), 100); } });
       await new Promise<void>(resolve => {
         retryNormal = async () => {
@@ -1069,7 +1073,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
             if (!await attempt(Boolean(database))) return storageStatus;
             await retentionStore.start(); retentionBootstrapError = undefined; resolve();
           }
-          catch (error) { storageStatus.reason = String(error); }
+          catch (error) { holdColdJournal(error); }
           return storageStatus;
         };
       });

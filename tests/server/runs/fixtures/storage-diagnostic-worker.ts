@@ -1,3 +1,7 @@
+import { SessionService } from '../../../../server/sessions/service.js';
+import { TemporaryCollector } from '../../../../server/temporary/directories.js';
+import { channel } from 'node:diagnostics_channel';
+import { writeFileSync, readFileSync } from 'node:fs';
 import { runRunnerWorker } from '../../../../server/runs/worker.js';
 import { StorageClient, StorageCommandError } from '../../../../server/storage/index.js';
 import { PermissionService } from '../../../../server/permissions/service.js';
@@ -7,6 +11,25 @@ import { RunManager } from '../../../../server/runs/manager.js';
 import type { Session } from '../../../../shared/types.js';
 import { writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+
+// Count calls while retaining the actual scanner, collector and native adapter.
+if (process.env.TOWER_FIXTURE_COLD_COUNTS === '1') {
+  const state = process.argv.at(-1)!;
+  const counts = { scanner: 0, temporary: 0, native: 0 };
+  const save = () => writeFileSync(join(state, 'fixture-cold-counts.json'), JSON.stringify(counts), { mode: 0o600 });
+  save();
+  const registry = SessionService.prototype.setColdRegistry;
+  SessionService.prototype.setColdRegistry = function (paths, ids, reconcile) {
+    const knownPaths = [...paths], knownIds = [...ids];
+    writeFileSync(join(state, 'fixture-cold-registry.json'), JSON.stringify({ paths: knownPaths, ids: knownIds }), { mode: 0o600 });
+    return registry.call(this, knownPaths, knownIds, reconcile);
+  };
+  const start = SessionService.prototype.start;
+  SessionService.prototype.start = async function () { writeFileSync(join(state, 'fixture-firstscan-registry.json'), readFileSync(join(state, 'fixture-cold-registry.json')), { mode: 0o600 }); counts.scanner++; save(); return start.call(this); };
+  const collect = TemporaryCollector.prototype.start;
+  TemporaryCollector.prototype.start = function () { counts.temporary++; save(); return collect.call(this); };
+  channel('tower.retention.codex-metadata-open').subscribe(() => { counts.native++; save(); });
+}
 
 // Existing disposable worker fixture only: real SDK commands fail at a later startup gate,
 // after permissions and auto prompts have started. No storage result is mocked as successful.
