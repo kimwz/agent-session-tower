@@ -1,3 +1,5 @@
+import type { storageWebHealth } from '../link/storage-web.js';
+import type { WorkerStorageStatus } from '../../shared/storage.js';
 import { MASTER_HEARTBEAT_HEADER, type HeartbeatAdmission } from '../../shared/master.js';
 import type { AttachmentStore } from '../stores/attachments.js';
 import type { AttachmentUploads } from '../stores/attachment-uploads.js';
@@ -42,6 +44,9 @@ import { TowerError, statusOf } from '../../shared/errors.js';
 import { sendStoredAttachment, sendWorkspaceMedia, sseSink } from './sinks.js';
 
 export interface Backend {
+  storageStatus?(): WorkerStorageStatus | undefined;
+  storageRetry?(): Promise<WorkerStorageStatus>;
+  storageRecovery?(action: string, input: Record<string, unknown>): Promise<unknown>;
   /** Dedicated owner input channel; never included in agent operations or their request ledger. */
   secrets?(action: string, input: Record<string, unknown>): Promise<unknown>;
   /** Tower operations (see shared/api/operations.ts), run by the worker as the owner. */
@@ -113,6 +118,9 @@ export interface HttpOptions {
   onNodeMessage?(nodeId: string, run: Run): void;
   /** It runs as the background service's own install, which updates replace. */
   service?: boolean;
+  /** Independent read-only candidate build readiness, composed with the attached worker. */
+  storageWebHealth?: () => ReturnType<typeof storageWebHealth>;
+  storageRollback?: (action: string, input: Record<string, unknown>) => Promise<unknown>;
   /** Moves this Tower to a version (the latest release when none is given), when it runs as the background service. */
   towerUpdate?: (version?: string) => Promise<{ status: number; body: unknown }>;
   /** The owner's "update now": running turns wrap up, the rest stop at a deadline, and the worker switches. */
@@ -177,7 +185,7 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ attachmentStores, attachmentUploads, port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, forceRunnerUpdate, service, notifications, decisions, master, backup, localMcp }: HttpOptions) {
+export function createMonitorServer({ attachmentStores, attachmentUploads, port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, storageRollback, storageWebHealth, forceRunnerUpdate, service, notifications, decisions, master, backup, localMcp }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   const unsubscribeAuth = auth?.onRevoke(id => {
@@ -278,11 +286,17 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
     try {
       const url = new URL(req.url || '/', `http://${req.headers.host}`);
       const path = decodeURIComponent(url.pathname);
-      if (req.method === 'GET' && path === '/api/health') return json(res, 200, {
-        ok: true, application: HEALTH_APPLICATION_ID, pid: process.pid, version: APP_VERSION,
-        bindHost: address && typeof address === 'object' ? address.address : undefined,
-        remoteAccess: Boolean(remote), service: Boolean(service),
-      });
+      if (req.method === 'GET' && path === '/api/health') {
+        const worker = backend.storageStatus?.();
+        const health = storageWebHealth ? await storageWebHealth() : {
+          status: worker?.healthStatus ?? 200, diagnostic: Boolean(worker && !worker.admissionOpen), ...(worker ? { storage: worker } : {}),
+        };
+        return json(res, health.status, {
+          ...health, ok: health.status === 200, application: HEALTH_APPLICATION_ID, pid: process.pid, version: APP_VERSION,
+          bindHost: address && typeof address === 'object' ? address.address : undefined,
+          remoteAccess: Boolean(remote), service: Boolean(service),
+        });
+      }
       const identity = await ownerIdentity(req);
       const sessionId = sessionCookie(req);
       const authenticated = identity.local || Boolean(auth?.session(sessionId, identity.ip));
@@ -545,6 +559,32 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         await auth!.unblock(body.ip);
         return json(res, 200, auth!.overview());
       }
+      if (path.startsWith('/api/storage/') && req.method === 'POST' && (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()])) return json(res, 403, { error: '저장소 복구는 소유자만 할 수 있습니다.' });
+      const rollbackAction = /^\/api\/storage\/rollback\/(status|validate|run|retry|withdraw|release-pin)$/.exec(path);
+      if (rollbackAction && req.method === 'POST') {
+        if (!identity.local) throw new TowerError('forbidden', 'Storage rollback is a local owner operation.');
+        if (!storageRollback) throw new TowerError('unavailable', 'Storage rollback is unavailable.');
+        return json(res, 200, await storageRollback(rollbackAction[1], await readJson(req)));
+      }
+      if (path === '/api/storage/status' && req.method === 'GET') return json(res, 200, backend.storageStatus?.() ?? { state: 'unavailable', code: 'worker-contract-missing' });
+      const storageRecovery = /^\/api\/storage\/(snapshot|adopt|reconcile|verify-update)$/.exec(path);
+      if (storageRecovery && req.method === 'POST') {
+        if (!backend.storageRecovery) throw new TowerError('unavailable', 'Storage recovery is unavailable.');
+        const input = await readJson(req);
+        if (storageRecovery[1] === 'verify-update' &&
+          (!['overwritten-done', 'stale-active', 'own-failed'].includes(String(input.kind)) ||
+            typeof input.by !== 'string' || !input.by.trim() || typeof input.evidence !== 'string' || !input.evidence.trim() ||
+            Object.keys(input).some(key => !['kind', 'by', 'evidence'].includes(key)))) {
+          throw new TowerError('invalid', 'Update recovery needs kind, by and evidence.');
+        }
+        return json(res, 200, await backend.storageRecovery(storageRecovery[1], input));
+      }
+      if (path === '/api/storage/retry' && req.method === 'POST') {
+        if (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()]) return json(res, 403, { error: '저장소 복구는 소유자만 할 수 있습니다.' });
+        if (!backend.storageRetry) throw new TowerError('unavailable', 'Storage recovery is unavailable.');
+        return json(res, 200, await backend.storageRetry());
+      }
+      if (req.method === 'GET' && (path === '/api/snapshot' || path.startsWith('/api/sessions/')) && backend.storageStatus?.()?.sessionsAvailable === false) throw new TowerError('unavailable', backend.storageStatus?.()?.reason ?? 'Sessions are unavailable.');
       if (req.method === 'GET' && path === '/api/bootstrap') return json(res, 200, { token });
       if (req.method === 'GET' && path === '/api/snapshot') {
         const scope = scopeFromParams(url.searchParams);

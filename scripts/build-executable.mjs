@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, realpath, writeFile, chmod, rename, access } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { storageThreadPlugin } from '../server/storage/thread-bundle.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const staging = join(root, 'dist', 'executable');
@@ -20,6 +21,9 @@ await build({
   banner: { js: "import { createRequire as monitorCreateRequire } from 'node:module'; const require = monitorCreateRequire(import.meta.url);" },
   // Keep the single executable independent of optional native ws accelerators.
   define: { 'process.env.WS_NO_BUFFER_UTIL': '"1"', 'process.env.WS_NO_UTF_8_VALIDATE': '"1"' },
+  // The storage thread is built in as text, as the one source its worker trusts (server/storage/build-identity.ts):
+  // the executable has no JS files beside it to start a thread from.
+  plugins: [await storageThreadPlugin()],
   // Playwright needs its own files and browsers; the executable offers no browser tools (see server/browser/tools.ts).
   external: ['@playwright/mcp', 'playwright', 'playwright-core'],
 });

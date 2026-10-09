@@ -1,3 +1,4 @@
+import { TowerError } from '../../../shared/errors.js';
 import { initialModelSettings } from '../../../shared/models.js';
 import { saveModelSettings } from '../../../server/models/settings.js';
 import assert from 'node:assert/strict';
@@ -822,4 +823,143 @@ test('a save writes the jobs as they were when it was asked for, not when its tu
   assert.equal(job.status, 'completed');
   assert.deepEqual(f.dispatches[0].input.attachmentIds, [attachment.id]);
   await assert.rejects(f.manager.submit({ ...input, attachmentIds: [randomUUID()] }), { kind: 'conflict' });
+});
+
+
+test('storage hold preserves queued and in-flight router stages without abort, dispatch or model replay', async t => {
+  const f = await fixture(t);
+  f.manager.holdStorage();
+  const queued = await f.manager.submit(request(f.cwd));
+  assert.equal(f.manager.get(queued.id)?.status, 'queued');
+  assert.equal(f.calls.length, 0);
+  let answer!: (value: unknown) => void;
+  f.respond(() => new Promise(resolve => { answer = resolve; }));
+  try {
+    f.manager.releaseStorage();
+    await until(() => f.calls.length === 1);
+    f.manager.holdStorage();
+    assert.equal(f.manager.busy(), true);
+    answer(resume(f.session.id));
+    await until(() => !f.manager.busy());
+    await f.manager.flush();
+    const saved = JSON.parse(await readFile(join(f.directory, 'auto-prompts.json'), 'utf8'));
+    assert.equal(saved[0].resumable, true);
+    assert.equal(saved[0].selection.decision.sessionId, f.session.id);
+    assert.equal(f.calls[0].signal?.aborted, false);
+    assert.equal(f.dispatches.length, 0);
+    assert.equal(f.manager.get(queued.id)?.status, 'routing');
+    f.manager.releaseStorage();
+    assert.equal((await f.finished(queued.id)).status, 'completed');
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.dispatches.length, 1);
+  } finally { answer?.(resume(f.session.id)); }
+});
+
+
+test('a held successor resumes queued and validated routing checkpoints with the same request ID and no model replay', async t => {
+  const f = await fixture(t);
+  let answer!: (value: unknown) => void;
+  f.respond(() => new Promise(resolve => { answer = resolve; }));
+  try {
+    const input = request(f.cwd);
+    await f.manager.submit(input, { origin: { kind: 'owner' } });
+    await until(() => f.calls.length === 1);
+    f.manager.holdStorage();
+    assert.equal(f.manager.busy(), true);
+    const queuedInput = request(f.cwd, { sessionMode: 'new', prompt: 'Independent queued task' });
+    await f.manager.submit(queuedInput);
+    answer(resume(f.session.id));
+    await until(() => !f.manager.busy());
+    await f.manager.flush();
+    const saved = JSON.parse(await readFile(join(f.directory, 'auto-prompts.json'), 'utf8'));
+    const decision = saved.find((entry: { job: { id: string } }) => entry.job.id === input.requestId).selection.decision;
+    const successor = new AutoPromptManager(f.options);
+    successor.holdStorage();
+    await successor.start();
+    try {
+      assert.equal((await successor.submit(input, { origin: { kind: 'owner' } })).id, input.requestId);
+      assert.equal(successor.get(input.requestId)?.status, 'queued');
+      assert.equal(successor.get(queuedInput.requestId)?.status, 'queued');
+      assert.equal(successor.busy(), false);
+      assert.equal(f.dispatches.length, 0);
+      await assert.rejects(successor.submit({ ...input, prompt: 'Changed' }, { origin: { kind: 'owner' } }), { kind: 'conflict' });
+      successor.releaseStorage();
+      await until(() => successor.get(input.requestId)?.status === 'completed' && successor.get(queuedInput.requestId)?.status === 'completed');
+      assert.deepEqual(successor.get(input.requestId)?.decision, decision);
+      assert.equal(f.calls.length, 1);
+      assert.equal(f.dispatches.length, 2);
+      assert.equal(f.managed.filter(run => run.autoPromptId === input.requestId).length, 1);
+      assert.equal(f.managed.filter(run => run.autoPromptId === queuedInput.requestId).length, 1);
+  } finally { await successor.close(); }
+  } finally { answer?.(resume(f.session.id)); }
+});
+
+test('a proven not-admitted dispatch pauses quietly and revalidates its saved target on successor release', async t => {
+  const f = await fixture(t);
+  f.beforeAdmission(async () => {
+    f.manager.holdStorage();
+    throw new TowerError('unavailable', 'Held before admission', { disposition: 'not-admitted' });
+  });
+  const input = request(f.cwd);
+  await f.manager.submit(input);
+  await until(() => f.calls.length === 1 && !f.manager.busy());
+  assert.equal(f.manager.get(input.requestId)?.status, 'dispatching');
+  assert.equal(f.dispatches.length, 0);
+  await f.manager.flush();
+  const successor = new AutoPromptManager(f.options);
+  successor.holdStorage();
+  await successor.start();
+  try {
+    f.beforeAdmission(async () => {});
+    f.current.sessions[0].closed = true;
+    successor.releaseStorage();
+    await until(() => successor.get(input.requestId)?.status === 'error');
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.dispatches.length, 0);
+  } finally { await successor.close(); }
+});
+
+
+test('a directory model result is saved before a held session stage and is not evaluated again', async t => {
+  const f = await fixture(t);
+  f.respond(async input => {
+    const value = JSON.parse(input.prompt);
+    if (value.directories) {
+      f.manager.holdStorage();
+      return { directoryId: value.directories.find((directory: { cwd: string }) => directory.cwd === f.cwd).id, reason: 'The editor project' };
+    }
+    return resume(f.session.id);
+  });
+  const input = request();
+  await f.manager.submit(input);
+  await until(() => f.calls.length === 1 && !f.manager.busy());
+  await f.manager.flush();
+  const successor = new AutoPromptManager(f.options);
+  successor.holdStorage(); await successor.start();
+  try {
+    successor.releaseStorage();
+    await until(() => successor.get(input.requestId)?.status === 'completed');
+    assert.equal(f.calls.length, 2);
+    assert.equal(f.calls.filter(call => JSON.parse(call.prompt).directories).length, 1);
+    assert.equal(f.dispatches.length, 1);
+  } finally { await successor.close(); }
+});
+
+test('cancel and close discard safe paused checkpoints without leaving busy waiters or resumable terminal records', async t => {
+  const f = await fixture(t);
+  f.manager.holdStorage();
+  const cancelled = await f.manager.submit(request(f.cwd));
+  await f.manager.cancel(cancelled.id);
+  const closed = await f.manager.submit(request(f.cwd, { prompt: 'Close pending work' }));
+  await f.manager.close();
+  assert.equal(f.manager.get(closed.id)?.status, 'cancelled');
+  assert.equal(f.manager.busy(), false);
+  const saved = JSON.parse(await readFile(join(f.directory, 'auto-prompts.json'), 'utf8'));
+  assert.ok(saved.every((entry: { resumable?: boolean; staged: unknown[] }) => entry.resumable === undefined && entry.staged.length === 0));
+  const successor = new AutoPromptManager(f.options); await successor.start();
+  try {
+    assert.equal(successor.get(cancelled.id)?.status, 'cancelled');
+    assert.equal(successor.get(closed.id)?.status, 'cancelled');
+    assert.equal(f.calls.length, 0); assert.equal(f.dispatches.length, 0);
+  } finally { await successor.close(); }
 });

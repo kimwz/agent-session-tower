@@ -47,6 +47,33 @@ export async function runLinkCommand(args: string[]): Promise<void> {
     else positional.push(arg);
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Port must be between 1 and 65535.');
+  if (command === 'storage') {
+    if (positional[0] === 'verify-update') {
+      const [_, kind, by, ...words] = positional;
+      const evidence = words.join(' ').trim();
+      if (!['overwritten-done', 'stale-active', 'own-failed'].includes(kind ?? '') || !by?.trim() || !evidence) {
+        throw new Error('Usage: storage verify-update overwritten-done|stale-active|own-failed <by> <evidence> [--state-dir <path>]');
+      }
+      const running = await runningTower(stateDir);
+      if (!running) throw new Error('진단 가능한 Tower가 실행 중이지 않습니다.');
+      console.log(JSON.stringify(await post(running.base, '/api/storage/verify-update', { kind, by, evidence })));
+      return;
+    }
+    if (positional[0] === 'rollback') {
+      const [_, action, target, ...reason] = positional;
+      if (!['status', 'validate', 'run', 'retry', 'withdraw', 'release-pin'].includes(action ?? '')) throw new Error('Usage: storage rollback status|validate|run|retry|withdraw|release-pin [target] [reason]');
+      const running = await runningTower(stateDir);
+      if (!running) throw new Error('진단 가능한 Tower가 실행 중이지 않습니다.');
+      console.log(JSON.stringify(await post(running.base, `/api/storage/rollback/${action}`, { ...(target ? { target } : {}), ...(action === 'withdraw' && target === 'release-pin' ? { releasePin: true } : {}), ...(action === 'run' ? { reason: reason.join(' ') } : {}) })));
+      return;
+    }
+    if (!['status', 'retry'].includes(positional[0] ?? '') || positional.length !== 1) throw new Error('Usage: agent-session-tower storage status|retry [--state-dir <path>]');
+    const running = await runningTower(stateDir);
+    if (!running) throw new Error('진단 가능한 Tower가 실행 중이지 않습니다.');
+    if (positional[0] === 'retry') await post(running.base, '/api/storage/retry', {});
+    console.log(JSON.stringify(await get(running.base, '/api/storage/status')));
+    return;
+  }
   if (command === 'service') return runService(positional[0], stateDir, port);
   if (positional.length !== 1) throw new Error(USAGE);
   const code = decodeJoinCode(positional[0]);
@@ -153,8 +180,8 @@ async function runningTower(stateDir: string): Promise<{ base: string; port: num
   for (const owner of await lockOwners(stateDir)) {
     const base = `http://127.0.0.1:${owner.port}`;
     const health = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(1500) })
-      .then(response => response.json() as Promise<{ ok?: boolean; application?: string; pid?: number; version?: string; service?: boolean; bindHost?: string }>).catch(() => undefined);
-    if (health?.ok && health.application === HEALTH_APPLICATION_ID && health.pid === owner.pid && health.version) {
+      .then(response => response.json() as Promise<{ ok?: boolean; diagnostic?: boolean; application?: string; pid?: number; version?: string; service?: boolean; bindHost?: string }>).catch(() => undefined);
+    if ((health?.ok || health?.diagnostic === true) && health.application === HEALTH_APPLICATION_ID && health.pid === owner.pid && health.version) {
       return { base, port: owner.port, version: health.version, pid: owner.pid, service: health.service === true, ...(typeof health.bindHost === 'string' ? { bindHost: health.bindHost } : {}), ...(owner.command ? { command: owner.command } : {}) };
     }
   }
@@ -268,10 +295,11 @@ async function get<T>(base: string, path: string): Promise<T> {
   if (!response.ok) throw new Error(((await response.json().catch(() => ({}))) as { error?: string }).error ?? `Request failed (${response.status}).`);
   return response.json() as Promise<T>;
 }
-async function post(base: string, path: string, body: unknown): Promise<void> {
+async function post(base: string, path: string, body: unknown): Promise<unknown> {
   const { token } = await get<{ token: string }>(base, '/api/bootstrap');
   const response = await fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body: JSON.stringify(body) });
   if (!response.ok) throw new Error(((await response.json().catch(() => ({}))) as { error?: string }).error ?? `Request failed (${response.status}).`);
+  return response.json();
 }
 async function waitFor<T>(read: () => Promise<T | undefined>, timeout: number): Promise<T | undefined> {
   const deadline = Date.now() + timeout;

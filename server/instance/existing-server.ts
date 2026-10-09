@@ -19,7 +19,7 @@ export async function existingServerUrl(error: MonitorAlreadyRunning, expected?:
         health = await response.json();
         reachedServer = true;
       } catch { continue; }
-      if (!response.ok || !health || health.ok !== true || health.application !== HEALTH_APPLICATION_ID || health.pid !== pid) continue;
+      if ((!response.ok && !(response.status === 503 && health?.diagnostic === true && health?.storage?.state === 'unavailable')) || !health || (health.ok !== true && health.diagnostic !== true) || health.application !== HEALTH_APPLICATION_ID || health.pid !== pid) continue;
       // Older local-only versions did not report binding information.
       const bindHost = health.bindHost || '127.0.0.1';
       const remoteAccess = health.remoteAccess === true;

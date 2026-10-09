@@ -1,3 +1,6 @@
+import type { TowerApi } from '../../../server/api/tower-api.js';
+import { storage, fixtureBundle, databasePath } from '../storage/helpers.js';
+import type { WorkerStorageStatus } from '../../../shared/storage.js';
 import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -11,7 +14,7 @@ import { test } from 'node:test';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
 import { RunManager } from '../../../server/runs/manager.js';
 import { SessionService } from '../../../server/sessions/service.js';
-import { startRunnerHost } from '../../../server/runs/worker.js';
+import { startRunnerHost, type RunnerHostOptions } from '../../../server/runs/worker.js';
 import type { SlackService } from '../../../server/slack/service.js';
 import { RUNNER_PROTOCOL, runnerPaths } from '../../../server/runs/runner-protocol.js';
 import type { CodexBridgeOptions } from '../../../server/runs/codex-bridge.js';
@@ -34,7 +37,7 @@ import { RetentionArchive } from '../../../server/sessions/retention/archive.js'
 import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
 import { worktreeCleanupVisible } from '../../../server/worktrees/janitor.js';
 
-async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector) {
+async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector, hostOptions?: (parts: { stateDir: string; sessions: SessionService; runs: RunManager }) => Promise<Partial<RunnerHostOptions>>) {
   const directory = await realpath(await temporaryFixture('tower-durable-fixture-'));
   const stateDir = join(directory, 'state');
   const id = '10000000-0000-4000-8000-000000000001';
@@ -73,7 +76,7 @@ async function fixture(workerClosed = false, withRetention = false, retentionUna
   const retention = withRetention ? { archive, temporary, service: new RetentionService({ archive, store: retentionStore,
     adapter: createNativeRetentionAdapter({ claude: [], codex: [] }), observe: async () => ({ now: Date.now(), migratedAt: Date.now(), complete: true, records: [], protectedIds: new Set() }) }) } : undefined;
   await retention?.service.start();
-  const host = await startRunnerHost({ stateDir, sessions, runs, closedSessions, retention, retentionUnavailable });
+  const host = await startRunnerHost({ stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, ...await hostOptions?.({ stateDir, sessions, runs }) });
   const paths = await runnerPaths(stateDir);
   const clients: DurableRunManager[] = [];
   const connect = async (pollMs = 10) => {
@@ -1911,4 +1914,216 @@ test('temporary cleanup failure remains visible without blocking native retentio
   const persisted=await client.retention('overview') as {temporary:typeof base};assert.equal(persisted.temporary.failed,1);
   fail=false;const recovered=await client.retention('check') as {temporary:typeof base};assert.equal(calls,2);assert.equal(recovered.temporary.failed,0);assert.deepEqual(recovered.temporary.issues,[]);
   assert.equal(f.starts(),0);assert.equal(f.cancels(),0);
+});
+
+
+test('actual SDK thread exit holds new work while the active fake provider and diagnostic RPC survive; explicit failed reopen never resends', async t => {
+  let diagnosis: WorkerStorageStatus = { state: 'ready', code: 'ready', reason: 'ready', admissionOpen: true, sessionsAvailable: true, healthStatus: 200 };
+  let database: Awaited<ReturnType<typeof storage.openStorage>>;
+  const f = await fixture(false, false, undefined, undefined, async ({ runs }) => {
+    return { storage: () => diagnosis, retryStorage: async () => {
+      try { await database.reopen(); await database.prepare({ allowMigration: false }); if ((await database.gate('core')).open) { diagnosis = { ...diagnosis, state: 'ready', admissionOpen: true }; runs.releaseStorage(); } }
+      catch { /* The SDK's typed failure stays in its unavailable callback. */ }
+      return diagnosis;
+    }, closeStorage: async () => { await database?.close(); } };
+  }); t.after(f.cleanup);
+  database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle(), onUnavailable: status => {
+    f.runs.holdStorage();
+    diagnosis = { ...diagnosis, state: 'unavailable', code: status.failure?.code ?? 'unknown', reason: status.failure?.message ?? 'unknown', admissionOpen: false, healthStatus: 503, failure: status.failure };
+    f.runs.emit('change');
+  } });
+  t.after(() => database.close());
+  await database.prepare({ allowMigration: true });
+  const client = await f.connect();
+  const run = await client.enqueue(f.session.id, 'accepted exactly once', {}, { origin: { kind: 'owner' } });
+  await until(() => f.starts() === 1);
+  const accepted = await client.enqueue(f.session.id, 'queued before failure', {}, { origin: { kind: 'owner' } });
+  await assert.rejects(database.write('fixture', 'putThenDie', { key: 'unknown' }, 'consumer-unknown'), (error: unknown) => {
+    assert.ok(error instanceof storage.StorageCommandError); assert.equal(error.disposition, 'unknown'); return true;
+  });
+  await until(() => client.storageStatus()?.state === 'unavailable');
+  assert.equal(f.cancels(), 0);
+  f.output('still running after DB exit');
+  await until(() => client.list().find(item => item.id === run.id)?.output.includes('still running'));
+  await assert.rejects(client.enqueue(f.session.id, 'new intake'), (error: unknown) => (error as { disposition?: string }).disposition === 'not-admitted');
+  assert.equal(client.list().find(item => item.id === accepted.id)?.status, 'queued');
+  assert.equal(client.storageStatus()?.failure?.sourcePreserved, true);
+  f.finish();
+  await until(() => client.list().find(item => item.id === run.id)?.status === 'completed');
+  const before = client.list();
+  await database.close();
+  const preserved = databasePath(f.stateDir) + '.fixture-preserved';
+  await rename(databasePath(f.stateDir), preserved);
+  assert.equal((await client.storageRetry()).state, 'unavailable');
+  assert.equal(f.starts(), 1); assert.equal(f.cancels(), 0);
+  assert.deepEqual(client.list().map(item => [item.id, item.status]), before.map(item => [item.id, item.status]));
+  await rename(preserved, databasePath(f.stateDir));
+  await database.reopen();
+  assert.equal((await database.receipt('consumer-unknown')).found, true, 'the unknown commit is looked up, never resent');
+  assert.equal(f.starts(), 1);
+});
+
+
+test('storage-held queued work and paused workflow references hand off patiently only after active provider ends, with DB close ACK before lock release', async t => {
+  const order: string[] = [];
+  const f = await fixture(false, false, undefined, undefined, async ({ stateDir }) => {
+    const paths = await runnerPaths(stateDir);
+    const release = await acquireStateLock(paths.runtime, 0);
+    return { releaseStateLock: async () => { await release(); order.push('lock-release'); } };
+  }); t.after(f.cleanup);
+  const database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle() });
+  t.after(() => database.close());
+  await database.prepare({ allowMigration: true });
+  let handed = false;
+  const client = await f.connect();
+  const first = await client.enqueue(f.session.id, 'accepted', {}, { origin: { kind: 'owner' } });
+  await until(() => f.starts() === 1);
+  const queued = await f.runs.enqueue(f.session.id, 'patient queued workflow', {}, { origin: { kind: 'trigger', triggerId: 'fixture-trigger', workflowId: 'paused-workflow' } });
+  f.runs.holdStorage();
+  const storageStatus: WorkerStorageStatus = { state: 'unavailable', code: 'thread-exited', reason: 'held', admissionOpen: false, sessionsAvailable: true, healthStatus: 503 };
+  f.host.activate({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, storage: () => storageStatus,
+    inFlight: () => true, transient: () => false,
+    quiesce: async () => { await f.sessions.quiesce(); await f.runs.flushState(); order.push('durable-flush'); },
+    closeStorage: async () => { const result = await database.close(); assert.ok(['closed', 'already-closed'].includes(result.ack)); order.push('db-close-ack'); },
+    startSuccessor: () => { order.push('successor'); handed = true; } });
+  assert.equal(await client.requestHandoff(true, { patient: true }), true);
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  assert.equal(handed, false); assert.equal(f.cancels(), 0);
+  f.finish();
+  await until(() => handed, 5000);
+  assert.equal(f.starts(), 1); assert.equal(f.cancels(), 0);
+  assert.equal(f.runs.list().find(run => run.id === first.id)?.status, 'completed');
+  assert.equal(f.runs.list().find(run => run.id === queued.id)?.status, 'queued');
+  assert.ok(order.indexOf('db-close-ack') < order.indexOf('lock-release'));
+  assert.ok(order.indexOf('lock-release') < order.indexOf('successor'));
+  const marker = JSON.parse(await readFile(join(f.paths.runtime, 'handoff.json'), 'utf8'));
+  assert.equal(marker.storageTransition, true, 'held admission carries the cold barrier even with sessions available');
+  assert.match(marker.successor, /^[a-f\d]{32}$/);
+});
+
+test('a handoff record ENOSPC leaves the existing record, diagnostic endpoint, provider and runtime lock intact and resumes partial quiesce', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const client = await f.connect();
+  let resumed = 0; let released = 0; let successors = 0;
+  const marker = join(f.paths.runtime, 'handoff.json');
+  await writeFile(marker, 'existing marker bytes', { mode: 0o600 });
+  const original = fsPromises.rename;
+  fsPromises.rename = (async (from, to) => {
+    if (String(to) === marker) throw Object.assign(new Error('fixture ENOSPC'), { code: 'ENOSPC' });
+    return original(from, to);
+  }) as typeof original;
+  syncBuiltinESMExports();
+  t.after(() => { fsPromises.rename = original; syncBuiltinESMExports(); });
+  f.host.activate({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs,
+    storage: () => ({ state: 'unavailable', code: 'held', reason: 'fixture', admissionOpen: false, sessionsAvailable: true, healthStatus: 503 }),
+    quiesce: async () => { await f.sessions.quiesce(); await f.runs.flushState(); },
+    resume: () => { resumed++; f.sessions.resume(); }, releaseStateLock: async () => { released++; }, startSuccessor: () => { successors++; } });
+  await client.requestHandoff(true, { patient: true });
+  await until(() => resumed === 1, 5000);
+  assert.deepEqual([released, successors, f.cancels()], [0, 0, 0]);
+  assert.equal(await readFile(marker, 'utf8'), 'existing marker bytes');
+  const second = await f.connect();
+  assert.equal(second.storageStatus()?.admissionOpen, false);
+  assert.equal(second.runnerVersion(), client.runnerVersion());
+});
+
+
+test('idle close keeps diagnosis and the runtime lock when close ACK is refused; an explicit second close releases only after ACK', async t => {
+  let database: Awaited<ReturnType<typeof storage.openStorage>>;
+  let fail = true; let released = 0; let diagnosed = 0;
+  const f = await fixture(false, false, undefined, undefined, async ({ stateDir }) => {
+    const paths = await runnerPaths(stateDir);
+    const release = await acquireStateLock(paths.runtime, 0);
+    return {
+      closeStorage: async () => {
+        if (fail) throw new Error('fixture close ACK unavailable');
+        if (database) {
+          const result = await database.close();
+          assert.ok(['closed', 'already-closed'].includes(result.ack));
+        }
+      },
+      onCloseFailure: () => { diagnosed++; }, releaseStateLock: async () => { await release(); released++; } };
+  }); t.after(f.cleanup);
+  try {
+    database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle() });
+    t.after(() => database.close());
+    await database.prepare({ allowMigration: true });
+    const client = await f.connect();
+    await assert.rejects(f.host.close(true), /close ACK unavailable/);
+    assert.equal(released, 0); assert.equal(diagnosed, 1);
+    assert.equal((await database.gate('core')).open, true, 'refused close preserves the actual SDK owner');
+    await assert.rejects(acquireStateLock(f.paths.runtime, 0), MonitorAlreadyRunning);
+    const second = await f.connect();
+    assert.equal(second.runnerVersion(), client.runnerVersion());
+    fail = false;
+    await f.host.close();
+    assert.equal(released, 1);
+  } finally { fail = false; }
+});
+
+import { WorkspaceTerminals, type WorkspacePty } from '../../../server/workspace-terminals.js';
+import { startTerminalHost } from '../../../server/terminals/host.js';
+import { TerminalHostClient } from '../../../server/terminals/client.js';
+
+class StorageFixturePty implements WorkspacePty {
+  writes: string[] = []; killed = 0;
+  exits = new Set<(event: { exitCode: number }) => void>();
+  write(data: string) { this.writes.push(data); }
+  resize() {}
+  kill() { this.killed++; for (const exit of this.exits) exit({ exitCode: 0 }); }
+  onData() { return { dispose() {} }; }
+  onExit(listener: (event: { exitCode: number }) => void) { this.exits.add(listener); return { dispose: () => { this.exits.delete(listener); } }; }
+}
+
+test('storage patient handoff keeps legacy PTY RPC pending until owner closes it; the independent terminal host survives web disconnect and DB close', async t => {
+  const f = await fixture();
+  const legacyPty = new StorageFixturePty(); const independentPty = new StorageFixturePty();
+  const legacy = new WorkspaceTerminals({ spawnPty: () => legacyPty, keepAliveOnDisconnect: true });
+  const independent = new WorkspaceTerminals({ spawnPty: () => independentPty, keepAliveOnDisconnect: true });
+  const terminalHost = await startTerminalHost({ stateDir: f.stateDir, terminals: independent });
+  const database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle() });
+  await database.prepare({ allowMigration: true });
+  const shells: TerminalHostClient[] = [];
+  t.after(async () => { for (const shell of shells) shell.dispose(); await database.close(); await terminalHost.close(); independent.dispose(); legacy.dispose(); await f.cleanup(); });
+  const terminal = new TerminalHostClient({ stateDir: f.stateDir, hostEntry: '/fixture/must-not-spawn.mjs' }); shells.push(terminal);
+  const hosted = await terminal.create(f.directory, 80, 24);
+  const old = await legacy.create(f.directory, 80, 24);
+  let handed = false;
+  f.runs.holdStorage();
+  f.host.activate({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, terminals: legacy,
+    storage: () => ({ state: 'unavailable', code: 'held', reason: 'fixture', admissionOpen: false, sessionsAvailable: true, healthStatus: 503 }),
+    closeStorage: async () => { await database.close(); }, startSuccessor: () => { handed = true; } });
+  const client = await f.connect();
+  await client.requestHandoff(true, { patient: true });
+  await client.terminals.input(old.id, 'legacy still attached');
+  assert.deepEqual(legacyPty.writes, ['legacy still attached']);
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  assert.equal(handed, false); assert.equal(legacyPty.killed, 0); assert.equal(independentPty.killed, 0);
+  terminal.dispose(); // A web disconnect does not close the independent host's shell.
+  const reconnected = new TerminalHostClient({ stateDir: f.stateDir, hostEntry: '/fixture/must-not-spawn.mjs' }); shells.push(reconnected);
+  await reconnected.input(hosted.id, 'after reconnect');
+  assert.deepEqual(independentPty.writes, ['after reconnect']);
+  await client.terminals.close(old.id); // Only this explicit owner action ends the legacy shell.
+  await until(() => handed, 5000);
+  assert.equal(legacyPty.killed, 1); assert.equal(independentPty.killed, 0);
+  await reconnected.input(hosted.id, 'after worker handoff');
+  assert.deepEqual(independentPty.writes, ['after reconnect', 'after worker handoff']);
+  await reconnected.close(hosted.id);
+  assert.equal(independentPty.killed, 1);
+});
+
+
+test('held typed API permits verified reads and rejects invalid, write and unavailable session operations', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const status: WorkerStorageStatus = { state: 'unavailable', code: 'held', reason: 'fixture', admissionOpen: false, sessionsAvailable: true, healthStatus: 503 };
+  const calls: string[] = [];
+  const api = { call: async (operation: string) => { calls.push(operation); return []; } } as unknown as TowerApi;
+  f.host.activate({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, storage: () => status, api });
+  const client = await f.connect();
+  assert.deepEqual(await client.api('runs.list', {}), []);
+  await assert.rejects(client.api('invalid.operation', {}));
+  await assert.rejects(client.api('runs.enqueue', {}));
+  status.sessionsAvailable = false;
+  await assert.rejects(client.api('sessions.list', {}));
+  assert.deepEqual(calls, ['runs.list']);
 });

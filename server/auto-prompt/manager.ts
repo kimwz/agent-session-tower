@@ -1,3 +1,4 @@
+import { TowerError } from '../../shared/errors.js';
 import { subscriptionOnly } from '../runs/subscription.js';
 import { requestedEffort, requestedModel, validEffort, validModelId } from '../providers/models.js';
 import { EventEmitter } from 'node:events';
@@ -28,7 +29,13 @@ interface AutoPromptOptions {
   /** What a remote controller's request may route into: never an excluded folder, never a coordinator conversation. */
   remote?: { prepare(paths: Iterable<string>, options?: { fresh?: boolean }): Promise<void>; matcher(): ExclusionMatcher; coordinators(): ReadonlySet<string> };
 }
-interface Entry { job: AutoPromptJob; fingerprint: string; staged: Attachment[] }
+interface Entry {
+  job: AutoPromptJob; fingerprint: string; staged: Attachment[];
+  /** Present only before an effect or after proven non-admission. */
+  resumable?: true;
+  selection?: { decision: AutoPromptDecision; relation: Relation; expectedNativeId?: string };
+}
+const STORAGE_PAUSED = Symbol('Auto Prompt storage pause');
 type Relation = 'continuation' | 'adjacent' | 'new';
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const TERMINAL = new Set<AutoPromptJob['status']>(['completed', 'error', 'cancelled']);
@@ -108,6 +115,20 @@ export class AutoPromptManager extends EventEmitter {
   private processing?: Promise<void>;
   private started = false;
   private stopping = false;
+  private storageHeld = false;
+
+  holdStorage(): void { this.storageHeld = true; }
+  releaseStorage(): void {
+    this.storageHeld = false;
+    this.pump();
+  }
+  private async storageGate(entry: Entry, signal: AbortSignal): Promise<void> {
+    if (this.storageHeld && !signal.aborted && !this.stopping) {
+      entry.resumable = true;
+      await this.persist();
+      throw STORAGE_PAUSED;
+    }
+  }
   private attachmentCleanupPaused = true;
   private attachmentCleanupTimer?: ReturnType<typeof setInterval>;
   private attachmentCleanup?: Promise<void>;
@@ -152,6 +173,7 @@ export class AutoPromptManager extends EventEmitter {
       if (!TERMINAL.has(entry.job.status)) {
         const run = this.options.runs.list().find(run => run.autoPromptId === entry.job.id);
         if (run) this.complete(entry, run);
+        else if (entry.resumable) { this.update(entry.job, { status: 'queued' }); continue; }
         else this.update(entry.job, { status: 'error', error: 'Tower가 라우팅 도중 종료되었습니다. 작업은 자동으로 다시 보내지 않았습니다. 새 요청으로 다시 시도하세요.' });
       }
       await this.cleanup(entry);
@@ -159,6 +181,7 @@ export class AutoPromptManager extends EventEmitter {
     await this.persist();
     this.started = true;
     this.resumeAttachmentCleanup();
+    this.pump();
   }
 
   list(): AutoPromptJob[] { return [...this.entries.values()].map(entry => copy(entry.job)); }
@@ -230,7 +253,7 @@ export class AutoPromptManager extends EventEmitter {
     providerReady(snapshot, input.provider, routed(input) ? router : undefined);
     const prepared = await this.attachments.prepare(input.requestId, { attachments: input.attachments, attachmentIds: input.attachmentIds }, origin.controllerId ?? 'local');
     const now = new Date().toISOString();
-    const entry: Entry = { fingerprint, staged: prepared.attachments, job: {
+    const entry: Entry = { fingerprint, resumable: true, staged: prepared.attachments, job: {
       id: input.requestId, ...(newSessionModel ? { newSessionModel } : {}), origin, ...(context.delegation ? { delegation: { ...context.delegation } } : {}), ...(origin.controllerId ? { exclusionRevision: this.options.remote!.matcher().revision } : {}), ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}), provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
       // The owner's own turns always use Codex's automatic reviewer; only other work keeps the one it chose.
       ...(input.provider === 'codex' && input.codexApprovalsReviewer && !ownerOrigin(origin) ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}),
@@ -265,7 +288,7 @@ export class AutoPromptManager extends EventEmitter {
     const entry = this.entries.get(id);
     if (!entry) throw new RunError('Auto Prompt 요청을 찾을 수 없습니다.', 'not-found');
     if (entry.job.status === 'cancelled') return copy(entry.job);
-    if (!['queued', 'routing'].includes(entry.job.status)) throw new RunError('이미 실행 대상으로 전달된 요청입니다. 세션의 작업 중지 기능을 사용하세요.', 'conflict');
+    if (!['queued', 'routing'].includes(entry.job.status) && !entry.resumable) throw new RunError('이미 실행 대상으로 전달된 요청입니다. 세션의 작업 중지 기능을 사용하세요.', 'conflict');
     this.update(entry.job, { status: 'cancelled', error: 'Auto Prompt 라우팅을 취소했습니다.' });
     this.controllers.get(id)?.abort();
     await this.persist();
@@ -308,7 +331,7 @@ export class AutoPromptManager extends EventEmitter {
     await this.pauseAttachmentCleanup();
     if (this.stopping) { await this.processing; return; }
     this.stopping = true;
-    for (const entry of this.entries.values()) if (['queued', 'routing'].includes(entry.job.status)) {
+    for (const entry of this.entries.values()) if (['queued', 'routing'].includes(entry.job.status) || entry.resumable) {
       this.update(entry.job, { status: 'cancelled', error: 'Tower가 종료되어 라우팅을 중단했습니다. 작업을 자동으로 다시 보내지 않습니다.' });
       this.controllers.get(entry.job.id)?.abort();
     }
@@ -319,10 +342,10 @@ export class AutoPromptManager extends EventEmitter {
   }
 
   private pump(): void {
-    if (this.processing || this.stopping) return;
+    if (this.processing || this.stopping || this.storageHeld) return;
     this.processing = this.drain().finally(() => {
       this.processing = undefined;
-      if (!this.stopping && [...this.entries.values()].some(entry => entry.job.status === 'queued' && !this.admissions.has(entry.job.id))) this.pump();
+      if (!this.stopping && !this.storageHeld && [...this.entries.values()].some(entry => (entry.job.status === 'queued' || entry.resumable === true) && !TERMINAL.has(entry.job.status) && !this.admissions.has(entry.job.id))) this.pump();
     });
     // Each job owns its error state; a final storage failure must not create an
     // unhandled rejection or replay a job that might have crossed admission.
@@ -330,13 +353,15 @@ export class AutoPromptManager extends EventEmitter {
   }
 
   private async drain(): Promise<void> {
-    while (!this.stopping) {
-      const entry = [...this.entries.values()].find(value => value.job.status === 'queued' && !this.admissions.has(value.job.id));
+    while (!this.stopping && !this.storageHeld) {
+      const entry = [...this.entries.values()].find(value => (value.job.status === 'queued' || value.resumable === true) && !TERMINAL.has(value.job.status) && !this.admissions.has(value.job.id));
       if (!entry) return;
       const controller = new AbortController();
       this.controllers.set(entry.job.id, controller);
       try { await this.route(entry, controller.signal); }
       catch (error) {
+        if (error === STORAGE_PAUSED) continue;
+        delete entry.resumable;
         const run = this.options.runs.list().find(run => run.autoPromptId === entry.job.id);
         if (run && !TERMINAL.has(entry.job.status)) this.complete(entry, run);
         else if (entry.job.status !== 'cancelled') this.update(entry.job, { status: 'error', error: errorText(error) });
@@ -344,7 +369,7 @@ export class AutoPromptManager extends EventEmitter {
         this.emit('change');
       } finally {
         this.controllers.delete(entry.job.id);
-        await this.cleanup(entry);
+        if (TERMINAL.has(entry.job.status)) await this.cleanup(entry);
         await this.persist();
       }
     }
@@ -353,6 +378,8 @@ export class AutoPromptManager extends EventEmitter {
   private async route(entry: Entry, signal: AbortSignal): Promise<void> {
     const job = entry.job;
     const active = () => { if (signal.aborted || this.stopping || job.status === 'cancelled') throw new RunError('Auto Prompt 라우팅을 취소했습니다.', 'conflict'); };
+    await this.storageGate(entry, signal); active();
+    delete entry.resumable;
     this.update(job, { status: 'routing', stage: job.cwd ? 'session' : 'directory' });
     await this.persist(); this.emit('change');
     await this.options.refresh(); active();
@@ -362,7 +389,8 @@ export class AutoPromptManager extends EventEmitter {
     const inventory = directories(snapshot);
     const staged = await this.attachments.resolve(job.id, entry.staged); active();
     const request = { prompt: job.prompt, attachments: attachmentContext(staged) };
-    const invoke = (prompt: string, schema: Record<string, unknown>, extra: string) => {
+    const invoke = async (prompt: string, schema: Record<string, unknown>, extra: string) => {
+      await this.storageGate(entry, signal); active();
       const input = { ...routerOf(job), ...(job.routerEffort ? { effort: job.routerEffort } : {}), systemPrompt: `${SYSTEM}\n${extra}`, prompt, schema, signal,
         imagePaths: imagePaths(staged) };
       return this.options.model ? this.options.model(input) : runAutoPromptModel(input, { stateDir: this.options.stateDir });
@@ -391,7 +419,9 @@ export class AutoPromptManager extends EventEmitter {
     let decision: AutoPromptDecision;
     let expectedNativeId: string | undefined;
     let relation: Relation = 'new';
-    if (job.sessionMode === 'new') {
+    if (entry.selection) {
+      ({ decision, relation, expectedNativeId } = copy(entry.selection));
+    } else if (job.sessionMode === 'new') {
       decision = { action: 'create', cwd, reason: '요청에 따라 독립된 새 세션을 생성합니다.' };
     } else if (job.targetSessionId !== undefined) {
       // The owner chose this conversation; it must still be one the router itself could have continued.
@@ -438,6 +468,8 @@ export class AutoPromptManager extends EventEmitter {
     if (decision.action === 'resume' && job.provider === 'codex' && job.codexApprovalsReviewer) {
       decision = { action: 'create', cwd, reason: `${decision.reason} 요청한 승인 검토 설정을 적용하기 위해 새 세션을 생성합니다.` };
     }
+    entry.selection = { decision, relation, ...(expectedNativeId ? { expectedNativeId } : {}) };
+    await this.persist();
     await this.options.refresh(); active();
     // The final choice for a remote request looks at its folder again now, not at an earlier look.
     if (job.origin?.controllerId) { await this.options.remote?.prepare([cwd], { fresh: true }); active(); }
@@ -451,6 +483,7 @@ export class AutoPromptManager extends EventEmitter {
         if (!session || session.nativeId !== expectedNativeId || !eligible(session, job.provider, cwd!) || (relation === 'adjacent' && !adjacentAllowed(session, current))) throw new RunError('라우팅 중 선택한 세션의 상태나 컨텍스트가 변경되었습니다. 실행하지 않았습니다. 다시 시도하세요.', 'conflict');
       }
     };
+    await this.storageGate(entry, signal); active();
     validate(); active();
     // This synchronous status transition claims dispatch before any await. A
     // cancellation can no longer race persistence and the run's admission.
@@ -458,10 +491,23 @@ export class AutoPromptManager extends EventEmitter {
     await this.persist(); this.emit('change');
     const attachmentIds = entry.staged.map(item => item.id);
     const internal: RunAdmission = { autoPromptId: job.id, validate, origin: job.origin ?? { kind: 'unknown' }, ...(job.delegation ? { delegation: job.delegation } : {}), ...(job.untrustedInput ? { untrustedInput: true } : {}), ...(job.unattended ? { unattended: true } : {}) };
-    const run = decision.action === 'resume'
+    await this.storageGate(entry, signal); active();
+    const dispatch = async () => decision.action === 'resume'
       ? await this.options.runs.enqueue(decision.sessionId!, job.prompt, { attachmentIds, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}) }, internal)
       : (await this.options.runs.create({ provider: job.provider, cwd, prompt: job.prompt, attachmentIds, ...job.newSessionModel, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}),
         ...(job.codexApprovalsReviewer ? { codexApprovalsReviewer: job.codexApprovalsReviewer } : {}) }, internal)).run;
+    let run: Run;
+    for (;;) {
+      await this.storageGate(entry, signal); active();
+      delete entry.resumable;
+      await this.persist();
+      await this.storageGate(entry, signal); active();
+      validate();
+      try { run = await dispatch(); break; }
+      catch (error) {
+        if (!this.storageHeld || !(error instanceof TowerError) || error.kind !== 'unavailable' || error.disposition !== 'not-admitted') throw error;
+      }
+    }
     this.complete(entry, run);
     await this.persist(); this.emit('change');
   }
@@ -488,10 +534,18 @@ export class AutoPromptManager extends EventEmitter {
   }
 
   private complete(entry: Entry, run: Run): void {
+    delete entry.resumable;
+    delete entry.selection;
     this.update(entry.job, { status: 'completed', sessionId: run.sessionId, runId: run.id });
     delete entry.job.error;
   }
-  private update(job: AutoPromptJob, patch: Partial<AutoPromptJob>): void { Object.assign(job, patch, { updatedAt: new Date().toISOString() }); }
+  private update(job: AutoPromptJob, patch: Partial<AutoPromptJob>): void {
+    if (patch.status && TERMINAL.has(patch.status)) {
+      const entry = this.entries.get(job.id);
+      if (entry) { delete entry.resumable; delete entry.selection; }
+    }
+    Object.assign(job, patch, { updatedAt: new Date().toISOString() });
+  }
   private async checkDirectory(cwd: string, inventory: Directory[]): Promise<void> {
     if (!inventory.some(directory => directory.cwd === cwd)) throw new RunError('Tower 목록에 있는 작업 폴더만 선택할 수 있습니다.');
     try { if (!(await stat(cwd)).isDirectory()) throw new Error(); }
@@ -519,7 +573,18 @@ export class AutoPromptManager extends EventEmitter {
 function validEntry(value: unknown): value is Entry {
   const entry = object(value);
   const job = object(entry?.job);
-  return !!job && typeof entry?.fingerprint === 'string' && /^[a-f\d]{64}$/.test(entry.fingerprint)
+  const selection = object(entry?.selection);
+  const decision = object(selection?.decision);
+  const checkpointValid = entry?.selection === undefined || !!selection && !!decision
+    && ['continuation', 'adjacent', 'new'].includes(String(selection.relation))
+    && (selection.expectedNativeId === undefined || validTarget(selection.expectedNativeId))
+    && typeof decision.cwd === 'string' && decision.cwd === job?.cwd
+    && typeof decision.reason === 'string' && !!decision.reason.trim() && decision.reason.length <= 1500
+    && (decision.action === 'create' && decision.sessionId === undefined
+      || decision.action === 'resume' && validTarget(decision.sessionId) && validTarget(selection.expectedNativeId) && selection.relation !== 'new');
+  return checkpointValid && (entry?.resumable === undefined || entry.resumable === true
+      && !!job && (job.status === 'queued' || job.status === 'routing' || job.status === 'dispatching' && !!selection))
+    && !!job && typeof entry?.fingerprint === 'string' && /^[a-f\d]{64}$/.test(entry.fingerprint)
     && Array.isArray(entry.staged) && entry.staged.length <= 10 && entry.staged.every(item => attachmentMetadata(item))
     && typeof job.id === 'string' && UUID.test(job.id) && ['claude', 'codex'].includes(String(job.provider))
     && (job.sessionMode === undefined || job.sessionMode === 'new')

@@ -33,3 +33,15 @@ test('repeat launch rejects a local-only server when remote access was requested
   assert.equal(await existingServerUrl(error, expected), `http://localhost:${port}`);
   await assert.rejects(existingServerUrl(error, { ...expected, bindHost: '127.0.0.1', remoteAccess: false }), /Stop that process first/);
 });
+
+test('repeat launch recognises a matching storage diagnostic 503 without adopting a foreign identity', async t => {
+  let health = { ok: false, application: 'agent-monitor', pid: process.pid, diagnostic: true, storage: { state: 'unavailable' } };
+  const server = createServer((_req, res) => { res.statusCode = 503; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(health)); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const port = (server.address() as { port: number }).port;
+  const error = new MonitorAlreadyRunning({ pid: process.pid, port, createdAt: new Date().toISOString() }, '/fixture');
+  assert.equal(await existingServerUrl(error), `http://localhost:${port}`);
+  health = { ...health, pid: process.pid + 1 };
+  assert.equal(await existingServerUrl(error), undefined);
+});

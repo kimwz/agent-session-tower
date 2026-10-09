@@ -1,0 +1,351 @@
+name: SQLite validation
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  fast-contracts:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24.15.0'
+      - name: Install and validate inside a private environment
+        shell: bash
+        env:
+          VALIDATION_ROOT: ${{ runner.temp }}/sqlite-validation
+          VALIDATION_MODE: supported-floor
+          VALIDATION_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$VALIDATION_ROOT"/{home,codex,claude,config,cache,state,data,runtime,tmp,npm,reports}
+          # Keep Unix socket paths short; canonicalize the fresh private tmp directory on macOS.
+          TEST_TMP="$(mktemp -d /tmp/sv.XXXXXX)"
+          TEST_TMP="$(cd "$TEST_TMP" && pwd -P)"
+          # No Actions credentials or provider authentication enter npm, tests or children.
+          env -i PATH="$PATH" HOME="$VALIDATION_ROOT/home" \
+            CODEX_HOME="$VALIDATION_ROOT/codex" CLAUDE_CONFIG_DIR="$VALIDATION_ROOT/claude" \
+            XDG_CONFIG_HOME="$VALIDATION_ROOT/config" XDG_CACHE_HOME="$VALIDATION_ROOT/cache" \
+            XDG_STATE_HOME="$VALIDATION_ROOT/state" XDG_DATA_HOME="$VALIDATION_ROOT/data" \
+            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
+            TMP="$TEST_TMP" TEMP="$TEST_TMP" \
+            npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
+            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
+            VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
+            VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
+          set -euo pipefail
+          # Private 0700 parents isolate fixtures; retain the usual user file-creation mask.
+          umask 022
+          report="$VALIDATION_ROOT/reports"
+          trap 'result=$?; printf "%s\n" "$result" > "$report/exit-code.txt"' EXIT
+          set -x
+          exec > >(tee "$report/stdout.log") 2> >(tee "$report/stderr.log" >&2)
+          printf '%s\n' "$VALIDATION_SHA" > "$report/source-sha.txt"
+          node --version > "$report/node-version.txt"
+          export SQLITE_VALIDATION_CI=1
+          printf '%s\n' npm-ci > "$report/stage.txt"
+          npm ci
+          node --import tsx scripts/sqlite-runtime-check.mjs "$VALIDATION_MODE" | tee "$report/runtime.json"
+          if [[ "$VALIDATION_MODE" == legacy-loader ]]; then
+            node --import tsx --test --test-reporter=tap tests/server/link/storage-update-legacy.test.ts
+            exit 0
+          fi
+          printf '%s\n' request-identity-old563-baseline > "$report/stage.txt"
+          (
+            module=server/runs/durable-runner.ts
+            current_hash="$(sha256sum "$module" | cut -d ' ' -f 1)"
+            head_hash="$(git show "HEAD:$module" | sha256sum | cut -d ' ' -f 1)"
+            [[ "$current_hash" == "$head_hash" ]]
+            restore() {
+              result=$?
+              trap - EXIT
+              git show "HEAD:$module" > "$module" || exit 1
+              [[ "$(sha256sum "$module" | cut -d ' ' -f 1)" == "$current_hash" ]] || exit 1
+              printf 'request-identity restored current HEAD SHA256 %s\n' "$current_hash"
+              exit "$result"
+            }
+            trap restore EXIT
+            git show "563f2afa0a2e85e48436de39777db7a05bb77729:$module" > "$module"
+            [[ "$(sha256sum "$module" | cut -d ' ' -f 1)" == 845ea018cbded318b8823717c3ac9d0a0d17addcdb4bf021520e4fc06b27d25c ]]
+            printf 'request-identity baseline actual old563 SHA256 845ea018cbded318b8823717c3ac9d0a0d17addcdb4bf021520e4fc06b27d25c\n'
+            set +e
+            node --import tsx --test --test-reporter=tap tests/server/link/storage-web.test.ts 2>&1 | tee "$report/request-identity-baseline.log"
+            baseline_exit=${PIPESTATUS[0]} tee_exit=${PIPESTATUS[1]}
+            set -e
+            [[ "$baseline_exit" == 1 && "$tee_exit" == 0 ]]
+            grep -Fq 'concurrent-adoption: actual snapshot adopted before held predecessor proof 409' "$report/request-identity-baseline.log"
+            grep -Fq 'concurrent-adoption: predecessor proof 409 after snapshot adoption must complete' "$report/request-identity-baseline.log"
+            grep -Eq '^# fail 1$' "$report/request-identity-baseline.log"
+            grep -Eq '^# cancelled 0$' "$report/request-identity-baseline.log"
+            printf 'request-identity baseline EXPECTED FAIL exit=1: concrete concurrent-adoption assertion; teardown completed\n'
+          )
+          printf '%s\n' tests/server/runs/storage-control.test.ts tests/server/runs/storage-diagnostic-worker.test.ts \
+            tests/server/permissions/one-shot.test.ts tests/server/runs/run-persistence.test.ts \
+            tests/server/http/storage-health.test.ts tests/server/link/storage-web.test.ts \
+            tests/server/runs/attachment-cleanup.test.ts tests/server/auto-prompt/auto-prompts.test.ts \
+            tests/server/runs/durable-runner.test.ts tests/gates/swallowed-errors.test.ts > "$report/test-files.txt"
+          files=()
+          while IFS= read -r file; do files+=("$file"); done < "$report/test-files.txt"
+          printf '%s\n' fast-contracts > "$report/stage.txt"
+          node --import tsx --test --test-reporter=tap "${files[@]}"
+          printf '0\n' > "$report/suite-exit.txt"
+          VALIDATE
+      - name: Preserve fast contract logs, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-fast-contracts-ubuntu-latest-24.15.0
+          path: ${{ runner.temp }}/sqlite-validation/reports/
+          if-no-files-found: error
+
+  sqlite:
+    needs: fast-contracts
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        node: ['22.22.3', '24.15.0', '26.0.0']
+        mode: [supported-floor]
+        include:
+          - os: ubuntu-latest
+            node: '22.13.0'
+            mode: legacy-loader
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install and validate inside a private environment
+        shell: bash
+        env:
+          VALIDATION_ROOT: ${{ runner.temp }}/sqlite-validation
+          VALIDATION_MODE: ${{ matrix.mode }}
+          VALIDATION_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$VALIDATION_ROOT"/{home,codex,claude,config,cache,state,data,runtime,tmp,npm,reports}
+          # Keep Unix socket paths short; canonicalize the fresh private tmp directory on macOS.
+          TEST_TMP="$(mktemp -d /tmp/sv.XXXXXX)"
+          TEST_TMP="$(cd "$TEST_TMP" && pwd -P)"
+          # No Actions credentials or provider authentication enter npm, tests or children.
+          env -i PATH="$PATH" HOME="$VALIDATION_ROOT/home" \
+            CODEX_HOME="$VALIDATION_ROOT/codex" CLAUDE_CONFIG_DIR="$VALIDATION_ROOT/claude" \
+            XDG_CONFIG_HOME="$VALIDATION_ROOT/config" XDG_CACHE_HOME="$VALIDATION_ROOT/cache" \
+            XDG_STATE_HOME="$VALIDATION_ROOT/state" XDG_DATA_HOME="$VALIDATION_ROOT/data" \
+            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
+            TMP="$TEST_TMP" TEMP="$TEST_TMP" \
+            npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
+            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
+            VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
+            VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
+          set -euo pipefail
+          # Private 0700 parents isolate fixtures; retain the usual user file-creation mask.
+          umask 022
+          report="$VALIDATION_ROOT/reports"
+          trap 'result=$?; printf "%s\n" "$result" > "$report/exit-code.txt"' EXIT
+          set -x
+          exec > >(tee "$report/stdout.log") 2> >(tee "$report/stderr.log" >&2)
+          printf '%s\n' "$VALIDATION_SHA" > "$report/source-sha.txt"
+          node --version > "$report/node-version.txt"
+          export SQLITE_VALIDATION_CI=1
+          printf '%s\n' npm-ci > "$report/stage.txt"
+          npm ci
+          node --import tsx scripts/sqlite-runtime-check.mjs "$VALIDATION_MODE" | tee "$report/runtime.json"
+          if [[ "$VALIDATION_MODE" == legacy-loader ]]; then
+            node --import tsx --test --test-reporter=tap tests/server/link/storage-update-legacy.test.ts
+            exit 0
+          fi
+          node --import tsx --test --test-reporter=tap \
+            --test-name-pattern='^(flush, close ack and an explicit reopen with the same captured bundle; nothing is sent while closed|a full queue still drains on flush and close: the accepted write commits, close acks, the thread exits 0, intake is refused meanwhile)$' \
+            tests/server/storage/client.test.ts
+          node --input-type=module <<'FILES'
+          import { globSync, readFileSync, writeFileSync } from 'node:fs';
+          import assert from 'node:assert/strict';
+          const storage = globSync('tests/server/storage/**/*.test.ts').sort();
+          const link = globSync('tests/server/link/**/*.test.ts').sort();
+          assert.ok(storage.length && link.length, 'suite globs must match');
+          const consumers = ['tests/server/runs/**/*storage*.test.ts', 'tests/server/http/**/*storage*.test.ts',
+            'tests/server/triggers/*storage*.test.ts'].flatMap(pattern => globSync(pattern));
+          assert.ok(consumers.length, 'storage consumers must match');
+          // Follow public storage imports as well as filenames, including newly added I fixtures.
+          const imported = ['tests/server/runs/**/*.test.ts', 'tests/server/http/**/*.test.ts',
+            'tests/server/instance/**/*.test.ts', 'tests/server/permissions/**/*.test.ts'].flatMap(pattern => globSync(pattern))
+            .filter(file => /(?:from|import).*['"][^'"]*storage[^'"]*['"]/.test(readFileSync(file, 'utf8')));
+          const lifecycle = ['tests/server/runs/durable-runner.test.ts', 'tests/server/runs/locked-state-handoff.test.ts',
+            'tests/server/runs/worker-restore-order.test.ts', 'tests/server/http/master-worker-http.test.ts',
+            'tests/server/terminals/terminal-host.test.ts', 'tests/server/instance/existing-server.test.ts',
+            'tests/server/permissions/permissions.test.ts', 'tests/server/auto-prompt/auto-prompts.test.ts'];
+          for (const file of lifecycle) assert.ok(globSync(file).length, `lifecycle fixture must exist: ${file}`);
+          const files = [...new Set([...storage, ...link, ...consumers, ...imported, ...lifecycle])].sort();
+          writeFileSync(`${process.env.VALIDATION_ROOT}/reports/test-files.txt`, files.join('\n') + '\n');
+          FILES
+          files=()
+          while IFS= read -r file; do files+=("$file"); done < "$report/test-files.txt"
+          printf '%s\n' real-suite > "$report/stage.txt"
+          node --import tsx --test --test-reporter=tap "${files[@]}"
+          printf '0\n' > "$report/suite-exit.txt"
+          printf '%s\n' foundation > "$report/stage.txt"
+          node --import tsx scripts/sqlite-foundation-benchmark.mjs 20 | tee "$report/foundation.json"
+          printf '0\n' > "$report/foundation-exit.txt"
+          if [[ "$(node -p 'process.versions.node.split(".")[0]')" == 26 ]]; then
+            printf '%s\n' sea-build > "$report/stage.txt"
+            npm run build:executable
+            printf '0\n' > "$report/sea-build-exit.txt"
+            printf '%s\n' sea-smoke > "$report/stage.txt"
+            npm run test:executable
+            printf '0\n' > "$report/sea-smoke-exit.txt"
+            printf '%s\n' sea-contract > "$report/stage.txt"
+            artifacts/agent-session-tower --storage-contract | tee "$report/sea-runtime.json"
+            printf '0\n' > "$report/sea-contract-exit.txt"
+            node --input-type=module <<'SEA'
+          import assert from 'node:assert/strict';
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { createHash } from 'node:crypto';
+          import { parseArtifactStorageContract } from './dist/server/link/storage-update.js';
+          const report = `${process.env.VALIDATION_ROOT}/reports`;
+          const contract = JSON.parse(readFileSync(`${report}/sea-runtime.json`, 'utf8'));
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          assert.equal(parseArtifactStorageContract(JSON.stringify(contract), pkg.version).state, 'contract');
+          assert.equal(contract.format, 'tower-artifact-storage-contract');
+          assert.equal(contract.supported, true, JSON.stringify(contract));
+          assert.equal(contract.appVersion, pkg.version);
+          assert.equal(contract.identity.appVersion, pkg.version);
+          assert.equal(contract.runtime.node, process.versions.node);
+          assert.equal(contract.runtime.platform, process.platform);
+          assert.equal(contract.runtime.arch, process.arch);
+          assert.equal(contract.runtime.sqlite, '3.51.3');
+          assert.match(contract.identity.sourceHash, /^[0-9a-f]{64}$/);
+          const source = readFileSync('dist/executable/monitor.mjs');
+          writeFileSync(`${report}/compiled-source.mjs`, source);
+          writeFileSync(`${report}/compiled-source-sha256.txt`, createHash('sha256').update(source).digest('hex') + '\n');
+          writeFileSync(`${report}/sea-build-config.json`, readFileSync('dist/executable/sea-config.json'));
+          const binaryHash = createHash('sha256').update(readFileSync('artifacts/agent-session-tower')).digest('hex');
+          assert.equal(binaryHash, readFileSync('artifacts/agent-session-tower.sha256', 'utf8').split(/\s+/)[0]);
+          writeFileSync(`${report}/binary-sha256.txt`, binaryHash + '\n');
+          SEA
+          fi
+          VALIDATE
+      - name: Preserve validation logs, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-${{ matrix.os }}-${{ matrix.node }}-${{ matrix.mode }}
+          path: ${{ runner.temp }}/sqlite-validation/reports/
+          if-no-files-found: error
+
+  release-prepare:
+    needs: fast-contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26.0.0'
+      - name: Prepare release sources through the official npm hooks
+        shell: bash
+        env:
+          VALIDATION_ROOT: ${{ runner.temp }}/sqlite-release-prepare
+          VALIDATION_MODE: release-prepare
+          VALIDATION_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$VALIDATION_ROOT"/{home,codex,claude,config,cache,state,data,runtime,tmp,npm,reports}
+          # Keep Unix socket paths short; canonicalize the fresh private tmp directory on macOS.
+          TEST_TMP="$(mktemp -d /tmp/sv.XXXXXX)"
+          TEST_TMP="$(cd "$TEST_TMP" && pwd -P)"
+          # No Actions credentials or provider authentication enter npm, tests or children.
+          env -i TZ=Asia/Seoul PATH="$PATH" HOME="$VALIDATION_ROOT/home" \
+            CODEX_HOME="$VALIDATION_ROOT/codex" CLAUDE_CONFIG_DIR="$VALIDATION_ROOT/claude" \
+            XDG_CONFIG_HOME="$VALIDATION_ROOT/config" XDG_CACHE_HOME="$VALIDATION_ROOT/cache" \
+            XDG_STATE_HOME="$VALIDATION_ROOT/state" XDG_DATA_HOME="$VALIDATION_ROOT/data" \
+            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
+            TMP="$TEST_TMP" TEMP="$TEST_TMP" \
+            npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
+            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
+            VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
+            VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
+          set -euo pipefail
+          # Private 0700 parents isolate fixtures; retain the usual user file-creation mask.
+          umask 022
+          report="$VALIDATION_ROOT/reports"
+          preserve() {
+            result=$?
+            printf '%s\n' "$result" > "$report/exit-code.txt"
+            mkdir -p "$report/release-sources/shared"
+            cp CHANGELOG.md package.json package-lock.json "$report/release-sources/"
+            cp shared/app-identity.ts "$report/release-sources/shared/"
+            node --input-type=module <<'HASHES'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { createHash } from 'node:crypto';
+          const files = ['CHANGELOG.md', 'package.json', 'package-lock.json', 'shared/app-identity.ts'];
+          writeFileSync(`${process.env.VALIDATION_ROOT}/reports/release-source-hashes.json`, JSON.stringify(
+            Object.fromEntries(files.map(file => [file, createHash('sha256').update(readFileSync(file)).digest('hex')])), null, 2) + '\n');
+          HASHES
+            exit "$result"
+          }
+          trap preserve EXIT
+          set -x
+          exec > >(tee "$report/stdout.log") 2> >(tee "$report/stderr.log" >&2)
+          printf '%s\n' "$VALIDATION_SHA" > "$report/source-sha.txt"
+          node --version > "$report/node-version.txt"
+          printf '%s\n' npm-ci > "$report/stage.txt"
+          npm ci
+          node --import tsx scripts/sqlite-runtime-check.mjs supported-floor | tee "$report/runtime.json"
+          printf '%s\n' release-version-decision > "$report/stage.txt"
+          if [[ "$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')" == 1.119.0 ]]; then
+            printf '%s\n' already-target > "$report/version-mode.txt"
+            printf '%s\n' already-target-official-checks > "$report/stage.txt"
+            npm run check
+            node scripts/release.mjs prepare
+            node --import tsx --test tests/shared/app-identity.test.ts
+            npm run build
+          else
+            node --input-type=module <<'FLOOR'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
+          assert.match(version, /^\d+\.\d+\.\d+$/);
+          const current = version.split('.').map(Number);
+          const target = [1, 119, 0];
+          const first = current.findIndex((part, index) => part !== target[index]);
+          assert.ok(first >= 0 && current[first] < target[first], 'target must exceed the input version');
+          FLOOR
+            printf '%s\n' npm-version > "$report/version-mode.txt"
+            printf '%s\n' npm-version-hooks > "$report/stage.txt"
+            npm version 1.119.0 --no-git-tag-version
+            printf '0\n' > "$report/npm-version-exit.txt"
+          fi
+          node --input-type=module <<'VERSION'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { APP_VERSION } from './dist/shared/app-identity.js';
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          assert.equal(pkg.version, '1.119.0');
+          assert.equal(lock.version, pkg.version);
+          assert.equal(lock.packages[''].version, pkg.version);
+          assert.equal(APP_VERSION, pkg.version);
+          VERSION
+          VALIDATE
+      - name: Preserve release sources and original logs, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-release-prepare
+          path: ${{ runner.temp }}/sqlite-release-prepare/reports/
+          if-no-files-found: error

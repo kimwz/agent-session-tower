@@ -2,13 +2,22 @@ import { execFile, spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { link, readdir, readFile, realpath, rm, stat, statfs, utimes, writeFile } from 'node:fs/promises';
 import { isSea } from 'node:sea';
-import { join, sep } from 'node:path';
+import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { UpdateFailure, UpdateStage, UpdateStatus } from '../../shared/link.js';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { writePrivateJson } from '../stores/private-json.js';
+import { observeProcess } from './process-owner.js';
 import { processStart } from '../instance/process-start.js';
-import { currentVersion, entryPoint, installVersion, newerVersion, pointCurrent, RELEASE_WAIT_MS, restartService, runtimePaths, versionDirectory } from './service.js';
+import { HoldError, observeHold, removeHold, writeHold, type HoldGeneration } from './storage-hold.js';
+import { TransitionLockError } from './storage-transition-lock.js';
+import { currentVersion, entryPoint, installVersion, newerVersion, pointUpdate, RELEASE_WAIT_MS, restartService, runtimePaths, versionDirectory } from './service.js';
+import {
+  pinnedVersion, preparationCheck, probeInstalledArtifact, readCurrentPointer, readHelperLock, readHold, readRollbackRecord, readUpdateRecord, rollbackActive, storageKeptVersions,
+  updateActive, updatePaths, type ArtifactRead, type HelperRead, type SavedUpdate,
+} from './storage-update.js';
+
+export { updateActive, updatePaths, type SavedUpdate } from './storage-update.js';
 
 const run = promisify(execFile);
 /** A new version that does not answer by then is given up on, and the previous one is started again. */
@@ -25,68 +34,107 @@ const STABLE_MS = 60_000;
 /** Space an install needs, besides what the running work may still write. */
 const MIN_FREE_BYTES = 2 * 1024 ** 3;
 
-const ACTIVE: ReadonlySet<UpdateStage> = new Set(['installing', 'checking', 'switching', 'verifying', 'rolling-back']);
 /** A helper that has not taken its lock this long after it was asked for did not start. */
 const STARTING_MS = 30_000;
 const RELEASE = /^\d+\.\d+\.\d+$/;
 
-export function updatePaths(stateDir: string) {
-  const { root, logs } = runtimePaths(stateDir);
-  return { status: join(root, 'update.json'), lock: join(root, 'update.lock'), hold: join(root, 'handoff-hold'), log: join(logs, 'update.log') };
-}
-
-/** What this computer keeps about its update; `controllers` (linked when it switched) stays here. */
-export interface SavedUpdate extends UpdateStatus { controllers?: string[] }
-
+/**
+ * The last update, when its record can be read and is one this build understands; undefined otherwise. Deciding
+ * anything about storage takes readUpdateRecord instead, which tells a missing record from one that cannot be read.
+ */
 export async function readUpdateStatus(stateDir: string): Promise<SavedUpdate | undefined> {
-  const value = await readPrivateJson(updatePaths(stateDir).status).catch(() => undefined) as Partial<SavedUpdate> | undefined;
-  if (!value || typeof value.version !== 'string' || !RELEASE.test(value.version) || typeof value.previous !== 'string' || typeof value.stage !== 'string') return undefined;
-  return value as SavedUpdate;
+  const read = await readUpdateRecord(stateDir);
+  return read.state === 'active' || read.state === 'terminal' ? read.update : undefined;
 }
 async function saveUpdateStatus(stateDir: string, status: SavedUpdate): Promise<void> {
   await writePrivateJson(updatePaths(stateDir).status, JSON.stringify(status));
 }
 /** The part of an update a controller is told. */
 export function publicUpdate({ controllers: _, ...status }: SavedUpdate): UpdateStatus { return status; }
-export const updateActive = (status: UpdateStatus | undefined): boolean => Boolean(status && ACTIVE.has(status.stage));
 
-const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT';
 /** The error last logged for each hold that could not be read, so a poll every second logs it once. */
 const unreadableHolds = new Map<string, string>();
 
+/** What last kept an expired hold in place, per hold, so a poll every second logs it once. */
+const keptHolds = new Map<string, string>();
+const keep = (hold: string, reason: string) => {
+  if (keptHolds.get(hold) !== reason) console.error(`The update hold is kept: ${reason}`);
+  keptHolds.set(hold, reason);
+  return true;
+};
+
 /**
  * While an update is being tried, the new web must not hand the worker over: until the update is kept, going back
- * to the previous version has to find the previous worker. A hold nobody released in time holds nothing. Rejects
- * when the hold or the helper lock cannot be read: whether to hold cannot be told then, and nothing is removed.
+ * to the previous version has to find the previous worker. A hold nobody released in time holds nothing: once it is
+ * that old and no helper can be running (the helper lock gone or absent; one that runs, names no process or cannot be
+ * read keeps holding, whichever release wrote it), the very generation judged old is removed, in the transition turn.
+ * A hold refreshed or replaced meanwhile is another generation: it stays, and holds. Without a hold, a helper lock
+ * that names no process or cannot be read still holds (HelperLockUnknownError), whatever the update record says: a
+ * helper may be at work whose hold could not be written or was removed (by a released web, for example). Rejects when
+ * the hold or the helper lock cannot be read, or the turn cannot be taken: whether to hold cannot be told then, and
+ * nothing is removed. The web calls this while it holds the state directory's instance lock, so no other web (a
+ * JSON-only one, which removes holds without the turn, included) runs on it meanwhile.
  */
 export async function handoffHeld(stateDir: string, now = Date.now()): Promise<boolean> {
   const { hold } = updatePaths(stateDir);
-  let held: boolean | undefined;
+  let present = false;
+  /** The generation judged expired: the only one removed. */
+  let expired: HoldGeneration | undefined;
+  let helper: Awaited<ReturnType<typeof readHelperLock>> | undefined;
   try {
-    const info = await stat(hold).catch(error => { if (missing(error)) return undefined; throw error; });
+    // Read as it is: a link (even one to nowhere) or anything but a file is not a missing hold.
+    const found = await readHold(stateDir, now);
+    if (found.state === 'unreadable') throw found.error;
     // No hold: nothing to remove, and one a helper writes meanwhile must stay.
-    held = info && (now - info.mtimeMs < HOLD_MS || await helperRunning(stateDir));
+    present = found.state === 'present';
+    if (found.state === 'present' && found.ageMs >= HOLD_MS) {
+      const observed = await observeHold(stateDir, now);
+      present = observed.state === 'present';
+      if (observed.state === 'present' && observed.ageMs >= HOLD_MS) {
+        expired = observed.generation;
+        helper = await readHelperLock(stateDir, startedAt);
+        if (helper.state === 'unreadable') throw new HelperLockUnknownError(stateDir, helper);
+      }
+    }
+    if (!present) {
+      const owner = await readHelperLock(stateDir, startedAt);
+      if (owner.state === 'invalid' || owner.state === 'unreadable') throw new HelperLockUnknownError(stateDir, owner);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (unreadableHolds.get(hold) !== message) console.error(`The update hold could not be read (${message}); the worker is not handed over until it can.`);
+    if (unreadableHolds.get(hold) !== message) {
+      console.error(error instanceof HelperLockUnknownError ? `${message} The worker is not handed over until it can be told.`
+        : `The update hold could not be read (${message}); the worker is not handed over until it can.`);
+    }
     unreadableHolds.set(hold, message);
     throw error;
   }
   if (unreadableHolds.delete(hold)) console.log('The update hold can be read again.');
-  if (held === undefined) return false;
-  if (held) return true;
-  await rm(hold, { force: true });
+  if (!present) return false;
+  if (!expired || !helper || helper.state === 'running') return true;
+  if (helper.state === 'invalid') return keep(hold, `${helper.reason} A helper may still own the hold; the owner inspects ${updatePaths(stateDir).lock}.`);
+  try { await removeHold(stateDir, { generation: expired }); } catch (error) {
+    if (error instanceof HoldError) return keep(hold, error.message);
+    throw error;
+  }
+  keptHolds.delete(hold);
   return false;
 }
 
-/** The previous version's entry point while an update is tried, for a worker that has to be started then. */
+/**
+ * The previous version's entry point while an update is tried, for a worker that has to be started then. Undefined
+ * when nothing holds the handoff (or a known hold names no previous version installed here). When whether to hold
+ * cannot be told and no previous version can be chosen, it rejects with why: undefined would be taken for nothing held.
+ */
 export async function heldWorkerEntry(stateDir: string): Promise<string | undefined> {
-  // A hold that cannot be read counts as held: the previous version's worker is the safe one to start.
-  if (!await handoffHeld(stateDir).catch(() => true)) return undefined;
+  // A hold or helper that cannot be told counts as held: the previous version's worker is the safe one to start.
+  let unknown: { error: unknown } | undefined;
+  if (!await handoffHeld(stateDir).catch(error => { unknown = { error }; return true; })) return undefined;
   const status = await readUpdateStatus(stateDir);
-  if (!status || !updateActive(status)) return undefined;
-  const entry = entryPoint(versionDirectory(stateDir, status.previous));
-  return await stat(entry).then(() => entry, () => undefined);
+  const entry = status && updateActive(status) ? entryPoint(versionDirectory(stateDir, status.previous)) : undefined;
+  const found = entry && await stat(entry).then(() => entry, () => undefined);
+  if (found || !unknown) return found;
+  throw unknown.error;
 }
 
 /** Whether this web is the background service's own install, which is what an update replaces. */
@@ -96,36 +144,55 @@ export async function managedByService(stateDir: string, entry: string | undefin
   return Boolean(actual && versions && actual.startsWith(versions + sep));
 }
 
-/** Whether a process is still running. */
-function alive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
-}
 const startedAt = processStart;
+
 /**
- * The lock's owner: its pid and when it started. However long the computer slept, a live helper still owns it.
- * No lock means no owner; a lock that cannot be read rejects, since a helper may still own it.
+ * A helper lock that names no process it can have (`invalid`, code `helper-lock-invalid`), cannot be read, or whose
+ * owner cannot be observed (`unreadable`, code and cause the read's or the observation's own error): a helper may
+ * still own it, so it is never taken for no helper. Nothing is written, removed, taken over or started on it; the
+ * owner inspects the lock.
  */
-async function lockOwner(stateDir: string): Promise<{ pid: number; started?: string } | undefined> {
-  const [pid, ...started] = (await readFile(updatePaths(stateDir).lock, 'utf8').catch(error => { if (missing(error)) return ''; throw error; })).split(' ');
-  return Number(pid) > 0 && Number.isInteger(Number(pid)) ? { pid: Number(pid), ...(started.length ? { started: started.join(' ') } : {}) } : undefined;
+export class HelperLockUnknownError extends Error {
+  readonly code: string;
+  readonly helper: 'invalid' | 'unreadable';
+  readonly reason: string;
+  constructor(stateDir: string, read: Extract<HelperRead, { state: 'invalid' | 'unreadable' }>) {
+    const { lock } = updatePaths(stateDir);
+    const code = read.state === 'invalid' ? 'helper-lock-invalid' : String((read.error as NodeJS.ErrnoException)?.code ?? 'EUNKNOWN');
+    super(read.state === 'invalid' ? `${read.reason} A helper may still own ${lock}; the owner inspects it.`
+      : read.pid !== undefined ? `${read.reason} (${code}) A helper may still own ${lock}; the owner inspects it.`
+        : `The update helper lock ${lock} cannot be read (${code}: ${read.reason}); a helper may still own it.`, read.state === 'unreadable' ? { cause: read.error } : undefined);
+    this.name = 'HelperLockUnknownError';
+    this.code = code;
+    this.helper = read.state;
+    this.reason = read.reason;
+  }
 }
-async function helperRunning(stateDir: string): Promise<boolean> {
-  const owner = await lockOwner(stateDir);
-  if (!owner || !alive(owner.pid)) return false;
-  if (!owner.started) return true;
-  const now = await startedAt(owner.pid);
-  return now === undefined || now === owner.started;
+
+/**
+ * Whether a helper may be at work, as every decision here takes it: the lock's owner, its pid as the process that
+ * started then, still runs. However long the computer slept, a live helper still owns it. No lock, or one whose owner
+ * is gone, means no helper; a lock that names no process, cannot be read or whose owner cannot be observed rejects
+ * (HelperLockUnknownError).
+ */
+export async function helperRunning(stateDir: string): Promise<boolean> {
+  const owner = await readHelperLock(stateDir, startedAt);
+  if (owner.state === 'invalid' || owner.state === 'unreadable') throw new HelperLockUnknownError(stateDir, owner);
+  return owner.state === 'running';
 }
 /**
  * Takes the helper lock. It is published whole, with its owner's pid and start time in it, so another helper never
- * sees it empty; a lock whose owner is gone is taken over, one that cannot be read never is. Two helpers taking
- * over the same stale lock at once can both publish; the one whose lock is no longer there a moment later stands down.
+ * sees it empty; a lock whose owner is gone is taken over, one that names no process or cannot be read never is (it
+ * rejects, and only this helper's own temporary goes). Two helpers taking over the same stale lock at once can both
+ * publish; the one whose lock is no longer there a moment later stands down.
  */
 async function takeLock(stateDir: string): Promise<boolean> {
   const { lock } = updatePaths(stateDir);
   const temporary = `${lock}.${process.pid}`;
   const mine = `${process.pid} ${await startedAt(process.pid) ?? ''}`.trim();
-  await writeFile(temporary, mine, { mode: 0o600 });
+  // Created new, never through whatever a link left at that name points to.
+  await rm(temporary, { force: true });
+  await writeFile(temporary, mine, { mode: 0o600, flag: 'wx' });
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -141,7 +208,7 @@ async function takeLock(stateDir: string): Promise<boolean> {
   } finally { await rm(temporary, { force: true }); }
 }
 
-export interface UpdateRequestResult { status: number; body: { update?: UpdateStatus; current?: true; error?: string; code?: string } }
+export interface UpdateRequestResult { status: number; body: { update?: UpdateStatus; current?: true; error?: string; code?: string; prepare?: string } }
 
 /**
  * This computer's side of updates: a controller asks for a newer version, and a separate helper process installs
@@ -160,7 +227,12 @@ export class Updates {
   get managed(): boolean { return this.options.managed; }
 
   request(version: unknown): Promise<UpdateRequestResult> {
-    const next = this.queue.then(() => this.start(version));
+    return this.exclusive(() => this.start(version));
+  }
+
+  /** Runs `work` in turn with requests and pruning: the owner's rollback pins its target this way. */
+  exclusive<T>(work: () => Promise<T>): Promise<T> {
+    const next = this.queue.then(work);
     this.queue = next.catch(() => {});
     return next;
   }
@@ -179,13 +251,46 @@ export class Updates {
 
   private async start(version: unknown): Promise<UpdateRequestResult> {
     if (typeof version !== 'string' || !RELEASE.test(version)) return { status: 400, body: { code: 'invalid-version', error: 'Not a released version.' } };
-    const current = await readUpdateStatus(this.options.stateDir);
+    const { stateDir } = this.options;
+    const read = await readUpdateRecord(stateDir);
+    const current = read.state === 'active' || read.state === 'terminal' ? read.update : undefined;
     if (!newerVersion(version, this.options.version)) return { status: 200, body: { current: true, ...(current ? { update: publicUpdate(current) } : {}) } };
     if (!this.options.managed) return { status: 409, body: { code: 'not-service', error: 'This computer does not run Tower as its background service.' } };
+    // The owner's pin keeps this version, whoever asks (the owner, the scheduler, a controller).
+    const pin = await pinnedVersion(stateDir);
+    if (pin.state === 'unknown') return { status: 409, body: { code: 'pin-unreadable', error: `The version pin cannot be read: ${pin.reason}` } };
+    if (pin.state === 'pinned' && pin.version !== version) return { status: 409, body: { code: 'pinned', error: `The owner pinned this computer to ${pin.version}; release the pin to update it.` } };
+    // An owner's rollback under way (or one whose record cannot be read) is settled first. Its reservation is taken in
+    // turn with requests (Updates.exclusive), so it sees an update asked for meanwhile and the other way around.
+    const rollback = await readRollbackRecord(stateDir);
+    if (rollback.state === 'unreadable' || rollback.state === 'invalid') return { status: 409, body: { code: 'rollback-unreadable', error: `The owner's rollback record cannot be read: ${rollback.reason}` } };
+    if (rollback.state === 'present' && rollbackActive(rollback.record)) return { status: 409, body: { code: 'rollback-under-way', error: `The owner's rollback to ${rollback.record.target} is under way.` } };
+    // A record that cannot be read may be an update under way; one this build does not understand is replaced only
+    // when no helper or hold is left that could belong to it.
+    if (read.state === 'unreadable') return { status: 409, body: { code: 'update-status-unreadable', error: `The last update cannot be read: ${read.reason}` } };
+    if (read.state === 'invalid') {
+      const helper = await helperRunning(stateDir).catch((error: unknown) => error);
+      if (helper instanceof HelperLockUnknownError) return { status: 409, body: { code: 'busy', error: `The last update is not one this version understands, and whether its helper still runs cannot be told: ${helper.message}` } };
+      if (helper !== false || (await readHold(stateDir)).state !== 'absent') {
+        return { status: 409, body: { code: 'busy', error: 'The last update is not one this version understands, and its helper or hold is still there.' } };
+      }
+    }
+    // The target needs its preparation release first (or cannot take over at all), and nothing here changed since it
+    // said so: asked again, it is not installed again. Installing that release (or a newer one) first is what moves on.
+    const refusal = current?.storage?.code;
+    if (current?.stage === 'failed' && current.version === version && current.previous === this.options.version && (refusal === 'prerequisite-required' || refusal === 'previous-incompatible')) {
+      return { status: 409, body: { code: refusal, ...(current.storage!.prepare ? { prepare: current.storage!.prepare } : {}), update: publicUpdate(current),
+        error: refusal === 'prerequisite-required' ? `${version} needs ${current.storage!.prepare ?? 'its preparation release'} to run here first.` : `${this.options.version} cannot take ${version}'s storage over; the owner decides how to move on.` } };
+    }
     if (updateActive(current) && await this.busy(current!)) {
       // The newest version asked for wins; it is asked for again once this update has finished.
       return current!.version === version ? { status: 202, body: { update: publicUpdate(current!) } } : { status: 409, body: { code: 'busy', update: publicUpdate(current!) } };
     }
+    // Nothing is recorded or started beside a helper lock that cannot be told, whatever the last update says: the record,
+    // its notes and the hold stay as they are for the owner.
+    const helper = await helperRunning(stateDir).catch((error: unknown) => error);
+    if (helper instanceof HelperLockUnknownError) return { status: 409, body: { code: 'helper-lock-unknown', error: helper.message } };
+    if (helper !== false && helper !== true) throw helper;
     const at = new Date(this.options.now?.() ?? Date.now()).toISOString();
     const update: UpdateStatus = { version, previous: this.options.version, stage: 'installing', startedAt: at, updatedAt: at };
     await saveUpdateStatus(this.options.stateDir, update);
@@ -204,23 +309,28 @@ export class Updates {
    */
   async recover(): Promise<void> {
     const { stateDir, version } = this.options;
-    const status = await readUpdateStatus(stateDir);
-    if (!this.options.managed || !status) return;
+    const read = await readUpdateRecord(stateDir);
+    if (!this.options.managed || (read.state !== 'active' && read.state !== 'terminal')) return;
+    const status = read.update;
     const resumes = updateActive(status) && status.version === version;
-    const running = await helperRunning(stateDir).catch(async error => {
-      // Whether a helper still runs cannot be told: hold the worker, but start no helper and settle nothing.
-      if (resumes) await writeFile(updatePaths(stateDir).hold, JSON.stringify({ version }), { mode: 0o600 });
-      throw error;
-    });
-    if (running) return;
+    // Whether a helper still runs cannot be told: it rejects, and nothing is written, removed, settled or started. The
+    // worker stays held by that judgment itself (handoffHeld rejects on it too), not by a hold written for it.
+    if (await helperRunning(stateDir)) return;
     if (resumes) {
-      // Held anew before the helper starts: however long the computer was off, this web must not take the worker.
-      await writeFile(updatePaths(stateDir).hold, JSON.stringify({ version }), { mode: 0o600 });
+      // Held anew before the helper starts: however long the computer was off, this web must not take the worker. A
+      // hold that is not this update's own plain file is left as it is, and no helper starts (writeHold rejects).
+      await writeHold(stateDir, version);
       this.spawn(version, true);
       return;
     }
-    // The previous version runs again: a hold left for an update is not needed by it.
-    if (status.previous === version) await rm(updatePaths(stateDir).hold, { force: true });
+    // The previous version runs again: the hold its update left is not needed by it. Anything else there is left, and
+    // so is the hold once another update is recorded than the one judged here (it may be that update's own).
+    if (status.previous === version) {
+      await removeHold(stateDir, { version: status.version, update: read.sha256 }).catch(error => {
+        if (!(error instanceof HoldError) && !(error instanceof TransitionLockError)) throw error;
+        console.error(`The update hold is kept: ${error.message}`);
+      });
+    }
     if (!updateActive(status)) return;
     const at = new Date(this.options.now?.() ?? Date.now()).toISOString();
     // Going back had brought the previous version up: the update failed for the reason already found.
@@ -233,20 +343,34 @@ export class Updates {
    * requests, and never while an update is under way, so it cannot remove what an update just installed.
    */
   prune(inUse: () => Promise<Array<string | null | undefined>>): Promise<void> {
-    const next = this.queue.then(async () => {
+    return this.exclusive(async () => {
       if (!this.options.managed) return;
       const { stateDir } = this.options;
-      const status = await readUpdateStatus(stateDir);
+      // What the last update, the current link or the owner's pin and rollback keep must be known before anything goes.
+      const read = await readUpdateRecord(stateDir);
+      if (read.state === 'unreadable' || read.state === 'invalid') return;
+      const status = read.state === 'absent' ? undefined : read.update;
       if (updateActive(status) || await helperRunning(stateDir)) return;
-      const keep = new Set([this.options.version, await currentVersion(stateDir), status?.previous, ...await inUse()].filter(Boolean));
+      const [current, storage] = await Promise.all([readCurrentPointer(stateDir), storageKeptVersions(stateDir)]);
+      if (current.state === 'unreadable' || current.state === 'invalid' || 'unknown' in storage) return;
+      const keep = new Set([this.options.version, current.state === 'version' ? current.version : undefined, status?.previous, ...storage.keep, ...await inUse()].filter(Boolean));
       const installed = await readdir(runtimePaths(stateDir).versions).catch(() => [] as string[]);
       // An install cut short leaves its staging folder behind; no helper runs now to finish it.
       // An install still under way (by a join or service command run by hand) keeps its staging folder.
-      const staging = (name: string) => { const pid = Number(/^\d+\.\d+\.\d+\.installing-(\d+)$/.exec(name)?.[1]); return pid > 0 && !alive(pid); };
+      const staging = (name: string) => {
+        const match = /^\d+\.\d+\.\d+\.installing-(\d+)$/.exec(name);
+        if (!match) return false;
+        const pid = Number(match[1]);
+        const observed = observeProcess(pid);
+        if (observed.state === 'unobserved' || observed.state === 'out-of-range') {
+          const reason = observed.state === 'out-of-range' ? 'pid is outside the signal-zero range' : `${(observed.error as NodeJS.ErrnoException | undefined)?.code ?? 'unknown'}: ${observed.error instanceof Error ? observed.error.message : String(observed.error)}`;
+          console.error(`The staging folder ${name} is kept: ${reason}`);
+        }
+        if (observed.state === 'present' && observed.code === 'EPERM') console.error(`The staging folder ${name} is kept: EPERM (the process is present).`);
+        return observed.state === 'gone';
+      };
       for (const name of installed) if ((RELEASE.test(name) && !keep.has(name)) || staging(name)) await rm(versionDirectory(stateDir, name), { recursive: true, force: true });
     });
-    this.queue = next.catch(() => {});
-    return next;
   }
 }
 
@@ -277,6 +401,11 @@ export interface UpdateHelperSteps {
   install(version: string): Promise<string>;
   /** Runs the installed version enough to know it starts. */
   check(directory: string, version: string): Promise<void>;
+  /**
+   * The storage contract an installed version states (`--storage-contract`). With it the helper refuses a target
+   * whose storage the version it would go back to cannot take over, before anything switches.
+   */
+  contract?(directory: string, version: string): Promise<ArtifactRead>;
   point(version: string): Promise<void>;
   restart(): Promise<void>;
   health(): Promise<{ version: string; pid: number } | undefined>;
@@ -299,7 +428,8 @@ export function serviceSteps(stateDir: string, port: number): UpdateHelperSteps 
       const { stdout } = await run(process.execPath, [entryPoint(directory), '--version'], { timeout: 60_000 });
       if (stdout.trim() !== version) throw new Error(`The installed version reports ${stdout.trim().slice(0, 40) || 'nothing'}.`);
     },
-    point: version => pointCurrent(stateDir, version),
+    contract: probeInstalledArtifact,
+    point: version => pointUpdate(stateDir, version),
     restart: () => restartService(stateDir),
     health: () => read<{ version: string; pid: number }>('/api/health'),
     // The new version answers these the way the helper's own version reads them; anything else counts as no answer.
@@ -320,6 +450,7 @@ export function serviceSteps(stateDir: string, port: number): UpdateHelperSteps 
  */
 export async function runUpdateHelper(stateDir: string, version: string, steps: UpdateHelperSteps, resume = false): Promise<UpdateStatus | undefined> {
   const paths = updatePaths(stateDir);
+  // A lock that cannot be told rejects here, before the try whose end removes the lock: it is left as it is.
   if (!await takeLock(stateDir)) return undefined;
   let status = await readUpdateStatus(stateDir);
   try {
@@ -344,6 +475,18 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
     // launchd starts the service again by itself when it stops unexpectedly, so a restart command that fails
     // (as it can while the service is failing to start) is not the end: whether it comes up decides.
     const restart = () => steps.restart().catch(error => steps.log(`restart: ${(error as Error).message.split('\n')[0]}`));
+    /**
+     * Removes this update's own hold, in the transition turn; anything else there is left as it is (and keeps holding).
+     * A release that did not happen is not taken for one: the update record says why (`hold`), for the owner.
+     */
+    let kept: SavedUpdate['hold'];
+    const release = async () => {
+      try { await removeHold(stateDir, { version }); kept = undefined; } catch (error) {
+        if (!(error instanceof HoldError) && !(error instanceof TransitionLockError)) throw error;
+        steps.log(`hold: ${error.message}`);
+        kept = { code: error.code, reason: error.message.slice(0, 2000), at: new Date(steps.now()).toISOString() };
+      }
+    };
     // The hold stays until the previous version answers again: until then the new web may still be running, and it
     // must not hand the worker over. A previous version that never comes back releases it itself when it starts.
     const back = async (code: UpdateFailure, failedStage: UpdateStage) => {
@@ -352,8 +495,8 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
         await steps.point(previous);
         await restart();
         const up = await wait(async () => (await steps.health())?.version === previous, START_MS);
-        if (up) await rm(paths.hold, { force: true });
-        await set('failed', up ? { code, failedStage } : { code: 'rollback-failed', failedStage });
+        if (up) await release();
+        await set('failed', up ? { code, failedStage, hold: kept } : { code: 'rollback-failed', failedStage });
       } catch (error) {
         steps.log(`rolling back failed: ${(error as Error).message}`);
         await set('failed', { code: 'rollback-failed', failedStage });
@@ -383,7 +526,8 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
       if (final !== true) return await back('start-failed', 'verifying');
       // Kept before the hold goes: stopped in between, the hold only runs out, and nothing is checked again unheld.
       await set('done');
-      await rm(paths.hold, { force: true });
+      await release();
+      if (kept) await set('done', { hold: kept });
       return status;
     };
     // Started again by the new version after the helper was stopped: carry on from where it was.
@@ -391,7 +535,8 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
       if (status.stage === 'rolling-back') return await back(status.code ?? 'interrupted', status.failedStage ?? 'verifying');
       if (status.stage === 'switching' || status.stage === 'verifying') return await verify(undefined, status.controllers ?? []);
       await set('failed', { code: 'interrupted', failedStage: status.stage });
-      await rm(paths.hold, { force: true });
+      await release();
+      if (kept) await set('failed', { hold: kept });
       return status;
     }
     await set('installing');
@@ -404,16 +549,42 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
     await set('checking');
     try { await steps.check(directory, version); }
     catch (error) { steps.log((error as Error).message); await set('failed', { code: 'check-failed', failedStage: 'checking' }); return status; }
+    if (steps.contract) {
+      // A target that imports a domain needs the version it would go back to to read and write that domain first: it
+      // is refused here, before the hold, the switch and the restart, and says which release to install first.
+      const target = await steps.contract(directory, version).catch(error => ({ state: 'unverifiable' as const, reason: (error as Error).message }));
+      const refusal = async (storage: NonNullable<SavedUpdate['storage']>, line: string) => {
+        steps.log(line);
+        await set('failed', { code: 'check-failed', failedStage: 'checking', storage });
+        return status;
+      };
+      if (target.state === 'missing' || target.state === 'unverifiable') return await refusal({ code: 'contract-unverifiable' }, `storage contract: ${target.state === 'missing' ? 'the installed version has no entry point' : target.reason}`);
+      if (target.state === 'contract') {
+        if (!target.contract.supported) return await refusal({ code: 'target-runtime-unsupported' }, `storage runtime: ${target.contract.refusal?.message ?? 'unsupported'}`);
+        const back = await steps.contract(versionDirectory(stateDir, previous), previous).catch(error => ({ state: 'unverifiable' as const, reason: (error as Error).message }));
+        const check = preparationCheck(target.contract.manifest, back);
+        if (check.state === 'prerequisite-required' || check.state === 'missing') {
+          return await refusal({ code: 'prerequisite-required', ...(check.prepare ? { prepare: check.prepare } : {}), domains: check.domains }, `storage: ${check.reason}`);
+        }
+        if (check.state === 'incompatible') return await refusal({ code: 'previous-incompatible', domains: check.domains }, `storage: ${check.reason}`);
+        if (check.state !== 'not-required' && check.state !== 'satisfied') return await refusal({ code: 'contract-unverifiable', domains: check.domains }, `storage: ${check.reason}`);
+      }
+    }
     const before = await steps.health();
     const linked = await steps.controllers() ?? [];
     await set('switching', { controllers: linked });
-    try {
-      await writeFile(paths.hold, JSON.stringify({ version }), { mode: 0o600 });
-      await steps.point(version);
-    } catch (error) {
+    try { await writeHold(stateDir, version); } catch (error) {
+      // A hold that is not this update's own plain file (a link, a folder, another version's) is left as it is, and
+      // nothing switches: the previous version keeps running untouched.
+      steps.log((error as Error).message);
+      if (!(error instanceof HoldError)) await release();
+      await set('failed', { code: 'switch-failed', failedStage: 'switching', hold: kept });
+      return status;
+    }
+    try { await steps.point(version); } catch (error) {
       steps.log((error as Error).message);
       // Nothing changed if the service still starts the previous version: it keeps running untouched.
-      if (await currentVersion(stateDir) === previous) { await rm(paths.hold, { force: true }); await set('failed', { code: 'switch-failed', failedStage: 'switching' }); return status; }
+      if (await currentVersion(stateDir) === previous) { await release(); await set('failed', { code: 'switch-failed', failedStage: 'switching', hold: kept }); return status; }
       return await back('switch-failed', 'switching');
     }
     await restart();

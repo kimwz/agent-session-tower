@@ -6,7 +6,9 @@ import test from 'node:test';
 test('the worker restores in order: files before services, the Vault before triggers, skills before a handoff', async () => {
   const source = await readFile(new URL('../../../server/runs/worker.ts', import.meta.url), 'utf8');
   const at = (text: string) => { const index = source.indexOf(text); assert.notEqual(index, -1, text); return index; };
-  assert.ok(at('takeWorkerRestore(') < at('new SessionService('));
+  assert.ok(at("database.gate('core')") < at('takeWorkerRestore('));
+  assert.ok(at('takeWorkerRestore(') < at('sessions.start()'));
+  assert.ok(at('await sessions.quiesce()') < at('takeWorkerRestore('));
   assert.ok(at('new SecretService(') < at('new TriggerService('));
   assert.ok(at('triggers.start(restoring') < at('runs.markReady()'));
   assert.ok(at('runs.markReady()') < at('restoring.finish('));

@@ -4,6 +4,7 @@ import { delimiter, join } from 'node:path';
 import { providerDirectories } from '../providers/discovery.js';
 import { promisify } from 'node:util';
 import type { PermissionRun, PermissionRunOutput } from '../../shared/permissions.js';
+import { TowerError } from '../../shared/errors.js';
 import { writePrivateJson } from '../stores/private-json.js';
 
 const exec = promisify(execFile);
@@ -59,8 +60,8 @@ export interface RunnerOptions {
   now?: () => Date;
   /** Adds to a run's environment for its conversation (how the commands it starts are known as that conversation's). */
   env?(group: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
-  /** Asked right before a run starts; false leaves it unstarted (its request went back to review). */
-  beforeStart?(id: string): Promise<boolean>;
+  /* Asked before every start attempt: false discards revoked/review work; defer preserves proven unstarted work until releaseStorage. */
+  beforeStart?(id: string): Promise<boolean | 'defer'>;
 }
 
 /**
@@ -73,6 +74,9 @@ export class PermissionRunner {
   private readonly queue: { id: string; command: string; cwd: string; timeoutSeconds: number; group: string }[] = [];
   private readonly groups = new Map<string, string>();
   private gate: Promise<void> | undefined;
+  private storageHeld = false;
+  private storageResume = 0;
+  private readonly deferred = new Set<string>();
   private readonly dir: string;
 
   private now(): string { return (this.options.now?.() ?? new Date()).toISOString(); }
@@ -80,8 +84,12 @@ export class PermissionRunner {
   constructor(private readonly options: RunnerOptions) { this.dir = join(options.stateDir, 'permission-runs'); }
 
   inFlight(): boolean { return this.running.size > 0 || this.queue.length > 0 || this.gate !== undefined; }
+  /** Executing/pre-start checks and recovery, excluding durable waiting work. */
+  active(): boolean { return this.running.size > 0 || this.gate !== undefined; }
+  holdStorage(): void { this.storageHeld = true; }
+  releaseStorage(): void { this.storageHeld = false; this.storageResume += 1; this.deferred.clear(); this.pump(); }
   async flush(): Promise<void> {
-    while (this.inFlight()) await Promise.all([...this.running.values(), this.gate, new Promise(resolve => setTimeout(resolve, 50))]);
+    while (this.active() || (!this.storageHeld && this.queue.some(item => !this.deferred.has(item.id)))) await Promise.all([...this.running.values(), this.gate, new Promise(resolve => setTimeout(resolve, 50))]);
   }
   isRunning(id: string): boolean { return this.running.has(id); }
 
@@ -99,15 +107,22 @@ export class PermissionRunner {
   }
 
   private pump(): void {
-    if (this.gate) return;
+    if (this.gate || this.storageHeld) return;
     const busy = new Set(this.groups.values());
     for (let index = 0; index < this.queue.length && this.running.size < MAX_RUNNING;) {
       const item = this.queue[index]!;
-      if (busy.has(item.group)) { index += 1; continue; }
+      if (this.deferred.has(item.id) || busy.has(item.group)) { index += 1; continue; }
       this.queue.splice(index, 1);
       busy.add(item.group);
       this.groups.set(item.id, item.group);
+      const resume = this.storageResume;
       const work = this.execute(item.id, item.command, item.cwd, item.timeoutSeconds, item.group)
+        .then(result => {
+          if (result === 'defer') {
+            this.queue.unshift(item);
+            if (resume === this.storageResume) this.deferred.add(item.id);
+          }
+        })
         .catch(error => console.error(`A permission run failed: ${error instanceof Error ? error.message : String(error)}`))
         .finally(() => { this.running.delete(item.id); this.groups.delete(item.id); this.pump(); });
       this.running.set(item.id, work);
@@ -121,19 +136,34 @@ export class PermissionRunner {
 
   async forget(id: string): Promise<void> { await rm(join(this.dir, `${id}.json`), { force: true }); }
 
-  private async execute(id: string, command: string, cwd: string, timeoutSeconds: number, group: string): Promise<void> {
-    let proceed: boolean;
+  private async execute(id: string, command: string, cwd: string, timeoutSeconds: number, group: string): Promise<void | 'defer'> {
+    let proceed: boolean | 'defer';
     try { proceed = await this.options.beforeStart?.(id) ?? true; } catch (error) {
+      if (error instanceof TowerError && error.disposition === 'not-admitted') return 'defer';
       // best-effort: this save reports the failure; if it fails too there is nothing left to record it in
       await this.options.update(id, { status: 'failed', finishedAt: this.now(), error: `Tower could not confirm what was reviewed: ${error instanceof Error ? error.message : String(error)}` }).catch(() => {});
       return;
     }
-    if (!proceed) return;
+    if (proceed === false) return;
+    // Still proven unstarted: no running record or process exists at this boundary.
+    if (proceed === 'defer' || this.storageHeld) return 'defer';
     const startedAt = this.now();
     // Saved before the command starts: a worker that stops from here on leaves a run whose result is unknown, never
     // one that would start again.
-    try { await this.retry(() => this.options.update(id, { status: 'running', startedAt })); } catch (error) {
-      // Not started: said so, if that can be saved at all.
+    let uncertainWrite = false;
+    try {
+      for (let attempt = 1; ; attempt += 1) {
+        try { await this.options.update(id, { status: 'running', startedAt }); break; }
+        catch (error) {
+          if (error instanceof TowerError && error.disposition === 'not-admitted') throw error;
+          uncertainWrite = true;
+          if (attempt >= 3) throw error;
+          await new Promise(resolve => setTimeout(resolve, 1_000 * attempt));
+        }
+      }
+    } catch (error) {
+      if (!uncertainWrite && error instanceof TowerError && error.disposition === 'not-admitted') return 'defer';
+      // No process started, but an earlier uncertain write must never be replayed.
       await this.options.update(id, { status: 'failed', startedAt, finishedAt: this.now(), error: `Tower could not record the start: ${error instanceof Error ? error.message : String(error)}` }).catch(() => {});
       return;
     }

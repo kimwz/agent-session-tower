@@ -8,6 +8,9 @@ import { createHash } from 'node:crypto';
 import { defaultStateDir } from '../state-dir.js';
 import { releasePackage } from './join-code.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
+import { readStoragePin, withStorageTransition } from './storage-transition-lock.js';
+
+export { storagePinPath } from './storage-transition-lock.js';
 
 const run = promisify(execFile);
 export const REPOSITORY = 'github:kimwz/agent-session-tower';
@@ -90,11 +93,41 @@ export function newerVersion(a: string, b: string): boolean {
   return false;
 }
 
-/** Points `current` at a version atomically. A newer version already in use is kept: the service never goes back. */
+/** Why the owner's pin keeps `current` where it is: `pinned` names another version, `pin-unreadable` cannot be told. */
+export class PinnedVersionError extends Error {
+  constructor(readonly code: 'pinned' | 'pin-unreadable', message: string) { super(message); }
+}
+/** Rejects unless the owner's pin lets `current` move to `version`: no pin, or the pin keeps that very version. */
+async function respectPin(stateDir: string, version: string): Promise<void> {
+  const pin = await readStoragePin(stateDir);
+  if (pin.state === 'absent' || (pin.state === 'present' && pin.pin.pinned === version)) return;
+  if (pin.state === 'present') throw new PinnedVersionError('pinned', `The owner pinned this computer to ${pin.pin.pinned} for a storage rollback; release that pin before the service starts ${version}.`);
+  throw new PinnedVersionError('pin-unreadable', `The version pin cannot be read (${pin.reason}); nothing is changed until the owner inspects it.`);
+}
+
+/**
+ * Points `current` at a version atomically. A newer version already in use is kept: the service never goes back. The
+ * owner's pin is respected however this is asked for (service install, join): installing is not releasing the pin.
+ * Taken in the computer's transition turn, so a pin written by the web meanwhile is seen before anything moves.
+ */
 export async function useVersion(stateDir: string, version: string): Promise<void> {
-  const current = await currentVersion(stateDir);
-  if (current && newerVersion(current, version)) return;
-  await pointCurrent(stateDir, version);
+  await withStorageTransition(stateDir, async () => {
+    const current = await currentVersion(stateDir);
+    if (current && newerVersion(current, version)) return;
+    if (current !== version) await respectPin(stateDir, version);
+    await pointCurrent(stateDir, version);
+  });
+}
+/**
+ * The update helper's switch. Going forward respects the owner's pin (a pin written after the update was asked for
+ * still stops it before anything switches); going back to the version that ran before does not need to.
+ */
+export async function pointUpdate(stateDir: string, version: string): Promise<void> {
+  await withStorageTransition(stateDir, async () => {
+    const current = await currentVersion(stateDir);
+    if (!current || newerVersion(version, current)) await respectPin(stateDir, version);
+    await pointCurrent(stateDir, version);
+  });
 }
 /** Points `current` at an installed version atomically, older or not; only an update going back uses that. */
 export async function pointCurrent(stateDir: string, version: string): Promise<void> {
@@ -106,6 +139,19 @@ export async function pointCurrent(stateDir: string, version: string): Promise<v
 }
 export async function currentVersion(stateDir: string): Promise<string | undefined> {
   try { return (await readlink(runtimePaths(stateDir).current)).split('/').at(-1); } catch { return undefined; }
+}
+/**
+ * Points `current` at an older installed version for the owner's validated rollback, and for nothing else: only the
+ * version the pin keeps (for that rollback, when `rollbackId` is given), only once its entry point is installed.
+ * useVersion and updates never go back this way. Taken in the computer's transition turn.
+ */
+export async function pointRollbackTarget(stateDir: string, version: string, rollbackId?: string): Promise<void> {
+  await withStorageTransition(stateDir, async () => {
+    const pin = await readStoragePin(stateDir);
+    if (pin.state !== 'present' || pin.pin.pinned !== version || (rollbackId !== undefined && pin.pin.rollbackId !== rollbackId)) throw new Error(`${version} is not the version the owner pinned for this rollback.`);
+    await access(entryPoint(versionDirectory(stateDir, version)), constants.R_OK);
+    await pointCurrent(stateDir, version);
+  });
 }
 
 /**

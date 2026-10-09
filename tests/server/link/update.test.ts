@@ -195,8 +195,10 @@ test('a computer accepts only newer released versions, only as the background se
 test('an update cut short by a restart is checked again from where it was, or settled when it never came to run', async t => {
   const state = await stateDir(t);
   const save = (stage: UpdateStatus['stage'], extra = {}) => writeFile(updatePaths(state).status, JSON.stringify({ version: '1.1.0', previous: '1.0.0', stage, startedAt: '2026-09-24T00:00:00.000Z', updatedAt: '2026-09-24T00:00:00.000Z', ...extra }));
+  // A hold as the update to 1.1.0 wrote it (its version owns it).
+  const ownHold = JSON.stringify({ version: '1.1.0' });
   await save('verifying', { controllers: ['controller-a'] });
-  await writeFile(updatePaths(state).hold, '{}');
+  await writeFile(updatePaths(state).hold, ownHold);
   const long = new Date(Date.now() - 60 * 60_000);
   await utimes(updatePaths(state).hold, long, long);
   const resumed: Array<[string, boolean]> = [];
@@ -209,13 +211,13 @@ test('an update cut short by a restart is checked again from where it was, or se
   assert.equal(status?.stage, 'done');
   assert.equal(existsSync(updatePaths(state).hold), false);
   await save('verifying', { controllers: ['controller-a'] });
-  await writeFile(updatePaths(state).hold, '{}');
+  await writeFile(updatePaths(state).hold, ownHold);
   const unreachable = service(state, { reconnects: false });
   const back = await runUpdateHelper(state, '1.1.0', { ...unreachable.steps, controllers: async () => [], health: async () => unreachable.running().pid === 100 ? { version: '1.1.0', pid: 7 } : unreachable.running() }, true);
   assert.equal(back?.code, 'link-failed', 'a resumed check goes back just the same');
   assert.equal(await currentVersion(state), '1.0.0');
   await save('installing');
-  await writeFile(updatePaths(state).hold, '{}');
+  await writeFile(updatePaths(state).hold, ownHold);
   await new Updates({ stateDir: state, version: '1.0.0', port: 1, managed: true }).recover();
   assert.equal(existsSync(updatePaths(state).hold), false, 'the previous version running needs no hold');
   await save('rolling-back', { code: 'start-failed', failedStage: 'verifying' });
@@ -421,13 +423,16 @@ test('an update whose helper lock cannot be read is not reported interrupted, an
 });
 
 test('recovery with an unreadable helper lock holds the worker but starts no helper', async t => {
+  t.mock.method(console, 'error', () => {});
   const state = await stateDir(t);
   await activeUpdate(state);
   const before = await readFile(updatePaths(state).status, 'utf8');
   await unreadableLock(state);
   const resumed: string[] = [];
   await assert.rejects(new Updates({ stateDir: state, version: '1.1.0', port: 1, managed: true, spawnHelper: version => resumed.push(version) }).recover(), { code: 'EISDIR' });
-  assert.equal(existsSync(updatePaths(state).hold), true);
+  // Held by the judgment itself, not by a hold written for it: no hold is written, and the handoff is still refused.
+  assert.equal(existsSync(updatePaths(state).hold), false, 'recovery writes no hold');
+  await assert.rejects(handoffHeld(state), { code: 'EISDIR' });
   assert.deepEqual(resumed, []);
   assert.equal(await readFile(updatePaths(state).status, 'utf8'), before);
   await assert.rejects(new Updates({ stateDir: state, version: '1.0.0', port: 1, managed: true }).recover(), { code: 'EISDIR' });

@@ -471,7 +471,25 @@ test('Finder-style PATH can run a Node CLI wrapper without searching its monitor
   try {
     // An unsafe inherited PATH would choose this workspace executable before ~/.local/bin/node.
     await writeFile(join(f.directory, 'node'), '#!/bin/sh\nexit 88\n', { mode: 0o700 });
-    const result = await finished(f.manager, (await f.manager.enqueue(f.session.id, 'continue from Finder')).id);
+    const accepted = await f.manager.enqueue(f.session.id, 'continue from Finder');
+    // Cold shebang startup and the initialize/resume round trips precede turn/start.
+    // Keep the usual completion budget after this external fixture is ready.
+    let result: Run;
+    try {
+      await eventually(async () => {
+        const run = f.manager.list().find(entry => entry.id === accepted.id);
+        if (run && ['completed', 'error', 'cancelled'].includes(run.status)) return true;
+        try { await readFile(join(f.directory, 'received.json')); return true; }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+      }, 15000);
+      result = await finished(f.manager, accepted.id);
+    } catch (error) {
+      throw new Error(`Finder fixture readiness/completion failed: ${JSON.stringify({
+        run: f.manager.list().find(entry => entry.id === accepted.id),
+        children: f.children.map(child => ({ pid: child.pid, exitCode: child.exitCode, signalCode: child.signalCode, spawnfile: child.spawnfile })),
+        launches: f.launches,
+      })}`, { cause: error });
+    }
     assert.equal(result.status, 'completed', result.error);
     assert.match(result.output, /Hello Codex/);
     const directories = f.launches[0].path!.split(delimiter);

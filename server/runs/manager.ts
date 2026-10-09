@@ -207,6 +207,7 @@ export class RunManager extends EventEmitter {
   private async awaitRetentionAdmission(id: string): Promise<void> {
     const deadline = Date.now() + 30_000;
     while (this.retentionHeld(id) || this.coldSessionIds.has(this.nativeSessionId(id))) {
+      if (this.storageHeld) throw notAdmitted(new RunError('Storage is unavailable; no instructions were admitted.', 'unavailable'));
       if (!this.started || this.stopping) throw notAdmitted(new RunError('The task runner is not accepting instructions.', 'unavailable'));
       if (this.retentionHeld(id)) {
         const remaining = deadline - Date.now();
@@ -241,6 +242,10 @@ export class RunManager extends EventEmitter {
     changed: () => this.changed(), pump: () => { void this.pump(); },
     mergePermission: (run, notice, wait) => this.permissions.mergeIntoUpdate(run, notice, wait),
   });
+  private storageHeld = false;
+  /** Storage failure pauses durable starts without disposing providers or their approvals. */
+  holdStorage(): void { this.storageHeld = true; }
+  releaseStorage(): void { this.storageHeld = false; void this.pump(); }
   private ready: boolean;
   private pollTimer?: ReturnType<typeof setInterval>;
   private notifyTimer?: ReturnType<typeof setTimeout>;
@@ -300,6 +305,7 @@ export class RunManager extends EventEmitter {
 
   /** Checked again at the last moment before a provider is started, after every asynchronous step. */
   private refusedAtLaunch(run: Run, session: Session): boolean {
+    if (this.storageHeld) { this.reservedSessions.delete(session.id); return true; }
     if (this.retentionWait(run)) { this.reservedSessions.delete(session.id); return true; }
     // A switch to the new worker began while this turn was being prepared: it waits for the new worker.
     if (this.updating && run.status === 'queued') {
@@ -530,6 +536,7 @@ export class RunManager extends EventEmitter {
   }
 
   private validateAdmission(prompt: string, hasAttachments = false): void {
+    if (this.storageHeld) throw notAdmitted(new RunError('Storage is unavailable; no instructions were admitted.', 'unavailable'));
     if (!this.started || this.stopping) throw notAdmitted(new RunError('The task runner is not accepting instructions.', 'unavailable'));
     if (typeof prompt !== 'string' || (!prompt.trim() && !hasAttachments)) throw new RunError('Enter an instruction or attach a file first.');
     if (prompt.length > MAX_PROMPT) throw new RunError(`Instructions must be at most ${MAX_PROMPT.toLocaleString()} characters.`, 'too-large');
@@ -845,12 +852,13 @@ export class RunManager extends EventEmitter {
   }
 
   private async pump(): Promise<void> {
-    if (this.pumping || this.stopping || !this.started || !this.ready) return;
+    if (this.pumping || this.stopping || !this.started || !this.ready || this.storageHeld) return;
     this.pumping = true;
     try {
       this.flushToolNotices();
       if (![...this.runs.values()].some((run) => run.status === 'queued' && due(run))) return;
       await this.options.refreshSessions();
+      if (this.storageHeld) return;
       // While Tower switches workers an owner message does not extend a turn that is being wrapped up.
       if (!this.updating) this.insertIntoWaitingTurns();
       // Tower's continuation after an update resumes the interrupted turn before any message queued behind that turn.
@@ -869,7 +877,7 @@ export class RunManager extends EventEmitter {
         if (requested && Date.parse(requested) > Date.parse(run.createdAt)) { this.supersede(run, 'The conversation continued before the scheduled time.'); continue; }
         // Each run's own look, taken now: an earlier run's start may have taken a while.
         await this.prepareLaunch(run);
-        if (run.status !== 'queued' || this.admissions.has(run.id) || this.stopping || this.retentionWait(run)) continue;
+        if (run.status !== 'queued' || this.admissions.has(run.id) || this.stopping || this.storageHeld || this.retentionWait(run)) continue;
         const refused = this.launchGate?.(run);
         if (refused) {
           run.status = 'cancelled'; run.error = refused; run.finishedAt = new Date().toISOString(); this.changed();
@@ -1214,7 +1222,7 @@ export class RunManager extends EventEmitter {
     // This save includes any streamed output that was waiting for its slower cadence.
     this.cancelOutputPersist();
     // A wrap-up request is never carried: after a restart it would start as a turn of its own.
-    if (this.updating) for (const run of this.runs.values()) if (run.status === 'queued' && !run.scheduled && !this.drain.isWrapUp(run.id)) this.history.carried.add(run.id);
+    if (this.updating || this.storageHeld) for (const run of this.runs.values()) if (run.status === 'queued' && !run.scheduled && !this.drain.isWrapUp(run.id)) this.history.carried.add(run.id);
     this.history.save(this.runs, this.list(), this.registry.serialize(), retained);
   }
 
