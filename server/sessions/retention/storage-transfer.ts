@@ -126,7 +126,13 @@ export function retentionBootstrap(storage: StorageClient, stateDir: string, upd
       try { if (await evidenceDirectory.read()) throw new Error('Retention import evidence exists without authority; explicit owner recovery required.'); }
       finally { await evidenceDirectory.close(); }
     }
-    if (!domain?.cutover) return;
+    if (!domain?.cutover) {
+      // Known legacy history cannot become an empty journal through ENOENT fallback.
+      if (await retentionLegacyFiles(stateDir, 'retention') === 'present') {
+        journalDocument(JSON.parse((await raw(join(stateDir, 'retention', 'journal.json'), JOURNAL_BYTES)).toString('utf8')));
+      }
+      return;
+    }
     await privateDirectory(evidenceParent);
     await storageFs.syncDirectory(stateDir);
     try {

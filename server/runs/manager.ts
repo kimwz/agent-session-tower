@@ -711,7 +711,7 @@ export class RunManager extends EventEmitter {
     if (!run) throw new RunError('Task not found.', 'not-found');
     try { await this.flush(); }
     catch (error) {
-      if (admissionUncertain(error) && options.targetRunId !== undefined && !run.steering) {
+      if (admissionUncertain(error) && options.targetRunId !== undefined && run.status === 'queued' && !run.steering) {
         this.unsentSteering.set(run.id, options.targetRunId); this.uncertainAdmissions.add(run.id);
       }
       throw error;

@@ -250,6 +250,62 @@ for (const wrapUp of [false,true]) test(`actual ${wrapUp ? 'update wrap-up globa
   await manager.close();
 });
 
+test('actual SQLite output reply loss preserves a running ordinary turn after a late explicit target steer', async t => {
+  const f = await prepared(t), initial = await f.open(f.b);
+  await new RunsRepository(initial).importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'running-steer-empty'); await initial.close();
+  const client = await f.open(f.a,'after-native-hold');
+  const session = { ...documents(f.stateDir).created[0].session,nativeId: '10000000-0000-4000-8000-000000000002',resumable: true,creationPending: false,status: 'completed' as const };
+  const turns: { output: (text: string) => void; end: () => void }[] = [];
+  let inserts = 0;
+  const manager = new RunManager({ stateDir: f.stateDir,storage: client,getSession: () => session,refreshSessions: async () => {},findExecutable: async () => '/fixture/codex',
+    spawnProcess: () => { throw new Error('Fixture forbids native launch'); },openCodexStdio: async config => {
+      let finish!: () => void;
+      const done = new Promise<void>(resolve => { finish = resolve; });
+      turns.push({ output: config.onOutput,end: () => { config.onFinished({ status: 'completed' }); finish(); } });
+      return { start: async () => { config.onStarted?.('fixture'); },done,close: finish,
+        cancel: async () => { config.onFinished({ status: 'cancelled' }); finish(); },
+        respondToApproval: async () => {},canSteer: () => true,steer: async () => { inserts++; } };
+    } });
+  await manager.start();
+  const target = await manager.enqueue(session.id,'Original target');
+  await until(() => manager.list().find(run => run.id === target.id)?.status === 'running');
+  const ordinary = await manager.enqueue(session.id,'Ordinary successor');
+  turns[0].end();
+  await until(() => manager.list().find(run => run.id === ordinary.id)?.status === 'running');
+  assert.equal(turns.length,2);
+  const write = client.write.bind(client);
+  let entered!: () => void, release!: () => void;
+  const saving = new Promise<void>(resolve => { entered = resolve; }), wait = new Promise<void>(resolve => { release = resolve; });
+  client.write = async <T>(...args: Parameters<typeof client.write>) => {
+    if (args[0] === 'runs' && args[1] === 'commit') { entered(); await wait; }
+    return write<T>(...args);
+  };
+  turns[1].output('native-hold-response-lost');
+  await saving;
+  const delivery = manager.steer(ordinary.id,{ targetRunId: target.id });
+  const rejected = assert.rejects(delivery,(error: { disposition?: string }) => error.disposition === 'uncertain');
+  release(); await rejected;
+  const pending = manager.pendingAdmission()!;
+  assert.ok(pending.commandId);
+  client.write = write;
+  await client.reopen(); await client.prepare({ allowMigration: false }); manager.holdStorage();
+  assert.equal((await client.receipt(pending.commandId)).found,true);
+  const resolution = await manager.resolveAdmission(pending.commandId);
+  assert.equal(resolution.disposition,'committed');
+  const running = manager.list().find(run => run.id === ordinary.id)!;
+  assert.equal(running.status,'running'); assert.equal(running.steering,undefined); assert.equal(running.error,undefined);
+  assert.equal(running.finishedAt,undefined); assert.equal(running.output,'native-hold-response-lost');
+  manager.releaseStorage();
+  turns[1].output(' normal output'); turns[1].end();
+  await until(() => manager.list().find(run => run.id === ordinary.id)?.status === 'completed');
+  await manager.flushState();
+  const completed = (await new RunsRepository(client).exportCurrent()).documents.runs.find(run => run.id === ordinary.id)!;
+  assert.equal(completed.status,'completed'); assert.equal(completed.output,'native-hold-response-lost normal output');
+  assert.ok(completed.finishedAt); assert.equal(completed.steering,undefined); assert.equal(completed.error,undefined);
+  assert.equal(turns.length,2); assert.equal(inserts,0);
+  await manager.close();
+});
+
 test('exact legacy source probes classify every domain independently', async t => {
   const stateDir = await folder(t);
   assert.equal(await workerLegacyFiles(stateDir,'runs'),'absent');
