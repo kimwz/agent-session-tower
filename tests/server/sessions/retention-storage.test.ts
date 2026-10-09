@@ -206,7 +206,7 @@ test('DB-backed automatic blocked-provider cycle retains grace and cannot reach 
   const { client, update } = await openB(t, stateDir, b); await importRetention({ storage: client, update, stateDir, evidenceParent });
   const store = new RetentionStore(join(stateDir, 'retention'), { storage: client }); await store.start();
   const records: RetentionRecord[] = ['parent', 'child'].map((id): RetentionRecord => ({
-    session: { id, nativeId: id, provider: 'claude', title: id, cwd: '/fixture', project: 'fixture', status: 'completed', statusReason: '', createdAt: new Date(now - 20 * day).toISOString(), updatedAt: new Date(now - 8 * day).toISOString(), lastMessage: '', messageCount: 1, ...(id === 'child' ? { parentId: 'parent', isSubagent: true } : {}) },
+    session: { id, nativeId: id, provider: 'claude', title: id, cwd: '/fixture', project: 'fixture', status: 'completed', statusReason: '', createdAt: new Date(now - 20 * day).toISOString(), updatedAt: new Date(now - 8 * day).toISOString(), lastMessage: '', messageCount: 1, resumable: true, isSubagent: id === 'child', ...(id === 'child' ? { parentId: 'parent' } : {}) },
     kind: id === 'child' ? 'subagent' : 'parent', projectKey: 'fixture', lastActivityAt: new Date(now - 8 * day).toISOString(), latestTaskEndedAt: new Date(now - 8 * day).toISOString(),
   }));
   let nativeEffects = 0;

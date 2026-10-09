@@ -8,7 +8,7 @@ export interface RetentionWriteIntent {
   mode: 'update' | 'import' | 'restore'; revision: number | null; generation: number | null;
   changes?: RetentionChange[]; documents?: RetentionDocuments; manifestSha256?: string;
 }
-const fail = (message: string): never => { throw Object.assign(new Error(message), { storageCode: 'domain-failed' }); };
+function fail(message: string): never { throw Object.assign(new Error(message), { storageCode: 'domain-failed' }); }
 function integer(value: unknown, max: number): number { if (!Number.isSafeInteger(value) || Number(value) < 0 || Number(value) > max) fail('Invalid retention bound.'); return Number(value); }
 function authority(context: DomainReadContext): DomainAuthority | null {
   const row = context.prepare('SELECT * FROM domain_imports WHERE domain = ?').get('retention') as Record<string, unknown> | undefined;
