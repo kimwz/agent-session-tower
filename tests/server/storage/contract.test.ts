@@ -41,7 +41,7 @@ test('the preparation manifest registers actual retention schema/handler without
   assert.equal(manifest.domains.length, 1);
   assert.equal(manifest.domains[0].scope, 'retention');
   assert.equal(manifest.domains[0].cutover, undefined);
-  assert.deepEqual(manifest.domains[0].preparation, { requiredArtifactVersion: '1.120.0', readerContract: 1, writerContract: 1 });
+  assert.deepEqual(manifest.domains[0].preparation, { requiredArtifactVersion: '1.120.1', readerContract: 1, writerContract: 1 });
   assert.equal(storageManifest().digest, manifest.digest, 'the same declarations give the same digest');
   assert.notEqual(storageManifest([], '0.0.1').digest, manifest.digest);
   const withFixture = storageManifest([fixtureSchema]);
