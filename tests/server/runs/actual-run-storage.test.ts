@@ -218,9 +218,11 @@ for (const wrapUp of [false,true]) test(`actual ${wrapUp ? 'update wrap-up globa
     if (args[0] === 'runs' && args[1] === 'commit') { entered(); await wait; }
     return write<T>(...args);
   };
+  let outputLost: Promise<void> | undefined;
   if (wrapUp) {
     // Lose a real concurrent parent write while the wrap-up waits on the global flush.
     output('native-hold-response-lost');
+    outputLost = assert.rejects(manager.flushState(),(error: { disposition?: string }) => error.disposition === 'uncertain');
     await saving;
     manager.driveUpdateDrain();
   }
@@ -233,6 +235,7 @@ for (const wrapUp of [false,true]) test(`actual ${wrapUp ? 'update wrap-up globa
   assert.equal(first,repeat); assert.equal(successes,0); assert.equal(inserts,0);
   release();
   const error = await firstResult;
+  await outputLost;
   assert.equal(await repeatResult,error); assert.equal(error.disposition,'uncertain');
   const pending = manager.pendingAdmission()!;
   await assert.rejects(manager.steer(queued.id),(next: unknown) => next === error);
