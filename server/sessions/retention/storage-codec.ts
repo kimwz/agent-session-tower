@@ -4,6 +4,19 @@ import type { RetentionPolicyState } from './store.js';
 
 export const JOURNAL_BYTES = 32_000_000;
 export const OBSERVATION_BYTES = 8_000_000;
+// JSON.stringify finite numbers use at most 25 ASCII bytes. One/two-byte input
+// integers do not grow; three/four-byte number tokens produce at most 11/22
+// bytes; tokens of >=5 bytes grow <=5x. Six is therefore a finite upper bound.
+// Strings/syntax do not grow (even replacement of invalid UTF-8 grows <=3x).
+export const CANONICAL_JOURNAL_BYTES = 6 * JOURNAL_BYTES;
+export const CANONICAL_OBSERVATION_BYTES = 6 * OBSERVATION_BYTES;
+// Update envelopes escape canonical row strings, repeat IDs and carry guards.
+// Numeric expansion introduces no escapable characters; string escaping and
+// repeated IDs cost <=2x raw bytes. The smallest legal row is a policy (>=28
+// bytes); six raw budgets also cover its fixed envelope and 64-byte digest.
+// Reserve one command envelope for fences/wrappers. This stays below V8's
+// 512MiB string ceiling; shared SDK payload/result limits stay unchanged.
+export const RETENTION_INTENT_BYTES = CANONICAL_JOURNAL_BYTES + CANONICAL_OBSERVATION_BYTES + 6 * (JOURNAL_BYTES + OBSERVATION_BYTES) + 1024 * 1024;
 // Base64 prevents JSON escaping and UTF-16 surrogate splits from enlarging a message unexpectedly.
 export const RETENTION_CHUNK_BYTES = 192 * 1024;
 export const retentionHash = (value: string | Uint8Array) => createHash('sha256').update(value).digest('hex');
@@ -45,7 +58,7 @@ export function observationDocument(value: unknown): ObservationDocument {
 }
 export type RetentionRowKind = 'entry' | 'policy' | 'observation' | 'journal' | 'observations';
 export interface RetentionRow { kind: RetentionRowKind; id: string; json: string }
-export interface RetentionChange extends RetentionRow { previous: string | null; remove?: boolean }
+export interface RetentionChange extends RetentionRow { previous: string | null; previousSha256?: string; remove?: boolean }
 export function rowsOf(documents: RetentionDocuments): RetentionRow[] {
   journalDocument(documents.journal); observationDocument(documents.observations);
   const { entries, policies, ...journal } = documents.journal;

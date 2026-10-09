@@ -100,6 +100,7 @@ jobs:
         env:
           VALIDATION_ROOT: ${{ runner.temp }}/sqlite-validation
           VALIDATION_MODE: ${{ matrix.mode }}
+          SQLITE_RETENTION_LARGE: ${{ matrix.os == 'ubuntu-latest' && matrix.node == '24.15.0' && '1' || '0' }}
           VALIDATION_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -118,7 +119,7 @@ jobs:
             npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
             TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
             VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
-            VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
+            VALIDATION_SHA="$VALIDATION_SHA" SQLITE_RETENTION_LARGE="$SQLITE_RETENTION_LARGE" /bin/bash --noprofile --norc <<'VALIDATE'
           set -euo pipefail
           # Private 0700 parents isolate fixtures; retain the usual user file-creation mask.
           umask 022
@@ -157,7 +158,9 @@ jobs:
             'tests/server/terminals/terminal-host.test.ts', 'tests/server/instance/existing-server.test.ts',
             'tests/server/permissions/permissions.test.ts', 'tests/server/auto-prompt/auto-prompts.test.ts'];
           for (const file of lifecycle) assert.ok(globSync(file).length, `lifecycle fixture must exist: ${file}`);
-          const files = [...new Set([...storage, ...link, ...consumers, ...imported, ...lifecycle])].sort();
+          const retention = ['tests/server/sessions/retention-storage.test.ts'];
+          for (const file of retention) assert.ok(globSync(file).length, `retention fixture must exist: ${file}`);
+          const files = [...new Set([...storage, ...link, ...consumers, ...imported, ...lifecycle, ...retention])].sort();
           writeFileSync(`${process.env.VALIDATION_ROOT}/reports/test-files.txt`, files.join('\n') + '\n');
           FILES
           files=()
@@ -248,7 +251,7 @@ jobs:
             npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
             TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
             VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
-            VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
+            VALIDATION_SHA="$VALIDATION_SHA" SQLITE_RETENTION_LARGE="$SQLITE_RETENTION_LARGE" /bin/bash --noprofile --norc <<'VALIDATE'
           set -euo pipefail
           # Private 0700 parents isolate fixtures; retain the usual user file-creation mask.
           umask 022

@@ -15,7 +15,7 @@ import {
 } from '../../../server/link/storage-update.js';
 import { readUpdateStatus, runUpdateHelper, updatePaths, Updates, type UpdateHelperSteps } from '../../../server/link/update.js';
 import { TowerAutoUpdate } from '../../../server/updates/tower.js';
-import { CORE_MIGRATIONS } from '../../../server/storage/schema.js';
+import { CORE_MIGRATIONS, storageManifest } from '../../../server/storage/schema.js';
 import { A, A0, B, C, L, identityOf, installArtifact, manifests, openGate, preparedStorage, runningBuild } from './fixtures/storage-builds.js';
 import { appliedFor, databaseOfB, rollbackWorld } from './fixtures/rollback-world.js';
 
@@ -140,7 +140,7 @@ test('an installed artifact states its storage contract; a JSON-only release is 
   assert.equal(parseArtifactStorageContract(JSON.stringify(rebound), A).state, 'unverifiable', 'an identity bound to another manifest');
 });
 
-test('this build prints its own contract: its trusted bundle, its runtime probe, and no domain (PR0 claims none)', async t => {
+test('this build prints its own contract: trusted bundle, runtime probe, retention preparation without cutover', async t => {
   const answer = await describeArtifactStorageContract();
   assert.ok('contract' in answer, 'error' in answer ? answer.error : '');
   const { supported, identity, runtime, refusal } = answer.contract;
@@ -148,7 +148,9 @@ test('this build prints its own contract: its trusted bundle, its runtime probe,
   const parsed = parseArtifactStorageContract(JSON.stringify(answer.contract), APP_VERSION);
   assert.equal(parsed.state, 'contract');
   assert.ok(parsed.state === 'contract');
-  assert.deepEqual(parsed.contract.manifest.domains, [], 'no future domain is claimed');
+  assert.deepEqual(parsed.contract.manifest.domains, storageManifest().domains);
+  assert.equal(parsed.contract.manifest.domains[0].scope, 'retention');
+  assert.equal(parsed.contract.manifest.domains[0].cutover, undefined);
   assert.equal(parsed.contract.identity.manifestDigest, parsed.contract.manifest.digest);
   assert.equal(typeof parsed.contract.supported, 'boolean');
   if (!parsed.contract.supported) assert.ok(parsed.contract.refusal, 'an unsupported runtime says why');

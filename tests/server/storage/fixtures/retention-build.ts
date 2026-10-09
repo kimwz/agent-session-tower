@@ -20,18 +20,34 @@ export async function retentionBuild(version: '1.120.0' | '1.121.0', output?: st
   const schema = version === '1.120.0' ? retentionSchema : { ...retentionSchema, cutover: { artifactVersion: version, importContract: 1 } };
   const manifest = storageManifest([schema], version);
   const artifacts: Record<string, StorageThreadArtifact> = {};
-  for (const fault of version === '1.120.0' ? ['normal'] : ['normal', 'before', 'after']) {
+  for (const fault of version === '1.120.0' ? ['normal'] : ['normal', 'before', 'after', 'refuse-once', 'corrupt', 'io']) {
     const entry = `
 import { parentPort } from 'node:worker_threads';
 import { runStorageThread } from './server/storage/thread/runtime.js';
 import { retentionDomainFor } from './server/sessions/retention/storage-commands.js';
 import { retentionSchema } from './server/sessions/retention/storage-schema.js';
 const schema = ${version === '1.120.0' ? 'retentionSchema' : `{ ...retentionSchema, cutover: { artifactVersion: '${version}', importContract: 1 } }`};
-${fault === 'normal' ? '' : `let commitId = -1;
+${!['before', 'after'].includes(fault) ? '' : `let commitId = -1;
 parentPort.on('message', message => { if (message.op === 'write' && message.command === 'commit') { commitId = message.id; ${fault === 'before' ? 'process.exit(9);' : ''} } });
 const post = parentPort.postMessage.bind(parentPort);
 parentPort.postMessage = message => { if (message.id === commitId) process.exit(9); post(message); };`}
-runStorageThread([retentionDomainFor(schema)]);`;
+const domain = retentionDomainFor(schema);
+${fault === 'refuse-once' ? `const commit = domain.commands.commit;
+let refused = false;
+domain.commands.commit = { ...commit, run(context, payload) {
+  if (!refused) { refused = true; throw Object.assign(new Error('fixture known write refusal'), { storageCode: 'domain-failed' }); }
+  return commit.run(context, payload);
+} };` : ''}
+${['corrupt', 'io'].includes(fault) ? `const head = domain.commands.head;
+domain.commands.head = { ...head, run(context, payload) {
+  const sqlite = process.getBuiltinModule('node:sqlite');
+  // Genuine SQLite errors on disposable fixture paths, classified by the
+  // production thread; no fabricated errcode or replacement SDK response.
+  const db = new sqlite.DatabaseSync(${JSON.stringify(join(directory, fault === 'corrupt' ? 'corrupt.sqlite' : 'missing-parent/io.sqlite'))});
+  try { db.prepare('SELECT * FROM damage').all(); } finally { db.close(); }
+  return head.run(context, payload);
+} };` : ''}
+runStorageThread([domain]);`;
     const result = await build({ stdin: { contents: entry, resolveDir: root, sourcefile: 'retention-fixture-thread.ts', loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'cjs', target: 'node22', plugins: [versionPlugin], logLevel: 'silent' });
     const body = result.outputFiles[0].text, sourceHash = createHash('sha256').update(body).digest('hex');
     artifacts[fault] = { format: STORAGE_BUNDLE_FORMAT, sourceHash, source: `var __TOWER_STORAGE_SOURCE_HASH__ = "${sourceHash}";\n${body}` };

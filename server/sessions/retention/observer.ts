@@ -94,7 +94,7 @@ export class RetentionObserver {
   private async readObservation(): Promise<RetentionObservation> {
     let snapshot: NativeRetentionObservation;
     try { snapshot = await this.options.snapshot(); }
-    catch (error) { this.inactive.clear(); this.restarted = true; throw error; }
+    catch (error) { this.restarted = true; throw error; }
     const now = this.options.now?.() ?? Date.now();
     const lineage=resolveRetentionLineage(this.options.reconcile(snapshot.records.map(record => record.session)),this.options.journalMembers?.() || [],snapshot.launchers);
     const sessions = lineage.sessions;
@@ -159,7 +159,7 @@ export class RetentionObserver {
         await writePrivateJson(this.path, JSON.stringify({ ...this.metadata, version: 1, entries: [...current].map(([id, value]) => [id, value, ...(this.tupleTails.get(id) ?? [])]) }), { syncDirectory: true });
       }
     }
-    catch (error) { this.inactive.clear(); this.restarted = true; throw error; }
+    catch (error) { this.restarted = true; throw error; }
     this.inactive = current; this.restarted = false;
     return { now, migratedAt: 0, complete: snapshot.complete, issues: snapshot.issues, records, protectedIds, ancestry:lineage.ancestry, blockedIds:lineage.blockedIds };
   }

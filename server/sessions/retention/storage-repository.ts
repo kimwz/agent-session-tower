@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { StorageClient } from '../../storage/client.js';
 import type { StorageCommandError } from '../../storage/contract.js';
-import { documentsOf, retentionHash, RETENTION_CHUNK_BYTES, rowsOf, type RetentionChange, type RetentionDocuments, type RetentionRow, type RetentionRowKind } from './storage-codec.js';
+import { documentsOf, retentionHash, RETENTION_CHUNK_BYTES, RETENTION_INTENT_BYTES, rowsOf, type RetentionChange, type RetentionDocuments, type RetentionRow, type RetentionRowKind } from './storage-codec.js';
 import type { RetentionHead, RetentionWriteIntent } from './storage-commands.js';
 
 /** One shared worker SDK; no domain connection, thread, SQL channel or unknown replay. */
@@ -60,9 +60,12 @@ export class RetentionRepository {
     await this.writeIntent({ mode: 'update', revision: head.revision, generation: head.authority.generation, changes });
   }
   /** Explicit current DB restore; caller retains existing backup version and owner/hold guards. */
-  async restore(documents: RetentionDocuments, commandId = `retention-${randomUUID()}`): Promise<void> {
+  async restore(documents: RetentionDocuments, commandId = `retention-${randomUUID()}`, expectedGeneration?: number): Promise<void> {
     rowsOf(documents);
     await this.gate();
+    const head = await this.head();
+    if (!head.authority) throw new Error('Cannot restore retention DB without imported authority.');
+    if (expectedGeneration !== undefined && head.authority.generation !== expectedGeneration) throw new Error('Retention restore export belongs to another authority generation.');
     const receipt = await this.storage.receipt(`${commandId}-commit`);
     if (receipt.found) {
       const record = receipt.receipt, result = record.result;
@@ -71,8 +74,6 @@ export class RetentionRepository {
       if (value?.mode !== 'restore' || value.documentsSha256 !== retentionHash(JSON.stringify(documents))) throw new Error('Retention restore command ID conflicts with another intent.');
       return;
     }
-    const head = await this.head();
-    if (!head.authority) throw new Error('Cannot restore retention DB without imported authority.');
     await this.writeIntent({ mode: 'restore', documents, revision: head.revision, generation: head.authority.generation }, commandId);
   }
   /** Prepared B calls this only after the actual update evaluator and private source backup. A refuses at commit. */
@@ -83,7 +84,12 @@ export class RetentionRepository {
   }
   private async writeIntent(input: RetentionWriteIntent, id = `retention-${randomUUID()}`, verifyBeforeCommit?: () => Promise<void>): Promise<void> {
     await this.gate();
-    const bytes = Buffer.from(JSON.stringify(input)), sha256 = retentionHash(bytes);
+    // Keep the exact previous-value guard without retransmitting a potentially
+    // 192MB committed row. Null remains the distinct absent-row precondition.
+    const transfer = input.changes ? { ...input, changes: input.changes.map(({ previous, ...change }) => ({ ...change, previous: null, ...(previous === null ? {} : { previousSha256: retentionHash(previous) }) })) } : input;
+    const bytes = Buffer.from(JSON.stringify(transfer));
+    if (bytes.length > RETENTION_INTENT_BYTES) throw new Error('Retention intent exceeds its bounded transfer allowance.');
+    const sha256 = retentionHash(bytes);
     this.lastIntent = { id, commandId: `${id}-commit`, sha256 };
     // An intent has one fixed ID per stage and final commit. We do not retry any lost answer.
     const write = async (command: string, payload: unknown, commandId: string) => {

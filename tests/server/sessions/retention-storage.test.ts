@@ -3,6 +3,11 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { RunManager } from '../../../server/runs/manager.js';
+import type { StorageStatus } from '../../../server/storage/contract.js';
+import type { WorkerStorageStatus } from '../../../shared/storage.js';
+import { createMonitorServer } from '../../../server/http/server.js';
 import { retentionBuild } from '../storage/fixtures/retention-build.js';
 import { recordPreparationEvidence, evaluateStorageUpdate, type StorageUpdateInput } from '../../../server/link/storage-update.js';
 import { RetentionStore } from '../../../server/sessions/retention/store.js';
@@ -231,4 +236,181 @@ test('missing known DB never falls back to valid stale legacy files', async t =>
   assert.equal(missing.status().state, 'unavailable');
   await assert.rejects(new RetentionStore(join(stateDir, 'retention'), { storage: missing }).start());
   assert.deepEqual(await readFile(join(stateDir, 'retention', 'journal.json')), legacyBytes);
+});
+
+
+test('DB observations recover snapshot and known write failures without losing committed guards or protection', async t => {
+  const { a, b } = await builds(t);
+  for (const failure of ['snapshot', 'write']) {
+    const stateDir = await folder(t), data = documents(), evidenceParent = await sources(stateDir, data);
+    await prepareA(stateDir, a);
+    const normal = await openB(t, stateDir, b);
+    await importRetention({ storage: normal.client, update: normal.update, stateDir, evidenceParent });
+    await normal.client.close();
+    const { client } = await openB(t, stateDir, b, failure === 'write' ? 'refuse-once' : 'normal');
+    let now = data.observations.entries[0][1].observedAt + 1000, failSnapshot = failure === 'snapshot';
+    let protectedChild = false;
+    const session = { id: 'codex:child', nativeId: 'child', provider: 'codex', status: 'completed', cwd: '/fixture', project: 'fixture', title: '', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: true };
+    const observer = new RetentionObserver({ stateDir, storage: client, now: () => now,
+      snapshot: () => { if (failSnapshot) throw new Error('fixture snapshot failure'); return { complete: true, records: [{ session: session as never, internal: false, fingerprint: 'fingerprint' }] }; },
+      reconcile: sessions => sessions, runs: () => [], settled: () => new Set(), protectedIds: () => protectedChild ? ['codex:child'] : [], projectIdentity: async () => undefined });
+    await observer.start();
+    await assert.rejects(observer.observe(), failure === 'write' ? /known write refusal/ : /snapshot failure/);
+    assert.deepEqual((await new RetentionRepository(client).exportCurrent()).documents.observations, data.observations, 'failed attempt leaves committed observations untouched');
+    failSnapshot = false; now += 1000;
+    const recovered = await observer.observe();
+    assert.equal(recovered.records[0].inactiveSince, new Date(now).toISOString(), 'failure breaks inferred continuity only');
+    now += 1000;
+    assert.equal((await observer.observe()).records[0].inactiveSince, recovered.records[0].inactiveSince, 'known retry commits and continuity resumes');
+    const current = (await new RetentionRepository(client).exportCurrent()).documents;
+    assert.equal(current.journal.migratedAt, data.journal.migratedAt);
+    assert.deepEqual(current.observations.entries[0][1].extra, data.observations.entries[0][1].extra);
+    assert.deepEqual(current.observations.entries[0].slice(2), data.observations.entries[0].slice(2));
+    protectedChild = true; now += 1000;
+    const protectedResult = await observer.observe();
+    assert.ok(protectedResult.protectedIds.has('codex:child'));
+    assert.equal(protectedResult.records[0].inactiveSince, undefined);
+    assert.deepEqual((await new RetentionRepository(client).exportCurrent()).documents.observations.entries, []);
+    await client.close();
+  }
+});
+
+test('accepted numeric expansion imports, guarded updates, pages and sealed restores through actual default SDK bounds', async t => {
+  const stateDir = await folder(t), { a, b } = await builds(t), data = documents();
+  // One designated hosted CI member runs the near-32MB source. Other members
+  // still genuinely exceed the old 32MB canonical restore budget.
+  const count = process.env.SQLITE_RETENTION_LARGE === '1' ? 6_000_000 : 1_500_000;
+  (data.journal.entries[0] as unknown as Record<string, unknown>).unknown = 'NUMERIC_EXPANSION';
+  data.journal.policies = Array.from({ length: 40 }, (_, index) => ({ id: `paged-${index}`, archiveRevision: index }));
+  const evidenceParent = await sources(stateDir, data);
+  const source = JSON.stringify(data.journal).replace('"NUMERIC_EXPANSION"', '[' + '1e20,'.repeat(count - 1) + '1e20]');
+  assert.ok(Buffer.byteLength(source) < 32_000_000);
+  const canonical = JSON.stringify(JSON.parse(source));
+  assert.ok(Buffer.byteLength(canonical) > 32_000_000);
+  if (count === 6_000_000) assert.ok(Buffer.byteLength(canonical) > 132_000_000);
+  await writeFile(join(stateDir, 'retention', 'journal.json'), source, { mode: 0o600 });
+  await prepareA(stateDir, a);
+  const { client, update } = await openB(t, stateDir, b);
+  await writeFile(join(stateDir, 'retention', 'journal.json'), source.padEnd(32_000_001, ' '), { mode: 0o600 });
+  await assert.rejects(importRetention({ storage: client, update, stateDir, evidenceParent, commandId: 'numeric-too-large' }), /Unsafe retention source/);
+  assert.equal((await new RetentionRepository(client).head()).authority, null);
+  await writeFile(join(stateDir, 'retention', 'journal.json'), source, { mode: 0o600 });
+  await importRetention({ storage: client, update, stateDir, evidenceParent, commandId: 'numeric-import' });
+  const store = new RetentionStore(join(stateDir, 'retention'), { storage: client }); await store.start();
+  await store.put({ ...store.get('operation')!, error: 'expanded guarded update' });
+  const repository = new RetentionRepository(client), current = await repository.exportCurrent();
+  const values = (current.documents.journal.entries[0] as unknown as Record<string, unknown>).unknown as number[];
+  assert.equal(values.length, count); assert.equal(values[0], 1e20); assert.equal(values[count - 1], 1e20);
+  assert.equal(current.documents.journal.policies && current.documents.journal.policies.length, 40, 'ordinal paging crosses a 32-row page');
+  const intent = (store as unknown as { repository: RetentionRepository }).repository.lastIntent!;
+  assert.equal((await client.receipt(intent.commandId)).found, true);
+  const db = new DatabaseSync(join(stateDir, 'state.sqlite'), { readOnly: true });
+  try {
+    const parts = db.prepare("SELECT count(*) AS n FROM operation_receipts WHERE scope = 'retention' AND command = 'stage'").get() as { n: number };
+    assert.ok(parts.n > 128, 'default 1MiB command/8MiB response SDK enforced many bounded stage pages');
+  } finally { db.close(); }
+  const exported = await exportRetention(client, evidenceParent, 'numeric-export');
+  assert.ok((await stat(join(exported.directory, 'journal.json'))).size > 32_000_000);
+  await store.put({ ...store.get('operation')!, error: 'after sealed export' });
+  await restoreRetention(client, exported.directory, 'numeric-restore');
+  const restored = (await repository.exportCurrent()).documents;
+  assert.equal(restored.journal.entries[0].error, 'expanded guarded update');
+  assert.equal(((restored.journal.entries[0] as unknown as Record<string, unknown>).unknown as number[]).length, count);
+  assert.equal((await client.receipt('numeric-restore-commit')).found, true);
+  assert.equal(retentionHash(JSON.stringify(restored)), current.sha256);
+  const manifestPath = join(exported.directory, 'manifest.json'), manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  const revision = (await repository.head()).revision;
+  await assert.rejects(repository.restore(restored, 'raced-export-generation', current.head.authority!.generation + 1), /another authority generation/);
+  assert.equal((await client.receipt('raced-export-generation-commit')).found, false);
+  manifest.head.authority.generation += 1;
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  await assert.rejects(restoreRetention(client, exported.directory, 'wrong-export-generation'), /another authority generation/);
+  assert.equal((await client.receipt('wrong-export-generation-commit')).found, false);
+  manifest.head.authority.generation -= 1;
+  const exportPath = join(exported.directory, 'journal.json'), noncanonical = Buffer.concat([Buffer.from(' '), await readFile(exportPath)]);
+  await writeFile(exportPath, noncanonical);
+  manifest.files['journal.json'] = { bytes: noncanonical.length, sha256: retentionHash(noncanonical) };
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  await assert.rejects(restoreRetention(client, exported.directory, 'noncanonical-export'), /exact canonical export/);
+  assert.equal((await client.receipt('noncanonical-export-commit')).found, false);
+  assert.equal((await repository.head()).revision, revision);
+});
+
+test('actual SQLite corrupt and I/O command errors activate existing intake hold; format refusal keeps core healthy', async t => {
+  const { a, b } = await builds(t);
+  const damagedPath = join(b.directory, 'corrupt.sqlite');
+  const damaged = new DatabaseSync(damagedPath);
+  damaged.exec('CREATE TABLE damage (value TEXT); INSERT INTO damage VALUES (\'fixture\');'); damaged.close();
+  const damagedBytes = await readFile(damagedPath); damagedBytes[100] = 0;
+  await writeFile(damagedPath, damagedBytes, { mode: 0o600 });
+  for (const fault of ['corrupt', 'io']) {
+    const stateDir = await folder(t), evidenceParent = await sources(stateDir);
+    await prepareA(stateDir, a);
+    const normal = await openB(t, stateDir, b);
+    await importRetention({ storage: normal.client, update: normal.update, stateDir, evidenceParent }); await normal.client.close();
+    let effects = 0, unavailable: StorageStatus | undefined;
+    let health: WorkerStorageStatus = { state: 'ready', code: 'ready', reason: '', admissionOpen: true, sessionsAvailable: true, healthStatus: 200 };
+    const manager = new RunManager({ stateDir: join(stateDir, 'fixture-runner'), getSession: () => undefined, refreshSessions: async () => {},
+      holdUntilReady: true, findExecutable: async () => { effects++; throw new Error('must not reach provider'); } });
+    await manager.start(); t.after(() => manager.close());
+    const client = await b.storage.openStorage({ stateDir, bundle: b.bundle(fault), onUnavailable: status => { unavailable = status; manager.holdStorage(); health = { ...health, state: 'unavailable', code: status.failure!.code, reason: status.failure!.message, admissionOpen: false, healthStatus: 503 }; } });
+    t.after(() => client.close()); await client.prepare({ allowMigration: false });
+    await assert.rejects(new RetentionStore(join(stateDir, 'retention'), { storage: client }).start(), (error: unknown) => {
+      assert.equal((error as { code: string }).code, fault === 'io' ? 'io-error' : 'corrupt'); return true;
+    });
+    assert.equal(unavailable?.state, 'unavailable');
+    assert.equal(client.status().state, 'unavailable');
+    assert.equal((await client.gate('core')).open, false);
+    await assert.rejects(manager.enqueue('codex:fixture', 'must not be admitted'), (error: unknown) => {
+      assert.equal((error as { kind: string }).kind, 'unavailable'); return true;
+    });
+    assert.equal(manager.list().length, 0); assert.equal(effects, 0);
+    const { server, dispose } = createMonitorServer({ port: 0, clientDir: stateDir, backend: {
+      snapshot: () => ({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'fixture', version: 'fixture', updatedAt: new Date().toISOString() }),
+      detail: async () => undefined, enqueue: (id, prompt) => manager.enqueue(id, prompt), cancel: async () => {}, subscribe: () => () => {}, storageStatus: () => health,
+    } });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const response = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/api/health`);
+      assert.equal(response.status, 503);
+      const body = await response.json() as { storage: WorkerStorageStatus };
+      assert.equal(body.storage.admissionOpen, false); assert.equal(body.storage.code, unavailable?.failure?.code);
+    } finally { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+
+    assert.deepEqual(await readFile(join(stateDir, 'retention', 'journal.json')), Buffer.from(JSON.stringify(documents().journal)), 'no legacy fallback write');
+    await client.close(); await manager.close();
+  }
+  const stateDir = await folder(t), evidenceParent = await sources(stateDir);
+  await prepareA(stateDir, a);
+  const normal = await openB(t, stateDir, b);
+  await importRetention({ storage: normal.client, update: normal.update, stateDir, evidenceParent }); await normal.client.close();
+  const db = new DatabaseSync(join(stateDir, 'state.sqlite'));
+  try { db.prepare("UPDATE retention_metadata SET json = ? WHERE kind = 'journal'").run('{invalid'); } finally { db.close(); }
+  const healthy = await openB(t, stateDir, b);
+  await assert.rejects(new RetentionStore(join(stateDir, 'retention'), { storage: healthy.client }).start(), SyntaxError);
+  assert.equal(healthy.client.status().state, 'ready', 'domain format quarantine does not claim a physical DB failure');
+  assert.equal((await healthy.client.gate('core')).open, true);
+
+});
+
+
+test('unknown observation commit preserves memory and forbids retry even when the DB committed', async t => {
+  const stateDir = await folder(t), { a, b } = await builds(t), data = documents(), evidenceParent = await sources(stateDir, data);
+  await prepareA(stateDir, a);
+  const normal = await openB(t, stateDir, b);
+  await importRetention({ storage: normal.client, update: normal.update, stateDir, evidenceParent }); await normal.client.close();
+  const lost = await openB(t, stateDir, b, 'after');
+  const observer = new RetentionObserver({ stateDir, storage: lost.client, now: () => data.observations.entries[0][1].observedAt + 1000,
+    snapshot: () => ({ complete: true, records: [] }), reconcile: sessions => sessions, runs: () => [], settled: () => new Set(), protectedIds: () => [] });
+  await observer.start();
+  const view = observer as unknown as { inactive: Map<string, unknown>; repository: RetentionRepository; restarted: boolean };
+  const committed = [...view.inactive];
+  await assert.rejects(observer.observe(), (error: unknown) => { assert.equal((error as { disposition: string }).disposition, 'unknown'); return true; });
+  assert.deepEqual([...view.inactive], committed); assert.equal(view.restarted, true);
+  const intent = view.repository.lastIntent!;
+  await assert.rejects(observer.observe()); assert.equal(view.repository.lastIntent!.id, intent.id);
+  await lost.client.close();
+  const reopened = await openB(t, stateDir, b);
+  assert.equal((await reopened.client.receipt(intent.commandId)).found, true);
+  assert.deepEqual((await new RetentionRepository(reopened.client).exportCurrent()).documents.observations.entries, []);
 });

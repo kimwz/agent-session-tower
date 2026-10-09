@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { StorageClient } from '../../storage/client.js';
 import { evaluateStorageUpdate, type StorageUpdateInput } from '../../link/storage-update.js';
-import { journalDocument, observationDocument, retentionHash, JOURNAL_BYTES, OBSERVATION_BYTES, type RetentionDocuments } from './storage-codec.js';
+import { journalDocument, observationDocument, retentionHash, JOURNAL_BYTES, OBSERVATION_BYTES, CANONICAL_JOURNAL_BYTES, CANONICAL_OBSERVATION_BYTES, type RetentionDocuments } from './storage-codec.js';
 import { RetentionRepository } from './storage-repository.js';
 
 /** Raw migration/export evidence is private, immutable and outside settings backup. Never opens native/cold objects. */
@@ -85,9 +85,11 @@ export async function importRetention(input: RetentionImportInput): Promise<{ di
 /** Current generation only. Seals private legacy files and manifest without changing authority or starting an old writer. */
 export async function exportRetention(storage: StorageClient, evidenceParent: string, id = `retention-export-${randomUUID()}`): Promise<{ directory: string; manifestSha256: string }> {
   const repository = new RetentionRepository(storage), current = await repository.exportCurrent();
+  const journal = Buffer.from(JSON.stringify(current.documents.journal)), observations = Buffer.from(JSON.stringify(current.documents.observations));
+  if (journal.length > CANONICAL_JOURNAL_BYTES || observations.length > CANONICAL_OBSERVATION_BYTES) throw new Error('Current retention export exceeds its bounded canonical restore allowance.');
   const evidence = await seal(evidenceParent, id, {
-    'journal.json': Buffer.from(JSON.stringify(current.documents.journal)),
-    'retention-observations.json': Buffer.from(JSON.stringify(current.documents.observations)),
+    'journal.json': journal,
+    'retention-observations.json': observations,
   }, { kind: 'current-db-export', head: current.head, canonicalSha256: current.sha256, build: storage.identity });
   const last = await repository.head();
   if (last.revision !== current.head.revision || last.authority?.generation !== current.head.authority?.generation) throw new Error('Retention changed before current export was sealed.');
@@ -99,13 +101,18 @@ export async function restoreRetention(storage: StorageClient, directory: string
   await privateFolder(directory);
   const manifest = JSON.parse((await raw(join(directory, 'manifest.json'), JOURNAL_BYTES)).toString('utf8')) as Record<string, unknown>;
   if (manifest.version !== 1 || manifest.domain !== 'retention' || manifest.kind !== 'current-db-export') throw new Error('Not a current retention DB export.');
+  const repository = new RetentionRepository(storage), current = await repository.head();
+  const exportedHead = manifest.head as { authority?: unknown } | undefined;
+  if (!current.authority || JSON.stringify(exportedHead?.authority) !== JSON.stringify(current.authority)) throw new Error('Retention restore export belongs to another authority generation.');
   const facts = manifest.files as Record<string, { bytes: number; sha256: string }>;
   const read = async (name: string, budget: number) => {
     const bytes = await raw(join(directory, name), budget);
     if (!facts?.[name] || facts[name].bytes !== bytes.length || facts[name].sha256 !== retentionHash(bytes)) throw new Error('Retention restore source hash mismatch.');
-    return JSON.parse(bytes.toString('utf8')) as unknown;
+    const value: unknown = JSON.parse(bytes.toString('utf8'));
+    if (!bytes.equals(Buffer.from(JSON.stringify(value)))) throw new Error('Retention restore source is not the exact canonical export.');
+    return value;
   };
-  const documents = { journal: journalDocument(await read('journal.json', JOURNAL_BYTES)), observations: observationDocument(await read('retention-observations.json', OBSERVATION_BYTES)) };
+  const documents = { journal: journalDocument(await read('journal.json', CANONICAL_JOURNAL_BYTES)), observations: observationDocument(await read('retention-observations.json', CANONICAL_OBSERVATION_BYTES)) };
   if (retentionHash(JSON.stringify(documents)) !== manifest.canonicalSha256) throw new Error('Retention restore canonical digest mismatch.');
-  await new RetentionRepository(storage).restore(documents, commandId);
+  await repository.restore(documents, commandId, current.authority.generation);
 }

@@ -1,7 +1,7 @@
 import { defineStorageDomain, type DomainReadContext, type DomainWriteContext, type StorageDomain } from '../../storage/domain.js';
 import type { DomainAuthority, StorageDomainSchema } from '../../storage/contract.js';
 import { retentionSchema } from './storage-schema.js';
-import { object, retentionHash, RETENTION_CHUNK_BYTES, rowsOf, validateRow, type RetentionChange, type RetentionDocuments, type RetentionRow } from './storage-codec.js';
+import { object, retentionHash, RETENTION_CHUNK_BYTES, RETENTION_INTENT_BYTES, rowsOf, validateRow, type RetentionChange, type RetentionDocuments, type RetentionRow } from './storage-codec.js';
 
 export interface RetentionHead { authority: DomainAuthority | null; revision: number | null }
 export interface RetentionWriteIntent {
@@ -54,7 +54,7 @@ export function retentionDomainFor(schema: StorageDomainSchema): StorageDomain {
     } },
     chunk: { kind: 'read', run(context, payload) {
       const input = object(payload); current(context, input);
-      const offset = integer(input.offset, 200_000_000);
+      const offset = integer(input.offset, RETENTION_INTENT_BYTES);
       const ordinal = integer(input.ordinal, Number.MAX_SAFE_INTEGER);
       const sql = input.field === 'id'
         ? 'SELECT substr(CAST(id AS BLOB), ?, ?) AS data FROM retention_metadata WHERE kind = ? AND ordinal = ?'
@@ -66,7 +66,7 @@ export function retentionDomainFor(schema: StorageDomainSchema): StorageDomain {
     begin: { kind: 'write', run(context, payload) {
       const input = object(payload), intent = String(input.intent);
       if (!/^[a-zA-Z0-9_-]{1,100}$/.test(intent) || !/^[0-9a-f]{64}$/.test(String(input.sha256))) fail('Invalid retention staging intent.');
-      const bytes = integer(input.bytes, 200_000_000), chunks = integer(input.chunks, 1024);
+      const bytes = integer(input.bytes, RETENTION_INTENT_BYTES), chunks = integer(input.chunks, Math.ceil(RETENTION_INTENT_BYTES / RETENTION_CHUNK_BYTES));
       if (!bytes || chunks !== Math.ceil(bytes / RETENTION_CHUNK_BYTES)) fail('Invalid retention staging size.');
       context.prepare('INSERT INTO retention_stages (intent,owner_epoch,bytes,sha256,chunks) VALUES (?,?,?,?,?)').run(intent, context.ownerEpoch, bytes, String(input.sha256), chunks);
       return { intent };
@@ -111,7 +111,9 @@ export function retentionDomainFor(schema: StorageDomainSchema): StorageDomain {
         for (const change of input.changes!) {
           validateRow(change);
           const previous = context.prepare('SELECT json FROM retention_metadata WHERE kind = ? AND id = ?').get(change.kind, change.id) as { json: string } | undefined;
-          if ((previous?.json ?? null) !== change.previous) fail('Retention row changed before guarded write.');
+          if (change.previousSha256 !== undefined) {
+            if (change.previous !== null || !/^[0-9a-f]{64}$/.test(change.previousSha256) || !previous || retentionHash(previous.json) !== change.previousSha256) fail('Retention row changed before guarded write.');
+          } else if ((previous?.json ?? null) !== change.previous) fail('Retention row changed before guarded write.');
           if (change.remove) {
             if (change.kind === 'entry' && previous && !['planned','blocked-provider'].includes(String(object(JSON.parse(previous.json)).phase))) fail('Retention metadata removal phase is protected.');
             if (change.kind === 'journal' || change.kind === 'observations') fail('Cannot remove retention document metadata.');

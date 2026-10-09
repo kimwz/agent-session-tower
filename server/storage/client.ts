@@ -623,6 +623,12 @@ export class StorageClient {
       // The thread decides the disposition of its own transaction; a read never commits anything.
       const disposition: CommitDisposition = pending.kind === 'write' ? error.disposition : 'not-committed';
       pending.reject(new StorageCommandError({ phase: pending.phase, code: error.code, message: error.message, disposition, retryable: error.retryable, commandId: pending.commandId }));
+      // A domain format refusal is local. SQLite corruption or failed I/O makes
+      // the shared connection unsafe: reuse the worker's existing intake hold.
+      if (['corrupt', 'not-a-database', 'io-error', 'no-space', 'read-only'].includes(error.code)) {
+        this.#threadFailed(failureOf(pending.phase, error.code, error.message, error.retryable));
+        return;
+      }
     }
     this.#pump();
   }

@@ -1,4 +1,5 @@
 import type { StorageDomainSchema } from '../../storage/contract.js';
+import { RETENTION_INTENT_BYTES, RETENTION_CHUNK_BYTES } from './storage-codec.js';
 
 /** Tentative A artifact; the parent fixes the release version before publishing. No production cutover. */
 export const retentionSchema: StorageDomainSchema = {
@@ -14,8 +15,8 @@ CREATE TABLE retention_metadata (
 CREATE INDEX retention_phase ON retention_metadata (phase) WHERE kind = 'entry';
 CREATE INDEX retention_order ON retention_metadata (kind, ordinal);
 CREATE TABLE retention_stages (
-  intent TEXT PRIMARY KEY, owner_epoch INTEGER NOT NULL, bytes INTEGER NOT NULL CHECK (bytes > 0 AND bytes <= 200000000),
-  sha256 TEXT NOT NULL, chunks INTEGER NOT NULL CHECK (chunks > 0 AND chunks <= 1024)
+  intent TEXT PRIMARY KEY, owner_epoch INTEGER NOT NULL, bytes INTEGER NOT NULL CHECK (bytes > 0 AND bytes <= ${RETENTION_INTENT_BYTES}),
+  sha256 TEXT NOT NULL, chunks INTEGER NOT NULL CHECK (chunks > 0 AND chunks <= ${Math.ceil(RETENTION_INTENT_BYTES / RETENTION_CHUNK_BYTES)})
 ) STRICT;
 CREATE TABLE retention_stage_chunks (
   intent TEXT NOT NULL REFERENCES retention_stages(intent) ON DELETE CASCADE,

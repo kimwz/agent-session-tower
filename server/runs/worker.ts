@@ -1036,7 +1036,13 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     await closedSessions.start();
     try {
       await retentionStore.start();
-    } catch (error) { retentionBootstrapError = error; console.error(`Cold journal unavailable: ${String(error)}`); }
+    } catch (error) {
+      retentionBootstrapError = error;
+      // The SDK routes physical SQLite failures through onUnavailable. Only a
+      // healthy shared core may quarantine malformed retention metadata alone.
+      if (database?.status().state === 'unavailable') unavailable(database.status());
+      console.error(`Cold journal unavailable: ${String(error)}`);
+    }
     if (!retentionBootstrapError) try {
       const entries = retentionStore.list();
       const members = entries.flatMap(entry => entry.members || []).filter(member => member.state !== 'restored');

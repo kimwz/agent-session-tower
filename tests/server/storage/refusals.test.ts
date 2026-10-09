@@ -399,6 +399,11 @@ test('a missing or replaced database is not replaced by a new empty one', async 
   }
 });
 
-test('the default manifest is this build\'s: core only', () => {
-  assert.deepEqual(storageManifest().domains, []);
+test('the default manifest declares retention preparation without cutover', () => {
+  const [domain] = storageManifest().domains;
+  assert.equal(storageManifest().domains.length, 1);
+  assert.equal(domain.scope, 'retention');
+  assert.equal(domain.schemaVersion, 1);
+  assert.deepEqual(domain.preparation, { requiredArtifactVersion: '1.120.0', readerContract: 1, writerContract: 1 });
+  assert.equal(domain.cutover, undefined);
 });
