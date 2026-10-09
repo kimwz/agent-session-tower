@@ -358,7 +358,7 @@ test('sealed B import before commit holds A JSON restoration on the same actual 
   const before = await Promise.all(names.map(name => readFile(join(f.stateDir,name))));
   const bc = await f.open(f.b,'before');
   const update = { stateDir: f.stateDir,managed: false,build: { version: f.b.version,manifest: f.b.manifest,preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.b.bundle('before') }) } };
-  await assert.rejects(importRuns({ storage: bc,stateDir: f.stateDir,evidenceParent,commandId: 'sealed-before-commit',update }));
+  await assert.rejects(importRuns({ storage: bc,repository: new RunsRepository(bc),stateDir: f.stateDir,evidenceParent,commandId: 'sealed-before-commit',update }));
   await bc.close();
   const ac = await f.open(f.a), repository = new RunsRepository(ac);
   assert.equal(await repository.databaseAuthority(),false);
