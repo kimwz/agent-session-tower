@@ -10,15 +10,16 @@ import { buildIdentityModule, buildIdentityPlugin, STORAGE_BUNDLE_FORMAT, type S
 import type * as Parent from './parent.js';
 
 /** Actual A/B domain handlers and captured SDK compiled as future artifact versions; no mocked import support. */
-export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.121.0', output?: string) {
+export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0', output?: string) {
   const directory = output ?? await mkdtemp(join(tmpdir(), 'tower-retention-artifact-'));
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const root = fileURLToPath(new URL('../../../../', import.meta.url));
   const old = version === '1.120.0';
-  const captureRoot = fileURLToPath(new URL('./retention-a120/', import.meta.url));
-  const capture = old ? JSON.parse(await readFile(join(captureRoot, 'capture.json'), 'utf8')) : undefined;
+  const preparation = version !== '1.121.0';
+  const captureRoot = fileURLToPath(new URL(old ? './retention-a120/' : './retention-a1201/', import.meta.url));
+  const capture = preparation ? JSON.parse(await readFile(join(captureRoot, 'capture.json'), 'utf8')) : undefined;
   const versionPlugin: Plugin = { name: 'retention-fixture-release', setup(builder) {
-    if (old) builder.onLoad({ filter: /[\\/]server[\\/]sessions[\\/]retention[\\/]storage-(schema|commands)\.ts$/ }, async args => {
+    if (preparation) builder.onLoad({ filter: /[\\/]server[\\/]sessions[\\/]retention[\\/]storage-(schema|commands)\.ts$/ }, async args => {
       const name = args.path.split(/[\\/]/).at(-1)!;
       const contents = await readFile(join(captureRoot, `${name}.txt`), 'utf8');
       if (createHash('sha256').update(contents).digest('hex') !== capture.files[`server/sessions/retention/${name}`]) throw new Error('Old A capture hash mismatch.');
@@ -26,7 +27,8 @@ export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.121.0',
     });
     builder.onLoad({ filter: /[\\/]shared[\\/]app-identity\.ts$/ }, async args => ({ contents: (await readFile(args.path, 'utf8')).replace(/export const APP_VERSION = '[^']+';/, `export const APP_VERSION = '${version}';`), loader: 'ts' }));
   } };
-  const schema = old ? { ...retentionSchema, preparation: { ...retentionSchema.preparation!, requiredArtifactVersion: '1.120.0' }, migrations: retentionSchema.migrations.slice(0, 1) } : version === '1.120.1' ? retentionSchema : { ...retentionSchema, cutover: { artifactVersion: version, importContract: 1 } };
+  const { cutover: _cutover, ...preparedSchema } = retentionSchema;
+  const schema = old ? { ...preparedSchema, preparation: { ...preparedSchema.preparation!, requiredArtifactVersion: '1.120.0' }, migrations: preparedSchema.migrations.slice(0, 1) } : preparation ? preparedSchema : retentionSchema;
   if (old) {
     const capturedSchema = await readFile(join(captureRoot, 'storage-schema.ts.txt'), 'utf8');
     const currentSchema = await readFile(join(root, 'server/sessions/retention/storage-schema.ts'), 'utf8');

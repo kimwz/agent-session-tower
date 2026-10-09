@@ -1,0 +1,9 @@
+{
+  "sourceCommit": "cc6221767f0fbf352167f95b7c2da445e35d7f6f",
+  "preparationMinimum": "1.120.1",
+  "note": "Actual pre-cutover source capture; not released 1.120.2 package/SHA evidence.",
+  "files": {
+    "server/sessions/retention/storage-schema.ts": "f0b5bc47470b5cb622a295c243fcb46e3c6bb354a567c0a0ab9eea973f696c49",
+    "server/sessions/retention/storage-commands.ts": "6f0f8afa7b89340b208f617645944d8410d783b614d1e6a7c0590890f70143a3"
+  }
+}

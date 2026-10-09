@@ -1,6 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, realpath, rm, stat, rename } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, realpath, rm, stat, rename, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -13,7 +13,7 @@ import { recordPreparationEvidence, evaluateStorageUpdate, type StorageUpdateInp
 import { RetentionStore } from '../../../server/sessions/retention/store.js';
 import { RetentionObserver } from '../../../server/sessions/retention/observer.js';
 import { RetentionRepository } from '../../../server/sessions/retention/storage-repository.js';
-import { exportRetention, importRetention, restoreRetention } from '../../../server/sessions/retention/storage-transfer.js';
+import { exportRetention, importRetention, restoreRetention, retentionBootstrap, retentionLegacyFiles } from '../../../server/sessions/retention/storage-transfer.js';
 import { journalDocument, observationDocument, retentionHash, RETENTION_INTENT_BYTES, RETENTION_CHUNK_BYTES, type RetentionDocuments } from '../../../server/sessions/retention/storage-codec.js';
 import { RetentionService } from '../../../server/sessions/retention/service.js';
 import { RetentionArchive } from '../../../server/sessions/retention/archive.js';
@@ -24,7 +24,7 @@ import type { RetentionJournalEntry, RetentionOperationContext } from '../../../
 
 async function folder(t: TestContext) { const path = await realpath(await mkdtemp(join(tmpdir(), 'tower-retention-fixture-'))); t.after(() => rm(path, { recursive: true, force: true })); return path; }
 async function builds(t: TestContext) {
-  const a = await retentionBuild('1.120.1', await folder(t)), b = await retentionBuild('1.121.0', await folder(t));
+  const a = await retentionBuild('1.120.2', await folder(t)), b = await retentionBuild('1.121.0', await folder(t));
   return { a, b };
 }
 const documents = (): RetentionDocuments => ({
@@ -196,17 +196,58 @@ test('actual evaluator requires A; malformed/missing sources refuse while core s
   assert.equal((await client.gate('core')).open, true);
 });
 
+test('actual B bootstrap uses pre-open new-state proof and current DB without missing JSON fallback', async t => {
+  const stateDir = await folder(t), { b } = await builds(t);
+  const before = await b.storage.preflightStorage({ bundle: b.bundle(), stateDir });
+  const initial: StorageUpdateInput = { stateDir, managed: false, legacyFiles: domain => retentionLegacyFiles(stateDir, domain), build: { version: b.version, manifest: b.manifest, preflight: before } };
+  assert.equal((await evaluateStorageUpdate(initial)).code, 'new-state');
+  const client = await b.storage.openStorage({ stateDir, bundle: b.bundle() }); t.after(() => client.close());
+  const prepared = await client.prepare({ allowMigration: true });
+  const update = async (): Promise<StorageUpdateInput> => ({ ...initial, build: { ...initial.build, preflight: await b.storage.preflightStorage({ bundle: b.bundle(), stateDir }) } });
+  await recordPreparationEvidence(stateDir, { context: client.context!, preflight: (await update()).build.preflight, prepared, gate: await client.gate('core') });
+  const bootstrap = retentionBootstrap(client, stateDir, update, true);
+  await Promise.all([bootstrap(), bootstrap()]);
+  await assert.rejects(stat(join(stateDir, 'retention', 'journal.json')), { code: 'ENOENT' });
+  const current = await new RetentionRepository(client).exportCurrent();
+  assert.equal(current.documents.journal.entries.length, 0);
+  assert.equal(current.documents.observations.entries.length, 0);
+  await bootstrap();
+  const store = new RetentionStore(join(stateDir, 'retention'), { storage: client }); await store.start();
+  assert.deepEqual(store.list(), []);
+  assert.equal((await new RetentionRepository(client).head()).revision, current.head.revision);
+});
+
+test('known retention history cannot become fresh missing sources', async t => {
+  const { b } = await builds(t);
+  for (const known of ['retention', 'retention-observations.json', 'retention-originals', 'storage-migrations']) {
+    const stateDir = await folder(t);
+    await mkdir(join(stateDir, known), { mode: 0o700 });
+    const preflight = await b.storage.preflightStorage({ bundle: b.bundle(), stateDir });
+    const evaluated = await evaluateStorageUpdate({ stateDir, managed: false, legacyFiles: domain => retentionLegacyFiles(stateDir, domain), build: { version: b.version, manifest: b.manifest, preflight } });
+    assert.equal(evaluated.importAllowed, false);
+    assert.notEqual(evaluated.code, 'new-state');
+  }
+});
+
 test('actual before/after commit crash receipts separate unknown from absent authority; no automatic replay', async t => {
   const { a, b } = await builds(t);
   for (const fault of ['before', 'after']) {
     const stateDir = await folder(t), evidenceParent = await sources(stateDir); await prepareA(stateDir, a);
     const { client, update } = await openB(t, stateDir, b, fault);
-    await assert.rejects(importRetention({ storage: client, update, stateDir, evidenceParent, commandId: `crash-${fault}` }), (error: unknown) => { assert.equal((error as { disposition: string }).disposition, 'unknown'); return true; });
+    const ownerBootstrap = retentionBootstrap(client, stateDir, async () => update, false);
+    await assert.rejects(ownerBootstrap(), (error: unknown) => { assert.equal((error as { disposition: string }).disposition, 'unknown'); return true; });
+    const attempts = await readdir(evidenceParent); assert.equal(attempts.length, 1);
+    await client.reopen(); await client.prepare({ allowMigration: false });
+    await assert.rejects(ownerBootstrap(), (error: unknown) => { assert.equal((error as { disposition: string }).disposition, 'unknown'); return true; });
+    assert.deepEqual(await readdir(evidenceParent), attempts, 'same SDK reopen cannot replay the bootstrap intent');
     await client.close();
-    const reopened = await openB(t, stateDir, b), receipt = await reopened.client.receipt(`crash-${fault}-commit`);
+    const reopened = await openB(t, stateDir, b), receipt = await reopened.client.receipt(`${attempts[0]}-commit`);
     assert.equal(receipt.found, fault === 'after');
     const head = await new RetentionRepository(reopened.client).head();
     assert.equal(Boolean(head.authority), fault === 'after');
+    const bootstrap = retentionBootstrap(reopened.client, stateDir, async () => reopened.update, false);
+    if (fault === 'before') await assert.rejects(bootstrap(), /evidence exists without authority/);
+    else await bootstrap();
     if (fault === 'after') {
       assert.deepEqual((await new RetentionRepository(reopened.client).exportCurrent()).documents, documents());
       await assert.rejects(importRetention({ storage: reopened.client, update: reopened.update, stateDir, evidenceParent }), /marker exists/);
