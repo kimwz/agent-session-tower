@@ -114,7 +114,7 @@ test('actual A refuses first import; actual B source backup/marker/receipt; A re
   // The externally restored row differs from the store's cached row; guarded deletion must refuse, not delete a newer phase.
 });
 
-test('actual B to A journal loads despite observation damage and the real cold scan preserves launcher proof bytes', async t => {
+for (const damage of ['malformed', 'missing'] as const) test(`actual B to A journal loads despite ${damage} observations and the real cold scan preserves launcher proof bytes`, async t => {
   const stateDir = await folder(t), { a, b } = await builds(t), data = documents();
   const claudeHome = join(stateDir, 'fixture-claude'), codexHome = join(stateDir, 'fixture-codex');
   const hot = join(claudeHome, 'projects', 'fixture'), coldPath = join(stateDir, 'fixture-cold', 'B.jsonl');
@@ -137,18 +137,25 @@ test('actual B to A journal loads despite observation damage and the real cold s
   const evidenceParent = await sources(stateDir, data); await prepareA(stateDir, a);
   const { client: bc, update } = await openB(t, stateDir, b);
   await importRetention({ storage: bc, update, stateDir, evidenceParent, commandId: 'cold-journal-import' });
+  const importedHead = await new RetentionRepository(bc).head();
   await bc.close();
   const db = new DatabaseSync(join(stateDir, 'state.sqlite'));
   try {
-    assert.equal(db.prepare("UPDATE retention_metadata SET json = ? WHERE kind = 'observations' AND id = ''").run(JSON.stringify({ ...data.observations, version: 2, entries: undefined })).changes, 1);
+    const changed = damage === 'missing'
+      ? db.prepare("DELETE FROM retention_metadata WHERE kind = 'observations' AND id = ''").run()
+      : db.prepare("UPDATE retention_metadata SET json = ? WHERE kind = 'observations' AND id = ''").run(JSON.stringify({ ...data.observations, version: 2, entries: undefined }));
+    assert.equal(changed.changes, 1);
   } finally { db.close(); }
   await writeFile(join(stateDir, 'retention', 'journal.json'), '{invalid legacy journal');
   await writeFile(join(stateDir, 'retention-observations.json'), '{invalid legacy observations');
   const currentA = await a.storage.openStorage({ stateDir, bundle: a.bundle() }); t.after(() => currentA.close());
   await currentA.prepare({ allowMigration: false });
   const repository = new RetentionRepository(currentA);
+  assert.deepEqual(await repository.head(), importedHead, 'observation damage preserves authority and revision');
+  assert.equal(await repository.databaseAuthority(), true);
+  const observationError = damage === 'missing' ? /Missing retention observations metadata/ : /Invalid retention observations/;
   assert.deepEqual((await repository.readCurrentJournal()).journal, data.journal, 'root and nested metadata survive independently');
-  await assert.rejects(repository.exportCurrent(), /Invalid retention observations/);
+  await assert.rejects(repository.exportCurrent(), observationError);
   const store = new RetentionStore(join(stateDir, 'retention'), { storage: currentA }); await store.start();
   assert.deepEqual(store.list(), data.journal.entries);
   assert.deepEqual(store.policy('policy'), data.journal.policies && data.journal.policies[0]);
@@ -161,7 +168,7 @@ test('actual B to A journal loads despite observation damage and the real cold s
   sessions.setColdRegistry(members.flatMap(member => [member.originalPath, ...(member.coldPath ? [member.coldPath] : [])]), members.map(member => `${member.provider}:${member.nativeId}`));
   const observer = new RetentionObserver({ stateDir, storage: currentA, snapshot: () => sessions.completedRetentionRecords(),
     reconcile: value => value, journalMembers: () => members, runs: () => [], settled: () => new Set(), protectedIds: () => [] });
-  await assert.rejects(observer.start(), /Invalid retention observations/);
+  await assert.rejects(observer.start(), observationError);
   assert.equal(currentA.status().state, 'ready');
   assert.equal((await currentA.gate('core')).open, true, 'observation format failure remains domain-local');
   await sessions.refresh(); await sessions.quiesce();

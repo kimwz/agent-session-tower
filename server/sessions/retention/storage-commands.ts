@@ -20,8 +20,9 @@ function head(context: DomainReadContext): RetentionHead {
   const marker = authority(context);
   const state = context.prepare('SELECT revision FROM retention_state WHERE singleton = 1').get() as { revision: number } | undefined;
   if (marker?.authority === 'database') {
-    const wrappers = context.prepare("SELECT count(*) AS n FROM retention_metadata WHERE kind IN ('journal','observations') AND id = ''").get() as { n: number };
-    if (!state || wrappers.n !== 2) fail('Imported retention metadata is missing.');
+    // Authority/state fences are shared by journal reads, guarded writes and explicit restore.
+    // Each document reader validates its own wrappers; observation damage cannot hide cold members.
+    if (!state) fail('Imported retention state is missing.');
   }
   return { authority: marker, revision: state?.revision ?? null };
 }

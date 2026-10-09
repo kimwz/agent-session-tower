@@ -381,9 +381,21 @@ test('a computer whose link breaks mid-request is dropped cleanly on both sides 
   const joined = await connected(a.controller, 'computer-b');
   const session = a.controller.session(joined.id)!;
   const pending = linkRequest(session, 'GET', '/api/snapshot').catch(error => error as Error);
+  // Capture the offline state in the actual event before a fast reconnect can replace it.
+  let offlineAtDisconnect = false;
+  let disconnectedId: string | undefined;
+  const disconnected = (id: string) => {
+    if (id !== joined.id) return;
+    offlineAtDisconnect = a.controller.list().some(node => node.id === id && node.status === 'offline');
+    disconnectedId = id;
+    a.controller.off('disconnected', disconnected);
+  };
+  a.controller.on('disconnected', disconnected);
+  t.after(() => a.controller.off('disconnected', disconnected));
   session.destroy(new Error('network went away'));
   assert.ok(await pending instanceof Error, 'the request in flight fails instead of hanging');
-  await until(() => a.controller.list().find(node => node.status === 'offline'), 5000);
+  await until(() => disconnectedId, 5000);
+  assert.equal(offlineAtDisconnect, true, 'actual disconnected event observes this computer offline');
   await connected(a.controller, 'computer-b');
 });
 
