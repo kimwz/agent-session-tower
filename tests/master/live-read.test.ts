@@ -143,7 +143,8 @@ test('a lookup process whose host was killed exits by itself', { skip: noLookups
 test('a lookup process stuck in a runaway query when its host is killed is ended by its CPU limit', { skip: noLookups }, async () => {
   const helper = spawn(process.execPath, ['--import', 'tsx', '-e', `
     const { ReadDatabase, tablesFrom } = await import(${JSON.stringify(new URL('../../server/tower-tools/read-db.ts', import.meta.url).href)});
-    const db = new ReadDatabase({ cpuLimitSeconds: 1 });
+    // The CPU budget includes cold Node/tsx loading before the runaway query starts.
+    const db = new ReadDatabase({ cpuLimitSeconds: 3 });
     const rows = Array.from({ length: 300 }, (_, index) => ({ id: 's' + index, nativeId: 's', provider: 'claude', title: 't', cwd: '/w', project: 'p', status: 'idle', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true }));
     const tables = () => tablesFrom({ sessions: rows, runs: [], providers: [], scanning: false, hostname: 'h', version: 'v', updatedAt: '' }, new Map(), text => text);
     await db.query('SELECT 1 AS one', 'v', tables);

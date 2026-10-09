@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
 import { once } from 'node:events';
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, realpath, readFile, rm, writeFile } from 'node:fs/promises';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -24,7 +24,7 @@ import { updatePaths } from '../../../server/link/storage-update.js';
 // Hosted disposable jobs only: this starts the actual product worker and its actual SQLite memory preflight,
 // with no native providers, no copied credentials, and only the direct child owned by this fixture.
 test('actual diagnostic worker holds restore, journal, proofs and launches before a storage update can be proven', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'tower-storage-diagnostic-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-storage-diagnostic-')));
   const state = join(root, 'state');
   const paths = await runnerPaths(state);
   const lock = updatePaths(state).lock;
@@ -81,7 +81,7 @@ async function launchDiagnostic(t: TestContext, root: string, state: string, pat
 
 
 test('actual product worker promotes update-held once in the same boot; a failed cold journal parks before scans and retries explicitly', { timeout: 90000 }, async t => {
-  const root = await mkdtemp(join(tmpdir(), 'tower-storage-promotion-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-storage-promotion-')));
   const state = join(root, 'state');
   const paths = await runnerPaths(state);
   const hold = updatePaths(state).hold;
@@ -263,7 +263,7 @@ test('actual product worker refuses an unsupported captured thread before restor
 
 
 for (const matching of [true, false]) test(`actual successor applies the new cold journal transition only for its exact observed nonce (matching=${matching})`, { timeout: 90000 }, async t => {
-  const root = await mkdtemp(join(tmpdir(), 'tower-storage-successor-')); const state = join(root, 'state'); const paths = await runnerPaths(state);
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-storage-successor-'))); const state = join(root, 'state'); const paths = await runnerPaths(state);
   await mkdir(paths.runtime, { recursive: true, mode: 0o700 });
   const nonce = 'a'.repeat(32);
   await writeHandoff(paths.runtime, { previous: 'fixture-predecessor', successor: matching ? nonce : 'b'.repeat(32), version: '1.0.0', clean: true, at: new Date().toISOString(), storageTransition: true });
@@ -297,7 +297,7 @@ async function fixtureCall(paths: Awaited<ReturnType<typeof runnerPaths>>, metho
 
 
 test('initial and poll fallback start the actual current worker behind its storage gate; restart and force cannot bypass the unknown previous build', { timeout: 90000 }, async t => {
-  const root = await mkdtemp(join(tmpdir(), 'tower-storage-fallback-')); const state = join(root, 'state'); const paths = await runnerPaths(state);
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-storage-fallback-'))); const state = join(root, 'state'); const paths = await runnerPaths(state);
   const lock = updatePaths(state).lock; await mkdir(dirname(lock), { recursive: true, mode: 0o700 }); await writeFile(lock, 'unknown previous helper', { mode: 0o600 });
   const restore = join(state, 'restore', 'pending-worker.json'); await mkdir(dirname(restore), { recursive: true, mode: 0o700 }); await writeFile(restore, 'preserve fallback source', { mode: 0o600 });
   const children: ChildProcess[] = []; const exits: Promise<unknown>[] = []; let closing = false;
@@ -345,7 +345,7 @@ test('initial and poll fallback start the actual current worker behind its stora
 
 
 for (const stage of ['1', 'late']) test(`actual SDK startup failure parks its continuation (${stage}); failed owner retry stays held and successful retry does not restart services`, { timeout: 90000 }, async t => {
-  const root = await mkdtemp(join(tmpdir(), 'tower-storage-startup-retry-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-storage-startup-retry-')));
   const state = join(root, 'state'); const paths = await runnerPaths(state);
   const { child, call, stderr } = await launchDiagnostic(t, root, state, paths, undefined, { TOWER_FIXTURE_STORAGE_STARTUP: stage });
   const deadline = Date.now() + 60000;

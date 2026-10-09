@@ -24,18 +24,23 @@ jobs:
           set -euo pipefail
           umask 077
           mkdir -p "$VALIDATION_ROOT"/{home,codex,claude,config,cache,state,data,runtime,tmp,npm,reports}
+          # Keep Unix socket paths short; canonicalize the fresh private tmp directory on macOS.
+          TEST_TMP="$(mktemp -d /tmp/sv.XXXXXX)"
+          TEST_TMP="$(cd "$TEST_TMP" && pwd -P)"
           # No Actions credentials or provider authentication enter npm, tests or children.
           env -i PATH="$PATH" HOME="$VALIDATION_ROOT/home" \
             CODEX_HOME="$VALIDATION_ROOT/codex" CLAUDE_CONFIG_DIR="$VALIDATION_ROOT/claude" \
             XDG_CONFIG_HOME="$VALIDATION_ROOT/config" XDG_CACHE_HOME="$VALIDATION_ROOT/cache" \
             XDG_STATE_HOME="$VALIDATION_ROOT/state" XDG_DATA_HOME="$VALIDATION_ROOT/data" \
-            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$VALIDATION_ROOT/tmp" \
-            TMP="$VALIDATION_ROOT/tmp" TEMP="$VALIDATION_ROOT/tmp" \
+            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
+            TMP="$TEST_TMP" TEMP="$TEST_TMP" \
             npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
             TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
             VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
             VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
           set -euo pipefail
+          # Private 0700 parents isolate fixtures; retain the usual user file-creation mask.
+          umask 022
           report="$VALIDATION_ROOT/reports"
           trap 'result=$?; printf "%s\n" "$result" > "$report/exit-code.txt"' EXIT
           set -x
@@ -97,18 +102,23 @@ jobs:
           set -euo pipefail
           umask 077
           mkdir -p "$VALIDATION_ROOT"/{home,codex,claude,config,cache,state,data,runtime,tmp,npm,reports}
+          # Keep Unix socket paths short; canonicalize the fresh private tmp directory on macOS.
+          TEST_TMP="$(mktemp -d /tmp/sv.XXXXXX)"
+          TEST_TMP="$(cd "$TEST_TMP" && pwd -P)"
           # No Actions credentials or provider authentication enter npm, tests or children.
           env -i PATH="$PATH" HOME="$VALIDATION_ROOT/home" \
             CODEX_HOME="$VALIDATION_ROOT/codex" CLAUDE_CONFIG_DIR="$VALIDATION_ROOT/claude" \
             XDG_CONFIG_HOME="$VALIDATION_ROOT/config" XDG_CACHE_HOME="$VALIDATION_ROOT/cache" \
             XDG_STATE_HOME="$VALIDATION_ROOT/state" XDG_DATA_HOME="$VALIDATION_ROOT/data" \
-            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$VALIDATION_ROOT/tmp" \
-            TMP="$VALIDATION_ROOT/tmp" TEMP="$VALIDATION_ROOT/tmp" \
+            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
+            TMP="$TEST_TMP" TEMP="$TEST_TMP" \
             npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
             TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
             VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
             VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
           set -euo pipefail
+          # Private 0700 parents isolate fixtures; retain the usual user file-creation mask.
+          umask 022
           report="$VALIDATION_ROOT/reports"
           trap 'result=$?; printf "%s\n" "$result" > "$report/exit-code.txt"' EXIT
           set -x
@@ -221,18 +231,23 @@ jobs:
           set -euo pipefail
           umask 077
           mkdir -p "$VALIDATION_ROOT"/{home,codex,claude,config,cache,state,data,runtime,tmp,npm,reports}
+          # Keep Unix socket paths short; canonicalize the fresh private tmp directory on macOS.
+          TEST_TMP="$(mktemp -d /tmp/sv.XXXXXX)"
+          TEST_TMP="$(cd "$TEST_TMP" && pwd -P)"
           # No Actions credentials or provider authentication enter npm, tests or children.
           env -i TZ=Asia/Seoul PATH="$PATH" HOME="$VALIDATION_ROOT/home" \
             CODEX_HOME="$VALIDATION_ROOT/codex" CLAUDE_CONFIG_DIR="$VALIDATION_ROOT/claude" \
             XDG_CONFIG_HOME="$VALIDATION_ROOT/config" XDG_CACHE_HOME="$VALIDATION_ROOT/cache" \
             XDG_STATE_HOME="$VALIDATION_ROOT/state" XDG_DATA_HOME="$VALIDATION_ROOT/data" \
-            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$VALIDATION_ROOT/tmp" \
-            TMP="$VALIDATION_ROOT/tmp" TEMP="$VALIDATION_ROOT/tmp" \
+            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
+            TMP="$TEST_TMP" TEMP="$TEST_TMP" \
             npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
             TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
             VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
             VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
           set -euo pipefail
+          # Private 0700 parents isolate fixtures; retain the usual user file-creation mask.
+          umask 022
           report="$VALIDATION_ROOT/reports"
           preserve() {
             result=$?
