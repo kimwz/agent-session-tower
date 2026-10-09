@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.121.0] - 2026-10-09
+
+### Changed
+
+- Following the validated 1.120.2 preparation, add the retention metadata SQLite first-import pilot with database journal authority, preserved original backups and no automatic replay. Production first import remains gated on actual A2 preparation; this pilot does not complete the full #84 migration.
+
 ## [1.120.2] - 2026-10-09
 
 ### Changed
