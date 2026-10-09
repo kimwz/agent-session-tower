@@ -1,6 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm, stat, rename } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, realpath, rm, stat, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -22,7 +22,7 @@ import type { RetentionRecord } from '../../../server/sessions/retention/policy.
 import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
 import type { RetentionJournalEntry, RetentionOperationContext } from '../../../server/sessions/retention/types.js';
 
-async function folder(t: TestContext) { const path = await mkdtemp(join(tmpdir(), 'tower-retention-fixture-')); t.after(() => rm(path, { recursive: true, force: true })); return path; }
+async function folder(t: TestContext) { const path = await realpath(await mkdtemp(join(tmpdir(), 'tower-retention-fixture-'))); t.after(() => rm(path, { recursive: true, force: true })); return path; }
 async function builds(t: TestContext) {
   const a = await retentionBuild('1.120.0', await folder(t)), b = await retentionBuild('1.121.0', await folder(t));
   return { a, b };
