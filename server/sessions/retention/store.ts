@@ -58,6 +58,11 @@ export class RetentionStore {
     return this.commit((_entries, policies) => { policies.set(input.id, input); });
   }
   list(): RetentionJournalEntry[] { return structuredClone([...this.entries.values()]); }
+  async gateNativeEffects(): Promise<void> {
+    if (this.options && !this.repository) throw new Error('Shared retention storage is unavailable.');
+    // The observer has its own repository; SDK reopen cannot settle this owner's lost intent.
+    await this.repository?.gate();
+  }
   get(id: string): RetentionJournalEntry | undefined { const entry = this.entries.get(id); return entry ? structuredClone(entry) : undefined; }
   async put(entry: RetentionJournalEntry): Promise<void> { await this.putMany([entry]); }
   async putMany(entries: RetentionJournalEntry[]): Promise<void> {

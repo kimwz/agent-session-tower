@@ -141,9 +141,9 @@ test('an unknown schema, another program\'s database, a damaged file or a schema
   before = await filesUnder(damaged);
   await refused(t, { stateDir: damaged, bundle: productionBundle }, { phase: 'open', code: 'not-a-database', retryable: false });
   assert.deepEqual(await filesUnder(damaged), before);
-  // A production storage opened by a build with one more domain is behind: it waits for an allowed migration.
+  // A pre-domain storage opened by a build with more domains is behind: it waits for an allowed migration.
   const behind = await stateDir(t);
-  const plain = await openStorage({ stateDir: behind, bundle: productionBundle });
+  const plain = await openStorage({ stateDir: behind, bundle: threadBundle('core') });
   await plain.prepare({ allowMigration: true });
   await plain.close();
   const upgraded = await openFixture(t, behind);

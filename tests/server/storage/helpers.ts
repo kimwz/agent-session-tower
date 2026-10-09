@@ -28,9 +28,10 @@ export const fixtureManifestA = storageManifest([fixtureSchemaA, plainSchema]);
 const FAULTS = ['protocol', 'app-version', 'forged-manifest', 'source-hash', 'no-sqlite', 'exit-on-check', 'exit-on-open', 'exit-after-open', 'change-on-check', 'change-exit-on-check', 'stall-on-check', 'swap-on-open'] as const;
 export type FaultThread = typeof FAULTS[number];
 /** Every thread source the fixture build trusts, each with the contract its thread must declare. */
-const SOURCES: Record<'fixture' | 'fixture-a' | 'production' | FaultThread, [entry: string, manifest: StorageBuildManifest]> = {
+const SOURCES: Record<'fixture' | 'fixture-a' | 'core' | 'production' | FaultThread, [entry: string, manifest: StorageBuildManifest]> = {
   fixture: [FIXTURE_ENTRY, fixtureManifest],
   'fixture-a': [FIXTURE_A_ENTRY, fixtureManifestA],
+  core: [here('./fixtures/core-thread.ts'), storageManifest([])],
   production: [STORAGE_THREAD_ENTRY, storageManifest()],
   ...Object.fromEntries(FAULTS.map(name => [name, [here(`./fixtures/faults/${name}.ts`), fixtureManifest]])) as Record<FaultThread, [string, StorageBuildManifest]>,
 };

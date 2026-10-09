@@ -20,7 +20,7 @@ export async function retentionBuild(version: '1.120.0' | '1.121.0', output?: st
   const schema = version === '1.120.0' ? retentionSchema : { ...retentionSchema, cutover: { artifactVersion: version, importContract: 1 } };
   const manifest = storageManifest([schema], version);
   const artifacts: Record<string, StorageThreadArtifact> = {};
-  for (const fault of version === '1.120.0' ? ['normal'] : ['normal', 'before', 'after', 'refuse-once', 'corrupt', 'io']) {
+  for (const fault of version === '1.120.0' ? ['normal', 'after-native-hold'] : ['normal', 'before', 'after', 'after-native-hold', 'refuse-once', 'corrupt', 'io']) {
     const entry = `
 import { parentPort } from 'node:worker_threads';
 import { runStorageThread } from './server/storage/thread/runtime.js';
@@ -32,6 +32,13 @@ parentPort.on('message', message => { if (message.op === 'write' && message.comm
 const post = parentPort.postMessage.bind(parentPort);
 parentPort.postMessage = message => { if (message.id === commitId) process.exit(9); post(message); };`}
 const domain = retentionDomainFor(schema);
+${fault === 'after-native-hold' ? `let loseNextCommit = false, lostCommitId = -1;
+parentPort.on('message', message => {
+  if (message.op === 'write' && message.command === 'stage' && Buffer.from(JSON.parse(message.payload).data, 'base64').toString('utf8').includes('native-hold-response-lost')) loseNextCommit = true;
+  if (message.op === 'write' && message.command === 'commit' && loseNextCommit) lostCommitId = message.id;
+});
+const post = parentPort.postMessage.bind(parentPort);
+parentPort.postMessage = message => { if (message.id === lostCommitId && message.ok) process.exit(9); post(message); };` : ''}
 ${fault === 'refuse-once' ? `const commit = domain.commands.commit;
 let refused = false;
 domain.commands.commit = { ...commit, run(context, payload) {

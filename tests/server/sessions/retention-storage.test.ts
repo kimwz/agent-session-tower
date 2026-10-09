@@ -19,6 +19,8 @@ import { RetentionService } from '../../../server/sessions/retention/service.js'
 import { RetentionArchive } from '../../../server/sessions/retention/archive.js';
 import { SessionService } from '../../../server/sessions/service.js';
 import type { RetentionRecord } from '../../../server/sessions/retention/policy.js';
+import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
+import type { RetentionJournalEntry, RetentionOperationContext } from '../../../server/sessions/retention/types.js';
 
 async function folder(t: TestContext) { const path = await mkdtemp(join(tmpdir(), 'tower-retention-fixture-')); t.after(() => rm(path, { recursive: true, force: true })); return path; }
 async function builds(t: TestContext) {
@@ -258,6 +260,71 @@ test('actual lost committed update does not publish draft memory or replay; rece
   const reopened = await openB(t, stateDir, b);
   assert.equal((await reopened.client.receipt(intent.commandId)).found, true);
   assert.equal((await new RetentionRepository(reopened.client).exportCurrent()).documents.journal.entries[0].error, 'committed-but-response-lost');
+});
+
+test('actual A/B same captured SDK reopen leaves uncertain store held despite healthy observer and native fixture', async t => {
+  const { a, b } = await builds(t);
+  for (const build of [a, b]) {
+    const stateDir = await folder(t), data = documents();
+    const claudeHome = join(stateDir, 'fixture-claude'), codexHome = join(stateDir, 'fixture-codex');
+    const hot = join(claudeHome, 'projects', 'fixture'), coldRoot = join(stateDir, 'fixture-cold');
+    await mkdir(hot, { recursive: true }); await mkdir(coldRoot); await mkdir(codexHome);
+    const originalPath = join(hot, 'B.jsonl'), coldPath = join(coldRoot, 'B.jsonl');
+    const coldBytes = Buffer.from('{"sessionId":"B","message":{"role":"user","content":"cold original"}}\n');
+    const hotPath = join(hot, 'A.jsonl'), hotBytes = Buffer.from('preserve unrelated hot original\n');
+    await writeFile(coldPath, coldBytes); await writeFile(hotPath, hotBytes);
+    const info = await stat(coldPath);
+    data.journal.entries[0] = { ...data.journal.entries[0], phase: 'archived', candidate: { ...data.journal.entries[0].candidate, ids: ['claude:B'] }, members: [{
+      sessionId: 'claude:B', provider: 'claude', nativeId: 'B', isSubagent: false, createdAt: '2026-09-01T00:00:00.000Z',
+      operationId: 'operation', state: 'cold', originalPath, coldPath,
+      identity: { dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs },
+    }] };
+    const evidenceParent = await sources(stateDir, data); await prepareA(stateDir, a);
+    const normal = await openB(t, stateDir, b);
+    await importRetention({ storage: normal.client, update: normal.update, stateDir, evidenceParent }); await normal.client.close();
+    const client = await build.storage.openStorage({ stateDir, bundle: build.bundle('after-native-hold') }); t.after(() => client.close());
+    await client.prepare({ allowMigration: false });
+    const store = new RetentionStore(join(stateDir, 'retention'), { storage: client }); await store.start();
+    const observer = new RetentionObserver({ stateDir, storage: client, snapshot: () => ({ complete: true, records: [] }),
+      reconcile: value => value, journalMembers: () => store.list().flatMap(entry => entry.members || []),
+      runs: () => [], settled: () => new Set(), protectedIds: () => [] });
+    await observer.start();
+    let inspections = 0;
+    const adapter = createNativeRetentionAdapter({ claude: [join(claudeHome, 'projects')], codex: [codexHome] }, {
+      coldRoot, claudeHome, codexHome, inspect: async () => { inspections++; return { complete: true, activeIds: new Set(), issues: [] }; },
+    });
+    const service = new RetentionService({ store, adapter, archive: new RetentionArchive(join(stateDir, 'bundles'), [hot], [coldRoot]), observe: () => observer.observe() });
+    const previous = store.get('operation')!;
+    const native = await adapter.inspectCold(previous.members!);
+    assert.equal(native.complete, true); assert.equal(native.members[0].state, 'cold');
+    inspections = 0;
+    await assert.rejects(store.put({ ...previous, error: 'native-hold-response-lost' }), (error: unknown) => {
+      assert.equal((error as { disposition: string }).disposition, 'unknown'); return true;
+    });
+    const repository = (store as unknown as { repository: RetentionRepository }).repository;
+    const intent = structuredClone(repository.lastIntent!);
+    await client.reopen(); await client.prepare({ allowMigration: false });
+    assert.equal((await client.gate('core')).open, true); assert.equal((await client.gate('retention')).open, true);
+    service.resume();
+    assert.equal((await observer.observe()).complete, true, 'same observer repository is healthy after same SDK reopen');
+    const current = new RetentionRepository(client);
+    const head = await current.head();
+    assert.equal((await client.receipt(intent.commandId)).found, true);
+    assert.equal((await current.readCurrentJournal()).journal.entries[0].error, 'native-hold-response-lost');
+    const context = (service as unknown as { context(entry: RetentionJournalEntry): RetentionOperationContext }).context(previous);
+    await assert.rejects(context.fresh(), (error: unknown) => (error as { disposition: string }).disposition === 'unknown');
+    await assert.rejects(adapter.restore!({ version: 1, id: previous.id, createdAt: previous.updatedAt, reason: previous.candidate.reason, files: [], sessions: [] },
+      'held-native-restore', previous.members!, context), (error: unknown) => (error as { disposition: string }).disposition === 'unknown');
+    for (let attempt = 0; attempt < 2; attempt++) await assert.rejects(service.restore('operation'), (error: unknown) => (error as { disposition: string }).disposition === 'unknown');
+    await assert.rejects(store.put({ ...previous, error: 'must-not-replay' }));
+    await service.quiesce();
+    assert.equal(inspections, 0, 'restore stops before provider inspection and native effects');
+    await assert.rejects(stat(originalPath), { code: 'ENOENT' });
+    assert.deepEqual(await readFile(coldPath), coldBytes); assert.deepEqual(await readFile(hotPath), hotBytes);
+    const after = await stat(coldPath); assert.equal(after.ino, info.ino); assert.equal(after.dev, info.dev); assert.equal(after.nlink, info.nlink);
+    assert.deepEqual(store.get('operation'), previous); assert.deepEqual(repository.lastIntent, intent);
+    assert.equal((await current.head()).revision, head.revision, 'held attempts neither replay nor publish conflict journal writes');
+  }
 });
 
 test('DB-backed automatic blocked-provider cycle retains grace and cannot reach native effects', async t => {

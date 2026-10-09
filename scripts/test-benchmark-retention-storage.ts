@@ -30,7 +30,7 @@ async function workload(store: RetentionStore) {
   }
   for (let index = 50; index < 100; index++) await store.removeMetadata([`op-${index}`]);
   for (let index = 0; index < 25; index++) await store.setPolicy({ id: `policy-${index}`, archiveRevision: index });
-  return { elapsedMs: performance.now() - start, writesMs: writes, projectionSha256: retentionHash(JSON.stringify(store.list())) };
+  return { elapsedMs: performance.now() - start, writesMs: writes, projectionSha256: retentionHash(JSON.stringify({ entries: store.list(), policies: Array.from({ length: 25 }, (_, index) => store.policy(`policy-${index}`)) })) };
 }
 try {
   const a = await retentionBuild('1.120.0', join(root, 'a-artifact')), b = await retentionBuild('1.121.0', join(root, 'b-artifact'));

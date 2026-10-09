@@ -80,6 +80,9 @@ test('a checkout whose own thread entry changes after its capture reopens with t
   const checkout = await mkdtemp(join(tmpdir(), 'tower-storage-checkout-'));
   t.after(() => rm(checkout, { recursive: true, force: true }));
   await cp(join(root, 'server/storage'), join(checkout, 'server/storage'), { recursive: true });
+  for (const name of ['storage-schema.ts', 'storage-codec.ts', 'storage-commands.ts']) {
+    await cp(join(root, 'server/sessions/retention', name), join(checkout, 'server/sessions/retention', name));
+  }
   await cp(join(root, 'shared/app-identity.ts'), join(checkout, 'shared/app-identity.ts'));
   await cp(join(root, 'tsconfig.json'), join(checkout, 'tsconfig.json'));
   await writeFile(join(checkout, 'package.json'), '{"type":"module"}');
@@ -99,7 +102,7 @@ test('a checkout whose own thread entry changes after its capture reopens with t
     const closed = await client.close();
     // The checkout's own default entry changes, in code its thread would run.
     const entry = await readFile(STORAGE_THREAD_ENTRY, 'utf8');
-    await writeFile(STORAGE_THREAD_ENTRY, entry.replace('runStorageThread([]);', 'if (Date.now() < 0) throw new Error("a changed checkout");\\nrunStorageThread([]);'));
+    await writeFile(STORAGE_THREAD_ENTRY, entry.replace('runStorageThread(', 'if (Date.now() < 0) throw new Error("a changed checkout");\\nrunStorageThread('));
     const changed = await bundleStorageThread();
     const reopened = await client.reopen();
     const claimed = await client.prepare({ allowMigration: false });
@@ -167,6 +170,7 @@ test('a dist artifact replaced after capture changes nothing: flush, close and r
 async function compileStorage(out: string): Promise<void> {
   const sources = [
     ...(await readdir(join(root, 'server/storage'), { recursive: true })).filter(name => name.endsWith('.ts') && !name.endsWith('.d.ts')).map(name => join(root, 'server/storage', name)),
+    ...['storage-schema.ts', 'storage-codec.ts', 'storage-commands.ts'].map(name => join(root, 'server/sessions/retention', name)),
     join(root, 'shared/app-identity.ts'),
   ];
   await build({ entryPoints: sources, outbase: root, outdir: out, format: 'esm', platform: 'node', target: 'node22', logLevel: 'silent' });
