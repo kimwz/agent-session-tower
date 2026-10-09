@@ -1,3 +1,4 @@
+import { RunAdmissionUncertain } from '../../../server/runs/run-records.js';
 import { TowerError } from '../../../shared/errors.js';
 import { initialModelSettings } from '../../../shared/models.js';
 import { saveModelSettings } from '../../../server/models/settings.js';
@@ -962,4 +963,25 @@ test('cancel and close discard safe paused checkpoints without leaving busy wait
     assert.equal(successor.get(closed.id)?.status, 'cancelled');
     assert.equal(f.calls.length, 0); assert.equal(f.dispatches.length, 0);
   } finally { await successor.close(); }
+});
+
+test('unknown run admission preserves Auto Prompt staging and is never recovered from an uncommitted memory run or resent', async t => {
+  const f = await fixture(t);
+  f.respond(async () => create());
+  let dispatches = 0;
+  f.options.runs.create = async (input,internal) => {
+    dispatches++;
+    f.managed.push({ id: randomUUID(),sessionId: f.session.id,prompt: input.prompt,status: 'queued',createdAt: new Date().toISOString(),output: '',autoPromptId: internal?.autoPromptId });
+    throw new RunAdmissionUncertain('fixed receipt unresolved',{ commandId: 'run-fixed-commit',sha256: 'a'.repeat(64) });
+  };
+  const input = request(f.cwd,{ sessionMode: 'new',attachments: [{ name: 'fixture.txt',mimeType: 'text/plain',data: Buffer.from('keep pending').toString('base64') }] });
+  const accepted = await f.manager.submit(input);
+  await until(() => f.manager.get(accepted.id)?.status === 'uncertain');
+  assert.equal(f.manager.get(accepted.id)?.runId,undefined,'a memory run is not an admission receipt');
+  const stored = JSON.parse(await readFile(join(f.directory,'auto-prompts.json'),'utf8'));
+  assert.ok(stored.find((entry: { job: { id: string } }) => entry.job.id === accepted.id).staged.length);
+  await f.manager.submit(input); assert.equal(dispatches,1);
+  await f.manager.close();
+  const restarted = new AutoPromptManager(f.options); await restarted.start();
+  assert.equal(restarted.get(accepted.id)?.status,'uncertain'); await restarted.close(); assert.equal(dispatches,1);
 });

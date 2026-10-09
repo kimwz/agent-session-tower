@@ -1,3 +1,5 @@
+import { runsSchema } from '../../../server/runs/storage-schema.js';
+import { runsDomain } from '../../../server/runs/storage-commands.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DEFAULT_STORAGE_LIMITS, storageLimits } from '../../../server/storage/contract.js';
@@ -34,11 +36,14 @@ test('limits are chosen within their ranges and refused outside them', () => {
 });
 
 test('the production manifest registers actual retention schema/handler with B cutover; schema text changes alter it', () => {
-  assert.deepEqual(STORAGE_DOMAIN_SCHEMAS, [retentionSchema]);
+  assert.deepEqual(STORAGE_DOMAIN_SCHEMAS, [retentionSchema, runsSchema]);
   assert.strictEqual(retentionDomain.schema, retentionSchema);
+  assert.strictEqual(runsDomain.schema, runsSchema);
+  assert.equal(runsSchema.cutover, undefined);
+  assert.deepEqual(runsSchema.preparation, { requiredArtifactVersion: '1.122.0', readerContract: 1, writerContract: 1 });
   const manifest = storageManifest();
   assert.equal(manifest.core.schemaVersion, CORE_MIGRATIONS.length);
-  assert.equal(manifest.domains.length, 1);
+  assert.equal(manifest.domains.length, 2);
   assert.equal(manifest.domains[0].scope, 'retention');
   assert.deepEqual(manifest.domains[0].cutover, { artifactVersion: '1.121.0', importContract: 1 });
   assert.deepEqual(manifest.domains[0].preparation, { requiredArtifactVersion: '1.120.2', readerContract: 1, writerContract: 1 });

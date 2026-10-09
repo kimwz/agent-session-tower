@@ -60,13 +60,13 @@ export const PAGE_JS = `(() => {
   const T = ko ? {
     send: '보내기', placeholder: '메시지를 입력하세요', password: '비밀번호', enter: '입장', typing: '답변을 작성하고 있습니다…', reset: '새 대화', resetConfirm: '이 대화를 지우고 새로 시작할까요?',
     empty: '무엇을 도와드릴까요?', request: '요청', you: '나', agent: '에이전트',
-    status: { reviewing: '검토 중', rejected: '접수되지 않음', queued: '대기 중', dispatching: '시작하는 중', running: '진행 중', summarizing: '결과 정리 중', completed: '완료', failed: '실패' },
+    status: { reviewing: '검토 중', rejected: '접수되지 않음', queued: '대기 중', dispatching: '시작하는 중', running: '진행 중', summarizing: '결과 정리 중', completed: '완료', failed: '실패', uncertain: '작업 접수 확인 필요' },
     errors: { not_found: '이 페이지를 찾을 수 없습니다.', wrong_password: '비밀번호가 올바르지 않습니다.', login_blocked: '로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요.', rate_limited: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.', password_required: '비밀번호를 입력하세요.', invalid_message: '메시지는 1자 이상 4000자 이하로 입력하세요.', unavailable: '지금은 사용할 수 없습니다. 잠시 후 다시 시도하세요.' },
     context: '대화 기억 사용량',
   } : {
     send: 'Send', placeholder: 'Type a message', password: 'Password', enter: 'Enter', typing: 'Writing a reply…', reset: 'New conversation', resetConfirm: 'Clear this conversation and start over?',
     empty: 'How can I help?', request: 'Request', you: 'You', agent: 'Agent',
-    status: { reviewing: 'Under review', rejected: 'Not accepted', queued: 'Waiting', dispatching: 'Starting', running: 'In progress', summarizing: 'Preparing result', completed: 'Done', failed: 'Failed' },
+    status: { reviewing: 'Under review', rejected: 'Not accepted', queued: 'Waiting', dispatching: 'Starting', running: 'In progress', summarizing: 'Preparing result', completed: 'Done', failed: 'Failed', uncertain: 'Admission needs confirmation' },
     errors: { not_found: 'This page was not found.', wrong_password: 'The password is not correct.', login_blocked: 'Too many sign-in attempts. Try again later.', rate_limited: 'Too many requests. Try again in a moment.', password_required: 'Enter the password.', invalid_message: 'Messages must be 1 to 4000 characters.', unavailable: 'Not available right now. Try again in a moment.' },
     context: 'Conversation memory',
   };

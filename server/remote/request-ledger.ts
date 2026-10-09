@@ -26,7 +26,7 @@ interface Entry { key: string; fingerprint: string; at: number; issued: number; 
 function refusedBeforeAdmission(error: unknown): boolean {
   const status = statusOf(error);
   const { disposition } = error as { disposition?: string };
-  if (disposition === 'uncertain') return false;
+  if (disposition === 'uncertain' || disposition === 'unknown' || disposition === 'committed') return false;
   return error instanceof RunError || disposition === 'handoff' || disposition === 'not-admitted' || (status !== undefined && status < 500);
 }
 

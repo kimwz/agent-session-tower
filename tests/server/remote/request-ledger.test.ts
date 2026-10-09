@@ -1,3 +1,4 @@
+import { RunAdmissionUncertain } from '../../../server/runs/run-records.js';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { until } from '../../helpers/until.ts';
@@ -178,4 +179,15 @@ test('whether a failed request may be sent again with its ID follows its status,
   assert.equal(await again(plain({ statusCode: 404, disposition: 'uncertain' })), false, 'uncertain always wins');
   assert.equal(await again(new RunError('own refusal', 'unavailable')), true);
   assert.equal(await again(Object.assign(new RunError('own but uncertain', 'invalid'), { disposition: 'uncertain' })), false);
+});
+
+ test('uncertain DB admission is a RunError but never frees the remote ledger for retry', async t => {
+  const f = await fixture(t), ledger = await f.open(), id = requestId(Date.now());
+  let attempts = 0;
+  const execute = async (): Promise<{ runId: string }> => { attempts++; throw new RunAdmissionUncertain('receipt unresolved', { commandId: 'fixed-run-commit', sha256: 'a'.repeat(64) }); };
+  await assert.rejects(ledger.once(CONTROLLER,'create',id,{},execute,record,() => undefined), (error: { disposition?: string; retryable?: boolean }) => error.disposition === 'uncertain' && error.retryable === false);
+  await assert.rejects(ledger.once(CONTROLLER,'create',id,{},execute,record,() => undefined), /확실하지/);
+  const restarted = await f.open();
+  await assert.rejects(restarted.once(CONTROLLER,'create',id,{},execute,record,() => undefined), /확실하지/);
+  assert.equal(attempts,1);
 });

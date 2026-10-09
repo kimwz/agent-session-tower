@@ -567,7 +567,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         return json(res, 200, await storageRollback(rollbackAction[1], await readJson(req)));
       }
       if (path === '/api/storage/status' && req.method === 'GET') return json(res, 200, backend.storageStatus?.() ?? { state: 'unavailable', code: 'worker-contract-missing' });
-      const storageRecovery = /^\/api\/storage\/(snapshot|adopt|reconcile|verify-update)$/.exec(path);
+      const storageRecovery = /^\/api\/storage\/(snapshot|adopt|reconcile|verify-update|runs-receipt)$/.exec(path);
       if (storageRecovery && req.method === 'POST') {
         if (!backend.storageRecovery) throw new TowerError('unavailable', 'Storage recovery is unavailable.');
         const input = await readJson(req);
@@ -922,7 +922,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
     } catch (error) {
       const message = error instanceof Error ? error.message : '요청을 처리하지 못했습니다.';
       const disposition = errorDisposition(error);
-      if (!res.headersSent) json(res, errorStatus(error), { error: message, ...(disposition ? { disposition } : {}) });
+      if (!res.headersSent) json(res, errorStatus(error), { error: message, ...(disposition ? { disposition } : {}), ...((error as { commitDisposition?: string }).commitDisposition ? { commitDisposition: (error as { commitDisposition?: string }).commitDisposition } : {}), ...((error as { admission?: unknown; identity?: unknown }).admission || (error as { identity?: unknown }).identity ? { admission: (error as { admission?: unknown }).admission ?? (error as { identity?: unknown }).identity } : {}) });
       else res.end();
     }
   });

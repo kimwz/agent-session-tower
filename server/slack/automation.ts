@@ -1,3 +1,4 @@
+import { admissionUncertain } from '../runs/run-records.js';
 import { slackLanguageInstruction } from './language.js';
 import { FOLLOW_UP_ADDRESSED } from './follow-up.js';
 import { validModelId } from '../providers/models.js';
@@ -77,7 +78,7 @@ export interface SlackAutomationOptions {
   /** Whether Codex work this conversation delegates uses automatic approval review. Always, unless given. */
   autoReview?(workflow: SlackWorkflow): boolean;
 }
-const terminal = new Set(['ignored', 'completed', 'error', 'reply-uncertain']);
+const terminal = new Set(['ignored', 'completed', 'error', 'admission-uncertain', 'reply-uncertain']);
 const MAX_STATE_BYTES = 10_000_000;
 const MAX_RULE_BYTES = 100_000;
 const MAX_REACTIONS = 20;
@@ -178,7 +179,7 @@ export class SlackAutomationManager extends EventEmitter {
       validateSlackRules(saved.rules);
       for (const item of saved.workflows) {
         if (!record(item) || !validMention(item.mention) || item.id !== slackRequestId(item.mention)
-          || !['received', 'matching', 'ignored', 'dispatching', 'running', 'composing', 'sending', 'completed', 'error', 'reply-uncertain'].includes(String(item.status))) throw new Error('Saved Slack workflow is invalid.');
+          || !['received', 'matching', 'ignored', 'dispatching', 'running', 'composing', 'sending', 'completed', 'error', 'admission-uncertain', 'reply-uncertain'].includes(String(item.status))) throw new Error('Saved Slack workflow is invalid.');
         if (item.mode !== undefined && item.mode !== 'conversation') throw new Error('Saved Slack workflow mode is invalid.');
         if (item.approvals !== undefined && item.approvals !== 'auto' && item.approvals !== 'owner') throw new Error('Saved Slack workflow approvals are invalid.');
         if (item.conversationClaimed !== undefined && typeof item.conversationClaimed !== 'boolean') throw new Error('Saved Slack creation claim is invalid.');
@@ -205,7 +206,7 @@ export class SlackAutomationManager extends EventEmitter {
           || !(typeof reaction.name === 'string' && (this.channel.validReaction ?? validEmoji)(reaction.name)) || !['add', 'remove'].includes(String(reaction.action)) || !text(reaction.at, 100)))) throw new Error('Saved Slack reactions are invalid.');
         if (item.followUps !== undefined && (!Array.isArray(item.followUps) || item.followUps.length > MAX_FOLLOW_UPS || item.followUps.some(followUp => !record(followUp)
           || !text(followUp.ts, 200) || !text(followUp.user, 200) || typeof followUp.text !== 'string' || followUp.text.length > MAX_FOLLOW_UP_TEXT || !text(followUp.receivedAt, 100)
-          || !['received', 'pending', 'delivering', 'delivered', 'skipped', 'error'].includes(String(followUp.status))
+          || !['received', 'pending', 'delivering', 'delivered', 'skipped', 'error', 'uncertain'].includes(String(followUp.status))
           || (followUp.mentioned !== undefined && typeof followUp.mentioned !== 'boolean')
           || (followUp.addressed !== undefined && !(typeof followUp.addressed === 'number' && followUp.addressed >= 0 && followUp.addressed <= 1))
           || (followUp.reason !== undefined && !text(followUp.reason, 1500)) || (followUp.runId !== undefined && !text(followUp.runId, 200))
@@ -232,7 +233,7 @@ export class SlackAutomationManager extends EventEmitter {
   rules(): SlackRule[] { return structuredClone(this.configured); }
   list(): SlackWorkflow[] {
     return structuredClone(this.items.map(item => {
-      if (item.mode !== 'conversation' || !item.sessionId) return item;
+      if (item.status === 'admission-uncertain' || item.mode !== 'conversation' || !item.sessionId) return item;
       const runs = this.options.getSessionRuns?.(item.sessionId) ?? [];
       const latest = runs.at(-1);
       const failedTask = item.delegatedTasks?.find(task => task.notificationError || task.submissionError);
@@ -357,12 +358,13 @@ export class SlackAutomationManager extends EventEmitter {
       });
       this.toolOperations.set(item.id, check);
       try { await check; } finally { if (this.toolOperations.get(item.id) === check) this.toolOperations.delete(item.id); }
+      if (item.status === 'admission-uncertain') continue;
       if ((terminal.has(item.status) && !(item.mode === 'conversation' && (item.delegatedTasks?.some(task => !task.notifiedRunId && !task.notificationError && !task.submissionError)
         || (item.sessionId && item.followUps?.some(followUpOpen))))) || this.admissions.has(item.id)) continue;
       if (this.waiting(item)) continue;
       try { await this.advance(item); }
       catch (error) {
-        this.update(item, { status: item.status === 'sending' ? 'reply-uncertain' : 'error', error: this.say(error instanceof Error ? error.message : 'Slack automation failed.').slice(0, 1500) });
+        this.update(item, { status: admissionUncertain(error) ? 'admission-uncertain' : item.status === 'sending' ? 'reply-uncertain' : 'error', error: this.say(error instanceof Error ? error.message : 'Slack automation failed.').slice(0, 1500) });
         await this.persist(); this.emit('change');
       }
     }
@@ -386,6 +388,7 @@ export class SlackAutomationManager extends EventEmitter {
       const job = this.options.getAutoPrompt(item.autoPromptId) ?? await this.options.submitAutoPrompt({ requestId: item.autoPromptId, provider: item.rule.provider, model: item.rule.model, sessionMode: 'new', routingContext: item.rule.instructions,
         ...(item.rule.provider === 'codex' ? { codexApprovalsReviewer: 'auto_review' as const } : {}),
         ...(item.rule.cwd ? { cwd: item.rule.cwd } : {}), prompt: item.prompt }, item.id);
+      if (job.status === 'uncertain') { await this.save(item, { status: 'admission-uncertain', error: job.error }); return; }
       if (job.status === 'error' || job.status === 'cancelled') throw new Error(job.error || 'Auto Prompt routing failed.');
       if (job.status !== 'completed') return;
       if (!job.runId || !job.sessionId) throw new Error('Auto Prompt did not return an execution task.');
@@ -430,7 +433,7 @@ export class SlackAutomationManager extends EventEmitter {
     await this.save(item, { thread, prompt, conversationClaimed: true, status: 'dispatching' });
     let created: { sessionId: string; runId: string };
     try { created = await this.options.startConversation!(structuredClone(item), item.prompt!, instructions); }
-    catch (error) { const recovered = this.options.findConversation?.(item.id); if (!recovered) throw error; created = recovered; }
+    catch (error) { if (admissionUncertain(error)) throw error; const recovered = this.options.findConversation?.(item.id); if (!recovered) throw error; created = recovered; }
     await this.save(item, { ...created, status: 'running' });
   }
   /** Whether a follow-up reached this conversation after its standing rule report was sent or found impossible. */
@@ -493,6 +496,10 @@ export class SlackAutomationManager extends EventEmitter {
       for (const followUp of pending) Object.assign(followUp, { status: 'delivered', runId: resumed.runId, deliveredAt });
       await this.save(item, { status: 'running', runId: resumed.runId });
     } catch (error) {
+      if (admissionUncertain(error)) {
+        for (const followUp of pending) Object.assign(followUp, { status: 'uncertain', reason: 'Run admission receipt is unresolved; this message was not resent.' });
+        await this.save(item, {}); return;
+      }
       const found = this.options.findConversation?.(correlation);
       for (const followUp of pending) Object.assign(followUp, found ? { status: 'delivered', runId: found.runId, deliveredAt }
         : { status: 'error', reason: (error instanceof Error ? error.message : 'The message could not reach the conversation.').slice(0, 1500) });
@@ -627,10 +634,10 @@ export class SlackAutomationManager extends EventEmitter {
         const resumed = await this.options.resumeConversation(structuredClone(item), prompt, correlation, instructions);
         task.notifiedRunId = resumed.runId; await this.save(item, { status: 'running', runId: resumed.runId });
       } catch (error) {
-        const recovered = this.options.findConversation?.(correlation);
+        const recovered = admissionUncertain(error) ? undefined : this.options.findConversation?.(correlation);
         if (recovered) task.notifiedRunId = recovered.runId;
         // A full queue, a runner not accepting yet, or a save that failed admitted nothing: sent on a later tick.
-        else if ((error as { retryable?: unknown })?.retryable === true) delete task.notificationClaimed;
+        else if (!admissionUncertain(error) && (error as { retryable?: unknown })?.retryable === true) delete task.notificationClaimed;
         else task.notificationError = (error instanceof Error ? error.message : 'Result notification failed.').slice(0, 1500);
         await this.save(item, {});
       }

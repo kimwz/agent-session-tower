@@ -34,6 +34,12 @@ export class CreatedSessionRegistry {
 
   serialize(): string { return JSON.stringify([...this.records.values()]); }
 
+  /** Only after a receipt proves the first run was not committed. Never removes a native session. */
+  removeUnconfirmed(id: string, runId: string): void {
+    const record = this.records.get(id);
+    if (record && !record.confirmed && record.runId === runId) this.records.delete(id);
+  }
+
   has(id: string): boolean { return this.records.has(id); }
   /** The session as created, before any native record of it. */
   created(id: string): Session | undefined { return this.records.get(id)?.session; }

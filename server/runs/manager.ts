@@ -1,3 +1,4 @@
+import type { StorageClient } from '../storage/client.js';
 import { MASTER_HEARTBEAT_MARK, type HeartbeatAdmission } from '../../shared/master.js';
 import { resolveRetentionLineage } from '../sessions/retention/ancestry.js';
 import type { RetentionMember } from '../../shared/retention.js';
@@ -31,7 +32,7 @@ import { OwnerAnswers } from './owner-answers.js';
 import { checkedInstructions, TurnNotes } from './turn-notes.js';
 import { sessionEnv, type LaunchMarks } from './turn-env.js';
 import { ToolNotices } from './tool-notices.js';
-import { errorMessage, FINISHED, finishedTime, MAX_OUTPUT, MAX_PROMPT, notAdmitted, RunError, shown } from './run-records.js';
+import { errorMessage, FINISHED, finishedTime, MAX_OUTPUT, MAX_PROMPT, notAdmitted, RunError, shown, admissionUncertain } from './run-records.js';
 import { MAX_RUNS, RunHistory, SCHEDULED_OUTPUT } from './run-history.js';
 import { PermissionContinuations, retainedReceipts } from './permission-continuation.js';
 import { inheritedRunFields, heartbeatRunProtected } from './continuations.js';
@@ -56,6 +57,8 @@ interface RunnerOptions {
   /** Latest native user record, read afresh for permission admission; never inferred from activity timestamps. */
   latestUserMessage?: (sessionId: string) => Promise<{ text: string; timestamp: string } | undefined>;
   stateDir?: string;
+  /** Only the execution worker owns this common storage SDK. */
+  storage?: StorageClient;
   /** How the master's Claude sign-in is checked before its turn (tests replace it). */
   checkClaudeSubscription?: typeof checkClaudeSubscription;
   env?: NodeJS.ProcessEnv;
@@ -231,6 +234,8 @@ export class RunManager extends EventEmitter {
   /** CLIs being updated: none of their runs start until the update is done. */
   private readonly heldProviders = new Set<Provider>();
   private readonly admissions = new Set<string>();
+  private readonly uncertainAdmissions = new Set<string>();
+  private readonly uncertainPrepared = new Map<string, { createdIds: string[]; sessionId?: string }>();
   private readonly incomingAttachments = new Set<ReadonlyArray<string>>();
   private readonly locallySettled = new Map<string, number>();
   private readonly settledRuns = new Set<string>();
@@ -267,7 +272,7 @@ export class RunManager extends EventEmitter {
   constructor(options: RunnerOptions) {
     super();
     this.options = options;
-    this.history = new RunHistory(options.stateDir ?? defaultStateDir());
+    this.history = new RunHistory(options.stateDir ?? defaultStateDir(), options.storage);
     this.ready = !options.holdUntilReady;
     this.attachments = new AttachmentStore(options.stateDir ?? defaultStateDir());
     this.autoAttachments = new AttachmentStore(join(options.stateDir ?? defaultStateDir(), 'auto-prompt-staging'));
@@ -378,6 +383,31 @@ export class RunManager extends EventEmitter {
   /** Fills provenance for sessions created before it was recorded (see CreatedSessionRegistry.backfill). */
   backfillSessionOrigins(links: { sessionIds: ReadonlySet<string>; requestIds: ReadonlySet<string> }): number {
     return this.registry.backfill(links, id => this.runs.get(id));
+  }
+
+  useStorage(storage: StorageClient): void { this.history.useStorage(storage); }
+  pendingAdmission(): { commandId: string; sha256: string } | undefined { return this.history.pendingAdmission(); }
+  /** Receipt inspection settles durability only; it never starts a provider or resends work. */
+  async resolveAdmission(commandId: string): Promise<{ disposition: 'committed' | 'not-committed'; runIds: string[] }> {
+    if (this.history.pendingAdmission()?.commandId !== commandId) throw new RunError('Unknown admission receipt identity.', 'conflict');
+    const resolved = await this.history.resolveAdmission(), runIds = [...this.uncertainAdmissions];
+    for (const id of runIds) {
+      const prepared = this.uncertainPrepared.get(id), run = this.runs.get(id);
+      if (prepared && !resolved.runIds.has(id)) {
+        this.runs.delete(id);
+        if (prepared.sessionId) this.registry.removeUnconfirmed(prepared.sessionId,id);
+        await this.attachments.rollback(prepared.createdIds);
+      } else if (run) {
+        if (run.steering?.state === 'sending') {
+          // Storage resolution does not send steering. This provider call never happened.
+          delete run.steering; delete run.startedAt; run.status = 'queued';
+        }
+        await this.retainAttachments(run);
+      }
+      this.uncertainPrepared.delete(id); this.uncertainAdmissions.delete(id); this.admissions.delete(id);
+    }
+    this.changed(); await this.flush();
+    return { disposition: resolved.disposition, runIds };
   }
 
   async start(): Promise<void> {
@@ -509,11 +539,12 @@ export class RunManager extends EventEmitter {
       catch (error) {
         // No provider starts until both records commit. Keep failure visible; never
         // leave an unacknowledged request queued for a later polling cycle.
+        if (admissionUncertain(error)) { this.uncertainAdmissions.add(run.id); this.uncertainPrepared.set(run.id, { createdIds: prepared.createdIds, sessionId: id }); throw error; }
         this.fail(run, error);
         await this.flush().catch(() => {});
         await this.attachments.rollback(prepared.createdIds);
         throw error;
-      } finally { this.admissions.delete(run.id); }
+      } finally { if (!this.uncertainAdmissions.has(run.id)) this.admissions.delete(run.id); }
       await this.retainAttachments(run);
       void this.pump();
       return { session: this.getSession(id)!, run: shown(run) };
@@ -612,8 +643,11 @@ export class RunManager extends EventEmitter {
       this.prune();
       this.changed();
       try { await this.flush(); } // An accepted instruction is durable before launching the provider.
-      catch (error) { this.runs.delete(run.id); this.changed(); await this.attachments.rollback(prepared.createdIds); throw error; }
-      finally { this.admissions.delete(run.id); }
+      catch (error) {
+        if (admissionUncertain(error)) { this.uncertainAdmissions.add(run.id); this.uncertainPrepared.set(run.id, { createdIds: prepared.createdIds }); throw error; }
+        this.runs.delete(run.id); this.changed(); await this.attachments.rollback(prepared.createdIds); throw error;
+      }
+      finally { if (!this.uncertainAdmissions.has(run.id)) this.admissions.delete(run.id); }
       await this.retainAttachments(run);
       // An accepted instruction replaces the continuation the agent planned; its next turn can schedule again.
       // Tower's own continuation after an update is not the agent's plan: it runs first, then this instruction.
@@ -691,6 +725,7 @@ export class RunManager extends EventEmitter {
       await this.settleSteer(run, selected.target.id);
       return this.list().find(item => item.id === runId)!;
     } catch (error) {
+      if (!submitted && admissionUncertain(error)) { this.uncertainAdmissions.add(run.id); throw error; }
       await this.settleSteer(run, selected.target.id, error, !submitted);
       throw error;
     }
@@ -922,7 +957,10 @@ export class RunManager extends EventEmitter {
             await this.launch(run, session, creating);
           }
           catch (error) { this.reservedSessions.delete(session.id); throw error; }
-        } catch (error) { this.fail(run, error); }
+        } catch (error) {
+          if (admissionUncertain(error)) { this.uncertainAdmissions.add(run.id); this.admissions.add(run.id); this.holdStorage(); }
+          else this.fail(run, error);
+        }
       }
     } catch (error) {
       // A failed refresh must never allow a write based on stale activity data.

@@ -1,3 +1,7 @@
+import { randomUUID } from 'node:crypto';
+import type { StorageClient } from '../storage/client.js';
+import { RunsRepository } from './storage-repository.js';
+import { canonical, rowsOf, RUN_SOURCE_BYTES, type RunDocuments, type RunRow, type RunChange } from './storage-codec.js';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Run, RunInstructions } from '../../shared/types.js';
@@ -6,7 +10,7 @@ import { attachmentMetadata } from '../stores/attachments.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { parseRunOrigin } from './origin.js';
 import { restorePermissionRun } from './permission-continuation.js';
-import { errorMessage, FINISHED, finishedTime, MAX_OUTPUT, MAX_PROMPT, notAdmitted, RunError } from './run-records.js';
+import { errorMessage, FINISHED, finishedTime, MAX_OUTPUT, MAX_PROMPT, notAdmitted, RunError, RunAdmissionUncertain, admissionUncertain } from './run-records.js';
 import { isSavedRun, UUID } from './saved-state.js';
 import { checkedInstructions } from './turn-notes.js';
 
@@ -15,7 +19,7 @@ export const MAX_RUNS = 100;
 const MAX_RETAINED = 50;
 /** A retained finished run keeps what its result notice uses. */
 const RETAINED_OUTPUT = 20_000;
-const MAX_SAVED_BYTES = 64 * 1024 * 1024;
+const MAX_SAVED_BYTES = RUN_SOURCE_BYTES;
 /** What builds before 1.86.0 read at most. */
 const LEGACY_SAVED_BYTES = 11_500_000;
 /** Marks, in runs.json, a turn still to run whose instructions (kept only in memory) it cannot go without. */
@@ -41,6 +45,11 @@ export class RunHistory {
   private readonly instructionsFile: string;
   /** The last content each file holds. Updated only inside the write queue, after a successful write. */
   private readonly saved: { runs?: string; created?: string; instructions?: string } = {};
+  private repository?: RunsRepository;
+  private database = false;
+  private current?: RunDocuments;
+  private rows: RunRow[] = [];
+  private unknown?: RunAdmissionUncertain;
   private writes: Promise<void> = Promise.resolve();
   private persistenceError?: Error;
   /** The last save of required instructions failed: a handoff would lose them, so `flushState` refuses. */
@@ -51,14 +60,42 @@ export class RunHistory {
   readonly restoredRetained = new Set<string>();
   private retained: () => Iterable<string> = () => [];
 
-  constructor(stateDir: string) {
+  constructor(stateDir: string, storage?: StorageClient) {
+    if (storage) this.repository = new RunsRepository(storage);
     this.runsFile = join(stateDir, 'runs.json');
     this.createdFile = join(stateDir, 'created-sessions.json');
     this.instructionsFile = join(stateDir, 'run-instructions.json');
   }
 
+  /** Bind exactly the worker's SDK, before restoration. The repository survives its close/reopen. */
+  useStorage(storage: StorageClient): void {
+    if (this.repository && this.repository.storage !== storage) throw new Error('Runs already belongs to another storage owner.');
+    this.repository ??= new RunsRepository(storage);
+  }
+  private async readDatabase(): Promise<void> {
+    if (!this.repository) return;
+    this.database = await this.repository.databaseAuthority();
+    if (this.database && !this.current) {
+      const current = await this.repository.exportCurrent();
+      this.current = current.documents; this.rows = current.rows;
+    }
+  }
+  pendingAdmission(): { commandId: string; sha256: string } | undefined { return this.unknown?.identity; }
+  async resolveAdmission(): Promise<{ disposition: 'committed' | 'not-committed'; runIds: Set<string> }> {
+    if (!this.unknown || !this.repository) throw new Error('No uncertain runs admission.');
+    await this.writes;
+    const result = await this.repository.resolvePending();
+    if (result === 'unknown') throw this.unknown;
+    const current = await this.repository.exportCurrent();
+    this.unknown = undefined; this.persistenceError = undefined;
+    this.current = current.documents; this.rows = current.rows;
+    return { disposition: result, runIds: new Set(current.documents.runs.map(run => run.id)) };
+  }
+
   /** The saved created conversations, undefined when there are none yet; `noteCreated` records what was read. */
   async readCreated(): Promise<unknown> {
+    await this.readDatabase();
+    if (this.database) return structuredClone(this.current!.created);
     try { return await readPrivateJson(this.createdFile); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -88,7 +125,14 @@ export class RunHistory {
 
   /** The saved runs as this worker takes them over (see restoreRuns); none when nothing was saved. */
   async restore(): Promise<Run[]> {
-    const kept = await this.readInstructions();
+    await this.readDatabase();
+    const kept = this.database ? new Map(Object.entries(this.current!.instructions).map(([id,value]) => [id, { ...checkedInstructions(value), required: true }])) : await this.readInstructions();
+    if (this.database) {
+      const restored = restoreRuns(this.current!.runs, kept);
+      for (const id of restored.restoredRetained) this.restoredRetained.add(id);
+      for (const id of restored.carried) this.carried.add(id);
+      return restored.runs;
+    }
     try {
       if ((await stat(this.runsFile)).size > MAX_SAVED_BYTES) throw new Error('Saved run history is too large.');
       const saved: unknown = JSON.parse(await readFile(this.runsFile, 'utf8'));
@@ -125,7 +169,34 @@ export class RunHistory {
     // Kept only for turns still to run, in a private file older Towers do not read (see instructionsFile).
     const instructions = JSON.stringify(Object.fromEntries([...runs.values()]
       .filter(run => run.instructions?.required && !FINISHED.has(run.status)).map(run => [run.id, run.instructions])));
+    const id = `runs-${randomUUID()}`;
     this.writes = this.writes.then(async () => {
+      if (this.unknown) throw this.unknown;
+      if (this.database) {
+        const documents: RunDocuments = { runs: JSON.parse(data), created: JSON.parse(created), instructions: JSON.parse(instructions) };
+        const next = rowsOf(documents), before = new Map(this.rows.map(row => [canonical([row.kind,row.id]),row]));
+        const changes: RunChange[] = [];
+        // R6 removal boundary: canonical row diff for the old RunHistory.save API only.
+        for (const row of next) {
+          const key = canonical([row.kind,row.id]), previous = before.get(key);
+          if (row.json !== previous?.json) changes.push({ ...row, previous: previous?.json ?? null });
+          before.delete(key);
+        }
+        for (const row of before.values()) changes.push({ ...row, previous: row.json, remove: true });
+        try { await this.repository!.update(changes,'update',id); }
+        catch (error) {
+          if (admissionUncertain(error)) {
+            const identity = this.repository!.lastIntent!;
+            this.unknown = new RunAdmissionUncertain('Run admission has an uncertain durable result. Resolve its fixed receipt before starting or resending.', identity, this.repository!.pending()?.finalSent && (error as { disposition?: string }).disposition === 'committed' ? 'committed' : 'unknown', error);
+            throw this.unknown;
+          }
+          throw error;
+        }
+        this.rows = next; this.current = documents;
+        this.saved.created = created; this.saved.instructions = instructions; this.saved.runs = data;
+        this.instructionsError = undefined; this.persistenceError = undefined;
+        return;
+      }
       // Compare inside the queue: an earlier queued write may still change what a file holds.
       // Write identities first. A crash between commits may leave an orphaned
       // placeholder, which recovery displays as failed and never submits again.
@@ -145,6 +216,7 @@ export class RunHistory {
   /** Waits for every queued save; a failed one refuses, so nothing is acknowledged that is not on disk. */
   async flush(): Promise<void> {
     await this.writes;
+    if (this.unknown) throw this.unknown;
     if (this.persistenceError) throw notAdmitted(new RunError(`Cannot save the instruction queue: ${this.persistenceError.message}`, 'unavailable'));
   }
 

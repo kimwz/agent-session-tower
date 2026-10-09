@@ -387,7 +387,7 @@ export interface AutoPromptJob {
   /** Set when the router runs on another provider than the work. */
   routerProvider?: Provider;
   routerEffort?: string;
-  status: 'queued' | 'routing' | 'dispatching' | 'completed' | 'error' | 'cancelled';
+  status: 'queued' | 'routing' | 'dispatching' | 'completed' | 'error' | 'cancelled' | 'uncertain';
   stage?: 'directory' | 'session';
   createdAt: string;
   updatedAt: string;

@@ -476,7 +476,8 @@ export class MasterSession {
     let ended: MasterTaskState | undefined;
     if (item.jobId && !item.runId) {
       const job = (snapshot.autoPrompts ?? []).find((entry: AutoPromptJob) => entry.id === item.jobId);
-      if (job?.runId && job.sessionId) { item.runId = job.runId; item.sessionId = job.sessionId; }
+      if (job?.status === 'uncertain') ended = 'unknown';
+      else if (job?.runId && job.sessionId) { item.runId = job.runId; item.sessionId = job.sessionId; }
       else if (job && (job.status === 'error' || job.status === 'cancelled')) ended = job.status;
     }
     let run: Run | undefined;

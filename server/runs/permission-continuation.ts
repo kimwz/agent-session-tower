@@ -4,7 +4,7 @@ import type { PermissionRequest } from '../../shared/permissions.js';
 import { TOWER_NOTICE } from '../../shared/task-notification.js';
 import type { Run, Session } from '../../shared/types.js';
 import { inheritedRunFields } from './continuations.js';
-import { FINISHED, finishedTime, RunError } from './run-records.js';
+import { FINISHED, finishedTime, RunError, admissionUncertain } from './run-records.js';
 
 export interface PermissionHost {
   /** The manager's runs: read, and added to by a decision. */
@@ -127,7 +127,7 @@ export class PermissionContinuations {
         });
         if (!approved && notice.steering?.state === 'delivered') { delete continuation.error; this.host.changed(); await this.host.flush(); }
       }
-      catch { if (notice.status === 'queued') { notice.status = 'cancelled'; notice.finishedAt = new Date().toISOString(); this.host.changed(); await this.host.flush(); } }
+      catch (error) { if (admissionUncertain(error)) throw error; if (notice.status === 'queued') { notice.status = 'cancelled'; notice.finishedAt = new Date().toISOString(); this.host.changed(); await this.host.flush(); } }
     }
     if (!approved && continuation.error) throw new RunError(continuation.error, 'conflict');
     this.host.pump();

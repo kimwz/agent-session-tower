@@ -1,3 +1,4 @@
+import { admissionUncertain } from '../runs/run-records.js';
 import { continuedRun, continuedRunById } from '../runs/continuations.js';
 import type { TriggerEvent } from '../../shared/triggers.js';
 import { refused, GitHubError, type GitHubFetch } from './github.js';
@@ -94,7 +95,7 @@ export class TriggerDispatch {
       try {
         let outcome: Partial<TriggerEvent>;
         try { outcome = await this.submit(claimed); }
-        catch (error) { outcome = { status: 'error', error: (error instanceof Error ? error.message : String(error)).slice(0, 1500) }; }
+        catch (error) { outcome = { status: admissionUncertain(error) ? 'uncertain' : 'error', error: (error instanceof Error ? error.message : String(error)).slice(0, 1500) }; }
         await this.store.commit(state => {
           const event = state.events.find(item => item.id === claimed.id);
           if (event) { Object.assign(event, outcome, { updatedAt: new Date(this.now()).toISOString() }); this.handFailed(state, event); }
@@ -217,6 +218,7 @@ export class TriggerDispatch {
         continue;
       }
       const job = event.input.target.mode === 'auto' ? this.executor.getAutoPrompt(event.requestId) : undefined;
+      if (job?.status === 'uncertain') { updates.set(event.id, { status: 'uncertain',error: job.error }); continue; }
       // A turn a forced worker update ended goes on in Tower's continuation; the event follows it.
       const run = continuedRunById(runs, event.dispatch?.runId ?? job?.runId) ?? continuedRun(runs, runs.find(item => item.autoPromptId === event.requestId));
       const patch: Partial<TriggerEvent> = {};

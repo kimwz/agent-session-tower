@@ -6,16 +6,18 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { storageManifest } from '../../../../server/storage/schema.js';
 import { retentionSchema } from '../../../../server/sessions/retention/storage-schema.js';
+import { runsSchema } from '../../../../server/runs/storage-schema.js';
 import { buildIdentityModule, buildIdentityPlugin, STORAGE_BUNDLE_FORMAT, type StorageThreadArtifact } from '../../../../server/storage/thread-bundle.mjs';
 import type * as Parent from './parent.js';
 
 /** Actual A/B domain handlers and captured SDK compiled as future artifact versions; no mocked import support. */
-export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0', output?: string) {
+export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0' | '1.122.0' | '1.123.0', output?: string) {
   const directory = output ?? await mkdtemp(join(tmpdir(), 'tower-retention-artifact-'));
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const root = fileURLToPath(new URL('../../../../', import.meta.url));
   const old = version === '1.120.0';
-  const preparation = version !== '1.121.0';
+  const runsRelease = version === '1.122.0' || version === '1.123.0';
+  const preparation = !runsRelease && version !== '1.121.0';
   const captureRoot = fileURLToPath(new URL(old ? './retention-a120/' : './retention-a1201/', import.meta.url));
   const capture = preparation ? JSON.parse(await readFile(join(captureRoot, 'capture.json'), 'utf8')) : undefined;
   const versionPlugin: Plugin = { name: 'retention-fixture-release', setup(builder) {
@@ -25,6 +27,7 @@ export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' 
       if (createHash('sha256').update(contents).digest('hex') !== capture.files[`server/sessions/retention/${name}`]) throw new Error('Old A capture hash mismatch.');
       return { contents, loader: 'ts' };
     });
+    if (version === '1.123.0') builder.onLoad({ filter: /[\\/]server[\\/]runs[\\/]storage-schema\.ts$/ }, async args => ({ contents: (await readFile(args.path, 'utf8')).replace("domain: 'runs', preparation:", "domain: 'runs', cutover: { artifactVersion: '1.123.0', importContract: 1 }, preparation:"), loader: 'ts' }));
     builder.onLoad({ filter: /[\\/]shared[\\/]app-identity\.ts$/ }, async args => ({ contents: (await readFile(args.path, 'utf8')).replace(/export const APP_VERSION = '[^']+';/, `export const APP_VERSION = '${version}';`), loader: 'ts' }));
   } };
   const { cutover: _cutover, ...preparedSchema } = retentionSchema;
@@ -35,15 +38,16 @@ export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' 
     const firstSql = (source: string) => source.split('version: 1, sql: `')[1]?.split('`.trim() }')[0];
     if (!firstSql(capturedSchema) || firstSql(capturedSchema) !== firstSql(currentSchema)) throw new Error('Old A migration1 changed.');
   }
-  const manifest = storageManifest([schema], version);
+  const manifest = storageManifest(runsRelease ? [schema, version === '1.123.0' ? { ...runsSchema, cutover: { artifactVersion: '1.123.0', importContract: 1 } } : runsSchema] : [schema], version);
   const artifacts: Record<string, StorageThreadArtifact> = {};
-  for (const fault of version !== '1.121.0' ? ['normal', 'after-native-hold'] : ['normal', 'before', 'after', 'after-native-hold', 'refuse-once', 'corrupt', 'io']) {
+  for (const fault of preparation ? ['normal', 'after-native-hold'] : ['normal', 'before', 'after', 'after-native-hold', 'refuse-once', 'corrupt', 'io']) {
     const entry = `
 import { parentPort } from 'node:worker_threads';
 import { runStorageThread } from './server/storage/thread/runtime.js';
 import { retentionDomainFor } from './server/sessions/retention/storage-commands.js';
 import { retentionSchema } from './server/sessions/retention/storage-schema.js';
-const schema = ${version !== '1.121.0' ? 'retentionSchema' : `{ ...retentionSchema, cutover: { artifactVersion: '${version}', importContract: 1 } }`};
+${runsRelease ? `import { runsDomain } from './server/runs/storage-commands.js';` : ''}
+const schema = ${version !== '1.121.0' || runsRelease ? 'retentionSchema' : `{ ...retentionSchema, cutover: { artifactVersion: '${version}', importContract: 1 } }`};
 ${!['before', 'after'].includes(fault) ? '' : `let commitId = -1;
 parentPort.on('message', message => { if (message.op === 'write' && message.command === 'commit') { commitId = message.id; ${fault === 'before' ? 'process.exit(9);' : ''} } });
 const post = parentPort.postMessage.bind(parentPort);
@@ -71,7 +75,7 @@ domain.commands.head = { ...head, run(context, payload) {
   try { db.prepare('SELECT * FROM damage').all(); } finally { db.close(); }
   return head.run(context, payload);
 } };` : ''}
-runStorageThread([domain]);`;
+runStorageThread([domain${runsRelease ? ', runsDomain' : ''}]);`;
     const result = await build({ stdin: { contents: entry, resolveDir: root, sourcefile: 'retention-fixture-thread.ts', loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'cjs', target: 'node22', plugins: [versionPlugin], logLevel: 'silent' });
     const body = result.outputFiles[0].text, sourceHash = createHash('sha256').update(body).digest('hex');
     artifacts[fault] = { format: STORAGE_BUNDLE_FORMAT, sourceHash, source: `var __TOWER_STORAGE_SOURCE_HASH__ = "${sourceHash}";\n${body}` };

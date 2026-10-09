@@ -1,3 +1,4 @@
+import { RunAdmissionUncertain } from '../../../server/runs/run-records.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -52,7 +53,7 @@ async function engine(t: TestContext) {
     await rm(directory, { recursive: true, force: true });
   });
   const file = () => readFile(join(directory, 'trigger-engine.json'), 'utf8');
-  return { directory, project, clock, runs, jobs, calls, order, open, file, hold: (barrier: Promise<void> | undefined) => { gate = barrier; } };
+  return { directory, project, clock, runs, jobs, calls, order, open, file, executor, hold: (barrier: Promise<void> | undefined) => { gate = barrier; } };
 }
 
 const task = (project: string, name: string, values: Partial<TriggerInput> = {}): TriggerInput => ({ name, enabled: true,
@@ -175,4 +176,16 @@ test('a claimed coordinator event is queued again after a restart', async t => {
   const service = await f.open();
   assert.equal(service.event(s.coordinator.id).status, 'queued');
   assert.equal(service.event(s.coordinator.id).claimedAt, undefined);
+});
+
+test('uncertain run admission records an uncertain trigger event and never submits again', async t => {
+  const f = await engine(t); let submitted = 0;
+  f.executor.create = async () => { submitted++; throw new RunAdmissionUncertain('receipt unresolved',{ commandId: 'trigger-fixed-commit',sha256: 'a'.repeat(64) }); };
+  const service = await f.open(), trigger = await service.create(task(f.project,'Uncertain'),OWNER);
+  await service.run(trigger.id,OWNER); await settled(service);
+  assert.equal(service.overview().recent[0].status,'uncertain');
+  await service.tick(); await settled(service); assert.equal(submitted,1);
+  service.close(); await service.settle();
+  const restarted = await f.open(); await restarted.tick(); await settled(restarted);
+  assert.equal(restarted.overview().recent[0].status,'uncertain'); assert.equal(submitted,1);
 });

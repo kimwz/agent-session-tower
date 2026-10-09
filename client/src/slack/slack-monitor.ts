@@ -5,7 +5,7 @@ const active = new Set<SlackWorkflowState>(['received', 'matching', 'dispatching
 const labels: Record<SlackWorkflowState, string> = {
   received: '접수됨', matching: '지침 확인 중', ignored: '해당 없음',
   dispatching: '작업 준비 중', running: '작업 중', composing: '댓글 작성 중',
-  sending: '댓글 전송 중', completed: '완료', error: '오류', 'reply-uncertain': '댓글 전송 확인 필요',
+  sending: '댓글 전송 중', completed: '완료', error: '오류', 'admission-uncertain': '작업 접수 확인 필요', 'reply-uncertain': '댓글 전송 확인 필요',
 };
 export function slackWorkflowWorking(value: SlackWorkflow | SlackWorkflowState): boolean {
   return active.has(typeof value === 'string' ? value : value.status);
