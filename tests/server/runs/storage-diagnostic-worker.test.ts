@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
 import { once } from 'node:events';
-import { lstat, mkdir, mkdtemp, realpath, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, realpath, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -16,7 +16,8 @@ import { rollbackPorts, storageControl } from '../../../server/runs/storage-cont
 import { buildIdentityModule, buildIdentityPlugin } from '../../../server/storage/thread-bundle.mjs';
 import { fileURLToPath } from 'node:url';
 import test, { type TestContext } from 'node:test';
-import { writeHandoff } from '../../../server/runs/handoff.js';
+import { readHandoff, writeHandoff } from '../../../server/runs/handoff.js';
+import { parseRunDocuments } from '../../../server/runs/storage-codec.js';
 import { retentionBootstrap, retentionLegacyFiles } from '../../../server/sessions/retention/storage-transfer.js';
 import { RetentionStore } from '../../../server/sessions/retention/store.js';
 import { retentionBuild } from '../storage/fixtures/retention-build.js';
@@ -458,11 +459,14 @@ for (const stage of ['1', 'late']) test(`actual SDK startup failure parks its co
   assert.deepEqual(JSON.parse(await readFile(counts, 'utf8')), { permissions: 1, autoPrompts: 1 });
 });
 
-async function waitForStorage(call: (method: string, args?: unknown[]) => Promise<RunnerReply>, ready: boolean, deadline: number) {
+async function waitForStorage(call: (method: string, args?: unknown[]) => Promise<RunnerReply>, ready: boolean, deadline: number, worker?: { child: ChildProcess; stderr(): string }) {
+  let lastRpcError: unknown;
+  const diagnosis = () => `exit=${worker?.child.exitCode}, signal=${worker?.child.signalCode}; RPC=${String(lastRpcError)}; stderr=${worker?.stderr() ?? ''}`;
   for (;;) {
-    const reply = await call('snapshot').catch(() => undefined);
+    if (worker && (worker.child.exitCode !== null || worker.child.signalCode !== null)) assert.fail(`Actual worker stopped: ${diagnosis()}`);
+    const reply = await call('snapshot').catch(error => { lastRpcError = error; return undefined; });
     if (reply?.snapshot?.storage?.admissionOpen === ready) return reply;
-    if (Date.now() > deadline) assert.fail('Actual worker storage did not reach the requested admission state.');
+    if (Date.now() > deadline) assert.fail(`Actual worker storage did not reach the requested admission state. ${diagnosis()}`);
     await new Promise(resolve => setTimeout(resolve, 25));
   }
 }
@@ -504,16 +508,18 @@ test('normal ready worker accepts withdrawal release but resumes only after the 
 });
 
 test('actual recovery RPC verifies an own failed update, preserves refusal guards, and leaves retry explicit', { timeout: 90000 }, async t => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'tw-receipt-')));
+  // Generated external-package ESM must resolve the checkout's installed dependencies.
+  const root = await realpath(await mkdtemp(join(dirname(fileURLToPath(import.meta.url)), 'tw-receipt-')));
   const state = join(root, 'state'); const paths = await runnerPaths(state);
   const journal = join(state, 'retention', 'journal.json');
   await mkdir(dirname(journal), { recursive: true, mode: 0o700 });
   await writeFile(journal, '{unknown journal', { mode: 0o600 });
   await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
   await prepareRetentionA(root, state);
-  const { call } = await launchDiagnostic(t, root, state, paths, await recoveryWorkerA122(root));
+  const worker = await launchDiagnostic(t, root, state, paths, await recoveryWorkerA122(root));
+  const { call } = worker;
   const deadline = Date.now() + 60000;
-  const first = await waitForStorage(call, false, deadline);
+  const first = await waitForStorage(call, false, deadline, worker);
   assert.equal(first.snapshot?.storage?.code, 'cold-journal-unavailable');
   assert.equal(first.snapshot?.storage?.identity?.appVersion, '1.122.0');
   assert.equal(first.snapshot?.storage?.identity?.sourceHash, '7c5ffc9947cb27e8f21b158d3136f6ea22cc971552c51327f64d6c297673be58');
@@ -541,7 +547,7 @@ test('actual recovery RPC verifies an own failed update, preserves refusal guard
   assert.equal((await call('snapshot')).snapshot?.storage?.code, 'cold-journal-unavailable', 'the receipt cannot bypass an unrepaired source');
   await writeFile(journal, JSON.stringify({ version: 1, migratedAt: 1234, entries: [] }), { mode: 0o600 });
   await call('storageRetry');
-  assert.equal((await waitForStorage(call, true, deadline)).instance, first.instance);
+  assert.equal((await waitForStorage(call, true, deadline, worker)).instance, first.instance);
 });
 
 test('explicit same-worker retry rechecks a repaired private database path without changing captured build identity', { timeout: 90000 }, async t => {
@@ -852,6 +858,7 @@ test('a durable owner hold accepted at the actual bootstrap success response par
     from: identity.appVersion, target: '0.0.1', sourceHash: 'b'.repeat(64), manifestDigest: 'c'.repeat(64), entrySha256: 'd'.repeat(64), updateSha256: null,
     state: 'waiting', by: 'fixture-owner', reason: 'new hold before restore', held: true, switched: false,
     attempt: { n: 1, pid: process.pid, start: 'fixture-parent', nonce: 'a'.repeat(32), kind: 'run', at }, startedAt: at, updatedAt: at };
+  await mkdir(dirname(storageUpdatePaths(state).rollback), { recursive: true, mode: 0o700 });
   await writeFile(storageUpdatePaths(state).rollback, JSON.stringify(record), { mode: 0o600 });
   assert.equal((await call('storageControl', ['hold', { fence }])).error, undefined, 'actual diagnostic RPC accepts the valid durable owner hold');
   await writeFile(join(state, 'fixture-bootstrap-release'), 'return successful product bootstrap', { mode: 0o600 });
@@ -897,6 +904,66 @@ test('a durable owner hold accepted at the actual bootstrap success response par
   await call('storageRetry');
   assert.equal(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')).scanner, 1);
   assert.equal((await listPendingSecretImports(state)).length, 1);
+});
+
+test('actual prestart B patient handoff preserves nonempty partial runs sources without import evidence', { timeout: 90000 }, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-runs-prestart-handoff-'))), state = join(root, 'state');
+  const paths = await runnerPaths(state), deadline = Date.now() + 60000;
+  await mkdir(state, { recursive: true, mode: 0o700 });
+  await mkdir(join(state, 'retention'), { mode: 0o700 });
+  await writeFile(join(state, 'retention', 'journal.json'), JSON.stringify({ version: 1, migratedAt: 1, entries: [], policies: [] }), { mode: 0o600 });
+  await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
+  const id = '10000000-0000-4000-8000-000000000001', sessionId = 'codex:monitor-10000000-0000-4000-8000-000000000002';
+  const at = '2026-10-01T00:00:00.000Z';
+  const runs = Buffer.from(JSON.stringify([{ id, sessionId, prompt: 'Preserve accepted work', status: 'queued', createdAt: at, output: '', needsInstructions: true, keepQueued: true, retain: true }], null, 2) + '\n');
+  const created = Buffer.from(JSON.stringify([{ session: { id: sessionId, nativeId: '', provider: 'codex', title: 'Preserve provenance', cwd: root, project: 'fixture', status: 'idle', statusReason: '', createdAt: at, updatedAt: at, lastMessage: '', messageCount: 0, isSubagent: false, resumable: false, creationPending: true }, runId: id, confirmed: false, origin: { kind: 'owner', untrustedInput: false } }], null, 2) + '\n');
+  // Validate the nonempty source records; the dependency stays missing on disk throughout.
+  const valid = parseRunDocuments({ runs, created, instructions: Buffer.from(JSON.stringify({ [id]: { text: 'Missing private dependency', required: true } })) });
+  assert.equal(valid.runs.length, 1); assert.equal(valid.created.length, 1);
+  const sourcePaths = [join(state, 'runs.json'), join(state, 'created-sessions.json')];
+  await writeFile(sourcePaths[0], runs, { mode: 0o600 });
+  await writeFile(sourcePaths[1], created, { mode: 0o600 });
+  const before = await Promise.all(sourcePaths.map(async path => ({ bytes: await readFile(path), info: await lstat(path) })));
+  await prepareRetentionA(root, state);
+  const worker = await launchDiagnostic(t, root, state, paths, undefined, { TOWER_FIXTURE_COLD_COUNTS: '1' });
+  let held = await waitForStorage(worker.call, false, deadline, worker);
+  while (held.snapshot?.storage?.code !== 'runs-bootstrap-held') {
+    assert.equal(worker.child.exitCode, null, worker.stderr());
+    if (Date.now() > deadline) assert.fail(`Bootstrap did not hold: ${worker.stderr()}`);
+    await new Promise(resolve => setTimeout(resolve, 25));
+    held = await worker.call('snapshot');
+  }
+  assert.equal(held.snapshot?.storage?.code, 'runs-bootstrap-held');
+  assert.equal(held.snapshot?.storage?.sessionsAvailable, false);
+  assert.equal((await worker.call('create')).error?.disposition, 'not-admitted');
+  const preserved = async () => {
+    for (const [index, path] of sourcePaths.entries()) {
+      const bytes = await readFile(path), info = await lstat(path);
+      assert.deepEqual(bytes, before[index].bytes);
+      assert.equal(createHash('sha256').update(bytes).digest('hex'), createHash('sha256').update(before[index].bytes).digest('hex'));
+      assert.equal(info.ino, before[index].info.ino); assert.equal(info.mtimeMs, before[index].info.mtimeMs);
+    }
+    await assert.rejects(lstat(join(state, 'run-instructions.json')), { code: 'ENOENT' });
+    assert.deepEqual(await readdir(join(state, 'runs-storage-migrations')), [], 'an empty parent is not a sealed backup');
+    assert.deepEqual(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')), { scanner: 0, temporary: 0, native: 0 });
+    const db = new DatabaseSync(join(state, 'state.sqlite'), { readOnly: true });
+    try {
+      for (const sql of ["SELECT * FROM domain_imports WHERE domain = 'runs'", 'SELECT * FROM runs_state', 'SELECT * FROM runs_rows', 'SELECT * FROM runs_stages', 'SELECT * FROM runs_stage_chunks', "SELECT * FROM operation_receipts WHERE scope = 'runs'"]) assert.deepEqual(db.prepare(sql).all(), []);
+    } finally { db.close(); }
+  };
+  await preserved();
+  // Exercise the real patient handoff/quiesce/close, but deliberately give it no executable
+  // successor: no detached worker can mutate the sources or escape this fixture's ownership.
+  const absentSuccessor = join(root, 'absent-successor');
+  await assert.rejects(lstat(absentSuccessor), { code: 'ENOENT' });
+  const closed = once(worker.child, 'close');
+  assert.equal((await worker.call('requestHandoff', [{ execPath: absentSuccessor, args: ['--runner-worker', state] }, { patient: true }])).error, undefined);
+  await closed;
+  assert.equal(worker.child.exitCode, 0, worker.stderr());
+  const handoff = await readHandoff(paths.runtime);
+  assert.ok(handoff?.clean); assert.equal(handoff.previous, held.instance); assert.equal(handoff.storageTransition, true);
+  assert.match(worker.stderr(), /Could not start the successor execution worker/);
+  await preserved();
 });
 
 test('actual B runs bootstrap parks before scans and admits once after explicit source repair', { timeout: 90000 }, async t => {

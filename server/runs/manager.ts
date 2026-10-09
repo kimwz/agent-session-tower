@@ -1341,7 +1341,9 @@ export class RunManager extends EventEmitter {
 
   /** Waits for every accepted change to reach disk, without stopping or cancelling anything. */
   async flushState(): Promise<void> {
-    this.persist(); await this.flush();
+    // Before restore completes, the empty live maps do not represent the saved source.
+    if (this.started) this.persist();
+    await this.flush();
     this.history.checkInstructionsSaved();
   }
 
