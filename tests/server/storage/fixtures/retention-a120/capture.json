@@ -1,0 +1,10 @@
+{
+  "sourceCommit": "fda8e45f700d914fd0208202871c3120c79c25cc",
+  "releaseTag": "v1.120.0",
+  "parentCreated": true,
+  "files": {
+    "server/sessions/retention/storage-schema.ts": "46970a7023d7a8ddbd5fe5b160ac16974ac5fbe1d1aa1998322fa11b45ad62da",
+    "server/sessions/retention/storage-commands.ts": "4ca3e87cbf0867692b23d648c0f82f84f2dfececf841bd6eb7a4ca669199cef3"
+  },
+  "purpose": "actual immutable schema1/handler source for older A negative boundary; not relabeled schema2"
+}

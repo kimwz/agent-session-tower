@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.120.1] - 2026-10-09
+
+### Changed
+
+- Bound retention staging reservations across all owners without deleting unresolved intents, and hold normal worker startup and failed retries until the cold journal is known. Production first import remains disabled.
+
 ## [1.120.0] - 2026-10-09
 
 ### Changed

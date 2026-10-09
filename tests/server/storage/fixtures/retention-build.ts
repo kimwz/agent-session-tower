@@ -10,23 +10,38 @@ import { buildIdentityModule, buildIdentityPlugin, STORAGE_BUNDLE_FORMAT, type S
 import type * as Parent from './parent.js';
 
 /** Actual A/B domain handlers and captured SDK compiled as future artifact versions; no mocked import support. */
-export async function retentionBuild(version: '1.120.0' | '1.121.0', output?: string) {
+export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.121.0', output?: string) {
   const directory = output ?? await mkdtemp(join(tmpdir(), 'tower-retention-artifact-'));
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const root = fileURLToPath(new URL('../../../../', import.meta.url));
+  const old = version === '1.120.0';
+  const captureRoot = fileURLToPath(new URL('./retention-a120/', import.meta.url));
+  const capture = old ? JSON.parse(await readFile(join(captureRoot, 'capture.json'), 'utf8')) : undefined;
   const versionPlugin: Plugin = { name: 'retention-fixture-release', setup(builder) {
+    if (old) builder.onLoad({ filter: /[\\/]server[\\/]sessions[\\/]retention[\\/]storage-(schema|commands)\.ts$/ }, async args => {
+      const name = args.path.split(/[\\/]/).at(-1)!;
+      const contents = await readFile(join(captureRoot, `${name}.txt`), 'utf8');
+      if (createHash('sha256').update(contents).digest('hex') !== capture.files[`server/sessions/retention/${name}`]) throw new Error('Old A capture hash mismatch.');
+      return { contents, loader: 'ts' };
+    });
     builder.onLoad({ filter: /[\\/]shared[\\/]app-identity\.ts$/ }, async args => ({ contents: (await readFile(args.path, 'utf8')).replace(/export const APP_VERSION = '[^']+';/, `export const APP_VERSION = '${version}';`), loader: 'ts' }));
   } };
-  const schema = version === '1.120.0' ? retentionSchema : { ...retentionSchema, cutover: { artifactVersion: version, importContract: 1 } };
+  const schema = old ? { ...retentionSchema, preparation: { ...retentionSchema.preparation!, requiredArtifactVersion: '1.120.0' }, migrations: retentionSchema.migrations.slice(0, 1) } : version === '1.120.1' ? retentionSchema : { ...retentionSchema, cutover: { artifactVersion: version, importContract: 1 } };
+  if (old) {
+    const capturedSchema = await readFile(join(captureRoot, 'storage-schema.ts.txt'), 'utf8');
+    const currentSchema = await readFile(join(root, 'server/sessions/retention/storage-schema.ts'), 'utf8');
+    const firstSql = (source: string) => source.split('version: 1, sql: `')[1]?.split('`.trim() }')[0];
+    if (!firstSql(capturedSchema) || firstSql(capturedSchema) !== firstSql(currentSchema)) throw new Error('Old A migration1 changed.');
+  }
   const manifest = storageManifest([schema], version);
   const artifacts: Record<string, StorageThreadArtifact> = {};
-  for (const fault of version === '1.120.0' ? ['normal', 'after-native-hold'] : ['normal', 'before', 'after', 'after-native-hold', 'refuse-once', 'corrupt', 'io']) {
+  for (const fault of version !== '1.121.0' ? ['normal', 'after-native-hold'] : ['normal', 'before', 'after', 'after-native-hold', 'refuse-once', 'corrupt', 'io']) {
     const entry = `
 import { parentPort } from 'node:worker_threads';
 import { runStorageThread } from './server/storage/thread/runtime.js';
 import { retentionDomainFor } from './server/sessions/retention/storage-commands.js';
 import { retentionSchema } from './server/sessions/retention/storage-schema.js';
-const schema = ${version === '1.120.0' ? 'retentionSchema' : `{ ...retentionSchema, cutover: { artifactVersion: '${version}', importContract: 1 } }`};
+const schema = ${version !== '1.121.0' ? 'retentionSchema' : `{ ...retentionSchema, cutover: { artifactVersion: '${version}', importContract: 1 } }`};
 ${!['before', 'after'].includes(fault) ? '' : `let commitId = -1;
 parentPort.on('message', message => { if (message.op === 'write' && message.command === 'commit') { commitId = message.id; ${fault === 'before' ? 'process.exit(9);' : ''} } });
 const post = parentPort.postMessage.bind(parentPort);

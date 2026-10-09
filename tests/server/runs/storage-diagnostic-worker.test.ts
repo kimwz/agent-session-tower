@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
 import { once } from 'node:events';
@@ -279,7 +280,7 @@ test('actual product worker refuses an unsupported captured thread before restor
 });
 
 
-for (const matching of [true, false]) test(`actual successor applies the new cold journal transition only for its exact observed nonce (matching=${matching})`, { timeout: 90000 }, async t => {
+for (const matching of [true, false]) test(`actual successor holds an unknown cold journal regardless of observed nonce (matching=${matching})`, { timeout: 90000 }, async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-storage-successor-'))); const state = join(root, 'state'); const paths = await runnerPaths(state);
   await mkdir(paths.runtime, { recursive: true, mode: 0o700 });
   const nonce = 'a'.repeat(32);
@@ -289,16 +290,16 @@ for (const matching of [true, false]) test(`actual successor applies the new col
   const { child, call, stderr } = await launchDiagnostic(t, root, state, paths, entry, { TOWER_HANDOFF: nonce });
   let snapshot: RunnerReply | undefined;
   const deadline = Date.now() + 60000;
-  while (matching ? snapshot?.snapshot?.storage?.code !== 'cold-journal-unavailable' : !snapshot?.snapshot?.storage?.admissionOpen) {
+  while (snapshot?.snapshot?.storage?.code !== 'cold-journal-unavailable') {
     assert.equal(child.exitCode, null, stderr());
     if (Date.now() > deadline) assert.fail(stderr());
     try { snapshot = await call('snapshot'); } catch { /* Owned child has not published its endpoint yet. */ }
     await new Promise(resolve => setTimeout(resolve, 25));
   }
-  assert.equal(snapshot?.snapshot?.storage?.sessionsAvailable, !matching);
-  assert.equal(snapshot?.snapshot?.storage?.admissionOpen, !matching);
+  assert.equal(snapshot?.snapshot?.storage?.sessionsAvailable, false);
+  assert.equal(snapshot?.snapshot?.storage?.admissionOpen, false);
   assert.equal(await readFile(journal, 'utf8'), '{broken fixture journal', 'failed journal reads preserve the original source');
-  if (matching) assert.equal((await call('create')).error?.disposition, 'not-admitted');
+  assert.equal((await call('create')).error?.disposition, 'not-admitted');
 });
 
 async function fixtureCall(paths: Awaited<ReturnType<typeof runnerPaths>>, method: string, args: unknown[] = []): Promise<RunnerReply> {
@@ -655,4 +656,73 @@ test('a newer actual rollback hold wins while the matching withdrawal retry awai
   assert.deepEqual(held.snapshot?.autoPrompts, [], 'no automation dispatch after the old retry resumes');
   const durable = await readRollbackRecord(state);
   assert.ok(durable.state === 'present' && durable.record.id === record.id && durable.record.held);
+});
+
+
+for (const damage of ['malformed', 'missing-wrapper', 'missing-state', 'physical'] as const) test(`normal boot holds cold journal ${damage} and repeated failed retry in the same actual worker`, { timeout: 90000 }, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-cold-boot-')));
+  const state = join(root, 'state'), paths = await runnerPaths(state);
+  const deadline = Date.now() + 60000;
+  if (damage !== 'malformed') {
+    const seed = await launchDiagnostic(t, root, state, paths);
+    const serving = await waitForStorage(seed.call, true, deadline);
+    assert.equal(serving.snapshot?.storage?.state, 'ready', 'fresh install ENOENT initializes without a DB authority marker');
+    const exit = once(seed.child, 'exit'); seed.child.kill('SIGKILL'); await exit;
+    const db = new DatabaseSync(join(state, 'state.sqlite'));
+    try {
+      db.prepare('INSERT INTO domain_imports VALUES (?,?,?,?,?,?,?,?,?,?)').run('retention', 'database', 1, 'a'.repeat(64), 1, 1, new Date().toISOString(), '1.121.0', 'b'.repeat(64), 1);
+      if (damage !== 'missing-state') db.prepare('INSERT INTO retention_state VALUES (1,1)').run();
+      if (damage !== 'missing-wrapper') db.prepare('INSERT INTO retention_metadata (kind,id,ordinal,json) VALUES (?,?,?,?)').run('journal', '', 0, JSON.stringify({ version: 1, migratedAt: 1234, entries: [] }));
+    } finally { db.close(); }
+    if (damage === 'physical') await writeFile(join(state, 'state.sqlite'), 'fixture physical SQLite corruption', { mode: 0o600 });
+  }
+  const journal = join(state, 'retention', 'journal.json');
+  await mkdir(dirname(journal), { recursive: true, mode: 0o700 });
+  await writeFile(journal, '{unknown journal', { mode: 0o600 });
+  const proof = join(state, 'launch-marks', 'cold-proof.json'); await mkdir(dirname(proof), { recursive: true, mode: 0o700 }); await writeFile(proof, 'preserve proof', { mode: 0o600 });
+  const launcher = join(state, 'agent-launches.json'), native = join(root, 'claude', 'projects', 'fixture', 'known-cold.jsonl');
+  await mkdir(dirname(native), { recursive: true, mode: 0o700 });
+  await writeFile(native, JSON.stringify({ type: 'user', sessionId: 'known-cold', cwd: state, timestamp: '2026-10-01T00:00:00.000Z', message: { role: 'user', content: 'fixture cold transcript' } }) + '\n', { mode: 0o600 });
+  await writeFile(launcher, JSON.stringify({ version: 1, launches: { 'claude:known-cold': ['claude:parent'] } }), { mode: 0o600 });
+  const protectedBytes = await Promise.all([launcher, native].map(path => readFile(path)));
+  const before = await lstat(proof);
+  const live = await launchDiagnostic(t, root, state, paths, undefined, { TOWER_FIXTURE_COLD_COUNTS: '1' });
+  const held = await waitForStorage(live.call, false, deadline);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const snapshot = await live.call('snapshot'), status = snapshot.snapshot!.storage!;
+    assert.equal(snapshot.instance, held.instance);
+    assert.equal(status.admissionOpen, false); assert.equal(status.sessionsAvailable, false); assert.equal(status.healthStatus, 503);
+    if (damage === 'physical') { assert.notEqual(status.code, 'cold-journal-unavailable'); assert.ok(status.failure); }
+    else { assert.equal(status.code, 'cold-journal-unavailable'); assert.equal(status.failure, undefined, 'healthy shared SDK is distinct from physical failure'); }
+    assert.equal((await live.call('sessionHistory')).error?.statusCode, 503);
+    assert.equal((await live.call('create')).error?.disposition, 'not-admitted');
+    assert.deepEqual(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')), { scanner: 0, temporary: 0, native: 0 });
+    assert.equal(await readFile(proof, 'utf8'), 'preserve proof'); assert.equal((await lstat(proof)).mtimeMs, before.mtimeMs);
+    assert.equal(await readFile(journal, 'utf8'), '{unknown journal');
+    assert.deepEqual(await Promise.all([launcher, native].map(path => readFile(path))), protectedBytes, 'unknown cold state never prunes launcher proof or changes native transcript');
+    if (attempt < 2) await live.call('storageRetry');
+  }
+  if (damage === 'physical') return; // physical schema damage requires the existing SDK recovery contract
+  const knownMember = { sessionId: 'claude:known-cold', provider: 'claude', nativeId: 'known-cold', isSubagent: false,
+    createdAt: '2026-10-01T00:00:00.000Z', operationId: 'known-operation', state: 'cold',
+    originalPath: join(root, 'claude', 'projects', 'fixture', 'known-cold.jsonl'),
+    coldPath: join(state, 'retention-originals', 'known-cold.jsonl'), identity: { dev: 1, ino: 2, size: 3, mtimeMs: 4 } };
+  const knownEntry = { id: 'known-operation', phase: 'archived', archiveRevision: 1, candidate: { ids: ['claude:known-cold'] }, members: [knownMember] };
+  if (damage === 'malformed') await writeFile(journal, JSON.stringify({ version: 1, migratedAt: 1234, entries: [knownEntry] }), { mode: 0o600 });
+  else {
+    const db = new DatabaseSync(join(state, 'state.sqlite'));
+    try {
+      db.prepare('INSERT INTO retention_metadata (kind,id,ordinal,json) VALUES (?,?,?,?)').run('entry', knownEntry.id, 0, JSON.stringify(knownEntry));
+      if (damage === 'missing-state') db.prepare('INSERT INTO retention_state VALUES (1,1)').run();
+      else db.prepare('INSERT INTO retention_metadata (kind,id,ordinal,json) VALUES (?,?,?,?)').run('journal', '', 0, JSON.stringify({ version: 1, migratedAt: 1234, entries: [] }));
+    } finally { db.close(); }
+  }
+  await live.call('storageRetry');
+  const resumed = await waitForStorage(live.call, true, deadline);
+  assert.equal(resumed.instance, held.instance); assert.equal(resumed.snapshot?.storage?.sessionsAvailable, true);
+  assert.equal(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')).scanner, 1);
+  const registry = JSON.parse(await readFile(join(state, 'fixture-cold-registry.json'), 'utf8'));
+  assert.deepEqual(JSON.parse(await readFile(join(state, 'fixture-firstscan-registry.json'), 'utf8')), registry, 'known registry precedes the actual first scan');
+  assert.ok(registry.ids.includes('claude:known-cold')); assert.ok(registry.paths.includes(knownMember.originalPath));
+  assert.equal(resumed.snapshot?.sessions.some(session => session.id === 'claude:known-cold'), false);
 });

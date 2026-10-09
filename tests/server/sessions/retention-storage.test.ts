@@ -14,7 +14,7 @@ import { RetentionStore } from '../../../server/sessions/retention/store.js';
 import { RetentionObserver } from '../../../server/sessions/retention/observer.js';
 import { RetentionRepository } from '../../../server/sessions/retention/storage-repository.js';
 import { exportRetention, importRetention, restoreRetention } from '../../../server/sessions/retention/storage-transfer.js';
-import { journalDocument, observationDocument, retentionHash, type RetentionDocuments } from '../../../server/sessions/retention/storage-codec.js';
+import { journalDocument, observationDocument, retentionHash, RETENTION_INTENT_BYTES, RETENTION_CHUNK_BYTES, type RetentionDocuments } from '../../../server/sessions/retention/storage-codec.js';
 import { RetentionService } from '../../../server/sessions/retention/service.js';
 import { RetentionArchive } from '../../../server/sessions/retention/archive.js';
 import { SessionService } from '../../../server/sessions/service.js';
@@ -24,7 +24,7 @@ import type { RetentionJournalEntry, RetentionOperationContext } from '../../../
 
 async function folder(t: TestContext) { const path = await realpath(await mkdtemp(join(tmpdir(), 'tower-retention-fixture-'))); t.after(() => rm(path, { recursive: true, force: true })); return path; }
 async function builds(t: TestContext) {
-  const a = await retentionBuild('1.120.0', await folder(t)), b = await retentionBuild('1.121.0', await folder(t));
+  const a = await retentionBuild('1.120.1', await folder(t)), b = await retentionBuild('1.121.0', await folder(t));
   return { a, b };
 }
 const documents = (): RetentionDocuments => ({
@@ -544,4 +544,93 @@ test('unknown observation commit preserves memory and forbids retry even when th
   const reopened = await openB(t, stateDir, b);
   assert.equal((await reopened.client.receipt(intent.commandId)).found, true);
   assert.deepEqual((await new RetentionRepository(reopened.client).exportCurrent()).documents.observations.entries, []);
+});
+
+
+test('all-owner reservations enforce count 16/17 and bytes boundary through actual SDK and rollback A', async t => {
+  const { a, b } = await builds(t);
+  for (const reservations of [Array(16).fill(1), [RETENTION_INTENT_BYTES, RETENTION_INTENT_BYTES], [RETENTION_INTENT_BYTES, RETENTION_INTENT_BYTES - 1, 1]]) {
+    const stateDir = await folder(t); await prepareA(stateDir, a);
+    const { client } = await openB(t, stateDir, b);
+    for (const [index, bytes] of reservations.entries()) {
+      const payload = { intent: `reserved-${index}`, bytes, chunks: Math.ceil(bytes / RETENTION_CHUNK_BYTES), sha256: 'a'.repeat(64) };
+      await client.write('retention', 'begin', payload, `reserve-${index}`);
+      await client.write('retention', 'begin', payload, `reserve-${index}`); // receipt replay does not reserve again
+      await assert.rejects(client.write('retention', 'commit', { intent: payload.intent }, `failed-${index}`), error => {
+        assert.equal((error as { disposition: string }).disposition, 'not-committed'); return true;
+      });
+      assert.equal((await client.receipt(`failed-${index}`)).found, false);
+    }
+    await client.close();
+    const rollback = await a.storage.openStorage({ stateDir, bundle: a.bundle() }); t.after(() => rollback.close());
+    await rollback.prepare({ allowMigration: false });
+    await assert.rejects(rollback.write('retention', 'begin', { intent: 'over-limit', bytes: 1, chunks: 1, sha256: 'b'.repeat(64) }, 'over-limit'), error => {
+      assert.equal((error as { code: string }).code, 'domain-failed');
+      assert.equal((error as { disposition: string }).disposition, 'not-committed'); return true;
+    });
+    assert.equal((await rollback.receipt('over-limit')).found, false);
+    assert.equal((await rollback.gate('core')).open, true);
+    await rollback.close();
+    const db = new DatabaseSync(join(stateDir, 'state.sqlite'));
+    try {
+      assert.equal((db.prepare('SELECT count(*) AS n FROM retention_stages').get() as { n: number }).n, reservations.length);
+      assert.throws(() => db.prepare('INSERT INTO retention_stages VALUES (?,?,?,?,?)').run('sql-bypass', 999, 1, 'c'.repeat(64), 1), /reservation limit/);
+      if (reservations.length !== 16) assert.throws(() => db.prepare('UPDATE retention_stages SET bytes = bytes + 1 WHERE intent = ?').run(`reserved-${reservations.length - 1}`), /reservation limit/);
+    } finally { db.close(); }
+  }
+});
+
+test('actual immutable old A rejects schema2; preparing over-limit schema1 preserves authority, stages and receipts', async t => {
+  const old = await retentionBuild('1.120.0', await folder(t)), { a } = await builds(t);
+  assert.equal(old.manifest.domains[0].schemaVersion, 1);
+  assert.equal(a.manifest.domains[0].schemaVersion, 2);
+  for (const count of [17, 3]) {
+    const stateDir = await folder(t);
+    const client = await old.storage.openStorage({ stateDir, bundle: old.bundle() });
+    await client.prepare({ allowMigration: true });
+    for (let index = 0; index < count; index++) {
+      const bytes = count === 17 ? 1 : RETENTION_INTENT_BYTES;
+      await client.write('retention', 'begin', { intent: `old-${index}`, bytes, chunks: Math.ceil(bytes / RETENTION_CHUNK_BYTES), sha256: 'a'.repeat(64) }, `old-${index}`);
+    }
+    await client.close();
+    await sources(stateDir);
+    const originalJournal = await readFile(join(stateDir, 'retention', 'journal.json'));
+    const path = join(stateDir, 'state.sqlite');
+    const marker = new DatabaseSync(path);
+    try { marker.prepare('INSERT INTO domain_imports VALUES (?,?,?,?,?,?,?,?,?,?)').run('retention', 'database', 1, 'a'.repeat(64), 1, 1, '2026-10-09', old.version, 'b'.repeat(64), 1); } finally { marker.close(); }
+    const snapshot = () => {
+      const db = new DatabaseSync(path);
+      try { return ['retention_stages', 'retention_stage_chunks', 'domain_imports', 'operation_receipts', 'storage_meta', 'schema_migrations'].map(table => db.prepare(`SELECT * FROM ${table} ORDER BY 1`).all()); }
+      finally { db.close(); }
+    };
+    const before = snapshot();
+    const next = await a.storage.openStorage({ stateDir, bundle: a.bundle() });
+    await assert.rejects(next.prepare({ allowMigration: true })); await next.close();
+    assert.deepEqual(snapshot(), before, 'prepare refuses without cleaning residue or rewriting authority/receipts');
+    assert.deepEqual(await readFile(join(stateDir, 'retention', 'journal.json')), originalJournal);
+  }
+  const stateDir = await folder(t); await prepareA(stateDir, a);
+  const older = await old.storage.openStorage({ stateDir, bundle: old.bundle() });
+  try { assert.equal(older.status().state, 'unavailable'); assert.equal(older.status().failure?.code, 'unknown-schema'); await assert.rejects(older.prepare({ allowMigration: false })); }
+  finally { await older.close(); }
+});
+
+
+test('failed current guards reserve their intent until the all-owner cap; receipts never authorize replay', async t => {
+  const stateDir = await folder(t), { a, b } = await builds(t), evidenceParent = await sources(stateDir);
+  await prepareA(stateDir, a); const { client, update } = await openB(t, stateDir, b);
+  await importRetention({ storage: client, update, stateDir, evidenceParent, commandId: 'guard-import' });
+  for (let index = 0; index < 16; index++) {
+    const intent = `guard-${index}`, bytes = Buffer.from(JSON.stringify({ mode: 'update', revision: 0, generation: 1, changes: [] }));
+    await client.write('retention', 'begin', { intent, bytes: bytes.length, chunks: 1, sha256: retentionHash(bytes) }, `${intent}-begin`);
+    await client.write('retention', 'stage', { intent, part: 0, data: bytes.toString('base64') }, `${intent}-stage`);
+    await assert.rejects(client.write('retention', 'commit', { intent }, `${intent}-commit`), /current generation/);
+    assert.equal((await client.receipt(`${intent}-begin`)).found, true);
+    assert.equal((await client.receipt(`${intent}-commit`)).found, false);
+  }
+  const before = await new RetentionRepository(client).exportCurrent(); await client.close();
+  const rollback = await a.storage.openStorage({ stateDir, bundle: a.bundle() }); t.after(() => rollback.close());
+  await rollback.prepare({ allowMigration: false });
+  await assert.rejects(rollback.write('retention', 'begin', { intent: 'blocked', bytes: 1, chunks: 1, sha256: 'a'.repeat(64) }, 'blocked'), /reservation limit/);
+  assert.deepEqual(await new RetentionRepository(rollback).exportCurrent(), before);
 });

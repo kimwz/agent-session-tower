@@ -33,7 +33,7 @@ async function workload(store: RetentionStore) {
   return { elapsedMs: performance.now() - start, writesMs: writes, projectionSha256: retentionHash(JSON.stringify({ entries: store.list(), policies: Array.from({ length: 25 }, (_, index) => store.policy(`policy-${index}`)) })) };
 }
 try {
-  const a = await retentionBuild('1.120.0', join(root, 'a-artifact')), b = await retentionBuild('1.121.0', join(root, 'b-artifact'));
+  const a = await retentionBuild('1.120.1', join(root, 'a-artifact')), b = await retentionBuild('1.121.0', join(root, 'b-artifact'));
   const legacyDir = join(root, 'json'), sqlDir = join(root, 'sql'); await seed(legacyDir); await seed(sqlDir);
   const legacy = new RetentionStore(join(legacyDir, 'retention')), jsonStartup = performance.now(); await legacy.start();
   const jsonStartupMs = performance.now() - jsonStartup;
