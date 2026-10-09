@@ -235,6 +235,7 @@ export class RunManager extends EventEmitter {
   private readonly heldProviders = new Set<Provider>();
   private readonly admissions = new Set<string>();
   private readonly uncertainAdmissions = new Set<string>();
+  private readonly unsentSteering = new Map<string, string>();
   private readonly steeringAdmissions = new Map<string, Promise<Run>>();
   private readonly uncertainPrepared = new Map<string, { createdIds: string[]; sessionId?: string }>();
   private readonly incomingAttachments = new Set<ReadonlyArray<string>>();
@@ -394,19 +395,23 @@ export class RunManager extends EventEmitter {
     const resolved = await this.history.resolveAdmission(), runIds = [...new Set([...resolved.newRunIds, ...this.uncertainAdmissions])];
     for (const id of runIds) {
       const prepared = this.uncertainPrepared.get(id), run = resolved.newRuns.get(id) ?? this.runs.get(id);
-      if (resolved.newRunIds.includes(id) && !resolved.runIds.has(id)) {
+      const unsentTarget = this.unsentSteering.get(id);
+      if (resolved.newRunIds.includes(id) && !resolved.runIds.has(id) && !unsentTarget) {
         this.runs.delete(id);
         if (prepared?.sessionId) this.registry.removeUnconfirmed(prepared.sessionId,id);
         if (prepared) await this.attachments.rollback(prepared.createdIds);
       } else if (run) {
         if (resolved.newRuns.has(id)) this.runs.set(id, run);
-        if (run.steering?.state === 'sending') {
-          // Storage resolution does not send steering. This provider call never happened.
-          delete run.steering; delete run.startedAt; run.status = 'queued';
+        if (unsentTarget) {
+          // A storage receipt cannot authorize a new turn for an instruction never handed to its target.
+          run.steering = { targetRunId: unsentTarget, state: 'uncertain', requestedAt: run.steering?.requestedAt ?? run.createdAt };
+          run.status = 'error'; run.finishedAt = new Date().toISOString();
+          run.error = 'Instruction was not sent to the target turn. Send a new instruction to deliver it.';
         }
         await this.retainAttachments(run);
       }
       this.uncertainPrepared.delete(id); this.uncertainAdmissions.delete(id); this.admissions.delete(id);
+      this.unsentSteering.delete(id);
     }
     this.changed(); await this.flush();
     return { disposition: resolved.disposition, runIds };
@@ -704,7 +709,13 @@ export class RunManager extends EventEmitter {
   private async admitSteer(runId: string, options: { whileWaiting?: boolean; targetRunId?: string }): Promise<Run> {
     const run = this.runs.get(runId);
     if (!run) throw new RunError('Task not found.', 'not-found');
-    await this.flush();
+    try { await this.flush(); }
+    catch (error) {
+      if (admissionUncertain(error) && options.targetRunId !== undefined && !run.steering) {
+        this.unsentSteering.set(run.id, options.targetRunId); this.uncertainAdmissions.add(run.id);
+      }
+      throw error;
+    }
     if (this.storageHeld) throw notAdmitted(new RunError('Storage is unavailable; instruction insertion is held.', 'unavailable'));
     if (run.steering) return this.list().find(item => item.id === runId)!;
     const selected = this.steeringTarget(run);
@@ -746,7 +757,7 @@ export class RunManager extends EventEmitter {
       await this.settleSteer(run, selected.target.id);
       return this.list().find(item => item.id === runId)!;
     } catch (error) {
-      if (!submitted && admissionUncertain(error)) { this.uncertainAdmissions.add(run.id); throw error; }
+      if (!submitted && admissionUncertain(error)) { this.unsentSteering.set(run.id, selected.target.id); this.uncertainAdmissions.add(run.id); throw error; }
       await this.settleSteer(run, selected.target.id, error, !submitted);
       throw error;
     }

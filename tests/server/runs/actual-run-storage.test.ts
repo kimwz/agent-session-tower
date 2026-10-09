@@ -190,20 +190,23 @@ for (const fault of ['before','after-native-hold']) test(`actual permission cont
   await manager.close();
 });
 
-test('actual repeated steer waits for fixed SQLite admission and preserves loss identity with no provider insert', async t => {
+for (const wrapUp of [false,true]) test(`actual ${wrapUp ? 'update wrap-up global flush' : 'repeated steer'} loss preserves target-only delivery after target end and drain give-up`, async t => {
   const f = await prepared(t), initial = await f.open(f.b);
   await new RunsRepository(initial).importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'steer-empty'); await initial.close();
-  const client = await f.open(f.a,'after-steer-hold'), session = { ...documents(f.stateDir).created[0].session,nativeId: '10000000-0000-4000-8000-000000000002',resumable: true,creationPending: false,status: 'completed' as const };
-  let inserts = 0, finish!: () => void;
+  const client = await f.open(f.a,wrapUp ? 'after-native-hold' : 'after-steer-hold'), session = { ...documents(f.stateDir).created[0].session,nativeId: '10000000-0000-4000-8000-000000000002',resumable: true,creationPending: false,status: 'completed' as const };
+  let inserts = 0, starts = 0, finish!: () => void, endTarget!: () => void, output!: (text: string) => void;
   const done = new Promise<void>(resolve => { finish = resolve; });
   const manager = new RunManager({ stateDir: f.stateDir,storage: client,getSession: () => session,refreshSessions: async () => {},findExecutable: async () => '/fixture/codex',
-    spawnProcess: () => { throw new Error('Fixture forbids native launch'); },openCodexStdio: async config => ({
+    spawnProcess: () => { throw new Error('Fixture forbids native launch'); },openCodexStdio: async config => {
+      starts++; output = config.onOutput; endTarget = () => { config.onFinished({ status: 'completed' }); finish(); };
+      return ({
       start: async () => { config.onStarted?.('fixture'); },done,close: finish,cancel: async () => { config.onFinished({ status: 'cancelled' }); finish(); },
-      respondToApproval: async () => {},canSteer: () => true,steer: async () => { inserts++; } }) });
+      respondToApproval: async () => {},canSteer: () => true,steer: async () => { inserts++; } }); } });
   await manager.start();
   const parent = await manager.enqueue(session.id,'Parent');
   await until(() => manager.list().find(run => run.id === parent.id)?.status === 'running');
-  const queued = await manager.enqueue(session.id,'Insert');
+  const instruction = wrapUp ? undefined : await manager.enqueue(session.id,'Insert');
+  manager.beginUpdateDrain(Date.now() + 60_000,() => false);
   const write = client.write.bind(client);
   let entered!: () => void, release!: () => void;
   const saving = new Promise<void>(resolve => { entered = resolve; }), wait = new Promise<void>(resolve => { release = resolve; });
@@ -211,8 +214,16 @@ test('actual repeated steer waits for fixed SQLite admission and preserves loss 
     if (args[0] === 'runs' && args[1] === 'commit') { entered(); await wait; }
     return write<T>(...args);
   };
+  if (wrapUp) {
+    // Lose a real concurrent parent write while the wrap-up waits on the global flush.
+    output('native-hold-response-lost');
+    await saving;
+    manager.driveUpdateDrain();
+  }
+  const queued = instruction ?? manager.list().find(run => run.updateWrapUp)!;
+  assert.ok(queued);
   let successes = 0;
-  const first = manager.steer(queued.id), firstResult = first.then(() => { successes++; },error => error);
+  const first = manager.steer(queued.id,{ targetRunId: parent.id }), firstResult = first.then(() => { successes++; },error => error);
   await saving;
   const repeat = manager.steer(queued.id), repeatResult = repeat.then(() => { successes++; },error => error);
   assert.equal(first,repeat); assert.equal(successes,0); assert.equal(inserts,0);
@@ -223,9 +234,19 @@ test('actual repeated steer waits for fixed SQLite admission and preserves loss 
   await assert.rejects(manager.steer(queued.id),(next: unknown) => next === error);
   assert.deepEqual(manager.pendingAdmission(),pending); assert.equal(successes,0); assert.equal(inserts,0);
   client.write = write;
+  endTarget();
+  assert.equal(manager.list().find(run => run.id === parent.id)?.status,'completed');
   await client.reopen(); await client.prepare({ allowMigration: false }); manager.holdStorage();
   await manager.resolveAdmission(pending.commandId);
-  assert.equal(inserts,0);
+  const unsent = manager.list().find(run => run.id === queued.id)!;
+  assert.equal(unsent.status,'error'); assert.equal(unsent.steering?.targetRunId,parent.id);
+  assert.match(unsent.error!,/not sent/);
+  manager.releaseStorage(); manager.endUpdateDrain();
+  await until(() => !manager.busy());
+  // Await the normal pump explicitly so zero launches is checked after drain release.
+  await (manager as unknown as { pump(): Promise<void> }).pump();
+  await manager.flushState();
+  assert.equal(starts,1,'only the original target provider exists'); assert.equal(inserts,0,'no insertion or reinsertion');
   await manager.close();
 });
 
