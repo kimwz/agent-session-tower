@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { RunManager } from '../../../server/runs/manager.js';
 import type { StorageStatus } from '../../../server/storage/contract.js';
+import { storageFs } from '../../../server/storage/paths.js';
 import type { WorkerStorageStatus } from '../../../shared/storage.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { retentionBuild } from '../storage/fixtures/retention-build.js';
@@ -215,6 +216,62 @@ test('actual B bootstrap uses pre-open new-state proof and current DB without mi
   const store = new RetentionStore(join(stateDir, 'retention'), { storage: client }); await store.start();
   assert.deepEqual(store.list(), []);
   assert.equal((await new RetentionRepository(client).head()).revision, current.head.revision);
+});
+
+test('actual SQLite bootstrap requires ancestor fsync on creation and retry before importing raw sources', async t => {
+  const stateDir = await folder(t), { a, b } = await builds(t), original = documents();
+  const evidenceParent = join(stateDir, 'storage-migrations');
+  await mkdir(join(stateDir, 'retention'), { mode: 0o700 });
+  const journal = Buffer.from(JSON.stringify(original.journal)), observations = Buffer.from(JSON.stringify(original.observations));
+  await writeFile(join(stateDir, 'retention', 'journal.json'), journal, { mode: 0o600 });
+  await writeFile(join(stateDir, 'retention-observations.json'), observations, { mode: 0o600 });
+  await prepareA(stateDir, a);
+  const { client, update } = await openB(t, stateDir, b);
+  await assert.rejects(stat(evidenceParent), { code: 'ENOENT' });
+  const bootstrap = retentionBootstrap(client, stateDir, async () => update, false);
+  const realSync = storageFs.syncDirectory, failure = new Error('fixture ancestor fsync failed');
+  let fail = true, rootSyncs = 0;
+  t.mock.method(storageFs, 'syncDirectory', async (path: string) => {
+    if (path === stateDir) {
+      rootSyncs++;
+      if (fail) throw failure;
+    }
+    await realSync(path);
+  });
+  const repository = new RetentionRepository(client);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    await assert.rejects(bootstrap(), error => error === failure);
+    assert.equal(rootSyncs, attempt, 'existing parent must be synced again on retry');
+    assert.deepEqual(await readdir(evidenceParent), [], 'no sealed attempt before ancestor sync');
+    assert.equal((await repository.head()).authority, null);
+    const db = new DatabaseSync(join(stateDir, 'state.sqlite'), { readOnly: true });
+    try {
+      for (const table of ['domain_imports', 'retention_stages', 'retention_stage_chunks']) {
+        assert.equal((db.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n, 0);
+      }
+      assert.equal((db.prepare("SELECT count(*) AS n FROM operation_receipts WHERE scope = 'retention'").get() as { n: number }).n, 0);
+    } finally { db.close(); }
+    assert.deepEqual(await readFile(join(stateDir, 'retention', 'journal.json')), journal);
+    assert.deepEqual(await readFile(join(stateDir, 'retention-observations.json')), observations);
+  }
+  fail = false;
+  await bootstrap();
+  assert.equal(rootSyncs, 3, 'retry completes real ancestor fsync before SQL import');
+  const attempts = await readdir(evidenceParent); assert.equal(attempts.length, 1);
+  const directory = join(evidenceParent, attempts[0]), manifestBytes = await readFile(join(directory, 'manifest.json'));
+  const manifest = JSON.parse(manifestBytes.toString());
+  assert.equal(manifest.kind, 'first-import');
+  for (const [name, bytes] of [['journal.json', journal], ['retention-observations.json', observations]] as const) {
+    assert.deepEqual(await readFile(join(directory, name)), bytes);
+    assert.deepEqual(manifest.files[name], { bytes: bytes.length, sha256: retentionHash(bytes) });
+  }
+  const current = await repository.exportCurrent();
+  assert.equal(current.head.authority?.authority, 'database');
+  assert.equal(current.head.authority?.manifestSha256, retentionHash(manifestBytes));
+  assert.deepEqual(current.documents, original);
+  assert.equal((await client.receipt(`${attempts[0]}-commit`)).found, true);
+  assert.deepEqual(await readFile(join(stateDir, 'retention', 'journal.json')), journal);
+  assert.deepEqual(await readFile(join(stateDir, 'retention-observations.json')), observations);
 });
 
 test('known retention history cannot become fresh missing sources', async t => {

@@ -3,6 +3,7 @@ import { lstat, mkdir, open, opendir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { StorageClient } from '../../storage/client.js';
+import { storageFs } from '../../storage/paths.js';
 import { evaluateStorageUpdate, type StorageUpdateInput } from '../../link/storage-update.js';
 import { journalDocument, observationDocument, retentionHash, JOURNAL_BYTES, OBSERVATION_BYTES, CANONICAL_JOURNAL_BYTES, CANONICAL_OBSERVATION_BYTES, type RetentionDocuments } from './storage-codec.js';
 import { RetentionRepository } from './storage-repository.js';
@@ -116,6 +117,7 @@ export function retentionBootstrap(storage: StorageClient, stateDir: string, upd
     if (fresh && await retentionLegacyFiles(stateDir, 'retention') !== 'absent') throw new Error('Fresh retention state gained source history; initialization held.');
     const evidenceParent = join(stateDir, 'storage-migrations');
     await privateDirectory(evidenceParent);
+    await storageFs.syncDirectory(stateDir);
     // A sealed attempt survives a worker crash even when no final receipt/marker exists.
     // Absence of a commit is never evidence that it is safe to repeat the raw import.
     const evidenceDirectory = await opendir(evidenceParent);
