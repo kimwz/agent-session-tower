@@ -18,7 +18,7 @@ import test, { type TestContext } from 'node:test';
 import { writeHandoff } from '../../../server/runs/handoff.js';
 import { RetentionStore } from '../../../server/sessions/retention/store.js';
 import { runnerPaths, RUNNER_PROTOCOL, type RunnerReply } from '../../../server/runs/runner-protocol.js';
-import { artifactStorageContract, completionProven, type ServingProof, resumeRollback, readRollbackRecord, evaluateStorageUpdate, type RunningBuild, storageUpdatePaths, type RollbackRecord } from '../../../server/link/storage-update.js';
+import { artifactStorageContract, completionProven, type ServingProof, resumeRollback, withdrawRollback, readRollbackRecord, evaluateStorageUpdate, type RunningBuild, storageUpdatePaths, type RollbackRecord } from '../../../server/link/storage-update.js';
 import { updatePaths } from '../../../server/link/storage-update.js';
 
 // Hosted disposable jobs only: this starts the actual product worker and its actual SQLite memory preflight,
@@ -383,4 +383,201 @@ for (const stage of ['1', 'late']) test(`actual SDK startup failure parks its co
   await rm(hold); await call('storageRetry');
   assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, true);
   assert.deepEqual(JSON.parse(await readFile(counts, 'utf8')), { permissions: 1, autoPrompts: 1 });
+});
+
+async function waitForStorage(call: (method: string, args?: unknown[]) => Promise<RunnerReply>, ready: boolean, deadline: number) {
+  for (;;) {
+    const reply = await call('snapshot').catch(() => undefined);
+    if (reply?.snapshot?.storage?.admissionOpen === ready) return reply;
+    if (Date.now() > deadline) assert.fail('Actual worker storage did not reach the requested admission state.');
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+}
+
+test('normal ready worker accepts withdrawal release but resumes only after the matching durable attempt commits', { timeout: 90000 }, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tw-release-')));
+  const state = join(root, 'state'); const paths = await runnerPaths(state);
+  const { call } = await launchDiagnostic(t, root, state, paths);
+  const deadline = Date.now() + 60000;
+  const first = await waitForStorage(call, true, deadline);
+  const identity = first.snapshot!.storage!.identity!;
+  const at = new Date().toISOString(); const fence = { id: 'normal-withdraw', attempt: 1 };
+  const rollback: RollbackRecord = { format: 'tower-storage-rollback', version: 1, id: fence.id,
+    from: identity.appVersion, target: '0.0.1', sourceHash: 'b'.repeat(64), manifestDigest: 'c'.repeat(64),
+    entrySha256: 'd'.repeat(64), updateSha256: null, state: 'waiting', by: 'fixture-owner', reason: 'withdraw normal hold', held: true, switched: false,
+    attempt: { n: 1, pid: process.pid, start: 'fixture-parent', nonce: 'a'.repeat(32), kind: 'run', at }, startedAt: at, updatedAt: at };
+  const publish = () => writeFile(storageUpdatePaths(state).rollback, JSON.stringify(rollback), { mode: 0o600 });
+  await publish();
+  assert.equal((await call('storageControl', ['hold', { fence }])).error, undefined);
+  const ports = rollbackPorts(async (action, input) => {
+    if (action !== 'release') { const reply = await call('storageControl', [action, input]); assert.equal(reply.error, undefined); return reply.result; }
+    assert.equal((await call('storageControl', ['release', { fence }])).error?.statusCode, 409, 'the withdrawal claims a new producer attempt');
+    assert.equal((await call('storageControl', [action, input])).error, undefined);
+    const durable = await readRollbackRecord(state);
+    assert.ok(durable.state === 'present' && durable.record.state === 'withdrawn' && durable.record.held);
+    await new Promise(resolve => setTimeout(resolve, 1200));
+    assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, false);
+    await call('storageRetry');
+    assert.equal((await call('create')).error?.disposition, 'not-admitted', 'explicit retry cannot outrun the producer commit either');
+  }, async () => assert.fail('withdrawal must not restart the web'));
+  const withdrawn = await withdrawRollback({ stateDir: state, ports });
+  assert.equal(withdrawn.state, 'withdrawn', JSON.stringify(withdrawn));
+  const committed = await readRollbackRecord(state);
+  assert.ok(committed.state === 'present' && !committed.record.held && committed.record.attempt!.n === 2);
+  const resumed = await waitForStorage(call, true, deadline);
+  assert.equal(resumed.instance, first.instance);
+  assert.equal(resumed.snapshot?.storage?.state, 'ready');
+  assert.equal((await call('storageControl', ['inspect'])).error, undefined, 'the same real SQLite worker remains serving');
+});
+
+test('actual recovery RPC verifies an own failed update, preserves refusal guards, and leaves retry explicit', { timeout: 90000 }, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tw-receipt-')));
+  const state = join(root, 'state'); const paths = await runnerPaths(state);
+  const { call } = await launchDiagnostic(t, root, state, paths);
+  const deadline = Date.now() + 60000;
+  const first = await waitForStorage(call, true, deadline);
+  const version = first.snapshot!.storage!.identity!.appVersion;
+  const at = new Date().toISOString();
+  await writeFile(updatePaths(state).status, JSON.stringify({ version, previous: '0.0.1', stage: 'failed', code: 'check-failed', startedAt: at, updatedAt: at }), { mode: 0o600 });
+  await call('storageRetry');
+  assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, false);
+  assert.equal((await call('storageRecovery', ['verify-update', { kind: 'invented', by: 'owner', evidence: 'verified' }])).error?.statusCode, 400);
+  const wrong = await call('storageRecovery', ['verify-update', { kind: 'overwritten-done', by: 'owner', evidence: 'verified' }]);
+  assert.equal((wrong.result as { recorded: boolean }).recorded, false);
+  await writeFile(updatePaths(state).hold, 'fixture hold', { mode: 0o600 });
+  const held = await call('storageRecovery', ['verify-update', { kind: 'own-failed', by: 'owner', evidence: 'verified' }]);
+  assert.equal((held.result as { code: string }).code, 'hold');
+  await rm(updatePaths(state).hold);
+  const receipt = await call('storageRecovery', ['verify-update', { kind: 'own-failed', by: 'owner', evidence: 'actual worker build and update inspected', cutoverMarkers: 'absent' }]);
+  assert.equal(receipt.error, undefined);
+  assert.equal((receipt.result as { recorded: boolean }).recorded, true);
+  const saved = JSON.parse(await readFile(storageUpdatePaths(state).receipt, 'utf8'));
+  assert.equal(saved.build.sourceHash, first.snapshot!.storage!.identity!.sourceHash);
+  assert.equal(saved.cutoverMarkers, 'not-applicable');
+  assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, false, 'receipt alone grants no runtime resume');
+  await call('storageRetry');
+  assert.equal((await waitForStorage(call, true, deadline)).instance, first.instance);
+});
+
+test('explicit same-worker retry rechecks a repaired private database path without changing captured build identity', { timeout: 90000 }, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tw-path-')));
+  const state = join(root, 'state'); const paths = await runnerPaths(state);
+  const database = join(state, 'state.sqlite'); await mkdir(database, { recursive: true, mode: 0o700 });
+  const { call } = await launchDiagnostic(t, root, state, paths);
+  const deadline = Date.now() + 60000;
+  const held = await waitForStorage(call, false, deadline);
+  assert.equal(held.snapshot?.storage?.admissionOpen, false);
+  assert.equal((await call('create')).error?.disposition, 'not-admitted');
+  await call('storageRetry');
+  assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, false, 'unrepaired non-file DB remains refused');
+  await rm(database, { recursive: true }); // Exact empty directory created by this fixture, never owner storage.
+  await call('storageRetry');
+  const ready = await waitForStorage(call, true, deadline);
+  assert.equal(ready.instance, held.instance);
+  assert.deepEqual(ready.snapshot?.storage?.identity, held.snapshot?.storage?.identity);
+  assert.equal((await lstat(database)).isFile(), true);
+});
+
+test('known identity with absent DB stays held until explicit snapshot adoption and reconciliation allow same-worker retry', { timeout: 90000 }, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tw-adopt-')));
+  const state = join(root, 'state'); const paths = await runnerPaths(state);
+  const seed = await launchDiagnostic(t, root, state, paths);
+  const deadline = Date.now() + 60000;
+  await waitForStorage(seed.call, true, deadline);
+  const snapshot = await seed.call('storageRecovery', ['snapshot', {}]);
+  assert.equal(snapshot.error, undefined);
+  const snapshotId = (snapshot.result as { id: string }).id;
+  const exit = once(seed.child, 'exit'); seed.child.kill('SIGKILL'); await exit;
+  for (const name of ['state.sqlite', 'state.sqlite-wal', 'state.sqlite-shm']) await rm(join(state, name), { force: true });
+  const live = await launchDiagnostic(t, root, state, paths);
+  const held = await waitForStorage(live.call, false, deadline);
+  assert.equal(held.snapshot?.storage?.code, 'known-storage-missing');
+  await live.call('storageRetry');
+  assert.equal((await live.call('snapshot')).snapshot?.storage?.code, 'known-storage-missing');
+  await assert.rejects(lstat(join(state, 'state.sqlite')), { code: 'ENOENT' });
+  const adoption = await live.call('storageRecovery', ['adopt', { snapshotId, reason: 'fixture owner restores its missing database' }]);
+  assert.equal(adoption.error, undefined);
+  const barrier = adoption.result as { id: string; scopes: { scope: string }[] };
+  await live.call('storageRetry');
+  assert.equal((await live.call('snapshot')).snapshot?.storage?.admissionOpen, false, 'adoption never grants reconciliation');
+  const reconciled = await live.call('storageRecovery', ['reconcile', { barrierId: barrier.id, scopes: barrier.scopes.map(scope => scope.scope), by: 'fixture-owner', evidence: 'snapshot and absent original verified' }]);
+  assert.equal(reconciled.error, undefined);
+  await live.call('storageRetry');
+  assert.equal((await waitForStorage(live.call, true, deadline)).instance, held.instance);
+});
+
+test('startup diagnostic quiet tracks a live owned permission command until its actual completion', { timeout: 90000 }, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tw-command-')));
+  const state = join(root, 'state'); const paths = await runnerPaths(state);
+  const hold = updatePaths(state).hold; await mkdir(dirname(hold), { recursive: true, mode: 0o700 });
+  await writeFile(hold, 'fixture initial diagnostic hold', { mode: 0o600 });
+  const { call } = await launchDiagnostic(t, root, state, paths, undefined, { TOWER_FIXTURE_STORAGE_STARTUP: 'command' });
+  const deadline = Date.now() + 60000;
+  const initial = await waitForStorage(call, false, deadline);
+  await rm(hold); await call('storageRetry');
+  let held = await call('snapshot');
+  while (held.snapshot?.storage?.code !== 'not-ready') {
+    if (Date.now() > deadline) assert.fail('Actual startup gate did not park after the owned command started.');
+    await new Promise(resolve => setTimeout(resolve, 25)); held = await call('snapshot');
+  }
+  assert.equal(held.instance, initial.instance, 'the already-open diagnostic host observes newly registered permission activity');
+  assert.equal(await readFile(join(state, 'fixture-command-started'), 'utf8'), 'started\n');
+  const identity = held.snapshot!.storage!.identity!; const at = new Date().toISOString();
+  const rollback: RollbackRecord = { format: 'tower-storage-rollback', version: 1, id: 'command-quiet', from: identity.appVersion, target: '0.0.1', sourceHash: 'b'.repeat(64), manifestDigest: 'c'.repeat(64), entrySha256: 'd'.repeat(64), updateSha256: null, state: 'waiting', by: 'fixture-owner', reason: 'owned command busy', held: true, switched: false, startedAt: at, updatedAt: at };
+  await writeFile(storageUpdatePaths(state).rollback, JSON.stringify(rollback), { mode: 0o600 });
+  const quiet = () => call('storageControl', ['quiet', { id: rollback.id }]);
+  assert.equal(((await quiet()).result as { state: string }).state, 'pending', 'handoff is refused while the real permission child is live');
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  assert.equal(((await quiet()).result as { state: string }).state, 'pending');
+  assert.equal((await call('snapshot')).instance, held.instance);
+  await writeFile(join(state, 'fixture-command-finish'), 'owner allows fixture command completion', { mode: 0o600 });
+  while (((await quiet()).result as { state: string }).state !== 'quiet') {
+    if (Date.now() > deadline) assert.fail('Actual owned permission command never completed.');
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  const id = await readFile(join(state, 'fixture-command-id'), 'utf8');
+  const output = JSON.parse(await readFile(join(state, 'permission-runs', `${id}.json`), 'utf8'));
+  assert.match(output.stdout, /completed/);
+  assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, false, 'command completion does not resume held storage');
+});
+
+test('managed B worker exposes overwritten-done owner recovery after a later C failure; changed pointer and artifact refuse the actual RPC', { timeout: 90000 }, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tw-overwritten-')));
+  const state = join(root, 'state'); const paths = await runnerPaths(state);
+  const seed = await launchDiagnostic(t, root, state, paths);
+  const deadline = Date.now() + 60000;
+  const serving = await waitForStorage(seed.call, true, deadline);
+  const identity = serving.snapshot!.storage!.identity!;
+  const exit = once(seed.child, 'exit'); seed.child.kill('SIGKILL'); await exit;
+  const context = contextOf('production');
+  assert.equal(context.manifest.digest, identity.manifestDigest);
+  const installed = await installArtifact(state, identity.appVersion, { manifest: context.manifest });
+  const contractPath = join(dirname(entryPoint(installed)), 'contract.json');
+  const contract = JSON.stringify({ format: 'tower-artifact-storage-contract', version: 1, appVersion: identity.appVersion, identity, manifest: context.manifest, supported: true });
+  await writeFile(contractPath, contract, { mode: 0o600 });
+  const managedEntry = join(dirname(entryPoint(installed)), 'diagnostic-worker.ts');
+  await writeFile(managedEntry, `import ${JSON.stringify(new URL('./fixtures/storage-diagnostic-worker.ts', import.meta.url).href)};\n`);
+  await pointCurrent(state, identity.appVersion);
+  const at = new Date().toISOString();
+  await writeFile(updatePaths(state).status, JSON.stringify({ version: '99.0.0', previous: identity.appVersion, stage: 'failed', code: 'check-failed', startedAt: at, updatedAt: at }), { mode: 0o600 });
+  const live = await launchDiagnostic(t, root, state, paths, managedEntry);
+  const held = await waitForStorage(live.call, false, deadline);
+  assert.equal(held.snapshot?.storage?.code, 'done-overwritten');
+  const verify = () => live.call('storageRecovery', ['verify-update', { kind: 'overwritten-done', by: 'fixture-owner', evidence: 'B current artifact and C failure verified' }]);
+  await pointCurrent(state, '99.0.0');
+  assert.equal(((await verify()).result as { code: string }).code, 'current-pointer');
+  await pointCurrent(state, identity.appVersion);
+  await writeFile(contractPath, '{invalid artifact');
+  assert.equal(((await verify()).result as { code: string }).code, 'current-artifact');
+  await writeFile(contractPath, contract, { mode: 0o600 });
+  await writeFile(updatePaths(state).lock, 'unverifiable fixture helper', { mode: 0o600 });
+  assert.equal(((await verify()).result as { code: string }).code, 'helper');
+  await rm(updatePaths(state).lock);
+  const recorded = await verify();
+  assert.equal(recorded.error, undefined); assert.equal((recorded.result as { recorded: boolean }).recorded, true);
+  assert.equal((await live.call('snapshot')).snapshot?.storage?.admissionOpen, false);
+  await live.call('storageRetry');
+  assert.equal((await waitForStorage(live.call, true, deadline)).instance, held.instance);
+  const saved = JSON.parse(await readFile(storageUpdatePaths(state).receipt, 'utf8'));
+  assert.equal(saved.kind, 'overwritten-done'); assert.deepEqual(saved.build, identity);
 });

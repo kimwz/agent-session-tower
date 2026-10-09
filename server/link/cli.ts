@@ -48,6 +48,17 @@ export async function runLinkCommand(args: string[]): Promise<void> {
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Port must be between 1 and 65535.');
   if (command === 'storage') {
+    if (positional[0] === 'verify-update') {
+      const [_, kind, by, ...words] = positional;
+      const evidence = words.join(' ').trim();
+      if (!['overwritten-done', 'stale-active', 'own-failed'].includes(kind ?? '') || !by?.trim() || !evidence) {
+        throw new Error('Usage: storage verify-update overwritten-done|stale-active|own-failed <by> <evidence> [--state-dir <path>]');
+      }
+      const running = await runningTower(stateDir);
+      if (!running) throw new Error('진단 가능한 Tower가 실행 중이지 않습니다.');
+      console.log(JSON.stringify(await post(running.base, '/api/storage/verify-update', { kind, by, evidence })));
+      return;
+    }
     if (positional[0] === 'rollback') {
       const [_, action, target, ...reason] = positional;
       if (!['status', 'validate', 'run', 'retry', 'withdraw', 'release-pin'].includes(action ?? '')) throw new Error('Usage: storage rollback status|validate|run|retry|withdraw|release-pin [target] [reason]');

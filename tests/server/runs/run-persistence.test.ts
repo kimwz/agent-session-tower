@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +9,7 @@ import { restoreRuns, SCHEDULED_OUTPUT, serializeRuns } from '../../../server/ru
 import type { CodexBridgeOptions } from '../../../server/runs/codex-bridge.js';
 import type { CreatedSession } from '../../../server/runs/saved-state.js';
 import type { Run, Session } from '../../../shared/types.js';
+import { storage, threadBundle } from '../storage/helpers.js';
 import { until } from '../../helpers/until.ts';
 
 const ID = '10000000-0000-4000-8000-000000000001';
@@ -170,7 +172,7 @@ async function quiet(t: TestContext) {
   const stateDir = join(directory, 'state');
   const session: Session = { id: `codex:${ID}`, nativeId: ID, provider: 'codex', title: 'History fixture', cwd: directory, project: 'fixture', status: 'idle', statusReason: '',
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
-  const manager = new RunManager({ stateDir, getSession: id => id === session.id ? session : undefined, refreshSessions: async () => {}, pollMs: 60_000, holdUntilReady: true,
+  const manager = new RunManager({ stateDir, getSession: id => id === session.id ? session : undefined, refreshSessions: async () => {}, pollMs: 60_000, holdUntilReady: true, findExecutable: async () => '/fixture/codex',
     spawnProcess: () => { throw new Error('Native provider launch is forbidden in this fixture.'); } });
   await manager.start();
   t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
@@ -249,4 +251,59 @@ test('serializeRuns adds the markers a restore reads and leaves live fields out'
   assert.deepEqual(saved[0], { ...base, id: 'queued', status: 'queued', output: '', needsInstructions: true, keepQueued: true });
   assert.equal(saved[1].retain, true);
   assert.equal((saved[1].output as string).length, 20_000);
+});
+
+test('storage-held predecessor carries accepted private instructions and workflow into a real successor exactly once', async t => {
+  const f = await quiet(t);
+  const db = await storage.openStorage({ stateDir: f.stateDir, bundle: threadBundle('production') });
+  await db.prepare({ allowMigration: true });
+  const instructions = { text: 'Required private workflow policy', required: true };
+  const origin = { kind: 'owner' as const, workflowId: 'workflow-storage-carry' };
+  const accepted = await f.manager.enqueue(f.session.id, 'Accepted before hold', {}, { instructions, origin });
+  f.manager.holdStorage();
+  await f.manager.flushState();
+  assert.equal(f.manager.list().find(r => r.id === accepted.id)?.status, 'queued');
+  assert.equal((await readFile(join(f.stateDir, 'runs.json'), 'utf8')).includes(instructions.text), false);
+  assert.equal((await db.close()).ack, 'closed');
+  // The handoff flush is the predecessor's final save; do not call ordinary owner shutdown before restore.
+  const nextDb = await storage.openStorage({ stateDir: f.stateDir, bundle: threadBundle('production') });
+  await nextDb.prepare({ allowMigration: false }); t.after(() => nextDb.close());
+  const provider = join(f.directory, 'provider.mjs');
+  const submissions = join(f.directory, 'submissions.jsonl');
+  // The existing stdio fixture protocol: production RunManager and Codex adapter
+  // consume an owned fake provider's wire frames, rather than completion callbacks.
+  await writeFile(provider, `
+import readline from 'node:readline';
+import { appendFileSync } from 'node:fs';
+const send = frame => process.stdout.write(JSON.stringify(frame) + '\\n');
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const r = JSON.parse(line);
+  if (r.method === 'initialize') send({ id: r.id, result: {} });
+  else if (r.method === 'account/read') send({ id: r.id, result: { account: { type: 'chatgpt' }, requiresOpenaiAuth: true } });
+  else if (r.method === 'thread/resume') send({ id: r.id, result: { thread: { id: '${ID}', status: { type: 'idle' } }, modelProvider: 'openai', approvalPolicy: 'on-request', sandbox: { type: 'readOnly', networkAccess: false }, approvalsReviewer: r.params.approvalsReviewer || 'user' } });
+  else if (r.method === 'turn/start') {
+    appendFileSync(${JSON.stringify(submissions)}, JSON.stringify(r.params) + '\\n');
+    send({ id: r.id, result: { turn: { id: 'successor-turn', status: 'inProgress', items: [] } } });
+    send({ method: 'turn/completed', params: { threadId: '${ID}', turn: { id: 'successor-turn', status: 'completed', items: [] } } });
+  }
+});
+`, { mode: 0o600 });
+  const successor = new RunManager({ stateDir: f.stateDir, getSession: id => id === f.session.id ? f.session : undefined,
+    refreshSessions: async () => {}, holdUntilReady: true, pollMs: 10, findExecutable: async () => '/fixture/codex',
+    spawnProcess: (_file, _args, options) => spawn(process.execPath, [provider], { ...options, stdio: ['pipe', 'pipe', 'pipe'] }) as ChildProcessWithoutNullStreams });
+  t.after(() => successor.close());
+  await successor.start();
+  const restored = successor.list().find(r => r.id === accepted.id)!;
+  assert.equal(restored.status, 'queued');
+  assert.deepEqual(restored.origin, origin);
+  assert.deepEqual((successor as unknown as Internals).runs.get(accepted.id)?.instructions, instructions);
+  await assert.rejects(readFile(submissions), { code: 'ENOENT' });
+  assert.equal((await nextDb.gate('core')).open, true);
+  successor.markReady();
+  await until(() => successor.list().find(r => r.id === accepted.id)?.status === 'completed');
+  await successor.flushState();
+  const dispatched = (await readFile(submissions, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(dispatched.length, 1);
+  assert.ok(JSON.stringify(dispatched[0].input).includes(instructions.text), 'required instructions reach the actual provider wire');
+  assert.equal(successor.list().filter(r => r.id === accepted.id).length, 1);
 });

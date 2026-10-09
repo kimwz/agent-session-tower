@@ -221,3 +221,22 @@ for (const accept of [false, true]) test(`predecessor proof reflects callback ac
   if (accept) assert.equal(outcome.state, 'handing-off');
   if (!accept) assert.equal(outcome.state, 'failed', 'refused predecessor must not settle forever as pending');
 });
+
+test('release ACK accepts a terminal held intent without rewriting the producer commit or SQLite claim', async t => {
+  const dir = await stateDir(t);
+  const client = await storage.openStorage({ stateDir: dir, bundle: threadBundle('production') });
+  t.after(() => client.close());
+  await client.prepare({ allowMigration: true });
+  const record = await intent(dir, client); record.state = 'withdrawn';
+  const path = storageUpdatePaths(dir).rollback;
+  await writeFile(path, JSON.stringify(record), { mode: 0o600 });
+  const bytes = await readFile(path); const inspection = await client.inspect();
+  let signals = 0;
+  const call = storageControl({ stateDir: dir, client: () => client, hold: async () => assert.fail('release must not hold again'), release: async () => { signals++; }, quiet: () => true, handoff: () => assert.fail('withdraw must not hand off') });
+  await call('release', { fence: { id: record.id, attempt: record.attempt!.n } });
+  assert.equal(signals, 1);
+  assert.deepEqual(await readFile(path), bytes, 'only the producer commits held:false after accepting the ACK');
+  assert.deepEqual(await client.inspect(), inspection);
+  await assert.rejects(call('release', { fence: { id: record.id, attempt: record.attempt!.n + 1 } }));
+  assert.equal(signals, 1);
+});

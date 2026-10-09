@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { PermissionRunner, processStart } from '../../../server/permissions/runner.js';
 import { PermissionService } from '../../../server/permissions/service.js';
+import { storage, threadBundle } from '../storage/helpers.js';
+import type { RunnerOptions } from '../../../server/permissions/runner.js';
 import { autoReviewBlock, type PermissionRun } from '../../../shared/permissions.js';
 
 const agent = (sessionId: string, runId = 'run-1') => ({ kind: 'agent', via: 'mcp', sessionId, runId });
@@ -17,7 +19,7 @@ const until = async (check: () => boolean, ms = 10_000) => {
 };
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart']) {
   const root = await mkdtemp(join(tmpdir(), 'tower-one-shot-'));
   const stateDir = join(root, 'state');
   const project = join(root, 'project');
@@ -26,7 +28,7 @@ async function fixture(t: TestContext) {
   let clock = new Date('2026-09-30T00:00:00.000Z');
   const finished: string[] = [];
   let service!: PermissionService;
-  const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 300, now: () => clock });
+  const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 300, now: () => clock, beforeStart });
   const make = () => new PermissionService({ stateDir, env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), now: () => clock,
     startRun: request => runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600, request.sessionId),
     onRunFinished: request => finished.push(request.id), runOutput: id => runner.output(id), forgetRun: id => runner.forget(id) });
@@ -485,4 +487,64 @@ test('a conversation rule allowed again after a reopen survives the late clean-u
   assert.equal(f.service.overview().rules[0]!.requestId, second.request.id);
   await f.service.forgetConversation('claude:one', closedAt);
   assert.equal(f.service.overview().rules.length, 1, 'the new approval stays');
+});
+
+for (const defer of [false, true]) for (const revoked of [false, true]) test(`storage hold during asynchronous approval preserves only unstarted work (defer=${defer}, revoked=${revoked})`, async t => {
+  let service!: PermissionService;
+  let db!: Awaited<ReturnType<typeof storage.openStorage>>;
+  let checking!: () => void, releaseCheck!: () => void;
+  const reached = new Promise<void>(resolve => { checking = resolve; });
+  const blocked = new Promise<void>(resolve => { releaseCheck = resolve; });
+  let first = true, checks = 0;
+  const f = await fixture(t, async id => {
+    checks++;
+    assert.equal((await db.gate('core')).open, true);
+    if (first) { first = false; checking(); await blocked; if (defer) return 'defer'; }
+    if (!service.overview().requests.some(r => r.id === id && r.status === 'approved' && r.run?.status === 'waiting')) return false;
+    return service.confirmReviewed(id);
+  });
+  service = f.service;
+  db = await storage.openStorage({ stateDir: f.stateDir, bundle: threadBundle('production') });
+  await db.prepare({ allowMigration: true });
+  t.after(() => db.close());
+  const asked = await service.requestRun({ command: 'echo once >> executions', reason: 'fixture' }, agent('claude:one'));
+  await service.decide(asked.request.id!, true);
+  await reached;
+  f.runner.holdStorage();
+  releaseCheck();
+  await f.runner.flush();
+  assert.equal(f.runner.active(), false);
+  assert.equal(f.runner.inFlight(), true);
+  assert.equal(service.overview().requests.find(r => r.id === asked.request.id)!.run!.status, 'waiting');
+  assert.equal(checks, 1, 'no hot retries while held');
+  if (revoked) await service.forgetConversation('claude:one');
+  assert.equal((await db.gate('core')).open, true);
+  f.runner.releaseStorage();
+  await f.runner.flush();
+  assert.equal(checks, 2, 'approval is checked again after resume');
+  if (revoked) await assert.rejects(readFile(join(f.project, 'executions')), { code: 'ENOENT' });
+  else {
+    assert.equal(await readFile(join(f.project, 'executions'), 'utf8'), 'once\n');
+    assert.equal(service.overview().requests.find(r => r.id === asked.request.id)!.run!.status, 'done');
+  }
+});
+
+test('storage hold keeps a same-conversation slot waiter while the owned command drains', async t => {
+  let service!: PermissionService;
+  const f = await fixture(t, id => service.confirmReviewed(id));
+  service = f.service;
+  const db = await storage.openStorage({ stateDir: f.stateDir, bundle: threadBundle('production') });
+  await db.prepare({ allowMigration: true }); t.after(() => db.close());
+  const first = await service.requestRun({ command: 'sleep 0.5; echo first', reason: 'fixture' }, agent('claude:one'));
+  const second = await service.requestRun({ command: 'echo once >> executions', reason: 'fixture' }, agent('claude:one'));
+  await service.decide(first.request.id!, true);
+  await until(() => service.overview().requests.find(r => r.id === first.request.id)?.run?.status === 'running');
+  await service.decide(second.request.id!, true);
+  f.runner.holdStorage();
+  assert.equal(f.runner.active(), true);
+  await f.runner.flush();
+  assert.equal(service.overview().requests.find(r => r.id === second.request.id)!.run!.status, 'waiting');
+  assert.equal((await db.gate('core')).open, true);
+  f.runner.releaseStorage(); await f.runner.flush();
+  assert.equal(await readFile(join(f.project, 'executions'), 'utf8'), 'once\n');
 });

@@ -1222,7 +1222,7 @@ export class RunManager extends EventEmitter {
     // This save includes any streamed output that was waiting for its slower cadence.
     this.cancelOutputPersist();
     // A wrap-up request is never carried: after a restart it would start as a turn of its own.
-    if (this.updating) for (const run of this.runs.values()) if (run.status === 'queued' && !run.scheduled && !this.drain.isWrapUp(run.id)) this.history.carried.add(run.id);
+    if (this.updating || this.storageHeld) for (const run of this.runs.values()) if (run.status === 'queued' && !run.scheduled && !this.drain.isWrapUp(run.id)) this.history.carried.add(run.id);
     this.history.save(this.runs, this.list(), this.registry.serialize(), retained);
   }
 

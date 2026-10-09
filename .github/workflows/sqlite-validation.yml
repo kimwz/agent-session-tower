@@ -52,9 +52,12 @@ jobs:
           npm ci
           node --import tsx scripts/sqlite-runtime-check.mjs "$VALIDATION_MODE" | tee "$report/runtime.json"
           if [[ "$VALIDATION_MODE" == legacy-loader ]]; then
+            node --import tsx --test --test-reporter=tap tests/server/link/storage-update-legacy.test.ts
             exit 0
           fi
           printf '%s\n' tests/server/runs/storage-control.test.ts tests/server/runs/storage-diagnostic-worker.test.ts \
+            tests/server/permissions/one-shot.test.ts tests/server/runs/run-persistence.test.ts \
+            tests/server/http/storage-health.test.ts tests/server/link/storage-web.test.ts \
             tests/server/runs/attachment-cleanup.test.ts tests/server/auto-prompt/auto-prompts.test.ts \
             tests/server/runs/durable-runner.test.ts tests/gates/swallowed-errors.test.ts > "$report/test-files.txt"
           files=()
@@ -130,6 +133,7 @@ jobs:
           npm ci
           node --import tsx scripts/sqlite-runtime-check.mjs "$VALIDATION_MODE" | tee "$report/runtime.json"
           if [[ "$VALIDATION_MODE" == legacy-loader ]]; then
+            node --import tsx --test --test-reporter=tap tests/server/link/storage-update-legacy.test.ts
             exit 0
           fi
           node --import tsx --test --test-reporter=tap \
@@ -146,7 +150,7 @@ jobs:
           assert.ok(consumers.length, 'storage consumers must match');
           // Follow public storage imports as well as filenames, including newly added I fixtures.
           const imported = ['tests/server/runs/**/*.test.ts', 'tests/server/http/**/*.test.ts',
-            'tests/server/instance/**/*.test.ts'].flatMap(pattern => globSync(pattern))
+            'tests/server/instance/**/*.test.ts', 'tests/server/permissions/**/*.test.ts'].flatMap(pattern => globSync(pattern))
             .filter(file => /(?:from|import).*['"][^'"]*storage[^'"]*['"]/.test(readFileSync(file, 'utf8')));
           const lifecycle = ['tests/server/runs/durable-runner.test.ts', 'tests/server/runs/locked-state-handoff.test.ts',
             'tests/server/runs/worker-restore-order.test.ts', 'tests/server/http/master-worker-http.test.ts',

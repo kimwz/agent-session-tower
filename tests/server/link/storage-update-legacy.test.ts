@@ -1,3 +1,4 @@
+import { APP_VERSION } from '../../../shared/app-identity.js';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -5,11 +6,12 @@ import { existsSync } from 'node:fs';
 import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { currentVersion, pointCurrent, runtimePaths, versionDirectory } from '../../../server/link/service.js';
-import { evaluateStorageUpdate, readPreparationEvidence, recordPreparationEvidence, storageHealth, type RunningBuild, type StorageUpdateVerdict } from '../../../server/link/storage-update.js';
+import { currentVersion, entryPoint, pointCurrent, runtimePaths, versionDirectory } from '../../../server/link/service.js';
+import { evaluateStorageUpdate, readPreparationEvidence, recordPreparationEvidence, type RunningBuild, type StorageUpdateVerdict } from '../../../server/link/storage-update.js';
 import { runUpdateHelper, serviceSteps, updatePaths, Updates, type UpdateHelperSteps } from '../../../server/link/update.js';
+import { storageWebBuild, storageWebHealth } from '../../../server/link/storage-web.js';
 import * as legacy from './fixtures/legacy-1.114.1/server/link/update.js';
 import { A, B, L, installArtifact, openGate, preparedStorage, runningBuild } from './fixtures/storage-builds.js';
 
@@ -64,10 +66,9 @@ class ServiceWeb {
     if (url !== '/api/health') return send(404, {});
     const build = this.builds[this.version];
     if (build === 'legacy') { this.answers.push({ version: this.version, status: 200 }); return send(200, { application: 'agent-session-tower', version: this.version, pid: this.pid }); }
-    const evaluation = await evaluateStorageUpdate({ stateDir: this.state, build, managed: true });
-    const health = storageHealth(evaluation);
-    this.answers.push({ version: this.version, status: health.status, verdict: evaluation.verdict, code: evaluation.code, importAllowed: evaluation.importAllowed });
-    send(health.status, { application: 'agent-session-tower', version: this.version, pid: this.pid, storage: health.storage });
+    const health = await storageWebHealth({ stateDir: this.state, build, managed: true });
+    this.answers.push({ version: this.version, status: health.status, verdict: health.candidateStorage.state, code: health.candidateStorage.code, importAllowed: health.candidateStorage.importAllowed });
+    send(health.status, { application: 'agent-session-tower', version: this.version, pid: this.pid, storage: health.candidateStorage });
   }
 }
 
@@ -160,4 +161,35 @@ test('the JSON-only updater asked for B goes back on B\'s 503 and leaves the sta
   assert.equal(after.verdict, 'ready');
   assert.equal(after.code, 'service-update-done');
   assert.equal(after.importAllowed, true, 'once kept, with no hold or helper left, B may import');
+});
+
+
+test('legacy helper consumes actual candidate web preflight and backs out on an unsupported runtime before changing data', async t => {
+  const state = await stateDir(t);
+  await installArtifact(state, L, { legacy: true });
+  const build = await storageWebBuild(state, APP_VERSION)();
+  const installed = await installArtifact(state, APP_VERSION, { manifest: build.manifest });
+  const { artifactStorageContract } = await import('../../../server/link/storage-update.js');
+  if (build.manifest && build.preflight.identity) {
+    await writeFile(join(dirname(entryPoint(installed)), 'contract.json'), JSON.stringify(artifactStorageContract({ manifest: build.manifest, identity: build.preflight.identity }, build.preflight)));
+  }
+  await pointCurrent(state, L);
+  await writeFile(join(state, 'runs.json'), '{"version":1,"runs":[]}', { mode: 0o600 });
+  const before = await untouched(state);
+  const web = new ServiceWeb(state, { [L]: 'legacy', [APP_VERSION]: build });
+  await web.start(L); t.after(() => web.stop());
+  const log: string[] = [];
+  const updates = new legacy.Updates({ stateDir: state, version: L, port: web.port, managed: true, spawnHelper: () => {} });
+  assert.equal((await updates.request(APP_VERSION)).status, 202);
+  const result = await legacy.runUpdateHelper(state, APP_VERSION, fixtureSteps(legacy.serviceSteps(state, web.port), state, web, log));
+  assert.equal(result?.stage, build.preflight.supported ? 'done' : 'failed', log.join('\n'));
+  const answers = web.answers.filter(answer => answer.version === APP_VERSION);
+  assert.ok(answers.length > 0);
+  assert.ok(answers.every(answer => answer.status === (build.preflight.supported ? 200 : 503)));
+  if (!build.preflight.supported) {
+    assert.equal(await currentVersion(state), L);
+    assert.ok(answers.every(answer => answer.code === 'runtime-unsupported'));
+  }
+  assert.deepEqual(await untouched(state), before, 'even legacy verification changes no original JSON, DB, migration or recovery state');
+  assert.equal(existsSync(join(state, 'state.sqlite')), false);
 });

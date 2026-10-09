@@ -70,6 +70,7 @@ Session retention (owner pages only; master, local agents and run-capability cal
 Storage diagnostics/recovery
 - GET /api/storage/status — the worker's storage diagnosis and admission status; available while sessions are held.
 - All storage POST routes below are owner pages only; master, local agents and run-capability callers are refused. Rollback is a local owner operation.
+- POST /api/storage/verify-update {kind:"overwritten-done"|"stale-active"|"own-failed", by, evidence} — owner pages only: verify update recovery evidence and record its receipt; explicitly retry afterward. This mutation is unavailable to agent tools.
 - POST /api/storage/retry {} — explicitly retry storage startup.
 - POST /api/storage/rollback/status {} — read the durable rollback record. POST /api/storage/rollback/validate {target} — validate a target version without running rollback.
 - POST /api/storage/rollback/run {target, reason} — request owner rollback. POST /api/storage/rollback/retry {} — resume its durable record.

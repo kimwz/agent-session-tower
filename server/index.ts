@@ -1,4 +1,4 @@
-import { captureStorageBundle, storageBuildContext, preflightStorage } from './storage/index.js';
+import { storageWebBuild, storageWebHealth, storageWebServing } from './link/storage-web.js';
 import { rollbackPorts } from './runs/storage-control.js';
 import { restartService } from './link/service.js';
 import { runRollback, resumeRollback, withdrawRollback, releaseStoragePin, validateRollback, readRollbackRecord, printArtifactStorageContract } from './link/storage-update.js';
@@ -277,7 +277,15 @@ async function main() {
   }
   await updates.recover().catch(error => console.error(`The last update could not be settled: ${error instanceof Error ? error.message : String(error)}`));
   // While an update is tried, the worker stays the previous version's, and one that is needed is started from it.
+  const webBuild = storageWebBuild(stateDir, APP_VERSION);
   const runs = new DurableRunManager({ stateDir, handoffHeld: () => handoffHeld(stateDir), heldWorkerEntry: () => heldWorkerEntry(stateDir) });
+  const rollbackContext = async () => {
+    const running = await webBuild();
+    if (!running.manifest) throw new TowerError('unavailable', running.preflight.refusal?.message ?? 'The captured storage build is unavailable.');
+    return { stateDir, managed: updates.managed, running,
+      ports: rollbackPorts((operation, payload) => runs.storageControl(operation, payload), () => restartService(stateDir)),
+      serialize: <T>(work: () => Promise<T>) => updates.exclusive(work) };
+  };
   // Load persisted history before shutdown or an HTTP request can touch the runner.
   try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await exclusions.start(); await runs.start(); } catch (error) { auth.close(); await releaseLock(); throw error; }
   const attachmentStores = { chat: new AttachmentStore(stateDir), auto: new AttachmentStore(join(stateDir, 'auto-prompt-staging')) };
@@ -646,19 +654,15 @@ async function main() {
       try { const answer = await runs.forceUpdate(); changed(); return { status: 202, body: answer }; }
       catch (error) { return { status: statusOf(error) ?? 500, body: { error: error instanceof Error ? error.message : 'The update could not start.' } }; }
     },
+    storageWebHealth: async () => storageWebHealth({ stateDir, managed: updates.managed, build: await webBuild() }, runs.storageStatus()),
     storageRollback: async (action, input) => {
       if (action === 'status') return readRollbackRecord(stateDir);
-      const bundle = await captureStorageBundle();
-      const contextBuild = storageBuildContext(bundle);
-      if (!contextBuild.ok) throw new TowerError('unavailable', contextBuild.failure.message);
-      const preflight = await preflightStorage({ bundle, stateDir });
-      const ports = rollbackPorts((operation, payload) => runs.storageControl(operation, payload), () => restartService(stateDir));
-      const context = { stateDir, managed: updates.managed, running: { version: APP_VERSION, manifest: contextBuild.manifest, preflight }, ports, serialize: <T>(work: () => Promise<T>) => updates.exclusive(work) };
+      const context = await rollbackContext();
       if (action === 'retry') return resumeRollback(context);
       if (action === 'withdraw') return withdrawRollback(context, { releasePin: input.releasePin === true });
       if (typeof input.target !== 'string') throw new TowerError('invalid', 'A storage rollback needs a target version.');
       if (action === 'validate') return validateRollback(context, { target: input.target });
-      if (action === 'release-pin') return releaseStoragePin(stateDir, { version: input.target }, { ports });
+      if (action === 'release-pin') return releaseStoragePin(stateDir, { version: input.target }, { ports: context.ports });
       if (action === 'run' && typeof input.reason === 'string') return runRollback(context, { target: input.target, reason: input.reason, by: 'owner' });
       throw new TowerError('invalid', 'Unknown storage rollback action.');
     },
@@ -678,6 +682,7 @@ async function main() {
     if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') throw new Error(`Port ${port} is already in use. Open http://localhost:${port} if Agent Session Tower is already running, or choose --port 8001.`);
     throw error;
   });
+  void rollbackContext().then(storageWebServing).catch(error => console.error(`Storage rollback continuation is unavailable: ${error instanceof Error ? error.message : String(error)}`));
   const listening = server.address();
   webCredentials = { port: listening && typeof listening === 'object' ? listening.port : port, token: pageToken, callerSecret: masterCallerSecret };
   master.start();
