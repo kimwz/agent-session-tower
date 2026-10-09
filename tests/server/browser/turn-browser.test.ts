@@ -224,6 +224,8 @@ test('code that closes the browser itself saves what that call changed first, an
 test('a page that does not answer in time is skipped; the cookies and the other pages are still saved', async t => {
   const dir = await stateDir(t);
   const f = fakes({ state: () => ({ cookies: [cookie('kept', '1')], origins: [{ origin: 'https://ok.com', localStorage: [{ name: 'k', value: 'v' }] }] }) });
+  // Use the 1,200ms default so the 500ms page timeout leaves time to save.
+  delete f.hooks.lastSaveMs;
   const original = f.hooks.newContext!;
   f.hooks.newContext = async (...args) => {
     const context = await original(...args) as unknown as { pages(): unknown[] };
