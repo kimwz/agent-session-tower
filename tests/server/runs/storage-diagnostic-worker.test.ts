@@ -477,9 +477,15 @@ test('normal ready worker accepts withdrawal release but resumes only after the 
 test('actual recovery RPC verifies an own failed update, preserves refusal guards, and leaves retry explicit', { timeout: 90000 }, async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tw-receipt-')));
   const state = join(root, 'state'); const paths = await runnerPaths(state);
+  const journal = join(state, 'retention', 'journal.json');
+  await mkdir(dirname(journal), { recursive: true, mode: 0o700 });
+  await writeFile(journal, '{unknown journal', { mode: 0o600 });
+  await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
+  await prepareRetentionA(root, state);
   const { call } = await launchDiagnostic(t, root, state, paths);
   const deadline = Date.now() + 60000;
-  const first = await waitForStorage(call, true, deadline);
+  const first = await waitForStorage(call, false, deadline);
+  assert.equal(first.snapshot?.storage?.code, 'cold-journal-unavailable');
   const version = first.snapshot!.storage!.identity!.appVersion;
   const at = new Date().toISOString();
   await writeFile(updatePaths(state).status, JSON.stringify({ version, previous: '0.0.1', stage: 'failed', code: 'check-failed', startedAt: at, updatedAt: at }), { mode: 0o600 });
@@ -497,8 +503,11 @@ test('actual recovery RPC verifies an own failed update, preserves refusal guard
   assert.equal((receipt.result as { recorded: boolean }).recorded, true);
   const saved = JSON.parse(await readFile(storageUpdatePaths(state).receipt, 'utf8'));
   assert.equal(saved.build.sourceHash, first.snapshot!.storage!.identity!.sourceHash);
-  assert.equal(saved.cutoverMarkers, 'not-applicable');
+  assert.equal(saved.cutoverMarkers, 'absent', 'the actual RPC inspects the marker-free database, independently of request body hints');
   assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, false, 'receipt alone grants no runtime resume');
+  await call('storageRetry');
+  assert.equal((await call('snapshot')).snapshot?.storage?.code, 'cold-journal-unavailable', 'the receipt cannot bypass an unrepaired source');
+  await writeFile(journal, JSON.stringify({ version: 1, migratedAt: 1234, entries: [] }), { mode: 0o600 });
   await call('storageRetry');
   assert.equal((await waitForStorage(call, true, deadline)).instance, first.instance);
 });
