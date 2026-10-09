@@ -488,6 +488,7 @@ test('actual recovery RPC verifies an own failed update, preserves refusal guard
   assert.equal(first.snapshot?.storage?.code, 'cold-journal-unavailable');
   const version = first.snapshot!.storage!.identity!.appVersion;
   const at = new Date().toISOString();
+  await mkdir(dirname(updatePaths(state).status), { recursive: true, mode: 0o700 });
   await writeFile(updatePaths(state).status, JSON.stringify({ version, previous: '0.0.1', stage: 'failed', code: 'check-failed', startedAt: at, updatedAt: at }), { mode: 0o600 });
   await call('storageRetry');
   assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, false);

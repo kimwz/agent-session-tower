@@ -182,13 +182,16 @@ test('legacy helper consumes actual candidate web preflight and backs out on an 
   const updates = new legacy.Updates({ stateDir: state, version: L, port: web.port, managed: true, spawnHelper: () => {} });
   assert.equal((await updates.request(APP_VERSION)).status, 202);
   const result = await legacy.runUpdateHelper(state, APP_VERSION, fixtureSteps(legacy.serviceSteps(state, web.port), state, web, log));
-  assert.equal(result?.stage, build.preflight.supported ? 'done' : 'failed', log.join('\n'));
+  const cutover = build.manifest?.domains.some(domain => domain.cutover);
+  const accepted = build.preflight.supported && !cutover;
+  assert.equal(result?.stage, accepted ? 'done' : 'failed', log.join('\n'));
   const answers = web.answers.filter(answer => answer.version === APP_VERSION);
   assert.ok(answers.length > 0);
-  assert.ok(answers.every(answer => answer.status === (build.preflight.supported ? 200 : 503)));
-  if (!build.preflight.supported) {
+  assert.ok(answers.every(answer => answer.status === (accepted ? 200 : 503)));
+  if (!accepted) {
+    assert.equal(result?.code, 'start-failed');
     assert.equal(await currentVersion(state), L);
-    assert.ok(answers.every(answer => answer.code === 'runtime-unsupported'));
+    assert.ok(answers.every(answer => answer.code === (build.preflight.supported ? 'prerequisite-required' : 'runtime-unsupported')));
   }
   assert.deepEqual(await untouched(state), before, 'even legacy verification changes no original JSON, DB, migration or recovery state');
   assert.equal(existsSync(join(state, 'state.sqlite')), false);
