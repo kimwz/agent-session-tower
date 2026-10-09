@@ -101,7 +101,10 @@ test('a checkout whose own thread entry changes after its capture reopens with t
   await cp(join(root, 'shared/app-identity.ts'), join(checkout, 'shared/app-identity.ts'));
   await cp(join(root, 'tsconfig.json'), join(checkout, 'tsconfig.json'));
   await writeFile(join(checkout, 'package.json'), '{"type":"module"}');
-  await symlink(join(root, 'node_modules'), join(checkout, 'node_modules'));
+  await mkdir(join(checkout, 'node_modules'));
+  // Bundle the root dependency's actual bytes at the same checkout-relative path; loader/build tools stay shared.
+  await cp(join(root, 'node_modules/zod'), join(checkout, 'node_modules/zod'), { recursive: true, dereference: true });
+  for (const name of ['tsx', 'esbuild']) await symlink(join(root, 'node_modules', name), join(checkout, 'node_modules', name));
   const state = await stateDir(t);
   const fresh = await stateDir(t);
   const module = (path: string) => JSON.stringify(join(checkout, path));
