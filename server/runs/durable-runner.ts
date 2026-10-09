@@ -403,7 +403,7 @@ export class DurableRunManager extends EventEmitter {
     let file;
     try { file = await open(this.paths.token, constants.O_RDONLY | constants.O_NOFOLLOW); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new TowerError('unavailable', 'The execution worker is not running.', { disposition: 'not-admitted' });
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new TowerError('unavailable', 'The execution worker is not running.', { disposition: 'not-admitted', cause: error });
       throw error;
     }
     let token: string;
@@ -441,7 +441,19 @@ export class DurableRunManager extends EventEmitter {
   }
 
   private async call(method: string, args: unknown[] = []): Promise<unknown> {
-    const token = await this.credential();
+    const proofFence = method === 'storageControl' && args[0] === 'proof'
+      ? (args[1] as { fence?: { id: string; attempt: number } } | undefined)?.fence : undefined;
+    const addressedInstance = this.snapshot?.instance;
+    const matchingHandoff = async () => {
+      const record = addressedInstance ? await this.handoffFrom(addressedInstance) : undefined;
+      return proofFence && record?.rollbackFence?.id === proofFence.id && record.rollbackFence.attempt === proofFence.attempt ? record : undefined;
+    };
+    const token = await this.credential().catch(async error => {
+      if (proofFence && (error.cause as NodeJS.ErrnoException | undefined)?.code === 'ENOENT' && await matchingHandoff()) {
+        Object.assign(error, { proofTransition: { reason: 'socket', fence: proofFence } });
+      }
+      throw error;
+    });
     const body = JSON.stringify({ protocol: RUNNER_PROTOCOL, method, args, instance: this.snapshot?.instance, revision: this.snapshot?.revision });
     const reply = await new Promise<RunnerReply>((resolve, reject) => {
       const req = request({ socketPath: this.paths!.socket, method: 'POST', path: '/rpc', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, res => {
@@ -458,6 +470,11 @@ export class DurableRunManager extends EventEmitter {
       // Before the request left, nothing ran. After it, the worker may have acted.
       req.on('error', error => reject(Object.assign(error, { statusCode: 503, disposition: (error as { disposition?: string }).disposition ?? (sent ? 'uncertain' : 'not-admitted') })));
       req.end(body);
+    }).catch(async error => {
+      // Only actual socket transitions of this recorded rollback are observations to repeat.
+      if (proofFence && ['ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE'].includes((error as NodeJS.ErrnoException).code ?? '')
+        && await matchingHandoff()) Object.assign(error, { proofTransition: { reason: 'socket', fence: proofFence } });
+      throw error;
     });
     const incompatible = () => Object.assign(new TowerError('unavailable', 'Runner identity changed or is incompatible. Restart Tower to reconnect; requests were not retried.'), { incompatible: true });
     if (reply.protocol !== RUNNER_PROTOCOL || reply.stateDir !== this.paths!.stateDir) throw incompatible();
@@ -476,8 +493,19 @@ export class DurableRunManager extends EventEmitter {
       this.emit('change');
     }
     // The successor refused a request addressed to its predecessor; it never ran.
-    if (adopted && reply.error?.statusCode === 409) throw new TowerError('unavailable', 'Tower just updated its execution worker. The request was not submitted; send it again.', { disposition: 'not-admitted' });
-    if (reply.error) throw fromStatus(reply.error.statusCode, reply.error.message, reply.error.disposition ? { disposition: reply.error.disposition as Disposition } : {});
+    if (adopted && reply.error?.statusCode === 409) {
+      const error = new TowerError('unavailable', 'Tower just updated its execution worker. The request was not submitted; send it again.', { disposition: 'not-admitted' });
+      if (proofFence && await matchingHandoff()) Object.assign(error, { proofTransition: { reason: 'adopted', fence: proofFence } });
+      throw error;
+    }
+    if (reply.error) {
+      const error = fromStatus(reply.error.statusCode, reply.error.message, reply.error.disposition ? { disposition: reply.error.disposition as Disposition } : {});
+      const transition = reply.error.proofTransition;
+      if (proofFence && transition?.reason === 'draining' && transition.fence.id === proofFence.id && transition.fence.attempt === proofFence.attempt) {
+        Object.assign(error, { proofTransition: transition });
+      }
+      throw error;
+    }
     return reply.result;
   }
 }
