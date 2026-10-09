@@ -1,3 +1,5 @@
+import { triggersSchema } from '../../../server/triggers/storage-schema.js';
+import { triggersDomain } from '../../../server/triggers/storage-commands.js';
 import { runsSchema } from '../../../server/runs/storage-schema.js';
 import { runsDomain } from '../../../server/runs/storage-commands.js';
 import assert from 'node:assert/strict';
@@ -35,16 +37,19 @@ test('limits are chosen within their ranges and refused outside them', () => {
   assert.throws(() => storageLimits({ maxPayloadBytes: 64 * 1024 * 1024 }), RangeError);
 });
 
-test('the production manifest registers actual retention schema/handler with published cutover declarations; schema text changes alter it', () => {
-  assert.deepEqual(STORAGE_DOMAIN_SCHEMAS, [retentionSchema, runsSchema]);
+test('the production manifest registers actual retention schema/handler with whole preparation-only declarations; schema text changes alter it', () => {
+  assert.deepEqual(STORAGE_DOMAIN_SCHEMAS, [retentionSchema, runsSchema, triggersSchema]);
   assert.strictEqual(retentionDomain.schema, retentionSchema);
   assert.strictEqual(runsDomain.schema, runsSchema);
-  assert.deepEqual(retentionSchema.cutover, { artifactVersion: '1.121.0', importContract: 1 });
-  assert.deepEqual(runsSchema.cutover, { artifactVersion: '1.123.0', importContract: 1 });
+  assert.equal(retentionSchema.cutover, undefined);
+  assert.equal(runsSchema.cutover, undefined);
+  assert.equal(triggersSchema.cutover,undefined);
+  assert.strictEqual(triggersDomain.schema,triggersSchema);
+  assert.deepEqual(triggersSchema.preparation,{ requiredArtifactVersion: '1.124.0',readerContract: 1,writerContract: 1 });
   assert.deepEqual(runsSchema.preparation, { requiredArtifactVersion: '1.122.0', readerContract: 1, writerContract: 1 });
   const manifest = storageManifest();
   assert.equal(manifest.core.schemaVersion, CORE_MIGRATIONS.length);
-  assert.equal(manifest.domains.length, 2);
+  assert.equal(manifest.domains.length, 3);
   assert.equal(manifest.domains[0].scope, 'retention');
   assert.deepEqual(manifest.domains[0].cutover, retentionSchema.cutover);
   assert.deepEqual(manifest.domains[0].preparation, { requiredArtifactVersion: '1.120.2', readerContract: 1, writerContract: 1 });

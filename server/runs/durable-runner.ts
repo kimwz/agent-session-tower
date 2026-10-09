@@ -19,6 +19,7 @@ import { readHandoff } from './handoff.js';
 import type { TriggerOverview } from '../../shared/triggers.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { newerVersion } from '../link/service.js';
+import type { TriggerBackup } from '../triggers/backup.js';
 import type { SkillBackup } from '../skills/backup.js';
 import { TowerError, fromStatus, statusOf, type Disposition } from '../../shared/errors.js';
 import type { StreamSink } from '../streams/sink.js';
@@ -365,6 +366,10 @@ export class DurableRunManager extends EventEmitter {
     return this.call(operation, args);
   }
   /** A full backup's share of the worker: every skill kept in Tower with the owner's guidance. */
+  async triggersBackup(): Promise<TriggerBackup> {
+    if (!this.supports('backup')) throw new TowerError('unavailable','실행 워커가 아직 백업 DTO를 제공하지 못합니다.');
+    return this.call('triggersBackup',[]) as Promise<TriggerBackup>;
+  }
   async skillsBackup(): Promise<SkillBackup> {
     if (!this.supports('backup')) throw new TowerError('unavailable', '실행 워커가 아직 새 버전으로 바뀌지 않아 백업을 만들 수 없습니다. 진행 중인 작업이 끝나 워커가 바뀌면 다시 시도하세요.');
     return this.call('skillsBackup', []) as Promise<SkillBackup>;

@@ -1,3 +1,4 @@
+import { collectTriggers } from '../../helpers/legacy-trigger-backup.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, rm, symlink } from 'node:fs/promises';
@@ -8,7 +9,7 @@ import { SecretStore } from '../../../server/triggers/secrets.js';
 import { BackupService } from '../../../server/backup/service.js';
 import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
 import type { TriggerInput } from '../../../shared/triggers.js';
-import { collectTriggers, collectWorkerFiles } from '../../../server/backup/payload.js';
+import { collectWorkerFiles } from '../../../server/backup/payload.js';
 import { collectEncryptedVault, importPendingSecret, listPendingSecretImports } from '../../../server/backup/secrets.js';
 import { decryptBackup, encryptBackup } from '../../../server/backup/crypto.js';
 import { takeWorkerRestore, readReport } from '../../../server/backup/restore-files.js';
@@ -18,7 +19,7 @@ const legacy = { id: 'legacy-identifier', name: 'HTTP token', origin: 'https://e
 async function vault(stateDir: string) { const service = new SecretService({ stateDir }); await service.start(); await service.initialize(VAULT_PASSWORD); return service; }
 async function backup(stateDir: string) {
   const store = { backupValue: () => ({}), restore: async () => undefined };
-  const service = new BackupService({ stateDir, version: '1.100.2', skills: async () => ({ bundle: { format: 'agent-session-tower.skills', version: 1, exportedAt: '', from: 'fixture', skills: [] }, guidance: '', settings: { enabled: false, provider: 'codex' } }), restartWorker: async () => true, stores: { groups: store, exclusions: store, decisions: store } });
+  const service = new BackupService({ stateDir, triggers: () => collectTriggers(stateDir), version: '1.100.2', skills: async () => ({ bundle: { format: 'agent-session-tower.skills', version: 1, exportedAt: '', from: 'fixture', skills: [] }, guidance: '', settings: { enabled: false, provider: 'codex' } }), restartWorker: async () => true, stores: { groups: store, exclusions: store, decisions: store } });
   await service.start(); return service;
 }
 test('legacy migration keeps identity and grants, verifies encrypted commit, removes plaintext and fails locked', async t => {

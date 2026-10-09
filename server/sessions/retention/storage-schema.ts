@@ -7,7 +7,6 @@ export const RETENTION_STAGE_BYTES = 2 * RETENTION_INTENT_BYTES;
 /** Published retention cutover; existing SQL authority never reimports legacy sources. */
 export const retentionSchema: StorageDomainSchema = {
   domain: 'retention',
-  cutover: { artifactVersion: '1.121.0', importContract: 1 },
   preparation: { requiredArtifactVersion: '1.120.2', readerContract: 1, writerContract: 1 },
   migrations: [{ version: 1, sql: `
 CREATE TABLE retention_state (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), revision INTEGER NOT NULL CHECK (revision > 0)) STRICT;

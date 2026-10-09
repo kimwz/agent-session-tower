@@ -206,15 +206,15 @@ test('a 1.105.0 state file loads and is written back as the base writes it', asy
   assert.deepEqual(Object.keys(written), ['version', 'onceConsumed', 'triggers', 'revisions', 'tombstones', 'cursors', 'events', 'fired', 'audit', 'secretGrants', 'settings', 'trustedFolders', 'recentFires']);
 });
 
-test('legacy issue watches, wrong shapes and parse failures load as before', async t => {
+test('wrong shapes and parse failures preserve state and hold startup', async t => {
   t.mock.method(console, 'error', () => {});
   const legacy = await goldenState();
   for (const broken of [{ ...legacy, version: 2 }, { ...legacy, cursors: [] }, { ...legacy, triggers: [{ id: 'x' }] }, { ...legacy, events: [{ id: 1 }] }]) {
     const f = await engine(t);
     await writeFile(join(f.directory, 'trigger-engine.json'), JSON.stringify(broken), { mode: 0o600 });
-    const service = await f.open();
-    assert.deepEqual(service.list({ includeArchived: true }), [], 'an unreadable file loads as an empty engine');
-    assert.equal((await readdir(f.directory)).filter(name => name.startsWith('trigger-engine.json.unreadable-')).length, 1, 'and is kept aside');
+    await assert.rejects(f.open(),{ kind: 'unavailable' });
+    assert.deepEqual(JSON.parse(await readFile(join(f.directory,'trigger-engine.json'),'utf8')),broken);
+    assert.equal((await readdir(f.directory)).filter(name => name.startsWith('trigger-engine.json.unreadable-')).length,0,'original is preserved without quarantine');
   }
 });
 

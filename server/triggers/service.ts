@@ -1,3 +1,6 @@
+import type { StorageClient } from '../storage/client.js';
+import { triggerBackupOf } from './backup.js';
+import { serializeState } from './state.js';
 import { EventEmitter } from 'node:events';
 import { mkdir } from 'node:fs/promises';
 import { type GitHubAuth, type GitHubCheck, type HttpCondition, type HttpRequest, type HttpTestResult, type SecretInput, type Trigger, type TriggerActor, type TriggerAuditEntry, type TriggerEvent, type TriggerOverview, type TriggerSecret, type TriggerSettings, type IssuePreview, type TriggerSource, type Schedule } from '../../shared/triggers.js';
@@ -47,6 +50,7 @@ export class TriggerService extends EventEmitter {
   private readonly now: () => number;
 
   constructor(private readonly options: { stateDir: string; executor: TriggerExecutor; now?: () => number; slack?: () => SlackProjection | undefined; tickMs?: number;
+    storage?: StorageClient;
     secretStore?: SecretStore;
     /** Public agents appear among triggers; their settings and history stay in their own files. */
     publicAgents?: () => SlackProjection[];
@@ -66,7 +70,7 @@ export class TriggerService extends EventEmitter {
     super();
     this.secrets = options.secretStore ?? new SecretStore(options.stateDir);
     this.now = options.now ?? Date.now;
-    this.store = new TriggerStore({ stateDir: options.stateDir, now: this.now, limits: () => this.options.limits, changed: () => this.emit('change') });
+    this.store = new TriggerStore({ stateDir: options.stateDir, storage: options.storage, now: this.now, limits: () => this.options.limits, changed: () => this.emit('change') });
     this.budget = new RequestBudget(this.now, () => this.options.limits?.requestsPerMinute);
     this.github = new GitHubAccess({ secrets: this.secrets, budget: this.budget, grants: () => this.state.secretGrants, now: this.now, ghToken: options.ghToken ?? readGhToken,
       transport: () => this.options.githubTransport, ownPorts: options.ownPorts, resolve: options.resolve });
@@ -86,7 +90,7 @@ export class TriggerService extends EventEmitter {
     await this.store.load(loaded => TriggerDispatch.recoverLoaded(loaded, this.options.executor));
     await this.secrets.load();
     const errors = options.restore ? await restoreFrom(options.restore, this.restoreContext()).catch(error => [`트리거를 복원하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`]) : [];
-    await this.store.commit(() => undefined, 'settle').catch(() => {});
+    await this.store.commit(() => undefined, 'settle');
     this.engine.markStarted();
     this.resume();
     return { errors };
@@ -193,6 +197,13 @@ export class TriggerService extends EventEmitter {
   inFlight(): boolean { return this.engine.isTicking() || Boolean(this.dispatch.closing()) || this.store.pending() > 0 || this.polls.size() > 0 || this.state.events.some(event => event.status === 'claimed'); }
   /** Saves again; a locked engine never saves, and a handoff must not wait on it. */
   flush(): Promise<void> { return this.store.flush(); }
+  /** Authoritative owner DTO; absence of the legacy file is irrelevant under SQL authority. */
+  async backup(): Promise<TriggerBackup> {
+    await this.store.idle();
+    if (!this.engine.isStarted()) throw failure('Trigger engine is not ready for a backup.','unavailable');
+    if (this.store.problem) throw failure(this.store.problem,'unavailable');
+    return triggerBackupOf(JSON.parse(serializeState(this.state)))!;
+  }
   settings(): TriggerSettings { return structuredClone(this.state.settings); }
   preview(schedule: Schedule): string[] { return previewSlots(schedule, this.now()); }
 

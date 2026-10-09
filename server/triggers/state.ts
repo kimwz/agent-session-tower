@@ -91,7 +91,7 @@ export function pruneState(state: EngineState, now: () => number): void {
 }
 
 /** A saved state as the engine takes it over, or undefined when it cannot be read. */
-export function parseState(value: unknown, now: () => number): EngineState | undefined {
+export function parseState(value: unknown, now: () => number, reconcile = true): EngineState | undefined {
   if (!value || typeof value !== 'object' || (value as EngineState).version !== 1) return undefined;
   const saved = upgradeState(value as EngineState, now());
   const state = empty();
@@ -130,7 +130,7 @@ export function parseState(value: unknown, now: () => number): EngineState | und
     if (projection) logTrigger(state, now, { kind: 'system', via: 'migration' }, 'consume', projection, projection.revision, projection.revision,
       'The once consumption ledger was absent after a downgrade; retained snapshots were recovered. Deleted IDs beyond legacy retention cannot be recovered.');
   }
-  normalizeOnce(state, now);
+  if (reconcile) normalizeOnce(state, now);
   return state;
 }
 

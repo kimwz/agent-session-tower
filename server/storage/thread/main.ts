@@ -1,3 +1,4 @@
+import { triggersDomain } from '../../triggers/storage-commands.js';
 import { runsDomain } from '../../runs/storage-commands.js';
 import { retentionDomain } from '../../sessions/retention/storage-commands.js';
 import { runStorageThread } from './runtime.js';
@@ -7,4 +8,4 @@ import { runStorageThread } from './runtime.js';
  * StorageDomain here together with their schema in STORAGE_DOMAIN_SCHEMAS (schema.ts); the handshake refuses a
  * thread whose domains differ from the worker's manifest.
  */
-runStorageThread([retentionDomain, runsDomain]);
+runStorageThread([retentionDomain, runsDomain, triggersDomain]);

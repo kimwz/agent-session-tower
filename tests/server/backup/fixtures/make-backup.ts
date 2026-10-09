@@ -1,3 +1,4 @@
+import { collectTriggers } from '../../../helpers/legacy-trigger-backup.js';
 /**
  * Makes a fixture backup with the code of one released Tower, so the backups the owner already holds stay readable.
  * Run against a checkout of that release (`git archive vX.Y.Z server shared package.json tsconfig.json`, with this
@@ -107,7 +108,7 @@ try {
   await groups.set({ cwd: project, title: 'Fixture project', pinned: true });
   await exclusions.add('/fixture/private');
   const skills = { bundle: { format: 'agent-session-tower.skills', version: 1, exportedAt: '', from: 'fixture', skills: [] }, guidance: 'Be brief.', settings: { enabled: true, provider: 'claude' } };
-  const backup = new BackupService({ stateDir, version, skills: async () => structuredClone(skills), restartWorker: async () => true, stores: { groups, exclusions, decisions }, master: async () => {}, host: 'fixture' });
+  const backup = new BackupService({ stateDir, triggers: () => collectTriggers(stateDir), version, skills: async () => structuredClone(skills), restartWorker: async () => true, stores: { groups, exclusions, decisions }, master: async () => {}, host: 'fixture' });
   await backup.start();
   const file = await backup.export(FIXTURE_PASSPHRASE);
   const { payload } = await decryptBackup(file.text, FIXTURE_PASSPHRASE);

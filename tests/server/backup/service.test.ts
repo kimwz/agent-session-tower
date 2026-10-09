@@ -1,3 +1,4 @@
+import { collectTriggers } from '../../helpers/legacy-trigger-backup.js';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -20,7 +21,7 @@ async function computer(t: TestContext, options: { now?: () => number; host?: st
   const groups = new ProjectGroupStore(stateDir), exclusions = new RemoteExclusionStore(stateDir), decisions = new DecisionService(stateDir);
   await groups.start(); await exclusions.start(); await decisions.start();
   const handoffs: number[] = [], master: Record<string, unknown>[] = [];
-  const service = new BackupService({ stateDir, version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => { handoffs.push(Date.now()); return true; },
+  const service = new BackupService({ stateDir, triggers: () => collectTriggers(stateDir), version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => { handoffs.push(Date.now()); return true; },
     stores: { groups, exclusions, decisions }, master: async body => { master.push(body); }, ...(options.now ? { now: options.now } : {}), host: options.host ?? 'studio' });
   await service.start();
   return { stateDir, groups, exclusions, decisions, service, handoffs, master };
@@ -225,7 +226,7 @@ test('a key that may only write still counts as backed up; removing old ones is 
 
 test('a backup from a newer Tower is refused, and worker settings a service would refuse are never written', async t => {
   const a = await computer(t);
-  const newer = new BackupService({ stateDir: a.stateDir, version: '9.0.0', skills: async () => structuredClone(skills), restartWorker: async () => true,
+  const newer = new BackupService({ stateDir: a.stateDir, triggers: () => collectTriggers(a.stateDir), version: '9.0.0', skills: async () => structuredClone(skills), restartWorker: async () => true,
     stores: { groups: a.groups, exclusions: a.exclusions, decisions: a.decisions }, host: 'studio' });
   await newer.start();
   const b = await computer(t);
@@ -294,7 +295,7 @@ test('an upload stopped because Tower shuts down is not a failure, and the next 
   t.after(() => rm(stateDir, { recursive: true, force: true }));
   const groups = new ProjectGroupStore(stateDir), exclusions = new RemoteExclusionStore(stateDir), decisions = new DecisionService(stateDir);
   await groups.start(); await exclusions.start(); await decisions.start();
-  const service = new BackupService({ stateDir, version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => true, stores: { groups, exclusions, decisions }, fetcher, host: 'studio' });
+  const service = new BackupService({ stateDir, triggers: () => collectTriggers(stateDir), version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => true, stores: { groups, exclusions, decisions }, fetcher, host: 'studio' });
   await service.start();
   await service.saveSettings({ enabled: true, intervalHours: 24, keep: 3, passphrase: PASS, remote: { endpoint: bucket.endpoint, bucket: 'bucket', prefix: '', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret-key' } });
   const upload = service.upload();
@@ -367,7 +368,7 @@ test('a worker that stops after applying files and triggers leaves only the skil
 test("a computer keeps its mark across restarts, so its own backups are its own even under another name", async t => {
   const a = await computer(t);
   const text = (await a.service.export(PASS)).text;
-  const restarted = new BackupService({ stateDir: a.stateDir, version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => true,
+  const restarted = new BackupService({ stateDir: a.stateDir, triggers: () => collectTriggers(a.stateDir), version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => true,
     stores: { groups: a.groups, exclusions: a.exclusions, decisions: a.decisions }, host: 'renamed' });
   await restarted.start();
   assert.equal((await restarted.check(text, PASS)).otherComputer, false);

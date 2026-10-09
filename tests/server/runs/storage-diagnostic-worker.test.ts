@@ -21,6 +21,8 @@ import { parseRunDocuments } from '../../../server/runs/storage-codec.js';
 import { retentionBootstrap, retentionLegacyFiles } from '../../../server/sessions/retention/storage-transfer.js';
 import { RetentionStore } from '../../../server/sessions/retention/store.js';
 import { retentionBuild } from '../storage/fixtures/retention-build.js';
+import { RunsRepository } from '../../../server/runs/storage-repository.js';
+import { RetentionRepository } from '../../../server/sessions/retention/storage-repository.js';
 import { recordPreparationEvidence } from '../../../server/link/storage-update.js';
 import { runnerPaths, RUNNER_PROTOCOL, type RunnerReply } from '../../../server/runs/runner-protocol.js';
 import { artifactStorageContract, completionProven, type ServingProof, resumeRollback, withdrawRollback, readRollbackRecord, evaluateStorageUpdate, type RunningBuild, storageUpdatePaths, type RollbackRecord } from '../../../server/link/storage-update.js';
@@ -82,6 +84,28 @@ async function prepareRetentionA(root: string, stateDir: string): Promise<void> 
     assert.deepEqual(a.manifest.domains.map(domain => domain.scope).sort(), ['retention', 'runs']);
     const preflight = await a.storage.preflightStorage({ bundle: a.bundle(), stateDir });
     await recordPreparationEvidence(stateDir, { context: client.context!, preflight, prepared, gate: await client.gate('core') });
+  } finally { await client.close(); }
+}
+
+/** Existing fixture factory supplies the captured future B SDK; A production declarations remain untouched. */
+async function futureBWorker(t: TestContext, root: string): Promise<string> {
+  const b = await retentionBuild('1.125.0',join(root,'future-b-artifact'));
+  const captured = b.bundle();
+  const generated = await mkdtemp(join(dirname(fileURLToPath(import.meta.url)),'future-b-worker-'));
+  t.after(() => rm(generated,{ recursive: true,force: true }));
+  const entry = join(generated,'worker.mjs');
+  await build({ entryPoints: [fileURLToPath(new URL('./fixtures/storage-diagnostic-worker.ts',import.meta.url))],outfile: entry,bundle: true,packages: 'external',platform: 'node',format: 'esm',target: 'node22',logLevel: 'silent',plugins: [
+    { name: 'future-b125-worker-profile',setup(builder) { builder.onLoad({ filter: /[\\/]shared[\\/]app-identity\.ts$/ },async args => ({ contents: (await readFile(args.path,'utf8')).replace(/export const APP_VERSION = '[^']+';/,"export const APP_VERSION = '1.125.0';"),loader: 'ts' })); } },
+    buildIdentityPlugin(buildIdentityModule({ contexts: [{ sourceHash: captured.sourceHash,manifest: b.manifest }],artifact: JSON.stringify({ format: 'tower-storage-thread-bundle/2',source: captured.source,sourceHash: captured.sourceHash }) })),
+  ] });
+  return entry;
+}
+async function prepareTriggersA124(root: string,stateDir: string): Promise<void> {
+  const a = await retentionBuild('1.124.0',join(root,'trigger-preparation-artifact'));
+  const client = await a.storage.openStorage({ stateDir,bundle: a.bundle() });
+  try {
+    const prepared = await client.prepare({ allowMigration: true }),preflight = await a.storage.preflightStorage({ stateDir,bundle: a.bundle() });
+    await recordPreparationEvidence(stateDir,{ context: client.context!,preflight,prepared,gate: await client.gate('core') });
   } finally { await client.close(); }
 }
 
@@ -924,8 +948,8 @@ test('actual prestart B patient handoff preserves nonempty partial runs sources 
   await writeFile(sourcePaths[0], runs, { mode: 0o600 });
   await writeFile(sourcePaths[1], created, { mode: 0o600 });
   const before = await Promise.all(sourcePaths.map(async path => ({ bytes: await readFile(path), info: await lstat(path) })));
-  await prepareRetentionA(root, state);
-  const worker = await launchDiagnostic(t, root, state, paths, undefined, { TOWER_FIXTURE_COLD_COUNTS: '1' });
+  await prepareTriggersA124(root,state);
+  const worker = await launchDiagnostic(t, root, state, paths, await futureBWorker(t,root), { TOWER_FIXTURE_COLD_COUNTS: '1' });
   let held = await waitForStorage(worker.call, false, deadline, worker);
   while (held.snapshot?.storage?.code !== 'runs-bootstrap-held') {
     assert.equal(worker.child.exitCode, null, worker.stderr());
@@ -974,8 +998,8 @@ test('actual B runs bootstrap parks before scans and admits once after explicit 
   await writeFile(join(state, 'retention', 'journal.json'), JSON.stringify({ version: 1, migratedAt: 1, entries: [], policies: [] }), { mode: 0o600 });
   await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
   await writeFile(join(state, 'runs.json'), '[]', { mode: 0o600 });
-  await prepareRetentionA(root, state);
-  const { child, call, stderr } = await launchDiagnostic(t, root, state, paths, undefined, { TOWER_FIXTURE_COLD_COUNTS: '1' });
+  await prepareTriggersA124(root,state);
+  const { child, call, stderr } = await launchDiagnostic(t, root, state, paths, await futureBWorker(t,root), { TOWER_FIXTURE_COLD_COUNTS: '1' });
   const deadline = Date.now() + 60000;
   let snapshot: RunnerReply | undefined;
   while (snapshot?.snapshot?.storage?.code !== 'runs-bootstrap-held') {
@@ -1011,4 +1035,36 @@ test('actual B runs bootstrap parks before scans and admits once after explicit 
   assert.equal(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')).scanner, 1);
   await call('storageRetry');
   assert.equal(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')).scanner, 1);
+});
+
+test('actual A124 worker adds only trigger preparation over retained 123 SQL authorities and records whole evidence before admission', { timeout: 90000 }, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(),'tower-trigger-prep-worker-'))), state = join(root,'state'), paths = await runnerPaths(state);
+  const previous = await retentionBuild('1.123.0',join(root,'previous-artifact'));
+  const client = await previous.storage.openStorage({ stateDir: state,bundle: previous.bundle() });
+  await client.prepare({ allowMigration: true });
+  await new RunsRepository(client).importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'retained-runs');
+  await new RetentionRepository(client).importPrepared({ journal: { version: 1,migratedAt: 1234,entries: [],policies: [] },observations: { version: 1,entries: [] } },'a'.repeat(64),'retained-retention');
+  const authorities = (await client.inspect()).authority; await client.close();
+  const source = JSON.stringify({ version: 1,onceConsumed: { deleted: { at: '2026-10-01T00:00:00Z' } },triggers: [],revisions: {},tombstones: [],cursors: {},events: [],fired: {},audit: [],secretGrants: {},settings: { maxTriggers: 50,maxConcurrentRuns: 3,maxEventsPerHour: 60,privateHosts: [] },trustedFolders: [],recentFires: [] });
+  await writeFile(join(state,'trigger-engine.json'),source,{ mode: 0o600 });
+  const { child,call,stderr } = await launchDiagnostic(t,root,state,paths);
+  let ready: RunnerReply | undefined; const deadline = Date.now() + 60000;
+  while (!ready?.snapshot?.storage?.admissionOpen) {
+    assert.equal(child.exitCode,null,stderr());
+    try { ready = await call('snapshot'); } catch { assert.equal(child.exitCode,null,stderr()); }
+    if (Date.now() > deadline) assert.fail(`A124 never became ready: ${JSON.stringify(ready)} ${stderr()}`);
+    await new Promise(resolve => setTimeout(resolve,25));
+  }
+  assert.equal(ready!.snapshot!.storage!.state,'ready');
+  const db = new DatabaseSync(join(state,'state.sqlite'),{ readOnly: true });
+  assert.deepEqual(db.prepare('SELECT domain,generation,manifest_sha256 FROM domain_imports ORDER BY domain').all().map(row => ({ domain: row.domain,generation: row.generation,manifestSha256: row.manifest_sha256 })),authorities.sort((a,b) => a.domain.localeCompare(b.domain)).map(row => ({ domain: row.domain,generation: row.generation,manifestSha256: row.manifestSha256 })));
+  assert.equal((db.prepare('SELECT count(*) AS n FROM triggers_rows').get() as { n: number }).n,0);
+  assert.equal((db.prepare('SELECT count(*) AS n FROM triggers_stages').get() as { n: number }).n,0);
+  assert.equal((db.prepare("SELECT count(*) AS n FROM operation_receipts WHERE scope = 'triggers'").get() as { n: number }).n,0);
+  db.close();
+  const evidence = await Promise.all(['retention','runs','triggers'].map(async domain => JSON.parse(await readFile(join(state,'storage-contracts',`${domain}.json`),'utf8'))));
+  for (const item of evidence) { assert.equal(item.preparationVersion,'1.124.0'); assert.deepEqual(item.manifest.domains.map((domain: { scope: string }) => domain.scope),['retention','runs','triggers']); assert.ok(item.manifest.domains.every((domain: { cutover?: unknown }) => domain.cutover === undefined)); }
+  assert.deepEqual(evidence.map(item => item.manifest),[evidence[0].manifest,evidence[0].manifest,evidence[0].manifest]);
+  assert.deepEqual(JSON.parse(await readFile(join(state,'trigger-engine.json'),'utf8')).onceConsumed,{ deleted: { at: '2026-10-01T00:00:00Z' } });
+  const backup = await call('triggersBackup'); assert.equal(backup.error,undefined); assert.deepEqual((backup.result as { onceConsumed: unknown }).onceConsumed,{ deleted: { at: '2026-10-01T00:00:00Z' } });
 });
