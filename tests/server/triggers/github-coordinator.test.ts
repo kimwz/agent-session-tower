@@ -318,6 +318,7 @@ test('actual admission loss reaches coordinator trigger event once without a new
   await manager.start();
   const f = await fixture(t,{ create: (input,internal) => manager.create({ ...input,cwd: stateDir,prompt: 'native-hold-response-lost' },internal) });
   const trigger = await f.service.create(coordinatorTrigger(),OWNER);
+  await assert.rejects(f.service.run(trigger.id,OWNER),/noted the issues already open/);
   f.issues.push({ number: 2 });
   const event = await f.service.run(trigger.id,OWNER);
   await f.settle();

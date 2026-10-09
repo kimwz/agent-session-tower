@@ -279,16 +279,22 @@ test('actual SQLite output reply loss preserves a running ordinary turn after a 
   assert.equal(turns.length,2);
   const write = client.write.bind(client);
   let entered!: () => void, release!: () => void;
+  let outputIntent: string | undefined;
   const saving = new Promise<void>(resolve => { entered = resolve; }), wait = new Promise<void>(resolve => { release = resolve; });
   client.write = async <T>(...args: Parameters<typeof client.write>) => {
-    if (args[0] === 'runs' && args[1] === 'commit') { entered(); await wait; }
+    if (args[0] === 'runs' && args[1] === 'stage') {
+      const payload = args[2] as { intent: string; data: string };
+      if (Buffer.from(payload.data,'base64').toString('utf8').includes('native-hold-response-lost')) outputIntent = payload.intent;
+    }
+    if (outputIntent && args[0] === 'runs' && args[1] === 'commit' && (args[2] as { intent: string }).intent === outputIntent) { entered(); await wait; }
     return write<T>(...args);
   };
   turns[1].output('native-hold-response-lost');
+  const outputLost = assert.rejects(manager.flushState(),(error: { disposition?: string }) => error.disposition === 'uncertain');
   await saving;
   const delivery = manager.steer(ordinary.id,{ targetRunId: target.id });
   const rejected = assert.rejects(delivery,(error: { disposition?: string }) => error.disposition === 'uncertain');
-  release(); await rejected;
+  release(); await Promise.all([outputLost,rejected]);
   const pending = manager.pendingAdmission()!;
   assert.ok(pending.commandId);
   client.write = write;
