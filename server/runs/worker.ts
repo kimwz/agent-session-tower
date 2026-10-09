@@ -973,8 +973,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     try {
       if (storageStatus.state === 'ready' && database) {
         const gate = await database.gate('core');
-        if (gate.open && storageStatus.state === 'ready' && generation === storageHoldGeneration) return;
-        if (storageStatus.state === 'ready') storageStatus = { ...storageStatus, state: 'recovery-required', code: 'storage-gate-held', reason: gate.reasons.join(', '), admissionOpen: false };
+        const pendingAdmission = runs.pendingAdmission();
+        if (gate.open && !pendingAdmission && storageStatus.state === 'ready' && generation === storageHoldGeneration) return;
+        if (storageStatus.state === 'ready') storageStatus = { ...storageStatus, state: 'recovery-required', code: 'storage-gate-held', reason: pendingAdmission ? `Run admission receipt ${pendingAdmission.commandId} remains unresolved.` : gate.reasons.join(', '), admissionOpen: false };
       }
     } catch (error) {
       // This catch covers only the actual storage await, never unrelated service initialization.
@@ -1516,6 +1517,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         if (releaseRequested && !await releaseCommitted()) return storageStatus;
         if (!await attempt(true)) return storageStatus;
         await requireEffects();
+        const pendingAdmission = runs.pendingAdmission();
+        if (pendingAdmission) await runs.resolveAdmission(pendingAdmission.commandId);
+        if (runs.pendingAdmission()) return storageStatus;
         if (!await releaseAllowed(generation, fence) || generation !== storageHoldGeneration) return storageStatus;
         storageStatus.admissionOpen = true; runs.releaseStorage(); autoPrompts.releaseStorage();
         paused = false; initializedRetention?.resume(); temporary.resume(); runs.resumeAttachmentCleanup(); autoPrompts.resumeAttachmentCleanup();

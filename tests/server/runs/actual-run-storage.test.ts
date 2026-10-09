@@ -13,6 +13,8 @@ import { canonical, documentsHash, parseRunDocuments, rowsOf, RUN_SOURCE_BYTES, 
 import { importRuns, exportRuns, restoreRunsStorage, workerLegacyFiles } from '../../../server/runs/storage-transfer.js';
 import { RemoteRequestLedger } from '../../../server/remote/request-ledger.js';
 import type { Run, Session } from '../../../shared/types.js';
+import type { PermissionRequest } from '../../../shared/permissions.js';
+import { until } from '../../helpers/until.ts';
 
 async function folder(t: TestContext) {
   const path = await realpath(await mkdtemp(join(tmpdir(),'tower-runs-fixture-')));
@@ -119,7 +121,7 @@ test('raw runs validation retains unknown fields/markers and rejects malformed, 
   assert.throws(() => parseRunDocuments({ ...raw,runs: Buffer.alloc(RUN_SOURCE_BYTES + 1) }));
 });
 
-for (const fault of ['before','after-native-hold']) test(`actual ${fault} response loss holds manager attachments/placeholder/remote ledger and provider until receipt resolution`, async t => {
+for (const fault of ['before','after-native-hold','runs-refuse-compensation-loss']) test(`actual ${fault} response loss holds manager attachments/placeholder/remote ledger and provider until receipt resolution`, async t => {
   const f = await prepared(t), initial = await f.open(f.b), repo = new RunsRepository(initial);
   await repo.importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'empty-import'); await initial.close();
   const client = await f.open(f.a,fault);
@@ -142,12 +144,89 @@ for (const fault of ['before','after-native-hold']) test(`actual ${fault} respon
   assert.equal(attempts,1); assert.equal(starts,0);
   assert.deepEqual(await manager.attachment(attachmentId),held,'unknown keeps prepared attachment files');
   await client.reopen(); await client.prepare({ allowMigration: false });
+  manager.releaseStorage();
+  assert.deepEqual(manager.pendingAdmission(),pending,'SDK prepare/release does not settle the original identity');
+  assert.equal(starts,0);
   assert.equal((await client.receipt(pending.commandId)).found,fault !== 'before');
   manager.holdStorage();
   assert.deepEqual(await manager.resolveAdmission(pending.commandId),{ disposition: fault === 'before' ? 'not-committed' : 'committed',runIds: [runId] });
   assert.equal(manager.list().length,fault === 'before' ? 0 : 1);
   assert.equal(starts,0,'resolution does not execute a provider');
+  if (fault === 'runs-refuse-compensation-loss') {
+    assert.ok((await manager.attachment(attachmentId)).content);
+    assert.equal(manager.sessionList([]).length,1);
+    await assert.rejects(ledger.once('controllerfixture','create',requestId,{},execute,value => ({ kind: 'run',runId: value.run.id }),() => undefined),/확실하지/);
+    assert.equal(attempts,1);
+  }
   manager.holdStorage(); await manager.close();
+});
+
+for (const fault of ['before','after-native-hold']) test(`actual permission continuation ${fault} stays held across reopen and never reinserts absent reservations`, async t => {
+  const f = await prepared(t), initial = await f.open(f.b), data = documents(f.stateDir);
+  const parent: Run = { id: data.runs[0].id,sessionId: data.runs[0].sessionId,prompt: 'Parent',output: '',createdAt: data.runs[0].createdAt,status: 'completed',finishedAt: data.runs[0].createdAt };
+  await new RunsRepository(initial).importPrepared({ runs: [parent],created: [],instructions: {} },'a'.repeat(64),'permission-parent');
+  await initial.close();
+  const client = await f.open(f.a,fault);
+  let starts = 0;
+  const manager = new RunManager({ stateDir: f.stateDir,storage: client,holdUntilReady: true,getSession: () => ({ ...data.created[0].session,creationPending: false }),refreshSessions: async () => {},
+    findExecutable: async () => '/fixture/codex',spawnProcess: () => { starts++; throw new Error('Fixture forbids native launch'); } });
+  await manager.start();
+  const request: PermissionRequest = { id: '10000000-0000-4000-8000-000000000003',sessionId: parent.sessionId,runId: parent.id,status: 'approved',
+    rule: { kind: 'command',value: 'fixture',providers: ['codex'],scope: 'project',cwd: f.stateDir },reason: 'Fixture',cwd: f.stateDir,createdAt: parent.createdAt };
+  await assert.rejects(manager.permissionDecision(request,'native-hold-response-lost'),(error: { disposition?: string }) => error.disposition === 'uncertain');
+  const pending = manager.pendingAdmission()!;
+  await client.reopen(); await client.prepare({ allowMigration: false });
+  manager.releaseStorage(); manager.markReady();
+  assert.deepEqual(manager.pendingAdmission(),pending); assert.equal(starts,0);
+  await assert.rejects(manager.flushState(),(error: { disposition?: string }) => error.disposition === 'uncertain');
+  assert.equal(starts,0);
+  manager.holdStorage();
+  assert.deepEqual(await manager.resolveAdmission(pending.commandId),{ disposition: fault === 'before' ? 'not-committed' : 'committed',runIds: [request.id] });
+  await manager.flushState();
+  const current = await new RunsRepository(client).exportCurrent();
+  assert.equal(current.documents.runs.some(run => run.id === request.id),fault !== 'before');
+  assert.equal(manager.list().some(run => run.id === request.id),fault !== 'before');
+  assert.equal(starts,0);
+  await manager.close();
+});
+
+test('actual repeated steer waits for fixed SQLite admission and preserves loss identity with no provider insert', async t => {
+  const f = await prepared(t), initial = await f.open(f.b);
+  await new RunsRepository(initial).importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'steer-empty'); await initial.close();
+  const client = await f.open(f.a,'after-steer-hold'), session = { ...documents(f.stateDir).created[0].session,nativeId: '10000000-0000-4000-8000-000000000002',resumable: true,creationPending: false,status: 'completed' as const };
+  let inserts = 0, finish!: () => void;
+  const done = new Promise<void>(resolve => { finish = resolve; });
+  const manager = new RunManager({ stateDir: f.stateDir,storage: client,getSession: () => session,refreshSessions: async () => {},findExecutable: async () => '/fixture/codex',
+    spawnProcess: () => { throw new Error('Fixture forbids native launch'); },openCodexStdio: async config => ({
+      start: async () => { config.onStarted?.('fixture'); },done,close: finish,cancel: async () => { config.onFinished({ status: 'cancelled' }); finish(); },
+      respondToApproval: async () => {},canSteer: () => true,steer: async () => { inserts++; } }) });
+  await manager.start();
+  const parent = await manager.enqueue(session.id,'Parent');
+  await until(() => manager.list().find(run => run.id === parent.id)?.status === 'running');
+  const queued = await manager.enqueue(session.id,'Insert');
+  const write = client.write.bind(client);
+  let entered!: () => void, release!: () => void;
+  const saving = new Promise<void>(resolve => { entered = resolve; }), wait = new Promise<void>(resolve => { release = resolve; });
+  client.write = async <T>(...args: Parameters<typeof client.write>) => {
+    if (args[0] === 'runs' && args[1] === 'commit') { entered(); await wait; }
+    return write<T>(...args);
+  };
+  let successes = 0;
+  const first = manager.steer(queued.id), firstResult = first.then(() => { successes++; },error => error);
+  await saving;
+  const repeat = manager.steer(queued.id), repeatResult = repeat.then(() => { successes++; },error => error);
+  assert.equal(first,repeat); assert.equal(successes,0); assert.equal(inserts,0);
+  release();
+  const error = await firstResult;
+  assert.equal(await repeatResult,error); assert.equal(error.disposition,'uncertain');
+  const pending = manager.pendingAdmission()!;
+  await assert.rejects(manager.steer(queued.id),(next: unknown) => next === error);
+  assert.deepEqual(manager.pendingAdmission(),pending); assert.equal(successes,0); assert.equal(inserts,0);
+  client.write = write;
+  await client.reopen(); await client.prepare({ allowMigration: false }); manager.holdStorage();
+  await manager.resolveAdmission(pending.commandId);
+  assert.equal(inserts,0);
+  await manager.close();
 });
 
 test('exact legacy source probes classify every domain independently', async t => {

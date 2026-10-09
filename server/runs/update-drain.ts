@@ -4,7 +4,7 @@ import type { Run } from '../../shared/types.js';
 import type { CodexBridgeRun } from './codex-bridge.js';
 import { inheritedRunFields } from './continuations.js';
 import { UPDATE_RESUME_WAIT } from './run-history.js';
-import { FINISHED } from './run-records.js';
+import { FINISHED, admissionUncertain } from './run-records.js';
 
 export const UPDATE_WAIT = 'Waiting: Tower is switching to its new version; this starts right after.';
 const WRAP_UP_RETRY_MS = 30_000;
@@ -112,7 +112,9 @@ export class UpdateDrain {
     state.sending = true;
     state.retryAt = Date.now() + WRAP_UP_RETRY_MS;
     this.host.changed();
-    void this.host.steer(wrapUp.id, { targetRunId: target.id }).catch(() => {}).finally(() => {
+    let uncertain = false;
+    void this.host.steer(wrapUp.id, { targetRunId: target.id }).catch(error => { uncertain = admissionUncertain(error); }).finally(() => {
+      if (uncertain) return;
       state.sending = false;
       // Put back in the queue means it was never handed over; it must not start later as a turn of its own.
       if (wrapUp.status !== 'queued' || wrapUp.steering || this.host.runs.get(wrapUp.id) !== wrapUp) return;

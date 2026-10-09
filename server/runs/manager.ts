@@ -235,6 +235,7 @@ export class RunManager extends EventEmitter {
   private readonly heldProviders = new Set<Provider>();
   private readonly admissions = new Set<string>();
   private readonly uncertainAdmissions = new Set<string>();
+  private readonly steeringAdmissions = new Map<string, Promise<Run>>();
   private readonly uncertainPrepared = new Map<string, { createdIds: string[]; sessionId?: string }>();
   private readonly incomingAttachments = new Set<ReadonlyArray<string>>();
   private readonly locallySettled = new Map<string, number>();
@@ -250,7 +251,7 @@ export class RunManager extends EventEmitter {
   private storageHeld = false;
   /** Storage failure pauses durable starts without disposing providers or their approvals. */
   holdStorage(): void { this.storageHeld = true; }
-  releaseStorage(): void { this.storageHeld = false; void this.pump(); }
+  releaseStorage(): void { if (this.pendingAdmission()) return; this.storageHeld = false; void this.pump(); }
   private ready: boolean;
   private pollTimer?: ReturnType<typeof setInterval>;
   private notifyTimer?: ReturnType<typeof setTimeout>;
@@ -310,7 +311,7 @@ export class RunManager extends EventEmitter {
 
   /** Checked again at the last moment before a provider is started, after every asynchronous step. */
   private refusedAtLaunch(run: Run, session: Session): boolean {
-    if (this.storageHeld) { this.reservedSessions.delete(session.id); return true; }
+    if (this.storageHeld || this.pendingAdmission()) { this.reservedSessions.delete(session.id); return true; }
     if (this.retentionWait(run)) { this.reservedSessions.delete(session.id); return true; }
     // A switch to the new worker began while this turn was being prepared: it waits for the new worker.
     if (this.updating && run.status === 'queued') {
@@ -390,14 +391,15 @@ export class RunManager extends EventEmitter {
   /** Receipt inspection settles durability only; it never starts a provider or resends work. */
   async resolveAdmission(commandId: string): Promise<{ disposition: 'committed' | 'not-committed'; runIds: string[] }> {
     if (this.history.pendingAdmission()?.commandId !== commandId) throw new RunError('Unknown admission receipt identity.', 'conflict');
-    const resolved = await this.history.resolveAdmission(), runIds = [...this.uncertainAdmissions];
+    const resolved = await this.history.resolveAdmission(), runIds = [...new Set([...resolved.newRunIds, ...this.uncertainAdmissions])];
     for (const id of runIds) {
-      const prepared = this.uncertainPrepared.get(id), run = this.runs.get(id);
-      if (prepared && !resolved.runIds.has(id)) {
+      const prepared = this.uncertainPrepared.get(id), run = resolved.newRuns.get(id) ?? this.runs.get(id);
+      if (resolved.newRunIds.includes(id) && !resolved.runIds.has(id)) {
         this.runs.delete(id);
-        if (prepared.sessionId) this.registry.removeUnconfirmed(prepared.sessionId,id);
-        await this.attachments.rollback(prepared.createdIds);
+        if (prepared?.sessionId) this.registry.removeUnconfirmed(prepared.sessionId,id);
+        if (prepared) await this.attachments.rollback(prepared.createdIds);
       } else if (run) {
+        if (resolved.newRuns.has(id)) this.runs.set(id, run);
         if (run.steering?.state === 'sending') {
           // Storage resolution does not send steering. This provider call never happened.
           delete run.steering; delete run.startedAt; run.status = 'queued';
@@ -541,7 +543,14 @@ export class RunManager extends EventEmitter {
         // leave an unacknowledged request queued for a later polling cycle.
         if (admissionUncertain(error)) { this.uncertainAdmissions.add(run.id); this.uncertainPrepared.set(run.id, { createdIds: prepared.createdIds, sessionId: id }); throw error; }
         this.fail(run, error);
-        await this.flush().catch(() => {});
+        try { await this.flush(); }
+        catch (compensationError) {
+          if (admissionUncertain(compensationError)) {
+            this.uncertainAdmissions.add(run.id);
+            this.uncertainPrepared.set(run.id, { createdIds: prepared.createdIds, sessionId: id });
+          }
+          throw compensationError;
+        }
         await this.attachments.rollback(prepared.createdIds);
         throw error;
       } finally { if (!this.uncertainAdmissions.has(run.id)) this.admissions.delete(run.id); }
@@ -683,9 +692,20 @@ export class RunManager extends EventEmitter {
   }
 
   /** `targetRunId` inserts only into that turn: a decision made about one turn never lands in the next. */
-  async steer(runId: string, options: { whileWaiting?: boolean; targetRunId?: string } = {}): Promise<Run> {
+  steer(runId: string, options: { whileWaiting?: boolean; targetRunId?: string } = {}): Promise<Run> {
+    const pending = this.steeringAdmissions.get(runId);
+    if (pending) return pending;
+    const delivery = this.admitSteer(runId, options);
+    this.steeringAdmissions.set(runId, delivery);
+    void delivery.finally(() => this.steeringAdmissions.delete(runId)).catch(() => {});
+    return delivery;
+  }
+
+  private async admitSteer(runId: string, options: { whileWaiting?: boolean; targetRunId?: string }): Promise<Run> {
     const run = this.runs.get(runId);
     if (!run) throw new RunError('Task not found.', 'not-found');
+    await this.flush();
+    if (this.storageHeld) throw notAdmitted(new RunError('Storage is unavailable; instruction insertion is held.', 'unavailable'));
     if (run.steering) return this.list().find(item => item.id === runId)!;
     const selected = this.steeringTarget(run);
     if (!selected) throw new RunError('This queued instruction cannot be inserted into an active Tower turn.', 'conflict');
@@ -703,6 +723,7 @@ export class RunManager extends EventEmitter {
       run.steering = { targetRunId: selected.target.id, state: 'sending', requestedAt: run.startedAt };
       this.changed();
       await this.flush();
+      if (this.storageHeld || this.pendingAdmission()) throw new SteeringError('Storage held before delivery.', 'rejected');
       if (this.stopping || selected.target.status !== 'running' || !selected.adapter.canSteer?.()) throw new SteeringError('The active turn finished before delivery.', 'rejected');
       // Saving yielded; an automatic insert goes only while the turn is still just waiting.
       if (options.whileWaiting && !selected.target.backgroundWait) throw new SteeringError('The waiting turn resumed before delivery.', 'rejected');
@@ -887,13 +908,15 @@ export class RunManager extends EventEmitter {
   }
 
   private async pump(): Promise<void> {
-    if (this.pumping || this.stopping || !this.started || !this.ready || this.storageHeld) return;
+    if (this.pumping || this.stopping || !this.started || !this.ready || this.storageHeld || this.pendingAdmission()) return;
     this.pumping = true;
     try {
+      await this.flush();
+      if (this.storageHeld || this.pendingAdmission()) return;
       this.flushToolNotices();
       if (![...this.runs.values()].some((run) => run.status === 'queued' && due(run))) return;
       await this.options.refreshSessions();
-      if (this.storageHeld) return;
+      if (this.storageHeld || this.pendingAdmission()) return;
       // While Tower switches workers an owner message does not extend a turn that is being wrapped up.
       if (!this.updating) this.insertIntoWaitingTurns();
       // Tower's continuation after an update resumes the interrupted turn before any message queued behind that turn.
@@ -912,6 +935,7 @@ export class RunManager extends EventEmitter {
         if (requested && Date.parse(requested) > Date.parse(run.createdAt)) { this.supersede(run, 'The conversation continued before the scheduled time.'); continue; }
         // Each run's own look, taken now: an earlier run's start may have taken a while.
         await this.prepareLaunch(run);
+        await this.flush();
         if (run.status !== 'queued' || this.admissions.has(run.id) || this.stopping || this.storageHeld || this.retentionWait(run)) continue;
         const refused = this.launchGate?.(run);
         if (refused) {
@@ -964,6 +988,7 @@ export class RunManager extends EventEmitter {
       }
     } catch (error) {
       // A failed refresh must never allow a write based on stale activity data.
+      if (admissionUncertain(error)) { this.holdStorage(); return; }
       for (const run of this.runs.values()) if (run.status === 'queued') {
         run.output = `Waiting for session activity to refresh: ${errorMessage(error)}`;
       }
@@ -1251,7 +1276,7 @@ export class RunManager extends EventEmitter {
 
   private prune(retained = this.retainedIds()): void {
     // The runs that finished longest ago go first: a long turn that just finished is still read by its watchers.
-    const finished = [...this.runs.values()].filter(run => FINISHED.has(run.status) && !retained.has(run.id)).sort((a, b) => finishedTime(a) - finishedTime(b));
+    const finished = [...this.runs.values()].filter(run => FINISHED.has(run.status) && !retained.has(run.id) && !this.history.reservingAdmission(run.id) && !this.admissions.has(run.id)).sort((a, b) => finishedTime(a) - finishedTime(b));
     for (const run of finished.slice(0, Math.max(0, finished.length - MAX_RUNS))) { this.runs.delete(run.id); this.settledRuns.delete(run.id); }
     for (const id of this.ownerStopped) if (!this.runs.has(id) || FINISHED.has(this.runs.get(id)!.status)) this.ownerStopped.delete(id);
   }
@@ -1291,7 +1316,7 @@ export class RunManager extends EventEmitter {
   }
 
   /** True while any provider process, desktop turn or admission is still live, whatever the run status says. */
-  busy(): boolean { return this.owned.size + this.bridged.size + this.stdio.size + this.admissions.size + this.reservedSessions.size + this.toolNotices.sending > 0 || this.pumping; }
+  busy(): boolean { return this.owned.size + this.bridged.size + this.stdio.size + this.admissions.size + this.reservedSessions.size + this.toolNotices.sending > 0 || this.pumping || Boolean(this.pendingAdmission()); }
 
   private flush(): Promise<void> { return this.history.flush(); }
 }

@@ -50,6 +50,7 @@ export class RunHistory {
   private current?: RunDocuments;
   private rows: RunRow[] = [];
   private unknown?: RunAdmissionUncertain;
+  private readonly newAdmissions = new Set<string>();
   private writes: Promise<void> = Promise.resolve();
   private persistenceError?: Error;
   /** The last save of required instructions failed: a handoff would lose them, so `flushState` refuses. */
@@ -81,7 +82,8 @@ export class RunHistory {
     }
   }
   pendingAdmission(): { commandId: string; sha256: string } | undefined { return this.unknown?.identity; }
-  async resolveAdmission(): Promise<{ disposition: 'committed' | 'not-committed'; runIds: Set<string> }> {
+  reservingAdmission(id: string): boolean { return this.newAdmissions.has(id); }
+  async resolveAdmission(): Promise<{ disposition: 'committed' | 'not-committed'; runIds: Set<string>; newRunIds: string[]; newRuns: Map<string, Run> }> {
     if (!this.unknown || !this.repository) throw new Error('No uncertain runs admission.');
     await this.writes;
     const result = await this.repository.resolvePending();
@@ -89,7 +91,15 @@ export class RunHistory {
     const current = await this.repository.exportCurrent();
     this.unknown = undefined; this.persistenceError = undefined;
     this.current = current.documents; this.rows = current.rows;
-    return { disposition: result, runIds: new Set(current.documents.runs.map(run => run.id)) };
+    const newRunIds = [...this.newAdmissions];
+    const newRuns = new Map<string, Run>();
+    for (const run of current.documents.runs) if (this.newAdmissions.has(run.id)) {
+      const admitted = { ...run, ...(current.documents.instructions[run.id] ? { instructions: current.documents.instructions[run.id] } : {}) };
+      for (const marker of [NEEDS_INSTRUCTIONS, KEEP_QUEUED, RETAIN]) delete (admitted as unknown as Record<string, unknown>)[marker];
+      newRuns.set(run.id, admitted);
+    }
+    this.newAdmissions.clear();
+    return { disposition: result, runIds: new Set(current.documents.runs.map(run => run.id)), newRunIds, newRuns };
   }
 
   /** The saved created conversations, undefined when there are none yet; `noteCreated` records what was read. */
@@ -164,6 +174,10 @@ export class RunHistory {
    * without them.
    */
   save(runs: ReadonlyMap<string, Run>, listed: readonly Run[], created: string, retained: ReadonlySet<string>): void {
+    if (this.database) {
+      const accepted = new Set(this.current!.runs.map(run => run.id));
+      for (const run of listed) if (!accepted.has(run.id)) this.newAdmissions.add(run.id);
+    }
     for (const id of this.carried) if (runs.get(id)?.status !== 'queued') this.carried.delete(id);
     const data = serializeRuns(listed, { required: id => Boolean(runs.get(id)?.instructions?.required), carried: this.carried, retained });
     // Kept only for turns still to run, in a private file older Towers do not read (see instructionsFile).
@@ -193,6 +207,7 @@ export class RunHistory {
           throw error;
         }
         this.rows = next; this.current = documents;
+        for (const run of documents.runs) this.newAdmissions.delete(run.id);
         this.saved.created = created; this.saved.instructions = instructions; this.saved.runs = data;
         this.instructionsError = undefined; this.persistenceError = undefined;
         return;

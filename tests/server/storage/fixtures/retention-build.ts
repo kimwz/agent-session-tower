@@ -40,9 +40,10 @@ export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' 
   }
   const manifest = storageManifest(runsRelease ? [schema, version === '1.123.0' ? { ...runsSchema, cutover: { artifactVersion: '1.123.0', importContract: 1 } } : runsSchema] : [schema], version);
   const artifacts: Record<string, StorageThreadArtifact> = {};
-  for (const fault of preparation ? ['normal', 'after-native-hold'] : ['normal', 'before', 'after', 'after-native-hold', 'refuse-once', 'corrupt', 'io']) {
+  for (const fault of preparation ? ['normal', 'after-native-hold'] : ['normal', 'before', 'after', 'after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss', 'refuse-once', 'corrupt', 'io']) {
     const entry = `
 import { parentPort } from 'node:worker_threads';
+import { existsSync, writeFileSync } from 'node:fs';
 import { runStorageThread } from './server/storage/thread/runtime.js';
 import { retentionDomainFor } from './server/sessions/retention/storage-commands.js';
 import { retentionSchema } from './server/sessions/retention/storage-schema.js';
@@ -53,13 +54,20 @@ parentPort.on('message', message => { if (message.op === 'write' && message.comm
 const post = parentPort.postMessage.bind(parentPort);
 parentPort.postMessage = message => { if (message.id === commitId) process.exit(9); post(message); };`}
 const domain = retentionDomainFor(schema);
-${fault === 'after-native-hold' ? `let loseNextCommit = false, lostCommitId = -1;
+${['after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss'].includes(fault) ? `let lostIntent, lostCommitId = -1;
+const lossMarker = ${JSON.stringify(join(directory, `${fault}-consumed`))};
 parentPort.on('message', message => {
-  if (message.op === 'write' && message.command === 'stage' && Buffer.from(JSON.parse(message.payload).data, 'base64').toString('utf8').includes('native-hold-response-lost')) loseNextCommit = true;
-  if (message.op === 'write' && message.command === 'commit' && loseNextCommit) lostCommitId = message.id;
+  if (!existsSync(lossMarker) && message.op === 'write' && message.command === 'stage' && Buffer.from(JSON.parse(message.payload).data, 'base64').toString('utf8').includes(${JSON.stringify(fault === 'after-steer-hold' ? 'sending' : 'native-hold-response-lost')})) lostIntent = JSON.parse(message.payload).intent;
+  if (message.op === 'write' && message.command === 'commit' && lostIntent && JSON.parse(message.payload).intent === lostIntent) lostCommitId = message.id;
 });
 const post = parentPort.postMessage.bind(parentPort);
-parentPort.postMessage = message => { if (message.id === lostCommitId && message.ok) process.exit(9); post(message); };` : ''}
+parentPort.postMessage = message => { if (message.id === lostCommitId && message.ok) { writeFileSync(lossMarker, 'consumed', { flag: 'wx', mode: 0o600 }); process.exit(9); } post(message); };` : ''}
+${fault === 'runs-refuse-compensation-loss' && runsRelease ? `const commit = runsDomain.commands.commit;
+let refused = false;
+runsDomain.commands.commit = { ...commit, run(context, payload) {
+  if (!refused && lostIntent === payload.intent && !existsSync(lossMarker)) { refused = true; throw Object.assign(new Error('fixture known runs write refusal'), { storageCode: 'domain-failed' }); }
+  return commit.run(context, payload);
+} };` : ''}
 ${fault === 'refuse-once' ? `const commit = domain.commands.commit;
 let refused = false;
 domain.commands.commit = { ...commit, run(context, payload) {
