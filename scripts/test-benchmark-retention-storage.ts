@@ -35,7 +35,8 @@ async function workload(store: RetentionStore) {
 try {
   const a = await retentionBuild('1.120.0', join(root, 'a-artifact')), b = await retentionBuild('1.121.0', join(root, 'b-artifact'));
   const legacyDir = join(root, 'json'), sqlDir = join(root, 'sql'); await seed(legacyDir); await seed(sqlDir);
-  const legacy = new RetentionStore(join(legacyDir, 'retention')); await legacy.start();
+  const legacy = new RetentionStore(join(legacyDir, 'retention')), jsonStartup = performance.now(); await legacy.start();
+  const jsonStartupMs = performance.now() - jsonStartup;
   const json = await workload(legacy);
   client = await a.storage.openStorage({ stateDir: sqlDir, bundle: a.bundle() });
   const prepared = await client.prepare({ allowMigration: true });
@@ -45,9 +46,10 @@ try {
   const migrationStart = performance.now();
   await importRetention({ stateDir: sqlDir, evidenceParent, storage: client, update: { stateDir: sqlDir, managed: false, build: { version: b.version, manifest: b.manifest, preflight: await b.storage.preflightStorage({ bundle: b.bundle(), stateDir: sqlDir }) } } });
   const migrationMs = performance.now() - migrationStart;
-  const sql = new RetentionStore(join(sqlDir, 'retention'), { storage: client }); await sql.start();
+  const sql = new RetentionStore(join(sqlDir, 'retention'), { storage: client }), sqlStartup = performance.now(); await sql.start();
+  const sqliteStartupMs = performance.now() - sqlStartup;
   const sqlite = await workload(sql);
   if (json.projectionSha256 !== sqlite.projectionSha256) throw new Error('JSON/SQL workload projections differ.');
-  await writeFile(out, JSON.stringify({ version: 1, runtime: process.version, input: { entries: 2000, journalBytes: Buffer.byteLength(JSON.stringify(journal)) }, json, sqlite, migrationMs,
+  await writeFile(out, JSON.stringify({ version: 1, runtime: process.version, input: { entries: 2000, journalBytes: Buffer.byteLength(JSON.stringify(journal)) }, json: { ...json, startupMs: jsonStartupMs }, sqlite: { ...sqlite, startupMs: sqliteStartupMs }, migrationMs,
     netBenefitEvidence: { measured: ['raw FULL/fsynced write samples', 'same workload projection', 'one-time import/backup elapsed'], unmeasuredCosts: ['A/B releases and reviewed artifact protection', 'common manifest and preparation evidence maintenance', 'chain/pin and update barrier fixture maintenance', 'source backup disk and operation receipt/staging growth', 'current export/restore and recovery fixture maintenance'], conclusion: 'Raw measurements only; no speedup/net-benefit claim. Parent evaluates complete lifecycle cost before expanding #84.' } }, null, 2));
 } finally { await client?.close(); await rm(root, { recursive: true, force: true }); }
