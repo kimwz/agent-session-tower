@@ -378,3 +378,46 @@ test('old export cannot replay a manually consumed once after SQL reopen', async
   await reopened.start(); await assert.rejects(reopened.run(id,{ kind: 'owner',via: 'ui' }),/consumed|archiv/); await reopened.tick();
   assert.equal(dispatches,submitted,'restore/reopen/manual run submits zero additional work');
 });
+
+test('SQL restore refuses absent unfinished events after pruning and 30-day evidence expiry, without a commit or new dispatch on reopen', async t => {
+  for (const status of ['queued', 'claimed', 'running'] as const) {
+    const f = await fixture(t), original = empty();
+    const oldAt = '2026-08-01T00:00:00.000Z';
+    const event = { ...documents().events[0], id: `pruned-${status}`, status, occurredAt: oldAt, receivedAt: oldAt, updatedAt: oldAt };
+    // A repeating definition has no once-consumption evidence that could mask the absence guard.
+    original.triggers = [{ ...definition(), source: { kind: 'schedule', schedule: { type: 'interval', everySeconds: 3600 }, catchUp: 'latest' } }];
+    original.events = [event, ...Array.from({ length: 500 }, (_, i) => ({ ...event, id: `finished-${i}`, requestId: `finished-request-${i}`, status: 'completed' as const }))];
+    original.fired = { [event.dedupKey]: oldAt };
+    original.recentFires = [{ triggerId: id, at: Date.parse(oldAt) }];
+    await f.repository.importPrepared(original, 'b'.repeat(64), `pruned-seed-${status}`);
+    const exported = await exportTriggers(f.repository, f.stateDir, `pruned-export-${status}`);
+    const completed = structuredClone(original); completed.events[0].status = 'completed';
+    pruneState(completed, now);
+    assert.equal(completed.events.length, 500);
+    assert.equal(completed.events.some(row => row.id === event.id), false);
+    assert.deepEqual(completed.fired, {}); assert.deepEqual(completed.recentFires, []);
+    await f.repository.update(changesOf(rowsOf(original), rowsOf(completed)), 'settle', `pruned-complete-${status}`);
+    const before = await f.repository.exportCurrent();
+    const committedReceipts = () => {
+      const db = new DatabaseSync(join(f.stateDir, 'state.sqlite'), { readOnly: true });
+      try { return db.prepare("SELECT * FROM operation_receipts WHERE scope = 'triggers' AND command = 'commit' ORDER BY command_id").all(); }
+      finally { db.close(); }
+    };
+    const receipts = committedReceipts();
+    await assert.rejects(restoreTriggers(f.repository, exported.directory, `pruned-restore-${status}`), /absent unfinished trigger event/);
+    assert.deepEqual(await f.repository.exportCurrent(), before, 'rows, authority and revision remain unchanged');
+    assert.deepEqual(committedReceipts(), receipts);
+    assert.equal((await f.client.receipt(`pruned-restore-${status}-commit`)).found, false);
+    await f.client.close();
+    const client = await f.open();
+    assert.deepEqual(await new TriggersRepository(client).exportCurrent(), before);
+    let dispatches = 0;
+    const forbidden = async () => { dispatches++; throw new Error('pruned event was dispatched'); };
+    const executor = { runs: () => [], session: () => undefined, getAutoPrompt: () => undefined,
+      create: forbidden, enqueue: forbidden, submitAutoPrompt: forbidden, coordinate: forbidden } as unknown as TriggerExecutor;
+    const service = new TriggerService({ stateDir: f.stateDir, storage: client, now, tickMs: 3_600_000, executor });
+    t.after(() => service.close());
+    await service.start(); await service.tick(); await service.settle();
+    assert.equal(dispatches, 0, 'pruned work creates no dispatch or coordinator after reopen');
+  }
+});

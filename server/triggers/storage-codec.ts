@@ -45,7 +45,8 @@ export function rowsOf(state: EngineState): TriggerRow[] {
   if (state.version !== 1) throw new Error('Unknown trigger state version.');
   const rows: TriggerRow[] = [];
   for (const kind of ROW_KINDS) {
-    const value = state[kind];
+    // Transport reads generic collections; only once.ts owns business ledger changes.
+    const value = object(state)[kind];
     if (kind === 'settings') rows.push({ kind, id: kind, ordinal: 0, json: canonical(value) });
     else if (ARRAYS.has(kind)) {
       if (!Array.isArray(value)) throw new Error('Invalid trigger array.');

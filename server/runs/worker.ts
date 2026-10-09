@@ -1376,7 +1376,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       // The decision reaches the conversation as the work it already was: the requesting turn's origin and approvals.
       reachable: request => Boolean(request.runId && runs.list().find(item => item.id === request.runId)?.origin),
       notify: (request, message) => runs.permissionDecision(request, `${TOWER_NOTICE} ${message}`).then(() => undefined) });
-    registerStorageHold(() => { reviewer.hold(); }, () => { reviewer.release(); }, () => reviewer.inFlight());
+    let triggersPrepared = false;
+    registerStorageHold(() => { reviewer.hold(); }, () => { if (triggersPrepared) reviewer.release(); }, () => reviewer.inFlight());
     // Nothing is reviewed before the triggers are in place (released below), not even a recovered run sent back to review.
     reviewer.hold();
 
@@ -1418,13 +1419,14 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     let restoredTriggers: { errors: string[] };
     while (true) {
       try { restoredTriggers = await triggers.start(restoring?.restore.triggers ? { restore: restoring.restore.triggers } : {}); break; }
-      catch (error) { unavailable(); storageStatus.reason = String(error); storageStatus.code = 'triggers-bootstrap-held'; storageStatus.sessionsAvailable = false; await startupGate(); }
+      catch (error) { unavailable(); storageStatus.reason = String(error); storageStatus.code = 'triggers-bootstrap-held'; await startupGate(); }
     }
     await restoring?.applied({ parts: restoring.restore.triggers ? ['triggers'] : [], errors: restoredTriggers.errors })
       .catch(error => console.error(`The restore's progress was not recorded: ${error instanceof Error ? error.message : String(error)}`));
     // Reviews waiting from before this worker started (or queued while the last one handed over, or sent back by a run
     // recovered above) go on, once the triggers whose instructions they read are in place.
     await startupGate();
+    triggersPrepared = true;
     reviewer.release();
     await startupGate();
     await github.start();

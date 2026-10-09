@@ -1,6 +1,7 @@
+import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
-import fsPromises, { rename, writeFile } from 'node:fs/promises';
+import fsPromises, { readFile, rename, writeFile } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -73,7 +74,12 @@ async function lockedStateWorker() {
     submitAutoPrompt: async () => { throw new Error('Fixture triggers never run.'); }, getAutoPrompt: () => undefined,
     create: async () => { throw new Error('Fixture triggers never run.'); }, enqueue: async () => { throw new Error('Fixture triggers never run.'); },
     runs: () => runs.list(), session: id => sessions.get(id) } });
-  await triggers.start();
+  const triggerBytes = await readFile(join(stateDir, 'trigger-engine.json'));
+  try { await triggers.start(); }
+  catch (error) {
+    if (!(error instanceof Error) || !error.message.includes('Trigger state is held; original data is preserved:')) throw error;
+    assert.deepEqual(await readFile(join(stateDir, 'trigger-engine.json')), triggerBytes);
+  }
   const tasks = new SessionTasks({ stateDir, sessions: () => [], history: async () => ({ messages: [], hasMore: false }), model: async () => ({}) });
   await tasks.start();
   const home = join(root, 'home');

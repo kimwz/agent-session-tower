@@ -97,6 +97,7 @@ export function triggersDomainFor(schema: StorageDomainSchema): StorageDomain {
       if (!['grow','settle','import','restore'].includes(String(header.mode))) fail('Unknown triggers write mode.');
       const replacing = header.mode === 'import' || header.mode === 'restore';
       const evidence = header.mode === 'restore' ? context.prepare("SELECT kind,id,ordinal,json FROM triggers_rows WHERE kind IN ('onceConsumed','fired','events','cursors','recentFires')").all() as unknown as TriggerRow[] : [];
+      const currentEventIds = new Set(evidence.filter(row => row.kind === 'events').map(row => row.id));
       if (replacing) context.prepare('DELETE FROM triggers_rows').run();
       const keys = new Set<string>();
       const changed: TriggerRow[] = []; const consumed = new Set<string>();
@@ -115,6 +116,9 @@ export function triggersDomainFor(schema: StorageDomainSchema): StorageDomain {
         if (!replacing && (item.previousSha256 === null ? !!previous : !previous || triggerHash(previous.json) !== item.previousSha256 || previous.ordinal !== item.previousOrdinal)) fail('Triggers row changed before guarded write.');
         const row: TriggerRow = { kind,id,ordinal: integer(item.ordinal,Number.MAX_SAFE_INTEGER),json: String(item.json) };
         validateRow(row);
+        // Absence after pruning proves nothing about whether an event was already dispatched.
+        if (header.mode === 'restore' && kind === 'events' && !currentEventIds.has(id) && ['queued','claimed','running'].includes(JSON.parse(row.json).status))
+          fail('Restore would resurrect an absent unfinished trigger event.');
         if (kind === 'onceConsumed') consumed.add(id);
         if (item.remove === true) {
           if (replacing || !previous || kind === 'settings') fail('Invalid trigger deletion.');

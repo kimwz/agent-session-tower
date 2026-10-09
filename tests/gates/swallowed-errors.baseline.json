@@ -146,7 +146,7 @@
   "server/triggers/outbound.ts": 1,
   "server/triggers/polls.ts": 6,
   "server/triggers/secrets.ts": 3,
-  "server/triggers/service.ts": 2,
+  "server/triggers/service.ts": 1,
   "server/triggers/state.ts": 1,
   "server/triggers/store.ts": 3,
   "server/updates/latest.ts": 2,

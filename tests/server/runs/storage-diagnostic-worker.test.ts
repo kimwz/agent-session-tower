@@ -27,6 +27,10 @@ import { recordPreparationEvidence } from '../../../server/link/storage-update.j
 import { runnerPaths, RUNNER_PROTOCOL, type RunnerReply } from '../../../server/runs/runner-protocol.js';
 import { artifactStorageContract, completionProven, type ServingProof, resumeRollback, withdrawRollback, readRollbackRecord, evaluateStorageUpdate, type RunningBuild, storageUpdatePaths, type RollbackRecord } from '../../../server/link/storage-update.js';
 import { updatePaths } from '../../../server/link/storage-update.js';
+import { createMonitorServer } from '../../../server/http/server.js';
+import { empty, serializeState } from '../../../server/triggers/state.js';
+import { triggerBackupOf } from '../../../server/triggers/backup.js';
+import type { Trigger } from '../../../shared/triggers.js';
 import { listPendingSecretImports } from '../../../server/secrets/imports.js';
 
 // Hosted disposable jobs only: this starts the actual product worker and its actual SQLite memory preflight,
@@ -88,14 +92,26 @@ async function prepareRetentionA(root: string, stateDir: string): Promise<void> 
 }
 
 /** Existing fixture factory supplies the captured future B SDK; A production declarations remain untouched. */
-async function futureBWorker(t: TestContext, root: string): Promise<string> {
+async function futureBWorker(t: TestContext, root: string, triggerRetry = false): Promise<string> {
   const b = await retentionBuild('1.125.0',join(root,'future-b-artifact'));
   const captured = b.bundle();
   const generated = await mkdtemp(join(dirname(fileURLToPath(import.meta.url)),'future-b-worker-'));
   t.after(() => rm(generated,{ recursive: true,force: true }));
   const entry = join(generated,'worker.mjs');
   await build({ entryPoints: [fileURLToPath(new URL('./fixtures/storage-diagnostic-worker.ts',import.meta.url))],outfile: entry,bundle: true,packages: 'external',platform: 'node',format: 'esm',target: 'node22',logLevel: 'silent',plugins: [
-    { name: 'future-b125-worker-profile',setup(builder) { builder.onLoad({ filter: /[\\/]shared[\\/]app-identity\.ts$/ },async args => ({ contents: (await readFile(args.path,'utf8')).replace(/export const APP_VERSION = '[^']+';/,"export const APP_VERSION = '1.125.0';"),loader: 'ts' })); } },
+    { name: 'future-b125-worker-profile',setup(builder) {
+      if (triggerRetry) builder.onLoad({ filter: /[\\/]server[\\/]auto-prompt[\\/]native\.ts$/ }, () => ({ contents: `
+        import { readFileSync, writeFileSync } from 'node:fs';
+        import { join } from 'node:path';
+        export async function runAutoPromptModel(request) {
+          const state = process.argv.at(-1);
+          const path = join(state, 'fixture-trigger-counts.json');
+          const counts = JSON.parse(readFileSync(path, 'utf8')); counts.model++;
+          writeFileSync(path, JSON.stringify(counts), { mode: 0o600 });
+          writeFileSync(join(state, 'fixture-review-prompt.json'), request.prompt, { mode: 0o600 });
+          return { verdict: 'owner', rule: null, scope: null, suggestion: null, reason: 'fixture model only', missing: [] };
+        }`, loader: 'ts' }));
+      builder.onLoad({ filter: /[\\/]shared[\\/]app-identity\.ts$/ },async args => ({ contents: (await readFile(args.path,'utf8')).replace(/export const APP_VERSION = '[^']+';/,"export const APP_VERSION = '1.125.0';"),loader: 'ts' })); } },
     buildIdentityPlugin(buildIdentityModule({ contexts: [{ sourceHash: captured.sourceHash,manifest: b.manifest }],artifact: JSON.stringify({ format: 'tower-storage-thread-bundle/2',source: captured.source,sourceHash: captured.sourceHash }) })),
   ] });
   return entry;
@@ -1067,4 +1083,80 @@ test('actual A124 worker adds only trigger preparation over retained 123 SQL aut
   assert.deepEqual(evidence.map(item => item.manifest),[evidence[0].manifest,evidence[0].manifest,evidence[0].manifest]);
   assert.deepEqual(JSON.parse(await readFile(join(state,'trigger-engine.json'),'utf8')).onceConsumed,{ deleted: { at: '2026-10-01T00:00:00Z' } });
   const backup = await call('triggersBackup'); assert.equal(backup.error,undefined); assert.deepEqual((backup.result as { onceConsumed: unknown }).onceConsumed,{ deleted: { at: '2026-10-01T00:00:00Z' } });
+});
+
+test('actual trigger startup retry preserves session reads and holds permission review through restored settle on the same worker', { timeout: 90000 }, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-trigger-startup-retry-'))), state = join(root, 'state');
+  const paths = await runnerPaths(state), deadline = Date.now() + 60000;
+  await mkdir(join(state, 'retention'), { recursive: true, mode: 0o700 });
+  await mkdir(join(state, 'project'), { mode: 0o700 });
+  await writeFile(join(state, 'retention', 'journal.json'), JSON.stringify({ version: 1, migratedAt: 1, entries: [], policies: [] }), { mode: 0o600 });
+  await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
+  for (const [name, bytes] of [['runs.json', '[]'], ['created-sessions.json', '[]'], ['run-instructions.json', '{}']])
+    await writeFile(join(state, name), bytes, { mode: 0o600 });
+  const original = empty();
+  await writeFile(join(state, 'trigger-engine.json'), serializeState(original), { mode: 0o600 });
+  await prepareTriggersA124(root, state);
+  const restored = empty();
+  const instructions = 'RESTORED AUTHORITY: the fixture permission remains with the owner.';
+  const trigger: Trigger = { id: '10000000-0000-4000-8000-000000000001', revision: 1, name: 'Restored trigger', enabled: false,
+    createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z', createdBy: { kind: 'owner', via: 'ui' }, updatedBy: { kind: 'owner', via: 'ui' },
+    source: { kind: 'schedule', schedule: { type: 'interval', everySeconds: 3600 }, catchUp: 'latest' },
+    handler: { kind: 'task', instructions, provider: 'codex', approvals: 'auto', target: { node: 'local', mode: 'folder', cwd: join(state, 'project') } },
+    policy: { overlap: 'skip', maxEventsPerHour: 20 } };
+  restored.triggers = [trigger];
+  const restoreId = '11111111-1111-4111-8111-111111111111';
+  await mkdir(join(state, 'restore'), { mode: 0o700 });
+  await writeFile(join(state, 'restore', 'pending-worker.json'), JSON.stringify({ id: restoreId, files: {}, triggers: triggerBackupOf(restored) }), { mode: 0o600 });
+  const live = await launchDiagnostic(t, root, state, paths, await futureBWorker(t, root, true), { TOWER_FIXTURE_TRIGGER_RETRY: '1' });
+  let reply: RunnerReply | undefined;
+  while (reply?.snapshot?.storage?.code !== 'triggers-bootstrap-held') {
+    assert.equal(live.child.exitCode, null, live.stderr());
+    if (Date.now() > deadline) assert.fail(`trigger startup never held: ${JSON.stringify(reply)} ${live.stderr()}`);
+    try { reply = await live.call('snapshot'); } catch { assert.equal(live.child.exitCode, null, live.stderr()); }
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  const instance = reply.instance;
+  assert.equal(reply.snapshot?.storage?.admissionOpen, false);
+  assert.equal(reply.snapshot?.storage?.sessionsAvailable, true, 'completed session startup is preserved by trigger failure');
+  const counts = async () => JSON.parse(await readFile(join(state, 'fixture-trigger-counts.json'), 'utf8')) as { start: number; review: number; model: number; apply: number; settled: boolean };
+  assert.deepEqual(await counts(), { start: 1, review: 0, model: 0, apply: 0, settled: false });
+  assert.equal((await live.call('create')).error?.disposition, 'not-admitted', 'durable admission remains held');
+  assert.equal((await live.call('storageRetry')).error, undefined, 'actual worker retry RPC');
+  for (;;) {
+    assert.equal(live.child.exitCode, null, live.stderr());
+    try { await readFile(join(state, 'fixture-trigger-waiting')); break; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || Date.now() > deadline) throw error; }
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  const barrier = await live.call('snapshot');
+  assert.equal(barrier.instance, instance); assert.equal(barrier.snapshot?.storage?.admissionOpen, false);
+  assert.equal(barrier.snapshot?.storage?.sessionsAvailable, true);
+  assert.deepEqual(await counts(), { start: 2, review: 0, model: 0, apply: 0, settled: false }, 'storage resume cannot start review/model/apply before restore');
+  await writeFile(join(state, 'fixture-trigger-release'), 'perform actual restore and settle', { mode: 0o600 });
+  reply = await waitForStorage(live.call, true, deadline, live);
+  assert.equal(reply.instance, instance); assert.equal(reply.snapshot?.storage?.state, 'ready');
+  assert.equal(reply.snapshot?.storage?.sessionsAvailable, true); assert.equal(reply.snapshot?.storage?.admissionOpen, true);
+  const history = await live.call('sessionHistory', ['fixture-trigger-review']);
+  assert.equal(history.error, undefined); assert.equal((history.result as { messages: { text: string }[] }).messages[0].text, 'Use the restored trigger instructions.');
+  for (;;) {
+    const observed = await counts();
+    if (observed.apply > 0) { assert.equal(observed.review, 1); assert.equal(observed.model, 1); assert.equal(observed.apply, 1); assert.equal(observed.settled, true); break; }
+    assert.equal(live.child.exitCode, null, live.stderr());
+    if (Date.now() > deadline) assert.fail(`restored review did not finish: ${JSON.stringify(observed)} ${live.stderr()}`);
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  const prompt = JSON.parse(await readFile(join(state, 'fixture-review-prompt.json'), 'utf8'));
+  assert.equal(prompt.authority.trigger.instructions, instructions, 'the real reviewer reads restored instructions after settle');
+  const backup = await live.call('triggersBackup'); assert.equal(backup.error, undefined);
+  assert.equal((backup.result as { triggers: Trigger[] }).triggers[0].handler.kind, 'task');
+  const web = createMonitorServer({ port: 0, clientDir: root, service: true, backend: {
+    storageStatus: () => reply?.snapshot?.storage,
+    snapshot: () => ({ sessions: reply!.snapshot!.sessions, runs: reply!.snapshot!.runs, providers: [], scanning: false, hostname: 'fixture', version: '1.125.0', updatedAt: new Date().toISOString() }),
+    detail: async () => undefined, enqueue: async () => { throw new Error('No fixture intake'); }, cancel: async () => {}, subscribe: () => () => {} } });
+  await new Promise<void>(resolve => web.server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { web.dispose(); web.server.closeAllConnections(); await new Promise<void>(resolve => web.server.close(() => resolve())); });
+  const response = await fetch(`http://127.0.0.1:${(web.server.address() as { port: number }).port}/api/snapshot`);
+  assert.equal(response.status, 200, 'actual HTTP snapshot guard no longer returns storage unavailable');
+  assert.deepEqual((await response.json() as { sessions: unknown[] }).sessions, reply.snapshot!.sessions);
 });
