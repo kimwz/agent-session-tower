@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import test from 'node:test';
 import { storageControl, rollbackPorts } from '../../../server/runs/storage-control.js';
@@ -76,7 +76,7 @@ test('serving proof includes the actual core bootstrap transaction receipt, neve
   await assert.rejects(ports.servingProof(fence), 'an unavailable database cannot become an empty proof');
 });
 
-import { artifactStorageContract, runRollback, validateRollback, withdrawRollback, readRollbackRecord } from '../../../server/link/storage-update.js';
+import { artifactStorageContract, resumeRollback, runRollback, validateRollback, withdrawRollback, readRollbackRecord } from '../../../server/link/storage-update.js';
 import { installArtifact, runningBuild } from '../link/fixtures/storage-builds.js';
 import { entryPoint, pointCurrent } from '../../../server/link/service.js';
 import { contextOf } from '../storage/helpers.js';
@@ -112,8 +112,11 @@ test('lower compatible target validation and withdrawal use the existing U execu
   const incompatible = artifactStorageContract(contextOf('production'), preflight);
   incompatible.supported = false;
   await writeFile(dirname(entryPoint(installed)) + '/contract.json', JSON.stringify(incompatible));
+  const replacement = entryPoint(installed) + '.replacement';
+  await writeFile(replacement, await readFile(entryPoint(installed)));
+  await rename(replacement, entryPoint(installed));
   const refusal = await validateRollback(context, { target });
-  assert.equal(refusal.ok, false);
+  assert.equal(refusal.ok, false, JSON.stringify({ phase: 'replaced-artifact', outcome: refusal }));
   if (!refusal.ok) assert.equal(refusal.code, 'target-runtime-unsupported');
   assert.equal(restart, 0);
 });
@@ -201,14 +204,16 @@ for (const accept of [false, true]) test(`predecessor proof reflects callback ac
   await pointCurrent(dir, source.identity.appVersion);
   let quietCalls = 0; let handoffs = 0; let acceptedFence: RollbackFence | undefined;
   const call = storageControl({ stateDir: dir, client: () => client, hold: async () => {}, release: async () => {},
-    quiet: () => ++quietCalls === 1 || accept,
+    quiet: () => ++quietCalls <= 2 || accept,
     handoff: (_command, fence) => { handoffs++; acceptedFence = { ...fence }; }, acceptedFence: () => acceptedFence });
   const ports = rollbackPorts(call, async () => {});
-  const outcome = await runRollback({ stateDir: dir, running: { version: source.identity.appVersion, manifest: source.manifest, preflight }, managed: true, ports, serialize: async <T>(work: () => Promise<T>) => work() }, { target, by: 'owner', reason: 'acceptance race' });
-  const read = await readRollbackRecord(dir); if (read.state !== 'present') assert.fail('intent required');
-  assert.ok(read.record.handoff, 'producer reached the durable sent handoff stage');
+  const switched = await runRollback({ stateDir: dir, running: { version: source.identity.appVersion, manifest: source.manifest, preflight }, managed: true, ports, serialize: async <T>(work: () => Promise<T>) => work() }, { target, by: 'owner', reason: 'acceptance race' });
+  assert.equal(switched.state, 'switched', JSON.stringify({ phase: 'switch', outcome: switched }));
+  const outcome = await resumeRollback({ stateDir: dir, running: { ...targetBuild, preflight: { ...preflight, identity: targetBuild.preflight.identity! } }, managed: true, ports, serialize: work => work() });
+  const read = await readRollbackRecord(dir); if (read.state !== 'present') assert.fail(JSON.stringify({ phase: 'resume', outcome, record: read }));
+  assert.ok(read.record.handoff, JSON.stringify({ phase: 'consumer-handoff', outcome, record: read.record }));
   assert.equal(read.record.handoff.state, accept ? 'pending' : 'no-effect', 'the actual consumer settles the sent handoff');
-  assert.equal(quietCalls, 2, 'the actual consumer rechecks quiet after the producer wait');
+  assert.equal(quietCalls, 3, 'the actual consumer rechecks quiet after the producer wait');
   assert.equal(handoffs, accept ? 1 : 0);
   const proof = await ports.servingProof({ id: read.record.id, attempt: read.record.handoff.attempt });
   assert.equal(proof.handoff, accept ? 'pending' : 'none');

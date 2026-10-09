@@ -17,6 +17,7 @@ import { test, type TestContext } from 'node:test';
 import { RunManager } from '../../../server/runs/manager.js';
 import { AutoPromptManager } from '../../../server/auto-prompt/manager.js';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
+import { storage, threadBundle } from '../storage/helpers.js';
 import type { Session, Snapshot } from '../../../shared/types.js';
 
 function gate<T = void>() { let resolve!: (value: T) => void; let reject!: (error: Error) => void; const promise = new Promise<T>((ok, fail) => { resolve = ok; reject = fail; }); return { promise, resolve, reject }; }
@@ -142,7 +143,7 @@ async function lifecycle(f: Awaited<ReturnType<typeof fixture>>, toolsStop: () =
   const temporaryCalls: string[] = [];
   const temporary = { quiesce: async () => { temporaryCalls.push("quiesce"); await temporaryStop(); }, resume: () => { temporaryCalls.push("resume"); } };
   const retention = { service: { quiesce: async () => { retentionCalls.push('quiesce'); }, resume: () => { retentionCalls.push('resume'); } } };
-  const context: Record<string, unknown> = { runs: f.runs, autoPrompts: f.auto, retention, temporary, clearInterval, secretExpiry: undefined, expiryTimer: undefined, stopTelling: () => {}, paused: false,
+  const context: Record<string, unknown> = { runs: f.runs, autoPrompts: f.auto, retention, temporary, clearInterval, secretExpiry: undefined, expiryTimer: undefined, stopTelling: () => {}, paused: false, publishCold: () => {}, storageStatus: { admissionOpen: true },
     tools: { ...noop, stop: toolsStop, pause: () => {}, resume: () => {} } };
   for (const name of ['secrets', 'triggers', 'github', 'slack', 'publicAgents', 'skills', 'tasks', 'compactions', 'worktrees', 'reviewer', 'runner', 'permissions', 'sessions', 'terminals', 'ledger']) context[name] = noop;
   const lifecycleSource = source.slice(source.indexOf('      onIdle: async () =>'));
@@ -157,13 +158,13 @@ async function host(f: Awaited<ReturnType<typeof fixture>>, extra: Partial<Param
   const result = await startRunnerHost({ stateDir: f.directory, runs: f.runs, sessions, ...extra });
   return result;
 }
-async function requestHandoff(directory: string) {
+async function requestHandoff(directory: string, method = 'requestHandoff') {
   const paths = await runnerPaths(directory); const token = await readFile(paths.token, 'utf8');
   return new Promise<void>((resolve, reject) => {
     const req = request({ socketPath: paths.socket, path: '/rpc', method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' } }, res => {
       let bytes = ''; res.on('data', data => { bytes += data; }); res.on('end', () => { const reply = JSON.parse(bytes); if (reply.error) reject(new Error(reply.error.message)); else resolve(); });
     });
-    req.on('error', reject); req.end(JSON.stringify({ protocol: 1, method: 'requestHandoff', args: [{ execPath: process.execPath, args: ['--runner-worker', paths.stateDir] }] }));
+    req.on('error', reject); req.end(JSON.stringify({ protocol: 1, method, args: [{ execPath: process.execPath, args: ['--runner-worker', paths.stateDir] }] }));
   });
 }
 
@@ -174,7 +175,7 @@ test('handoff holds the state lock and successor until both production manager s
   void internals(f.runs).cleanupAttachments(); void internals(f.auto).cleanupAttachments();
   const hooks = await lifecycle(f); let released = false; let successor = false;
   const worker = await host(f, { quiesce: async () => { paused.resolve(); await hooks.quiesce(); }, resume: hooks.resume, releaseStateLock: async () => { released = true; }, startSuccessor: () => { assert.equal(released, true); successor = true; } });
-  t.after(() => worker.close()); await requestHandoff(f.directory); await paused.promise;
+  t.after(async () => { for (const drain of f.drains) drain(); await worker.close(); }); await requestHandoff(f.directory); await paused.promise;
   assert.equal(released, false); assert.equal(successor, false); runGC.resolve(); await Promise.resolve(); assert.equal(released, false);
   autoGC.resolve(); await until(() => successor); assert.equal(internals(f.runs).attachmentCleanupTimer, undefined); assert.equal(internals(f.auto).attachmentCleanupTimer, undefined);
   assert.deepEqual(hooks.retentionCalls, ['quiesce']); assert.deepEqual(hooks.temporaryCalls, ['quiesce']);
@@ -184,7 +185,7 @@ test('handoff holds the state lock and successor until both production manager s
 test('failed production quiesce resumes both manager cleanup timers without releasing the lock', { timeout: 10_000 }, async t => {
   const f = await fixture(t); const hooks = await lifecycle(f); const resumed = gate(); let released = false;
   const worker = await host(f, { quiesce: async () => { await hooks.quiesce(); throw new Error('fixture flush failure'); }, resume: () => { hooks.resume(); resumed.resolve(); }, releaseStateLock: async () => { released = true; } });
-  t.after(() => worker.close()); const log = console.error; console.error = () => {};
+  t.after(async () => { for (const drain of f.drains) drain(); await worker.close(); }); const log = console.error; console.error = () => {};
   try { await requestHandoff(f.directory); await resumed.promise; } finally { console.error = log; }
   assert.equal(released, false); assert.ok(internals(f.runs).attachmentCleanupTimer); assert.ok(internals(f.auto).attachmentCleanupTimer);
   assert.deepEqual(hooks.retentionCalls, ['quiesce', 'resume']); assert.deepEqual(hooks.temporaryCalls, ['quiesce', 'resume']);
@@ -195,13 +196,26 @@ test('production onIdle drains both GCs before a later flush failure can release
   f.drains.push(() => { runGC.resolve(); autoGC.resolve(); });
   internals(f.runs).attachments.sweepPending = () => runGC.promise; internals(f.auto).attachments.sweepPending = () => autoGC.promise;
   void internals(f.runs).cleanupAttachments(); void internals(f.auto).cleanupAttachments();
-  const hooks = await lifecycle(f, async () => { downstream.resolve(); throw new Error('fixture tool flush failure'); }); let released = false;
-  const worker = await host(f, { onIdle: hooks.onIdle, releaseStateLock: async () => { released = true; } });
-  const closing = worker.close(true); const failed = assert.rejects(closing, /fixture tool flush failure/);
-  await new Promise(resolve => setTimeout(resolve, 15)); assert.equal(released, false); runGC.resolve(); await Promise.resolve(); assert.equal(released, false);
-  autoGC.resolve(); await downstream.promise; await failed; assert.equal(released, true);
-  assert.equal(internals(f.runs).attachmentCleanupTimer, undefined); assert.equal(internals(f.auto).attachmentCleanupTimer, undefined);
-  assert.deepEqual(hooks.retentionCalls, ['quiesce']); assert.deepEqual(hooks.temporaryCalls, ['quiesce']);
+  const hooks = await lifecycle(f, async () => { downstream.resolve(); throw new Error('fixture tool flush failure'); }); let released = 0; let diagnosed = 0; let closeAcks = 0;
+  const bundle = threadBundle('production');
+  const preflight = await storage.preflightStorage({ stateDir: f.directory, bundle });
+  assert.equal(preflight.supported, true, 'actual supported runtime required');
+  const database = await storage.openStorage({ stateDir: f.directory, bundle });
+  t.after(() => database.close());
+  await database.prepare({ allowMigration: true });
+  const worker = await host(f, { onIdle: hooks.onIdle, onCloseFailure: () => { diagnosed++; },
+    closeStorage: async () => { const ack = await database.close(); assert.equal(ack.ack, 'closed'); closeAcks++; },
+    releaseStateLock: async () => { assert.equal(closeAcks, 1); released++; } });
+  try {
+    const closing = worker.close(true); const failed = assert.rejects(closing, /fixture tool flush failure/);
+    await new Promise(resolve => setTimeout(resolve, 15)); assert.equal(released, 0); runGC.resolve(); await Promise.resolve(); assert.equal(released, 0);
+    autoGC.resolve(); await downstream.promise; await failed; assert.equal(released, 0); assert.equal(diagnosed, 1); assert.equal(closeAcks, 0);
+    assert.equal((await database.gate('core')).open, true);
+    await requestHandoff(f.directory, 'snapshot');
+    await worker.close(); assert.equal(released, 1); assert.equal(closeAcks, 1);
+    assert.equal(internals(f.runs).attachmentCleanupTimer, undefined); assert.equal(internals(f.auto).attachmentCleanupTimer, undefined);
+    assert.deepEqual(hooks.retentionCalls, ['quiesce']); assert.deepEqual(hooks.temporaryCalls, ['quiesce']);
+  } finally { runGC.resolve(); autoGC.resolve(); await worker.close(); await database.close(); }
 });
 
 for (const autoStarted of [false, true]) test(`production startup failure drains initialized managers before lock release (Auto ${autoStarted})`, async t => {
@@ -210,15 +224,26 @@ for (const autoStarted of [false, true]) test(`production startup failure drains
   if (autoStarted) { internals(f.auto).attachments.sweepPending = () => autoGC.promise; void internals(f.auto).cleanupAttachments(); }
   const source = await readFile(new URL('../../../server/runs/worker.ts', import.meta.url), 'utf8');
   const line = source.split('\n').find(line => line.includes('initializedAutoPrompts?.pauseAttachmentCleanup()')); assert.ok(line);
-  const body = line.slice(line.indexOf('{') + 1, line.lastIndexOf('}')); let released = false;
+  const offset = source.indexOf(line);
+  const finallyLine = source.slice(offset).split('\n')[1];
+  assert.match(finallyLine, /finally \{ await closeStorage\(\); await release\(\); \}/);
+  const body = `${line.trim()} ${finallyLine.trim()} throw error;`; let released = false; let closeAcks = 0;
+  const bundle = threadBundle('production');
+  const preflight = await storage.preflightStorage({ stateDir: f.directory, bundle });
+  assert.equal(preflight.supported, true, 'actual supported runtime required');
+  const database = await storage.openStorage({ stateDir: f.directory, bundle });
+  t.after(() => database.close());
+  await database.prepare({ allowMigration: true });
   let retentionPaused = false, temporaryPaused = false;
   const cleanup = runInNewContext(`(async error => { ${body} })`, { runs: f.runs, initializedAutoPrompts: autoStarted ? f.auto : undefined,
-    initializedRetention: { quiesce: async () => { retentionPaused = true; } }, temporary: { quiesce: async () => { temporaryPaused = true; } }, carry: undefined, tools: undefined, sessions: { stop() {} }, release: async () => { released = true; } }) as (error: Error) => Promise<void>;
-  const failed = assert.rejects(cleanup(new Error('fixture startup failure')), /fixture startup failure/);
-  await Promise.resolve(); assert.equal(released, false); runGC.resolve(); await Promise.resolve(); if (autoStarted) assert.equal(released, false);
-  autoGC.resolve(); await failed; assert.equal(released, true); assert.equal(internals(f.runs).attachmentCleanupTimer, undefined);
-  if (autoStarted) assert.equal(internals(f.auto).attachmentCleanupTimer, undefined);
-  assert.equal(retentionPaused, true); assert.equal(temporaryPaused, true);
+    initializedRetention: { quiesce: async () => { retentionPaused = true; } }, temporary: { quiesce: async () => { temporaryPaused = true; } }, carry: undefined, tools: undefined, sessions: { stop() {} }, closeStorage: async () => { assert.equal((await database.close()).ack, 'closed'); closeAcks++; }, release: async () => { assert.equal(closeAcks, 1); released = true; } }) as (error: Error) => Promise<void>;
+  try {
+    const failed = assert.rejects(cleanup(new Error('fixture startup failure')), /fixture startup failure/);
+    await Promise.resolve(); assert.equal(released, false); runGC.resolve(); await Promise.resolve(); if (autoStarted) assert.equal(released, false);
+    autoGC.resolve(); await failed; assert.equal(released, true); assert.equal(internals(f.runs).attachmentCleanupTimer, undefined);
+    if (autoStarted) assert.equal(internals(f.auto).attachmentCleanupTimer, undefined);
+    assert.equal(retentionPaused, true); assert.equal(temporaryPaused, true);
+  } finally { runGC.resolve(); autoGC.resolve(); await database.close(); }
 });
 
 test('a ready replacement host resumes both adopted engines once after host close paused cleanup', { timeout: 10_000 }, async t => {
@@ -246,7 +271,7 @@ test('production handoff drains owned temporary collection before releasing the 
   const hooks = await lifecycle(f, async () => {}, async () => { began.resolve(); await temporaryDrain.promise; });
   let released = false, successor = false;
   const worker = await host(f, { quiesce: hooks.quiesce, resume: hooks.resume, releaseStateLock: async () => { released = true; }, startSuccessor: () => { assert.equal(released, true); successor = true; } });
-  t.after(() => worker.close()); await requestHandoff(f.directory); await began.promise;
+  t.after(async () => { for (const drain of f.drains) drain(); await worker.close(); }); await requestHandoff(f.directory); await began.promise;
   assert.equal(released, false); assert.equal(successor, false); temporaryDrain.resolve(); await until(() => successor);
   assert.deepEqual(hooks.temporaryCalls, ['quiesce']);
 });

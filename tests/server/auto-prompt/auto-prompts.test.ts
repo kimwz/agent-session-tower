@@ -834,23 +834,25 @@ test('storage hold preserves queued and in-flight router stages without abort, d
   assert.equal(f.calls.length, 0);
   let answer!: (value: unknown) => void;
   f.respond(() => new Promise(resolve => { answer = resolve; }));
-  f.manager.releaseStorage();
-  await until(() => f.calls.length === 1);
-  f.manager.holdStorage();
-  assert.equal(f.manager.busy(), true);
-  answer(resume(f.session.id));
-  await until(() => !f.manager.busy());
-  await f.manager.flush();
-  const saved = JSON.parse(await readFile(join(f.directory, 'auto-prompts.json'), 'utf8'));
-  assert.equal(saved[0].resumable, true);
-  assert.equal(saved[0].selection.decision.sessionId, f.session.id);
-  assert.equal(f.calls[0].signal?.aborted, false);
-  assert.equal(f.dispatches.length, 0);
-  assert.equal(f.manager.get(queued.id)?.status, 'routing');
-  f.manager.releaseStorage();
-  assert.equal((await f.finished(queued.id)).status, 'completed');
-  assert.equal(f.calls.length, 1);
-  assert.equal(f.dispatches.length, 1);
+  try {
+    f.manager.releaseStorage();
+    await until(() => f.calls.length === 1);
+    f.manager.holdStorage();
+    assert.equal(f.manager.busy(), true);
+    answer(resume(f.session.id));
+    await until(() => !f.manager.busy());
+    await f.manager.flush();
+    const saved = JSON.parse(await readFile(join(f.directory, 'auto-prompts.json'), 'utf8'));
+    assert.equal(saved[0].resumable, true);
+    assert.equal(saved[0].selection.decision.sessionId, f.session.id);
+    assert.equal(f.calls[0].signal?.aborted, false);
+    assert.equal(f.dispatches.length, 0);
+    assert.equal(f.manager.get(queued.id)?.status, 'routing');
+    f.manager.releaseStorage();
+    assert.equal((await f.finished(queued.id)).status, 'completed');
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.dispatches.length, 1);
+  } finally { answer?.(resume(f.session.id)); }
 });
 
 
@@ -858,36 +860,38 @@ test('a held successor resumes queued and validated routing checkpoints with the
   const f = await fixture(t);
   let answer!: (value: unknown) => void;
   f.respond(() => new Promise(resolve => { answer = resolve; }));
-  const input = request(f.cwd);
-  await f.manager.submit(input, { origin: { kind: 'owner' } });
-  await until(() => f.calls.length === 1);
-  f.manager.holdStorage();
-  assert.equal(f.manager.busy(), true);
-  const queuedInput = request(f.cwd, { sessionMode: 'new', prompt: 'Independent queued task' });
-  await f.manager.submit(queuedInput);
-  answer(resume(f.session.id));
-  await until(() => !f.manager.busy());
-  await f.manager.flush();
-  const saved = JSON.parse(await readFile(join(f.directory, 'auto-prompts.json'), 'utf8'));
-  const decision = saved.find((entry: { job: { id: string } }) => entry.job.id === input.requestId).selection.decision;
-  const successor = new AutoPromptManager(f.options);
-  successor.holdStorage();
-  await successor.start();
   try {
-    assert.equal((await successor.submit(input, { origin: { kind: 'owner' } })).id, input.requestId);
-    assert.equal(successor.get(input.requestId)?.status, 'queued');
-    assert.equal(successor.get(queuedInput.requestId)?.status, 'queued');
-    assert.equal(successor.busy(), false);
-    assert.equal(f.dispatches.length, 0);
-    await assert.rejects(successor.submit({ ...input, prompt: 'Changed' }, { origin: { kind: 'owner' } }), { kind: 'conflict' });
-    successor.releaseStorage();
-    await until(() => successor.get(input.requestId)?.status === 'completed' && successor.get(queuedInput.requestId)?.status === 'completed');
-    assert.deepEqual(successor.get(input.requestId)?.decision, decision);
-    assert.equal(f.calls.length, 1);
-    assert.equal(f.dispatches.length, 2);
-    assert.equal(f.managed.filter(run => run.autoPromptId === input.requestId).length, 1);
-    assert.equal(f.managed.filter(run => run.autoPromptId === queuedInput.requestId).length, 1);
+    const input = request(f.cwd);
+    await f.manager.submit(input, { origin: { kind: 'owner' } });
+    await until(() => f.calls.length === 1);
+    f.manager.holdStorage();
+    assert.equal(f.manager.busy(), true);
+    const queuedInput = request(f.cwd, { sessionMode: 'new', prompt: 'Independent queued task' });
+    await f.manager.submit(queuedInput);
+    answer(resume(f.session.id));
+    await until(() => !f.manager.busy());
+    await f.manager.flush();
+    const saved = JSON.parse(await readFile(join(f.directory, 'auto-prompts.json'), 'utf8'));
+    const decision = saved.find((entry: { job: { id: string } }) => entry.job.id === input.requestId).selection.decision;
+    const successor = new AutoPromptManager(f.options);
+    successor.holdStorage();
+    await successor.start();
+    try {
+      assert.equal((await successor.submit(input, { origin: { kind: 'owner' } })).id, input.requestId);
+      assert.equal(successor.get(input.requestId)?.status, 'queued');
+      assert.equal(successor.get(queuedInput.requestId)?.status, 'queued');
+      assert.equal(successor.busy(), false);
+      assert.equal(f.dispatches.length, 0);
+      await assert.rejects(successor.submit({ ...input, prompt: 'Changed' }, { origin: { kind: 'owner' } }), { kind: 'conflict' });
+      successor.releaseStorage();
+      await until(() => successor.get(input.requestId)?.status === 'completed' && successor.get(queuedInput.requestId)?.status === 'completed');
+      assert.deepEqual(successor.get(input.requestId)?.decision, decision);
+      assert.equal(f.calls.length, 1);
+      assert.equal(f.dispatches.length, 2);
+      assert.equal(f.managed.filter(run => run.autoPromptId === input.requestId).length, 1);
+      assert.equal(f.managed.filter(run => run.autoPromptId === queuedInput.requestId).length, 1);
   } finally { await successor.close(); }
+  } finally { answer?.(resume(f.session.id)); }
 });
 
 test('a proven not-admitted dispatch pauses quietly and revalidates its saved target on successor release', async t => {

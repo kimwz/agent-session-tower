@@ -2044,19 +2044,21 @@ test('idle close keeps diagnosis and the runtime lock when close ACK is refused;
       },
       onCloseFailure: () => { diagnosed++; }, releaseStateLock: async () => { await release(); released++; } };
   }); t.after(f.cleanup);
-  database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle() });
-  t.after(() => database.close());
-  await database.prepare({ allowMigration: true });
-  const client = await f.connect();
-  await assert.rejects(f.host.close(true), /close ACK unavailable/);
-  assert.equal(released, 0); assert.equal(diagnosed, 1);
-  assert.equal((await database.gate('core')).open, true, 'refused close preserves the actual SDK owner');
-  await assert.rejects(acquireStateLock(f.paths.runtime, 0), MonitorAlreadyRunning);
-  const second = await f.connect();
-  assert.equal(second.runnerVersion(), client.runnerVersion());
-  fail = false;
-  await f.host.close();
-  assert.equal(released, 1);
+  try {
+    database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle() });
+    t.after(() => database.close());
+    await database.prepare({ allowMigration: true });
+    const client = await f.connect();
+    await assert.rejects(f.host.close(true), /close ACK unavailable/);
+    assert.equal(released, 0); assert.equal(diagnosed, 1);
+    assert.equal((await database.gate('core')).open, true, 'refused close preserves the actual SDK owner');
+    await assert.rejects(acquireStateLock(f.paths.runtime, 0), MonitorAlreadyRunning);
+    const second = await f.connect();
+    assert.equal(second.runnerVersion(), client.runnerVersion());
+    fail = false;
+    await f.host.close();
+    assert.equal(released, 1);
+  } finally { fail = false; }
 });
 
 import { WorkspaceTerminals, type WorkspacePty } from '../../../server/workspace-terminals.js';

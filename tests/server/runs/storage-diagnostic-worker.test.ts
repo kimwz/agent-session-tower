@@ -93,7 +93,10 @@ test('actual product worker promotes update-held once in the same boot; a failed
   const journalBytes = await readFile(journal);
   const context = contextOf('production');
   const installed = await installArtifact(state, context.identity.appVersion, { manifest: context.manifest });
-  const managedEntry = join(dirname(entryPoint(installed)), 'diagnostic-worker.ts');
+  const packageRoot = dirname(dirname(entryPoint(installed)));
+  assert.equal(packageRoot, join(installed, 'node_modules', 'agent-session-tower'));
+  assert.equal(JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')).type, 'module');
+  const managedEntry = join(packageRoot, 'bin', 'diagnostic-worker.ts');
   await writeFile(managedEntry, `import ${JSON.stringify(new URL('./fixtures/storage-diagnostic-worker.ts', import.meta.url).href)};\n`);
   await pointCurrent(state, context.identity.appVersion);
   const { child, call, stderr } = await launchDiagnostic(t, root, state, paths, managedEntry);

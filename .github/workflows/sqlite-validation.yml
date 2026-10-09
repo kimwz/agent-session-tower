@@ -4,7 +4,70 @@ on:
 permissions:
   contents: read
 jobs:
+  fast-contracts:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24.15.0'
+      - name: Install and validate inside a private environment
+        shell: bash
+        env:
+          VALIDATION_ROOT: ${{ runner.temp }}/sqlite-validation
+          VALIDATION_MODE: supported-floor
+          VALIDATION_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$VALIDATION_ROOT"/{home,codex,claude,config,cache,state,data,runtime,tmp,npm,reports}
+          # No Actions credentials or provider authentication enter npm, tests or children.
+          env -i PATH="$PATH" HOME="$VALIDATION_ROOT/home" \
+            CODEX_HOME="$VALIDATION_ROOT/codex" CLAUDE_CONFIG_DIR="$VALIDATION_ROOT/claude" \
+            XDG_CONFIG_HOME="$VALIDATION_ROOT/config" XDG_CACHE_HOME="$VALIDATION_ROOT/cache" \
+            XDG_STATE_HOME="$VALIDATION_ROOT/state" XDG_DATA_HOME="$VALIDATION_ROOT/data" \
+            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$VALIDATION_ROOT/tmp" \
+            TMP="$VALIDATION_ROOT/tmp" TEMP="$VALIDATION_ROOT/tmp" \
+            npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
+            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
+            VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
+            VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
+          set -euo pipefail
+          report="$VALIDATION_ROOT/reports"
+          trap 'result=$?; printf "%s\n" "$result" > "$report/exit-code.txt"' EXIT
+          set -x
+          exec > >(tee "$report/stdout.log") 2> >(tee "$report/stderr.log" >&2)
+          printf '%s\n' "$VALIDATION_SHA" > "$report/source-sha.txt"
+          node --version > "$report/node-version.txt"
+          export SQLITE_VALIDATION_CI=1
+          printf '%s\n' npm-ci > "$report/stage.txt"
+          npm ci
+          node --import tsx scripts/sqlite-runtime-check.mjs "$VALIDATION_MODE" | tee "$report/runtime.json"
+          if [[ "$VALIDATION_MODE" == legacy-loader ]]; then
+            exit 0
+          fi
+          printf '%s\n' tests/server/runs/storage-control.test.ts tests/server/runs/storage-diagnostic-worker.test.ts \
+            tests/server/runs/attachment-cleanup.test.ts tests/server/auto-prompt/auto-prompts.test.ts \
+            tests/server/runs/durable-runner.test.ts tests/gates/swallowed-errors.test.ts > "$report/test-files.txt"
+          files=()
+          while IFS= read -r file; do files+=("$file"); done < "$report/test-files.txt"
+          printf '%s\n' fast-contracts > "$report/stage.txt"
+          node --import tsx --test --test-reporter=tap "${files[@]}"
+          printf '0\n' > "$report/suite-exit.txt"
+          VALIDATE
+      - name: Preserve fast contract logs, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-fast-contracts-ubuntu-latest-24.15.0
+          path: ${{ runner.temp }}/sqlite-validation/reports/
+          if-no-files-found: error
+
   sqlite:
+    needs: fast-contracts
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -138,6 +201,7 @@ jobs:
           if-no-files-found: error
 
   release-prepare:
+    needs: fast-contracts
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
