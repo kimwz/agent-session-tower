@@ -28,7 +28,7 @@ export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' 
     builder.onLoad({ filter: /[\\/]shared[\\/]app-identity\.ts$/ }, async args => ({ contents: (await readFile(args.path, 'utf8')).replace(/export const APP_VERSION = '[^']+';/, `export const APP_VERSION = '${version}';`), loader: 'ts' }));
   } };
   const { cutover: _cutover, ...preparedSchema } = retentionSchema;
-  const schema = old ? { ...preparedSchema, preparation: { ...preparedSchema.preparation!, requiredArtifactVersion: '1.120.0' }, migrations: preparedSchema.migrations.slice(0, 1) } : preparation ? preparedSchema : retentionSchema;
+  const schema = old ? { ...preparedSchema, preparation: { ...preparedSchema.preparation!, requiredArtifactVersion: '1.120.0' }, migrations: preparedSchema.migrations.slice(0, 1) } : preparation ? { ...preparedSchema, preparation: { ...preparedSchema.preparation!, requiredArtifactVersion: capture.preparationMinimum } } : retentionSchema;
   if (old) {
     const capturedSchema = await readFile(join(captureRoot, 'storage-schema.ts.txt'), 'utf8');
     const currentSchema = await readFile(join(root, 'server/sessions/retention/storage-schema.ts'), 'utf8');

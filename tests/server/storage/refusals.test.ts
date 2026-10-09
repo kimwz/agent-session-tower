@@ -410,6 +410,6 @@ test('the default manifest declares retention preparation and B cutover', () => 
   assert.equal(storageManifest().domains.length, 1);
   assert.equal(domain.scope, 'retention');
   assert.equal(domain.schemaVersion, 2);
-  assert.deepEqual(domain.preparation, { requiredArtifactVersion: '1.120.1', readerContract: 1, writerContract: 1 });
+  assert.deepEqual(domain.preparation, { requiredArtifactVersion: '1.120.2', readerContract: 1, writerContract: 1 });
   assert.deepEqual(domain.cutover, { artifactVersion: '1.121.0', importContract: 1 });
 });

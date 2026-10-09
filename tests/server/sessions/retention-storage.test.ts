@@ -9,7 +9,7 @@ import type { StorageStatus } from '../../../server/storage/contract.js';
 import type { WorkerStorageStatus } from '../../../shared/storage.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { retentionBuild } from '../storage/fixtures/retention-build.js';
-import { recordPreparationEvidence, evaluateStorageUpdate, type StorageUpdateInput } from '../../../server/link/storage-update.js';
+import { artifactStorageContract, preparationCheck, recordPreparationEvidence, evaluateStorageUpdate, type StorageUpdateInput } from '../../../server/link/storage-update.js';
 import { RetentionStore } from '../../../server/sessions/retention/store.js';
 import { RetentionObserver } from '../../../server/sessions/retention/observer.js';
 import { RetentionRepository } from '../../../server/sessions/retention/storage-repository.js';
@@ -622,9 +622,25 @@ test('all-owner reservations enforce count 16/17 and bytes boundary through actu
 });
 
 test('actual immutable old A rejects schema2; preparing over-limit schema1 preserves authority, stages and receipts', async t => {
-  const old = await retentionBuild('1.120.0', await folder(t)), { a } = await builds(t);
+  const old = await retentionBuild('1.120.0', await folder(t)), { a, b } = await builds(t);
   assert.equal(old.manifest.domains[0].schemaVersion, 1);
   assert.equal(a.manifest.domains[0].schemaVersion, 2);
+  assert.equal(old.manifest.domains[0].preparation.requiredArtifactVersion, '1.120.0');
+  assert.equal(a.manifest.domains[0].preparation.requiredArtifactVersion, '1.120.1');
+  assert.equal(b.manifest.domains[0].preparation.requiredArtifactVersion, '1.120.2');
+  for (const artifact of [old, a]) {
+    const bundle = artifact.bundle(), context = artifact.storage.storageBuildContext(bundle);
+    assert.ok(context.ok);
+    const preflight = await artifact.storage.preflightStorage({ bundle, stateDir: await folder(t) });
+    assert.equal(preflight.supported, true, 'captured SDK runtime must support the actual artifact');
+    const check = preparationCheck(b.manifest, { state: 'contract', contract: artifactStorageContract(context, preflight) });
+    if (artifact === old) {
+      assert.equal(check.state, 'prerequisite-required');
+      assert.equal(check.prepare, '1.120.2');
+    } else {
+      assert.deepEqual(check, { state: 'satisfied', domains: ['retention'] });
+    }
+  }
   for (const count of [17, 3]) {
     const stateDir = await folder(t);
     const client = await old.storage.openStorage({ stateDir, bundle: old.bundle() });
