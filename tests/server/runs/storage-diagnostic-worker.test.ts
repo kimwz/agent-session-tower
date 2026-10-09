@@ -989,14 +989,22 @@ test('actual B runs bootstrap parks before scans and admits once after explicit 
   assert.equal(snapshot.snapshot?.storage?.admissionOpen, false);
   assert.equal((await call('create')).error?.disposition, 'not-admitted');
   await call('storageRetry');
-  assert.equal((await call('snapshot')).snapshot?.storage?.admissionOpen, false);
+  // A ready SDK with admission still closed is not the failed bootstrap's next parked continuation.
+  // Wait for that actual failure before repairing the source and sending its explicit retry.
+  let reparking = await call('snapshot');
+  while (reparking.snapshot?.storage?.code !== 'runs-bootstrap-held') {
+    assert.equal(child.exitCode, null, stderr());
+    if (Date.now() > deadline) assert.fail(JSON.stringify(reparking.snapshot?.storage) + stderr());
+    await new Promise(resolve => setTimeout(resolve, 25)); reparking = await call('snapshot');
+  }
+  assert.equal(reparking.snapshot?.storage?.admissionOpen, false);
   assert.deepEqual(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')), heldCounts);
   await writeFile(join(state, 'created-sessions.json'), '[]', { mode: 0o600 });
   await writeFile(join(state, 'run-instructions.json'), '{}', { mode: 0o600 });
   await call('storageRetry');
   let ready = await call('snapshot');
   while (!ready.snapshot?.storage?.admissionOpen) {
-    assert.equal(child.exitCode, null, stderr()); if (Date.now() > deadline) assert.fail(stderr());
+    assert.equal(child.exitCode, null, stderr()); if (Date.now() > deadline) assert.fail(JSON.stringify(ready.snapshot?.storage) + stderr());
     await new Promise(resolve => setTimeout(resolve, 25)); ready = await call('snapshot');
   }
   assert.equal(ready.instance, snapshot.instance);
