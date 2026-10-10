@@ -55,7 +55,7 @@ test('a forced update starts no new turn while running turns go on', async t => 
   const later = await f.manager.enqueue(f.session.id, 'another message', {}, { origin: owner });
   f.emit({ type: 'result', session_id: nativeId, is_error: false });
   await until(() => f.run(f.first.id)?.status === 'completed');
-  await new Promise(resolve => setTimeout(resolve, 40));
+  await until(() => !f.manager.busy() && /switching to its new version/.test(f.run(later.id)?.output ?? ''));
   assert.equal(f.launches(), 1, 'nothing new started');
   assert.equal(f.run(later.id)?.status, 'queued');
   assert.match(f.run(later.id)!.output, /switching to its new version/);
