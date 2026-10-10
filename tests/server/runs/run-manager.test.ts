@@ -10,7 +10,9 @@ import { PassThrough, Writable } from 'node:stream';
 import { MASTER_FOLDER } from '../../../shared/master.js';
 import { CapabilityRegistry } from '../../../server/api/mcp.js';
 import { runToolResolver } from '../../../server/api/run-tools.js';
-import { RunManager, fixtureDocuments, fixtureReplaceRuns } from './sql-fixture.js';
+import { RunManager, fixtureDocuments, fixtureReplaceRuns, fixtureCommandError } from './sql-fixture.js';
+import { canonical, runHash } from '../../../server/runs/storage-codec.js';
+import { RunsRepository } from '../../../server/runs/storage-repository.js';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { MAX_ATTACHMENT_BYTES } from '../../../shared/attachments.js';
 import { buildCreateArgs, buildResumeArgs } from '../../../server/runs/claude-args.js';
@@ -701,13 +703,56 @@ for (const mode of ['fail', 'stream-error', 'mismatch', 'empty', 'invalid-event'
 
 test('rejected persistence never launches an instruction later from the polling queue',async()=>{
   const f=await fixture();
+  const client = f.manager.sqlFixture(), write = client.write.bind(client);
   try{
-    await rm(f.stateDir,{recursive:true,force:true});
-    await assert.rejects(f.manager.enqueue(f.session.id,'must not run'),/Cannot save/);
+    const before = await fixtureDocuments(f.manager);
+    const repository = new RunsRepository(client), head = await repository.head();
+    let staged: Buffer | undefined, failedCommand: string | undefined, commits = 0;
+    client.write = async <T>(...args: Parameters<typeof client.write>) => {
+      if (args[0] === 'runs' && args[1] === 'stage') {
+        const payload = args[2] as { part: number; data: string };
+        assert.equal(payload.part, 0, 'this small admission fits in one fixture chunk');
+        staged = Buffer.from(payload.data, 'base64');
+      }
+      if (args[0] === 'runs' && args[1] === 'commit') {
+        commits++;
+        assert.ok(staged);
+        const lines = staged.toString('utf8').trimEnd().split('\n');
+        const header = JSON.parse(lines[0]);
+        assert.ok(lines.slice(1).some(line => JSON.parse(line).kind === 'instruction'));
+        // The real SQL handler writes both rows, then rejects the canonical request hash.
+        // Its transaction must roll back those writes before admission can be acknowledged.
+        lines[0] = canonical({ ...header, requestSha256: '0'.repeat(64) });
+        const bytes = Buffer.from(lines.join('\n') + '\n');
+        const intent = `${(args[2] as { intent: string }).intent}-fault`;
+        await write('runs', 'begin', { intent, bytes: bytes.length, sha256: runHash(bytes), chunks: 1 }, `${intent}-begin`);
+        await write('runs', 'stage', { intent, part: 0, data: bytes.toString('base64') }, `${intent}-stage`);
+        failedCommand = args[3];
+        try { return await write<T>('runs', 'commit', { intent }, args[3]); }
+        catch (error) {
+          assert.ok(error instanceof fixtureCommandError(client));
+          assert.equal(error.code, 'domain-failed');
+          assert.equal(error.disposition, 'not-committed');
+          assert.match(error.message, /Runs canonical request hash mismatch/);
+          throw error;
+        }
+      }
+      return write<T>(...args);
+    };
+    await assert.rejects(f.manager.enqueue(f.session.id,'must not run', {}, { instructions: { text: 'must not reach a provider', required: true } }),/Cannot save/);
+    await f.manager.flushState();
     await new Promise(resolve=>setTimeout(resolve,100));
+    assert.equal(commits, 1, 'the refused admission is never replayed');
+    assert.ok(failedCommand);
+    assert.equal((await client.receipt(failedCommand)).found, false, 'no receipt authorizes delivery');
+    assert.deepEqual(await fixtureDocuments(f.manager), before, 'SQL rolls back the run and required instructions');
+    assert.deepEqual(await repository.head(), head, 'a refused commit cannot advance the durable revision or authority');
     assert.equal(f.launches.length,0);
     assert.equal(f.manager.list().length,0);
-  }finally{await mkdir(f.stateDir,{recursive:true});await f.cleanup();}
+    client.write = write;
+    await f.manager.close();
+    assert.deepEqual(await fixtureDocuments(f.manager), before, 'the durable queue stays empty after reopening');
+  }finally{client.write = write; await f.cleanup();}
 });
 
 test('an executable lookup finishing after shutdown cannot admit or launch work',async()=>{
