@@ -1,6 +1,7 @@
+import { apiTriggerStorageFixture } from './trigger-storage-fixture.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -23,7 +24,7 @@ const requests = (() => { let next = 0; return () => { const time = Date.now().t
 
 /** This computer with a shared folder `open` and a folder `secret` kept out of sharing, and a conversation in each. */
 async function fixture(t: TestContext) {
-  const root = await mkdtemp(join(tmpdir(), 'tower-remote-triggers-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-remote-triggers-')));
   const open = join(root, 'open'), secret = join(root, 'secret');
   await Promise.all([mkdir(open), mkdir(secret)]);
   const excluded = new Set([secret]);
@@ -36,7 +37,8 @@ async function fixture(t: TestContext) {
   const job = (requestId: string): AutoPromptJob => ({ id: requestId, provider: 'codex', prompt: '', routerModel: 'r', status: 'queued', createdAt: '', updatedAt: '' });
   // Runs while a run is being admitted, before its last check (like a change to the sharing list at that moment).
   const admitting: { before?: () => void } = {};
-  const triggers = new TriggerService({ stateDir: root, tickMs: 60_000, sharing: { check: async path => excludes(path), now: excludes }, executor: {
+  const storage = await apiTriggerStorageFixture(t, root);
+  const triggers = new TriggerService({ stateDir: root, storage: storage.storage, tickMs: 60_000, sharing: { check: async path => excludes(path), now: excludes }, executor: {
     submitAutoPrompt: async (request, internal) => { started.push({ how: 'auto', origin: internal.origin }); return job(request.requestId); },
     getAutoPrompt: () => undefined,
     create: async (input, internal) => {
@@ -49,6 +51,7 @@ async function fixture(t: TestContext) {
       return { session: session(run.sessionId, input.cwd), run };
     },
     enqueue: async () => { throw new Error('unused'); }, runs: () => runs, session: id => sessions.find(item => item.id === id) } });
+  t.after(async () => { triggers.close(); await triggers.settle(); await storage.storage.close(); await rm(root, { recursive: true, force: true, maxRetries: 3 }); });
   await triggers.start();
   const submitted: Array<{ origin?: RunOrigin }> = [];
   // Runs during a look (after `skip` others), after what it judges was read: like a change made here at that moment.
@@ -62,8 +65,6 @@ async function fixture(t: TestContext) {
       if (looking.skip) looking.skip--; else looking.during = undefined;
       await during?.();
       return { matcher: { revision: 1, excludes }, coordinators: new Set(['codex:coordinator']) }; } });
-  // Runs still being handed over finish writing before the folder goes.
-  t.after(async () => { triggers.close(); await triggers.settle(); await rm(root, { recursive: true, force: true, maxRetries: 3 }); });
   const call = <T>(name: string, input: unknown, actor = remote, key?: string) => api.call(name, input, actor, key ?? (actor.controllerId && actor.kind === 'owner' ? requests() : undefined)) as Promise<T>;
   return { root, open, secret, excluded, sessions, runs, started, submitted, triggers, api, call, admitting, looking };
 }
@@ -258,18 +259,18 @@ test('what a trigger set up remotely starts never uses a folder kept out of shar
 });
 
 test('where a folder really is, and the sharing list, are looked at again for every answer and as a run starts', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'tower-remote-sharing-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-remote-sharing-')));
   const open = join(root, 'open'), secret = join(root, 'secret'), link = join(root, 'link');
   await Promise.all([mkdir(open), mkdir(secret), mkdir(join(root, 'state'))]);
   await symlink(open, link);
   const store = new RemoteExclusionStore(join(root, 'state'));
   await store.start();
   await store.add(secret);
-  const triggers = new TriggerService({ stateDir: root, tickMs: 60_000, executor: { submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
+  const storage = await apiTriggerStorageFixture(t, root);
+  const triggers = new TriggerService({ stateDir: root, storage: storage.storage, tickMs: 60_000, executor: { submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
     create: async () => { throw new Error('unused'); }, enqueue: async () => { throw new Error('unused'); }, runs: () => [], session: () => undefined } });
+  t.after(async () => { triggers.close(); await triggers.settle(); await storage.storage.close(); await rm(root, { recursive: true, force: true }); });
   await triggers.start();
-  t.after(() => triggers.close());
   const api = new TowerApi({ stateDir: root, triggers, sessions: { list: () => [], read: async () => ({ messages: [], hasMore: false }) },
     remote: async paths => { await store.reload(); await store.prepare(paths, { fresh: true }); return { matcher: store.matcher(), coordinators: new Set() }; } });
   await api.call('triggers.create', { trigger: trigger({ mode: 'folder', cwd: link }, 'Through a link') }, owner);

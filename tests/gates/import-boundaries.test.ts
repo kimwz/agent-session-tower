@@ -57,7 +57,7 @@ export const EDGE: ReadonlyMap<string, string> = new Map([
   ['server/master/client.ts', 'web side of the master host wire'], ['server/master/host.ts', 'master host listener and wire'], ['server/master/routes.ts', 'master routes'],
   ['server/mcp/stdio.ts', 'MCP stdio bridge to Tower over HTTP'], ['server/owner-mcp/tools.ts', 'owner MCP client of Tower over HTTP'],
   ['server/public-agents/listener.ts', 'public agent listener'],
-  ['server/remote/request-ledger.ts', 'remote requests: whether a refusal may be sent again follows its status'], ['server/remote/router.ts', 'remote HTTP router'],
+  ['server/remote/router.ts', 'remote HTTP router'],
   ['server/runs/durable-runner.ts', 'web side of the runner wire'], ['server/runs/runner-protocol.ts', 'runner wire format'], ['server/runs/worker.ts', 'worker socket listener and wire'],
   ['server/slack/mcp-bridge.ts', 'Slack MCP bridge over HTTP'],
   ['server/terminals/client.ts', 'web side of the terminal host wire'], ['server/terminals/host.ts', 'terminal host listener and wire'],
