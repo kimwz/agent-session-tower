@@ -123,9 +123,14 @@ test('a queued save that restores earlier content still reaches disk', async t =
 });
 
 test('a known SQL failure retries only the touched run and does not rewrite saved identities', async t => {
-  const f = await fixture(t);
-  const { run } = await f.running();
+  // holdUntilReady keeps the poll from retrying a failed save during SQL observation.
+  // This fixture owns the single explicit retry; no provider turn is needed.
+  const f = await quiet(t);
+  const run = finishedRun(ID, '');
+  f.internals.runs.set(run.id, run);
+  f.internals.touch(run.id); f.internals.persist(); await f.internals.flush();
   const live = f.internals.runs.get(run.id)!;
+  const savedPrompt = (await f.saved()).find(item => item.id === run.id)!.prompt;
   const session = f.manager.getSession(`codex:${ID}`)!;
   const createdId = 'codex:created-fixture';
   f.internals.createdSessions.set(createdId, { session: { ...session, id: createdId }, runId: run.id, confirmed: true });
@@ -143,7 +148,8 @@ test('a known SQL failure retries only the touched run and does not rewrite save
   };
   live.prompt = 'Saved after the failure'; f.internals.changed(live);
   await assert.rejects(f.internals.flush(), /Cannot save the instruction queue/);
-  assert.notEqual((await f.saved()).find(item => item.id === run.id)?.prompt, live.prompt);
+  assert.equal(failed, true, 'the real SQL storage write path refused the save');
+  assert.equal((await f.saved()).find(item => item.id === run.id)?.prompt, savedPrompt, 'the failed write preserves the old SQL value');
   f.internals.changed(live); await f.internals.flush();
   assert.equal((await f.saved()).find(item => item.id === run.id)?.prompt, live.prompt);
   assert.equal((await new RunsRepository(f.db).exportCurrent()).rows.find(row => row.kind === 'created' && row.id === createdId)!.json, identity);
