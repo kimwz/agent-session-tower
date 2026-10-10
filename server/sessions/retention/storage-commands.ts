@@ -1,3 +1,4 @@
+import { offlineCompletionCommand, offlineAuthorityReceiptCommand } from '../../storage/offline-completion.js';
 import { defineStorageDomain, type DomainReadContext, type DomainWriteContext, type StorageDomain } from '../../storage/domain.js';
 import type { DomainAuthority, StorageDomainSchema } from '../../storage/contract.js';
 import { retentionSchema, RETENTION_STAGE_COUNT, RETENTION_STAGE_BYTES } from './storage-schema.js';
@@ -47,6 +48,8 @@ function put(context: DomainWriteContext, row: RetentionRow): void {
 export function retentionDomainFor(schema: StorageDomainSchema): StorageDomain {
   if (schema.domain !== retentionSchema.domain || JSON.stringify(schema.migrations) !== JSON.stringify(retentionSchema.migrations) || JSON.stringify(schema.preparation) !== JSON.stringify(retentionSchema.preparation)) throw new Error('Retention schema/contract mismatch.');
   return defineStorageDomain({ schema, commands: {
+    offlineAuthorityReceipt: offlineAuthorityReceiptCommand,
+    offlineCompletion: offlineCompletionCommand('retention_stages'),
     head: { kind: 'read', run: context => head(context) },
     keys: { kind: 'read', run(context, payload) {
       const input = object(payload); current(context, input);

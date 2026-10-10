@@ -737,7 +737,7 @@ for (const change of ['closed', 'source', 'provider'] as const) {
     const unfinished = restarted.unfinishedRuns();
     assert.deepEqual(unfinished, { start: [], running: [] });
     // Mirror startup's automatic start list after the policy becomes allowed again.
-    for (const request of unfinished.start) f.runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600, request.sessionId);
+    for (const request of ((): ReturnType<PermissionService['unfinishedRuns']> => unfinished)().start) f.runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600, request.sessionId);
     await f.runner.flush();
     await assert.rejects(readFile(join(f.project, 'last-effect-executions')), { code: 'ENOENT' });
   });

@@ -1,3 +1,4 @@
+import { runOfflineStorageCommand } from './storage-offline-cli.js';
 import { fileURLToPath } from 'node:url';
 import { userInfo } from 'node:os';
 import { createServer } from 'node:net';
@@ -32,6 +33,7 @@ const NEXT_START: Record<ServiceManager, string> = { launchd: 'from your next lo
 const packageRoot = () => fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? '../..' : '../../..', import.meta.url));
 
 export async function runLinkCommand(args: string[]): Promise<void> {
+  if(args[0]==='storage' && args[1]==='offline') { console.log(JSON.stringify(await runOfflineStorageCommand(args.slice(2)))); return; }
   const [command, ...rest] = args;
   let stateDir = defaultStateDir();
   let port = 8000;

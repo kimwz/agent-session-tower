@@ -1,3 +1,4 @@
+import { offlineCompletionCommand, offlineAuthorityReceiptCommand } from '../storage/offline-completion.js';
 import { defineStorageDomain, type DomainReadContext, type DomainWriteContext, type StorageDomain } from '../storage/domain.js';
 import { StorageCommandError, type DomainAuthority, type StorageDomainSchema } from '../storage/contract.js';
 import { permissionHash, checkPermissionBounds, validatePermissionRow, PERMISSION_CHUNK_BYTES, PERMISSION_BYTES, type PermissionRow, type PermissionRowKind, type PermissionChange } from './storage-codec.js';
@@ -41,6 +42,8 @@ function put(c: DomainWriteContext,r: PermissionRow): void {
 }
 export function permissionsDomainFor(schema: StorageDomainSchema): StorageDomain {
   return defineStorageDomain({ schema,commands:{
+    offlineAuthorityReceipt: offlineAuthorityReceiptCommand,
+    offlineCompletion: offlineCompletionCommand(),
     head:{ kind:'read',run(c) { return permissionsHead(c); } },
     keys:{ kind:'read',run(c,value) { const p=obj(value); current(c,p); bounded(c); const t=table(p.kind); if (!Number.isSafeInteger(p.after) || (p.after as number)<0) fail('Invalid permission page.'); const page=c.prepare(`SELECT * FROM ${t} ORDER BY ordinal,id LIMIT 32 OFFSET ?`).all(p.after as number) as Record<string,unknown>[];
       return page.map(r=>{
@@ -79,7 +82,7 @@ export function permissionsDomainFor(schema: StorageDomainSchema): StorageDomain
       if (p.mode==='import') c.authority.markImported({ manifestSha256:p.manifestSha256 as string });
       const revision=(h.revision ?? 0)+1;
       c.prepare('INSERT INTO permission_state(singleton,revision) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET revision=excluded.revision').run(revision);
-      return { revision,generation:c.authority.current()!.generation,payloadSha256:permissionHash(JSON.stringify(value)) };
+      return { mode:p.mode,revision,generation:c.authority.current()!.generation,payloadSha256:permissionHash(JSON.stringify(value)) };
     } },
   } });
 }

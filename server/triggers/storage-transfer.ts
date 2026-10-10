@@ -1,3 +1,4 @@
+import { checkStorageActivation, type OfflineActivationOwner } from '../link/storage-offline.js';
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, opendir } from 'node:fs/promises';
@@ -93,14 +94,14 @@ async function seal(parent: string, id: string, bytes: Buffer, facts: Record<str
   return { directory,manifestSha256: triggerHash(manifest) };
 }
 /** B entry only. Raw backup is sealed before import, and source bytes are rechecked before the receipt transaction. */
-export async function importTriggers(input: { repository: TriggersRepository; stateDir: string; evidenceParent: string; commandId: string; update: StorageUpdateInput; now: () => number }): Promise<{ directory: string; manifestSha256: string }> {
+export async function importTriggers(input: { repository: TriggersRepository; stateDir: string; evidenceParent: string; commandId: string; update: StorageUpdateInput; activation?: OfflineActivationOwner; now: () => number }): Promise<{ directory: string; manifestSha256: string }> {
   const { repository } = input, context = repository.storage.context;
   if (!context?.manifest.domains.find(domain => domain.scope === 'triggers')?.cutover) throw new Error('Trigger preparation has no cutover contract.');
   if ((await repository.head()).authority) throw new Error('Trigger authority exists; reimport forbidden.');
   await holdTriggersEvidence(input.stateDir);
   if ((await repository.storage.read<{ stages: number }>('triggers','bootstrapHistory',{})).stages !== 0) throw new Error('Trigger stages exist without authority; explicit owner recovery required.');
   if (input.update.stateDir !== input.stateDir || input.update.build.manifest?.digest !== context.manifest.digest || input.update.build.preflight.identity?.sourceHash !== context.identity.sourceHash || input.update.build.version !== context.identity.appVersion) throw new Error('Trigger import belongs to another captured build.');
-  const check = async () => { const result = await evaluateStorageUpdate(input.update); if (!result.importAllowed || result.verdict !== 'ready') throw new Error(`Trigger import held: ${result.code}`); await repository.gate(); };
+  const check = async () => { const result = await checkStorageActivation(input.activation ? { kind: 'offline', owner: input.activation, update: input.update, storage: repository.storage } : { kind: 'normal', update: input.update }, 'triggers'); if (!result.importAllowed || result.verdict !== 'ready') throw new Error(`Trigger import held: ${result.code}`); await repository.gate(); };
   await check(); const path = join(input.stateDir,'trigger-engine.json'), bytes = await raw(path);
   const state = parseState(JSON.parse(bytes.toString('utf8')),input.now,false);
   if (!state) throw new Error('Invalid trigger source; preserved without import.');

@@ -3,26 +3,22 @@ import { constants } from 'node:fs';
 import { open, lstat, realpath } from 'node:fs/promises';
 import { dirname, join, resolve, relative } from 'node:path';
 import { validateStrictStateLease, type StrictStateLease } from '../instance/state-lock.js';
-import { readStorageIdentity } from '../storage/recovery.js';
+import { fileSha256, readStorageIdentity } from '../storage/recovery.js';
 import { StorageClient } from '../storage/client.js';
 import type { StorageBuildIdentity, StorageBuildManifest } from '../storage/contract.js';
 import { manifestDigest } from '../storage/schema.js';
-import { privateDirectory, storageLayout, writePrivateDocument } from '../storage/paths.js';
+import { privateDirectory, privateFile, sameGeneration, storageLayout, writePrivateDocument } from '../storage/paths.js';
 import { evaluateStorageUpdate, parseArtifactStorageContract, recordPreparationEvidence, type StorageUpdateInput, type StorageUpdateEvaluation } from './storage-update.js';
 
 const hash = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 const sha = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
-const refuse = (reason: string): never => { throw new Error(`Offline activation held: ${reason}`); };
+const refuse: (reason: string) => never = (reason) => { throw new Error(`Offline activation held: ${reason}`); };
 export const offlineActivationPath = (stateDir: string) => join(stateDir, 'storage-offline-activation.json');
 
-/** I supplies a sealed, consistent full inventory; C verifies the named private files, never scans the host. */
+export type { OfflineBackupDescriptor } from './storage-offline-backup.js';
+import { verifyOfflineBackup, type OfflineBackupDescriptor } from './storage-offline-backup.js';
 export interface OfflineFileDescriptor { path: string; sha256: string }
-export interface OfflineBackupDescriptor {
-  root: string;
-  manifest: OfflineFileDescriptor;
-  files: Array<OfflineFileDescriptor & { role: 'database' | 'wal' | 'domain-json' | 'recovery' | 'migration' | 'preparation' }>;
-}
 export interface OfflineDomainCompletion {
   scope: string;
   commandId: string;
@@ -37,6 +33,7 @@ export interface OfflineActivationRecord {
   build: StorageBuildIdentity; manifest: StorageBuildManifest;
   oldArtifact: { identity: StorageBuildIdentity; entry: OfflineFileDescriptor; contract: OfflineFileDescriptor };
   backup: OfflineBackupDescriptor; targets: string[]; domains: OfflineDomainCompletion[];
+  corePrepared?: { commandId: string; payloadSha256: string };
   phase: 'pending' | 'schema-prepared' | 'complete';
 }
 export function decodeOfflineActivation(value: unknown): OfflineActivationRecord {
@@ -48,15 +45,15 @@ export function decodeOfflineActivation(value: unknown): OfflineActivationRecord
     || r.build.appVersion !== r.manifest.appVersion || r.build.protocol !== r.manifest.protocol
     || !r.oldArtifact?.identity || !sha(r.oldArtifact.identity.sourceHash) || !sha(r.oldArtifact.identity.manifestDigest)
     || !sha(r.oldArtifact.contract?.sha256) || !sha(r.oldArtifact.entry?.sha256) || !r.backup || !sha(r.backup.manifest?.sha256)
-    || !Array.isArray(r.backup.files) || !r.backup.files.length || r.backup.files.some(f => !sha(f.sha256)
-      || !['database', 'wal', 'domain-json', 'recovery', 'migration', 'preparation'].includes(f.role))
+    || typeof r.backup.root !== 'string' || !r.backup.snapshotId
+    || r.phase !== 'pending' && (!r.corePrepared?.commandId || !sha(r.corePrepared.payloadSha256))
     || !Array.isArray(r.targets) || !r.targets.length || new Set(r.targets).size !== r.targets.length
     || r.targets.length !== 1 + r.manifest.domains.length || r.targets.some(s => ![r.manifest.core.scope, ...r.manifest.domains.map(d => d.scope)].includes(s))
-    || !Array.isArray(r.domains) || r.domains.length !== r.targets.length || new Set(r.domains.map(d => d.scope)).size !== r.targets.length
-    || r.domains.some(d => !r.targets.includes(d.scope) || !d.commandId || !d.command || !d.completionCommand || !sha(d.typeHash) || !sha(d.inputSha256))) refuse('invalid record');
+    || !Array.isArray(r.domains) || r.domains.length > r.manifest.domains.length || r.phase === 'complete' && r.domains.length !== r.manifest.domains.length || new Set(r.domains.map(d => d.scope)).size !== r.domains.length
+    || r.domains.some(d => d.scope === r.manifest.core.scope || !r.targets.includes(d.scope) || !d.commandId || d.command !== 'commit' || d.completionCommand !== 'offlineCompletion' || !sha(d.typeHash) || !sha(d.inputSha256))) refuse('invalid record');
   return structuredClone(r);
 }
-async function privateBytes(path: string): Promise<Buffer> {
+export async function readOfflinePrivateBytes(path: string): Promise<Buffer> {
   const parent = dirname(resolve(path));
   if (await realpath(parent) !== parent) refuse('linked parent');
   // Check every ancestor below the filesystem root without reading unrelated files.
@@ -80,11 +77,16 @@ async function privateBytes(path: string): Promise<Buffer> {
 }
 async function verifyFile(file: OfflineFileDescriptor, root?: string) {
   if (resolve(file.path) !== file.path || root && (relative(root, file.path).startsWith('..') || file.path === root)) refuse('file boundary');
-  if (hash(await privateBytes(file.path)) !== file.sha256) refuse('file hash');
+  const parent=dirname(file.path);
+  if(await realpath(parent)!==parent || !await privateDirectory(parent,false)) refuse('file parent boundary');
+  const before=await privateFile(file.path);
+  if(!before || await fileSha256(file.path)!==file.sha256) refuse('file hash');
+  const after=await privateFile(file.path);
+  if(!after || !sameGeneration(before,after)) refuse('file changed');
 }
 export async function readOfflineActivation(stateDir: string): Promise<OfflineActivationRecord | undefined> {
   try {
-    const r = decodeOfflineActivation(JSON.parse((await privateBytes(offlineActivationPath(stateDir))).toString('utf8')));
+    const r = decodeOfflineActivation(JSON.parse((await readOfflinePrivateBytes(offlineActivationPath(stateDir))).toString('utf8')));
     if (r.stateDir !== resolve(stateDir)) refuse('state directory mismatch');
     return r;
   } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
@@ -95,31 +97,23 @@ export async function beginOfflineActivation(input: { lease: StrictStateLease; r
   await validateStrictStateLease(input.lease, input.runtimeDir);
   const record = decodeOfflineActivation(input.record);
   if (resolve(input.runtimeDir) !== join(record.stateDir, 'runner-runtime') || record.phase !== 'pending' || record.stateDir !== resolve(input.update.stateDir)) refuse('begin context');
+  await verifyProtectedOfflineArtifact(record);
+  const previous = await readOfflineActivation(record.stateDir);
+  await verifyOfflineBackup(record.backup, record.stateDir, record.storageId, !previous);
+  await offlineEvaluation(input.update, record);
+  if (previous && !same({ ...previous, phase: 'pending', corePrepared: undefined, domains: [] }, { ...record, corePrepared: undefined, domains: [] })) refuse('explicit retry identity');
+  if (previous?.phase === 'complete') refuse('already complete; no replay');
+  await writePrivateDocument(offlineActivationPath(record.stateDir), JSON.stringify(previous ?? record));
+  const owner: OfflineActivationOwner = Object.freeze({ kind: 'offline-owner' });
+  owners.set(owner, { lease: input.lease, runtimeDir: input.runtimeDir, record: previous ?? record });
+  return owner;
+}
+export async function verifyProtectedOfflineArtifact(record: OfflineActivationRecord) {
   await verifyFile(record.oldArtifact.entry);
   await verifyFile(record.oldArtifact.contract);
-  const old = parseArtifactStorageContract((await privateBytes(record.oldArtifact.contract.path)).toString('utf8'), record.oldArtifact.identity.appVersion);
+  const old = parseArtifactStorageContract((await readOfflinePrivateBytes(record.oldArtifact.contract.path)).toString('utf8'), record.oldArtifact.identity.appVersion);
   if (old.state !== 'contract' || !same(old.contract.identity, record.oldArtifact.identity)) refuse('old artifact contract');
-  await verifyFile(record.backup.manifest, record.backup.root);
-  if (!same(JSON.parse((await privateBytes(record.backup.manifest.path)).toString('utf8')), { storageId: record.storageId, files: record.backup.files })) refuse('backup manifest inventory');
-  if (!record.backup.files.some(f => f.role === 'database') || new Set(record.backup.files.map(f => f.path)).size !== record.backup.files.length) refuse('backup inventory');
-  for (const f of record.backup.files) {
-    const name = relative(record.backup.root, f.path);
-    const allowed = f.role === 'database' ? name === 'state.sqlite' : f.role === 'wal' ? name === 'state.sqlite-wal'
-      : f.role === 'domain-json' ? ['runs.json', 'created-sessions.json', 'run-instructions.json', 'trigger-engine.json', 'permissions.json', 'remote-requests.json', 'remote-exclusions.json', 'retention/journal.json', 'retention-observations.json'].includes(name)
-      : f.role === 'preparation' ? /^storage-contracts\/[a-z][a-z0-9-]{0,47}\.json$/.test(name)
-      : f.role === 'recovery' ? /^storage-recovery\/(identity|barrier)\.json$/.test(name)
-      : false;
-    if (!allowed) refuse('backup file outside explicit whitelist; I must register remaining metadata');
-    await verifyFile(f, record.backup.root);
-  }
-  await offlineEvaluation(input.update, record);
-  const previous = await readOfflineActivation(record.stateDir);
-  if (previous && !same({ ...previous, phase: 'pending' }, record)) refuse('explicit retry identity');
-  if (previous?.phase === 'complete') refuse('already complete; no replay');
-  await writePrivateDocument(offlineActivationPath(record.stateDir), JSON.stringify(record));
-  const owner: OfflineActivationOwner = Object.freeze({ kind: 'offline-owner' });
-  owners.set(owner, { lease: input.lease, runtimeDir: input.runtimeDir, record });
-  return owner;
+  return old.contract;
 }
 async function offlineEvaluation(update: StorageUpdateInput, record: OfflineActivationRecord): Promise<StorageUpdateEvaluation> {
   const result = await evaluateStorageUpdate(update);
@@ -158,14 +152,50 @@ export async function prepareOfflineActivation(owner: OfflineActivationOwner, st
   const prepared = await storage.prepare({ allowMigration: true, commandId: `offline-${held.record.activationId}-prepare` });
   const gate = await storage.gate('core');
   await recordPreparationEvidence(held.record.stateDir, { context: { identity: held.record.build, manifest: held.record.manifest }, preflight: update.build.preflight, prepared, gate });
+  const commandId = `offline-${held.record.activationId}-prepare`;
+  const payloadSha256 = hash(JSON.stringify({ allowMigration: true, storageId: held.record.storageId }));
+  const receipt = await storage.receipt(commandId);
+  if (!receipt.found || receipt.receipt.scope !== 'core' || receipt.receipt.command !== 'prepare' || receipt.receipt.payloadSha256 !== payloadSha256
+    || !prepared.claimed || !gate.open) refuse('actual core prepare receipt');
+  held.record.corePrepared = { commandId, payloadSha256 };
   held.record.phase = 'schema-prepared';
   await writePrivateDocument(offlineActivationPath(held.record.stateDir), JSON.stringify(held.record));
 }
+export async function recordOfflineDomainCompletion(owner: OfflineActivationOwner, storage: StorageClient, scope: string): Promise<void> {
+  const held = await validateOwnerContext(owner, storage);
+  if (held.record.phase !== 'schema-prepared' || !held.record.manifest.domains.some(d => d.scope === scope)) refuse('domain store phase');
+  const completion = await storage.read<OfflineDomainCompletion>(scope, 'offlineAuthorityReceipt', {});
+  if (completion.scope !== scope || completion.completionCommand !== 'offlineCompletion') refuse('registered domain descriptor');
+  const record = { ...held.record, domains: [...held.record.domains.filter(d => d.scope !== scope), completion] };
+  // Validate the actual registered query before publishing any domain evidence.
+  const inspection = await storage.inspect();
+  const authority = inspection.authority.find(a => a.domain === scope);
+  if (!authority) refuse('domain authority');
+  const result = await storage.read(scope, completion.completionCommand, { commandId: completion.commandId, inputSha256: completion.inputSha256 });
+  if (!same(result, { commandId: completion.commandId, command: completion.command, typeHash: completion.typeHash, inputSha256: completion.inputSha256,
+    authorityGeneration: authority.generation, restore: 'complete', unresolvedIntents: 0 })) refuse('domain completion query');
+  await writePrivateDocument(offlineActivationPath(record.stateDir), JSON.stringify(record));
+  held.record = record;
+}
 export async function finishOfflineActivation(owner: OfflineActivationOwner, storage: StorageClient) {
   const held = await validateOwnerContext(owner, storage);
-  if (held.record.phase !== 'schema-prepared') refuse('schema not prepared');
+  if (held.record.phase !== 'schema-prepared' || held.record.domains.length !== held.record.manifest.domains.length) refuse('schema not prepared');
+  await verifyOfflineCompletion(held.record, storage);
+  await validateOwnerContext(owner, storage);
+  const completed = { ...held.record, phase: 'complete' as const };
+  await writePrivateDocument(offlineActivationPath(held.record.stateDir), JSON.stringify(completed));
+  held.record = completed;
+}
+export async function verifyOfflineCompletion(record: OfflineActivationRecord, storage: StorageClient): Promise<void> {
+  if (record.domains.length !== record.manifest.domains.length || await privateFile(join(record.stateDir,'storage-permissions-pending.json'))) refuse('global store completion/pending intent');
+  if (!same(storage.identity, record.build)) refuse('completion SDK identity');
+  const core = record.corePrepared;
+  if (!core || core.commandId !== `offline-${record.activationId}-prepare` || core.payloadSha256 !== hash(JSON.stringify({ allowMigration: true, storageId: record.storageId }))) refuse('core prepared receipt missing/mismatch');
+  const prepared = await storage.receipt(core.commandId);
+  if (!prepared.found || prepared.receipt.scope !== 'core' || prepared.receipt.command !== 'prepare'
+    || prepared.receipt.payloadSha256 !== core.payloadSha256 || !(await storage.gate('core')).open) refuse('core prepared receipt/gate');
   const inspection = await storage.inspect();
-  for (const d of held.record.domains) {
+  for (const d of record.domains) {
     if (!(await storage.gate(d.scope)).open) refuse('historical/domain gate');
     const authority = inspection.authority.find(a => a.domain === d.scope);
     const receipt = await storage.receipt(d.commandId);
@@ -175,18 +205,30 @@ export async function finishOfflineActivation(owner: OfflineActivationOwner, sto
     if (!same(completion, { commandId: d.commandId, command: d.command, typeHash: d.typeHash, inputSha256: d.inputSha256,
       authorityGeneration: authority.generation, restore: 'complete', unresolvedIntents: 0 })) refuse('registered completion evidence');
   }
-  await validateOwnerContext(owner, storage);
-  const completed = { ...held.record, phase: 'complete' as const };
-  await writePrivateDocument(offlineActivationPath(held.record.stateDir), JSON.stringify(completed));
-  held.record = completed;
+  if (inspection.schema.kind !== 'current' || inspection.schema.storageId !== record.storageId) refuse('completion schema identity');
 }
 /** Restart never infers completion from preparation files or worker ready. */
-export async function offlineBootstrapHeld(stateDir: string, build?: StorageBuildIdentity, storageId?: string): Promise<boolean> {
+export async function offlineBootstrapHeld(stateDir: string, build?: StorageBuildIdentity, storageId?: string, storage?: StorageClient): Promise<boolean> {
   const record = await readOfflineActivation(stateDir);
   if (!record) return false;
   if (!storageId) {
     const identity = await readStorageIdentity(await storageLayout(stateDir));
     if (identity.state === 'present' && identity.identity.state === 'created') storageId = identity.identity.storageId;
   }
-  return record.phase !== 'complete' || !build || !same(record.build, build) || storageId !== record.storageId;
+  if (record.phase !== 'complete' || !build || !same(record.build, build) || storageId !== record.storageId || !storage) return true;
+  try { await verifyOfflineCompletion(record, storage); return false; } catch { return true; }
+}
+
+/** Normal guards remain intact; only a bound, previously finished installation may consume this explicit proof. */
+export async function completedOfflineCandidate(update: StorageUpdateInput): Promise<OfflineActivationRecord | undefined> {
+  const record = await readOfflineActivation(update.stateDir);
+  if (!record || record.phase !== 'complete') return undefined;
+  await offlineEvaluation(update, record);
+  return record;
+}
+export async function evaluateCompletedOffline(update: StorageUpdateInput, storage: StorageClient): Promise<StorageUpdateEvaluation> {
+  const record = await completedOfflineCandidate(update);
+  if (!record || await offlineBootstrapHeld(update.stateDir, record.build, record.storageId, storage)) refuse('completed SDK proof held');
+  const evaluation = await offlineEvaluation(update, record);
+  return { ...evaluation, code:'offline-completion-verified', reason:'Exact offline installation receipts and current storage gates verified.' };
 }

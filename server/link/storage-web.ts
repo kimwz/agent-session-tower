@@ -1,4 +1,4 @@
-import { offlineBootstrapHeld, readOfflineActivation } from './storage-offline.js';
+import { completedOfflineCandidate, readOfflineActivation } from './storage-offline.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { WorkerStorageStatus } from '../../shared/storage.js';
 import { captureStorageBundle, preflightStorage, storageBuildContext } from '../storage/index.js';
@@ -21,10 +21,13 @@ export async function storageWebHealth(input: { stateDir: string; managed: boole
   let evaluation = await evaluateStorageUpdate(input);
   try {
     const record = await readOfflineActivation(input.stateDir);
-    if (record && await offlineBootstrapHeld(input.stateDir, input.build.preflight.identity)) {
-      evaluation = { ...evaluation, verdict: 'recovery-required', code: 'offline-activation-held', reason: 'Offline completion does not bind this installation.', importAllowed: false };
+    if(record) {
+      const completed=await completedOfflineCandidate(input);
+      const workerProof=completed && worker?.state==='ready' && worker.code==='offline-completion-verified' && worker.admissionOpen
+        && JSON.stringify(worker.identity)===JSON.stringify(completed.build);
+      evaluation=workerProof ? { ...evaluation,verdict:'ready',code:'offline-completion-verified',reason:'Exact completed installation verified by the current worker SDK.',importAllowed:true }
+        : { ...evaluation,verdict:'recovery-required',code:'offline-activation-held',reason:'Offline completion requires current worker SQL proof.',importAllowed:false };
     }
-    // Completed evidence never overrides a refused/unknown normal candidate.
   } catch (error) {
     evaluation = { ...evaluation, verdict: 'refused', code: 'offline-record-invalid', reason: String(error), importAllowed: false };
   }

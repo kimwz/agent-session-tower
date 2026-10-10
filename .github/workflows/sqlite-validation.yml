@@ -147,7 +147,10 @@ jobs:
           const link = globSync('tests/server/link/**/*.test.ts').sort();
           assert.ok(storage.length && link.length, 'suite globs must match');
           const consumers = ['tests/server/runs/**/*storage*.test.ts', 'tests/server/http/**/*storage*.test.ts',
-            'tests/server/triggers/*storage*.test.ts'].flatMap(pattern => globSync(pattern));
+            'tests/server/triggers/*storage*.test.ts', 'tests/server/permissions/*storage*.test.ts',
+            'tests/server/permissions/*sql*.test.ts', 'tests/server/runs/trigger-admission.test.ts',
+            'tests/server/remote/*storage*.test.ts', 'tests/server/auto-prompt/*storage*.test.ts',
+            'tests/server/slack/*storage*.test.ts', 'tests/server/link/storage-offline*.test.ts'].flatMap(pattern => globSync(pattern));
           assert.ok(consumers.length, 'storage consumers must match');
           // Follow public storage imports as well as filenames, including newly added I fixtures.
           const imported = ['tests/server/runs/**/*.test.ts', 'tests/server/http/**/*.test.ts',

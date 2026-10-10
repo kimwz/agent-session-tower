@@ -1,3 +1,4 @@
+import { offlineCompletionCommand, offlineAuthorityReceiptCommand } from '../storage/offline-completion.js';
 import type { EngineState } from './state.js';
 import { createHash } from 'node:crypto';
 import { defineStorageDomain, type DomainReadContext, type DomainWriteContext, type StorageDomain } from '../storage/domain.js';
@@ -76,6 +77,8 @@ function recost(context: DomainWriteContext, row: TriggerRow, ledger: EngineStat
 export function triggersDomainFor(schema: StorageDomainSchema): StorageDomain {
   if (schema.domain !== triggersSchema.domain || canonical(schema.migrations) !== canonical(triggersSchema.migrations) || canonical(schema.preparation) !== canonical(triggersSchema.preparation)) throw new Error('Triggers schema/contract mismatch.');
   return defineStorageDomain({ schema, commands: {
+    offlineAuthorityReceipt: offlineAuthorityReceiptCommand,
+    offlineCompletion: offlineCompletionCommand('triggers_stages'),
     head: { kind: 'read', run: context => head(context) },
     bootstrapHistory: { kind: 'read', run: context => ({ stages: Number((context.prepare('SELECT count(*) AS n FROM triggers_stages').get() as { n: number }).n) }) },
     keys: { kind: 'read', run(context, payload) {

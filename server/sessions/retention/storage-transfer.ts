@@ -1,3 +1,4 @@
+import { checkStorageActivation, type OfflineActivationOwner } from '../../link/storage-offline.js';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, opendir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -64,7 +65,7 @@ async function seal(parent: string, id: string, files: Record<string, Buffer>, f
 export interface RetentionImportInput {
   storage: StorageClient; stateDir: string; evidenceParent: string; commandId?: string;
   /** The actual shared evaluator input, using this client's captured build/preflight and existing artifact probe. */
-  update: StorageUpdateInput;
+  update: StorageUpdateInput; activation?: OfflineActivationOwner;
   /** Same bootstrap owner retains uncertain writes across explicit startup retries. */
   repository?: RetentionRepository;
 }
@@ -78,7 +79,7 @@ export async function importRetention(input: RetentionImportInput): Promise<{ di
   if (!domain?.cutover) throw Object.assign(new Error('Retention preparation has no cutover contract.'), { storageCode: 'no-cutover-contract' });
   if (input.update.stateDir !== input.stateDir || input.update.build.preflight.identity?.sourceHash !== context!.identity.sourceHash || input.update.build.manifest?.digest !== context!.manifest.digest || input.update.build.version !== context!.identity.appVersion) throw new Error('Retention import update evidence is for another captured build.');
   const check = async () => {
-    const evaluation = await evaluateStorageUpdate(input.update);
+    const evaluation = await checkStorageActivation(input.activation ? { kind: 'offline', owner: input.activation, update: input.update, storage: input.storage } : { kind: 'normal', update: input.update }, 'retention');
     if (!evaluation.importAllowed || evaluation.verdict !== 'ready') throw new Error(`Retention import held: ${evaluation.code}: ${evaluation.reason}`);
     await repository.gate();
   };

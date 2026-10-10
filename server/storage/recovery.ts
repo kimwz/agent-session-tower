@@ -52,7 +52,7 @@ async function readOwnerFile(path: string, maxBytes: number): Promise<{ bytes: B
     return { bytes: await file.readFile(), generation: generationOf(info) };
   } finally { await file.close(); }
 }
-async function fileSha256(path: string): Promise<string> {
+export async function fileSha256(path: string): Promise<string> {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const hash = createHash('sha256');

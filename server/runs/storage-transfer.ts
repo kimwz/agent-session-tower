@@ -1,3 +1,4 @@
+import { checkStorageActivation, type OfflineActivationOwner } from '../link/storage-offline.js';
 import { triggersLegacyFiles } from '../triggers/storage-transfer.js';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, opendir } from 'node:fs/promises';
@@ -76,7 +77,7 @@ async function seal(parent: string, id: string, files: Record<string, Buffer>, f
 }
 export interface RunsImportInput {
   storage: StorageClient; stateDir: string; evidenceParent: string; commandId: string;
-  update: StorageUpdateInput; repository: RunsRepository;
+  update: StorageUpdateInput; repository: RunsRepository; activation?: OfflineActivationOwner;
 }
 /** Prepared import entry for B. Production A never calls this and refuses before source access. */
 export async function importRuns(input: RunsImportInput): Promise<{ directory: string; manifestSha256: string }> {
@@ -87,7 +88,7 @@ export async function importRuns(input: RunsImportInput): Promise<{ directory: s
   if ((await repository.head()).authority) throw new Error('Runs marker exists; source JSON must never be reimported.');
   if (input.update.stateDir !== input.stateDir || input.update.build.preflight.identity?.sourceHash !== context.identity.sourceHash || input.update.build.manifest?.digest !== context.manifest.digest || input.update.build.version !== context.identity.appVersion) throw new Error('Runs import evidence belongs to another captured build.');
   const check = async () => {
-    const evaluation = await evaluateStorageUpdate(input.update);
+    const evaluation = await checkStorageActivation(input.activation ? { kind: 'offline', owner: input.activation, update: input.update, storage } : { kind: 'normal', update: input.update }, 'runs');
     if (!evaluation.importAllowed || evaluation.verdict !== 'ready') throw new Error(`Runs import held: ${evaluation.code}: ${evaluation.reason}`);
     await repository.gate();
   };
