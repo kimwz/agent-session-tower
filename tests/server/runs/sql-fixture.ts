@@ -25,9 +25,17 @@ function artifacts() {
 after(async () => { if (builds) await rm((await builds).directory, { recursive: true, force: true }); });
 
 /** Existing captured SDK/actual SQLite handlers; missing SDK is a failure, never a successful mock. */
-export async function actualStorage(stateDir: string, initial?: RunDocuments) {
+const commandErrors = new WeakMap<StorageClient, typeof import('../../../server/storage/contract.js').StorageCommandError>();
+export function fixtureCommandError(client: StorageClient) {
+  const error = commandErrors.get(client);
+  if (!error) throw new Error('Fixture SDK error class is not captured.');
+  return error;
+}
+let faultBuild: ReturnType<typeof retentionBuild> | undefined;
+export async function actualStorage(stateDir: string, initial?: RunDocuments, threadFault = false, onUnavailable?: import('../../../server/storage/client.js').StorageClientOptions['onUnavailable']) {
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
-  const { a, b } = await artifacts();
+  const { a, b: normal, directory } = await artifacts();
+  const b = threadFault ? await (faultBuild ??= retentionBuild('1.125.0', join(directory, 'thread-fault'), true, true, true, undefined, true)) : normal;
   let fresh = false;
   try { await stat(join(stateDir, 'state.sqlite')); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; fresh = true; }
@@ -40,7 +48,8 @@ export async function actualStorage(stateDir: string, initial?: RunDocuments) {
       await recordPreparationEvidence(stateDir, { context: preparation.context!, preflight, prepared, gate: await preparation.gate('core') });
     } finally { await preparation.close(); }
   }
-  const client = await b.storage.openStorage({ stateDir, bundle: b.bundle() });
+  const client = await b.storage.openStorage({ stateDir, bundle: b.bundle(), onUnavailable });
+  commandErrors.set(client, b.storage.StorageCommandError);
   try {
     await client.prepare({ allowMigration: true });
     const repository = new RunsRepository(client);
@@ -87,7 +96,7 @@ export class RunManager extends ProductionRunManager {
   private fixtureClient?: StorageClient;
   private bound: boolean;
   private fixtureClosed = false;
-  constructor(private readonly fixtureOptions: ConstructorParameters<typeof ProductionRunManager>[0] & { fixtureInitial?: RunDocuments }) {
+  constructor(private readonly fixtureOptions: ConstructorParameters<typeof ProductionRunManager>[0] & { fixtureInitial?: RunDocuments; fixtureThreadFault?: boolean; fixtureOnUnavailable?: import('../../../server/storage/client.js').StorageClientOptions['onUnavailable'] }) {
     super(fixtureOptions); this.bound = Boolean(fixtureOptions.storage);
   }
   override useStorage(storage: StorageClient): void { super.useStorage(storage); this.bound = true; }
@@ -100,7 +109,7 @@ export class RunManager extends ProductionRunManager {
   override async start(): Promise<void> {
     if (!this.bound) {
       if (!this.fixtureOptions.stateDir) throw new Error('Run fixture requires its isolated stateDir.');
-      this.fixtureClient = await actualStorage(this.fixtureOptions.stateDir, this.fixtureOptions.fixtureInitial);
+      this.fixtureClient = await actualStorage(this.fixtureOptions.stateDir, this.fixtureOptions.fixtureInitial, this.fixtureOptions.fixtureThreadFault, this.fixtureOptions.fixtureOnUnavailable);
       this.useStorage(this.fixtureClient);
     }
     this.fixtureClosed = false;

@@ -45,6 +45,7 @@ export class ExternalRowRepository {
       const h = await this.head(); if (!h.authority) throw new Error('External write requires SQL authority.');
       await this.write(copied, { mode: 'update', revision: h.revision, generation: h.authority.generation }, id);
     });
+    // best-effort: only the queue tail is normalized; the returned work still rejects to its caller.
     this.operations = work.catch(() => {}); return work;
   }
   async importPrepared(rows:readonly ExternalRow[],manifestSha256:string,id:string,beforeCommit:()=>Promise<void>): Promise<void> {

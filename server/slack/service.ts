@@ -210,6 +210,7 @@ export class SlackService extends EventEmitter {
   /** I must hold this queue through ownerChat AND durable native run admission/enqueue. */
   withOwnerTurnAdmission<T>(admit: () => Promise<T>): Promise<T> {
     const work = this.operations.then(async () => { await this.effectsGate(); return admit(); });
+    // best-effort: normalize only the serial queue tail; return the original rejection to the admission caller.
     this.operations = work.catch(() => {});
     return work;
   }

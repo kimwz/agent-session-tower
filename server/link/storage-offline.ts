@@ -295,7 +295,10 @@ export async function offlineBootstrapHeld(stateDir: string, build?: StorageBuil
       }
     }
     return false;
-  } catch { return true; }
+  } catch (error) {
+    console.error('Offline completion verification remains held:', error);
+    return true;
+  }
 }
 
 /** Normal guards remain intact; only a bound, previously finished installation may consume this explicit proof. */
@@ -318,6 +321,15 @@ export async function evaluateCompletedOffline(update: StorageUpdateInput, stora
   if (!record || await offlineBootstrapHeld(update.stateDir, storage.identity, record.storageId, storage)) refuse('completed SDK proof held');
   const evaluation = same(storage.identity,record.build) ? await offlineEvaluation(update, record) : await evaluateStorageUpdate(update);
   return { ...evaluation, code:'offline-completion-verified', reason:'Exact offline installation receipts and current storage gates verified.' };
+}
+
+/** Explicit retry of this owner only: existing schema claim precedes live receipt verification. */
+export async function retryCompletedOffline(update: StorageUpdateInput, storage: StorageClient): Promise<StorageUpdateEvaluation | undefined> {
+  if (!await completedOfflineCandidate(update)) return undefined;
+  if (!same(update.build.preflight.identity, storage.identity)) refuse('retry SDK/current build identity');
+  if (storage.status().state !== 'ready') await storage.reopen();
+  await storage.prepare({ allowMigration: false });
+  return evaluateCompletedOffline(update, storage);
 }
 
 /** Explicit stopped-service maintenance only; hashes cover the package installVersion actually selected. */

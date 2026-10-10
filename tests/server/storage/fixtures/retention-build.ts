@@ -14,10 +14,11 @@ import { workflowsSchema } from '../../../../server/slack/storage-schema.js';
 import { runsSchema } from '../../../../server/runs/storage-schema.js';
 import { buildIdentityModule, buildIdentityPlugin, STORAGE_BUNDLE_FORMAT, type StorageThreadArtifact } from '../../../../server/storage/thread-bundle.mjs';
 import type * as Parent from './parent.js';
+import { fixtureSchema } from './fixture-domain.js';
 export interface OfflineServiceFixture { installed:boolean; loadedAtCheck?:number; ownerAtCheck?:number; readFailure?:boolean; ownerReadFailure?:boolean; managerQueryFailure?:boolean }
 
 /** Actual A/B domain handlers and captured SDK compiled as future artifact versions; no mocked import support. */
-export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0' | '1.122.0' | '1.123.0' | '1.124.0' | '1.125.0' | '1.125.1', output?: string, retentionCutover = version === '1.121.0' || version === '1.123.0' || (version === '1.125.0' || version === '1.125.1'), includePermissions = false, externalDomains = false, product?: {artifact:StorageThreadArtifact;manifest:import('../../../../server/storage/contract.js').StorageBuildManifest;serviceFixture?:OfflineServiceFixture}) {
+export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0' | '1.122.0' | '1.123.0' | '1.124.0' | '1.125.0' | '1.125.1', output?: string, retentionCutover = version === '1.121.0' || version === '1.123.0' || (version === '1.125.0' || version === '1.125.1'), includePermissions = false, externalDomains = false, product?: {artifact:StorageThreadArtifact;manifest:import('../../../../server/storage/contract.js').StorageBuildManifest;serviceFixture?:OfflineServiceFixture}, threadFaultDomain = false, defaultFault = 'normal') {
   const directory = output ?? await mkdtemp(join(tmpdir(), 'tower-retention-artifact-'));
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const root = fileURLToPath(new URL('../../../../', import.meta.url));
@@ -117,11 +118,11 @@ export async function lockOwners() {
   const { cutover: _triggerCutover, ...triggerPreparation } = triggersSchema;
   const triggerProfile = (version === '1.125.0' || version === '1.125.1') ? triggersSchema : triggerPreparation;
   if (externalDomains && version !== '1.125.0' && version !== '1.125.1') throw new Error('External fixture requires final artifact.');
-  const manifest = storageManifest(runsRelease ? [schema,runProfile,...(triggersRelease ? [triggerProfile] : []), ...(includePermissions ? [permissionsSchema] : []), ...(externalDomains ? [remoteSchema,autoPromptSchema,workflowsSchema] : [])] : [schema],version);
+  const manifest = storageManifest(runsRelease ? [schema,runProfile,...(triggersRelease ? [triggerProfile] : []), ...(includePermissions ? [permissionsSchema] : []), ...(externalDomains ? [remoteSchema,autoPromptSchema,workflowsSchema] : []), ...(threadFaultDomain ? [fixtureSchema] : [])] : [schema],version);
   if (triggerACapture && manifest.digest !== triggerACapture.identity.manifestDigest) throw new Error('Actual A124 manifest mismatch.');
   if (actualACapture && manifest.digest !== actualACapture.identity.manifestDigest) throw new Error('Actual A122 manifest mismatch.');
   const artifacts: Record<string, StorageThreadArtifact> = {};
-  for (const fault of preparation ? ['normal', 'after-native-hold'] : ['normal', ...(externalDomains ? ['remote-completed-refused'] : []), 'before', 'after', 'after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss', ...(runsRelease ? ['after-unsent-compensation'] : []), 'refuse-once', 'corrupt', 'io']) {
+  for (const fault of preparation ? ['normal', 'after-native-hold'] : ['normal', ...(externalDomains ? ['remote-completed-refused', 'inspect-exit-once'] : []), 'before', 'after', 'after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss', ...(runsRelease ? ['after-unsent-compensation'] : []), 'refuse-once', 'corrupt', 'io']) {
     const entry = `
 import { parentPort } from 'node:worker_threads';
 import { existsSync, writeFileSync } from 'node:fs';
@@ -142,6 +143,13 @@ ${includePermissions ? `import { permissionsDomain } from './server/permissions/
 ${externalDomains ? `import { remoteDomain } from './server/remote/storage-commands.js';
 import { autoPromptDomain } from './server/auto-prompt/storage-commands.js';
 import { workflowsDomain } from './server/slack/storage-commands.js';` : ''}
+${threadFaultDomain ? `import { fixtureDomain, fault } from './tests/server/storage/fixtures/fixture-domain.js';
+const postFault = parentPort.postMessage.bind(parentPort);
+parentPort.postMessage = message => { if (fault.dieBeforeAnswer) process.exit(9); postFault(message); };` : ''}
+${fault === 'inspect-exit-once' ? `parentPort.on('message', message => {
+  const armed = ${JSON.stringify(join(directory, 'inspect-exit-armed'))}, consumed = ${JSON.stringify(join(directory, 'inspect-exit-consumed'))};
+  if (message.op === 'inspect' && existsSync(armed) && !existsSync(consumed)) { writeFileSync(consumed, 'consumed', {flag:'wx',mode:0o600}); process.exit(9); }
+});` : ''}
 const schema = ${retentionCutover ? `{ ...retentionSchema, cutover: { artifactVersion: '1.121.0', importContract: 1 } }` : 'retentionSchema'};
 ${!['before', 'after'].includes(fault) ? '' : `let commitId = -1;
 parentPort.on('message', message => { if (message.op === 'write' && message.command === 'commit') { commitId = message.id; ${fault === 'before' ? 'process.exit(9);' : ''} } });
@@ -196,7 +204,7 @@ remoteDomain.commands.mutate = { ...mutate, run(context, payload) {
   if (payload.changes.some(row => JSON.parse(row.json).result)) throw Object.assign(new Error('fixture completed receipt refusal'), { storageCode: 'domain-failed' });
   return mutate.run(context, payload);
 } };` : ''}
-runStorageThread([domain${runsRelease ? ', runsDomain' : ''}${triggersRelease ? ', triggersDomain' : ''}${includePermissions ? ', permissionsDomain' : ''}${externalDomains ? ', remoteDomain, autoPromptDomain, workflowsDomain' : ''}]);`;
+runStorageThread([domain${runsRelease ? ', runsDomain' : ''}${triggersRelease ? ', triggersDomain' : ''}${includePermissions ? ', permissionsDomain' : ''}${externalDomains ? ', remoteDomain, autoPromptDomain, workflowsDomain' : ''}${threadFaultDomain ? ', fixtureDomain' : ''}]);`;
     const result = await build({ stdin: { contents: entry, resolveDir: root, sourcefile: 'retention-fixture-thread.ts', loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'cjs', target: 'node22', plugins: [versionPlugin], logLevel: 'silent' });
     const body = result.outputFiles[0].text, sourceHash = createHash('sha256').update(body).digest('hex');
     artifacts[fault] = { format: STORAGE_BUNDLE_FORMAT, sourceHash, source: `var __TOWER_STORAGE_SOURCE_HASH__ = "${sourceHash}";\n${body}` };
@@ -218,9 +226,9 @@ runStorageThread([domain${runsRelease ? ', runsDomain' : ''}${triggersRelease ? 
     artifacts.normal=artifact;
   }
   const parentPath = join(directory, 'parent.mjs');
-  await build({ entryPoints: [join(root, 'tests/server/storage/fixtures/parent.ts')], outfile: parentPath, bundle: true, platform: 'node', format: 'esm', target: 'node22', logLevel: 'silent', plugins: [versionPlugin, buildIdentityPlugin(buildIdentityModule({ artifact:JSON.stringify(artifacts.normal), contexts: Object.values(artifacts).map(artifact => ({ sourceHash: artifact.sourceHash, manifest })) }))] });
+  await build({ entryPoints: [join(root, 'tests/server/storage/fixtures/parent.ts')], outfile: parentPath, bundle: true, platform: 'node', format: 'esm', target: 'node22', logLevel: 'silent', plugins: [versionPlugin, buildIdentityPlugin(buildIdentityModule({ artifact:JSON.stringify(artifacts[defaultFault]), contexts: Object.values(artifacts).map(artifact => ({ sourceHash: artifact.sourceHash, manifest })) }))] });
   const storage = await import(pathToFileURL(parentPath).href) as typeof Parent;
-  const bundle = (fault = 'normal') => {
+  const bundle = (fault = defaultFault) => {
     const captured = storage.storageBundleFromArtifact(JSON.stringify(artifacts[fault]), 'artifact');
     if (!captured.ok) throw new Error(captured.failure.message);
     return captured;

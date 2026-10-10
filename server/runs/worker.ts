@@ -11,7 +11,7 @@ import { AutoPromptRepository } from '../auto-prompt/storage-repository.js';
 import { WorkflowRepository } from '../slack/storage-repository.js';
 import { privateFile } from '../storage/paths.js';
 import { PermissionsRepository } from '../permissions/storage-repository.js';
-import { completedOfflineCandidate, evaluateCompletedOffline, offlineBootstrapHeld } from '../link/storage-offline.js';
+import { completedOfflineCandidate, evaluateCompletedOffline, offlineBootstrapHeld, retryCompletedOffline } from '../link/storage-offline.js';
 import { workerLegacyFiles } from './storage-transfer.js';
 import { OPERATIONS, type OperationName } from '../../shared/api/operations.js';
 import { storageControl } from './storage-control.js';
@@ -859,7 +859,18 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const nextPreflight = await preflightStorage({ bundle, stateDir });
     if (generation !== storageHoldGeneration) return false;
     preflight = nextPreflight;
-    const nextEvaluation = await evaluate();
+    let nextEvaluation: Awaited<ReturnType<typeof evaluate>>;
+    try {
+      // A closed completed-installation SDK cannot verify SQL until this explicit
+      // retry reclaims existing schema. Pending/unknown installations retain their hold.
+      nextEvaluation = reopen && database && database.status().state !== 'ready'
+        ? await retryCompletedOffline(updateInput(), database) ?? await evaluate()
+        : await evaluate();
+    } catch (error) {
+      if (generation === storageHoldGeneration) unavailable();
+      console.error('Completed installation retry remains held:', error);
+      return false;
+    }
     if (generation !== storageHoldGeneration) return false;
     evaluation = nextEvaluation;
     const health = storageHealth(evaluation);
@@ -890,7 +901,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       if (database.status().state !== 'ready') { unavailable(); return false; }
       const commandId = bootstrapPrepareCommandId(await readRollbackRecord(stateDir), (await database.inspect()).schema.kind, build.ok ? build.identity : { appVersion: APP_VERSION, sourceHash: '' });
       if (generation !== storageHoldGeneration) return false;
-      const prepared = await database.prepare({ allowMigration: !reopen || Boolean(commandId), ...(commandId ? { commandId } : {}) });
+      const prepared = await database.prepare({ allowMigration: evaluation.code !== 'offline-completion-verified' && (!reopen || Boolean(commandId)), ...(commandId ? { commandId } : {}) });
       const gate = await database.gate('core');
       if (generation !== storageHoldGeneration) return false;
       if (!gate.open) {

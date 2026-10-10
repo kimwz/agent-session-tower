@@ -23,7 +23,7 @@ async function fixture(t:TestContext,fault='normal',product?:Parameters<typeof r
   const stateDir=join(root,'state');await mkdir(stateDir,{mode:0o700});
   const full=process.env.TOWER_SQLITE_OLD124_ROOT ? await protectedOld124() : undefined;
   const old=full ?? await retentionBuild('1.124.0',join(root,'old-sdk'));
-  const final=await retentionBuild('1.125.0',join(root,'final-sdk'),true,true,true,product);
+  const final=await retentionBuild('1.125.0',join(root,'final-sdk'),true,true,true,product,false,fault);
   const oldDb=await old.storage.openStorage({stateDir,bundle:old.bundle()});
   await oldDb.prepare({allowMigration:true});
   const schema=(await oldDb.inspect()).schema;assert.notEqual(schema.kind,'empty');
@@ -456,5 +456,45 @@ test('actual offline activation with a valid uncertain Auto Prompt import refuse
     await db.prepare({ allowMigration: false });
     assert.deepEqual((await new AutoPromptRepository(db).load())[0].entry, entry);
     await assert.rejects(f.final.storage.verifyOfflineCompletion(record, db));
+  } finally { await db.close(); }
+});
+
+
+test('completed installation keeps a real SDK exit held until explicit same-owner retry verifies all receipts', async t => {
+  const f = await fixture(t, 'inspect-exit-once');
+  await f.final.storage.runOfflineStorageCommand(['activate', '--state-dir', f.stateDir, '--input', f.input]);
+  const record = await f.final.storage.readOfflineActivation(f.stateDir); assert.ok(record);
+  let held = false, effects = 0;
+  const db = await f.final.storage.openStorage({ stateDir: f.stateDir, bundle: f.final.bundle('inspect-exit-once'), onUnavailable: () => { held = true; } });
+  try {
+    await db.prepare({ allowMigration: false });
+    const update = async () => ({ stateDir: f.stateDir, managed: false, build: { version: '1.125.0', manifest: f.final.manifest,
+      preflight: await f.final.storage.preflightStorage({ stateDir: f.stateDir, bundle: f.final.bundle('inspect-exit-once') }) } });
+    assert.equal((await f.final.storage.evaluateCompletedOffline(await update(), db)).importAllowed, true);
+    await writeFile(join(f.final.directory, 'inspect-exit-armed'), 'armed', { mode: 0o600 });
+    await assert.rejects(db.inspect(), error => {
+      assert.ok(error instanceof f.final.storage.StorageCommandError);
+      assert.equal(error.code, 'thread-exited'); return true;
+    });
+    assert.equal(db.status().state, 'unavailable'); assert.equal(held, true);
+    await assert.rejects(f.final.storage.evaluateCompletedOffline(await update(), db));
+    assert.equal(effects, 0); assert.equal(db.status().state, 'unavailable', 'ordinary evaluation never reopens');
+    const activationPath = f.final.storage.offlineActivationPath(f.stateDir);
+    await writeFile(activationPath, JSON.stringify({ ...record, phase: 'schema-prepared' }), { mode: 0o600 });
+    assert.equal(await f.final.storage.retryCompletedOffline(await update(), db), undefined, 'pending installation cannot use completed retry');
+    assert.equal(db.status().state, 'unavailable'); assert.equal(effects, 0);
+    await writeFile(activationPath, JSON.stringify(record), { mode: 0o600 });
+    const retry = await f.final.storage.retryCompletedOffline(await update(), db);
+    assert.equal(retry?.importAllowed, true); assert.equal(retry?.code, 'offline-completion-verified');
+    await f.final.storage.verifyOfflineCompletion(record, db);
+    assert.equal((await db.inspect()).authority.length, 7);
+    for (const scope of record.targets) assert.equal((await db.gate(scope)).open, true);
+    if (retry?.importAllowed) { held = false; effects++; }
+    assert.equal(held, false); assert.equal(effects, 1);
+    assert.deepEqual(await f.final.storage.readOfflineActivation(f.stateDir), record, 'retry does not replay or rewrite completion');
+    const source = await readFile('server/runs/worker.ts', 'utf8');
+    const attempt = source.slice(source.indexOf('const attempt = async'), source.indexOf('const closeStorage = async'));
+    assert.ok(attempt.indexOf('retryCompletedOffline') < attempt.indexOf('if (!evaluation.importAllowed)'));
+    assert.ok(source.indexOf('if (!await attempt(true))') < source.indexOf('await requireEffects();', source.indexOf('if (!await attempt(true))')));
   } finally { await db.close(); }
 });

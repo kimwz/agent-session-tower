@@ -1,6 +1,13 @@
+import { workerSettingsFixture, backupPermissionRule, backupPermissionRequest } from '../remote/external-storage-fixture.js';
+import { BackupService } from '../../../server/backup/service.js';
+import { parsePayload } from '../../../server/backup/payload.js';
+import { decryptBackup } from '../../../server/backup/crypto.js';
+import { ProjectGroupStore } from '../../../server/stores/project-groups.js';
+import { RemoteExclusionStore } from '../../../server/remote/exclusions.js';
+import { DecisionService } from '../../../server/decisions/service.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
@@ -50,4 +57,38 @@ test('backups need a signed-in page and its token, come as a file, and are never
   assert.match((await expired.json()).error, /만료/);
   assert.equal((await post('/api/backup/export', { passphrase: 'correct horse' }, { cookie, 'X-Agent-Monitor-Token': token, 'x-tower-master': secret })).status, 403);
   assert.deepEqual(calls.map(call => (call as unknown[])[0]), ['export', 'check']);
+});
+
+test('authenticated backup HTTP export encrypts the actual SQL owner settings in the existing v1 payload', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-backup-http-sql-'));
+  const settings = await workerSettingsFixture(dir);
+  const permission = backupPermissionRule('http-owner-rule');
+  await settings.seed('permissions.json', { version: 1, rules: [permission], requests: [backupPermissionRequest('http-local-request')], codex: [] });
+  await writeFile(join(dir, 'permissions.json'), '{"rules":[]}', { mode: 0o600 });
+  const { auth, origins, cookie, fetch } = await createRemoteAuthFixture(dir);
+  const groups = new ProjectGroupStore(dir), exclusions = new RemoteExclusionStore(dir), decisions = new DecisionService(dir);
+  await groups.start(); await exclusions.start(); await decisions.start();
+  const backup = new BackupService({ stateDir: dir, version: '1.125.0', settings: settings.collect, triggers: settings.triggersBackup,
+    skills: async () => ({ bundle: { format: 'agent-session-tower.skills', version: 1, exportedAt: '', from: 'fixture', skills: [] }, guidance: '', settings: { enabled: false, provider: 'codex' } }), restartWorker: async () => true, stores: { groups, exclusions, decisions } });
+  await backup.start();
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, auth, remote: { origins }, backup,
+    backend: { snapshot: () => snapshot, detail: async () => undefined, enqueue: async () => { throw new Error('unused'); }, cancel: async () => {}, subscribe: () => () => {} } });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    backup.close(); await backup.flush(); await settings.close(); await rm(dir, { recursive: true, force: true });
+  });
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { cookie } })).json();
+  const response = await fetch(`${base}/api/backup/export`, { method: 'POST', headers: { cookie, 'X-Agent-Monitor-Token': token, 'Content-Type': 'application/json' }, body: JSON.stringify({ passphrase: 'SQL owner fixture passphrase' }) });
+  assert.equal(response.status, 200); assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.match(response.headers.get('content-disposition')!, /attachment; filename="tower-backup-/);
+  const encrypted = await response.text(); assert.equal(encrypted.includes('http-owner-rule'), false);
+  await assert.rejects(decryptBackup(encrypted, 'wrong fixture passphrase'));
+  const payload = parsePayload((await decryptBackup(encrypted, 'SQL owner fixture passphrase')).payload);
+  assert.equal(payload.version, 1); assert.deepEqual(payload.worker.files['permissions.json'], { rules: [permission] });
+  assert.deepEqual(payload.worker.files['slack-automation.json'], { rules: [] });
+  assert.deepEqual(payload.worker.files['github-automation.json'], { rules: [] });
+  assert.equal(JSON.stringify(payload).includes('http-local-request'), false);
+  assert.equal(await readFile(join(dir, 'permissions.json'), 'utf8'), '{"rules":[]}');
 });

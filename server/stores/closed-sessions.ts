@@ -18,6 +18,7 @@ export class ClosedSessionStore {
       await mkdir(this.stateDir, { recursive: true, mode: 0o700 });
       await this.reload();
     });
+    // best-effort: reset only the queue tail so reload can retry; start returns the original rejecting load.
     this.writes = load.then(() => {}, () => {});
     return load;
   }

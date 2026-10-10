@@ -1,5 +1,5 @@
 import type { TowerApi } from '../../../server/api/tower-api.js';
-import { storage, fixtureBundle, databasePath } from '../storage/helpers.js';
+import { storage, databasePath } from '../storage/helpers.js';
 import type { WorkerStorageStatus } from '../../../shared/storage.js';
 import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import assert from 'node:assert/strict';
@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
-import { RunManager, fixtureDocuments, importFixtureRetention, importFixtureTriggers, fixtureTriggerText, stopFixtureWriter } from './sql-fixture.js';
+import { RunManager, fixtureDocuments, importFixtureRetention, importFixtureTriggers, fixtureTriggerText, stopFixtureWriter, fixtureCommandError } from './sql-fixture.js';
 import { SessionService } from '../../../server/sessions/service.js';
 import { startRunnerHost, type RunnerHostOptions } from '../../../server/runs/worker.js';
 import type { SlackService } from '../../../server/slack/service.js';
@@ -37,7 +37,7 @@ import { RetentionArchive } from '../../../server/sessions/retention/archive.js'
 import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
 import { worktreeCleanupVisible } from '../../../server/worktrees/janitor.js';
 
-async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector, hostOptions?: (parts: { stateDir: string; sessions: SessionService; runs: RunManager }) => Promise<Partial<RunnerHostOptions>>) {
+async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector, hostOptions?: (parts: { stateDir: string; sessions: SessionService; runs: RunManager }) => Promise<Partial<RunnerHostOptions>>, fault?: { onUnavailable: (status: ReturnType<import('../../../server/storage/client.js').StorageClient['status']>, runs: RunManager) => void }) {
   const directory = await realpath(await temporaryFixture('tower-durable-fixture-'));
   const stateDir = join(directory, 'state');
   const id = '10000000-0000-4000-8000-000000000001';
@@ -57,7 +57,7 @@ async function fixture(workerClosed = false, withRetention = false, retentionUna
   let starts = 0;
   let resolveDone!: () => void;
   const done = new Promise<void>(resolve => { resolveDone = resolve; });
-  const runs = new RunManager({ stateDir, getSession: value => sessions.get(value), refreshSessions: async () => {}, pollMs: 10,
+  const runs: RunManager = new RunManager({ ...(fault ? { fixtureThreadFault: true, fixtureOnUnavailable: status => fault.onUnavailable(status, runs) } : {}), stateDir, getSession: value => sessions.get(value), refreshSessions: async () => {}, pollMs: 10,
     findExecutable: async () => '/fixture/codex',
     spawnProcess: () => { throw new Error('Native provider launch is forbidden in this fixture.'); },
     openCodexBridge: async options => {
@@ -1926,27 +1926,27 @@ test('temporary cleanup failure remains visible without blocking native retentio
 
 test('actual SDK thread exit holds new work while the active fake provider and diagnostic RPC survive; explicit failed reopen never resends', async t => {
   let diagnosis: WorkerStorageStatus = { state: 'ready', code: 'ready', reason: 'ready', admissionOpen: true, sessionsAvailable: true, healthStatus: 200 };
-  let database: Awaited<ReturnType<typeof storage.openStorage>>;
+  let database!: import('../../../server/storage/client.js').StorageClient;
   const f = await fixture(false, false, undefined, undefined, async ({ runs }) => {
+    database = runs.sqlFixture();
     return { storage: () => diagnosis, retryStorage: async () => {
       try { await database.reopen(); await database.prepare({ allowMigration: false }); if ((await database.gate('core')).open) { diagnosis = { ...diagnosis, state: 'ready', admissionOpen: true }; runs.releaseStorage(); } }
       catch { /* The SDK's typed failure stays in its unavailable callback. */ }
       return diagnosis;
     }, closeStorage: async () => { await database?.close(); } };
-  }); t.after(f.cleanup);
-  database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle(), onUnavailable: status => {
-    f.runs.holdStorage();
+  }, { onUnavailable: (status, runs) => {
+    runs.holdStorage();
     diagnosis = { ...diagnosis, state: 'unavailable', code: status.failure?.code ?? 'unknown', reason: status.failure?.message ?? 'unknown', admissionOpen: false, healthStatus: 503, failure: status.failure };
-    f.runs.emit('change');
-  } });
-  t.after(() => database.close());
-  await database.prepare({ allowMigration: true });
+    runs.emit('change');
+  } }); t.after(f.cleanup);
+  assert.equal(database, f.runs.sqlFixture(), 'fault and run owner share the same SDK');
+  assert.deepEqual(database.context!.manifest.domains.map(domain => domain.scope).sort(), ['retention', 'runs', 'triggers', 'permissions', 'remote', 'auto-prompt', 'automation-workflows', 'fixture'].sort());
   const client = await f.connect();
   const run = await client.enqueue(f.session.id, 'accepted exactly once', {}, { origin: { kind: 'owner' } });
   await until(() => f.starts() === 1);
   const accepted = await client.enqueue(f.session.id, 'queued before failure', {}, { origin: { kind: 'owner' } });
   await assert.rejects(database.write('fixture', 'putThenDie', { key: 'unknown' }, 'consumer-unknown'), (error: unknown) => {
-    assert.ok(error instanceof storage.StorageCommandError); assert.equal(error.disposition, 'unknown'); return true;
+    assert.ok(error instanceof fixtureCommandError(database)); assert.equal(error.code, 'thread-exited'); assert.equal(error.disposition, 'unknown'); return true;
   });
   await until(() => client.storageStatus()?.state === 'unavailable');
   assert.equal(f.cancels(), 0);

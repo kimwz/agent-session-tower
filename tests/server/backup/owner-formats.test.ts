@@ -1,4 +1,6 @@
-import { collectTriggers } from '../../helpers/legacy-trigger-backup.js';
+import { empty } from '../../../server/triggers/state.js';
+import { workerSettingsFixture, backupPermissionRule as permissionRule, backupPermissionRequest as permissionRequest, backupWorkflow } from '../remote/external-storage-fixture.js';
+import { collectTriggers as collectLegacyTriggers } from '../../helpers/legacy-trigger-backup.js';
 /**
  * What a backup keeps of each part of Tower, how a restore merges it with this computer's, and the files a restore
  * stages, pinned before those rules move to the parts that own them. Fixtures under fixtures/ were made by the released
@@ -9,9 +11,9 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { applyWorkerFiles, collectWorkerFiles, parsePayload, payloadParts } from '../../../server/backup/payload.js';
+import { applyWorkerFiles as applyOwnedWorkerFiles, collectWorkerFiles as collectOwnedWorkerFiles, parsePayload, payloadParts } from '../../../server/backup/payload.js';
 import { collectEncryptedVault, importPendingSecret, listPendingSecretImports, stageLegacyImport, stageVaultImport } from '../../../server/backup/secrets.js';
-import { readPendingWorker, takeWorkerRestore, writePendingWorker } from '../../../server/backup/restore-files.js';
+import { readPendingWorker, readReport, takeWorkerRestore as takeOwnedWorkerRestore, writePendingWorker } from '../../../server/backup/restore-files.js';
 import { BackupService } from '../../../server/backup/service.js';
 import { decryptBackup } from '../../../server/backup/crypto.js';
 import { SecretService } from '../../../server/secrets/service.js';
@@ -23,6 +25,11 @@ import type { TriggerActor, TriggerInput } from '../../../shared/triggers.js';
 import type { Run } from '../../../shared/types.js';
 import { payloadOf } from './fixtures/payload-of.ts';
 
+const collectTriggers = async (stateDir: string) => (await workerSettingsFixture(stateDir)).triggersBackup();
+const collectWorkerFiles = async (stateDir: string) => collectOwnedWorkerFiles(stateDir, (await workerSettingsFixture(stateDir)).collect);
+const applyWorkerFiles = async (stateDir: string, files: Parameters<typeof applyOwnedWorkerFiles>[1]) => applyOwnedWorkerFiles(stateDir, files, (await workerSettingsFixture(stateDir)).owner);
+const takeWorkerRestore = async (stateDir: string) => takeOwnedWorkerRestore(stateDir, (await workerSettingsFixture(stateDir)).owner);
+const sqlFile = (name: string): name is import('../../../server/backup/payload.js').WorkerSqlFile => ['permissions.json', 'slack-automation.json', 'github-automation.json'].includes(name);
 const FIXTURES = join(import.meta.dirname, 'fixtures');
 const PASS = 'fixture backup passphrase';
 const VAULT_PASSWORD = 'fixture vault password 1';
@@ -32,21 +39,28 @@ const secret = (id: string, value = `Bearer ${id}`) => ({ id, name: `Secret ${id
 
 async function dir(t: TestContext, prefix = 'tower-owner-formats-'): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), prefix));
-  t.after(() => rm(path, { recursive: true, force: true }));
+  const settings = await workerSettingsFixture(path);
+  t.after(async () => { await settings.close(); await rm(path, { recursive: true, force: true }); });
   return path;
 }
-const write = (stateDir: string, name: string, value: unknown) => mkdir(join(stateDir, name, '..'), { recursive: true }).then(() => writeFile(join(stateDir, name), typeof value === 'string' ? value : JSON.stringify(value), { mode: 0o600 }));
-const read = async (stateDir: string, name: string) => readFile(join(stateDir, name), 'utf8');
+const write = async (stateDir: string, name: string, value: unknown) => {
+  await mkdir(join(stateDir, name, '..'), { recursive: true });
+  await writeFile(join(stateDir, name), typeof value === 'string' ? value : JSON.stringify(value), { mode: 0o600 });
+  if (sqlFile(name) && typeof value !== 'string' && !Array.isArray(value)) await (await workerSettingsFixture(stateDir)).seed(name, value);
+};
+const read = async (stateDir: string, name: string) => name === 'trigger-engine.json'
+  ? JSON.stringify(await (await workerSettingsFixture(stateDir)).triggerState()) : sqlFile(name)
+  ? JSON.stringify(await (await workerSettingsFixture(stateDir)).read(name)) : readFile(join(stateDir, name), 'utf8');
 const mode = async (path: string) => (await stat(path)).mode & 0o777;
 async function vault(stateDir: string) { const service = new SecretService({ stateDir }); await service.start(); await service.initialize(VAULT_PASSWORD); return service; }
 
 async function backupService(t: TestContext, stateDir: string) {
   const store = (value: unknown) => ({ backupValue: () => structuredClone(value), restore: async () => undefined });
-  const service = new BackupService({ stateDir, triggers: () => collectTriggers(stateDir), version: 'fixture', restartWorker: async () => true,
+  const service = new BackupService({ stateDir, settings: (await workerSettingsFixture(stateDir)).collect, triggers: () => collectTriggers(stateDir), version: 'fixture', restartWorker: async () => true,
     skills: async () => ({ bundle: { format: 'agent-session-tower.skills', version: 1, exportedAt: '', from: 'fixture', skills: [] }, guidance: '', settings: { enabled: true, provider: 'claude' } }),
     stores: { groups: store({ groups: [] }), exclusions: store({ folders: [] }), decisions: store({}) } });
   await service.start();
-  t.after(() => service.flush());
+  (await workerSettingsFixture(stateDir)).beforeClose.push(async () => { service.close(); await service.flush(); });
   return service;
 }
 
@@ -60,9 +74,11 @@ async function engine(t: TestContext, stateDir: string, clock = { now: Date.pars
     enqueue: async () => { throw new Error('not used'); }, runs: () => structuredClone(runs), session: () => undefined,
   };
   const open = async (restore?: TriggerBackup) => {
-    const service = new TriggerService({ stateDir, executor, now: () => clock.now, tickMs: 60_000, ...(secretStore ? { secretStore } : {}) });
+    const settings = await workerSettingsFixture(stateDir);
+    if (!await settings.triggers.databaseAuthority()) await settings.seedTriggers(empty());
+    const service = new TriggerService({ storage: settings.storage, stateDir, executor, now: () => clock.now, tickMs: 60_000, ...(secretStore ? { secretStore } : {}) });
     const result = await service.start(restore ? { restore } : {});
-    t.after(async () => { service.close(); await service.settle(); });
+    settings.beforeClose.push(async () => { service.close(); await service.settle(); });
     return { service, errors: result.errors };
   };
   return { open, clock, finish: () => { for (const run of runs) if (run.status === 'running') run.status = 'completed'; } };
@@ -75,12 +91,12 @@ const once = (cwd: string, at: string, name: string): TriggerInput => hourly(cwd
 /** Every worker file with the runtime records a backup must leave out. */
 async function workerFiles(stateDir: string) {
   await write(stateDir, 'trigger-secrets.json', [secret('local')]);
-  await write(stateDir, 'permissions.json', { version: 1, rules: [{ id: 'r1' }], requests: [{ id: 'pending', notification: { at: 'x' } }], codex: [{ path: '/codex.rules' }], lost: 'lost note', autoReview: { enabled: true, provider: 'claude', model: 'opus' } });
+  await write(stateDir, 'permissions.json', { version: 1, rules: [permissionRule('r1')], requests: [{ ...permissionRequest('pending'), notification: { state: 'pending', message: 'x' } }], codex: [{ path: '/codex.rules', scope: 'global' }], lost: 'lost note', autoReview: { enabled: true, provider: 'claude', model: 'opus', resume: true } });
   await write(stateDir, 'models.json', initialModelSettings());
   await write(stateDir, 'slack-connection.json', { enabled: true, userToken: 'xoxp-1', appToken: 'xapp-1', account: { teamId: 'T', userId: 'U' } });
   await write(stateDir, 'slack-tone.json', { tone: 'Brief.' });
-  await write(stateDir, 'slack-automation.json', { rules: [RULE], workflows: [{ id: 'w', status: 'running' }], extra: 1 });
-  await write(stateDir, 'github-automation.json', { rules: [{ ...RULE, id: 'g' }], workflows: [{ id: 'gw' }] });
+  await write(stateDir, 'slack-automation.json', { rules: [RULE], workflows: [backupWorkflow('w')], extra: 1 });
+  await write(stateDir, 'github-automation.json', { rules: [{ ...RULE, id: 'g' }], workflows: [backupWorkflow('gw', 'completed')] });
   await write(stateDir, 'public-agents.json', { version: 1, agents: [] });
 }
 
@@ -88,7 +104,7 @@ test('collectWorkerFiles keeps only each file\'s settings, in file order', async
   const stateDir = await dir(t);
   await workerFiles(stateDir);
   assert.equal(JSON.stringify(await collectWorkerFiles(stateDir)),
-    `{"trigger-secrets.json":[${JSON.stringify(secret('local'))}],"permissions.json":{"rules":[{"id":"r1"}],"autoReview":{"enabled":true,"provider":"claude","model":"opus"}},"models.json":${JSON.stringify(initialModelSettings())},`
+    `{"trigger-secrets.json":[${JSON.stringify(secret('local'))}],"permissions.json":{"rules":[${JSON.stringify(permissionRule('r1'))}],"autoReview":{"enabled":true,"provider":"claude","model":"opus","resume":true}},"models.json":${JSON.stringify(initialModelSettings())},`
     + '"slack-connection.json":{"enabled":true,"userToken":"xoxp-1","appToken":"xapp-1","account":{"teamId":"T","userId":"U"}},"slack-tone.json":{"tone":"Brief."},"slack-automation.json":{"rules":[' + JSON.stringify(RULE) + ']},'
     + '"github-automation.json":{"rules":[' + JSON.stringify({ ...RULE, id: 'g' }) + ']},"public-agents.json":{"version":1,"agents":[]}}');
 });
@@ -116,7 +132,7 @@ test('collectWorkerFiles leaves out missing and non-object files but keeps a tri
   await write(stateDir, 'trigger-secrets.json', []);
   await write(stateDir, 'permissions.json', [1]);
   await write(stateDir, 'slack-tone.json', '"text"');
-  assert.equal(JSON.stringify(await collectWorkerFiles(stateDir)), '{"trigger-secrets.json":[]}');
+  assert.equal(JSON.stringify(await collectWorkerFiles(stateDir)), '{"trigger-secrets.json":[],"permissions.json":{"rules":[]},"slack-automation.json":{"rules":[]},"github-automation.json":{"rules":[]}}');
   await mkdir(join(stateDir, 'models.json'));
   await assert.rejects(collectWorkerFiles(stateDir), /invalid or too large/);
 });
@@ -143,9 +159,9 @@ test('collectTriggers keeps once consumption, triggers, settings, trusted folder
 
   const bare = await dir(t);
   await write(bare, 'trigger-engine.json', { version: 1, triggers: [], settings: { a: 1 }, trustedFolders: ['/a', 2], secretGrants: { s: ['t'] }, fired: { 'x y': 'z' }, cursors: { t: { github: { handled: [] } }, u: { anchorAt: 1 } } });
-  assert.equal(JSON.stringify(await collectTriggers(bare)), '{"onceConsumed":{},"triggers":[],"settings":{"a":1},"trustedFolders":["/a"],"secretGrants":{"s":["t"]},"fired":{"x y":"z"},"github":{"t":{"handled":[]}}}');
+  assert.equal(JSON.stringify(await collectLegacyTriggers(bare)), '{"onceConsumed":{},"triggers":[],"settings":{"a":1},"trustedFolders":["/a"],"secretGrants":{"s":["t"]},"fired":{"x y":"z"},"github":{"t":{"handled":[]}}}');
   await write(bare, 'trigger-engine.json', []);
-  assert.equal(await collectTriggers(bare), undefined);
+  assert.equal(await collectLegacyTriggers(bare), undefined);
 });
 
 test('trigger restore through a backup: once and archive, through the worker files, the web apply and the trigger owner', async t => {
@@ -160,7 +176,7 @@ test('trigger restore through a backup: once and archive, through the worker fil
   const file = await (await backupService(t, from)).export(PASS);
 
   // The target consumed the pending reservation itself and archived nothing yet.
-  await writeFile(join(to, 'trigger-engine.json'), await read(from, 'trigger-engine.json'));
+  await (await workerSettingsFixture(to)).seedTriggers(JSON.parse(await read(from, 'trigger-engine.json')));
   const local = await engine(t, to, { now: Date.parse('2026-12-01T09:00:05.000Z') });
   let { service: b } = await local.open();
   await b.run(pending.id, OWNER); await b.tick(); local.finish(); await b.tick();
@@ -195,14 +211,16 @@ test('trigger restore through a backup: once and archive, through the worker fil
 
 test('permissions restore keeps this computer\'s requests (pending ones and their notifications stay), codex files and lost note', async t => {
   const stateDir = await dir(t);
-  await write(stateDir, 'permissions.json', { version: 1, rules: [{ id: 'old' }], requests: [{ id: 'pending', status: 'pending', notification: { at: 'n' } }], codex: [{ path: '/c' }], lost: 'note', extra: 'dropped' });
-  const result = await applyWorkerFiles(stateDir, { 'permissions.json': { rules: [{ id: 'new' }], autoReview: { enabled: false } } });
+  await write(stateDir, 'permissions.json', { version: 1, rules: [permissionRule('old')], requests: [{ ...permissionRequest('pending'), notification: { state: 'pending', message: 'n' } }], codex: [{ path: '/c', scope: 'global' }], lost: 'note', extra: 'dropped' });
+  const staleBefore = await readFile(join(stateDir, 'permissions.json'), 'utf8');
+  const result = await applyWorkerFiles(stateDir, { 'permissions.json': { rules: [permissionRule('new')], autoReview: { enabled: false, resume: false } } });
   assert.deepEqual(result, { parts: ['permissions'], errors: [] });
-  assert.equal(await read(stateDir, 'permissions.json'), '{"version":1,"requests":[{"id":"pending","status":"pending","notification":{"at":"n"}}],"codex":[{"path":"/c"}],"lost":"note","rules":[{"id":"new"}],"autoReview":{"enabled":false}}');
+  assert.deepEqual(JSON.parse(await read(stateDir, 'permissions.json')), { version: 1, rules: [permissionRule('new')], requests: [{ ...permissionRequest('pending'), notification: { state: 'pending', message: 'n' } }], codex: [{ path: '/c', scope: 'global' }], lost: 'note', extra: 'dropped', autoReview: { enabled: false, resume: false } });
+  assert.equal(await readFile(join(stateDir, 'permissions.json'), 'utf8'), staleBefore, 'SQL restore never rewrites legacy authority');
   const fresh = await dir(t);
   await applyWorkerFiles(fresh, { 'permissions.json': { rules: [] } });
-  assert.equal(await read(fresh, 'permissions.json'), '{"version":1,"requests":[],"codex":[],"rules":[]}');
-  assert.deepEqual(await applyWorkerFiles(fresh, { 'permissions.json': { rules: 'x' } }), { parts: [], errors: ['permissions.json: 백업의 내용이 올바르지 않아 건너뛰었습니다.'] });
+  assert.equal(await read(fresh, 'permissions.json'), '{"version":1,"rules":[],"requests":[],"codex":[]}');
+  assert.deepEqual(await applyWorkerFiles(fresh, { 'permissions.json': { rules: 'x' } }), { parts: [], errors: ['permissions.json: Invalid permissions backup.'] });
 });
 
 test('trigger secrets: the backup wins per id, local-only secrets stay; one bad entry refuses the file', async t => {
@@ -223,32 +241,35 @@ test('with an initialized Vault, plaintext trigger secrets are refused with thei
   await assert.rejects(readFile(join(stateDir, 'trigger-secrets.json')), { code: 'ENOENT' });
 });
 
-test('Slack and GitHub automation take rules and keep local workflows; other keys are dropped; invalid rules refused', async t => {
+test('Slack and GitHub automation take rules, preserve local workflows and wrapper metadata, ignore incoming extras and refuse invalid rules', async t => {
   const stateDir = await dir(t);
-  await write(stateDir, 'slack-automation.json', { rules: [], workflows: [{ id: 'local' }], extra: 1 });
+  await write(stateDir, 'slack-automation.json', { rules: [], workflows: [backupWorkflow('local', 'completed')], extra: 1 });
   const result = await applyWorkerFiles(stateDir, { 'slack-automation.json': { rules: [RULE], workflows: [{ id: 'backup' }], extra: 2 }, 'github-automation.json': { rules: [{ ...RULE, provider: 'gemini' }] } });
-  assert.deepEqual(result, { parts: ['slack'], errors: ['github-automation.json: 백업의 내용이 올바르지 않아 건너뛰었습니다.'] });
-  assert.equal(await read(stateDir, 'slack-automation.json'), `{"rules":[${JSON.stringify(RULE)}],"workflows":[{"id":"local"}]}`);
+  assert.deepEqual(result, { parts: ['slack'], errors: ['github-automation.json: Slack 처리 지침이 올바르지 않습니다.'] });
+  assert.deepEqual(JSON.parse(await read(stateDir, 'slack-automation.json')), { rules: [RULE], workflows: [backupWorkflow('local', 'completed')], extra: 1 });
   await applyWorkerFiles(stateDir, { 'github-automation.json': { rules: [RULE] } });
   assert.equal(await read(stateDir, 'github-automation.json'), `{"rules":[${JSON.stringify(RULE)}],"workflows":[]}`);
 });
 
 test('Slack account swap matrix', async t => {
-  const connection = (teamId: string) => ({ enabled: true, account: { teamId, userId: 'U' } });
-  const cases: Array<[string, unknown, string | undefined, boolean]> = [
+  const connection = (teamId: string, userId = 'U') => ({ enabled: true, account: { teamId, userId } });
+  const cases: Array<[string, unknown, string | undefined, boolean, ReturnType<typeof connection>?]> = [
     ['same account, work running', connection('T'), 'running', true],
     ['another account, only completed work', connection('T'), 'completed', true],
     ['another account, reply-uncertain work', connection('T'), 'reply-uncertain', false],
     ['another account, work running', connection('T'), 'running', false],
     ['no current connection counts as another account', undefined, 'running', false],
+    ['same team, different user with running work', connection('T'), 'running', false, connection('T', 'OTHER')],
+    ['same team, different user with uncertain reply', connection('T'), 'reply-uncertain', false, connection('T', 'OTHER')],
+    ['foreign SQL unfinished team blocks even matching credentials', connection('OTHER'), 'running', false, connection('OTHER')],
   ];
-  for (const [name, current, status, applied] of cases) {
+  for (const [name, current, status, applied, selected] of cases) {
     const stateDir = await dir(t);
     if (current) await write(stateDir, 'slack-connection.json', current);
-    await write(stateDir, 'slack-automation.json', { rules: [], workflows: status ? [{ id: 'w', status }] : [] });
-    const incoming = name.startsWith('same') ? connection('T') : connection('OTHER');
+    await write(stateDir, 'slack-automation.json', { rules: [], workflows: status ? [backupWorkflow('w', status as Parameters<typeof backupWorkflow>[1])] : [] });
+    const incoming = selected ?? (name.startsWith('same account') ? connection('T') : connection('OTHER'));
     const result = await applyWorkerFiles(stateDir, { 'slack-connection.json': incoming, 'slack-tone.json': { tone: 'new' }, 'slack-automation.json': { rules: [RULE] } });
-    assert.equal(result.errors.includes('진행 중인 Slack 작업이 있어 Slack 연결은 복원하지 않았습니다. 작업이 끝난 뒤 다시 복원하세요.'), !applied, name);
+    assert.equal(result.errors.some(error => error.startsWith('slack-connection.json:') && /Unfinished.*Slack/.test(error)), !applied, name);
     assert.equal(JSON.parse(await read(stateDir, 'slack-automation.json')).rules.length, 1, `${name}: automation rules still apply`);
     const tone = await read(stateDir, 'slack-tone.json').catch(() => undefined);
     assert.equal(tone === '{"tone":"new"}', applied, `${name}: tone follows the connection`);
@@ -262,18 +283,19 @@ test('models restore drops unknown roles; slack-tone is written as is; every wri
     'slack-connection.json': { enabled: false }, 'public-agents.json': { version: 1, agents: [] }, 'permissions.json': { rules: [] }, 'trigger-secrets.json': [], 'slack-automation.json': { rules: [] }, 'github-automation.json': { rules: [] } });
   assert.equal(await read(stateDir, 'models.json'), JSON.stringify(settings));
   assert.equal(await read(stateDir, 'slack-tone.json'), '{"tone":"Brief.","extra":[1]}');
-  for (const name of await readdir(stateDir)) assert.equal(await mode(join(stateDir, name)), 0o600, name);
+  for (const name of await readdir(stateDir)) assert.equal(await mode(join(stateDir, name)), (await stat(join(stateDir, name))).isDirectory() ? 0o700 : 0o600, name);
   const id = await stageLegacyImport(stateDir, [], PASS, undefined);
   assert.equal(await mode(join(stateDir, 'secrets')), 0o700);
   assert.equal(await mode(join(stateDir, 'secrets', `pending-import-${id}.json`)), 0o600);
 });
 
-test('an unreadable local file is skipped with its own message; the rest apply', async t => {
+test('an unreadable legacy permission file does not override SQL authority; file-owned settings still apply', async t => {
   const stateDir = await dir(t);
   await write(stateDir, 'permissions.json', '{ not json');
   const result = await applyWorkerFiles(stateDir, { 'permissions.json': { rules: [] }, 'slack-tone.json': { tone: 'x' } });
-  assert.deepEqual(result, { parts: ['slack'], errors: ['permissions.json: 이 컴퓨터의 파일을 읽지 못해 건너뛰었습니다.'] });
-  assert.equal(await read(stateDir, 'permissions.json'), '{ not json');
+  assert.deepEqual(result, { parts: ['permissions', 'slack'], errors: [] });
+  assert.deepEqual(await (await workerSettingsFixture(stateDir)).read('permissions.json'), { version: 1, rules: [], requests: [], codex: [] });
+  assert.equal(await readFile(join(stateDir, 'permissions.json'), 'utf8'), '{ not json');
 });
 
 test('restoring the same worker part twice gives the same files; a pending-worker file that still holds encryptedVault is staged once and dropped, also when taken twice', async t => {
@@ -282,9 +304,10 @@ test('restoring the same worker part twice gives the same files; a pending-worke
   const incoming = await collectWorkerFiles(stateDir);
   const target = await dir(t);
   await applyWorkerFiles(target, incoming);
-  const first = Object.fromEntries(await Promise.all((await readdir(target)).map(async name => [name, await read(target, name)])));
+  const names = Object.keys(incoming);
+  const first = Object.fromEntries(await Promise.all(names.map(async name => [name, await read(target, name)])));
   await applyWorkerFiles(target, incoming);
-  assert.deepEqual(Object.fromEntries(await Promise.all((await readdir(target)).map(async name => [name, await read(target, name)]))), first);
+  assert.deepEqual(Object.fromEntries(await Promise.all(names.map(async name => [name, await read(target, name)]))), first);
 
   const source = await dir(t);
   await vault(source);
@@ -334,14 +357,14 @@ test('restore matrix: plaintext and Vault backups onto computers with and withou
   const plaintext = async () => {
     const source = await dir(t);
     await write(source, 'trigger-secrets.json', [secret('legacy', 'LEGACY_CANARY')]);
-    await write(source, 'trigger-engine.json', { version: 1, triggers: [], settings: {}, trustedFolders: [], secretGrants: { legacy: [] }, fired: {}, cursors: {} });
+    await (await workerSettingsFixture(source)).seedTriggers({ ...empty(), secretGrants: { legacy: [] } });
     return (await backupService(t, source)).export(PASS);
   };
   const vaulted = async () => {
     const source = await dir(t);
     const secrets = await vault(source);
     await new SecretStore(source, { vault: secrets }).create({ name: 'Legacy', origin: 'https://status.example.com', value: 'LEGACY_CANARY' }, Date.now());
-    await write(source, 'trigger-engine.json', { version: 1, triggers: [], settings: {}, trustedFolders: [], secretGrants: {}, fired: {}, cursors: {} });
+    await (await workerSettingsFixture(source)).seedTriggers(empty());
     return (await backupService(t, source)).export(PASS);
   };
   const apply = async (file: { text: string }, targetVault: boolean) => {
@@ -396,7 +419,7 @@ const FROZEN_PARTS: Record<string, string[]> = {
   'backup-1.106.0-once': ['triggers', 'permissions', 'models', 'slack', 'github', 'publicAgents', 'skills', 'decisions', 'projectGroups', 'remoteExclusions', 'backup'],
 };
 
-test('a 1.92.0, a 1.95.0, a 1.105.0 and a 1.106.0 backup still check and restore', async t => {
+test('historic backups still check and restore valid parts while malformed permission grants are reported', async t => {
   for (const [name, parts] of Object.entries(FROZEN_PARTS)) {
     const text = await readFile(join(FIXTURES, `${name}.towerbackup`), 'utf8');
     const released = JSON.parse(await readFile(join(FIXTURES, `${name}.payload.json`), 'utf8'));
@@ -418,9 +441,15 @@ test('a 1.92.0, a 1.95.0, a 1.105.0 and a 1.106.0 backup still check and restore
     const taken = await takeWorkerRestore(target);
     for (const file of Object.keys(files)) {
       if (file === 'trigger-secrets.json' && name.includes('vault')) continue;
-      assert.ok((await readdir(target)).includes(file), `${name}: ${file} restored`);
+      if (sqlFile(file)) {
+        if (file === 'permissions.json') assert.deepEqual((await (await workerSettingsFixture(target)).read(file) as { rules: unknown[] }).rules, [], `${name}: malformed historic permission grant is refused`);
+        else assert.deepEqual((await (await workerSettingsFixture(target)).read(file) as { rules: unknown[] }).rules, (files[file] as { rules: unknown[] }).rules, `${name}: ${file} restored through SQL`);
+      } else assert.ok((await readdir(target)).includes(file), `${name}: ${file} restored`);
     }
-    assert.equal(await read(target, 'permissions.json'), JSON.stringify({ version: 1, requests: [], codex: [], ...files['permissions.json'] as object }), name);
+    assert.deepEqual(JSON.parse(await read(target, 'permissions.json')), { version: 1, rules: [], requests: [], codex: [] }, `${name}: invalid grants do not change SQL authority`);
+    await taken!.applied({ parts: [], errors: [] });
+    await taken!.finish({ parts: [], errors: [] });
+    assert.match((await readReport(target))!.errors.join(' '), /permissions.json:.*Malformed permission enum/, `${name}: partial refusal is visible`);
     if (!name.includes('vault')) {
       const e = await engine(t, target);
       const { service } = await e.open(taken!.restore.triggers);
@@ -433,10 +462,15 @@ test('a 1.92.0, a 1.95.0, a 1.105.0 and a 1.106.0 backup still check and restore
   }
 });
 
-test('the payload this build makes equals the 1.106.0 payload of the same state', async () => {
+test('the SQL settings payload keeps the exact 1.106.0 public format and every other part', async () => {
   for (const [state, expected] of [['backup-1.95.0', 'plain'], ['backup-1.106.0-once', 'once'], ['backup-1.105.0-vault', 'vault']]) {
     const files = JSON.parse(await readFile(join(FIXTURES, `${state}.state.json`), 'utf8'));
-    assert.equal(await payloadOf(join(import.meta.dirname, '../../..'), files), (await readFile(join(FIXTURES, `payload-1.106.0-${expected}.json`), 'utf8')).trimEnd(), expected);
+    const reference = JSON.parse(await readFile(join(FIXTURES, `payload-1.106.0-${expected}.json`), 'utf8'));
+    assert.equal(reference.worker.files['permissions.json'].rules[0].kind, undefined, 'frozen fixture permission is not a valid current grant');
+    const settings = { ...reference.worker.files['permissions.json'], rules: [permissionRule('r1')] };
+    const sqlSettings = { 'permissions.json': settings, 'slack-automation.json': reference.worker.files['slack-automation.json'], 'github-automation.json': reference.worker.files['github-automation.json'] };
+    reference.worker.files['permissions.json'] = settings;
+    assert.equal(await payloadOf(join(import.meta.dirname, '../../..'), files, sqlSettings), JSON.stringify(reference), expected);
   }
 });
 
@@ -446,4 +480,21 @@ test('fixture states hold no unexpected plaintext secret', async () => {
   }
   const state = JSON.parse(await readFile(join(FIXTURES, 'backup-1.105.0-vault.state.json'), 'utf8')) as Record<string, string>;
   assert.equal('trigger-secrets.json' in state, false, 'the Vault release keeps trigger secrets encrypted');
+});
+
+test('public backup and restore reject the closed SQL owner without reading or overwriting stale permission settings', async t => {
+  const stateDir = await dir(t), settings = await workerSettingsFixture(stateDir);
+  const local = { ...permissionRequest('held-local'), notification: { state: 'pending' as const, message: 'local notice' } };
+  await settings.seed('permissions.json', { version: 1, rules: [permissionRule('owner-rule')], requests: [local], codex: [{ path: '/local/rules', scope: 'global' }], lost: 'local loss' });
+  const before = await settings.read('permissions.json');
+  const stale = '{"rules":[],"requests":[]}';
+  await writeFile(join(stateDir, 'permissions.json'), stale, { mode: 0o600 });
+  const service = await backupService(t, stateDir);
+  await settings.storage.close();
+  await assert.rejects(service.export(PASS));
+  const restore = await applyWorkerFiles(stateDir, { 'permissions.json': { rules: [permissionRule('foreign-rule')] } });
+  assert.deepEqual(restore.parts, []); assert.equal(restore.errors.length, 1); assert.match(restore.errors[0], /^permissions.json:/);
+  assert.equal(await readFile(join(stateDir, 'permissions.json'), 'utf8'), stale);
+  await settings.storage.reopen(); await settings.storage.prepare({ allowMigration: false });
+  assert.deepEqual(await settings.read('permissions.json'), before, 'failed restore preserves local requests, notices, files, loss and rules');
 });
