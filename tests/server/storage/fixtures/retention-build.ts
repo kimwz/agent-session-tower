@@ -14,9 +14,10 @@ import { workflowsSchema } from '../../../../server/slack/storage-schema.js';
 import { runsSchema } from '../../../../server/runs/storage-schema.js';
 import { buildIdentityModule, buildIdentityPlugin, STORAGE_BUNDLE_FORMAT, type StorageThreadArtifact } from '../../../../server/storage/thread-bundle.mjs';
 import type * as Parent from './parent.js';
+export interface OfflineServiceFixture { installed:boolean; loadedAtCheck?:number; ownerAtCheck?:number; readFailure?:boolean; ownerReadFailure?:boolean; managerQueryFailure?:boolean }
 
 /** Actual A/B domain handlers and captured SDK compiled as future artifact versions; no mocked import support. */
-export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0' | '1.122.0' | '1.123.0' | '1.124.0' | '1.125.0' | '1.125.1', output?: string, retentionCutover = version === '1.121.0' || version === '1.123.0' || (version === '1.125.0' || version === '1.125.1'), includePermissions = false, externalDomains = false, product?: {artifact:StorageThreadArtifact;manifest:import('../../../../server/storage/contract.js').StorageBuildManifest;serviceFixture?:{installed:boolean}}) {
+export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0' | '1.122.0' | '1.123.0' | '1.124.0' | '1.125.0' | '1.125.1', output?: string, retentionCutover = version === '1.121.0' || version === '1.123.0' || (version === '1.125.0' || version === '1.125.1'), includePermissions = false, externalDomains = false, product?: {artifact:StorageThreadArtifact;manifest:import('../../../../server/storage/contract.js').StorageBuildManifest;serviceFixture?:OfflineServiceFixture}) {
   const directory = output ?? await mkdtemp(join(tmpdir(), 'tower-retention-artifact-'));
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const root = fileURLToPath(new URL('../../../../', import.meta.url));
@@ -56,11 +57,39 @@ import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { currentVersion } from ${JSON.stringify(join(root,'server/link/service.ts'))};
 export * from ${JSON.stringify(join(root,'server/link/service.ts'))};
-export async function serviceStatus(stateDir:string) { return {installed:${serviceFixture.installed},loaded:false,version:await currentVersion(stateDir)}; }
+let statusChecks=0;
+export async function serviceStatus(stateDir:string) {
+ if(${!!serviceFixture.readFailure}) throw new Error('fixture manager read unavailable');
+ return {manager:'launchd',installed:${serviceFixture.installed},loaded:++statusChecks>=${serviceFixture.loadedAtCheck ?? 'Infinity'},version:await currentVersion(stateDir)};
+}
 export async function installService(stateDir:string,input:unknown) {
  await writeFile(join(stateDir,'offline-service-fixture-start.json'),JSON.stringify({version:await currentVersion(stateDir),input}),{flag:'wx',mode:0o600});
  return 'launchd';
 }` }));
+      builder.onResolve({filter:/^\.\.\/instance\/state-lock\.js$/},args=>args.importer.endsWith('/server/link/cli.ts') ? {path:'offline-owner-query',namespace:'offline-fixture'} : undefined);
+      builder.onResolve({filter:/^node:child_process$/},args=>args.importer.endsWith('/server/link/cli.ts') ? {path:'offline-manager-query',namespace:'offline-fixture'} : undefined);
+      builder.onLoad({filter:/^offline-manager-query$/,namespace:'offline-fixture'},()=>({loader:'ts',contents:`
+import { execFile as actualExecFile } from 'node:child_process';
+import { promisify } from 'node:util';
+export * from 'node:child_process';
+export const execFile=Object.assign((...args:any[])=>actualExecFile(...args),{
+ [promisify.custom]:async(command:string,args:string[],options:unknown)=>{
+   if(command==='launchctl') {
+     if(${!!serviceFixture.managerQueryFailure}) throw new Error('fixture manager query unavailable');
+     return {stdout:'services = {\\n}',stderr:''};
+   }
+   return promisify(actualExecFile)(command,args,options);
+ }
+});
+`}));
+      builder.onLoad({filter:/^offline-owner-query$/,namespace:'offline-fixture'},()=>({loader:'ts',resolveDir:root,contents:`
+export * from ${JSON.stringify(join(root,'server/instance/state-lock.ts'))};
+let ownerChecks=0;
+export async function lockOwners() {
+ if(${!!serviceFixture.ownerReadFailure}) throw new Error('fixture owner read unavailable');
+ return ++ownerChecks>=${serviceFixture.ownerAtCheck ?? 'Infinity'} ? [{pid:2147483647,port:1}] : [];
+}
+`}));
     }
 
     if (preparation) builder.onLoad({ filter: /[\\/]server[\\/]sessions[\\/]retention[\\/]storage-(schema|commands)\.ts$/ }, async args => {

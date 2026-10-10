@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { constants } from 'node:fs';
 import { open, lstat, realpath, readdir } from 'node:fs/promises';
 import { dirname, join, resolve, relative } from 'node:path';
 import { validateStrictStateLease, type StrictStateLease } from '../instance/state-lock.js';
-import { fileSha256, readStorageIdentity, readRecoveryBarrier, recoveryHold } from '../storage/recovery.js';
+import { fileSha256, readSnapshot, readStorageIdentity, readRecoveryBarrier, recoveryHold, type RecoveryBarrier, type SnapshotManifest } from '../storage/recovery.js';
 import { StorageClient } from '../storage/client.js';
 import type { StorageBuildContext } from '../storage/bundle.js';
 import type { StorageBuildIdentity, StorageBuildManifest } from '../storage/contract.js';
@@ -14,6 +15,19 @@ import { databaseSupported, evaluateStorageUpdate, parseArtifactStorageContract,
 const hash = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 const sha = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+const snapshotFacts = (snapshot: SnapshotManifest): RecoveryBarrier['snapshot'] => ({
+  id: snapshot.id, createdAt: snapshot.createdAt, build: snapshot.build, storageId: snapshot.storageId,
+  ownerEpoch: snapshot.ownerEpoch, sha256: snapshot.file.sha256,
+  schema: snapshot.schema.map(({scope,version})=>({scope,version})),
+  authority: snapshot.authority.map(({domain,authority,generation})=>({domain,authority,generation})),
+});
+export async function verifyOfflineRecoverySnapshot(record: OfflineActivationRecord, barrier: RecoveryBarrier): Promise<void> {
+  const backup = await readSnapshot(record.backup.root, record.backup.snapshotId);
+  const live = await readSnapshot(record.stateDir, record.backup.snapshotId);
+  // SDK opens may change live database metadata; the sealed snapshot facts remain immutable.
+  if (backup.storageId !== record.storageId || !isDeepStrictEqual(snapshotFacts(backup), snapshotFacts(live))
+    || !isDeepStrictEqual(snapshotFacts(backup), barrier.snapshot)) refuse('recovery snapshot facts mismatch');
+}
 const refuse: (reason: string) => never = (reason) => { throw new Error(`Offline activation held: ${reason}`); };
 export const offlineActivationPath = (stateDir: string) => join(stateDir, 'storage-offline-activation.json');
 
@@ -102,6 +116,7 @@ export async function beginOfflineActivation(input: { lease: StrictStateLease; r
   const previous = await readOfflineActivation(record.stateDir);
   if(input.recovery) {
     const barrier=await readRecoveryBarrier(record.stateDir);
+    if(barrier.state==='present') await verifyOfflineRecoverySnapshot(record,barrier.barrier);
     if(barrier.state!=='present' || barrier.barrier.id!==input.recovery.barrierId || barrier.barrier.snapshot.id!==record.backup.snapshotId
       || barrier.barrier.snapshot.storageId!==record.storageId || !same(input.recovery.context.identity,record.build)
       || record.targets.some(scope=>recoveryHold(barrier,scope,input.recovery!.context).held)) refuse('explicit recovery binding/gates');

@@ -8,7 +8,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { retentionBuild, protectedOld124, currentProductProfile } from '../storage/fixtures/retention-build.js';
+import { retentionBuild, protectedOld124, currentProductProfile, type OfflineServiceFixture } from '../storage/fixtures/retention-build.js';
 import { RemoteRepository } from '../../../server/remote/storage-repository.js';
 import { empty } from '../../../server/triggers/state.js';
 import { parseSuccessor } from '../../../server/runs/handoff.js';
@@ -131,6 +131,52 @@ test('completed offline installation permits a compatible actual SDK successor a
   await assert.rejects(missing.storage.completedOfflineCandidate({stateDir:f.stateDir,managed:false,build:{version:'1.125.1',manifest:missing.manifest,preflight:held}}));
 });
 
+for(const mismatch of ['barrier-sha','live-sha','barrier-build'] as const) test(`snapshot ${mismatch} refuses reconciliation before scope release and protects full files`,async t=>{
+  const f=await fixture(t);
+  await f.final.storage.runOfflineStorageCommand(['activate','--state-dir',f.stateDir,'--input',f.input]);
+  const completed=await f.final.storage.readOfflineActivation(f.stateDir);assert.ok(completed);
+  const input=join(f.root,'snapshot-binding.json');await writeFile(input,JSON.stringify(completed),{mode:0o600});
+  const restored=await f.final.storage.runOfflineStorageCommand(['restore','--state-dir',f.stateDir,'--input',input]) as {barrierId:string};
+  const barrierPath=join(f.stateDir,'storage-recovery','barrier.json');
+  const barrier=JSON.parse(await readFile(barrierPath,'utf8'));
+  if(mismatch==='live-sha') {
+    const dir=join(f.stateDir,'storage-snapshots',completed.backup.snapshotId);
+    const manifestPath=join(dir,'manifest.json'), manifest=JSON.parse(await readFile(manifestPath,'utf8'));
+    const bytes=await readFile(join(dir,'snapshot.db'));bytes[bytes.length-1]^=1;
+    await writeFile(join(dir,'snapshot.db'),bytes,{mode:0o600});manifest.file.sha256=digest(bytes);
+    await writeFile(manifestPath,JSON.stringify(manifest),{mode:0o600});
+  } else {
+    if(mismatch==='barrier-sha') barrier.snapshot.sha256='f'.repeat(64);
+    else barrier.snapshot.build.sourceHash='f'.repeat(64);
+    await writeFile(barrierPath,JSON.stringify(barrier),{mode:0o600});
+  }
+  async function inventory(root:string,prefix=''):Promise<Record<string,string>> {
+    const result:Record<string,string>={};
+    for(const entry of await readdir(root,{withFileTypes:true})) {
+      const name=prefix+entry.name,path=join(root,entry.name);
+      if(entry.isDirectory()) Object.assign(result,await inventory(path,`${name}/`));
+      else if(entry.isFile()) result[name]=digest(await readFile(path));
+    }
+    return result;
+  }
+  const before=await inventory(f.stateDir),backupBefore=await inventory(completed.backup.root);
+  const pointer=await f.final.storage.currentVersion(f.stateDir);
+  const record={...f.activation,backup:completed.backup};
+  await writeFile(input,JSON.stringify({format:'tower-offline-reconcile',activation:record,barrierId:restored.barrierId,scopes:record.targets,by:'owner',evidence:'Fixture exact snapshot boundary'}),{mode:0o600});
+  await assert.rejects(f.final.storage.runOfflineStorageCommand(['reconcile','--state-dir',f.stateDir,'--input',input]),/snapshot facts mismatch/);
+  const runtimeDir=join(f.stateDir,'runner-runtime'),lease=await f.final.storage.acquireStrictStateLock(runtimeDir);
+  try {
+    const context=f.final.storage.storageBuildContext(f.final.bundle());if(!context.ok) throw new Error('fixture SDK context held');
+    await assert.rejects(f.final.storage.beginOfflineActivation({lease,runtimeDir,record,
+      update:{stateDir:f.stateDir,managed:false,build:{version:'1.125.0',manifest:f.final.manifest,preflight:await f.final.storage.preflightStorage({stateDir:f.stateDir,bundle:f.final.bundle()})}},
+      recovery:{barrierId:restored.barrierId,context}}),/snapshot facts mismatch/);
+  } finally {await lease.release();}
+  assert.deepEqual(await inventory(f.stateDir),before);assert.deepEqual(await inventory(completed.backup.root),backupBefore);
+  assert.equal(await f.final.storage.currentVersion(f.stateDir),pointer);
+  const held=await f.final.storage.readRecoveryBarrier(f.stateDir);assert.equal(held.state,'present');
+  if(held.state==='present') assert.deepEqual(held.barrier.reconciled,[]);
+});
+
 for(const partial of [false,true]) test(`full restore explicit current SDK recovery ${partial?'keeps unnamed scopes held':'returns healthy completion'} without effects`,async t=>{
   const f=await fixture(t);
   await f.final.storage.runOfflineStorageCommand(['activate','--state-dir',f.stateDir,'--input',f.input]);
@@ -186,8 +232,17 @@ async function selectedPackage(f:Awaited<ReturnType<typeof fixture>>) {
   return {selectedRoot,files};
 }
 
-test('full actual selected service package validates actual SDK and SQL completion before pointer use',async t=>{
-  const f=await fixture(t,'normal',{...await currentProductProfile(),serviceFixture:{installed:true}});
+for (const boundary of ['stopped','loaded-http-unavailable','owner-http-unavailable','manager-read-unavailable','manager-query-unavailable','owner-read-unavailable','lease-loaded','lease-new-owner'] as const)
+test(`full actual selected service package ${boundary} validates actual SDK and SQL completion before pointer use`,async t=>{
+  const serviceFixture:OfflineServiceFixture={installed:true,
+    ...(boundary==='loaded-http-unavailable'?{loadedAtCheck:1}:{}),
+    ...(boundary==='owner-http-unavailable'?{ownerAtCheck:1}:{}),
+    ...(boundary==='manager-read-unavailable'?{readFailure:true}:{}),
+    ...(boundary==='manager-query-unavailable'?{managerQueryFailure:true}:{}),
+    ...(boundary==='owner-read-unavailable'?{ownerReadFailure:true}:{}),
+    ...(boundary==='lease-loaded'?{loadedAtCheck:3}:{}),
+    ...(boundary==='lease-new-owner'?{ownerAtCheck:6}:{})};
+  const f=await fixture(t,'normal',{...await currentProductProfile(),serviceFixture});
   await f.final.storage.runOfflineStorageCommand(['activate','--state-dir',f.stateDir,'--input',f.input]);
   const record=await f.final.storage.readOfflineActivation(f.stateDir);assert.ok(record);
   const completionInput=join(f.root,'completion.json');await writeFile(completionInput,JSON.stringify(record),{mode:0o600});
@@ -202,6 +257,15 @@ test('full actual selected service package validates actual SDK and SQL completi
   await symlink(join('versions','1.124.0'),join(f.stateDir,'runtime','current'));
   const approval=join(f.root,'service-maintenance.json');await writeFile(approval,JSON.stringify(request),{mode:0o600});
   const command=['service','install','--state-dir',f.stateDir,'--offline-maintenance',approval];
+  if(boundary!=='stopped') {
+    const before=await readFile(join(f.stateDir,'state.sqlite'));
+    await assert.rejects(f.final.storage.runLinkCommand(command),/explicitly stopped|manager read unavailable|manager query unavailable|owner read unavailable/);
+    assert.equal(await f.final.storage.currentVersion(f.stateDir),'1.124.0');
+    if(!boundary.startsWith('lease-')) assert.deepEqual(await readFile(join(f.stateDir,'state.sqlite')),before);
+    assert.deepEqual(await f.final.storage.readOfflineActivation(f.stateDir),record);
+    await assert.rejects(readFile(join(f.stateDir,'offline-service-fixture-start.json')),{code:'ENOENT'});
+    return;
+  }
   const indexPath=join(selectedRoot,'dist/server/index.js'), originalIndex=await readFile(indexPath);
   await writeFile(indexPath,'wrong existing installed bytes',{mode:0o600});
   await assert.rejects(f.final.storage.runLinkCommand(command),/bytes changed/);
@@ -233,7 +297,7 @@ test('full actual selected service package validates actual SDK and SQL completi
   const service=source.slice(source.indexOf('async function runService'));
   assert.ok(service.indexOf('verifyOfflineServiceSelection')<service.indexOf('await useVersion'));
   assert.ok(service.indexOf("'offline','check'")<service.indexOf('await useVersion'));
-  assert.match(service,/running \|\| !\(await serviceStatus\(stateDir\)\).installed/);
+  assert.ok(service.lastIndexOf('await requireStoppedInstalledService(stateDir)')<service.indexOf('await useVersion'));
 });
 
 for(const damage of ['receipt-mismatch','reader-future','schema-future'] as const) test(`actual all-domain SQLite ${damage} keeps restart held`,async t=>{

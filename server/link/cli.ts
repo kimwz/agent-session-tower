@@ -14,7 +14,7 @@ import { commandEnvironment, lockOwners, type OwnerCommand } from '../instance/s
 import { defaultStateDir } from '../state-dir.js';
 import { decodeJoinCode } from './join-code.js';
 import { displayFingerprint, linkId } from './identity.js';
-import { currentVersion, entryPoint, installService, installVersion, newerVersion, runtimePaths, serviceManager, serviceStatus, START_YOURSELF, startService, stopService, uninstallService, useVersion, versionDirectory, type ServiceManager } from './service.js';
+import { currentVersion, entryPoint, installService, installVersion, newerVersion, runtimePaths, serviceManager, serviceStatus, serviceLabel, serviceUnit, START_YOURSELF, startService, stopService, uninstallService, useVersion, versionDirectory, type ServiceManager } from './service.js';
 import { execFile, spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { promisify } from 'node:util';
@@ -146,13 +146,28 @@ export async function runLinkCommand(args: string[]): Promise<void> {
   console.log('Work runs with this computer\'s own Claude Code and Codex sign-ins; sign in to them here if you have not yet.');
 }
 
+async function requireStoppedInstalledService(stateDir: string): Promise<void> {
+  const status = await serviceStatus(stateDir);
+  if (status.installed !== true || status.loaded !== false || (await lockOwners(stateDir)).length !== 0
+    || await runningTower(stateDir)) throw new Error('Maintenance requires an already installed, explicitly stopped service.');
+  // serviceStatus deliberately tolerates manager query errors for display. Maintenance needs positive stopped evidence.
+  if (status.manager === 'launchd') {
+    const {stdout} = await promisify(execFile)('launchctl',['print',`gui/${process.getuid?.() ?? 501}`],{timeout:1500,maxBuffer:16*1024*1024});
+    if (!stdout.includes('services = {') || stdout.includes(serviceLabel(stateDir))) throw new Error('Maintenance manager stopped state unknown or loaded.');
+  } else if (status.manager === 'systemd-system' || status.manager === 'systemd-user') {
+    const {stdout} = await promisify(execFile)('systemctl',[...(status.manager==='systemd-user'?['--user']:[]),'show',serviceUnit(stateDir),'--property=LoadState,ActiveState,SubState'],{timeout:1500,maxBuffer:64*1024});
+    const facts=new Map(stdout.trim().split('\n').map(line=>line.split('=',2) as [string,string]));
+    if(facts.get('LoadState')!=='loaded' || facts.get('ActiveState')!=='inactive' || facts.get('SubState')!=='dead') throw new Error('Maintenance manager stopped state unknown or active.');
+  } else throw new Error('Maintenance manager stopped state unknown.');
+}
+
 async function runService(action: string | undefined, stateDir: string, port: number, maintenance?: string): Promise<void> {
   if (action === 'install') {
     const running = await runningTower(stateDir);
     // The service runs as this account, with its home, on 127.0.0.1. A Tower started another way would come back as a
     // different one: reading other sessions, or no longer reachable from other devices. That is refused, not changed.
     if (running && !running.service) refuseTakeover(running);
-    if(maintenance && (running || !(await serviceStatus(stateDir)).installed)) throw new Error('Maintenance requires an already installed, explicitly stopped service.');
+    if(maintenance) await requireStoppedInstalledService(stateDir);
     const request=maintenance ? JSON.parse((await readOfflinePrivateBytes(maintenance)).toString('utf8')) as OfflineServiceMaintenance : undefined;
     if(maintenance && (!request || request.format!=='tower-offline-service-maintenance' || request.service!==true || request.previousVersion!=='1.124.0'
       || request.stateDir!==stateDir || request.version!==APP_VERSION || !request.by?.trim() || !request.evidence?.trim())) throw new Error('Exact stopped-service owner maintenance input required.');
@@ -160,7 +175,7 @@ async function runService(action: string | undefined, stateDir: string, port: nu
     await installVersion(stateDir, APP_VERSION, line => console.log(line), packageRoot());
     if(maintenance && request) {
       // installVersion may reuse an existing directory. Verify THAT package before current moves.
-      if(running || !(await serviceStatus(stateDir)).installed) throw new Error('Maintenance requires an already installed, explicitly stopped service.');
+      await requireStoppedInstalledService(stateDir);
       const selectedRoot=resolve(versionDirectory(stateDir,APP_VERSION),'node_modules/agent-session-tower');
       const record=await verifyOfflineServiceSelection(selectedRoot,request,stateDir,APP_VERSION);
       const selectedEntry=entryPoint(versionDirectory(stateDir,APP_VERSION));
@@ -185,6 +200,7 @@ async function runService(action: string | undefined, stateDir: string, port: nu
         sdk=undefined;
         const current=await currentVersion(stateDir);
         if(current!==request.previousVersion && current!==APP_VERSION) throw new Error('Maintenance previous pointer mismatch.');
+        await requireStoppedInstalledService(stateDir);
         await useVersion(stateDir,APP_VERSION);
         if(await currentVersion(stateDir)!==APP_VERSION) throw new Error('Maintenance exact candidate was not selected; service not started.');
       } finally {

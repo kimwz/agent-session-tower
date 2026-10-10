@@ -10,7 +10,7 @@ import { captureStorageBundle, storageBuildContext, preflightStorage, openStorag
 import { databaseSupported } from './storage-update.js';
 import { readSnapshot, readStorageIdentity, readRecoveryBarrier, reconcileRecovery, recoveryHold } from '../storage/recovery.js';
 import { storageLayout } from '../storage/paths.js';
-import { beginOfflineActivation, checkStorageActivation, finishOfflineActivation, decodeOfflineActivation, prepareOfflineActivation, recordOfflineDomainCompletion, verifyProtectedOfflineArtifact, readOfflinePrivateBytes, verifyOfflineCompletion, readOfflineActivation } from './storage-offline.js';
+import { beginOfflineActivation, checkStorageActivation, finishOfflineActivation, decodeOfflineActivation, prepareOfflineActivation, recordOfflineDomainCompletion, verifyProtectedOfflineArtifact, readOfflinePrivateBytes, verifyOfflineCompletion, readOfflineActivation, verifyOfflineRecoverySnapshot } from './storage-offline.js';
 import { collectOfflineBackup, restoreOfflineBackup, verifyOfflineBackup, verifyOfflineRestoredInventory } from './storage-offline-backup.js';
 import { workerLegacyFiles, importRuns, holdRunsEvidence } from '../runs/storage-transfer.js';
 import { RunsRepository } from '../runs/storage-repository.js';
@@ -98,6 +98,7 @@ export async function runOfflineStorageCommand(args: string[]): Promise<unknown>
       const barrier=await readRecoveryBarrier(stateDir);
       if(barrier.state!=='present' || barrier.barrier.id!==request.barrierId || barrier.barrier.snapshot.id!==record.backup.snapshotId
         || barrier.barrier.snapshot.storageId!==record.storageId) throw new Error('Recovery backup/barrier binding mismatch.');
+      await verifyOfflineRecoverySnapshot(record,barrier.barrier);
       await reconcileRecovery(stateDir,{barrierId:request.barrierId,scopes:request.scopes as string[],by:request.by,evidence:request.evidence,context});
       // Reconciliation records judgment only. Never replay effects or infer unnamed releases.
       const reconciled=await readRecoveryBarrier(stateDir);
