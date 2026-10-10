@@ -3,7 +3,7 @@ import test, { type TestContext } from 'node:test';
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager } from '../runs/sql-fixture.js';
 import { trustWorkspace } from '../../../server/providers/workspace-trust.js';
 
 async function homes(t: TestContext) {
@@ -61,6 +61,7 @@ test('creating a session makes a missing folder and trusts it before the provide
   const { session } = await manager.create({ provider: 'claude', cwd, prompt: 'hi' });
   assert.equal(session.cwd, cwd);
   assert.deepEqual(trusted, [`claude:${cwd}`]);
+  await writeFile(join(f.directory, 'state', 'runs.json'), 'fixture path obstruction');
   await assert.rejects(manager.create({ provider: 'claude', cwd: join(f.directory, 'state', 'runs.json', 'child'), prompt: 'hi' }), { kind: 'invalid' });
   await manager.close();
 });

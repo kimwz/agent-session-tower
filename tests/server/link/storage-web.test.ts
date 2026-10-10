@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
 import { startRunnerHost } from '../../../server/runs/worker.js';
 import { RunManager } from '../../../server/runs/manager.js';
+import { importFixtureRuns, stopFixtureWriter } from '../runs/sql-fixture.js';
 import { SessionService } from '../../../server/sessions/service.js';
 import { runnerPaths } from '../../../server/runs/runner-protocol.js';
 import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
@@ -46,7 +47,7 @@ test('serving target web resumes only the durable owner rollback through the rea
   const preflight = await predecessor.preflightStorage({ bundle, stateDir: state });
   assert.equal(preflight.supported, true, 'actual supported SQLite required; no runtime gate substitution');
   const client = await predecessor.openStorage({ stateDir: state, bundle });
-  t.after(() => client.close());
+  t.after(async () => { await stopFixtureWriter(runs); await client.close(); });
   await client.prepare({ allowMigration: true });
   const targetContext = contextOf('production');
   const target = targetContext.identity.appVersion;
@@ -68,7 +69,8 @@ test('serving target web resumes only the durable owner rollback through the rea
   const sessions = new SessionService({ codexHome: join(root, 'codex'), claudeHome: join(root, 'claude'),
     inspectProcesses: async () => ({ claude: new Map(), codex: new Set(), providerRunning: { claude: false, codex: false } }) });
   sessions.list = () => [];
-  const runs = new RunManager({ stateDir: state, getSession: () => undefined, refreshSessions: async () => {},
+  await importFixtureRuns(client);
+  const runs = new RunManager({ stateDir: state, storage: client, getSession: () => undefined, refreshSessions: async () => {},
     spawnProcess: () => { throw new Error('Native providers forbidden'); } });
   await runs.start();
   let child: ReturnType<typeof spawn> | undefined;
@@ -96,7 +98,7 @@ test('serving target web resumes only the durable owner rollback through the rea
   const successorArtifactFile = join(root, 'successor-artifact.json');
   const host = await startRunnerHost({ stateDir: state, sessions, runs, inFlight: () => !allowHandoff,
     storageControl: (action, input, dispatch) => { hostDispatch = dispatch; return control(action, input); },
-    quiesce: async () => { await delay(400); }, closeStorage: async () => { await client.close(); },
+    quiesce: async () => { await delay(400); }, closeStorage: async () => { await stopFixtureWriter(runs); await client.close(); },
     startSuccessor: (_command, nonce) => {
       launchTimer = setTimeout(() => {
         void (async () => {
@@ -211,10 +213,10 @@ const client = await sdk.openStorage({stateDir, bundle: sdk.storageBundleFromArt
 await client.prepare({allowMigration:false});
 const sessions = new SessionService({codexHome:join(stateDir,'fixture-codex'),claudeHome:join(stateDir,'fixture-claude'),inspectProcesses:async()=>({claude:new Map(),codex:new Set(),providerRunning:{claude:false,codex:false}})});
 sessions.list = () => [];
-const runs = new RunManager({stateDir,getSession:()=>undefined,refreshSessions:async()=>{},spawnProcess:()=>{throw new Error('native provider forbidden');}});
+const runs = new RunManager({stateDir,storage:client,getSession:()=>undefined,refreshSessions:async()=>{},spawnProcess:()=>{throw new Error('native provider forbidden');}});
 await runs.start();
 const call = storageControl({stateDir, client:()=>client, successorFence:fence, hold:async()=>{}, release:async()=>{}, quiet:()=>true, handoff:()=>{throw new Error('duplicate successor');}});
-const host = await startRunnerHost({stateDir,sessions,runs,handoffNonce:process.argv[5],storageControl:call,closeStorage:()=>client.close()});
+const host = await startRunnerHost({stateDir,sessions,runs,handoffNonce:process.argv[5],storageControl:call,closeStorage:async()=>{await runs.close();await client.close();}});
 const releaseReplies = () => { released = true; for(const release of heldReplies.splice(0)) release(); };
 process.on('message', async message => { if(message.releaseProof){releaseReplies();process.send({proofReleased:true,sha256:releasedSha256});} if(message.close){releaseReplies();await host.close();await runs.close();sessions.stop();process.disconnect();} });
 process.send({ready:true});`);

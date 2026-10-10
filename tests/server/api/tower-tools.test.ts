@@ -160,7 +160,7 @@ test('only owner turns in the owner’s own conversations receive Tower tools; e
 test('the Tower tool server lists and calls tools through the worker with its capability', async t => {
   const { startTowerMcp } = await import('../../../server/slack/mcp-bridge.js');
   const { startRunnerHost } = await import('../../../server/runs/worker.js');
-  const { RunManager } = await import('../../../server/runs/manager.js');
+  const { RunManager } = await import('../runs/sql-fixture.js');
   const { EventEmitter } = await import('node:events');
   const { runnerPaths } = await import('../../../server/runs/runner-protocol.js');
   const f = await fixture(t);
@@ -213,7 +213,7 @@ test('the standing session key opens only the read-only session tools, for any c
 test('the session tool server answers through the worker with the key kept in the state directory', async t => {
   const { startSessionsMcp, sessionToolsKey } = await import('../../../server/api/session-tools.js');
   const { startRunnerHost } = await import('../../../server/runs/worker.js');
-  const { RunManager } = await import('../../../server/runs/manager.js');
+  const { RunManager } = await import('../runs/sql-fixture.js');
   const { EventEmitter } = await import('node:events');
   const { runnerPaths } = await import('../../../server/runs/runner-protocol.js');
   const f = await fixture(t);

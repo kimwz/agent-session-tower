@@ -8,6 +8,7 @@ import type { StorageClient } from '../../../server/storage/client.js';
 import { retentionBuild } from '../storage/fixtures/retention-build.js';
 import { recordPreparationEvidence } from '../../../server/link/storage-update.js';
 import { RunsRepository } from '../../../server/runs/storage-repository.js';
+import { RetentionRepository } from '../../../server/sessions/retention/storage-repository.js';
 import type { RunDocuments } from '../../../server/runs/storage-codec.js';
 
 let builds: Promise<{ a: Awaited<ReturnType<typeof retentionBuild>>; b: Awaited<ReturnType<typeof retentionBuild>>; directory: string }> | undefined;
@@ -39,6 +40,28 @@ export async function actualStorage(stateDir: string, initial?: RunDocuments) {
     else if (initial) throw new Error('Fixture initial import cannot overwrite an existing SQL authority.');
     return client;
   } catch (error) { await client.close(); throw error; }
+}
+
+/** Import only the missing runs authority on the consumer's existing shared SDK. */
+export async function importFixtureRuns(client: StorageClient, initial: RunDocuments = { runs: [], created: [], instructions: {} }): Promise<void> {
+  const repository = new RunsRepository(client);
+  if (!await repository.databaseAuthority()) {
+    await repository.importPrepared(initial, 'a'.repeat(64), 'runs-fixture-initial-import');
+    const receipt = await client.receipt('runs-fixture-initial-import-commit');
+    if (!receipt.found || receipt.receipt.scope !== 'runs' || !await repository.databaseAuthority()) throw new Error('Runs fixture import receipt/authority is missing.');
+  }
+}
+
+/** Retention and observer fixtures share the runs SDK and its released SQL commands. */
+export async function importFixtureRetention(client: StorageClient, migratedAt = Date.UTC(2026, 8, 1)): Promise<void> {
+  const repository = new RetentionRepository(client);
+  if (!await repository.databaseAuthority()) {
+    await repository.importPrepared({
+      journal: { version: 1, migratedAt, entries: [], policies: [] }, observations: { version: 1, entries: [] },
+    }, 'a'.repeat(64), 'retention-fixture-initial-import');
+    const receipt = await client.receipt('retention-fixture-initial-import-commit');
+    if (!receipt.found || receipt.receipt.scope !== 'retention' || !await repository.databaseAuthority()) throw new Error('Retention fixture import receipt/authority is missing.');
+  }
 }
 
 /** Consumer fixtures run the production manager against an actual imported SQL authority. */
@@ -86,4 +109,26 @@ export async function fixtureReplaceRuns(manager: RunManager, runs: RunDocuments
     const repository = new RunsRepository(client), current = await repository.exportCurrent();
     await repository.restore({ ...current.documents, runs }, `fixture-restore-${randomUUID()}`);
   } finally { if (closed) await client.close(); }
+}
+
+/** A quiet fixture models the process exit after final handoff flush, before releasing its SDK lease.
+ * Ordinary owner close cancels queued work; a stopped predecessor must preserve it for the successor.
+ */
+const stoppedFixtureWriters = new WeakSet<ProductionRunManager>();
+export async function stopFixtureWriter(manager: ProductionRunManager): Promise<void> {
+  const stopped = manager as unknown as {
+    owned: Map<string, unknown>; bridged: Map<string, unknown>; stdio: Map<string, unknown>;
+    stopping: boolean; pollTimer?: ReturnType<typeof setInterval>; notifyTimer?: ReturnType<typeof setTimeout>;
+    cancelOutputPersist(): void;
+  };
+  if (stoppedFixtureWriters.has(manager)) return;
+  manager.holdStorage();
+  await manager.pauseAttachmentCleanup();
+  await manager.flushState();
+  if (stopped.owned.size || stopped.bridged.size || stopped.stdio.size) throw new Error('Only an exact quiet fixture writer can release its lease.');
+  stopped.stopping = true;
+  if (stopped.pollTimer) { clearInterval(stopped.pollTimer); stopped.pollTimer = undefined; }
+  if (stopped.notifyTimer) { clearTimeout(stopped.notifyTimer); stopped.notifyTimer = undefined; }
+  stopped.cancelOutputPersist();
+  stoppedFixtureWriters.add(manager);
 }

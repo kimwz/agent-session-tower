@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { RunManager } from '../../../server/runs/manager.js';
+import { importFixtureRuns } from '../runs/sql-fixture.js';
 import type { StorageStatus } from '../../../server/storage/contract.js';
 import { storageFs } from '../../../server/storage/paths.js';
 import type { WorkerStorageStatus } from '../../../shared/storage.js';
@@ -653,7 +654,7 @@ test('accepted numeric expansion imports, guarded updates, pages and sealed rest
 });
 
 test('actual SQLite corrupt and I/O command errors activate existing intake hold; format refusal keeps core healthy', async t => {
-  const { a, b } = await builds(t);
+  const a = await retentionBuild('1.122.0', await folder(t)), b = await retentionBuild('1.123.0', await folder(t));
   const damagedPath = join(b.directory, 'corrupt.sqlite');
   const damaged = new DatabaseSync(damagedPath);
   damaged.exec('CREATE TABLE damage (value TEXT); INSERT INTO damage VALUES (\'fixture\');'); damaged.close();
@@ -663,14 +664,17 @@ test('actual SQLite corrupt and I/O command errors activate existing intake hold
     const stateDir = await folder(t), evidenceParent = await sources(stateDir);
     await prepareA(stateDir, a);
     const normal = await openB(t, stateDir, b);
-    await importRetention({ storage: normal.client, update: normal.update, stateDir, evidenceParent }); await normal.client.close();
+    await importRetention({ storage: normal.client, update: normal.update, stateDir, evidenceParent });
+    await importFixtureRuns(normal.client); await normal.client.close();
     let effects = 0, unavailable: StorageStatus | undefined;
     let health: WorkerStorageStatus = { state: 'ready', code: 'ready', reason: '', admissionOpen: true, sessionsAvailable: true, healthStatus: 200 };
-    const manager = new RunManager({ stateDir: join(stateDir, 'fixture-runner'), getSession: () => undefined, refreshSessions: async () => {},
-      holdUntilReady: true, findExecutable: async () => { effects++; throw new Error('must not reach provider'); } });
-    await manager.start(); t.after(() => manager.close());
+    let manager: RunManager;
+    t.after(async () => { await manager?.close(); });
     const client = await b.storage.openStorage({ stateDir, bundle: b.bundle(fault), onUnavailable: status => { unavailable = status; manager.holdStorage(); health = { ...health, state: 'unavailable', code: status.failure!.code, reason: status.failure!.message, admissionOpen: false, healthStatus: 503 }; } });
     t.after(() => client.close()); await client.prepare({ allowMigration: false });
+    manager = new RunManager({ stateDir, storage: client, getSession: () => undefined, refreshSessions: async () => {},
+      holdUntilReady: true, findExecutable: async () => { effects++; throw new Error('must not reach provider'); } });
+    await manager.start();
     await assert.rejects(new RetentionStore(join(stateDir, 'retention'), { storage: client }).start(), (error: unknown) => {
       assert.equal((error as { code: string }).code, fault === 'io' ? 'io-error' : 'corrupt'); return true;
     });
@@ -694,7 +698,7 @@ test('actual SQLite corrupt and I/O command errors activate existing intake hold
     } finally { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 
     assert.deepEqual(await readFile(join(stateDir, 'retention', 'journal.json')), Buffer.from(JSON.stringify(documents().journal)), 'no legacy fallback write');
-    await client.close(); await manager.close();
+    await manager.close(); await client.close();
   }
   const stateDir = await folder(t), evidenceParent = await sources(stateDir);
   await prepareA(stateDir, a);

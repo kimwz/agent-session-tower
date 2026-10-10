@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
-import { RunManager, fixtureDocuments } from './sql-fixture.js';
+import { RunManager, fixtureDocuments, importFixtureRetention } from './sql-fixture.js';
 import { SessionService } from '../../../server/sessions/service.js';
 import { startRunnerHost, type RunnerHostOptions } from '../../../server/runs/worker.js';
 import type { SlackService } from '../../../server/slack/service.js';
@@ -72,7 +72,8 @@ async function fixture(workerClosed = false, withRetention = false, retentionUna
   const closedSessions = workerClosed ? new ClosedSessionStore(stateDir) : undefined;
   await closedSessions?.start();
   const archive = new RetentionArchive(join(stateDir, 'cold'), []);
-  const retentionStore = new RetentionStore(join(stateDir, 'retention'));
+  if (withRetention) await importFixtureRetention(runs.sqlFixture());
+  const retentionStore = new RetentionStore(join(stateDir, 'retention'), { storage: runs.sqlFixture() });
   const retention = withRetention ? { archive, temporary, service: new RetentionService({ archive, store: retentionStore,
     adapter: createNativeRetentionAdapter({ claude: [], codex: [] }), observe: async () => ({ now: Date.now(), migratedAt: Date.now(), complete: true, records: [], protectedIds: new Set() }) }) } : undefined;
   await retention?.service.start();
@@ -265,19 +266,16 @@ test('reopening retries a real archive cancellation write failure and remains ca
   await f.retentionStore.put(entry);
   await client.setClosed(f.session.id, true);
   const root = f.retentionStore.root;
-  const displacedRoot = `${root}-displaced`;
-  await rename(root, displacedRoot);
-  await writeFile(root, 'fixture blocks retention directory writes');
+  const database = f.runs.sqlFixture();
+  const gate = database.gate.bind(database);
+  database.gate = async scope => scope === 'retention' ? { open: false, reasons: ['fixture SQL write held'] } : gate(scope);
   try {
-    await assert.rejects(client.setClosed(f.session.id, false), /ENOTDIR/);
+    await assert.rejects(client.setClosed(f.session.id, false), /Retention storage held/);
     assert.equal(client.applyClosed(f.session).closed, true);
-  } finally {
-    await rm(root, { force: true });
-    await rename(displacedRoot, root);
-  }
+  } finally { database.gate = gate; }
   await client.setClosed(f.session.id, false);
   assert.equal(Boolean(client.applyClosed(f.session).closed), false);
-  const reloaded = new RetentionStore(root); await reloaded.start();
+  const reloaded = new RetentionStore(root, { storage: database }); await reloaded.start();
   assert.equal(reloaded.policy(f.session.id)?.archivedAt, undefined, 'successful retry must persist cancellation rather than leave the archive request to revive after restart');
   assert.equal(reloaded.policy(f.session.id)?.archiveRevision, 5);
   assert.equal(reloaded.policy(f.session.id)?.restoredAt, restoredAt);
