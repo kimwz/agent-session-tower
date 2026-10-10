@@ -14,6 +14,7 @@ import { empty } from '../../../server/triggers/state.js';
 import { restoreRuns } from '../../../server/runs/run-history.js';
 import { RunManager } from '../../../server/runs/manager.js';
 import { TriggersRepository } from '../../../server/triggers/storage-repository.js';
+import { TriggerDispatch } from '../../../server/triggers/dispatch.js';
 import { TriggerStore } from '../../../server/triggers/store.js';
 import { retentionBuild } from '../storage/fixtures/retention-build.js';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
@@ -35,7 +36,7 @@ function fixture() {
   db.prepare('INSERT INTO runs_state VALUES (1,1)').run();
   const state = empty();
   const requestId = '40000000-0000-4000-8000-000000000001';
-  state.events = [{ id: 'event',triggerId: 'trigger',triggerName: 'fixture',triggerRevision: 1,dedupKey: 'slot',occurredAt: '2026-10-01T00:00:00Z',receivedAt: '2026-10-01T00:00:00Z',updatedAt: '2026-10-01T00:00:00Z',summary: 'fixture',requestId,status: 'claimed',claimedAt: '2026-10-01T00:00:00Z',kind: 'manual',input: { target: { node: 'local',mode: 'session',sessionId: 'codex:fixture' },instructions: 'fixture',provider: 'codex',approvals: 'auto',untrustedInput: false } }];
+  state.events = [{ id: 'event',triggerId: 'trigger',triggerName: 'fixture',triggerRevision: 1,dedupKey: 'slot',occurredAt: '2026-10-01T00:00:00Z',receivedAt: '2026-10-01T00:00:00Z',updatedAt: '2026-10-01T00:00:00Z',summary: 'fixture',requestId,status: 'claimed',claimedAt: '2026-10-01T00:00:00Z',kind: 'manual',input: { target: { node: 'local',mode: 'session',sessionId: 'codex:fixture' },instructions: 'fixture',provider: 'codex',approvals: 'auto',untrustedInput: false,overlap: 'skip' } }];
   const rows = rowsOf(state);
   for (const row of rows) db.prepare('INSERT INTO triggers_rows VALUES (?,?,?,?,?,?,?)').run(row.kind,row.id,row.ordinal,row.json,0,row.kind === 'events' ? 'trigger' : null,row.kind === 'events' ? 'claimed' : null);
   db.prepare('INSERT INTO triggers_state VALUES (1,1,?)').run(logicalBytes(rows));
@@ -157,7 +158,7 @@ test('unknown receipt with a different payload hash stays unresolved and cannot 
   assert.equal(f.writes.length,count);
 });
 
-for (const response of ['known','lost'] as const) test(`SDK/manager local trigger provider gate and store readback: ${response} commit response`, async t => {
+for (const response of ['known','lost'] as const) test(`actual dispatch local trigger provider gate, readback and completion tracking: ${response} commit response`, async t => {
   const directory = await realpath(await mkdtemp(join(tmpdir(),'tower-r4-admission-')));
   t.after(() => rm(directory,{ recursive: true,force: true }));
   const build = await retentionBuild('1.125.0',join(directory,'build'));
@@ -166,7 +167,7 @@ for (const response of ['known','lost'] as const) test(`SDK/manager local trigge
   await new RunsRepository(client).importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'runs-import');
   const state = empty(), requestId = '40000000-0000-4000-8000-000000000001';
   const session: Session = { id: 'codex:10000000-0000-4000-8000-000000000002',nativeId: '10000000-0000-4000-8000-000000000002',provider: 'codex',title: 'fixture',cwd: directory,project: 'fixture',status: 'completed',statusReason: '',createdAt: '2026-10-01T00:00:00Z',updatedAt: '2026-10-01T00:00:00Z',lastMessage: '',messageCount: 0,isSubagent: false,resumable: true };
-  state.events = [{ id: 'event',triggerId: 'trigger',triggerName: 'fixture',triggerRevision: 1,dedupKey: 'slot',occurredAt: session.createdAt,receivedAt: session.createdAt,updatedAt: session.createdAt,summary: 'fixture',requestId,status: 'claimed',claimedAt: session.createdAt,kind: 'manual',input: { target: { node: 'local',mode: 'session',sessionId: session.id },instructions: 'fixture',provider: 'codex',approvals: 'auto',untrustedInput: false } }];
+  state.events = [{ id: 'event',triggerId: 'trigger',triggerName: 'fixture',triggerRevision: 1,dedupKey: 'slot',occurredAt: session.createdAt,receivedAt: session.createdAt,updatedAt: session.createdAt,summary: 'fixture',requestId,status: 'queued',kind: 'manual',input: { target: { node: 'local',mode: 'session',sessionId: session.id },instructions: 'fixture',provider: 'codex',approvals: 'auto',untrustedInput: false,overlap: 'skip' } }];
   await new TriggersRepository(client).importPrepared(state,'b'.repeat(64),'triggers-import');
   const store = new TriggerStore({ storage: client,stateDir: join(directory,'state'),now: () => Date.parse(session.createdAt),limits: () => undefined,changed: () => {} });
   await store.load(() => {});
@@ -177,7 +178,11 @@ for (const response of ['known','lost'] as const) test(`SDK/manager local trigge
       return { start: async () => { config.onFinished({ status: 'completed' }); },done: Promise.resolve(),close: () => {},cancel: async () => {},respondToApproval: async () => {} };
     } });
   await manager.start();
-  const link = await store.admissionLink('event'); assert.ok(link);
+  const dispatch = new TriggerDispatch(store, {
+    enqueue: manager.enqueue.bind(manager),runs: () => manager.list(),session: () => session,getAutoPrompt: () => undefined,
+    submitAutoPrompt: async () => { throw new Error('Fixture forbids Auto Prompt'); },
+    create: async () => { throw new Error('Fixture forbids folder creation'); },
+  }, () => Date.parse(session.createdAt), { isHeld: () => false,githubClient: async () => { throw new Error('Fixture forbids GitHub'); } });
   const write = client.write.bind(client);
   let entered!: () => void, release!: () => void, targetIntent: string | undefined;
   const saving = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
@@ -194,25 +199,35 @@ for (const response of ['known','lost'] as const) test(`SDK/manager local trigge
     }
     return write<T>(...args);
   };
-  const delivery = manager.enqueue(session.id,'fixture',{}, { autoPromptId: requestId,origin: { kind: 'trigger',eventId: 'event',triggerId: 'trigger' },triggerLink: link });
-  const outcome = delivery.then(run => ({ run }),error => ({ error }));
+  const delivery = dispatch.dispatch();
   await saving; manager.markReady();
   await (manager as unknown as { pump(): Promise<void> }).pump(); assert.equal(providers,0);
-  release(); const result = await outcome; client.write = write;
+  release(); await delivery; client.write = write;
   if (response === 'lost') {
-    assert.ok('error' in result); assert.ok(manager.pendingAdmission());
+    assert.ok(manager.pendingAdmission());
     await (manager as unknown as { pump(): Promise<void> }).pump(); assert.equal(providers,0);
   } else {
-    assert.ok('run' in result); await until(() => providers > 0);
+    await until(() => providers > 0);
   }
-  // This begins with the store's old claimed snapshot and must read the SQL running event first.
-  await store.commit(draft => { draft.trustedFolders.push('/fixture/readback'); },'settle');
+  // The actual outcome callback must preserve SQL running/runId even on response loss.
+  assert.equal(store.state.events[0].status,'running');
+  assert.equal(store.state.events[0].error,undefined);
   const saved = (await new TriggersRepository(client).exportCurrent()).documents.events[0];
   assert.equal(saved.status,'running'); assert.ok(saved.dispatch?.runId); assert.equal(store.state.events[0].dispatch?.runId,saved.dispatch?.runId);
   if (response === 'lost') {
     const count = providers, pending = manager.pendingAdmission()!;
-    manager.holdStorage(); await manager.resolveAdmission(pending.commandId);
+    const resolved = await manager.resolveAdmission(pending.commandId);
+    assert.equal(resolved.disposition,'committed');
+    assert.equal(manager.pendingAdmission(),undefined);
     assert.equal(providers,count,'receipt resolution itself never launches a provider');
   }
+  manager.releaseStorage();
+  await until(() => manager.list().some(run => run.id === saved.dispatch?.runId && run.status === 'completed'));
+  await (manager as unknown as { flush(): Promise<void> }).flush();
+  await dispatch.track();
+  const completed = (await new TriggersRepository(client).exportCurrent()).documents.events[0];
+  assert.equal(completed.status,'completed');
+  assert.equal(completed.dispatch?.runId,saved.dispatch?.runId);
+  assert.equal(providers,1,'receipt recovery and tracking never replay the provider');
   await manager.close();
 });

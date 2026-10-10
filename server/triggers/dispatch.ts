@@ -98,7 +98,8 @@ export class TriggerDispatch {
         catch (error) { outcome = { status: admissionUncertain(error) ? 'uncertain' : 'error', error: (error instanceof Error ? error.message : String(error)).slice(0, 1500) }; }
         await this.store.commit(state => {
           const event = state.events.find(item => item.id === claimed.id);
-          if (event) { Object.assign(event, outcome, { updatedAt: new Date(this.now()).toISOString() }); this.handFailed(state, event); }
+          // Atomic admission may already have linked the run in SQL before its response was lost.
+          if (event?.status === 'claimed' && event.requestId === claimed.requestId) { Object.assign(event, outcome, { updatedAt: new Date(this.now()).toISOString() }); this.handFailed(state, event); }
         }, 'settle').catch(() => {});
       } finally { this.submitting.delete(claimed.id); }
     }
