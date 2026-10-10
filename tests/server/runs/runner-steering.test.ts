@@ -8,6 +8,7 @@ import test, { type TestContext } from 'node:test';
 import { type RunAdmission } from '../../../server/runs/manager.js';
 import { RunManager, fixtureDocuments, fixtureReplaceRuns } from './sql-fixture.js';
 import { savedRun } from '../../../server/runs/run-history.js';
+import { parseRunDocuments } from '../../../server/runs/storage-codec.js';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { SteeringError, type SteeringInput } from '../../../server/runs/steering.js';
 import type { CodexStdioResult } from '../../../server/runs/codex-stdio.js';
@@ -293,7 +294,9 @@ test('restart recovers an unacknowledged sending instruction as uncertain withou
   assert.ok(saved.every(run => ['instructions', 'approvals', 'canSteer', 'steerBlocked'].every(key => !(key in run))), 'only the persistable projection enters SQL');
   await f.manager.close();
   await f.manager.close();
-  await fixtureReplaceRuns(f.manager, saved as Run[]);
+  await fixtureReplaceRuns(f.manager, parseRunDocuments({
+    runs: Buffer.from(JSON.stringify(saved)), created: Buffer.from('[]'), instructions: Buffer.from('{}'),
+  }).runs);
   let providerEffects = 0;
   const restored = new RunManager({ stateDir: f.stateDir, getSession: () => f.session, refreshSessions: async () => {},
     spawnProcess: () => { providerEffects++; throw new Error('Recovery must not spawn providers'); },
