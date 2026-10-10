@@ -528,6 +528,12 @@ test('normal ready worker accepts withdrawal release but resumes only after the 
   const { call } = worker;
   const deadline = Date.now() + 60000;
   const first = await waitForStorage(call, true, deadline, worker);
+  const inspected = await call('storageControl', ['inspect']);
+  assert.equal(inspected.error, undefined);
+  const authority = (inspected.result as { authority: { domain: string; authority: string }[] }).authority;
+  assert.deepEqual(authority.map(row => [row.domain, row.authority]).sort(),
+    ['retention', 'runs', 'triggers', 'permissions', 'remote', 'auto-prompt', 'automation-workflows'].map(domain => [domain, 'database']).sort(),
+    'the same current default worker holds all seven domains in its actual database before withdrawal');
   const identity = first.snapshot!.storage!.identity!;
   const at = new Date().toISOString(); const fence = { id: 'normal-withdraw', attempt: 1 };
   const rollback: RollbackRecord = { format: 'tower-storage-rollback', version: 1, id: fence.id,
