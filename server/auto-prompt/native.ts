@@ -31,6 +31,7 @@ export interface AutoPromptModelRequest {
 export interface ReadTools { server: string; command: string; args: string[]; tools: readonly string[] }
 
 export interface AutoPromptNativeDependencies {
+  beforeSpawn?: () => Promise<void>;
   stateDir?: string;
   env?: NodeJS.ProcessEnv;
   findExecutable?: typeof findExecutable;
@@ -204,6 +205,8 @@ async function routeWith(options: AutoPromptModelRequest, dependencies: AutoProm
     const stdin = options.provider === 'codex' ? options.prompt : JSON.stringify({
       type: 'user', message: { role: 'user', content: [{ type: 'text', text: options.prompt }, ...images.blocks] },
     }) + '\n';
+    await dependencies.beforeSpawn?.();
+    if (options.signal.aborted) throw cancelled();
     return await collect(options, dependencies, executable, args, directory, env, stdin);
   } finally { await rm(directory, { recursive: true, force: true }); }
 }

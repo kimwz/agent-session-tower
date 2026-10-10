@@ -41,10 +41,18 @@ export class GitHubAccess {
    * Requests to GitHub carry the credentials only to api.github.com, within the shared request budget.
    * `identity` names the credential itself, so a changed gh login is never taken for the account checked before.
    */
-  async fetchFor(auth: GitHubAuth, triggerId?: string): Promise<{ fetch: GitHubFetch; identity: string }> {
+  async fetchFor(auth: GitHubAuth, triggerId?: string, beforeSend?: () => Promise<void>): Promise<{ fetch: GitHubFetch; identity: string }> {
     const token = await this.token(auth, triggerId);
     const authorization = /^\S+\s/.test(token) ? token : `Bearer ${token}`;
     const identity = createHash('sha256').update(authorization).digest('hex');
+    const current = async () => {
+      try { await beforeSend?.(); } catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { uncertain: false }); }
+      // Recheck captured identity without resolving a different account after an await.
+      if (auth.type === 'token') {
+        const secret = this.ports.secrets.get(auth.secretId);
+        if (!secret || secret.origin !== GITHUB_API || secret.value !== token || (triggerId && !(this.ports.grants()[secret.id] ?? []).includes(triggerId))) throw Object.assign(new GitHubError('GitHub credential or grant changed; nothing was sent.'), { uncertain: false });
+      } else if (this.ghToken?.value !== token) throw Object.assign(new GitHubError('GitHub credential identity changed; nothing was sent.'), { uncertain: false });
+    };
     // A used-up rate limit holds every trigger using this credential until it resets.
     const guard = (response: GitHubResponse): GitHubResponse => {
       if ((response.status === 403 || response.status === 429) && response.remaining === 0 && response.reset) this.githubBlocked.set(identity, response.reset * 1000);
@@ -57,7 +65,7 @@ export class GitHubAccess {
     };
     if (this.ports.transport()) {
       const transport = this.ports.transport()!(authorization);
-      return { identity, fetch: async (path, etag, send) => { blocked(); const over = this.ports.budget.spend(); if (over) throw Object.assign(new GitHubError(over), { uncertain: false }); return guard(await transport(path, etag, send)); } };
+      return { identity, fetch: async (path, etag, send) => { await current(); blocked(); const over = this.ports.budget.spend(); if (over) throw Object.assign(new GitHubError(over), { uncertain: false }); return guard(await transport(path, etag, send)); } };
     }
     const ownPorts = await this.ports.ownPorts?.().catch(() => []) ?? [];
     return { identity, fetch: async (path, etag, send) => {
@@ -65,7 +73,7 @@ export class GitHubAccess {
       const outcome = await performHttp({ method: send?.method ?? 'GET', url: `${GITHUB_API}${path}`, secretOrigin: GITHUB_API, secretHeaders: { authorization },
         headers: { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', ...(etag ? { 'if-none-match': etag } : {}), ...(send ? { 'content-type': 'application/json' } : {}) },
         // A write is never followed through a redirect: whatever answered it, the POST arrived and is not repeated.
-        ...(send ? { body: JSON.stringify(send.body), noRedirects: true } : {}), timeoutMs: 30_000, maxBytes: 5_000_000, beforeSend: () => this.ports.budget.spend() }, { privateHosts: [], ownPorts }, this.ports.resolve);
+        ...(send ? { body: JSON.stringify(send.body), noRedirects: true } : {}), timeoutMs: 30_000, maxBytes: 5_000_000, beforeSend: async () => { await current(); blocked(); return this.ports.budget.spend(); } }, { privateHosts: [], ownPorts }, this.ports.resolve);
       if (!outcome.ok) throw Object.assign(new GitHubError(outcome.error), { uncertain: outcome.uncertain });
       let body: unknown;
       try { body = outcome.status === 304 ? undefined : JSON.parse(outcome.body); } catch { body = undefined; }
@@ -83,11 +91,11 @@ export class GitHubAccess {
    * GitHub access for a trigger's coordinator conversation: the trigger's own credentials (also after it is
    * deleted, while it can be restored), and only while they still act as the trigger's account.
    */
-  async clientFor(trigger: Trigger | undefined, fresh = false): Promise<GitHubFetch> {
+  async clientFor(trigger: Trigger | undefined, fresh = false, beforeSend?: () => Promise<void>): Promise<GitHubFetch> {
     if (!trigger || trigger.source.kind !== 'github') throw new GitHubError('This GitHub trigger no longer exists.');
     // For a write, the credential and its account are read again: what is checked is what posts.
     if (fresh && trigger.source.auth.type === 'gh') this.ghToken = undefined;
-    const { fetch, identity } = await this.fetchFor(trigger.source.auth, trigger.id);
+    const { fetch, identity } = await this.fetchFor(trigger.source.auth, trigger.id, beforeSend);
     const login = await this.login(fetch, identity, fresh);
     if (login.toLowerCase() !== trigger.source.account.toLowerCase()) throw new GitHubError(`GitHub is signed in as ${login}, not ${trigger.source.account}; nothing was sent.`);
     return fetch;

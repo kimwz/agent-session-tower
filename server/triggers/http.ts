@@ -37,7 +37,7 @@ export interface HttpCall {
   body?: string;
   timeoutMs: number;
   /** Asked before each request goes out, redirects included; a message refuses it. */
-  beforeSend?: () => string | undefined;
+  beforeSend?: () => string | undefined | Promise<string | undefined>;
   /** Largest response body kept; the rest is cut off and marked truncated. */
   maxBytes?: number;
   /** Stop at a redirect instead of following it; a POST answered with one arrived and is reported as uncertain. */
@@ -170,12 +170,15 @@ async function perform(call: HttpCall, destination: Destination, resolve: typeof
     try { target = await allowedAddress(url, destination, resolve, deadline); }
     catch (error) { return { ok: false, error: (error as Error).message, uncertain: delivered }; }
     const headers = { ...call.headers, ...(sendSecrets ? call.secretHeaders : {}), ...(body !== undefined && method !== 'GET' ? { 'content-length': String(Buffer.byteLength(body)) } : {}) };
-    const remaining = deadline - Date.now();
+    let remaining = deadline - Date.now();
     // A POST answered with a redirect was delivered: whatever happens next, it must not be sent again.
     const stop = (error: string): HttpOutcome => ({ ok: false, error, uncertain: delivered });
     if (remaining <= 0) return stop(`No response within ${Math.round(call.timeoutMs / 1000)} seconds.`);
-    const refused = call.beforeSend?.();
+    let refused: string | undefined;
+    try { refused = await call.beforeSend?.(); } catch (error) { return stop(error instanceof Error ? error.message : String(error)); }
     if (refused) return stop(refused);
+    remaining = deadline - Date.now();
+    if (remaining <= 0) return stop(`No response within ${Math.round(call.timeoutMs / 1000)} seconds.`);
     const outcome = await once(url, method, headers, method !== 'GET' ? body : undefined, target, remaining, call.maxBytes ?? MAX_RESPONSE_BYTES);
     if (!outcome.ok) return { ...outcome, uncertain: outcome.uncertain || delivered };
     if (!('redirect' in outcome)) return outcome;

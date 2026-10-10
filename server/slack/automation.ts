@@ -203,7 +203,7 @@ export class SlackAutomationManager extends EventEmitter {
     this.effectsStarted = true;
   }
   private async effectsGate(): Promise<void> { if (!this.options.effectGate) throw new Error('Workflow effects require the worker effect gate.'); await this.options.effectGate(); await this.options.repository!.gate(); }
-  async hasUnfinished(): Promise<boolean> { return this.options.repository!.unfinished(this.storageChannel); }
+  async hasUnfinished(): Promise<boolean> { const durable = await this.options.repository!.unfinished(this.storageChannel); return durable || this.hasPending(); }
   async exportSettings(): Promise<{ rules: SlackRule[] }> {
     const source = this.options.repository!.source(await this.options.repository!.loadRows(), this.storageChannel);
     return { rules: source.rules };
@@ -212,7 +212,7 @@ export class SlackAutomationManager extends EventEmitter {
   rules(): SlackRule[] { return structuredClone(this.configured); }
   list(): SlackWorkflow[] {
     return structuredClone(this.items.map(item => {
-      if (item.status === 'admission-uncertain' || item.mode !== 'conversation' || !item.sessionId) return item;
+      if (['admission-uncertain','reply-uncertain'].includes(item.status) || item.mode !== 'conversation' || !item.sessionId) return item;
       const runs = this.options.getSessionRuns?.(item.sessionId) ?? [];
       const latest = runs.at(-1);
       const failedTask = item.delegatedTasks?.find(task => task.notificationError || task.submissionError);
@@ -223,7 +223,8 @@ export class SlackAutomationManager extends EventEmitter {
         updatedAt: latest.finishedAt ?? latest.startedAt ?? latest.createdAt, error: latest.error ?? item.error } : item;
     }));
   }
-  hasPending(): boolean { return this.items.some(item => !terminal.has(item.status) || ['admission-uncertain','reply-uncertain'].includes(item.status) || item.replies?.some(reply => reply.status === 'sending' || reply.status === 'uncertain')); }
+  private coordinatorRunning(): boolean { return this.items.some(item => item.mode === 'conversation' && !!item.sessionId && (this.options.getSessionRuns?.(item.sessionId) ?? []).some(run => run.status === 'running' || run.status === 'queued')); }
+  hasPending(): boolean { return this.coordinatorRunning() || this.items.some(item => !terminal.has(item.status) || ['admission-uncertain','reply-uncertain'].includes(item.status) || item.replies?.some(reply => reply.status === 'sending' || reply.status === 'uncertain')); }
   /** Anything already underway: a tick advancing an item, an admission, a tool call, or an unfinished workflow. */
   inFlight(): boolean {
     return Boolean(this.processing) || Boolean(this.marking) || this.admissions.size > 0 || this.toolOperations.size > 0

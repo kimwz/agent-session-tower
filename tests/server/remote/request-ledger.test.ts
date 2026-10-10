@@ -195,3 +195,29 @@ test('whether a failed request may be sent again with its ID requires a definite
   await assert.rejects(restarted.once(CONTROLLER,'create',id,{},execute,record,() => undefined), /확실하지/);
   assert.equal(attempts,1);
 });
+
+for (const receiptFailure of ['record', 'sql'] as const) test(`effect success then ${receiptFailure} failure is uncertain and never replayed after restart`, async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-ledger-receipt-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const storage = await externalStorageFixture(t, stateDir, true, receiptFailure === 'sql' ? 'remote-completed-refused' : 'normal');
+  const ledger = new RemoteRequestLedger(stateDir, Date.now, 20_000, storage.remote, storage.effectGate);
+  await ledger.start();
+  const id = requestId(Date.now()); let effects = 0;
+  const execute = async () => { effects++; return { runId: 'effect-1' }; };
+  await assert.rejects(ledger.once(CONTROLLER, 'enqueue', id, {}, execute, value => {
+    if (receiptFailure === 'record') throw new Error('fixture record failure');
+    return record(value);
+  }, () => undefined), (error: Error & { disposition?: string; requestIdentity?: string; cause?: unknown }) => {
+    assert.equal(error.disposition, 'uncertain'); assert.equal(error.requestIdentity, `${CONTROLLER}\nenqueue\n${id}`);
+    assert.ok(error.cause);
+    if (receiptFailure === 'sql') assert.equal((error.cause as { disposition?: string }).disposition, 'not-committed');
+    return true;
+  });
+  assert.equal(effects, 1);
+  await storage.storage.close();
+  const reopened = await externalStorageFixture(t, stateDir, false, receiptFailure === 'sql' ? 'remote-completed-refused' : 'normal');
+  const restarted = new RemoteRequestLedger(stateDir, Date.now, 20_000, reopened.remote, reopened.effectGate);
+  await restarted.start(); effects = 0;
+  await assert.rejects(restarted.once(CONTROLLER, 'enqueue', id, {}, execute, record, () => undefined), { disposition: 'uncertain' });
+  assert.equal(effects, 0);
+});

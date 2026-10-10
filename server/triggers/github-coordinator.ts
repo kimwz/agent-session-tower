@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
-import type { CoordinatorRule, TriggerEvent } from '../../shared/triggers.js';
+import type { CoordinatorRule, TriggerEvent, Trigger } from '../../shared/triggers.js';
 import type { SlackMention, SlackMessage, SlackWorkflow } from '../../shared/slack.js';
 import type { AutoPromptJob, AutoPromptRequest, Run, RunOrigin } from '../../shared/types.js';
 import type { AutoPromptManager } from '../auto-prompt/manager.js';
@@ -86,11 +86,12 @@ export interface GitHubCoordinatorOptions {
   runs: Pick<RunManager, 'list' | 'create' | 'enqueue'>;
   autoPrompts: Pick<AutoPromptManager, 'get' | 'submit'>;
   refresh: () => Promise<void>;
+  currentSource?: (triggerId: string) => Trigger['source'] | undefined;
   /**
    * The trigger's GitHub access, checked against its account. `fresh` reads the credential and its account
    * again, for a write: a change of login since the last check is never missed.
    */
-  github(triggerId: string, fresh?: boolean): Promise<GitHubFetch>;
+  github(triggerId: string, fresh?: boolean, beforeSend?: () => Promise<void>): Promise<GitHubFetch>;
   language?: () => 'ko' | 'en';
   model?: typeof runAutoPromptModel;
 }
@@ -132,7 +133,7 @@ export class GitHubCoordinator extends EventEmitter {
       findConversation: id => { const run = options.runs.list().find(item => item.autoPromptId === id); return run ? { sessionId: run.sessionId, runId: run.id } : undefined; },
       getSessionRuns: id => options.runs.list().filter(run => run.sessionId === id).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
       fetchThread: async mention => {
-        const get = await options.github(triggerOf(mention));
+        const get = await options.github(triggerOf(mention), false, this.sourceGate(triggerOf(mention)));
         const issue = await get(issuePath(mention));
         if (issue.status !== 200 || !issue.body || typeof issue.body !== 'object') throw new GitHubError(`GitHub answered HTTP ${issue.status} for the issue.`);
         const item = issue.body as { user?: { login?: string }; title?: string; body?: string | null };
@@ -175,7 +176,7 @@ export class GitHubCoordinator extends EventEmitter {
           systemPrompt: OWNER_REPLY_INTENT_PROMPT.replace(' or permission to act on GitHub', '').replace(/Slack/g, 'GitHub').replace(/슬랙/g, '깃허브'),
           prompt: JSON.stringify({ ownerMessage: message, tasks: (workflow.delegatedTasks ?? []).map(task => ({ requestId: task.requestId, status: options.autoPrompts.get(task.requestId)?.status, notified: !!task.notifiedRunId })) }),
           schema: OWNER_REPLY_INTENT_SCHEMA, signal: AbortSignal.timeout(30_000),
-        }, { stateDir: options.stateDir });
+        }, { stateDir: options.stateDir, beforeSpawn: () => this.effectsGate() });
       },
       submitAutoPrompt: async (request: AutoPromptRequest, workflowId: string): Promise<AutoPromptJob> => {
         const workflow = workflowOf(workflowId);
@@ -189,7 +190,7 @@ export class GitHubCoordinator extends EventEmitter {
       sendReply: async (mention, text) => {
         const notSent = (error: unknown, known = true) => Object.assign(error instanceof Error ? error : new Error(String(error)), { notSent: known });
         let post: GitHubFetch;
-        try { post = await options.github(triggerOf(mention), true); } catch (error) { throw notSent(error); }
+        try { post = await options.github(triggerOf(mention), true, this.sourceGate(triggerOf(mention))); } catch (error) { throw notSent(error); }
         let review: ReturnType<typeof reviewOf> | undefined;
         try { review = mention.review ? reviewOf(text, mention.review.verdicts) : undefined; } catch (error) { throw notSent(error); }
         const what = review ? 'review' : 'comment';
@@ -204,13 +205,25 @@ export class GitHubCoordinator extends EventEmitter {
       },
       react: async (mention, name, action) => {
         if (action !== 'add') throw new Error('GitHub reactions can only be added from here.');
-        const post = await options.github(triggerOf(mention), true);
+        const post = await options.github(triggerOf(mention), true, this.sourceGate(triggerOf(mention)));
         if (!options.effectGate) throw new Error('Missing GitHub effect gate.'); await options.effectGate(); await options.repository!.gate();
         const response = await post(`${issuePath(mention)}/reactions`, undefined, { method: 'POST', body: { content: name } });
         if (response.status !== 200 && response.status !== 201) throw new GitHubError(`GitHub answered HTTP ${response.status} for the reaction.`);
       },
     });
     this.automation.on('change', () => this.emit('change'));
+  }
+
+  private async effectsGate(): Promise<void> {
+    if (!this.options.effectGate) throw new Error('Missing GitHub effect gate.');
+    await this.options.effectGate(); await this.options.repository!.gate();
+  }
+  private sourceGate(triggerId: string): () => Promise<void> {
+    const source = JSON.stringify(this.options.currentSource?.(triggerId));
+    return async () => {
+      await this.effectsGate();
+      if (!source || JSON.stringify(this.options.currentSource?.(triggerId)) !== source) throw Object.assign(new GitHubError('GitHub source policy changed; nothing was sent.'), { uncertain: false });
+    };
   }
 
   async start(): Promise<void> {

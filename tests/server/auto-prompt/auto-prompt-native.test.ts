@@ -406,3 +406,17 @@ test('a review the model\'s safeguards stop fails with that reason, never as app
     await assert.rejects(runAutoPromptModel(f.request, f.dependencies), /safeguards stopped its answer/);
   }
 });
+
+test('hold during CLI preparation refuses the actual spawn after files are ready', async t => {
+  const f = await fixture(t); let held = false, effects = 0;
+  f.dependencies.findExecutable = async () => { held = true; return '/fixture/native-cli'; };
+  f.dependencies.beforeSpawn = async () => {
+    const tempRoot = join(f.dependencies.stateDir!, 'tmp');
+    const [directory] = await readdir(tempRoot);
+    assert.equal(await readFile(join(tempRoot, directory, 'instructions.txt'), 'utf8'), f.request.systemPrompt);
+    if (held) throw new Error('fixture storage/history hold');
+  };
+  f.dependencies.spawnProcess = () => { effects++; throw new Error('must not spawn'); };
+  await assert.rejects(runAutoPromptModel(f.request, f.dependencies), /storage\/history hold/);
+  assert.equal(effects, 0);
+});

@@ -132,7 +132,20 @@ test('dedicated coordinator exposes scoped MCP during creation and follows later
   await service.automation.ingest({ id: 'event', teamId: 'T1', channel: 'G1', user: 'U2', ts: '1', threadTs: '1', text: '<@U1> hello' });
   await service.automation.tick(); assert.deepEqual(service.coordinatorSessionIds(), ['codex:test']);
   runs[0].status = 'completed'; await service.automation.tick(); assert.equal(service.overview().events[0].status, 'completed');
-  runs.push({ ...runs[0], id: 'r2', createdAt: '2026-01-02', status: 'running' });
+  let admitted!: () => void; let release!: () => void;
+  const prepared = new Promise<void>(resolve => { admitted = resolve; });
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  const turn = service.withOwnerTurnAdmission(async () => {
+    await service.ownerChat('codex:test', 'continue'); admitted(); await hold;
+    runs.push({ ...runs[0], id: 'r2', createdAt: '2026-01-02', status: 'running' });
+  });
+  await prepared;
+  const replacing = service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  release(); await turn;
+  await assert.rejects(replacing, /진행 중/);
+  await assert.rejects(service.mutate('disconnect', {}), /진행 중/);
+  await assert.rejects(service.restoreConnection({ enabled: false }), /진행 중/);
+  assert.equal(await service.automation.hasUnfinished(), true);
   assert.equal(service.overview().events[0].status, 'running'); assert.equal(service.hasActive(), true);
 });
 
@@ -327,4 +340,25 @@ test('the working reaction is a saved setting that marks new mentions at once on
   assert.equal(service.overview().workingReaction, 'loading', 'kept across restarts');
   await service.mutate('settings', { workingReaction: '' });
   assert.equal(service.overview().workingReaction, undefined, 'an empty value turns it off');
+});
+
+test('account authentication preparation serializes a later owner turn admission', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-account-race-'));
+  const storage = await externalStorageFixture(t, stateDir);
+  let prepared!: () => void, release!: () => void;
+  const ready = new Promise<void>(resolve => { prepared = resolve; });
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  let admitted = false;
+  const service = new SlackService({ repository: storage.workflows, effectGate: storage.effectGate, stateDir,
+    runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('must not submit'); } }, refresh: async () => {} }, {
+    client: () => ({ auth: async () => { prepared(); await hold; return { teamId: 'T1', userId: 'U9' }; }, thread: async () => [], reply: async () => { throw new Error('must not send'); } }),
+    model: async () => { throw new Error('must not start'); },
+  });
+  t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
+  await service.start();
+  const update = service.mutate('connect', { appToken: 'xapp-fixture-1234567890', userToken: 'xoxp-fixture-1234567890' });
+  await ready;
+  const turn = service.withOwnerTurnAdmission(async () => { admitted = true; assert.equal(service.overview().account?.userId, 'U9'); });
+  await Promise.resolve(); assert.equal(admitted, false);
+  release(); await update; await turn; assert.equal(admitted, true);
 });

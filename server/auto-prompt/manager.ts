@@ -401,7 +401,7 @@ export class AutoPromptManager extends EventEmitter {
       const input = { ...routerOf(job), ...(job.routerEffort ? { effort: job.routerEffort } : {}), systemPrompt: `${SYSTEM}\n${extra}`, prompt, schema, signal,
         imagePaths: imagePaths(staged) };
       await this.storageGate(entry, signal); active();
-      return this.options.model ? this.options.model(input) : runAutoPromptModel(input, { stateDir: this.options.stateDir });
+      return this.options.model ? this.options.model(input) : runAutoPromptModel(input, { stateDir: this.options.stateDir, beforeSpawn: async () => { await this.storageGate(entry, signal); active(); } });
     };
     let cwd = job.cwd;
     if (!cwd) {

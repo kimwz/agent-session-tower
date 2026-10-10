@@ -121,9 +121,14 @@ export class RemoteRequestLedger {
       }
       throw error;
     }
-    const completed = { ...entry, result: record(value) };
-    await this.queue(() => this.repository!.put(completed, ordinal, entry));
-    this.entries.set(key, completed);
+    try {
+      const completed = { ...entry, result: record(value) };
+      await this.queue(() => this.repository!.put(completed, ordinal, entry));
+      this.entries.set(key, completed);
+    } catch (cause) {
+      // The intent stays durable: a receipt failure cannot prove the remote effect did not run.
+      throw Object.assign(new TowerError('conflict', '원격 요청은 실행되었으나 완료 기록을 확인할 수 없습니다.', { disposition: 'uncertain', cause }), { requestIdentity: key, fingerprint });
+    }
     return value;
   }
 

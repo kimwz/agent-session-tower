@@ -2,7 +2,7 @@ import { defineStorageDomain, type DomainReadContext, type DomainWriteContext } 
 import type { DomainAuthority, StorageDomainSchema } from '../storage/contract.js';
 import { canonical, object, hash, EXTERNAL_INTENT_BYTES, EXTERNAL_CHUNK_BYTES, type ExternalCodec, type ExternalRow } from './storage-rows.js';
 export interface ExternalHead { storageId: string; authority: DomainAuthority | null; revision: number | null }
-const fail = (message: string): never => { throw Object.assign(new Error(message),{ storageCode: 'domain-failed' }); };
+const fail: (message: string) => never = (message) => { throw Object.assign(new Error(message),{ storageCode: 'domain-failed' }); };
 const integer = (v: unknown, max = Number.MAX_SAFE_INTEGER): number => { if (!Number.isSafeInteger(v) || Number(v)<0 || Number(v)>max) fail('Invalid external storage bound.'); return Number(v); };
 /** Fixed code/SQL in the one DB thread; codecs are imported by owners, never accepted from RPC payloads. */
 export function externalDomain(schema: StorageDomainSchema, codec: ExternalCodec) {

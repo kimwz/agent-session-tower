@@ -63,7 +63,7 @@ export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' 
   const manifest = storageManifest([...(runsRelease ? [schema,runProfile,...(triggersRelease ? [triggerProfile] : [])] : [schema]),...(externalDomains ? [remoteSchema,autoPromptSchema,workflowsSchema] : [])],version);
   if (actualACapture && manifest.digest !== actualACapture.identity.manifestDigest) throw new Error('Actual A122 manifest mismatch.');
   const artifacts: Record<string, StorageThreadArtifact> = {};
-  for (const fault of preparation ? ['normal', 'after-native-hold'] : ['normal', 'before', 'after', 'after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss', ...(runsRelease ? ['after-unsent-compensation'] : []), 'refuse-once', 'corrupt', 'io']) {
+  for (const fault of preparation ? ['normal', 'after-native-hold'] : ['normal', ...(externalDomains ? ['remote-completed-refused'] : []), 'before', 'after', 'after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss', ...(runsRelease ? ['after-unsent-compensation'] : []), 'refuse-once', 'corrupt', 'io']) {
     const entry = `
 import { parentPort } from 'node:worker_threads';
 import { existsSync, writeFileSync } from 'node:fs';
@@ -130,6 +130,11 @@ domain.commands.head = { ...head, run(context, payload) {
   const db = new sqlite.DatabaseSync(${JSON.stringify(join(directory, fault === 'corrupt' ? 'corrupt.sqlite' : 'missing-parent/io.sqlite'))});
   try { db.prepare('SELECT * FROM damage').all(); } finally { db.close(); }
   return head.run(context, payload);
+} };` : ''}
+${fault === 'remote-completed-refused' && externalDomains ? `const mutate = remoteDomain.commands.mutate;
+remoteDomain.commands.mutate = { ...mutate, run(context, payload) {
+  if (payload.changes.some(row => JSON.parse(row.json).result)) throw Object.assign(new Error('fixture completed receipt refusal'), { storageCode: 'domain-failed' });
+  return mutate.run(context, payload);
 } };` : ''}
 runStorageThread([domain${runsRelease ? ', runsDomain' : ''}${triggersRelease ? ', triggersDomain' : ''}${externalDomains ? ', remoteDomain, autoPromptDomain, workflowsDomain' : ''}]);`;
     const result = await build({ stdin: { contents: entry, resolveDir: root, sourcefile: 'retention-fixture-thread.ts', loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'cjs', target: 'node22', plugins: [versionPlugin], logLevel: 'silent' });
