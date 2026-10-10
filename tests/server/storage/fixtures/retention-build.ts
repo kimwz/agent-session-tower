@@ -114,7 +114,8 @@ export async function lockOwners() {
     const firstSql = (source: string) => source.split('version: 1, sql: `')[1]?.split('`.trim() }')[0];
     if (!firstSql(capturedSchema) || firstSql(capturedSchema) !== firstSql(currentSchema)) throw new Error('Old A migration1 changed.');
   }
-  const runProfile = version === '1.123.0' || (version === '1.125.0' || version === '1.125.1') ? { ...runsSchema,cutover: { artifactVersion: '1.123.0',importContract: 1 } } : runsSchema;
+  const { cutover: _runsCutover, ...runsPreparation } = runsSchema;
+  const runProfile = version === '1.123.0' || (version === '1.125.0' || version === '1.125.1') ? { ...runsSchema,cutover: { artifactVersion: '1.123.0',importContract: 1 } } : runsPreparation;
   const { cutover: _triggerCutover, ...triggerPreparation } = triggersSchema;
   const triggerProfile = (version === '1.125.0' || version === '1.125.1') ? triggersSchema : triggerPreparation;
   if (externalDomains && version !== '1.125.0' && version !== '1.125.1') throw new Error('External fixture requires final artifact.');
@@ -135,7 +136,7 @@ import { remoteSchema } from './server/remote/storage-schema.js';
 import { autoPromptSchema } from './server/auto-prompt/storage-schema.js';
 import { workflowsSchema } from './server/slack/storage-schema.js';
 import { runsSchema } from './server/runs/storage-schema.js';
-const runsDomain = runsDomainFor(${version === '1.123.0' || (version === '1.125.0' || version === '1.125.1') ? `{ ...runsSchema,cutover: { artifactVersion: '1.123.0',importContract: 1 } }` : 'runsSchema'});` : ''}
+const runsDomain = runsDomainFor(${version === '1.123.0' || (version === '1.125.0' || version === '1.125.1') ? `{ ...runsSchema,cutover: { artifactVersion: '1.123.0',importContract: 1 } }` : '{ ...runsSchema, cutover: undefined }'});` : ''}
 ${triggersRelease ? `import { triggersDomainFor } from './server/triggers/storage-commands.js';
 import { triggersSchema } from './server/triggers/storage-schema.js';
 const triggersDomain = triggersDomainFor(${(version === '1.125.0' || version === '1.125.1') ? `{ ...triggersSchema,cutover: { artifactVersion: '1.125.0',importContract: 1 } }` : '{ ...triggersSchema,cutover: undefined }'});` : ''}

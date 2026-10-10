@@ -524,9 +524,16 @@ async function waitForStorage(call: (method: string, args?: unknown[]) => Promis
 test('normal ready worker accepts withdrawal release but resumes only after the matching durable attempt commits', { timeout: 90000 }, async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tw-release-')));
   const state = join(root, 'state'); const paths = await runnerPaths(state);
-  const { call } = await launchDiagnostic(t, root, state, paths);
+  const worker = await launchDiagnostic(t, root, state, paths);
+  const { call } = worker;
   const deadline = Date.now() + 60000;
-  const first = await waitForStorage(call, true, deadline);
+  const first = await waitForStorage(call, true, deadline, worker);
+  const inspected = await call('storageControl', ['inspect']);
+  assert.equal(inspected.error, undefined);
+  const authority = (inspected.result as { authority: { domain: string; authority: string }[] }).authority;
+  assert.deepEqual(authority.map(row => [row.domain, row.authority]).sort(),
+    ['retention', 'runs', 'triggers', 'permissions', 'remote', 'auto-prompt', 'automation-workflows'].map(domain => [domain, 'database']).sort(),
+    'the same current default worker holds all seven domains in its actual database before withdrawal');
   const identity = first.snapshot!.storage!.identity!;
   const at = new Date().toISOString(); const fence = { id: 'normal-withdraw', attempt: 1 };
   const rollback: RollbackRecord = { format: 'tower-storage-rollback', version: 1, id: fence.id,
@@ -551,7 +558,7 @@ test('normal ready worker accepts withdrawal release but resumes only after the 
   assert.equal(withdrawn.state, 'withdrawn', JSON.stringify(withdrawn));
   const committed = await readRollbackRecord(state);
   assert.ok(committed.state === 'present' && !committed.record.held && committed.record.attempt!.n === 2);
-  const resumed = await waitForStorage(call, true, deadline);
+  const resumed = await waitForStorage(call, true, deadline, worker);
   assert.equal(resumed.instance, first.instance);
   assert.equal(resumed.snapshot?.storage?.state, 'ready');
   assert.equal((await call('storageControl', ['inspect'])).error, undefined, 'the same real SQLite worker remains serving');
