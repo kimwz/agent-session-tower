@@ -1,3 +1,5 @@
+import { DatabaseSync } from 'node:sqlite';
+import { RetentionStore } from '../../../../server/sessions/retention/store.js';
 import { SessionService } from '../../../../server/sessions/service.js';
 import { TemporaryCollector } from '../../../../server/temporary/directories.js';
 import { channel } from 'node:diagnostics_channel';
@@ -12,6 +14,31 @@ import { RunManager } from '../../../../server/runs/manager.js';
 import type { Session } from '../../../../shared/types.js';
 import { writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+
+// Damage the fixture-owned SQL journal only at the real cold reader, after all-domain bootstrap.
+// Earlier source/preparation failures would exercise a different gate; no successful result is mocked.
+const coldSqlDamage = process.env.TOWER_FIXTURE_COLD_SQL_DAMAGE;
+if (coldSqlDamage) {
+  const allowed = ['malformed', 'missing-source', 'missing-wrapper', 'missing-state'];
+  if (!allowed.includes(coldSqlDamage)) throw new Error('Unknown cold SQL fixture fault.');
+  const start = RetentionStore.prototype.start;
+  let injected = false;
+  RetentionStore.prototype.start = async function (...args) {
+    if (!injected) {
+      const state = process.argv.at(-1)!;
+      const db = new DatabaseSync(join(state, 'state.sqlite'));
+      try {
+        if (!db.prepare("SELECT * FROM domain_imports WHERE domain = 'retention' AND authority = 'database'").get())
+          throw new Error('Cold SQL fault requires the real retention authority.');
+        if (coldSqlDamage === 'missing-state') db.prepare('DELETE FROM retention_state').run();
+        else if (coldSqlDamage === 'malformed') db.prepare("UPDATE retention_metadata SET json = ? WHERE kind = 'journal'").run('{unknown journal');
+        else db.prepare("DELETE FROM retention_metadata WHERE kind = 'journal'").run();
+        injected = true;
+      } finally { db.close(); }
+    }
+    return start.apply(this, args);
+  };
+}
 
 // Count calls while retaining the actual scanner, collector and native adapter.
 if (process.env.TOWER_FIXTURE_COLD_COUNTS === '1') {
