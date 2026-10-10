@@ -180,6 +180,9 @@ async function prepareCurrentCold(root: string, stateDir: string): Promise<void>
     targets: ['core', ...context.manifest.domains.map(domain => domain.scope)], domains: [], phase: 'pending' };
   const input = join(root, 'cold-owner.json');
   await writeFile(input, JSON.stringify({ format: 'tower-offline-owner', activation, backupRoot: join(root, 'cold-consistent-backup') }), { mode: 0o600 });
+  for (const name of ['storage-migrations', 'runs-storage-migrations', 'triggers-storage-migrations']) {
+    await assert.rejects(lstat(join(stateDir, name)), { code: 'ENOENT' }, 'fresh offline CLI must create its own missing evidence parent');
+  }
   const completed = await current.storage.runOfflineStorageCommand(['activate', '--state-dir', stateDir, '--input', input]);
   assert.deepEqual(completed, { activationId: activation.activationId, state: 'complete', completedStoreScopes: context.manifest.domains.map(domain => domain.scope), effectsStarted: false });
   const client = await current.storage.openStorage({ stateDir, bundle: current.bundle() });

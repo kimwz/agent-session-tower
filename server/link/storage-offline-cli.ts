@@ -9,7 +9,7 @@ import { acquireStrictStateLock } from '../instance/state-lock.js';
 import { captureStorageBundle, storageBuildContext, preflightStorage, openStorage, type StorageClient } from '../storage/index.js';
 import { databaseSupported } from './storage-update.js';
 import { readSnapshot, readStorageIdentity, readRecoveryBarrier, reconcileRecovery, recoveryHold } from '../storage/recovery.js';
-import { storageLayout } from '../storage/paths.js';
+import { privateDirectory, storageLayout } from '../storage/paths.js';
 import { beginOfflineActivation, checkStorageActivation, finishOfflineActivation, decodeOfflineActivation, prepareOfflineActivation, recordOfflineDomainCompletion, verifyProtectedOfflineArtifact, readOfflinePrivateBytes, verifyOfflineCompletion, readOfflineActivation, verifyOfflineRecoverySnapshot } from './storage-offline.js';
 import { collectOfflineBackup, restoreOfflineBackup, verifyOfflineBackup, verifyOfflineRestoredInventory } from './storage-offline-backup.js';
 import { workerLegacyFiles, importRuns, holdRunsEvidence } from '../runs/storage-transfer.js';
@@ -144,6 +144,10 @@ export async function runOfflineStorageCommand(args: string[]): Promise<unknown>
       if(authority && authority.authority!=='database') throw new Error('Offline non-database authority requires owner recovery.');
       if(!authority) {
         if(['retention','runs','triggers','permissions'].includes(scope)) await inspectOfflineImportHistory(storage,stateDir,scope);
+        // Offline import bypasses startup's evidence-parent creation; history holds must run first.
+        if(scope==='retention') await privateDirectory(join(stateDir,'storage-migrations'),true);
+        if(scope==='runs') await privateDirectory(join(stateDir,'runs-storage-migrations'),true);
+        if(scope==='triggers') await privateDirectory(join(stateDir,'triggers-storage-migrations'),true);
         if(scope==='retention') await importRetention({storage,stateDir,evidenceParent:join(stateDir,'storage-migrations'),commandId,update,activation:owner});
         if(scope==='runs') await importRuns({storage,stateDir,evidenceParent:join(stateDir,'runs-storage-migrations'),commandId,update,activation:owner,repository:new RunsRepository(storage)});
         if(scope==='triggers') await importTriggers({stateDir,evidenceParent:join(stateDir,'triggers-storage-migrations'),commandId,update,activation:owner,repository:new TriggersRepository(storage),now:Date.now});
