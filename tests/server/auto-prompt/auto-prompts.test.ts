@@ -69,9 +69,19 @@ async function fixture(t: TestContext) {
   };
   const manager = new AutoPromptManager(options);
   await manager.start(); await manager.startRuntimeEffects();
-  t.after(async () => { await manager.close(); await storage.storage.close(); await rm(directory, { recursive: true, force: true }); });
+  let cleanupOwner = manager;
+  t.after(async () => { await cleanupOwner.close(); await storage.storage.close(); await rm(directory, { recursive: true, force: true }); });
   const finished = (id: string) => until(() => { const job = manager.get(id); return job && ['completed', 'error', 'cancelled'].includes(job.status) ? job : undefined; });
   return { directory, cwd, other, session, current, managed, calls, dispatches, manager, options, finished,
+    successor: async () => {
+      // A quiet held predecessor exits after its durable flush; only the successor owns teardown writes.
+      manager.holdStorage();
+      assert.equal(manager.busy(), false);
+      await manager.flush(); await manager.pauseAttachmentCleanup();
+      const successor = new AutoPromptManager(options);
+      cleanupOwner = successor;
+      return successor;
+    },
     respond: (fn: typeof response) => { response = fn; }, beforeAdmission: (fn: () => Promise<void>) => { beforeAdmission = fn; } };
 }
 
@@ -847,7 +857,7 @@ test('a held successor resumes queued and validated routing checkpoints with the
     await f.manager.flush();
     const saved = JSON.parse(await readAutoPromptFixture(f.options.repository));
     const decision = saved.find((entry: { job: { id: string } }) => entry.job.id === input.requestId).selection.decision;
-    const successor = new AutoPromptManager(f.options);
+    const successor = await f.successor();
     successor.holdStorage();
     await successor.start(); await successor.startRuntimeEffects();
     try {
@@ -864,6 +874,9 @@ test('a held successor resumes queued and validated routing checkpoints with the
       assert.equal(f.dispatches.length, 2);
       assert.equal(f.managed.filter(run => run.autoPromptId === input.requestId).length, 1);
       assert.equal(f.managed.filter(run => run.autoPromptId === queuedInput.requestId).length, 1);
+      const committed = await readAutoPromptFixture(f.options.repository);
+      await assert.rejects(f.manager.close(), /External row changed before guarded write/);
+      assert.equal(await readAutoPromptFixture(f.options.repository), committed, 'a stale predecessor cannot overwrite the successor');
   } finally { await successor.close(); }
   } finally { answer?.(resume(f.session.id)); }
 });
@@ -880,7 +893,7 @@ test('a proven not-admitted dispatch pauses quietly and revalidates its saved ta
   assert.equal(f.manager.get(input.requestId)?.status, 'dispatching');
   assert.equal(f.dispatches.length, 0);
   await f.manager.flush();
-  const successor = new AutoPromptManager(f.options);
+  const successor = await f.successor();
   successor.holdStorage();
   await successor.start(); await successor.startRuntimeEffects();
   try {
@@ -908,7 +921,7 @@ test('a directory model result is saved before a held session stage and is not e
   await f.manager.submit(input);
   await until(() => f.calls.length === 1 && !f.manager.busy());
   await f.manager.flush();
-  const successor = new AutoPromptManager(f.options);
+  const successor = await f.successor();
   successor.holdStorage(); await successor.start(); await successor.startRuntimeEffects();
   try {
     successor.releaseStorage();
