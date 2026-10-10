@@ -63,6 +63,8 @@ export interface RunnerOptions {
   env?(group: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
   /* Asked before every start attempt: false discards revoked/review work; defer preserves proven unstarted work until releaseStorage. */
   beforeStart?(id: string): Promise<boolean | 'defer'>;
+  /** Calls launch synchronously after its final current-policy check; refusal never requeues a running receipt. */
+  beforeLaunch?(id: string, command: string, cwd: string, timeoutSeconds: number, launch: () => void): Promise<void>;
 }
 
 /**
@@ -173,17 +175,23 @@ export class PermissionRunner {
     }
     const stdout = new Kept();
     const stderr = new Kept();
-    let child;
+    let child: ReturnType<typeof spawn> | undefined;
     try {
       // The same search path an agent's turn has, so a command it could name (gh, npm, …) is found here too.
       let env: NodeJS.ProcessEnv = { ...process.env, PATH: providerDirectories(process.env).join(delimiter) };
       delete env.CLAUDECODE; delete env.CLAUDE_CODE_SESSION_ID; delete env.CODEX_THREAD_ID;
       env = this.options.env?.(group, env) ?? env;
-      child = spawn('/bin/sh', ['-c', command], { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      const launch = () => {
+        if (this.storageHeld || child) return;
+        child = spawn('/bin/sh', ['-c', command], { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      };
+      if (this.options.beforeLaunch) await this.options.beforeLaunch(id, command, cwd, timeoutSeconds, launch);
+      else if (!this.options.beforeStart) launch();
     } catch (error) {
       await this.options.update(id, { status: 'failed', startedAt, finishedAt: this.now(), error: error instanceof Error ? error.message : String(error) });
       return;
     }
+    if (!child) return;
     const pid = child.pid;
     if (!pid) {
       const error = await new Promise<string>(resolve => child.once('error', value => resolve(value.message)));

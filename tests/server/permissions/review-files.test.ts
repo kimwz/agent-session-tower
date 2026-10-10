@@ -33,7 +33,7 @@ async function fixture(t: TestContext, now?: () => Date) {
   execFileSync('git', ['-C', project, 'init', '-q']);
   const sessions = new Map<string, { cwd: string; provider: 'claude' | 'codex' }>([['codex:sqlite', { cwd: project, provider: 'codex' }]]);
   let service!: PermissionService;
-  const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 200, beforeStart: id => service.confirmReviewed(id) });
+  const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 200, beforeStart: id => service.confirmReviewed(id), beforeLaunch: (id, command, cwd, timeout, launch) => service.launchReviewed(id, command, cwd, timeout, launch) });
   let reviewer: PermissionReviewer | undefined;
   service = new PermissionService({ stateDir, repository:noStorageFixture(stateDir), env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), ...(now ? { now } : {}),
     startRun: request => runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600, request.sessionId),

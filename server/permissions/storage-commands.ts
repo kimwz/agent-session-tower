@@ -50,7 +50,7 @@ export function permissionsDomainFor(schema: StorageDomainSchema): StorageDomain
         if (!matches) fail('Permission search projection disagrees with its validated payload.');
         return { id:row.id,ordinal:row.ordinal,bytes:Buffer.byteLength(row.json) };
       }); } },
-    chunk:{ kind:'read',run(c,value) { const p=obj(value); current(c,p); const t=table(p.kind); if (typeof p.id !== 'string' || !Number.isSafeInteger(p.offset) || (p.offset as number)<0 || (p.offset as number)>=PERMISSION_BYTES) fail('Invalid permission chunk.'); const row=c.prepare(`SELECT substr(CAST(json AS BLOB),?,?) AS data FROM ${t} WHERE id=?`).get((p.offset as number)+1,PERMISSION_CHUNK_BYTES,p.id) as { data:Uint8Array } | undefined; if (!row) fail('Permission row missing.'); return Buffer.from(row!.data).toString('base64'); } },
+    chunk:{ kind:'read',run(c,value) { const p=obj(value); current(c,p); const t=table(p.kind); if (typeof p.id !== 'string' || !Number.isSafeInteger(p.offset) || (p.offset as number)<0 || (p.offset as number)>=PERMISSION_BYTES) fail('Invalid permission chunk.'); const id=p.id; if (typeof id !== 'string') throw new Error('Invalid permission chunk identity.'); const row=c.prepare(`SELECT substr(CAST(json AS BLOB),?,?) AS data FROM ${t} WHERE id=?`).get((p.offset as number)+1,PERMISSION_CHUNK_BYTES,id) as { data:Uint8Array } | undefined; if (!row) fail('Permission row missing.'); return Buffer.from(row!.data).toString('base64'); } },
     commit:{ kind:'write',run(c,value) {
       const p=obj(value), h=permissionsHead(c);
       if (!['import','update','restore'].includes(String(p.mode))) fail('Unknown permission write mode.');

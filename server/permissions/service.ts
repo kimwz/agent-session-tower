@@ -74,6 +74,8 @@ export interface PermissionServiceOptions {
   effectGate?(): Promise<void>;
   /** Worker rechecks its current closed-session/source policy; SQL/native artifacts never supply this authority. */
   requestGate?(request:PermissionRequest): Promise<void>;
+  /** Current worker policy, synchronously checked after the last await and before launch. */
+  requestAdmission?(request: PermissionRequest): void;
   env?: NodeJS.ProcessEnv;
   /** The folder and provider of a Tower session. */
   session(id: string): { cwd: string; provider: Provider } | undefined;
@@ -501,7 +503,10 @@ export class PermissionService {
     const stale = waited > MAX_APPROVAL_WAIT_MS || earlier;
     // The same places stay out of a folder's entries as when the reviewer listed it (see PermissionReviewer).
     const changed = stale || !request.review?.files?.length ? [] : await changedFiles(request.review.files, await deniedPaths(this.options.stateDir));
-    if (!stale && !changed.length) { await this.requireEffects(); return true; }
+    if (!stale && !changed.length) {
+      await this.requireRequestEffects(request);
+      return this.currentRunAdmission(request, 'waiting');
+    }
     const requeued = await this.serial(async () => {
       const item = this.state.requests.find(entry => entry.id === id);
       // Decided again, or started, meanwhile: left as it is.
@@ -522,6 +527,30 @@ export class PermissionService {
     });
     if (requeued) this.options.onReviewQueued?.();
     return false;
+  }
+
+  private currentRunAdmission(request: PermissionRequest, status: 'waiting' | 'running'): boolean {
+    if (!this.effectsAvailable()) return false;
+    const current = this.state.requests.find(item => item.id === request.id);
+    const session = this.options.session(request.sessionId);
+    if (!current || current.status !== 'approved' || current.rule.kind !== 'run' || current.run?.status !== status
+      || current.sessionId !== request.sessionId || current.cwd !== request.cwd || current.provider !== request.provider
+      || current.rule.value !== request.rule.value || current.timeoutSeconds !== request.timeoutSeconds
+      || !session || session.cwd !== current.cwd || (current.provider && current.provider !== (session.provider === 'codex' ? 'codex' : 'claude'))
+      || (current.decidedBy === 'auto' && this.options.autoReviewSkip?.(current))) return false;
+    this.options.requestAdmission?.(structuredClone(current));
+    return true;
+  }
+
+  /** The known running receipt is consumed once; refusal must never put it back into waiting. */
+  async launchReviewed(id: string, command: string, cwd: string, timeoutSeconds: number, launch: () => void): Promise<void> {
+    const request = this.state.requests.find(item => item.id === id);
+    if (!request || request.status !== 'approved' || request.rule.kind !== 'run' || request.run?.status !== 'running' || request.run.pid !== undefined
+      || request.rule.value !== command || request.cwd !== cwd || (request.timeoutSeconds ?? 600) !== timeoutSeconds) return;
+    await this.requireRequestEffects(request);
+    // An async worker policy alone cannot cover the final await-to-launch boundary.
+    if (this.options.requestGate && !this.options.requestAdmission) return;
+    if (this.currentRunAdmission(request, 'running')) launch();
   }
 
   /** The runner reports a run's progress. */
