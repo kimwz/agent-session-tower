@@ -1,0 +1,30 @@
+{
+  "publicCommit": "0ef1f1df85b2b7c546c6e691283bb0a26123bbad",
+  "officialRelease": "https://github.com/kimwz/agent-session-tower/releases/tag/v1.124.0",
+  "officialAssetId": 626540259,
+  "officialPackageSHA256": "5647224b149023ad8f5a429832c1fc6b3012e7b27c16808a1fc2af6b00ef371d",
+  "identity": {
+    "appVersion": "1.124.0",
+    "protocol": "tower-storage/1",
+    "sourceHash": "5318990f15be1bbe73ba69c390c4b5ae32c7ee4ca61ba89f4d34241723936a0a",
+    "manifestDigest": "7cd7d758851f5ef047450f63d372660ccc8a36f41af5b736274d00bbd2fdccc0"
+  },
+  "files": {
+    "thread-bundle.json": {
+      "member": "package/dist/server/storage/generated/thread-bundle.json",
+      "bytes": 827112,
+      "sha256": "80664388b126c95cf5355cdf7636900c0254a7dc3c72693d6ef6176e10c02432"
+    },
+    "storage-schema.js.txt": {
+      "member": "package/dist/server/storage/schema.js",
+      "bytes": 4089,
+      "sha256": "faf9155abfeca96948f76649267a2c28d3fbadac45ed22c44a7faa499b8a3b34"
+    },
+    "triggers-storage-schema.js.txt": {
+      "member": "package/dist/server/triggers/storage-schema.js",
+      "bytes": 2184,
+      "sha256": "0df71f3dd6ab9fc20a90b6a87414d186bfd34339477927d7533bea79a39575d3"
+    }
+  },
+  "source": "Read-only member capture of parent-protected official A124 tgz; no artifact execution."
+}

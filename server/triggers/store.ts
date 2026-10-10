@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { readPrivateBytes, writePrivateJson } from '../stores/private-json.js';
+import type { StorageUpdateInput } from '../link/storage-update.js';
 import type { StorageClient } from '../storage/client.js';
 import { TriggersRepository } from './storage-repository.js';
 import { bootstrapTriggers, holdTriggersEvidence } from './storage-transfer.js';
@@ -20,6 +21,7 @@ const FULL = 'Trigger history is full; scheduled times pass without running unti
 export class TriggerStore {
   private repository?: TriggersRepository;
   private database = false;
+  private bootstrap?: Promise<void>;
   private rows: TriggerRow[] = [];
   private current: EngineState = empty();
   private writes: Promise<unknown> = Promise.resolve();
@@ -34,6 +36,21 @@ export class TriggerStore {
   constructor(private readonly options: { stateDir: string; storage?: StorageClient; now: () => number; limits: () => { acceptBytes?: number; maxBytes?: number } | undefined; changed: () => void }) {
     if (options.storage) this.repository = new TriggersRepository(options.storage);
     this.path = join(options.stateDir, 'trigger-engine.json');
+  }
+
+  /** The worker parks its existing startup continuation here, before load/recovery or secret/native effects. */
+  bootstrapStorage(update: () => Promise<StorageUpdateInput>): Promise<void> {
+    if (!this.repository) return Promise.reject(new Error('Triggers storage is unavailable.'));
+    return this.bootstrap ??= bootstrapTriggers(this.repository,this.options.stateDir,{ update,now: this.options.now })
+      .then(() => undefined).finally(() => { this.bootstrap = undefined; });
+  }
+
+  /** Reopen/prepare the common SDK first. Resolution never retries the staged command. */
+  async resolveStorage(): Promise<'committed' | 'not-committed'> {
+    if (!this.repository?.pending()) throw new Error('No uncertain trigger write to resolve.');
+    const disposition = await this.repository.resolvePending();
+    if (disposition === 'unknown') throw new Error('Trigger receipt remains unknown.');
+    return disposition;
   }
 
   private get acceptBytes() { return this.options.limits()?.acceptBytes ?? ACCEPT_STATE_BYTES; }

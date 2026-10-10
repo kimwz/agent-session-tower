@@ -32,6 +32,15 @@ export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' 
       if (createHash('sha256').update(await readFile(join(actualARoot, fact.captureFile))).digest('hex') !== fact.sha256) throw new Error('Actual A122 schema capture mismatch.');
     }
   }
+  const triggerARoot = fileURLToPath(new URL('./triggers-a124/', import.meta.url));
+  const triggerACapture = version === '1.124.0' ? JSON.parse(await readFile(join(triggerARoot,'capture.json'),'utf8')) : undefined;
+  const triggerABytes = triggerACapture ? await readFile(join(triggerARoot,'thread-bundle.json')) : undefined;
+  if (triggerACapture) {
+    if (triggerACapture.publicCommit !== '0ef1f1df85b2b7c546c6e691283bb0a26123bbad' || triggerACapture.officialAssetId !== 626540259 || triggerACapture.officialPackageSHA256 !== '5647224b149023ad8f5a429832c1fc6b3012e7b27c16808a1fc2af6b00ef371d') throw new Error('Actual A124 release provenance mismatch.');
+    const expected = { 'thread-bundle.json': '80664388b126c95cf5355cdf7636900c0254a7dc3c72693d6ef6176e10c02432', 'storage-schema.js.txt': 'faf9155abfeca96948f76649267a2c28d3fbadac45ed22c44a7faa499b8a3b34', 'triggers-storage-schema.js.txt': '0df71f3dd6ab9fc20a90b6a87414d186bfd34339477927d7533bea79a39575d3' };
+    for (const [name,sha256] of Object.entries(expected)) if (createHash('sha256').update(await readFile(join(triggerARoot,name))).digest('hex') !== sha256 || triggerACapture.files[name]?.sha256 !== sha256) throw new Error('Actual A124 capture bytes/hash mismatch.');
+    if (triggerABytes!.length !== 827112) throw new Error('Actual A124 artifact length mismatch.');
+  }
   const versionPlugin: Plugin = { name: 'retention-fixture-release', setup(builder) {
     if (preparation) builder.onLoad({ filter: /[\\/]server[\\/]sessions[\\/]retention[\\/]storage-(schema|commands)\.ts$/ }, async args => {
       const name = args.path.split(/[\\/]/).at(-1)!;
@@ -55,8 +64,10 @@ export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' 
     if (!firstSql(capturedSchema) || firstSql(capturedSchema) !== firstSql(currentSchema)) throw new Error('Old A migration1 changed.');
   }
   const runProfile = version === '1.123.0' || version === '1.125.0' ? { ...runsSchema,cutover: { artifactVersion: '1.123.0',importContract: 1 } } : runsSchema;
-  const triggerProfile = version === '1.125.0' ? { ...triggersSchema,cutover: { artifactVersion: '1.125.0',importContract: 1 } } : triggersSchema;
+  const { cutover: _triggerCutover, ...triggerPreparation } = triggersSchema;
+  const triggerProfile = version === '1.125.0' ? triggersSchema : triggerPreparation;
   const manifest = storageManifest(runsRelease ? [schema,runProfile,...(triggersRelease ? [triggerProfile] : [])] : [schema],version);
+  if (triggerACapture && manifest.digest !== triggerACapture.identity.manifestDigest) throw new Error('Actual A124 manifest mismatch.');
   if (actualACapture && manifest.digest !== actualACapture.identity.manifestDigest) throw new Error('Actual A122 manifest mismatch.');
   const artifacts: Record<string, StorageThreadArtifact> = {};
   for (const fault of preparation ? ['normal', 'after-native-hold'] : ['normal', 'before', 'after', 'after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss', ...(runsRelease ? ['after-unsent-compensation'] : []), 'refuse-once', 'corrupt', 'io']) {
@@ -71,7 +82,7 @@ import { runsSchema } from './server/runs/storage-schema.js';
 const runsDomain = runsDomainFor(${version === '1.123.0' || version === '1.125.0' ? `{ ...runsSchema,cutover: { artifactVersion: '1.123.0',importContract: 1 } }` : 'runsSchema'});` : ''}
 ${triggersRelease ? `import { triggersDomainFor } from './server/triggers/storage-commands.js';
 import { triggersSchema } from './server/triggers/storage-schema.js';
-const triggersDomain = triggersDomainFor(${version === '1.125.0' ? `{ ...triggersSchema,cutover: { artifactVersion: '1.125.0',importContract: 1 } }` : 'triggersSchema'});` : ''}
+const triggersDomain = triggersDomainFor(${version === '1.125.0' ? `{ ...triggersSchema,cutover: { artifactVersion: '1.125.0',importContract: 1 } }` : '{ ...triggersSchema,cutover: undefined }'});` : ''}
 const schema = ${retentionCutover ? `{ ...retentionSchema, cutover: { artifactVersion: '1.121.0', importContract: 1 } }` : 'retentionSchema'};
 ${!['before', 'after'].includes(fault) ? '' : `let commitId = -1;
 parentPort.on('message', message => { if (message.op === 'write' && message.command === 'commit') { commitId = message.id; ${fault === 'before' ? 'process.exit(9);' : ''} } });
@@ -129,6 +140,11 @@ runStorageThread([domain${runsRelease ? ', runsDomain' : ''}${triggersRelease ? 
   if (actualACapture) {
     const actual = JSON.parse(actualABytes!.toString('utf8')) as StorageThreadArtifact;
     if (actual.sourceHash !== actualACapture.identity.sourceHash) throw new Error('Actual A122 source identity mismatch.');
+    artifacts.normal = actual;
+  }
+  if (triggerACapture) {
+    const actual = JSON.parse(triggerABytes!.toString('utf8')) as StorageThreadArtifact;
+    if (actual.sourceHash !== '5318990f15be1bbe73ba69c390c4b5ae32c7ee4ca61ba89f4d34241723936a0a' || actual.sourceHash !== triggerACapture.identity.sourceHash) throw new Error('Actual A124 source identity mismatch.');
     artifacts.normal = actual;
   }
   const parentPath = join(directory, 'parent.mjs');

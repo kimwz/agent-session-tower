@@ -1,3 +1,4 @@
+import type { StorageUpdateInput } from '../link/storage-update.js';
 import type { StorageClient } from '../storage/client.js';
 import { triggerBackupOf } from './backup.js';
 import { serializeState } from './state.js';
@@ -80,6 +81,10 @@ export class TriggerService extends EventEmitter {
     this.dispatch = new TriggerDispatch(this.store, options.executor, this.now, { isHeld: () => this.engine.isHeld(), githubClient: (id, fresh) => this.githubClient(id, fresh), sharing: options.sharing });
     this.engine = new TriggerEngine(this.store, this.polls, this.dispatch, this.budget, this.now, options.tickMs ?? 1000);
   }
+
+  /** Called by the worker's existing parked startup continuation before start(). */
+  bootstrapStorage(update: () => Promise<StorageUpdateInput>): Promise<void> { return this.store.bootstrapStorage(update); }
+  resolveStorage(): Promise<'committed' | 'not-committed'> { return this.store.resolveStorage(); }
 
   /**
    * `restore`: a backup's triggers and settings, applied before anything fires (see `restoreFrom`). Answers what of it
