@@ -20,7 +20,7 @@ const createdRecord = (id: string, runId: string, cwd: string, values: Record<st
 const savedRun = (id: string, sessionId: string, values: Omit<Partial<Run>, 'origin'> & Record<string, unknown> = {}) => ({
   id, sessionId, prompt: 'Earlier work', status: 'completed', createdAt: now, finishedAt: now, output: 'done', ...values });
 
-async function fixture(t: TestContext, saved: { created?: unknown[]; runs?: unknown[] } = {}) {
+async function fixture(t: TestContext, saved: { created?: unknown[]; runs?: unknown[] } = {}, holdUntilReady = false) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-run-origin-'));
   const stateDir = join(directory, 'state');
   await mkdir(stateDir, { recursive: true });
@@ -28,6 +28,7 @@ async function fixture(t: TestContext, saved: { created?: unknown[]; runs?: unkn
   if (saved.runs) await writeFile(join(stateDir, 'runs.json'), JSON.stringify(saved.runs), { mode: 0o600 });
   const natives = new Map([NATIVE, OTHER].map(id => [`codex:${id}`, nativeSession(id, directory)]));
   const managers: RunManager[] = [];
+  let providerStarts = 0;
   const sqlObservations: Array<Record<string, unknown>> = [];
   const observe = (manager: RunManager) => {
     const client = manager.sqlFixture();
@@ -65,10 +66,10 @@ async function fixture(t: TestContext, saved: { created?: unknown[]; runs?: unkn
   };
   const open = async () => {
     const initial = managers.length === 0 ? parseRunDocuments({ runs: Buffer.from(JSON.stringify(saved.runs ?? [])), created: Buffer.from(JSON.stringify(saved.created ?? [])), instructions: Buffer.from('{}') }) : undefined;
-    const manager = new RunManager({ stateDir, fixtureInitial: initial, getSession: id => natives.get(id), refreshSessions: async () => {}, pollMs: 60_000,
+    const manager = new RunManager({ stateDir, fixtureInitial: initial, holdUntilReady, getSession: id => natives.get(id), refreshSessions: async () => {}, pollMs: 60_000,
       findExecutable: async () => '/fixture/codex',
-      spawnProcess: () => { throw new Error('Provenance fixtures never launch providers.'); },
-      openCodexStdio: async () => { throw new Error('Provenance fixtures never launch providers.'); } });
+      spawnProcess: () => { providerStarts++; throw new Error('Provenance fixtures never launch providers.'); },
+      openCodexStdio: async () => { providerStarts++; throw new Error('Provenance fixtures never launch providers.'); } });
     await manager.start();
     observe(manager);
     managers.push(manager);
@@ -80,11 +81,11 @@ async function fixture(t: TestContext, saved: { created?: unknown[]; runs?: unkn
     await manager.flushState();
     return (await fixtureDocuments(manager)).created as Array<{ session: { id: string }; origin?: unknown }>;
   };
-  return { directory, stateDir, open, createdFile, sqlObservations };
+  return { directory, stateDir, open, createdFile, sqlObservations, providerStarts: () => providerStarts };
 }
 
 test('a new session records who created it before any provider starts', async t => {
-  const f = await fixture(t);
+  const f = await fixture(t, {}, true);
   try {
     const manager = await f.open();
     const owner = await manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Owner task' }, { origin: { kind: 'owner' } });
@@ -92,10 +93,14 @@ test('a new session records who created it before any provider starts', async t 
     const slack = await manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Slack thread' }, { origin: { kind: 'slack', workflowId }, untrustedInput: true });
     const unmarked = await manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Internal caller' });
     assert.deepEqual(owner.run.origin, { kind: 'owner' });
+    assert.deepEqual([owner.run.status, slack.run.status, unmarked.run.status], ['queued', 'queued', 'queued']);
     const saved = new Map((await f.createdFile()).map(record => [record.session.id, record.origin]));
     assert.deepEqual(saved.get(owner.session.id), { kind: 'owner', untrustedInput: false });
     assert.deepEqual(saved.get(slack.session.id), { kind: 'slack', workflowId, untrustedInput: true });
     assert.deepEqual(saved.get(unmarked.session.id), { kind: 'unknown', untrustedInput: false });
+    const durable = await fixtureDocuments(manager);
+    assert.deepEqual(durable.runs.map(run => run.status), ['queued', 'queued', 'queued']);
+    assert.equal(f.providerStarts(), 0);
   } catch (error) {
     assert.fail(`${error instanceof Error ? error.stack ?? error.message : String(error)}\nBounded existing SQL RPC observations (last 64):\n${JSON.stringify(f.sqlObservations, null, 2)}`);
   }

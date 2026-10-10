@@ -9,6 +9,7 @@ import { TriggerService, triggerRequestId, type TriggerExecutor } from '../../..
 import type { RunAdmission } from '../../../server/runs/manager.js';
 import type { AutoPromptJob, CreateSessionRequest, Run, Session } from '../../../shared/types.js';
 import type { TriggerActor, TriggerInput } from '../../../shared/triggers.js';
+import { documentsHash, requestHash, rowsOf, triggerHash } from '../../../server/triggers/storage-codec.js';
 import { asideNames, blockQuarantine, captureErrors } from '../../helpers/quarantine.js';
 
 const OWNER: TriggerActor = { kind: 'owner', via: 'ui' };
@@ -924,19 +925,77 @@ test('restoring a consumed unarchived definition respects the active definition 
   assert.equal(service.get(repeat.id).trigger.enabled, true);
 });
 
-test('a missing downgrade consumption ledger is recovered from snapshots with one durable warning', async t => {
+test('a missing downgrade consumption ledger is recovered from snapshots with one durable sealed-manifest warning', async t => {
   const f = await fixture(t); let service = await f.open();
   const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
   const event = await service.run(trigger.id, OWNER); await service.tick(); f.finish(); await service.tick();
   service.close(); await service.settle();
   const state = JSON.parse(await f.sql.text()); delete state.onceConsumed;
+  const source = Buffer.from(JSON.stringify(state));
+  const originalAudit = JSON.stringify(state.audit);
   const imported = await fixture(t);
-  await imported.sql.raw(JSON.stringify(state)); service = await imported.open();
+  await imported.sql.raw(source.toString('utf8'));
+  await imported.sql.bootstrap(() => { throw new Error('raw import must not read execution clock'); });
+  const current = await imported.sql.repository.exportCurrent();
+  assert.equal(JSON.stringify(current.documents.audit), originalAudit);
+  assert.deepEqual(current.documents.onceConsumed, { [trigger.id]: state.triggers.find((entry: { id: string }) => entry.id === trigger.id).consumed });
+  assert.deepEqual(current.documents.events, state.events);
+  const parent = join(imported.directory, 'triggers-storage-migrations');
+  const evidence = await readdir(parent);
+  assert.equal(evidence.length, 1);
+  const directory = join(parent, evidence[0]);
+  const manifestBytes = await readFile(join(directory, 'manifest.json'));
+  const manifest = JSON.parse(manifestBytes.toString('utf8'));
+  const manifestHash = triggerHash(manifestBytes);
+  assert.equal(current.head.authority!.manifestSha256, manifestHash);
+  assert.equal(manifest.kind, 'raw-import'); assert.equal(manifest.domain, 'triggers');
+  assert.deepEqual(manifest.build, imported.sql.client.context!.identity);
+  assert.equal(manifest.files['trigger-engine.json'].bytes, source.length);
+  assert.equal(manifest.files['trigger-engine.json'].sha256, triggerHash(source));
+  assert.equal(manifest.canonicalSha256, documentsHash(current.documents));
+  assert.equal(manifest.warningTimeBasis, 'fixed-migration-epoch-unknown-source-time');
+  assert.equal(manifest.sourceWarnings.length, 1);
+  const warning = manifest.sourceWarnings[0];
+  assert.match(warning.summary, /ledger was absent/);
+  assert.match(warning.summary, /Deleted IDs beyond legacy retention cannot be recovered/);
+  assert.equal(warning.action, 'consume'); assert.equal(warning.triggerId, trigger.id);
+  assert.equal(warning.triggerName, trigger.name);
+  assert.equal(warning.at, '1970-01-01T00:00:00.000Z');
+  assert.deepEqual(warning.actor, { kind: 'system', via: 'migration' });
+  assert.match(warning.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  const receiptId = `${evidence[0]}-commit`;
+  const receipt = await imported.sql.client.receipt(receiptId);
+  assert.equal(receipt.found, true);
+  if (!receipt.found) assert.fail('missing import receipt');
+  assert.equal(receipt.receipt.scope, 'triggers'); assert.equal(receipt.receipt.command, 'commit');
+  assert.equal(receipt.receipt.result.state, 'included');
+  if (receipt.receipt.result.state !== 'included') assert.fail('import receipt result omitted');
+  assert.deepEqual(receipt.receipt.result.value, {
+    revision: 1, generation: current.head.authority!.generation, mode: 'import',
+    requestSha256: requestHash('import', rowsOf(current.documents)), intentSha256: imported.sql.repository.lastIntent!.sha256,
+    documentsSha256: documentsHash(current.documents),
+  });
+  service = await imported.open();
   assert.equal(service.get(trigger.id).trigger.consumed!.eventId, event.id);
-  assert.equal(service.audit().filter(entry => entry.summary.includes('ledger was absent')).length, 1);
-  service.close(); await service.settle(); service = await imported.open();
-  assert.equal(service.audit().filter(entry => entry.summary.includes('ledger was absent')).length, 1);
+  assert.equal(service.audit().filter(entry => entry.summary.includes('ledger was absent')).length, 0);
+  service.close(); await service.settle();
+  await imported.sql.client.close(); await imported.sql.client.reopen(); await imported.sql.client.prepare({ allowMigration: false });
+  service = await imported.open();
+  const reopened = await imported.sql.repository.exportCurrent();
+  assert.equal(JSON.stringify(reopened.documents.audit), originalAudit);
+  assert.deepEqual(reopened.documents.onceConsumed, current.documents.onceConsumed);
+  assert.deepEqual(reopened.documents.events, state.events);
+  assert.equal(service.get(trigger.id).trigger.consumed!.eventId, event.id);
+  assert.equal(service.audit().filter(entry => entry.summary.includes('ledger was absent')).length, 0);
+  assert.deepEqual(await readFile(join(directory, 'manifest.json')), manifestBytes);
+  assert.equal(triggerHash(await readFile(join(directory, 'manifest.json'))), manifestHash);
+  assert.equal(reopened.head.authority!.manifestSha256, manifestHash);
+  assert.deepEqual(await readFile(join(directory, 'trigger-engine.json')), source);
+  assert.deepEqual(await readFile(join(imported.directory, 'trigger-engine.json')), source);
+  assert.deepEqual(await imported.sql.client.receipt(receiptId), receipt);
+  assert.equal(imported.calls.length, 0);
   await assert.rejects(service.run(trigger.id, OWNER), /consumed/i);
+  assert.equal(imported.calls.length, 0);
 });
 
 test('a once skip policy uses the admission time after waiting for a commit', async t => {
