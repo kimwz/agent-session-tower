@@ -424,9 +424,17 @@ jobs:
           printf '%s\n' release-version-decision > "$report/stage.txt"
           if [[ "$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')" == 1.125.0 ]]; then
             printf '%s\n' already-target > "$report/version-mode.txt"
-            printf '%s\n' already-target-official-hooks > "$report/stage.txt"
-            npm version 1.125.0 --allow-same-version --no-git-tag-version
-            printf '0\n' > "$report/npm-version-exit.txt"
+            if git fetch --no-tags origin refs/tags/v1.125.0:refs/tags/v1.125.0; then
+              # An immutable tagged version already passed its release hooks. Reuse only identical release metadata.
+              git diff --exit-code v1.125.0 -- CHANGELOG.md package.json package-lock.json shared/app-identity.ts
+              printf '%s\n' already-target-tagged-hooks-reused > "$report/stage.txt"
+              node scripts/release.mjs notes 1.125.0 > /dev/null
+              npm run build
+            else
+              printf '%s\n' already-target-official-hooks > "$report/stage.txt"
+              npm version 1.125.0 --allow-same-version --no-git-tag-version
+              printf '0\n' > "$report/npm-version-exit.txt"
+            fi
           else
             node --input-type=module <<'FLOOR'
           import assert from 'node:assert/strict';

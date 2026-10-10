@@ -10,7 +10,7 @@ import type { CodexBridgeOptions } from '../../../server/runs/codex-bridge.js';
 import { checkedInstructions } from '../../../server/runs/turn-notes.js';
 import { UUID, type CreatedSession } from '../../../server/runs/saved-state.js';
 import type { Run, Session } from '../../../shared/types.js';
-import { actualStorage, stopFixtureWriter } from './sql-fixture.js';
+import { actualStorage, fixtureCommandError, stopFixtureWriter } from './sql-fixture.js';
 import { retainedReceipts } from '../../../server/runs/permission-continuation.js';
 import { RunsRepository } from '../../../server/runs/storage-repository.js';
 import { parseRunDocuments } from '../../../server/runs/storage-codec.js';
@@ -73,11 +73,27 @@ test('streamed output is announced at once but saved on its slower cadence', asy
 test('output waiting for its cadence reaches disk on the cadence alone', async t => {
   const f = await fixture(t, 40);
   const { run, bridge } = await f.running();
+  const repo = new RunsRepository(f.db);
+  const head = await repo.head();
+  assert.equal(head.authority?.authority, 'database');
+  const generation = head.authority!.generation;
   bridge.onOutput('Eventually saved');
   const deadline = Date.now() + 5000;
   for (;;) {
-    await f.internals.flush();
-    if ((await f.saved()).find(item => item.id === run.id)?.output === 'Eventually saved') break;
+    try {
+      if ((await f.saved()).find(item => item.id === run.id)?.output === 'Eventually saved') break;
+    } catch (error) {
+      // Both export fences can refuse a cadence commit; authority/generation changes must still fail.
+      const pagingChanged = error instanceof Error && error.constructor === Error
+        && error.message === 'Runs changed while paging current export.';
+      const currentChanged = error instanceof fixtureCommandError(f.db)
+        && error.phase === 'command' && error.code === 'domain-failed'
+        && error.message === 'Runs authority or current generation changed.';
+      if (!pagingChanged && !currentChanged) throw error;
+      const current = await repo.head();
+      assert.equal(current.authority?.authority, 'database');
+      assert.equal(current.authority!.generation, generation);
+    }
     assert.ok(Date.now() < deadline, 'output was not saved on its cadence');
     await new Promise(resolve => setTimeout(resolve, 10));
   }
