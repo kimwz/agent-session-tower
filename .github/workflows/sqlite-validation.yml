@@ -96,7 +96,6 @@ jobs:
           if-no-files-found: error
 
   residual-probe:
-    needs: fast-contracts
     timeout-minutes: 10
     runs-on: macos-latest
     steps:
