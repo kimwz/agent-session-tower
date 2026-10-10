@@ -10,7 +10,7 @@ import { changedFiles, deniedPaths } from './inspect.js';
 import type { Provider } from '../../shared/types.js';
 import { codexRulesPath, realLocation, syncCodex } from './native.js';
 import type { PermissionsRepository } from './storage-repository.js';
-import { permissionRows, permissionStateBytes, type PermissionRowKind, type PermissionChange } from './storage-codec.js';
+import { permissionRows, permissionStateBytes, permissionValueBytes, type PermissionRowKind, type PermissionChange } from './storage-codec.js';
 import { mergePermissions, permissionsBackupOf } from './backup.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
@@ -136,10 +136,13 @@ export class PermissionService {
     await this.serial(async () => {
       const merged=mergePermissions(incoming,this.state);
       if (!merged) throw failure('Invalid permissions backup.');
-      permissionRows(merged);
+      const settings = { version: 1 as const, rules: merged.rules as PermissionRule[], requests: [], codex: [], ...(merged.autoReview ? { autoReview: merged.autoReview as PermissionAutoReview } : {}) };
+      permissionRows(settings);
       if (!this.options.repository) throw failure('Permission restore requires SQL authority.','unavailable');
-      await this.options.repository.restore(merged as unknown as PermissionState,expectedGeneration,commandId);
-      this.state=await this.options.repository.load();
+      await this.options.repository.restore(settings,expectedGeneration,commandId);
+      const next = { ...this.state, rules: settings.rules };
+      if (settings.autoReview) next.autoReview = settings.autoReview; else delete next.autoReview;
+      this.state = next;
     });
     // Backup restore itself never applies a grant or admits a continuation.
   }
@@ -190,12 +193,14 @@ export class PermissionService {
     return this.serial(async () => {
       const { provider, model } = this.autoReview();
       const settings: PermissionAutoReview = { enabled: input.enabled, resume: input.resume, ...(provider ? { provider } : {}), ...(model ? { model } : {}) };
-      await this.commit((state, touch) => { touch('meta','autoReview'); for (const r of state.requests) if (!settings.enabled && r.status === 'pending' && r.review?.status === 'queued') touch('request',r.id);
-        state.autoReview = settings;
-        if (!settings.enabled) for (const request of state.requests) {
-          if (request.status === 'pending' && request.review?.status === 'queued') request.review = { status: 'skipped', reason: '자동 검토가 꺼졌습니다.', at: this.now() };
+      {
+        const batch = new PermissionBatch(this.state);
+        batch.autoReview(settings);
+        if (!settings.enabled) for (const request of this.state.requests) {
+          if (request.status === 'pending' && request.review?.status === 'queued') batch.request(request.id)!.review = { status: 'skipped', reason: '자동 검토가 꺼졌습니다.', at: this.now() };
         }
-      });
+        await this.commitRows(batch);
+      }
       this.options.onAutoReviewChange?.(settings);
       return this.overview();
     });
@@ -262,17 +267,19 @@ export class PermissionService {
         const block = autoReviewBlock(request.rule, request.cwd);
         if (block) return owner(block);
         // Every waiting run's reviewed files stay in the state file until it starts: together they stay well within it.
-        const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value, null, 2));
+        const size = permissionValueBytes;
         const held = this.state.requests.reduce((sum, item) => sum + (item.review?.files ? size(item.review.files) : 0), 0);
         // Together with everything else saved, the state file must stay readable (MAX_BYTES) after a restart.
         if (result.files?.length && (held + size(result.files) > MAX_HELD_REVIEWED || permissionStateBytes(this.state) + size(result.files) > MAX_BYTES * 0.9)) {
           return owner('실행을 기다리는 자동 승인이 많아 검토한 파일을 더 보관할 수 없습니다');
         }
-        await this.commit((state, touch) => { touch('request',id);
-          const item = state.requests.find(entry => entry.id === id)!;
+        {
+          const batch = new PermissionBatch(this.state);
+          const item = batch.request(id)!;
           item.status = 'approved'; item.decidedAt = at; item.decidedBy = 'auto'; item.run = { status: 'waiting', ...(this.autoReview().resume ? { notify: true } : {}) };
           item.review = review({ verdict: 'approve', ...(result.files?.length ? { files: result.files } : {}) });
-        });
+          await this.commitRows(batch);
+        }
         const item = this.state.requests.find(entry => entry.id === id)!;
         await this.requireEffects();
         this.options.startRun?.(item);
@@ -303,13 +310,15 @@ export class PermissionService {
         if (asked.scope === 'conversation' && given.scope !== 'conversation') return owner('이 대화에만 요청한 규칙을 넓힐 수 없습니다');
         if (!ruleIsNarrower({ ...asked, scope: 'project', cwd: request.cwd }, { ...given, scope: 'project' })) return owner('검토기가 요청보다 넓은 규칙을 냈습니다');
         try {
-          await this.commit((state, touch) => { touch('request',id);
-            const made = upsert(state, given, undefined, 'auto', id, at); touch('rule',made.id);
-            const item = state.requests.find(entry => entry.id === id)!;
+          {
+            const batch = new PermissionBatch(this.state);
+            const made = upsert(batch, given, undefined, 'auto', id, at);
+            const item = batch.request(id)!;
             item.status = 'approved'; item.decidedAt = at; item.ruleId = made.id; item.decidedBy = 'auto';
             item.review = review({ verdict: 'approve' });
             if (this.autoReview().resume) item.notification = { state: 'pending', message: reviewMessage(item, given) };
-          });
+            await this.commitRows(batch);
+          }
         } catch (error) { return owner(error instanceof Error ? error.message : String(error)); }
         await this.apply();
         const item = this.state.requests.find(entry => entry.id === id)!;
@@ -320,12 +329,14 @@ export class PermissionService {
         const narrowed = this.state.requests.filter(item => item.sessionId === request.sessionId && item.review?.verdict === 'narrow' && Date.parse(item.review.at ?? item.createdAt) >= since).length;
         if (narrowed >= MAX_NARROW) return owner('이 대화는 오늘 이미 범위를 줄여 다시 요청했습니다');
         const suggestion = result.suggestion?.trim().slice(0, 500);
-        await this.commit((state, touch) => { touch('request',id);
-          const item = state.requests.find(entry => entry.id === id)!;
+        {
+          const batch = new PermissionBatch(this.state);
+          const item = batch.request(id)!;
           item.status = 'withdrawn'; item.decidedAt = at; item.decidedBy = 'auto';
           item.review = review({ verdict: 'narrow', ...(suggestion ? { suggestion } : {}) });
           if (this.autoReview().resume) item.notification = { state: 'pending', message: reviewMessage(item) };
-        });
+          await this.commitRows(batch);
+        }
         const item = this.state.requests.find(entry => entry.id === id)!;
         return { request: item, message: reviewMessage(item) };
       }
@@ -347,17 +358,22 @@ export class PermissionService {
   /** A request sent back for a narrower rule whose agent could not be told: it waits for the owner instead. */
   reopenForOwner(id: string, why: string): Promise<void> {
     return this.serial(async () => {
-      await this.commit((state, touch) => { touch('request',id);
-        const item = state.requests.find(entry => entry.id === id);
-        if (!item || item.status !== 'withdrawn' || item.decidedBy !== 'auto') return;
-        item.status = 'pending'; delete item.decidedAt; delete item.decidedBy; delete item.notification;
-        item.review = { ...(item.review ?? { status: 'done' }), status: 'done', verdict: 'owner', reason: `${item.review?.reason ?? ''} (${why})`.trim() };
-      });
+      {
+        const batch = new PermissionBatch(this.state);
+        const item = batch.request(id);
+        if (item && item.status === 'withdrawn' && item.decidedBy === 'auto') {
+          item.status = 'pending'; delete item.decidedAt; delete item.decidedBy; delete item.notification;
+          item.review = { ...(item.review ?? { status: 'done' }), status: 'done', verdict: 'owner', reason: `${item.review?.reason ?? ''} (${why})`.trim() };
+        }
+        await this.commitRows(batch);
+      }
     });
   }
 
   private async setReview(id: string, review: PermissionReview): Promise<void> {
-    await this.commit((state, touch) => { touch('request',id); const item = state.requests.find(entry => entry.id === id); if (item) item.review = review; });
+    const batch = new PermissionBatch(this.state);
+    const item = batch.request(id); if (item) item.review = review;
+    await this.commitRows(batch);
   }
 
   pending(): number { return this.state.requests.filter(request => request.status === 'pending').length; }
@@ -419,7 +435,11 @@ export class PermissionService {
         const skip = (rule.kind === 'command' ? undefined : autoReviewBlock(rule, session.cwd)) ?? this.options.autoReviewSkip?.(request);
         request.review = skip ? { status: 'skipped', reason: skip, at: this.now() } : { status: 'queued', at: this.now() };
       }
-      await this.commit((state, touch) => { touch('request',request.id); state.requests.push(request); });
+      {
+        const batch = new PermissionBatch(this.state);
+        batch.putRequest(request);
+        await this.commitRows(batch);
+      }
       if (request.review?.status === 'queued') this.options.onReviewQueued?.();
       return { request: { id: request.id, status: request.status }, note: request.review?.status === 'queued' ? REVIEW_NOTE : WAIT_NOTE };
     });
@@ -454,7 +474,11 @@ export class PermissionService {
         const skip = autoReviewBlock(rule, session.cwd) ?? this.options.autoReviewSkip?.(request);
         request.review = skip ? { status: 'skipped', reason: skip, at: this.now() } : { status: 'queued', at: this.now() };
       }
-      await this.commit((state, touch) => { touch('request',request.id); state.requests.push(request); });
+      {
+        const batch = new PermissionBatch(this.state);
+        batch.putRequest(request);
+        await this.commitRows(batch);
+      }
       if (request.review?.status === 'queued') this.options.onReviewQueued?.();
       return { request: runView(request), note: RUN_NOTE };
     });
@@ -477,7 +501,11 @@ export class PermissionService {
       request = find();
     }
     if (request.run && finishedRun(request.run) && !request.run.delivered) {
-      await this.serial(async () => { await this.commit((state, touch) => { touch('request',input.id); const item = state.requests.find(entry => entry.id === input.id); if (item?.run) { item.run.delivered = true; item.run.toldAt = this.now(); } }); }).catch(() => {});
+      await this.serial(async () => {
+        const batch = new PermissionBatch(this.state);
+        const item = batch.request(input.id); if (item?.run) { item.run.delivered = true; item.run.toldAt = this.now(); }
+        await this.commitRows(batch);
+      }).catch(() => {});
     }
     const output = request.run && finishedRun(request.run) ? await this.options.runOutput?.(request.id) : undefined;
     return { request: runView(request), ...(output ? { output } : {}) };
@@ -512,8 +540,9 @@ export class PermissionService {
       // Decided again, or started, meanwhile: left as it is.
       if (!item || item.status !== 'approved' || item.decidedBy !== 'auto' || item.run?.status !== 'waiting') return false;
       const again = stale || (item.rechecks ?? 0) < MAX_RECHECKS;
-      await this.commit((state, touch) => { touch('request',id);
-        const entry = state.requests.find(value => value.id === id)!;
+      {
+        const batch = new PermissionBatch(this.state);
+        const entry = batch.request(id)!;
         entry.status = 'pending';
         delete entry.decidedAt; delete entry.decidedBy; delete entry.run;
         // Only files changing before the start count: a wait is reviewed again as often as it happens.
@@ -522,7 +551,8 @@ export class PermissionService {
         // Files that keep changing before every start (something else writing there) are the owner's to judge.
         entry.review = again ? { status: 'queued', reason: `${why} 지금 내용으로 다시 검토합니다`.slice(0, MAX_REVIEW_REASON), at: this.now() }
           : { status: 'done', verdict: 'owner', reason: `${why} 다시 검토하기를 ${MAX_RECHECKS}번 했지만 실행 직전에 같은 내용인지 확인할 수 없어 소유자에게 넘깁니다`.slice(0, MAX_REVIEW_REASON), at: this.now() };
-      });
+        await this.commitRows(batch);
+      }
       return again;
     });
     if (requeued) this.options.onReviewQueued?.();
@@ -560,12 +590,14 @@ export class PermissionService {
       if (!request) return;
       const completion = finishedRun(run) && request.status === 'approved' && request.rule.kind === 'run' && request.run?.status === 'running';
       if (!completion) this.requireOpen();
-      await this.commit((state, touch) => { touch('request',id);
-        const item = state.requests.find(entry => entry.id === id)!;
+      {
+        const batch = new PermissionBatch(this.state);
+        const item = batch.request(id)!;
         item.run = { ...run, ...(item.run?.delivered ? { delivered: true } : {}), ...(item.run?.notify ? { notify: true } : {}), ...(item.run?.toldAt ? { toldAt: item.run.toldAt } : {}) };
         // Needed only until the run starts; kept longer, many of them would outgrow the state file.
         if (run.status !== 'waiting' && item.review?.files) delete item.review.files;
-      }, completion);
+        await this.commitRows(batch, completion);
+      }
       if (finishedRun(run)) this.options.onRunFinished?.(this.state.requests.find(item => item.id === id)!);
     }, true);
   }
@@ -584,7 +616,11 @@ export class PermissionService {
 
   /** The result reached the conversation as a message. */
   markTold(id: string): Promise<void> {
-    return this.serial(async () => { await this.commit((state, touch) => { touch('request',id); const item = state.requests.find(entry => entry.id === id); if (item?.run) { item.run.delivered = true; item.run.toldAt = this.now(); } }); });
+    return this.serial(async () => {
+      const batch = new PermissionBatch(this.state);
+      const item = batch.request(id); if (item?.run) { item.run.delivered = true; item.run.toldAt = this.now(); }
+      await this.commitRows(batch);
+    });
   }
 
   /** Conversation rules whose time is up, or whose conversation is closed or gone, go. */
@@ -593,7 +629,11 @@ export class PermissionService {
       const now = Date.parse(this.now());
       const gone = (rule: PermissionRule) => rule.scope === 'conversation' && (expired(rule, now) || closed.has(rule.sessionId!) || !this.options.session(rule.sessionId!));
       if (!this.state.rules.some(gone)) return;
-      await this.commit((state, touch) => { for (const r of state.rules) if (gone(r)) touch('rule',r.id); state.rules = state.rules.filter(rule => !gone(rule)); });
+      {
+        const batch = new PermissionBatch(this.state);
+        for (const r of this.state.rules) if (gone(r)) batch.removeRule(r.id);
+        await this.commitRows(batch);
+      }
     });
   }
 
@@ -609,10 +649,15 @@ export class PermissionService {
       const origin = (rule: PermissionRule) => this.state.requests.find(request => request.id === rule.requestId)?.createdAt ?? rule.updatedAt;
       const mine = (rule: PermissionRule) => rule.scope === 'conversation' && rule.sessionId === sessionId && (before(rule.updatedAt) || before(origin(rule)));
       if (this.state.rules.some(mine) || this.state.requests.some(open)) {
-        await this.commit((state, touch) => { for (const r of state.rules) if (mine(r)) touch('rule',r.id); for (const r of state.requests) if (open(r)) touch('request',r.id);
-          state.rules = state.rules.filter(rule => !mine(rule));
-          for (const request of state.requests) if (open(request)) { request.status = 'withdrawn'; request.decidedAt = at; request.decidedBy = 'owner'; }
-        });
+        {
+          const batch = new PermissionBatch(this.state);
+          for (const rule of this.state.rules) if (mine(rule)) batch.removeRule(rule.id);
+          for (const request of this.state.requests) if (open(request)) {
+            const item = batch.request(request.id)!;
+            item.status = 'withdrawn'; item.decidedAt = at; item.decidedBy = 'owner';
+          }
+          await this.commitRows(batch);
+        }
       }
       return this.overview();
     });
@@ -622,7 +667,12 @@ export class PermissionService {
 
   /** The owner has seen that an earlier record was set aside. */
   acknowledge(): Promise<PermissionOverview> {
-    return this.serial(async () => { await this.commit((state, touch) => { touch('meta','lost'); delete state.lost; }); return this.overview(); });
+    return this.serial(async () => {
+      const batch = new PermissionBatch(this.state);
+      batch.clearLost();
+      await this.commitRows(batch);
+      return this.overview();
+    });
   }
 
   /** The owner adds a rule, or changes one. */
@@ -631,7 +681,11 @@ export class PermissionService {
       if (input.kind === 'run') throw failure('한 번 실행은 규칙으로 저장할 수 없습니다.');
       const rule = await this.checked(clean(input));
       let replaced: string[] = [];
-      await this.commit((state, touch) => { const made = upsert(state, rule, input.id, 'owner', undefined, this.now()); touch('rule',made.id); if (made.source !== 'auto') replaced = dropOverlappingAuto(state, made, touch); });
+      {
+        const batch = new PermissionBatch(this.state);
+        const made = upsert(batch, rule, input.id, 'owner', undefined, this.now()); if (made.source !== 'auto') replaced = dropOverlappingAuto(batch, made);
+        await this.commitRows(batch);
+      }
       await this.apply();
       return { ...this.overview(), ...(replaced.length ? { replaced } : {}) };
     });
@@ -640,7 +694,11 @@ export class PermissionService {
   remove(id: string): Promise<PermissionOverview> {
     return this.serial(async () => {
       if (!this.state.rules.some(rule => rule.id === id)) throw failure('규칙을 찾지 못했습니다.', 'not-found');
-      await this.commit((state, touch) => { touch('rule',id); state.rules = state.rules.filter(rule => rule.id !== id); });
+      {
+        const batch = new PermissionBatch(this.state);
+        batch.removeRule(id);
+        await this.commitRows(batch);
+      }
       await this.apply();
       return this.overview();
     });
@@ -658,13 +716,21 @@ export class PermissionService {
       if (request.status !== 'pending') throw failure('이미 처리한 요청입니다.', 'conflict');
       const at = this.now();
       if (!approve) {
-        await this.commit((state, touch) => { touch('request',id); const item = state.requests.find(entry => entry.id === id)!; item.status = 'denied'; item.decidedAt = at; item.decidedBy = 'owner'; if (resume && request.rule.kind !== 'run') item.notification = { state: 'pending', message: decisionMessage(request.rule, undefined) }; });
+        {
+          const batch = new PermissionBatch(this.state);
+          const item = batch.request(id)!; item.status = 'denied'; item.decidedAt = at; item.decidedBy = 'owner'; if (resume && request.rule.kind !== 'run') item.notification = { state: 'pending', message: decisionMessage(request.rule, undefined) };
+          await this.commitRows(batch);
+        }
         return { request, rule: undefined };
       }
       await this.requireRequestEffects(request);
       if (request.rule.kind === 'run') {
         // The owner allows the exact command: Tower runs it once, now. Its result reaches the conversation when it is done.
-        await this.commit((state, touch) => { touch('request',id); const item = state.requests.find(entry => entry.id === id)!; item.status = 'approved'; item.decidedAt = at; item.decidedBy = 'owner'; item.run = { status: 'waiting', ...(resume ? { notify: true } : {}) }; });
+        {
+          const batch = new PermissionBatch(this.state);
+          const item = batch.request(id)!; item.status = 'approved'; item.decidedAt = at; item.decidedBy = 'owner'; item.run = { status: 'waiting', ...(resume ? { notify: true } : {}) };
+          await this.commitRows(batch);
+        }
         await this.requireEffects();
         this.options.startRun?.(this.state.requests.find(entry => entry.id === id)!);
         return { request, rule: undefined, run: true };
@@ -673,13 +739,15 @@ export class PermissionService {
       const chosen = edited ?? request.rule;
       // A rule for one conversation lasts from the decision, however long the request waited.
       const rule = await this.checked(clean(chosen.scope === 'conversation' ? { ...chosen, expiresAt: this.expiry() } : chosen));
-      await this.commit((state, touch) => { touch('request',id);
-        const made = upsert(state, rule, undefined, 'request', id, at); touch('rule',made.id);
-        replaced = dropOverlappingAuto(state, made, touch);
-        const item = state.requests.find(entry => entry.id === id)!;
+      {
+        const batch = new PermissionBatch(this.state);
+        const made = upsert(batch, rule, undefined, 'request', id, at);
+        replaced = dropOverlappingAuto(batch, made);
+        const item = batch.request(id)!;
         item.status = 'approved'; item.decidedAt = at; item.ruleId = made.id; item.decidedBy = 'owner';
         if (resume) item.notification = { state: 'pending', message: decisionMessage(request.rule, rule) };
-      });
+        await this.commitRows(batch);
+      }
       await this.apply();
       return { request, rule };
     });
@@ -710,7 +778,11 @@ export class PermissionService {
       if (notify) await notify(structuredClone(request), request.notification.message);
       else if (this.options.resume) await this.options.resume(request.sessionId, request.notification.message);
       else return;
-      await this.commit((state, touch) => { touch('request',id); const item = state.requests.find(entry => entry.id === id); if (item?.notification) item.notification.state = 'recorded'; });
+      {
+        const batch = new PermissionBatch(this.state);
+        const item = batch.request(id); if (item?.notification) item.notification.state = 'recorded';
+        await this.commitRows(batch);
+      }
     });
   }
 
@@ -753,27 +825,23 @@ export class PermissionService {
     await this.requireEffects();
   }
 
-  /** A change becomes current only once it is saved. */
-  private async commit(change: (state: PermissionState, touch: (kind:PermissionRowKind,id:string)=>void) => void, completionOnly = false): Promise<void> {
-    const next = structuredClone(this.state);
-    const touched = new Map<PermissionRowKind,Set<string>>();
-    const touch = (kind:PermissionRowKind,id:string) => { const ids=touched.get(kind) ?? new Set<string>(); ids.add(id); touched.set(kind,ids); };
-    change(next,touch);
+  /** Only explicit row operations enter SQL; publish their projection after the commit succeeds. */
+  private async commitRows(batch: PermissionBatch, completionOnly = false): Promise<void> {
     if (!completionOnly) {
-      for (const id of trim(next, this.options.now?.() ?? new Date())) touch('request',id);
+      for (const id of trimmedRequests(batch.requests(), this.options.now?.() ?? new Date())) batch.removeRequest(id);
       await this.requireEffects();
     }
     if (this.options.repository) {
-      const changes:PermissionChange[]=[];
-      for (const [kind,ids] of touched) for (const id of ids) {
-        const value=kind==='meta' ? (next as unknown as Record<string,unknown>)[id] : kind==='rule' ? next.rules.find(r=>r.id===id) : kind==='request' ? next.requests.find(r=>r.id===id) : next.codex.find(r=>r.path===id);
-        const row=this.options.repository.change(kind,id,value,changes); if (row) changes.push(row);
+      const changes: PermissionChange[] = [];
+      for (const operation of batch.operations()) {
+        const row = this.options.repository.change(operation.kind, operation.id, operation.value, changes);
+        if (row) changes.push(row);
       }
       await this.options.repository.update(changes);
-    } else if (!this.options.noStorageFixture) throw failure('Permission SQL repository is required.','unavailable');
-    const kept = new Set(next.requests.map(request => request.id));
-    for (const request of this.state.requests) if (request.rule.kind === 'run' && !kept.has(request.id)) void this.requireEffects().then(() => this.options.forgetRun?.(request.id)).catch(() => {});
-    this.state = next;
+    } else if (!this.options.noStorageFixture) throw failure('Permission SQL repository is required.', 'unavailable');
+    const removedRuns = batch.removedRequests().filter(request => request.rule.kind === 'run');
+    this.state = batch.publish();
+    for (const request of removedRuns) void this.requireEffects().then(() => this.options.forgetRun?.(request.id)).catch(() => {});
   }
 
   /** Every Codex rules file Tower writes, with the lines it should hold now. */
@@ -800,14 +868,18 @@ export class PermissionService {
     for (const [path, file] of files) {
       try {
         const had = this.state.codex.some(item => item.path === path);
-        if (!had && file.lines.length) await this.commit((state,touch) => {
-          touch('codex',path); state.codex.push({ path,scope:file.scope,...(file.cwd ? { cwd:file.cwd } : {}) });
-        });
+        if (!had && file.lines.length) {
+          const batch = new PermissionBatch(this.state);
+          batch.putCodex({ path,scope:file.scope,...(file.cwd ? { cwd:file.cwd } : {}) });
+          await this.commitRows(batch);
+        }
         await this.requireEffects();
         await syncCodex(path, file.lines, file.scope === 'project' ? file.cwd : undefined, codexRulesPath('global', undefined, this.options.env));
-        if (had && !file.lines.length) await this.commit((state,touch) => {
-          touch('codex',path); state.codex=state.codex.filter(item=>item.path!==path);
-        });
+        if (had && !file.lines.length) {
+          const batch = new PermissionBatch(this.state);
+          batch.removeCodex(path);
+          await this.commitRows(batch);
+        }
       } catch (error) { errors.set(path, error instanceof Error ? error.message : String(error)); }
     }
     this.errors = errors;
@@ -893,56 +965,113 @@ function clean(input: PermissionRuleInput): PermissionRuleInput {
  * The owner's own rule where the reviewer allowed an overlapping one (`git push --force-with-lease` beside `git push`):
  * the reviewer's rule would deny what the owner allows, so it goes. Agents ask again, and the owner decides those.
  */
-function dropOverlappingAuto(state: PermissionState, rule: PermissionRule, touch:(kind:PermissionRowKind,id:string)=>void): string[] {
+function dropOverlappingAuto(batch: PermissionBatch, rule: PermissionRule): string[] {
   const overlaps = (item: PermissionRule) => item.id !== rule.id && item.source === 'auto' && item.kind === 'command' && rule.kind === 'command' && rulesOverlap(item.value, rule.value)
     // A rule for one conversation replaces only that conversation's own: the rest of the project keeps its rules.
     && (rule.scope === 'conversation' ? item.scope === 'conversation' && item.sessionId === rule.sessionId
       : item.scope !== 'conversation' && (rule.scope === 'global' || item.scope === 'global' || within(item.cwd!, rule.cwd!) || within(rule.cwd!, item.cwd!)));
-  const gone = state.rules.filter(overlaps);
-  for (const item of gone) touch('rule',item.id);
-  state.rules = state.rules.filter(item => !gone.includes(item));
+  const gone = batch.rules().filter(overlaps);
+  for (const item of gone) batch.removeRule(item.id);
   return gone.map(item => item.value);
 }
 
 /** Saves a rule as a new one, into the one it edits, or into an existing rule meaning the same (providers joined). */
-function upsert(state: PermissionState, rule: PermissionRuleInput, id: string | undefined, source: PermissionRule['source'], requestId: string | undefined, at: string): PermissionRule {
+function upsert(batch: PermissionBatch, rule: PermissionRuleInput, id: string | undefined, source: PermissionRule['source'], requestId: string | undefined, at: string): PermissionRule {
+  const rules = batch.rules();
   if (id) {
-    const index = state.rules.findIndex(item => item.id === id);
-    if (index < 0) throw failure('규칙을 찾지 못했습니다.', 'not-found');
-    if (state.rules.some(item => item.id !== id && sameRule(item, rule))) throw failure('같은 규칙이 이미 있습니다.', 'conflict');
-    state.rules[index] = { ...state.rules[index], ...rule, ...(rule.note ? {} : { note: undefined }), ...(rule.cwd ? {} : { cwd: undefined }), updatedAt: at,
-      // A rule the reviewer made becomes the owner's once the owner changes what it allows; a note or its agents alone keep its deny rules.
-      ...(state.rules[index]!.source === 'auto' && source !== 'auto' && !sameRule(state.rules[index]!, rule) ? { source } : {}) };
-    state.rules[index] = JSON.parse(JSON.stringify(state.rules[index]));
-    return state.rules[index];
+    const previous = rules.find(item => item.id === id);
+    if (!previous) throw failure('규칙을 찾지 못했습니다.', 'not-found');
+    if (rules.some(item => item.id !== id && sameRule(item, rule))) throw failure('같은 규칙이 이미 있습니다.', 'conflict');
+    const made: PermissionRule = { ...previous, ...rule, ...(rule.note ? {} : { note: undefined }), ...(rule.cwd ? {} : { cwd: undefined }), updatedAt: at,
+      ...(previous.source === 'auto' && source !== 'auto' && !sameRule(previous, rule) ? { source } : {}) };
+    const saved: PermissionRule = JSON.parse(JSON.stringify(made));
+    batch.putRule(saved);
+    return saved;
   }
-  const same = state.rules.find(item => sameRule(item, rule));
-  if (same) {
-    // The owner making or allowing a rule the reviewer made makes it the owner's: it keeps no guards of its own.
+  const previous = rules.find(item => sameRule(item, rule));
+  if (previous) {
+    const same = structuredClone(previous);
     if (same.source === 'auto' && source !== 'auto') { same.source = source; delete same.requestId; if (requestId) same.requestId = requestId; }
     same.providers = (['claude', 'codex'] as const).filter(item => same.providers.includes(item) || rule.providers.includes(item));
     same.updatedAt = at;
-    // Allowed again: a rule for one conversation lasts from now, and belongs to the request that asked last.
     if (rule.expiresAt && (!same.expiresAt || same.expiresAt < rule.expiresAt)) same.expiresAt = rule.expiresAt;
     if (same.scope === 'conversation' && requestId) same.requestId = requestId;
+    batch.putRule(same);
     return same;
   }
-  if (state.rules.length >= MAX_RULES) throw failure('규칙은 200개까지 저장할 수 있습니다.', 'conflict');
+  if (rules.length >= MAX_RULES) throw failure('규칙은 200개까지 저장할 수 있습니다.', 'conflict');
   const made: PermissionRule = { ...rule, id: randomUUID(), source, ...(requestId ? { requestId } : {}), createdAt: at, updatedAt: at };
-  state.rules.push(made);
+  batch.putRule(made);
   return made;
 }
 
-function trim(state: PermissionState, now: Date): string[] {
+function trimmedRequests(requests: readonly PermissionRequest[], now: Date): string[] {
   const cutoff = now.getTime() - DECIDED_DAYS * 24 * 60 * 60 * 1000;
   // A run counts from when it finished, so a result is kept a while after it arrives however long it waited.
   // (and from when the conversation heard of it, so it can still read the result it was told about).
   const at = (request: PermissionRequest) => Date.parse(request.run?.toldAt ?? request.run?.finishedAt ?? request.decidedAt ?? request.createdAt);
-  const decided = state.requests.filter(request => request.status !== 'pending' && at(request) >= cutoff).sort((a, b) => at(a) - at(b)).slice(-MAX_DECIDED);
+  const decided = requests.filter(request => request.status !== 'pending' && at(request) >= cutoff).sort((a, b) => at(a) - at(b)).slice(-MAX_DECIDED);
   const keep = new Set(decided);
   // A run still waiting or running, or whose result its conversation has yet to hear, is kept whatever its age.
-  const before=state.requests;
-  state.requests = state.requests.filter(request => request.status === 'pending' || request.notification?.state === 'pending' || keep.has(request)
+  const retained = requests.filter(request => request.status === 'pending' || request.notification?.state === 'pending' || keep.has(request)
     || (request.run && (!finishedRun(request.run) || (request.run.notify && !request.run.delivered))));
-  const kept=new Set(state.requests.map(r=>r.id)); return before.filter(r=>!kept.has(r.id)).map(r=>r.id);
+  const kept=new Set(retained.map(r=>r.id)); return requests.filter(r=>!kept.has(r.id)).map(r=>r.id);
+}
+
+interface PermissionOperation { kind: PermissionRowKind; id: string; value: unknown | undefined }
+/** Domain batch contains only named target rows. Unchanged projection objects are never cloned or serialized. */
+class PermissionBatch {
+  private readonly edits = new Map<string, PermissionOperation>();
+  constructor(private readonly prior: PermissionState) {}
+  private key(kind: PermissionRowKind, id: string): string { return `${kind}:${id}`; }
+  private put(kind: PermissionRowKind, id: string, value: unknown | undefined): void {
+    this.edits.set(this.key(kind, id), { kind, id, value });
+  }
+  request(id: string): PermissionRequest | undefined {
+    const operation = this.edits.get(this.key('request', id));
+    if (operation) return operation.value as PermissionRequest | undefined;
+    const previous = this.prior.requests.find(request => request.id === id);
+    if (!previous) return undefined;
+    const next = structuredClone(previous);
+    this.putRequest(next);
+    return next;
+  }
+  putRequest(request: PermissionRequest): void { this.put('request', request.id, request); }
+  removeRequest(id: string): void { this.put('request', id, undefined); }
+  putRule(rule: PermissionRule): void { this.put('rule', rule.id, rule); }
+  removeRule(id: string): void { this.put('rule', id, undefined); }
+  putCodex(file: CodexFile): void { this.put('codex', file.path, file); }
+  removeCodex(path: string): void { this.put('codex', path, undefined); }
+  autoReview(settings: PermissionAutoReview): void { this.put('meta', 'autoReview', settings); }
+  clearLost(): void { this.put('meta', 'lost', undefined); }
+  operations(): Iterable<PermissionOperation> { return this.edits.values(); }
+  private project<T>(kind: PermissionRowKind, prior: T[], identity: (row: T) => string): T[] {
+    const operations = [...this.edits.values()].filter(operation => operation.kind === kind);
+    if (!operations.length) return prior;
+    const pending = new Map(operations.map(operation => [operation.id, operation.value as T | undefined]));
+    const result: T[] = [];
+    for (const row of prior) {
+      const id = identity(row);
+      if (!pending.has(id)) result.push(row);
+      else { const value = pending.get(id); if (value !== undefined) result.push(value); pending.delete(id); }
+    }
+    for (const value of pending.values()) if (value !== undefined) result.push(value);
+    return result;
+  }
+  rules(): PermissionRule[] { return this.project('rule', this.prior.rules, row => row.id); }
+  requests(): PermissionRequest[] { return this.project('request', this.prior.requests, row => row.id); }
+  removedRequests(): PermissionRequest[] {
+    return this.prior.requests.filter(request => {
+      const operation = this.edits.get(this.key('request', request.id));
+      return operation !== undefined && operation.value === undefined;
+    });
+  }
+  publish(): PermissionState {
+    const next = { ...this.prior, rules: this.rules(), requests: this.requests(), codex: this.project('codex', this.prior.codex, row => row.path) };
+    for (const operation of this.edits.values()) if (operation.kind === 'meta') {
+      if (operation.id === 'lost') delete next.lost;
+      else if (operation.id === 'autoReview') next.autoReview = operation.value as PermissionAutoReview;
+    }
+    return next;
+  }
 }
