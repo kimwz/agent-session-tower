@@ -4,6 +4,12 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      existing_tag:
+        description: Published version tag to revalidate without publishing
+        required: true
+        type: string
 permissions:
   contents: write
 jobs:
@@ -11,6 +17,51 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Resolve the existing release tag
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          EXISTING_TAG: ${{ inputs.existing_tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          EVIDENCE_PATH: ${{ runner.temp }}/release-revalidation.json
+        run: |
+          set -euo pipefail
+          [[ "$EXISTING_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid existing_tag'; exit 1; }
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo 'Dispatch must use the main workflow'; exit 1; }
+          git fetch --no-tags origin "refs/tags/$EXISTING_TAG"
+          TAG_SHA="$(git rev-parse 'FETCH_HEAD^{commit}')"
+          git checkout --detach "$TAG_SHA"
+          export TAG_SHA
+          gh release view "$EXISTING_TAG" --json tagName,isDraft,url,assets > "$RUNNER_TEMP/existing-release.json"
+          node --input-type=module <<'EVIDENCE'
+          import fs from 'node:fs';
+          const release = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/existing-release.json`, 'utf8'));
+          const version = JSON.parse(fs.readFileSync('package.json', 'utf8')).version;
+          const tag = process.env.EXISTING_TAG;
+          const asset = `agent-session-tower-${version}.tgz`;
+          if (`v${version}` !== tag || release.tagName !== tag || release.isDraft ||
+              !release.assets.some(item => item.name === asset && item.size > 0)) {
+            throw new Error('Published release, package version or package asset does not match the tag');
+          }
+          const evidence = {
+            tag, tagSha: process.env.TAG_SHA, version,
+            workflowSha: process.env.WORKFLOW_SHA, workflowRef: process.env.WORKFLOW_REF,
+            releaseExists: true, releaseUrl: release.url, asset,
+          };
+          const json = JSON.stringify(evidence, null, 2);
+          fs.writeFileSync(process.env.EVIDENCE_PATH, `${json}\n`);
+          console.log(json);
+          EVIDENCE
+      - name: Upload existing release evidence
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-revalidation-evidence
+          path: ${{ runner.temp }}/release-revalidation.json
+          if-no-files-found: error
       - uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -18,10 +69,65 @@ jobs:
       - run: npm ci
       # The version was checked before it was tagged. Its built package is published first, since joined computers wait
       # for it to update; the checks run again after.
-      - run: npm run build
-      - run: node scripts/release.mjs notes "$GITHUB_REF_NAME" > release-notes.md
-      - run: npm pack --ignore-scripts
-      - run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md --verify-tag "agent-session-tower-${GITHUB_REF_NAME#v}.tgz"
+      - if: github.event_name == 'push'
+        run: npm run build
+      - if: github.event_name == 'push'
+        run: node scripts/release.mjs notes "$GITHUB_REF_NAME" > release-notes.md
+      - if: github.event_name == 'push'
+        run: npm pack --ignore-scripts
+      - if: github.event_name == 'push'
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md --verify-tag "agent-session-tower-${GITHUB_REF_NAME#v}.tgz"
         env:
           GH_TOKEN: ${{ github.token }}
-      - run: npm run check
+      - name: Capture the pinned genuine old worker inputs
+        shell: bash
+        env:
+          VALIDATION_ROOT: ${{ runner.temp }}/sqlite-general-old-fixtures
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir "$VALIDATION_ROOT"
+          mkdir -p "$VALIDATION_ROOT"/{home,codex,claude,config,cache,state,data,runtime,tmp,npm,reports}
+          TEST_TMP="$(mktemp -d /tmp/sv.XXXXXX)"
+          TEST_TMP="$(cd "$TEST_TMP" && pwd -P)"
+          printf '%s\n' "$TEST_TMP" > "$VALIDATION_ROOT/test-tmp.txt"
+          env -i PATH="$PATH" HOME="$VALIDATION_ROOT/home" \
+            CODEX_HOME="$VALIDATION_ROOT/codex" CLAUDE_CONFIG_DIR="$VALIDATION_ROOT/claude" \
+            XDG_CONFIG_HOME="$VALIDATION_ROOT/config" XDG_CACHE_HOME="$VALIDATION_ROOT/cache" \
+            XDG_STATE_HOME="$VALIDATION_ROOT/state" XDG_DATA_HOME="$VALIDATION_ROOT/data" \
+            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
+            TMP="$TEST_TMP" TEMP="$TEST_TMP" \
+            npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 NODE_OPTIONS=--max-old-space-size=4096 \
+            SQLITE_VALIDATION_CI=1 VALIDATION_ROOT="$VALIDATION_ROOT" \
+            TOWER_SQLITE_OLD122_ROOT="$VALIDATION_ROOT/old122" \
+            TOWER_SQLITE_OLD124_ROOT="$VALIDATION_ROOT/old124" \
+            /bin/bash --noprofile --norc <<'CAPTURE'
+          set -euo pipefail
+          umask 022
+          node scripts/sqlite-old124-capture.mjs 1.122.0
+          node scripts/sqlite-old124-capture.mjs 1.124.0
+          CAPTURE
+      - name: Run npm run check
+        shell: bash
+        env:
+          VALIDATION_ROOT: ${{ runner.temp }}/sqlite-general-old-fixtures
+        run: |
+          set -euo pipefail
+          TEST_TMP="$(cat "$VALIDATION_ROOT/test-tmp.txt")"
+          # Capture and the full check share canonical private paths, without Actions credentials.
+          env -i PATH="$PATH" HOME="$VALIDATION_ROOT/home" \
+            CODEX_HOME="$VALIDATION_ROOT/codex" CLAUDE_CONFIG_DIR="$VALIDATION_ROOT/claude" \
+            XDG_CONFIG_HOME="$VALIDATION_ROOT/config" XDG_CACHE_HOME="$VALIDATION_ROOT/cache" \
+            XDG_STATE_HOME="$VALIDATION_ROOT/state" XDG_DATA_HOME="$VALIDATION_ROOT/data" \
+            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
+            TMP="$TEST_TMP" TEMP="$TEST_TMP" \
+            npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
+            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 NODE_OPTIONS=--max-old-space-size=4096 \
+            SQLITE_VALIDATION_CI=1 VALIDATION_ROOT="$VALIDATION_ROOT" \
+            TOWER_SQLITE_OLD122_ROOT="$VALIDATION_ROOT/old122" \
+            TOWER_SQLITE_OLD124_ROOT="$VALIDATION_ROOT/old124" \
+            /bin/bash --noprofile --norc <<'CHECK'
+          set -euo pipefail
+          umask 022
+          npm run check
+          CHECK
