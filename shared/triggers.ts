@@ -127,8 +127,8 @@ export const GitHubWatchSchema = z.discriminatedUnion('type', [
 export type GitHubWatch = z.infer<typeof GitHubWatchSchema>;
 
 /**
- * Saved watches from before issues had one kind, as that kind: new issues and newly assigned ones start from now,
- * the open-issues queue keeps taking what is open. Anything else is returned as it is.
+ * Saved watches from before issues had one kind, as that kind: new issues start from now; assigned issues and
+ * the open-issues queue take matching open issues except those remembered by their cursors. Anything else is returned as it is.
  */
 export function upgradeWatch(watch: unknown, overlap?: unknown): unknown {
   if (!watch || typeof watch !== 'object') return watch;
@@ -137,7 +137,8 @@ export function upgradeWatch(watch: unknown, overlap?: unknown): unknown {
   const filters = { ...(old.labels ? { labels: old.labels } : {}), ...(old.authors ? { authors: old.authors } : {}), ...(old.authorAssociation ? { authorAssociation: old.authorAssociation } : {}) };
   if (old.type === 'issue-opened') return { type: 'issues', repos: old.repos ?? [], ...filters, start: 'new', concurrency };
   if (old.type === 'open-issues') return { type: 'issues', repos: old.repos ?? [], ...filters, start: 'existing', concurrency: old.concurrency ?? 1, assign: old.assign ?? true, close: old.close ?? true };
-  if (old.type === 'assigned-to-me') return { type: 'issues', repos: old.repos ?? [], assignee: 'me', authorAssociation: 'any', includePullRequests: old.includePullRequests ?? false, start: 'new', concurrency };
+  // The assigned cursor is a sparse seen set, not an initial baseline: unseen existing issues still count.
+  if (old.type === 'assigned-to-me') return { type: 'issues', repos: old.repos ?? [], assignee: 'me', authorAssociation: 'any', includePullRequests: old.includePullRequests ?? false, start: 'existing', concurrency };
   return watch;
 }
 export const GitHubSourceSchema = z.object({

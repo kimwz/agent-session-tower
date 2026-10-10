@@ -5,10 +5,11 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { checkGitHub, GitHubError, type GitHubFetch } from '../../../server/triggers/github.js';
+import { checkGitHub, GitHubError, keyOf, passed, type GitHubFetch } from '../../../server/triggers/github.js';
+import { upgradeState } from '../../../server/triggers/state.js';
 import { KEEP_OPEN, TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
 import type { Run } from '../../../shared/types.js';
-import { GitHubSourceSchema, type TriggerActor, type TriggerInput } from '../../../shared/triggers.js';
+import { GitHubSourceSchema, upgradeWatch, type TriggerActor, type TriggerInput } from '../../../shared/triggers.js';
 
 const OWNER: TriggerActor = { kind: 'owner', via: 'ui' };
 
@@ -295,6 +296,7 @@ test('saved triggers of the earlier issue kinds become issue watches that take n
   assert.deepEqual(watches['New issues'], { type: 'issues', repos: ['octo/app'], assignee: 'any', authorAssociation: ['OWNER', 'MEMBER', 'COLLABORATOR'], includePullRequests: false,
     start: 'new', order: 'oldest', concurrency: 5, assign: false, close: false }, 'new issues start from now, as many at once as overlapping runs did');
   assert.equal(watches.Assigned?.type === 'issues' && watches.Assigned.assignee, 'me');
+  assert.equal(watches.Assigned?.type === 'issues' && watches.Assigned.start, 'existing');
   assert.equal(watches.Queue?.type === 'issues' && watches.Queue.start, 'existing');
   const [earlier] = f.service.get(opened.id).revisions;
   assert.equal(earlier.source.kind === 'github' && earlier.source.watch.type, 'issues', 'earlier revisions move too');
@@ -302,6 +304,28 @@ test('saved triggers of the earlier issue kinds become issue watches that take n
   await f.step();
   const started = f.service.events().map(event => `${event.triggerName} ${event.summary.split(' ')[0]}`).sort();
   assert.deepEqual(started, ['Assigned octo/lib#2', 'New issues octo/app#3', 'Queue octo/app#2'], 'only what the earlier kinds had not seen yet');
+
+  // Reuse the legacy fixture without startup reconciliation, as the SQL import path does.
+  saved.cursors[assigned.id].github = { assigned: ['octo/lib#1', 'octo/lib#5'] };
+  const imported = upgradeState(saved, 0, false, false);
+  const previous = imported.cursors[assigned.id].github!;
+  assert.deepEqual(previous, { handled: ['octo/lib#1', 'octo/lib#5'] }, 'no synthetic clock or baseline');
+  const sparse = { 'octo/lib': [1, 2, 4, 5].map(number => ({ number, assignees: ['me'] })), 'octo/other': [{ number: 1, assignees: ['me'] }] };
+  const sparseGitHub = fakeGitHub(sparse);
+  const fetch: GitHubFetch = (path, etag, send) => new URL(path, 'https://api.github.com').pathname === '/issues'
+    ? Promise.resolve({ status: 200, body: Object.entries(sparse).flatMap(([repo, issues]) => issues.map(issue => item(issue, repo))) })
+    : sparseGitHub.fetch(path, etag, send);
+  for (const repos of [['octo/lib'], ['octo/lib', 'octo/other'], []]) {
+    const watch = GitHubSourceSchema.shape.watch.parse(upgradeWatch({ type: 'assigned-to-me', repos, includePullRequests: false }));
+    assert.equal(watch.type, 'issues');
+    if (watch.type !== 'issues') throw new Error('Legacy assigned must become an issue watch.');
+    const checked = await checkGitHub(watch, previous, fetch, 'me', f.clock.now);
+    const excluded = passed(watch, checked.cursor);
+    assert.deepEqual(checked.issues.map(keyOf).filter(key => !excluded.has(key)).sort(),
+      ['octo/lib#2', 'octo/lib#4', ...(repos.length === 1 ? [] : ['octo/other#1'])].sort(),
+      `only the sparse seen set is excluded, with repositories ${JSON.stringify(repos)}`);
+    assert.deepEqual(checked.cursor.skipped, [], 'unseen existing issues are not baselined away');
+  }
 });
 
 test('an edit to what an issue watch covers leaves an issue that was waiting for a place its turn', async t => {

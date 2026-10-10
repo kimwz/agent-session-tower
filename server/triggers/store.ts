@@ -35,7 +35,7 @@ export function rowsForOperations(previous: readonly TriggerRow[], draft: Engine
       const old = before.get(canonical([kind,id]));
       if (old) { batch.set(canonical([kind,id]),{ ...old,previous: old.json,previousOrdinal: old.ordinal,remove: true }); tail = Math.min(tail,old.ordinal); }
     }
-    const collection = draft[kind];
+    const collection = kind === 'onceConsumed' ? consumedSnapshot(draft) : draft[kind];
     const ids = kind === 'settings' ? ['settings'] : arrayKinds.has(kind)
       ? (collection as unknown[]).map((value,index) => identityKinds.has(kind) ? (value as { id: string }).id : String(index))
       : Object.keys(collection);

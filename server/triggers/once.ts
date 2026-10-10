@@ -2,7 +2,8 @@ import { OnceConsumptionSchema, type OnceConsumption, type Trigger, type Trigger
 import { logTrigger } from './audit.js';
 import { failure } from './errors.js';
 import { MAX_ONCE_RESERVATIONS, MAX_RETAINED_TRIGGERS, MAX_REVISIONS } from './limits.js';
-import { writeRows, orderRows, type EngineState } from './state.js';
+import type { EngineState } from './state.js';
+import { writeRows, orderRows } from './row-operations.js';
 
 /**
  * The rules of once reservations and archived definitions over a state, and the only code that writes the consumption
@@ -49,16 +50,21 @@ export function consumeOnce(state: EngineState, trigger: Trigger, eventId: strin
   logTrigger(state, now, next.updatedBy, 'consume', next, trigger.revision, next.revision, 'Once reservation consumed and archived; run outcome is separate from task completion');
 }
 
+/** Recovers retained consumption evidence without reading the clock or reconciling execution. */
+export function recoverConsumed(state: EngineState): void {
+  for (const trigger of [...state.triggers, ...state.tombstones, ...Object.values(state.revisions).flat()]) {
+    const parsed = OnceConsumptionSchema.safeParse(trigger.consumed);
+    if (parsed.success && !state.onceConsumed[trigger.id]) { state.onceConsumed[trigger.id] = parsed.data; writeRows(state,'onceConsumed',trigger.id); }
+  }
+}
+
 /**
  * Makes the ledger and the definitions agree: consumption a snapshot still shows is recorded, a consumed definition is
  * turned off without a next time, an archived one that is on is not archived, and a past reservation without a pending
  * time is turned off.
  */
 export function normalizeOnce(state: EngineState, now: () => number): void {
-  for (const trigger of [...state.triggers, ...state.tombstones, ...Object.values(state.revisions).flat()]) {
-    const parsed = OnceConsumptionSchema.safeParse(trigger.consumed);
-    if (parsed.success && !state.onceConsumed[trigger.id]) { state.onceConsumed[trigger.id] = parsed.data; writeRows(state,'onceConsumed',trigger.id); }
-  }
+  recoverConsumed(state);
   for (const trigger of state.triggers) {
     const cursor = state.cursors[trigger.id];
     const consumed = state.onceConsumed[trigger.id];

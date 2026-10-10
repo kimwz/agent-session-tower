@@ -5,6 +5,10 @@ import test from 'node:test';
 import ts from 'typescript';
 import { importEdges } from '../../gates/import-boundaries.test.js';
 import { root, sourceFiles } from '../../helpers/source-scan.js';
+import { empty } from '../../../server/triggers/state.js';
+import { readLedger } from '../../../server/triggers/once.js';
+import { beginRowOperations, writeRows } from '../../../server/triggers/row-operations.js';
+import { rowsForOperations } from '../../../server/triggers/store.js';
 
 /**
  * The trigger engine's ownership rules, checked on its source:
@@ -328,6 +332,7 @@ test('limits.ts is a leaf, and state, once and audit refer back to each other on
     return importEdges(path, text).map(edge => edge.split(' -> ')[1]!).filter(to => !typeOnly.has(`./${to.split('/').pop()}`));
   };
   assert.deepEqual(importEdges(`${TRIGGERS}/limits.ts`, files.get(`${TRIGGERS}/limits.ts`)!), []);
+  assert.deepEqual(runtime(`${TRIGGERS}/row-operations.ts`), [], 'row declarations are a runtime leaf');
   assert.ok(!runtime(`${TRIGGERS}/once.ts`).includes(`${TRIGGERS}/state`), 'once.ts reads the state type only');
   assert.ok(!runtime(`${TRIGGERS}/audit.ts`).some(to => [`${TRIGGERS}/state`, `${TRIGGERS}/once`].includes(to)), 'audit.ts is below state and once');
   assert.ok(!runtime(`${TRIGGERS}/store.ts`).includes(`${TRIGGERS}/service`));
@@ -338,7 +343,25 @@ test('the store requires SQL authority and sends guarded touched row batches; le
   assert.match(text,/Triggers SQL authority is unavailable/);
   assert.match(text,/repository\.update\(changed,kind,undefined,this\.revision\)/);
   assert.doesNotMatch(text,/writePrivateJson|readPrivateBytes|serializeState|rowsOf|changesOf|structuredClone\(this\.current\)/);
-  assert.match(text,/selected\(kind,id\)/,'business mutations declare their writable domain rows');
+  assert.match(text,/operations\.rows\.get\(kind\)/,'business mutations declare their writable domain rows');
+  assert.match(text,/operation !== 'write' && ordinal < tail/);
+  assert.match(text,/Undeclared trigger row/);
+  assert.match(text,/Declared trigger write is absent/);
+});
+
+test('declared consumption rows encode the owner snapshot without changing ledger entries', () => {
+  const state = empty();
+  const consumed = { at: '2026-09-24T00:00:30.000Z' };
+  assert.equal(readLedger({ reservation: consumed },state), true);
+  const ledger = state.onceConsumed;
+  const entry = ledger.reservation;
+  const operations = beginRowOperations(state);
+  writeRows(state,'onceConsumed','reservation');
+  assert.deepEqual(rowsForOperations([],state,operations), [{ kind: 'onceConsumed', id: 'reservation', ordinal: 0,
+    json: '{"at":"2026-09-24T00:00:30.000Z"}', previous: null, previousOrdinal: undefined }]);
+  assert.equal(state.onceConsumed,ledger);
+  assert.equal(state.onceConsumed.reservation,entry);
+  assert.deepEqual(entry,consumed);
 });
 
 test('no trigger module imports the engine or the service but the service itself', async () => {

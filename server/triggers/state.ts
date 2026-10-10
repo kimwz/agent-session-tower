@@ -4,9 +4,11 @@ import { logTrigger } from './audit.js';
 import type { GitHubCursor } from './github.js';
 import type { ConditionState } from './http.js';
 import { MAX_AUDIT } from './limits.js';
-import { normalizeOnce, readLedger } from './once.js';
+import { normalizeOnce, readLedger, recoverConsumed } from './once.js';
 import type { TriggerRowKind } from './storage-codec.js';
 import { decodeOnceTrigger, encodeOnceTrigger } from './once-storage.js';
+import { writeRows, removeRows, orderRows, type RowOperations } from './row-operations.js';
+export { beginRowOperations, writeRows, removeRows, orderRows, mergeRowOperations, type RowOperations } from './row-operations.js';
 
 /** Where a trigger stands between firings. */
 export interface Cursor {
@@ -42,36 +44,6 @@ export interface EngineState {
   recentFires: Array<{ at: number; triggerId: string }>;
   /** Secret id → triggers the owner gave it to. Saved with the definitions, so a change and its grant commit together. */
   secretGrants: Record<string, string[]>;
-}
-
-/** Explicit owner declarations, separate from the durable business projection. */
-export interface RowOperations {
-  rows: Map<TriggerRowKind, Map<string, 'write' | 'remove'>>;
-  tails: Map<TriggerRowKind, number>;
-}
-const operations = new WeakMap<EngineState, RowOperations>();
-export function beginRowOperations(state: EngineState): RowOperations {
-  const result: RowOperations = { rows: new Map(), tails: new Map() };
-  operations.set(state,result); return result;
-}
-export function writeRows(state: EngineState, kind: TriggerRowKind, ...ids: string[]): void {
-  const result = operations.get(state); if (!result) return;
-  const rows = result.rows.get(kind) ?? new Map<string,'write' | 'remove'>(); result.rows.set(kind,rows);
-  for (const id of ids) rows.set(id,'write');
-}
-export function removeRows(state: EngineState, kind: TriggerRowKind, ...ids: string[]): void {
-  const result = operations.get(state); if (!result) return;
-  const rows = result.rows.get(kind) ?? new Map<string,'write' | 'remove'>(); result.rows.set(kind,rows);
-  for (const id of ids) rows.set(id,'remove');
-}
-/** Only the affected collection's tail needs new ordinals; untouched JSON is reused. */
-export function orderRows(state: EngineState, kind: TriggerRowKind, from: number): void {
-  const result = operations.get(state); if (result) result.tails.set(kind,Math.min(result.tails.get(kind) ?? Infinity,from));
-}
-export function mergeRowOperations(state: EngineState, incoming: RowOperations): void {
-  for (const [kind,rows] of incoming.rows) for (const [id,operation] of rows)
-    (operation === 'remove' ? removeRows : writeRows)(state,kind,id);
-  for (const [kind,from] of incoming.tails) orderRows(state,kind,from);
 }
 
 /** Producers replacing positional arrays know both their old size and their new members. */
@@ -204,10 +176,7 @@ export function parseState(value: unknown, now: () => number, reconcile = true, 
   }
   if (firstSource && !reconcile) {
     // Recover retained consumption evidence without scheduling or execution-time reconciliation.
-    for (const trigger of [...state.triggers, ...state.tombstones, ...Object.values(state.revisions).flat()]) {
-      const consumed = OnceConsumptionSchema.safeParse(trigger.consumed);
-      if (consumed.success && !state.onceConsumed[trigger.id]) state.onceConsumed[trigger.id] = consumed.data;
-    }
+    recoverConsumed(state);
   }
   if (reconcile) normalizeOnce(state, now);
   return state;

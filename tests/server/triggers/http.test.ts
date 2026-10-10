@@ -1,3 +1,4 @@
+import { actualStorage } from './actual-storage-fixture.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -41,6 +42,7 @@ async function fixture(t: TestContext, ownPorts: number[] = []) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-http-triggers-'));
   const project = join(directory, 'project');
   await mkdir(project);
+  const sql = await actualStorage(t, directory);
   const clock = { now: start };
   const runs: Run[] = [];
   const calls: Array<{ input: CreateSessionRequest; internal: RunAdmission }> = [];
@@ -60,8 +62,9 @@ async function fixture(t: TestContext, ownPorts: number[] = []) {
     session: () => undefined,
   };
   const services: TriggerService[] = [];
-  const open = async () => {
-    const service = new TriggerService({ stateDir: directory, executor, now: () => clock.now, tickMs: 60_000, ownPorts: async () => ownPorts });
+  const open = async (limits?: ConstructorParameters<typeof TriggerService>[0]['limits']) => {
+    const service = new TriggerService({ stateDir: directory, storage: sql.client, executor, now: () => clock.now, tickMs: 60_000, ownPorts: async () => ownPorts, limits });
+    await sql.bootstrap(() => clock.now);
     await service.start();
     services.push(service);
     return service;
@@ -71,11 +74,12 @@ async function fixture(t: TestContext, ownPorts: number[] = []) {
     // A manual run's dispatch tick can save after settle() starts; let that tick finish before deleting its state.
     await until(() => services.every(service => !service.inFlight()));
     await Promise.allSettled(services.map(service => service.settle()));
+    await sql.client.close();
     await rm(directory, { recursive: true, force: true });
   });
   /** One tick, then waits for the request it started and dispatches what it fired. */
   const step = async (service: TriggerService) => { await service.tick(); await until(() => !service.inFlight()); await service.tick(); };
-  return { directory, project, clock, runs, calls, open, step };
+  return { directory, project, clock, runs, calls, open, step, text: sql.text };
 }
 
 const watcher = (project: string, url: string, condition: HttpCondition, values: Partial<TriggerInput['source']> = {}): TriggerInput => ({
@@ -198,7 +202,7 @@ test('only the owner gives a trigger a secret, and the secret is only sent to it
   const secret = await service.createSecret({ name: 'Token', origin: server.origin, value: 'Bearer hidden' }, OWNER);
   const saved = await readFile(join(f.directory, 'trigger-secrets.json'), 'utf8');
   assert.match(saved, /Bearer hidden/);
-  assert.doesNotMatch(await readFile(join(f.directory, 'trigger-engine.json'), 'utf8'), /Bearer hidden/);
+  assert.doesNotMatch(await f.text(), /Bearer hidden/);
   assert.equal(JSON.stringify(service.secretList()).includes('hidden'), false);
   const withSecret = (url: string) => {
     const input = watcher(f.project, url, { type: 'every-success' });
@@ -241,7 +245,7 @@ test('a POST cut off by a stop is not sent again, and failing requests back off'
   f.clock.now += 60_000;
   await service.tick();
   await until(() => server.received.length === 1);
-  const saved = JSON.parse(await readFile(join(f.directory, 'trigger-engine.json'), 'utf8'));
+  const saved = JSON.parse(await f.text());
   assert.equal(saved.cursors[trigger.id].polling.method, 'POST');
   // A restart while the POST is out: the new engine does not send it again for that time.
   const stopped = service;
@@ -334,7 +338,7 @@ test('a secret echoed back by the server is removed before anything is recorded,
   const tested = await service.testHttp(input.source.kind === 'http' ? input.source.request : ({} as never), input.source.kind === 'http' ? input.source.condition : undefined, OWNER);
   const event = await service.run(trigger.id, AGENT);
   await until(() => f.calls.length === 1);
-  const seen = JSON.stringify([tested, event, service.events(), service.overview(), f.calls[0].input.prompt, await readFile(join(f.directory, 'trigger-engine.json'), 'utf8')]);
+  const seen = JSON.stringify([tested, event, service.events(), service.overview(), f.calls[0].input.prompt, await f.text()]);
   assert.equal(server.received.length, 2);
   assert.doesNotMatch(seen, /s3cr3t-value/);
   assert.match(f.calls[0].input.prompt, /\[secret removed\]/);
@@ -353,7 +357,7 @@ test('a manual POST that may have been delivered is not sent again when an agent
   await assert.rejects(api.call('triggers.run', { id: trigger.id }, AGENT, 'deploy-1'), /will not be sent again/);
   await assert.rejects(api.call('triggers.run', { id: trigger.id }, AGENT, 'deploy-1'), /may or may not have completed/);
   assert.equal(server.received.length, 1);
-  assert.equal(JSON.parse(await readFile(join(f.directory, 'trigger-engine.json'), 'utf8')).cursors[trigger.id].polling, undefined);
+  assert.equal(JSON.parse(await f.text()).cursors[trigger.id].polling, undefined);
 });
 
 test('scheduled and manual requests of one trigger never overlap, and a response to an older revision is dropped', async t => {
@@ -382,9 +386,7 @@ test('all HTTP requests together stay within the per-minute budget, redirects an
     response.end('{}');
   });
   const f = await fixture(t);
-  const service = new TriggerService({ stateDir: f.directory, executor: { runs: () => [], session: () => undefined, getAutoPrompt: () => undefined } as unknown as TriggerExecutor, now: () => f.clock.now, tickMs: 60_000, limits: { requestsPerMinute: 3 } });
-  await service.start();
-  t.after(() => service.close());
+  const service = await f.open({ requestsPerMinute: 3 });
   await service.updateSettings({ ...service.settings(), privateHosts: ['127.0.0.1'] }, OWNER);
   const request = (path: string) => ({ method: 'GET' as const, url: `${server.origin}${path}`, headers: [], timeoutSeconds: 5 });
   assert.equal((await service.testHttp(request('/hop'), undefined, OWNER)).ok, true);
@@ -507,16 +509,13 @@ test('stopping waits for a request in flight and its save before the state is le
   assert.equal(settled, false);
   waiting.shift()!();
   await settling;
-  assert.equal(JSON.parse(await readFile(join(f.directory, 'trigger-engine.json'), 'utf8')).cursors[trigger.id].polling, undefined);
+  assert.equal(JSON.parse(await f.text()).cursors[trigger.id].polling, undefined);
 });
 
 test('scheduled requests resume in the next minute after the request budget ran out', async t => {
   const server = await endpoint(t);
   const f = await fixture(t);
-  const service = new TriggerService({ stateDir: f.directory, executor: { runs: () => [], session: () => undefined, getAutoPrompt: () => undefined } as unknown as TriggerExecutor,
-    now: () => f.clock.now, tickMs: 60_000, limits: { requestsPerMinute: 1 } });
-  await service.start();
-  t.after(() => service.close());
+  const service = await f.open({ requestsPerMinute: 1 });
   await service.updateSettings({ ...service.settings(), privateHosts: ['127.0.0.1'] }, OWNER);
   await service.create(watcher(f.project, `${server.origin}/poll`, { type: 'changed' }), OWNER);
   f.clock.now += 30_000;

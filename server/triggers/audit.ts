@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { Trigger, TriggerActor, TriggerAuditEntry } from '../../shared/triggers.js';
 import { MAX_AUDIT } from './limits.js';
-import { writeRows, removeRows, type EngineState } from './state.js';
+import type { EngineState } from './state.js';
+import { writeRows, removeRows } from './row-operations.js';
 
 /** Adds an entry to the audit log, keeping the newest MAX_AUDIT. `now` is read once, for the entry's time. */
 export function appendAudit(state: EngineState, now: () => number, entry: Omit<TriggerAuditEntry, 'id' | 'at'>): void {

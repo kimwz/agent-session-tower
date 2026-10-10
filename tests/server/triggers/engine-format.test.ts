@@ -176,7 +176,11 @@ async function load(t: TestContext, saved: unknown) {
   const service = await f.open();
   await service.flush();
   assert.deepEqual(await readFile(join(f.directory, 'trigger-engine.json')), source, 'first import and current SQL writes preserve sealed raw input');
-  return { f, service, written: JSON.parse(await f.file()) };
+  const parent = join(f.directory, 'triggers-storage-migrations');
+  const manifests = await Promise.all((await readdir(parent)).map(async id => JSON.parse(await readFile(join(parent, id, 'manifest.json'), 'utf8'))));
+  assert.equal(manifests.length, 1, 'one sealed import manifest');
+  assert.deepEqual(JSON.parse(await f.file()).audit, (saved as { audit: unknown }).audit, 'original audit remains exact');
+  return { f, service, written: JSON.parse(await f.file()), warnings: manifests[0].sourceWarnings };
 }
 
 test('a file an older engine rewrote loads turned off with one audit entry', async t => {
@@ -186,11 +190,11 @@ test('a file an older engine rewrote loads turned off with one audit entry', asy
     onceSchedule: { at: '2026-12-01T00:00:00.000Z', enabled: true, revision: 2 } };
   saved.triggers.push(marker);
   saved.cursors[marker.id] = { anchorAt: start };
-  const { service, written } = await load(t, saved);
+  const { service, written, warnings } = await load(t, saved);
   const loaded = service.list().find(item => item.id === marker.id)!;
   assert.equal(loaded.enabled, false);
-  assert.equal(service.audit({ limit: 1000 }).filter(entry => entry.triggerId === marker.id).length, 1);
-  assert.match(service.audit({ limit: 1000 }).find(entry => entry.triggerId === marker.id)!.summary, /changed by an older engine/);
+  assert.equal(warnings.filter((entry: { triggerId?: string }) => entry.triggerId === marker.id).length, 1);
+  assert.match(warnings.find((entry: { triggerId?: string }) => entry.triggerId === marker.id)!.summary, /changed by an older engine/);
   assert.equal(written.triggers.find((item: { id: string }) => item.id === marker.id).onceSchedule.enabled, false, 'saved again as a turned-off reservation');
 });
 
@@ -198,11 +202,11 @@ test('a downgraded file without the ledger recovers consumption from snapshots w
   const saved = await goldenState();
   const ledger = saved.onceConsumed as Record<string, unknown>;
   delete saved.onceConsumed;
-  const { service, written } = await load(t, saved);
+  const { service, written, warnings } = await load(t, saved);
   const recovered = Object.keys(written.onceConsumed);
   // Only consumption still visible in a snapshot (a tombstone, a revision, an archived definition) comes back.
   assert.ok(recovered.length >= 1 && recovered.every(id => id in ledger));
-  assert.equal(service.audit({ limit: 1000 }).filter(entry => /ledger was absent after a downgrade/.test(entry.summary)).length, 1);
+  assert.equal(warnings.filter((entry: { summary: string }) => /ledger was absent after a downgrade/.test(entry.summary)).length, 1);
 });
 
 test('a 1.105.0 state file loads and is written back as the base writes it', async t => {
