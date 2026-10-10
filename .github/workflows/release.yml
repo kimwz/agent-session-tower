@@ -31,11 +31,13 @@ jobs:
           set -euo pipefail
           [[ "$EXISTING_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid existing_tag'; exit 1; }
           [[ "$GITHUB_REF" == refs/heads/main ]] || { echo 'Dispatch must use the main workflow'; exit 1; }
+          [[ "$WORKFLOW_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || { echo 'Invalid workflow SHA'; exit 1; }
           git fetch --no-tags origin "refs/tags/$EXISTING_TAG"
           TAG_SHA="$(git rev-parse 'FETCH_HEAD^{commit}')"
           git checkout --detach "$TAG_SHA"
           export TAG_SHA
           gh release view "$EXISTING_TAG" --json tagName,isDraft,url,assets > "$RUNNER_TEMP/existing-release.json"
+          git diff --no-renames --name-only -z "$TAG_SHA" "$WORKFLOW_SHA" > "$RUNNER_TEMP/non-product-delta.paths"
           node --input-type=module <<'EVIDENCE'
           import fs from 'node:fs';
           const release = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/existing-release.json`, 'utf8'));
@@ -46,15 +48,23 @@ jobs:
               !release.assets.some(item => item.name === asset && item.size > 0)) {
             throw new Error('Published release, package version or package asset does not match the tag');
           }
+          const nonProductDelta = fs.readFileSync(`${process.env.RUNNER_TEMP}/non-product-delta.paths`, 'utf8').split('\0').filter(Boolean);
+          const allowedPaths = new Set(['.github/workflows/release.yml', 'tests/server/runs/run-persistence.test.ts']);
+          if (nonProductDelta.some(path => !allowedPaths.has(path))) {
+            throw new Error('Workflow source differs from the tag outside the allowed CI and regression fixture paths');
+          }
           const evidence = {
             tag, tagSha: process.env.TAG_SHA, version,
             workflowSha: process.env.WORKFLOW_SHA, workflowRef: process.env.WORKFLOW_REF,
             releaseExists: true, releaseUrl: release.url, asset,
+            productSourceUnchanged: true, checkSourceSha: process.env.WORKFLOW_SHA, nonProductDelta,
           };
           const json = JSON.stringify(evidence, null, 2);
           fs.writeFileSync(process.env.EVIDENCE_PATH, `${json}\n`);
           console.log(json);
           EVIDENCE
+          # Validate exact-tag product code with the reviewed CI-only regression fixture from the workflow revision.
+          git checkout --detach "$WORKFLOW_SHA"
       - name: Upload existing release evidence
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
