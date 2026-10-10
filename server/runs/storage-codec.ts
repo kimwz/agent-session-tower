@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Run, RunInstructions } from '../../shared/types.js';
 import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
 import { checkedInstructions } from './turn-notes.js';
+import type { TriggerAdmissionLink } from '../triggers/storage-commands.js';
 
 export const RUN_SOURCE_BYTES = 64 * 1024 * 1024;
 export const RUN_DEPENDENCY_BYTES = 12_000_000;
@@ -88,8 +89,8 @@ export function transferRow(row: RunRow | RunChange, replacing: boolean): string
   return canonical({ kind: row.kind,id: row.id,value: JSON.parse(row.json),
     ...(replacing ? {} : { previousSha256: change.previousSha256 ?? (change.previous === null ? null : runHash(change.previous)), ...(change.remove ? { remove: true } : {}) }) }) + '\n';
 }
-export function requestHash(mode: string, rows: readonly (RunRow | RunChange)[]): string {
-  const hash = createHash('sha256').update(canonical({ mode }) + '\n');
+export function requestHash(mode: string, rows: readonly (RunRow | RunChange)[], triggerLinks?: readonly TriggerAdmissionLink[]): string {
+  const hash = createHash('sha256').update(canonical({ mode,...(triggerLinks ? { triggerLinks } : {}) }) + '\n');
   for (const row of rows) hash.update(transferRow(row,mode === 'import' || mode === 'restore'));
   return hash.digest('hex');
 }

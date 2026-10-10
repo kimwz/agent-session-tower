@@ -98,7 +98,8 @@ export class TriggerDispatch {
         catch (error) { outcome = { status: admissionUncertain(error) ? 'uncertain' : 'error', error: (error instanceof Error ? error.message : String(error)).slice(0, 1500) }; }
         await this.store.commit(state => {
           const event = state.events.find(item => item.id === claimed.id);
-          if (event) { Object.assign(event, outcome, { updatedAt: new Date(this.now()).toISOString() }); this.handFailed(state, event); }
+          // Atomic admission may already have linked the run in SQL before its response was lost.
+          if (event?.status === 'claimed' && event.requestId === claimed.requestId) { Object.assign(event, outcome, { updatedAt: new Date(this.now()).toISOString() }); this.handFailed(state, event); }
         }, 'settle').catch(() => {});
       } finally { this.submitting.delete(claimed.id); }
     }
@@ -112,7 +113,7 @@ export class TriggerDispatch {
   }
 
   private async submit(event: TriggerEvent): Promise<Partial<TriggerEvent>> {
-    const outcome = await handEvent(event, { executor: this.executor, sharing: this.ports.sharing, trustedFolders: () => this.store.state.trustedFolders });
+    const outcome = await handEvent(event, { executor: this.executor, sharing: this.ports.sharing, trustedFolders: () => this.store.state.trustedFolders,admissionLink: id => this.store.admissionLink(id) });
     // Assigned only once the run really started, so an issue nobody works on is not left assigned.
     const assigned = event.input.issue?.assign && outcome.status === 'running' ? await this.assignIssue(event) : undefined;
     return assigned ? { ...outcome, issueActions: assigned } : outcome;

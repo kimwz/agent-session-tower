@@ -230,18 +230,21 @@ test('typed trigger commands respect common SDK owner fences and leave state and
   assert.deepEqual((await owner.exportCurrent()).documents,state);
 });
 
-test('SQL startup restore disables/deletes recovered queued coordinator before receipt completes: new coordinator/workflow zero', async t => {
+test('first-import SQL startup restore disables/deletes recovered queued coordinator before receipt completes: new coordinator/workflow zero', async t => {
   for (const remove of [false,true]) {
     const f = await fixture(t), state = empty(), trigger = definition();
     trigger.enabled = true; trigger.source = TriggerSourceSchema.parse({ kind: 'github',schedule: { type: 'interval',everySeconds: 300 },auth: { type: 'gh' },account: 'fixture',watch: { type: 'issues',repos: ['octo/app'],assignee: 'any',start: 'existing' } });
     state.triggers = [trigger]; state.cursors[id] = { anchorAt: now(),nextAt: now() + 300_000 };
     const event = documents().events[0]; event.input.handler = 'coordinator'; event.status = 'claimed'; event.triggerRevision = trigger.revision; state.events = [event];
-    await f.repository.importPrepared(state,'b'.repeat(64),`restore-seed-${remove}`);
+    const source = Buffer.from(serializeState(state));
+    await writeFile(join(f.stateDir,'trigger-engine.json'),source,{ mode: 0o600 });
     let coordinators = 0, workflows = 0;
     const executor = { runs: () => [],session: () => undefined,getAutoPrompt: () => undefined,coordinate: async () => { coordinators++; workflows++; return { workflowId: 'forbidden' }; } } as unknown as TriggerExecutor;
     const service = new TriggerService({ stateDir: f.stateDir,storage: f.client,now,tickMs: 3_600_000,executor }); t.after(() => service.close());
     const backup = { triggers: remove ? [] : [{ ...trigger,enabled: false }],settings: state.settings,trustedFolders: [],secretGrants: {},fired: {},github: {} };
+    await service.bootstrapStorage(async () => ({ stateDir: f.stateDir,managed: false,build: { version: f.b.version,manifest: f.b.manifest,preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.b.bundle() }) } }));
     const restored = await service.start({ restore: backup }); assert.deepEqual(restored.errors,[]);
+    assert.deepEqual(await readFile(join(f.stateDir,'trigger-engine.json')),source);
     await service.tick(); assert.equal(service.event(event.id).status,'cancelled');
     assert.equal(coordinators,0); assert.equal(workflows,0);
     const current = (await f.repository.exportCurrent()).documents; assert.equal(current.events[0].status,'cancelled');
@@ -420,4 +423,106 @@ test('SQL restore refuses absent unfinished events after pruning and 30-day evid
     await service.start(); await service.tick(); await service.settle();
     assert.equal(dispatches, 0, 'pruned work creates no dispatch or coordinator after reopen');
   }
+});
+
+test('B owner bootstrap seals first import before load/recovery and keeps independent once consumption and raw source', async t => {
+  const f = await fixture(t), state = documents();
+  state.triggers[0].enabled = true;
+  const source = Buffer.from(serializeState(state) + '\n'), path = join(f.stateDir,'trigger-engine.json');
+  await writeFile(path,source,{ mode: 0o600 });
+  const store = new TriggerStore({ stateDir: f.stateDir,storage: f.client,now,limits: () => undefined,changed: () => {} });
+  const update = async () => ({ stateDir: f.stateDir,managed: false,build: { version: f.b.version,manifest: f.b.manifest,preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.b.bundle() }) } });
+  const first = store.bootstrapStorage(update);
+  assert.equal(store.bootstrapStorage(update),first,'concurrent continuation callers share one first import');
+  await first;
+  const imported = await f.repository.exportCurrent();
+  assert.equal(imported.head.revision,1); assert.equal(imported.documents.triggers[0].enabled,true,'import does not execute once normalization');
+  assert.deepEqual(imported.documents.onceConsumed,state.onceConsumed);
+  const db = new DatabaseSync(join(f.stateDir,'state.sqlite'),{ readOnly: true });
+  try { assert.equal((db.prepare("SELECT count(*) AS n FROM operation_receipts WHERE scope = 'triggers' AND command = 'commit'").get() as { n: number }).n,1); }
+  finally { db.close(); }
+  await store.load(loaded => { assert.equal(loaded.triggers[0].enabled,false,'only load reconciles consumed definitions'); });
+  await store.commit(() => undefined,'settle');
+  assert.deepEqual(store.state.onceConsumed,state.onceConsumed); assert.deepEqual(await readFile(path),source);
+  await store.bootstrapStorage(async () => { throw new Error('SQL authority must precede update/source access'); });
+});
+
+test('B missing bootstrap evidence or missing source amid legacy history holds load, never saving an empty JSON owner', async t => {
+  const f = await fixture(t), path = join(f.stateDir,'trigger-engine.json');
+  const store = new TriggerStore({ stateDir: f.stateDir,storage: f.client,now,limits: () => undefined,changed: () => {} });
+  let recovered = 0;
+  await assert.rejects(store.load(() => { recovered++; }),/bootstrap evidence/);
+  await assert.rejects(store.commit(() => undefined,'settle'),/bootstrap evidence/);
+  assert.equal(recovered,0); assert.equal((await f.repository.head()).authority,null);
+  await assert.rejects(readFile(path),{ code: 'ENOENT' });
+  await mkdir(join(f.stateDir,'triggers-storage-migrations'),{ mode: 0o700 });
+  const update = async () => ({ stateDir: f.stateDir,managed: false,build: { version: f.b.version,manifest: f.b.manifest,preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.b.bundle() }) } });
+  await assert.rejects(store.bootstrapStorage(update),/ENOENT/);
+  assert.equal((await f.repository.head()).authority,null);
+});
+
+test('B source mutation after seal refuses commit, preserves both byte versions and holds subsequent bootstrap', async t => {
+  const f = await fixture(t), path = join(f.stateDir,'trigger-engine.json'), original = Buffer.from(serializeState(documents()));
+  await writeFile(path,original,{ mode: 0o600 });
+  const replacement = Buffer.from(serializeState(empty()));
+  const prepare = f.repository.importPrepared.bind(f.repository);
+  f.repository.importPrepared = async (state,hash,id,verify) => prepare(state,hash,id,async () => { await writeFile(path,replacement); await verify?.(); });
+  const update = { stateDir: f.stateDir,managed: false,build: { version: f.b.version,manifest: f.b.manifest,preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.b.bundle() }) } };
+  const parent = join(f.stateDir,'triggers-storage-migrations'); await mkdir(parent,{ mode: 0o700 });
+  await assert.rejects(importTriggers({ repository: f.repository,stateDir: f.stateDir,evidenceParent: parent,commandId: 'source-race',update,now }),/changed after sealing/);
+  assert.deepEqual(await readFile(join(parent,'source-race','trigger-engine.json')),original);
+  assert.deepEqual(await readFile(path),replacement);
+  assert.equal((await f.client.receipt('source-race-commit')).found,false); assert.equal((await f.repository.head()).authority,null);
+  await assert.rejects(bootstrapTriggers(f.repository,f.stateDir,{ update: async () => update,now }),/seal exists/);
+});
+
+test('B first-import crash before/after commit holds the same owner until receipt resolution, without native replay', async t => {
+  for (const fault of ['before','after']) {
+    const f = await fixture(t), state = documents(), path = join(f.stateDir,'trigger-engine.json'), source = Buffer.from(serializeState(state));
+    await writeFile(path,source,{ mode: 0o600 }); await f.client.close();
+    const client = await f.open(f.b,fault);
+    let effects = 0;
+    const forbidden = async () => { effects++; throw new Error('unexpected dispatch'); };
+    const service = new TriggerService({ stateDir: f.stateDir,storage: client,now,tickMs: 3_600_000,
+      executor: { runs: () => [],session: () => undefined,getAutoPrompt: () => undefined,create: forbidden,coordinate: forbidden,enqueue: forbidden } as unknown as TriggerExecutor });
+    t.after(() => service.close());
+    const update = async () => ({ stateDir: f.stateDir,managed: false,build: { version: f.b.version,manifest: f.b.manifest,preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.b.bundle(fault) }) } });
+    await assert.rejects(service.bootstrapStorage(update),error => (error as { disposition?: string }).disposition === 'unknown');
+    await assert.rejects(service.start()); await service.tick(); assert.equal(effects,0);
+    await client.reopen(); await client.prepare({ allowMigration: false });
+    await assert.rejects(service.bootstrapStorage(update),'SDK reopen alone cannot release uncertain owner');
+    assert.equal(await service.resolveStorage(),fault === 'after' ? 'committed' : 'not-committed');
+    if (fault === 'after') {
+      await service.bootstrapStorage(async () => { throw new Error('committed authority must not evaluate JSON'); });
+      assert.deepEqual((await new TriggersRepository(client).exportCurrent()).documents.onceConsumed,state.onceConsumed);
+    } else await assert.rejects(service.bootstrapStorage(update),/seal exists/);
+    await service.tick(); assert.equal(effects,0); assert.deepEqual(await readFile(path),source);
+    const db = new DatabaseSync(join(f.stateDir,'state.sqlite'),{ readOnly: true });
+    try { assert.equal((db.prepare("SELECT count(*) AS n FROM operation_receipts WHERE scope = 'triggers' AND command = 'commit'").get() as { n: number }).n,fault === 'after' ? 1 : 0,'no new-ID import replay'); }
+    finally { db.close(); }
+  }
+});
+
+test('B bootstrap refuses unknown source version and unsafe source permissions without modifying source or granting authority', async t => {
+  for (const unsafe of [false,true]) {
+    const f = await fixture(t), path = join(f.stateDir,'trigger-engine.json');
+    const bytes = Buffer.from(unsafe ? serializeState(documents()) : JSON.stringify({ ...empty(),version: 2 }));
+    await writeFile(path,bytes,{ mode: unsafe ? 0o644 : 0o600 });
+    const update = async () => ({ stateDir: f.stateDir,managed: false,build: { version: f.b.version,manifest: f.b.manifest,preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.b.bundle() }) } });
+    await assert.rejects(bootstrapTriggers(f.repository,f.stateDir,{ update,now }),unsafe ? /Unsafe trigger source/ : /Invalid trigger source/);
+    assert.deepEqual(await readFile(path),bytes); assert.equal((await f.repository.head()).authority,null);
+    const db = new DatabaseSync(join(f.stateDir,'state.sqlite'),{ readOnly: true });
+    try { assert.equal((db.prepare("SELECT count(*) AS n FROM operation_receipts WHERE scope = 'triggers'").get() as { n: number }).n,0); }
+    finally { db.close(); }
+  }
+});
+
+test('B genuinely absent trigger domain initializes once with sealed evidence, no legacy JSON authority', async t => {
+  const f = await fixture(t);
+  const update = async () => ({ stateDir: f.stateDir,managed: false,build: { version: f.b.version,manifest: f.b.manifest,preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.b.bundle() }) } });
+  assert.equal(await bootstrapTriggers(f.repository,f.stateDir,{ update,now }),true);
+  const first = await f.repository.exportCurrent(); assert.deepEqual(first.documents,empty()); assert.equal(first.head.revision,1);
+  assert.equal(await bootstrapTriggers(f.repository,f.stateDir,{ update: async () => { throw new Error('authority early return'); },now }),true);
+  assert.deepEqual(await f.repository.exportCurrent(),first);
+  await assert.rejects(readFile(join(f.stateDir,'trigger-engine.json')),{ code: 'ENOENT' });
 });

@@ -1,12 +1,14 @@
 import { join } from 'node:path';
 import { readPrivateBytes, writePrivateJson } from '../stores/private-json.js';
+import type { StorageUpdateInput } from '../link/storage-update.js';
 import type { StorageClient } from '../storage/client.js';
 import { TriggersRepository } from './storage-repository.js';
 import { bootstrapTriggers, holdTriggersEvidence } from './storage-transfer.js';
-import { changesOf, logicalBytes, rowsOf, type TriggerRow } from './storage-codec.js';
+import { changesOf, logicalBytes, rowsOf, triggerHash, type TriggerRow } from './storage-codec.js';
 import { normalizeOnce } from './once.js';
 import { failure } from './errors.js';
 import { empty, parseState, pruneState, serializeState, type EngineState } from './state.js';
+import type { TriggerAdmissionLink } from './storage-commands.js';
 
 const MAX_STATE_BYTES = 10_000_000;
 /** New runs stop being accepted here, so runs already accepted can still record how they end. */
@@ -20,7 +22,29 @@ const FULL = 'Trigger history is full; scheduled times pass without running unti
 export class TriggerStore {
   private repository?: TriggersRepository;
   private database = false;
+  private bootstrap?: Promise<void>;
   private rows: TriggerRow[] = [];
+  private revision?: number;
+  /** SQL admissions advance the revision outside this owner's write queue. Read before drafting. */
+  private async refreshAdmissionState(): Promise<void> {
+    if (!this.database) return;
+    const head = await this.repository!.head();
+    if (head.revision === this.revision) return;
+    const current = await this.repository!.exportCurrent();
+    this.rows = current.rows; this.current = current.documents; this.revision = current.head.revision!;
+    this.stateBytes = logicalBytes(this.rows);
+  }
+  async admissionLink(eventId: string): Promise<TriggerAdmissionLink | undefined> {
+    await this.idle();
+    if (!this.database) return undefined;
+    if (this.locked || this.storageError) throw failure('Trigger storage is held.','unavailable');
+    await this.refreshAdmissionState();
+    const head = await this.repository!.head(), row = this.rows.find(item => item.kind === 'events' && item.id === eventId);
+    if (!row || head.revision !== this.revision || !head.authority) throw failure('Trigger admission fence changed.','conflict');
+    const event = JSON.parse(row.json);
+    if (event.status !== 'claimed') throw failure('Trigger event is no longer claimed.','conflict');
+    return { storageId: head.storageId,generation: head.authority.generation,revision: head.revision!,eventId,requestId: event.requestId,eventSha256: triggerHash(row.json) };
+  }
   private current: EngineState = empty();
   private writes: Promise<unknown> = Promise.resolve();
   private pendingCommits = 0;
@@ -34,6 +58,21 @@ export class TriggerStore {
   constructor(private readonly options: { stateDir: string; storage?: StorageClient; now: () => number; limits: () => { acceptBytes?: number; maxBytes?: number } | undefined; changed: () => void }) {
     if (options.storage) this.repository = new TriggersRepository(options.storage);
     this.path = join(options.stateDir, 'trigger-engine.json');
+  }
+
+  /** The worker parks its existing startup continuation here, before load/recovery or secret/native effects. */
+  bootstrapStorage(update: () => Promise<StorageUpdateInput>): Promise<void> {
+    if (!this.repository) return Promise.reject(new Error('Triggers storage is unavailable.'));
+    return this.bootstrap ??= bootstrapTriggers(this.repository,this.options.stateDir,{ update,now: this.options.now })
+      .then(() => undefined).finally(() => { this.bootstrap = undefined; });
+  }
+
+  /** Reopen/prepare the common SDK first. Resolution never retries the staged command. */
+  async resolveStorage(): Promise<'committed' | 'not-committed'> {
+    if (!this.repository?.pending()) throw new Error('No uncertain trigger write to resolve.');
+    const disposition = await this.repository.resolvePending();
+    if (disposition === 'unknown') throw new Error('Trigger receipt remains unknown.');
+    return disposition;
   }
 
   private get acceptBytes() { return this.options.limits()?.acceptBytes ?? ACCEPT_STATE_BYTES; }
@@ -61,7 +100,7 @@ export class TriggerStore {
     try {
       this.database = this.repository ? await bootstrapTriggers(this.repository,this.options.stateDir) : false;
       if (this.database) {
-        const current = await this.repository!.exportCurrent(); loaded = current.documents; this.rows = current.rows; normalizeOnce(loaded,this.options.now);
+        const current = await this.repository!.exportCurrent(); loaded = current.documents; this.rows = current.rows; this.revision = current.head.revision!; normalizeOnce(loaded,this.options.now);
       } else {
         // Standalone owners keep the same seal guard even without an injected SDK.
         if (!this.repository) await holdTriggersEvidence(this.options.stateDir);
@@ -88,6 +127,7 @@ export class TriggerStore {
   commit<T>(change: (state: EngineState) => T, kind: 'grow' | 'settle' = 'grow'): Promise<T> {
     this.pendingCommits++;
     const work = this.writes.catch(() => {}).then(async () => {
+      await this.refreshAdmissionState();
       const draft = structuredClone(this.current);
       // A new attempt to add something starts without the last capacity warning; the change may set it again.
       if (kind === 'grow') this.capacityError = undefined;
@@ -103,7 +143,11 @@ export class TriggerStore {
       }
       if (this.locked) { this.storageError = this.locked; this.options.changed(); throw failure(this.storageError, 'unavailable'); }
       try {
-        if (this.database) await this.repository!.update(changesOf(this.rows,rows!),kind);
+        if (this.database) {
+          const changed = changesOf(this.rows,rows!);
+          await this.repository!.update(changed,kind,undefined,this.revision);
+          if (changed.length) this.revision = (this.revision ?? 0) + 1;
+        }
         else await writePrivateJson(this.path,data!);
       }
       catch (error) {

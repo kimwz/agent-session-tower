@@ -60,7 +60,7 @@ export class TriggersRepository {
     return { documents, rows, head, sha256: documentsHash(documents) };
   }
   /** The R6-removable compatibility adapter is in TriggerStore; future owners send individual row commands here. */
-  async update(changes: TriggerChange[], mode: Exclude<TriggerWriteMode,'import' | 'restore'> = 'grow', id = `triggers-${randomUUID()}`): Promise<TriggerWriteIdentity | undefined> {
+  async update(changes: TriggerChange[], mode: Exclude<TriggerWriteMode,'import' | 'restore'> = 'grow', id = `triggers-${randomUUID()}`, expectedRevision?: number): Promise<TriggerWriteIdentity | undefined> {
     if (!changes.length) { await this.head(); return undefined; }
     await this.gate();
     const receipt = await this.storage.receipt(`${id}-commit`);
@@ -73,6 +73,7 @@ export class TriggersRepository {
     }
     const head = await this.head();
     if (!head.authority) throw new Error('Cannot write triggers DB without imported authority.');
+    if (expectedRevision !== undefined && head.revision !== expectedRevision) throw new Error('Triggers changed after admission readback; draft was not saved.');
     return this.writeIntent({ mode, revision: head.revision, generation: head.authority.generation }, changes, id);
   }
   async restore(documents: EngineState, id: string, expectedGeneration?: number): Promise<TriggerWriteIdentity | undefined> {

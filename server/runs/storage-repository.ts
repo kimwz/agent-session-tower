@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { TriggerAdmissionLink } from '../triggers/storage-commands.js';
 import type { StorageClient } from '../storage/client.js';
 import { StorageCommandError, type CommitDisposition } from '../storage/contract.js';
 import { canonical, requestHash, transferRow, documentsHash, documentsOf, runHash, rowsOf, RUN_CHUNK_BYTES, RUN_INTENT_BYTES, type RunChange, type RunDocuments, type RunRow, type RunRowKind } from './storage-codec.js';
@@ -18,6 +19,11 @@ export class RunsRepository {
     if (!core.open || !domain.open) throw new Error(`Runs storage held: ${[...core.reasons,...domain.reasons].join('; ')}`);
   }
   async gate(): Promise<void> { if (this.uncertain) throw this.uncertain.error; await this.storageGate(); }
+  private async triggerGate(links?: readonly TriggerAdmissionLink[]): Promise<void> {
+    if (!links?.length) return;
+    const gate = await this.storage.gate('triggers');
+    if (!gate.open) throw new Error(`Trigger admission storage held: ${gate.reasons.join('; ')}`);
+  }
   async head(): Promise<RunsHead> {
     await this.gate();
     const head = await this.storage.read<RunsHead>('runs','head',{});
@@ -58,20 +64,21 @@ export class RunsRepository {
     return { documents, rows, head, sha256: documentsHash(documents) };
   }
   /** The R6-removable compatibility adapter is in RunHistory; future owners send individual row commands here. */
-  async update(changes: RunChange[], mode: Exclude<RunWriteMode,'import' | 'restore'> = 'update', id = `runs-${randomUUID()}`): Promise<RunWriteIdentity | undefined> {
+  async update(changes: RunChange[], mode: Exclude<RunWriteMode,'import' | 'restore'> = 'update', id = `runs-${randomUUID()}`, triggerLinks?: readonly TriggerAdmissionLink[]): Promise<RunWriteIdentity | undefined> {
     if (!changes.length) { await this.head(); return undefined; }
     await this.gate();
+    await this.triggerGate(triggerLinks);
     const receipt = await this.storage.receipt(`${id}-commit`);
     if (receipt.found) {
       const record = receipt.receipt;
       if (record.scope !== 'runs' || record.command !== 'commit' || record.result.state !== 'included') throw new Error('Runs receipt cannot be verified.');
       const result = record.result.value as { requestSha256?: string; intentSha256?: string };
-      if (result?.requestSha256 !== requestHash(mode,changes) || typeof result.intentSha256 !== 'string') throw new Error('Runs command ID conflicts with another canonical payload.');
+      if (result?.requestSha256 !== requestHash(mode,changes,triggerLinks) || typeof result.intentSha256 !== 'string') throw new Error('Runs command ID conflicts with another canonical payload.');
       return { id,commandId: `${id}-commit`,sha256: result.intentSha256 };
     }
     const head = await this.head();
     if (!head.authority) throw new Error('Cannot write runs DB without imported authority.');
-    return this.writeIntent({ mode, revision: head.revision, generation: head.authority.generation }, changes, id);
+    return this.writeIntent({ mode, revision: head.revision, generation: head.authority.generation,...(triggerLinks ? { triggerLinks } : {}) }, changes, id);
   }
   /** A single admission includes its placeholder/provenance and required instructions in the final receipt TX. */
   async admit(input: { run: RunDocuments['runs'][number]; created?: RunDocuments['created'][number]; instructions?: RunDocuments['instructions'][string] }, id: string): Promise<RunWriteIdentity | undefined> {
@@ -142,7 +149,8 @@ export class RunsRepository {
   }
   private async writeIntent(header: RunIntentHeader, rows: readonly (RunRow | RunChange)[], id: string, verifyBeforeCommit?: () => Promise<void>): Promise<RunWriteIdentity> {
     await this.gate();
-    const parts: Buffer[] = [Buffer.from(canonical({ ...header,requestSha256: requestHash(header.mode,rows) }) + '\n')];
+    await this.triggerGate(header.triggerLinks);
+    const parts: Buffer[] = [Buffer.from(canonical({ ...header,requestSha256: requestHash(header.mode,rows,header.triggerLinks) }) + '\n')];
     let size = parts[0].length;
     for (const row of rows) {
       const line = Buffer.from(transferRow(row,header.mode === 'import' || header.mode === 'restore'));
@@ -164,6 +172,7 @@ export class RunsRepository {
     for (let offset = 0, part = 0; offset < bytes.length; offset += RUN_CHUNK_BYTES, part++) await write('stage',{ intent: id, part, data: bytes.subarray(offset,offset + RUN_CHUNK_BYTES).toString('base64') },`${id}-${part}`);
     await verifyBeforeCommit?.();
     await this.gate();
+    await this.triggerGate(header.triggerLinks);
     await write('commit',{ intent: id },identity.commandId);
     return identity;
   }

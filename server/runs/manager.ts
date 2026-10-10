@@ -96,6 +96,8 @@ interface RunnerOptions {
 }
 /** Internal admission data is never accepted from the public message endpoint. */
 export interface RunAdmission {
+  /** Only local session triggers; committed with the fresh run and the runs receipt. */
+  triggerLink?: import('../triggers/storage-commands.js').TriggerAdmissionLink;
   heartbeat?: HeartbeatAdmission;
   autoPromptId?: string;
   validate?: () => void;
@@ -522,6 +524,7 @@ export class RunManager extends EventEmitter {
   }
 
   async create(input: CreateSessionRequest, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
+    if (internal.triggerLink) throw notAdmitted(new RunError('Atomic trigger admission only continues local sessions.','forbidden'));
     if (internal.heartbeat) throw notAdmitted(new RunError('Heartbeat cannot create sessions.', 'forbidden'));
     const incoming = Array.isArray(input.attachmentIds) ? input.attachmentIds.filter(id => typeof id === 'string') : [];
     this.incomingAttachments.add(incoming);
@@ -682,6 +685,10 @@ export class RunManager extends EventEmitter {
         ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),
         ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}) };
       if (internal.heartbeat) run.heartbeatRootRunId = run.id;
+      if (internal.triggerLink) {
+        try { this.history.linkTrigger(run.id,internal.triggerLink); }
+        catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
+      }
       this.admissions.add(run.id);
       this.runs.set(run.id, run);
       this.prune();
@@ -689,7 +696,7 @@ export class RunManager extends EventEmitter {
       try { await this.flush(); } // An accepted instruction is durable before launching the provider.
       catch (error) {
         if (admissionUncertain(error)) { this.uncertainAdmissions.add(run.id); this.uncertainPrepared.set(run.id, { createdIds: prepared.createdIds }); throw error; }
-        this.runs.delete(run.id); this.changed(); await this.attachments.rollback(prepared.createdIds); throw error;
+        this.history.forgetTrigger(run.id); this.runs.delete(run.id); this.changed(); await this.attachments.rollback(prepared.createdIds); throw error;
       }
       finally { if (!this.uncertainAdmissions.has(run.id)) this.admissions.delete(run.id); }
       await this.retainAttachments(run);
