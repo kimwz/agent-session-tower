@@ -1,15 +1,14 @@
 import { execFile } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
-import { join, isAbsolute } from 'node:path';
+import { isAbsolute } from 'node:path';
 import { promisify } from 'node:util';
 import type { Run, Session } from '../../../shared/types.js';
-import { readPrivateJson, writePrivateJson } from '../../stores/private-json.js';
 import { resolveRetentionLineage } from './ancestry.js';
 import type { RetentionMember } from '../../../shared/retention.js';
 import type { RetentionObservation, RetentionRecord } from './policy.js';
 import type { StorageClient } from '../../storage/client.js';
 import { RetentionRepository } from './storage-repository.js';
-import { observationDocument, type InactiveObservation, type RetentionChange } from './storage-codec.js';
+import type { InactiveObservation, RetentionChange } from './storage-codec.js';
 
 /** An execution result stays protected until delivered, even if no notification was requested. */
 export function permissionRetentionPending(request: { status: string; notification?: { state: string }; run?: { status: string; delivered?: boolean } }): boolean {
@@ -58,29 +57,19 @@ export class RetentionObserver {
   private inactive = new Map<string, InactiveObservation>();
   private restarted = true;
   private observing?: Promise<RetentionObservation>;
-  private readonly path: string;
   private repository?: RetentionRepository;
-  private database = false;
+  private started = false;
   private tupleTails = new Map<string, unknown[]>();
-  private metadata: Record<string, unknown> = { version: 1 };
-  constructor(private readonly options: RetentionObserverOptions) { this.path = join(options.stateDir, 'retention-observations.json'); if (options.storage) this.repository = new RetentionRepository(options.storage); }
+  constructor(private readonly options: RetentionObserverOptions) { if (options.storage) this.repository = new RetentionRepository(options.storage); }
   async start(): Promise<void> {
-    if (Object.hasOwn(this.options, 'storage') && !this.repository) throw new Error('Shared retention storage is unavailable.');
-    if (this.repository && await this.repository.databaseAuthority()) {
-      const { documents } = await this.repository.exportCurrent();
-      const { entries, ...metadata } = documents.observations;
-      this.metadata = metadata; this.inactive = new Map(entries.map(([id, value]) => [id, value])); this.tupleTails = new Map(entries.map(([id, _value, ...tail]) => [id, tail])); this.database = true; return;
-    }
-    try {
-      const data = observationDocument(await readPrivateJson(this.path, 8_000_000));
-      const { entries: _entries, ...metadata } = data; this.metadata = metadata;
-      if (data.version !== 1 || !Array.isArray(data.entries)) throw new Error('Invalid retention observations.');
-      for (const [id, entry, ...tail] of data.entries) {
-        this.tupleTails.set(id, tail);
-        if (typeof id !== 'string' || !entry || typeof entry.fingerprint !== 'string' || !Number.isFinite(entry.observedAt) || !Number.isFinite(Date.parse(entry.since))) throw new Error('Invalid inactive observation.');
-        this.inactive.set(id, entry);
-      }
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    this.started = false;
+    if (!this.repository) throw new Error('Shared retention storage is unavailable.');
+    if (!await this.repository.databaseAuthority()) throw new Error('Retention database authority is required.');
+    const { documents } = await this.repository.exportCurrent();
+    const { entries } = documents.observations;
+    this.inactive = new Map(entries.map(([id, value]) => [id, value]));
+    this.tupleTails = new Map(entries.map(([id, _value, ...tail]) => [id, tail]));
+    this.started = true;
   }
   observe(): Promise<RetentionObservation> {
     if (this.observing) return this.observing;
@@ -92,6 +81,9 @@ export class RetentionObserver {
     return task;
   }
   private async readObservation(): Promise<RetentionObservation> {
+    if (!this.started || !this.repository) throw new Error('Retention observer has not loaded database authority.');
+    try { if (!await this.repository.databaseAuthority()) throw new Error('Retention database authority is required.'); }
+    catch (error) { this.restarted = true; throw error; }
     let snapshot: NativeRetentionObservation;
     try { snapshot = await this.options.snapshot(); }
     catch (error) { this.restarted = true; throw error; }
@@ -124,18 +116,29 @@ export class RetentionObserver {
     const projects = new Map<string, string | undefined>();
     const projectDeadline = Date.now() + 10_000;
     const current = new Map<string, InactiveObservation>();
+    const changes = new Map<string, RetentionChange>();
+    const unseen = new Set(this.inactive.keys());
+    const tuple = (id: string, value: InactiveObservation) => JSON.stringify([id, value, ...(this.tupleTails.get(id) ?? [])]);
     for (const raw of snapshot.records) {
       const reconciled = byNative.get(`${raw.session.provider}:${raw.session.nativeId}`) ?? raw.session;
       const session = { ...reconciled };
       if (session.parentId) session.parentId = aliases.get(session.parentId) ?? aliases.get(`${session.provider}:${session.parentId}`) ?? session.parentId;
       const inactive = snapshot.complete && !protectedIds.has(session.id);
       const previous = this.inactive.get(session.id);
+      unseen.delete(session.id);
       let observation: InactiveObservation | undefined;
       if (inactive) {
         observation = previous && !this.restarted && previous.fingerprint === raw.fingerprint && now >= previous.observedAt && now - previous.observedAt <= 7_200_000
           ? { ...previous, observedAt: now }
           : { ...previous, fingerprint: raw.fingerprint, since: new Date(now).toISOString(), observedAt: now };
         current.set(session.id, observation);
+        const json = tuple(session.id, observation), old = previous ? tuple(session.id, previous) : null;
+        if (json !== old) changes.set(session.id, { kind: 'observation', id: session.id, json, previous: old });
+        else changes.delete(session.id);
+      } else if (previous) {
+        const json = tuple(session.id, previous);
+        current.delete(session.id);
+        changes.set(session.id, { kind: 'observation', id: session.id, json, previous: json, remove: true });
       }
       const kind = raw.internal ? 'guardian' : session.isSubagent ? 'subagent' : session.launchedByAgent ? 'helper' : 'parent';
       const needsProject = kind === 'parent' && !session.master;
@@ -145,19 +148,13 @@ export class RetentionObserver {
         projectKey: needsProject ? projects.get(session.cwd) : undefined, lastActivityAt: raw.lastActivityAt,
         latestTaskEndedAt: raw.latestTaskEndedAt, inactiveSince: observation?.since });
     }
+    for (const id of unseen) {
+      const json = tuple(id, this.inactive.get(id)!);
+      changes.set(id, { kind: 'observation', id, json, previous: json, remove: true });
+    }
     try {
-      if (this.database) {
-        const changes: RetentionChange[] = [];
-        for (const [id, value] of current) {
-          const json = JSON.stringify([id, value, ...(this.tupleTails.get(id) ?? [])]), previous = this.inactive.has(id) ? JSON.stringify([id, this.inactive.get(id), ...(this.tupleTails.get(id) ?? [])]) : null;
-          if (json !== previous) changes.push({ kind: 'observation', id, json, previous });
-        }
-        for (const [id, value] of this.inactive) if (!current.has(id)) changes.push({ kind: 'observation', id, json: JSON.stringify([id, value, ...(this.tupleTails.get(id) ?? [])]), previous: JSON.stringify([id, value, ...(this.tupleTails.get(id) ?? [])]), remove: true });
-        await this.repository!.update(changes);
-      } else {
-        if (this.repository && await this.repository.databaseAuthority()) throw new Error('Retention authority changed; restart the owner before writing.');
-        await writePrivateJson(this.path, JSON.stringify({ ...this.metadata, version: 1, entries: [...current].map(([id, value]) => [id, value, ...(this.tupleTails.get(id) ?? [])]) }), { syncDirectory: true });
-      }
+      if (!this.repository) throw new Error('Shared retention storage is unavailable.');
+      await this.repository.update([...changes.values()]);
     }
     catch (error) { this.restarted = true; throw error; }
     this.inactive = current; this.restarted = false;

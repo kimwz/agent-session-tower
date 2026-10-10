@@ -1,3 +1,4 @@
+import { actualStorage, prepareActualStorage, closeActualStorage, corruptActualObservations } from './retention-actual-storage.js';
 import { strict as assert } from 'node:assert';
 import { execFile } from 'node:child_process';
 import { mkdtemp, realpath, rm, readFile, writeFile } from 'node:fs/promises';
@@ -15,13 +16,13 @@ function session(id: string, parentId?: string): Session {
 }
 async function fixture(run: (root: string) => Promise<void>): Promise<void> {
   const temporary = await mkdtemp(join(tmpdir(), 'tower-retention-observer-'));
-  try { await run(await realpath(temporary)); } finally { await rm(temporary, { force: true, recursive: true }); }
+  try { const root = await realpath(temporary); await prepareActualStorage(root); await run(root); } finally { await closeActualStorage(await realpath(temporary)); await rm(temporary, { force: true, recursive: true }); }
 }
 
 test('unknown termination needs uninterrupted fingerprint observations; restart and incomplete scans reset it', async () => fixture(async stateDir => {
   let now = Date.parse('2026-10-01T00:00:00Z');
   const snapshot: NativeRetentionObservation = { complete: true, records: [{ session: session('child', 'claude:parent'), internal: false, fingerprint: 'v1' }] };
-  const make = () => new RetentionObserver({ stateDir, now: () => now, snapshot: () => snapshot, reconcile: value => value,
+  const make = () => new RetentionObserver({ stateDir, storage: actualStorage(stateDir), now: () => now, snapshot: () => snapshot, reconcile: value => value,
     runs: () => [], settled: () => new Set(), protectedIds: () => [], projectIdentity: async () => undefined });
   const observer = make(); await observer.start();
   const first = (await observer.observe()).records[0]!.inactiveSince;
@@ -52,7 +53,7 @@ test('native aliases protect waiting runs and all Claude descendants, including 
     { session: completed, internal: false, fingerprint: 'v1', latestTaskEndedAt: '2026-01-01T00:00:00Z' },
     { session: waiting, internal: false, fingerprint: 'v1', latestTaskEndedAt: '2026-01-01T00:00:00Z' },
   ] };
-  const observer = new RetentionObserver({ stateDir, snapshot: () => snapshot,
+  const observer = new RetentionObserver({ stateDir, storage: actualStorage(stateDir), snapshot: () => snapshot,
     reconcile: value => value.map(item => ({ ...item, id: `claude:monitor-${item.nativeId}` })),
     runs: () => [{ id: 'queued-run', sessionId: 'claude:waiting', status: 'queued' } as Run],
     settled: () => new Set(), protectedIds: () => [], projectIdentity: async () => 'git-common' });
@@ -76,10 +77,11 @@ test('logical projects use proven git common directory, while deleted worktrees 
   assert.equal(await gitProjectIdentity(worktree), undefined);
 }));
 
-test('invalid retained observations fail closed and preserve the corrupt file for inspection', async () => fixture(async stateDir => {
+test('invalid retained SQL observations fail closed and preserve the corrupt legacy file for inspection', async () => fixture(async stateDir => {
   const path = join(stateDir, 'retention-observations.json');
   await writeFile(path, '{broken fixture');
-  const observer = new RetentionObserver({ stateDir, snapshot: () => ({ complete: true, records: [] }),
+  await corruptActualObservations(stateDir);
+  const observer = new RetentionObserver({ stateDir, storage: actualStorage(stateDir), snapshot: () => ({ complete: true, records: [] }),
     reconcile: value => value, runs: () => [], settled: () => new Set(), protectedIds: () => [] });
   await assert.rejects(observer.start());
   assert.equal(await readFile(path, 'utf8'), '{broken fixture');
@@ -92,7 +94,7 @@ test('a normal asynchronous scan finishes before inactivity, clock and pending-r
   let resumeScan!: () => void;
   let requested!: () => void;
   let pendingRuns: Run[] = [];
-  const observer = new RetentionObserver({ stateDir, now: () => now,
+  const observer = new RetentionObserver({ stateDir, storage: actualStorage(stateDir), now: () => now,
     snapshot: async () => { requested?.(); await scan; return snapshot; }, reconcile: value => value,
     runs: () => pendingRuns, settled: () => new Set(), protectedIds: () => [], projectIdentity: async () => undefined });
   await observer.start();
@@ -123,7 +125,7 @@ test('a rejected scan breaks continuous inactive observation instead of extendin
   let now = Date.parse('2026-10-01T00:00:00Z');
   let fail = false;
   const snapshot: NativeRetentionObservation = { complete: true, records: [{ session: session('child', 'claude:parent'), internal: false, fingerprint: 'stable' }] };
-  const observer = new RetentionObserver({ stateDir, now: () => now, snapshot: async () => { if (fail) throw new Error('fixture scan failure'); return snapshot; },
+  const observer = new RetentionObserver({ stateDir, storage: actualStorage(stateDir), now: () => now, snapshot: async () => { if (fail) throw new Error('fixture scan failure'); return snapshot; },
     reconcile: value => value, runs: () => [], settled: () => new Set(), protectedIds: () => [], projectIdentity: async () => undefined });
   await observer.start(); const original = (await observer.observe()).records[0]!.inactiveSince;
   now += 3_600_000; fail = true;

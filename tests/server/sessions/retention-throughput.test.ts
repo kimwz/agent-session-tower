@@ -1,3 +1,4 @@
+import { actualStorage, prepareActualStorage, closeActualStorage } from './retention-actual-storage.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
@@ -20,7 +21,7 @@ function session(id: string, child = false): Session {
 }
 
 test('two thousand child workspaces do not amplify fresh parent project discovery', async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-retention-throughput-')));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-retention-throughput-')));await prepareActualStorage(root);
   try {
     const parents = Array.from({ length: 20 }, (_, i) => ({ ...session(`p${i}`), cwd: `/fixture/${i % 2 ? 'b' : 'a'}` }));
     const children = Array.from({ length: 2000 }, (_, i) => ({ ...session(`c${i}`, true), cwd: `/fixture/one-shot-${i}` }));
@@ -29,7 +30,7 @@ test('two thousand child workspaces do not amplify fresh parent project discover
     const snapshot: NativeRetentionObservation = { complete: true, records: [...parents, ...children, helper, guardian].map(s => ({ session: s,
       internal: s.id === guardian.id, fingerprint: 'stable', latestTaskEndedAt: new Date(now - 8 * day).toISOString() })) };
     let calls: string[] = [], generation = 'old';
-    const observer = new RetentionObserver({ stateDir: root, now: () => now, snapshot: () => snapshot, reconcile: s => s,
+    const observer = new RetentionObserver({ stateDir: root, storage: actualStorage(root), now: () => now, snapshot: () => snapshot, reconcile: s => s,
       runs: () => [], settled: () => new Set(), protectedIds: () => [], projectIdentity: async cwd => { calls.push(cwd); return `${generation}:${cwd}`; } });
     await observer.start();
     const first = await observer.observe();
@@ -42,16 +43,19 @@ test('two thousand child workspaces do not amplify fresh parent project discover
     assert.ok(second.records.filter(r => r.kind === 'parent').every(r => r.projectKey?.startsWith('new:')), 'fresh parent proof is never reused across observations');
     assert.equal(second.records.length, first.records.length);
     assert.equal(second.records.find(r => r.session.id === children[0]!.id)?.latestTaskEndedAt, new Date(now - 8 * day).toISOString());
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await closeActualStorage(root); await rm(root, { recursive: true, force: true }); }
 });
 
 
 async function maintenanceFixture(t: TestContext, count: number, hook?: (id: string) => Promise<boolean>) {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-retention-throughput-')));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-retention-throughput-')));await prepareActualStorage(root);
+  t.mock.timers.enable({apis: ['setTimeout', 'Date'], now});
   const native = join(root, 'native'); await mkdir(native);
   const file = join(native, 'fixture.jsonl'); await writeFile(file, 'fixture\n'); const info = await stat(file);
-  const store = new RetentionStore(join(root, 'state')); await store.start(now - 10 * day);
+  const store = new RetentionStore(join(root, 'state'), { storage: actualStorage(join(root, 'state')) }); await store.start(now - 10 * day);
   const records = [session('p0'), ...Array.from({ length: count }, (_, i) => session(`c${i}`, true))].map(s => ({session: s, kind: s.isSubagent ? 'subagent' as const : 'parent' as const, latestTaskEndedAt: new Date(now - 8 * day).toISOString()}));
+  const waiting = new Map<number, (() => void)[]>();
+  const waitForAttempts = (count: number): Promise<void> => attempts.length >= count ? Promise.resolve() : new Promise(resolve => { waiting.set(count, [...(waiting.get(count) ?? []), resolve]); });
   const attempts: string[] = [], observation = {complete: true, calls: 0, fail: false};
   const service = new RetentionService({store, archive: new RetentionArchive(join(root, 'cold'), [native]),
     observe: async () => { observation.calls++; if (observation.fail) throw new Error('fixture observation failed'); const cold = new Set(store.list().flatMap(e => e.members || []).filter(m => m.state === 'cold').map(m => m.sessionId));
@@ -59,6 +63,7 @@ async function maintenanceFixture(t: TestContext, count: number, hook?: (id: str
     adapter: {capability: () => ({status: 'supported'}), files: async () => [], inspectCold: async members => ({complete: true, members, issues: []}),
       reserve: async (candidate, selected, context) => {
         attempts.push(candidate.rootId);
+        for (const [count, callbacks] of waiting) if (attempts.length >= count) { waiting.delete(count); for (const resolve of callbacks) resolve(); }
         if (hook && !await hook(candidate.rootId)) return undefined;
         const members: RetentionMember[] = selected.map(({session: s}) => ({sessionId: s.id, nativeId: s.nativeId, provider: s.provider, parentId: s.parentId,
           isSubagent: s.isSubagent, createdAt: s.createdAt, operationId: context.operationId, state: 'cold', originalPath: file, coldPath: file,
@@ -67,18 +72,17 @@ async function maintenanceFixture(t: TestContext, count: number, hook?: (id: str
           moveCold: async () => { await context.fresh(); for(const m of members) await context.commitMember(m); return members; },
           sources: async () => selected.map(({session: s}) => ({path: file, root: native, nativeId: s.nativeId, provider: s.provider})), release: async () => {}};
       }} });
-  t.after(async () => {await service.quiesce(); await rm(root, {recursive: true, force: true});});
-  await service.start(); return {service, attempts, records, observation};
+  t.after(async () => {await service.quiesce(); t.mock.timers.reset(); await closeActualStorage(root); await rm(root, {recursive: true, force: true});});
+  await service.start(); return {service, attempts, records, observation, waitForAttempts};
 }
 
 test('budgeted progress continues after one second and shares an in-flight manual check', async t => {
-  t.mock.timers.enable({apis: ['setTimeout', 'Date'], now});
-  const {service, attempts} = await maintenanceFixture(t, 101);
+  const {service, attempts, waitForAttempts} = await maintenanceFixture(t, 101);
   const first = service.cycle(); assert.equal(service.cycle(), first);
   assert.equal((await first).archivedMembers, 100);
   assert.equal(service.overview().deferredReasons?.['session-budget'], 1);
   t.mock.timers.tick(999); await new Promise(setImmediate); assert.equal(attempts.length, 100);
-  t.mock.timers.tick(1); await new Promise(setImmediate);
+  t.mock.timers.tick(1); await waitForAttempts(101);
   assert.equal(attempts.length, 101, 'automatic continuation starts without another manual request');
   const second = service.cycle(); assert.equal(service.cycle(), second);
   assert.equal((await second).archivedMembers, 101, 'timer and manual call share the same next chunk');
@@ -87,7 +91,6 @@ test('budgeted progress continues after one second and shares an in-flight manua
 });
 
 test('no progress keeps the hourly delay rather than retrying failed candidates in a tight loop', async t => {
-  t.mock.timers.enable({apis: ['setTimeout', 'Date'], now});
   const {service, attempts} = await maintenanceFixture(t, 1, async () => false);
   await service.cycle(); assert.equal(attempts.length, 1);
   t.mock.timers.tick(1000); await new Promise(setImmediate); assert.equal(attempts.length, 1);
@@ -95,7 +98,6 @@ test('no progress keeps the hourly delay rather than retrying failed candidates 
 });
 
 test('time-budget cursor reaches later candidates after a slow failure at the front', async t => {
-  t.mock.timers.enable({apis: ['setTimeout', 'Date'], now});
   const {service, attempts, records} = await maintenanceFixture(t, 3, async id => {t.mock.timers.tick(30_000); return id !== 'codex:c0';});
   records.push({session: {...session('p0'), id: 'claude:p0', provider: 'claude'}, kind: 'parent', latestTaskEndedAt: new Date(now - 8 * day).toISOString()});
   const later = records.find(r => r.session.nativeId === 'c1')!;
@@ -108,7 +110,6 @@ test('time-budget cursor reaches later candidates after a slow failure at the fr
 });
 
 test('session-budget cursor reaches a healthy provider behind one hundred fast failures', async t => {
-  t.mock.timers.enable({apis: ['setTimeout', 'Date'], now});
   const {service, attempts, records} = await maintenanceFixture(t, 101, async id => id === 'claude:c100');
   records.push({session: {...session('p0'), id: 'claude:p0', provider: 'claude'}, kind: 'parent', latestTaskEndedAt: new Date(now - 8 * day).toISOString()});
   const later = records.find(r => r.session.nativeId === 'c100')!;
@@ -121,7 +122,6 @@ test('session-budget cursor reaches a healthy provider behind one hundred fast f
 });
 
 for (const recovers of [false, true]) test(`incomplete fresh observation keeps the hourly delay even when it later recovers: ${recovers}`, async t => {
-  t.mock.timers.enable({apis: ['setTimeout', 'Date'], now});
   const fixture = await maintenanceFixture(t, recovers ? 4 : 3, async id => {
     if (id === 'codex:c1') { fixture.observation.complete = false; if (!recovers) t.mock.timers.tick(30_000); }
     if (id === 'codex:c2' && recovers) { fixture.observation.complete = true; t.mock.timers.tick(30_000); }
@@ -137,7 +137,6 @@ for (const recovers of [false, true]) test(`incomplete fresh observation keeps t
 });
 
 test('a failed fresh observation after partial progress also prevents a fast retry', async t => {
-  t.mock.timers.enable({apis: ['setTimeout', 'Date'], now});
   const fixture = await maintenanceFixture(t, 3, async id => {
     if (id === 'codex:c1') { fixture.observation.fail = true; t.mock.timers.tick(30_000); }
     return true;
@@ -149,7 +148,6 @@ test('a failed fresh observation after partial progress also prevents a fast ret
 });
 
 test('quiesce clears a scheduled catch-up and drains an in-flight original operation', async t => {
-  t.mock.timers.enable({apis: ['setTimeout', 'Date'], now});
   let entered!: () => void, finish!: () => void;
   const began = new Promise<void>(r => {entered = r;}), barrier = new Promise<void>(r => {finish = r;});
   const {service, attempts} = await maintenanceFixture(t, 2, async () => {entered(); await barrier; t.mock.timers.tick(30_000); return true;});
@@ -162,7 +160,6 @@ test('quiesce clears a scheduled catch-up and drains an in-flight original opera
 });
 
 test('stopping after a successful chunk removes its pending catch-up timer', async t => {
-  t.mock.timers.enable({apis: ['setTimeout', 'Date'], now});
   const {service, attempts} = await maintenanceFixture(t, 101);
   await service.cycle(); assert.equal(attempts.length, 100);
   await service.quiesce(); t.mock.timers.tick(3_600_000); await new Promise(setImmediate);
