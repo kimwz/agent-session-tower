@@ -742,14 +742,22 @@ test('updating on request stops the running turn at the deadline, hands off, and
   await until(() => f.runs.list().find(item => item.id === run.id)?.error !== undefined);
   await f.runs.flushState();
   const saved = (await fixtureDocuments(f.runs)).runs;
-  const stopped = saved.find(item => item.id === run.id)!;
+  const stopped = saved.find(item => item.id === run.id);
+  assert.ok(stopped);
   assert.equal(stopped.status, 'cancelled');
+  assert.ok(typeof stopped.error === 'string');
   assert.match(stopped.error, /Tower update/);
   const resume = saved.find(item => item.scheduled?.resume === 'update');
-  assert.equal(resume?.status, 'queued');
-  assert.equal(resume?.scheduled.afterRunId, run.id);
-  const carried = saved.find(item => item.id === queued.id)!;
+  assert.ok(resume);
+  assert.equal(resume.status, 'queued');
+  assert.ok(resume.scheduled);
+  assert.equal(resume.scheduled.resume, 'update');
+  assert.equal(resume.scheduled.afterRunId, run.id);
+  const carried = saved.find(item => item.id === queued.id);
+  assert.ok(carried);
   assert.equal(carried.status, 'queued');
+  // SQL documents retain this private field beyond the public Run projection.
+  assert.ok('keepQueued' in carried);
   assert.equal(carried.keepQueued, true, 'the next worker keeps it queued');
 });
 
