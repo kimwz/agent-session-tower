@@ -59,7 +59,7 @@ async function fixture(t: TestContext) {
       return run;
     },
   };
-  const storage = await externalStorageFixture(t, directory);
+  const storage = await externalStorageFixture(t, directory, true, 'normal', false);
   const options = { repository: storage.autoPrompt, effectGate: storage.effectGate, stateDir: directory, snapshot: () => structuredClone(current), refresh: async () => {}, runs,
     detail: async (id: string) => { const found = current.sessions.find(value => value.id === id); return found ? { session: found, hasMore: false, messages: [
       { id: 'user', role: 'user' as const, text: 'The editor crashes when saving.', timestamp: session.createdAt },
@@ -69,7 +69,7 @@ async function fixture(t: TestContext) {
   };
   const manager = new AutoPromptManager(options);
   await manager.start(); await manager.startRuntimeEffects();
-  t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
+  t.after(async () => { await manager.close(); await storage.storage.close(); await rm(directory, { recursive: true, force: true }); });
   const finished = (id: string) => until(() => { const job = manager.get(id); return job && ['completed', 'error', 'cancelled'].includes(job.status) ? job : undefined; });
   return { directory, cwd, other, session, current, managed, calls, dispatches, manager, options, finished,
     respond: (fn: typeof response) => { response = fn; }, beforeAdmission: (fn: () => Promise<void>) => { beforeAdmission = fn; } };
@@ -951,6 +951,7 @@ test('unknown run admission preserves Auto Prompt staging and is never recovered
   const accepted = await f.manager.submit(input);
   await until(() => f.manager.get(accepted.id)?.status === 'uncertain');
   assert.equal(f.manager.get(accepted.id)?.runId,undefined,'a memory run is not an admission receipt');
+  await until(() => !f.manager.busy()); await f.manager.flush();
   const stored = JSON.parse(await readAutoPromptFixture(f.options.repository));
   assert.ok(stored.find((entry: { job: { id: string } }) => entry.job.id === accepted.id).staged.length);
   await assert.rejects(f.manager.submit(input), (error: unknown) => (error as {disposition?:string}).disposition === 'uncertain'); assert.equal(dispatches,1);

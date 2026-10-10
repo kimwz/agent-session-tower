@@ -29,6 +29,7 @@ async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'
   const stateDir = join(root, 'state');
   const project = join(root, 'project');
   await mkdir(project);
+  await mkdir(stateDir, { mode: 0o700 });
   const sessions = new Map([['claude:one', { cwd: project, provider: 'claude' as const }], ['claude:other', { cwd: project, provider: 'claude' as const }], ['codex:two', { cwd: project, provider: 'codex' as const }]]);
   let clock = new Date('2026-09-30T00:00:00.000Z');
   const finished: string[] = [];

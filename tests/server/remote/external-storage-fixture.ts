@@ -16,9 +16,10 @@ after(async()=> { if(buildDirectory) await rm(buildDirectory,{recursive:true,for
 async function artifact() {
  if(!build) build=(async()=> {buildDirectory=await realpath(await mkdtemp(join(tmpdir(),'tower-external-artifact-')));return retentionBuild('1.125.0',buildDirectory,true,true,true);})();return build;
 }
-export async function externalStorageFixture(t:TestContext,stateDir:string,importDomains=true,fault='normal') {
+export async function externalStorageFixture(t:TestContext,stateDir:string,importDomains=true,fault='normal',registerClose=true) {
  await mkdir(stateDir,{recursive:true,mode:0o700}); stateDir = await realpath(stateDir);
- const captured=await artifact(),storage=await captured.storage.openStorage({stateDir,bundle:captured.bundle(fault)});t.after(()=>storage.close());
+ const captured=await artifact(),storage=await captured.storage.openStorage({stateDir,bundle:captured.bundle(fault)});
+ if(registerClose) t.after(()=>storage.close());
  await storage.prepare({allowMigration:true});
  const remote=new RemoteRepository(storage),autoPrompt=new AutoPromptRepository(storage),workflows=new WorkflowRepository(storage);
  const checkActivation=async()=> {
