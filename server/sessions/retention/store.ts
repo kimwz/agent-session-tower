@@ -1,10 +1,9 @@
 import { mkdir, lstat, chmod } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
-import { readPrivateJson, writePrivateJson } from '../../stores/private-json.js';
 import type { RetentionJournalEntry } from './types.js';
 import type { StorageClient } from '../../storage/client.js';
 import { RetentionRepository } from './storage-repository.js';
-import { journalDocument, type JournalDocument, type RetentionChange } from './storage-codec.js';
+import type { JournalDocument, RetentionChange } from './storage-codec.js';
 
 export async function privateDirectory(path: string): Promise<string> {
   const absolute = resolve(path);
@@ -28,20 +27,16 @@ export class RetentionStore {
   migratedAt = 0;
   private journal: Record<string, unknown> = { version: 1 };
   private repository?: RetentionRepository;
-  private database = false;
-  constructor(readonly root: string, private readonly options?: { storage: StorageClient | undefined }) {
+  private started = false;
+  constructor(readonly root: string, options?: { storage: StorageClient | undefined }) {
     if (options?.storage) this.repository = new RetentionRepository(options.storage);
   }
-  async start(now = Date.now()): Promise<void> {
-    if (this.options && !this.repository) throw new Error('Shared retention storage is unavailable.');
-    if (this.repository && await this.repository.databaseAuthority()) {
-      const { journal } = await this.repository.readCurrentJournal();
-      this.load(journal); this.database = true; return;
-    }
-    await privateDirectory(this.root);
-    try {
-      this.load(journalDocument(await readPrivateJson(join(this.root, 'journal.json'), 32_000_000)));
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; this.migratedAt = now; await this.commit(() => {}); }
+  async start(_now = Date.now()): Promise<void> {
+    this.started = false;
+    if (!this.repository) throw new Error('Shared retention storage is unavailable.');
+    if (!await this.repository.databaseAuthority()) throw new Error('Retention database authority is required.');
+    const { journal } = await this.repository.readCurrentJournal();
+    this.load(journal); this.started = true;
   }
   private load(data: JournalDocument): void {
     const { entries, policies, ...metadata } = data;
@@ -49,64 +44,74 @@ export class RetentionStore {
     this.entries = new Map(entries.map(entry => [entry.id, entry]));
     this.policies = new Map((policies || []).map(policy => [policy.id, policy]));
   }
-  private document(entries = this.entries, policies = this.policies): JournalDocument {
-    return { ...this.journal, version: 1, migratedAt: this.migratedAt, entries: [...entries.values()], policies: [...policies.values()] };
-  }
   policy(id: string): RetentionPolicyState | undefined { const policy = this.policies.get(id); return policy ? structuredClone(policy) : undefined; }
   async setPolicy(policy: RetentionPolicyState): Promise<void> {
     const input = structuredClone(policy);
-    return this.commit((_entries, policies) => { policies.set(input.id, input); });
+    return this.enqueue(async () => {
+      const changes = [this.change('policy', input.id, input, this.policies.get(input.id))];
+      const wrapper = { ...this.journal, version: 1, migratedAt: this.migratedAt, policies: [] };
+      if (JSON.stringify(wrapper) !== JSON.stringify(this.journal)) changes.push(this.change('journal', '', wrapper, this.journal));
+      await this.requiredRepository().update(changes);
+      this.policies.set(input.id, input); this.journal = wrapper;
+    });
   }
   list(): RetentionJournalEntry[] { return structuredClone([...this.entries.values()]); }
   async gateNativeEffects(): Promise<void> {
-    if (this.options && !this.repository) throw new Error('Shared retention storage is unavailable.');
-    // The observer has its own repository; SDK reopen cannot settle this owner's lost intent.
-    await this.repository?.gate();
+    if (!await this.requiredRepository().databaseAuthority()) throw new Error('Retention database authority is required.');
   }
   get(id: string): RetentionJournalEntry | undefined { const entry = this.entries.get(id); return entry ? structuredClone(entry) : undefined; }
   async put(entry: RetentionJournalEntry): Promise<void> { await this.putMany([entry]); }
   async putMany(entries: RetentionJournalEntry[]): Promise<void> {
     const inputs = structuredClone(entries);
     for (const entry of inputs) validateOperationId(entry.id);
-    return this.commit(draft => { for (const entry of inputs) draft.set(entry.id, entry); });
+    return this.enqueue(async () => {
+      const targets = new Map(inputs.map(entry => [entry.id, entry]));
+      await this.requiredRepository().update([...targets].map(([id, value]) => this.change('entry', id, value, this.entries.get(id))));
+      for (const [id, value] of targets) this.entries.set(id, value);
+    });
   }
   async putIfUnchanged(updates: { previous: RetentionJournalEntry; next: RetentionJournalEntry }[], allowed: (id: string) => boolean): Promise<void> {
     const inputs = structuredClone(updates);
-    for (const item of inputs) validateOperationId(item.next.id);
-    return this.commit(draft => {
-      for (const { previous, next } of inputs) if (allowed(previous.id) && JSON.stringify(draft.get(previous.id)) === JSON.stringify(previous)) draft.set(next.id, next);
+    for (const item of inputs) {
+      validateOperationId(item.next.id);
+      if (item.previous.id !== item.next.id) throw new Error('Retention guarded update cannot change operation ID.');
+    }
+    return this.enqueue(async () => {
+      const changes: RetentionChange[] = [];
+      const targets = new Map<string, RetentionJournalEntry>();
+      for (const { previous, next } of inputs) {
+        const current = targets.get(previous.id) ?? this.entries.get(previous.id);
+        if (allowed(previous.id) && JSON.stringify(current) === JSON.stringify(previous)) {
+          changes.push(this.change('entry', next.id, next, current)); targets.set(next.id, next);
+        }
+      }
+      await this.requiredRepository().update(changes);
+      for (const [id, value] of targets) this.entries.set(id, value);
     });
   }
   async removeMetadata(ids: string[]): Promise<void> {
-    const inputs = [...ids];
-    return this.commit(draft => {
-      for (const id of inputs) { const entry = draft.get(id); if (entry && ['planned', 'blocked-provider'].includes(entry.phase)) draft.delete(id); }
+    const inputs = [...new Set(ids)];
+    return this.enqueue(async () => {
+      const changes: RetentionChange[] = [];
+      for (const id of inputs) {
+        const entry = this.entries.get(id);
+        if (entry && ['planned', 'blocked-provider'].includes(entry.phase)) changes.push({ ...this.change('entry', id, entry, entry), remove: true });
+      }
+      await this.requiredRepository().update(changes);
+      for (const change of changes) this.entries.delete(change.id);
     });
   }
-  private commit(mutate: (entries: Map<string, RetentionJournalEntry>, policies: Map<string, RetentionPolicyState>) => void): Promise<void> {
-    const next = this.writing.then(async () => {
-      // Build from the last committed state inside the queue; failed drafts never become visible.
-      const entries = new Map(this.entries), policies = new Map(this.policies);
-      mutate(entries, policies);
-      if (this.database) {
-        const changes: RetentionChange[] = [];
-        const delta = <T>(kind: 'entry' | 'policy', before: Map<string, T>, after: Map<string, T>) => {
-          for (const [id, value] of after) if (before.get(id) !== value) {
-            const json = JSON.stringify(value), previous = before.has(id) ? JSON.stringify(before.get(id)) : null;
-            if (json !== previous) changes.push({ kind, id, json, previous });
-          }
-          for (const [id, value] of before) if (!after.has(id)) changes.push({ kind, id, json: JSON.stringify(value), previous: JSON.stringify(value), remove: true });
-        };
-        delta('entry', this.entries, entries); delta('policy', this.policies, policies);
-        const wrapper = { ...this.journal, version: 1, migratedAt: this.migratedAt, policies: [] };
-        if (JSON.stringify(wrapper) !== JSON.stringify(this.journal)) changes.push({ kind: 'journal', id: '', json: JSON.stringify(wrapper), previous: JSON.stringify(this.journal) });
-        await this.repository!.update(changes);
-      } else {
-        if (this.repository && await this.repository.databaseAuthority()) throw new Error('Retention authority changed; restart the owner before writing.');
-        await writePrivateJson(join(this.root, 'journal.json'), JSON.stringify(this.document(entries, policies)), { syncDirectory: true });
-      }
-      this.entries = entries; this.policies = policies; this.journal = { ...this.journal, version: 1, migratedAt: this.migratedAt, policies: [] };
-    });
-    this.writing = next.catch(error => { console.error('Retention journal write failed:', error); }); return next;
+  private change(kind: RetentionChange['kind'], id: string, value: unknown, previous: unknown): RetentionChange {
+    return { kind, id, json: JSON.stringify(value), previous: previous === undefined ? null : JSON.stringify(previous) };
+  }
+  private requiredRepository(): RetentionRepository {
+    if (!this.repository) throw new Error('Shared retention storage is unavailable.');
+    if (!this.started) throw new Error('Retention store has not loaded database authority.');
+    return this.repository;
+  }
+  private enqueue(operation: () => Promise<void>): Promise<void> {
+    const next = this.writing.then(operation);
+    this.writing = next.catch(error => { console.error('Retention journal write failed:', error); });
+    return next;
   }
 }
