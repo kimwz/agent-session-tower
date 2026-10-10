@@ -7,7 +7,7 @@ import { appendAudit, changedFields, describeTrigger, logTrigger } from './audit
 import { failure } from './errors.js';
 import { keptGitHub } from './github-cursor.js';
 import { MAX_REVISIONS, MAX_TOMBSTONES } from './limits.js';
-import { assertFuture, assertOnceRoom, assertRoom, normalizeOnce } from './once.js';
+import { assertFuture, assertOnceRoom, assertRoom, projectConsumed } from './once.js';
 import { nextSlot, validateSchedule } from './schedule.js';
 import type { SecretStore } from './secrets.js';
 import { UNFINISHED, type EngineState } from './state.js';
@@ -47,7 +47,7 @@ export class TriggerDefinitions {
   async create(value: unknown, actor: TriggerActor, scope?: TriggerScope): Promise<Trigger> {
     const input = await this.validate(value, scope);
     hereOnly(input, scope);
-    return this.store.commit(state => {
+    return this.store.mutate({ type: 'definition', id: '' },state => {
       assertRoom(state);
       assertFuture(input, this.now);
       assertOnceRoom(state, input);
@@ -65,7 +65,7 @@ export class TriggerDefinitions {
 
   async update(id: string, value: unknown, expectedRevision: number, actor: TriggerActor, scope?: TriggerScope): Promise<Trigger> {
     const input = await this.validate(value, scope);
-    return this.store.commit(state => {
+    return this.store.mutate({ type: 'definition', id },state => {
       const current = this.revisionOf(state, id, expectedRevision, scope);
       hereOnly(current, scope); hereOnly(input, scope);
       this.guardAutoReply({ ...current, ...structuredClone(input) }, current, actor, 'refuse');
@@ -77,7 +77,7 @@ export class TriggerDefinitions {
 
   async setEnabled(id: string, enabled: boolean, expectedRevision: number, actor: TriggerActor, scope?: TriggerScope): Promise<Trigger> {
     // Turning off must work even when history is full; it may use the space kept for settling.
-    return this.store.commit(state => {
+    return this.store.mutate({ type: 'definition', id },state => {
       const current = this.revisionOf(state, id, expectedRevision, scope);
       if (enabled) {
         hereOnly(current, scope);
@@ -99,7 +99,7 @@ export class TriggerDefinitions {
   }
 
   async setArchived(id: string, archived: boolean, expectedRevision: number, actor: TriggerActor, scope?: TriggerScope): Promise<Trigger> {
-    return this.store.commit(state => {
+    return this.store.mutate({ type: 'definition', id },state => {
       const current = this.revisionOf(state, id, expectedRevision, scope);
       if (Boolean(current.archivedAt) === archived) return structuredClone(current);
       if (state.events.some(event => event.triggerId === id && UNFINISHED.has(event.status))) throw failure('This trigger has unfinished work; wait for it to finish before archiving or unarchiving.', 'conflict');
@@ -116,7 +116,7 @@ export class TriggerDefinitions {
 
   /** Returns what was deleted. */
   async remove(id: string, expectedRevision: number, actor: TriggerActor, scope?: TriggerScope): Promise<Trigger> {
-    return this.store.commit(state => {
+    return this.store.mutate({ type: 'definition', id },state => {
       const current = this.revisionOf(state, id, expectedRevision, scope);
       state.triggers = state.triggers.filter(trigger => trigger.id !== id);
       state.tombstones = [...state.tombstones, current].slice(-MAX_TOMBSTONES);
@@ -130,7 +130,7 @@ export class TriggerDefinitions {
 
   /** A revert is a new revision that copies an earlier one; history is never rewritten. */
   async revert(id: string, revision: number, expectedRevision: number, actor: TriggerActor, scope?: TriggerScope): Promise<Trigger> {
-    return this.store.commit(state => {
+    return this.store.mutate({ type: 'definition', id },state => {
       const current = this.revisionOf(state, id, expectedRevision, scope);
       hereOnly(current, scope);
       const earlier = (state.revisions[id] ?? []).find(item => item.revision === revision);
@@ -145,7 +145,7 @@ export class TriggerDefinitions {
   }
 
   async restore(id: string, actor: TriggerActor, scope?: TriggerScope): Promise<Trigger> {
-    return this.store.commit(state => {
+    return this.store.mutate({ type: 'definition', id },state => {
       const deleted = [...state.tombstones].reverse().find(item => item.id === id);
       if (!deleted || !seen(deleted, scope)) throw failure('This deleted trigger is no longer kept.', 'not-found');
       hereOnly(deleted, scope);
@@ -158,7 +158,7 @@ export class TriggerDefinitions {
       assertOnceRoom(state, trigger, trigger.id);
       this.grantSecrets(state, trigger, actor);
       state.triggers.push(trigger);
-      normalizeOnce(state, this.now);
+      projectConsumed(state,trigger);
       state.tombstones = state.tombstones.filter(item => item !== deleted);
       this.schedule(state, trigger);
       this.log(state, actor, 'restore', trigger, deleted.revision, trigger.revision, `Restored after deletion, turned off${note}`);
@@ -169,7 +169,7 @@ export class TriggerDefinitions {
   async updateSettings(value: unknown, actor: TriggerActor): Promise<TriggerSettings> {
     if (actor.kind !== 'owner') throw failure('Only the owner can change trigger limits.', 'forbidden');
     const settings = TriggerSettingsSchema.parse(value);
-    const saved = await this.store.commit(state => {
+    const saved = await this.store.mutate({ type: 'settings' },state => {
       state.settings = settings;
       appendAudit(state, this.now, { actor, action: 'settings', triggerId: '', triggerName: '', summary: `Limits: ${JSON.stringify(settings)}` });
       return structuredClone(settings);
@@ -179,7 +179,7 @@ export class TriggerDefinitions {
 
   /** Slack keeps its own files; its changes still appear in the shared audit log. */
   async recordSlack(actor: TriggerActor, slackId: string, summary: string): Promise<void> {
-    await this.store.commit(state => {
+    await this.store.mutate({ type: 'audit' },state => {
       appendAudit(state, this.now, { actor, action: 'slack', triggerId: slackId, triggerName: 'Slack', summary });
     }).catch(() => {});
   }
@@ -187,14 +187,14 @@ export class TriggerDefinitions {
   async createSecret(input: SecretInput, actor: TriggerActor): Promise<TriggerSecret> {
     if (actor.kind !== 'owner') throw failure('Only the owner can save secrets.', 'forbidden');
     const secret = await this.secrets.create(input, this.now());
-    await this.store.commit(state => { this.note(state, actor, 'secret', `Saved secret "${secret.name}" for ${secret.origin}`); }).catch(() => {});
+    await this.store.mutate({ type: 'audit' },state => { this.note(state, actor, 'secret', `Saved secret "${secret.name}" for ${secret.origin}`); }).catch(() => {});
     return { ...secret, triggerIds: [] };
   }
 
   async deleteSecret(id: string, actor: TriggerActor): Promise<void> {
     if (actor.kind !== 'owner') throw failure('Only the owner can delete secrets.', 'forbidden');
     const secret = await this.secrets.remove(id);
-    await this.store.commit(state => { delete state.secretGrants[id]; this.note(state, actor, 'secret', `Deleted secret "${secret.name}"`); }, 'settle').catch(() => {});
+    await this.store.mutate({ type: 'secretGrant', id },state => { delete state.secretGrants[id]; this.note(state, actor, 'secret', `Deleted secret "${secret.name}"`); }, 'settle').catch(() => {});
   }
 
   // ---- Helpers ------------------------------------------------------------------------------------

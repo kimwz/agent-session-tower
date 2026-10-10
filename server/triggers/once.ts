@@ -83,6 +83,15 @@ export function mergeConsumed(state: EngineState, incoming: Record<string, OnceC
   state.onceConsumed = { ...incoming, ...state.onceConsumed };
 }
 
+/** A row mutation has its own ledger container; entries remain immutable until once.ts replaces them. */
+export function isolateConsumed(state: EngineState): void { state.onceConsumed = { ...state.onceConsumed }; }
+
+export function consumedSnapshot(state: EngineState): EngineState['onceConsumed'] { return { ...state.onceConsumed }; }
+
+export function projectConsumed(state: EngineState, trigger: Trigger): void {
+  if (state.onceConsumed[trigger.id]) { trigger.consumed = { ...state.onceConsumed[trigger.id] }; trigger.enabled = false; }
+}
+
 /** The final say on a restored state, checked on the state about to be saved. */
 export function admitCapacity(state: EngineState): void {
   if (state.triggers.length > MAX_RETAINED_TRIGGERS || activeCount(state) > state.settings.maxTriggers || onceCount(state) > MAX_ONCE_RESERVATIONS) throw failure('The restored trigger state exceeds the supported capacity. Existing records were preserved.', 'conflict');

@@ -11,7 +11,7 @@ import { admitCapacity, mergeConsumed, normalizeOnce } from './once.js';
 import { decodeOnceTrigger } from './once-storage.js';
 import type { SecretStore } from './secrets.js';
 import { empty, upgradeState } from './state.js';
-import type { TriggerStore } from './store.js';
+import { mutationProjection, type TriggerStore } from './store.js';
 
 export interface RestoreContext { store: TriggerStore; secrets: SecretStore; definitions: TriggerDefinitions; now: () => number }
 
@@ -27,7 +27,7 @@ export async function restoreOwnerBackup(backup: TriggerBackup, context: Restore
   if (!backup || !Array.isArray(backup.triggers) || !backup.secretGrants || typeof backup.secretGrants !== 'object') throw failure('Invalid trigger backup.');
   // A deferred restore must not remove current definitions until every referenced encrypted secret is ready.
   for (const id of Object.keys(backup.secretGrants)) if (!secrets.get(id)) throw failure('Import the original secret Vault before restoring its trigger grants.');
-  const draft = structuredClone(store.state);
+  const draft = { ...store.state,secretGrants: { ...store.state.secretGrants } };
   for (const value of backup.triggers) {
     if (!value || typeof value !== 'object' || typeof (value as Trigger).id !== 'string') throw failure('Invalid restored trigger.');
     const trigger = decodeOnceTrigger(value).trigger as Trigger;
@@ -85,7 +85,7 @@ export async function restoreFrom(backup: TriggerBackup, context: RestoreContext
   }
   if (incoming.length > MAX_RETAINED_TRIGGERS || new Set([...Object.keys(consumed), ...incoming.filter(item => item.source.schedule.type === 'once').map(item => item.id)]).size > MAX_ONCE_RESERVATIONS) throw failure('The restored reservation definitions exceed the supported capacity. Existing records were preserved.', 'conflict');
   const same = (a: Trigger, b: Trigger) => (['name', 'enabled', 'source', 'handler', 'policy', 'archivedAt', 'consumed'] as const).every(key => JSON.stringify(a[key]) === JSON.stringify(b[key]));
-  await store.commit(state => {
+  await store.mutate({ type: 'restore' },state => {
     const now = new Date(clock()).toISOString();
     mergeConsumed(state, consumed);
     normalizeOnce(state, clock);
@@ -120,7 +120,7 @@ export async function restoreFrom(backup: TriggerBackup, context: RestoreContext
         if (!current) trigger.archivedAt ??= trigger.consumed.at;
       }
       if (current && same(current, trigger)) continue;
-      const draft = structuredClone(state);
+      const draft = mutationProjection(state,{ type: 'definition',id: trigger.id });
       try {
         if (current) {
           const next = definitions.replace(draft, current, { name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy }, actor);
@@ -163,7 +163,7 @@ export async function restoreFrom(backup: TriggerBackup, context: RestoreContext
     }
     state.fired = { ...(record(backup.fired) ? backup.fired : {}), ...state.fired };
     normalizeOnce(state, clock);
-    // Preflight validation yields; the final serialized state is the admission authority.
+    // Preflight validation yields; the guarded SQL batch is the admission authority.
     admitCapacity(state);
     // Restoring trusts exactly the folders the backup trusted (and those of triggers kept here), nothing its triggers add.
     state.trustedFolders = trusted;

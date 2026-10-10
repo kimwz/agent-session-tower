@@ -6,7 +6,7 @@ import type { DomainAuthority, StorageDomainSchema } from '../storage/contract.j
 import { triggersSchema, TRIGGER_STAGE_COUNT, TRIGGER_STAGE_BYTES } from './storage-schema.js';
 import { canonical, object, triggerHash, TRIGGER_CHUNK_BYTES, TRIGGER_INTENT_BYTES, ROW_KINDS, WRAPPER_BYTES, ACCEPT_TRIGGER_BYTES, MAX_TRIGGER_BYTES, projectedJson, rowCost, validateRow, type TriggerRow } from './storage-codec.js';
 
-export interface TriggersHead { storageId: string; authority: DomainAuthority | null; revision: number | null }
+export interface TriggersHead { storageId: string; authority: DomainAuthority | null; revision: number | null; logicalBytes: number | null }
 /** Worker-private fence; never parsed from a public request. */
 export interface TriggerAdmissionLink { storageId: string; generation: number; revision: number; eventId: string; requestId: string; eventSha256: string }
 /** Fixed domain operation on the runs command's connection and transaction. */
@@ -55,7 +55,7 @@ function head(context: DomainReadContext): TriggersHead {
   } else if (state || context.prepare('SELECT 1 FROM triggers_rows LIMIT 1').get()) fail('Triggers rows exist without authority.');
   const storage = context.prepare("SELECT value FROM storage_meta WHERE key = 'storage_id'").get() as { value: string } | undefined;
   if (!storage || !/^[0-9a-f-]{36}$/.test(storage.value)) fail('Missing trigger storage identity.');
-  return { storageId: storage.value,authority, revision: state?.revision ?? null };
+  return { storageId: storage.value,authority, revision: state?.revision ?? null, logicalBytes: state?.logical_bytes ?? null };
 }
 function current(context: DomainReadContext, input: Record<string, unknown>): TriggersHead {
   const value = head(context);
@@ -182,7 +182,11 @@ export function triggersDomainFor(schema: StorageDomainSchema): StorageDomain {
         ? Object.fromEntries((context.prepare("SELECT id,json FROM triggers_rows WHERE kind = 'onceConsumed'").all() as { id: string; json: string }[]).map(row => [row.id,JSON.parse(row.json)])) : {};
       for (const row of changed) recost(context,row,ledger);
       for (const id of consumed) for (const row of context.prepare("SELECT kind,id,ordinal,json FROM triggers_rows WHERE trigger_id = ? AND kind IN ('triggers','tombstones')").all(id) as unknown as TriggerRow[]) recost(context,row,ledger);
-      if (consumed.size) for (const row of context.prepare("SELECT kind,id,ordinal,json FROM triggers_rows WHERE kind = 'revisions'").all() as unknown as TriggerRow[]) recost(context,row,ledger);
+      const recosted = new Set<string>();
+      for (const id of consumed) for (const row of context.prepare("SELECT kind,id,ordinal,json FROM triggers_rows WHERE kind = 'revisions' AND EXISTS (SELECT 1 FROM json_each(triggers_rows.json) WHERE json_extract(value,'$.id') = ?)").all(id) as unknown as TriggerRow[]) {
+        if (recosted.has(row.id)) continue;
+        recosted.add(row.id); recost(context,row,ledger);
+      }
       const groups = context.prepare('SELECT kind,count(*) AS n,sum(logical_bytes) AS bytes,count(DISTINCT ordinal) AS distinct_n,min(ordinal) AS low,max(ordinal) AS high FROM triggers_rows GROUP BY kind').all() as { kind: string; n: number; bytes: number; distinct_n: number; low: number; high: number }[];
       if (groups.find(row => row.kind === 'settings')?.n !== 1 || groups.some(row => row.low !== 0 || row.high !== row.n - 1 || row.distinct_n !== row.n)) fail('Invalid trigger collection order or settings.');
       const size = WRAPPER_BYTES + groups.reduce((sum,row) => sum + row.bytes + (row.kind === 'settings' ? 0 : Math.max(0,row.n - 1)),0);

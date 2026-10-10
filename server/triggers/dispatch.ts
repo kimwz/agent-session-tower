@@ -66,7 +66,7 @@ export class TriggerDispatch {
    */
   reconcileOrphans(): Promise<void> | undefined {
     if (!this.store.state.events.some(event => event.status === 'claimed' && !this.submitting.has(event.id))) return undefined;
-    return this.store.commit(state => { reconcile(state, event => !this.submitting.has(event.id), this.executor); }, 'settle').catch(() => {});
+    return this.store.mutate({ type: 'events', ids: this.store.state.events.filter(event => event.status === 'claimed' && !this.submitting.has(event.id)).map(event => event.id) },state => { reconcile(state, event => !this.submitting.has(event.id), this.executor); }, 'settle').catch(() => {});
   }
 
   /** Closing issues talks to GitHub; it goes on beside the tick so a slow answer never holds up other triggers. */
@@ -84,7 +84,7 @@ export class TriggerDispatch {
       const next = this.store.state.events.find(event => event.status === 'queued' && this.ready(event));
       if (!next) return;
       // The claim is saved before anything is submitted; if the result is lost it is never submitted again.
-      const claimed = await this.store.commit(state => {
+      const claimed = await this.store.mutate({ type: 'events', ids: [next.id] },state => {
         const event = state.events.find(item => item.id === next.id);
         if (!event || event.status !== 'queued') return undefined;
         Object.assign(event, { status: 'claimed', claimedAt: new Date(this.now()).toISOString(), updatedAt: new Date(this.now()).toISOString() });
@@ -96,7 +96,7 @@ export class TriggerDispatch {
         let outcome: Partial<TriggerEvent>;
         try { outcome = await this.submit(claimed); }
         catch (error) { outcome = { status: admissionUncertain(error) ? 'uncertain' : 'error', error: (error instanceof Error ? error.message : String(error)).slice(0, 1500) }; }
-        await this.store.commit(state => {
+        await this.store.mutate({ type: 'events', ids: [claimed.id] },state => {
           const event = state.events.find(item => item.id === claimed.id);
           // Atomic admission may already have linked the run in SQL before its response was lost.
           if (event?.status === 'claimed' && event.requestId === claimed.requestId) { Object.assign(event, outcome, { updatedAt: new Date(this.now()).toISOString() }); this.handFailed(state, event); }
@@ -192,7 +192,7 @@ export class TriggerDispatch {
         }
         this.closeRetries.delete(event.id);
       }
-      await this.store.commit(state => {
+      await this.store.mutate({ type: 'events', ids: [event.id] },state => {
         const saved = state.events.find(item => item.id === event.id);
         if (saved) { saved.issueActions = { ...saved.issueActions, ...result }; saved.updatedAt = new Date(this.now()).toISOString(); }
       }, 'settle').catch(() => {});
@@ -236,7 +236,7 @@ export class TriggerDispatch {
       if (Object.keys(patch).length) updates.set(event.id, patch);
     }
     if (!updates.size) return;
-    await this.store.commit(state => {
+    await this.store.mutate({ type: 'events', ids: [...updates.keys()] },state => {
       for (const event of state.events) {
         const patch = updates.get(event.id);
         if (patch && event.status === 'running') { Object.assign(event, patch, { updatedAt: new Date(this.now()).toISOString() }); this.nextIssue(state, event); }

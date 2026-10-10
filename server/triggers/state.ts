@@ -63,7 +63,10 @@ export function serializeState(draft: EngineState): string {
 }
 
 /** Trims what a commit saves: old firings, finished history, payloads and grants of gone triggers. */
-export function pruneState(state: EngineState, now: () => number): void {
+export function pruneState(state: EngineState, now: () => number): Set<string> {
+  const touched = new Set<string>();
+  const mark = (kind: string,id: string) => touched.add(JSON.stringify([kind,id]));
+  if (state.recentFires.some(item => item.at <= now() - 60 * 60 * 1000)) state.recentFires.forEach((_,index) => mark('recentFires',String(index)));
   state.recentFires = state.recentFires.filter(item => item.at > now() - 60 * 60 * 1000);
   const known = new Set([...state.triggers, ...state.tombstones].map(trigger => trigger.id));
   for (const id of Object.keys(state.cursors)) if (!known.has(id)) delete state.cursors[id];
@@ -75,19 +78,23 @@ export function pruneState(state: EngineState, now: () => number): void {
     state.events = state.events.filter(event => !drop.has(event.id));
   }
   // Once a run was handed over (or never will be), only a short trace of the response it saw is kept.
-  for (const event of state.events) {
-    if (event.payload === undefined || event.status === 'queued' || event.status === 'claimed') continue;
+  state.events = state.events.map(event => {
+    if (event.payload === undefined || event.status === 'queued' || event.status === 'claimed') return event;
     const { status, url, selected } = event.payload as { status?: unknown; url?: unknown; selected?: unknown };
     const trace = selected === undefined ? undefined : typeof selected === 'string' ? selected : JSON.stringify(selected) ?? '';
-    event.payload = { status, url, ...(trace !== undefined ? { selected: trace.slice(0, 300) } : {}), trimmed: true };
-    if (JSON.stringify(event.payload).length > 1000) event.payload = { status, trimmed: true };
-  }
+    let payload: TriggerEvent['payload'] = { status, url, ...(trace !== undefined ? { selected: trace.slice(0, 300) } : {}), trimmed: true };
+    if (JSON.stringify(payload).length > 1000) payload = { status, trimmed: true };
+    if (JSON.stringify(event.payload) === JSON.stringify(payload)) return event;
+    mark('events',event.id); return { ...event,payload };
+  });
   for (const [secretId, triggerIds] of Object.entries(state.secretGrants)) {
     const kept = triggerIds.filter(id => known.has(id));
-    if (kept.length) state.secretGrants[secretId] = kept; else delete state.secretGrants[secretId];
+    if (kept.length) { if (kept.length !== triggerIds.length) { state.secretGrants[secretId] = kept; mark('secretGrants',secretId); } } else delete state.secretGrants[secretId];
   }
   // Older finished runs keep their outcome but not the full instructions they were given.
-  for (const event of finished.slice(0, Math.max(0, finished.length - KEEP_FULL_INPUT))) if (event.input.instructions.length > 200) event.input.instructions = `${event.input.instructions.slice(0, 200)}…`;
+  const trim = new Set(finished.slice(0,Math.max(0,finished.length - KEEP_FULL_INPUT)).filter(event => event.input.instructions.length > 200).map(event => event.id));
+  state.events = state.events.map(event => { if (!trim.has(event.id)) return event; mark('events',event.id); return { ...event,input: { ...event.input,instructions: `${event.input.instructions.slice(0,200)}…` } }; });
+  return touched;
 }
 
 /** A saved state as the engine takes it over, or undefined when it cannot be read. */

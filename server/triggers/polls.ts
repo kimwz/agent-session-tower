@@ -71,7 +71,7 @@ export class TriggerPolls {
       let fired: TriggerEvent[];
       const first = this.store.state.cursors[id]?.github?.checkedAt === undefined;
       try {
-        await this.store.commit(state => { const position = state.cursors[id]; if (position) position.polling = { slot: this.now(), revision: trigger.revision, method: 'GET' }; }, 'settle');
+        await this.store.mutate({ type: 'cursor', id },state => { const position = state.cursors[id]; if (position) position.polling = { slot: this.now(), revision: trigger.revision, method: 'GET' }; }, 'settle');
         fired = await this.pollGitHub(trigger, this.now(), actor);
       } finally { unlock(); }
       const problem = this.store.state.cursors[id]?.lastError;
@@ -88,7 +88,7 @@ export class TriggerPolls {
       this.ports.requestTick();
       return structuredClone(fired[0]);
     }
-    const event = trigger.source.kind === 'http' ? await this.runHttp(trigger, actor) : await this.store.commit(state => {
+    const event = trigger.source.kind === 'http' ? await this.runHttp(trigger, actor) : await this.store.mutate({ type: 'fire', id },state => {
       const current = state.triggers.find(item => item.id === id);
       if (!current || !seen(current, scope)) throw failure('Trigger not found.', 'not-found');
       hereOnly(current, scope);
@@ -124,7 +124,7 @@ export class TriggerPolls {
     const uncertain = (error: unknown) => Object.assign(error instanceof Error ? error : new Error(String(error)), { uncertain: true,
       message: `${error instanceof Error ? error.message : String(error)} The POST was sent, or may have been; it will not be sent again for this request.` });
     try {
-      await this.store.commit(state => {
+      await this.store.mutate({ type: 'cursor', id },state => {
         const position = state.cursors[id];
         if (position) position.polling = { slot: this.now(), revision: trigger.revision, method };
       }, 'settle');
@@ -132,10 +132,10 @@ export class TriggerPolls {
       sent = method === 'POST' && (outcome.ok || outcome.uncertain);
       const unclaim = (state: EngineState) => { const position = state.cursors[id]; if (position) delete position.polling; };
       if (!outcome.ok) {
-        await this.store.commit(unclaim, 'settle').catch(() => {});
+        await this.store.mutate({ type: 'cursor', id },unclaim, 'settle').catch(() => {});
         throw failure(`The request failed, so nothing ran: ${outcome.error}`, 'upstream');
       }
-      return await this.store.commit(state => {
+      return await this.store.mutate({ type: 'fire', id },state => {
         unclaim(state);
         const current = state.triggers.find(item => item.id === id);
         if (!current) throw failure('Trigger not found.', 'not-found');
@@ -146,7 +146,7 @@ export class TriggerPolls {
         this.log(state, actor, 'run', current, current.revision, current.revision, `Ran now: ${created?.status ?? 'skipped'}`);
         return created;
       }).catch(async error => {
-        await this.store.commit(unclaim, 'settle').catch(() => {});
+        await this.store.mutate({ type: 'cursor', id },unclaim, 'settle').catch(() => {});
         throw error;
       });
     } catch (error) {
@@ -209,7 +209,7 @@ export class TriggerPolls {
     if (trigger?.source.kind === 'github' && trigger.revision === revision) { await this.pollGitHub(trigger, slot); return; }
     if (!trigger || trigger.source.kind !== 'http' || trigger.revision !== revision) return;
     const outcome = await this.request(trigger);
-    await this.store.commit(state => {
+    await this.store.mutate({ type: 'fire', id: triggerId },state => {
       const current = state.triggers.find(item => item.id === triggerId);
       const position = state.cursors[triggerId];
       if (!position) return;
@@ -224,7 +224,7 @@ export class TriggerPolls {
       if (!result.fire) return;
       const event = this.fire(state, current, new Date(slot).toISOString(), slot, 'http');
       if (event) { event.payload = responsePayload(current, outcome, result.selected); event.summary = responseSummary(outcome, result.selected); }
-    }).catch(() => this.store.commit(state => {
+    }).catch(() => this.store.mutate({ type: 'cursor', id: triggerId },state => {
       // The result could not be recorded (history full): the claim is still released, so it is not reported as cut off.
       const position = state.cursors[triggerId];
       if (position?.polling?.slot === slot) delete position.polling;
@@ -252,7 +252,7 @@ export class TriggerPolls {
     let problem: { message: string; retryAt?: number } | undefined;
     // Working through open issues: while every place is taken, there is nothing to ask GitHub.
     if (source.watch.type === 'issues' && this.unfinished(trigger.id) >= source.watch.concurrency) {
-      return this.store.commit(state => { const position = state.cursors[trigger.id]; if (position?.polling?.slot === slot) delete position.polling; return []; }, 'settle').catch(() => []);
+      return this.store.mutate({ type: 'cursor', id: trigger.id },state => { const position = state.cursors[trigger.id]; if (position?.polling?.slot === slot) delete position.polling; return []; }, 'settle').catch(() => []);
     }
     try {
       const { fetch, identity } = await this.github.fetchFor(source.auth, trigger.id);
@@ -260,7 +260,7 @@ export class TriggerPolls {
       if (login.toLowerCase() !== source.account.toLowerCase()) throw new GitHubError(`GitHub is signed in as ${login}, not ${source.account}; this trigger stopped checking until the account is set again.`);
       result = await checkGitHub(source.watch, this.store.state.cursors[trigger.id]?.github ?? {}, fetch, source.account, this.now());
     } catch (error) { problem = { message: error instanceof Error ? error.message : String(error), ...((error as GitHubError).retryAt ? { retryAt: (error as GitHubError).retryAt } : {}) }; }
-    return this.store.commit(state => {
+    return this.store.mutate({ type: 'fire', id: trigger.id },state => {
       const current = state.triggers.find(item => item.id === trigger.id);
       const position = state.cursors[trigger.id];
       if (!position) return [];
@@ -316,7 +316,7 @@ export class TriggerPolls {
       }
       if (manual) this.log(state, manual, 'run', current, current.revision, current.revision, baseline ? 'Checked GitHub and noted the current issues' : `Checked GitHub now: ${fired.length} new`);
       return structuredClone(fired);
-    }).catch(() => this.store.commit(state => { const position = state.cursors[trigger.id]; if (position?.polling?.slot === slot) delete position.polling; return []; }, 'settle').catch(() => []));
+    }).catch(() => this.store.mutate({ type: 'cursor', id: trigger.id },state => { const position = state.cursors[trigger.id]; if (position?.polling?.slot === slot) delete position.polling; return []; }, 'settle').catch(() => []));
   }
 
   /** A trigger's request, with only the secrets the owner gave this trigger. */
