@@ -51,7 +51,7 @@ test('instructions reach the provider beside the request, and never leave the wo
   try {
     await f.manager.flushState();
     assert.equal(f.codex.length, 1, 'the provider was called once');
-    assert.equal(f.manager.list().find(item => item.id === run.id)?.status, 'failed');
+    assert.equal(f.manager.list().find(item => item.id === run.id)?.status, 'error');
     assert.equal(f.manager.busy(), false, 'the provider and manager have settled');
     assert.doesNotMatch(JSON.stringify((await new RunsRepository(f.db).exportCurrent()).documents.runs), /Coordinator policy/, 'their text never reaches disk, where an older Tower could show it');
   } finally { f.manager.releaseStorage(); }
