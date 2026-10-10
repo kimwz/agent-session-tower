@@ -74,6 +74,23 @@ const hourly = (project: string, values: Partial<TriggerInput> = {}): TriggerInp
   policy: { overlap: 'skip', maxEventsPerHour: 20 }, ...values,
 });
 
+test('normal artifact reuse keeps fixture clients and database state independent', async t => {
+  const a = await fixture(t), b = await fixture(t);
+  assert.equal(a.sql.client.constructor, b.sql.client.constructor, 'same compiled normal parent module');
+  assert.notEqual(a.directory, b.directory);
+  assert.notEqual(a.sql.client, b.sql.client);
+  assert.notEqual(a.sql.repository, b.sql.repository);
+  assert.deepEqual(a.sql.client.context, b.sql.client.context);
+  const first = await a.open(), second = await b.open();
+  const created = await first.create(hourly(a.project), OWNER);
+  assert.equal(second.list().length, 0);
+  assert.ok((await a.sql.text()).includes(created.id));
+  assert.equal((await b.sql.text()).includes(created.id), false);
+  await second.create(hourly(b.project), OWNER);
+  assert.equal(first.list().length, 1);
+  assert.equal(second.list().length, 1);
+});
+
 test('a schedule fires once for each time it is due, and a restart never fires that time again', async t => {
   const f = await fixture(t);
   let service = await f.open();
