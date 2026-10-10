@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
-import { RunManager, fixtureDocuments, importFixtureRetention } from './sql-fixture.js';
+import { RunManager, fixtureDocuments, importFixtureRetention, importFixtureTriggers, fixtureTriggerText, stopFixtureWriter } from './sql-fixture.js';
 import { SessionService } from '../../../server/sessions/service.js';
 import { startRunnerHost, type RunnerHostOptions } from '../../../server/runs/worker.js';
 import type { SlackService } from '../../../server/slack/service.js';
@@ -637,7 +637,7 @@ test('a web Auto Prompt is admitted as the owner’s request but never read as S
   await f.host.close();
   const ownerMessages: string[] = [];
   const submitted: unknown[] = [];
-  const slack = { sessionMcp: () => undefined, coordinatorSessionIds: () => [], ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return message; } } as unknown as SlackService;
+  const slack = { withOwnerTurnAdmission: <T>(admit: () => Promise<T>) => admit(), sessionMcp: () => undefined, coordinatorSessionIds: () => [], ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return message; } } as unknown as SlackService;
   const { EventEmitter } = await import('node:events');
   const autoPrompts = Object.assign(new EventEmitter(), {
     list: () => [], updateContext: () => {}, pauseAttachmentCleanup: async () => {}, resumeAttachmentCleanup: () => {}, cancel: async () => { throw new Error('unused'); },
@@ -725,7 +725,7 @@ test('updating on request stops the running turn at the deadline, hands off, and
   await f.host.close();
   let handoffs = 0;
   let successorStarted = 0;
-  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => { successorStarted++; } });
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { await stopFixtureWriter(f.runs); handoffs++; }, startSuccessor: () => { successorStarted++; } });
   t.after(() => host.close());
   const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0' });
   t.after(() => client.close());
@@ -1293,7 +1293,8 @@ test('trigger operations run in the worker as the owner and their state reaches 
   await f.host.close();
   const { TriggerService } = await import('../../../server/triggers/service.js');
   const { TowerApi } = await import('../../../server/api/tower-api.js');
-  const triggers = new TriggerService({ stateDir: f.stateDir, tickMs: 60_000, executor: {
+  await importFixtureTriggers(f.runs.sqlFixture());
+  const triggers = new TriggerService({ storage: f.runs.sqlFixture(), stateDir: f.stateDir, tickMs: 60_000, executor: {
     submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
     create: (input, internal) => f.runs.create(input, internal), enqueue: (id, prompt, request, internal) => f.runs.enqueue(id, prompt, request, internal),
     runs: () => f.runs.list(), session: id => f.runs.getSession(id) } });
@@ -1394,7 +1395,7 @@ test('worker records a verified calling turn without treating its message as own
   await f.host.close();
   const capabilities = new CapabilityRegistry();
   const ownerMessages: string[] = [];
-  const slack = { sessionMcp: () => undefined, coordinatorSessionIds: () => [],
+  const slack = { withOwnerTurnAdmission: <T>(admit: () => Promise<T>) => admit(), sessionMcp: () => undefined, coordinatorSessionIds: () => [],
     ownerChat: async (_id: string, prompt: string) => { ownerMessages.push(prompt); return { prompt };  } } as unknown as SlackService;
   const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, capabilities, slack });
   t.after(() => host.close());
@@ -1617,7 +1618,8 @@ async function triggerHandoff(t: test.TestContext, inject: HandoffInjection = {}
     enqueue: async (sessionId, prompt, request, internal) => { enqueues++; await gate; if (inject.submitDelayMs) await new Promise(resolve => setTimeout(resolve, inject.submitDelayMs)); return f.runs.enqueue(sessionId, prompt, request, internal); },
     runs: () => f.runs.list(), session: id => f.runs.getSession(id),
   };
-  const engine = () => new TriggerService({ stateDir: f.stateDir, executor, tickMs: 3_600_000 });
+  await importFixtureTriggers(f.runs.sqlFixture());
+  const engine = () => new TriggerService({ storage: f.runs.sqlFixture(), stateDir: f.stateDir, executor, tickMs: 3_600_000 });
   let first: TriggerService;
   try {
     await f.host.close();
@@ -1671,11 +1673,10 @@ async function nothingLeft(h: Awaited<ReturnType<typeof triggerHandoff>>) {
   const release = await acquireStateLock(f.paths.runtime, 0);
   await release();
   assert.deepEqual(h.engines().map(item => item.inFlight()), h.engines().map(() => false));
-  const file = join(f.stateDir, 'trigger-engine.json');
-  const before = await readFile(file, 'utf8');
+  const before = await fixtureTriggerText(f.runs);
   const enqueues = h.enqueues();
   await new Promise(resolve => setTimeout(resolve, 300));
-  assert.equal(await readFile(file, 'utf8'), before, 'nothing writes the engine file after cleanup');
+  assert.equal(await fixtureTriggerText(f.runs), before, 'nothing writes the engine state after cleanup');
   assert.equal(h.enqueues(), enqueues, 'nothing is submitted after cleanup');
 }
 
@@ -1977,9 +1978,7 @@ test('storage-held queued work and paused workflow references hand off patiently
     const release = await acquireStateLock(paths.runtime, 0);
     return { releaseStateLock: async () => { await release(); order.push('lock-release'); } };
   }); t.after(f.cleanup);
-  const database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle() });
-  t.after(() => database.close());
-  await database.prepare({ allowMigration: true });
+  const database = f.runs.sqlFixture();
   let handed = false;
   const client = await f.connect();
   const first = await client.enqueue(f.session.id, 'accepted', {}, { origin: { kind: 'owner' } });
@@ -1990,7 +1989,7 @@ test('storage-held queued work and paused workflow references hand off patiently
   f.host.activate({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, storage: () => storageStatus,
     inFlight: () => true, transient: () => false,
     quiesce: async () => { await f.sessions.quiesce(); await f.runs.flushState(); order.push('durable-flush'); },
-    closeStorage: async () => { const result = await database.close(); assert.ok(['closed', 'already-closed'].includes(result.ack)); order.push('db-close-ack'); },
+    closeStorage: async () => { await stopFixtureWriter(f.runs); const result = await database.close(); assert.ok(['closed', 'already-closed'].includes(result.ack)); order.push('db-close-ack'); },
     startSuccessor: () => { order.push('successor'); handed = true; } });
   assert.equal(await client.requestHandoff(true, { patient: true }), true);
   await new Promise(resolve => setTimeout(resolve, 1200));
@@ -2044,6 +2043,7 @@ test('idle close keeps diagnosis and the runtime lock when close ACK is refused;
       closeStorage: async () => {
         if (fail) throw new Error('fixture close ACK unavailable');
         if (database) {
+          await stopFixtureWriter(f.runs);
           const result = await database.close();
           assert.ok(['closed', 'already-closed'].includes(result.ack));
         }
@@ -2051,9 +2051,7 @@ test('idle close keeps diagnosis and the runtime lock when close ACK is refused;
       onCloseFailure: () => { diagnosed++; }, releaseStateLock: async () => { await release(); released++; } };
   }); t.after(f.cleanup);
   try {
-    database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle() });
-    t.after(() => database.close());
-    await database.prepare({ allowMigration: true });
+    database = f.runs.sqlFixture();
     const client = await f.connect();
     await assert.rejects(f.host.close(true), /close ACK unavailable/);
     assert.equal(released, 0); assert.equal(diagnosed, 1);
@@ -2087,10 +2085,9 @@ test('storage patient handoff keeps legacy PTY RPC pending until owner closes it
   const legacy = new WorkspaceTerminals({ spawnPty: () => legacyPty, keepAliveOnDisconnect: true });
   const independent = new WorkspaceTerminals({ spawnPty: () => independentPty, keepAliveOnDisconnect: true });
   const terminalHost = await startTerminalHost({ stateDir: f.stateDir, terminals: independent });
-  const database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle() });
-  await database.prepare({ allowMigration: true });
+  const database = f.runs.sqlFixture();
   const shells: TerminalHostClient[] = [];
-  t.after(async () => { for (const shell of shells) shell.dispose(); await database.close(); await terminalHost.close(); independent.dispose(); legacy.dispose(); await f.cleanup(); });
+  t.after(async () => { for (const shell of shells) shell.dispose(); await terminalHost.close(); independent.dispose(); legacy.dispose(); await f.cleanup(); });
   const terminal = new TerminalHostClient({ stateDir: f.stateDir, hostEntry: '/fixture/must-not-spawn.mjs' }); shells.push(terminal);
   const hosted = await terminal.create(f.directory, 80, 24);
   const old = await legacy.create(f.directory, 80, 24);
@@ -2098,7 +2095,7 @@ test('storage patient handoff keeps legacy PTY RPC pending until owner closes it
   f.runs.holdStorage();
   f.host.activate({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, terminals: legacy,
     storage: () => ({ state: 'unavailable', code: 'held', reason: 'fixture', admissionOpen: false, sessionsAvailable: true, healthStatus: 503 }),
-    closeStorage: async () => { await database.close(); }, startSuccessor: () => { handed = true; } });
+    closeStorage: async () => { await stopFixtureWriter(f.runs); await database.close(); }, startSuccessor: () => { handed = true; } });
   const client = await f.connect();
   await client.requestHandoff(true, { patient: true });
   await client.terminals.input(old.id, 'legacy still attached');
