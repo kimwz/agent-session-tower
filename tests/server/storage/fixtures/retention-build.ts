@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { build, type Plugin } from 'esbuild';
 import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -267,6 +268,34 @@ export async function protectedOld124() {
   const retention=await import(pathToFileURL(join(packageRoot,'dist/server/sessions/retention/store.js')).href) as {RetentionStore:new(root:string,options?:{storage:import('../../../../server/storage/client.js').StorageClient})=>LegacyRetentionStore};
   const runs=await import(pathToFileURL(join(packageRoot,'dist/server/runs/run-history.js')).href) as {RunHistory:new(stateDir:string)=>LegacyRunHistory};
   return {directory,packageRoot,contract,receipt,storage,bundle:()=>bundle,RetentionStore:retention.RetentionStore,RunHistory:runs.RunHistory};
+}
+
+/** Full immutable official package only: the worker's SDK, schemas and consumers stay together. */
+export async function protectedOldWorker(version: '1.122.0' | '1.124.0'): Promise<string> {
+  const a122 = version === '1.122.0';
+  const directory = process.env[a122 ? 'TOWER_SQLITE_OLD122_ROOT' : 'TOWER_SQLITE_OLD124_ROOT'];
+  if (!directory || process.env.SQLITE_VALIDATION_CI !== '1') throw new Error('Official worker requires the hosted full capture.');
+  const receipt = JSON.parse(await readFile(join(directory, 'receipt.json'), 'utf8'));
+  const expected = a122 ? { hash: '438767a17b42db5c021b8d9f91f650b9b6c24eeaf7272ea90e9992feaf85a2fd', bytes: 4981649, members: 704 } : { hash: '5647224b149023ad8f5a429832c1fc6b3012e7b27c16808a1fc2af6b00ef371d', bytes: 5118858, members: 714 };
+  if (receipt.format !== `tower-full-old${a122 ? '122' : '124'}-capture` || receipt.packageSHA256 !== expected.hash || receipt.archiveBytes !== expected.bytes || Object.keys(receipt.members).length !== expected.members || receipt.dependenciesEqual !== true) throw new Error('Official worker provenance mismatch.');
+  const packageRoot = join(directory, 'package');
+  for (const [member, fact] of Object.entries(receipt.members) as [string, { bytes: number; sha256: string }][]) {
+    if (!member || member.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('Official member boundary mismatch.');
+    const bytes = await readFile(join(packageRoot, member));
+    if (bytes.length !== fact.bytes || createHash('sha256').update(bytes).digest('hex') !== fact.sha256) throw new Error('Official member bytes changed.');
+  }
+  const old = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8'));
+  const current = JSON.parse(await readFile(new URL('../../../../package.json', import.meta.url), 'utf8'));
+  if (old.version !== version) throw new Error('Official worker version mismatch.');
+  // Fail closed on metadata drift before the tiny entry imports any old consumer.
+  assert.deepEqual(old.dependencies, current.dependencies); assert.deepEqual(old.devDependencies, current.devDependencies);
+  const stdout = await readFile(join(directory, 'storage-contract.json'));
+  assert.equal(createHash('sha256').update(stdout).digest('hex'), receipt.contractSHA256);
+  const contract = JSON.parse(stdout.toString('utf8'));
+  const capture = JSON.parse(await readFile(new URL(`./${a122 ? 'runs-a122' : 'triggers-a124'}/capture.json`, import.meta.url), 'utf8'));
+  assert.equal(contract.supported, true); assert.deepEqual(contract.identity, capture.identity); assert.deepEqual(receipt.identity, capture.identity);
+  assert.match(await readFile(join(packageRoot, 'dist/server/runs/worker.js'), 'utf8'), /export async function runRunnerWorker\(stateDir\)/);
+  return packageRoot;
 }
 
 /** Product-profile tests and benchmark share the exact built candidate SDK, including SEA source identity. */
