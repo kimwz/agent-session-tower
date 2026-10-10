@@ -191,18 +191,19 @@ export class PermissionRunner {
       await this.options.update(id, { status: 'failed', startedAt, finishedAt: this.now(), error: error instanceof Error ? error.message : String(error) });
       return;
     }
-    if (!child) return;
-    const pid = child.pid;
+    const launched = child;
+    if (!launched) return;
+    const pid = launched.pid;
     if (!pid) {
-      const error = await new Promise<string>(resolve => child.once('error', value => resolve(value.message)));
+      const error = await new Promise<string>(resolve => launched.once('error', value => resolve(value.message)));
       await this.options.update(id, { status: 'failed', startedAt, finishedAt: this.now(), error });
       return;
     }
     // Listened to at once: a quick command can be done before the waits below.
-    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('exit', (value, sig) => resolve({ code: value, signal: sig })));
-    const closed = new Promise<void>(resolve => child.once('close', () => resolve()));
-    child.stdout!.on('data', (chunk: Buffer) => stdout.add(chunk));
-    child.stderr!.on('data', (chunk: Buffer) => stderr.add(chunk));
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => launched.once('exit', (value, sig) => resolve({ code: value, signal: sig })));
+    const closed = new Promise<void>(resolve => launched.once('close', () => resolve()));
+    launched.stdout!.on('data', (chunk: Buffer) => stdout.add(chunk));
+    launched.stderr!.on('data', (chunk: Buffer) => stderr.add(chunk));
     // The time limit holds from the start, whatever happens to the saves below.
     let timedOut = false;
     const grace = this.options.killGraceMs ?? KILL_GRACE_MS;

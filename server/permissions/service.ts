@@ -490,10 +490,10 @@ export class PermissionService {
   async confirmReviewed(id: string): Promise<boolean> {
     await this.requireEffects();
     const request = this.state.requests.find(item => item.id === id);
-    if (!request || request.status !== 'approved' || request.rule.kind !== 'run' || request.run?.status !== 'waiting' || !this.options.session(request.sessionId)) return false;
+    if (!request || request.status !== 'approved' || request.rule.kind !== 'run' || request.run?.status !== 'waiting') return false;
     await this.requireRequestEffects(request);
     if (request.decidedBy !== 'auto') return true;
-    if (this.options.autoReviewSkip?.(request)) return false;
+    if (this.options.autoReviewSkip?.(request)) throw failure('Permission request source policy refused.', 'forbidden');
     // An earlier run of the conversation went back to review: this one waits its turn behind it, reviewed again too.
     const earlier = this.state.requests.some(item => item.rule.kind === 'run' && item.sessionId === request.sessionId && item.createdAt < request.createdAt
       && item.status === 'pending' && (item.review?.status === 'queued' || item.review?.status === 'running'));
@@ -535,9 +535,9 @@ export class PermissionService {
     const session = this.options.session(request.sessionId);
     if (!current || current.status !== 'approved' || current.rule.kind !== 'run' || current.run?.status !== status
       || current.sessionId !== request.sessionId || current.cwd !== request.cwd || current.provider !== request.provider
-      || current.rule.value !== request.rule.value || current.timeoutSeconds !== request.timeoutSeconds
-      || !session || session.cwd !== current.cwd || (current.provider && current.provider !== (session.provider === 'codex' ? 'codex' : 'claude'))
-      || (current.decidedBy === 'auto' && this.options.autoReviewSkip?.(current))) return false;
+      || current.rule.value !== request.rule.value || current.timeoutSeconds !== request.timeoutSeconds) return false;
+    if (!session || session.cwd !== current.cwd || (current.provider && current.provider !== (session.provider === 'codex' ? 'codex' : 'claude'))
+      || (current.decidedBy === 'auto' && this.options.autoReviewSkip?.(current))) throw failure('Permission request current session or source policy refused.', 'forbidden');
     this.options.requestAdmission?.(structuredClone(current));
     return true;
   }

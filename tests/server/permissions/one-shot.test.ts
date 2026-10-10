@@ -24,7 +24,7 @@ const until = async (check: () => boolean, ms = 10_000) => {
 };
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'], effectGate?: () => Promise<void>, requestAdmission?: () => void) {
+async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'], effectGate?: () => Promise<void>, requestAdmission?: () => void, autoReviewSkip?: () => string | undefined) {
   const root = await mkdtemp(join(tmpdir(), 'tower-one-shot-'));
   const stateDir = join(root, 'state');
   const project = join(root, 'project');
@@ -34,7 +34,7 @@ async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'
   const finished: string[] = [];
   let service!: PermissionService;
   const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 300, now: () => clock, beforeStart, beforeLaunch: (id, command, cwd, timeout, launch) => service.launchReviewed(id, command, cwd, timeout, launch) });
-  const make = () => new PermissionService({ stateDir, repository:noStorageFixture(stateDir), effectGate, requestAdmission, env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), now: () => clock,
+  const make = () => new PermissionService({ stateDir, repository:noStorageFixture(stateDir), effectGate, requestAdmission, autoReviewSkip, env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), now: () => clock,
     startRun: request => runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600, request.sessionId),
     onRunFinished: request => finished.push(request.id), runOutput: id => runner.output(id), forgetRun: id => runner.forget(id) });
   service = make();
@@ -688,5 +688,57 @@ for (const boundary of ['files', 'receipt'] as const) for (const change of ['clo
     f.runner.releaseStorage();
     await f.runner.flush();
     await assert.rejects(readFile(join(f.project, 'admission-executions')), { code: 'ENOENT' });
+  });
+}
+
+for (const change of ['closed', 'source', 'provider'] as const) {
+  test(`last approval effect await makes ${change} denial terminal across restart`, async t => {
+    let service!: PermissionService, armed = false, denied = false;
+    let reached!: () => void, release!: () => void;
+    const checking = new Promise<void>(resolve => { reached = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const f = await fixture(t, id => service.confirmReviewed(id), async () => {
+      if (armed) { armed = false; reached(); await blocked; }
+    }, undefined, () => denied ? 'fixture source denied' : undefined);
+    service = f.service;
+    const path = join(f.project, 'last-effect-reviewed.txt');
+    await writeFile(path, 'reviewed');
+    const canonical = await realpath(path);
+    const original = fsPromises.realpath;
+    let first = true;
+    const mock = t.mock.method(fsPromises, 'realpath', async (file: Parameters<typeof original>[0]) => {
+      const result = await original(file);
+      if (String(file) === path && first) { first = false; armed = true; }
+      return result;
+    });
+    syncBuiltinESMExports();
+    t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+    await service.saveAutoReview(ON);
+    const asked = await service.requestRun({ command: 'echo forbidden >> last-effect-executions', reason: 'fixture' }, agent('claude:one'));
+    await service.startReview(asked.request.id!);
+    await service.applyReview(asked.request.id!, { verdict: 'approve', reason: 'fixture', files: [{ path, real: canonical, sha256: createHash('sha256').update('reviewed').digest('hex') }] });
+    await checking;
+    // Change only admission while the final effect gate is awaiting; the approval stays waiting.
+    assert.equal(service.overview().requests.find(r => r.id === asked.request.id)!.run!.status, 'waiting');
+    if (change === 'closed') f.sessions.delete('claude:one');
+    if (change === 'source') denied = true;
+    if (change === 'provider') f.sessions.set('claude:one', { cwd: f.project, provider: 'codex' });
+    release();
+    await f.runner.flush();
+    assert.equal(f.runner.inFlight(), false);
+    const durable = await noStorageFixture(f.stateDir).load();
+    assert.equal(durable.requests.find(r => r.id === asked.request.id)!.run!.status, 'failed');
+    denied = false;
+    f.sessions.set('claude:one', { cwd: f.project, provider: 'claude' });
+    service.close();
+    const restarted = f.make();
+    t.after(() => restarted.close());
+    await restarted.start();
+    const unfinished = restarted.unfinishedRuns();
+    assert.deepEqual(unfinished, { start: [], running: [] });
+    // Mirror startup's automatic start list after the policy becomes allowed again.
+    for (const request of unfinished.start) f.runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600, request.sessionId);
+    await f.runner.flush();
+    await assert.rejects(readFile(join(f.project, 'last-effect-executions')), { code: 'ENOENT' });
   });
 }
