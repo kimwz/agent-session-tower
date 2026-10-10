@@ -13,7 +13,7 @@ import type { AutoPromptJob, AutoPromptRequest, Run } from '../../../shared/type
 
 const rule: SlackRule = { id: 'review', name: 'PR review', enabled: true, condition: 'Verse8 PR review requested', instructions: 'Review the PR', replyInstructions: 'Confirm only a finished review', provider: 'codex' };
 const mention: SlackMention = { id: 'event-1', teamId: 'T1', channel: 'C1', user: 'U2', ts: '1.1', threadTs: '1.0', text: '<@U1> review this Verse8 PR' };
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, expectedCapacityFlushFailure = false) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-slack-'));
   let job: AutoPromptJob | undefined;
   let run: Run = { id: 'run', sessionId: 'session', prompt: '', status: 'running', createdAt: '', output: 'Review finished with no findings.' };
@@ -32,7 +32,10 @@ async function fixture(t: TestContext) {
   };
   const manager = new SlackAutomationManager(options); await manager.start(); await manager.startRuntimeEffects(); await manager.setRules([rule]);
   t.after(async () => {
-    await manager.flush();
+    if (expectedCapacityFlushFailure) await assert.rejects(manager.flush(), error => error instanceof storage.captured.storage.StorageCommandError
+      && error.code === 'domain-failed' && error.disposition === 'not-committed'
+      && error.message === 'Slack 저장 용량이 가득 찼습니다.');
+    else await manager.flush();
     await storage.storage.close();
     await rm(directory, { recursive: true, force: true });
   });
@@ -116,7 +119,7 @@ test('terminal SQL history compacts on capacity pressure while retaining dedup I
 });
 
 test('SQL storage capacity refuses oversized unfinished context without changing its durable row', async t => {
-  const f = await fixture(t); await f.manager.ingest(mention); await f.manager.tick();
+  const f = await fixture(t, true); await f.manager.ingest(mention); await f.manager.tick();
   const original = await readWorkflowFixture(f.options.repository), saved = JSON.parse(original);
   saved.workflows[0].thread = Array.from({ length: 900 }, (_, i) => ({ user: 'U2', ts: String(i), text: 'a'.repeat(12_000) }));
   await assert.rejects(writeWorkflowFixture(f.options.repository, JSON.stringify(saved)), /저장 용량/);

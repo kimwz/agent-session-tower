@@ -156,7 +156,14 @@ for (const fault of ['before','after-native-hold','runs-refuse-compensation-loss
   const manager = new RunManager({ stateDir: f.stateDir,storage: client,getSession: () => undefined,refreshSessions: async () => {},findExecutable: async () => '/fixture/codex',
     spawnProcess: () => { starts++; throw new Error('Fixture forbids native launch'); } });
   await manager.start();
-  const ledger = new RemoteRequestLedger(f.stateDir,Date.now,undefined,new RemoteRepository(client)); await ledger.start();
+  const effectGate = async () => {
+    const before = client.status();
+    const core = await client.gate('core');
+    const after = client.status();
+    if (before.state !== 'ready' || after.state !== 'ready' || !core.open
+      || before.ownerEpoch !== after.ownerEpoch || manager.pendingAdmission()) throw new Error('Fixture worker effects are held.');
+  };
+  const ledger = new RemoteRequestLedger(f.stateDir,Date.now,undefined,new RemoteRepository(client),effectGate); await ledger.start();
   const now = Date.now().toString(16).padStart(12,'0'), requestId = `${now.slice(0,8)}-${now.slice(8)}-7123-8abc-0123456789ab`;
   let attempts = 0;
   const execute = async () => { attempts++; return manager.create({ provider: 'codex',cwd: f.stateDir,prompt: 'native-hold-response-lost', attachments: [{ name: 'proof.txt',mimeType: 'text/plain',data: Buffer.from('preserve attachments').toString('base64') }] },{ instructions: { text: 'required',required: true },trustWorkspace: false }); };
