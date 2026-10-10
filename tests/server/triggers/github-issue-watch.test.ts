@@ -313,7 +313,7 @@ test('saved triggers of the earlier issue kinds become issue watches that take n
   const sparse = { 'octo/lib': [1, 2, 4, 5].map(number => ({ number, assignees: ['me'] })), 'octo/other': [{ number: 1, assignees: ['me'] }] };
   const sparseGitHub = fakeGitHub(sparse);
   const fetch: GitHubFetch = (path, etag, send) => new URL(path, 'https://api.github.com').pathname === '/issues'
-    ? Promise.resolve({ status: 200, body: Object.entries(sparse).flatMap(([repo, issues]) => issues.map(issue => item(issue, repo))) })
+    ? Promise.resolve({ status: 200, body: Object.entries(sparse).flatMap(([repo, issues]) => issues.map(issue => ({ ...item(issue, repo), repository: { full_name: repo }, repository_url: `https://api.github.com/repos/${repo}` }))) })
     : sparseGitHub.fetch(path, etag, send);
   for (const repos of [['octo/lib'], ['octo/lib', 'octo/other'], []]) {
     const watch = GitHubSourceSchema.shape.watch.parse(upgradeWatch({ type: 'assigned-to-me', repos, includePullRequests: false }));

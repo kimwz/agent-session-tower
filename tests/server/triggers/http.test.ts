@@ -42,7 +42,6 @@ async function fixture(t: TestContext, ownPorts: number[] = []) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-http-triggers-'));
   const project = join(directory, 'project');
   await mkdir(project);
-  const sql = await actualStorage(t, directory);
   const clock = { now: start };
   const runs: Run[] = [];
   const calls: Array<{ input: CreateSessionRequest; internal: RunAdmission }> = [];
@@ -70,13 +69,21 @@ async function fixture(t: TestContext, ownPorts: number[] = []) {
     return service;
   };
   t.after(async () => {
-    for (const service of services) service.close();
-    // A manual run's dispatch tick can save after settle() starts; let that tick finish before deleting its state.
-    await until(() => services.every(service => !service.inFlight()));
-    await Promise.allSettled(services.map(service => service.settle()));
+    // Fence producers while SQL is still open; calls[] does not mean dispatch has saved its outcome.
+    for (const service of services) { service.pause(); service.hold(); }
+    for (const service of services) {
+      await service.settle();
+      await service.tick();
+      await service.settle();
+      await service.flush();
+      assert.equal(service.inFlight(), false, 'all producers and writes finish before storage closes');
+      service.close();
+    }
     await sql.client.close();
     await rm(directory, { recursive: true, force: true });
   });
+  // Register the producer drain before actualStorage registers its client-close hook.
+  const sql = await actualStorage(t, directory);
   /** One tick, then waits for the request it started and dispatches what it fired. */
   const step = async (service: TriggerService) => { await service.tick(); await until(() => !service.inFlight()); await service.tick(); };
   return { directory, project, clock, runs, calls, open, step, text: sql.text };
@@ -338,6 +345,13 @@ test('a secret echoed back by the server is removed before anything is recorded,
   const tested = await service.testHttp(input.source.kind === 'http' ? input.source.request : ({} as never), input.source.kind === 'http' ? input.source.condition : undefined, OWNER);
   const event = await service.run(trigger.id, AGENT);
   await until(() => f.calls.length === 1);
+  // The export's generation fence must outlive every producer, including the manual dispatch tick.
+  service.pause();
+  service.hold();
+  await service.tick();
+  await service.settle();
+  await service.flush();
+  assert.equal(service.inFlight(), false, 'SQL export starts only after producers and writes finish');
   const seen = JSON.stringify([tested, event, service.events(), service.overview(), f.calls[0].input.prompt, await f.text()]);
   assert.equal(server.received.length, 2);
   assert.doesNotMatch(seen, /s3cr3t-value/);
