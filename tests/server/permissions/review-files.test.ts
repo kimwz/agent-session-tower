@@ -10,6 +10,7 @@ import type { ReviewSources } from '../../../server/permissions/context.js';
 import { ReviewFiles, type ReviewScopeSpec } from '../../../server/permissions/inspect.js';
 import { PermissionReviewer } from '../../../server/permissions/reviewer.js';
 import { PermissionRunner } from '../../../server/permissions/runner.js';
+import { noStorageFixture, closePermissionFixture } from './storage-fixture.js';
 import { PermissionService } from '../../../server/permissions/service.js';
 import { ruleGuards } from '../../../shared/permissions.js';
 
@@ -32,9 +33,9 @@ async function fixture(t: TestContext, now?: () => Date) {
   execFileSync('git', ['-C', project, 'init', '-q']);
   const sessions = new Map<string, { cwd: string; provider: 'claude' | 'codex' }>([['codex:sqlite', { cwd: project, provider: 'codex' }]]);
   let service!: PermissionService;
-  const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 200, beforeStart: id => service.confirmReviewed(id) });
+  const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 200, beforeStart: id => service.confirmReviewed(id), beforeLaunch: (id, command, cwd, timeout, launch) => service.launchReviewed(id, command, cwd, timeout, launch) });
   let reviewer: PermissionReviewer | undefined;
-  service = new PermissionService({ stateDir, env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), ...(now ? { now } : {}),
+  service = new PermissionService({ stateDir, repository:noStorageFixture(stateDir), env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), ...(now ? { now } : {}),
     startRun: request => runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600, request.sessionId),
     runOutput: id => runner.output(id), onReviewQueued: () => reviewer?.wake() });
   await service.start();
@@ -68,7 +69,7 @@ async function fixture(t: TestContext, now?: () => Date) {
     service.confirmReviewed = async id => { await held; return then ? then() : original(id); };
     return release;
   };
-  t.after(async () => { for (const release of releases) release(); await reviewer!.flush(); await runner.flush(); service.close(); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { for (const release of releases) release(); await reviewer!.flush(); await runner.flush(); service.close(); closePermissionFixture(stateDir); await rm(root, { recursive: true, force: true }); });
   const settle = async () => { while (reviewer!.inFlight()) await reviewer!.flush(); await runner.flush(); };
   return { root, stateDir, project, sessions, service, runner, reviewer, calls, settle, holdStarts, answer: (value: typeof answer) => { answer = value; },
     request: (id: string) => service.overview().requests.find(item => item.id === id)! };
@@ -337,7 +338,7 @@ test('an approved waiting run keeps what it was bound to across a restart', asyn
   // Approved, and held before it starts (the runner waits at the check, so nothing is settled here).
   await until(() => f.request(request.id!).status === 'approved');
   const before = f.request(request.id!);
-  const again = new PermissionService({ stateDir: f.stateDir, env: { CODEX_HOME: join(f.root, 'codex-home') }, session: () => ({ cwd: f.project, provider: 'codex' as const }) });
+  const again = new PermissionService({ stateDir: f.stateDir, repository:noStorageFixture(f.stateDir), env: { CODEX_HOME: join(f.root, 'codex-home') }, session: () => ({ cwd: f.project, provider: 'codex' as const }) });
   await again.start();
   t.after(() => again.close());
   assert.deepEqual(again.overview().requests.find(item => item.id === request.id)!.review!.files, before.review!.files);
