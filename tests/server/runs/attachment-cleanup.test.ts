@@ -1,5 +1,5 @@
 import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
-import { externalStorageFixture } from '../remote/external-storage-fixture.js';
+import { externalStorageFixture, readAutoPromptFixture } from '../remote/external-storage-fixture.js';
 import assert from 'node:assert/strict';
 import fsPromises from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
@@ -36,10 +36,10 @@ async function fixture(t: TestContext, executable?: () => Promise<string>) {
   const runs = new RunManager({ storage: owners.storage, stateDir: directory, getSession: id => id === session.id ? session : undefined, refreshSessions: async () => {}, maxConcurrent: 0, findExecutable: executable ?? (async () => '/fixture/codex'), spawnProcess: () => { throw new Error('No native provider allowed'); } });
   await runs.start();
   const snapshot = (): Snapshot => ({ sessions: [session], runs: runs.list(), providers: [{ provider: 'codex', available: true, sessionCount: 1 }], scanning: false, updatedAt: session.updatedAt, hostname: 'fixture', version: 'test' });
-  const auto = new AutoPromptManager({ repository: owners.autoPrompt, effectGate: owners.effectGate, stateDir: directory, snapshot, detail: async () => undefined, refresh: async () => {}, runs, model: async () => { throw new Error('No native router allowed'); } }); await auto.start();
+  const auto = new AutoPromptManager({ repository: owners.autoPrompt, effectGate: owners.effectGate, stateDir: directory, snapshot, detail: async () => undefined, refresh: async () => {}, runs, model: async () => { throw new Error('No native router allowed'); } }); await auto.start(); await auto.startRuntimeEffects();
   const drains: Array<() => void> = [];
   t.after(async () => { for (const drain of drains) drain(); await auto.close(); await runs.close(); await owners.storage.close(); await removeTemporaryFixture(directory); });
-  return { directory, session, runs, auto, snapshot, drains, storage: owners.storage, captured: owners.captured };
+  return { directory, session, runs, auto, snapshot, drains, storage: owners.storage, autoRepository: owners.autoPrompt, captured: owners.captured };
 }
 async function upload(store: AttachmentStore, scope: string) { const item = await store.upload(scope, 'fixture.txt', 'text/plain', (async function* () { yield Buffer.from('original'); })(), { pending: true }); await expire(store, item.id); return item; }
 
@@ -96,15 +96,15 @@ test('Auto durable nonterminal entries skip unused originals in their scope unti
   (f.auto as unknown as { pump(): void }).pump = () => {};
   await f.auto.submit({ requestId, provider: 'codex', prompt: '', attachmentIds: [accepted.id], targetSessionId: f.session.id, cwd: f.directory });
   assert.equal(f.auto.get(requestId)?.status, 'queued');
-  assert.equal(JSON.parse(await readFile(join(f.directory, 'auto-prompts.json'), 'utf8'))[0].staged[0].id, accepted.id);
+  assert.equal(JSON.parse(await readAutoPromptFixture(f.autoRepository))[0].staged[0].id, accepted.id);
   await internals(f.auto).cleanupAttachments(); assert.equal((await manifest(store, unused.id)).pendingUntil, 1);
   await f.auto.cancel(requestId); await internals(f.auto).cleanupAttachments(); await assert.rejects(store.openVerified(unused.id));
 });
 
 for (const kind of ['runs', 'auto'] as const) test(`${kind} pause and repeated close wait for the same sweep, and resume rearms only once`, async t => {
-  const f = await fixture(t); const manager = f[kind]; const state = internals(manager); const finished = gate(); let sweeps = 0;
-  state.attachments.sweepPending = async () => { sweeps++; await finished.promise; };
-  const sweep = state.cleanupAttachments(); assert.equal(state.cleanupAttachments(), sweep); assert.equal(sweeps, 1);
+  const f = await fixture(t); const manager = f[kind]; const state = internals(manager); const finished = gate(); const entered = gate(); let sweeps = 0;
+  state.attachments.sweepPending = async () => { sweeps++; entered.resolve(); await finished.promise; };
+  const sweep = state.cleanupAttachments(); assert.equal(state.cleanupAttachments(), sweep); await entered.promise; assert.equal(sweeps, 1);
   let paused = false; const pause = manager.pauseAttachmentCleanup().then(() => { paused = true; });
   assert.equal(state.attachmentCleanupTimer, undefined); await Promise.resolve(); assert.equal(paused, false);
   finished.resolve(); await pause; await state.cleanupAttachments(); assert.equal(sweeps, 1);

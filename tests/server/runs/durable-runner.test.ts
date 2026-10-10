@@ -488,6 +488,7 @@ test('only the owner’s own message can approve a Slack send; agent work and co
   await f.host.close();
   const ownerMessages: string[] = [];
   const slack = {
+    withOwnerTurnAdmission: <T>(admit: () => Promise<T>) => admit(),
     sessionMcp: () => undefined,
     ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return { prompt: message, instructions: '[owner receipt]' }; },
     coordinatorSessionIds: () => [],
@@ -1416,6 +1417,9 @@ test('worker records a verified calling turn without treating its message as own
   f.finish();
   await until(() => f.runs.list().find(run => run.id === parent.id)?.status === 'completed');
   await assert.rejects(client.enqueue(f.session.id, 'Expired', {}, { callerCapability: token }), { kind: 'forbidden' });
+  // Completion is published before its ordered save finishes; export only after the owner is quiet.
+  await until(() => !f.runs.busy());
+  await f.runs.flushState();
   const saved = JSON.stringify((await fixtureDocuments(f.runs)).runs);
   assert.equal(saved.includes(token), false, 'credentials never enter persisted run history');
   assert.ok(saved.includes(parent.id));
@@ -1933,7 +1937,7 @@ test('actual SDK thread exit holds new work while the active fake provider and d
       try { await database.reopen(); await database.prepare({ allowMigration: false }); if ((await database.gate('core')).open) { diagnosis = { ...diagnosis, state: 'ready', admissionOpen: true }; runs.releaseStorage(); } }
       catch { /* The SDK's typed failure stays in its unavailable callback. */ }
       return diagnosis;
-    }, closeStorage: async () => { await database?.close(); } };
+    }, closeStorage: async () => { await stopFixtureWriter(runs); await database.close(); } };
   }, { onUnavailable: (status, runs) => {
     runs.holdStorage();
     diagnosis = { ...diagnosis, state: 'unavailable', code: status.failure?.code ?? 'unknown', reason: status.failure?.message ?? 'unknown', admissionOpen: false, healthStatus: 503, failure: status.failure };
@@ -1966,8 +1970,15 @@ test('actual SDK thread exit holds new work while the active fake provider and d
   assert.deepEqual(client.list().map(item => [item.id, item.status]), before.map(item => [item.id, item.status]));
   await rename(preserved, databasePath(f.stateDir));
   await database.reopen();
+  await database.prepare({ allowMigration: false });
   assert.equal((await database.receipt('consumer-unknown')).found, true, 'the unknown commit is looked up, never resent');
   assert.equal(f.starts(), 1);
+  await until(() => !f.runs.busy());
+  await f.close();
+  assert.equal(database.status().state, 'closed');
+  assert.equal(f.runs.fixtureIsClosed(), true);
+  assert.equal(f.cancels(), 0);
+  assert.equal(f.runs.list().find(item => item.id === accepted.id)?.status, 'queued');
 });
 
 
