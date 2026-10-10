@@ -46,7 +46,7 @@ test('a backup made on one computer restores on another: web settings now, the w
   await write(a.stateDir, 'permissions.json', { version: 1, rules: [permissionRule('r1')], requests: [permissionRequest('a-request')], codex: [], autoReview: { enabled: true, resume: true } });
   await write(a.stateDir, 'slack-automation.json', { rules: [RULE], workflows: [backupWorkflow('a-work', 'completed')] });
   await write(a.stateDir, 'slack-connection.json', { enabled: true, userToken: 'xoxp-1', appToken: 'xapp-1', account: { teamId: 'T', userId: 'U' } });
-  await write(a.stateDir, 'trigger-engine.json', { version: 1, triggers: [], settings: {}, trustedFolders: ['/work'], secretGrants: {}, fired: {}, cursors: {}, events: [{ id: 'history' }] });
+  await write(a.stateDir, 'trigger-engine.json', { version: 1, triggers: [], settings: {}, trustedFolders: ['/work'], secretGrants: {}, fired: {}, cursors: {}, events: [{ id: 'history', triggerId: 'historic-trigger', status: 'completed', requestId: 'historic-request', input: { instructions: 'Historic report', target: { node: 'local', mode: 'folder', cwd: '/work' }, overlap: 'skip' } }] });
   await write(a.stateDir, 'master/settings.json', { voice: { voiceId: 'abcdefghij' }, session: { sessionId: 'x', provider: 'claude', startedAt: '' } });
   await write(a.stateDir, 'master/elevenlabs-key.json', { apiKey: 'eleven-key-1' });
   await a.groups.set({ cwd: '/work/shop', title: 'Shop', pinned: true });

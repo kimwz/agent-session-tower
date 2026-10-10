@@ -85,6 +85,28 @@ test('stale generation/revision or row contents roll back without replacing auth
   await assert.rejects(one.update([bad])); assert.equal((await f.repository().load()).rules[0].value,'git diff');
 });
 
+test('one guarded permission batch reorders two rules and exactly replaces them without losing local rows',async t=>{
+  const f=fixture(t),original=state();
+  original.rules=[rule,{ ...rule,id:'r2',value:'git diff' }];
+  await seed(f,original);
+  const repo=f.repository();
+  const replace=async (rules:PermissionState['rules'])=>{
+    const current=permissionRows(await repo.load()),next=permissionRows({ ...original,rules });
+    const changes=next.filter(r=>r.kind==='rule').map(r=>({ ...r,previous:current.find(old=>old.kind==='rule' && old.id===r.id)?.json ?? null }));
+    for (const old of current.filter(r=>r.kind==='rule')) if (!rules.some(r=>r.id===old.id)) changes.push({ ...old,previous:old.json,remove:true } as typeof changes[number]);
+    await repo.update(changes);
+    assert.deepEqual(await repo.load(),{ ...original,rules });
+  };
+  await replace([original.rules[1],original.rules[0]]);
+  await replace([{ ...rule,id:'replacement',value:'git log' },{ ...original.rules[1],value:'git show' }]);
+  assert.deepEqual(f.db.prepare('SELECT id,ordinal FROM permission_rules ORDER BY ordinal').all().map(r=>({ ...r })),[{ id:'replacement',ordinal:0 },{ id:'r2',ordinal:1 }]);
+  const before=await repo.load(),head=await repo.head();
+  const collision=permissionRows({ ...before,rules:[{ ...rule,id:'collision' }] })[0];
+  await assert.rejects(repo.update([{ ...collision,previous:null }]));
+  assert.deepEqual(await f.repository().load(),before);
+  assert.deepEqual(await f.repository().head(),head,'failed ordinal collision rolls back the revision too');
+});
+
 test('search projection corruption and payload identity corruption refuse load, never empty authority',async t=>{
   const f=fixture(t); await seed(f,state());
   f.db.prepare('UPDATE permission_requests SET status=? WHERE id=?').run('approved','q');

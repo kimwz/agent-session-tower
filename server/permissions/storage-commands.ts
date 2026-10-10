@@ -75,6 +75,9 @@ export function permissionsDomainFor(schema: StorageDomainSchema): StorageDomain
         c.prepare('DELETE FROM permission_rules').run();
         c.prepare("DELETE FROM permission_metadata WHERE id='autoReview'").run();
       }
+      // Guards above see the complete old state. Vacate changed ordinals together
+      // before inserting replacements; the owner transaction rolls back any collision.
+      if (p.mode==='update') for (const r of p.changes as PermissionChange[]) if (r.kind==='rule') c.prepare('DELETE FROM permission_rules WHERE id=?').run(r.id);
       for (const r of p.changes as PermissionChange[]) {
         // Older full restore DTOs may include identical local rows; validate them above, never rewrite them.
         if (p.mode==='restore' && r.kind!=='rule' && !(r.kind==='meta' && r.id==='autoReview')) continue;

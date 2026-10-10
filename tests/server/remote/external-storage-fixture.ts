@@ -1,6 +1,6 @@
 import { TriggersRepository } from '../../../server/triggers/storage-repository.js';
 import { triggerBackupOf } from '../../../server/triggers/backup.js';
-import type { EngineState } from '../../../server/triggers/state.js';
+import { serializeState, type EngineState } from '../../../server/triggers/state.js';
 import { slackRequestId, workflowRows } from '../../../server/slack/storage-codec.js';
 import { randomUUID } from 'node:crypto';
 import { PermissionsRepository } from '../../../server/permissions/storage-repository.js';
@@ -114,7 +114,7 @@ async function openSettingsOwner(stateDir: string) {
   else await triggers.restore(state, `backup-fixture-triggers-${randomUUID()}`);
  };
  const triggerState = async () => (await triggers.exportCurrent()).documents;
- const triggersBackup = async () => await triggers.databaseAuthority() ? triggerBackupOf(await triggerState()) : undefined;
+ const triggersBackup = async () => await triggers.databaseAuthority() ? triggerBackupOf(JSON.parse(serializeState(await triggerState()))) : undefined;
  return { ...f, permissions, triggers, seedTriggers, triggerState, triggersBackup, beforeClose, collect, owner, seed, read, close: async (): Promise<void> => { try { for (const settle of beforeClose) await settle(); } finally { await f.storage.close(); } settingsOwners.delete(stateDir); } };
 }
 
