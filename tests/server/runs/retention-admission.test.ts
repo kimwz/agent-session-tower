@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager } from './sql-fixture.js';
 import type { Session } from '../../../shared/types.js';
 function session(id: string): Session {
   return { id, nativeId: id.slice(6), provider: 'codex', title: 'fixture', cwd: tmpdir(), project: 'fixture', status: 'completed', statusReason: '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };

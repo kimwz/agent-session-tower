@@ -4,7 +4,7 @@ import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager, fixtureDocuments } from './sql-fixture.js';
 import type { Session } from '../../../shared/types.js';
 
 async function fixture(t: TestContext) {
@@ -29,7 +29,7 @@ test('new sessions retain blank attachment prompts and persist Auto Prompt corre
   assert.equal(run.attachments?.length, 1);
   const stored = await f.manager.attachment(run.attachments![0].id);
   assert.equal(stored.content.toString(), 'Original bytes');
-  const persisted = JSON.parse(await readFile(join(f.directory, 'runs.json'), 'utf8'));
+  const persisted = JSON.parse(JSON.stringify((await fixtureDocuments(f.manager)).runs));
   assert.equal(persisted[0].autoPromptId, autoPromptId);
   assert.equal(persisted[0].attachments[0].id, run.attachments![0].id);
   await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Duplicate' }, { autoPromptId }), { kind: 'conflict' });

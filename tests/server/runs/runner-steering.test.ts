@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test, { type TestContext } from 'node:test';
-import { RunManager, type RunAdmission } from '../../../server/runs/manager.js';
+import { type RunAdmission } from '../../../server/runs/manager.js';
+import { RunManager, fixtureDocuments, fixtureReplaceRuns } from './sql-fixture.js';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { SteeringError, type SteeringInput } from '../../../server/runs/steering.js';
 import type { CodexStdioResult } from '../../../server/runs/codex-stdio.js';
@@ -87,7 +88,7 @@ test('private tool changes reach only the active owner turn, with no new run or 
   assert.equal(f.manager.list().length, 1);
   assert.equal(f.read(first.id).prompt, 'Original instruction');
   await f.manager.flushState();
-  assert.doesNotMatch(await readFile(join(f.stateDir, 'runs.json'), 'utf8'), /explicitly connected a secret/);
+  assert.doesNotMatch(JSON.stringify((await fixtureDocuments(f.manager)).runs), /explicitly connected a secret/);
   assert.doesNotMatch(JSON.stringify([...f.published.values()]), /explicitly connected a secret/);
 });
 
@@ -143,7 +144,7 @@ test('queued same-session instruction is persisted before delivery and follows o
   const gate = deferred();
   let f: Awaited<ReturnType<typeof fixture>>;
   f = await fixture(t, { onSteer: async input => {
-    const saved: Run[] = JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'));
+    const saved: Run[] = JSON.parse(JSON.stringify((await fixtureDocuments(f.manager)).runs));
     assert.equal(saved.find(run => run.id === input.id)?.steering?.state, 'sending');
     await gate.promise;
   } });
@@ -207,7 +208,7 @@ test('a queued instruction that cannot join the running turn says why, and says 
     assert.equal(f.read(run.id).canSteer, reason === undefined, run.prompt);
   }
   await f.manager.flushState();
-  const saved: Run[] = JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'));
+  const saved: Run[] = JSON.parse(JSON.stringify((await fixtureDocuments(f.manager)).runs));
   assert.ok(saved.every(run => run.steerBlocked === undefined && run.canSteer === undefined));
 });
 
@@ -288,7 +289,8 @@ test('restart recovers an unacknowledged sending instruction as uncertain withou
   const { first, second } = await f.pair();
   const saved = f.manager.list().map(run => run.id === second.id ? { ...run, status: 'running', steering: { targetRunId: first.id, state: 'sending', requestedAt: new Date().toISOString() } } : run);
   await f.manager.close();
-  await writeFile(join(f.stateDir, 'runs.json'), JSON.stringify(saved));
+  await f.manager.close();
+  await fixtureReplaceRuns(f.manager, saved as Run[]);
   const restored = new RunManager({ stateDir: f.stateDir, getSession: () => f.session, refreshSessions: async () => {},
     spawnProcess: () => { throw new Error('Recovery must not spawn providers'); } });
   await restored.start();
@@ -409,8 +411,8 @@ test('failed permission notice is never launched as standalone work and a newer 
 test('permission continuation survives queued restore but never restarts an uncertain parent', async t => {
   const f = await fixture(t); const parent = await f.running(); const request = permissionRequest(f, parent.id);
   const resume = await f.manager.permissionDecision(request, 'Allowed.'); await f.manager.flushState();
-  // Read the persisted state using another manager with no provider transport: any launch is forbidden.
-  const restored = new RunManager({ stateDir: f.stateDir, getSession: () => f.session, refreshSessions: async () => {}, pollMs: 10000,
+  // Restore the committed SQL projection in an isolated owner; the live predecessor keeps its lifetime.
+  const restored = new RunManager({ stateDir: join(f.stateDir, 'restored-permission'), fixtureInitial: await fixtureDocuments(f.manager), getSession: () => f.session, refreshSessions: async () => {}, pollMs: 10000,
     spawnProcess: () => { throw new Error('Native provider forbidden'); }, findExecutable: async () => { throw new Error('Launch forbidden'); } });
   await restored.start(); t.after(() => restored.close());
   assert.equal(restored.list().find(run => run.id === parent.id)?.status, 'error');
@@ -453,9 +455,10 @@ test('an exact completed task outcome and missing requesting run cannot restart 
 
 test('a saved queued turn-only notice is cancelled on restore and owner stop evidence survives', async t => {
   const f = await fixture(t); const parent = await f.running(); await f.manager.cancel(parent.id); await f.manager.flushState();
-  const saved = JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8')) as Run[];
+  const saved = JSON.parse(JSON.stringify((await fixtureDocuments(f.manager)).runs)) as Run[];
   saved.push({ id: randomUUID(), sessionId: f.session.id, prompt: 'Turn only', createdAt: new Date().toISOString(), output: '', status: 'queued', permissionNotice: { targetRunId: parent.id } });
-  await writeFile(join(f.stateDir, 'runs.json'), JSON.stringify(saved));
+  await f.manager.close();
+  await fixtureReplaceRuns(f.manager, saved as Run[]);
   const restored = new RunManager({ stateDir: f.stateDir, getSession: () => f.session, refreshSessions: async () => {}, pollMs: 10000,
     spawnProcess: () => { throw new Error('Native provider forbidden'); } });
   await restored.start(); t.after(() => restored.close());

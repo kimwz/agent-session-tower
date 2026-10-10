@@ -35,6 +35,7 @@ export async function prepareCodexTurn(host: TurnHost, run: Run, session: Sessio
   let reported = false;
   const end = (exit: TurnExit) => { if (reported) return; reported = true; host.exited(exit); };
   await host.notes.add(run, session, creating);
+  host.touch(run);
   const tools = host.runTools(run, session);
   await awaitToolServers(tools);
   if (run.status !== 'queued' || host.stopping()) {
@@ -62,23 +63,23 @@ export async function prepareCodexTurn(host: TurnHost, run: Run, session: Sessio
       if (creating) {
         if (!host.registry.confirm(session.id, id)) throw new Error('The new conversation identity changed. No message was submitted.');
         session.nativeId = id;
-        host.changed();
+        host.changed(run);
         try { if (!await host.persistNativeIdentity(run)) return; }
         catch (error) { throw new Error(`Cannot save the new conversation identity: ${errorMessage(error)}`); }
       }
     },
     onStarted: (_turnId, startedAt) => {
       if (FINISHED.has(run.status)) return;
-      started = true; run.startedAt = startedAt ?? new Date().toISOString(); host.changed();
+      started = true; run.startedAt = startedAt ?? new Date().toISOString(); host.changed(run);
     },
     onOutput: text => { if (!FINISHED.has(run.status)) host.append(run, text); },
-    ...(codexReplies ? { onReply: (id: string, text: string, done: boolean) => { if (!FINISHED.has(run.status) && codexReplies.add(id, text, done)) host.notifyOutput(); } } : {}),
-    onApproval: approval => { if (run.status === 'running') { run.approvals = [...(run.approvals || []), approval]; host.changed(); } },
+    ...(codexReplies ? { onReply: (id: string, text: string, done: boolean) => { if (!FINISHED.has(run.status) && codexReplies.add(id, text, done)) host.notifyOutput(run); } } : {}),
+    onApproval: approval => { if (run.status === 'running') { run.approvals = [...(run.approvals || []), approval]; host.changed(run); } },
     onApprovalCancelled: id => {
       if (!run.approvals?.some(approval => approval.id === id)) return;
       run.approvals = run.approvals.filter(approval => approval.id !== id);
       if (!run.approvals.length) delete run.approvals;
-      host.changed();
+      host.changed(run);
     },
     // The adapter reports completion only after its native child has closed.
     onFinished: result => { if (registered) end({ kind: 'codex', run, session, result, started }); },
@@ -86,5 +87,5 @@ export async function prepareCodexTurn(host: TurnHost, run: Run, session: Sessio
   // Opening an adapter does not spawn. Admission can be cancelled during discovery.
   try { await host.prepareLaunch(run); } catch (error) { handle.close(); throw error; }
   return { kind: 'ready', handle, dispose: () => handle.close(),
-    start: () => { registered = true; run.status = 'running'; run.output = ''; host.changed(); } };
+    start: () => { registered = true; run.status = 'running'; run.output = ''; host.changed(run); } };
 }

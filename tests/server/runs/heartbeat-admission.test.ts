@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager } from './sql-fixture.js';
 import { MASTER_FOLDER, MASTER_HEARTBEAT_MARK } from '../../../shared/master.js';
 import type { Run, Session } from '../../../shared/types.js';
 import { SessionService } from '../../../server/sessions/service.js';

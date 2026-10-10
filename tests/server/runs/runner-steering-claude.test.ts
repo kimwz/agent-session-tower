@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { PassThrough, Writable } from 'node:stream';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { RunManager } from '../../../server/runs/manager.js';
+import { restoreRuns } from '../../../server/runs/run-history.js';
+import { RunManager } from './sql-fixture.js';
 import type { Run, Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
 
@@ -123,7 +124,10 @@ test('restored steering validates shape and converts in-flight delivery to uncer
   const base: Run = { id: nativeId, sessionId: `claude:${nativeId}`, prompt: 'test', output: '', createdAt: now, status: 'running' };
   const valid = { ...base, steerBlocked: 'origin', canSteer: true, steering: { targetRunId: '20000000-0000-4000-8000-000000000002', state: 'sending', requestedAt: now } };
   await writeFile(join(directory, 'runs.json'), JSON.stringify([valid, ...[null, 'bad', {}, { ...valid.steering, requestedAt: 42 }].map((steering, index) => ({ ...base, id: `invalid-${index}`, steering }))]));
-  const manager = new RunManager({ stateDir: directory, getSession: () => undefined, refreshSessions: async () => {} });
+  const legacy = JSON.parse(await readFile(join(directory, 'runs.json'), 'utf8')) as unknown[];
+  const decoded = restoreRuns(legacy, new Map());
+  assert.equal(decoded.runs.length, 1);
+  const manager = new RunManager({ stateDir: directory, fixtureInitial: { runs: decoded.runs, created: [], instructions: {} }, getSession: () => undefined, refreshSessions: async () => {} });
   t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
   await manager.start();
   assert.equal(manager.list().length, 1);

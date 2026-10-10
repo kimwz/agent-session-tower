@@ -42,9 +42,10 @@ export interface TurnHost {
   readonly registry: CreatedSessionRegistry;
   readonly attachments: AttachmentStore;
   readonly notes: TurnNotes;
-  changed(): void;
+  changed(...runs: Run[]): void;
+  touch(run: Run): void;
   append(run: Run, text: string): void;
-  notifyOutput(): void;
+  notifyOutput(run: Run): void;
   flush(): Promise<void>;
   /** Native identity only: wait for its fixed receipt; false means explicit cancellation. */
   persistNativeIdentity(run: Run): Promise<boolean>;

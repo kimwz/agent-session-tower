@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import test from 'node:test';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager } from './sql-fixture.js';
 import type { CodexStdioOptions } from '../../../server/runs/codex-stdio.js';
 
 test('every Claude and Codex turn finds the launch shims first in its PATH and knows where their marks go', async t => {

@@ -63,7 +63,7 @@ export class RunsRepository {
     catch (error) { throw new StorageCommandError({ phase: 'command',code: 'domain-failed',message: `Current runs data is malformed: ${(error as Error).message}`,disposition: 'not-committed',retryable: false }); }
     return { documents, rows, head, sha256: documentsHash(documents) };
   }
-  /** The R6-removable compatibility adapter is in RunHistory; future owners send individual row commands here. */
+  /** Guarded touched rows from one owner operation; the final receipt commits all dependencies together. */
   async update(changes: RunChange[], mode: Exclude<RunWriteMode,'import' | 'restore'> = 'update', id = `runs-${randomUUID()}`, triggerLinks?: readonly TriggerAdmissionLink[]): Promise<RunWriteIdentity | undefined> {
     if (!changes.length) { await this.head(); return undefined; }
     await this.gate();

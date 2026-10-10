@@ -13,7 +13,8 @@ export interface PermissionHost {
   getSession(id: string): Session | undefined;
   supersede(run: Run, reason: string): void;
   steer(runId: string, options: { targetRunId?: string }): Promise<Run>;
-  changed(): void;
+  changed(...runs: Run[]): void;
+  touch(...ids: string[]): void;
   flush(): Promise<void>;
   pump(): void;
   stopping(): boolean;
@@ -105,7 +106,7 @@ export class PermissionContinuations {
     continuation.permissionRequestIds = [...(continuation.permissionRequestIds ?? []), request.id];
     if (merge) continuation.prompt += `\n${prompt.replace(/the next provider turn/g, 'this provider turn')}`;
     this.host.runs.set(continuation.id, continuation);
-    this.host.changed(); await this.host.flush();
+    this.host.changed(continuation); await this.host.flush();
     // Check the native owner record before our notice can become its latest user message.
     if (approved && continuation.status === 'queued') { await this.checkUserMessage(continuation); await this.host.flush(); }
     // Persisted intent precedes any notice. A failed/uncertain insert never becomes a separate native turn.
@@ -113,7 +114,7 @@ export class PermissionContinuations {
       const notice: Run = { id: randomUUID(), sessionId: target.sessionId, origin: target.origin ?? { kind: 'unknown' },
         prompt: `${TOWER_NOTICE} [Permission decision ${request.id}] ${approved ? 'The permission rule was approved and applies from the next provider turn. Bring the current step to a safe stopping point and end this turn normally. Tower will resume unfinished work in a fresh turn; do not repeat completed actions.' : prompt}`,
         status: 'queued', createdAt: now, output: '', permissionNotice: { targetRunId: target.id } };
-      this.host.runs.set(notice.id, notice); this.host.admit(notice.id); this.host.changed(); await this.host.flush(); this.host.unadmit(notice.id);
+      this.host.runs.set(notice.id, notice); this.host.admit(notice.id); this.host.changed(notice); await this.host.flush(); this.host.unadmit(notice.id);
       try {
         await this.host.steer(notice.id, { targetRunId: target.id });
         if (!approved && notice.steering?.state === 'sending') await new Promise<void>((resolve, reject) => {
@@ -125,9 +126,9 @@ export class PermissionContinuations {
           const timer = setTimeout(() => finish(false), 30_000); timer.unref();
           this.host.events.on('change', check); check();
         });
-        if (!approved && notice.steering?.state === 'delivered') { delete continuation.error; this.host.changed(); await this.host.flush(); }
+        if (!approved && notice.steering?.state === 'delivered') { delete continuation.error; this.host.changed(continuation); await this.host.flush(); }
       }
-      catch (error) { if (admissionUncertain(error)) throw error; if (notice.status === 'queued') { notice.status = 'cancelled'; notice.finishedAt = new Date().toISOString(); this.host.changed(); await this.host.flush(); } }
+      catch (error) { if (admissionUncertain(error)) throw error; if (notice.status === 'queued') { notice.status = 'cancelled'; notice.finishedAt = new Date().toISOString(); this.host.changed(notice); await this.host.flush(); } }
     }
     if (!approved && continuation.error) throw new RunError(continuation.error, 'conflict');
     this.host.pump();
@@ -156,7 +157,7 @@ export class PermissionContinuations {
   sweep(): void {
     for (const run of this.host.runs.values()) if (run.status === 'queued' && run.permissionRequestIds?.length && run.scheduled) {
       const parent = this.host.runs.get(run.scheduled.afterRunId);
-      if (parent && (parent.ownerStopped || parent.status === 'error' || (parent.status === 'cancelled' && run.scheduled.resume !== 'update'))) { run.status = 'cancelled'; run.finishedAt = new Date().toISOString(); run.error = 'The requesting turn stopped; permission continuation was not started.'; }
+      if (parent && (parent.ownerStopped || parent.status === 'error' || (parent.status === 'cancelled' && run.scheduled.resume !== 'update'))) { run.status = 'cancelled'; run.finishedAt = new Date().toISOString(); run.error = 'The requesting turn stopped; permission continuation was not started.'; this.host.touch(run.id); }
     }
   }
 
@@ -164,7 +165,7 @@ export class PermissionContinuations {
   mergeIntoUpdate(run: Run, resumeNotice: string, resumeWait: string): boolean {
     const permission = [...this.host.runs.values()].find(other => other.status === 'queued' && other.scheduled?.afterRunId === run.id && other.scheduled.resume === 'permission');
     if (!permission) return false;
-    permission.scheduled!.resume = 'update'; permission.prompt = `${resumeNotice}\n\n${permission.prompt}`; permission.output = resumeWait;
+    permission.scheduled!.resume = 'update'; permission.prompt = `${resumeNotice}\n\n${permission.prompt}`; permission.output = resumeWait; this.host.touch(permission.id);
     return true;
   }
 }
