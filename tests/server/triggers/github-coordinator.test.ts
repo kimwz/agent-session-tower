@@ -1,3 +1,4 @@
+import { actualStorage } from './actual-storage-fixture.js';
 import { externalStorageFixture } from '../remote/external-storage-fixture.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -74,6 +75,8 @@ async function fixture(t: TestContext, options: { login?: string; postStatus?: n
   };
   let service: TriggerService | undefined;
   const storage = await externalStorageFixture(t, directory);
+  const sql = await actualStorage(t, directory, storage);
+  await sql.bootstrap(() => clock.now);
   const coordinator = new GitHubCoordinator({ repository: storage.workflows, effectGate: storage.effectGate, stateDir: directory, runs: runManager as never, refresh: async () => {},
     autoPrompts: { get: id => jobs.get(id), submit: async (request, internal) => { assert.ok(request.provider); submitted.push({ request: { ...request, provider: request.provider }, internal }); const job = { id: request.requestId, provider: request.provider, prompt: request.prompt, routerModel: 'r', status: 'queued' as const, createdAt: '', updatedAt: '' }; jobs.set(job.id, job); return job; } },
     github: (triggerId, fresh) => service!.githubClient(triggerId, fresh) });
@@ -83,10 +86,10 @@ async function fixture(t: TestContext, options: { login?: string; postStatus?: n
     runs: () => structuredClone(runs), session: () => undefined,
     coordinate: event => coordinator.coordinate(event), coordination: id => coordinator.coordination(id),
   };
-  service = new TriggerService({ stateDir: directory, executor, now: () => clock.now, tickMs: 60_000, ghToken: async () => 'gho_token', githubTransport: () => github });
+  service = new TriggerService({ stateDir: directory, storage: sql.client, executor, now: () => clock.now, tickMs: 60_000, ghToken: async () => 'gho_token', githubTransport: () => github });
   await service.start();
   await coordinator.start(); await coordinator.startRuntimeEffects();
-  t.after(async () => { coordinator.close(); service!.close(); await service!.settle(); await rm(directory, { recursive: true, force: true }); });
+  t.after(async () => { coordinator.close(); service!.close(); await service!.settle(); await sql.client.close(); await rm(directory, { recursive: true, force: true }); });
   const settle = async () => { for (let index = 0; index < 5; index++) { await service!.tick(); await coordinator.automation.tick(); } };
   return { directory, project, clock, runs, created, submitted, posts, issues, requested, service, coordinator, settle };
 }

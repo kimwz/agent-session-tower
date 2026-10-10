@@ -1,4 +1,4 @@
-import { collectTriggers } from '../../helpers/legacy-trigger-backup.js';
+import { actualStorage } from './actual-storage-fixture.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
@@ -15,6 +15,7 @@ const start = Date.parse('2026-09-24T00:00:30.000Z');
 
 async function fixture(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-trigger-restore-'));
+  const sql = await actualStorage(t, directory);
   const project = join(directory, 'project');
   await mkdir(project);
   const clock = { now: start };
@@ -25,14 +26,15 @@ async function fixture(t: TestContext) {
   } as unknown as TriggerExecutor;
   const services: TriggerService[] = [];
   const open = async (restore?: TriggerBackup) => {
-    const service = new TriggerService({ stateDir: directory, executor, now: () => clock.now, tickMs: 60_000 });
+    const service = new TriggerService({ stateDir: directory, storage: sql.client, executor, now: () => clock.now, tickMs: 60_000 });
+    await sql.bootstrap(() => clock.now);
     const result = await service.start(restore ? { restore } : {});
     services.push(service);
     return { service, errors: result.errors };
   };
   const reopen = async (service: TriggerService, restore?: TriggerBackup) => { service.close(); await service.settle(); return open(restore); };
-  t.after(async () => { for (const service of services) service.close(); await Promise.all(services.map(service => service.settle())); await rm(directory, { recursive: true, force: true, maxRetries: 3 }); });
-  return { directory, project, clock, runs, open, reopen };
+  t.after(async () => { for (const service of services) service.close(); await Promise.all(services.map(service => service.settle())); await sql.client.close(); await rm(directory, { recursive: true, force: true, maxRetries: 3 }); });
+  return { directory, sql, project, clock, runs, open, reopen };
 }
 
 const hourly = (project: string, values: Partial<TriggerInput> = {}): TriggerInput => ({
@@ -56,7 +58,7 @@ test('a restore keeps unchanged triggers as they are, reschedules changed ones f
   const same = await service.create(hourly(f.project, { name: 'Same' }), OWNER);
   const changed = await service.create(hourly(f.project, { name: 'Changed' }), OWNER);
   const extra = await service.create(hourly(f.project, { name: 'Extra' }), OWNER);
-  const saved = await collectTriggers(f.directory);
+  const saved = await f.sql.backup();
   assert.ok(saved);
   // After the backup: one is edited, one is gone from the backup, and time goes on.
   const backup = { ...saved, triggers: saved.triggers.filter(item => (item as Trigger).id !== extra.id).map(item => (item as Trigger).id === changed.id ? { ...(item as Trigger), name: 'Changed back' } : item) };
@@ -81,7 +83,7 @@ test('a trigger deleted after the backup runs again once the backup is restored'
   const f = await fixture(t);
   let { service } = await f.open();
   const trigger = await service.create(hourly(f.project), OWNER);
-  const backup = await collectTriggers(f.directory);
+  const backup = await f.sql.backup();
   await service.remove(trigger.id, trigger.revision, OWNER);
   ({ service } = await f.reopen(service, backup));
   const restored = service.list().find(item => item.id === trigger.id);
@@ -99,7 +101,7 @@ test("either computer's GitHub history counts, so an issue one of them took is n
   assert.deepEqual(errors, []);
   const b = github(a.trigger.id, ['octo/app#2'], 2000);
   ({ service, errors } = await f.reopen(service, backupOf([b.trigger], { github: { [b.trigger.id]: b.cursor }, fired: { [`${a.trigger.id} octo/app#2`]: '2026-09-02T00:00:00.000Z' } })));
-  const saved = await collectTriggers(f.directory);
+  const saved = await f.sql.backup();
   assert.deepEqual(saved?.github[a.trigger.id]?.handled?.sort(), ['octo/app#1', 'octo/app#2']);
   assert.equal(saved?.github[a.trigger.id]?.checkedAt, 2000);
   assert.deepEqual(Object.keys(saved!.fired).sort(), [`${a.trigger.id} octo/app#1`, `${a.trigger.id} octo/app#2`]);
@@ -114,7 +116,7 @@ test('broken entries and secrets that do not exist here are left out and reporte
   assert.equal(errors.length, 2);
   assert.ok(errors.some(error => /Broken/.test(error)));
   assert.deepEqual(service.list().map(item => item.name), ['Good']);
-  const saved = await collectTriggers(f.directory);
+  const saved = await f.sql.backup();
   assert.deepEqual(saved?.secretGrants, {});
   assert.deepEqual(saved?.trustedFolders, [f.project]);
 });
@@ -124,7 +126,7 @@ test('a restored trigger never runs a time missed before the restore, and one th
   let { service } = await f.open();
   const edited = await service.create(hourly(f.project, { name: 'Edited' }), OWNER);
   const kept = await service.create(hourly(f.project, { name: 'Kept' }), OWNER);
-  const saved = (await collectTriggers(f.directory))!;
+  const saved = (await f.sql.backup())!;
   const elsewhere = { ...(saved.triggers[0] as Trigger), id: randomUUID(), name: 'Elsewhere', handler: { ...(saved.triggers[0] as Trigger).handler, target: { node: 'local', mode: 'folder', cwd: join(f.directory, 'missing') } } } as Trigger;
   const backup = { ...saved, triggers: [
     { ...(saved.triggers[0] as Trigger), handler: { ...(saved.triggers[0] as Trigger).handler, instructions: 'Changed instructions' } },
@@ -159,7 +161,7 @@ test('the trigger limit counts triggers kept here, and a kept trigger keeps its 
   let { service } = await f.open();
   await service.updateSettings({ ...service.settings(), maxTriggers: 2 }, OWNER);
   const kept = await service.create(hourly(f.project, { name: 'Kept' }), OWNER);
-  const template = (await collectTriggers(f.directory))!.triggers[0] as Trigger;
+  const template = (await f.sql.backup())!.triggers[0] as Trigger;
   const fresh = (name: string) => ({ ...template, id: randomUUID(), name });
   // The backup names A, B and the kept one (in a shape this build cannot read), with no trusted folders.
   const backup = backupOf([fresh('A'), fresh('B'), { id: kept.id, revision: 1, name: 'Kept', source: { kind: 'unknown' } } as unknown as Trigger],
@@ -168,7 +170,7 @@ test('the trigger limit counts triggers kept here, and a kept trigger keeps its 
   ({ service, errors } = await f.reopen(service, backup));
   assert.deepEqual(service.list().map(item => item.name).sort(), ['A', 'Kept']);
   assert.ok(errors.some(error => /"B".*한도/.test(error)));
-  assert.deepEqual((await collectTriggers(f.directory))!.trustedFolders, [f.project]);
+  assert.deepEqual((await f.sql.backup())!.trustedFolders, [f.project]);
 });
 
 test('a GitHub watch record is taken whole: its baseline comes along, and a malformed one is ignored', async t => {
@@ -176,10 +178,10 @@ test('a GitHub watch record is taken whole: its baseline comes along, and a malf
   const a = github('22222222-2222-4222-8222-222222222222', ['octo/app#1'], 1000);
   const baseline = { handled: ['octo/app#1'], checkedAt: 1000, baseline: { before: '2026-09-01T00:00:00.000Z' }, matched: ['octo/app#1'] };
   let { service } = await f.open(backupOf([a.trigger], { github: { [a.trigger.id]: baseline } }));
-  assert.deepEqual((await collectTriggers(f.directory))!.github[a.trigger.id], baseline, 'nothing of it is dropped');
+  assert.deepEqual((await f.sql.backup())!.github[a.trigger.id], baseline, 'nothing of it is dropped');
   const broken = { handled: 'octo/app#9', skipped: ['octo/app#2'], checkedAt: 5000 } as never;
   ({ service } = await f.reopen(service, backupOf([a.trigger], { github: { [a.trigger.id]: broken } })));
-  assert.deepEqual((await collectTriggers(f.directory))!.github[a.trigger.id], baseline, 'a malformed record changes nothing');
+  assert.deepEqual((await f.sql.backup())!.github[a.trigger.id], baseline, 'a malformed record changes nothing');
   assert.equal(service.list().length, 1);
 });
 
@@ -193,7 +195,7 @@ test('a trigger whose backed-up definition needs a secret this computer no longe
   const trigger = await service.create(http(first.id), OWNER);
   // The first secret is deleted, then the backup is made: it has the trigger still naming it.
   await service.deleteSecret(first.id, OWNER);
-  const backup = (await collectTriggers(f.directory))!;
+  const backup = (await f.sql.backup())!;
   const second = await service.createSecret({ name: 'New', origin: 'https://status.example.com', value: 'Bearer new' }, OWNER);
   await service.update(trigger.id, http(second.id), trigger.revision, OWNER);
   service.close(); await service.settle();
@@ -203,6 +205,6 @@ test('a trigger whose backed-up definition needs a secret this computer no longe
   const kept = service.list().find(item => item.id === trigger.id)!;
   assert.equal(kept.source.kind === 'http' && 'secretId' in kept.source.request.headers[0]! ? kept.source.request.headers[0].secretId : undefined, second.id);
   assert.ok(errors.some(error => /Status/.test(error)));
-  assert.deepEqual((await collectTriggers(f.directory))!.secretGrants[second.id], [trigger.id]);
+  assert.deepEqual((await f.sql.backup())!.secretGrants[second.id], [trigger.id]);
   assert.deepEqual(service.secretList().map(item => item.id), [second.id], 'the secret only this computer had stays');
 });
