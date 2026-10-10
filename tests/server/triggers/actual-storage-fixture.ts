@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
-import type { TestContext } from 'node:test';
+import { after, type TestContext } from 'node:test';
 import type { StorageClient } from '../../../server/storage/client.js';
 import { recordPreparationEvidence } from '../../../server/link/storage-update.js';
 import { TriggersRepository } from '../../../server/triggers/storage-repository.js';
@@ -13,6 +13,50 @@ import { changesOf, rowsOf } from '../../../server/triggers/storage-codec.js';
 import { empty, parseState, serializeState, type EngineState } from '../../../server/triggers/state.js';
 import { triggerBackupOf } from '../../../server/triggers/backup.js';
 import { retentionBuild } from '../storage/fixtures/retention-build.js';
+
+type Build = Awaited<ReturnType<typeof retentionBuild>>;
+type Normal = Pick<Build, 'storage' | 'manifest' | 'version'> & { bundle: () => ReturnType<Build['bundle']> };
+const normalBuilds = new Map<'1.124.0' | '1.125.0', Promise<() => Promise<Normal>>>();
+const normalOwners: Array<{ path: string; dev: number; ino: number }> = [];
+const hash = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
+after(async () => {
+  assert.ok(normalOwners.length <= 2);
+  for (const owner of normalOwners) {
+    const current = await lstat(owner.path);
+    assert.equal(await realpath(owner.path), owner.path);
+    assert.ok(current.isDirectory() && !current.isSymbolicLink());
+    assert.equal(current.dev, owner.dev); assert.equal(current.ino, owner.ino);
+  }
+  for (const owner of normalOwners) await rm(owner.path, { recursive: true, force: true });
+});
+async function normalBuild(version: '1.124.0' | '1.125.0'): Promise<Normal> {
+  let pending = normalBuilds.get(version);
+  if (!pending) {
+    pending = (async () => {
+      const path = await realpath(await mkdtemp(join(tmpdir(), 'tower-trigger-consumer-artifact-')));
+      await chmod(path, 0o700);
+      const owner = await lstat(path); normalOwners.push({ path, dev: owner.dev, ino: owner.ino });
+      const built = await retentionBuild(version, path);
+      const bundle = Object.freeze(built.bundle());
+      const context = built.storage.storageBuildContext(bundle);
+      assert.ok(context.ok); assert.equal(context.identity.appVersion, version);
+      assert.equal(context.sourceHash, bundle.sourceHash); assert.deepEqual(context.manifest, built.manifest);
+      if (version === '1.124.0') assert.equal(context.sourceHash, '5318990f15be1bbe73ba69c390c4b5ae32c7ee4ca61ba89f4d34241723936a0a');
+      const capsule = Object.freeze({ storage: built.storage, manifest: context.manifest, version, bundle: () => bundle });
+      const files = ['parent.mjs', 'manifest.json'].map(name => join(path, name));
+      const hashes = await Promise.all(files.map(async file => hash(await readFile(file))));
+      const sourceHash = hash(bundle.source);
+      return async () => {
+        assert.equal(hash(bundle.source), sourceHash);
+        assert.deepEqual(await Promise.all(files.map(async file => hash(await readFile(file)))), hashes);
+        assert.deepEqual(capsule.storage.storageBuildContext(bundle), context);
+        return capsule;
+      };
+    })();
+    normalBuilds.set(version, pending);
+  }
+  return (await pending)();
+}
 
 /** Same actual captured SDK/preparation pattern as storage.test.ts; owners share one live client. */
 export async function actualStorage(t: TestContext, directory: string, shared?: {
@@ -23,11 +67,12 @@ export async function actualStorage(t: TestContext, directory: string, shared?: 
     const path = await realpath(await mkdtemp(join(tmpdir(), 'tower-trigger-consumer-artifact-')));
     t.after(() => rm(path, { recursive: true, force: true })); return path;
   };
-  let client: StorageClient, b: Awaited<ReturnType<typeof retentionBuild>>;
+  let client: StorageClient, b: Normal;
+  let faultBuild: Build | undefined;
   if (shared) { client = shared.storage; b = shared.captured; }
   else {
-    const a = await retentionBuild('1.124.0', await folder());
-    b = await retentionBuild('1.125.0', await folder());
+    const a = fault === 'normal' ? await normalBuild('1.124.0') : await retentionBuild('1.124.0', await folder());
+    b = fault === 'normal' ? await normalBuild('1.125.0') : (faultBuild = await retentionBuild('1.125.0', await folder()));
     const ac = await a.storage.openStorage({ stateDir, bundle: a.bundle() });
     try {
       await ac.prepare({ allowMigration: true });
@@ -44,7 +89,7 @@ export async function actualStorage(t: TestContext, directory: string, shared?: 
     await bootstrapTriggers(seed, stateDir, { now: () => 0, update: async () => ({ stateDir, managed: false, build: { version: b.version, manifest: b.manifest, preflight: await b.storage.preflightStorage({ stateDir, bundle: b.bundle() }) } }) });
     await client.close();
     // Reuse the existing before/after captured artifact fault; never overlap own writers.
-    client = await b.storage.openStorage({ stateDir, bundle: b.bundle(fault) });
+    client = await b.storage.openStorage({ stateDir, bundle: faultBuild!.bundle(fault) });
     await client.prepare({ allowMigration: false });
   }
   const repository = new TriggersRepository(client);

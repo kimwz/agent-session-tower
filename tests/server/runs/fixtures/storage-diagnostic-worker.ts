@@ -225,7 +225,8 @@ if (process.env.TOWER_FIXTURE_TRIGGER_RETRY === '1') {
   for (const method of ['pauseForStorage', 'resume'] as const) {
     const original = PermissionService.prototype[method];
     PermissionService.prototype[method] = function () {
-      recordPermission(this, `${method}.before`);
+      recordPermission(this, `${method}.before`, method === 'pauseForStorage'
+        ? { callerStack: new Error('fixture pauseForStorage caller').stack } : undefined);
       try { const result = original.call(this); recordPermission(this, `${method}.after`); return result; }
       catch (error) { recordPermission(this, `${method}.failed`, observeFailure(error)); throw error; }
     };
@@ -270,7 +271,18 @@ if (process.env.TOWER_FIXTURE_TRIGGER_RETRY === '1') {
     } catch (error) { recordPermission(this, 'startReview.failed', { id, ...observeFailure(error) }); throw error; }
   };
   const apply = PermissionService.prototype.applyReview;
-  PermissionService.prototype.applyReview = function (id, result) { bump('apply'); return apply.call(this, id, result); };
+  PermissionService.prototype.applyReview = function (id, result) {
+    bump('apply');
+    try {
+      const promise = apply.call(this, id, result);
+      void promise.then(value => recordPermission(this, 'applyReview.fulfilled', { id, value }),
+        error => recordPermission(this, 'applyReview.rejected', { id, ...observeFailure(error) }));
+      return promise;
+    } catch (error) {
+      recordPermission(this, 'applyReview.failed', { id, ...observeFailure(error) });
+      throw error;
+    }
+  };
   const start = TriggerService.prototype.start;
   let attempts = 0;
   TriggerService.prototype.start = async function (options) {
