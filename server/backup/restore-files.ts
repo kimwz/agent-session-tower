@@ -77,7 +77,8 @@ export async function removePendingWorker(stateDir: string): Promise<boolean> {
  * Only the newest few copies are kept.
  */
 export async function keepBefore(stateDir: string, files: string[], now = new Date(), triggers?: TriggerBackup, settings?: WorkerSqlSettings): Promise<string> {
-  if (!settings || ['permissions.json', 'slack-automation.json', 'github-automation.json'].some(name => settings[name as keyof WorkerSqlSettings] === undefined)) {
+  const needsSQL = files.some(name => name === 'permissions.json' || name === 'slack-automation.json' || name === 'github-automation.json');
+  if (needsSQL && (!settings || ['permissions.json', 'slack-automation.json', 'github-automation.json'].some(name => settings[name as keyof WorkerSqlSettings] === undefined))) {
     throw new Error('Worker SQL settings DTO is incomplete.');
   }
   const root = restoreDir(stateDir);
@@ -85,7 +86,7 @@ export async function keepBefore(stateDir: string, files: string[], now = new Da
   await mkdir(target, { recursive: true, mode: 0o700 });
   for (const name of files) {
     if (name === 'permissions.json' || name === 'slack-automation.json' || name === 'github-automation.json') {
-      await writePrivateJson(join(target, name), JSON.stringify(settings[name]));
+      await writePrivateJson(join(target, name), JSON.stringify(settings![name]));
       continue;
     }
     await cp(join(stateDir, name), join(target, name), { recursive: true, errorOnExist: false, force: true, verbatimSymlinks: true }).catch(error => {
