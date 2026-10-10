@@ -1,3 +1,11 @@
+import { bootstrapFreshPermissions } from '../permissions/storage-transfer.js';
+import { bootstrapExternal, importRemote } from '../remote/storage-transfer.js';
+import { importAutoPrompts } from '../auto-prompt/storage-transfer.js';
+import { importWorkflows } from '../slack/storage-transfer.js';
+import { bootstrapTriggers } from '../triggers/storage-transfer.js';
+import { TriggersRepository } from '../triggers/storage-repository.js';
+import { collectAutomationSettings, restoreAutomationSettings, guardSlackConnectionRestore } from '../slack/backup.js';
+import type { WorkerSqlSettings } from '../backup/payload.js';
 import { RemoteRepository } from '../remote/storage-repository.js';
 import { AutoPromptRepository } from '../auto-prompt/storage-repository.js';
 import { WorkflowRepository } from '../slack/storage-repository.js';
@@ -91,7 +99,7 @@ import { permissionRetentionPending, RetentionObserver } from '../sessions/reten
 import { createNativeRetentionAdapter } from '../sessions/retention/provider.js';
 import { TemporaryCollector, inspectTemporaryProtection } from '../temporary/directories.js';
 
-const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan', 'skillsBackup', 'triggersBackup', 'secretCall', 'compactionGet']);
+const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan', 'skillsBackup', 'triggersBackup', 'settingsBackup', 'secretCall', 'compactionGet']);
 
 export interface RunnerHostOptions {
   storage?: () => WorkerStorageStatus;
@@ -112,6 +120,7 @@ export interface RunnerHostOptions {
   /** Coordinator conversations for GitHub issue events. */
   github?: GitHubCoordinator;
   triggers?: TriggerService;
+  settingsBackup?: () => Promise<WorkerSqlSettings>;
   /** Pages the owner published for outside visitors. */
   publicAgents?: PublicAgentService;
   /** The owner's skills and the advisor that proposes new ones. */
@@ -467,6 +476,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'skillsMutate': if (options.skills) return options.skills.mutate(String(args[0]), record(args[1])); break;
       case 'skillsExport': if (options.skills) return options.skills.exportBundle(record(args[0])); break;
       case 'skillsImportPlan': if (options.skills) return options.skills.importPlan(args[0]); break;
+      case 'settingsBackup': if (options.settingsBackup) return options.settingsBackup(); break;
       case 'triggersBackup': if (options.triggers) return options.triggers.backup(); break;
       case 'skillsBackup': if (options.skills) return options.skills.backup(); break;
       case 'publicAgentsOverview': if (options.publicAgents) return options.publicAgents.overview(); break;
@@ -795,14 +805,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     return evaluated;
   };
   let database: StorageClient | undefined;
-  // Completed maintenance may reopen/claim existing schema only; pending maintenance never opens an importer here.
-  try {
-    if(await completedOfflineCandidate(updateInput())) {
-      database=await openStorage({stateDir,bundle,limits:{maxPayloadBytes:16*1024*1024}});
-      await database.prepare({allowMigration:false});
-    }
-  } catch(error) { console.error('Offline completion remains held:',error); }
-  let evaluation = await evaluate();
+  let evaluation: Awaited<ReturnType<typeof evaluate>>;
   let storageStatus: WorkerStorageStatus = { state: 'starting', code: 'starting', reason: 'Storage is starting.', admissionOpen: false, sessionsAvailable: false, healthStatus: 200,
     ...(build.ok ? { identity: build.identity } : {}) };
   let retentionFresh = false;
@@ -833,6 +836,14 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     maintenanceHeld = Promise.all([maintenanceHeld, ...held, storageEffects?.()]).then(() => undefined);
     void maintenanceHeld.catch(error => console.error('Storage hold has unfinished maintenance:', error));
   };
+  // Completed maintenance may reopen/claim existing schema only; pending maintenance never opens an importer here.
+  try {
+    if(await completedOfflineCandidate(updateInput())) {
+      database=await openStorage({stateDir,bundle,limits:{maxPayloadBytes:16*1024*1024},onUnavailable:unavailable});
+      await database.prepare({allowMigration:false});
+    }
+  } catch(error) { console.error('Offline completion remains held:',error); }
+  evaluation = await evaluate();
   let heldRollbackFence: RollbackFence | undefined;
   let rollbackPrepareRefusal: { code: 'migration-required'; disposition: 'not-committed' } | undefined;
   const releaseAllowed = async (generation: number, fence: RollbackFence | undefined): Promise<boolean> => {
@@ -999,7 +1010,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   const offlineStorageId = (storage: StorageClient) => { const schema = storage.status().schema; return !schema || schema.kind === 'empty' ? undefined : schema.storageId; };
   const permissionIntentHeld=async()=>Boolean(await privateFile(join(stateDir,'storage-permissions-pending.json')));
   let externalIntentHeld=()=>false;
+  let domainsReady = false;
   const requireEffects = async () => {
+    if (!domainsReady) throw new TowerError('unavailable', 'All seven SQL authorities must be ready before effects.');
     if(externalIntentHeld()) throw new TowerError('unavailable','External SQL receipt reconciliation remains held.',{disposition:'not-admitted'});
     if(await permissionIntentHeld()) throw new TowerError('unavailable','Permission SQL receipt/effect reconciliation remains held.',{disposition:'not-admitted'});
     if (await offlineBootstrapHeld(stateDir, database?.identity, database ? await offlineStorageId(database) : undefined, database)) throw new TowerError('unavailable', 'Offline bootstrap is incomplete.');
@@ -1069,7 +1082,62 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     }
   }
   await startupGate();
-  const restoring = await takeWorkerRestore(stateDir).catch(error => { console.error(`A waiting restore was not applied: ${error instanceof Error ? error.message : String(error)}`); return undefined; });
+  const externalRemote = new RemoteRepository(database!);
+  const externalPrompts = new AutoPromptRepository(database!);
+  const externalWorkflows = new WorkflowRepository(database!);
+  const permissionRepository = new PermissionsRepository(database!, stateDir, error => { unavailable(); storageStatus = { ...storageStatus, code: 'permissions-receipt-held', reason: String(error), admissionOpen: false }; });
+  externalIntentHeld = () => [externalRemote, externalPrompts, externalWorkflows].some(repository => Boolean(repository.pending()));
+  const bootstrapUpdate = async () => { preflight = await preflightStorage({ bundle, stateDir }); return updateInput(); };
+  const freshActivation = async () => {
+    if (!retentionFresh || storageStatus.state !== 'ready' || !database || database.status().state !== 'ready') throw new Error('Fresh initialization proof is unavailable.');
+    const result = await evaluate();
+    if (!result.importAllowed || result.verdict !== 'ready') throw new Error('Fresh initialization activation is held.');
+    if (await permissionIntentHeld()) throw new Error('Permission pending evidence holds fresh initialization.');
+    for (const scope of ['core', 'permissions', 'remote', 'auto-prompt', 'automation-workflows']) if (!(await database.gate(scope)).open) throw new Error('Fresh domain gate held.');
+  };
+  const earlyRetentionBootstrap = retentionBootstrap(database!, stateDir, bootstrapUpdate, retentionFresh);
+  const earlyTriggerRepository = new TriggersRepository(database!);
+  while (true) {
+    try {
+      if (retentionFresh) {
+        await bootstrapFreshPermissions(permissionRepository, stateDir, freshActivation);
+        for (const [repository, importer] of [[externalRemote, importRemote], [externalPrompts, importAutoPrompts], [externalWorkflows, importWorkflows]] as const) {
+          if (!(await repository.head()).authority) await importer({ repository, stateDir, evidenceParent: join(stateDir, `${repository.codec.scope}-storage-migrations`), commandId: `fresh-${randomUUID()}`, checkActivation: freshActivation, fresh: true });
+        }
+      }
+      for (const repository of [externalRemote, externalPrompts, externalWorkflows]) await bootstrapExternal(repository, stateDir);
+      await permissionRepository.load();
+      await earlyRetentionBootstrap();
+      await bootstrapTriggers(earlyTriggerRepository, stateDir, { update: bootstrapUpdate, now: Date.now });
+      for (const scope of ['runs', 'retention', 'triggers']) {
+        if ((await database!.read<{ stages: number }>(scope, 'bootstrapHistory', {})).stages !== 0) throw new Error(`${scope} stages require explicit owner recovery.`);
+      }
+      await startupGate();
+      domainsReady = true;
+      break;
+    } catch (error) {
+      unavailable(); storageStatus.reason = String(error); storageStatus.code = 'all-domains-bootstrap-held';
+      storageStatus.sessionsAvailable = false;
+      await startupGate();
+    }
+  }
+  const settingsOwner = {
+    restore: async (name: import('../backup/payload.js').WorkerSqlFile, incoming: unknown) => {
+      await requireEffects();
+      if (name === 'permissions.json') {
+        const settingsPermissions = new PermissionService({ stateDir, repository: permissionRepository, session: id => runs.getSession(id) });
+        await settingsPermissions.start();
+        const head = await permissionRepository.head();
+        if (!head.authority) throw new Error('Permission SQL authority missing.');
+        await settingsPermissions.restoreBackup(incoming, `backup-${randomUUID()}`, head.authority.generation);
+      } else await restoreAutomationSettings(externalWorkflows, name === 'slack-automation.json' ? 'slack' : 'github', incoming);
+    },
+    guardSlackConnection: async (existing: unknown, incoming: unknown) => {
+      await requireEffects();
+      await guardSlackConnectionRestore(externalWorkflows, existing, incoming);
+    },
+  };
+  const restoring = await takeWorkerRestore(stateDir, settingsOwner).catch(error => { console.error(`A waiting restore was not applied: ${error instanceof Error ? error.message : String(error)}`); return undefined; });
   // Only the Tower on the account's own state folder keeps its Claude Code and Codex current, so two never update one install.
   // It is there even with automatic updates off: an install a previous worker left running is still waited for.
   const tools = resolve(stateDir) === resolve(defaultStateDir()) ? new ToolUpdates({ stateDir, env: process.env,
@@ -1169,9 +1237,6 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // The web process saves the remote-sharing exclusion list; this copy follows it on every refresh.
     const exclusions = new RemoteExclusionStore(stateDir);
     await exclusions.start();
-    const externalRemote=new RemoteRepository(database!);
-    const externalPrompts=new AutoPromptRepository(database!);
-    const externalWorkflows=new WorkflowRepository(database!);
     externalIntentHeld=()=>[externalRemote,externalPrompts,externalWorkflows].some(repository=>Boolean(repository.pending()));
     const externalGate=async()=>{ await requireEffects(); for(const repository of [externalRemote,externalPrompts,externalWorkflows]) await repository.gate(); };
     const ledger = new RemoteRequestLedger(stateDir,Date.now,undefined,externalRemote,externalGate);
@@ -1235,7 +1300,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const skills = new SkillService({ stateDir, homes: skillHomes(stateDir), sessions: () => visible.allSessions(), runs: () => runs.list(), origin: id => runs.sessionOrigin(id),
       projects: () => (visible.snapshot().groups ?? []).map(group => group.cwd),
       history: async (session, limit) => (await sessions.detail(runs.nativeSessionId(session.id), undefined, limit))?.messages,
-      model: async (request, options) => { await requireEffects(); return runAutoPromptModel(request, { stateDir, ...(options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) }); },
+      model: async (request, options) => { await requireEffects(); return runAutoPromptModel(request, { stateDir, beforeSpawn:requireEffects, ...(options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) }); },
       advise: resolve(stateDir) === resolve(defaultStateDir()), seed: resolve(stateDir) === resolve(defaultStateDir()),
       // Only the Tower on the account's own state folder points the agents' global instructions at itself.
       ...(resolve(stateDir) === resolve(defaultStateDir()) ? { installGuidance: async () => { await installAgentGuidance({ stateDir, claudeHome: process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), codexHome: process.env.CODEX_HOME || join(homedir(), '.codex') }); } } : {}) });
@@ -1359,7 +1424,6 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     };
     const stopTelling = () => { stopping = true; for (const timer of runWaits) clearTimeout(timer); runWaits.clear(); };
     if(!database) throw new TowerError('unavailable','Permission SDK owner is unavailable.');
-    const permissionRepository=new PermissionsRepository(database,stateDir,error=>{ unavailable(); storageStatus={...storageStatus,code:'permissions-receipt-held',reason:String(error),admissionOpen:false}; });
     const permissions: PermissionService = new PermissionService({ stateDir, repository: permissionRepository, effectGate: requireEffects,
       requestGate: async request => { await closedSessions.start(); permissionAdmission(request); }, requestAdmission: permissionAdmission, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),
       decision: async (request, prompt) => runs.permissionDecision(request, prompt, { closed: await closedNow(request.sessionId) }),
@@ -1614,7 +1678,14 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       try { await retryNormal!(); } finally { if (releaseRequested === fence) releaseRequested = undefined; }
     })().catch(error => console.error('Storage rollback release:', error)); }, 1000);
     releaseTimer.unref();
-    const hostOptions: RunnerHostOptions = { stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, compactions, api, secrets, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce, storage: () => storageStatus, retryStorage: () => retryNormal!(), storageRecovery, storageControl: control, closeStorage, onCloseFailure: () => unavailable(), handoffCarry: () => secrets.handoff(),
+    const settingsBackup = async (): Promise<WorkerSqlSettings> => {
+      await requireEffects();
+      await permissionRepository.gate();
+      const settings = { 'permissions.json': permissions.exportBackup(), 'slack-automation.json': await collectAutomationSettings(externalWorkflows, 'slack'), 'github-automation.json': await collectAutomationSettings(externalWorkflows, 'github') };
+      await requireEffects();
+      return settings;
+    };
+    const hostOptions: RunnerHostOptions = { settingsBackup, stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, compactions, api, secrets, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce, storage: () => storageStatus, retryStorage: () => retryNormal!(), storageRecovery, storageControl: control, closeStorage, onCloseFailure: () => unavailable(), handoffCarry: () => secrets.handoff(),
       onIdle: async () => { clearInterval(releaseTimer); await retention?.service.quiesce(); await temporary.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); clearInterval(secretExpiry); secrets.close(); stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await tasks.close(); await compactions.close(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
       inFlight: () => secrets.inFlight() || restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || compactions.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       // A forced update waits only for a compaction creating its session; one still reading or summarizing stops with the worker.

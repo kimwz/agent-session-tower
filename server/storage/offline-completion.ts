@@ -11,7 +11,7 @@ export function offlineCompletionCommand(stageTable?: 'retention_stages' | 'runs
     const uncertainSql=context.domain==='permissions' ? "SELECT count(*) AS n FROM permission_requests WHERE run_status='running'"
       : context.domain==='runs' ? "SELECT count(*) AS n FROM runs_rows WHERE kind='run' AND (status='running' OR json_extract(json,'$.steering.state') IN ('sending','uncertain'))"
       : context.domain==='triggers' ? "SELECT count(*) AS n FROM triggers_rows WHERE kind='events' AND json_extract(json,'$.status') IN ('claimed','uncertain')" : context.domain==='remote' ? "SELECT count(*) AS n FROM remote_rows WHERE status IN ('claimed','uncertain')"
-      : context.domain==='auto-prompt' ? "SELECT count(*) AS n FROM auto_prompt_rows WHERE status IN ('routing','admission-uncertain','running')"
+      : context.domain==='auto-prompt' ? "SELECT count(*) AS n FROM auto_prompt_rows WHERE status IN ('routing','dispatching','uncertain')"
       : context.domain==='automation-workflows' ? "SELECT count(*) AS n FROM automation_workflows_rows WHERE status IN ('sending','reply-uncertain','admission-uncertain') OR EXISTS (SELECT 1 FROM automation_workflows_links l WHERE l.channel=automation_workflows_rows.channel AND l.kind=automation_workflows_rows.kind AND l.id=automation_workflows_rows.id AND l.status IN ('sending','uncertain','delivering'))" : undefined;
     const unresolved=stages+(uncertainSql ? Number((context.prepare(uncertainSql).get() as {n:number}).n) : 0);
     if (!authority || authority.authority !== 'database' || authority.manifest_sha256 !== p.inputSha256 || !receipt || receipt.scope !== context.domain || receipt.command !== 'commit' || unresolved !== 0) throw new Error('Offline authority/receipt/staging incomplete.');

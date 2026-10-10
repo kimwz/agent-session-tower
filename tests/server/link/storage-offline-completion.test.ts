@@ -27,3 +27,25 @@ test('registered completion binds authority generation, exact import receipt and
     assert.throws(()=>offlineAuthorityReceiptCommand.run(context,{}),/missing/);
   } finally { db.close(); }
 });
+
+
+test('Auto Prompt completion uses codec dispatching/uncertain states and keeps queued resumable work intact', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec('CREATE TABLE domain_imports(domain TEXT,authority TEXT,generation INTEGER,manifest_sha256 TEXT); CREATE TABLE operation_receipts(command_id TEXT,scope TEXT,command TEXT,payload_sha256 TEXT,result TEXT,committed_at TEXT); CREATE TABLE auto_prompt_stages(intent TEXT); CREATE TABLE auto_prompt_rows(status TEXT,json TEXT);');
+    const inputSha256 = 'a'.repeat(64);
+    db.prepare('INSERT INTO domain_imports VALUES(?,?,?,?)').run('auto-prompt', 'database', 1, inputSha256);
+    db.prepare('INSERT INTO operation_receipts VALUES(?,?,?,?,?,?)').run('import-commit', 'auto-prompt', 'commit', 'b'.repeat(64), JSON.stringify({ generation: 1, mode: 'import' }), '2026-10-10');
+    const context: DomainReadContext = { domain: 'auto-prompt', prepare: sql => db.prepare(sql) };
+    const command = offlineCompletionCommand('auto_prompt_stages');
+    const payload = { commandId: 'import-commit', inputSha256 };
+    const saved = JSON.stringify({ job: { status: 'queued' }, resumable: true, outcome: { state: 'pending' } });
+    db.prepare('INSERT INTO auto_prompt_rows VALUES(?,?)').run('queued', saved);
+    assert.equal((command.run(context, payload) as { unresolvedIntents: number }).unresolvedIntents, 0);
+    for (const status of ['dispatching', 'uncertain']) {
+      db.prepare('UPDATE auto_prompt_rows SET status=?').run(status);
+      assert.throws(() => command.run(context, payload), /incomplete/);
+      assert.equal((db.prepare('SELECT json FROM auto_prompt_rows').get() as { json: string }).json, saved);
+    }
+  } finally { db.close(); }
+});

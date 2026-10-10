@@ -40,4 +40,5 @@ export async function restoreAutomationSettings(repository: import('./storage-re
 }
 export async function guardSlackConnectionRestore(repository: import('./storage-repository.js').WorkflowRepository, existing:unknown, incoming:unknown): Promise<void> {
   if(slackAccountKey(existing)!==slackAccountKey(incoming) && await repository.unfinished('slack')) throw new Error('Unfinished or reply-uncertain Slack work prevents changing accounts.');
+  await repository.assertAccountTeam('slack', record(incoming) && record(incoming.account) && typeof incoming.account.teamId === 'string' ? incoming.account.teamId : '');
 }

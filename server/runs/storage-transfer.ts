@@ -1,3 +1,7 @@
+import { permissionsLegacyFiles } from '../permissions/storage-transfer.js';
+import { remoteLegacyFiles } from '../remote/storage-transfer.js';
+import { autoPromptLegacyFiles } from '../auto-prompt/storage-transfer.js';
+import { workflowLegacyFiles } from '../slack/storage-transfer.js';
 import { checkStorageActivation, type OfflineActivationOwner } from '../link/storage-offline.js';
 import { triggersLegacyFiles } from '../triggers/storage-transfer.js';
 import { constants } from 'node:fs';
@@ -21,6 +25,10 @@ export async function workerLegacyFiles(stateDir: string, domain: string): Promi
   if (domain === 'triggers') return triggersLegacyFiles(stateDir);
   if (domain === 'runs') return runsLegacyFiles(stateDir);
   if (domain === 'retention') return retentionLegacyFiles(stateDir,domain);
+  if (domain === 'permissions') return permissionsLegacyFiles(stateDir);
+  if (domain === 'remote') return remoteLegacyFiles(stateDir);
+  if (domain === 'auto-prompt') return autoPromptLegacyFiles(stateDir);
+  if (domain === 'automation-workflows') return workflowLegacyFiles(stateDir);
   return 'present';
 }
 /** Raw migration/export evidence is private, immutable and outside settings backup. Never opens native/cold objects. */

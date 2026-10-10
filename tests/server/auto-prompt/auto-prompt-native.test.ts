@@ -1,3 +1,6 @@
+import { runInNewContext } from 'node:vm';
+import { openFixture, stateDir as storageStateDir } from '../storage/helpers.js';
+import { TowerError } from '../../../shared/errors.js';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -419,4 +422,55 @@ test('hold during CLI preparation refuses the actual spawn after files are ready
   f.dependencies.spawnProcess = () => { effects++; throw new Error('must not spawn'); };
   await assert.rejects(runAutoPromptModel(f.request, f.dependencies), /storage\/history hold/);
   assert.equal(effects, 0);
+});
+
+
+test('completed-start SDK thread fault during native preparation runs the actual worker hold and fresh spawn gate', async t => {
+  const source = await readFile(new URL('../../../server/runs/worker.ts', import.meta.url), 'utf8');
+  const completed = source.slice(source.indexOf('// Completed maintenance may reopen'), source.indexOf('  evaluation = await evaluate();'));
+  assert.match(completed, /onUnavailable:unavailable/);
+  const holdStart = source.indexOf('  const unavailable =');
+  const holdEnd = source.indexOf('  // Completed maintenance may reopen', holdStart);
+  const hold = source.slice(holdStart, holdEnd).replace("reported?: ReturnType<StorageClient['status']>", 'reported').replaceAll(' as const', '');
+  const gateStart = source.indexOf('  const requireEffects = async () => {');
+  const gateEnd = source.indexOf('  const startupGate =', gateStart);
+  const f = await fixture(t);
+  const dir = await storageStateDir(t);
+  const initial = await openFixture(t, dir);
+  await initial.prepare({ allowMigration: true });
+  await initial.close();
+  const context: Record<string, unknown> = { TowerError, console, Promise, stateDir: dir, database: undefined, offlineBootstrapHeld: async () => false, offlineStorageId: async () => undefined };
+  // Execute the production callback and requireEffects bodies, retaining their global admission and maintenance state.
+  const ports = runInNewContext(`
+    let storageStatus = { state: 'ready', admissionOpen: true, healthStatus: 200 };
+    let storageHoldGeneration = 0, maintenanceHeld = Promise.resolve(), paused = 0, runHolds = 0;
+    const runs = { holdStorage: () => { runHolds++; } };
+    const startupHolds = [() => { paused++; }];
+    const storageEffects = () => { paused++; };
+    const domainsReady = true, externalIntentHeld = () => false, permissionIntentHeld = async () => false;
+    ${hold}
+    ${source.slice(gateStart, gateEnd)}
+    ({ unavailable, requireEffects, inspect: () => ({ ...storageStatus, paused, runHolds }) });
+  `, context) as { unavailable(status: unknown): void; requireEffects(): Promise<void>; inspect(): { state: string; admissionOpen: boolean; healthStatus: number; paused: number; runHolds: number } };
+  const database = await openFixture(t, dir, { onUnavailable: status => ports.unavailable(status) });
+  context.database = database;
+  await database.prepare({ allowMigration: false });
+  await ports.requireEffects();
+  let providers = 0, prepared = 0;
+  f.dependencies.findExecutable = async () => {
+    prepared++;
+    await assert.rejects(database.write('fixture', 'putThenDie', { key: 'preparation-fault' }, 'preparation-fault'));
+    assert.equal(database.status().state, 'unavailable');
+    return '/fixture/native-cli';
+  };
+  f.dependencies.beforeSpawn = ports.requireEffects;
+  f.dependencies.spawnProcess = () => { providers++; throw new Error('must not spawn'); };
+  await assert.rejects(runAutoPromptModel(f.request, f.dependencies));
+  assert.equal(prepared, 1);
+  assert.equal(providers, 0);
+  assert.equal(ports.inspect().state, 'unavailable');
+  assert.equal(ports.inspect().admissionOpen, false);
+  assert.equal(ports.inspect().healthStatus, 503);
+  assert.equal(ports.inspect().runHolds, 1);
+  assert.equal(ports.inspect().paused, 2);
 });

@@ -1,3 +1,9 @@
+import { applyWorkerFiles, collectWorkerFiles } from '../../../server/backup/payload.js';
+import { takeWorkerRestore, writePendingWorker } from '../../../server/backup/restore-files.js';
+import { restoreAutomationSettings } from '../../../server/slack/backup.js';
+import { bootstrapFreshPermissions } from '../../../server/permissions/storage-transfer.js';
+import { PermissionsRepository } from '../../../server/permissions/storage-repository.js';
+import { importWorkflows } from '../../../server/slack/storage-transfer.js';
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
 import { mkdtemp, mkdir, readFile, rm, writeFile, readdir, realpath } from 'node:fs/promises';
@@ -144,4 +150,71 @@ test('actual bounded pages/chunks retain source order and immutable receipt payl
  await f.remote.update([{...next,previous:previous.json}],'fixed-result');const head=await f.remote.head();
  await f.remote.update([{...next,previous:previous.json}],'fixed-result');assert.equal((await f.remote.head()).revision,head.revision);
  await assert.rejects(f.remote.update([{...next,json:canonical({...source[0],result:{kind:'run',runId:'changed'}}),previous:previous.json}],'fixed-result'),/conflicts/);
+});
+
+
+test('normal fresh bootstrap establishes the four additional authorities and receipts in the same SDK; prior seal is held', async t => {
+ const dir = await folder(t), f = await externalStorageFixture(t, dir, false);
+ const permissions = new PermissionsRepository(f.storage, dir);
+ await bootstrapFreshPermissions(permissions, dir, f.checkActivation);
+ assert.deepEqual((await permissions.load()).rules, []);
+ for (const [repository, importer] of [[f.remote, importRemote], [f.autoPrompt, importAutoPrompts], [f.workflows, importWorkflows]] as const) {
+  await importer({ repository, stateDir: dir, evidenceParent: join(dir, `${repository.codec.scope}-storage-migrations`), commandId: `fresh-${repository.codec.scope}`, checkActivation: f.checkActivation, fresh: true });
+  assert.equal((await repository.head()).authority?.authority, 'database');
+  assert.equal((await f.storage.receipt(`fresh-${repository.codec.scope}-commit`)).found, true);
+ }
+ await assert.rejects(readFile(join(dir, 'storage-offline-activation.json')), { code: 'ENOENT' });
+ const heldDir = await folder(t), held = await externalStorageFixture(t, heldDir, false);
+ await mkdir(join(heldDir, 'remote-storage-migrations', 'prior-seal'), { recursive: true, mode: 0o700 });
+ await assert.rejects(importRemote({ repository: held.remote, stateDir: heldDir, evidenceParent: join(heldDir, 'remote-storage-migrations'), commandId: 'fresh-held', checkActivation: held.checkActivation, fresh: true }), /seal/);
+ assert.equal((await held.remote.head()).authority, null);
+});
+
+test('actual uncertain Auto Prompt import refuses completion and preserves the exact pending outcome', async t => {
+ const dir = await folder(t), f = await externalStorageFixture(t, dir, false);
+ const original = { ...entry(), outcome: { state: 'pending', marker: 'preserve' }, job: { ...entry().job, cwd: '/fixture', status: 'uncertain' as const } };
+ await writeFile(join(dir, 'auto-prompts.json'), JSON.stringify([original]), { mode: 0o600 });
+ await importAutoPrompts({ repository: f.autoPrompt, stateDir: dir, evidenceParent: join(dir, 'auto-prompt-storage-migrations'), commandId: 'uncertain-import', checkActivation: f.checkActivation });
+ const head = await f.autoPrompt.head();
+ await assert.rejects(f.storage.read('auto-prompt', 'offlineCompletion', { commandId: 'uncertain-import-commit', inputSha256: head.authority!.manifestSha256 }), /incomplete/);
+ assert.deepEqual((await f.autoPrompt.load())[0].entry, original);
+ assert.deepEqual(JSON.parse(await readFile(join(dir, 'auto-prompts.json'), 'utf8')), [original]);
+});
+
+test('public worker files consume SQL rules, commit restores, preserve local workflow metadata and guard credentials from SQL', async t => {
+ const dir = await folder(t);
+ const original = { rules: [], workflows: [workflow()], extensions: { keep: true } };
+ await writeFile(join(dir, 'slack-automation.json'), JSON.stringify(original), { mode: 0o600 });
+ const f = await externalStorageFixture(t, dir);
+ // This stale source would previously bypass the unfinished SQL account check.
+ await writeFile(join(dir, 'slack-automation.json'), '{"rules":[],"workflows":[]}', { mode: 0o600 });
+ const connection = { enabled: false, appToken: 'fixture-app', userToken: 'fixture-user', account: { teamId: 'T1', userId: 'U1' } };
+ await writeFile(join(dir, 'slack-connection.json'), JSON.stringify(connection), { mode: 0o600 });
+ const rule = { id: 'sql-rule', name: 'fixture', enabled: true, condition: 'fixture', instructions: 'fixture', replyInstructions: 'fixture', provider: 'codex' as const };
+ await f.workflows.replaceRules('slack', [rule]);
+ const currentRules = await collectAutomationSettings(f.workflows, 'slack');
+ const exportOwner = async () => ({ 'permissions.json': { rules: [] }, 'slack-automation.json': await collectAutomationSettings(f.workflows, 'slack'), 'github-automation.json': await collectAutomationSettings(f.workflows, 'github') });
+ const owner = { restore: async (name: string, incoming: unknown) => {
+  if (name === 'permissions.json') throw new Error('permission owner is not part of this fixture');
+  await restoreAutomationSettings(f.workflows, name === 'slack-automation.json' ? 'slack' : 'github', incoming);
+ }, guardSlackConnection: (existing: unknown, incoming: unknown) => guardSlackConnectionRestore(f.workflows, existing, incoming) };
+ const files = await collectWorkerFiles(dir, exportOwner);
+ assert.deepEqual(files['slack-automation.json'], currentRules);
+ const before = f.workflows.source(await f.workflows.loadRows(), 'slack');
+ const result = await applyWorkerFiles(dir, { 'slack-automation.json': { rules: [{ ...rule, instructions: 'restored' }] } }, owner);
+ assert.deepEqual(result, { parts: ['slack'], errors: [] });
+ assert.deepEqual(f.workflows.source(await f.workflows.loadRows(), 'slack'), { ...before, rules: [{ ...rule, instructions: 'restored' }] });
+ assert.deepEqual(JSON.parse(await readFile(join(dir, 'slack-automation.json'), 'utf8')), { rules: [], workflows: [] });
+ await writePendingWorker(dir, { id: '10000000-0000-4000-8000-000000000001', files: { 'slack-connection.json': { ...connection, account: { teamId: 'T1', userId: 'U2' } } } });
+ const restore = await takeWorkerRestore(dir, owner);
+ assert.ok(restore);
+ await restore.finish({ parts: [], errors: [] });
+ const outcome = JSON.parse(await readFile(join(dir, 'restore', 'outcome-10000000-0000-4000-8000-000000000001.json'), 'utf8'));
+ assert.equal(outcome.parts.includes('slack'), false);
+ assert.match(outcome.errors.join(' '), /Unfinished/);
+ assert.deepEqual(JSON.parse(await readFile(join(dir, 'slack-connection.json'), 'utf8')), connection);
+ await assert.rejects(collectWorkerFiles(dir, async () => { throw new Error('owner held'); }), /owner held/);
+ const held = await applyWorkerFiles(dir, { 'slack-automation.json': currentRules }, { ...owner, restore: async () => { throw new Error('owner held'); } });
+ assert.deepEqual(held.parts, []);
+ assert.match(held.errors.join(' '), /owner held/);
 });

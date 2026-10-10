@@ -14,7 +14,7 @@ let build: ReturnType<typeof retentionBuild> | undefined;
 let buildDirectory: string | undefined;
 after(async()=> { if(buildDirectory) await rm(buildDirectory,{recursive:true,force:true}); });
 async function artifact() {
- if(!build) build=(async()=> {buildDirectory=await realpath(await mkdtemp(join(tmpdir(),'tower-external-artifact-')));return retentionBuild('1.125.0',buildDirectory,true,false,true);})();return build;
+ if(!build) build=(async()=> {buildDirectory=await realpath(await mkdtemp(join(tmpdir(),'tower-external-artifact-')));return retentionBuild('1.125.0',buildDirectory,true,true,true);})();return build;
 }
 export async function externalStorageFixture(t:TestContext,stateDir:string,importDomains=true,fault='normal') {
  await mkdir(stateDir,{recursive:true,mode:0o700}); stateDir = await realpath(stateDir);

@@ -8,7 +8,7 @@ export interface ExternalSource { name:string; maxBytes:number; missing:unknown;
 /** I supplies its captured normal/offline activation checker. This is an SDK/storage gate, not the effect gate. */
 export interface ExternalImportInput {
  repository:ExternalRowRepository; stateDir:string; evidenceParent:string; commandId:string;
- checkActivation():Promise<void>; sources:readonly ExternalSource[];
+ checkActivation():Promise<void>; fresh?: true; sources:readonly ExternalSource[];
 }
 async function privateFolder(path:string):Promise<void> {
  let current='/';for(const part of resolve(path).split('/').filter(Boolean)) {current=join(current,part);const info=await lstat(current);if(!info.isDirectory()||info.isSymbolicLink()) throw new Error('Unsafe external evidence parent.');}
@@ -45,7 +45,7 @@ export async function importExternal(input:ExternalImportInput):Promise<{directo
  if(resolve(existing)!==resolve(input.evidenceParent)) throw new Error('External evidence parent is not the captured domain path.');
  try {await bootstrapExternal(repository,input.stateDir);} catch(error) {if((error as Error).message!==`${repository.codec.scope} has no SQL authority; explicit verified offline import is required.`) throw error;}
  const captured: {source:ExternalSource;data:Buffer|null}[]=[];const rows:ExternalRow[]=[];
- for(const source of input.sources) {if(!/^[a-z][a-z0-9-]*\.json$/.test(source.name)) throw new Error('Invalid external source name.');const data=await raw(join(input.stateDir,source.name));if(data && data.length>source.maxBytes) throw new Error('External legacy source exceeds its original bound.');captured.push({source,data});rows.push(...source.rows(data===null?source.missing:JSON.parse(data.toString('utf8'))));}
+ for(const source of input.sources) {if(!/^[a-z][a-z0-9-]*\.json$/.test(source.name)) throw new Error('Invalid external source name.');const data=await raw(join(input.stateDir,source.name));if(input.fresh && data!==null) throw new Error('Fresh external source appeared before initialization.');if(data && data.length>source.maxBytes) throw new Error('External legacy source exceeds its original bound.');captured.push({source,data});rows.push(...source.rows(data===null?source.missing:JSON.parse(data.toString('utf8'))));}
  repository.codec.validateCollection(rows);
  await mkdir(input.evidenceParent,{mode:0o700,recursive:true});await privateFolder(input.evidenceParent);
  const directory=join(input.evidenceParent,input.commandId);await mkdir(directory,{mode:0o700});
@@ -81,4 +81,12 @@ export async function exportExternal(repository:ExternalRowRepository,parent:str
 }
 export function exportRemote(repository:ExternalRowRepository,parent:string,id:string) {
  return exportExternal(repository,parent,id,[{name:'remote-requests.json',value:rows=>rows.slice().sort((a,b)=>a.ordinal-b.ordinal).map(row=>JSON.parse(row.json))}]);
+}
+
+export async function remoteLegacyFiles(stateDir: string): Promise<'absent' | 'present'> {
+  for (const name of ['remote-requests.json', 'remote-storage-migrations']) {
+    try { await lstat(join(stateDir, name)); return 'present'; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return 'present'; }
+  }
+  return 'absent';
 }

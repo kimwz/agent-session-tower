@@ -1,3 +1,4 @@
+import { AutoPromptRepository } from '../../../server/auto-prompt/storage-repository.js';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -436,4 +437,24 @@ test('explicit maintenance refuses an absent service instead of converting servi
   await assert.rejects(f.final.storage.runLinkCommand(['service','install','--state-dir',f.stateDir,'--offline-maintenance',join(f.root,'never-read.json')]),/already installed/);
   assert.equal(await f.final.storage.currentVersion(f.stateDir),undefined);
   await assert.rejects(readFile(join(f.stateDir,'offline-service-fixture-start.json')),{code:'ENOENT'});
+});
+
+
+test('actual offline activation with a valid uncertain Auto Prompt import refuses global finish and preserves raw and SQL checkpoints', async t => {
+  const f = await fixture(t);
+  const entry = { fingerprint: 'a'.repeat(64), staged: [], outcome: { state: 'pending', preserve: true }, job: { id: '10000000-0000-4000-8000-000000000001', provider: 'codex', prompt: 'fixture', routerModel: 'fixture', status: 'uncertain', createdAt: '2026-10-10T00:00:00Z', updatedAt: '2026-10-10T00:00:00Z' } };
+  const source = JSON.stringify([entry]);
+  await writeFile(join(f.stateDir, 'auto-prompts.json'), source, { mode: 0o600 });
+  await assert.rejects(f.final.storage.runOfflineStorageCommand(['activate', '--state-dir', f.stateDir, '--input', f.input]), /incomplete/);
+  const record = await f.final.storage.readOfflineActivation(f.stateDir);
+  assert.ok(record);
+  assert.notEqual(record.phase, 'complete');
+  assert.equal(record.domains.some(domain => domain.scope === 'auto-prompt'), false);
+  assert.equal(await readFile(join(f.stateDir, 'auto-prompts.json'), 'utf8'), source);
+  const db = await f.final.storage.openStorage({ stateDir: f.stateDir, bundle: f.final.bundle() });
+  try {
+    await db.prepare({ allowMigration: false });
+    assert.deepEqual((await new AutoPromptRepository(db).load())[0].entry, entry);
+    await assert.rejects(f.final.storage.verifyOfflineCompletion(record, db));
+  } finally { await db.close(); }
 });

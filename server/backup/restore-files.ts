@@ -4,7 +4,7 @@ import type { TriggerBackup } from '../triggers/backup.js';
 import type { BackupPart, RestoreReport } from '../../shared/backup.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { listPendingSecretImports, stageVaultImport } from '../secrets/imports.js';
-import { applyWorkerFiles, type WorkerRestore } from './payload.js';
+import { applyWorkerFiles, type WorkerSettingsOwner, type WorkerRestore } from './payload.js';
 
 /** Where restores keep their state: the worker's part waiting for it, the last report, and copies of replaced files. */
 export const restoreDir = (stateDir: string) => join(stateDir, 'restore');
@@ -97,7 +97,7 @@ export async function keepBefore(stateDir: string, files: string[], now = new Da
  * was taken. A worker that stops before `finish` leaves it for the next one, unless a newer restore arrived meanwhile;
  * every step can be done again.
  */
-export async function takeWorkerRestore(stateDir: string): Promise<{ restore: WorkerRestore; applied(result: { parts: BackupPart[]; errors: string[] }): Promise<void>; finish(result: { parts: BackupPart[]; errors: string[]; skills?: RestoreReport['skills'] }): Promise<void> } | undefined> {
+export async function takeWorkerRestore(stateDir: string, owner?: WorkerSettingsOwner): Promise<{ restore: WorkerRestore; applied(result: { parts: BackupPart[]; errors: string[] }): Promise<void>; finish(result: { parts: BackupPart[]; errors: string[]; skills?: RestoreReport['skills'] }): Promise<void> } | undefined> {
   const taken = takenPath(stateDir);
   try { await rename(pendingPath(stateDir), taken); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -116,7 +116,7 @@ export async function takeWorkerRestore(stateDir: string): Promise<{ restore: Wo
   const ours = async () => (await readOptional(taken).catch(() => undefined) as WorkerRestore | undefined)?.id === id;
   const earlier = restore.done ?? { parts: [], errors: [] };
   // Files and triggers are applied once: after a worker recorded them, a later one only does the skills left.
-  const written = restore.done ? { parts: [], errors: [] } : await applyWorkerFiles(stateDir, restore.files);
+  const written = restore.done ? { parts: [], errors: [] } : await applyWorkerFiles(stateDir, restore.files, owner);
   let done = { parts: [...earlier.parts, ...written.parts], errors: [...earlier.errors, ...written.errors] };
   const taking: WorkerRestore = restore.done ? { ...restore, files: {}, triggers: undefined } : restore;
   return {

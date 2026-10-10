@@ -7,7 +7,7 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { BackupError, checkPassphrase, decryptBackup, encryptBackup, readBackupHeader, type BackupHeader } from './crypto.js';
 import { stageLegacyImport } from './secrets.js';
 import { deferredSecretParts, encryptedVaultOf, stageVaultImport } from '../secrets/imports.js';
-import { collectTriggers, collectWorkerFiles, parsePayload, payloadParts, WORKER_FILES, type BackupPayload } from './payload.js';
+import { collectTriggers, collectWorkerFiles, parsePayload, payloadParts, WORKER_FILES, type BackupPayload, type WorkerSqlSettings } from './payload.js';
 import type { TriggerBackup } from '../triggers/backup.js';
 import type { SkillBackup } from '../skills/backup.js';
 import { keepBefore, readReport, removePendingWorker, writePendingWorker, writeReport } from './restore-files.js';
@@ -25,6 +25,7 @@ export interface BackupServiceOptions {
   /** The worker's skills, guidance and their confirmations; throws while the worker cannot make them. */
   skills(): Promise<SkillBackup>;
   triggers(): Promise<TriggerBackup | undefined>;
+  settings?: () => Promise<WorkerSqlSettings>;
   /** Why no backup can be made right now, if so. */
   unavailable?: () => string | undefined;
   /** Asks the worker to hand over to a new worker at its next quiet moment; false when it cannot. */
@@ -163,7 +164,7 @@ export class BackupService {
     return {
       version: 1,
       machine: this.saved.machine,
-      worker: { files: await collectWorkerFiles(stateDir), encryptedVault: await encryptedVaultOf(stateDir), ...(triggers ? { triggers } : {}), skills },
+      worker: { files: await collectWorkerFiles(stateDir, this.options.settings), encryptedVault: await encryptedVaultOf(stateDir), ...(triggers ? { triggers } : {}), skills },
       web: { projectGroups: this.options.stores.groups.backupValue(), remoteExclusions: this.options.stores.exclusions.backupValue(), decisions: this.options.stores.decisions.backupValue(), backup: settings },
       // Only a computer that set the master up has anything to bring back.
       ...(record(master) && master.voice !== undefined || record(voiceKey) && typeof voiceKey.apiKey === 'string'

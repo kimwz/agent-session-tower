@@ -1,3 +1,7 @@
+import { collectWorkerFiles, applyWorkerFiles } from '../../../server/backup/payload.js';
+import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { PermissionService, type PermissionState } from '../../../server/permissions/service.js';
@@ -142,4 +146,28 @@ test('row byte accounting retains the exact existing pretty JSON budget', () => 
   assert.equal(permissionStateBytes(state),Buffer.byteLength(JSON.stringify(state,null,2)));
   const extensions={ ...state, extra:{ empty:{}, list:[[],null,true,5,'😀',{'a"b':'line\nend'}] } };
   assert.equal(permissionStateBytes(extensions),Buffer.byteLength(JSON.stringify(extensions,null,2)));
+});
+
+
+test('public settings payload roundtrips SQL permission rules while stale JSON and local notices remain untouched', async t => {
+  const local = { ...request('pending-local'), notification: { state: 'pending' as const, message: 'local notice' } };
+  const { fixture, repository, service } = await setup(t, { version: 1, rules: [rule('sql-rule')], requests: [local], codex: [{ path: '/fixture/rules', scope: 'project', cwd: '/fixture' }], lost: 'local lost', futureExtension: { preserve: true } } as PermissionState);
+  const dir = await mkdtemp(join(tmpdir(), 'tower-sql-backup-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const stale = '{"rules":[],"requests":[]}';
+  await writeFile(join(dir, 'permissions.json'), stale, { mode: 0o600 });
+  const files = await collectWorkerFiles(dir, async () => ({ 'permissions.json': service.exportBackup(), 'slack-automation.json': { rules: [] }, 'github-automation.json': { rules: [] } }));
+  assert.deepEqual(files['permissions.json'], { rules: [rule('sql-rule')] });
+  const localBefore = ['permission_requests', 'permission_codex_files', 'permission_metadata'].map(table => fixture.db.prepare(`SELECT * FROM ${table}`).all());
+  const owner = { restore: async (_name: string, value: unknown) => service.restoreBackup(value, 'public-settings-restore', (await repository.head()).authority!.generation), guardSlackConnection: async () => {} };
+  const result = await applyWorkerFiles(dir, { 'permissions.json': { rules: [rule('restored-rule')] } }, owner);
+  assert.deepEqual(result, { parts: ['permissions'], errors: [] });
+  assert.deepEqual(service.exportBackup(), { rules: [rule('restored-rule')] });
+  assert.deepEqual(['permission_requests', 'permission_codex_files', 'permission_metadata'].map(table => fixture.db.prepare(`SELECT * FROM ${table}`).all()), localBefore);
+  assert.equal(await readFile(join(dir, 'permissions.json'), 'utf8'), stale);
+  fixture.held = true;
+  const held = await applyWorkerFiles(dir, { 'permissions.json': files['permissions.json'] }, owner);
+  assert.deepEqual(held.parts, []);
+  assert.ok(held.errors.length);
+  assert.deepEqual(service.exportBackup(), { rules: [rule('restored-rule')] });
 });
