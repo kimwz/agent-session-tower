@@ -39,7 +39,11 @@ async function fixture(t: TestContext, saved: { created?: unknown[]; runs?: unkn
     return manager;
   };
   t.after(async () => { for (const manager of managers) await manager.close(); await rm(directory, { recursive: true, force: true }); });
-  const createdFile = async () => (await fixtureDocuments(managers.at(-1)!)).created as Array<{ session: { id: string }; origin?: unknown }>;
+  const createdFile = async () => {
+    const manager = managers.at(-1)!;
+    await manager.flushState();
+    return (await fixtureDocuments(manager)).created as Array<{ session: { id: string }; origin?: unknown }>;
+  };
   return { directory, stateDir, open, createdFile };
 }
 

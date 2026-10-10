@@ -35,7 +35,7 @@ jobs:
             XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
             TMP="$TEST_TMP" TEMP="$TEST_TMP" \
             npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
-            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
+            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 NODE_OPTIONS=--max-old-space-size=4096 \
             VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
             VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
           set -euo pipefail
@@ -52,7 +52,7 @@ jobs:
           npm ci
           node --import tsx scripts/sqlite-runtime-check.mjs "$VALIDATION_MODE" | tee "$report/runtime.json"
           if [[ "$VALIDATION_MODE" == legacy-loader ]]; then
-            node --import tsx --test --test-reporter=tap tests/server/link/storage-update-legacy.test.ts
+            node --import tsx --test --test-concurrency=2 --test-reporter=tap tests/server/link/storage-update-legacy.test.ts
             exit 0
           fi
           export TOWER_SQLITE_OLD122_ROOT="$VALIDATION_ROOT/old122"
@@ -67,9 +67,9 @@ jobs:
           files=()
           while IFS= read -r file; do files+=("$file"); done < "$report/test-files.txt"
           printf '%s\n' diagnostic-single-repro > "$report/stage.txt"
-          node --import tsx --test --test-reporter=tap --test-name-pattern='^actual trigger startup retry preserves session reads and holds permission review through restored settle on the same worker$' tests/server/runs/storage-diagnostic-worker.test.ts | tee "$report/diagnostic-single-repro.log"
+          node --import tsx --test --test-concurrency=2 --test-reporter=tap --test-name-pattern='^actual trigger startup retry preserves session reads and holds permission review through restored settle on the same worker$' tests/server/runs/storage-diagnostic-worker.test.ts | tee "$report/diagnostic-single-repro.log"
           printf '%s\n' fast-contracts > "$report/stage.txt"
-          node --import tsx --test --test-reporter=tap "${files[@]}"
+          node --import tsx --test --test-concurrency=2 --test-reporter=tap "${files[@]}"
           printf '0\n' > "$report/suite-exit.txt"
           VALIDATE
       - name: Supply the immutable full A122 capture to supported environments
@@ -138,7 +138,7 @@ jobs:
             XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
             TMP="$TEST_TMP" TEMP="$TEST_TMP" \
             npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
-            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
+            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 NODE_OPTIONS=--max-old-space-size=4096 \
             VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
             VALIDATION_SHA="$VALIDATION_SHA" SQLITE_RETENTION_LARGE="$SQLITE_RETENTION_LARGE" /bin/bash --noprofile --norc <<'VALIDATE'
           set -euo pipefail
@@ -155,14 +155,14 @@ jobs:
           npm ci
           node --import tsx scripts/sqlite-runtime-check.mjs "$VALIDATION_MODE" | tee "$report/runtime.json"
           if [[ "$VALIDATION_MODE" == legacy-loader ]]; then
-            node --import tsx --test --test-reporter=tap tests/server/link/storage-update-legacy.test.ts
+            node --import tsx --test --test-concurrency=2 --test-reporter=tap tests/server/link/storage-update-legacy.test.ts
             exit 0
           fi
           export TOWER_SQLITE_OLD122_ROOT="$VALIDATION_ROOT/old122"
           ln -s "$PWD/node_modules" "$TOWER_SQLITE_OLD122_ROOT/node_modules"
           export TOWER_SQLITE_OLD124_ROOT="$VALIDATION_ROOT/old124"
           node scripts/sqlite-old124-capture.mjs
-          node --import tsx --test --test-reporter=tap \
+          node --import tsx --test --test-concurrency=2 --test-reporter=tap \
             --test-name-pattern='^(flush, close ack and an explicit reopen with the same captured bundle; nothing is sent while closed|a full queue still drains on flush and close: the accepted write commits, close acks, the thread exits 0, intake is refused meanwhile)$' \
             tests/server/storage/client.test.ts
           node --input-type=module <<'FILES'
@@ -202,7 +202,7 @@ jobs:
           files=()
           while IFS= read -r file; do files+=("$file"); done < "$report/test-files.txt"
           printf '%s\n' real-suite > "$report/stage.txt"
-          node --import tsx --test --test-reporter=tap "${files[@]}"
+          node --import tsx --test --test-concurrency=2 --test-reporter=tap "${files[@]}"
           printf '0\n' > "$report/suite-exit.txt"
           printf '%s\n' foundation > "$report/stage.txt"
           node --import tsx scripts/sqlite-foundation-benchmark.mjs 20 | tee "$report/foundation.json"
@@ -250,7 +250,7 @@ jobs:
           writeFileSync(`${report}/binary-sha256.txt`, binaryHash + '\n');
           SEA
             export TOWER_SQLITE_FINAL_BINARY="$PWD/artifacts/agent-session-tower"
-            node --import tsx --test --test-reporter=tap --test-name-pattern='^final actual CLI source and optional Node26 SEA' tests/server/link/storage-offline-activation.test.ts
+            node --import tsx --test --test-concurrency=2 --test-reporter=tap --test-name-pattern='^final actual CLI source and optional Node26 SEA' tests/server/link/storage-offline-activation.test.ts
             printf '0\n' > "$report/sea-offline-exit.txt"
           fi
           VALIDATE
@@ -294,7 +294,7 @@ jobs:
             XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
             TMP="$TEST_TMP" TEMP="$TEST_TMP" \
             npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
-            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
+            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 NODE_OPTIONS=--max-old-space-size=4096 \
             VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
             VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
           set -euo pipefail

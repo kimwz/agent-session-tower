@@ -150,8 +150,8 @@ test('this build prints its own contract: trusted bundle, runtime probe, whole p
   assert.ok(parsed.state === 'contract');
   assert.deepEqual(parsed.contract.manifest.domains, storageManifest().domains);
   assert.equal(parsed.contract.manifest.domains[0].scope, 'retention');
-  assert.equal(parsed.contract.manifest.domains.length, 3);
-  assert.deepEqual(parsed.contract.manifest.domains.map(domain => domain.cutover), [undefined,undefined,undefined]);
+  assert.equal(parsed.contract.manifest.domains.length, 7);
+  assert.deepEqual(parsed.contract.manifest.domains.map(domain => domain.cutover), [{ artifactVersion: '1.121.0', importContract: 1 }, { artifactVersion: '1.123.0', importContract: 1 }, ...Array.from({ length: 5 }, () => ({ artifactVersion: '1.125.0', importContract: 1 }))]);
   assert.equal(parsed.contract.identity.manifestDigest, parsed.contract.manifest.digest);
   assert.equal(typeof parsed.contract.supported, 'boolean');
   if (!parsed.contract.supported) assert.ok(parsed.contract.refusal, 'an unsupported runtime says why');

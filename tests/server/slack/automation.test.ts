@@ -15,12 +15,11 @@ const rule: SlackRule = { id: 'review', name: 'PR review', enabled: true, condit
 const mention: SlackMention = { id: 'event-1', teamId: 'T1', channel: 'C1', user: 'U2', ts: '1.1', threadTs: '1.0', text: '<@U1> review this Verse8 PR' };
 async function fixture(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-slack-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
   let job: AutoPromptJob | undefined;
   let run: Run = { id: 'run', sessionId: 'session', prompt: '', status: 'running', createdAt: '', output: 'Review finished with no findings.' };
   let sends = 0, autoSends = 0, submissions = 0, fetches = 0;
   const submitted: AutoPromptRequest[] = [];
-  const storage = await externalStorageFixture(t, directory);
+  const storage = await externalStorageFixture(t, directory, true, 'normal', false);
   const options: SlackAutomationOptions & { repository: typeof storage.workflows } = {
     repository: storage.workflows, effectGate: storage.effectGate, stateDir: directory,
     fetchThread: async () => { fetches++; return [{ user: 'U2', ts: '1.0', text: 'Review PR 5 for Verse8' }]; },
@@ -32,6 +31,11 @@ async function fixture(t: TestContext) {
     sendReply: async (_mention, _text, _mentionable, automatic) => { sends++; autoSends += Number(automatic); return { ts: '2.0' }; },
   };
   const manager = new SlackAutomationManager(options); await manager.start(); await manager.startRuntimeEffects(); await manager.setRules([rule]);
+  t.after(async () => {
+    await manager.flush();
+    await storage.storage.close();
+    await rm(directory, { recursive: true, force: true });
+  });
   return { manager, options, directory, submitted, counts: () => ({ sends, submissions, fetches }), autoSends: () => autoSends, finish: (status: Run['status'] = 'completed') => { run = { ...run, status }; } };
 }
 test('Slack Codex work always requests Auto approval review while Claude retains its permission flow', async t => {
@@ -1237,6 +1241,7 @@ test('a request whose admission is not saved gets no reaction, and clearing take
   assert.deepEqual(calls, [], 'no reaction for a request that was not admitted');
   await f.options.repository.storage.reopen(); await f.options.repository.storage.prepare({ allowMigration: false });
   await f.manager.ingest(mention);
+  await f.manager.flush();
   assert.deepEqual(calls, ['add:loading:1.1']);
   await f.manager.clearMarks();
   assert.deepEqual(calls, ['add:loading:1.1', 'remove:loading:1.1']);
@@ -1269,7 +1274,7 @@ test('nothing is marked while clearing, and nothing goes back on before the acco
   const answers: Array<() => void> = [];
   f.options.react = (_mention, name, action, ts) => { calls.push(`${action}:${name}:${ts}`); return new Promise<void>(resolve => answers.push(resolve)); };
   f.options.workingReaction = () => 'loading';
-  f.options.startConversation = () => new Promise(() => {});
+  f.options.startConversation = async () => ({ sessionId: 'account-change-session', runId: 'account-change-run' });
   const admitted = f.manager.ingest(mention);
   for (let wait = 0; !calls.length && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
   answers.shift()!(); await admitted;
@@ -1281,7 +1286,7 @@ test('nothing is marked while clearing, and nothing goes back on before the acco
   const second = f.manager.ingest({ ...mention, id: 'event-2', ts: '2.1', threadTs: '2.0' });
   answers.shift()!(); await second;
   await new Promise(resolve => setTimeout(resolve, 20));
-  void f.manager.tick();
+  await f.manager.tick();
   await new Promise(resolve => setTimeout(resolve, 20));
   release(); await clearing;
   assert.equal(changed, true);

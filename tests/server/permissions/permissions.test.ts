@@ -10,6 +10,7 @@ import { TowerApi } from '../../../server/api/tower-api.js';
 import { CODEX_HEADER, syncCodex } from '../../../server/permissions/native.js';
 import { noStorageFixture, permissionFixture, closePermissionFixture } from './storage-fixture.js';
 import { PermissionService } from '../../../server/permissions/service.js';
+import { apiTriggerStorageFixture } from '../api/trigger-storage-fixture.js';
 import { TriggerService } from '../../../server/triggers/service.js';
 import { claudeRule, codexRule, ruleIsBroad, ruleProblem } from '../../../shared/permissions.js';
 import type { PermissionOverview } from '../../../shared/permissions.js';
@@ -154,7 +155,9 @@ test('a corrupt SQL row is refused without empty fallback or modifying native ru
 test('agents reach permissions only through their own keyed requests; owner-only operations stay with the owner', async t => {
   const f = await fixture(t);
   const runs: Run[] = [];
-  const triggers = new TriggerService({ stateDir: f.stateDir, tickMs: 60_000, executor: { submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
+  await mkdir(f.stateDir, { recursive: true, mode: 0o700 });
+  const { storage } = await apiTriggerStorageFixture(t, f.stateDir);
+  const triggers = new TriggerService({ storage, stateDir: f.stateDir, tickMs: 60_000, executor: { submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
     create: async () => { throw new Error('unused'); }, enqueue: async () => { throw new Error('unused'); }, runs: () => runs, session: () => undefined } });
   await triggers.start();
   t.after(() => triggers.close());
