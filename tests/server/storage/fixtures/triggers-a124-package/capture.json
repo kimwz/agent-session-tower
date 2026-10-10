@@ -1,0 +1,22 @@
+{
+  "officialPackageSHA256": "5647224b149023ad8f5a429832c1fc6b3012e7b27c16808a1fc2af6b00ef371d",
+  "officialAssetId": 626540259,
+  "source": "Read-only original A124 package members; no execution. SDK/schema original triggers-a124 capture reused.",
+  "files": {
+    "bin-entry.mjs.txt": {
+      "member": "package/bin/agent-session-tower.mjs",
+      "bytes": 525,
+      "sha256": "94350c0830e305fd67d19fd8db7840f1628684bf13e82147e531e392ee3cec4e"
+    },
+    "server-entry.js.txt": {
+      "member": "package/dist/server/index.js",
+      "bytes": 57377,
+      "sha256": "1ac0a3eabfdc77b30740efa6401e660c976f66255b9534c177e324a7fb7cd948"
+    },
+    "build-identity.js.txt": {
+      "member": "package/dist/server/storage/build-identity.js",
+      "bytes": 127,
+      "sha256": "3104832e07e143d7b31931b818aa853bf1eef6615a8b299179a483eb716af41c"
+    }
+  }
+}

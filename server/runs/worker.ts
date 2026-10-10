@@ -1287,11 +1287,10 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     let stopping = false;
     let paused = false;
     // Read from the web's saved file each time: the owner may close a conversation at any moment.
-    const permissionClosed = new ClosedSessionStore(stateDir);
-    const closedNow = async (sessionId: string) => { await permissionClosed.start(); return permissionClosed.closedIds().has(sessionId); };
+    const closedNow = async (sessionId: string) => { await closedSessions.start(); return closedSessions.closedIds().has(sessionId); };
     const permissionAdmission = (request: PermissionRequest) => {
       const current = runs.getSession(request.sessionId);
-      if (permissionClosed.closedIds().has(request.sessionId) || !current || current.cwd !== request.cwd
+      if (closedSessions.closedIds().has(request.sessionId) || !current || current.cwd !== request.cwd
         || request.provider && request.provider !== (current.provider === 'codex' ? 'codex' : 'claude')) throw new TowerError('forbidden', 'Permission current conversation/provider refused.');
       if (request.decidedBy === 'auto') {
         const origin = runs.sessionOrigin(request.sessionId);
@@ -1349,7 +1348,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     if(!database) throw new TowerError('unavailable','Permission SDK owner is unavailable.');
     const permissionRepository=new PermissionsRepository(database,stateDir,error=>{ unavailable(); storageStatus={...storageStatus,code:'permissions-receipt-held',reason:String(error),admissionOpen:false}; });
     const permissions: PermissionService = new PermissionService({ stateDir, repository: permissionRepository, effectGate: requireEffects,
-      requestGate: async request => { await permissionClosed.start(); permissionAdmission(request); }, requestAdmission: permissionAdmission, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),
+      requestGate: async request => { await closedSessions.start(); permissionAdmission(request); }, requestAdmission: permissionAdmission, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),
       decision: async (request, prompt) => runs.permissionDecision(request, prompt, { closed: await closedNow(request.sessionId) }),
       resume: async (sessionId, prompt) => { await runs.enqueue(sessionId, prompt, {}, { origin: { kind: 'owner' } }); },
       // A public agent's requests always wait for the owner: its conversations carry outsiders' words.
@@ -1368,9 +1367,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     await startupGate();
     registerStorageHold(() => { permissions.pauseForStorage(); }, () => { permissions.resume(); });
     await permissions.start();
-    await permissionClosed.start();
+    await closedSessions.start();
     await startupGate();
-    await permissions.bootstrapEffects(permissionClosed.closedIds());
+    await permissions.bootstrapEffects(closedSessions.closedIds());
     // Runs a previous worker left: allowed ones start now; ones it left running are stopped only when provably its own.
     // Nothing new runs, and the worker is not handed off, until that is done.
     const left = permissions.unfinishedRuns();

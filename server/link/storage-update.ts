@@ -163,7 +163,7 @@ export async function readHold(stateDir: string, now = Date.now()): Promise<Hold
 export type HelperRead =
   | { state: 'absent' } | { state: 'running'; pid: number } | { state: 'gone'; pid: number }
   | { state: 'invalid'; reason: string } | { state: 'unreadable'; reason: string; error: unknown; pid?: number };
-export async function readHelperLock(stateDir: string, started: (pid: number) => Promise<string | undefined> = processStart): Promise<HelperRead> {
+export async function readHelperLock(stateDir: string, started: (pid: number) => Promise<string | undefined> = processStart, observe: typeof observeProcess = observeProcess, mode?: 'offline'): Promise<HelperRead> {
   let text: string;
   try {
     const bytes = await readExact(updatePaths(stateDir).lock, 4096);
@@ -172,11 +172,12 @@ export async function readHelperLock(stateDir: string, started: (pid: number) =>
   } catch (error) {
     return { state: 'unreadable', reason: messageOf(error), error };
   }
+  if (mode === 'offline') return { state: 'invalid', reason: 'Offline update helper lock exists; observation forbidden.' };
   const [pidText, ...rest] = text.split(' ');
   const pid = Number(pidText);
   if (!(pid > 0) || !Number.isInteger(pid)) return { state: 'invalid', reason: 'The update helper lock names no process.' };
   const unobserved = (error: unknown): HelperRead => ({ state: 'unreadable', reason: `Whether pid ${pid} still runs cannot be observed: ${messageOf(error)}`, error, pid });
-  const observed = observeProcess(pid);
+  const observed = observe(pid);
   if (observed.state === 'out-of-range') return { state: 'invalid', reason: `The update helper lock names pid ${pidText.slice(0, 40)}, which no process here can have.` };
   if (observed.state === 'gone') return { state: 'gone', pid };
   if (observed.state === 'unobserved') return unobserved(observed.error);
@@ -735,12 +736,12 @@ const entryHash = async (entry: string) => sha256((await readExact(entry, 64 * 1
  * installed artifacts it needs (the current one, to know this build is what the service runs; the previous one, when
  * this build imports a domain).
  */
-export async function evaluateStorageUpdate(input: StorageUpdateInput): Promise<StorageUpdateEvaluation> {
+export async function evaluateStorageUpdate(input: StorageUpdateInput, helperObservation?: 'offline'): Promise<StorageUpdateEvaluation> {
   const { stateDir, build, managed } = input;
   const now = input.now ?? Date.now();
   const probe = input.probe ?? probeInstalledArtifact;
   const [update, hold, helper, current, receipt, pin, rollback] = await Promise.all([
-    readUpdateRecord(stateDir), readHold(stateDir, now), readHelperLock(stateDir), readCurrentPointer(stateDir), readRecoveryReceipt(stateDir), readStoragePin(stateDir), readRollbackRecord(stateDir),
+    readUpdateRecord(stateDir), readHold(stateDir, now), readHelperLock(stateDir, undefined, undefined, helperObservation), readCurrentPointer(stateDir), readRecoveryReceipt(stateDir), readStoragePin(stateDir), readRollbackRecord(stateDir),
   ]);
   const identity = build.preflight.identity;
   const evidence: StorageUpdateEvidence = {
@@ -749,6 +750,8 @@ export async function evaluateStorageUpdate(input: StorageUpdateInput): Promise<
   };
   const answer = (verdict: StorageUpdateVerdict, code: string, reason: string, extra: Partial<StorageUpdateEvaluation> = {}): StorageUpdateEvaluation =>
     ({ verdict, code, reason, importAllowed: verdict === 'ready', ...extra, evidence, evaluatedAt: new Date(now).toISOString() });
+
+  if (helperObservation === 'offline' && helper.state !== 'absent') return answer('recovery-required', 'offline-helper-held', 'Offline helper history requires owner recovery without process observation.');
 
   // The runtime and the contract this build binds to its storage.
   const manifest = build.manifest;

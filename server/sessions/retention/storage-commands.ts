@@ -50,6 +50,7 @@ export function retentionDomainFor(schema: StorageDomainSchema): StorageDomain {
   return defineStorageDomain({ schema, commands: {
     offlineAuthorityReceipt: offlineAuthorityReceiptCommand,
     offlineCompletion: offlineCompletionCommand('retention_stages'),
+    bootstrapHistory: { kind: 'read', run(context) { return { stages: Number((context.prepare('SELECT count(*) AS n FROM retention_stages').get() as { n: number }).n) }; } },
     head: { kind: 'read', run: context => head(context) },
     keys: { kind: 'read', run(context, payload) {
       const input = object(payload); current(context, input);

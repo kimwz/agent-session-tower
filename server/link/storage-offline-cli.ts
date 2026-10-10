@@ -6,13 +6,35 @@ import { readSnapshot, readStorageIdentity } from '../storage/recovery.js';
 import { storageLayout } from '../storage/paths.js';
 import { beginOfflineActivation, decodeOfflineActivation, prepareOfflineActivation, recordOfflineDomainCompletion, verifyProtectedOfflineArtifact, readOfflinePrivateBytes } from './storage-offline.js';
 import { collectOfflineBackup, restoreOfflineBackup } from './storage-offline-backup.js';
-import { workerLegacyFiles, importRuns } from '../runs/storage-transfer.js';
+import { workerLegacyFiles, importRuns, holdRunsEvidence } from '../runs/storage-transfer.js';
 import { RunsRepository } from '../runs/storage-repository.js';
 import { TriggersRepository } from '../triggers/storage-repository.js';
-import { importTriggers } from '../triggers/storage-transfer.js';
-import { importRetention } from '../sessions/retention/storage-transfer.js';
+import { importTriggers, holdTriggersEvidence } from '../triggers/storage-transfer.js';
+import { importRetention, holdRetentionEvidence } from '../sessions/retention/storage-transfer.js';
 import { PermissionsRepository } from '../permissions/storage-repository.js';
-import { importPermissions } from '../permissions/storage-transfer.js';
+import { importPermissions, holdPermissionsEvidence } from '../permissions/storage-transfer.js';
+
+/** Before creating any new seal, retain each domain owner's no-authority history hold. */
+export async function inspectOfflineImportHistory(storage: StorageClient, stateDir: string, scope: string): Promise<void> {
+  for (const domain of ['core',scope]) {
+    const gate=await storage.gate(domain);
+    if (!gate.open) throw new Error(`Offline ${scope} history gate held: ${gate.reasons.join('; ')}`);
+  }
+  const authority=(await storage.inspect()).authority.find(a=>a.domain===scope);
+  if (authority) throw new Error('Offline prior authority requires owner recovery; no import.');
+  if (scope==='retention') await holdRetentionEvidence(stateDir);
+  else if (scope==='runs') await holdRunsEvidence(stateDir);
+  else if (scope==='triggers') await holdTriggersEvidence(stateDir);
+  else if (scope==='permissions') {
+    const head=await new PermissionsRepository(storage,stateDir).head(); // durable pending / revision / recovery owner
+    if (head.authority || head.revision!==null) throw new Error('Permission SQL history without authority requires owner recovery.');
+    await holdPermissionsEvidence(stateDir);
+  } else throw new Error('Unknown offline import scope.');
+  if (scope!=='permissions') {
+    const history=await storage.read<{ stages: number }>(scope,'bootstrapHistory',{});
+    if (history.stages!==0) throw new Error('Offline staged history requires owner recovery; no import.');
+  }
+}
 
 /** Explicit local command. A conflict refuses immediately; no PID cleanup, service stop, provider, or network calls. */
 export async function runOfflineStorageCommand(args: string[]): Promise<unknown> {
@@ -67,7 +89,9 @@ export async function runOfflineStorageCommand(args: string[]): Promise<unknown>
     for(const scope of ['retention','runs','triggers','permissions']) {
       const authority=(await storage.inspect()).authority.find(a=>a.domain===scope);
       const commandId=`offline-${record.activationId}-${scope}`;
+      if(authority && authority.authority!=='database') throw new Error('Offline non-database authority requires owner recovery.');
       if(!authority) {
+        await inspectOfflineImportHistory(storage,stateDir,scope);
         if(scope==='retention') await importRetention({storage,stateDir,evidenceParent:join(stateDir,'storage-migrations'),commandId,update,activation:owner});
         if(scope==='runs') await importRuns({storage,stateDir,evidenceParent:join(stateDir,'runs-storage-migrations'),commandId,update,activation:owner,repository:new RunsRepository(storage)});
         if(scope==='triggers') await importTriggers({stateDir,evidenceParent:join(stateDir,'triggers-storage-migrations'),commandId,update,activation:owner,repository:new TriggersRepository(storage),now:Date.now});

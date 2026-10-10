@@ -41,8 +41,10 @@ export class PermissionsRepository {
   }
   private async clearPending():Promise<void> {
     if (!this.stateDir) return;
-    await unlink(this.pendingPath()).catch((error:NodeJS.ErrnoException)=>{ if(error.code!=='ENOENT') throw error; });
+    // Prove the existing hold durable before removing its name. A crash may resurrect
+    // this marker (requiring reconciliation), but no failing sync can erase the hold.
     await storageFs.syncDirectory(this.stateDir);
+    await unlink(this.pendingPath()).catch((error:NodeJS.ErrnoException)=>{ if(error.code!=='ENOENT') throw error; });
   }
   pending(): Readonly<PermissionPendingWrite> | undefined { return this.uncertain; }
   effectsAvailable(): boolean {
@@ -152,7 +154,13 @@ export class PermissionsRepository {
       if (this.loaded) this.loaded={ ...this.loaded,revision:answer.result.revision };
     } catch (error) {
       if (error instanceof StorageCommandError && (error.disposition==='unknown' || error.disposition==='committed')) { this.uncertain={ commandId,payloadSha256,error }; this.reconciliationRequired=true; }
-      else if (error instanceof StorageCommandError && error.disposition==='not-committed') await this.clearPending();
+      else if (error instanceof StorageCommandError && error.disposition==='not-committed') {
+        try { await this.clearPending(); }
+        catch (clearError) {
+          this.uncertain={commandId,payloadSha256,error:clearError}; this.reconciliationRequired=true;
+          this.onHeld?.(clearError); throw clearError;
+        }
+      }
       else { this.uncertain={commandId,payloadSha256,error}; this.reconciliationRequired=true; }
       if(this.uncertain) this.onHeld?.(error);
       throw error;

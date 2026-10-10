@@ -742,3 +742,28 @@ for (const change of ['closed', 'source', 'provider'] as const) {
     await assert.rejects(readFile(join(f.project, 'last-effect-executions')), { code: 'ENOENT' });
   });
 }
+
+test('actual closure owner save during last beforeLaunch effect await refuses spawn', async t=>{
+  const { ClosedSessionStore }=await import('../../../server/stores/closed-sessions.js');
+  const root=await mkdtemp(join(tmpdir(),'tower-closure-owner-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const closedSessions=new ClosedSessionStore(root);await closedSessions.start();
+  const repository=noStorageFixture(root);t.after(()=>closePermissionFixture(root));
+  let armed=false, checks=0, spawn=0, reached!:()=>void, release!:()=>void;
+  const checking=new Promise<void>(r=>{reached=r;});const blocked=new Promise<void>(r=>{release=r;});
+  const admission=()=>{if(closedSessions.closedIds().has('codex:two')) throw new TowerError('forbidden','closed owner');};
+  const service=new PermissionService({stateDir:root,repository,env:{CODEX_HOME:join(root,'codex-home')},session:()=>({cwd:root,provider:'codex'}),
+    requestGate:async()=>{await closedSessions.start();admission();},requestAdmission:admission,
+    effectGate:async()=>{if(armed && ++checks===2){reached();await blocked;}}});
+  t.after(()=>service.close());await service.start();
+  const asked=await service.requestRun({command:'fixture-no-execution',reason:'closure owner'},agent('codex:two'));
+  await service.decide(asked.request.id!,true);
+  await service.updateRun(asked.request.id!,{status:'running',startedAt:'2026-10-10T00:00:00.000Z'});
+  armed=true;
+  const pending=service.launchReviewed(asked.request.id!,'fixture-no-execution',root,600,()=>{spawn++;});
+  await checking;
+  // Use the same closure owner as worker setClosed; saving does not remove the session projection.
+  await closedSessions.set({id:'codex:two'} as Parameters<InstanceType<typeof ClosedSessionStore>['set']>[0],true);
+  assert.deepEqual(JSON.parse(await readFile(join(root,'closed-sessions.json'),'utf8')),['codex:two']);
+  release();await assert.rejects(pending,/closed owner/);assert.equal(spawn,0);
+});

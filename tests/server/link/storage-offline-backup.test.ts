@@ -76,10 +76,10 @@ for(const boundary of ['before-copy','after-copy','manifest-sync'] as const) {
     const backup=join(root,'backup');
     if(boundary==='manifest-sync') {
       const original=build.storage.storageFs.syncDirectory;
-      t.mock.method(build.storage.storageFs,'syncDirectory',async path=>{ if(path===backup) { const exists=await readFile(join(backup,'manifest.json')).then(()=>true,()=>false);if(exists) throw new Error('fixture manifest fsync interruption'); } await original(path); });
+      t.mock.method(build.storage.storageFs,'syncDirectory',async (path: string)=>{ if(path===backup) { const exists=await readFile(join(backup,'manifest.json')).then(()=>true,()=>false);if(exists) throw new Error('fixture manifest fsync interruption'); } await original(path); });
     } else {
       const original=build.storage.storageFs.copyFile;let first=true;
-      t.mock.method(build.storage.storageFs,'copyFile',async(from,to)=>{ if(!first) return original(from,to);first=false;if(boundary==='after-copy') await original(from,to);throw new Error('fixture copy interruption'); });
+      t.mock.method(build.storage.storageFs,'copyFile',async(from: string,to: string)=>{ if(!first) return original(from,to);first=false;if(boundary==='after-copy') await original(from,to);throw new Error('fixture copy interruption'); });
     }
     await assert.rejects(build.storage.collectOfflineBackup({stateDir,root:backup,snapshotId:snapshot.id,lease}),/fixture/);
     assert.equal(await build.storage.offlineBootstrapHeld(stateDir),false,'a failed backup never fabricated a completed activation');

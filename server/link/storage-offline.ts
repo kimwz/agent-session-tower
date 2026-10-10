@@ -108,15 +108,51 @@ export async function beginOfflineActivation(input: { lease: StrictStateLease; r
   owners.set(owner, { lease: input.lease, runtimeDir: input.runtimeDir, record: previous ?? record });
   return owner;
 }
+// Official A124 package member capture (asset 626540259), never executed here.
+// Only the unpacked npm package layout is supported; SEA/arbitrary entries are held.
+const protectedA124 = {
+  "identity": {
+    "appVersion": "1.124.0",
+    "protocol": "tower-storage/1",
+    "sourceHash": "5318990f15be1bbe73ba69c390c4b5ae32c7ee4ca61ba89f4d34241723936a0a",
+    "manifestDigest": "7cd7d758851f5ef047450f63d372660ccc8a36f41af5b736274d00bbd2fdccc0"
+  },
+  "members": {
+    "bin/agent-session-tower.mjs": "94350c0830e305fd67d19fd8db7840f1628684bf13e82147e531e392ee3cec4e",
+    "dist/server/index.js": "1ac0a3eabfdc77b30740efa6401e660c976f66255b9534c177e324a7fb7cd948",
+    "dist/server/storage/generated/thread-bundle.json": "80664388b126c95cf5355cdf7636900c0254a7dc3c72693d6ef6176e10c02432",
+    "dist/server/storage/build-identity.js": "3104832e07e143d7b31931b818aa853bf1eef6615a8b299179a483eb716af41c",
+    "dist/server/storage/schema.js": "faf9155abfeca96948f76649267a2c28d3fbadac45ed22c44a7faa499b8a3b34"
+  }
+};
 export async function verifyProtectedOfflineArtifact(record: OfflineActivationRecord) {
   await verifyFile(record.oldArtifact.entry);
   await verifyFile(record.oldArtifact.contract);
-  const old = parseArtifactStorageContract((await readOfflinePrivateBytes(record.oldArtifact.contract.path)).toString('utf8'), record.oldArtifact.identity.appVersion);
+  const contractBytes=await readOfflinePrivateBytes(record.oldArtifact.contract.path);
+  if (hash(contractBytes)!==record.oldArtifact.contract.sha256) refuse('old artifact contract changed');
+  const old = parseArtifactStorageContract(contractBytes.toString('utf8'), record.oldArtifact.identity.appVersion);
   if (old.state !== 'contract' || !same(old.contract.identity, record.oldArtifact.identity)) refuse('old artifact contract');
+  if (!same(old.contract.identity, protectedA124.identity)) refuse('unsupported protected artifact profile');
+  const root = resolve(dirname(record.oldArtifact.entry.path), '..');
+  if (record.oldArtifact.entry.path !== join(root, 'bin/agent-session-tower.mjs')) refuse('unsupported protected artifact entry');
+  for (const [member, digest] of Object.entries(protectedA124.members)) {
+    const bytes = await readOfflinePrivateBytes(join(root, member));
+    if (member === 'bin/agent-session-tower.mjs' && hash(bytes)!==record.oldArtifact.entry.sha256) refuse('old artifact entry changed');
+    if (hash(bytes) !== digest) refuse('old artifact embedded identity/entry mismatch');
+    if (member === 'dist/server/storage/generated/thread-bundle.json') {
+      const bundle = JSON.parse(bytes.toString('utf8')) as { format: string; source: string; sourceHash: string };
+      const first = `var __TOWER_STORAGE_SOURCE_HASH__ = "${protectedA124.identity.sourceHash}";\n`;
+      if (bundle.format !== 'tower-storage-thread-bundle/2' || bundle.sourceHash !== old.contract.identity.sourceHash
+        || !bundle.source.startsWith(first) || hash(bundle.source.slice(first.length)) !== bundle.sourceHash) refuse('old artifact SDK source');
+    }
+  }
+  // Recheck descriptors after the member reads; both proofs cover the same bytes.
+  await verifyFile(record.oldArtifact.entry);
+  await verifyFile(record.oldArtifact.contract);
   return old.contract;
 }
 async function offlineEvaluation(update: StorageUpdateInput, record: OfflineActivationRecord): Promise<StorageUpdateEvaluation> {
-  const result = await evaluateStorageUpdate(update);
+  const result = await evaluateStorageUpdate(update, 'offline');
   if (!same(update.build.preflight.identity, record.build) || !same(update.build.manifest, record.manifest)
     || !update.build.preflight.state || update.build.preflight.state.problem || !update.build.preflight.supported) refuse('trusted build/preflight');
   // Only the direct-start preparation prerequisite is replaceable by this same artifact's actual prepare.

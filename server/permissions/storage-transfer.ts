@@ -1,3 +1,4 @@
+import { opendir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { privateDirectory, storageFs } from '../storage/paths.js';
 import { fileSha256 } from '../storage/recovery.js';
@@ -6,12 +7,21 @@ import type { StorageUpdateInput } from '../link/storage-update.js';
 import { PermissionsRepository } from './storage-repository.js';
 import { permissionRows } from './storage-codec.js';
 
+export async function holdPermissionsEvidence(stateDir: string): Promise<void> {
+  const parent=join(stateDir,'permissions-storage-migrations');
+  if (!await privateDirectory(parent,false)) return;
+  const directory=await opendir(parent);
+  try { if (await directory.read()) throw new Error('Permission seal without authority requires explicit recovery.'); }
+  finally { await directory.close(); }
+}
+
 /** First import is storage-only. The exact raw source and its seal survive unknown outcomes. */
 export async function importPermissions(input: { repository: PermissionsRepository; stateDir: string; activation: OfflineActivationOwner; update: StorageUpdateInput; commandId: string }): Promise<void> {
   const { repository, stateDir, commandId }=input;
   if ((await repository.head()).authority) throw new Error('Permission authority exists; JSON replay forbidden.');
   const check=async()=> { const result=await checkStorageActivation({ kind:'offline',owner:input.activation,update:input.update,storage:repository.storage },'permissions'); if(!result.importAllowed) throw new Error('Permission offline store gate held.'); };
   await check();
+  await holdPermissionsEvidence(stateDir);
   const source=join(stateDir,'permissions.json'), bytes=await readOfflinePrivateBytes(source);
   const state:unknown=JSON.parse(bytes.toString('utf8')); permissionRows(state);
   const parent=join(stateDir,'permissions-storage-migrations');
