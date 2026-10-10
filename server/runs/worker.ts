@@ -1520,9 +1520,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       // The decision reaches the conversation as the work it already was: the requesting turn's origin and approvals.
       reachable: request => Boolean(request.runId && runs.list().find(item => item.id === request.runId)?.origin),
       notify: (request, message) => runs.permissionDecision(request, `${TOWER_NOTICE} ${message}`).then(() => undefined) });
-    let triggersPrepared = false;
-    registerStorageHold(() => { reviewer.hold(); }, () => { if (triggersPrepared) reviewer.release(); }, () => reviewer.inFlight());
-    // Nothing is reviewed before the triggers are in place (released below), not even a recovered run sent back to review.
+    let startupComplete = false;
+    registerStorageHold(() => { reviewer.hold(); }, () => { if (startupComplete) reviewer.release(); }, () => reviewer.inFlight());
+    // Review writes create pending receipts, so they must wait until every startup admission gate has passed.
     reviewer.hold();
 
     runs.setClaudeSettings((cwd, sessionId) => permissions.claudeSettings(cwd, sessionId));
@@ -1567,11 +1567,6 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     }
     await restoring?.applied({ parts: restoring.restore.triggers ? ['triggers'] : [], errors: restoredTriggers.errors })
       .catch(error => console.error(`The restore's progress was not recorded: ${error instanceof Error ? error.message : String(error)}`));
-    // Reviews waiting from before this worker started (or queued while the last one handed over, or sent back by a run
-    // recovered above) go on, once the triggers whose instructions they read are in place.
-    await startupGate();
-    triggersPrepared = true;
-    reviewer.release();
     await startupGate();
     await github.start();
     // Slack and triggers share one limit on provider turns running at once.
@@ -1689,7 +1684,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         if (!await releaseAllowed(generation, fence) || generation !== storageHoldGeneration) return storageStatus;
         storageStatus.admissionOpen = true; runs.releaseStorage(); autoPrompts.releaseStorage();
         paused = false; initializedRetention?.resume(); temporary.resume(); runs.resumeAttachmentCleanup(); autoPrompts.resumeAttachmentCleanup();
-        slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); tasks.resume(); compactions.release(); worktrees.resume(); permissions.resume(); reviewer.release(); runner.releaseStorage();
+        slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); tasks.resume(); compactions.release(); worktrees.resume(); permissions.resume(); if (startupComplete) reviewer.release(); runner.releaseStorage();
         return storageStatus;
       } finally { retrying = undefined; }
     })();
@@ -1714,10 +1709,10 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       transient: () => secrets.inFlight() || restoringSkills || slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || compactions.creating() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       // Work a Slack or GitHub coordinator delegated: its coordinator hears how it ended and decides what follows.
       delegated: run => Boolean(run.origin?.workflowId) && !coordinators().has(run.sessionId),
-      releaseIntake: () => { slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); tasks.resume(); compactions.release(); worktrees.resume(); reviewer.release(); },
+      releaseIntake: () => { slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); tasks.resume(); compactions.release(); worktrees.resume(); if (startupComplete) reviewer.release(); },
       holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); publicAgents.hold(); skills.pause(); tasks.pause(); compactions.hold(); worktrees.pause(); reviewer.hold(); },
       quiesce: async () => { compactions.pause(); await retention?.service.quiesce(); await temporary.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); paused = true; secrets.pause(); tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); tasks.pause(); worktrees.pause(); reviewer.hold(); await reviewer.flush(); permissions.pause(); await Promise.all([secrets.flush(), worktrees.flush(), tasks.flush(), compactions.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
-      resume: () => { publishCold(); sessions.resume(); if (!storageStatus.admissionOpen) return; compactions.resume(); retention?.service.resume(); temporary.resume(); runs.resumeAttachmentCleanup(); autoPrompts.resumeAttachmentCleanup(); paused = false; secrets.resume(); tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); tasks.resume(); worktrees.resume(); permissions.resume(); reviewer.release(); sessions.resume(); },
+      resume: () => { publishCold(); sessions.resume(); if (!storageStatus.admissionOpen) return; compactions.resume(); retention?.service.resume(); temporary.resume(); runs.resumeAttachmentCleanup(); autoPrompts.resumeAttachmentCleanup(); paused = false; secrets.resume(); tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); tasks.resume(); worktrees.resume(); permissions.resume(); if (startupComplete) reviewer.release(); sessions.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
       onHandedOff: () => { retention?.service.stop(); void temporary.close(); clearInterval(secretExpiry); secrets.close(); stopTelling(); void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); void tasks.close(); void compactions.close(); worktrees.close(); reviewer.close(); clearInterval(expiryTimer); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } };
     if (diagnosticHost) diagnosticHost.activate(hostOptions); else diagnosticHost = await startRunnerHost(hostOptions);
@@ -1734,6 +1729,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     autoPrompts.releaseStorage();
     runner.releaseStorage();
     runs.markReady();
+    startupComplete = true;
+    reviewer.release();
     void retention?.service.cycle().catch(error => console.error(`Session retention: ${error instanceof Error ? error.message : String(error)}`));
     // A restore's skills are written once the worker serves: linking into project folders (on a slow volume, say) never
     // keeps it from starting. The restore is recorded as done after them; a worker that stops first leaves it to the next.
