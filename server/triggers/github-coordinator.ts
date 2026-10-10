@@ -7,6 +7,7 @@ import type { AutoPromptManager } from '../auto-prompt/manager.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
 import { resolveModel } from '../models/settings.js';
 import type { RunManager } from '../runs/manager.js';
+import type { WorkflowRepository } from '../slack/storage-repository.js';
 import { SlackAutomationManager, type CoordinatorChannel } from '../slack/automation.js';
 import { SLACK_SESSION_TOOLS } from '../slack/mcp-bridge.js';
 import { OWNER_REPLY_INTENT_PROMPT, OWNER_REPLY_INTENT_SCHEMA } from '../slack/owner-consent.js';
@@ -79,6 +80,8 @@ export function reviewInstructions(verdicts: 'comment' | 'any'): string {
 }
 
 export interface GitHubCoordinatorOptions {
+  repository?: WorkflowRepository;
+  effectGate?: () => Promise<void>;
   stateDir: string;
   runs: Pick<RunManager, 'list' | 'create' | 'enqueue'>;
   autoPrompts: Pick<AutoPromptManager, 'get' | 'submit'>;
@@ -107,7 +110,7 @@ export class GitHubCoordinator extends EventEmitter {
     const pullPath = (mention: SlackMention) => `/repos/${mention.channel}/pulls/${mention.threadTs}`;
     const withReview = (workflow: SlackWorkflow, given?: string) => workflow.mention.review ? [given, reviewInstructions(workflow.mention.review.verdicts)].filter(Boolean).join('\n\n') : given;
     this.automation = new SlackAutomationManager({
-      stateDir: options.stateDir,
+      stateDir: options.stateDir, repository: options.repository, effectGate: options.effectGate,
       channel: GITHUB_CHANNEL,
       language: () => options.language?.() ?? 'ko',
       // The approval choice was fixed when the conversation began; later edits of the trigger do not change it.
@@ -167,6 +170,7 @@ export class GitHubCoordinator extends EventEmitter {
       composeReply: async () => { throw new Error('Not used by conversation coordinators.'); },
       classifyOwnerReply: async (message, workflow) => {
         const model = await resolveModel(options.stateDir, 'github.replyIntent', { provider: workflow.rules[0]?.provider ?? 'codex', override: { provider: workflow.rules[0]?.provider ?? 'codex', model: workflow.rules[0]?.model } });
+        if (!options.effectGate) throw new Error('Missing GitHub effect gate.'); await options.effectGate(); await options.repository!.gate();
         return (options.model ?? runAutoPromptModel)({ ...model,
           systemPrompt: OWNER_REPLY_INTENT_PROMPT.replace(' or permission to act on GitHub', '').replace(/Slack/g, 'GitHub').replace(/슬랙/g, '깃허브'),
           prompt: JSON.stringify({ ownerMessage: message, tasks: (workflow.delegatedTasks ?? []).map(task => ({ requestId: task.requestId, status: options.autoPrompts.get(task.requestId)?.status, notified: !!task.notifiedRunId })) }),
@@ -190,6 +194,7 @@ export class GitHubCoordinator extends EventEmitter {
         try { review = mention.review ? reviewOf(text, mention.review.verdicts) : undefined; } catch (error) { throw notSent(error); }
         const what = review ? 'review' : 'comment';
         let response;
+        if (!options.effectGate) throw new Error('Missing GitHub effect gate.'); await options.effectGate(); await options.repository!.gate();
         try { response = await post(review ? `${pullPath(mention)}/reviews` : `${issuePath(mention)}/comments`, undefined, { method: 'POST', body: review ? { event: review.event, ...(review.body ? { body: review.body } : {}) } : { body: text } }); }
         catch (error) { throw notSent(error, (error as { uncertain?: boolean }).uncertain === false); }
         const id = response.body && typeof response.body === 'object' ? (response.body as { id?: unknown }).id : undefined;
@@ -200,6 +205,7 @@ export class GitHubCoordinator extends EventEmitter {
       react: async (mention, name, action) => {
         if (action !== 'add') throw new Error('GitHub reactions can only be added from here.');
         const post = await options.github(triggerOf(mention), true);
+        if (!options.effectGate) throw new Error('Missing GitHub effect gate.'); await options.effectGate(); await options.repository!.gate();
         const response = await post(`${issuePath(mention)}/reactions`, undefined, { method: 'POST', body: { content: name } });
         if (response.status !== 200 && response.status !== 201) throw new GitHubError(`GitHub answered HTTP ${response.status} for the reaction.`);
       },
@@ -208,10 +214,12 @@ export class GitHubCoordinator extends EventEmitter {
   }
 
   async start(): Promise<void> {
-    await this.automation.start();
-    this.resume();
+    await this.automation.load();
   }
-  resume(): void {
+  async startRuntimeEffects(): Promise<void> { await this.automation.startRuntimeEffects(); await this.resume(); }
+  async resume(): Promise<void> {
+    if (!this.options.effectGate) throw new Error('GitHub coordinator requires the worker effect gate.');
+    await this.options.effectGate(); await this.options.repository!.gate();
     this.pause();
     this.timer = setInterval(() => { void this.automation.tick().catch(() => {}); }, 1000);
     this.timer.unref();

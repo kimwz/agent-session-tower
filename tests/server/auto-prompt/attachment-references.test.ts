@@ -1,3 +1,4 @@
+import { externalStorageFixture } from '../remote/external-storage-fixture.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
@@ -22,10 +23,11 @@ async function fixture(t: TestContext) {
   const main = new AttachmentStore(directory);
   const snapshot = (): Snapshot => ({ sessions: [session], runs: runs.list(), providers: [{ provider: 'codex', available: true, sessionCount: 1 }], scanning: false,
     updatedAt: session.updatedAt, hostname: 'fixture', version: 'test' });
-  const options = { stateDir: directory, snapshot, detail: async () => undefined, refresh: async () => {}, runs,
+  const storage = await externalStorageFixture(t, directory);
+  const options = { repository: storage.autoPrompt, effectGate: storage.effectGate, stateDir: directory, snapshot, detail: async () => undefined, refresh: async () => {}, runs,
     model: async () => { throw new Error('Explicit targets must not call the native router'); },
     remote: { prepare: async () => {}, matcher: () => ({ revision: 1, excludes: () => false }), coordinators: () => new Set<string>() } };
-  const auto = new AutoPromptManager(options); await auto.start();
+  const auto = new AutoPromptManager(options); await auto.start(); await auto.startRuntimeEffects();
   t.after(async () => { await auto.close(); await runs.close(); await rm(directory, { recursive: true, force: true }); });
   return { directory, session, runs, staged, main, auto, options };
 }
@@ -61,7 +63,7 @@ for (const action of ['new', 'resume'] as const) test(`Auto ${action} dispatches
   await until(() => !f.auto.busy());
   assert.deepEqual(await readdir(f.staged.directory), []);
   await f.auto.close();
-  const restarted = new AutoPromptManager(f.options); await restarted.start();
+  const restarted = new AutoPromptManager(f.options); await restarted.start(); await restarted.startRuntimeEffects();
   try { assert.equal((await restarted.submit(input)).runId, run.id); assert.equal(f.runs.list().length, 1); }
   finally { await restarted.close(); }
 });

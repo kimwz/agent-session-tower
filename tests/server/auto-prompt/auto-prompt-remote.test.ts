@@ -1,3 +1,4 @@
+import { externalStorageFixture } from '../remote/external-storage-fixture.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
@@ -41,11 +42,12 @@ async function fixture(t: TestContext) {
     },
     enqueue: async () => { throw new Error('Remote fixtures always create.'); },
   };
-  const manager = new AutoPromptManager({ stateDir: join(directory, 'state'), snapshot: () => structuredClone(current), refresh: async () => { await exclusions.reload(); }, runs,
+  const storage = await externalStorageFixture(t, join(directory, 'state'));
+  const manager = new AutoPromptManager({ repository: storage.autoPrompt, effectGate: storage.effectGate, stateDir: join(directory, 'state'), snapshot: () => structuredClone(current), refresh: async () => { await exclusions.reload(); }, runs,
     detail: async id => { const found = current.sessions.find(item => item.id === id); return found ? { session: found, hasMore: false, messages: [] } : undefined; },
     model: async input => { calls.push(input); return respond(input); },
     remote: { prepare: (paths, options) => exclusions.prepare(paths, options), matcher: () => exclusions.matcher(), coordinators: () => coordinators } });
-  await manager.start();
+  await manager.start(); await manager.startRuntimeEffects();
   t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
   const finished = (id: string) => until(() => { const job = manager.get(id); return job && ['completed', 'error', 'cancelled'].includes(job.status) ? job : undefined; });
   return { directory, open, secret, exclusions, manager, calls, dispatches, finished, coordinators, current, respond: (fn: typeof respond) => { respond = fn; } };

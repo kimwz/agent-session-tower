@@ -1,26 +1,30 @@
 import { admissionUncertain } from '../runs/run-records.js';
 import { TowerError } from '../../shared/errors.js';
 import { subscriptionOnly } from '../runs/subscription.js';
-import { requestedEffort, requestedModel, validEffort, validModelId } from '../providers/models.js';
+import { requestedEffort, requestedModel } from '../providers/models.js';
 import { EventEmitter } from 'node:events';
-import { constants } from 'node:fs';
-import { mkdir, open, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
-import type { Attachment, AutoPromptDecision, AutoPromptJob, AutoPromptInput, AutoPromptRequest, Run, RunOrigin, Session, SessionDetail, Snapshot } from '../../shared/types.js';
-import { AttachmentStore, attachmentMetadata, imagePaths, type StoredAttachment } from '../stores/attachments.js';
-import { writePrivateJson } from '../stores/private-json.js';
+import type { AutoPromptDecision, AutoPromptJob, AutoPromptInput, AutoPromptRequest, Run, RunOrigin, Session, SessionDetail, Snapshot } from '../../shared/types.js';
+import { AttachmentStore, imagePaths, type StoredAttachment } from '../stores/attachments.js';
+import { AutoPromptRepository } from './storage-repository.js';
+import { bootstrapExternal } from '../remote/storage-transfer.js';
+import { canonical, type ExternalChange } from '../remote/storage-rows.js';
+import { validEntry, type Entry } from './storage-codec.js';
 import { RunError, type RunAdmission, type RunManager } from '../runs/manager.js';
 import { isSavedDelegation } from '../runs/saved-state.js';
 import { ownerOrigin, parseRunOrigin } from '../runs/origin.js';
 import { runAutoPromptModel } from './native.js';
 import { readModelSettings, resolveModel } from '../models/settings.js';
-import { masterWorkerModel, pickProblem, type ResolvedModel } from '../../shared/models.js';
+import { masterWorkerModel, type ResolvedModel } from '../../shared/models.js';
 import type { ExclusionMatcher } from '../remote/exclusions.js';
 import { remoteWorkingSnapshot } from '../remote/visibility.js';
 import { directories, eligible, type Directory } from './inventory.js';
 
-interface AutoPromptOptions {
+export interface AutoPromptOptions {
+  repository?: AutoPromptRepository;
+  effectGate?: () => Promise<void>;
   stateDir: string;
   snapshot(): Snapshot;
   detail(id: string): Promise<SessionDetail | undefined>;
@@ -29,12 +33,6 @@ interface AutoPromptOptions {
   model?: typeof runAutoPromptModel;
   /** What a remote controller's request may route into: never an excluded folder, never a coordinator conversation. */
   remote?: { prepare(paths: Iterable<string>, options?: { fresh?: boolean }): Promise<void>; matcher(): ExclusionMatcher; coordinators(): ReadonlySet<string> };
-}
-interface Entry {
-  job: AutoPromptJob; fingerprint: string; staged: Attachment[];
-  /** Present only before an effect or after proven non-admission. */
-  resumable?: true;
-  selection?: { decision: AutoPromptDecision; relation: Relation; expectedNativeId?: string };
 }
 const STORAGE_PAUSED = Symbol('Auto Prompt storage pause');
 type Relation = 'continuation' | 'adjacent' | 'new';
@@ -107,7 +105,12 @@ function attachmentContext(attachments: StoredAttachment[]) {
 
 /** Persists the routing intent separately; only RunManager may submit an actual task. */
 export class AutoPromptManager extends EventEmitter {
-  private readonly path: string;
+  private readonly ordinals = new Map<string, number>();
+  private nextOrdinal = 0;
+  private readonly dirty = new Set<string>();
+  private readonly removed = new Map<string, { entry: Entry; ordinal: number }>();
+  private readonly saved = new Map<string, string>();
+  private effectsStarted = false;
   private readonly attachments: AttachmentStore;
   private readonly entries = new Map<string, Entry>();
   private readonly admissions = new Map<string, { fingerprint: string; promise: Promise<AutoPromptJob> }>();
@@ -124,9 +127,10 @@ export class AutoPromptManager extends EventEmitter {
     this.pump();
   }
   private async storageGate(entry: Entry, signal: AbortSignal): Promise<void> {
+    if (!this.options.effectGate) throw new Error('Auto Prompt effects require the worker effect gate.'); await this.options.effectGate(); await this.options.repository!.gate();
     if (this.storageHeld && !signal.aborted && !this.stopping) {
       entry.resumable = true;
-      await this.persist();
+      await this.persist(entry);
       throw STORAGE_PAUSED;
     }
   }
@@ -137,7 +141,6 @@ export class AutoPromptManager extends EventEmitter {
 
   constructor(private readonly options: AutoPromptOptions) {
     super();
-    this.path = join(options.stateDir, 'auto-prompts.json');
     this.attachments = new AttachmentStore(join(options.stateDir, 'auto-prompt-staging'));
   }
 
@@ -146,30 +149,22 @@ export class AutoPromptManager extends EventEmitter {
     Object.assign(this.options, context);
   }
 
-  async start(): Promise<void> {
+  async load(): Promise<void> {
     if (this.started) return;
-    await mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
-    await this.attachments.start();
-    let file;
-    try { file = await open(this.path, constants.O_RDONLY | constants.O_NOFOLLOW); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    if (file) {
-      try {
-        const info = await file.stat();
-        if (!info.isFile() || info.size > 12_000_000) throw new Error('Saved Auto Prompt history is invalid or too large.');
-        const saved: unknown = JSON.parse(await file.readFile('utf8'));
-        if (!Array.isArray(saved) || saved.length > MAX_HISTORY || saved.some(value => !validEntry(value))) throw new Error('Saved Auto Prompt history is invalid.');
-        await file.chmod(0o600);
-        for (const entry of saved as Entry[]) {
-          if (this.entries.has(entry.job.id)) throw new Error('Saved Auto Prompt IDs are duplicated.');
-          // A malformed origin never reads back as owner work; a missing one stays missing.
-          if (entry.job.delegation !== undefined && !isSavedDelegation(entry.job.delegation)) throw new Error('Saved delegation is invalid.');
-          if (entry.job.origin !== undefined) entry.job.origin = parseRunOrigin(entry.job.origin) ?? { kind: 'unknown' };
-          if (entry.job.untrustedInput !== undefined && entry.job.untrustedInput !== true) entry.job.untrustedInput = true;
-          this.entries.set(entry.job.id, entry);
-        }
-      } finally { await file.close(); }
+    if (!this.options.repository) throw new Error('AutoPromptManager requires its worker SQL repository.');
+    await bootstrapExternal(this.options.repository, this.options.stateDir);
+    for (const { entry, ordinal } of await this.options.repository.load()) {
+      if (!validEntry(entry)) throw new Error('Invalid SQL Auto Prompt entry.');
+      this.entries.set(entry.job.id, entry); this.ordinals.set(entry.job.id, ordinal);
+      this.saved.set(entry.job.id, canonical(entry)); this.nextOrdinal = Math.max(this.nextOrdinal, ordinal + 1);
     }
+    this.started = true;
+  }
+  async start(): Promise<void> { await this.load(); }
+  async startRuntimeEffects(): Promise<void> {
+    if (this.effectsStarted) return;
+    if (!this.options.effectGate) throw new Error('Auto Prompt effects require the worker effect gate.'); await this.options.effectGate(); await this.options.repository!.gate();
+    await this.attachments.start();
     for (const entry of this.entries.values()) {
       if (!TERMINAL.has(entry.job.status)) {
         const run = this.options.runs.list().find(run => run.autoPromptId === entry.job.id);
@@ -180,7 +175,7 @@ export class AutoPromptManager extends EventEmitter {
       await this.cleanup(entry);
     }
     await this.persist();
-    this.started = true;
+    this.effectsStarted = true;
     this.resumeAttachmentCleanup();
     this.pump();
   }
@@ -190,6 +185,7 @@ export class AutoPromptManager extends EventEmitter {
 
   /** `internal` comes from Tower itself (web owner, Slack, triggers); request fields cannot set it. */
   async submit(input: AutoPromptInput, internal: Pick<RunAdmission, 'origin' | 'untrustedInput' | 'unattended' | 'delegation' | 'validate'> = {}): Promise<AutoPromptJob> {
+    await this.options.repository!.gate();
     if (!this.started || this.stopping) throw new RunError('Auto Prompt가 요청을 받지 않고 있습니다.', 'unavailable');
     const origin = internal.origin === undefined ? { kind: 'unknown' as const } : parseRunOrigin(internal.origin);
     if (!origin) throw new RunError('Auto Prompt 요청 출처가 올바르지 않습니다.');
@@ -228,6 +224,7 @@ export class AutoPromptManager extends EventEmitter {
     const matches = (entry: { fingerprint: string }, legacy: boolean) => entry.fingerprint === fingerprint || (legacy && entry.fingerprint === hash(request));
     if ((previous && !matches(previous, previous.job.origin === undefined)) || (admitting && admitting.fingerprint !== fingerprint)) throw new RunError('같은 요청 ID에 다른 지시문이나 출처를 사용할 수 없습니다.', 'conflict');
     if (admitting) return admitting.promise;
+    if (previous?.job.status === 'uncertain') throw new RunError(previous.job.error ?? '이전 요청의 실행 여부가 불확실합니다. 자동으로 다시 제출하지 않습니다.', 'conflict', { disposition: 'uncertain' });
     if (previous) return copy(previous.job);
     if (this.admissions.size + [...this.entries.values()].filter(entry => !TERMINAL.has(entry.job.status)).length >= MAX_PENDING) throw new RunError('Auto Prompt 대기열이 가득 찼습니다. 진행 중인 라우팅을 기다려 주세요.', 'rate-limited');
     const promise = Promise.resolve().then(() => this.admit(input, fingerprint, origin, untrustedInput, unattended, internal)).finally(() => { this.admissions.delete(input.requestId); this.pump(); });
@@ -252,6 +249,7 @@ export class AutoPromptManager extends EventEmitter {
     if (input.cwd) await this.checkDirectory(input.cwd, inventory);
     const router = await resolveModel(this.options.stateDir, 'autoPrompt.router', { provider: input.provider });
     providerReady(snapshot, input.provider, routed(input) ? router : undefined);
+    if (!this.options.effectGate) throw new Error('Missing Auto Prompt effect gate.'); await this.options.effectGate(); await this.options.repository!.gate();
     const prepared = await this.attachments.prepare(input.requestId, { attachments: input.attachments, attachmentIds: input.attachmentIds }, origin.controllerId ?? 'local');
     const now = new Date().toISOString();
     const entry: Entry = { fingerprint, resumable: true, staged: prepared.attachments, job: {
@@ -269,15 +267,16 @@ export class AutoPromptManager extends EventEmitter {
     try {
       if (this.stopping) throw new RunError('Auto Prompt가 종료되고 있습니다.', 'unavailable');
       context.validate?.();
-      this.entries.set(entry.job.id, entry);
+      this.entries.set(entry.job.id, entry); this.ordinals.set(entry.job.id, this.nextOrdinal++); this.dirty.add(entry.job.id);
       this.prune();
-      await this.persist();
+      await this.persist(entry);
     } catch (error) {
-      this.entries.delete(entry.job.id);
+      if (admissionUncertain(error)) { this.storageHeld = true; throw error; }
+      this.entries.delete(entry.job.id); this.dirty.delete(entry.job.id);
       await this.attachments.rollback(prepared.createdIds);
       throw error;
     }
-    try { await this.attachments.retain(entry.staged.map(item => item.id)); }
+    try { await this.options.effectGate!(); await this.options.repository!.gate(); await this.attachments.retain(entry.staged.map(item => item.id)); }
     catch { console.error('Accepted Auto Prompt attachment retention failed; durable job scope protects the files until the next sweep.'); }
     this.emit('change');
     const accepted = copy(entry.job);
@@ -292,8 +291,8 @@ export class AutoPromptManager extends EventEmitter {
     if (!['queued', 'routing'].includes(entry.job.status) && !entry.resumable) throw new RunError('이미 실행 대상으로 전달된 요청입니다. 세션의 작업 중지 기능을 사용하세요.', 'conflict');
     this.update(entry.job, { status: 'cancelled', error: 'Auto Prompt 라우팅을 취소했습니다.' });
     this.controllers.get(id)?.abort();
-    await this.persist();
-    if (!this.controllers.has(id)) { await this.cleanup(entry); await this.persist(); }
+    await this.persist(entry);
+    if (!this.controllers.has(id)) { await this.cleanup(entry); await this.persist(entry); }
     this.emit('change');
     return copy(entry.job);
   }
@@ -308,7 +307,7 @@ export class AutoPromptManager extends EventEmitter {
   }
 
   resumeAttachmentCleanup(): void {
-    if (!this.started || this.stopping || this.attachmentCleanupTimer) return;
+    if (!this.effectsStarted || this.stopping || this.attachmentCleanupTimer) return;
     this.attachmentCleanupPaused = false;
     this.attachmentCleanupTimer = setInterval(() => { void this.cleanupAttachments(); }, 60_000);
     this.attachmentCleanupTimer.unref();
@@ -323,7 +322,8 @@ export class AutoPromptManager extends EventEmitter {
     return pending;
   }
 
-  private sweepAttachments(): Promise<void> {
+  private async sweepAttachments(): Promise<void> {
+    if (!this.options.effectGate) throw new Error('Missing Auto Prompt effect gate.'); await this.options.effectGate(); await this.options.repository!.gate();
     return this.attachments.sweepPending(new Set(), new Set(), { isProtected: (_id, scope) =>
       this.admissions.has(scope) || Boolean(this.entries.get(scope) && (this.entries.get(scope)!.job.status === 'uncertain' || !TERMINAL.has(this.entries.get(scope)!.job.status))) });
   }
@@ -343,7 +343,7 @@ export class AutoPromptManager extends EventEmitter {
   }
 
   private pump(): void {
-    if (this.processing || this.stopping || this.storageHeld) return;
+    if (!this.effectsStarted || this.processing || this.stopping || this.storageHeld) return;
     this.processing = this.drain().finally(() => {
       this.processing = undefined;
       if (!this.stopping && !this.storageHeld && [...this.entries.values()].some(entry => (entry.job.status === 'queued' || entry.resumable === true) && !TERMINAL.has(entry.job.status) && !this.admissions.has(entry.job.id))) this.pump();
@@ -365,18 +365,18 @@ export class AutoPromptManager extends EventEmitter {
         if (admissionUncertain(error)) {
           delete entry.resumable; delete entry.selection;
           this.update(entry.job, { status: 'uncertain', error: errorText(error) });
-          await this.persist(); this.emit('change'); continue;
+          await this.persist(entry); this.emit('change'); continue;
         }
         delete entry.resumable;
         const run = this.options.runs.list().find(run => run.autoPromptId === entry.job.id);
         if (run && !TERMINAL.has(entry.job.status)) this.complete(entry, run);
         else if (entry.job.status !== 'cancelled') this.update(entry.job, { status: 'error', error: errorText(error) });
-        await this.persist();
+        await this.persist(entry);
         this.emit('change');
       } finally {
         this.controllers.delete(entry.job.id);
         if (TERMINAL.has(entry.job.status)) await this.cleanup(entry);
-        await this.persist();
+        await this.persist(entry);
       }
     }
   }
@@ -387,18 +387,20 @@ export class AutoPromptManager extends EventEmitter {
     await this.storageGate(entry, signal); active();
     delete entry.resumable;
     this.update(job, { status: 'routing', stage: job.cwd ? 'session' : 'directory' });
-    await this.persist(); this.emit('change');
+    await this.persist(entry); this.emit('change');
     await this.options.refresh(); active();
     let snapshot = await this.snapshotFor(job.origin); active();
     if (job.origin?.controllerId) this.update(job, { exclusionRevision: this.options.remote!.matcher().revision });
     providerReady(snapshot, job.provider, routed(job) ? routerOf(job) : undefined);
     const inventory = directories(snapshot);
+    await this.storageGate(entry, signal); active();
     const staged = await this.attachments.resolve(job.id, entry.staged); active();
     const request = { prompt: job.prompt, attachments: attachmentContext(staged) };
     const invoke = async (prompt: string, schema: Record<string, unknown>, extra: string) => {
       await this.storageGate(entry, signal); active();
       const input = { ...routerOf(job), ...(job.routerEffort ? { effort: job.routerEffort } : {}), systemPrompt: `${SYSTEM}\n${extra}`, prompt, schema, signal,
         imagePaths: imagePaths(staged) };
+      await this.storageGate(entry, signal); active();
       return this.options.model ? this.options.model(input) : runAutoPromptModel(input, { stateDir: this.options.stateDir });
     };
     let cwd = job.cwd;
@@ -418,7 +420,7 @@ export class AutoPromptManager extends EventEmitter {
     }
     await this.checkDirectory(cwd, inventory); active();
     this.update(job, { cwd, stage: 'session' });
-    await this.persist(); this.emit('change');
+    await this.persist(entry); this.emit('change');
     await this.options.refresh(); active();
     snapshot = await this.snapshotFor(job.origin); active();
     await this.checkDirectory(cwd, directories(snapshot)); active();
@@ -475,7 +477,7 @@ export class AutoPromptManager extends EventEmitter {
       decision = { action: 'create', cwd, reason: `${decision.reason} 요청한 승인 검토 설정을 적용하기 위해 새 세션을 생성합니다.` };
     }
     entry.selection = { decision, relation, ...(expectedNativeId ? { expectedNativeId } : {}) };
-    await this.persist();
+    await this.persist(entry);
     await this.options.refresh(); active();
     // The final choice for a remote request looks at its folder again now, not at an earlier look.
     if (job.origin?.controllerId) { await this.options.remote?.prepare([cwd], { fresh: true }); active(); }
@@ -494,7 +496,7 @@ export class AutoPromptManager extends EventEmitter {
     // This synchronous status transition claims dispatch before any await. A
     // cancellation can no longer race persistence and the run's admission.
     this.update(job, { status: 'dispatching', decision });
-    await this.persist(); this.emit('change');
+    await this.persist(entry); this.emit('change');
     const attachmentIds = entry.staged.map(item => item.id);
     const internal: RunAdmission = { autoPromptId: job.id, validate, origin: job.origin ?? { kind: 'unknown' }, ...(job.delegation ? { delegation: job.delegation } : {}), ...(job.untrustedInput ? { untrustedInput: true } : {}), ...(job.unattended ? { unattended: true } : {}) };
     await this.storageGate(entry, signal); active();
@@ -506,7 +508,7 @@ export class AutoPromptManager extends EventEmitter {
     for (;;) {
       await this.storageGate(entry, signal); active();
       delete entry.resumable;
-      await this.persist();
+      await this.persist(entry);
       await this.storageGate(entry, signal); active();
       validate();
       try { run = await dispatch(); break; }
@@ -515,7 +517,7 @@ export class AutoPromptManager extends EventEmitter {
       }
     }
     this.complete(entry, run);
-    await this.persist(); this.emit('change');
+    await this.persist(entry); this.emit('change');
   }
 
   /**
@@ -550,6 +552,7 @@ export class AutoPromptManager extends EventEmitter {
       const entry = this.entries.get(job.id);
       if (entry) { delete entry.resumable; delete entry.selection; }
     }
+    this.dirty.add(job.id);
     Object.assign(job, patch, { updatedAt: new Date().toISOString() });
   }
   private async checkDirectory(cwd: string, inventory: Directory[]): Promise<void> {
@@ -559,54 +562,33 @@ export class AutoPromptManager extends EventEmitter {
   }
   private async cleanup(entry: Entry): Promise<void> {
     if (entry.job.status === 'uncertain') return;
-    await this.attachments.rollback(entry.staged.map(item => item.id)); entry.staged = [];
+    if (!this.options.effectGate) throw new Error('Auto Prompt effects require the worker effect gate.'); await this.options.effectGate(); await this.options.repository!.gate();
+    await this.attachments.rollback(entry.staged.map(item => item.id)); entry.staged = []; this.dirty.add(entry.job.id);
   }
   private prune(): void {
     for (const [id, entry] of this.entries) {
       if (this.entries.size <= MAX_HISTORY) break;
-      if (entry.job.status !== 'uncertain' && TERMINAL.has(entry.job.status) && !entry.staged.length) this.entries.delete(id);
+      if (entry.job.status !== 'uncertain' && TERMINAL.has(entry.job.status) && !entry.staged.length) { this.removed.set(id, { entry, ordinal: this.ordinals.get(id)! }); this.entries.delete(id); this.dirty.delete(id); }
     }
   }
   /** Saves the current routing state again and reports failure, without cancelling anything. */
   async flush(): Promise<void> { await this.persist(); }
   /** True while an admission or routing pass is underway, including its cleanup. */
   busy(): boolean { return this.admissions.size > 0 || this.controllers.size > 0 || Boolean(this.processing); }
-  private persist(): Promise<void> {
-    const data = JSON.stringify([...this.entries.values()]);
-    const write = this.writes.then(() => writePrivateJson(this.path, data));
-    this.writes = write.catch(() => {});
-    return write;
+  private persist(entry?: Entry): Promise<void> {
+    if (entry) this.dirty.add(entry.job.id);
+    const changes: ExternalChange[] = [...this.dirty].flatMap(id => {
+      const value = this.entries.get(id); if (!value) return [];
+      return [{ ...this.options.repository!.row(value, this.ordinals.get(id)!), previous: this.saved.get(id) ?? null }];
+    });
+    for (const [id, value] of this.removed) if (this.saved.has(id)) changes.push({ ...this.options.repository!.row(value.entry, value.ordinal), previous: this.saved.get(id)! , remove: true });
+    this.dirty.clear(); this.removed.clear();
+    const write = this.writes.then(async () => {
+      // Previous row values are selected at execution, after earlier queued commits.
+      const guarded = changes.map(row => ({ ...row, previous: this.saved.get(row.id) ?? null }));
+      await this.options.repository!.update(guarded);
+      for (const row of guarded) { if ('remove' in row) this.saved.delete(row.id); else this.saved.set(row.id, row.json); }
+    });
+    this.writes = write.catch(() => { this.storageHeld = true; }); return write;
   }
-}
-
-function validEntry(value: unknown): value is Entry {
-  const entry = object(value);
-  const job = object(entry?.job);
-  const selection = object(entry?.selection);
-  const decision = object(selection?.decision);
-  const checkpointValid = entry?.selection === undefined || !!selection && !!decision
-    && ['continuation', 'adjacent', 'new'].includes(String(selection.relation))
-    && (selection.expectedNativeId === undefined || validTarget(selection.expectedNativeId))
-    && typeof decision.cwd === 'string' && decision.cwd === job?.cwd
-    && typeof decision.reason === 'string' && !!decision.reason.trim() && decision.reason.length <= 1500
-    && (decision.action === 'create' && decision.sessionId === undefined
-      || decision.action === 'resume' && validTarget(decision.sessionId) && validTarget(selection.expectedNativeId) && selection.relation !== 'new');
-  return checkpointValid && (entry?.resumable === undefined || entry.resumable === true
-      && !!job && (job.status === 'queued' || job.status === 'routing' || job.status === 'dispatching' && !!selection))
-    && !!job && typeof entry?.fingerprint === 'string' && /^[a-f\d]{64}$/.test(entry.fingerprint)
-    && Array.isArray(entry.staged) && entry.staged.length <= 10 && entry.staged.every(item => attachmentMetadata(item))
-    && typeof job.id === 'string' && UUID.test(job.id) && ['claude', 'codex'].includes(String(job.provider))
-    && (job.sessionMode === undefined || job.sessionMode === 'new')
-    && (job.targetSessionId === undefined || (validTarget(job.targetSessionId) && job.sessionMode === undefined && typeof job.cwd === 'string'))
-    && (job.routingContext === undefined || typeof job.routingContext === 'string' && job.routingContext.length <= 32_000)
-    && (job.newSessionModel === undefined || !pickProblem(job.newSessionModel, job.provider as 'claude' | 'codex'))
-    && (job.model === undefined || validModelId(job.model))
-    && (job.effort === undefined || validEffort(job.effort))
-    && typeof job.prompt === 'string' && job.prompt.length <= 32_000 && typeof job.routerModel === 'string'
-    && (job.routerProvider === undefined || ['claude', 'codex'].includes(String(job.routerProvider))) && (job.routerEffort === undefined || validEffort(job.routerEffort))
-    && typeof job.createdAt === 'string' && typeof job.updatedAt === 'string'
-    && ['queued', 'routing', 'dispatching', 'completed', 'error', 'cancelled', 'uncertain'].includes(String(job.status))
-    && (job.cwd === undefined || typeof job.cwd === 'string' && isAbsolute(job.cwd) && job.cwd.length <= 4096)
-    && (job.codexApprovalsReviewer === undefined || ['user', 'auto_review'].includes(String(job.codexApprovalsReviewer)))
-    && (job.exclusionRevision === undefined || Number.isSafeInteger(job.exclusionRevision));
 }

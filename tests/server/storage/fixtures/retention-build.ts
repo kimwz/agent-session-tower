@@ -7,12 +7,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { storageManifest } from '../../../../server/storage/schema.js';
 import { retentionSchema } from '../../../../server/sessions/retention/storage-schema.js';
 import { triggersSchema } from '../../../../server/triggers/storage-schema.js';
+import { remoteSchema } from '../../../../server/remote/storage-schema.js';
+import { autoPromptSchema } from '../../../../server/auto-prompt/storage-schema.js';
+import { workflowsSchema } from '../../../../server/slack/storage-schema.js';
 import { runsSchema } from '../../../../server/runs/storage-schema.js';
 import { buildIdentityModule, buildIdentityPlugin, STORAGE_BUNDLE_FORMAT, type StorageThreadArtifact } from '../../../../server/storage/thread-bundle.mjs';
 import type * as Parent from './parent.js';
 
 /** Actual A/B domain handlers and captured SDK compiled as future artifact versions; no mocked import support. */
-export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0' | '1.122.0' | '1.123.0' | '1.124.0' | '1.125.0', output?: string, retentionCutover = version === '1.121.0' || version === '1.123.0' || version === '1.125.0') {
+export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0' | '1.122.0' | '1.123.0' | '1.124.0' | '1.125.0', output?: string, retentionCutover = version === '1.121.0' || version === '1.123.0' || version === '1.125.0', externalDomains = false) {
   const directory = output ?? await mkdtemp(join(tmpdir(), 'tower-retention-artifact-'));
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const root = fileURLToPath(new URL('../../../../', import.meta.url));
@@ -56,7 +59,8 @@ export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' 
   }
   const runProfile = version === '1.123.0' || version === '1.125.0' ? { ...runsSchema,cutover: { artifactVersion: '1.123.0',importContract: 1 } } : runsSchema;
   const triggerProfile = version === '1.125.0' ? { ...triggersSchema,cutover: { artifactVersion: '1.125.0',importContract: 1 } } : triggersSchema;
-  const manifest = storageManifest(runsRelease ? [schema,runProfile,...(triggersRelease ? [triggerProfile] : [])] : [schema],version);
+  if (externalDomains && version !== '1.125.0') throw new Error('External offline fixture is a single 1.125.0 artifact, never an actual old A.');
+  const manifest = storageManifest([...(runsRelease ? [schema,runProfile,...(triggersRelease ? [triggerProfile] : [])] : [schema]),...(externalDomains ? [remoteSchema,autoPromptSchema,workflowsSchema] : [])],version);
   if (actualACapture && manifest.digest !== actualACapture.identity.manifestDigest) throw new Error('Actual A122 manifest mismatch.');
   const artifacts: Record<string, StorageThreadArtifact> = {};
   for (const fault of preparation ? ['normal', 'after-native-hold'] : ['normal', 'before', 'after', 'after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss', ...(runsRelease ? ['after-unsent-compensation'] : []), 'refuse-once', 'corrupt', 'io']) {
@@ -67,11 +71,17 @@ import { runStorageThread } from './server/storage/thread/runtime.js';
 import { retentionDomainFor } from './server/sessions/retention/storage-commands.js';
 import { retentionSchema } from './server/sessions/retention/storage-schema.js';
 ${runsRelease ? `import { runsDomainFor } from './server/runs/storage-commands.js';
+import { remoteSchema } from '../../../../server/remote/storage-schema.js';
+import { autoPromptSchema } from '../../../../server/auto-prompt/storage-schema.js';
+import { workflowsSchema } from '../../../../server/slack/storage-schema.js';
 import { runsSchema } from './server/runs/storage-schema.js';
 const runsDomain = runsDomainFor(${version === '1.123.0' || version === '1.125.0' ? `{ ...runsSchema,cutover: { artifactVersion: '1.123.0',importContract: 1 } }` : 'runsSchema'});` : ''}
 ${triggersRelease ? `import { triggersDomainFor } from './server/triggers/storage-commands.js';
 import { triggersSchema } from './server/triggers/storage-schema.js';
 const triggersDomain = triggersDomainFor(${version === '1.125.0' ? `{ ...triggersSchema,cutover: { artifactVersion: '1.125.0',importContract: 1 } }` : 'triggersSchema'});` : ''}
+${externalDomains ? `import { remoteDomain } from './server/remote/storage-commands.js';
+import { autoPromptDomain } from './server/auto-prompt/storage-commands.js';
+import { workflowsDomain } from './server/slack/storage-commands.js';` : ''}
 const schema = ${retentionCutover ? `{ ...retentionSchema, cutover: { artifactVersion: '1.121.0', importContract: 1 } }` : 'retentionSchema'};
 ${!['before', 'after'].includes(fault) ? '' : `let commitId = -1;
 parentPort.on('message', message => { if (message.op === 'write' && message.command === 'commit') { commitId = message.id; ${fault === 'before' ? 'process.exit(9);' : ''} } });
@@ -121,7 +131,7 @@ domain.commands.head = { ...head, run(context, payload) {
   try { db.prepare('SELECT * FROM damage').all(); } finally { db.close(); }
   return head.run(context, payload);
 } };` : ''}
-runStorageThread([domain${runsRelease ? ', runsDomain' : ''}${triggersRelease ? ', triggersDomain' : ''}]);`;
+runStorageThread([domain${runsRelease ? ', runsDomain' : ''}${triggersRelease ? ', triggersDomain' : ''}${externalDomains ? ', remoteDomain, autoPromptDomain, workflowsDomain' : ''}]);`;
     const result = await build({ stdin: { contents: entry, resolveDir: root, sourcefile: 'retention-fixture-thread.ts', loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'cjs', target: 'node22', plugins: [versionPlugin], logLevel: 'silent' });
     const body = result.outputFiles[0].text, sourceHash = createHash('sha256').update(body).digest('hex');
     artifacts[fault] = { format: STORAGE_BUNDLE_FORMAT, sourceHash, source: `var __TOWER_STORAGE_SOURCE_HASH__ = "${sourceHash}";\n${body}` };
