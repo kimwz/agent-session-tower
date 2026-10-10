@@ -172,6 +172,12 @@ if (process.env.TOWER_FIXTURE_STORAGE_RETRY === 'new-hold') {
 // is replaced by this test's compile profile, and the second real start waits on an owned file barrier.
 if (process.env.TOWER_FIXTURE_TRIGGER_RETRY === '1') {
   const state = process.argv.at(-1)!;
+  const listAutoPrompts = AutoPromptManager.prototype.list;
+  AutoPromptManager.prototype.list = function () {
+    const jobs = listAutoPrompts.call(this);
+    writeFileSync(join(state, 'fixture-trigger-ap-diagnostic.json'), JSON.stringify({ jobs }), { mode: 0o600 });
+    return jobs;
+  };
   const countsPath = join(state, 'fixture-trigger-counts.json');
   const bump = (key: 'start' | 'review' | 'apply') => {
     const counts = JSON.parse(readFileSync(countsPath, 'utf8')); counts[key]++;

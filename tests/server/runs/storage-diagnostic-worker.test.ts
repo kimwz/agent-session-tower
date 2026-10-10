@@ -39,6 +39,7 @@ import { RemoteRepository } from '../../../server/remote/storage-repository.js';
 import { AutoPromptRepository } from '../../../server/auto-prompt/storage-repository.js';
 
 import { WorkflowRepository } from '../../../server/slack/storage-repository.js';
+import { workflowRows } from '../../../server/slack/storage-codec.js';
 
 // Hosted disposable jobs only: this starts the actual product worker and its actual SQLite memory preflight,
 // with no native providers, no copied credentials, and only the direct child owned by this fixture.
@@ -242,7 +243,10 @@ async function prepareExternalAuthorities(root: string, stateDir: string): Promi
     await new PermissionsRepository(client).importPrepared({ version: 1, rules: [], requests: [], codex: [] }, hash, 'fixture-permissions', verify);
     await new RemoteRepository(client).importPrepared([], hash, 'fixture-remote', verify);
     await new AutoPromptRepository(client).importPrepared([], hash, 'fixture-auto-prompts', verify);
-    await new WorkflowRepository(client).importPrepared([], hash, 'fixture-workflows', verify);
+    await new WorkflowRepository(client).importPrepared([
+      ...workflowRows({ rules: [], workflows: [] }, 'slack'),
+      ...workflowRows({ rules: [], workflows: [] }, 'github'),
+    ], hash, 'fixture-workflows', verify);
     const after = (await client.inspect()).authority;
     assert.deepEqual(after.filter(row => !['permissions', 'remote', 'auto-prompt', 'automation-workflows'].includes(row.domain)), before);
     assert.deepEqual(after.map(row => row.domain).sort(), ['auto-prompt', 'automation-workflows', 'permissions', 'remote']);
@@ -1232,9 +1236,21 @@ test('actual trigger startup retry preserves session reads and holds permission 
   assert.equal(history.error, undefined); assert.equal((history.result as { messages: { text: string }[] }).messages[0].text, 'Use the restored trigger instructions.');
   for (;;) {
     const observed = await counts();
+    let rpcError: string | undefined;
+    try { reply = await live.call('snapshot'); }
+    catch (error) { rpcError = String(error); }
+    const diagnostic = async () => {
+      let autoPrompt: unknown;
+      try { autoPrompt = JSON.parse(await readFile(join(state, 'fixture-trigger-ap-diagnostic.json'), 'utf8')); }
+      catch (error) { autoPrompt = { readError: String(error) }; }
+      return JSON.stringify({ counts: observed, rpcError, instance: reply?.instance, storage: reply?.snapshot?.storage,
+        autoPrompts: reply?.snapshot?.autoPrompts, fixtureAutoPrompt: autoPrompt, stderr: live.stderr() });
+    };
+    if (live.child.exitCode !== null) assert.fail(`restored review worker exited (${live.child.exitCode}): ${await diagnostic()}`);
+    if (Date.now() > deadline) assert.fail(`restored review did not finish: ${await diagnostic()}`);
+    if (rpcError) assert.fail(`restored review snapshot failed: ${await diagnostic()}`);
+    assert.equal(reply?.instance, instance, 'final review observation stays on the same worker');
     if (observed.apply > 0) { assert.equal(observed.review, 1); assert.equal(observed.model, 1); assert.equal(observed.apply, 1); assert.equal(observed.settled, true); break; }
-    assert.equal(live.child.exitCode, null, live.stderr());
-    if (Date.now() > deadline) assert.fail(`restored review did not finish: ${JSON.stringify(observed)} ${live.stderr()}`);
     await new Promise(resolve => setTimeout(resolve, 25));
   }
   const prompt = JSON.parse(await readFile(join(state, 'fixture-review-prompt.json'), 'utf8'));

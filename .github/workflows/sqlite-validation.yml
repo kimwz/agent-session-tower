@@ -67,7 +67,7 @@ jobs:
           files=()
           while IFS= read -r file; do files+=("$file"); done < "$report/test-files.txt"
           printf '%s\n' diagnostic-single-repro > "$report/stage.txt"
-          node --import tsx --test --test-reporter=tap --test-name-pattern='^normal boot holds cold journal malformed and repeated failed retry in the same actual worker$' tests/server/runs/storage-diagnostic-worker.test.ts | tee "$report/diagnostic-single-repro.log"
+          node --import tsx --test --test-reporter=tap --test-name-pattern='^actual trigger startup retry preserves session reads and holds permission review through restored settle on the same worker$' tests/server/runs/storage-diagnostic-worker.test.ts | tee "$report/diagnostic-single-repro.log"
           printf '%s\n' fast-contracts > "$report/stage.txt"
           node --import tsx --test --test-reporter=tap "${files[@]}"
           printf '0\n' > "$report/suite-exit.txt"
