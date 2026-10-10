@@ -1229,7 +1229,13 @@ test('actual trigger startup retry preserves session reads and holds permission 
   assert.equal(barrier.snapshot?.storage?.sessionsAvailable, true);
   assert.deepEqual(await counts(), { start: 2, review: 0, model: 0, apply: 0, settled: false }, 'storage resume cannot start review/model/apply before restore');
   await writeFile(join(state, 'fixture-trigger-release'), 'perform actual restore and settle', { mode: 0o600 });
-  reply = await waitForStorage(live.call, true, deadline, live);
+  try { reply = await waitForStorage(live.call, true, deadline, live); }
+  catch (error) {
+    let permission: unknown;
+    try { permission = JSON.parse(await readFile(join(state, 'fixture-trigger-permission-diagnostic.json'), 'utf8')); }
+    catch (readError) { permission = { readError: String(readError) }; }
+    assert.fail(`${error instanceof Error ? error.stack ?? String(error) : String(error)} same-child restore boundary: ${JSON.stringify({ instance, storage: barrier.snapshot?.storage, counts: await counts(), permission })}`);
+  }
   assert.equal(reply.instance, instance); assert.equal(reply.snapshot?.storage?.state, 'ready');
   assert.equal(reply.snapshot?.storage?.sessionsAvailable, true); assert.equal(reply.snapshot?.storage?.admissionOpen, true);
   const history = await live.call('sessionHistory', ['fixture-trigger-review']);

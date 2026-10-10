@@ -63,6 +63,8 @@ test('a snapshot holds the rows still in the WAL, is owner-only, checked and des
 test('adopting a snapshot records the barrier first, preserves the originals, and holds every scope until the owner reconciles it by name', async t => {
   const { dir, context, known, snapshotId, liveSha } = await historyAfterSnapshot(t);
   const barrier = await adoptSnapshot(dir, { snapshotId, reason: 'fixture corruption', context, known });
+  assert.deepEqual(barrier.source.known, { schema: known.schema.map(({ scope, version }) => ({ scope, version })), authority: known.authority.map(({ domain, authority, generation }) => ({ domain, authority, generation })), ownerEpoch: known.ownerEpoch });
+  assert.equal((await readRecoveryBarrier(dir)).state, 'present');
   assert.deepEqual(barrier.recordedBy, context.identity, 'recorded by the trusted build that ran it');
   assert.equal(barrier.state, 'activated');
   assert.equal(barrier.snapshot.id, snapshotId);

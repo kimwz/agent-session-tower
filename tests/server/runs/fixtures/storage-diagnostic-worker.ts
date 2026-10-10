@@ -203,9 +203,42 @@ if (process.env.TOWER_FIXTURE_TRIGGER_RETRY === '1') {
   const permissionDiagnosticPath = join(state, 'fixture-trigger-permission-diagnostic.json');
   const permissionEvents: unknown[] = [];
   const recordPermission = (service: PermissionService, boundary: string, result?: unknown) => {
-    const overview = service.overview();
-    permissionEvents.push({ boundary, result, autoReview: overview.autoReview, requests: overview.requests });
-    writeFileSync(permissionDiagnosticPath, JSON.stringify(permissionEvents), { mode: 0o600 });
+    // Fixture-only field observation; never load/head/gate or change product state.
+    if (permissionEvents.length >= 64) return;
+    try {
+      const current = service as unknown as { closed: boolean; storagePaused: boolean; options: { repository?: {
+        loadedEpoch?: number; loaded?: { revision: number | null; authority?: unknown };
+        storage: { status(): { ownerEpoch?: number; state: string } }; effectsAvailable(): boolean;
+      } } };
+      const repository = current.options.repository, status = repository?.storage.status();
+      const overview = service.overview();
+      permissionEvents.push({ boundary, result, closed: current.closed, storagePaused: current.storagePaused,
+        loadedEpoch: repository?.loadedEpoch ?? null, statusOwnerEpoch: status?.ownerEpoch ?? null,
+        loadedRevision: repository?.loaded?.revision ?? null, loadedHead: repository?.loaded ?? null,
+        storageState: status?.state ?? null, repositoryEffectsAvailable: repository?.effectsAvailable() ?? null,
+        autoReview: overview.autoReview, requests: overview.requests });
+      writeFileSync(permissionDiagnosticPath, JSON.stringify(permissionEvents), { mode: 0o600 });
+    } catch { /* Observation cannot change the original return/throw contract. */ }
+  };
+  const observeFailure = (error: unknown) => error instanceof Error
+    ? { name: error.name, message: error.message, stack: error.stack } : { thrown: String(error) };
+  for (const method of ['pauseForStorage', 'resume'] as const) {
+    const original = PermissionService.prototype[method];
+    PermissionService.prototype[method] = function () {
+      recordPermission(this, `${method}.before`);
+      try { const result = original.call(this); recordPermission(this, `${method}.after`); return result; }
+      catch (error) { recordPermission(this, `${method}.failed`, observeFailure(error)); throw error; }
+    };
+  }
+  const bind = PermissionService.prototype.bindAfterStorageRetry;
+  PermissionService.prototype.bindAfterStorageRetry = function () {
+    recordPermission(this, 'bindAfterStorageRetry.before');
+    try {
+      const result = bind.call(this);
+      void result.then(() => recordPermission(this, 'bindAfterStorageRetry.after'),
+        error => recordPermission(this, 'bindAfterStorageRetry.failed', observeFailure(error)));
+      return result;
+    } catch (error) { recordPermission(this, 'bindAfterStorageRetry.failed', observeFailure(error)); throw error; }
   };
   const nextReview = PermissionService.prototype.nextReview;
   PermissionService.prototype.nextReview = function () {
@@ -227,7 +260,15 @@ if (process.env.TOWER_FIXTURE_TRIGGER_RETRY === '1') {
     recordPermission(this, 'start.requested', requested);
   };
   const review = PermissionService.prototype.startReview;
-  PermissionService.prototype.startReview = function (id) { bump('review'); return review.call(this, id); };
+  PermissionService.prototype.startReview = function (id) {
+    bump('review'); recordPermission(this, 'startReview.before', { id });
+    try {
+      const result = review.call(this, id);
+      void result.then(value => recordPermission(this, 'startReview.after', { id, value }),
+        error => recordPermission(this, 'startReview.failed', { id, ...observeFailure(error) }));
+      return result;
+    } catch (error) { recordPermission(this, 'startReview.failed', { id, ...observeFailure(error) }); throw error; }
+  };
   const apply = PermissionService.prototype.applyReview;
   PermissionService.prototype.applyReview = function (id, result) { bump('apply'); return apply.call(this, id, result); };
   const start = TriggerService.prototype.start;

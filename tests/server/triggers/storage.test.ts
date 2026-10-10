@@ -20,8 +20,8 @@ import { retentionBootstrap } from '../../../server/sessions/retention/storage-t
 import { bootstrapTriggers, exportTriggers, importTriggers, restoreTriggers } from '../../../server/triggers/storage-transfer.js';
 import { TriggerStore } from '../../../server/triggers/store.js';
 import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
-import { writeRows, empty, pruneState, serializeState, type EngineState } from '../../../server/triggers/state.js';
-import { ACCEPT_TRIGGER_BYTES, MAX_TRIGGER_BYTES, changesOf, documentsHash, logicalBytes, rowsOf, stateOf } from '../../../server/triggers/storage-codec.js';
+import { writeRows, empty, parseState, pruneState, serializeState, type EngineState } from '../../../server/triggers/state.js';
+import { ACCEPT_TRIGGER_BYTES, MAX_TRIGGER_BYTES, changesOf, documentsHash, logicalBytes, requestHash, rowsOf, stateOf } from '../../../server/triggers/storage-codec.js';
 import { collectTriggers } from '../../../server/backup/payload.js';
 import { keepBefore, takeWorkerRestore, writePendingWorker } from '../../../server/backup/restore-files.js';
 import { MAX_AUDIT } from '../../../server/triggers/limits.js';
@@ -360,6 +360,8 @@ test('raw import keeps MAX_AUDIT and larger audit bytes and ordering during old 
     assert.deepEqual(await readFile(path),source); assert.deepEqual(await readFile(join(sealed.directory,'trigger-engine.json')),source);
     const manifest = JSON.parse(await readFile(join(sealed.directory,'manifest.json'),'utf8'));
     assert.equal(manifest.files['trigger-engine.json'].sha256,triggerHash(source)); assert.equal(manifest.files['trigger-engine.json'].bytes,source.length);
+    assert.equal(manifest.warningTimeBasis,'fixed-migration-epoch-unknown-source-time');
+    assert.ok(manifest.sourceWarnings.some((entry: { action: string; at: string }) => entry.action === 'disable' && entry.at === '1970-01-01T00:00:00.000Z'));
     const imported = await f.repository.exportCurrent(); assert.equal(imported.sha256,documentsHash(imported.documents)); assert.deepEqual(imported.documents.audit,state.audit);
     assert.equal(JSON.stringify(imported.documents.audit),JSON.stringify(raw.audit)); assert.equal(imported.documents.triggers[0].enabled,false);
     const db = new DatabaseSync(join(f.stateDir,'state.sqlite'),{ readOnly: true });
@@ -547,9 +549,9 @@ test('actualStorage typed settings/cursor/once batches preserve unrelated rows, 
   assert.equal(store.state.events[0],event,'settings do not clone event input');
   assert.equal(store.state.tombstones[0],tombstone,'settings do not clone historical definitions');
   await store.mutate({ type: 'cursor',id },draft => { draft.cursors[id].lastSlot = 123; },'settle');
-  await store.mutate({ type: 'fire',id },draft => { consumeOnce(draft,draft.triggers[0],'event',now); },'settle');
+  await store.mutate({ type: 'fire',id },draft => { consumeOnce(draft,draft.triggers[0],'20000000-0000-4000-8000-000000000002',now); },'settle');
   const saved = await f.repository.exportCurrent();
-  assert.equal(saved.documents.onceConsumed[id].eventId,'event');
+  assert.equal(saved.documents.onceConsumed[id].eventId,'20000000-0000-4000-8000-000000000002');
   assert.deepEqual(saved.documents.onceConsumed.deleted,state.onceConsumed.deleted);
   assert.deepEqual(saved.documents.secretGrants,baseline.documents.secretGrants);
   assert.equal(saved.documents.settings.maxConcurrentRuns,3);
@@ -596,6 +598,8 @@ test('actualStorage eventclaimed/runcommit lost reply refreshes the event revisi
     await client.reopen(); await client.prepare({ allowMigration: false });
     assert.equal(await runs.resolvePending(),fault === 'after' ? 'committed' : 'not-committed');
     assert.equal((await client.receipt('r6-new-id-begin')).found,false);
+    const fixedReceipt = await client.receipt('r6-fixed-admission-commit');
+    assert.equal(fixedReceipt.found,fault === 'after');
     if (fault === 'after') {
       await store.mutate({ type: 'events',ids: [event.id] },draft => { if (draft.events[0].status === 'claimed') draft.events[0].status = 'uncertain'; },'settle');
       assert.equal(store.state.events[0].status,'running','SQL revision refresh precedes stale outcome mutation');
@@ -606,18 +610,22 @@ test('actualStorage eventclaimed/runcommit lost reply refreshes the event revisi
     // Assert the pending recovery projection; the fault fixture deliberately loses every subsequent commit too.
     assert.equal(reopened.state.events[0].status,fault === 'after' ? 'running' : 'uncertain');
     if (fault === 'before') await assert.rejects(reopened.flush(),/Cannot save triggers/);
+    await client.reopen(); await client.prepare({ allowMigration: false });
     assert.equal(effects,0); assert.equal((await client.receipt('r6-fixed-admission-commit')).found,fault === 'after');
+    assert.deepEqual(await client.receipt('r6-fixed-admission-commit'),fixedReceipt,'explicit SDK reopen only resolves the exact receipt, without replay');
+    assert.equal((await client.receipt('r6-new-id-begin')).found,false);
   }
 });
 
-test('raw first-source warnings commit with the import receipt and retain exactly one identical audit across two SQL reopens', async t => {
+test('raw first-source warnings are sealed with import authority while original audit and consumption survive two SQL reopens', async t => {
   for (const warning of ['older-marker','missing-ledger'] as const) {
     const f = await actualStorage(t), state = empty();
     state.triggers = [definition()]; state.cursors[id] = { anchorAt: 1 };
     if (warning === 'missing-ledger') {
       state.triggers[0].enabled = true;
-      state.triggers[0].consumed = { at: '2026-10-02T00:00:00Z',eventId: 'consumed-event' };
+      state.triggers[0].consumed = { at: '2026-10-02T00:00:00Z',eventId: '20000000-0000-4000-8000-000000000004' };
     }
+    state.audit = documents().audit;
     const source = JSON.parse(serializeState(state));
     if (warning === 'older-marker') source.triggers[0].onceSchedule = { at: '2026-12-01T00:00:00.000Z',enabled: true,revision: 1 };
     else delete source.onceConsumed;
@@ -627,21 +635,46 @@ test('raw first-source warnings commit with the import receipt and retain exactl
       preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.b.bundle() }) } });
     const parent = join(f.stateDir,'triggers-storage-migrations'); await mkdir(parent,{ mode: 0o700 });
     const commandId = `r6-raw-${warning}`;
-    const sealed = await importTriggers({ repository: f.repository,stateDir: f.stateDir,evidenceParent: parent,commandId,update: await update(),now });
+    const sealed = await importTriggers({ repository: f.repository,stateDir: f.stateDir,evidenceParent: parent,commandId,update: await update(),now: () => { throw new Error('raw import must not read execution clock'); } });
     const imported = await f.repository.exportCurrent();
     const match = (entry: EngineState['audit'][number]) => warning === 'older-marker'
       ? entry.summary.includes('changed by an older engine') : entry.summary.includes('ledger was absent');
-    const audits = imported.documents.audit.filter(match);
-    assert.equal(audits.length,1,'the genuine raw source fact is already durable at first import');
-    assert.equal(audits[0].at,new Date(now()).toISOString());
-    assert.equal((await f.client.receipt(`${commandId}-commit`)).found,true);
-    assert.equal(imported.head.revision,1,'warning and import share one receipt transaction');
+    assert.deepEqual(imported.documents.audit,state.audit,'raw import preserves every original audit entry and its order');
+    const receipt = await f.client.receipt(`${commandId}-commit`);
+    assert.equal(receipt.found,true);
+    if (!receipt.found) assert.fail('missing import receipt');
+    assert.equal(receipt.receipt.scope,'triggers'); assert.equal(receipt.receipt.command,'commit');
+    assert.equal(receipt.receipt.result.state,'included');
+    if (receipt.receipt.result.state !== 'included') assert.fail('import receipt result omitted');
+    assert.deepEqual(receipt.receipt.result.value,{
+      revision: 1,generation: imported.head.authority!.generation,mode: 'import',
+      requestSha256: requestHash('import',rowsOf(imported.documents)),intentSha256: f.repository.lastIntent!.sha256,documentsSha256: documentsHash(imported.documents),
+    });
+    assert.equal(imported.head.revision,1,'source evidence and authority share the first receipt transaction');
     assert.equal(imported.documents.triggers[0].enabled,warning === 'missing-ledger','first-source warning creation does not reconcile execution');
-    assert.deepEqual(imported.documents.onceConsumed,{},'snapshot recovery still belongs to startup');
+    const ledger = warning === 'missing-ledger' ? { [id]: state.triggers[0].consumed! } : {};
+    assert.deepEqual(imported.documents.onceConsumed,ledger,'retained consumption is recovered during raw import');
     assert.deepEqual(await readFile(join(sealed.directory,'trigger-engine.json')),bytes);
-    const manifest = JSON.parse(await readFile(join(sealed.directory,'manifest.json'),'utf8'));
+    const manifestBytes = await readFile(join(sealed.directory,'manifest.json'));
+    const manifest = JSON.parse(manifestBytes.toString('utf8'));
+    assert.equal(triggerHash(manifestBytes),sealed.manifestSha256);
+    assert.equal(imported.head.authority!.manifestSha256,sealed.manifestSha256);
+    assert.equal(imported.head.authority!.authority,'database');
+    assert.equal(manifest.kind,'raw-import'); assert.equal(manifest.domain,'triggers');
+    assert.deepEqual(manifest.build,f.client.context!.identity);
+    assert.equal(manifest.files['trigger-engine.json'].bytes,bytes.length);
     assert.equal(manifest.files['trigger-engine.json'].sha256,triggerHash(bytes));
     assert.equal(manifest.canonicalSha256,documentsHash(imported.documents));
+    assert.equal(manifest.warningTimeBasis,'fixed-migration-epoch-unknown-source-time');
+    // SOURCEVALID accepts seal-only warnings to preserve the original SQL audit exactly.
+    const warnings: EngineState['audit'] = manifest.sourceWarnings;
+    assert.equal(warnings.length,1); assert.ok(match(warnings[0]));
+    assert.match(warnings[0].id,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.equal(warnings[0].at,'1970-01-01T00:00:00.000Z');
+    assert.deepEqual(warnings[0].actor,{ kind: 'system',via: 'migration' });
+    assert.equal(warnings[0].triggerId,id); assert.equal(warnings[0].triggerName,state.triggers[0].name);
+    assert.equal(warnings[0].action,warning === 'older-marker' ? 'disable' : 'consume');
+    if (warning === 'missing-ledger') assert.match(warnings[0].summary,/Deleted IDs beyond legacy retention cannot be recovered/);
     const bootstrapOnlyAuthority = async () => { throw new Error('prior authority must not evaluate raw source or update'); };
     await f.client.close();
     for (let reopen = 0; reopen < 2; reopen++) {
@@ -651,13 +684,16 @@ test('raw first-source warnings commit with the import receipt and retain exactl
       await store.load(loaded => TriggerDispatch.recoverLoaded(loaded,{ runs: () => [],getAutoPrompt: () => undefined }));
       await store.flush();
       const durable = (await repository.exportCurrent()).documents;
-      assert.deepEqual(durable.audit.filter(match),audits,'same warning ID/time/bytes, exactly once after every reopen');
+      assert.deepEqual(durable.audit,state.audit,'every original audit survives startup and reopen');
+      assert.deepEqual(await readFile(join(sealed.directory,'manifest.json')),manifestBytes,'same warning identity/time/hash and manifest bytes after every reopen');
+      assert.deepEqual(await readFile(join(sealed.directory,'trigger-engine.json')),bytes);
+      assert.equal((await repository.head()).authority!.manifestSha256,sealed.manifestSha256);
       assert.equal(durable.triggers[0].enabled,false);
-      if (warning === 'missing-ledger') assert.equal(durable.onceConsumed[id].eventId,'consumed-event');
+      assert.deepEqual(durable.onceConsumed,ledger,'once ledger survives without replay');
       await assert.rejects(importTriggers({ repository,stateDir: f.stateDir,evidenceParent: parent,commandId,
         update: {} as never,now: () => { throw new Error('reimport must not generate a new warning'); } }),/authority exists/);
       assert.deepEqual(await readFile(path),bytes);
-      assert.equal((await client.receipt(`${commandId}-commit`)).found,true);
+      assert.deepEqual(await client.receipt(`${commandId}-commit`),receipt,'exact original import receipt survives without replay');
       await client.close();
     }
   }
@@ -757,4 +793,20 @@ test('owner settings restore declares accepted additions and absent deletions wh
   assert.deepEqual(saved.documents.onceConsumed,{ incoming: { at: '2026-10-02T00:00:00Z' },deleted: { at: '2026-10-01T00:00:00Z' } });
   assert.deepEqual(saved.documents.fired,{ incoming: '2026-10-02T00:00:00Z',retained: '2026-10-01T00:00:00Z' });
   assert.deepEqual(store.state,saved.documents,'only the successful SQL batch becomes local state');
+});
+
+
+test('first source recovers retained once consumption and seals warnings separately without trimming audit or reading clock', () => {
+  const state = empty(), trigger = definition();
+  trigger.consumed = { at: '2026-10-01T00:00:00.000Z', eventId: '20000000-0000-4000-8000-000000000003' };
+  state.triggers = [trigger];
+  state.audit = Array.from({ length: MAX_AUDIT + 1 }, (_, n) => ({ id: `retained-${n}`, at: trigger.consumed!.at, actor: { kind: 'owner' as const, via: 'ui' as const }, action: 'create' as const, triggerId: id, triggerName: trigger.name, summary: String(n) }));
+  const raw = JSON.parse(serializeState(state)); delete raw.onceConsumed;
+  const warnings: EngineState['audit'] = [];
+  const imported = parseState(raw, () => { throw new Error('execution clock forbidden'); }, false, true, warnings)!;
+  assert.deepEqual(imported.audit, state.audit);
+  assert.deepEqual(imported.onceConsumed[id], trigger.consumed);
+  assert.equal(warnings.length, 1); assert.equal(warnings[0].action, 'consume');
+  assert.equal(warnings[0].at, '1970-01-01T00:00:00.000Z');
+  assert.match(warnings[0].summary, /Deleted IDs beyond legacy retention cannot be recovered/);
 });
