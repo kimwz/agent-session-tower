@@ -1,9 +1,8 @@
+import { actualStorage } from './actual-storage-fixture.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import fsPromises from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { syncBuiltinESMExports } from 'node:module';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -41,6 +40,7 @@ async function golden(name: string, actual: string): Promise<void> {
 
 async function engine(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-engine-format-'));
+  const sql = await actualStorage(t, directory);
   const project = join(directory, 'project');
   await mkdir(project);
   const clock = { now: start };
@@ -61,7 +61,11 @@ async function engine(t: TestContext) {
   };
   const services: TriggerService[] = [];
   const open = async () => {
-    const service = new TriggerService({ stateDir: directory, executor, now: () => clock.now, tickMs: 3_600_000 });
+    const service = new TriggerService({ stateDir: directory, storage: sql.client, executor, now: () => clock.now, tickMs: 3_600_000 });
+    await sql.bootstrap(() => clock.now).catch(async error => {
+      // A failed first import has no authority: the real owner load below must reject and hold it.
+      assert.equal(await sql.repository.databaseAuthority(), false, String(error));
+    });
     await service.start();
     services.push(service);
     return service;
@@ -69,11 +73,11 @@ async function engine(t: TestContext) {
   t.after(async () => {
     for (const service of services) service.close();
     await Promise.allSettled(services.map(service => service.settle()));
-    await rm(directory, { recursive: true, force: true });
+    await sql.client.close(); await rm(directory, { recursive: true, force: true });
   });
   const finish = () => { for (const run of runs) if (run.status === 'running') run.status = 'completed'; };
-  const file = () => readFile(join(directory, 'trigger-engine.json'), 'utf8');
-  return { directory, project, clock, runs, open, finish, file };
+  const file = () => sql.text();
+  return { directory, sql, project, clock, runs, open, finish, file };
 }
 
 const task = (project: string) => ({ kind: 'task' as const, instructions: 'Summarize open issues', provider: 'codex' as const, approvals: 'auto' as const, target: { node: 'local' as const, mode: 'folder' as const, cwd: project } });
@@ -138,7 +142,8 @@ async function operations(t: TestContext, f: Awaited<ReturnType<typeof engine>>)
 test('the saved file after a fixed sequence of operations is byte-identical', async t => {
   const f = await engine(t);
   const { port } = await operations(t, f);
-  assert.equal((await stat(join(f.directory, 'trigger-engine.json'))).mode & 0o777, 0o600);
+  const exported = await f.sql.exportLegacy();
+  assert.equal((await stat(exported)).mode & 0o777, 0o600);
   await golden('engine-after-operations.json', `${normalized(await f.file(), port, f.directory)}\n`);
 });
 
@@ -166,9 +171,11 @@ test('the saved file stays readable by a 1.105.0 engine', async () => {
 /** Loads a saved file in a fresh engine, makes its first commit, and answers the engine and the file it wrote. */
 async function load(t: TestContext, saved: unknown) {
   const f = await engine(t);
-  await writeFile(join(f.directory, 'trigger-engine.json'), JSON.stringify(saved), { mode: 0o600 });
+  await f.sql.raw(JSON.stringify(saved));
+  const source = await readFile(join(f.directory, 'trigger-engine.json'));
   const service = await f.open();
   await service.flush();
+  assert.deepEqual(await readFile(join(f.directory, 'trigger-engine.json')), source, 'first import and current SQL writes preserve sealed raw input');
   return { f, service, written: JSON.parse(await f.file()) };
 }
 
@@ -211,7 +218,7 @@ test('wrong shapes and parse failures preserve state and hold startup', async t 
   const legacy = await goldenState();
   for (const broken of [{ ...legacy, version: 2 }, { ...legacy, cursors: [] }, { ...legacy, triggers: [{ id: 'x' }] }, { ...legacy, events: [{ id: 1 }] }, ...['triggers','revisions','tombstones','cursors','events','fired','audit','trustedFolders','recentFires','secretGrants','onceConsumed'].flatMap(key => [null, 'broken', 1].map(value => ({ ...legacy, [key]: value }))), ...[{ triggers: {} }, { tombstones: {} }, { events: {} }, { audit: {} }, { trustedFolders: {} }, { recentFires: {} }, { revisions: [] }, { fired: [] }, { secretGrants: [] }, { onceConsumed: [] }, { trustedFolders: [1] }, { recentFires: [null] }, { audit: [null] }, { fired: { x: 1 } }, { secretGrants: { x: [1] } }].map(fields => ({ ...legacy, ...fields }))]) {
     const f = await engine(t);
-    await writeFile(join(f.directory, 'trigger-engine.json'), JSON.stringify(broken), { mode: 0o600 });
+    await f.sql.raw(JSON.stringify(broken));
     const original = await readFile(join(f.directory,'trigger-engine.json'));
     await assert.rejects(f.open(),{ kind: 'unavailable' });
     assert.deepEqual(await readFile(join(f.directory,'trigger-engine.json')),original);
@@ -226,23 +233,18 @@ test('a failed write, a full state and a locked state behave as before', async t
   const service = await f.open();
   await service.create(hourly(f.project), OWNER);
   const before = await f.file();
-  // Test-only: writes of the engine file fail after a successful load, as on a disk error.
-  const original = fsPromises.open;
-  t.mock.method(fsPromises, 'open', async (...args: Parameters<typeof original>) => {
-    if (String(args[0]).startsWith(join(f.directory, 'trigger-engine.json.')) && String(args[0]).endsWith('.tmp')) throw Object.assign(new Error('EIO: i/o error, open'), { code: 'EIO' });
-    return original(...args);
-  });
-  syncBuiltinESMExports();
-  await assert.rejects(service.create(hourly(f.project, { name: 'Unsaved' }), OWNER), { kind: 'unavailable', message: /^Cannot save triggers: EIO/ });
+  await f.sql.failCommit();
+  await assert.rejects(service.create(hourly(f.project, { name: 'Unsaved' }), OWNER), { kind: 'unavailable', message: /Cannot save triggers:.*fixture SQL commit refusal/ });
   assert.equal(await f.file(), before, 'the file is not changed');
-  assert.match(service.overview().storageError ?? '', /^Cannot save triggers: EIO/);
+  assert.match(service.overview().storageError ?? '', /Cannot save triggers:.*fixture SQL commit refusal/);
   assert.equal(service.list().length, 1, 'nothing unsaved becomes current');
-  t.mock.restoreAll(); syncBuiltinESMExports();
+  await f.sql.allowCommit();
   await service.flush();
   assert.equal(service.overview().storageError, undefined, 'the next save clears the problem');
   // Full: nothing new is accepted past the acceptance limit.
   const full = await engine(t);
-  const small = new TriggerService({ stateDir: full.directory, executor: { runs: () => [], session: () => undefined, getAutoPrompt: () => undefined } as never, now: () => full.clock.now, tickMs: 3_600_000, limits: { acceptBytes: 500, maxBytes: 100_000 } });
+  const small = new TriggerService({ stateDir: full.directory, storage: full.sql.client, executor: { runs: () => [], session: () => undefined, getAutoPrompt: () => undefined } as never, now: () => full.clock.now, tickMs: 3_600_000, limits: { acceptBytes: 500, maxBytes: 100_000 } });
+  await full.sql.bootstrap(() => full.clock.now);
   await small.start();
   t.after(() => small.close());
   await assert.rejects(small.create(hourly(full.project), OWNER), { kind: 'storage-full' });

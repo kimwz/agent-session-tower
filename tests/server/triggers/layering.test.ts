@@ -333,12 +333,12 @@ test('limits.ts is a leaf, and state, once and audit refer back to each other on
   assert.ok(!runtime(`${TRIGGERS}/store.ts`).includes(`${TRIGGERS}/service`));
 });
 
-test('the store writes the engine file only through serializeState', async () => {
+test('the store requires SQL authority and sends guarded touched row batches; legacy serialization stays outside runtime writes', async () => {
   const text = (await sourceFiles([TRIGGERS])).get(`${TRIGGERS}/store.ts`)!;
-  assert.match(text, /else await writePrivateJson\(this\.path,data!\)/);
-  assert.match(text, /const data = this\.database \? undefined : serializeState\(draft\);/);
-  assert.match(text, /if \(this\.database\) await this\.repository!\.update\(changesOf\(this\.rows,rows!\),kind\);/, 'SQL transport remains separate from the legacy file serializer');
-  assert.doesNotMatch(text, /JSON\.stringify\(/, 'no other encoding of the state');
+  assert.match(text,/Triggers SQL authority is unavailable/);
+  assert.match(text,/repository\.update\(changed,kind,undefined,this\.revision\)/);
+  assert.doesNotMatch(text,/writePrivateJson|readPrivateBytes|serializeState|rowsOf|changesOf|structuredClone\(this\.current\)/);
+  assert.match(text,/selected\(kind,id\)/,'business mutations declare their writable domain rows');
 });
 
 test('no trigger module imports the engine or the service but the service itself', async () => {

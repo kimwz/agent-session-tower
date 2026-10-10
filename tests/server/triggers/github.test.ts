@@ -1,6 +1,7 @@
+import { actualStorage } from './actual-storage-fixture.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -176,6 +177,7 @@ test('pull requests newly asking for my review are found, again after a review, 
 
 async function fixture(t: TestContext, github: ReturnType<typeof fakeGitHub>) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-github-triggers-'));
+  const sql = await actualStorage(t, directory);
   const project = join(directory, 'project');
   await mkdir(project);
   const clock = { now: Date.parse('2026-09-24T00:00:30.000Z') };
@@ -196,12 +198,13 @@ async function fixture(t: TestContext, github: ReturnType<typeof fakeGitHub>) {
     runs: () => structuredClone(runs),
     session: () => undefined,
   };
-  const service = new TriggerService({ stateDir: directory, executor, now: () => clock.now, tickMs: 60_000, ghToken: async () => 'gho_cli_token', githubTransport: github.fetch });
+  const service = new TriggerService({ stateDir: directory, storage: sql.client, executor, now: () => clock.now, tickMs: 60_000, ghToken: async () => 'gho_cli_token', githubTransport: github.fetch });
+  await sql.bootstrap(() => clock.now);
   await service.start();
   // A tick a manual run started may still be saving; the folder is removed only once nothing is in flight.
-  t.after(async () => { service.close(); for (let wait = 0; service.inFlight() && wait < 400; wait++) await new Promise(resolve => setTimeout(resolve, 5)); await service.settle(); await rm(directory, { recursive: true, force: true }); });
+  t.after(async () => { service.close(); for (let wait = 0; service.inFlight() && wait < 400; wait++) await new Promise(resolve => setTimeout(resolve, 5)); await service.settle(); await sql.client.close(); await rm(directory, { recursive: true, force: true }); });
   const step = async () => { await service.tick(); for (let wait = 0; service.inFlight() && wait < 300; wait++) await new Promise(resolve => setTimeout(resolve, 5)); await service.tick(); };
-  return { directory, project, clock, calls, service, step };
+  return { directory, sql, project, clock, calls, service, step };
 }
 
 const watcher = (project: string, source: Partial<Extract<TriggerInput['source'], { kind: 'github' }>> = {}): TriggerInput => ({
@@ -256,7 +259,7 @@ test('a GitHub token is given to a trigger only by the owner, and only for api.g
   f.clock.now += 300_000;
   await f.step();
   assert.ok(github.calls.length > 0 && github.calls.every(call => call.authorization === 'Bearer ghp_saved_token'));
-  assert.doesNotMatch(await readFile(join(f.directory, 'trigger-engine.json'), 'utf8'), /ghp_saved_token/);
+  assert.doesNotMatch(await f.sql.text(), /ghp_saved_token/);
   assert.equal((await f.service.checkGitHub({ type: 'token', secretId: token.id }, OWNER)).login, 'me');
   await assert.rejects(f.service.checkGitHub({ type: 'gh' }, AGENT), /Only the owner/);
 });
@@ -278,14 +281,16 @@ test('a changed gh login is checked again before anything is read, and GitHub ra
   const github = fakeGitHub(data);
   let token = 'gho_first';
   const directory = await mkdtemp(join(tmpdir(), 'tower-github-login-'));
+  const sql = await actualStorage(t, directory);
   const project = join(directory, 'project');
   await mkdir(project);
   const clock = { now: Date.parse('2026-09-24T00:00:30.000Z') };
-  const service = new TriggerService({ stateDir: directory, executor: { runs: () => [], session: () => undefined, getAutoPrompt: () => undefined } as unknown as TriggerExecutor,
+  const service = new TriggerService({ stateDir: directory, storage: sql.client, executor: { runs: () => [], session: () => undefined, getAutoPrompt: () => undefined } as unknown as TriggerExecutor,
     now: () => clock.now, tickMs: 60_000, ghToken: async () => token, githubTransport: github.fetch });
+  await sql.bootstrap(() => clock.now);
   await service.start();
   // A tick a manual run started may still be saving; the folder is removed only once nothing is in flight.
-  t.after(async () => { service.close(); for (let wait = 0; service.inFlight() && wait < 400; wait++) await new Promise(resolve => setTimeout(resolve, 5)); await service.settle(); await rm(directory, { recursive: true, force: true }); });
+  t.after(async () => { service.close(); for (let wait = 0; service.inFlight() && wait < 400; wait++) await new Promise(resolve => setTimeout(resolve, 5)); await service.settle(); await sql.client.close(); await rm(directory, { recursive: true, force: true }); });
   const trigger = await service.create(watcher(project), OWNER);
   await assert.rejects(service.run(trigger.id, OWNER), /noted the issues already open/);
   // The gh login changes to another account: the next check notices before reading issues.
@@ -297,7 +302,10 @@ test('a changed gh login is checked again before anything is read, and GitHub ra
   // A used-up rate limit on the account check holds every check, manual ones too, until it resets.
   data.login = 'me';
   const reset = Math.floor((clock.now + 3_600_000) / 1000);
-  const limited = new TriggerService({ stateDir: join(directory, 'limited'), executor: { runs: () => [], session: () => undefined, getAutoPrompt: () => undefined } as unknown as TriggerExecutor,
+  const limitedDirectory = join(directory, 'limited'); await mkdir(limitedDirectory, { mode: 0o700 });
+  const limitedSQL = await actualStorage(t, limitedDirectory);
+  await limitedSQL.bootstrap(() => clock.now);
+  const limited = new TriggerService({ stateDir: limitedDirectory, storage: limitedSQL.client, executor: { runs: () => [], session: () => undefined, getAutoPrompt: () => undefined } as unknown as TriggerExecutor,
     now: () => clock.now, tickMs: 60_000, ghToken: async () => 'gho_limited', githubTransport: () => async () => ({ status: 403, body: {}, remaining: 0, reset }) });
   await limited.start();
   t.after(async () => { limited.close(); await limited.settle(); });

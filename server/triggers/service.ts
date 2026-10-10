@@ -99,7 +99,7 @@ export class TriggerService extends EventEmitter {
       if (this.store.problem) throw error;
       return [`트리거를 복원하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`];
     }) : [];
-    await this.store.commit(() => undefined, 'settle');
+    await this.store.mutate({ type: 'maintenance' },() => undefined, 'settle');
     this.engine.markStarted();
     this.resume();
     return { errors };

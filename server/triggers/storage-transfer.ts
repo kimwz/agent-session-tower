@@ -103,7 +103,7 @@ export async function importTriggers(input: { repository: TriggersRepository; st
   if (input.update.stateDir !== input.stateDir || input.update.build.manifest?.digest !== context.manifest.digest || input.update.build.preflight.identity?.sourceHash !== context.identity.sourceHash || input.update.build.version !== context.identity.appVersion) throw new Error('Trigger import belongs to another captured build.');
   const check = async () => { const result = await checkStorageActivation(input.activation ? { kind: 'offline', owner: input.activation, update: input.update, storage: repository.storage } : { kind: 'normal', update: input.update }, 'triggers'); if (!result.importAllowed || result.verdict !== 'ready') throw new Error(`Trigger import held: ${result.code}`); await repository.gate(); };
   await check(); const path = join(input.stateDir,'trigger-engine.json'), bytes = await raw(path);
-  const state = parseState(JSON.parse(bytes.toString('utf8')),input.now,false);
+  const state = parseState(JSON.parse(bytes.toString('utf8')),input.now,false,true);
   if (!state) throw new Error('Invalid trigger source; preserved without import.');
   const evidence = await seal(input.evidenceParent,input.commandId,bytes,{ kind: 'raw-import',build: context.identity,canonicalSha256: documentsHash(state) });
   await repository.importPrepared(state,evidence.manifestSha256,input.commandId,async () => { if (!(await raw(path)).equals(bytes)) throw new Error('Trigger source changed after sealing.'); await check(); });

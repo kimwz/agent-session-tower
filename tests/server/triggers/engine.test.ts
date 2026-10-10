@@ -1,12 +1,12 @@
+import { actualStorage } from './actual-storage-fixture.js';
 import { RunAdmissionUncertain } from '../../../server/runs/run-records.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import fsPromises from 'node:fs/promises';
-import { syncBuiltinESMExports } from 'node:module';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { TriggersRepository } from '../../../server/triggers/storage-repository.js';
 import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
 import type { AutoPromptJob, Run } from '../../../shared/types.js';
 import type { TriggerActor, TriggerEvent, TriggerInput } from '../../../shared/triggers.js';
@@ -14,8 +14,9 @@ import type { TriggerActor, TriggerEvent, TriggerInput } from '../../../shared/t
 const OWNER: TriggerActor = { kind: 'owner', via: 'ui' };
 const start = Date.parse('2026-09-24T00:00:30.000Z');
 
-async function engine(t: TestContext) {
+async function engine(t: TestContext, fault: 'normal' | 'before' | 'after' = 'normal') {
   const directory = await mkdtemp(join(tmpdir(), 'tower-trigger-engine-'));
+  const sql = await actualStorage(t, directory, undefined, fault);
   const project = join(directory, 'project');
   await mkdir(project);
   const clock = { now: start };
@@ -41,12 +42,13 @@ async function engine(t: TestContext) {
   };
   const services: TriggerService[] = [];
   const make = () => {
-    const service = new TriggerService({ stateDir: directory, executor, now: () => clock.now, tickMs: 3_600_000 });
+    const service = new TriggerService({ stateDir: directory, storage: sql.client, executor, now: () => clock.now, tickMs: 3_600_000 });
     services.push(service);
     return service;
   };
   const open = async () => {
     const service = make();
+    await sql.bootstrap(() => clock.now);
     await service.start();
     return service;
   };
@@ -54,10 +56,10 @@ async function engine(t: TestContext) {
     for (const service of services) service.close();
     for (let i = 0; i < 400 && services.some(service => service.inFlight()); i++) await new Promise(resolve => setTimeout(resolve, 5));
     await Promise.allSettled(services.map(service => service.settle()));
-    await rm(directory, { recursive: true, force: true });
+    await sql.client.close(); await rm(directory, { recursive: true, force: true });
   });
-  const file = () => readFile(join(directory, 'trigger-engine.json'), 'utf8');
-  return { directory, project, clock, runs, jobs, calls, order, open, make, file, executor, hold: (barrier: Promise<void> | undefined) => { gate = barrier; } };
+  const file = () => sql.text();
+  return { directory, sql, project, clock, runs, jobs, calls, order, open, make, file, executor, hold: (barrier: Promise<void> | undefined) => { gate = barrier; } };
 }
 
 const task = (project: string, name: string, values: Partial<TriggerInput> = {}): TriggerInput => ({ name, enabled: true,
@@ -106,7 +108,7 @@ async function seeded(f: Awaited<ReturnType<typeof engine>>) {
   state.events.push(listed, routed, coordinator, lost);
   state.cursors[get.id].polling = { slot: start, revision: 1, method: 'GET' };
   state.cursors[post.id].polling = { slot: start, revision: 1, method: 'POST' };
-  await writeFile(join(f.directory, 'trigger-engine.json'), JSON.stringify(state), { mode: 0o600 });
+  await f.sql.replace(state);
   const run: Run = { id: randomUUID(), sessionId: `codex:${randomUUID()}`, prompt: 'Work', status: 'running', createdAt: '', output: '', autoPromptId: listed.requestId };
   f.runs.push(run);
   f.jobs.set(routed.requestId, { id: routed.requestId, provider: 'codex', prompt: 'Work', routerModel: 'r', status: 'queued', createdAt: '', updatedAt: '' });
@@ -137,12 +139,7 @@ test('when the first commit at start cannot be written, startup rejects and expl
   const f = await engine(t);
   const s = await seeded(f);
   const before = await f.file();
-  const original = fsPromises.open;
-  t.mock.method(fsPromises, 'open', async (...args: Parameters<typeof original>) => {
-    if (String(args[0]).startsWith(join(f.directory, 'trigger-engine.json.')) && String(args[0]).endsWith('.tmp')) throw Object.assign(new Error('EIO: i/o error, open'), { code: 'EIO' });
-    return original(...args);
-  });
-  syncBuiltinESMExports();
+  await f.sql.failCommit();
   const service = f.make();
   Object.assign(f.calls, { create: 0, enqueue: 0, auto: 0 });
   await assert.rejects(service.start(), /Cannot save triggers/);
@@ -152,7 +149,7 @@ test('when the first commit at start cannot be written, startup rejects and expl
   await service.tick();
   assert.deepEqual([f.calls.create, f.calls.enqueue, f.calls.auto], [0, 0, 0], 'held engine tick cannot dispatch recovered work');
   assert.equal(await f.file(), before, 'the claims stay on disk');
-  t.mock.restoreAll(); syncBuiltinESMExports();
+  await f.sql.allowCommit();
   await service.start();
   assert.deepEqual([f.calls.create, f.calls.enqueue, f.calls.auto], [0, 0, 0], 'explicit retry recovers without dispatch');
   const saved = JSON.parse(await f.file());
@@ -198,4 +195,29 @@ test('uncertain run admission records an uncertain trigger event and never submi
   service.close(); await service.settle();
   const restarted = await f.open(); await restarted.tick(); await settled(restarted);
   assert.equal(restarted.overview().recent[0].status,'uncertain'); assert.equal(submitted,1);
+});
+
+
+test('an unknown SQL commit publishes no draft and resolves only its fixed receipt without replay', async t => {
+  for (const fault of ['before', 'after'] as const) {
+    const f = await engine(t, fault), service = await f.open();
+    const before = await f.sql.text();
+    await assert.rejects(service.create(task(f.project, 'Unknown'), OWNER), error =>
+      (error as { commitDisposition?: string }).commitDisposition === 'unknown');
+    assert.deepEqual(service.list(), [], 'an unknown commit never publishes its memory draft');
+    assert.equal(f.calls.create, 0);
+    const owner = (service as unknown as { store: { repository: TriggersRepository } }).store.repository;
+    const pending = owner.pending(); assert.ok(pending);
+    const identity = { ...pending };
+    await assert.rejects(service.create(task(f.project, 'No replay'), OWNER));
+    assert.equal(owner.pending()?.id, identity.id, 'no new command identity replaces the unresolved write');
+    await f.sql.client.reopen(); await f.sql.client.prepare({ allowMigration: false });
+    assert.equal((await f.sql.client.receipt(identity.commandId)).found, fault === 'after');
+    assert.equal(await service.resolveStorage(), fault === 'after' ? 'committed' : 'not-committed');
+    const current = await new TriggersRepository(f.sql.client).exportCurrent();
+    assert.equal(current.documents.triggers.length, fault === 'after' ? 1 : 0);
+    if (fault === 'before') assert.equal(await f.sql.text(), before);
+    assert.deepEqual(service.list(), [], 'receipt resolution alone does not publish a stale draft');
+    assert.equal(f.calls.create, 0);
+  }
 });

@@ -1,5 +1,5 @@
+import { actualStorage } from './actual-storage-fixture.js';
 import assert from 'node:assert/strict';
-import { collectTriggers } from '../../helpers/legacy-trigger-backup.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -18,6 +18,7 @@ const start = Date.parse('2026-09-24T00:00:30.000Z');
 
 async function fixture(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-triggers-'));
+  const sql = await actualStorage(t, directory);
   const project = join(directory, 'project');
   await mkdir(project);
   const clock = { now: start };
@@ -51,15 +52,19 @@ async function fixture(t: TestContext) {
   };
   const services: TriggerService[] = [];
   const open = async (limits?: { acceptBytes?: number; maxBytes?: number }) => {
-    const service = new TriggerService({ stateDir: directory, executor, now: () => clock.now, tickMs: 60_000, ...(limits ? { limits } : {}) });
+    const service = new TriggerService({ stateDir: directory, storage: sql.client, executor, now: () => clock.now, tickMs: 60_000, ...(limits ? { limits } : {}) });
+    await sql.bootstrap(() => clock.now).catch(async error => {
+      // A failed first import has no authority: the real owner load below must reject and hold it.
+      assert.equal(await sql.repository.databaseAuthority(), false, String(error));
+    });
     await service.start();
     services.push(service);
     return service;
   };
   // Saves still under way are waited for, or removing the folder races a write into it.
-  t.after(async () => { for (const service of services) service.close(); await Promise.all(services.map(service => service.settle())); await rm(directory, { recursive: true, force: true, maxRetries: 3 }); });
+  t.after(async () => { for (const service of services) service.close(); await Promise.all(services.map(service => service.settle())); await sql.client.close(); await rm(directory, { recursive: true, force: true, maxRetries: 3 }); });
   const finish = (status: Run['status'] = 'completed') => { for (const run of runs) if (run.status === 'running') run.status = status; };
-  return { directory, project, clock, runs, jobs, calls, sessions, executor, open, finish };
+  return { directory, sql, project, clock, runs, jobs, calls, sessions, executor, open, finish };
 }
 
 const hourly = (project: string, values: Partial<TriggerInput> = {}): TriggerInput => ({
@@ -150,13 +155,12 @@ test('a claim saved before a crash is matched to its run or reported uncertain, 
   let service = await f.open();
   const trigger = await service.create(hourly(f.project), OWNER);
   service.close();
-  const path = join(f.directory, 'trigger-engine.json');
-  const state = JSON.parse(await readFile(path, 'utf8'));
+  const state = JSON.parse(await f.sql.text());
   const claimed = (dedupKey: string) => ({ id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name, triggerRevision: 1, kind: 'schedule', dedupKey,
     occurredAt: dedupKey, receivedAt: dedupKey, updatedAt: dedupKey, status: 'claimed', requestId: triggerRequestId(trigger.id, dedupKey),
     input: { instructions: 'x', provider: 'codex', approvals: 'auto', target: { node: 'local', mode: 'folder', cwd: f.project }, untrustedInput: false }, summary: '' });
   state.events = [claimed('2026-09-23T22:00:00.000Z'), claimed('2026-09-23T23:00:00.000Z')];
-  await writeFile(path, JSON.stringify(state));
+  await f.sql.replace(state);
   f.runs.push({ id: randomUUID(), sessionId: 'codex:admitted', prompt: '', status: 'running', createdAt: '', output: '', autoPromptId: state.events[1].requestId });
   service = await f.open();
   assert.deepEqual(service.events().map(event => event.status), ['running', 'uncertain']);
@@ -241,18 +245,17 @@ test('turning a trigger off cancels runs that are waiting but never ones already
   assert.equal(f.runs[0].status, 'running');
 });
 
-test('a state file that cannot be saved stops new runs and says why', async t => {
+test('a refused SQL commit stops new runs and says why', async t => {
   const f = await fixture(t);
   const service = await f.open();
   const trigger = await service.create(hourly(f.project), OWNER);
-  const path = join(f.directory, 'trigger-engine.json');
-  await rm(path); await mkdir(path);
+  await f.sql.failCommit();
   f.clock.now = Date.parse('2026-09-24T01:00:05.000Z');
   await service.tick();
   assert.equal(f.calls.length, 0);
   assert.match(service.overview().storageError ?? '', /Cannot save triggers/);
   await assert.rejects(service.run(trigger.id, OWNER), { kind: 'unavailable' });
-  await rm(path, { recursive: true });
+  await f.sql.allowCommit();
   await service.tick();
   assert.equal(service.overview().storageError, undefined);
   assert.equal(f.calls.length, 1, 'the due time runs once the state can be saved');
@@ -260,7 +263,7 @@ test('a state file that cannot be saved stops new runs and says why', async t =>
 
 test('unreadable trigger state holds startup and preserves exact original bytes', async t => {
   const f = await fixture(t), path = join(f.directory,'trigger-engine.json');
-  await writeFile(path,'{ not json',{ mode: 0o600 });
+  await f.sql.raw('{ not json');
   await assert.rejects(f.open(),{ kind: 'unavailable',message: /original data is preserved/ });
   assert.equal(await readFile(path,'utf8'),'{ not json');
   assert.deepEqual(await asideNames(path),[]);
@@ -269,8 +272,8 @@ test('unreadable trigger state holds startup and preserves exact original bytes'
 
 test('wrong shape holds startup instead of treating once history as empty', async t => {
   const f = await fixture(t), path = join(f.directory,'trigger-engine.json');
-  await writeFile(path,'[]',{ mode: 0o600 });
-  await assert.rejects(f.open(),{ kind: 'unavailable',message: /Saved trigger state is invalid/ });
+  await f.sql.raw('[]');
+  await assert.rejects(f.open(),{ kind: 'unavailable',message: /original data is preserved/ });
   assert.equal(await readFile(path,'utf8'),'[]');
   assert.deepEqual(await asideNames(path),[]);
   assert.equal(f.calls.length,0);
@@ -280,16 +283,20 @@ test('invalid independent once ledger holds startup without quarantine', async t
   for (const onceConsumed of [[],{ id: { bad: 1 } }]) {
     const f = await fixture(t), service = await f.open();
     await service.create(hourly(f.project),OWNER); service.close(); await service.settle();
-    const path = join(f.directory,'trigger-engine.json'), saved = JSON.parse(await readFile(path,'utf8'));
-    saved.onceConsumed = onceConsumed; const text = JSON.stringify(saved); await writeFile(path,text);
+    await f.sql.malformedLedger(onceConsumed);
+    const before = await f.sql.sql(db => db.prepare('SELECT * FROM triggers_rows ORDER BY kind,ordinal').all());
     await assert.rejects(f.open(),{ kind: 'unavailable' });
-    assert.equal(await readFile(path,'utf8'),text); assert.deepEqual(await asideNames(path),[]); assert.equal(f.calls.length,0);
+    await assert.rejects(f.sql.text(), /malformed|Invalid|Expected|array/i);
+    assert.equal(f.calls.length,0);
+    assert.deepEqual(await f.sql.sql(db => db.prepare('SELECT * FROM triggers_rows ORDER BY kind,ordinal').all()), before, 'failed startup preserves exact SQL rows');
+    assert.deepEqual((await readdir(f.directory)).filter(name => name.startsWith('trigger-engine.json.unreadable-')), []);
+
   }
 });
 
 test('occupied quarantine destination does not alter data-preserving startup hold', async t => {
   const f = await fixture(t), path = join(f.directory,'trigger-engine.json');
-  await writeFile(path,'{ not json',{ mode: 0o600 });
+  await f.sql.raw('{ not json');
   const blocked = await blockQuarantine(t,path);
   await assert.rejects(f.open(),{ kind: 'unavailable' }); blocked.release();
   assert.deepEqual(await readdir(blocked.aside),['occupied']);
@@ -306,8 +313,8 @@ test('trigger secrets that were moved aside are shown on the triggers page', asy
 
 test('held malformed state cannot dispatch, restore or overwrite once evidence', async t => {
   const f = await fixture(t), path = join(f.directory,'trigger-engine.json'), original = '{ "version": 1, "onceConsumed": [ not json';
-  await writeFile(path,original,{ mode: 0o600 });
-  const service = new TriggerService({ stateDir: f.directory,executor: f.executor,now: () => f.clock.now,tickMs: 60_000 });
+  await f.sql.raw(original);
+  const service = new TriggerService({ stateDir: f.directory,storage: f.sql.client,executor: f.executor,now: () => f.clock.now,tickMs: 60_000 });
   await assert.rejects(service.start(),{ kind: 'unavailable' });
   f.clock.now += 2 * HOUR; await service.tick();
   await assert.rejects(service.create(hourly(f.project),OWNER),{ kind: 'unavailable' });
@@ -350,13 +357,12 @@ test('if the result of a submission cannot be saved, it is matched to its run la
   const f = await fixture(t);
   const service = await f.open();
   const trigger = await service.create(hourly(f.project), OWNER);
-  const path = join(f.directory, 'trigger-engine.json');
   const create = f.executor.create;
-  f.executor.create = async (input, internal) => { const result = await create(input, internal); await rm(path); await mkdir(path); return result; };
+  f.executor.create = async (input, internal) => { const result = await create(input, internal); await f.sql.failCommit(); return result; };
   await service.run(trigger.id, OWNER);
   await service.tick();
   assert.equal(service.events()[0].status, 'claimed');
-  await rm(path, { recursive: true });
+  await f.sql.allowCommit();
   f.executor.create = create;
   await service.tick();
   assert.equal(service.events()[0].status, 'running');
@@ -386,7 +392,7 @@ test('when trigger history is full, new runs and definitions stop but accepted r
   await service.run(trigger.id, OWNER);
   await service.tick();
   service.close();
-  const size = (await readFile(join(f.directory, 'trigger-engine.json'))).byteLength;
+  const size = Buffer.byteLength(await f.sql.text());
   service = await f.open({ acceptBytes: size - 1, maxBytes: size + 5000 });
   await assert.rejects(service.create(hourly(f.project, { name: 'One more' }), OWNER), { kind: 'storage-full' });
   await assert.rejects(service.run(trigger.id, OWNER), { kind: 'storage-full' });
@@ -402,10 +408,9 @@ test('hourly limits count every recent firing, even ones no longer in the histor
   const trigger = await service.create(hourly(f.project, { policy: { overlap: 'parallel', maxEventsPerHour: 60 } }), OWNER);
   await service.updateSettings({ maxTriggers: 50, maxConcurrentRuns: 3, maxEventsPerHour: 5 }, OWNER);
   service.close();
-  const path = join(f.directory, 'trigger-engine.json');
-  const state = JSON.parse(await readFile(path, 'utf8'));
+  const state = JSON.parse(await f.sql.text());
   state.recentFires = Array.from({ length: 5 }, (_, index) => ({ at: start - index * 1000, triggerId: 'another-trigger' }));
-  await writeFile(path, JSON.stringify(state));
+  await f.sql.replace(state);
   service = await f.open();
   const event = await service.run(trigger.id, OWNER);
   assert.equal(event.status, 'skipped');
@@ -417,14 +422,13 @@ test('a trigger at its record limit adds nothing more and says so', async t => {
   let service = await f.open();
   const trigger = await service.create(hourly(f.project), OWNER);
   service.close();
-  const path = join(f.directory, 'trigger-engine.json');
-  const state = JSON.parse(await readFile(path, 'utf8'));
+  const state = JSON.parse(await f.sql.text());
   for (let index = 0; index < 20_000; index++) state.fired[`${trigger.id} old:${index}`] = new Date(start - 1000).toISOString();
-  await writeFile(path, JSON.stringify(state));
+  await f.sql.replace(state);
   service = await f.open();
   await assert.rejects(service.run(trigger.id, OWNER), { kind: 'conflict' });
   assert.match(service.overview().storageError ?? '', /20000 runs recorded/);
-  assert.equal(Object.keys(JSON.parse(await readFile(path, 'utf8')).fired).length, 20_000);
+  assert.equal(Object.keys(JSON.parse(await f.sql.text()).fired).length, 20_000);
 });
 
 test('with history full, a trigger can still be turned off or deleted, and a schedule moves on with a warning', async t => {
@@ -433,7 +437,7 @@ test('with history full, a trigger can still be turned off or deleted, and a sch
   const first = await service.create(hourly(f.project, { policy: { overlap: 'parallel', maxEventsPerHour: 20 } }), OWNER);
   const second = await service.create(hourly(f.project, { name: 'Second' }), OWNER);
   service.close();
-  const size = (await readFile(join(f.directory, 'trigger-engine.json'))).byteLength;
+  const size = Buffer.byteLength(await f.sql.text());
   // Room for nothing new: the next recorded run would cross the acceptance limit.
   service = await f.open({ acceptBytes: size + 50, maxBytes: size + 20_000 });
   f.clock.now = Date.parse('2026-09-24T01:00:05.000Z');
@@ -630,13 +634,12 @@ test('once storage failure and capacity exhaustion keep the original reservation
   const f = await fixture(t);
   const service = await f.open();
   const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
-  const path = join(f.directory, 'trigger-engine.json');
-  await rm(path); await mkdir(path);
+  await f.sql.failCommit();
   f.clock.now = Date.parse('2026-09-24T01:00:05Z');
   await service.tick();
   assert.equal(f.calls.length, 0);
   assert.equal(service.get(trigger.id).trigger.enabled, true);
-  await rm(path, { recursive: true });
+  await f.sql.allowCommit();
   // Exercise the acceptance capacity path without filling a file with synthetic history.
   (service as any).options.limits = { acceptBytes: 1 };
   await service.tick();
@@ -697,12 +700,11 @@ test('a consumed queued reservation starts after restart, while an uncertain cla
   assert.equal(f.calls.length, 2);
   assert.equal(service.event(queued.id).status, 'running');
   service.close(); await service.settle();
-  const path = join(f.directory, 'trigger-engine.json');
-  const state = JSON.parse(await readFile(path, 'utf8'));
+  const state = JSON.parse(await f.sql.text());
   const event = state.events.find((item: any) => item.id === queued.id);
   event.status = 'claimed'; delete event.dispatch;
   f.runs.length = 0;
-  await writeFile(path, JSON.stringify(state));
+  await f.sql.replace(state);
   service = await f.open(); await service.tick();
   assert.equal(service.event(queued.id).status, 'uncertain');
   assert.equal(f.calls.length, 2);
@@ -728,10 +730,10 @@ test('backups retain consumption after deleting a definition and a fresh restore
   const f = await fixture(t);
   const service = await f.open();
   const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
-  const before = await collectTriggers(f.directory);
+  const before = await f.sql.backup();
   const event = await service.run(trigger.id, OWNER); await service.tick(); f.finish(); await service.tick();
   await service.remove(trigger.id, service.get(trigger.id).trigger.revision, OWNER);
-  const after = await collectTriggers(f.directory);
+  const after = await f.sql.backup();
   assert.equal(after!.triggers.length, 0);
   assert.equal(after!.onceConsumed![trigger.id].eventId, event.id);
   const fresh = await fixture(t);
@@ -765,9 +767,9 @@ test('a full consumption ledger admits restoration of its own consumed ID and ke
   await service.run(once.id, OWNER); await service.tick(); f.finish(); await service.tick();
   await service.remove(once.id, service.get(once.id).trigger.revision, OWNER);
   service.close(); await service.settle();
-  const path = join(f.directory, 'trigger-engine.json'); const state = JSON.parse(await readFile(path, 'utf8'));
+  const state = JSON.parse(await f.sql.text());
   for (let i = 1; i < 2000; i++) state.onceConsumed[randomUUID()] = { at: new Date(f.clock.now).toISOString() };
-  await writeFile(path, JSON.stringify(state)); service = await f.open();
+  await f.sql.replace(state); service = await f.open();
   const restored = await service.restore(once.id, OWNER);
   assert.equal(restored.enabled, false); assert.ok(restored.consumed);
   await assert.rejects(service.create(hourly(f.project, { source: once.source }), OWNER), /records are full/);
@@ -781,9 +783,9 @@ test('retained archived definitions cannot exhaust admission for existing recurr
   const f = await fixture(t); let service = await f.open();
   const repeat = await service.create(hourly(f.project), OWNER);
   service.close(); await service.settle();
-  const path = join(f.directory, 'trigger-engine.json'); const state = JSON.parse(await readFile(path, 'utf8'));
+  const state = JSON.parse(await f.sql.text());
   for (let i = 1; i < 200; i++) state.triggers.push({ ...state.triggers[0], id: randomUUID(), name: `Archived ${i}`, enabled: false, archivedAt: new Date(f.clock.now).toISOString() });
-  await writeFile(path, JSON.stringify(state)); service = await f.open();
+  await f.sql.replace(state); service = await f.open();
   assert.equal(service.list().length, 1); assert.equal(service.list({ includeArchived: true }).length, 200);
   await assert.rejects(service.create(hourly(f.project), OWNER), /definitions can be retained/);
   const event = await service.run(repeat.id, OWNER); await service.tick();
@@ -795,11 +797,11 @@ test('a tick waiting for a commit rechecks an edited once due time before consum
   const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
   f.clock.now = Date.parse('2026-09-24T01:00:01Z');
   // Every commit goes through the engine's store; the first one, the tick's, waits.
-  const engine = (service as any).store; const commit = engine.commit.bind(engine);
+  const engine = (service as any).store; const commit = engine.mutate.bind(engine);
   let entered!: () => void; let release!: () => void;
   const waiting = new Promise<void>(resolve => { entered = resolve; }); const gate = new Promise<void>(resolve => { release = resolve; });
   let first = true;
-  engine.commit = async (...args: any[]) => { if (first) { first = false; entered(); await gate; } return commit(...args); };
+  engine.mutate = async (...args: any[]) => { if (first) { first = false; entered(); await gate; } return commit(...args); };
   const tick = service.tick(); await waiting;
   await service.update(trigger.id, hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T02:00:00Z' }, catchUp: 'latest' } }), trigger.revision, OWNER);
   release(); await tick;
@@ -822,10 +824,10 @@ test('backup restore rechecks reservation capacity after concurrent local consum
   const f = await fixture(t); let service = await f.open();
   const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
   service.close(); await service.settle();
-  const path = join(f.directory, 'trigger-engine.json'); const state = JSON.parse(await readFile(path, 'utf8'));
+  const state = JSON.parse(await f.sql.text());
   for (let i = 0; i < 1999; i++) state.onceConsumed[randomUUID()] = { at: new Date(f.clock.now).toISOString() };
-  await writeFile(path, JSON.stringify(state)); service = await f.open();
-  const backup = (await collectTriggers(f.directory))!;
+  await f.sql.replace(state); service = await f.open();
+  const backup = (await f.sql.backup())!;
   const newId = randomUUID(); backup.triggers = [{ ...service.get(trigger.id).trigger, id: newId, name: 'Incoming reservation' }];
   // A restore checks each incoming definition through the definitions' validate.
   const engine = (service as any).definitions; const validate = engine.validate.bind(engine);
@@ -852,7 +854,7 @@ test('unarchiving an already active recurring definition is a no-op and never tu
 test('restoring an older backup preserves an explicit local archive and converges without new revisions', async t => {
   const f = await fixture(t); const service = await f.open();
   const trigger = await service.create(hourly(f.project), OWNER);
-  const backup = (await collectTriggers(f.directory))!;
+  const backup = (await f.sql.backup())!;
   const archived = await service.setArchived(trigger.id, true, trigger.revision, OWNER);
   await service.restoreBackup(backup);
   assert.equal(service.get(trigger.id).trigger.enabled, false);
@@ -878,14 +880,14 @@ test('manual execution races a due tick as one reservation in both invocation or
 
 test('older backups keep archived definitions missing from the snapshot and preserve consumed unarchive choice', async t => {
   const f = await fixture(t); const service = await f.open();
-  const emptyBackup = (await collectTriggers(f.directory))!;
+  const emptyBackup = (await f.sql.backup())!;
   const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
   const event = await service.run(trigger.id, OWNER); await service.tick(); f.finish(); await service.tick();
-  const consumedBackup = (await collectTriggers(f.directory))!;
+  const consumedBackup = (await f.sql.backup())!;
   await service.restoreBackup(emptyBackup);
   assert.ok(service.get(trigger.id).trigger.archivedAt);
   assert.equal(service.event(event.id).status, 'completed');
-  assert.ok((await collectTriggers(f.directory))!.trustedFolders.includes(f.project));
+  assert.ok((await f.sql.backup())!.trustedFolders.includes(f.project));
   const visible = await service.setArchived(trigger.id, false, service.get(trigger.id).trigger.revision, OWNER);
   await service.restoreBackup(consumedBackup);
   assert.equal(service.get(trigger.id).trigger.archivedAt, undefined);
@@ -910,11 +912,12 @@ test('a missing downgrade consumption ledger is recovered from snapshots with on
   const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
   const event = await service.run(trigger.id, OWNER); await service.tick(); f.finish(); await service.tick();
   service.close(); await service.settle();
-  const path = join(f.directory, 'trigger-engine.json'); const state = JSON.parse(await readFile(path, 'utf8')); delete state.onceConsumed;
-  await writeFile(path, JSON.stringify(state)); service = await f.open();
+  const state = JSON.parse(await f.sql.text()); delete state.onceConsumed;
+  const imported = await fixture(t);
+  await imported.sql.raw(JSON.stringify(state)); service = await imported.open();
   assert.equal(service.get(trigger.id).trigger.consumed!.eventId, event.id);
   assert.equal(service.audit().filter(entry => entry.summary.includes('ledger was absent')).length, 1);
-  service.close(); await service.settle(); service = await f.open();
+  service.close(); await service.settle(); service = await imported.open();
   assert.equal(service.audit().filter(entry => entry.summary.includes('ledger was absent')).length, 1);
   await assert.rejects(service.run(trigger.id, OWNER), /consumed/i);
 });
@@ -924,11 +927,11 @@ test('a once skip policy uses the admission time after waiting for a commit', as
   const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'skip' } }), OWNER);
   f.clock.now = Date.parse('2026-09-24T01:00:01Z');
   // Every commit goes through the engine's store; the first one, the tick's, waits.
-  const engine = (service as any).store; const commit = engine.commit.bind(engine);
+  const engine = (service as any).store; const commit = engine.mutate.bind(engine);
   let entered!: () => void; let release!: () => void;
   const waiting = new Promise<void>(resolve => { entered = resolve; }); const gate = new Promise<void>(resolve => { release = resolve; });
   let first = true;
-  engine.commit = async (...args: any[]) => { if (first) { first = false; entered(); await gate; } return commit(...args); };
+  engine.mutate = async (...args: any[]) => { if (first) { first = false; entered(); await gate; } return commit(...args); };
   const tick = service.tick(); await waiting;
   f.clock.now = Date.parse('2026-09-24T01:02:00Z'); release(); await tick;
   assert.equal(service.events({ triggerId: trigger.id })[0].status, 'skipped');

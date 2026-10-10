@@ -2,7 +2,7 @@ import { OnceConsumptionSchema, type OnceConsumption, type Trigger, type Trigger
 import { logTrigger } from './audit.js';
 import { failure } from './errors.js';
 import { MAX_ONCE_RESERVATIONS, MAX_RETAINED_TRIGGERS, MAX_REVISIONS } from './limits.js';
-import type { EngineState } from './state.js';
+import { writeRows, orderRows, type EngineState } from './state.js';
 
 /**
  * The rules of once reservations and archived definitions over a state, and the only code that writes the consumption
@@ -38,6 +38,9 @@ export function assertFuture(input: TriggerInput, now: () => number): void {
 export function consumeOnce(state: EngineState, trigger: Trigger, eventId: string | undefined, now: () => number): void {
   const at = new Date(now()).toISOString();
   state.onceConsumed[trigger.id] ??= { at, ...(eventId ? { eventId } : {}) };
+  writeRows(state,'onceConsumed',trigger.id);
+  writeRows(state,'triggers',trigger.id); writeRows(state,'revisions',trigger.id);
+  if (state.cursors[trigger.id]) writeRows(state,'cursors',trigger.id);
   const next: Trigger = { ...trigger, consumed: state.onceConsumed[trigger.id], enabled: false, archivedAt: at, revision: trigger.revision + 1,
     updatedAt: at, updatedBy: { kind: 'system', via: 'migration' } };
   state.revisions[trigger.id] = [...(state.revisions[trigger.id] ?? []), trigger].slice(-MAX_REVISIONS);
@@ -54,17 +57,22 @@ export function consumeOnce(state: EngineState, trigger: Trigger, eventId: strin
 export function normalizeOnce(state: EngineState, now: () => number): void {
   for (const trigger of [...state.triggers, ...state.tombstones, ...Object.values(state.revisions).flat()]) {
     const parsed = OnceConsumptionSchema.safeParse(trigger.consumed);
-    if (parsed.success) state.onceConsumed[trigger.id] ??= parsed.data;
+    if (parsed.success && !state.onceConsumed[trigger.id]) { state.onceConsumed[trigger.id] = parsed.data; writeRows(state,'onceConsumed',trigger.id); }
   }
   for (const trigger of state.triggers) {
     const cursor = state.cursors[trigger.id];
-    if (state.onceConsumed[trigger.id]) {
-      trigger.consumed = state.onceConsumed[trigger.id]; trigger.enabled = false;
-      if (cursor) delete cursor.nextAt;
-    } else if (trigger.archivedAt && trigger.enabled) delete trigger.archivedAt;
-    if (trigger.source.schedule.type === 'once' && !trigger.enabled && cursor) delete cursor.nextAt;
+    const consumed = state.onceConsumed[trigger.id];
+    if (consumed) {
+      if (trigger.enabled || trigger.consumed?.at !== consumed.at || trigger.consumed?.eventId !== consumed.eventId)
+        writeRows(state,'triggers',trigger.id);
+      trigger.consumed = consumed; trigger.enabled = false;
+      if (cursor?.nextAt !== undefined) { writeRows(state,'cursors',trigger.id); delete cursor.nextAt; }
+    } else if (trigger.archivedAt && trigger.enabled) { writeRows(state,'triggers',trigger.id); delete trigger.archivedAt; }
+    if (trigger.source.schedule.type === 'once' && !trigger.enabled && cursor?.nextAt !== undefined) {
+      writeRows(state,'cursors',trigger.id); delete cursor.nextAt;
+    }
     if (trigger.source.schedule.type === 'once' && trigger.enabled && cursor?.nextAt === undefined && Date.parse(trigger.source.schedule.at) <= now()) {
-      trigger.enabled = false;
+      writeRows(state,'triggers',trigger.id); trigger.enabled = false;
       logTrigger(state, now, { kind: 'system', via: 'migration' }, 'disable', trigger, trigger.revision, trigger.revision, 'A past once reservation without a pending slot was loaded turned off.');
     }
   }
@@ -80,7 +88,18 @@ export function readLedger(saved: unknown, state: EngineState): boolean {
 
 /** A restore's ledger: what this computer recorded wins, the rest comes from the backup. */
 export function mergeConsumed(state: EngineState, incoming: Record<string, OnceConsumption>): void {
+  for (const id of Object.keys(incoming)) if (!state.onceConsumed[id]) writeRows(state,'onceConsumed',id);
+  orderRows(state,'onceConsumed',0);
   state.onceConsumed = { ...incoming, ...state.onceConsumed };
+}
+
+/** A row mutation has its own ledger container; entries remain immutable until once.ts replaces them. */
+export function isolateConsumed(state: EngineState): void { state.onceConsumed = { ...state.onceConsumed }; }
+
+export function consumedSnapshot(state: EngineState): EngineState['onceConsumed'] { return { ...state.onceConsumed }; }
+
+export function projectConsumed(state: EngineState, trigger: Trigger): void {
+  if (state.onceConsumed[trigger.id]) { trigger.consumed = { ...state.onceConsumed[trigger.id] }; trigger.enabled = false; }
 }
 
 /** The final say on a restored state, checked on the state about to be saved. */

@@ -53,7 +53,7 @@ export class TriggerEngine {
 
   private async step(): Promise<void> {
     // After a failed save, try saving again before anything new is accepted.
-    if (this.store.problem) await this.store.commit(() => undefined, 'settle').catch(() => {});
+    if (this.store.problem) await this.store.mutate({ type: 'maintenance' },() => undefined, 'settle').catch(() => {});
     // A claim whose outcome could not be saved is matched to what was admitted, never submitted again.
     const orphans = this.dispatch.reconcileOrphans();
     if (orphans) await orphans;
@@ -73,7 +73,7 @@ export class TriggerEngine {
         const full = this.store.full();
         if (full && trigger.source.schedule.type === 'once') continue;
         let poll: { slot: number; revision: number } | undefined;
-        await this.store.commit(state => {
+        await this.store.mutate({ type: 'fire', id: trigger.id },state => {
           const current = state.triggers.find(item => item.id === trigger.id);
           const position = state.cursors[trigger.id];
           const admissionNow = this.now();
@@ -114,7 +114,7 @@ export class TriggerEngine {
           }
           // Repeating schedules move on, with a visible warning.
           this.store.noteCapacity(`"${trigger.name}" skipped a scheduled run because trigger history is full.`);
-          await this.store.commit(state => {
+          await this.store.mutate({ type: 'cursor', id: trigger.id },state => {
             const position = state.cursors[trigger.id];
             const current = state.triggers.find(item => item.id === trigger.id);
             if (position && current && current.source.schedule.type !== 'once') position.nextAt = nextSlot(current.source.schedule, now, position.anchorAt);
