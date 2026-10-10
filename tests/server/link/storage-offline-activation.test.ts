@@ -409,6 +409,8 @@ for(const boundary of ['prior-seal','unsafe','malformed','unknown'] as const) te
 test('post-backup uncertain effect receipt is preserved and current SDK remains held without explicit remote reconciliation',async t=>{
   const f=await fixture(t);
   await f.final.storage.runOfflineStorageCommand(['activate','--state-dir',f.stateDir,'--input',f.input]);
+  const prepared=await f.final.storage.openStorage({stateDir:f.stateDir,bundle:f.final.bundle()});
+  try {await prepared.prepare({allowMigration:true});} finally {await prepared.close();}
   const completed=await f.final.storage.readOfflineActivation(f.stateDir);assert.ok(completed);
   let db=await f.final.storage.openStorage({stateDir:f.stateDir,bundle:f.final.bundle()});
   await db.prepare({allowMigration:false});
@@ -424,11 +426,23 @@ test('post-backup uncertain effect receipt is preserved and current SDK remains 
   const original=new DatabaseSync(join(f.stateDir,'storage-recovery',restored.barrierId,'source','state.sqlite'),{readOnly:true});
   try {assert.equal((original.prepare("SELECT count(*) AS n FROM remote_rows WHERE status='uncertain'").get() as {n:number}).n,1);}
   finally {original.close();}
+  db=await f.final.storage.openStorage({stateDir:f.stateDir,bundle:f.final.bundle()});
+  try {await db.prepare({allowMigration:true});} finally {await db.close();}
   const reconcile=join(f.root,'named-only.json');
   await writeFile(reconcile,JSON.stringify({format:'tower-offline-reconcile',activation:{...f.activation,backup:completed.backup},barrierId:restored.barrierId,scopes:f.activation.targets.filter(scope=>scope!=='remote'),by:'owner',evidence:'Remote admission outcome still unknown; intentionally not reconciled.'}),{mode:0o600});
   assert.deepEqual(await f.final.storage.runOfflineStorageCommand(['reconcile','--state-dir',f.stateDir,'--input',reconcile]),{barrierId:restored.barrierId,state:'held',effectsStarted:false});
   db=await f.final.storage.openStorage({stateDir:f.stateDir,bundle:f.final.bundle()});
-  try {await db.prepare({allowMigration:false});assert.equal((await db.gate('remote')).open,false);assert.equal(await f.final.storage.offlineBootstrapHeld(f.stateDir,db.identity,completed.storageId,db),true);}
+  try {
+    await db.prepare({allowMigration:false});
+    assert.equal(await f.final.storage.readOfflineActivation(f.stateDir),undefined);
+    assert.equal((await db.gate('remote')).open,false);
+    const recovery=db.status().recovery;assert.ok(recovery);assert.equal(recovery.state,'held');
+    if(recovery.state!=='held') throw new Error('Expected named recovery hold.');
+    assert.equal(recovery.barrierId,restored.barrierId);
+    assert.ok(recovery.unreconciled.includes('remote'));
+    assert.equal(recovery.reconciled.includes('remote'),false);
+    assert.equal(await f.final.storage.offlineBootstrapHeld(f.stateDir,db.identity,completed.storageId,db),false,'Absent activation record does not hold bootstrap; the SDK recovery barrier keeps remote closed.');
+  }
   finally {await db.close();}
 });
 

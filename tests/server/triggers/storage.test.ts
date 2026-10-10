@@ -593,7 +593,7 @@ test('actualStorage eventclaimed/runcommit lost reply refreshes the event revisi
     await assert.rejects((async () => { await runs.update([{ kind: 'run',id: run.id,json: runCanonical(run),previous: null }],'update','r6-fixed-admission',[link]); effects++; })(),error => (error as { disposition?: string }).disposition === 'unknown');
     assert.equal(effects,0);
     await assert.rejects(runs.update([{ kind: 'run',id: run.id,json: runCanonical(run),previous: null }],'update','r6-new-id',[link]));
-    await client.reopen(); await client.prepare({ allowMigration: false });
+    if (client.status().state === 'unavailable') { await client.reopen(); await client.prepare({ allowMigration: false }); }
     assert.equal(await runs.resolvePending(),fault === 'after' ? 'committed' : 'not-committed');
     assert.equal((await client.receipt('r6-new-id-begin')).found,false);
     if (fault === 'after') {
@@ -606,6 +606,7 @@ test('actualStorage eventclaimed/runcommit lost reply refreshes the event revisi
     // Assert the pending recovery projection; the fault fixture deliberately loses every subsequent commit too.
     assert.equal(reopened.state.events[0].status,fault === 'after' ? 'running' : 'uncertain');
     if (fault === 'before') await assert.rejects(reopened.flush(),/Cannot save triggers/);
+    if (client.status().state === 'unavailable') { await client.reopen(); await client.prepare({ allowMigration: false }); }
     assert.equal(effects,0); assert.equal((await client.receipt('r6-fixed-admission-commit')).found,fault === 'after');
   }
 });

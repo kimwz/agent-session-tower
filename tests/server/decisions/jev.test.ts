@@ -75,8 +75,10 @@ test('failures are named by kind and never repeat the API key or the request', a
 test('a slow answer times out and a cancelled one says so', async () => {
   // Like a real request, a pending answer keeps the process alive; abort timers alone do not.
   const hang = (_body: Record<string, unknown>, init: RequestInit) => new Promise<Response>((_, reject) => {
+    const signal = init.signal!;
+    if (signal.aborted) { reject(signal.reason); return; }
     const alive = setInterval(() => {}, 1000);
-    init.signal!.addEventListener('abort', () => { clearInterval(alive); reject(init.signal!.reason); });
+    signal.addEventListener('abort', () => { clearInterval(alive); reject(signal.reason); }, { once: true });
   });
   await assert.rejects(engine(hang, 20).engine.decide({ state: 'x', questions }), { kind: 'timeout' });
   const controller = new AbortController();

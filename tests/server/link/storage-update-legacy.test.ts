@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { currentVersion, entryPoint, pointCurrent, runtimePaths, versionDirectory } from '../../../server/link/service.js';
-import { evaluateStorageUpdate, readPreparationEvidence, recordPreparationEvidence, type RunningBuild, type StorageUpdateVerdict } from '../../../server/link/storage-update.js';
+import { evaluateStorageUpdate, preparationCheck, readPreparationEvidence, recordPreparationEvidence, type RunningBuild, type StorageUpdateVerdict } from '../../../server/link/storage-update.js';
 import { runUpdateHelper, serviceSteps, updatePaths, Updates, type UpdateHelperSteps } from '../../../server/link/update.js';
 import { storageWebBuild, storageWebHealth } from '../../../server/link/storage-web.js';
 import * as legacy from './fixtures/legacy-1.114.1/server/link/update.js';
@@ -182,8 +182,11 @@ test('legacy helper consumes actual candidate web preflight and backs out on an 
   const updates = new legacy.Updates({ stateDir: state, version: L, port: web.port, managed: true, spawnHelper: () => {} });
   assert.equal((await updates.request(APP_VERSION)).status, 202);
   const result = await legacy.runUpdateHelper(state, APP_VERSION, fixtureSteps(legacy.serviceSteps(state, web.port), state, web, log));
-  const cutover = build.manifest?.domains.some(domain => domain.cutover);
-  const accepted = build.preflight.supported && !cutover;
+  assert.ok(build.manifest);
+  const previous = preparationCheck(build.manifest, { state: 'legacy', version: L });
+  const accepted = build.preflight.supported && previous.state === 'not-required';
+  const refusal = !build.preflight.supported ? 'runtime-unsupported'
+    : previous.state === 'prerequisite-required' ? 'prerequisite-required' : `previous-${previous.state}`;
   assert.equal(result?.stage, accepted ? 'done' : 'failed', log.join('\n'));
   const answers = web.answers.filter(answer => answer.version === APP_VERSION);
   assert.ok(answers.length > 0);
@@ -191,7 +194,7 @@ test('legacy helper consumes actual candidate web preflight and backs out on an 
   if (!accepted) {
     assert.equal(result?.code, 'start-failed');
     assert.equal(await currentVersion(state), L);
-    assert.ok(answers.every(answer => answer.code === (build.preflight.supported ? 'prerequisite-required' : 'runtime-unsupported')),
+    assert.ok(answers.every(answer => answer.code === refusal),
       JSON.stringify({ target: APP_VERSION, managed: true, preflight: build.preflight, result, answers, log }));
   }
   assert.deepEqual(await untouched(state), before, 'even legacy verification changes no original JSON, DB, migration or recovery state');
