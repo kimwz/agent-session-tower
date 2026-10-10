@@ -119,7 +119,11 @@ export class PermissionsRepository {
   /** Explicit settings restore: requests/notices/codex/lost are preserved by the service, never read from backup. */
   async restore(state:PermissionState, expectedGeneration:number, commandId:string): Promise<void> {
     const h=await this.head(); if (h.authority?.generation!==expectedGeneration || h.revision!==this.loaded?.revision) throw new Error('Permission restore is stale.');
-    await this.commit({ mode:'restore',revision:h.revision,generation:expectedGeneration,changes:permissionRows(state).map(r=>({ ...r,previous:null })) },commandId);
+    const settings = { version:1, rules:state.rules, requests:[], codex:[], ...(state.autoReview ? { autoReview:state.autoReview } : {}) };
+    const replacement = permissionRows(settings);
+    await this.commit({ mode:'restore',revision:h.revision,generation:expectedGeneration,changes:replacement.map(r=>({ ...r,previous:null })) },commandId);
+    for (const [key,row] of this.rows) if (row.kind==='rule' || row.kind==='meta' && row.id==='autoReview') this.rows.delete(key);
+    for (const row of replacement) this.rows.set(JSON.stringify([row.kind,row.id]),row);
   }
   async resolvePending(): Promise<CommitDisposition> {
     await this.loadPending();

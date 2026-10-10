@@ -135,27 +135,28 @@ export function checkPermissionBounds(rows:readonly PermissionRow[]): void {
     else grouped[row.kind].push(value);
     if (row.kind==='request') {
       if (value.status==='pending') pending++;
-      if (value.review?.files) held+=Buffer.byteLength(JSON.stringify(value.review.files,null,2));
+      if (value.review?.files) held+=permissionValueBytes(value.review.files);
     }
   }
   if (grouped.rule.length>200 || pending>50 || held>1_000_000 || rows.length>PERMISSION_BYTES) throw new Error('Permission count/attachment allowance exceeded.');
   if (permissionStateBytes(properties)>PERMISSION_BYTES) throw new Error('Permission state exceeds its existing allowance.');
 }
 
-/** Measures each row/value independently, including pretty JSON wrapper/indentation costs. */
-export function permissionStateBytes(properties:Record<string,unknown> | PermissionState):number {
-  const valueBytes=(value:unknown, indent:number):number => {
-    const text=JSON.stringify(value,null,2); return Buffer.byteLength(text)+(text.split('\n').length-1)*indent;
-  };
-  let bytes=4; // opening/closing braces and newlines
-  const entries=Object.entries(properties);
-  for (const [key,value] of entries) {
-    bytes+=2+Buffer.byteLength(JSON.stringify(key))+2;
-    if (key==='rules' || key==='requests' || key==='codex') {
-      const values=value as unknown[];
-      bytes+=values.length ? 6+values.reduce<number>((sum,v)=>sum+4+valueBytes(v,4),0)+2*(values.length-1) : 2;
-    } else bytes+=valueBytes(value,2);
+/** Pretty JSON byte budget for parsed row values, without reserializing unchanged SQL rows. */
+export function permissionValueBytes(value: unknown, depth = 0): number {
+  if (value === null) return 4;
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return Buffer.byteLength(JSON.stringify(value));
+  const indent = (depth + 1) * 2;
+  if (Array.isArray(value)) {
+    if (!value.length) return 2;
+    return 4 + depth * 2 + value.reduce<number>((sum, item) => sum + indent + permissionValueBytes(item ?? null, depth + 1), 0) + 2 * (value.length - 1);
   }
-  bytes+=2*Math.max(0,entries.length-1);
-  return bytes;
+  const entries = Object.entries(value as Record<string,unknown>).filter(([,item]) => item !== undefined);
+  if (!entries.length) return 2;
+  return 4 + depth * 2 + entries.reduce((sum, [key,item]) => sum + indent + Buffer.byteLength(JSON.stringify(key)) + 2 + permissionValueBytes(item, depth + 1), 0) + 2 * (entries.length - 1);
+}
+
+/** Includes the exact existing pretty JSON wrapper/indentation costs. */
+export function permissionStateBytes(properties:Record<string,unknown> | PermissionState):number {
+  return permissionValueBytes(properties);
 }

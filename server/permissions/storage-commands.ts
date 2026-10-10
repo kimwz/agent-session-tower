@@ -70,9 +70,14 @@ export function permissionsDomainFor(schema: StorageDomainSchema): StorageDomain
         if (p.mode==='restore' && raw.kind!=='rule' && !(raw.kind==='meta' && raw.id==='autoReview') && (prior?.json ?? null)!==raw.json) fail('Settings restore cannot alter local requests/notices/files/lost metadata.');
         if (raw.remove !== undefined && raw.remove !== true) fail('Malformed permission deletion.');
       }
-      if (p.mode==='restore') for (const r of rows(c)) if (r.kind!=='rule' && !(r.kind==='meta' && r.id==='autoReview') && !seen.has(JSON.stringify([r.kind,r.id]))) fail('Settings restore cannot remove local permission records.');
-      if (p.mode==='import' || p.mode==='restore') for (const kind of Object.keys(tables)) c.prepare(`DELETE FROM ${table(kind)}`).run();
+      if (p.mode==='import') for (const kind of Object.keys(tables)) c.prepare(`DELETE FROM ${table(kind)}`).run();
+      if (p.mode==='restore') {
+        c.prepare('DELETE FROM permission_rules').run();
+        c.prepare("DELETE FROM permission_metadata WHERE id='autoReview'").run();
+      }
       for (const r of p.changes as PermissionChange[]) {
+        // Older full restore DTOs may include identical local rows; validate them above, never rewrite them.
+        if (p.mode==='restore' && r.kind!=='rule' && !(r.kind==='meta' && r.id==='autoReview')) continue;
         if (r.remove) c.prepare(`DELETE FROM ${table(r.kind)} WHERE id=?`).run(r.id); else put(c,r);
       }
       // Bound the persisted projection before parsing it; the 4MB domain does not need a large-intent framework.
