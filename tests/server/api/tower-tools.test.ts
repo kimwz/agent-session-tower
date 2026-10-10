@@ -1,4 +1,5 @@
 import { apiTriggerStorageFixture } from './trigger-storage-fixture.js';
+import { importFixtureRuns } from '../runs/sql-fixture.js';
 import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -35,7 +36,7 @@ async function fixture(t: TestContext, preparing?: (internal: { validate?: () =>
   const context: McpContext = { api, capabilities, run: runId => runs.find(run => run.id === runId) };
   const ownerTurn = (sessionId: string, towerTools: Run['towerTools'] = 'attached') => { const run: Run = { id: randomUUID(), sessionId, prompt: '', status: 'running', createdAt: '', output: '', origin: { kind: 'owner' }, towerTools }; runs.push(run); return run; };
   const token = (run: Run) => capabilities.issue({ kind: 'owner-run', runId: run.id, sessionId: run.sessionId });
-  return { stateDir, project, runs, sessions, submitted, triggers, api, capabilities, context, ownerTurn, token };
+  return { stateDir, project, storage: storage.storage, runs, sessions, submitted, triggers, api, capabilities, context, ownerTurn, token };
 }
 const schedule = (project: string) => ({ name: 'Morning digest', source: { kind: 'schedule', schedule: { type: 'cron', expression: '0 8 * * *', timezone: 'Asia/Seoul' } },
   handler: { kind: 'task', instructions: 'Summarize new issues', provider: 'codex', target: { mode: 'folder', cwd: project } } });
@@ -166,7 +167,8 @@ test('the Tower tool server lists and calls tools through the worker with its ca
   const { EventEmitter } = await import('node:events');
   const { runnerPaths } = await import('../../../server/runs/runner-protocol.js');
   const f = await fixture(t);
-  const runs = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000, findExecutable: async () => undefined });
+  await importFixtureRuns(f.storage);
+  const runs = new RunManager({ stateDir: f.stateDir, storage: f.storage, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000, findExecutable: async () => undefined });
   await runs.start();
   const list = runs.list.bind(runs);
   runs.list = () => [...list(), ...f.runs];
@@ -227,7 +229,8 @@ test('the session tool server answers through the worker with the key kept in th
   const list = { jsonrpc: '2.0', id: 1, method: 'tools/list' };
   // Before Tower has made its key, the tool says so instead of failing obscurely.
   assert.match((await out([list]))[0].error.message, /has not started/);
-  const runs = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000, findExecutable: async () => undefined });
+  await importFixtureRuns(f.storage);
+  const runs = new RunManager({ stateDir: f.stateDir, storage: f.storage, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000, findExecutable: async () => undefined });
   await runs.start();
   const sessions = Object.assign(new EventEmitter(), { list: () => [] }) as unknown as import('../../../server/sessions/service.js').SessionService;
   f.capabilities.grant(await sessionToolsKey(f.stateDir), { kind: 'session-reader' });

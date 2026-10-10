@@ -116,5 +116,9 @@ export function workflowRows(value:unknown,channel:WorkflowChannel):ExternalRow[
 }
 export function workflowSource(rows:readonly ExternalRow[],channel:WorkflowChannel):Record<string,unknown> & {rules:SlackRule[];workflows:SlackWorkflow[]} {
  const own=rows.filter(r=>r.channel===channel),wrapper=own.find(r=>r.kind==='settings');if(!wrapper) throw new Error('Missing workflow wrapper authority.');
- const source={...JSON.parse(wrapper.json),rules:own.filter(r=>r.kind==='rule').sort((a,b)=>a.ordinal-b.ordinal).map(r=>JSON.parse(r.json)),workflows:own.filter(r=>r.kind==='workflow').sort((a,b)=>a.ordinal-b.ordinal).map(r=>JSON.parse(r.json))};validateAutomationSource(source,channel);return source;
+ const source={...JSON.parse(wrapper.json),rules:own.filter(r=>r.kind==='rule').sort((a,b)=>a.ordinal-b.ordinal).map(r=>{
+  // SQL hashes retain canonical bytes; the public rule DTO retains its typed field order.
+  const {id,name,enabled,condition,instructions,replyInstructions,provider,model,cwd,autoReply,...extra}=JSON.parse(r.json) as SlackRule;
+  return {id,name,enabled,condition,instructions,replyInstructions,provider,...(model!==undefined?{model}:{}),...(cwd!==undefined?{cwd}:{}),...(autoReply!==undefined?{autoReply}:{}),...extra};
+ }),workflows:own.filter(r=>r.kind==='workflow').sort((a,b)=>a.ordinal-b.ordinal).map(r=>JSON.parse(r.json))};validateAutomationSource(source,channel);return source;
 }

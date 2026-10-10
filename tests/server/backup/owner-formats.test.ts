@@ -1,4 +1,4 @@
-import { empty } from '../../../server/triggers/state.js';
+import { empty, serializeState } from '../../../server/triggers/state.js';
 import { workerSettingsFixture, backupPermissionRule as permissionRule, backupPermissionRequest as permissionRequest, backupWorkflow } from '../remote/external-storage-fixture.js';
 import { collectTriggers as collectLegacyTriggers } from '../../helpers/legacy-trigger-backup.js';
 /**
@@ -49,7 +49,7 @@ const write = async (stateDir: string, name: string, value: unknown) => {
   if (sqlFile(name) && typeof value !== 'string' && !Array.isArray(value)) await (await workerSettingsFixture(stateDir)).seed(name, value);
 };
 const read = async (stateDir: string, name: string) => name === 'trigger-engine.json'
-  ? JSON.stringify(await (await workerSettingsFixture(stateDir)).triggerState()) : sqlFile(name)
+  ? serializeState(await (await workerSettingsFixture(stateDir)).triggerState()) : sqlFile(name)
   ? JSON.stringify(await (await workerSettingsFixture(stateDir)).read(name)) : readFile(join(stateDir, name), 'utf8');
 const mode = async (path: string) => (await stat(path)).mode & 0o777;
 async function vault(stateDir: string) { const service = new SecretService({ stateDir }); await service.start(); await service.initialize(VAULT_PASSWORD); return service; }
