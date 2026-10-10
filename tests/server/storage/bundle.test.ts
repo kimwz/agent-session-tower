@@ -32,6 +32,7 @@ const runsStorageSources = [
 const triggerStorageSources = [
   'server/triggers/storage-schema.ts', 'server/triggers/storage-codec.ts', 'server/triggers/storage-commands.ts',
   'server/triggers/state.ts', 'server/triggers/once.ts', 'server/triggers/once-storage.ts',
+  'server/triggers/row-operations.ts',
   'server/triggers/audit.ts', 'server/triggers/errors.ts', 'server/triggers/limits.ts', 'shared/triggers.ts',
 ];
 
