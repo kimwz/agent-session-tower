@@ -16,7 +16,7 @@ import { buildIdentityModule, buildIdentityPlugin, STORAGE_BUNDLE_FORMAT, type S
 import type * as Parent from './parent.js';
 
 /** Actual A/B domain handlers and captured SDK compiled as future artifact versions; no mocked import support. */
-export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0' | '1.122.0' | '1.123.0' | '1.124.0' | '1.125.0' | '1.125.1', output?: string, retentionCutover = version === '1.121.0' || version === '1.123.0' || (version === '1.125.0' || version === '1.125.1'), includePermissions = false, externalDomains = false) {
+export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0' | '1.122.0' | '1.123.0' | '1.124.0' | '1.125.0' | '1.125.1', output?: string, retentionCutover = version === '1.121.0' || version === '1.123.0' || (version === '1.125.0' || version === '1.125.1'), includePermissions = false, externalDomains = false, product?: {artifact:StorageThreadArtifact;manifest:import('../../../../server/storage/contract.js').StorageBuildManifest;serviceFixture?:{installed:boolean}}) {
   const directory = output ?? await mkdtemp(join(tmpdir(), 'tower-retention-artifact-'));
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const root = fileURLToPath(new URL('../../../../', import.meta.url));
@@ -46,6 +46,23 @@ export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' 
     if (triggerABytes!.length !== 827112) throw new Error('Actual A124 artifact length mismatch.');
   }
   const versionPlugin: Plugin = { name: 'retention-fixture-release', setup(builder) {
+    const serviceFixture=product?.serviceFixture;
+    if(serviceFixture) {
+      // Only the OS manager boundary is replaced. Actual installation reuse, pointer/pin,
+      // captured SDK, selected executable contract and SQL completion remain product code.
+      builder.onResolve({filter:/^\.\/service\.js$/},args=>args.importer.endsWith('/server/link/cli.ts') ? {path:'offline-service-manager',namespace:'offline-fixture'} : undefined);
+      builder.onLoad({filter:/^offline-service-manager$/,namespace:'offline-fixture'},()=>({loader:'ts',resolveDir:root,contents:`
+import { join } from 'node:path';
+import { writeFile } from 'node:fs/promises';
+import { currentVersion } from ${JSON.stringify(join(root,'server/link/service.ts'))};
+export * from ${JSON.stringify(join(root,'server/link/service.ts'))};
+export async function serviceStatus(stateDir:string) { return {installed:${serviceFixture.installed},loaded:false,version:await currentVersion(stateDir)}; }
+export async function installService(stateDir:string,input:unknown) {
+ await writeFile(join(stateDir,'offline-service-fixture-start.json'),JSON.stringify({version:await currentVersion(stateDir),input}),{flag:'wx',mode:0o600});
+ return 'launchd';
+}` }));
+    }
+
     if (preparation) builder.onLoad({ filter: /[\\/]server[\\/]sessions[\\/]retention[\\/]storage-(schema|commands)\.ts$/ }, async args => {
       const name = args.path.split(/[\\/]/).at(-1)!;
       const contents = await readFile(join(captureRoot, `${name}.txt`), 'utf8');
@@ -165,6 +182,12 @@ runStorageThread([domain${runsRelease ? ', runsDomain' : ''}${triggersRelease ? 
     if (actual.sourceHash !== '5318990f15be1bbe73ba69c390c4b5ae32c7ee4ca61ba89f4d34241723936a0a' || actual.sourceHash !== triggerACapture.identity.sourceHash) throw new Error('Actual A124 source identity mismatch.');
     artifacts.normal = actual;
   }
+  if(product) {
+    if(version!=='1.125.0' || JSON.stringify(product.manifest)!==JSON.stringify(manifest)) throw new Error('Exact final product profile mismatch.');
+    const artifact=product.artifact, first=`var __TOWER_STORAGE_SOURCE_HASH__ = "${artifact.sourceHash}";\n`;
+    if(!artifact.source.startsWith(first) || createHash('sha256').update(artifact.source.slice(first.length)).digest('hex')!==artifact.sourceHash) throw new Error('Product source bytes mismatch.');
+    artifacts.normal=artifact;
+  }
   const parentPath = join(directory, 'parent.mjs');
   await build({ entryPoints: [join(root, 'tests/server/storage/fixtures/parent.ts')], outfile: parentPath, bundle: true, platform: 'node', format: 'esm', target: 'node22', logLevel: 'silent', plugins: [versionPlugin, buildIdentityPlugin(buildIdentityModule({ artifact:JSON.stringify(artifacts.normal), contexts: Object.values(artifacts).map(artifact => ({ sourceHash: artifact.sourceHash, manifest })) }))] });
   const storage = await import(pathToFileURL(parentPath).href) as typeof Parent;
@@ -175,4 +198,46 @@ runStorageThread([domain${runsRelease ? ', runsDomain' : ''}${triggersRelease ? 
   };
   await writeFile(join(directory, 'manifest.json'), JSON.stringify({ manifest, artifacts: Object.fromEntries(Object.entries(artifacts).map(([key, artifact]) => [key, artifact.sourceHash])) }));
   return { directory, version, manifest, storage, bundle };
+}
+
+export type LegacyRetentionStore = Pick<import('../../../../server/sessions/retention/store.js').RetentionStore,'start'|'get'|'put'|'putIfUnchanged'|'removeMetadata'|'setPolicy'|'list'|'policy'>;
+export type LegacyRunHistory = Pick<import('../../../../server/runs/run-history.js').RunHistory,'readCreated'|'restore'|'flush'> & {
+  save(runs:ReadonlyMap<string,import('../../../../shared/types.js').Run>,listed:readonly import('../../../../shared/types.js').Run[],created:string,retained:ReadonlySet<string>):void;
+};
+
+/** Same verified public bytes supply the full CLI, actual SDK and legacy benchmark classes. */
+export async function protectedOld124() {
+  const directory=process.env.TOWER_SQLITE_OLD124_ROOT;
+  if(!directory || process.env.SQLITE_VALIDATION_CI!=='1') throw new Error('Full old124 fixture requires the hosted official capture, not a five-member substitute.');
+  const receipt=JSON.parse(await readFile(join(directory,'receipt.json'),'utf8'));
+  if(receipt.format!=='tower-full-old124-capture' || receipt.packageSHA256!=='5647224b149023ad8f5a429832c1fc6b3012e7b27c16808a1fc2af6b00ef371d'
+    || receipt.archiveBytes!==5118858 || Object.keys(receipt.members).length!==714 || receipt.dependenciesEqual!==true) throw new Error('Full old artifact provenance mismatch.');
+  const packageRoot=join(directory,'package');
+  for(const [member,fact] of Object.entries(receipt.members) as [string,{bytes:number;sha256:string}][]) {
+    if(!member || member.split('/').some(part=>!part || part==='.' || part==='..')) throw new Error('Old member boundary mismatch.');
+    const bytes=await readFile(join(packageRoot,member));
+    if(bytes.length!==fact.bytes || createHash('sha256').update(bytes).digest('hex')!==fact.sha256) throw new Error('Full old member readback mismatch.');
+  }
+  const stdout=await readFile(join(directory,'storage-contract.json'));
+  if(createHash('sha256').update(stdout).digest('hex')!==receipt.contractSHA256) throw new Error('Full CLI stdout changed.');
+  const contract=JSON.parse(stdout.toString('utf8'));
+  const capture=JSON.parse(await readFile(fileURLToPath(new URL('./triggers-a124/capture.json',import.meta.url)),'utf8'));
+  if(!contract.supported || JSON.stringify(contract.identity)!==JSON.stringify(capture.identity)) throw new Error('Full old CLI identity mismatch.');
+  const storage=await import(pathToFileURL(join(packageRoot,'dist/server/storage/index.js')).href) as typeof Parent;
+  const bundle=await storage.captureStorageBundle(), context=storage.storageBuildContext(bundle);
+  if(!context.ok || JSON.stringify(context.identity)!==JSON.stringify(contract.identity)) throw new Error('Full old actual SDK mismatch.');
+  const retention=await import(pathToFileURL(join(packageRoot,'dist/server/sessions/retention/store.js')).href) as {RetentionStore:new(root:string,options?:{storage:import('../../../../server/storage/client.js').StorageClient})=>LegacyRetentionStore};
+  const runs=await import(pathToFileURL(join(packageRoot,'dist/server/runs/run-history.js')).href) as {RunHistory:new(stateDir:string)=>LegacyRunHistory};
+  return {directory,packageRoot,contract,receipt,storage,bundle:()=>bundle,RetentionStore:retention.RetentionStore,RunHistory:runs.RunHistory};
+}
+
+/** Product-profile tests and benchmark share the exact built candidate SDK, including SEA source identity. */
+export async function currentProductProfile() {
+  const root=fileURLToPath(new URL('../../../../',import.meta.url));
+  const storage=await import(pathToFileURL(join(root,'dist/server/storage/index.js')).href) as typeof Parent;
+  const context=storage.storageBuildContext(await storage.captureStorageBundle());
+  if(!context.ok) throw new Error('Built product SDK contract held.');
+  const artifact=JSON.parse(await readFile(join(root,'dist/server/storage/generated/thread-bundle.json'),'utf8')) as StorageThreadArtifact;
+  if(artifact.sourceHash!==context.identity.sourceHash) throw new Error('Built product source identity mismatch.');
+  return {artifact,manifest:context.manifest};
 }

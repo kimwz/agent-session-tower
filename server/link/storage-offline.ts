@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { open, lstat, realpath } from 'node:fs/promises';
+import { open, lstat, realpath, readdir } from 'node:fs/promises';
 import { dirname, join, resolve, relative } from 'node:path';
 import { validateStrictStateLease, type StrictStateLease } from '../instance/state-lock.js';
-import { fileSha256, readStorageIdentity } from '../storage/recovery.js';
+import { fileSha256, readStorageIdentity, readRecoveryBarrier, recoveryHold } from '../storage/recovery.js';
 import { StorageClient } from '../storage/client.js';
+import type { StorageBuildContext } from '../storage/bundle.js';
 import type { StorageBuildIdentity, StorageBuildManifest } from '../storage/contract.js';
 import { manifestDigest } from '../storage/schema.js';
 import { privateDirectory, privateFile, sameGeneration, storageLayout, writePrivateDocument } from '../storage/paths.js';
@@ -17,7 +18,7 @@ const refuse: (reason: string) => never = (reason) => { throw new Error(`Offline
 export const offlineActivationPath = (stateDir: string) => join(stateDir, 'storage-offline-activation.json');
 
 export type { OfflineBackupDescriptor } from './storage-offline-backup.js';
-import { verifyOfflineBackup, type OfflineBackupDescriptor } from './storage-offline-backup.js';
+import { verifyOfflineBackup, verifyOfflineRestoredInventory, type OfflineBackupDescriptor } from './storage-offline-backup.js';
 export interface OfflineFileDescriptor { path: string; sha256: string }
 export interface OfflineDomainCompletion {
   scope: string;
@@ -93,13 +94,20 @@ export async function readOfflineActivation(stateDir: string): Promise<OfflineAc
 }
 export interface OfflineActivationOwner { readonly kind: 'offline-owner' }
 const owners = new WeakMap<OfflineActivationOwner, { lease: StrictStateLease; runtimeDir: string; record: OfflineActivationRecord; storage?: StorageClient }>();
-export async function beginOfflineActivation(input: { lease: StrictStateLease; runtimeDir: string; record: OfflineActivationRecord; update: StorageUpdateInput }): Promise<OfflineActivationOwner> {
+export async function beginOfflineActivation(input: { lease: StrictStateLease; runtimeDir: string; record: OfflineActivationRecord; update: StorageUpdateInput; recovery?: {barrierId:string;context:StorageBuildContext} }): Promise<OfflineActivationOwner> {
   await validateStrictStateLease(input.lease, input.runtimeDir);
   const record = decodeOfflineActivation(input.record);
   if (resolve(input.runtimeDir) !== join(record.stateDir, 'runner-runtime') || record.phase !== 'pending' || record.stateDir !== resolve(input.update.stateDir)) refuse('begin context');
   await verifyProtectedOfflineArtifact(record);
   const previous = await readOfflineActivation(record.stateDir);
-  await verifyOfflineBackup(record.backup, record.stateDir, record.storageId, !previous);
+  if(input.recovery) {
+    const barrier=await readRecoveryBarrier(record.stateDir);
+    if(barrier.state!=='present' || barrier.barrier.id!==input.recovery.barrierId || barrier.barrier.snapshot.id!==record.backup.snapshotId
+      || barrier.barrier.snapshot.storageId!==record.storageId || !same(input.recovery.context.identity,record.build)
+      || record.targets.some(scope=>recoveryHold(barrier,scope,input.recovery!.context).held)) refuse('explicit recovery binding/gates');
+    if(!previous) await verifyOfflineRestoredInventory(record.backup,record.stateDir,record.storageId);
+  }
+  await verifyOfflineBackup(record.backup, record.stateDir, record.storageId, !previous && !input.recovery);
   await offlineEvaluation(input.update, record);
   if (previous && !same({ ...previous, phase: 'pending', corePrepared: undefined, domains: [] }, { ...record, corePrepared: undefined, domains: [] })) refuse('explicit retry identity');
   if (previous?.phase === 'complete') refuse('already complete; no replay');
@@ -295,4 +303,48 @@ export async function evaluateCompletedOffline(update: StorageUpdateInput, stora
   if (!record || await offlineBootstrapHeld(update.stateDir, storage.identity, record.storageId, storage)) refuse('completed SDK proof held');
   const evaluation = same(storage.identity,record.build) ? await offlineEvaluation(update, record) : await evaluateStorageUpdate(update);
   return { ...evaluation, code:'offline-completion-verified', reason:'Exact offline installation receipts and current storage gates verified.' };
+}
+
+/** Explicit stopped-service maintenance only; hashes cover the package installVersion actually selected. */
+export interface OfflineServiceMaintenance {
+  format: 'tower-offline-service-maintenance'; stateDir: string; version: string; service: true; previousVersion: string;
+  by: string; evidence: string; publishedPackageSHA256: string;
+  files: Record<string,string>; completionInput: OfflineFileDescriptor;
+}
+export async function verifyOfflineServiceSelection(packageRoot: string, request: OfflineServiceMaintenance, stateDir: string, version: string): Promise<OfflineActivationRecord> {
+  if(request.format!=='tower-offline-service-maintenance' || request.service!==true || request.previousVersion!=='1.124.0' || request.stateDir!==stateDir || request.version!==version
+    || !request.by?.trim() || !request.evidence?.trim() || !sha(request.publishedPackageSHA256)
+    || !request.files || typeof request.files!=='object' || Array.isArray(request.files)
+    || typeof request.completionInput?.path!=='string' || !sha(request.completionInput.sha256)) refuse('explicit maintenance approval/artifact');
+  for(const member of ['package.json','bin/agent-session-tower.mjs','dist/server/index.js','dist/server/storage/build-identity.js','dist/server/storage/generated/thread-bundle.json','dist/server/storage/schema.js']) {
+    if(!sha(request.files[member])) refuse('selected package member missing');
+  }
+  if(await realpath(packageRoot)!==packageRoot) refuse('selected package linked');
+  const actual:string[]=[];
+  async function visit(directory:string,prefix=''):Promise<void> {
+    const info=await lstat(directory);
+    if(!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o022)!==0 || process.getuid && info.uid!==process.getuid()) refuse('selected package directory boundary');
+    for(const entry of await readdir(directory,{withFileTypes:true})) {
+      const name=prefix+entry.name, path=join(directory,entry.name);
+      if(entry.isDirectory()) await visit(path,`${name}/`);
+      else if(entry.isFile()) actual.push(name);
+      else refuse('selected package non-regular member');
+    }
+  }
+  await visit(packageRoot);
+  if(!same(actual.sort(),Object.keys(request.files).sort())) refuse('selected full package inventory mismatch');
+  for(const [member,digest] of Object.entries(request.files)) {
+    const path=resolve(packageRoot,member);
+    if(!sha(digest) || relative(packageRoot,path)!==member || await realpath(dirname(path))!==dirname(path)) refuse('selected member boundary');
+    const before=await lstat(path);
+    if(!before.isFile() || before.nlink!==1 || (before.mode & 0o022)!==0 || process.getuid && before.uid!==process.getuid()
+      || await fileSha256(path)!==digest || !sameGeneration(before,await lstat(path))) refuse('selected package bytes changed');
+  }
+  await verifyFile(request.completionInput);
+  const record=decodeOfflineActivation(JSON.parse((await readOfflinePrivateBytes(request.completionInput.path)).toString('utf8')));
+  if(record.phase!=='complete' || record.stateDir!==stateDir || record.build.appVersion!==version || record.oldArtifact.identity.appVersion!==request.previousVersion
+    || !same(await readOfflineActivation(stateDir),record)) refuse('exact maintenance completion record');
+  await verifyProtectedOfflineArtifact(record);
+  await verifyOfflineBackup(record.backup,stateDir,record.storageId);
+  return record;
 }

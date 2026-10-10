@@ -180,3 +180,12 @@ export async function restoreOfflineBackup(input: { descriptor: OfflineBackupDes
   await validateStrictStateLease(input.lease, join(stateDir, 'runner-runtime'));
   return { barrierId: barrier.id, state: 'held' };
 }
+
+/** A restored SQL snapshot and its new recovery barrier differ from the archived SQL files.
+ * The whitelist JSON/evidence presence and bytes must still match before store-only reimport. */
+export async function verifyOfflineRestoredInventory(descriptor: OfflineBackupDescriptor,stateDir:string,storageId:string):Promise<void> {
+  const backup=await verifyOfflineBackup(descriptor,stateDir,storageId);
+  const raw=(entries:OfflineInventoryEntry[])=>entries.filter(entry=>!databases.includes(entry.name as typeof databases[number])
+    && !['storage-recovery','storage-snapshots'].some(root=>entry.name===root || entry.name.startsWith(`${root}/`)));
+  if(!same(raw(backup.entries),raw(await offlineInventory(stateDir)))) held('restored raw presence/bytes mismatch');
+}

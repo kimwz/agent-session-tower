@@ -137,6 +137,8 @@ jobs:
             node --import tsx --test --test-reporter=tap tests/server/link/storage-update-legacy.test.ts
             exit 0
           fi
+          export TOWER_SQLITE_OLD124_ROOT="$VALIDATION_ROOT/old124"
+          node scripts/sqlite-old124-capture.mjs
           node --import tsx --test --test-reporter=tap \
             --test-name-pattern='^(flush, close ack and an explicit reopen with the same captured bundle; nothing is sent while closed|a full queue still drains on flush and close: the accepted write commits, close acks, the thread exits 0, intake is refused meanwhile)$' \
             tests/server/storage/client.test.ts
@@ -224,6 +226,9 @@ jobs:
           assert.equal(binaryHash, readFileSync('artifacts/agent-session-tower.sha256', 'utf8').split(/\s+/)[0]);
           writeFileSync(`${report}/binary-sha256.txt`, binaryHash + '\n');
           SEA
+            export TOWER_SQLITE_FINAL_BINARY="$PWD/artifacts/agent-session-tower"
+            node --import tsx --test --test-reporter=tap --test-name-pattern='^final actual CLI source and optional Node26 SEA' tests/server/link/storage-offline-activation.test.ts
+            printf '0\n' > "$report/sea-offline-exit.txt"
           fi
           VALIDATE
       - name: Preserve validation logs, including failures
@@ -295,6 +300,9 @@ jobs:
           node --version > "$report/node-version.txt"
           printf '%s\n' npm-ci > "$report/stage.txt"
           npm ci
+          export SQLITE_VALIDATION_CI=1
+          export TOWER_SQLITE_OLD124_ROOT="$VALIDATION_ROOT/old124"
+          node scripts/sqlite-old124-capture.mjs
           node --import tsx scripts/sqlite-runtime-check.mjs supported-floor | tee "$report/runtime.json"
           printf '%s\n' release-version-decision > "$report/stage.txt"
           if [[ "$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')" == 1.125.0 ]]; then
@@ -309,7 +317,7 @@ jobs:
           const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
           assert.match(version, /^\d+\.\d+\.\d+$/);
           const current = version.split('.').map(Number);
-          const target = [1, 124, 0];
+          const target = [1, 125, 0];
           const first = current.findIndex((part, index) => part !== target[index]);
           assert.ok(first >= 0 && current[first] < target[first], 'target must exceed the input version');
           FLOOR
