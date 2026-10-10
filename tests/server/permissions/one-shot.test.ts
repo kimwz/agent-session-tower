@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { PermissionRunner, processStart } from '../../../server/permissions/runner.js';
+import { noStorageFixture, permissionFixture, closePermissionFixture } from './storage-fixture.js';
 import { PermissionService } from '../../../server/permissions/service.js';
 import { storage, threadBundle } from '../storage/helpers.js';
 import type { RunnerOptions } from '../../../server/permissions/runner.js';
@@ -33,12 +34,12 @@ async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'
   const finished: string[] = [];
   let service!: PermissionService;
   const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 300, now: () => clock, beforeStart });
-  const make = () => new PermissionService({ stateDir, effectGate, env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), now: () => clock,
+  const make = () => new PermissionService({ stateDir, repository:noStorageFixture(stateDir), effectGate, env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), now: () => clock,
     startRun: request => runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600, request.sessionId),
     onRunFinished: request => finished.push(request.id), runOutput: id => runner.output(id), forgetRun: id => runner.forget(id) });
   service = make();
   await service.start();
-  t.after(async () => { await runner.flush(); service.close(); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { await runner.flush(); service.close(); closePermissionFixture(stateDir); await rm(root, { recursive: true, force: true }); });
   return { root, stateDir, project, sessions, service, runner, finished, make, tick: (ms: number) => { clock = new Date(clock.getTime() + ms); } };
 }
 
@@ -613,24 +614,20 @@ for (const stale of [false, true]) test(`actual first running record gate preser
 test('actual initial record unknown write followed by storage refusal never requeues', async t => {
   let service!: PermissionService, armed = false;
   const f = await fixture(t, async id => { const ok = await service.confirmReviewed(id); armed = ok; return ok; }); service = f.service;
-  const original = fsPromises.rename;
-  const mocked = t.mock.method(fsPromises, 'rename', async (...args: Parameters<typeof original>) => {
-    if (armed && String(args[1]) === join(f.stateDir, 'permissions.json')) {
-      armed = false;
-      // The real rename took effect, but its acknowledgement is lost. This is not a prewrite refusal.
-      await original(...args); service.pauseForStorage(); f.runner.holdStorage();
-      throw new TowerError('unavailable', 'fixture lost write acknowledgement', { disposition: 'uncertain' });
+  const sql=permissionFixture(f.stateDir);
+  sql.onWrite=payload=>{
+    const p=payload as { changes?: { json:string }[] };
+    if (armed && p.changes?.some(r=>JSON.parse(r.json).run?.status==='running')) {
+      armed=false; sql.lostAnswer=true; f.runner.holdStorage();
     }
-    return original(...args);
-  });
-  syncBuiltinESMExports(); t.after(() => { mocked.mock.restore(); syncBuiltinESMExports(); });
+  };
   const asked = await service.requestRun({ command: 'echo forbidden >> executions', reason: 'fixture' }, agent('claude:one'));
   await service.decide(asked.request.id!, true); await f.runner.flush();
   assert.equal(f.runner.inFlight(), false, 'unknown write disables storage requeue');
   service.resume(); f.runner.releaseStorage(); await f.runner.flush();
   await assert.rejects(readFile(join(f.project, 'executions')), { code: 'ENOENT' });
-  const durable = JSON.parse(await readFile(join(f.stateDir, 'permissions.json'), 'utf8'));
-  assert.equal(durable.requests.find((r: { id: string }) => r.id === asked.request.id).run.status, 'running');
+  const durable = await noStorageFixture(f.stateDir).load();
+  assert.equal(durable.requests.find((r: { id: string }) => r.id === asked.request.id)!.run!.status, 'running');
 });
 
 test('ordinary permission pause and close never claim storage prewrite deferral', async t => {

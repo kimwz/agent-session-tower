@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { PermissionReviewer } from '../../../server/permissions/reviewer.js';
+import { noStorageFixture, closePermissionFixture } from './storage-fixture.js';
 import { PermissionService } from '../../../server/permissions/service.js';
 import type { ReviewSources } from '../../../server/permissions/context.js';
 import { autoReviewBlock, ruleGuards, ruleIsNarrower, type PermissionRequest } from '../../../shared/permissions.js';
@@ -23,11 +24,11 @@ async function fixture(t: TestContext, options: { skip?: (request: PermissionReq
   git(project, 'init', '-q');
   const sessions = new Map([['claude:one', { cwd: project, provider: 'claude' as const }], ['codex:two', { cwd: project, provider: 'codex' as const }]]);
   let queued = 0;
-  const make = () => new PermissionService({ stateDir, env: { CODEX_HOME: codexHome }, session: id => sessions.get(id),
+  const make = () => new PermissionService({ stateDir, repository:noStorageFixture(stateDir), env: { CODEX_HOME: codexHome }, session: id => sessions.get(id),
     autoReviewSkip: options.skip, onReviewQueued: () => { queued += 1; } });
   const service = make();
   await service.start();
-  t.after(async () => { service.close(); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { service.close(); closePermissionFixture(stateDir); await rm(root, { recursive: true, force: true }); });
   return { root, stateDir, codexHome, project, service, make, queued: () => queued };
 }
 

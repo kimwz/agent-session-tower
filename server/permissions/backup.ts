@@ -13,6 +13,7 @@ export function permissionsBackupOf(saved: Record<string, unknown>): Record<stri
 export function mergePermissions(incoming: unknown, existing: unknown): Record<string, unknown> | undefined {
   if (!record(incoming) || !Array.isArray(incoming.rules)) return undefined;
   const kept = record(existing) ? existing : {};
+  const extensions=Object.fromEntries(Object.entries(kept).filter(([key])=>!['version','rules','requests','codex','lost','autoReview'].includes(key)));
   return { version: 1, requests: Array.isArray(kept.requests) ? kept.requests : [], codex: Array.isArray(kept.codex) ? kept.codex : [], ...(typeof kept.lost === 'string' ? { lost: kept.lost } : {}),
-    rules: incoming.rules, ...(record(incoming.autoReview) ? { autoReview: incoming.autoReview } : {}) };
+    rules: incoming.rules, ...(record(incoming.autoReview) ? { autoReview: incoming.autoReview } : {}), ...extensions };
 }
