@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager, fixtureDocuments } from './sql-fixture.js';
 import { SessionService } from '../../../server/sessions/service.js';
 import { startRunnerHost, type RunnerHostOptions } from '../../../server/runs/worker.js';
 import type { SlackService } from '../../../server/slack/service.js';
@@ -740,10 +740,10 @@ test('updating on request stops the running turn at the deadline, hands off, and
   const queued = await client.enqueue(f.session.id, 'Sent while updating');
   await until(() => f.cancels() === 1 && successorStarted === 1, 5000);
   assert.equal(handoffs, 1);
-  const read = () => JSON.parse(readFileSync(join(f.stateDir, 'runs.json'), 'utf8')) as Array<Record<string, any>>;
-  // This fixture's quiesce does not flush; the real one waits for the save.
-  await until(() => read().find(item => item.id === run.id)?.error !== undefined);
-  const saved = read();
+  // Flush the actual SQL owner before inspecting its committed projection.
+  await until(() => f.runs.list().find(item => item.id === run.id)?.error !== undefined);
+  await f.runs.flushState();
+  const saved = (await fixtureDocuments(f.runs)).runs;
   const stopped = saved.find(item => item.id === run.id)!;
   assert.equal(stopped.status, 'cancelled');
   assert.match(stopped.error, /Tower update/);
@@ -1409,7 +1409,7 @@ test('worker records a verified calling turn without treating its message as own
   f.finish();
   await until(() => f.runs.list().find(run => run.id === parent.id)?.status === 'completed');
   await assert.rejects(client.enqueue(f.session.id, 'Expired', {}, { callerCapability: token }), { kind: 'forbidden' });
-  const saved = await readFile(join(f.stateDir, 'runs.json'), 'utf8');
+  const saved = JSON.stringify((await fixtureDocuments(f.runs)).runs);
   assert.equal(saved.includes(token), false, 'credentials never enter persisted run history');
   assert.ok(saved.includes(parent.id));
 });

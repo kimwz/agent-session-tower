@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
 import { test, type TestContext } from 'node:test';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager } from './sql-fixture.js';
 import type { CodexStdioOptions } from '../../../server/runs/codex-stdio.js';
 import { MAX_REPLIES, MAX_REPLY_CHARS, ReplyLog } from '../../../server/runs/replies.js';
 import type { Run, Session } from '../../../shared/types.js';

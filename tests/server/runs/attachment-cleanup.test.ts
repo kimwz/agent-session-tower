@@ -14,7 +14,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager, fixtureDocuments } from './sql-fixture.js';
 import { AutoPromptManager } from '../../../server/auto-prompt/manager.js';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { storage, threadBundle } from '../storage/helpers.js';
@@ -76,7 +76,7 @@ test('GC retains durable run references but only skips an admission before its d
   await internals(f.runs).cleanupAttachments(); await assert.rejects(store.openVerified(item.id));
   const durable = await upload(store, f.session.id); await f.runs.enqueue(f.session.id, '', { attachmentIds: [durable.id] }); await expire(store, durable.id);
   await internals(f.runs).cleanupAttachments(); assert.equal((await manifest(store, durable.id)).pendingUntil, undefined);
-  const saved = JSON.parse(await readFile(join(f.directory, 'runs.json'), 'utf8')); assert.equal(saved[0].attachments[0].id, durable.id);
+  const saved = JSON.parse(JSON.stringify((await fixtureDocuments(f.runs)).runs)); assert.equal(saved[0].attachments[0].id, durable.id);
 });
 
 test('Auto admission protects its scope without retaining unused originals and releases on failure', async t => {

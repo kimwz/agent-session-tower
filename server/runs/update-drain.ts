@@ -37,7 +37,8 @@ export interface DrainHost {
   stopping(): boolean;
   steer(runId: string, options: { targetRunId?: string }): Promise<Run>;
   cancel(runId: string, reason?: string): Promise<void>;
-  changed(): void;
+  changed(...runs: Run[]): void;
+  touch(...ids: string[]): void;
   pump(): void;
   /** A forced update carries the turn on once: a permission continuation waiting for it becomes the update's. */
   mergePermission(run: Run, resumeNotice: string, resumeWait: string): boolean;
@@ -111,19 +112,19 @@ export class UpdateDrain {
     this.state!.wrapUps.add(wrapUp.id);
     state.sending = true;
     state.retryAt = Date.now() + WRAP_UP_RETRY_MS;
-    this.host.changed();
+    this.host.changed(wrapUp);
     let uncertain = false;
     void this.host.steer(wrapUp.id, { targetRunId: target.id }).catch(error => { uncertain = admissionUncertain(error); }).finally(() => {
       if (uncertain) return;
       state.sending = false;
       // Put back in the queue means it was never handed over; it must not start later as a turn of its own.
       if (wrapUp.status !== 'queued' || wrapUp.steering || this.host.runs.get(wrapUp.id) !== wrapUp) return;
-      this.host.runs.delete(wrapUp.id);
+      this.host.runs.delete(wrapUp.id); this.host.touch(wrapUp.id);
       state.reached = false;
       // The turn ended meanwhile, counted as asked to wrap up: it was not, so it is not carried on.
       const turn = this.host.runs.get(target.id);
       if (turn?.status === 'completed') {
-        for (const run of [...this.host.runs.values()]) if (run.status === 'queued' && run.scheduled?.resume === 'update' && run.scheduled.afterRunId === turn.id) this.host.runs.delete(run.id);
+        for (const run of [...this.host.runs.values()]) if (run.status === 'queued' && run.scheduled?.resume === 'update' && run.scheduled.afterRunId === turn.id) { this.host.runs.delete(run.id); this.host.touch(run.id); }
       }
       this.host.changed();
     });
@@ -172,10 +173,11 @@ export class UpdateDrain {
     if (!((target.stopping && run.status === 'cancelled') || (run.status === 'completed' && target.reached))) return;
     if (this.host.mergePermission(run, RESUME_NOTICE, UPDATE_RESUME_WAIT)) return;
     for (const other of [...this.host.runs.values()]) {
-      if (other.status === 'queued' && other.scheduled?.afterRunId === run.id && other.scheduled.resume !== 'update') this.host.runs.delete(other.id);
+      if (other.status === 'queued' && other.scheduled?.afterRunId === run.id && other.scheduled.resume !== 'update') { this.host.runs.delete(other.id); this.host.touch(other.id); }
     }
     const now = new Date().toISOString();
     const id = randomUUID();
+    this.host.touch(id);
     this.host.runs.set(id, { id, sessionId: run.sessionId, ...inheritedRunFields(run), prompt: RESUME_NOTICE, status: 'queued',
       createdAt: now, output: UPDATE_RESUME_WAIT, scheduled: { at: now, afterRunId: run.id, resume: 'update' } });
   }

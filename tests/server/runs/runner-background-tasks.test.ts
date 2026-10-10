@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { isSavedRun } from '../../../server/runs/saved-state.js';
 import { BackgroundTaskTracker } from '../../../server/runs/background-tasks.js';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager } from './sql-fixture.js';
 import { WakeupTracker } from '../../../server/runs/wakeup.js';
 import type { Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';

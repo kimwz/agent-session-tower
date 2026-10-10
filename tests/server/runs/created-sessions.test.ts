@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager, fixtureDocuments, fixtureReplaceRuns } from './sql-fixture.js';
 import { SessionTitleStore } from '../../../server/stores/session-titles.js';
 import { MASTER_FOLDER } from '../../../shared/master.js';
 import type { Provider, Run, Session } from '../../../shared/types.js';
@@ -57,6 +57,18 @@ function processPrompt() {
     spawnProcess: (_file, args, options) => { launches.push(args); assert.equal(options.shell, false); return spawn(process.execPath, [script, ...args], options); },
   });
   await manager.start();
+  if (mode === 'break-registry') {
+    const client = manager.sqlFixture(), write = client.write.bind(client);
+    let identity = false, failed = false;
+    client.write = async <T>(...args: Parameters<typeof client.write>) => {
+      if (args[0] === 'runs' && args[1] === 'stage') {
+        const rows = Buffer.from((args[2] as { data: string }).data, 'base64').toString('utf8').trim().split('\n').slice(1).map(line => JSON.parse(line));
+        identity ||= rows.some(row => row.kind === 'created' && row.value.confirmed === true);
+      }
+      if (identity && !failed && args[0] === 'runs' && args[1] === 'commit') { failed = true; throw new Error('Known identity commit refusal'); }
+      return write<T>(...args);
+    };
+  }
   t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
   return { manager, directory, stateDir, native, launches };
 }
@@ -215,7 +227,8 @@ for (const provider of ['claude', 'codex'] as Provider[]) {
       assert.equal(resumed.threadMethod, 'thread/resume');
       assert.equal(resumed.threadParams.threadId, confirmed.nativeId);
     }
-    assert.equal((await stat(join(f.stateDir, 'created-sessions.json'))).mode & 0o777, 0o600);
+    assert.equal((await stat(join(f.stateDir, 'state.sqlite'))).mode & 0o777, 0o600);
+    await assert.rejects(stat(join(f.stateDir, 'created-sessions.json')), { code: 'ENOENT' });
   });
 }
 
@@ -239,7 +252,7 @@ test('native discovery merges under the stable ID and maps child parents; identi
   assert.equal(nativeAliasRun.sessionId, accepted.session.id);
   await finished(f.manager, nativeAliasRun.id);
   await f.manager.close();
-  await writeFile(join(f.stateDir, 'runs.json'), '[]'); // Simulate bounded run history aging out the initial turn.
+  await fixtureReplaceRuns(f.manager, []); // Simulate bounded SQL run history aging out the initial turn.
   const restarted = new RunManager({ stateDir: f.stateDir, getSession: id => f.native.get(id), refreshSessions: async () => {}, findExecutable: async () => { throw new Error('Must not launch'); } });
   await restarted.start();
   try {
@@ -335,18 +348,22 @@ test('invalid input and a partially committed admission cannot launch a provider
     { provider: 'codex', cwd: 'relative', prompt: 'hi' },
     { provider: 'codex', cwd: f.directory, prompt: '' },
     { provider: 'bad', cwd: f.directory, prompt: 'hi' },
-    { provider: 'codex', cwd: join(f.stateDir, 'runs.json', 'child'), prompt: 'hi' },
+    { provider: 'codex', cwd: join(f.stateDir, 'state.sqlite', 'child'), prompt: 'hi' },
     { provider: 'codex', cwd: f.directory, prompt: 'hi', title: 't'.repeat(121) },
   ]) await assert.rejects(f.manager.create(input as Parameters<RunManager['create']>[0]), { kind: 'invalid' });
-  await rm(join(f.stateDir, 'runs.json'));
-  await mkdir(join(f.stateDir, 'runs.json'));
+  const client = f.manager.sqlFixture(), write = client.write.bind(client);
+  let refused = false;
+  client.write = async <T>(...args: Parameters<typeof client.write>) => {
+    if (!refused && args[0] === 'runs' && args[1] === 'commit') { refused = true; throw new Error('Known SQL admission refusal'); }
+    return write<T>(...args);
+  };
   await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'must not run later' }), { kind: 'unavailable' });
   assert.ok(f.manager.list().every(run => run.status === 'error'));
   assert.ok(f.manager.sessionList([]).every(session => session.status === 'error' && !session.creationPending));
   assert.equal(f.launches.length, 0);
-  await rm(join(f.stateDir, 'runs.json'), { recursive: true });
+  client.write = write;
   await f.manager.close();
-  await writeFile(join(f.stateDir, 'runs.json'), '[]');
+  await writeFile(join(f.stateDir, 'runs.json'), '[]'); // stale JSON cannot replace the committed failure projection
   const restarted = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, spawnProcess: () => { throw new Error('Must never replay'); } });
   await restarted.start();
   try { assert.equal(restarted.sessionList([])[0]?.status, 'error'); assert.equal(restarted.sessionList([])[0]?.resumable, false); }

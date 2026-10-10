@@ -4,7 +4,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { RunManager } from '../../../server/runs/manager.js';
+import { restoreRuns } from '../../../server/runs/run-history.js';
+import { RunManager, fixtureDocuments } from './sql-fixture.js';
 import type { RunApproval, RunApprovalResponse, Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
 
@@ -74,17 +75,18 @@ test('cancel and restart cannot revive or answer a pending permission request', 
   const f = await fixture(t);
   await until(() => f.manager.list().find(run => run.approvals?.length));
   await (f.manager as unknown as { flush(): Promise<void> }).flush();
-  const liveSaved = await readFile(join(f.stateDir, 'runs.json'), 'utf8');
+  const liveSaved = JSON.stringify((await fixtureDocuments(f.manager)).runs);
   assert.equal(JSON.parse(liveSaved)[0].approvals, undefined);
   assert.doesNotMatch(liveSaved, /gh --version/);
   await f.manager.cancel(f.accepted.id); await f.manager.close();
   await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', 'allow'), { kind: 'conflict' });
   assert.equal(f.manager.list()[0].approvals, undefined);
-  const saved = JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'));
+  const saved = JSON.parse(JSON.stringify((await fixtureDocuments(f.manager)).runs));
   assert.equal(saved[0].approvals, undefined);
   // Even a file written by an older version cannot restore a live decision.
   saved[0].approvals = [{ id: 'stale', toolName: 'Bash', input: { command: 'must not execute' } }];
-  await writeFile(join(f.stateDir, 'runs.json'), JSON.stringify(saved));
+  assert.equal(restoreRuns(saved, new Map()).runs[0].approvals, undefined);
+  await writeFile(join(f.stateDir, 'runs.json'), JSON.stringify(saved)); // stale JSON must not override SQL
   const restarted = new RunManager({ stateDir: f.stateDir, getSession: () => f.session, refreshSessions: async () => {}, spawnProcess: () => { throw new Error('Must not start'); } });
   await restarted.start();
   try { assert.equal(restarted.list()[0].approvals, undefined); await assert.rejects(restarted.respondToApproval(f.accepted.id, 'stale', 'allow'), { kind: 'conflict' }); }
@@ -131,7 +133,7 @@ test('runner forwards structured Codex answers and keeps child form metadata liv
   assert.equal(manager.list()[0].approvals, undefined);
   await assert.rejects(manager.respondToApproval(accepted.id, questions.id, answer), { kind: 'conflict' });
   await (manager as unknown as { flush(): Promise<void> }).flush();
-  const saved = await readFile(join(directory, 'runs.json'), 'utf8');
+  const saved = JSON.stringify((await fixtureDocuments(manager)).runs);
   assert.doesNotMatch(saved, /private-token-not-saved|Enter secret|Credential/);
   assert.equal(manager.list()[0].output, '');
 });
@@ -151,7 +153,7 @@ test('runner roundtrips Claude question answers through the owned provider trans
   assert.equal(frames.length, 1);
   assert.deepEqual(frames[0].response.response.updatedInput.answers, { 'Get game code?': 'private-fixture-answer' });
   await (f.manager as unknown as { flush(): Promise<void> }).flush();
-  const saved = await readFile(join(f.stateDir, 'runs.json'), 'utf8');
+  const saved = JSON.stringify((await fixtureDocuments(f.manager)).runs);
   assert.doesNotMatch(saved, /private-fixture-answer|Get game code/);
   assert.equal(JSON.parse(saved)[0].approvals, undefined);
 });

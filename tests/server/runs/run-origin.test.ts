@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { spawn as nodeSpawn } from 'node:child_process';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager, fixtureDocuments } from './sql-fixture.js';
+import { parseRunDocuments } from '../../../server/runs/storage-codec.js';
 import type { Run, Session } from '../../../shared/types.js';
 
 const NATIVE = '30000000-0000-4000-8000-000000000001';
@@ -28,7 +29,8 @@ async function fixture(t: TestContext, saved: { created?: unknown[]; runs?: unkn
   const natives = new Map([NATIVE, OTHER].map(id => [`codex:${id}`, nativeSession(id, directory)]));
   const managers: RunManager[] = [];
   const open = async () => {
-    const manager = new RunManager({ stateDir, getSession: id => natives.get(id), refreshSessions: async () => {}, pollMs: 60_000,
+    const initial = managers.length === 0 ? parseRunDocuments({ runs: Buffer.from(JSON.stringify(saved.runs ?? [])), created: Buffer.from(JSON.stringify(saved.created ?? [])), instructions: Buffer.from('{}') }) : undefined;
+    const manager = new RunManager({ stateDir, fixtureInitial: initial, getSession: id => natives.get(id), refreshSessions: async () => {}, pollMs: 60_000,
       findExecutable: async () => '/fixture/codex',
       spawnProcess: () => { throw new Error('Provenance fixtures never launch providers.'); },
       openCodexStdio: async () => { throw new Error('Provenance fixtures never launch providers.'); } });
@@ -37,7 +39,7 @@ async function fixture(t: TestContext, saved: { created?: unknown[]; runs?: unkn
     return manager;
   };
   t.after(async () => { for (const manager of managers) await manager.close(); await rm(directory, { recursive: true, force: true }); });
-  const createdFile = async () => JSON.parse(await readFile(join(stateDir, 'created-sessions.json'), 'utf8')) as Array<{ session: { id: string }; origin?: unknown }>;
+  const createdFile = async () => (await fixtureDocuments(managers.at(-1)!)).created as Array<{ session: { id: string }; origin?: unknown }>;
   return { directory, stateDir, open, createdFile };
 }
 
@@ -120,15 +122,14 @@ test('a session is not started when its provenance cannot be saved', async t => 
   const manager = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000,
     findExecutable: async () => '/fixture/codex', spawnProcess: () => { launches++; throw new Error('never'); }, openCodexStdio: async () => { launches++; throw new Error('never'); } });
   await manager.start();
-  const registry = join(f.stateDir, 'created-sessions.json');
-  await rm(registry, { force: true });
-  await mkdir(registry);
+  const client = manager.sqlFixture(), write = client.write.bind(client);
+  client.write = async <T>(...args: Parameters<typeof client.write>) => { if (args[0] === 'runs' && args[1] === 'commit') throw new Error('Cannot save provenance SQL'); return write<T>(...args); };
   try {
     await assert.rejects(manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Owner task' }, { origin: { kind: 'owner' } }), /Cannot save/);
     await new Promise(resolve => setTimeout(resolve, 50));
     assert.equal(launches, 0);
   } finally {
-    await rm(registry, { recursive: true, force: true });
+    client.write = write;
     await manager.close().catch(() => {});
   }
 });

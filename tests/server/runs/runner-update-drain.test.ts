@@ -6,7 +6,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager, fixtureDocuments } from './sql-fixture.js';
 import { SteeringError } from '../../../server/runs/steering.js';
 import { continuedRun, continuedRunById } from '../../../server/runs/continuations.js';
 import type { Run, Session } from '../../../shared/types.js';
@@ -199,13 +199,13 @@ test('the next worker keeps queued turns, their instructions and the continuatio
   f.manager.driveUpdateDrain(Date.now() + 61_000);
   await until(() => f.continuation() !== undefined);
   await f.manager.flushState();
-  const saved = JSON.parse(await readFile(join(f.directory, 'runs.json'), 'utf8')) as Record<string, unknown>[];
+  const saved = JSON.parse(JSON.stringify((await fixtureDocuments(f.manager)).runs)) as Record<string, unknown>[];
   assert.equal(JSON.stringify(saved).includes('receipt: approved'), false, 'runs.json never holds instruction text');
-  const kept = JSON.parse(await readFile(join(f.directory, 'run-instructions.json'), 'utf8')) as Record<string, { text: string }>;
+  const kept = JSON.parse(JSON.stringify((await fixtureDocuments(f.manager)).instructions)) as Record<string, { text: string }>;
   assert.equal(kept[receipt.id]?.text, 'receipt: approved');
 
   let launches = 0;
-  const next = new RunManager({ stateDir: f.directory, getSession: id => id === f.session.id ? f.session : undefined,
+  const next = new RunManager({ stateDir: join(f.directory, 'successor-sql'), fixtureInitial: await fixtureDocuments(f.manager), getSession: id => id === f.session.id ? f.session : undefined,
     refreshSessions: async () => {}, findExecutable: async () => '/fixture/claude', pollMs: 10, holdUntilReady: true,
     spawnProcess: () => { launches++; throw new Error('fixture: not started'); } });
   t.after(async () => { await next.close(); await f.cleanup(); });
@@ -228,7 +228,7 @@ test('restore keeps every unfinished run and runs an automation still has to rep
   for (let index = 1; index <= 150; index++) runs.push(base(index));
   for (let index = 151; index <= 260; index++) runs.push({ ...base(index), status: 'queued', keepQueued: true });
   await writeFile(join(directory, 'runs.json'), JSON.stringify(runs));
-  const manager = new RunManager({ stateDir: directory, getSession: () => undefined, refreshSessions: async () => {}, holdUntilReady: true });
+  const manager = new RunManager({ stateDir: directory, fixtureInitial: { runs: runs as Run[], created: [], instructions: {} }, getSession: () => undefined, refreshSessions: async () => {}, holdUntilReady: true });
   t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
   await manager.start();
   const list = manager.list();
@@ -237,7 +237,7 @@ test('restore keeps every unfinished run and runs an automation still has to rep
   assert.equal(list.filter(run => run.status === 'completed' && run.id !== id(0)).length, 100);
   assert.ok(list.some(run => run.id === id(150)) && !list.some(run => run.id === id(1)), 'the newest finished runs are kept');
   await manager.flushState();
-  const saved = JSON.parse(await readFile(join(directory, 'runs.json'), 'utf8')) as Array<Record<string, unknown>>;
+  const saved = JSON.parse(JSON.stringify((await fixtureDocuments(manager)).runs)) as Array<Record<string, unknown>>;
   assert.equal(saved.find(run => run.id === id(0))?.retain, true, 'still retained until the automations are loaded');
 });
 
@@ -249,7 +249,7 @@ test('history keeps the runs that finished last, not the ones created last', asy
   const runs = [{ id: id(0), sessionId: `claude:${nativeId}`, prompt: 'long', output: '', createdAt: at(0), finishedAt: at(500), status: 'completed' },
     ...Array.from({ length: 120 }, (_, index) => ({ id: id(index + 1), sessionId: `claude:${nativeId}`, prompt: 'short', output: '', createdAt: at(index + 1), finishedAt: at(index + 1), status: 'completed' }))];
   await writeFile(join(directory, 'runs.json'), JSON.stringify(runs));
-  const manager = new RunManager({ stateDir: directory, getSession: () => undefined, refreshSessions: async () => {} });
+  const manager = new RunManager({ stateDir: directory, fixtureInitial: { runs: runs as Run[], created: [], instructions: {} }, getSession: () => undefined, refreshSessions: async () => {} });
   t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
   await manager.start();
   assert.ok(manager.list().some(run => run.id === id(0)));
@@ -268,7 +268,7 @@ test('after the switch the interrupted turn resumes before a message queued behi
   const stop = () => { if (child.exitCode !== null) return; Object.assign(child, { exitCode: 1 }); child.emit('close', 1, null); };
   Object.assign(child, { stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, pid: undefined,
     stdin: new Writable({ write(_chunk, _encoding, done) { done(); } }), kill: () => { stop(); return true; } });
-  const next = new RunManager({ stateDir: f.directory, getSession: id => id === f.session.id ? f.session : undefined,
+  const next = new RunManager({ stateDir: join(f.directory, 'successor-sql'), fixtureInitial: await fixtureDocuments(f.manager), getSession: id => id === f.session.id ? f.session : undefined,
     refreshSessions: async () => {}, findExecutable: async () => '/fixture/claude', pollMs: 10, holdUntilReady: true,
     spawnProcess: () => child });
   t.after(async () => { await next.close(); await f.cleanup(); });
@@ -430,19 +430,17 @@ test('a Codex app submission withdrawn for the update waits for the new worker',
 
 test('a wrap-up request is never saved as keepQueued', async t => {
   const f = await fixture(); t.after(f.cleanup);
-  // Test-only: what each save of runs.json writes, read as it is written.
-  const original = fsPromises.open;
+  // Inspect the real staged row payloads; the SDK still executes every command.
+  const client = f.manager.sqlFixture(), write = client.write.bind(client);
   const writes: Array<Array<Record<string, unknown>>> = [];
-  t.mock.method(fsPromises, 'open', async (...args: Parameters<typeof original>) => {
-    const handle = await original(...args);
-    if (String(args[0]).startsWith(join(f.directory, 'runs.json.'))) {
-      const writeFile = handle.writeFile.bind(handle);
-      handle.writeFile = (async (data: string) => { writes.push(JSON.parse(String(data))); return writeFile(data); }) as typeof handle.writeFile;
+  client.write = async <T>(...args: Parameters<typeof client.write>) => {
+    if (args[0] === 'runs' && args[1] === 'stage') {
+      const lines = Buffer.from((args[2] as { data: string }).data, 'base64').toString('utf8').trim().split('\n');
+      writes.push(lines.slice(1).map(line => JSON.parse(line)).filter(row => row.kind === 'run' && !row.remove).map(row => row.value));
     }
-    return handle;
-  });
-  syncBuiltinESMExports();
-  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+    return write<T>(...args);
+  };
+  t.after(() => { client.write = write; });
   const waiting = await f.manager.enqueue(f.session.id, 'queued behind the turn', {}, { origin: owner });
   f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
   f.manager.driveUpdateDrain();

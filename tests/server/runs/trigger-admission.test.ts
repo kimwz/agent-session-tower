@@ -12,7 +12,7 @@ import { rowsOf, logicalBytes, rowCost, triggerHash } from '../../../server/trig
 import type { TriggerAdmissionLink } from '../../../server/triggers/storage-commands.js';
 import { empty } from '../../../server/triggers/state.js';
 import { restoreRuns } from '../../../server/runs/run-history.js';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager } from './sql-fixture.js';
 import { TriggersRepository } from '../../../server/triggers/storage-repository.js';
 import { TriggerDispatch } from '../../../server/triggers/dispatch.js';
 import { TriggerStore } from '../../../server/triggers/store.js';
