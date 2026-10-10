@@ -1,3 +1,4 @@
+import { offlineBootstrapHeld } from '../link/storage-offline.js';
 import { workerLegacyFiles } from './storage-transfer.js';
 import { OPERATIONS, type OperationName } from '../../shared/api/operations.js';
 import { storageControl } from './storage-control.js';
@@ -772,11 +773,22 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   const managed = await managedByService(stateDir, process.argv[1], true);
   const updateInput = () => ({ stateDir, managed, legacyFiles: (domain: string) => workerLegacyFiles(stateDir, domain),
     build: { version: APP_VERSION, preflight, ...(build.ok ? { manifest: build.manifest } : {}) } });
-  const evaluate = () => evaluateStorageUpdate(updateInput());
+  const evaluate = async () => {
+    const evaluated = await evaluateStorageUpdate(updateInput());
+    // An interrupted maintenance activation is never completed by normal startup/retry.
+    try {
+      const schema = database?.status().schema;
+      if (await offlineBootstrapHeld(stateDir, build.ok ? build.identity : undefined, schema && schema.kind !== 'empty' ? schema.storageId : undefined))
+        return { ...evaluated, verdict: 'recovery-required' as const, code: 'offline-activation-held', reason: 'Offline activation requires explicit maintenance retry.', importAllowed: false };
+    } catch (error) {
+      return { ...evaluated, verdict: 'recovery-required' as const, code: 'offline-record-invalid', reason: String(error), importAllowed: false };
+    }
+    return evaluated;
+  };
+  let database: StorageClient | undefined;
   let evaluation = await evaluate();
   let storageStatus: WorkerStorageStatus = { state: 'starting', code: 'starting', reason: 'Storage is starting.', admissionOpen: false, sessionsAvailable: false, healthStatus: 200,
     ...(build.ok ? { identity: build.identity } : {}) };
-  let database: StorageClient | undefined;
   let retentionFresh = false;
   let storageEffects: (() => Promise<void>) | undefined;
   let maintenanceHeld: Promise<void> = Promise.resolve();
@@ -964,7 +976,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     try { await new Promise<void>(resolve => { wake = resolve; if (ready) resolve(); }); }
     finally { clearInterval(timer); }
   }
+  const offlineStorageId = (storage: StorageClient) => { const schema = storage.status().schema; return !schema || schema.kind === 'empty' ? undefined : schema.storageId; };
   const requireEffects = async () => {
+    if (await offlineBootstrapHeld(stateDir, database?.identity, database ? await offlineStorageId(database) : undefined)) throw new TowerError('unavailable', 'Offline bootstrap is incomplete.');
     if (storageStatus.state !== 'ready' || !database || !(await database.gate('core')).open || storageStatus.state !== 'ready') throw new TowerError('unavailable', storageStatus.reason, { disposition: 'not-admitted' });
   };
   const startupGate = async () => {
@@ -972,7 +986,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // Park at this await, before the next startup effect. Retrying the whole startup would replay restores
     // and services already running; only this continuation may resume after the owner's successful retry.
     try {
-      if (storageStatus.state === 'ready' && database) {
+      if (storageStatus.state === 'ready' && database && !await offlineBootstrapHeld(stateDir, database.identity, await offlineStorageId(database))) {
         const gate = await database.gate('core');
         const pendingAdmission = runs.pendingAdmission();
         if (gate.open && !pendingAdmission && storageStatus.state === 'ready' && generation === storageHoldGeneration) return;
