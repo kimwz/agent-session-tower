@@ -335,7 +335,7 @@ test('actual product worker promotes update-held once in the same boot; a failed
   await closed;
   assert.equal(child.exitCode, 0, stderr());
   const released = await readHandoff(paths.runtime);
-  assert.ok(released?.clean); assert.equal(released.previous, first.instance); assert.equal(released.storageTransition, true);
+  assert.ok(released?.clean); assert.equal(released.previous, first.instance); assert.equal(released.storageTransition, undefined);
   await client.reopen(); await client.prepare({ allowMigration: false });
   const store = new RetentionStore(dirname(journal), { storage: client }); await store.start();
   assert.deepEqual(store.list(), []);

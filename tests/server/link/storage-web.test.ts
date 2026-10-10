@@ -20,7 +20,7 @@ import { artifactStorageContract, storageUpdatePaths, readRollbackRecord, runRol
 import { rollbackPorts, storageControl } from '../../../server/runs/storage-control.js';
 import { entryPoint, pointCurrent } from '../../../server/link/service.js';
 import { Updates } from '../../../server/link/update.js';
-import { storageManifest } from '../../../server/storage/schema.js';
+import { STORAGE_DOMAIN_SCHEMAS, storageManifest } from '../../../server/storage/schema.js';
 import { buildIdentityModule, buildIdentityPlugin, STORAGE_THREAD_ENTRY } from '../../../server/storage/thread-bundle.mjs';
 import { contextOf, fixtureParentFile, stateDir, storage, threadBundle } from '../storage/helpers.js';
 import { installArtifact } from './fixtures/storage-builds.js';
@@ -29,24 +29,28 @@ test('serving target web resumes only the durable owner rollback through the rea
   const state = await stateDir(t);
   const root = await mkdtemp(join(dirname(fileURLToPath(import.meta.url)), 'storage-web-fixture-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  // Build the existing SDK fixture as the newer predecessor, using the real runtime gate and core schema.
+  // Use the existing B runs import contract in both the manifest and the registered thread domain.
   const version = '99.0.0';
+  const runsCutover = { artifactVersion: '1.123.0', importContract: 1 };
   const versionPlugin = { name: 'fixture-release', setup(builder: import('esbuild').PluginBuild) {
+    builder.onLoad({ filter: /server\/runs\/storage-schema\.ts$/ }, async args => ({ contents: (await readFile(args.path, 'utf8')).replace(/domain: 'runs',/, `domain: 'runs', cutover: ${JSON.stringify(runsCutover)},`), loader: 'ts' }));
     builder.onLoad({ filter: /shared\/app-identity\.ts$/ }, async args => ({ contents: (await readFile(args.path, 'utf8')).replace(/export const APP_VERSION = '[^']+';/, `export const APP_VERSION = '${version}';`), loader: 'ts' }));
   } };
   const thread = await build({ entryPoints: [STORAGE_THREAD_ENTRY], bundle: true, write: false, platform: 'node', format: 'cjs', target: 'node22', plugins: [versionPlugin], logLevel: 'silent' });
   const body = thread.outputFiles[0].text;
   const sourceHash = createHash('sha256').update(body).digest('hex');
   const artifact = { format: 'tower-storage-thread-bundle/2', sourceHash, source: `var __TOWER_STORAGE_SOURCE_HASH__ = "${sourceHash}";\n${body}` };
-  const manifest = storageManifest(undefined, version);
+  const manifest = storageManifest(STORAGE_DOMAIN_SCHEMAS.map(schema => schema.domain === 'runs' ? { ...schema, cutover: runsCutover } : schema), version);
   const parentFile = join(root, 'predecessor.mjs');
   await build({ entryPoints: [fileURLToPath(new URL('../storage/fixtures/parent.ts', import.meta.url))], outfile: parentFile, bundle: true, platform: 'node', format: 'esm', target: 'node22', logLevel: 'silent',
-    plugins: [versionPlugin, buildIdentityPlugin(buildIdentityModule({ contexts: [{ sourceHash, manifest }] }))] });
+    plugins: [versionPlugin, buildIdentityPlugin(buildIdentityModule({ artifact: JSON.stringify(artifact), contexts: [{ sourceHash, manifest }] }))] });
   const predecessor = await import(pathToFileURL(parentFile).href) as typeof storage;
   const bundle = predecessor.storageBundleFromArtifact(JSON.stringify(artifact), 'artifact');
   const preflight = await predecessor.preflightStorage({ bundle, stateDir: state });
   assert.equal(preflight.supported, true, 'actual supported SQLite required; no runtime gate substitution');
   const client = await predecessor.openStorage({ stateDir: state, bundle });
+  assert.equal(client.context?.identity.sourceHash, sourceHash);
+  assert.deepEqual(client.context?.manifest, manifest);
   t.after(async () => { await stopFixtureWriter(runs); await client.close(); });
   await client.prepare({ allowMigration: true });
   const targetContext = contextOf('production');
