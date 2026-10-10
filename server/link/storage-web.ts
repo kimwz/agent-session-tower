@@ -1,3 +1,4 @@
+import { completedOfflineCandidate, readOfflineActivation } from './storage-offline.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { WorkerStorageStatus } from '../../shared/storage.js';
 import { captureStorageBundle, preflightStorage, storageBuildContext } from '../storage/index.js';
@@ -17,7 +18,19 @@ export function storageWebBuild(stateDir: string, version: string): () => Promis
 
 /** Candidate web readiness is independent of the worker, including a JSON-only attached worker. */
 export async function storageWebHealth(input: { stateDir: string; managed: boolean; build: RunningBuild }, worker?: WorkerStorageStatus) {
-  const evaluation = await evaluateStorageUpdate(input);
+  let evaluation = await evaluateStorageUpdate(input);
+  try {
+    const record = await readOfflineActivation(input.stateDir);
+    if(record) {
+      const completed=await completedOfflineCandidate(input);
+      const workerProof=completed && worker?.state==='ready' && worker.code==='offline-completion-verified' && worker.admissionOpen
+        && JSON.stringify(worker.identity)===JSON.stringify(input.build.preflight.identity);
+      evaluation=workerProof ? { ...evaluation,verdict:'ready',code:'offline-completion-verified',reason:'Exact completed installation verified by the current worker SDK.',importAllowed:true }
+        : { ...evaluation,verdict:'recovery-required',code:'offline-activation-held',reason:'Offline completion requires current worker SQL proof.',importAllowed:false };
+    }
+  } catch (error) {
+    evaluation = { ...evaluation, verdict: 'refused', code: 'offline-record-invalid', reason: String(error), importAllowed: false };
+  }
   return composeStorageWebHealth(evaluation, worker);
 }
 

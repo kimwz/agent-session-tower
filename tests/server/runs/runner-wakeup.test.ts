@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager, fixtureDocuments } from './sql-fixture.js';
 import { WakeupTracker } from '../../../server/runs/wakeup.js';
 import type { Run, Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
@@ -48,7 +48,7 @@ async function fixture(turns: unknown[][], saved?: Run[]) {
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
   const sessions = new Map([[SESSION, session]]);
   const launches: string[][] = [];
-  const manager = new RunManager({ getSession: id => sessions.get(id), refreshSessions: async () => {}, stateDir, pollMs: 20,
+  const manager = new RunManager({ getSession: id => sessions.get(id), refreshSessions: async () => {}, stateDir, fixtureInitial: saved ? { runs: saved, created: [], instructions: {} } : undefined, pollMs: 20,
     findExecutable: async provider => `/fixture/${provider}`, env: { PROMPTS: prompts, TURNS: JSON.stringify(turns) },
     spawnProcess: (_file, args, options) => { launches.push(args); return spawn(process.execPath, [script, ...args], options); } });
   await manager.start();
@@ -77,7 +77,7 @@ test('a wakeup the agent scheduled becomes a queued continuation with the same a
   assert.equal(next.canSteer, false);
   // It is saved, so another worker can deliver it.
   await manager.flushState();
-  assert.ok(JSON.parse(await readFile(join(stateDir, 'runs.json'), 'utf8')).some((run: Run) => run.scheduled?.afterRunId === first.id));
+  assert.ok(JSON.parse(JSON.stringify((await fixtureDocuments(manager)).runs)).some((run: Run) => run.scheduled?.afterRunId === first.id));
 });
 
 test('Slack and trigger turns follow their event, so they never schedule a continuation', async t => {

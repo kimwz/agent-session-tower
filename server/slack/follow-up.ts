@@ -26,9 +26,9 @@ export interface SlackFollowUpInput {
 const clip = (value: string, length: number) => value.length > length ? `${value.slice(0, length - 1)}…` : value;
 const line = (owner: string, message: SlackMessage, length: number) => `<@${message.user}>${message.user === owner ? ' (owner)' : ''}: ${clip(message.text.trim(), length)}`;
 
-export async function judgeSlackFollowUp(engine: DecisionEngine, input: SlackFollowUpInput, signal?: AbortSignal): Promise<{ addressed: number }> {
+export async function judgeSlackFollowUp(engine: DecisionEngine, input: SlackFollowUpInput, signal?: AbortSignal, beforeSend?: () => Promise<void>): Promise<{ addressed: number }> {
   const earlier = input.thread.filter(message => message.ts !== input.message.ts && Number(message.ts) < Number(input.message.ts)).slice(-RECENT_MESSAGES);
-  const { audience } = await engine.decide({ signal, state: {
+  const { audience } = await engine.decide({ signal, beforeSend, state: {
     about: `A Slack thread in which someone mentioned the owner (<@${input.owner}>) with a request that the owner's assistant handled. A new message was just posted in the same thread without mentioning the owner.`,
     owner: `<@${input.owner}>`,
     first_request: line(input.owner, input.request, 2000),

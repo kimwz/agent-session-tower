@@ -1,7 +1,9 @@
+import { apiTriggerStorageFixture } from './trigger-storage-fixture.js';
+import { importFixtureRuns } from '../runs/sql-fixture.js';
 import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
@@ -17,23 +19,24 @@ const session = (id: string): Session => ({ id, nativeId: id.split(':')[1], prov
   createdAt: '', updatedAt: '', lastMessage: '', messageCount: 1, isSubagent: false, resumable: true });
 
 async function fixture(t: TestContext, preparing?: (internal: { validate?: () => void }) => Promise<void>, withSessions = false) {
-  const stateDir = await temporaryFixture('tower-tools-');
+  const stateDir = await realpath(await temporaryFixture('tower-tools-'));
   const project = join(stateDir, 'project');
   await mkdir(project);
   const runs: Run[] = [];
   const sessions: Session[] = [];
   const submitted: unknown[] = [];
-  const triggers = new TriggerService({ stateDir, tickMs: 60_000, executor: { submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
+  const storage = await apiTriggerStorageFixture(t, stateDir);
+  const triggers = new TriggerService({ stateDir, storage: storage.storage, tickMs: 60_000, executor: { submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
     create: async () => { throw new Error('unused'); }, enqueue: async () => { throw new Error('unused'); }, runs: () => runs, session: () => undefined } });
+  t.after(async () => { triggers.close(); await triggers.settle(); await storage.storage.close(); await removeTemporaryFixture(stateDir); });
   await triggers.start();
   const api = new TowerApi({ stateDir, triggers, runs: { list: () => runs }, ...(withSessions ? { sessions: { list: () => sessions, read: async () => undefined } } : {}),
     autoPrompts: { submit: async (request, internal) => { await preparing?.(internal); submitted.push({ request, internal }); return { id: request.requestId, provider: request.provider, prompt: request.prompt, routerModel: 'r', status: 'queued', createdAt: '', updatedAt: '' } as AutoPromptJob; }, get: () => undefined } });
   const capabilities = new CapabilityRegistry();
   const context: McpContext = { api, capabilities, run: runId => runs.find(run => run.id === runId) };
-  t.after(async () => { triggers.close(); await removeTemporaryFixture(stateDir); });
   const ownerTurn = (sessionId: string, towerTools: Run['towerTools'] = 'attached') => { const run: Run = { id: randomUUID(), sessionId, prompt: '', status: 'running', createdAt: '', output: '', origin: { kind: 'owner' }, towerTools }; runs.push(run); return run; };
   const token = (run: Run) => capabilities.issue({ kind: 'owner-run', runId: run.id, sessionId: run.sessionId });
-  return { stateDir, project, runs, sessions, submitted, triggers, api, capabilities, context, ownerTurn, token };
+  return { stateDir, project, storage: storage.storage, runs, sessions, submitted, triggers, api, capabilities, context, ownerTurn, token };
 }
 const schedule = (project: string) => ({ name: 'Morning digest', source: { kind: 'schedule', schedule: { type: 'cron', expression: '0 8 * * *', timezone: 'Asia/Seoul' } },
   handler: { kind: 'task', instructions: 'Summarize new issues', provider: 'codex', target: { mode: 'folder', cwd: project } } });
@@ -160,11 +163,12 @@ test('only owner turns in the owner’s own conversations receive Tower tools; e
 test('the Tower tool server lists and calls tools through the worker with its capability', async t => {
   const { startTowerMcp } = await import('../../../server/slack/mcp-bridge.js');
   const { startRunnerHost } = await import('../../../server/runs/worker.js');
-  const { RunManager } = await import('../../../server/runs/manager.js');
+  const { RunManager } = await import('../runs/sql-fixture.js');
   const { EventEmitter } = await import('node:events');
   const { runnerPaths } = await import('../../../server/runs/runner-protocol.js');
   const f = await fixture(t);
-  const runs = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000, findExecutable: async () => undefined });
+  await importFixtureRuns(f.storage);
+  const runs = new RunManager({ stateDir: f.stateDir, storage: f.storage, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000, findExecutable: async () => undefined });
   await runs.start();
   const list = runs.list.bind(runs);
   runs.list = () => [...list(), ...f.runs];
@@ -213,7 +217,7 @@ test('the standing session key opens only the read-only session tools, for any c
 test('the session tool server answers through the worker with the key kept in the state directory', async t => {
   const { startSessionsMcp, sessionToolsKey } = await import('../../../server/api/session-tools.js');
   const { startRunnerHost } = await import('../../../server/runs/worker.js');
-  const { RunManager } = await import('../../../server/runs/manager.js');
+  const { RunManager } = await import('../runs/sql-fixture.js');
   const { EventEmitter } = await import('node:events');
   const { runnerPaths } = await import('../../../server/runs/runner-protocol.js');
   const f = await fixture(t);
@@ -225,7 +229,8 @@ test('the session tool server answers through the worker with the key kept in th
   const list = { jsonrpc: '2.0', id: 1, method: 'tools/list' };
   // Before Tower has made its key, the tool says so instead of failing obscurely.
   assert.match((await out([list]))[0].error.message, /has not started/);
-  const runs = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000, findExecutable: async () => undefined });
+  await importFixtureRuns(f.storage);
+  const runs = new RunManager({ stateDir: f.stateDir, storage: f.storage, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000, findExecutable: async () => undefined });
   await runs.start();
   const sessions = Object.assign(new EventEmitter(), { list: () => [] }) as unknown as import('../../../server/sessions/service.js').SessionService;
   f.capabilities.grant(await sessionToolsKey(f.stateDir), { kind: 'session-reader' });

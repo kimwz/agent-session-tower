@@ -14,13 +14,12 @@ import { installArtifact } from '../link/fixtures/storage-builds.js';
 import { entryPoint, pointCurrent } from '../../../server/link/service.js';
 import { rollbackPorts, storageControl } from '../../../server/runs/storage-control.js';
 import { buildIdentityModule, buildIdentityPlugin } from '../../../server/storage/thread-bundle.mjs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test, { type TestContext } from 'node:test';
 import { readHandoff, writeHandoff } from '../../../server/runs/handoff.js';
 import { parseRunDocuments } from '../../../server/runs/storage-codec.js';
-import { retentionBootstrap, retentionLegacyFiles } from '../../../server/sessions/retention/storage-transfer.js';
 import { RetentionStore } from '../../../server/sessions/retention/store.js';
-import { retentionBuild } from '../storage/fixtures/retention-build.js';
+import { protectedOldWorker, retentionBuild } from '../storage/fixtures/retention-build.js';
 import { RunsRepository } from '../../../server/runs/storage-repository.js';
 import { RetentionRepository } from '../../../server/sessions/retention/storage-repository.js';
 import { recordPreparationEvidence } from '../../../server/link/storage-update.js';
@@ -32,6 +31,15 @@ import { empty, serializeState } from '../../../server/triggers/state.js';
 import { triggerBackupOf } from '../../../server/triggers/backup.js';
 import type { Trigger } from '../../../shared/triggers.js';
 import { listPendingSecretImports } from '../../../server/secrets/imports.js';
+
+import { PermissionsRepository } from '../../../server/permissions/storage-repository.js';
+
+import { RemoteRepository } from '../../../server/remote/storage-repository.js';
+
+import { AutoPromptRepository } from '../../../server/auto-prompt/storage-repository.js';
+
+import { WorkflowRepository } from '../../../server/slack/storage-repository.js';
+import { workflowRows } from '../../../server/slack/storage-codec.js';
 
 // Hosted disposable jobs only: this starts the actual product worker and its actual SQLite memory preflight,
 // with no native providers, no copied credentials, and only the direct child owned by this fixture.
@@ -91,9 +99,10 @@ async function prepareRetentionA(root: string, stateDir: string): Promise<void> 
   } finally { await client.close(); }
 }
 
-/** Existing fixture factory supplies the captured future B SDK; A production declarations remain untouched. */
+/** Current seven-domain handlers and manifest; historical A captures remain separate. */
 async function futureBWorker(t: TestContext, root: string, triggerRetry = false): Promise<string> {
-  const b = await retentionBuild('1.125.0',join(root,'future-b-artifact'));
+  const b = await retentionBuild('1.125.0',join(root,'future-b-artifact'),true,true,true);
+  assert.deepEqual(b.manifest, contextOf('production').manifest, 'B worker must declare the current seven-domain contract');
   const captured = b.bundle();
   const generated = await mkdtemp(join(dirname(fileURLToPath(import.meta.url)),'future-b-worker-'));
   t.after(() => rm(generated,{ recursive: true,force: true }));
@@ -116,38 +125,133 @@ async function futureBWorker(t: TestContext, root: string, triggerRetry = false)
   ] });
   return entry;
 }
-async function prepareTriggersA124(root: string,stateDir: string): Promise<void> {
-  const a = await retentionBuild('1.124.0',join(root,'trigger-preparation-artifact'));
-  const client = await a.storage.openStorage({ stateDir,bundle: a.bundle() });
+async function prepareCurrentDomains(root: string,stateDir: string): Promise<void> {
+  assert.equal(stateDir, join(root, 'state'));
+  const bundle = threadBundle('production');
+  const client = await storage.openStorage({ stateDir, bundle });
   try {
-    const prepared = await client.prepare({ allowMigration: true }),preflight = await a.storage.preflightStorage({ stateDir,bundle: a.bundle() });
+    const prepared = await client.prepare({ allowMigration: true }), preflight = await storage.preflightStorage({ stateDir, bundle });
     await recordPreparationEvidence(stateDir,{ context: client.context!,preflight,prepared,gate: await client.gate('core') });
   } finally { await client.close(); }
 }
 
-async function recoveryWorkerA122(root: string): Promise<string> {
-  const a = await retentionBuild('1.122.0', join(root, 'recovery-artifact'));
-  const captured = a.bundle();
-  assert.equal(captured.ok, true);
-  const artifact = await readFile(new URL('../storage/fixtures/runs-a122/thread-bundle.json', import.meta.url), 'utf8');
-  const workerSource = await readFile(new URL('./fixtures/storage-diagnostic-worker-a122.ts.txt', import.meta.url), 'utf8');
-  // Exact public A122 worker from 1544951; do not relabel B's bootstrap as a preparation worker.
-  assert.equal(createHash('sha256').update(workerSource).digest('hex'), '35a804316f1a08b9ded92b9cfc30a71cb67f2466ee8de28a96a8e274e81e067a');
-  const entry = join(root, 'recovery-worker-a122.mjs');
-  await build({ entryPoints: [fileURLToPath(new URL('./fixtures/storage-diagnostic-worker.ts', import.meta.url))], outfile: entry,
-    bundle: true, packages: 'external', platform: 'node', format: 'esm', target: 'node22', logLevel: 'silent', plugins: [
-      { name: 'actual-a122-recovery-profile', setup(builder) {
-        builder.onLoad({ filter: /[\\/]server[\\/]runs[\\/]worker\.ts$/ }, () => ({ contents: workerSource, loader: 'ts' }));
-        builder.onLoad({ filter: /[\\/]server[\\/](runs|sessions[\\/]retention)[\\/]storage-schema\.ts$/ }, async args => ({
-          contents: await readFile(new URL(`../storage/fixtures/runs-a122/${args.path.includes('/runs/') ? 'runs' : 'retention'}-storage-schema.ts.txt`, import.meta.url), 'utf8'), loader: 'ts',
-        }));
-        builder.onLoad({ filter: /[\\/]shared[\\/]app-identity\.ts$/ }, async args => ({
-          contents: (await readFile(args.path, 'utf8')).replace(/export const APP_VERSION = '[^']+';/, "export const APP_VERSION = '1.122.0';"), loader: 'ts',
-        }));
-      } },
-      buildIdentityPlugin(buildIdentityModule({ contexts: [{ sourceHash: captured.ok ? captured.sourceHash : '', manifest: a.manifest }], artifact })),
-    ] });
+// Use the existing store-only offline owner contract with the exact current product thread.
+// The five-member protected A124 fixture proves provenance only; no native worker is launched.
+async function prepareCurrentCold(root: string, stateDir: string): Promise<void> {
+  const old = await retentionBuild('1.124.0', join(root, 'cold-old-artifact'));
+  const previous = await old.storage.openStorage({ stateDir, bundle: old.bundle() });
+  let storageId: string;
+  try {
+    await previous.prepare({ allowMigration: true });
+    const schema = (await previous.inspect()).schema;
+    assert.notEqual(schema.kind, 'empty');
+    if (schema.kind === 'empty') throw new Error('Cold fixture preparation is empty.');
+    storageId = schema.storageId;
+  } finally { await previous.close(); }
+  await mkdir(join(stateDir, 'retention'), { recursive: true, mode: 0o700 });
+  for (const [name, value] of Object.entries({
+    'runs.json': [], 'created-sessions.json': [], 'run-instructions.json': {},
+    'trigger-engine.json': empty(), 'permissions.json': { version: 1, rules: [], requests: [], codex: [] },
+    'retention/journal.json': { version: 1, migratedAt: 1, entries: [], policies: [] },
+    'retention-observations.json': { version: 1, entries: [] },
+  })) await writeFile(join(stateDir, name), JSON.stringify(value), { mode: 0o600 });
+  const packageRoot = join(root, 'cold-protected-a124');
+  for (const [member, capture] of Object.entries({
+    'bin/agent-session-tower.mjs': 'triggers-a124-package/bin-entry.mjs.txt',
+    'dist/server/index.js': 'triggers-a124-package/server-entry.js.txt',
+    'dist/server/storage/build-identity.js': 'triggers-a124-package/build-identity.js.txt',
+    'dist/server/storage/generated/thread-bundle.json': 'triggers-a124/thread-bundle.json',
+    'dist/server/storage/schema.js': 'triggers-a124/storage-schema.js.txt',
+  })) {
+    const path = join(packageRoot, member);
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await writeFile(path, await readFile(new URL(`../storage/fixtures/${capture}`, import.meta.url)), { mode: 0o600 });
+  }
+  const oldContext = old.storage.storageBuildContext(old.bundle()); assert.ok(oldContext.ok);
+  const contract = join(root, 'cold-old-contract.json');
+  await writeFile(contract, JSON.stringify(artifactStorageContract(oldContext, await old.storage.preflightStorage({ stateDir, bundle: old.bundle() }))), { mode: 0o600 });
+  const context = contextOf('production');
+  const current = await retentionBuild('1.125.0', join(root, 'cold-current-artifact'), true, true, true,
+    { artifact: artifactOf('production'), manifest: context.manifest });
+  const entry = join(packageRoot, 'bin/agent-session-tower.mjs');
+  const hash = async (path: string) => createHash('sha256').update(await readFile(path)).digest('hex');
+  const activation = { format: 'tower-offline-activation', version: 1, activationId: 'cold-all-domains', stateDir, storageId,
+    build: context.identity, manifest: context.manifest,
+    oldArtifact: { identity: oldContext.identity, entry: { path: entry, sha256: await hash(entry) }, contract: { path: contract, sha256: await hash(contract) } },
+    targets: ['core', ...context.manifest.domains.map(domain => domain.scope)], domains: [], phase: 'pending' };
+  const input = join(root, 'cold-owner.json');
+  await writeFile(input, JSON.stringify({ format: 'tower-offline-owner', activation, backupRoot: join(root, 'cold-consistent-backup') }), { mode: 0o600 });
+  for (const name of ['storage-migrations', 'runs-storage-migrations', 'triggers-storage-migrations']) {
+    await assert.rejects(lstat(join(stateDir, name)), { code: 'ENOENT' }, 'fresh offline CLI must create its own missing evidence parent');
+  }
+  const completed = await current.storage.runOfflineStorageCommand(['activate', '--state-dir', stateDir, '--input', input]);
+  assert.deepEqual(completed, { activationId: activation.activationId, state: 'complete', completedStoreScopes: context.manifest.domains.map(domain => domain.scope), effectsStarted: false });
+  const client = await current.storage.openStorage({ stateDir, bundle: current.bundle() });
+  try {
+    const prepared = await client.prepare({ allowMigration: false });
+    const record = await current.storage.readOfflineActivation(stateDir); assert.ok(record);
+    await current.storage.verifyOfflineCompletion(record, client);
+    assert.deepEqual((await client.inspect()).authority.map(item => [item.domain, item.authority]).sort(), context.manifest.domains.map(domain => [domain.scope, 'database']).sort());
+    await recordPreparationEvidence(stateDir, { context: client.context!, preflight: await current.storage.preflightStorage({ stateDir, bundle: current.bundle() }), prepared, gate: await client.gate('core') });
+  } finally { await client.close(); }
+}
+
+async function officialWorker(root: string, version: '1.122.0' | '1.124.0'): Promise<string> {
+  const packageRoot = await protectedOldWorker(version);
+  const entry = join(root, `official-worker-${version}.mjs`);
+  const module = (member: string) => JSON.stringify(pathToFileURL(join(packageRoot, member)).href);
+  // Original old worker/SDK consumers remain intact; only external observation/effect leaves are adapters.
+  await writeFile(entry, `
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { channel } from 'node:diagnostics_channel';
+import { SessionService } from ${module('dist/server/sessions/service.js')};
+import { TemporaryCollector } from ${module('dist/server/temporary/directories.js')};
+import { WorktreeJanitor } from ${module('dist/server/worktrees/janitor.js')};
+import { RunManager } from ${module('dist/server/runs/manager.js')};
+import { runRunnerWorker } from ${module('dist/server/runs/worker.js')};
+const state = process.argv.at(-1);
+const facts = { effects: { scanner: 0, temporary: 0, native: 0 }, blocked: { scanner: 0, temporary: 0, janitor: 0 } };
+const save = () => writeFileSync(join(state, 'fixture-old-effects.json'), JSON.stringify(facts), { mode: 0o600 });
+save();
+SessionService.prototype.start = async function () { facts.blocked.scanner++; save(); };
+SessionService.prototype.refresh = async function () {};
+TemporaryCollector.prototype.start = function () { facts.blocked.temporary++; save(); };
+WorktreeJanitor.prototype.start = async function () { facts.blocked.janitor++; save(); };
+RunManager.prototype.create = async function () { facts.effects.native++; save(); throw new Error('Fixture forbids old provider effects.'); };
+channel('tower.retention.codex-metadata-open').subscribe(() => { facts.effects.native++; save(); });
+await runRunnerWorker(state);
+`, { flag: 'wx', mode: 0o600 });
   return entry;
+}
+
+async function assertOldEffectsHeld(state: string): Promise<void> {
+  const facts = JSON.parse(await readFile(join(state, 'fixture-old-effects.json'), 'utf8'));
+  assert.deepEqual(facts.effects, { scanner: 0, temporary: 0, native: 0 });
+  assert.ok(facts.blocked.scanner > 0, 'the original old worker reached the isolated scanner adapter');
+}
+
+// Narrow consumer prerequisites only; never an offline activation/completion claim.
+async function prepareExternalAuthorities(root: string, stateDir: string): Promise<void> {
+  await prepareCurrentDomains(root, stateDir);
+  const client = await storage.openStorage({ stateDir, bundle: threadBundle('production') });
+  try {
+    await client.prepare({ allowMigration: false });
+    const before = (await client.inspect()).authority;
+    assert.equal(before.some(row => row.domain === 'runs'), false);
+    const hash = 'a'.repeat(64), verify = async () => {};
+    await new PermissionsRepository(client).importPrepared({ version: 1, rules: [], requests: [], codex: [] }, hash, 'fixture-permissions', verify);
+    await new RemoteRepository(client).importPrepared([], hash, 'fixture-remote', verify);
+    await new AutoPromptRepository(client).importPrepared([], hash, 'fixture-auto-prompts', verify);
+    await new WorkflowRepository(client).importPrepared([
+      ...workflowRows({ rules: [], workflows: [] }, 'slack'),
+      ...workflowRows({ rules: [], workflows: [] }, 'github'),
+    ], hash, 'fixture-workflows', verify);
+    const after = (await client.inspect()).authority;
+    assert.deepEqual(after.filter(row => !['permissions', 'remote', 'auto-prompt', 'automation-workflows'].includes(row.domain)), before);
+    assert.deepEqual(after.map(row => row.domain).sort(), ['auto-prompt', 'automation-workflows', 'permissions', 'remote']);
+    assert.ok(after.every(row => row.authority === 'database'));
+  } finally { await client.close(); }
 }
 
 async function launchDiagnostic(t: TestContext, root: string, state: string, paths: Awaited<ReturnType<typeof runnerPaths>>, entry = fileURLToPath(new URL('./fixtures/storage-diagnostic-worker.ts', import.meta.url)), extraEnv: Record<string, string> = {}) {
@@ -181,7 +285,7 @@ async function launchDiagnostic(t: TestContext, root: string, state: string, pat
 }
 
 
-test('actual product worker promotes update-held once in the same boot; a failed cold journal parks before scans and retries explicitly', { timeout: 90000 }, async t => {
+test('actual product worker publishes empty rollback handoff but holds whole-offline admission in the same boot', { timeout: 90000 }, async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-storage-promotion-')));
   const state = join(root, 'state');
   const paths = await runnerPaths(state);
@@ -193,6 +297,11 @@ test('actual product worker promotes update-held once in the same boot; a failed
   await writeFile(journal, '{incomplete journal', { mode: 0o600 });
   await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
   const journalBytes = await readFile(journal);
+  const pendingRestore = join(state, 'restore', 'pending-worker.json');
+  await mkdir(dirname(pendingRestore), { recursive: true, mode: 0o700 });
+  await writeFile(pendingRestore, JSON.stringify({ id: '24200000-0000-4000-8000-000000000001', files: { 'models.json': { version: 1, roles: {}, custom: [] } } }), { mode: 0o600 });
+  const restoreBaseline = { bytes: await readFile(pendingRestore), info: await lstat(pendingRestore) };
+
   const context = contextOf('production');
   const installed = await installArtifact(state, context.identity.appVersion, { manifest: context.manifest });
   const packageRoot = dirname(dirname(entryPoint(installed)));
@@ -201,7 +310,7 @@ test('actual product worker promotes update-held once in the same boot; a failed
   const managedEntry = join(packageRoot, 'bin', 'diagnostic-worker.ts');
   await writeFile(managedEntry, `import ${JSON.stringify(new URL('./fixtures/storage-diagnostic-worker.ts', import.meta.url).href)};\n`);
   await pointCurrent(state, context.identity.appVersion);
-  const { child, call, stderr } = await launchDiagnostic(t, root, state, paths, managedEntry);
+  const { child, call, stderr } = await launchDiagnostic(t, root, state, paths, managedEntry, { TOWER_FIXTURE_COLD_COUNTS: '1' });
   let first: RunnerReply | undefined;
   const deadline = Date.now() + 60000;
   while (!first) {
@@ -298,37 +407,28 @@ test('actual product worker promotes update-held once in the same boot; a failed
   const trusted = await evaluateStorageUpdate({ stateDir: state, build: running, managed: true });
   assert.equal(trusted.verdict, 'ready');
   assert.equal(trusted.code, 'owner-rollback', 'durable producer completion is the trusted startup authority');
-  let parked: RunnerReply | undefined;
-  while (parked?.snapshot?.storage?.code !== 'cold-journal-unavailable') {
-    if (Date.now() > deadline) assert.fail(stderr());
-    parked = await call('snapshot'); await new Promise(resolve => setTimeout(resolve, 25));
-  }
-  assert.equal(parked.instance, first.instance);
-  assert.equal(parked.snapshot?.storage?.sessionsAvailable, false);
-  assert.deepEqual(await readFile(journal), journalBytes);
-  assert.equal((await call('create')).error?.disposition, 'not-admitted');
-  // The fixture owner repairs only its own journal; product retry must publish it before sessions resume.
-  await writeFile(journal, JSON.stringify({ version: 1, migratedAt: Date.now(), entries: [] }), { mode: 0o600 });
   await call('storageRetry');
-  let promoted: RunnerReply | undefined;
-  while (!promoted?.snapshot?.storage?.admissionOpen) {
-    if (Date.now() > deadline) assert.fail(stderr());
-    promoted = await call('snapshot'); await new Promise(resolve => setTimeout(resolve, 25));
-  }
-  assert.equal(promoted.instance, first.instance);
-  assert.equal(promoted.snapshot?.storage?.sessionsAvailable, true);
-  assert.equal(promoted.snapshot?.storage?.state, 'ready');
-  assert.deepEqual(promoted.snapshot?.runs, []);
-  assert.equal((await call('storageStatus')).instance, first.instance);
+  const parked = await waitForStorage(call, false, deadline, { child, stderr }, 'all-domains-bootstrap-held');
+  assert.equal(parked.instance, first.instance);
+  assert.equal(parked.snapshot?.storage?.code, 'all-domains-bootstrap-held');
+  assert.match(parked.snapshot!.storage!.reason, /authority|offline import/i, 'actual external authority absence holds the whole installation');
+  assert.equal(parked.snapshot?.storage?.admissionOpen, false);
+  assert.equal(parked.snapshot?.storage?.sessionsAvailable, false);
+  assert.equal((await call('create')).error?.disposition, 'not-admitted');
+  assert.deepEqual(await readFile(journal), journalBytes, 'rollback publication never repairs or consumes legacy history');
+  assert.deepEqual(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')), { scanner: 0, temporary: 0, native: 0 });
+  assert.deepEqual(await readFile(pendingRestore), restoreBaseline.bytes, 'restore remains unconsumed');
+  assert.equal((await lstat(pendingRestore)).ino, restoreBaseline.info.ino);
+  assert.equal((await lstat(pendingRestore)).mtimeMs, restoreBaseline.info.mtimeMs);
+  await assert.rejects(lstat(join(state, 'restore', 'applying-worker.json')), { code: 'ENOENT' });
   const serving = await call('storageControl', ['proof', { fence }]);
   assert.equal(serving.error, undefined);
   const proof = serving.result as ServingProof;
   assert.equal(proof.inspection.schema.kind, 'current'); assert.equal(proof.gate.open, true);
   assert.ok(proof.status.ownerEpoch! > 0); assert.equal(proof.bootstrap?.found, true);
   if (published.state !== 'present') assert.fail('producer publication required');
-  assert.deepEqual(completionProven(published.record, proof), { ok: true }, 'the actual target bootstrap receipt, schema and claim prove the continued completion');
-  const store = new RetentionStore(dirname(journal)); await store.start();
-  assert.deepEqual(store.list(), []);
+  assert.deepEqual(completionProven(published.record, proof), { ok: true }, 'the published handoff and actual bootstrap proof do not bypass whole-offline admission');
+
 });
 
 
@@ -366,14 +466,14 @@ test('actual product worker refuses an unsupported captured thread before restor
 
 for (const matching of [true, false]) test(`actual successor holds an unknown cold journal regardless of observed nonce (matching=${matching})`, { timeout: 90000 }, async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-storage-successor-'))); const state = join(root, 'state'); const paths = await runnerPaths(state);
+  await prepareCurrentCold(root, state);
   await mkdir(paths.runtime, { recursive: true, mode: 0o700 });
   const nonce = 'a'.repeat(32);
   await writeHandoff(paths.runtime, { previous: 'fixture-predecessor', successor: matching ? nonce : 'b'.repeat(32), version: '1.0.0', clean: true, at: new Date().toISOString(), storageTransition: true });
   const journal = join(state, 'retention', 'journal.json'); await mkdir(dirname(journal), { recursive: true, mode: 0o700 }); await writeFile(journal, '{broken fixture journal', { mode: 0o600 });
   await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
-  await prepareRetentionA(root, state);
   const entry = fileURLToPath(new URL('./fixtures/storage-diagnostic-worker.ts', import.meta.url));
-  const { child, call, stderr } = await launchDiagnostic(t, root, state, paths, entry, { TOWER_HANDOFF: nonce });
+  const { child, call, stderr } = await launchDiagnostic(t, root, state, paths, entry, { TOWER_HANDOFF: nonce, TOWER_FIXTURE_COLD_SQL_DAMAGE: 'malformed' });
   let snapshot: RunnerReply | undefined;
   const deadline = Date.now() + 60000;
   while (snapshot?.snapshot?.storage?.code !== 'cold-journal-unavailable') {
@@ -499,13 +599,13 @@ for (const stage of ['1', 'late']) test(`actual SDK startup failure parks its co
   assert.deepEqual(JSON.parse(await readFile(counts, 'utf8')), { permissions: 1, autoPrompts: 1 });
 });
 
-async function waitForStorage(call: (method: string, args?: unknown[]) => Promise<RunnerReply>, ready: boolean, deadline: number, worker?: { child: ChildProcess; stderr(): string }) {
+async function waitForStorage(call: (method: string, args?: unknown[]) => Promise<RunnerReply>, ready: boolean, deadline: number, worker?: { child: ChildProcess; stderr(): string }, code?: string) {
   let lastRpcError: unknown;
   const diagnosis = () => `exit=${worker?.child.exitCode}, signal=${worker?.child.signalCode}; RPC=${String(lastRpcError)}; stderr=${worker?.stderr() ?? ''}`;
   for (;;) {
     if (worker && (worker.child.exitCode !== null || worker.child.signalCode !== null)) assert.fail(`Actual worker stopped: ${diagnosis()}`);
     const reply = await call('snapshot').catch(error => { lastRpcError = error; return undefined; });
-    if (reply?.snapshot?.storage?.admissionOpen === ready) return reply;
+    if (reply?.snapshot?.storage?.admissionOpen === ready && (!code || reply.snapshot.storage.code === code)) return reply;
     if (Date.now() > deadline) assert.fail(`Actual worker storage did not reach the requested admission state. ${diagnosis()}`);
     await new Promise(resolve => setTimeout(resolve, 25));
   }
@@ -514,9 +614,16 @@ async function waitForStorage(call: (method: string, args?: unknown[]) => Promis
 test('normal ready worker accepts withdrawal release but resumes only after the matching durable attempt commits', { timeout: 90000 }, async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tw-release-')));
   const state = join(root, 'state'); const paths = await runnerPaths(state);
-  const { call } = await launchDiagnostic(t, root, state, paths);
+  const worker = await launchDiagnostic(t, root, state, paths);
+  const { call } = worker;
   const deadline = Date.now() + 60000;
-  const first = await waitForStorage(call, true, deadline);
+  const first = await waitForStorage(call, true, deadline, worker);
+  const inspected = await call('storageControl', ['inspect']);
+  assert.equal(inspected.error, undefined);
+  const authority = (inspected.result as { authority: { domain: string; authority: string }[] }).authority;
+  assert.deepEqual(authority.map(row => [row.domain, row.authority]).sort(),
+    ['retention', 'runs', 'triggers', 'permissions', 'remote', 'auto-prompt', 'automation-workflows'].map(domain => [domain, 'database']).sort(),
+    'the same current default worker holds all seven domains in its actual database before withdrawal');
   const identity = first.snapshot!.storage!.identity!;
   const at = new Date().toISOString(); const fence = { id: 'normal-withdraw', attempt: 1 };
   const rollback: RollbackRecord = { format: 'tower-storage-rollback', version: 1, id: fence.id,
@@ -541,7 +648,7 @@ test('normal ready worker accepts withdrawal release but resumes only after the 
   assert.equal(withdrawn.state, 'withdrawn', JSON.stringify(withdrawn));
   const committed = await readRollbackRecord(state);
   assert.ok(committed.state === 'present' && !committed.record.held && committed.record.attempt!.n === 2);
-  const resumed = await waitForStorage(call, true, deadline);
+  const resumed = await waitForStorage(call, true, deadline, worker);
   assert.equal(resumed.instance, first.instance);
   assert.equal(resumed.snapshot?.storage?.state, 'ready');
   assert.equal((await call('storageControl', ['inspect'])).error, undefined, 'the same real SQLite worker remains serving');
@@ -556,7 +663,7 @@ test('actual recovery RPC verifies an own failed update, preserves refusal guard
   await writeFile(journal, '{unknown journal', { mode: 0o600 });
   await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
   await prepareRetentionA(root, state);
-  const worker = await launchDiagnostic(t, root, state, paths, await recoveryWorkerA122(root));
+  const worker = await launchDiagnostic(t, root, state, paths, await officialWorker(root, '1.122.0'));
   const { call } = worker;
   const deadline = Date.now() + 60000;
   const first = await waitForStorage(call, false, deadline, worker);
@@ -588,6 +695,7 @@ test('actual recovery RPC verifies an own failed update, preserves refusal guard
   await writeFile(journal, JSON.stringify({ version: 1, migratedAt: 1234, entries: [] }), { mode: 0o600 });
   await call('storageRetry');
   assert.equal((await waitForStorage(call, true, deadline, worker)).instance, first.instance);
+  await assertOldEffectsHeld(state);
 });
 
 test('explicit same-worker retry rechecks a repaired private database path without changing captured build identity', { timeout: 90000 }, async t => {
@@ -766,38 +874,11 @@ for (const damage of ['malformed', 'missing-source', 'missing-wrapper', 'missing
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-cold-boot-')));
   const state = join(root, 'state'), paths = await runnerPaths(state);
   const deadline = Date.now() + 60000;
-  if (damage !== 'malformed' && damage !== 'missing-source') {
-    // Actual source-built B121 SDK/handler seeds authority, not released-package proof; the successor is current A.
-    const b = await retentionBuild('1.121.0', join(root, 'authority-artifact'));
-    const before = await b.storage.preflightStorage({ bundle: b.bundle(), stateDir: state });
-    const initial = { stateDir: state, managed: false, legacyFiles: (domain: string) => retentionLegacyFiles(state, domain),
-      build: { version: b.version, manifest: b.manifest, preflight: before } };
-    assert.equal((await evaluateStorageUpdate(initial)).code, 'new-state');
-    const client = await b.storage.openStorage({ stateDir: state, bundle: b.bundle() });
-    try {
-      const prepared = await client.prepare({ allowMigration: true });
-      const update = async () => ({ ...initial, build: { ...initial.build, preflight: await b.storage.preflightStorage({ bundle: b.bundle(), stateDir: state }) } });
-      await recordPreparationEvidence(state, { context: client.context!, preflight: (await update()).build.preflight, prepared, gate: await client.gate('core') });
-      await retentionBootstrap(client, state, update, true)();
-    } finally { await client.close(); }
-    // B123 cuts over both domains: B121 retention authority alone does not satisfy whole A122 preparation.
-    await prepareRetentionA(root, state);
-    const db = new DatabaseSync(join(state, 'state.sqlite'));
-    try {
-      assert.ok(db.prepare('SELECT * FROM domain_imports WHERE domain = ?').get('retention'));
-      if (damage === 'missing-state') db.prepare('DELETE FROM retention_state').run();
-      if (damage === 'missing-wrapper') db.prepare("DELETE FROM retention_metadata WHERE kind = 'journal'").run();
-    } finally { db.close(); }
-    if (damage === 'physical') await writeFile(join(state, 'state.sqlite'), 'fixture physical SQLite corruption', { mode: 0o600 });
-  }
+  await prepareCurrentCold(root, state);
+  if (damage === 'physical') await writeFile(join(state, 'state.sqlite'), 'fixture physical SQLite corruption', { mode: 0o600 });
   const journal = join(state, 'retention', 'journal.json');
-  await mkdir(dirname(journal), { recursive: true, mode: 0o700 });
   await writeFile(journal, '{unknown journal', { mode: 0o600 });
-  if (damage === 'malformed' || damage === 'missing-source') {
-    await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
-    await prepareRetentionA(root, state);
-    if (damage === 'missing-source') await rm(journal);
-  }
+  if (damage === 'missing-source') await rm(journal);
   const proof = join(state, 'launch-marks', 'cold-proof.json'); await mkdir(dirname(proof), { recursive: true, mode: 0o700 }); await writeFile(proof, 'preserve proof', { mode: 0o600 });
   const launcher = join(state, 'agent-launches.json'), native = join(root, 'claude', 'projects', 'fixture', 'known-cold.jsonl');
   await mkdir(dirname(native), { recursive: true, mode: 0o700 });
@@ -808,13 +889,21 @@ for (const damage of ['malformed', 'missing-source', 'missing-wrapper', 'missing
   for (const path of coldSources) { await mkdir(dirname(path), { recursive: true, mode: 0o700 }); await writeFile(path, 'preserve cold source', { mode: 0o600 }); }
   const coldBefore = await Promise.all(coldSources.map(async path => ({ bytes: await readFile(path), info: await lstat(path) })));
   const before = await lstat(proof);
-  const live = await launchDiagnostic(t, root, state, paths, undefined, { TOWER_FIXTURE_COLD_COUNTS: '1' });
-  const held = await waitForStorage(live.call, false, deadline);
+  const live = await launchDiagnostic(t, root, state, paths, undefined, { TOWER_FIXTURE_COLD_COUNTS: '1', ...(damage === 'physical' ? {} : { TOWER_FIXTURE_COLD_SQL_DAMAGE: damage }) });
+  const held = await waitForStorage(live.call, false, deadline, live, damage === 'physical' ? 'offline-activation-held' : 'cold-journal-unavailable');
   for (let attempt = 0; attempt < 3; attempt++) {
     const snapshot = await live.call('snapshot'), status = snapshot.snapshot!.storage!;
     assert.equal(snapshot.instance, held.instance);
-    assert.equal(status.admissionOpen, false); assert.equal(status.sessionsAvailable, false); assert.equal(status.healthStatus, 503);
-    if (damage === 'physical') { assert.notEqual(status.code, 'cold-journal-unavailable'); assert.ok(status.failure); }
+    assert.equal(status.admissionOpen, false); assert.equal(status.sessionsAvailable, false); assert.equal(status.healthStatus, damage === 'physical' && attempt === 0 ? 200 : 503);
+    if (damage === 'physical') {
+      if (attempt === 0) {
+        assert.equal(status.code, 'offline-activation-held', 'the earlier failed SDK open cannot verify the completed offline authority');
+        assert.equal(status.state, 'recovery-required');
+      } else assert.equal(status.state, 'unavailable', 'explicit reopen fails closed on the actual corrupt database');
+      assert.ok(status.failure?.code, 'actual SDK failure remains visible, distinct from a cold reader failure');
+      assert.ok(status.reason);
+      assert.equal(await readFile(join(state, 'state.sqlite'), 'utf8'), 'fixture physical SQLite corruption');
+    }
     else { assert.equal(status.code, 'cold-journal-unavailable'); assert.equal(status.failure, undefined, 'healthy shared SDK is distinct from physical failure'); }
     assert.equal((await live.call('sessionHistory')).error?.statusCode, 503);
     assert.equal((await live.call('create')).error?.disposition, 'not-admitted');
@@ -836,19 +925,20 @@ for (const damage of ['malformed', 'missing-source', 'missing-wrapper', 'missing
     originalPath: join(root, 'claude', 'projects', 'fixture', 'known-cold.jsonl'),
     coldPath: join(state, 'retention-originals', 'known-cold.jsonl'), identity: { dev: 1, ino: 2, size: 3, mtimeMs: 4 } };
   const knownEntry = { id: 'known-operation', phase: 'archived', archiveRevision: 1, candidate: { ids: ['claude:known-cold'] }, members: [knownMember] };
-  if (damage === 'malformed' || damage === 'missing-source') await writeFile(journal, JSON.stringify({ version: 1, migratedAt: 1234, entries: [knownEntry] }), { mode: 0o600 });
-  else {
-    const db = new DatabaseSync(join(state, 'state.sqlite'));
-    try {
-      db.prepare('INSERT INTO retention_metadata (kind,id,ordinal,json) VALUES (?,?,?,?)').run('entry', knownEntry.id, 0, JSON.stringify(knownEntry));
-      if (damage === 'missing-state') db.prepare('INSERT INTO retention_state VALUES (1,1)').run();
-      else db.prepare('INSERT INTO retention_metadata (kind,id,ordinal,json) VALUES (?,?,?,?)').run('journal', '', 0, JSON.stringify({ version: 1, migratedAt: 1234, entries: [] }));
-    } finally { db.close(); }
-  }
+  // Repair the authority the real RetentionStore reads. Legacy bytes remain unknown/absent.
+  const db = new DatabaseSync(join(state, 'state.sqlite'));
+  try {
+    db.prepare('INSERT INTO retention_metadata (kind,id,ordinal,json) VALUES (?,?,?,?)').run('entry', knownEntry.id, 0, JSON.stringify(knownEntry));
+    if (damage === 'missing-state') db.prepare('INSERT INTO retention_state VALUES (1,1)').run();
+    else if (damage === 'malformed') db.prepare("UPDATE retention_metadata SET json = ? WHERE kind = 'journal'").run(JSON.stringify({ version: 1, migratedAt: 1234, entries: [] }));
+    else db.prepare('INSERT INTO retention_metadata (kind,id,ordinal,json) VALUES (?,?,?,?)').run('journal', '', 0, JSON.stringify({ version: 1, migratedAt: 1234, entries: [] }));
+  } finally { db.close(); }
   await live.call('storageRetry');
-  const resumed = await waitForStorage(live.call, true, deadline);
+  const resumed = await waitForStorage(live.call, true, deadline, live);
   assert.equal(resumed.instance, held.instance); assert.equal(resumed.snapshot?.storage?.sessionsAvailable, true);
   assert.equal(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')).scanner, 1);
+  if (damage === 'missing-source') await assert.rejects(lstat(journal), { code: 'ENOENT' });
+  else assert.equal(await readFile(journal, 'utf8'), '{unknown journal', 'SQL repair never replaces unknown legacy history');
   const registry = JSON.parse(await readFile(join(state, 'fixture-cold-registry.json'), 'utf8'));
   assert.deepEqual(JSON.parse(await readFile(join(state, 'fixture-firstscan-registry.json'), 'utf8')), registry, 'known registry precedes the actual first scan');
   assert.ok(registry.ids.includes('claude:known-cold')); assert.ok(registry.paths.includes(knownMember.originalPath));
@@ -864,7 +954,7 @@ test('a durable owner hold accepted at the actual bootstrap success response par
   await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
   // The initial partial source failure opens the existing diagnostic RPC before retry imports all three files.
   await writeFile(join(state, 'runs.json'), '[]', { mode: 0o600 });
-  await prepareTriggersA124(root, state);
+  await prepareExternalAuthorities(root, state);
   const pending = join(state, 'restore', 'pending-worker.json'), applying = join(state, 'restore', 'applying-worker.json');
   const settings = join(state, 'models.json');
   const oldSettings = JSON.stringify({ version: 1, roles: {}, custom: [] });
@@ -940,9 +1030,11 @@ test('a durable owner hold accepted at the actual bootstrap success response par
   assert.deepEqual(restored.custom, incoming.custom);
   assert.equal((await listPendingSecretImports(state)).length, 1);
   assert.equal(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')).scanner, 1);
+  assert.equal(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')).native, 0);
   assert.equal(JSON.parse(await readFile(join(state, 'fixture-bootstrap-successes.json'), 'utf8')), 1, 'release resumes the same bootstrap continuation without replay');
   await call('storageRetry');
   assert.equal(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')).scanner, 1);
+  assert.equal(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')).native, 0);
   assert.equal((await listPendingSecretImports(state)).length, 1);
 });
 
@@ -964,7 +1056,7 @@ test('actual prestart B patient handoff preserves nonempty partial runs sources 
   await writeFile(sourcePaths[0], runs, { mode: 0o600 });
   await writeFile(sourcePaths[1], created, { mode: 0o600 });
   const before = await Promise.all(sourcePaths.map(async path => ({ bytes: await readFile(path), info: await lstat(path) })));
-  await prepareTriggersA124(root,state);
+  await prepareCurrentDomains(root,state);
   const worker = await launchDiagnostic(t, root, state, paths, await futureBWorker(t,root), { TOWER_FIXTURE_COLD_COUNTS: '1' });
   let held = await waitForStorage(worker.call, false, deadline, worker);
   while (held.snapshot?.storage?.code !== 'runs-bootstrap-held') {
@@ -1014,7 +1106,7 @@ test('actual B runs bootstrap parks before scans and admits once after explicit 
   await writeFile(join(state, 'retention', 'journal.json'), JSON.stringify({ version: 1, migratedAt: 1, entries: [], policies: [] }), { mode: 0o600 });
   await writeFile(join(state, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
   await writeFile(join(state, 'runs.json'), '[]', { mode: 0o600 });
-  await prepareTriggersA124(root,state);
+  await prepareExternalAuthorities(root,state);
   const { child, call, stderr } = await launchDiagnostic(t, root, state, paths, await futureBWorker(t,root), { TOWER_FIXTURE_COLD_COUNTS: '1' });
   const deadline = Date.now() + 60000;
   let snapshot: RunnerReply | undefined;
@@ -1049,8 +1141,10 @@ test('actual B runs bootstrap parks before scans and admits once after explicit 
   }
   assert.equal(ready.instance, snapshot.instance);
   assert.equal(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')).scanner, 1);
+  assert.equal(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')).native, 0);
   await call('storageRetry');
   assert.equal(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')).scanner, 1);
+  assert.equal(JSON.parse(await readFile(join(state, 'fixture-cold-counts.json'), 'utf8')).native, 0);
 });
 
 test('actual A124 worker adds only trigger preparation over retained 123 SQL authorities and records whole evidence before admission', { timeout: 90000 }, async t => {
@@ -1063,7 +1157,7 @@ test('actual A124 worker adds only trigger preparation over retained 123 SQL aut
   const authorities = (await client.inspect()).authority; await client.close();
   const source = JSON.stringify({ version: 1,onceConsumed: { deleted: { at: '2026-10-01T00:00:00Z' } },triggers: [],revisions: {},tombstones: [],cursors: {},events: [],fired: {},audit: [],secretGrants: {},settings: { maxTriggers: 50,maxConcurrentRuns: 3,maxEventsPerHour: 60,privateHosts: [] },trustedFolders: [],recentFires: [] });
   await writeFile(join(state,'trigger-engine.json'),source,{ mode: 0o600 });
-  const { child,call,stderr } = await launchDiagnostic(t,root,state,paths);
+  const { child,call,stderr } = await launchDiagnostic(t,root,state,paths,await officialWorker(root, '1.124.0'));
   let ready: RunnerReply | undefined; const deadline = Date.now() + 60000;
   while (!ready?.snapshot?.storage?.admissionOpen) {
     assert.equal(child.exitCode,null,stderr());
@@ -1083,11 +1177,13 @@ test('actual A124 worker adds only trigger preparation over retained 123 SQL aut
   assert.deepEqual(evidence.map(item => item.manifest),[evidence[0].manifest,evidence[0].manifest,evidence[0].manifest]);
   assert.deepEqual(JSON.parse(await readFile(join(state,'trigger-engine.json'),'utf8')).onceConsumed,{ deleted: { at: '2026-10-01T00:00:00Z' } });
   const backup = await call('triggersBackup'); assert.equal(backup.error,undefined); assert.deepEqual((backup.result as { onceConsumed: unknown }).onceConsumed,{ deleted: { at: '2026-10-01T00:00:00Z' } });
+  await assertOldEffectsHeld(state);
 });
 
 test('actual trigger startup retry preserves session reads and holds permission review through restored settle on the same worker', { timeout: 90000 }, async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-trigger-startup-retry-'))), state = join(root, 'state');
   const paths = await runnerPaths(state), deadline = Date.now() + 60000;
+  await prepareCurrentCold(root, state);
   await mkdir(join(state, 'retention'), { recursive: true, mode: 0o700 });
   await mkdir(join(state, 'project'), { mode: 0o700 });
   await writeFile(join(state, 'retention', 'journal.json'), JSON.stringify({ version: 1, migratedAt: 1, entries: [], policies: [] }), { mode: 0o600 });
@@ -1096,7 +1192,6 @@ test('actual trigger startup retry preserves session reads and holds permission 
     await writeFile(join(state, name), bytes, { mode: 0o600 });
   const original = empty();
   await writeFile(join(state, 'trigger-engine.json'), serializeState(original), { mode: 0o600 });
-  await prepareTriggersA124(root, state);
   const restored = empty();
   const instructions = 'RESTORED AUTHORITY: the fixture permission remains with the owner.';
   const trigger: Trigger = { id: '10000000-0000-4000-8000-000000000001', revision: 1, name: 'Restored trigger', enabled: false,
@@ -1134,16 +1229,37 @@ test('actual trigger startup retry preserves session reads and holds permission 
   assert.equal(barrier.snapshot?.storage?.sessionsAvailable, true);
   assert.deepEqual(await counts(), { start: 2, review: 0, model: 0, apply: 0, settled: false }, 'storage resume cannot start review/model/apply before restore');
   await writeFile(join(state, 'fixture-trigger-release'), 'perform actual restore and settle', { mode: 0o600 });
-  reply = await waitForStorage(live.call, true, deadline, live);
+  try { reply = await waitForStorage(live.call, true, deadline, live); }
+  catch (error) {
+    let permission: unknown;
+    try { permission = JSON.parse(await readFile(join(state, 'fixture-trigger-permission-diagnostic.json'), 'utf8')); }
+    catch (readError) { permission = { readError: String(readError) }; }
+    assert.fail(`${error instanceof Error ? error.stack ?? String(error) : String(error)} same-child restore boundary: ${JSON.stringify({ instance, storage: barrier.snapshot?.storage, counts: await counts(), permission })}`);
+  }
   assert.equal(reply.instance, instance); assert.equal(reply.snapshot?.storage?.state, 'ready');
   assert.equal(reply.snapshot?.storage?.sessionsAvailable, true); assert.equal(reply.snapshot?.storage?.admissionOpen, true);
   const history = await live.call('sessionHistory', ['fixture-trigger-review']);
   assert.equal(history.error, undefined); assert.equal((history.result as { messages: { text: string }[] }).messages[0].text, 'Use the restored trigger instructions.');
   for (;;) {
     const observed = await counts();
+    let rpcError: string | undefined;
+    try { reply = await live.call('snapshot'); }
+    catch (error) { rpcError = String(error); }
+    const diagnostic = async () => {
+      let permission: unknown;
+      try { permission = JSON.parse(await readFile(join(state, 'fixture-trigger-permission-diagnostic.json'), 'utf8')); }
+      catch (error) { permission = { readError: String(error) }; }
+      let autoPrompt: unknown;
+      try { autoPrompt = JSON.parse(await readFile(join(state, 'fixture-trigger-ap-diagnostic.json'), 'utf8')); }
+      catch (error) { autoPrompt = { readError: String(error) }; }
+      return JSON.stringify({ counts: observed, rpcError, instance: reply?.instance, storage: reply?.snapshot?.storage,
+        autoPrompts: reply?.snapshot?.autoPrompts, fixtureAutoPrompt: autoPrompt, permission, stderr: live.stderr() });
+    };
+    if (live.child.exitCode !== null) assert.fail(`restored review worker exited (${live.child.exitCode}): ${await diagnostic()}`);
+    if (Date.now() > deadline) assert.fail(`restored review did not finish: ${await diagnostic()}`);
+    if (rpcError) assert.fail(`restored review snapshot failed: ${await diagnostic()}`);
+    assert.equal(reply?.instance, instance, 'final review observation stays on the same worker');
     if (observed.apply > 0) { assert.equal(observed.review, 1); assert.equal(observed.model, 1); assert.equal(observed.apply, 1); assert.equal(observed.settled, true); break; }
-    assert.equal(live.child.exitCode, null, live.stderr());
-    if (Date.now() > deadline) assert.fail(`restored review did not finish: ${JSON.stringify(observed)} ${live.stderr()}`);
     await new Promise(resolve => setTimeout(resolve, 25));
   }
   const prompt = JSON.parse(await readFile(join(state, 'fixture-review-prompt.json'), 'utf8'));

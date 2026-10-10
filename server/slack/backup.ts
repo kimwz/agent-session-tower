@@ -14,7 +14,7 @@ export function automationBackupOf(saved: Record<string, unknown>): Record<strin
 export function mergeAutomation(incoming: unknown, existing: unknown): Record<string, unknown> | undefined {
   if (!record(incoming) || !Array.isArray(incoming.rules)) return undefined;
   try { validateSlackRules(incoming.rules); } catch { return undefined; }
-  return { rules: incoming.rules, workflows: record(existing) && Array.isArray(existing.workflows) ? existing.workflows : [] };
+  return { ...(record(existing) ? existing : {}), rules: incoming.rules, workflows: record(existing) && Array.isArray(existing.workflows) ? existing.workflows : [] };
 }
 
 /** Slack work not yet finished belongs to the account that received it. */
@@ -27,3 +27,18 @@ export function hasUnfinishedSlackWork(automation: unknown): boolean {
 
 /** The backup's connection when the Slack service would start with it; undefined otherwise, so it is never written. */
 export function restoreSlackConnection(incoming: unknown): unknown { return validSlackConnection(incoming) ? incoming : undefined; }
+
+/** SQL authority DTOs, independent of whether stale legacy source files still exist. */
+export async function collectAutomationSettings(repository: import('./storage-repository.js').WorkflowRepository, channel: import('./storage-codec.js').WorkflowChannel): Promise<Record<string,unknown>> {
+  const source = repository.source(await repository.loadRows(),channel);
+  return automationBackupOf(source);
+}
+export async function restoreAutomationSettings(repository: import('./storage-repository.js').WorkflowRepository, channel: import('./storage-codec.js').WorkflowChannel, incoming:unknown): Promise<void> {
+  if (!record(incoming)) throw new Error('Invalid automation settings DTO.');
+  validateSlackRules(incoming.rules);
+  await repository.replaceRules(channel,incoming.rules);
+}
+export async function guardSlackConnectionRestore(repository: import('./storage-repository.js').WorkflowRepository, existing:unknown, incoming:unknown): Promise<void> {
+  if(slackAccountKey(existing)!==slackAccountKey(incoming) && await repository.unfinished('slack')) throw new Error('Unfinished or reply-uncertain Slack work prevents changing accounts.');
+  await repository.assertAccountTeam('slack', record(incoming) && record(incoming.account) && typeof incoming.account.teamId === 'string' ? incoming.account.teamId : '');
+}

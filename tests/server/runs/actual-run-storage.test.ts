@@ -14,6 +14,7 @@ import { RunHistory } from '../../../server/runs/run-history.js';
 import { RunManager } from '../../../server/runs/manager.js';
 import { canonical, documentsHash, parseRunDocuments, rowsOf, RUN_SOURCE_BYTES, type RunDocuments } from '../../../server/runs/storage-codec.js';
 import { bootstrapRuns, importRuns, exportRuns, restoreRunsStorage, workerLegacyFiles } from '../../../server/runs/storage-transfer.js';
+import { RemoteRepository } from '../../../server/remote/storage-repository.js';
 import { RemoteRequestLedger } from '../../../server/remote/request-ledger.js';
 import type { Run, Session } from '../../../shared/types.js';
 import type { PermissionRequest } from '../../../shared/permissions.js';
@@ -88,7 +89,7 @@ test('actual runs A refuses first import; B authority survives absent/stale JSON
   const ready = await compatible.restore(), live = new Map(ready.map(value => [value.id,value]));
   live.get(run.id)!.instructions = { text: 'Compatibility instructions only',required: true };
   compatible.carried.delete(run.id);
-  compatible.save(live,ready.map(({ instructions: _private,...value }) => value),JSON.stringify(data.created),new Set());
+  compatible.saveRows({ runs: [...live.values()], deleted: [], created: data.created, deletedCreated: [], retained: new Set() });
   await compatible.flush();
   const compatibleData = (await repository.exportCurrent()).documents;
   assert.equal(compatibleData.instructions[run.id].text,'Compatibility instructions only');
@@ -141,14 +142,28 @@ test('raw runs validation retains unknown fields/markers and rejects malformed, 
 });
 
 for (const fault of ['before','after-native-hold','runs-refuse-compensation-loss']) test(`actual ${fault} response loss holds manager attachments/placeholder/remote ledger and provider until receipt resolution`, async t => {
-  const f = await prepared(t), initial = await f.open(f.b), repo = new RunsRepository(initial);
+  const stateDir = await folder(t);
+  const captured = await retentionBuild('1.125.0',await folder(t),true,true,true);
+  const initial = await captured.storage.openStorage({ stateDir,bundle: captured.bundle() });
+  t.after(() => initial.close()); await initial.prepare({ allowMigration: true });
+  const repo = new RunsRepository(initial);
+  await new RemoteRepository(initial).importPrepared([],'b'.repeat(64),'remote-empty-import',async () => {});
+  const f = { stateDir };
   await repo.importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'empty-import'); await initial.close();
-  const client = await f.open(f.a,fault);
+  const client = await captured.storage.openStorage({ stateDir,bundle: captured.bundle(fault === 'before' ? 'runs-before' : fault) });
+  t.after(() => client.close()); await client.prepare({ allowMigration: false });
   let starts = 0;
   const manager = new RunManager({ stateDir: f.stateDir,storage: client,getSession: () => undefined,refreshSessions: async () => {},findExecutable: async () => '/fixture/codex',
     spawnProcess: () => { starts++; throw new Error('Fixture forbids native launch'); } });
   await manager.start();
-  const ledger = new RemoteRequestLedger(f.stateDir); await ledger.start();
+  const effectGate = async () => {
+    const before = client.status();
+    const core = await client.gate('core');
+    const after = client.status();
+    if (before.state !== 'ready' || after.state !== 'ready' || !core.open
+      || before.ownerEpoch !== after.ownerEpoch || manager.pendingAdmission()) throw new Error('Fixture worker effects are held.');
+  };
+  const ledger = new RemoteRequestLedger(f.stateDir,Date.now,undefined,new RemoteRepository(client),effectGate); await ledger.start();
   const now = Date.now().toString(16).padStart(12,'0'), requestId = `${now.slice(0,8)}-${now.slice(8)}-7123-8abc-0123456789ab`;
   let attempts = 0;
   const execute = async () => { attempts++; return manager.create({ provider: 'codex',cwd: f.stateDir,prompt: 'native-hold-response-lost', attachments: [{ name: 'proof.txt',mimeType: 'text/plain',data: Buffer.from('preserve attachments').toString('base64') }] },{ instructions: { text: 'required',required: true },trustWorkspace: false }); };
@@ -159,10 +174,10 @@ for (const fault of ['before','after-native-hold','runs-refuse-compensation-loss
   assert.ok((await manager.attachment(attachmentId)).content);
   const held = await manager.attachment(attachmentId);
   await assert.rejects(manager.flushState(),(error: { disposition?: string }) => error.disposition === 'uncertain');
+  await client.reopen(); await client.prepare({ allowMigration: false });
   await assert.rejects(ledger.once('controllerfixture','create',requestId,{},execute,value => ({ kind: 'run',runId: value.run.id }),() => undefined),/확실하지/);
   assert.equal(attempts,1); assert.equal(starts,0);
   assert.deepEqual(await manager.attachment(attachmentId),held,'unknown keeps prepared attachment files');
-  await client.reopen(); await client.prepare({ allowMigration: false });
   manager.releaseStorage();
   assert.deepEqual(manager.pendingAdmission(),pending,'SDK prepare/release does not settle the original identity');
   assert.equal(starts,0);
@@ -664,4 +679,118 @@ for (const fault of ['before', 'after'] as const) test(`B bootstrap ${fault} los
   if (fault === 'before') await assert.rejects(next(), /evidence exists without authority/);
   else { await next(); assert.deepEqual((await nextRepository.exportCurrent()).documents, data); }
   assert.equal((await readdir(evidenceParent)).length, 1);
+});
+
+test('R6 runtime reads refuse absent SQL authority even when no JSON or migration evidence exists', async t => {
+  const f = await prepared(t), client = await f.open(f.b);
+  const history = new RunHistory(f.stateDir, client);
+  await assert.rejects(history.readCreated(), /SQL authority is missing/);
+  await assert.rejects(history.restore(), /SQL authority is missing/);
+  const missing = new RunHistory(f.stateDir);
+  await assert.rejects(missing.readCreated(), /SQL authority is required/);
+  await assert.rejects(missing.restore(), /SQL authority is required/);
+  assert.equal((await new RunsRepository(client).head()).authority, null);
+  for (const name of ['runs.json', 'created-sessions.json', 'run-instructions.json']) await assert.rejects(lstat(join(f.stateDir, name)), { code: 'ENOENT' });
+});
+
+test('R6 operation snapshots only touched rows, preserves queued A→B→A ordering and commits dependency deletion together', async t => {
+  const f = await prepared(t), client = await f.open(f.b), repository = new RunsRepository(client);
+  const data = documents(f.stateDir), touchedId = data.runs[0].id;
+  const untouched: Run = { id: '10000000-0000-4000-8000-000000000088', sessionId: data.runs[0].sessionId,
+    status: 'completed', prompt: 'Untouched historical output', output: 'x'.repeat(3_000_000), createdAt: data.runs[0].createdAt };
+  data.runs.push(untouched);
+  await repository.importPrepared(data, 'a'.repeat(64), 'r6-operation-seed');
+  const history = new RunHistory(f.stateDir, client);
+  await history.readCreated();
+  const restored = await history.restore(), run = restored.find(row => row.id === touchedId)!;
+  const other = restored.find(row => row.id === untouched.id)!;
+  Object.defineProperty(other, 'output', { get() { throw new Error('Untouched history must never be serialized by a write'); } });
+  const before = await repository.exportCurrent(), beforeRow = before.rows.find(row => row.id === untouched.id)!;
+  const stagePayloads: string[] = [], write = client.write.bind(client);
+  client.write = async <T>(...args: Parameters<typeof client.write>) => {
+    if (args[0] === 'runs' && args[1] === 'stage') stagePayloads.push(Buffer.from((args[2] as { data: string }).data, 'base64').toString('utf8'));
+    return write<T>(...args);
+  };
+  const save = () => history.saveRows({ runs: [run], deleted: [], created: [], deletedCreated: [], retained: new Set() });
+  const original = run.prompt;
+  run.prompt = 'B'; save(); run.prompt = original; save(); await history.flush();
+  let current = await repository.exportCurrent();
+  assert.equal(current.documents.runs.find(row => row.id === touchedId)!.prompt, original);
+  assert.equal(current.rows.find(row => row.id === untouched.id)!.json, beforeRow.json);
+  assert.ok(stagePayloads.length >= 2);
+  assert.ok(stagePayloads.every(payload => !payload.includes(untouched.id) && Buffer.byteLength(payload) < 10_000));
+  stagePayloads.length = 0;
+  run.status = 'completed'; run.output = 'Final'; save(); await history.flush();
+  current = await repository.exportCurrent();
+  assert.equal(current.documents.instructions[touchedId], undefined);
+  const finalRows = stagePayloads.join('').trim().split('\n').slice(1).map(line => JSON.parse(line));
+  assert.ok(finalRows.some(row => row.kind === 'run' && row.value.status === 'completed'));
+  assert.ok(finalRows.some(row => row.kind === 'instruction' && row.id === touchedId && row.remove === true));
+  assert.equal((current.documents.runs.find(row => row.id === touchedId) as unknown as { needsInstructions?: boolean }).needsInstructions, undefined);
+  history.saveRows({ runs: [], deleted: [touchedId], created: [], deletedCreated: [], retained: new Set() }); await history.flush();
+  assert.equal((await repository.exportCurrent()).documents.runs.some(row => row.id === touchedId), false);
+  client.write = write;
+  for (const name of ['runs.json', 'created-sessions.json', 'run-instructions.json']) await assert.rejects(lstat(join(f.stateDir, name)), { code: 'ENOENT' });
+});
+
+test('R6 manager uses explicit mutation IDs without reading output from unrelated historical runs', async t => {
+  const f = await prepared(t), client = await f.open(f.b), repository = new RunsRepository(client);
+  const data = documents(f.stateDir);
+  const first: Run = { ...data.runs[0], status: 'completed', output: 'First' };
+  for (const marker of ['needsInstructions', 'keepQueued', 'retain']) delete (first as unknown as Record<string, unknown>)[marker];
+  const other: Run = { ...first, id: '10000000-0000-4000-8000-000000000089', output: 'Historical' };
+  await repository.importPrepared({ runs: [first, other], created: data.created, instructions: {} }, 'a'.repeat(64), 'r6-manager-seed');
+  const manager = new RunManager({ stateDir: f.stateDir, storage: client, holdUntilReady: true, getSession: () => undefined, refreshSessions: async () => {},
+    spawnProcess: () => { throw new Error('No native launch'); } });
+  await manager.start();
+  const owner = manager as unknown as { runs: Map<string, Run>; changed(...runs: Run[]): void };
+  const live = owner.runs.get(first.id)!, old = owner.runs.get(other.id)!;
+  Object.defineProperty(old, 'output', { configurable: true, get() { throw new Error('Whole-history observation is forbidden'); } });
+  live.output = 'Owner update'; owner.changed(live); await manager.flushState();
+  const current = await repository.exportCurrent();
+  assert.equal(current.documents.runs.find(run => run.id === first.id)!.output, 'Owner update');
+  assert.equal(current.documents.runs.find(run => run.id === other.id)!.output, 'Historical');
+  Object.defineProperty(old, 'output', { configurable: true, writable: true, value: 'Historical' });
+  await manager.close();
+});
+
+for (const fault of ['before', 'after'] as const) test(`R6 history ${fault} reply loss holds queued row operations until the same receipt resolves`, async t => {
+  const f = await prepared(t), seed = await f.open(f.b), data = documents(f.stateDir);
+  await new RunsRepository(seed).importPrepared(data, 'a'.repeat(64), 'r6-loss-seed'); await seed.close();
+  const client = await f.open(f.b, fault), history = new RunHistory(f.stateDir, client);
+  await history.readCreated(); const run = (await history.restore())[0];
+  const calls: string[] = [], write = client.write.bind(client);
+  client.write = async <T>(...args: Parameters<typeof client.write>) => { calls.push(args[1]); return write<T>(...args); };
+  const save = () => history.saveRows({ runs: [run], deleted: [], created: [], deletedCreated: [], retained: new Set() });
+  run.output = 'First operation'; save();
+  await assert.rejects(history.flush(), (error: { disposition?: string }) => error.disposition === 'uncertain');
+  const identity = history.pendingAdmission()!; assert.ok(identity);
+  const sent = calls.length;
+  run.output = 'Queued after lost reply'; save();
+  await assert.rejects(history.flush(), (error: { disposition?: string }) => error.disposition === 'uncertain');
+  assert.deepEqual(history.pendingAdmission(), identity); assert.equal(calls.length, sent, 'held rows create no replacement intent or resend');
+  await client.reopen(); await client.prepare({ allowMigration: false });
+  const resolved = await history.resolveAdmission();
+  assert.equal(resolved.disposition, fault === 'after' ? 'committed' : 'not-committed');
+  assert.ok(resolved.touchedRunIds.includes(run.id)); assert.equal(calls.length, sent);
+  const durable = (await new RunsRepository(client).exportCurrent()).documents.runs[0];
+  assert.equal(durable.output, fault === 'after' ? 'First operation' : data.runs[0].output);
+  assert.notEqual(durable.output, 'Queued after lost reply', 'receipt resolution alone never submits queued operations');
+});
+
+test('R6 startup prunes orphan instruction rows through the same SQL owner while retaining carried instructions', async t => {
+  const f = await prepared(t), client = await f.open(f.b), repository = new RunsRepository(client), data = documents(f.stateDir);
+  const orphan = '10000000-0000-4000-8000-000000000090';
+  data.instructions[orphan] = { text: 'No remaining run owns these instructions', required: true };
+  await repository.importPrepared(data, 'a'.repeat(64), 'r6-orphan-instruction-seed');
+  const manager = new RunManager({ stateDir: f.stateDir, storage: client, holdUntilReady: true, getSession: () => undefined, refreshSessions: async () => {},
+    spawnProcess: () => { throw new Error('No native replay'); } });
+  await manager.start(); await manager.flushState();
+  const current = (await repository.exportCurrent()).documents;
+  assert.equal(current.instructions[orphan], undefined);
+  assert.deepEqual(current.instructions[data.runs[0].id], data.instructions[data.runs[0].id]);
+  assert.equal(manager.list()[0].status, 'queued');
+  assert.equal((current.runs[0] as unknown as { needsInstructions: boolean; keepQueued: boolean }).needsInstructions, true);
+  assert.equal((current.runs[0] as unknown as { keepQueued: boolean }).keepQueued, true);
+  await manager.close();
 });

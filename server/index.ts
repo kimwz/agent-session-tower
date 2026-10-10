@@ -1,3 +1,4 @@
+import { runOfflineStorageCommand } from './link/storage-offline-cli.js';
 import { storageWebBuild, storageWebHealth, storageWebServing } from './link/storage-web.js';
 import { rollbackPorts } from './runs/storage-control.js';
 import { restartService } from './link/service.js';
@@ -142,6 +143,13 @@ async function main() {
   if (args[0] === '--storage-contract') {
     if (args.length !== 1) throw new Error('Usage: agent-session-tower --storage-contract');
     await printArtifactStorageContract(); return;
+  }
+  if (args[0] === '--offline-owner') {
+    if(args.length!==4 || !args[1] || args[2]!=='--runner-worker' || !args[3]) throw new Error('Offline successor requires exact owner input and final worker state directory.');
+    const stateDir=resolve(args[3]);
+    await runOfflineStorageCommand(['activate','--state-dir',stateDir,'--input',resolve(args[1])]);
+    await runRunnerWorker(stateDir);
+    return;
   }
   if (args[0] === '--runner-worker') {
     if (args.length !== 2 || !args[1]) throw new Error('Runner worker requires a state directory.');
@@ -587,7 +595,7 @@ async function main() {
   const masterCallerSecret = randomBytes(32).toString('hex');
   const master = new MasterClient({ stateDir, credentials: () => webCredentials });
   // Full backups: the worker gives its skills; restores go through each process's own stores (see BackupService.apply).
-  const backups = new BackupService({ stateDir, version: APP_VERSION, skills: () => runs.skillsBackup(), triggers: () => runs.triggersBackup(), restartWorker: () => runs.restartWorker(),
+  const backups = new BackupService({ stateDir, version: APP_VERSION, skills: () => runs.skillsBackup(), triggers: () => runs.triggersBackup(), settings: () => runs.settingsBackup(), restartWorker: () => runs.restartWorker(),
     unavailable: () => runs.supports('backup') ? undefined : '실행 워커가 아직 새 버전으로 바뀌지 않아 백업을 만들 수 없습니다. 진행 중인 작업이 끝나 워커가 바뀌면 쓸 수 있습니다.',
     stores: { groups, exclusions, decisions }, master: body => master.call('settings', { body }), onChange: () => changed() });
   await backups.start();

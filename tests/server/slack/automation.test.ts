@@ -1,8 +1,9 @@
+import { externalStorageFixture, readWorkflowFixture, writeWorkflowFixture } from '../remote/external-storage-fixture.js';
 import { RunAdmissionUncertain } from '../../../server/runs/run-records.js';
 /** An owner turn as the agent receives it: the message, then Tower's instructions. */
 const chatText = (turn: { prompt: string; instructions?: string }) => `${turn.prompt}\n\n${turn.instructions ?? ''}`;
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -12,15 +13,15 @@ import type { AutoPromptJob, AutoPromptRequest, Run } from '../../../shared/type
 
 const rule: SlackRule = { id: 'review', name: 'PR review', enabled: true, condition: 'Verse8 PR review requested', instructions: 'Review the PR', replyInstructions: 'Confirm only a finished review', provider: 'codex' };
 const mention: SlackMention = { id: 'event-1', teamId: 'T1', channel: 'C1', user: 'U2', ts: '1.1', threadTs: '1.0', text: '<@U1> review this Verse8 PR' };
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, expectedCapacityFlushFailure = false) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-slack-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
   let job: AutoPromptJob | undefined;
   let run: Run = { id: 'run', sessionId: 'session', prompt: '', status: 'running', createdAt: '', output: 'Review finished with no findings.' };
   let sends = 0, autoSends = 0, submissions = 0, fetches = 0;
   const submitted: AutoPromptRequest[] = [];
-  const options: SlackAutomationOptions = {
-    stateDir: directory,
+  const storage = await externalStorageFixture(t, directory, true, 'normal', false);
+  const options: SlackAutomationOptions & { repository: typeof storage.workflows } = {
+    repository: storage.workflows, effectGate: storage.effectGate, stateDir: directory,
     fetchThread: async () => { fetches++; return [{ user: 'U2', ts: '1.0', text: 'Review PR 5 for Verse8' }]; },
     match: async () => ({ ruleId: 'review', reason: 'PR review request' }),
     submitAutoPrompt: async input => { submissions++; submitted.push(input); job = { id: input.requestId, provider: input.provider, prompt: input.prompt, routerModel: 'test', status: 'completed', createdAt: '', updatedAt: '', runId: run.id, sessionId: run.sessionId }; return job; },
@@ -29,7 +30,15 @@ async function fixture(t: TestContext) {
     composeReply: async input => { assert.equal(input.output, run.output); return { text: '확인 했습니다.' }; },
     sendReply: async (_mention, _text, _mentionable, automatic) => { sends++; autoSends += Number(automatic); return { ts: '2.0' }; },
   };
-  const manager = new SlackAutomationManager(options); await manager.start(); await manager.setRules([rule]);
+  const manager = new SlackAutomationManager(options); await manager.start(); await manager.startRuntimeEffects(); await manager.setRules([rule]);
+  t.after(async () => {
+    if (expectedCapacityFlushFailure) await assert.rejects(manager.flush(), error => error instanceof storage.captured.storage.StorageCommandError
+      && error.code === 'domain-failed' && error.disposition === 'not-committed'
+      && error.message === 'Slack 저장 용량이 가득 찼습니다.');
+    else await manager.flush();
+    await storage.storage.close();
+    await rm(directory, { recursive: true, force: true });
+  });
   return { manager, options, directory, submitted, counts: () => ({ sends, submissions, fetches }), autoSends: () => autoSends, finish: (status: Run['status'] = 'completed') => { run = { ...run, status }; } };
 }
 test('Slack Codex work always requests Auto approval review while Claude retains its permission flow', async t => {
@@ -54,7 +63,7 @@ test('admission does no network/model work; dedup and actual execution completio
 test('rule snapshots remain immutable after settings change and restart', async t => {
   const f = await fixture(t); await f.manager.ingest(mention);
   await f.manager.setRules([{ ...rule, instructions: 'Changed instruction' }]);
-  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects(); await restarted.tick();
   assert.equal(restarted.list()[0].rule?.instructions, 'Review the PR');
   assert.ok(restarted.list()[0].prompt?.includes('Do not send Slack messages yourself'));
   f.finish(); await restarted.tick(); assert.equal(f.counts().submissions, 1);
@@ -82,9 +91,9 @@ test('uncertain sends are not retried, including restart during sending', async 
   await assert.rejects(f.manager.approveReply(item.id, item.replies![0].requestKey, item.replies![0].text), /connection lost/);
   assert.equal(attempts, 1); assert.equal(f.manager.list()[0].replies![0].status, 'uncertain');
   const path = join(f.directory, 'slack-automation.json');
-  const saved = JSON.parse(await readFile(path, 'utf8')); saved.workflows[0].status = 'sending';
-  await writeFile(path, JSON.stringify(saved));
-  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick();
+  const saved = JSON.parse(await readWorkflowFixture(f.options.repository)); saved.workflows[0].status = 'sending';
+  await writeWorkflowFixture(f.options.repository, JSON.stringify(saved));
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects(); await restarted.tick();
   assert.equal(attempts, 1); assert.equal(restarted.list()[0].status, 'reply-uncertain');
 });
 test('read failure and unconfirmed completion fail closed without posting', async t => {
@@ -96,47 +105,44 @@ test('read failure and unconfirmed completion fail closed without posting', asyn
   await f.manager.ingest({ ...mention, id: 'event-2' }); await f.manager.tick();
   assert.equal(f.manager.list()[1].status, 'error'); assert.equal(f.counts().sends, 0);
 });
-test('large terminal history compacts below restart limit while retaining dedup IDs', async t => {
+test('terminal SQL history compacts on capacity pressure while retaining dedup IDs', async t => {
   const f = await fixture(t); await f.manager.ingest(mention); f.finish(); await f.manager.tick();
-  const path = join(f.directory, 'slack-automation.json');
-  const saved = JSON.parse(await readFile(path, 'utf8'));
-  saved.workflows[0].mention.text = ' '.repeat(600) + mention.text;
-  saved.workflows[0].thread = Array.from({ length: 900 }, (_, i) => ({ user: 'U2', ts: String(i), text: 'a'.repeat(12_000) }));
-  await writeFile(path, JSON.stringify(saved));
-  const restarted = new SlackAutomationManager(f.options); await restarted.start();
-  assert.ok(Buffer.byteLength(await readFile(path, 'utf8')) < 10_000_000);
+  const saved = JSON.parse(await readWorkflowFixture(f.options.repository));
+  saved.workflows[0].thread = Array.from({ length: 250 }, (_, i) => ({ user: 'U2', ts: String(i), text: 'a'.repeat(39_800) }));
+  saved.workflows[0].thread.push({user: 'U2', ts: 'last', text: 'a'.repeat(9_990_000-Buffer.byteLength(JSON.stringify(saved)))});
+  await writeWorkflowFixture(f.options.repository, JSON.stringify(saved));
+  const restarted = new SlackAutomationManager(f.options); await restarted.load(); await restarted.startRuntimeEffects();
+  await restarted.ingest({...mention, id: 'pressure', text: 'b'.repeat(40_000)});
   assert.equal(restarted.list()[0].thread, undefined);
-  await restarted.ingest(mention); await restarted.tick();
-  assert.equal(restarted.list().length, 1); assert.equal(f.counts().submissions, 1);
-  const again = new SlackAutomationManager(f.options); await again.start();
-  assert.equal(again.list()[0].status, 'completed');
+  await restarted.ingest(mention); assert.equal(restarted.list().filter(item=>item.id===f.manager.list()[0].id).length,1);
+  assert.ok(Buffer.byteLength(await readWorkflowFixture(f.options.repository))<10_000_000);
 });
-test('storage limit preserves unfinished context and refuses oversized rule configuration', async t => {
-  const f = await fixture(t); await f.manager.ingest(mention); await f.manager.tick();
-  const path = join(f.directory, 'slack-automation.json');
-  const saved = JSON.parse(await readFile(path, 'utf8'));
+
+test('SQL storage capacity refuses oversized unfinished context without changing its durable row', async t => {
+  const f = await fixture(t, true); await f.manager.ingest(mention); await f.manager.tick();
+  const original = await readWorkflowFixture(f.options.repository), saved = JSON.parse(original);
   saved.workflows[0].thread = Array.from({ length: 900 }, (_, i) => ({ user: 'U2', ts: String(i), text: 'a'.repeat(12_000) }));
-  const original = JSON.stringify(saved); await writeFile(path, original);
-  const restarted = new SlackAutomationManager(f.options);
-  await assert.rejects(restarted.start(), /저장 용량/);
-  assert.equal(await readFile(path, 'utf8'), original);
+  await assert.rejects(writeWorkflowFixture(f.options.repository, JSON.stringify(saved)), /저장 용량/);
+  const heldRead = await readWorkflowFixture(new (await import('../../../server/slack/storage-repository.js')).WorkflowRepository(f.options.repository.storage));
+  assert.equal(heldRead, original);
   await assert.rejects(f.manager.setRules(Array.from({ length: 20 }, (_, i) => ({ ...rule, id: String(i), instructions: 'a'.repeat(8000) }))), /100 KB/);
   assert.deepEqual(f.manager.rules(), [rule]);
 });
+
 test('overbudget event admission rolls back and remains unacknowledged', async t => {
   const f = await fixture(t); await f.manager.ingest(mention); await f.manager.tick();
   const path = join(f.directory, 'slack-automation.json');
-  const saved = JSON.parse(await readFile(path, 'utf8'));
+  const saved = JSON.parse(await readWorkflowFixture(f.options.repository));
   saved.workflows[0].thread = Array.from({ length: 250 }, (_, i) => ({ user: 'U2', ts: String(i), text: 'a'.repeat(39_800) }));
   saved.workflows[0].thread.push({ user: 'U2', ts: 'last', text: '' });
   const padding = 9_990_000 - Buffer.byteLength(JSON.stringify(saved));
   assert.ok(padding > 0 && padding < 40_000);
   saved.workflows[0].thread.at(-1).text = 'a'.repeat(padding);
-  await writeFile(path, JSON.stringify(saved));
-  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  await writeWorkflowFixture(f.options.repository, JSON.stringify(saved));
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects();
   await assert.rejects(restarted.ingest({ ...mention, id: 'too-large', text: 'b'.repeat(40_000) }), /저장 용량/);
   assert.equal(restarted.list().length, 1);
-  const again = new SlackAutomationManager(f.options); await again.start();
+  const again = new SlackAutomationManager(f.options); await again.start(); await again.startRuntimeEffects();
   assert.equal(again.list().length, 1); assert.equal(again.list()[0].thread?.length, 251);
 });
 
@@ -169,7 +175,7 @@ test('conversation tools scope task reads and deduplicate delegation with Auto r
   await Promise.all([f.manager.tool(id, 'tower_auto_prompt', args), f.manager.tool(id, 'tower_auto_prompt', args)]);
   assert.equal(f.counts().submissions, 1); assert.equal(f.submitted[0].codexApprovalsReviewer, 'auto_review');
   assert.equal(f.submitted[0].prompt, args.prompt, 'preserve the task and owner constraints without injecting coordinator policy');
-  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects();
   await restarted.tool(id, 'tower_auto_prompt', args);
   assert.equal(f.counts().submissions, 1);
   const followup = chatText(await restarted.ownerChat('session', '다음 PR도 같은 범위로 검토해주세요'));
@@ -186,7 +192,7 @@ test('uncertain conversational send persists across restart and never resends', 
   await f.manager.tool(id, 'slack_reply', { requestKey: 'r', text: 'Result' });
   assert.equal(attempts, 0);
   await assert.rejects(f.manager.approveReply(id, 'r', 'Result'), /lost response/);
-  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects();
   const result = await restarted.tool(id, 'slack_reply', { requestKey: 'r', text: 'Result' }) as { status: string };
   assert.equal(result.status, 'uncertain'); assert.equal(attempts, 1);
   await restarted.tool(id, 'slack_reply', { requestKey: 'other', text: 'Result' });
@@ -197,10 +203,10 @@ test('claimed conversation creation recovers correlated run without spawning twi
   const f = await fixture(t); let attempts = 0;
   f.options.startConversation = async () => { attempts++; throw new Error('lost creation response'); };
   await f.manager.ingest(mention); await f.manager.tick();
-  const path = join(f.directory, 'slack-automation.json'); const saved = JSON.parse(await readFile(path, 'utf8'));
-  saved.workflows[0].status = 'dispatching'; await writeFile(path, JSON.stringify(saved));
+  const path = join(f.directory, 'slack-automation.json'); const saved = JSON.parse(await readWorkflowFixture(f.options.repository));
+  saved.workflows[0].status = 'dispatching'; await writeWorkflowFixture(f.options.repository, JSON.stringify(saved));
   f.options.findConversation = () => ({ sessionId: 'session', runId: 'run' });
-  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects(); await restarted.tick();
   assert.equal(restarted.list()[0].sessionId, 'session'); assert.equal(attempts, 1);
 });
 
@@ -221,7 +227,7 @@ test('delegated completion resumes an idle coordinator once and does not occupy 
   f.finish(); await f.manager.tick(); assert.equal(resumes, 0, 'do not enqueue while coordinator is still active');
   coordinator.status = 'completed'; await f.manager.tick(); assert.equal(resumes, 1);
   await f.manager.tick(); assert.equal(resumes, 1);
-  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects(); await restarted.tick();
   assert.equal(resumes, 1); assert.equal(restarted.list()[0].delegatedTasks?.[0].notifiedRunId, 'notification');
 });
 
@@ -235,9 +241,9 @@ test('settled conversational ticks do not emit changes or rewrite history while 
   await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'pending', prompt: 'Review' });
   await f.manager.tick();
   let changes = 0; f.manager.on('change', () => { changes++; });
-  const path = join(f.directory, 'slack-automation.json'); const before = await readFile(path, 'utf8');
+  const path = join(f.directory, 'slack-automation.json'); const before = await readWorkflowFixture(f.options.repository);
   await f.manager.tick(); await f.manager.tick();
-  assert.equal(changes, 0); assert.equal(await readFile(path, 'utf8'), before);
+  assert.equal(changes, 0); assert.equal(await readWorkflowFixture(f.options.repository), before);
   assert.match(f.manager.list()[0].prompt!, /^Slack request from <@U2> in C1:\n<@U1> review this Verse8 PR/);
   assert.doesNotMatch(JSON.stringify(f.manager.list()), /first whose condition clearly matches/, 'pages read the workflow; the policy is not in it');
 });
@@ -253,7 +259,7 @@ test('rejected delegation becomes a durable visible error and the same key can r
   const args = { requestKey: 'retry', prompt: 'Review' };
   await assert.rejects(f.manager.tool(id, 'tower_auto_prompt', args), /Queue full/);
   assert.equal(f.manager.list()[0].status, 'error'); assert.equal(f.manager.hasPending(), false);
-  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects();
   assert.match(restarted.list()[0].delegatedTasks![0].submissionError!, /Queue full/);
   f.options.submitAutoPrompt = submit;
   await restarted.tool(id, 'tower_auto_prompt', args);
@@ -317,9 +323,9 @@ test('a result notice refused for good (the CLI is missing) is recorded, not ret
 
 test('persisted legacy composing work produces only an approval proposal after restart', async t => {
   const f = await fixture(t); await f.manager.ingest(mention); await f.manager.tick(); f.finish();
-  const path = join(f.directory, 'slack-automation.json'); const saved = JSON.parse(await readFile(path, 'utf8'));
-  saved.workflows[0].status = 'composing'; await writeFile(path, JSON.stringify(saved));
-  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick();
+  const path = join(f.directory, 'slack-automation.json'); const saved = JSON.parse(await readWorkflowFixture(f.options.repository));
+  saved.workflows[0].status = 'composing'; await writeWorkflowFixture(f.options.repository, JSON.stringify(saved));
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects(); await restarted.tick();
   const item = restarted.list()[0]; assert.equal(f.counts().sends, 0); assert.equal(item.replies![0].status, 'proposed');
   await restarted.approveReply(item.id, item.replies![0].requestKey, item.replies![0].text);
   assert.equal(f.counts().sends, 1);
@@ -329,8 +335,9 @@ test('approval fails closed before network when its durable send claim cannot be
   const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'session', runId: 'run' });
   await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
   await f.manager.tool(id, 'slack_reply', { requestKey: 'r', text: 'Exact reply' });
-  const path = join(f.directory, 'slack-automation.json'); await rm(path); await mkdir(path);
+  await f.options.repository.storage.close();
   await assert.rejects(f.manager.approveReply(id, 'r', 'Exact reply'));
+  await f.options.repository.storage.reopen(); await f.options.repository.storage.prepare({ allowMigration: false });
   assert.equal(f.counts().sends, 0);
   await assert.rejects(f.manager.approveReply(id, 'r', 'Exact reply'), /불확실/);
   assert.equal(f.counts().sends, 0);
@@ -341,7 +348,7 @@ test('configured models survive snapshot restart and delegate through matched ru
   await f.manager.setRules([{ ...rule, model: 'gpt-6-astra' }]);
   await f.manager.ingest(mention);
   await f.manager.setRules([{ ...rule, model: 'gpt-5.6-sol' }]);
-  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects(); await restarted.tick();
   assert.equal(f.submitted[0].model, 'gpt-6-astra');
   f.options.getAutoPrompt = () => undefined;
   f.options.startConversation = async () => ({ sessionId: 'coordinator', runId: 'coordinator-run' });
@@ -387,9 +394,9 @@ test('created delegate provenance and completion survive restart and routing his
     assert.equal(f.manager.list()[0].delegatedTasks![0].delegatedFinished, undefined);
     f.options.getAutoPrompt = () => undefined;
     run = { ...run, status: 'completed' };
-    const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick();
+    const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects(); await restarted.tick();
     assert.equal(restarted.list()[0].delegatedTasks![0].delegatedFinished, action === 'create' ? true : undefined);
-    const again = new SlackAutomationManager(f.options); await again.start();
+    const again = new SlackAutomationManager(f.options); await again.start(); await again.startRuntimeEffects();
     assert.deepEqual(again.list()[0].delegatedTasks, restarted.list()[0].delegatedTasks);
   }
 });
@@ -402,7 +409,7 @@ test('owner chat selects exact saved wording and explicit approval sends once ac
   for (const [index, text] of ['First', 'Second', 'Third'].entries()) await f.manager.tool(id, 'slack_reply', { requestKey: `r${index}`, text });
   chatText(await f.manager.ownerChat('owner-chat', '3번'));
   assert.equal(f.counts().sends, 0);
-  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects();
   assert.match(chatText(await restarted.ownerChat('owner-chat', '승인합니다')), /status: sent/);
   chatText(await restarted.ownerChat('owner-chat', '승인합니다'));
   assert.equal(f.counts().sends, 1);
@@ -516,7 +523,7 @@ test('conditional owner authorization survives restart and sends exact text only
   await f.manager.tool(f.id, 'tower_task_complete', args);
   assert.equal(f.counts().sends, 0);
   f.run.status = 'completed';
-  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects();
   await restarted.tick(); assert.equal(f.counts().sends, 0);
   await Promise.all([restarted.tool(f.id, 'tower_task_complete', args), restarted.tool(f.id, 'tower_task_complete', args)]);
   assert.equal(f.counts().sends, 1); assert.equal(restarted.list()[0].reply, '배포됐습니다');
@@ -541,7 +548,7 @@ test('owner cancellation is serialized before completion and uncertain delivery 
   const g = await conditionalFixture(t); chatText(await g.manager.ownerChat('owner-chat', conditionalCommand)); g.run.status = 'completed';
   let attempts = 0; g.options.sendReply = async () => { attempts++; throw Error('uncertain'); };
   await g.manager.tool(g.id, 'tower_task_complete', { ...args, requestId: g.task.requestId });
-  const restarted = new SlackAutomationManager(g.options); await restarted.start();
+  const restarted = new SlackAutomationManager(g.options); await restarted.start(); await restarted.startRuntimeEffects();
   await restarted.tool(g.id, 'tower_task_complete', { ...args, requestId: g.task.requestId });
   assert.equal(attempts, 1); assert.equal(restarted.list()[0].ownerConditionalReply?.status, 'uncertain');
 });
@@ -605,7 +612,7 @@ test('composed owner consent during work survives restart and sends once without
   const args = { requestId: f.task.requestId, runId: f.run.id, outcome: 'succeeded', evidence: 'Verified deployment.', text: '배포를 마쳤습니다. 확인 부탁드립니다.' };
   await f.manager.tool(f.id, 'tower_task_complete', args); assert.equal(f.counts().sends, 0);
   f.run.status = 'completed';
-  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects();
   await Promise.all([restarted.tool(f.id, 'tower_task_complete', args), restarted.tool(f.id, 'tower_task_complete', args)]);
   assert.equal(f.counts().sends, 1); assert.equal(restarted.list()[0].reply, args.text);
 });
@@ -667,7 +674,7 @@ test('an immediate owner permission is used by the next reply, which then is the
   await f.manager.tool(id, 'slack_send', { text: '반영했습니다.', requestKey: 'b' });
   // A new permission in between does not make a retry of the same call a new reply.
   assert.match(chatText(await f.manager.ownerChat('owner-chat', '이 문구로 슬랙에 보내주세요')), /authorization saved/);
-  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects();
   await restarted.tool(id, 'slack_send', { text: '반영했습니다.', requestKey: 'b' });
   assert.equal(f.counts().sends, 1);
   assert.equal(restarted.list()[0].ownerConditionalReply?.status, 'pending');
@@ -687,7 +694,7 @@ test('the owner telling Tower not to send holds open replies and automatic repor
   await assert.rejects(f.manager.tool(id, 'slack_send', { text: 'Done', requestKey: 'done' }), /asked not to send/);
   await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'deploy', ruleId: 'review', prompt: 'Deploy the fix' });
   assert.equal(f.manager.list()[0].ownerConditionalReply, undefined, 'no standing report while held');
-  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects();
   await assert.rejects(restarted.tool(id, 'slack_send', { text: 'Done', requestKey: 'done' }), /asked not to send/);
   // A failed approval changes nothing.
   await assert.rejects(restarted.approveReply(id, 'proposal', 'Changed text'));
@@ -724,7 +731,7 @@ test('a permission bound to a task is not reported while an unclear owner messag
   chatText(await f.manager.ownerChat('owner-chat', '잠깐, 결과는 내가 직접 전할게요'));
   f.run.status = 'completed';
   const args = { requestId: f.task.requestId, runId: f.run.id, outcome: 'succeeded', evidence: 'Verified deployment.', text: '배포를 마쳤습니다.' };
-  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects();
   assert.equal((await restarted.tool(f.id, 'tower_task_complete', args) as { status: string }).status, 'blocked');
   assert.equal(restarted.list()[0].ownerConditionalReply?.status, 'pending', 'the permission waits');
   assert.equal(f.counts().sends, 0);
@@ -878,7 +885,7 @@ test('autoReply rule delegation grants one truthful report and participant menti
   const args = { requestId: task.requestId, runId: run.id, outcome: 'succeeded', evidence: 'Review completed.', text: '<@U2> 확인 했습니다.' };
   assert.equal((await f.manager.tool(id, 'tower_task_complete', args) as { status: string }).status, 'blocked');
   run.status = 'completed';
-  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects();
   await Promise.all([restarted.tool(id, 'tower_task_complete', args), restarted.tool(id, 'tower_task_complete', args)]);
   assert.equal(mentionables.length, 1);
   assert.deepEqual(mentionables[0], ['U2']);
@@ -915,7 +922,7 @@ test('while the worker hands off, new mentions are saved but only the successor 
   assert.equal(f.manager.hasPending(), true, 'it is still accepted work');
   assert.deepEqual(f.counts(), { sends: 0, submissions: 0, fetches: 0 });
   await f.manager.flush();
-  const successor = new SlackAutomationManager(f.options); await successor.start(); await successor.tick();
+  const successor = new SlackAutomationManager(f.options); await successor.start(); await successor.startRuntimeEffects(); await successor.tick();
   assert.equal(successor.list()[0].status, 'running');
   assert.equal(f.counts().submissions, 1);
 });
@@ -936,27 +943,24 @@ test('holding intake never abandons a mention whose thread is already being read
   assert.equal(f.manager.list()[0].status, 'running');
   assert.equal(f.counts().submissions, 1);
 });
-test('a handoff flush reports a state file that cannot be saved instead of hiding it', async t => {
-  const f = await fixture(t);
-  await f.manager.ingest(mention);
-  await rm(join(f.directory, 'slack-automation.json'), { force: true });
-  await mkdir(join(f.directory, 'slack-automation.json'));
-  await assert.rejects(f.manager.flush());
-  await rm(join(f.directory, 'slack-automation.json'), { recursive: true, force: true });
-  await f.manager.flush();
-  assert.equal(JSON.parse(await readFile(join(f.directory, 'slack-automation.json'), 'utf8')).workflows.length, 1);
+test('a handoff flush checks actual SQL readiness while stale legacy paths are ignored', async t => {
+  const f = await fixture(t); await f.manager.ingest(mention);
+  await mkdir(join(f.directory, 'slack-automation.json')); await f.manager.flush();
+  assert.equal(JSON.parse(await readWorkflowFixture(f.options.repository)).workflows.length, 1);
+  await f.options.repository.storage.close(); await assert.rejects(f.manager.flush());
+  await f.options.repository.storage.reopen(); await f.options.repository.storage.prepare({ allowMigration: false });
 });
 
 test('the same coordinator serves another channel under its own name, tools and state file', async t => {
   const f = await fixture(t);
-  const channel: CoordinatorChannel = { label: 'GitHub', tools: 'github', file: 'github-automation.json', validReaction: name => ['+1', 'eyes', 'rocket', '👍'].includes(name),
+  const channel: CoordinatorChannel = { label: 'GitHub', tools: 'github', file: 'github-automation.json', validReaction: name => ['+1', 'eyes', 'rocket'].includes(name),
     aliases: ['깃허브', 'GitHub'], mentionGuide: 'To mention someone, write @login.' };
   let prompt = '';
   const reacted: string[] = [];
   const options: SlackAutomationOptions = { ...f.options, channel, startConversation: async (_workflow, text, instructions) => { prompt = `${instructions}\n${text}`; return { sessionId: 'gh-session', runId: 'run' }; },
     react: async (_mention, name) => { reacted.push(name); } };
   const github = new SlackAutomationManager(options);
-  await github.start();
+  await github.start(); await github.startRuntimeEffects();
   // Rules and issue text are passed exactly as written, even where they name Slack.
   await github.setRules([{ ...rule, id: 'slack_review', instructions: 'Fix slack_send in Slack' }]);
   await github.ingest({ ...mention, id: 'issue-event', teamId: 'github', channel: 'octo/app', text: 'Slack is down' });
@@ -982,16 +986,16 @@ test('the same coordinator serves another channel under its own name, tools and 
   (github as unknown as { items: Array<{ ownerConditionalReply?: unknown }> }).items[0].ownerConditionalReply = { mode: 'composed', requestId: 'immediate', requestKey: 'k', text: 'x', status: 'sent', authorizedAt: new Date().toISOString() };
   await assert.rejects(github.tool(id, 'github_react', { name: 'hourglass', action: 'add' }), /Provide an emoji name/);
   await github.tool(id, 'github_react', { name: 'eyes', action: 'add' });
-  await github.tool(id, 'github_react', { name: '👍', action: 'add' });
-  assert.deepEqual(reacted, ['eyes', '👍']);
+  await github.tool(id, 'github_react', { name: 'rocket', action: 'add' });
+  assert.deepEqual(reacted, ['eyes', 'rocket']);
   // Each channel keeps its own state and restarts from it, reactions included.
   const again = new SlackAutomationManager(options);
-  await again.start();
+  await again.start(); await again.startRuntimeEffects();
   assert.equal(again.list()[0].mention.channel, 'octo/app');
   assert.equal(again.rules()[0].id, 'slack_review');
   await f.manager.ingest(mention);
   const slack = new SlackAutomationManager(f.options);
-  await slack.start();
+  await slack.start(); await slack.startRuntimeEffects();
   assert.equal(slack.rules()[0].id, 'review');
   assert.deepEqual(slack.list().map(item => item.mention.channel), ['C1'], 'Slack restarts with only its own workflow');
   assert.deepEqual(again.list().map(item => item.mention.channel), ['octo/app']);
@@ -1037,7 +1041,7 @@ test('a later thread message for the owner continues the conversation once; othe
   assert.equal(followUps[1].addressed, 0.1); assert.equal(followUps[2].addressed, 0.9); assert.equal(followUps[3].addressed, undefined, 'a mention is not judged');
   assert.equal(followUps[2].runId, 'follow-up-1');
   f.runs[1].status = 'completed';
-  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick(); await restarted.tick();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects(); await restarted.tick(); await restarted.tick();
   assert.equal(f.resumed.length, 1, 'nothing is handed over twice');
 });
 
@@ -1064,12 +1068,12 @@ test('follow-ups are left alone without a judgment, and a claimed delivery is se
   assert.equal(f.resumed.length, 0);
   // A worker that stopped between claiming a delivery and recording it: the run it started is found, not started again.
   const path = join(f.directory, 'slack-automation.json');
-  const saved = JSON.parse(await readFile(path, 'utf8'));
+  const saved = JSON.parse(await readWorkflowFixture(f.options.repository));
   saved.workflows[0].followUps.push({ ts: '4.0', user: 'U2', text: '<@U1> merge?', mentioned: true, status: 'delivering', receivedAt: new Date().toISOString() });
-  await writeFile(path, JSON.stringify(saved));
+  await writeWorkflowFixture(f.options.repository, JSON.stringify(saved));
   const correlation = (await import('../../../server/slack/automation.js')).slackRequestId({ ...mention, id: JSON.stringify(['follow-up', saved.workflows[0].id, '4.0']) });
   f.runs.push({ ...f.coordinator, id: 'delivered-before-restart', autoPromptId: correlation });
-  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects(); await restarted.tick();
   assert.equal(restarted.list()[0].followUps![1].status, 'delivered'); assert.equal(restarted.list()[0].followUps![1].runId, 'delivered-before-restart');
   assert.equal(f.resumed.length, 0);
 });
@@ -1147,16 +1151,16 @@ test('working reactions whose outcome is uncertain are taken off with a real cal
   assert.deepEqual(f.manager.list()[0].workingMarks, [{ ts: '2.1', name: 'loading', state: 'off', error: 'ratelimited' }]);
   // A worker that stopped after Slack took the reaction but before it recorded that.
   const path = join(f.directory, 'slack-automation.json');
-  const saved = JSON.parse(await readFile(path, 'utf8'));
+  const saved = JSON.parse(await readWorkflowFixture(f.options.repository));
   saved.workflows[0].workingMarks = [{ ts: '2.1', name: 'loading', state: 'add' }, { ts: '2.2', name: 'eyes', state: 'on' }];
-  await writeFile(path, JSON.stringify(saved));
+  await writeWorkflowFixture(f.options.repository, JSON.stringify(saved));
   calls.length = 0;
-  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick(); await restarted.tick();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects(); await restarted.tick(); await restarted.tick();
   assert.deepEqual(calls, ['remove:loading:2.1', 'remove:eyes:2.2']);
   assert.deepEqual(restarted.list()[0].workingMarks?.map(mark => mark.state), ['off', 'off']);
   saved.workflows[0].workingMarks = [{ ts: '2.1', name: 'not an emoji', state: 'add' }];
-  await writeFile(path, JSON.stringify(saved));
-  await assert.rejects(new SlackAutomationManager(f.options).start(), /working marks are invalid/);
+  await assert.rejects(writeWorkflowFixture(f.options.repository, JSON.stringify(saved)), /working marks are invalid/);
+  await new SlackAutomationManager(f.options).load();
 });
 
 test('a follow-up for the owner gets the working reaction on its own message before it reaches the conversation', async t => {
@@ -1204,7 +1208,7 @@ test('slack_react can mark a follow-up the conversation received, and nothing el
   await assert.rejects(f.manager.tool(id, 'slack_react', { name: 'x', action: 'add', ts: '9.9' }), /ts must be/);
   assert.deepEqual(targets, ['add:loading:3.0', `add:white_check_mark:${request.ts}`]);
   assert.deepEqual(f.manager.list()[1].reactions?.map(reaction => reaction.ts), ['3.0', undefined, '1.0']);
-  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects();
   assert.equal(restarted.list()[1].reactions?.length, 3);
 });
 
@@ -1224,7 +1228,7 @@ test('a reaction call underway keeps the worker from handing off, and the handof
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(flushed, false, 'the handoff save waits for the reaction call');
   answer(); await flush;
-  const saved = JSON.parse(await readFile(join(f.directory, 'slack-automation.json'), 'utf8'));
+  const saved = JSON.parse(await readWorkflowFixture(f.options.repository));
   assert.equal(saved.workflows[0].workingMarks[0].state, 'on');
   await f.manager.tick(); assert.deepEqual(calls, ['add:loading:1.1'], 'held, nothing new starts');
 });
@@ -1235,12 +1239,12 @@ test('a request whose admission is not saved gets no reaction, and clearing take
   f.options.react = async (_mention, name, action, ts) => { calls.push(`${action}:${name}:${ts}`); };
   f.options.workingReaction = () => 'loading';
   f.options.startConversation = () => new Promise(() => {});
-  const path = join(f.directory, 'slack-automation.json');
-  await rm(path); await mkdir(path);
+  await f.options.repository.storage.close();
   await assert.rejects(f.manager.ingest(mention));
   assert.deepEqual(calls, [], 'no reaction for a request that was not admitted');
-  await rm(path, { recursive: true });
+  await f.options.repository.storage.reopen(); await f.options.repository.storage.prepare({ allowMigration: false });
   await f.manager.ingest(mention);
+  await f.manager.flush();
   assert.deepEqual(calls, ['add:loading:1.1']);
   await f.manager.clearMarks();
   assert.deepEqual(calls, ['add:loading:1.1', 'remove:loading:1.1']);
@@ -1273,7 +1277,7 @@ test('nothing is marked while clearing, and nothing goes back on before the acco
   const answers: Array<() => void> = [];
   f.options.react = (_mention, name, action, ts) => { calls.push(`${action}:${name}:${ts}`); return new Promise<void>(resolve => answers.push(resolve)); };
   f.options.workingReaction = () => 'loading';
-  f.options.startConversation = () => new Promise(() => {});
+  f.options.startConversation = async () => ({ sessionId: 'account-change-session', runId: 'account-change-run' });
   const admitted = f.manager.ingest(mention);
   for (let wait = 0; !calls.length && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
   answers.shift()!(); await admitted;
@@ -1285,7 +1289,7 @@ test('nothing is marked while clearing, and nothing goes back on before the acco
   const second = f.manager.ingest({ ...mention, id: 'event-2', ts: '2.1', threadTs: '2.0' });
   answers.shift()!(); await second;
   await new Promise(resolve => setTimeout(resolve, 20));
-  void f.manager.tick();
+  await f.manager.tick();
   await new Promise(resolve => setTimeout(resolve, 20));
   release(); await clearing;
   assert.equal(changed, true);
@@ -1299,6 +1303,6 @@ test('unknown admission keeps the Slack claim without a retry or a confirmed err
   await f.manager.ingest(mention); await f.manager.tick();
   assert.equal(f.manager.list()[0].status,'admission-uncertain');
   await f.manager.tick();
-  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick();
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects(); await restarted.tick();
   assert.equal(restarted.list()[0].status,'admission-uncertain'); assert.equal(submissions,1); assert.equal(f.counts().sends,0);
 });

@@ -1,3 +1,5 @@
+import { DatabaseSync } from 'node:sqlite';
+import { RetentionStore } from '../../../../server/sessions/retention/store.js';
 import { SessionService } from '../../../../server/sessions/service.js';
 import { TemporaryCollector } from '../../../../server/temporary/directories.js';
 import { channel } from 'node:diagnostics_channel';
@@ -12,6 +14,31 @@ import { RunManager } from '../../../../server/runs/manager.js';
 import type { Session } from '../../../../shared/types.js';
 import { writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+
+// Damage the fixture-owned SQL journal only at the real cold reader, after all-domain bootstrap.
+// Earlier source/preparation failures would exercise a different gate; no successful result is mocked.
+const coldSqlDamage = process.env.TOWER_FIXTURE_COLD_SQL_DAMAGE;
+if (coldSqlDamage) {
+  const allowed = ['malformed', 'missing-source', 'missing-wrapper', 'missing-state'];
+  if (!allowed.includes(coldSqlDamage)) throw new Error('Unknown cold SQL fixture fault.');
+  const start = RetentionStore.prototype.start;
+  let injected = false;
+  RetentionStore.prototype.start = async function (...args) {
+    if (!injected) {
+      const state = process.argv.at(-1)!;
+      const db = new DatabaseSync(join(state, 'state.sqlite'));
+      try {
+        if (!db.prepare("SELECT * FROM domain_imports WHERE domain = 'retention' AND authority = 'database'").get())
+          throw new Error('Cold SQL fault requires the real retention authority.');
+        if (coldSqlDamage === 'missing-state') db.prepare('DELETE FROM retention_state').run();
+        else if (coldSqlDamage === 'malformed') db.prepare("UPDATE retention_metadata SET json = ? WHERE kind = 'journal'").run('{unknown journal');
+        else db.prepare("DELETE FROM retention_metadata WHERE kind = 'journal'").run();
+        injected = true;
+      } finally { db.close(); }
+    }
+    return start.apply(this, args);
+  };
+}
 
 // Count calls while retaining the actual scanner, collector and native adapter.
 if (process.env.TOWER_FIXTURE_COLD_COUNTS === '1') {
@@ -145,6 +172,12 @@ if (process.env.TOWER_FIXTURE_STORAGE_RETRY === 'new-hold') {
 // is replaced by this test's compile profile, and the second real start waits on an owned file barrier.
 if (process.env.TOWER_FIXTURE_TRIGGER_RETRY === '1') {
   const state = process.argv.at(-1)!;
+  const listAutoPrompts = AutoPromptManager.prototype.list;
+  AutoPromptManager.prototype.list = function () {
+    const jobs = listAutoPrompts.call(this);
+    writeFileSync(join(state, 'fixture-trigger-ap-diagnostic.json'), JSON.stringify({ jobs }), { mode: 0o600 });
+    return jobs;
+  };
   const countsPath = join(state, 'fixture-trigger-counts.json');
   const bump = (key: 'start' | 'review' | 'apply') => {
     const counts = JSON.parse(readFileSync(countsPath, 'utf8')); counts[key]++;
@@ -167,16 +200,89 @@ if (process.env.TOWER_FIXTURE_TRIGGER_RETRY === '1') {
     ? { session, messages: [{ id: 'fixture-word', role: 'user', text: 'Use the restored trigger instructions.', timestamp: at }], hasMore: false }
     : detail.call(this, id, before, limit, options); };
   PermissionService.prototype.reviewModel = async () => ({ provider: 'codex', model: 'fixture-model' });
+  const permissionDiagnosticPath = join(state, 'fixture-trigger-permission-diagnostic.json');
+  const permissionEvents: unknown[] = [];
+  const recordPermission = (service: PermissionService, boundary: string, result?: unknown) => {
+    // Fixture-only field observation; never load/head/gate or change product state.
+    if (permissionEvents.length >= 64) return;
+    try {
+      const current = service as unknown as { closed: boolean; storagePaused: boolean; options: { repository?: {
+        loadedEpoch?: number; loaded?: { revision: number | null; authority?: unknown };
+        storage: { status(): { ownerEpoch?: number; state: string } }; effectsAvailable(): boolean;
+      } } };
+      const repository = current.options.repository, status = repository?.storage.status();
+      const overview = service.overview();
+      permissionEvents.push({ boundary, result, closed: current.closed, storagePaused: current.storagePaused,
+        loadedEpoch: repository?.loadedEpoch ?? null, statusOwnerEpoch: status?.ownerEpoch ?? null,
+        loadedRevision: repository?.loaded?.revision ?? null, loadedHead: repository?.loaded ?? null,
+        storageState: status?.state ?? null, repositoryEffectsAvailable: repository?.effectsAvailable() ?? null,
+        autoReview: overview.autoReview, requests: overview.requests });
+      writeFileSync(permissionDiagnosticPath, JSON.stringify(permissionEvents), { mode: 0o600 });
+    } catch { /* Observation cannot change the original return/throw contract. */ }
+  };
+  const observeFailure = (error: unknown) => error instanceof Error
+    ? { name: error.name, message: error.message, stack: error.stack } : { thrown: String(error) };
+  for (const method of ['pauseForStorage', 'resume'] as const) {
+    const original = PermissionService.prototype[method];
+    PermissionService.prototype[method] = function () {
+      recordPermission(this, `${method}.before`, method === 'pauseForStorage'
+        ? { callerStack: new Error('fixture pauseForStorage caller').stack } : undefined);
+      try { const result = original.call(this); recordPermission(this, `${method}.after`); return result; }
+      catch (error) { recordPermission(this, `${method}.failed`, observeFailure(error)); throw error; }
+    };
+  }
+  const bind = PermissionService.prototype.bindAfterStorageRetry;
+  PermissionService.prototype.bindAfterStorageRetry = function () {
+    recordPermission(this, 'bindAfterStorageRetry.before');
+    try {
+      const result = bind.call(this);
+      void result.then(() => recordPermission(this, 'bindAfterStorageRetry.after'),
+        error => recordPermission(this, 'bindAfterStorageRetry.failed', observeFailure(error)));
+      return result;
+    } catch (error) { recordPermission(this, 'bindAfterStorageRetry.failed', observeFailure(error)); throw error; }
+  };
+  const nextReview = PermissionService.prototype.nextReview;
+  PermissionService.prototype.nextReview = function () {
+    const next = nextReview.call(this);
+    recordPermission(this, 'nextReview', { selected: next?.id ?? null });
+    return next;
+  };
+  const bootstrapEffects = PermissionService.prototype.bootstrapEffects;
+  PermissionService.prototype.bootstrapEffects = async function (closed) {
+    recordPermission(this, 'bootstrapEffects.before', { closed: [...closed] });
+    await bootstrapEffects.call(this, closed);
+    recordPermission(this, 'bootstrapEffects.after');
+  };
   const permissionsStart = PermissionService.prototype.start;
   PermissionService.prototype.start = async function () {
     await permissionsStart.call(this);
     await this.saveAutoReview({ enabled: true, resume: false });
-    await this.request({ kind: 'command', value: 'printf fixture', scope: 'project', providers: ['codex'], reason: 'queued before trigger restoration' }, { kind: 'agent', sessionId: session.id });
+    const requested = await this.request({ kind: 'command', value: 'printf fixture', scope: 'project', providers: ['codex'], reason: 'queued before trigger restoration' }, { kind: 'agent', sessionId: session.id });
+    recordPermission(this, 'start.requested', requested);
   };
   const review = PermissionService.prototype.startReview;
-  PermissionService.prototype.startReview = function (id) { bump('review'); return review.call(this, id); };
+  PermissionService.prototype.startReview = function (id) {
+    bump('review'); recordPermission(this, 'startReview.before', { id });
+    try {
+      const result = review.call(this, id);
+      void result.then(value => recordPermission(this, 'startReview.after', { id, value }),
+        error => recordPermission(this, 'startReview.failed', { id, ...observeFailure(error) }));
+      return result;
+    } catch (error) { recordPermission(this, 'startReview.failed', { id, ...observeFailure(error) }); throw error; }
+  };
   const apply = PermissionService.prototype.applyReview;
-  PermissionService.prototype.applyReview = function (id, result) { bump('apply'); return apply.call(this, id, result); };
+  PermissionService.prototype.applyReview = function (id, result) {
+    bump('apply');
+    try {
+      const promise = apply.call(this, id, result);
+      void promise.then(value => recordPermission(this, 'applyReview.fulfilled', { id, value }),
+        error => recordPermission(this, 'applyReview.rejected', { id, ...observeFailure(error) }));
+      return promise;
+    } catch (error) {
+      recordPermission(this, 'applyReview.failed', { id, ...observeFailure(error) });
+      throw error;
+    }
+  };
   const start = TriggerService.prototype.start;
   let attempts = 0;
   TriggerService.prototype.start = async function (options) {

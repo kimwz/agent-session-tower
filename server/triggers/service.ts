@@ -1,3 +1,4 @@
+import type { StorageUpdateInput } from '../link/storage-update.js';
 import type { StorageClient } from '../storage/client.js';
 import { triggerBackupOf } from './backup.js';
 import { serializeState } from './state.js';
@@ -81,6 +82,10 @@ export class TriggerService extends EventEmitter {
     this.engine = new TriggerEngine(this.store, this.polls, this.dispatch, this.budget, this.now, options.tickMs ?? 1000);
   }
 
+  /** Called by the worker's existing parked startup continuation before start(). */
+  bootstrapStorage(update: () => Promise<StorageUpdateInput>): Promise<void> { return this.store.bootstrapStorage(update); }
+  resolveStorage(): Promise<'committed' | 'not-committed'> { return this.store.resolveStorage(); }
+
   /**
    * `restore`: a backup's triggers and settings, applied before anything fires (see `restoreFrom`). Answers what of it
    * could not be applied.
@@ -94,7 +99,7 @@ export class TriggerService extends EventEmitter {
       if (this.store.problem) throw error;
       return [`트리거를 복원하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`];
     }) : [];
-    await this.store.commit(() => undefined, 'settle');
+    await this.store.mutate({ type: 'maintenance' },() => undefined, 'settle');
     this.engine.markStarted();
     this.resume();
     return { errors };
@@ -163,9 +168,11 @@ export class TriggerService extends EventEmitter {
    * GitHub access for a trigger's coordinator conversation: the trigger's own credentials (also after it is
    * deleted, while it can be restored), and only while they still act as the trigger's account.
    */
-  githubClient(triggerId: string, fresh = false): Promise<GitHubFetch> {
-    return this.github.clientFor(this.state.triggers.find(item => item.id === triggerId) ?? [...this.state.tombstones].reverse().find(item => item.id === triggerId), fresh);
+  githubClient(triggerId: string, fresh = false, beforeSend?: () => Promise<void>): Promise<GitHubFetch> {
+    return this.github.clientFor(this.githubTrigger(triggerId), fresh, beforeSend);
   }
+  private githubTrigger(id:string) { return this.state.triggers.find(item=>item.id===id) ?? [...this.state.tombstones].reverse().find(item=>item.id===id); }
+  githubSource(id:string) { return this.githubTrigger(id)?.source; }
   private send(request: HttpRequest, usable: (secret: StoredSecret) => boolean): Promise<HttpOutcome> {
     return sendRequest(request, usable, { secrets: this.secrets, budget: this.budget, privateHosts: () => this.state.settings.privateHosts, ownPorts: this.options.ownPorts, resolve: this.options.resolve });
   }

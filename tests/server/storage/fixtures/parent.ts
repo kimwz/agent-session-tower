@@ -9,3 +9,13 @@ export { isStorageBuildContext, readStorageBundleArtifact, storageBundleFromArti
 export { jsonBytesWith, writeResult } from '../../../../server/storage/contract.js';
 export { storageFs, storageLayout } from '../../../../server/storage/paths.js';
 export { proveRecoveryBarrier, readStorageIdentity, recordStorageIdentity } from '../../../../server/storage/recovery.js';
+
+export * from '../../../../server/link/storage-offline-backup.js';
+export * from '../../../../server/link/storage-offline.js';
+export { acquireStrictStateLock } from '../../../../server/instance/state-lock.js';
+export { PermissionsRepository } from '../../../../server/permissions/storage-repository.js';
+
+export { runOfflineStorageCommand } from '../../../../server/link/storage-offline-cli.js';
+
+export { runLinkCommand } from '../../../../server/link/cli.js';
+export { currentVersion, versionDirectory } from '../../../../server/link/service.js';

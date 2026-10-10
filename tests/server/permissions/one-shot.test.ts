@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { PermissionRunner, processStart } from '../../../server/permissions/runner.js';
+import { noStorageFixture, permissionFixture, closePermissionFixture } from './storage-fixture.js';
 import { PermissionService } from '../../../server/permissions/service.js';
 import { storage, threadBundle } from '../storage/helpers.js';
 import type { RunnerOptions } from '../../../server/permissions/runner.js';
@@ -23,22 +24,23 @@ const until = async (check: () => boolean, ms = 10_000) => {
 };
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'], effectGate?: () => Promise<void>) {
+async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'], effectGate?: () => Promise<void>, requestAdmission?: () => void, autoReviewSkip?: () => string | undefined) {
   const root = await mkdtemp(join(tmpdir(), 'tower-one-shot-'));
   const stateDir = join(root, 'state');
   const project = join(root, 'project');
   await mkdir(project);
+  await mkdir(stateDir, { mode: 0o700 });
   const sessions = new Map([['claude:one', { cwd: project, provider: 'claude' as const }], ['claude:other', { cwd: project, provider: 'claude' as const }], ['codex:two', { cwd: project, provider: 'codex' as const }]]);
   let clock = new Date('2026-09-30T00:00:00.000Z');
   const finished: string[] = [];
   let service!: PermissionService;
-  const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 300, now: () => clock, beforeStart });
-  const make = () => new PermissionService({ stateDir, effectGate, env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), now: () => clock,
+  const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 300, now: () => clock, beforeStart, beforeLaunch: (id, command, cwd, timeout, launch) => service.launchReviewed(id, command, cwd, timeout, launch) });
+  const make = () => new PermissionService({ stateDir, repository:noStorageFixture(stateDir), effectGate, requestAdmission, autoReviewSkip, env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), now: () => clock,
     startRun: request => runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600, request.sessionId),
     onRunFinished: request => finished.push(request.id), runOutput: id => runner.output(id), forgetRun: id => runner.forget(id) });
   service = make();
   await service.start();
-  t.after(async () => { await runner.flush(); service.close(); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { await runner.flush(); service.close(); closePermissionFixture(stateDir); await rm(root, { recursive: true, force: true }); });
   return { root, stateDir, project, sessions, service, runner, finished, make, tick: (ms: number) => { clock = new Date(clock.getTime() + ms); } };
 }
 
@@ -613,24 +615,20 @@ for (const stale of [false, true]) test(`actual first running record gate preser
 test('actual initial record unknown write followed by storage refusal never requeues', async t => {
   let service!: PermissionService, armed = false;
   const f = await fixture(t, async id => { const ok = await service.confirmReviewed(id); armed = ok; return ok; }); service = f.service;
-  const original = fsPromises.rename;
-  const mocked = t.mock.method(fsPromises, 'rename', async (...args: Parameters<typeof original>) => {
-    if (armed && String(args[1]) === join(f.stateDir, 'permissions.json')) {
-      armed = false;
-      // The real rename took effect, but its acknowledgement is lost. This is not a prewrite refusal.
-      await original(...args); service.pauseForStorage(); f.runner.holdStorage();
-      throw new TowerError('unavailable', 'fixture lost write acknowledgement', { disposition: 'uncertain' });
+  const sql=permissionFixture(f.stateDir);
+  sql.onWrite=payload=>{
+    const p=payload as { changes?: { json:string }[] };
+    if (armed && p.changes?.some(r=>JSON.parse(r.json).run?.status==='running')) {
+      armed=false; sql.lostAnswer=true; f.runner.holdStorage();
     }
-    return original(...args);
-  });
-  syncBuiltinESMExports(); t.after(() => { mocked.mock.restore(); syncBuiltinESMExports(); });
+  };
   const asked = await service.requestRun({ command: 'echo forbidden >> executions', reason: 'fixture' }, agent('claude:one'));
   await service.decide(asked.request.id!, true); await f.runner.flush();
   assert.equal(f.runner.inFlight(), false, 'unknown write disables storage requeue');
   service.resume(); f.runner.releaseStorage(); await f.runner.flush();
   await assert.rejects(readFile(join(f.project, 'executions')), { code: 'ENOENT' });
-  const durable = JSON.parse(await readFile(join(f.stateDir, 'permissions.json'), 'utf8'));
-  assert.equal(durable.requests.find((r: { id: string }) => r.id === asked.request.id).run.status, 'running');
+  const durable = await noStorageFixture(f.stateDir).load();
+  assert.equal(durable.requests.find((r: { id: string }) => r.id === asked.request.id)!.run!.status, 'running');
 });
 
 test('ordinary permission pause and close never claim storage prewrite deferral', async t => {
@@ -640,4 +638,133 @@ test('ordinary permission pause and close never claim storage prewrite deferral'
     f.service.pauseForStorage();
     await assert.rejects(f.service.confirmReviewed('missing'), (error: unknown) => error instanceof TowerError && error.disposition === undefined);
   }
+});
+
+
+// Source regressions only: fixture SQL and file barriers, no native provider.
+for (const boundary of ['files', 'receipt'] as const) for (const change of ['closed', 'source', 'provider'] as const) {
+  test(`permission admission refuses ${change} changed while awaiting ${boundary}`, async t => {
+    let service!: PermissionService, denied = false;
+    const f = await fixture(t, id => service.confirmReviewed(id), undefined, () => {
+      if (denied) throw new TowerError('forbidden', 'fixture source policy refused');
+    });
+    service = f.service;
+    let reached!: () => void, release!: () => void;
+    const checking = new Promise<void>(resolve => { reached = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const path = join(f.project, 'admission-reviewed.txt');
+    await writeFile(path, 'reviewed');
+    const canonical = await realpath(path);
+    if (boundary === 'files') {
+      const original = fsPromises.realpath;
+      let first = true;
+      const mock = t.mock.method(fsPromises, 'realpath', async (file: Parameters<typeof original>[0]) => {
+        if (String(file) === path && first) { first = false; reached(); await blocked; }
+        return original(file);
+      });
+      syncBuiltinESMExports();
+      t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+    } else {
+      const update = service.updateRun.bind(service);
+      let first = true;
+      service.updateRun = async (id, run) => {
+        await update(id, run);
+        if (run.status === 'running' && first) { first = false; reached(); await blocked; }
+      };
+    }
+    await service.saveAutoReview(ON);
+    const asked = await service.requestRun({ command: 'echo forbidden >> admission-executions', reason: 'fixture' }, agent('claude:one'));
+    await service.startReview(asked.request.id!);
+    await service.applyReview(asked.request.id!, { verdict: 'approve', reason: 'fixture', files: [{ path, real: canonical, sha256: createHash('sha256').update('reviewed').digest('hex') }] });
+    await checking;
+    if (change === 'closed') { f.sessions.delete('claude:one'); await service.forgetConversation('claude:one'); }
+    if (change === 'source') denied = true;
+    if (change === 'provider') f.sessions.set('claude:one', { cwd: f.project, provider: 'codex' });
+    release();
+    await f.runner.flush();
+    assert.equal(f.runner.inFlight(), false, 'refusal must not retain an automatic retry');
+    await assert.rejects(readFile(join(f.project, 'admission-executions')), { code: 'ENOENT' });
+    denied = false;
+    f.sessions.set('claude:one', { cwd: f.project, provider: 'claude' });
+    f.runner.releaseStorage();
+    await f.runner.flush();
+    await assert.rejects(readFile(join(f.project, 'admission-executions')), { code: 'ENOENT' });
+  });
+}
+
+for (const change of ['closed', 'source', 'provider'] as const) {
+  test(`last approval effect await makes ${change} denial terminal across restart`, async t => {
+    let service!: PermissionService, armed = false, denied = false;
+    let reached!: () => void, release!: () => void;
+    const checking = new Promise<void>(resolve => { reached = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const f = await fixture(t, id => service.confirmReviewed(id), async () => {
+      if (armed) { armed = false; reached(); await blocked; }
+    }, undefined, () => denied ? 'fixture source denied' : undefined);
+    service = f.service;
+    const path = join(f.project, 'last-effect-reviewed.txt');
+    await writeFile(path, 'reviewed');
+    const canonical = await realpath(path);
+    const original = fsPromises.realpath;
+    let first = true;
+    const mock = t.mock.method(fsPromises, 'realpath', async (file: Parameters<typeof original>[0]) => {
+      const result = await original(file);
+      if (String(file) === path && first) { first = false; armed = true; }
+      return result;
+    });
+    syncBuiltinESMExports();
+    t.after(() => { mock.mock.restore(); syncBuiltinESMExports(); });
+    await service.saveAutoReview(ON);
+    const asked = await service.requestRun({ command: 'echo forbidden >> last-effect-executions', reason: 'fixture' }, agent('claude:one'));
+    await service.startReview(asked.request.id!);
+    await service.applyReview(asked.request.id!, { verdict: 'approve', reason: 'fixture', files: [{ path, real: canonical, sha256: createHash('sha256').update('reviewed').digest('hex') }] });
+    await checking;
+    // Change only admission while the final effect gate is awaiting; the approval stays waiting.
+    assert.equal(service.overview().requests.find(r => r.id === asked.request.id)!.run!.status, 'waiting');
+    if (change === 'closed') f.sessions.delete('claude:one');
+    if (change === 'source') denied = true;
+    if (change === 'provider') f.sessions.set('claude:one', { cwd: f.project, provider: 'codex' });
+    release();
+    await f.runner.flush();
+    assert.equal(f.runner.inFlight(), false);
+    const durable = await noStorageFixture(f.stateDir).load();
+    assert.equal(durable.requests.find(r => r.id === asked.request.id)!.run!.status, 'failed');
+    denied = false;
+    f.sessions.set('claude:one', { cwd: f.project, provider: 'claude' });
+    service.close();
+    const restarted = f.make();
+    t.after(() => restarted.close());
+    await restarted.start();
+    const unfinished = restarted.unfinishedRuns();
+    assert.deepEqual(unfinished, { start: [], running: [] });
+    // Mirror startup's automatic start list after the policy becomes allowed again.
+    for (const request of ((): ReturnType<PermissionService['unfinishedRuns']> => unfinished)().start) f.runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600, request.sessionId);
+    await f.runner.flush();
+    await assert.rejects(readFile(join(f.project, 'last-effect-executions')), { code: 'ENOENT' });
+  });
+}
+
+test('actual closure owner save during last beforeLaunch effect await refuses spawn', async t=>{
+  const { ClosedSessionStore }=await import('../../../server/stores/closed-sessions.js');
+  const root=await mkdtemp(join(tmpdir(),'tower-closure-owner-'));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const closedSessions=new ClosedSessionStore(root);await closedSessions.start();
+  const repository=noStorageFixture(root);t.after(()=>closePermissionFixture(root));
+  let armed=false, checks=0, spawn=0, reached!:()=>void, release!:()=>void;
+  const checking=new Promise<void>(r=>{reached=r;});const blocked=new Promise<void>(r=>{release=r;});
+  const admission=()=>{if(closedSessions.closedIds().has('codex:two')) throw new TowerError('forbidden','closed owner');};
+  const service=new PermissionService({stateDir:root,repository,env:{CODEX_HOME:join(root,'codex-home')},session:()=>({cwd:root,provider:'codex'}),
+    requestGate:async()=>{await closedSessions.start();admission();},requestAdmission:admission,
+    effectGate:async()=>{if(armed && ++checks===2){reached();await blocked;}}});
+  t.after(()=>service.close());await service.start();
+  const asked=await service.requestRun({command:'fixture-no-execution',reason:'closure owner'},agent('codex:two'));
+  await service.decide(asked.request.id!,true);
+  await service.updateRun(asked.request.id!,{status:'running',startedAt:'2026-10-10T00:00:00.000Z'});
+  armed=true;
+  const pending=service.launchReviewed(asked.request.id!,'fixture-no-execution',root,600,()=>{spawn++;});
+  await checking;
+  // Use the same closure owner as worker setClosed; saving does not remove the session projection.
+  await closedSessions.set({id:'codex:two'} as Parameters<InstanceType<typeof ClosedSessionStore>['set']>[0],true);
+  assert.deepEqual(JSON.parse(await readFile(join(root,'closed-sessions.json'),'utf8')),['codex:two']);
+  release();await assert.rejects(pending,/closed owner/);assert.equal(spawn,0);
 });

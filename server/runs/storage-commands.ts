@@ -1,4 +1,6 @@
+import { offlineCompletionCommand, offlineAuthorityReceiptCommand } from '../storage/offline-completion.js';
 import { createHash } from 'node:crypto';
+import { linkTriggerAdmissions, type TriggerAdmissionLink } from '../triggers/storage-commands.js';
 import { defineStorageDomain, type DomainReadContext, type DomainWriteContext, type StorageDomain } from '../storage/domain.js';
 import type { DomainAuthority, StorageDomainSchema } from '../storage/contract.js';
 import { runsSchema, RUN_STAGE_COUNT, RUN_STAGE_BYTES } from './storage-schema.js';
@@ -6,7 +8,7 @@ import { canonical, object, runHash, RUN_CHUNK_BYTES, RUN_INTENT_BYTES, RUN_SOUR
 
 export interface RunsHead { authority: DomainAuthority | null; revision: number | null }
 export type RunWriteMode = 'admission' | 'transition' | 'output' | 'delete' | 'markers' | 'update' | 'import' | 'restore';
-export interface RunIntentHeader { mode: RunWriteMode; revision: number | null; generation: number | null; manifestSha256?: string; documentsSha256?: string }
+export interface RunIntentHeader { mode: RunWriteMode; revision: number | null; generation: number | null; manifestSha256?: string; documentsSha256?: string; triggerLinks?: readonly TriggerAdmissionLink[] }
 function fail(message: string): never { throw Object.assign(new Error(message), { storageCode: 'domain-failed' }); }
 function integer(value: unknown, max: number): number { if (!Number.isSafeInteger(value) || Number(value) < 0 || Number(value) > max) fail('Invalid runs bound.'); return Number(value); }
 function head(context: DomainReadContext): RunsHead {
@@ -37,6 +39,8 @@ function put(context: DomainWriteContext, row: RunRow): void {
 export function runsDomainFor(schema: StorageDomainSchema): StorageDomain {
   if (schema.domain !== runsSchema.domain || canonical(schema.migrations) !== canonical(runsSchema.migrations) || canonical(schema.preparation) !== canonical(runsSchema.preparation)) throw new Error('Runs schema/contract mismatch.');
   return defineStorageDomain({ schema, commands: {
+    offlineAuthorityReceipt: offlineAuthorityReceiptCommand,
+    offlineCompletion: offlineCompletionCommand('runs_stages'),
     head: { kind: 'read', run: context => head(context) },
     bootstrapHistory: { kind: 'read', run: context => ({ stages: Number((context.prepare('SELECT count(*) AS n FROM runs_stages').get() as { n: number }).n) }) },
     keys: { kind: 'read', run(context, payload) {
@@ -89,11 +93,19 @@ export function runsDomainFor(schema: StorageDomainSchema): StorageDomain {
         context.authority.markImported({ manifestSha256: String(header.manifestSha256 ?? '') });
       } else current(context, header);
       if (!['admission','transition','output','delete','markers','update','import','restore'].includes(String(header.mode))) fail('Unknown runs write mode.');
+      if (header.triggerLinks !== undefined) {
+        if (!['admission','update'].includes(String(header.mode)) || !Array.isArray(header.triggerLinks) || !header.triggerLinks.length || header.triggerLinks.length > 100) fail('Invalid trigger link write mode.');
+        const requests = new Set(header.triggerLinks.map(link => String(object(link).requestId)));
+        // Inspect before row changes: removing an old run in this same intent cannot authorize replay.
+        for (const row of context.prepare("SELECT json FROM runs_rows WHERE kind = 'run'").all() as { json: string }[])
+          if (requests.has(String(object(JSON.parse(row.json)).autoPromptId))) fail('Trigger request already admitted.');
+      }
       const replacing = header.mode === 'import' || header.mode === 'restore';
       if (replacing) context.prepare('DELETE FROM runs_rows').run();
       const keys = new Set<string>();
       const admission: RunRow[] = [];
-      const request = createHash('sha256').update(canonical({ mode: header.mode }) + '\n');
+      const freshRuns: Record<string, unknown>[] = [];
+      const request = createHash('sha256').update(canonical({ mode: header.mode,...(header.triggerLinks !== undefined ? { triggerLinks: header.triggerLinks } : {}) }) + '\n');
       let offset = separator + 1;
       while (offset < bytes.length) {
         const end = bytes.indexOf(10,offset);
@@ -107,6 +119,7 @@ export function runsDomainFor(schema: StorageDomainSchema): StorageDomain {
         const previous = context.prepare('SELECT json FROM runs_rows WHERE kind = ? AND id = ?').get(kind,id) as { json: string } | undefined;
         if (!replacing && (item.previousSha256 === null ? !!previous : !previous || runHash(previous.json) !== item.previousSha256)) fail('Runs row changed before guarded write.');
         const row = { kind, id, json: canonical(item.value) };
+        if (kind === 'run' && !previous && !item.remove) freshRuns.push(object(item.value));
         if (header.mode === 'admission') {
           if (previous || item.remove) fail('Admission must insert fresh identities.');
           admission.push(row);
@@ -129,6 +142,11 @@ export function runsDomainFor(schema: StorageDomainSchema): StorageDomain {
       }
       const requestSha256 = request.digest('hex');
       if (requestSha256 !== header.requestSha256) fail('Runs canonical request hash mismatch.');
+      let triggerAdmission: { revision: number; generation: number } | undefined;
+      if (header.triggerLinks !== undefined) {
+        if (!['admission','update'].includes(String(header.mode)) || !Array.isArray(header.triggerLinks)) fail('Invalid trigger link write mode.');
+        triggerAdmission = linkTriggerAdmissions(context,header.triggerLinks as TriggerAdmissionLink[],freshRuns);
+      }
       if (header.mode === 'admission') {
         const runs = admission.filter(row => row.kind === 'run');
         if (runs.length !== 1) fail('Admission needs exactly one run.');
@@ -154,7 +172,7 @@ export function runsDomainFor(schema: StorageDomainSchema): StorageDomain {
       const revision = (state.revision ?? 0) + 1;
       context.prepare('INSERT INTO runs_state (singleton,revision) VALUES (1,?) ON CONFLICT(singleton) DO UPDATE SET revision=excluded.revision').run(revision);
       context.prepare('DELETE FROM runs_stages WHERE intent = ?').run(intent);
-      return { revision, generation: context.authority.current()!.generation, mode: header.mode, requestSha256, intentSha256: stage.sha256, ...(typeof header.documentsSha256 === 'string' ? { documentsSha256: header.documentsSha256 } : {}) };
+      return { revision, generation: context.authority.current()!.generation, mode: header.mode, requestSha256, intentSha256: stage.sha256, ...(triggerAdmission ? { triggerAdmission } : {}), ...(typeof header.documentsSha256 === 'string' ? { documentsSha256: header.documentsSha256 } : {}) };
     } },
   } });
 }

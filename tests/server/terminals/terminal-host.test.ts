@@ -125,7 +125,7 @@ test('the terminal host leaves once no shell is open and no page has called for 
 
 test('the worker credential cannot reach shells and the terminal credential cannot reach the worker', async t => {
   const f = await fixture(t);
-  const { RunManager } = await import('../../../server/runs/manager.js');
+  const { RunManager } = await import('../runs/sql-fixture.js');
   const { startRunnerHost } = await import('../../../server/runs/worker.js');
   const { EventEmitter } = await import('node:events');
   const runs = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000, findExecutable: async () => undefined });

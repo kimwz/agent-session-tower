@@ -37,7 +37,7 @@ export async function prepareBridgeTurn(host: TurnHost, run: Run, session: Sessi
       if (FINISHED.has(run.status)) return;
       started = true;
       run.status = 'running'; run.startedAt = new Date().toISOString(); run.output = '';
-      host.changed();
+      host.changed(run);
     },
     onOutput: text => { if (!FINISHED.has(run.status)) host.append(run, text); },
     onFinished: result => end({ kind: 'bridge', run, session, result, started, heldForUpdate }),
@@ -51,7 +51,7 @@ export async function prepareBridgeTurn(host: TurnHost, run: Run, session: Sessi
       // The desktop app runs the turn with its own tools; Tower's cannot be attached there.
       if (tools.towerTools) run.towerTools = tools.servers ? 'desktop-app' : tools.towerTools;
       run.output = '열려 있는 Codex 앱의 기존 세션으로 요청을 전달하고 있습니다.';
-      host.changed();
+      host.changed(run);
       try { await bridge.start(); }
       catch (error) {
         if (!reported) { reported = true; host.exited({ kind: 'bridge-start-failed', run, session, handle: bridge, error }); }

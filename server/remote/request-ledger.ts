@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
-import { RunError } from '../runs/manager.js';
-import { TowerError, statusOf, type ErrorKind } from '../../shared/errors.js';
+import { RemoteRepository } from './storage-repository.js';
+import { bootstrapExternal } from './storage-transfer.js';
+import type { RemoteEntry } from './storage-codec.js';
+import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
 /** How long a remote request ID is remembered. A retry older than this is refused instead of run again. */
 export const REMOTE_REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -17,17 +17,15 @@ export type RemoteResult =
   | { kind: 'autoPrompt'; jobId: string }
   | { kind: 'compaction'; sessionId: string; jobId: string };
 /** `at` is when this machine received it; `issued` is the controller's time inside the ID. */
-interface Entry { key: string; fingerprint: string; at: number; issued: number; result?: RemoteResult }
+type Entry = RemoteEntry;
 
 /**
- * Refusals that happen before the work is admitted: Tower's own validation errors (RunError, any status,
- * such as a missing CLI or a full queue), client errors, and anything explicitly marked as not admitted.
+ * Only a definite non-admission permits deleting the durable intent. Error classes/status alone prove nothing.
  */
 function refusedBeforeAdmission(error: unknown): boolean {
-  const status = statusOf(error);
-  const { disposition } = error as { disposition?: string };
+  const disposition = (error as { disposition?: string } | null)?.disposition;
   if (disposition === 'uncertain' || disposition === 'unknown' || disposition === 'committed') return false;
-  return error instanceof RunError || disposition === 'handoff' || disposition === 'not-admitted' || (status !== undefined && status < 500);
+  return disposition === 'not-admitted' || disposition === 'not-committed';
 }
 
 const failure = (message: string, kind: ErrorKind, disposition?: 'uncertain' | 'not-admitted') => new TowerError(kind, message, disposition ? { disposition } : {});
@@ -46,26 +44,23 @@ export function remoteRequestTime(id: string): number | undefined {
  * starts, so a crash in between leaves an "uncertain" answer rather than a second run.
  */
 export class RemoteRequestLedger {
-  private readonly path: string;
+  private readonly ordinals = new Map<string, number>();
+  private nextOrdinal = 0;
   private entries = new Map<string, Entry>();
   /** Requests still running here: a retry that arrives meanwhile waits for the same outcome. */
   private readonly running = new Map<string, { fingerprint: string; promise: Promise<unknown> }>();
   private writes: Promise<unknown> = Promise.resolve();
 
-  constructor(stateDir: string, private readonly now: () => number = Date.now, private readonly capacity = MAX_ENTRIES) { this.path = join(stateDir, 'remote-requests.json'); }
+  constructor(private readonly stateDir: string, private readonly now: () => number = Date.now, private readonly capacity = MAX_ENTRIES, private readonly repository?: RemoteRepository, private readonly effectGate?: () => Promise<void>) {}
 
   async start(): Promise<void> {
-    let saved: unknown;
-    try { saved = await readPrivateJson(this.path); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
-    if (!Array.isArray(saved)) throw new Error('Saved remote request records are invalid.');
-    for (const value of saved as Entry[]) {
-      if (!value || typeof value.key !== 'string' || typeof value.fingerprint !== 'string' || !Number.isFinite(value.at)) continue;
-      // Records from before the issue time was kept still carry it inside their request ID.
-      const issued = Number.isFinite(value.issued) ? value.issued : remoteRequestTime(value.key.split('\n').at(-1) ?? '') ?? value.at;
-      this.entries.set(value.key, { ...value, issued });
+    if (!this.repository) throw new Error('RemoteRequestLedger requires its worker SQL repository.');
+    await bootstrapExternal(this.repository, this.stateDir);
+    for (const { entry, ordinal } of await this.repository.load()) {
+      this.entries.set(entry.key, entry); this.ordinals.set(entry.key, ordinal);
+      this.nextOrdinal = Math.max(this.nextOrdinal, ordinal + 1);
     }
-    this.prune();
+    await this.prune();
   }
 
   /**
@@ -80,6 +75,9 @@ export class RemoteRequestLedger {
     if (issued > now + FUTURE_SKEW_MS) throw failure('요청 시각이 이 컴퓨터의 시계보다 너무 앞서 있습니다. 두 컴퓨터의 시계를 확인하세요.', 'conflict', 'not-admitted');
     // It may have run before its record expired; only a look at the conversation can tell.
     if (issued < now - REMOTE_REQUEST_RETENTION_MS) throw failure('너무 오래된 원격 요청입니다. 대화 상태를 확인한 뒤 필요하면 새로 보내세요.', 'conflict', 'uncertain');
+    if (!controllerId || !operation || /[\n\r]/.test(controllerId + operation)) throw failure('원격 요청 범위가 올바르지 않습니다.', 'invalid', 'not-admitted');
+    await this.repository!.gate();
+    await this.prune();
     const key = `${controllerId}\n${operation}\n${requestId.toLowerCase()}`;
     const fingerprint = requestFingerprint(content);
     const inFlight = this.running.get(key);
@@ -96,7 +94,6 @@ export class RemoteRequestLedger {
       if (value === undefined) throw failure('이미 처리된 요청입니다. 세부 기록은 만료되었습니다.', 'conflict', 'uncertain');
       return value;
     }
-    this.prune();
     // A record still inside its window is never dropped to make room: forgetting it would let a retry run again.
     if (this.entries.size >= this.capacity) throw failure('이 컴퓨터가 최근 원격 요청을 너무 많이 받았습니다. 잠시 후 다시 보내세요.', 'unavailable', 'not-admitted');
     const promise = this.admit(key, fingerprint, now, issued, execute, record);
@@ -107,37 +104,47 @@ export class RemoteRequestLedger {
   private async admit<T>(key: string, fingerprint: string, at: number, issued: number, execute: () => Promise<T>, record: (value: T) => RemoteResult): Promise<T> {
     const entry: Entry = { key, fingerprint, at, issued };
     this.entries.set(key, entry);
-    try { await this.save(); }
-    catch (error) { this.entries.delete(key); throw Object.assign(error as Error, { disposition: 'not-admitted' }); }
+    const ordinal = this.nextOrdinal++; this.ordinals.set(key, ordinal);
+    try { await this.queue(() => this.repository!.put(entry, ordinal, null)); }
+    catch (error) {
+      if ((error as { disposition?: string }).disposition === 'not-committed') { this.entries.delete(key); this.ordinals.delete(key); throw Object.assign(error as Error, { disposition: 'not-admitted' }); }
+      throw error;
+    }
     let value: T;
-    try { value = await execute(); }
+    try { if (!this.effectGate) throw new Error('Remote effects require the worker effect gate.'); await this.effectGate(); await this.repository!.gate(); value = await execute(); }
     catch (error) {
       if (refusedBeforeAdmission(error)) {
         // Nothing ran, so the same ID may be sent again; the controller is told so.
-        this.entries.delete(key);
-        await this.save().catch(() => {});
+        await this.queue(() => this.repository!.remove(entry, ordinal));
+        this.entries.delete(key); this.ordinals.delete(key);
         if (error && typeof error === 'object' && !(error as { disposition?: string }).disposition) Object.assign(error, { disposition: 'not-admitted' });
       }
       throw error;
     }
-    entry.result = record(value);
-    await this.save().catch(() => {});
+    try {
+      const completed = { ...entry, result: record(value) };
+      await this.queue(() => this.repository!.put(completed, ordinal, entry));
+      this.entries.set(key, completed);
+    } catch (cause) {
+      // The intent stays durable: a receipt failure cannot prove the remote effect did not run.
+      throw Object.assign(new TowerError('conflict', '원격 요청은 실행되었으나 완료 기록을 확인할 수 없습니다.', { disposition: 'uncertain', cause }), { requestIdentity: key, fingerprint });
+    }
     return value;
   }
 
-  flush(): Promise<void> { return this.writes.then(() => {}, () => {}); }
+  flush(): Promise<void> { return this.writes.then(() => this.repository!.gate()); }
 
-  /** A record is kept until both its arrival and the time inside its ID are out of the window, so a controller clock ahead of this one cannot reopen it. */
-  private prune(): void {
+  private async prune(): Promise<void> {
     const cutoff = this.now() - REMOTE_REQUEST_RETENTION_MS;
-    for (const [key, entry] of this.entries) if (Math.max(entry.at, entry.issued) < cutoff) this.entries.delete(key);
+    for (const [key, entry] of this.entries) if (Math.max(entry.at, entry.issued) < cutoff) {
+      await this.queue(async () => {
+        if (this.entries.get(key) !== entry) return;
+        await this.repository!.remove(entry, this.ordinals.get(key)!);
+        this.entries.delete(key); this.ordinals.delete(key);
+      });
+    }
   }
-
-  private save(): Promise<void> {
-    this.prune();
-    const data = JSON.stringify([...this.entries.values()]);
-    const write = this.writes.then(() => writePrivateJson(this.path, data));
-    this.writes = write.catch(() => {});
-    return write;
+  private queue(write: () => Promise<void>): Promise<void> {
+    const pending = this.writes.then(write); this.writes = pending.catch(() => {}); return pending;
   }
 }

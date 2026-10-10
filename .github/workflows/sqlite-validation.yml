@@ -35,7 +35,7 @@ jobs:
             XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
             TMP="$TEST_TMP" TEMP="$TEST_TMP" \
             npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
-            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
+            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 NODE_OPTIONS=--max-old-space-size=4096 \
             VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
             VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
           set -euo pipefail
@@ -52,20 +52,43 @@ jobs:
           npm ci
           node --import tsx scripts/sqlite-runtime-check.mjs "$VALIDATION_MODE" | tee "$report/runtime.json"
           if [[ "$VALIDATION_MODE" == legacy-loader ]]; then
-            node --import tsx --test --test-reporter=tap tests/server/link/storage-update-legacy.test.ts
+            node --import tsx --test --test-concurrency=2 --test-reporter=tap tests/server/link/storage-update-legacy.test.ts
             exit 0
           fi
+          export TOWER_SQLITE_OLD122_ROOT="$VALIDATION_ROOT/old122"
+          export TOWER_SQLITE_OLD124_ROOT="$VALIDATION_ROOT/old124"
+          node scripts/sqlite-old124-capture.mjs 1.122.0
+          node scripts/sqlite-old124-capture.mjs 1.124.0
           printf '%s\n' tests/server/runs/storage-control.test.ts tests/server/runs/storage-diagnostic-worker.test.ts \
             tests/server/permissions/one-shot.test.ts tests/server/runs/run-persistence.test.ts \
             tests/server/http/storage-health.test.ts tests/server/link/storage-web.test.ts \
             tests/server/runs/attachment-cleanup.test.ts tests/server/auto-prompt/auto-prompts.test.ts \
-            tests/server/runs/durable-runner.test.ts tests/gates/swallowed-errors.test.ts > "$report/test-files.txt"
+            tests/server/runs/durable-runner.test.ts tests/gates/swallowed-errors.test.ts \
+            tests/server/decisions/jev.test.ts tests/server/link/storage-offline-activation.test.ts \
+            tests/server/link/storage-update-legacy.test.ts tests/server/runs/actual-run-storage.test.ts \
+            tests/server/runs/run-origin.test.ts tests/server/slack/automation.test.ts \
+            tests/server/triggers/storage.test.ts tests/server/triggers/service.test.ts > "$report/test-files.txt"
           files=()
           while IFS= read -r file; do files+=("$file"); done < "$report/test-files.txt"
+          printf '%s\n' lifecycle-resume-single-repro > "$report/stage.txt"
+          node --import tsx --test --test-concurrency=2 --test-reporter=tap --test-name-pattern='^failed production quiesce resumes both manager cleanup timers without releasing the lock$' tests/server/runs/attachment-cleanup.test.ts
+          printf '%s\n' jev-cancel-single-repro > "$report/stage.txt"
+          node --import tsx --test --test-concurrency=2 --test-reporter=tap --test-name-pattern='^a slow answer times out and a cancelled one says so$' tests/server/decisions/jev.test.ts
+          printf '%s\n' diagnostic-single-repro > "$report/stage.txt"
+          node --import tsx --test --test-concurrency=2 --test-reporter=tap --test-name-pattern='^actual trigger startup retry preserves session reads and holds permission review through restored settle on the same worker$' tests/server/runs/storage-diagnostic-worker.test.ts | tee "$report/diagnostic-single-repro.log"
           printf '%s\n' fast-contracts > "$report/stage.txt"
-          node --import tsx --test --test-reporter=tap "${files[@]}"
+          node --import tsx --test --test-concurrency=2 --test-reporter=tap "${files[@]}"
           printf '0\n' > "$report/suite-exit.txt"
           VALIDATE
+      - name: Supply the immutable full A122 capture to supported environments
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-official-a122
+          path: |
+            ${{ runner.temp }}/sqlite-validation/old122/package/
+            ${{ runner.temp }}/sqlite-validation/old122/receipt.json
+            ${{ runner.temp }}/sqlite-validation/old122/storage-contract.json
+          if-no-files-found: error
       - name: Preserve fast contract logs, including failures
         if: always()
         uses: actions/upload-artifact@v4
@@ -74,8 +97,92 @@ jobs:
           path: ${{ runner.temp }}/sqlite-validation/reports/
           if-no-files-found: error
 
+  residual-probe:
+    timeout-minutes: 10
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26.0.0'
+      - name: Install and validate inside a private environment
+        shell: bash
+        env:
+          VALIDATION_ROOT: ${{ runner.temp }}/sqlite-validation
+          VALIDATION_MODE: supported-floor
+          VALIDATION_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$VALIDATION_ROOT"/{home,codex,claude,config,cache,state,data,runtime,tmp,npm,reports}
+          # Keep Unix socket paths short; canonicalize the fresh private tmp directory on macOS.
+          TEST_TMP="$(mktemp -d /tmp/sv.XXXXXX)"
+          TEST_TMP="$(cd "$TEST_TMP" && pwd -P)"
+          # No Actions credentials or provider authentication enter npm, tests or children.
+          env -i PATH="$PATH" HOME="$VALIDATION_ROOT/home" \
+            CODEX_HOME="$VALIDATION_ROOT/codex" CLAUDE_CONFIG_DIR="$VALIDATION_ROOT/claude" \
+            XDG_CONFIG_HOME="$VALIDATION_ROOT/config" XDG_CACHE_HOME="$VALIDATION_ROOT/cache" \
+            XDG_STATE_HOME="$VALIDATION_ROOT/state" XDG_DATA_HOME="$VALIDATION_ROOT/data" \
+            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
+            TMP="$TEST_TMP" TEMP="$TEST_TMP" \
+            npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
+            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 NODE_OPTIONS=--max-old-space-size=4096 \
+            VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
+            VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
+          set -euo pipefail
+          # Private 0700 parents isolate fixtures; retain the usual user file-creation mask.
+          umask 022
+          report="$VALIDATION_ROOT/reports"
+          trap 'result=$?; printf "%s\n" "$result" > "$report/exit-code.txt"' EXIT
+          set -x
+          exec > >(tee "$report/stdout.log") 2> >(tee "$report/stderr.log" >&2)
+          printf '%s\n' "$VALIDATION_SHA" > "$report/source-sha.txt"
+          node --version > "$report/node-version.txt"
+          export SQLITE_VALIDATION_CI=1
+          printf '%s\n' npm-ci > "$report/stage.txt"
+          npm ci
+          node --import tsx scripts/sqlite-runtime-check.mjs "$VALIDATION_MODE" | tee "$report/runtime.json"
+          if [[ "$VALIDATION_MODE" == legacy-loader ]]; then
+            node --import tsx --test --test-concurrency=2 --test-reporter=tap tests/server/link/storage-update-legacy.test.ts
+            exit 0
+          fi
+          export TOWER_SQLITE_OLD122_ROOT="$VALIDATION_ROOT/old122"
+          export TOWER_SQLITE_OLD124_ROOT="$VALIDATION_ROOT/old124"
+          node scripts/sqlite-old124-capture.mjs 1.122.0
+          node scripts/sqlite-old124-capture.mjs 1.124.0
+          printf '%s\n' tests/server/decisions/service.test.ts \
+            tests/server/http/storage-health.test.ts \
+            tests/server/link/storage-update-legacy.test.ts \
+            tests/server/link/storage-web.test.ts \
+            tests/server/permissions/permissions.test.ts \
+            tests/server/runs/run-instructions.test.ts \
+            tests/server/runs/run-manager.test.ts \
+            tests/server/runs/runner-steering.test.ts \
+            tests/server/runs/runner-update-drain.test.ts \
+            tests/server/runs/endpoint-keeper.test.ts \
+            tests/server/slack/backup.test.ts \
+            tests/server/triggers/engine-format.test.ts \
+            tests/server/triggers/github-issue-watch.test.ts \
+            tests/server/triggers/http.test.ts \
+            tests/server/triggers/layering.test.ts > "$report/test-files.txt"
+          files=()
+          while IFS= read -r file; do files+=("$file"); done < "$report/test-files.txt"
+          printf '%s\n' general-known-failures > "$report/stage.txt"
+          node --import tsx --test --test-concurrency=2 --test-reporter=tap "${files[@]}" | tee "$report/diagnostic-single-repro.log"
+          printf '0\n' > "$report/suite-exit.txt"
+          VALIDATE
+      - name: Preserve General known failure logs, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-residual-probe-macos-latest-26.0.0
+          path: ${{ runner.temp }}/sqlite-validation/reports/
+          if-no-files-found: error
+
   sqlite:
-    needs: fast-contracts
+    needs: [fast-contracts, residual-probe]
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -95,6 +202,12 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
+      - name: Reuse the fast job's genuine A122 input
+        if: matrix.mode != 'legacy-loader'
+        uses: actions/download-artifact@v4
+        with:
+          name: sqlite-official-a122
+          path: ${{ runner.temp }}/sqlite-validation/old122
       - name: Install and validate inside a private environment
         shell: bash
         env:
@@ -117,7 +230,7 @@ jobs:
             XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
             TMP="$TEST_TMP" TEMP="$TEST_TMP" \
             npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
-            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
+            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 NODE_OPTIONS=--max-old-space-size=4096 \
             VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
             VALIDATION_SHA="$VALIDATION_SHA" SQLITE_RETENTION_LARGE="$SQLITE_RETENTION_LARGE" /bin/bash --noprofile --norc <<'VALIDATE'
           set -euo pipefail
@@ -134,10 +247,14 @@ jobs:
           npm ci
           node --import tsx scripts/sqlite-runtime-check.mjs "$VALIDATION_MODE" | tee "$report/runtime.json"
           if [[ "$VALIDATION_MODE" == legacy-loader ]]; then
-            node --import tsx --test --test-reporter=tap tests/server/link/storage-update-legacy.test.ts
+            node --import tsx --test --test-concurrency=2 --test-reporter=tap tests/server/link/storage-update-legacy.test.ts
             exit 0
           fi
-          node --import tsx --test --test-reporter=tap \
+          export TOWER_SQLITE_OLD122_ROOT="$VALIDATION_ROOT/old122"
+          ln -s "$PWD/node_modules" "$TOWER_SQLITE_OLD122_ROOT/node_modules"
+          export TOWER_SQLITE_OLD124_ROOT="$VALIDATION_ROOT/old124"
+          node scripts/sqlite-old124-capture.mjs
+          node --import tsx --test --test-concurrency=2 --test-reporter=tap \
             --test-name-pattern='^(flush, close ack and an explicit reopen with the same captured bundle; nothing is sent while closed|a full queue still drains on flush and close: the accepted write commits, close acks, the thread exits 0, intake is refused meanwhile)$' \
             tests/server/storage/client.test.ts
           node --input-type=module <<'FILES'
@@ -147,7 +264,10 @@ jobs:
           const link = globSync('tests/server/link/**/*.test.ts').sort();
           assert.ok(storage.length && link.length, 'suite globs must match');
           const consumers = ['tests/server/runs/**/*storage*.test.ts', 'tests/server/http/**/*storage*.test.ts',
-            'tests/server/triggers/*storage*.test.ts'].flatMap(pattern => globSync(pattern));
+            'tests/server/triggers/*storage*.test.ts', 'tests/server/permissions/*storage*.test.ts',
+            'tests/server/permissions/*sql*.test.ts', 'tests/server/runs/trigger-admission.test.ts',
+            'tests/server/remote/*storage*.test.ts', 'tests/server/auto-prompt/*storage*.test.ts',
+            'tests/server/slack/*storage*.test.ts', 'tests/server/slack/*effect-boundary.test.ts', 'tests/server/triggers/github-effect-boundary.test.ts', 'tests/server/remote/actual-external-storage.test.ts', 'tests/server/link/storage-offline*.test.ts'].flatMap(pattern => globSync(pattern));
           assert.ok(consumers.length, 'storage consumers must match');
           // Follow public storage imports as well as filenames, including newly added I fixtures.
           const imported = ['tests/server/runs/**/*.test.ts', 'tests/server/http/**/*.test.ts',
@@ -174,7 +294,7 @@ jobs:
           files=()
           while IFS= read -r file; do files+=("$file"); done < "$report/test-files.txt"
           printf '%s\n' real-suite > "$report/stage.txt"
-          node --import tsx --test --test-reporter=tap "${files[@]}"
+          node --import tsx --test --test-concurrency=2 --test-reporter=tap "${files[@]}"
           printf '0\n' > "$report/suite-exit.txt"
           printf '%s\n' foundation > "$report/stage.txt"
           node --import tsx scripts/sqlite-foundation-benchmark.mjs 20 | tee "$report/foundation.json"
@@ -221,6 +341,9 @@ jobs:
           assert.equal(binaryHash, readFileSync('artifacts/agent-session-tower.sha256', 'utf8').split(/\s+/)[0]);
           writeFileSync(`${report}/binary-sha256.txt`, binaryHash + '\n');
           SEA
+            export TOWER_SQLITE_FINAL_BINARY="$PWD/artifacts/agent-session-tower"
+            node --import tsx --test --test-concurrency=2 --test-reporter=tap --test-name-pattern='^final actual CLI source and optional Node26 SEA' tests/server/link/storage-offline-activation.test.ts
+            printf '0\n' > "$report/sea-offline-exit.txt"
           fi
           VALIDATE
       - name: Preserve validation logs, including failures
@@ -263,7 +386,7 @@ jobs:
             XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
             TMP="$TEST_TMP" TEMP="$TEST_TMP" \
             npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
-            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
+            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 NODE_OPTIONS=--max-old-space-size=4096 \
             VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
             VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
           set -euo pipefail
@@ -292,12 +415,17 @@ jobs:
           node --version > "$report/node-version.txt"
           printf '%s\n' npm-ci > "$report/stage.txt"
           npm ci
+          export SQLITE_VALIDATION_CI=1
+          export TOWER_SQLITE_OLD122_ROOT="$VALIDATION_ROOT/old122"
+          export TOWER_SQLITE_OLD124_ROOT="$VALIDATION_ROOT/old124"
+          node scripts/sqlite-old124-capture.mjs 1.122.0
+          node scripts/sqlite-old124-capture.mjs 1.124.0
           node --import tsx scripts/sqlite-runtime-check.mjs supported-floor | tee "$report/runtime.json"
           printf '%s\n' release-version-decision > "$report/stage.txt"
-          if [[ "$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')" == 1.124.0 ]]; then
+          if [[ "$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')" == 1.125.0 ]]; then
             printf '%s\n' already-target > "$report/version-mode.txt"
             printf '%s\n' already-target-official-hooks > "$report/stage.txt"
-            npm version 1.124.0 --allow-same-version --no-git-tag-version
+            npm version 1.125.0 --allow-same-version --no-git-tag-version
             printf '0\n' > "$report/npm-version-exit.txt"
           else
             node --input-type=module <<'FLOOR'
@@ -306,13 +434,13 @@ jobs:
           const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
           assert.match(version, /^\d+\.\d+\.\d+$/);
           const current = version.split('.').map(Number);
-          const target = [1, 124, 0];
+          const target = [1, 125, 0];
           const first = current.findIndex((part, index) => part !== target[index]);
           assert.ok(first >= 0 && current[first] < target[first], 'target must exceed the input version');
           FLOOR
             printf '%s\n' npm-version > "$report/version-mode.txt"
             printf '%s\n' npm-version-hooks > "$report/stage.txt"
-            npm version 1.124.0 --no-git-tag-version
+            npm version 1.125.0 --no-git-tag-version
             printf '0\n' > "$report/npm-version-exit.txt"
           fi
           node --input-type=module <<'VERSION'
@@ -321,7 +449,7 @@ jobs:
           import { APP_VERSION } from './dist/shared/app-identity.js';
           const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
           const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
-          assert.equal(pkg.version, '1.124.0');
+          assert.equal(pkg.version, '1.125.0');
           assert.equal(lock.version, pkg.version);
           assert.equal(lock.packages[''].version, pkg.version);
           assert.equal(APP_VERSION, pkg.version);

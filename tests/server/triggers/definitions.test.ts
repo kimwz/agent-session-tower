@@ -1,6 +1,7 @@
+import { actualStorage } from './actual-storage-fixture.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -15,6 +16,7 @@ const start = Date.parse('2026-09-24T00:00:30.000Z');
 
 async function engine(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-trigger-definitions-'));
+  const sql = await actualStorage(t, directory);
   const project = join(directory, 'project');
   await mkdir(project);
   const clock = { now: start };
@@ -27,13 +29,13 @@ async function engine(t: TestContext) {
   };
   const services: TriggerService[] = [];
   const open = async (started = true) => {
-    const service = new TriggerService({ stateDir: directory, executor, now: () => clock.now, tickMs: 3_600_000 });
-    if (started) await service.start();
+    const service = new TriggerService({ stateDir: directory, storage: sql.client, executor, now: () => clock.now, tickMs: 3_600_000 });
+    if (started) { await sql.bootstrap(() => clock.now); await service.start(); }
     services.push(service);
     return service;
   };
-  t.after(async () => { for (const service of services) service.close(); await Promise.allSettled(services.map(service => service.settle())); await rm(directory, { recursive: true, force: true }); });
-  return { directory, project, clock, runs, open, file: () => readFile(join(directory, 'trigger-engine.json'), 'utf8').catch(() => '') };
+  t.after(async () => { for (const service of services) service.close(); await Promise.allSettled(services.map(service => service.settle())); await sql.client.close(); await rm(directory, { recursive: true, force: true }); });
+  return { directory, sql, project, clock, runs, open, file: () => sql.text() };
 }
 
 const definition = (project: string, values: Partial<TriggerInput> = {}): TriggerInput => ({ name: 'Report', enabled: true,

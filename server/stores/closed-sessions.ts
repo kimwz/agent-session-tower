@@ -13,9 +13,14 @@ export class ClosedSessionStore {
 
   constructor(private readonly stateDir: string) { this.path = join(stateDir, 'closed-sessions.json'); }
 
-  async start(): Promise<void> {
-    await mkdir(this.stateDir, { recursive: true, mode: 0o700 });
-    await this.reload();
+  start(): Promise<void> {
+    const load = this.writes.then(async () => {
+      await mkdir(this.stateDir, { recursive: true, mode: 0o700 });
+      await this.reload();
+    });
+    // best-effort: reset only the queue tail so reload can retry; start returns the original rejecting load.
+    this.writes = load.then(() => {}, () => {});
+    return load;
   }
 
   private async reload(): Promise<void> {

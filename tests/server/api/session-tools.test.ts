@@ -1,5 +1,6 @@
+import { apiTriggerStorageFixture } from './trigger-storage-fixture.js';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -16,20 +17,21 @@ const claudeRow = (sessionId: string, role: 'user' | 'assistant', content: unkno
 
 /** Claude conversations in a private home, read through the same TowerApi agents call. */
 async function fixture(t: TestContext, overlay: (session: Session) => Session = session => session) {
-  const root = await mkdtemp(join(tmpdir(), 'tower-session-tools-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-session-tools-')));
   const claudeHome = join(root, 'claude');
   const codexHome = join(root, 'codex');
   await Promise.all([mkdir(join(claudeHome, 'projects', 'app'), { recursive: true }), mkdir(join(codexHome, 'sessions'), { recursive: true })]);
   const sessions = new SessionService({ claudeHome, codexHome, inspectProcesses: async () => ({ claude: new Map(), codex: new Set(), providerRunning: { claude: false, codex: false } }) });
-  const triggers = new TriggerService({ stateDir: root, tickMs: 60_000, executor: { submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
+  const storage = await apiTriggerStorageFixture(t, root);
+  const triggers = new TriggerService({ stateDir: root, storage: storage.storage, tickMs: 60_000, executor: { submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
     create: async () => { throw new Error('unused'); }, enqueue: async () => { throw new Error('unused'); }, runs: () => [], session: () => undefined } });
+  t.after(async () => { sessions.stop(); triggers.close(); await triggers.settle(); await storage.storage.close(); await rm(root, { recursive: true, force: true }); });
   await triggers.start();
   const api = new TowerApi({ stateDir: root, triggers, sessions: {
     list: () => sessions.list().map(overlay),
     read: (session, limit, before) => sessions.detail(session, before, limit),
     search: (session, query) => sessions.search(session, query),
   } });
-  t.after(async () => { sessions.stop(); triggers.close(); await rm(root, { recursive: true, force: true }); });
   const write = (n: number, rows: unknown[]) => writeFile(join(claudeHome, 'projects', 'app', `${id(n)}.jsonl`), rows.map(row => JSON.stringify(row)).join('\n') + '\n');
   const call = <T>(name: string, input: unknown) => api.call(name, input, agent) as Promise<T>;
   return { sessions, write, call };

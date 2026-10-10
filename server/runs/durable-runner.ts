@@ -1,3 +1,4 @@
+import type { WorkerSqlSettings } from '../backup/payload.js';
 import type { WorkerStorageStatus } from '../../shared/storage.js';
 import { AttachmentStore } from '../stores/attachments.js';
 import { isImageAttachment, MAX_ATTACHMENT_BYTES, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../../shared/attachments.js';
@@ -369,6 +370,10 @@ export class DurableRunManager extends EventEmitter {
   async triggersBackup(): Promise<TriggerBackup> {
     if (!this.supports('backup')) throw new TowerError('unavailable','실행 워커가 아직 백업 DTO를 제공하지 못합니다.');
     return this.call('triggersBackup',[]) as Promise<TriggerBackup>;
+  }
+  async settingsBackup(): Promise<WorkerSqlSettings> {
+    if (!this.supports('backup')) throw new TowerError('unavailable', '실행 워커가 아직 SQL 설정 DTO를 제공하지 못합니다.');
+    return this.call('settingsBackup', []) as Promise<WorkerSqlSettings>;
   }
   async skillsBackup(): Promise<SkillBackup> {
     if (!this.supports('backup')) throw new TowerError('unavailable', '실행 워커가 아직 새 버전으로 바뀌지 않아 백업을 만들 수 없습니다. 진행 중인 작업이 끝나 워커가 바뀌면 다시 시도하세요.');

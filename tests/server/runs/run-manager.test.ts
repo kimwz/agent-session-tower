@@ -10,7 +10,9 @@ import { PassThrough, Writable } from 'node:stream';
 import { MASTER_FOLDER } from '../../../shared/master.js';
 import { CapabilityRegistry } from '../../../server/api/mcp.js';
 import { runToolResolver } from '../../../server/api/run-tools.js';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager, fixtureDocuments, fixtureReplaceRuns, fixtureCommandError } from './sql-fixture.js';
+import { canonical, runHash } from '../../../server/runs/storage-codec.js';
+import { RunsRepository } from '../../../server/runs/storage-repository.js';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { MAX_ATTACHMENT_BYTES } from '../../../shared/attachments.js';
 import { buildCreateArgs, buildResumeArgs } from '../../../server/runs/claude-args.js';
@@ -140,7 +142,7 @@ test('effort request is persisted and passed to the native Codex turn', async t 
   const f = await fixture({ busy: true }); t.after(f.cleanup);
   const accepted = await f.manager.enqueue(f.session.id, 'Think harder', { effort: 'xhigh' });
   assert.equal(accepted.effort, 'xhigh');
-  assert.equal(JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'))[0].effort, 'xhigh');
+  assert.equal(JSON.parse(JSON.stringify((await fixtureDocuments(f.manager)).runs))[0].effort, 'xhigh');
   f.sessions.set(f.session.id, { ...f.session, status: 'completed' });
   assert.equal((await finished(f.manager, accepted.id)).status, 'completed');
   const received = JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8'));
@@ -155,7 +157,7 @@ test('model request is snapshotted, persisted and passed to the native thread', 
   const accepted = await f.manager.enqueue(f.session.id, 'Use the chosen model', request);
   request.model = 'changed-later';
   assert.equal(accepted.model, 'native-chosen');
-  assert.equal(JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'))[0].model, 'native-chosen');
+  assert.equal(JSON.parse(JSON.stringify((await fixtureDocuments(f.manager)).runs))[0].model, 'native-chosen');
   f.sessions.set(f.session.id, { ...f.session, status: 'completed' });
   assert.equal((await finished(f.manager, accepted.id)).status, 'completed');
   const received = JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8'));
@@ -266,7 +268,7 @@ test('Claude retains exact root context, persists it, and enriches only the matc
   result.contextUsage!.contextWindow = 1;
   assert.equal(f.manager.list().find(run => run.id === accepted.id)?.contextUsage?.contextWindow, 200_000);
   await f.manager.close();
-  const saved = JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'));
+  const saved = JSON.parse(JSON.stringify((await fixtureDocuments(f.manager)).runs));
   assert.equal(saved[0].contextUsage.contextWindow, 200_000);
   restored = new RunManager({ getSession: id => f.sessions.get(id), refreshSessions: async () => {}, stateDir: f.stateDir });
   await restored.start();
@@ -322,11 +324,10 @@ test('invalid persisted context metadata is discarded without losing the saved r
   const f = await fixture({ provider: 'claude', contextFrames: [contextAssistant, contextResult] }); t.after(f.cleanup);
   const accepted = await f.manager.enqueue(f.session.id, 'Synthetic context observation');
   await finished(f.manager, accepted.id); await f.manager.close();
-  const path = join(f.stateDir, 'runs.json');
-  const saved = JSON.parse(await readFile(path, 'utf8'));
+  const saved = (await fixtureDocuments(f.manager)).runs;
   const original = saved[0].contextUsage;
   for (const patch of [{ capacitySource: 'model-default' }, { model: '--invalid' }, { usedTokens: -1 }, { contextWindow: 0 }, { usedPercent: 25 }, { updatedAt: 'invalid' }]) {
-    saved[0].contextUsage = { ...original, ...patch }; await writeFile(path, JSON.stringify(saved));
+    saved[0].contextUsage = { ...original, ...patch } as Run['contextUsage']; await fixtureReplaceRuns(f.manager, saved);
     const restored = new RunManager({ getSession: id => f.sessions.get(id), refreshSessions: async () => {}, stateDir: f.stateDir });
     try {
       await restored.start();
@@ -347,7 +348,7 @@ for (const decision of ['allow', 'deny'] as const) test(`owned Codex exposes a l
   approval.input.command = 'browser cannot change the requested command';
   assert.equal(f.manager.list().find(run => run.id === accepted.id)?.approvals?.[0].input.command, 'gh pr view 1');
   await (f.manager as unknown as { flush(): Promise<void> }).flush();
-  assert.equal(JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'))[0].approvals, undefined);
+  assert.equal(JSON.parse(JSON.stringify((await fixtureDocuments(f.manager)).runs))[0].approvals, undefined);
   await f.manager.respondToApproval(accepted.id, approval.id, decision);
   await assert.rejects(f.manager.respondToApproval(accepted.id, approval.id, decision), { kind: 'conflict' });
   const result = await finished(f.manager, accepted.id);
@@ -433,11 +434,15 @@ test('failed admission and full queues roll back only newly saved attachment fil
   try {
     const input = { name: 'notes.txt', mimeType: 'text/plain', data: 'aGVsbG8=' };
     const first = await f.manager.enqueue(f.session.id, 'first', { attachments: [input] });
-    await rm(join(f.stateDir, 'runs.json'));
-    await mkdir(join(f.stateDir, 'runs.json'));
+    const client = f.manager.sqlFixture(), write = client.write.bind(client);
+    let refused = false;
+    client.write = async <T>(...args: Parameters<typeof client.write>) => {
+      if (!refused && args[0] === 'runs' && args[1] === 'begin') { refused = true; throw new Error('Known SQL admission refusal'); }
+      return write<T>(...args);
+    };
     await assert.rejects(f.manager.enqueue(f.session.id, 'rejected', { attachmentIds: [first.attachments![0].id], attachments: [input] }), /Cannot save/);
     assert.deepEqual(await readdir(join(f.stateDir, 'attachments')), [first.attachments![0].id]);
-    await rm(join(f.stateDir, 'runs.json'), { recursive: true });
+    client.write = write;
     const results = await Promise.allSettled(Array.from({ length: 40 }, (_, i) => f.manager.enqueue(f.session.id, `queued ${i}`, { attachments: [input] })));
     assert.equal(results.filter(result => result.status === 'fulfilled').length, 31);
     assert.equal((await readdir(join(f.stateDir, 'attachments'))).length, 32);
@@ -698,13 +703,56 @@ for (const mode of ['fail', 'stream-error', 'mismatch', 'empty', 'invalid-event'
 
 test('rejected persistence never launches an instruction later from the polling queue',async()=>{
   const f=await fixture();
+  const client = f.manager.sqlFixture(), write = client.write.bind(client);
   try{
-    await rm(f.stateDir,{recursive:true,force:true});
-    await assert.rejects(f.manager.enqueue(f.session.id,'must not run'),/Cannot save/);
+    const before = await fixtureDocuments(f.manager);
+    const repository = new RunsRepository(client), head = await repository.head();
+    let staged: Buffer | undefined, failedCommand: string | undefined, commits = 0;
+    client.write = async <T>(...args: Parameters<typeof client.write>) => {
+      if (args[0] === 'runs' && args[1] === 'stage') {
+        const payload = args[2] as { part: number; data: string };
+        assert.equal(payload.part, 0, 'this small admission fits in one fixture chunk');
+        staged = Buffer.from(payload.data, 'base64');
+      }
+      if (args[0] === 'runs' && args[1] === 'commit') {
+        commits++;
+        assert.ok(staged);
+        const lines = staged.toString('utf8').trimEnd().split('\n');
+        const header = JSON.parse(lines[0]);
+        assert.ok(lines.slice(1).some(line => JSON.parse(line).kind === 'instruction'));
+        // The real SQL handler writes both rows, then rejects the canonical request hash.
+        // Its transaction must roll back those writes before admission can be acknowledged.
+        lines[0] = canonical({ ...header, requestSha256: '0'.repeat(64) });
+        const bytes = Buffer.from(lines.join('\n') + '\n');
+        const intent = `${(args[2] as { intent: string }).intent}-fault`;
+        await write('runs', 'begin', { intent, bytes: bytes.length, sha256: runHash(bytes), chunks: 1 }, `${intent}-begin`);
+        await write('runs', 'stage', { intent, part: 0, data: bytes.toString('base64') }, `${intent}-stage`);
+        failedCommand = args[3];
+        try { return await write<T>('runs', 'commit', { intent }, args[3]); }
+        catch (error) {
+          assert.ok(error instanceof fixtureCommandError(client));
+          assert.equal(error.code, 'domain-failed');
+          assert.equal(error.disposition, 'not-committed');
+          assert.match(error.message, /Runs canonical request hash mismatch/);
+          throw error;
+        }
+      }
+      return write<T>(...args);
+    };
+    await assert.rejects(f.manager.enqueue(f.session.id,'must not run', {}, { instructions: { text: 'must not reach a provider', required: true } }),/Cannot save/);
+    await f.manager.flushState();
     await new Promise(resolve=>setTimeout(resolve,100));
+    assert.equal(commits, 1, 'the refused admission is never replayed');
+    assert.ok(failedCommand);
+    assert.equal((await client.receipt(failedCommand)).found, false, 'no receipt authorizes delivery');
+    assert.deepEqual(await fixtureDocuments(f.manager), before, 'SQL rolls back the run and required instructions');
+    assert.deepEqual(await repository.head(), head, 'a refused commit cannot advance the durable revision or authority');
     assert.equal(f.launches.length,0);
     assert.equal(f.manager.list().length,0);
-  }finally{await mkdir(f.stateDir,{recursive:true});await f.cleanup();}
+    client.write = write;
+    await f.manager.close();
+    assert.deepEqual(await fixtureDocuments(f.manager), before, 'the durable queue stays empty after reopening');
+  }finally{client.write = write; await f.cleanup();}
 });
 
 test('an executable lookup finishing after shutdown cannot admit or launch work',async()=>{
@@ -788,9 +836,10 @@ test('cancels only its owned process and persists private terminal run state', a
     await f.manager.cancel(run.id);
     assert.equal((await finished(f.manager, run.id)).status, 'cancelled');
     await assert.rejects(f.manager.cancel('unknown'), /Task not found/);
-    const persisted: Run[] = JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'));
+    const persisted: Run[] = JSON.parse(JSON.stringify((await fixtureDocuments(f.manager)).runs));
     assert.equal(persisted.find((entry) => entry.id === run.id)?.status, 'cancelled');
-    assert.equal((await stat(join(f.stateDir, 'runs.json'))).mode & 0o777, 0o600);
+    assert.equal((await stat(join(f.stateDir, 'state.sqlite'))).mode & 0o777, 0o600);
+    await assert.rejects(stat(join(f.stateDir, 'runs.json')), { code: 'ENOENT' });
   } finally { await f.cleanup(); }
 });
 
@@ -812,7 +861,7 @@ test('restart preserves finished history and never replays interrupted or queued
   const directory = await mkdtemp(join(tmpdir(), 'agent-monitor-recovery-'));
   const records: Run[] = ['running','queued','completed'].map((status, index) => ({id:String(index),sessionId:`codex:${ID}`,prompt:'must not replay',status:status as Run['status'],createdAt:new Date().toISOString(),output:'history'}));
   await writeFile(join(directory, 'runs.json'), JSON.stringify(records));
-  const manager = new RunManager({getSession:()=>undefined,refreshSessions:async()=>{},stateDir:directory});
+  const manager = new RunManager({getSession:()=>undefined,refreshSessions:async()=>{},stateDir:directory,fixtureInitial:{runs:records,created:[],instructions:{}}});
   try {
     await manager.start();
     assert.deepEqual(manager.list().map((run)=>run.status), ['error','cancelled','completed']);

@@ -3,7 +3,7 @@ import { ROW_KINDS } from './storage-codec.js';
 import { randomUUID } from 'node:crypto';
 import type { StorageClient } from '../storage/client.js';
 import { StorageCommandError, type CommitDisposition } from '../storage/contract.js';
-import { canonical, requestHash, transferRow, documentsHash, stateOf, triggerHash, rowsOf, TRIGGER_CHUNK_BYTES, TRIGGER_INTENT_BYTES, type TriggerChange, type TriggerRow } from './storage-codec.js';
+import { canonical, requestHash, transferRow, documentsHash, stateOf, triggerHash, rowsOf, validateRow, TRIGGER_CHUNK_BYTES, TRIGGER_INTENT_BYTES, type TriggerChange, type TriggerRow, type TriggerRowKind } from './storage-codec.js';
 import type { TriggerIntentHeader, TriggersHead, TriggerWriteMode } from './storage-commands.js';
 
 export interface TriggerWriteIdentity { id: string; commandId: string; sha256: string }
@@ -27,12 +27,12 @@ export class TriggersRepository {
     return head;
   }
   async databaseAuthority(): Promise<boolean> { return (await this.head()).authority?.authority === 'database'; }
-  async exportCurrent(): Promise<{ documents: EngineState; rows: TriggerRow[]; head: TriggersHead; sha256: string }> {
+  async readCurrentRows(kinds: readonly TriggerRowKind[]): Promise<{ rows: TriggerRow[]; head: TriggersHead }> {
     const head = await this.head();
     if (!head.authority || head.revision === null) throw new Error('No imported triggers authority to export.');
     const fence = { revision: head.revision, generation: head.authority.generation }, rows: TriggerRow[] = [];
     let total = 0;
-    for (const kind of ROW_KINDS) {
+    for (const kind of kinds) {
       let after = 0;
       while (true) {
         const page = await this.storage.read<{ ordinal: number; idBytes: number; bytes: number }[]>('triggers','keys',{ ...fence, kind, after });
@@ -54,13 +54,18 @@ export class TriggersRepository {
     }
     const last = await this.head();
     if (last.revision !== head.revision || last.authority?.generation !== head.authority.generation) throw new Error('Triggers changed while paging current export.');
+    for (const row of rows) validateRow(row);
+    return { rows,head };
+  }
+  async exportCurrent(): Promise<{ documents: EngineState; rows: TriggerRow[]; head: TriggersHead; sha256: string }> {
+    const { rows,head } = await this.readCurrentRows(ROW_KINDS);
     let documents: EngineState;
     try { documents = stateOf(rows); }
     catch (error) { throw new StorageCommandError({ phase: 'command',code: 'domain-failed',message: `Current triggers data is malformed: ${(error as Error).message}`,disposition: 'not-committed',retryable: false }); }
     return { documents, rows, head, sha256: documentsHash(documents) };
   }
-  /** The R6-removable compatibility adapter is in TriggerStore; future owners send individual row commands here. */
-  async update(changes: TriggerChange[], mode: Exclude<TriggerWriteMode,'import' | 'restore'> = 'grow', id = `triggers-${randomUUID()}`): Promise<TriggerWriteIdentity | undefined> {
+  /** Guarded domain row batch. Only touched rows are staged; fixed identities resolve receipts without replay. */
+  async update(changes: TriggerChange[], mode: Exclude<TriggerWriteMode,'import' | 'restore'> = 'grow', id = `triggers-${randomUUID()}`, expectedRevision?: number): Promise<TriggerWriteIdentity | undefined> {
     if (!changes.length) { await this.head(); return undefined; }
     await this.gate();
     const receipt = await this.storage.receipt(`${id}-commit`);
@@ -73,6 +78,7 @@ export class TriggersRepository {
     }
     const head = await this.head();
     if (!head.authority) throw new Error('Cannot write triggers DB without imported authority.');
+    if (expectedRevision !== undefined && head.revision !== expectedRevision) throw new Error('Triggers changed after admission readback; draft was not saved.');
     return this.writeIntent({ mode, revision: head.revision, generation: head.authority.generation }, changes, id);
   }
   async restore(documents: EngineState, id: string, expectedGeneration?: number): Promise<TriggerWriteIdentity | undefined> {

@@ -1,5 +1,5 @@
 import type { TowerApi } from '../../../server/api/tower-api.js';
-import { storage, fixtureBundle, databasePath } from '../storage/helpers.js';
+import { storage, databasePath } from '../storage/helpers.js';
 import type { WorkerStorageStatus } from '../../../shared/storage.js';
 import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import assert from 'node:assert/strict';
@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager, fixtureDocuments, importFixtureRetention, importFixtureTriggers, fixtureTriggerText, stopFixtureWriter, fixtureCommandError } from './sql-fixture.js';
 import { SessionService } from '../../../server/sessions/service.js';
 import { startRunnerHost, type RunnerHostOptions } from '../../../server/runs/worker.js';
 import type { SlackService } from '../../../server/slack/service.js';
@@ -37,7 +37,7 @@ import { RetentionArchive } from '../../../server/sessions/retention/archive.js'
 import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
 import { worktreeCleanupVisible } from '../../../server/worktrees/janitor.js';
 
-async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector, hostOptions?: (parts: { stateDir: string; sessions: SessionService; runs: RunManager }) => Promise<Partial<RunnerHostOptions>>) {
+async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector, hostOptions?: (parts: { stateDir: string; sessions: SessionService; runs: RunManager }) => Promise<Partial<RunnerHostOptions>>, fault?: { onUnavailable: (status: ReturnType<import('../../../server/storage/client.js').StorageClient['status']>, runs: RunManager) => void }) {
   const directory = await realpath(await temporaryFixture('tower-durable-fixture-'));
   const stateDir = join(directory, 'state');
   const id = '10000000-0000-4000-8000-000000000001';
@@ -57,7 +57,7 @@ async function fixture(workerClosed = false, withRetention = false, retentionUna
   let starts = 0;
   let resolveDone!: () => void;
   const done = new Promise<void>(resolve => { resolveDone = resolve; });
-  const runs = new RunManager({ stateDir, getSession: value => sessions.get(value), refreshSessions: async () => {}, pollMs: 10,
+  const runs: RunManager = new RunManager({ ...(fault ? { fixtureThreadFault: true, fixtureOnUnavailable: status => fault.onUnavailable(status, runs) } : {}), stateDir, getSession: value => sessions.get(value), refreshSessions: async () => {}, pollMs: 10,
     findExecutable: async () => '/fixture/codex',
     spawnProcess: () => { throw new Error('Native provider launch is forbidden in this fixture.'); },
     openCodexBridge: async options => {
@@ -72,7 +72,8 @@ async function fixture(workerClosed = false, withRetention = false, retentionUna
   const closedSessions = workerClosed ? new ClosedSessionStore(stateDir) : undefined;
   await closedSessions?.start();
   const archive = new RetentionArchive(join(stateDir, 'cold'), []);
-  const retentionStore = new RetentionStore(join(stateDir, 'retention'));
+  if (withRetention) await importFixtureRetention(runs.sqlFixture());
+  const retentionStore = new RetentionStore(join(stateDir, 'retention'), { storage: runs.sqlFixture() });
   const retention = withRetention ? { archive, temporary, service: new RetentionService({ archive, store: retentionStore,
     adapter: createNativeRetentionAdapter({ claude: [], codex: [] }), observe: async () => ({ now: Date.now(), migratedAt: Date.now(), complete: true, records: [], protectedIds: new Set() }) }) } : undefined;
   await retention?.service.start();
@@ -265,19 +266,16 @@ test('reopening retries a real archive cancellation write failure and remains ca
   await f.retentionStore.put(entry);
   await client.setClosed(f.session.id, true);
   const root = f.retentionStore.root;
-  const displacedRoot = `${root}-displaced`;
-  await rename(root, displacedRoot);
-  await writeFile(root, 'fixture blocks retention directory writes');
+  const database = f.runs.sqlFixture();
+  const gate = database.gate.bind(database);
+  database.gate = async scope => scope === 'retention' ? { open: false, reasons: ['fixture SQL write held'] } : gate(scope);
   try {
-    await assert.rejects(client.setClosed(f.session.id, false), /ENOTDIR/);
+    await assert.rejects(client.setClosed(f.session.id, false), /Retention storage held/);
     assert.equal(client.applyClosed(f.session).closed, true);
-  } finally {
-    await rm(root, { force: true });
-    await rename(displacedRoot, root);
-  }
+  } finally { database.gate = gate; }
   await client.setClosed(f.session.id, false);
   assert.equal(Boolean(client.applyClosed(f.session).closed), false);
-  const reloaded = new RetentionStore(root); await reloaded.start();
+  const reloaded = new RetentionStore(root, { storage: database }); await reloaded.start();
   assert.equal(reloaded.policy(f.session.id)?.archivedAt, undefined, 'successful retry must persist cancellation rather than leave the archive request to revive after restart');
   assert.equal(reloaded.policy(f.session.id)?.archiveRevision, 5);
   assert.equal(reloaded.policy(f.session.id)?.restoredAt, restoredAt);
@@ -490,6 +488,7 @@ test('only the owner’s own message can approve a Slack send; agent work and co
   await f.host.close();
   const ownerMessages: string[] = [];
   const slack = {
+    withOwnerTurnAdmission: <T>(admit: () => Promise<T>) => admit(),
     sessionMcp: () => undefined,
     ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return { prompt: message, instructions: '[owner receipt]' }; },
     coordinatorSessionIds: () => [],
@@ -639,7 +638,7 @@ test('a web Auto Prompt is admitted as the owner’s request but never read as S
   await f.host.close();
   const ownerMessages: string[] = [];
   const submitted: unknown[] = [];
-  const slack = { sessionMcp: () => undefined, coordinatorSessionIds: () => [], ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return message; } } as unknown as SlackService;
+  const slack = { withOwnerTurnAdmission: <T>(admit: () => Promise<T>) => admit(), sessionMcp: () => undefined, coordinatorSessionIds: () => [], ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return message; } } as unknown as SlackService;
   const { EventEmitter } = await import('node:events');
   const autoPrompts = Object.assign(new EventEmitter(), {
     list: () => [], updateContext: () => {}, pauseAttachmentCleanup: async () => {}, resumeAttachmentCleanup: () => {}, cancel: async () => { throw new Error('unused'); },
@@ -727,7 +726,7 @@ test('updating on request stops the running turn at the deadline, hands off, and
   await f.host.close();
   let handoffs = 0;
   let successorStarted = 0;
-  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => { successorStarted++; } });
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { await stopFixtureWriter(f.runs); handoffs++; }, startSuccessor: () => { successorStarted++; } });
   t.after(() => host.close());
   const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0' });
   t.after(() => client.close());
@@ -740,18 +739,26 @@ test('updating on request stops the running turn at the deadline, hands off, and
   const queued = await client.enqueue(f.session.id, 'Sent while updating');
   await until(() => f.cancels() === 1 && successorStarted === 1, 5000);
   assert.equal(handoffs, 1);
-  const read = () => JSON.parse(readFileSync(join(f.stateDir, 'runs.json'), 'utf8')) as Array<Record<string, any>>;
-  // This fixture's quiesce does not flush; the real one waits for the save.
-  await until(() => read().find(item => item.id === run.id)?.error !== undefined);
-  const saved = read();
-  const stopped = saved.find(item => item.id === run.id)!;
+  // Flush the actual SQL owner before inspecting its committed projection.
+  await until(() => f.runs.list().find(item => item.id === run.id)?.error !== undefined);
+  await f.runs.flushState();
+  const saved = (await fixtureDocuments(f.runs)).runs;
+  const stopped = saved.find(item => item.id === run.id);
+  assert.ok(stopped);
   assert.equal(stopped.status, 'cancelled');
+  assert.ok(typeof stopped.error === 'string');
   assert.match(stopped.error, /Tower update/);
   const resume = saved.find(item => item.scheduled?.resume === 'update');
-  assert.equal(resume?.status, 'queued');
-  assert.equal(resume?.scheduled.afterRunId, run.id);
-  const carried = saved.find(item => item.id === queued.id)!;
+  assert.ok(resume);
+  assert.equal(resume.status, 'queued');
+  assert.ok(resume.scheduled);
+  assert.equal(resume.scheduled.resume, 'update');
+  assert.equal(resume.scheduled.afterRunId, run.id);
+  const carried = saved.find(item => item.id === queued.id);
+  assert.ok(carried);
   assert.equal(carried.status, 'queued');
+  // SQL documents retain this private field beyond the public Run projection.
+  assert.ok('keepQueued' in carried);
   assert.equal(carried.keepQueued, true, 'the next worker keeps it queued');
 });
 
@@ -1287,7 +1294,8 @@ test('trigger operations run in the worker as the owner and their state reaches 
   await f.host.close();
   const { TriggerService } = await import('../../../server/triggers/service.js');
   const { TowerApi } = await import('../../../server/api/tower-api.js');
-  const triggers = new TriggerService({ stateDir: f.stateDir, tickMs: 60_000, executor: {
+  await importFixtureTriggers(f.runs.sqlFixture());
+  const triggers = new TriggerService({ storage: f.runs.sqlFixture(), stateDir: f.stateDir, tickMs: 60_000, executor: {
     submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
     create: (input, internal) => f.runs.create(input, internal), enqueue: (id, prompt, request, internal) => f.runs.enqueue(id, prompt, request, internal),
     runs: () => f.runs.list(), session: id => f.runs.getSession(id) } });
@@ -1388,7 +1396,7 @@ test('worker records a verified calling turn without treating its message as own
   await f.host.close();
   const capabilities = new CapabilityRegistry();
   const ownerMessages: string[] = [];
-  const slack = { sessionMcp: () => undefined, coordinatorSessionIds: () => [],
+  const slack = { withOwnerTurnAdmission: <T>(admit: () => Promise<T>) => admit(), sessionMcp: () => undefined, coordinatorSessionIds: () => [],
     ownerChat: async (_id: string, prompt: string) => { ownerMessages.push(prompt); return { prompt };  } } as unknown as SlackService;
   const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, capabilities, slack });
   t.after(() => host.close());
@@ -1409,7 +1417,10 @@ test('worker records a verified calling turn without treating its message as own
   f.finish();
   await until(() => f.runs.list().find(run => run.id === parent.id)?.status === 'completed');
   await assert.rejects(client.enqueue(f.session.id, 'Expired', {}, { callerCapability: token }), { kind: 'forbidden' });
-  const saved = await readFile(join(f.stateDir, 'runs.json'), 'utf8');
+  // Completion is published before its ordered save finishes; export only after the owner is quiet.
+  await until(() => !f.runs.busy());
+  await f.runs.flushState();
+  const saved = JSON.stringify((await fixtureDocuments(f.runs)).runs);
   assert.equal(saved.includes(token), false, 'credentials never enter persisted run history');
   assert.ok(saved.includes(parent.id));
 });
@@ -1611,7 +1622,8 @@ async function triggerHandoff(t: test.TestContext, inject: HandoffInjection = {}
     enqueue: async (sessionId, prompt, request, internal) => { enqueues++; await gate; if (inject.submitDelayMs) await new Promise(resolve => setTimeout(resolve, inject.submitDelayMs)); return f.runs.enqueue(sessionId, prompt, request, internal); },
     runs: () => f.runs.list(), session: id => f.runs.getSession(id),
   };
-  const engine = () => new TriggerService({ stateDir: f.stateDir, executor, tickMs: 3_600_000 });
+  await importFixtureTriggers(f.runs.sqlFixture());
+  const engine = () => new TriggerService({ storage: f.runs.sqlFixture(), stateDir: f.stateDir, executor, tickMs: 3_600_000 });
   let first: TriggerService;
   try {
     await f.host.close();
@@ -1665,11 +1677,10 @@ async function nothingLeft(h: Awaited<ReturnType<typeof triggerHandoff>>) {
   const release = await acquireStateLock(f.paths.runtime, 0);
   await release();
   assert.deepEqual(h.engines().map(item => item.inFlight()), h.engines().map(() => false));
-  const file = join(f.stateDir, 'trigger-engine.json');
-  const before = await readFile(file, 'utf8');
+  const before = await fixtureTriggerText(f.runs);
   const enqueues = h.enqueues();
   await new Promise(resolve => setTimeout(resolve, 300));
-  assert.equal(await readFile(file, 'utf8'), before, 'nothing writes the engine file after cleanup');
+  assert.equal(await fixtureTriggerText(f.runs), before, 'nothing writes the engine state after cleanup');
   assert.equal(h.enqueues(), enqueues, 'nothing is submitted after cleanup');
 }
 
@@ -1919,27 +1930,27 @@ test('temporary cleanup failure remains visible without blocking native retentio
 
 test('actual SDK thread exit holds new work while the active fake provider and diagnostic RPC survive; explicit failed reopen never resends', async t => {
   let diagnosis: WorkerStorageStatus = { state: 'ready', code: 'ready', reason: 'ready', admissionOpen: true, sessionsAvailable: true, healthStatus: 200 };
-  let database: Awaited<ReturnType<typeof storage.openStorage>>;
+  let database!: import('../../../server/storage/client.js').StorageClient;
   const f = await fixture(false, false, undefined, undefined, async ({ runs }) => {
+    database = runs.sqlFixture();
     return { storage: () => diagnosis, retryStorage: async () => {
       try { await database.reopen(); await database.prepare({ allowMigration: false }); if ((await database.gate('core')).open) { diagnosis = { ...diagnosis, state: 'ready', admissionOpen: true }; runs.releaseStorage(); } }
       catch { /* The SDK's typed failure stays in its unavailable callback. */ }
       return diagnosis;
-    }, closeStorage: async () => { await database?.close(); } };
-  }); t.after(f.cleanup);
-  database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle(), onUnavailable: status => {
-    f.runs.holdStorage();
+    }, closeStorage: async () => { await stopFixtureWriter(runs); await database.close(); } };
+  }, { onUnavailable: (status, runs) => {
+    runs.holdStorage();
     diagnosis = { ...diagnosis, state: 'unavailable', code: status.failure?.code ?? 'unknown', reason: status.failure?.message ?? 'unknown', admissionOpen: false, healthStatus: 503, failure: status.failure };
-    f.runs.emit('change');
-  } });
-  t.after(() => database.close());
-  await database.prepare({ allowMigration: true });
+    runs.emit('change');
+  } }); t.after(f.cleanup);
+  assert.equal(database, f.runs.sqlFixture(), 'fault and run owner share the same SDK');
+  assert.deepEqual(database.context!.manifest.domains.map(domain => domain.scope).sort(), ['retention', 'runs', 'triggers', 'permissions', 'remote', 'auto-prompt', 'automation-workflows', 'fixture'].sort());
   const client = await f.connect();
   const run = await client.enqueue(f.session.id, 'accepted exactly once', {}, { origin: { kind: 'owner' } });
   await until(() => f.starts() === 1);
   const accepted = await client.enqueue(f.session.id, 'queued before failure', {}, { origin: { kind: 'owner' } });
   await assert.rejects(database.write('fixture', 'putThenDie', { key: 'unknown' }, 'consumer-unknown'), (error: unknown) => {
-    assert.ok(error instanceof storage.StorageCommandError); assert.equal(error.disposition, 'unknown'); return true;
+    assert.ok(error instanceof fixtureCommandError(database)); assert.equal(error.code, 'thread-exited'); assert.equal(error.disposition, 'unknown'); return true;
   });
   await until(() => client.storageStatus()?.state === 'unavailable');
   assert.equal(f.cancels(), 0);
@@ -1959,8 +1970,15 @@ test('actual SDK thread exit holds new work while the active fake provider and d
   assert.deepEqual(client.list().map(item => [item.id, item.status]), before.map(item => [item.id, item.status]));
   await rename(preserved, databasePath(f.stateDir));
   await database.reopen();
+  await database.prepare({ allowMigration: false });
   assert.equal((await database.receipt('consumer-unknown')).found, true, 'the unknown commit is looked up, never resent');
   assert.equal(f.starts(), 1);
+  await until(() => !f.runs.busy());
+  await f.close();
+  assert.equal(database.status().state, 'closed');
+  assert.equal(f.runs.fixtureIsClosed(), true);
+  assert.equal(f.cancels(), 0);
+  assert.equal(f.runs.list().find(item => item.id === accepted.id)?.status, 'queued');
 });
 
 
@@ -1971,9 +1989,7 @@ test('storage-held queued work and paused workflow references hand off patiently
     const release = await acquireStateLock(paths.runtime, 0);
     return { releaseStateLock: async () => { await release(); order.push('lock-release'); } };
   }); t.after(f.cleanup);
-  const database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle() });
-  t.after(() => database.close());
-  await database.prepare({ allowMigration: true });
+  const database = f.runs.sqlFixture();
   let handed = false;
   const client = await f.connect();
   const first = await client.enqueue(f.session.id, 'accepted', {}, { origin: { kind: 'owner' } });
@@ -1984,7 +2000,7 @@ test('storage-held queued work and paused workflow references hand off patiently
   f.host.activate({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, storage: () => storageStatus,
     inFlight: () => true, transient: () => false,
     quiesce: async () => { await f.sessions.quiesce(); await f.runs.flushState(); order.push('durable-flush'); },
-    closeStorage: async () => { const result = await database.close(); assert.ok(['closed', 'already-closed'].includes(result.ack)); order.push('db-close-ack'); },
+    closeStorage: async () => { await stopFixtureWriter(f.runs); const result = await database.close(); assert.ok(['closed', 'already-closed'].includes(result.ack)); order.push('db-close-ack'); },
     startSuccessor: () => { order.push('successor'); handed = true; } });
   assert.equal(await client.requestHandoff(true, { patient: true }), true);
   await new Promise(resolve => setTimeout(resolve, 1200));
@@ -2038,6 +2054,7 @@ test('idle close keeps diagnosis and the runtime lock when close ACK is refused;
       closeStorage: async () => {
         if (fail) throw new Error('fixture close ACK unavailable');
         if (database) {
+          await stopFixtureWriter(f.runs);
           const result = await database.close();
           assert.ok(['closed', 'already-closed'].includes(result.ack));
         }
@@ -2045,9 +2062,7 @@ test('idle close keeps diagnosis and the runtime lock when close ACK is refused;
       onCloseFailure: () => { diagnosed++; }, releaseStateLock: async () => { await release(); released++; } };
   }); t.after(f.cleanup);
   try {
-    database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle() });
-    t.after(() => database.close());
-    await database.prepare({ allowMigration: true });
+    database = f.runs.sqlFixture();
     const client = await f.connect();
     await assert.rejects(f.host.close(true), /close ACK unavailable/);
     assert.equal(released, 0); assert.equal(diagnosed, 1);
@@ -2081,10 +2096,9 @@ test('storage patient handoff keeps legacy PTY RPC pending until owner closes it
   const legacy = new WorkspaceTerminals({ spawnPty: () => legacyPty, keepAliveOnDisconnect: true });
   const independent = new WorkspaceTerminals({ spawnPty: () => independentPty, keepAliveOnDisconnect: true });
   const terminalHost = await startTerminalHost({ stateDir: f.stateDir, terminals: independent });
-  const database = await storage.openStorage({ stateDir: f.stateDir, bundle: await fixtureBundle() });
-  await database.prepare({ allowMigration: true });
+  const database = f.runs.sqlFixture();
   const shells: TerminalHostClient[] = [];
-  t.after(async () => { for (const shell of shells) shell.dispose(); await database.close(); await terminalHost.close(); independent.dispose(); legacy.dispose(); await f.cleanup(); });
+  t.after(async () => { for (const shell of shells) shell.dispose(); await terminalHost.close(); independent.dispose(); legacy.dispose(); await f.cleanup(); });
   const terminal = new TerminalHostClient({ stateDir: f.stateDir, hostEntry: '/fixture/must-not-spawn.mjs' }); shells.push(terminal);
   const hosted = await terminal.create(f.directory, 80, 24);
   const old = await legacy.create(f.directory, 80, 24);
@@ -2092,7 +2106,7 @@ test('storage patient handoff keeps legacy PTY RPC pending until owner closes it
   f.runs.holdStorage();
   f.host.activate({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, terminals: legacy,
     storage: () => ({ state: 'unavailable', code: 'held', reason: 'fixture', admissionOpen: false, sessionsAvailable: true, healthStatus: 503 }),
-    closeStorage: async () => { await database.close(); }, startSuccessor: () => { handed = true; } });
+    closeStorage: async () => { await stopFixtureWriter(f.runs); await database.close(); }, startSuccessor: () => { handed = true; } });
   const client = await f.connect();
   await client.requestHandoff(true, { patient: true });
   await client.terminals.input(old.id, 'legacy still attached');

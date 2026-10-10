@@ -96,6 +96,8 @@ interface RunnerOptions {
 }
 /** Internal admission data is never accepted from the public message endpoint. */
 export interface RunAdmission {
+  /** Only local session triggers; committed with the fresh run and the runs receipt. */
+  triggerLink?: import('../triggers/storage-commands.js').TriggerAdmissionLink;
   heartbeat?: HeartbeatAdmission;
   autoPromptId?: string;
   validate?: () => void;
@@ -142,6 +144,9 @@ export class RunManager extends EventEmitter {
   private readonly autoAttachments: AttachmentStore;
   private readonly registry = new CreatedSessionRegistry({ native: id => this.options.getSession(id), persist: () => this.persist() });
   private readonly runs = new Map<string, Run>();
+  private readonly touchedRuns = new Set<string>();
+  private retainedMarkers = new Set<string>();
+  private touch(...ids: string[]): void { for (const id of ids) this.touchedRuns.add(id); }
   private readonly answers = new OwnerAnswers();
   private readonly owned = new Map<string, OwnedProcess>();
   private readonly bridged = new Map<string, CodexBridgeRun>();
@@ -228,7 +233,7 @@ export class RunManager extends EventEmitter {
   }
   private retentionWait(run: Run): boolean {
     if (!this.retentionHeld(run.sessionId)) return false;
-    run.output = 'Waiting for session cold storage maintenance.'; this.changed(); return true;
+    run.output = 'Waiting for session cold storage maintenance.'; this.changed(run); return true;
   }
 
   /** CLIs being updated: none of their runs start until the update is done. */
@@ -247,7 +252,8 @@ export class RunManager extends EventEmitter {
   private readonly drain = new UpdateDrain({
     runs: this.runs, bridged: this.bridged, ownerStopped: id => this.ownerStopped.has(id), stopping: () => this.stopping,
     steer: (runId, options) => this.steer(runId, options), cancel: (runId, reason) => this.cancel(runId, reason),
-    changed: () => this.changed(), pump: () => { void this.pump(); },
+    changed: (...runs) => this.changed(...runs), pump: () => { void this.pump(); },
+    touch: (...ids) => this.touch(...ids),
     mergePermission: (run, notice, wait) => this.permissions.mergeIntoUpdate(run, notice, wait),
   });
   private storageHeld = false;
@@ -282,7 +288,7 @@ export class RunManager extends EventEmitter {
     const manager = this;
     this.turnHost = {
       get options() { return manager.options; }, registry: this.registry, attachments: this.attachments, notes: this.notes,
-      changed: () => this.changed(), append: (run, text) => this.append(run, text), notifyOutput: () => this.notifyOutput(), flush: () => this.flush(), persistNativeIdentity: run => this.persistNativeIdentity(run),
+      changed: (...runs) => this.changed(...runs), touch: run => this.touch(run.id), append: (run, text) => this.append(run, text), notifyOutput: run => { this.touch(run.id); this.notifyOutput(); }, flush: () => this.flush(), persistNativeIdentity: run => this.persistNativeIdentity(run),
       stopping: () => this.stopping, updating: () => this.updating, stop: (id, owned) => this.stopOwned(id, owned),
       prepareLaunch: run => this.prepareLaunch(run), refusedAtLaunch: (run, session) => this.refusedAtLaunch(run, session),
       release: sessionId => { this.reservedSessions.delete(sessionId); }, exited: exit => this.exited(exit),
@@ -319,14 +325,14 @@ export class RunManager extends EventEmitter {
     if (this.updating && run.status === 'queued') {
       if (run.output !== UPDATE_WAIT) run.output = UPDATE_WAIT;
       this.reservedSessions.delete(session.id);
-      this.changed();
+      this.changed(run);
       return true;
     }
     const reason = run.status === 'queued' ? this.launchGate?.(run) : undefined;
     if (!reason) return false;
     run.status = 'cancelled'; run.error = reason; run.finishedAt = new Date().toISOString();
     this.reservedSessions.delete(session.id);
-    this.changed();
+    this.changed(run);
     return true;
   }
 
@@ -353,7 +359,8 @@ export class RunManager extends EventEmitter {
 
   private readonly permissions = new PermissionContinuations({
     runs: this.runs, events: this, getSession: id => this.getSession(id), supersede: (run, reason) => this.supersede(run, reason),
-    steer: (runId, options) => this.steer(runId, options), changed: () => this.changed(), flush: () => this.flush(), pump: () => { void this.pump(); },
+    steer: (runId, options) => this.steer(runId, options), changed: (...runs) => this.changed(...runs), flush: () => this.flush(), pump: () => { void this.pump(); },
+    touch: (...ids) => this.touch(...ids),
     stopping: () => this.stopping, admit: id => { this.admissions.add(id); }, unadmit: id => { this.admissions.delete(id); },
     latestUserMessage: id => this.options.latestUserMessage?.(id), shown,
   });
@@ -437,6 +444,8 @@ export class RunManager extends EventEmitter {
       this.uncertainPrepared.delete(id); this.uncertainAdmissions.delete(id); this.admissions.delete(id);
       this.unsentSteering.delete(id);
     }
+    this.touch(...resolved.touchedRunIds, ...runIds);
+    for (const id of resolved.touchedCreatedIds) this.registry.touch(id);
     this.changed();
     // Queue the current identity before waking waiters: this receipt may cover an older projection.
     for (const waiter of [...this.nativeIdentityWaiters.values()]) if (waiter.commandId === commandId) {
@@ -452,13 +461,14 @@ export class RunManager extends EventEmitter {
     await mkdir(this.options.stateDir ?? defaultStateDir(), { recursive: true, mode: 0o700 });
     await this.attachments.start();
     const saved = await this.history.readCreated();
-    if (saved !== undefined) this.history.noteCreated(this.registry.load(saved));
+    if (saved !== undefined) this.registry.load(saved);
     for (const run of await this.history.restore()) {
-      this.runs.set(run.id, run);
+      this.runs.set(run.id, run); this.touch(run.id);
       // No transport from the predecessor remains for an already terminal history item.
       // Unread results and approvals have their own retention protection; native activity is checked separately.
       if (FINISHED.has(run.status) && !run.approvals?.length && !run.backgroundWait) this.settledRuns.add(run.id);
     }
+    this.touch(...this.history.storedRunIds(), ...this.runs.keys());
     this.started = true;
     // Without a worker to load the automations later, the retained runs are whatever they report from now on.
     if (this.ready) this.history.restoredRetained.clear();
@@ -522,6 +532,7 @@ export class RunManager extends EventEmitter {
   }
 
   async create(input: CreateSessionRequest, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
+    if (internal.triggerLink) throw notAdmitted(new RunError('Atomic trigger admission only continues local sessions.','forbidden'));
     if (internal.heartbeat) throw notAdmitted(new RunError('Heartbeat cannot create sessions.', 'forbidden'));
     const incoming = Array.isArray(input.attachmentIds) ? input.attachmentIds.filter(id => typeof id === 'string') : [];
     this.incomingAttachments.add(incoming);
@@ -563,10 +574,10 @@ export class RunManager extends EventEmitter {
         ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
       // Provenance commits with the session identity, before any provider starts.
       this.registry.add(input, id, input.provider === 'claude' ? uuid : '', run, title, origin, internal.untrustedInput === true);
-      this.runs.set(run.id, run);
+      this.runs.set(run.id, run); this.touch(run.id);
       this.admissions.add(run.id);
       this.prune();
-      this.changed();
+      this.changed(run);
       try {
         // The run is already registered, so a concurrent request with the same ID is refused while this waits.
         // Only an admitted request answers the native trust prompt; a refused one leaves settings untouched.
@@ -682,14 +693,18 @@ export class RunManager extends EventEmitter {
         ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),
         ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}) };
       if (internal.heartbeat) run.heartbeatRootRunId = run.id;
+      if (internal.triggerLink) {
+        try { this.history.linkTrigger(run.id,internal.triggerLink); }
+        catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
+      }
       this.admissions.add(run.id);
-      this.runs.set(run.id, run);
+      this.runs.set(run.id, run); this.touch(run.id);
       this.prune();
-      this.changed();
+      this.changed(run);
       try { await this.flush(); } // An accepted instruction is durable before launching the provider.
       catch (error) {
         if (admissionUncertain(error)) { this.uncertainAdmissions.add(run.id); this.uncertainPrepared.set(run.id, { createdIds: prepared.createdIds }); throw error; }
-        this.runs.delete(run.id); this.changed(); await this.attachments.rollback(prepared.createdIds); throw error;
+        this.history.forgetTrigger(run.id); this.runs.delete(run.id); this.touch(run.id); this.changed(run); await this.attachments.rollback(prepared.createdIds); throw error;
       }
       finally { if (!this.uncertainAdmissions.has(run.id)) this.admissions.delete(run.id); }
       await this.retainAttachments(run);
@@ -762,7 +777,7 @@ export class RunManager extends EventEmitter {
       if (!current || current.target !== selected.target || current.adapter !== selected.adapter || (options.whileWaiting && !current.target.backgroundWait)) throw new SteeringError('The active turn changed before delivery.', 'rejected');
       run.status = 'running'; run.startedAt = new Date().toISOString(); run.output = '';
       run.steering = { targetRunId: selected.target.id, state: 'sending', requestedAt: run.startedAt };
-      this.changed();
+      this.changed(run);
       await this.flush();
       if (this.storageHeld || this.pendingAdmission()) throw new SteeringError('Storage held before delivery.', 'rejected');
       if (this.stopping || selected.target.status !== 'running' || !selected.adapter.canSteer?.()) throw new SteeringError('The active turn finished before delivery.', 'rejected');
@@ -783,7 +798,7 @@ export class RunManager extends EventEmitter {
       const sending = selected.adapter.steer!({ id: run.id, prompt, imagePaths: imagePaths(attachments) });
       // Codex takes one insert at a time: other queued instructions show they wait for this one. Its outcome is
       // recorded even if telling the page fails.
-      try { this.changed(); } finally { await sending; }
+      try { this.changed(run); } finally { await sending; }
       await this.settleSteer(run, selected.target.id);
       return this.list().find(item => item.id === runId)!;
     } catch (error) {
@@ -809,7 +824,7 @@ export class RunManager extends EventEmitter {
       run.steering.state = 'uncertain'; run.status = 'error'; run.finishedAt = new Date().toISOString();
       run.error = `Delivery could not be confirmed. Check the conversation before sending again. ${errorMessage(error)}`;
     }
-    this.changed();
+    this.changed(run);
     try { await this.flush(); } finally { this.owned.get(targetRunId)?.finishInput?.(); }
   }
 
@@ -819,9 +834,9 @@ export class RunManager extends EventEmitter {
     if (!run) throw new RunError('Task not found.', 'not-found');
     if (FINISHED.has(run.status)) return;
     if (run.steering) throw new RunError('An inserted instruction belongs to the active turn. Stop the active turn instead.', 'conflict');
-    const noted = () => { if (reason && run.status === 'cancelled' && run.error !== reason) { run.error = reason; this.changed(); } };
+    const noted = () => { if (reason && run.status === 'cancelled' && run.error !== reason) { run.error = reason; this.changed(run); } };
     // Stopped by the owner, not by the update's deadline: the update does not bring the work back.
-    if (!reason) { this.ownerStopped.add(runId); run.ownerStopped = true; this.changed(); }
+    if (!reason) { this.ownerStopped.add(runId); run.ownerStopped = true; this.changed(run); }
     this.nativeIdentityWaiters.get(runId)?.settle(false);
     const bridge = this.bridged.get(runId);
     if (bridge) {
@@ -842,7 +857,7 @@ export class RunManager extends EventEmitter {
     const owned = this.owned.get(runId);
     owned?.claude?.close();
     if (owned) this.stopOwned(runId, owned);
-    this.changed();
+    this.changed(run);
     await this.flush();
   }
 
@@ -911,6 +926,7 @@ export class RunManager extends EventEmitter {
         run.status = 'cancelled';
         run.finishedAt = new Date().toISOString();
         run.error = 'Stopped when Agent Session Tower shut down. This task will not restart automatically.';
+        this.touch(run.id);
       }
     }
     const processes = [...this.owned.entries()];
@@ -924,7 +940,7 @@ export class RunManager extends EventEmitter {
         try { await bridge.cancel(); }
         catch {
           const run = this.runs.get(id);
-          if (run) { run.status = 'error'; run.error = 'Codex 앱과 연결이 끊어져 중지 여부를 확인하지 못했습니다. 원래 앱에서 작업 상태를 확인하세요. 이 요청은 자동 재전송하지 않습니다.'; }
+          if (run) { this.touch(run.id); run.status = 'error'; run.error = 'Codex 앱과 연결이 끊어져 중지 여부를 확인하지 못했습니다. 원래 앱에서 작업 상태를 확인하세요. 이 요청은 자동 재전송하지 않습니다.'; }
         } finally { bridge.close(); }
       }),
     ]);
@@ -988,12 +1004,12 @@ export class RunManager extends EventEmitter {
         if (run.status !== 'queued' || this.admissions.has(run.id) || this.stopping || this.storageHeld || this.retentionWait(run)) continue;
         const refused = this.launchGate?.(run);
         if (refused) {
-          run.status = 'cancelled'; run.error = refused; run.finishedAt = new Date().toISOString(); this.changed();
+          run.status = 'cancelled'; run.error = refused; run.finishedAt = new Date().toISOString(); this.changed(run);
           continue;
         }
         if (automated(run) && [...this.runs.values()].filter(item => item.status === 'running' && automated(item)).length >= this.automationLimit) {
           const reason = 'Waiting: Slack and trigger work is already running at the limit set in Triggers.';
-          if (run.output !== reason) { run.output = reason; this.changed(); }
+          if (run.output !== reason) { run.output = reason; this.changed(run); }
           continue;
         }
         const session = this.getSession(run.sessionId);
@@ -1003,18 +1019,18 @@ export class RunManager extends EventEmitter {
           if (!creating) this.validateSession(session);
           if (this.isWorking(session) || this.reservedSessions.has(session.id)) {
             const reason = this.waitReason(session);
-            if (run.output !== reason) { run.output = reason; this.changed(); }
+            if (run.output !== reason) { run.output = reason; this.changed(run); }
             continue;
           }
           // Looked at in the same step as the reservation below, so a switch to a new worker and a launch never cross.
           if (this.updating) {
-            if (run.output !== UPDATE_WAIT) { run.output = UPDATE_WAIT; this.changed(); }
+            if (run.output !== UPDATE_WAIT) { run.output = UPDATE_WAIT; this.changed(run); }
             continue;
           }
           // Looked at in the same step as the reservation below, so an update's hold and a launch never cross.
           if (this.heldProviders.has(session.provider)) {
             const reason = `Waiting: ${session.provider === 'claude' ? 'Claude Code' : 'Codex'} is being updated to its latest version; this starts right after.`;
-            if (run.output !== reason) { run.output = reason; this.changed(); }
+            if (run.output !== reason) { run.output = reason; this.changed(run); }
             continue;
           }
           this.reservedSessions.add(session.id);
@@ -1024,7 +1040,7 @@ export class RunManager extends EventEmitter {
             if (!creating && session.provider === 'codex' && this.getSession(session.id)?.activeProcess) {
               this.reservedSessions.delete(session.id);
               const reason = this.waitReason(session);
-              if (run.output !== reason) { run.output = reason; this.changed(); }
+              if (run.output !== reason) { run.output = reason; this.changed(run); }
               continue;
             }
             await this.launch(run, session, creating);
@@ -1039,7 +1055,7 @@ export class RunManager extends EventEmitter {
       // A failed refresh must never allow a write based on stale activity data.
       if (admissionUncertain(error)) { this.holdStorage(); return; }
       for (const run of this.runs.values()) if (run.status === 'queued') {
-        run.output = `Waiting for session activity to refresh: ${errorMessage(error)}`;
+        run.output = `Waiting for session activity to refresh: ${errorMessage(error)}`; this.touch(run.id);
       }
       this.changed();
     } finally { this.pumping = false; }
@@ -1162,9 +1178,9 @@ export class RunManager extends EventEmitter {
         else {
           run.status = 'completed'; run.finishedAt = new Date().toISOString();
           if (summary.wakeup && !this.stopping) this.scheduleContinuation(run, summary.wakeup);
-          this.changed();
+          this.changed(run);
         }
-      } else this.changed();
+      } else this.changed(run);
       exit.finish();
       if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
     } else if (exit.kind === 'codex') {
@@ -1177,7 +1193,7 @@ export class RunManager extends EventEmitter {
       if (!FINISHED.has(run.status)) {
         run.status = result.status; run.error = result.error; run.finishedAt = result.finishedAt ?? new Date().toISOString();
       }
-      this.changed();
+      this.changed(run);
       if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
     } else if (exit.kind === 'bridge') {
       const { result, started } = exit;
@@ -1186,7 +1202,7 @@ export class RunManager extends EventEmitter {
       // Taken back out of the app's queue before it started: it waits in Tower's queue for the new worker.
       if ((result.withdrawn || exit.heldForUpdate) && !started && run.status === 'queued' && !this.ownerStopped.has(run.id)) {
         run.output = UPDATE_WAIT; delete run.towerTools;
-        this.changed();
+        this.changed(run);
         return;
       }
       // A lost shared connection does not prove the native turn stopped.
@@ -1196,7 +1212,7 @@ export class RunManager extends EventEmitter {
       }
       if (!FINISHED.has(run.status)) {
         run.status = result.status; run.error = result.error; run.finishedAt = new Date().toISOString();
-        this.changed();
+        this.changed(run);
       }
       if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
     } else {
@@ -1227,9 +1243,9 @@ export class RunManager extends EventEmitter {
       run.output = 'Tower will resume unfinished background work after an unexpected provider exit.';
       this.append(after, `\n[Tower] Scheduled background recovery ${backgroundRecoveryAttempt}/3.\n`);
     }
-    this.runs.set(run.id, run);
+    this.runs.set(run.id, run); this.touch(run.id);
     this.prune();
-    this.changed();
+    this.changed(run);
   }
 
   /** The owner asked Tower to switch to its new version now (see UpdateDrain). */
@@ -1249,7 +1265,7 @@ export class RunManager extends EventEmitter {
 
   private supersede(run: Run, reason: string): void {
     run.status = 'cancelled'; run.finishedAt = new Date().toISOString(); run.output = `Scheduled continuation not started: ${reason}`;
-    this.changed();
+    this.changed(run);
   }
 
   /** Work that is live, or will start within `withinMs`. A continuation due later waits in saved state for any worker. */
@@ -1276,11 +1292,12 @@ export class RunManager extends EventEmitter {
 
   private fail(run: Run, error: unknown): void {
     if (run.status === 'cancelled') return;
-    run.status = 'error'; run.error = errorMessage(error); run.finishedAt = new Date().toISOString(); this.changed();
+    run.status = 'error'; run.error = errorMessage(error); run.finishedAt = new Date().toISOString(); this.changed(run);
   }
 
   private append(run: Run, value: string): void {
     run.output = (run.output + value).slice(-MAX_OUTPUT);
+    this.touch(run.id);
     this.notifyOutput();
   }
 
@@ -1308,13 +1325,14 @@ export class RunManager extends EventEmitter {
     this.outputPersistTimer = undefined;
   }
 
-  private changed(): void {
+  private changed(...changedRuns: Run[]): void {
+    this.touch(...changedRuns.map(run => run.id));
     for (const run of this.runs.values()) {
       if (run.status !== 'running' || run.steering?.state !== 'delivered') continue;
       const target = this.runs.get(run.steering.targetRunId);
       if (target && FINISHED.has(target.status)) {
         run.status = target.status; run.finishedAt = target.finishedAt; run.error = target.error;
-        this.settledRuns.add(run.id);
+        this.settledRuns.add(run.id); this.touch(run.id);
       }
     }
     this.drain.track();
@@ -1327,7 +1345,7 @@ export class RunManager extends EventEmitter {
   private prune(retained = this.retainedIds()): void {
     // The runs that finished longest ago go first: a long turn that just finished is still read by its watchers.
     const finished = [...this.runs.values()].filter(run => FINISHED.has(run.status) && !retained.has(run.id) && !this.history.reservingAdmission(run.id) && !this.admissions.has(run.id)).sort((a, b) => finishedTime(a) - finishedTime(b));
-    for (const run of finished.slice(0, Math.max(0, finished.length - MAX_RUNS))) { this.runs.delete(run.id); this.settledRuns.delete(run.id); }
+    for (const run of finished.slice(0, Math.max(0, finished.length - MAX_RUNS))) { this.runs.delete(run.id); this.touch(run.id); this.settledRuns.delete(run.id); }
     for (const id of this.ownerStopped) if (!this.runs.has(id) || FINISHED.has(this.runs.get(id)!.status)) this.ownerStopped.delete(id);
   }
 
@@ -1335,8 +1353,22 @@ export class RunManager extends EventEmitter {
     // This save includes any streamed output that was waiting for its slower cadence.
     this.cancelOutputPersist();
     // A wrap-up request is never carried: after a restart it would start as a turn of its own.
-    if (this.updating || this.storageHeld) for (const run of this.runs.values()) if (run.status === 'queued' && !run.scheduled && !this.drain.isWrapUp(run.id)) this.history.carried.add(run.id);
-    this.history.save(this.runs, this.list(), this.registry.serialize(), retained);
+    if (this.updating || this.storageHeld) for (const run of this.runs.values()) if (run.status === 'queued' && !run.scheduled && !this.drain.isWrapUp(run.id)) if (!this.history.carried.has(run.id)) { this.history.carried.add(run.id); this.touch(run.id); }
+    // Marker changes are explicit set operations, independent of run-state observation.
+    for (const id of retained) if (!this.retainedMarkers.has(id)) this.touch(id);
+    for (const id of this.retainedMarkers) if (!retained.has(id)) this.touch(id);
+    this.retainedMarkers = new Set(retained);
+    const retry = this.history.retryRows();
+    this.touch(...retry.runIds);
+    for (const id of retry.createdIds) this.registry.touch(id);
+    const ids = [...this.touchedRuns]; this.touchedRuns.clear();
+    const createdIds = this.registry.takeTouched();
+    this.history.saveRows({
+      runs: ids.flatMap(id => { const run = this.runs.get(id); return run ? [run] : []; }),
+      deleted: ids.filter(id => !this.runs.has(id)),
+      created: createdIds.flatMap(id => { const row = this.registry.records.get(id); return row ? [row] : []; }),
+      deletedCreated: createdIds.filter(id => !this.registry.records.has(id)), retained,
+    });
   }
 
   /** Waits for every accepted change to reach disk, without stopping or cancelling anything. */

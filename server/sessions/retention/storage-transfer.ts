@@ -1,3 +1,4 @@
+import { checkStorageActivation, type OfflineActivationOwner } from '../../link/storage-offline.js';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, opendir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
@@ -41,6 +42,18 @@ async function privateFolder(path: string): Promise<void> {
   const info = await lstat(absolute);
   if (info.uid !== process.getuid?.() || info.mode & 0o077) throw new Error('Retention evidence directory must be owner-only.');
 }
+export async function holdRetentionEvidence(stateDir: string): Promise<void> {
+  const evidenceParent = join(stateDir, 'storage-migrations');
+  let evidenceExists = false;
+  try { await lstat(evidenceParent); evidenceExists = true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  if (evidenceExists) {
+    await privateFolder(evidenceParent);
+    const evidenceDirectory = await opendir(evidenceParent);
+    try { if (await evidenceDirectory.read()) throw new Error('Retention import evidence exists without authority; explicit owner recovery required.'); }
+    finally { await evidenceDirectory.close(); }
+  }
+}
 async function seal(parent: string, id: string, files: Record<string, Buffer>, facts: Record<string, unknown>): Promise<{ directory: string; manifestSha256: string }> {
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw new Error('Invalid retention evidence ID.');
   await privateFolder(parent);
@@ -64,7 +77,7 @@ async function seal(parent: string, id: string, files: Record<string, Buffer>, f
 export interface RetentionImportInput {
   storage: StorageClient; stateDir: string; evidenceParent: string; commandId?: string;
   /** The actual shared evaluator input, using this client's captured build/preflight and existing artifact probe. */
-  update: StorageUpdateInput;
+  update: StorageUpdateInput; activation?: OfflineActivationOwner;
   /** Same bootstrap owner retains uncertain writes across explicit startup retries. */
   repository?: RetentionRepository;
 }
@@ -78,7 +91,7 @@ export async function importRetention(input: RetentionImportInput): Promise<{ di
   if (!domain?.cutover) throw Object.assign(new Error('Retention preparation has no cutover contract.'), { storageCode: 'no-cutover-contract' });
   if (input.update.stateDir !== input.stateDir || input.update.build.preflight.identity?.sourceHash !== context!.identity.sourceHash || input.update.build.manifest?.digest !== context!.manifest.digest || input.update.build.version !== context!.identity.appVersion) throw new Error('Retention import update evidence is for another captured build.');
   const check = async () => {
-    const evaluation = await evaluateStorageUpdate(input.update);
+    const evaluation = await checkStorageActivation(input.activation ? { kind: 'offline', owner: input.activation, update: input.update, storage: input.storage } : { kind: 'normal', update: input.update }, 'retention');
     if (!evaluation.importAllowed || evaluation.verdict !== 'ready') throw new Error(`Retention import held: ${evaluation.code}: ${evaluation.reason}`);
     await repository.gate();
   };
@@ -117,15 +130,7 @@ export function retentionBootstrap(storage: StorageClient, stateDir: string, upd
     const evidenceParent = join(stateDir, 'storage-migrations');
     // A sealed attempt survives a worker crash even without a final receipt/marker.
     // Preparation-only builds must keep the same recovery hold before JSON fallback.
-    let evidenceExists = false;
-    try { await lstat(evidenceParent); evidenceExists = true; }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    if (evidenceExists) {
-      await privateFolder(evidenceParent);
-      const evidenceDirectory = await opendir(evidenceParent);
-      try { if (await evidenceDirectory.read()) throw new Error('Retention import evidence exists without authority; explicit owner recovery required.'); }
-      finally { await evidenceDirectory.close(); }
-    }
+    await holdRetentionEvidence(stateDir);
     if (!domain?.cutover) {
       // Known legacy history cannot become an empty journal through ENOENT fallback.
       if (await retentionLegacyFiles(stateDir, 'retention') === 'present') {

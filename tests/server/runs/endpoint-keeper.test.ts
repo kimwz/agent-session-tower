@@ -12,8 +12,10 @@ const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function files(t: test.TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-endpoint-keeper-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  return { socket: join(directory, 'rpc.sock'), token: join(directory, 'token'), value: 'a'.repeat(64) };
+  let stop: (() => Promise<void>) | undefined;
+  t.after(async () => { await stop?.(); await rm(directory, { recursive: true, force: true }); });
+  return { socket: join(directory, 'rpc.sock'), token: join(directory, 'token'), value: 'a'.repeat(64),
+    own: (writer: () => Promise<void>) => { stop = writer; return writer; } };
 }
 
 test('files older than an hour are touched so /tmp cleaners keep them', async t => {
@@ -23,8 +25,7 @@ test('files older than an hour are touched so /tmp cleaners keep them', async t 
   const old = new Date(Date.now() - 4 * 24 * 60 * 60 * 1000);
   await utimes(f.token, old, old);
   await utimes(f.socket, old, old);
-  const stop = keepEndpoint(f, 10);
-  t.after(() => stop());
+  f.own(keepEndpoint(f, 10));
   const fresh = (path: string) => { const info = statSync(path); return Date.now() - info.mtimeMs < 60_000 && Date.now() - info.atimeMs < 60_000; };
   await until(() => fresh(f.token) && fresh(f.socket));
 });
@@ -32,7 +33,7 @@ test('files older than an hour are touched so /tmp cleaners keep them', async t 
 test('an existing credential is never replaced, and nothing is written once stopped', async t => {
   const f = await files(t);
   await writeFile(f.token, 'b'.repeat(64), { mode: 0o600 });
-  const stop = keepEndpoint(f, 10);
+  const stop = f.own(keepEndpoint(f, 10));
   await pause(60);
   assert.equal(await readFile(f.token, 'utf8'), 'b'.repeat(64));
   await stop();
@@ -48,13 +49,13 @@ test('stopping waits for a credential being written, so it never lands after the
   let started = false;
   let written = false;
   const missing = () => Promise.reject(Object.assign(new Error('gone'), { code: 'ENOENT' }));
-  const stop = keepEndpoint(f, 5, {
+  const stop = f.own(keepEndpoint(f, 5, {
     lstat: missing as never,
     utimes: (() => Promise.resolve()) as never,
     writeFile: (async () => { started = true; await writing; written = true; }) as never,
     link: (() => Promise.resolve()) as never,
     unlink: (() => Promise.resolve()) as never,
-  });
+  }));
   while (!started) await pause(5);
   let stopped = false;
   const stopping = stop().then(() => { stopped = true; });
@@ -68,14 +69,13 @@ test('stopping waits for a credential being written, so it never lands after the
 test('a credential that could not be written whole is never published, and the next check writes it', async t => {
   const f = await files(t);
   let failures = 1;
-  const stop = keepEndpoint(f, 10, {
+  const stop = f.own(keepEndpoint(f, 10, {
     ...fs,
     writeFile: (async (path: string, data: string, options: object) => {
       if (failures-- > 0) { await writeFile(path, data.slice(0, 10), options); throw Object.assign(new Error('no space'), { code: 'ENOSPC' }); }
       await writeFile(path, data, options);
     }) as never,
-  });
-  t.after(() => stop());
+  }));
   const content = await until(() => existsSync(f.token) && readFileSync(f.token, 'utf8'));
   assert.equal(content, f.value, 'only the whole credential appears');
   await stop();

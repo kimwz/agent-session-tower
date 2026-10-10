@@ -29,7 +29,58 @@ jobs:
       # Fails if this Node cannot run the lookup tests, so they are never silently skipped.
       - if: matrix.node == 24
         run: node --import tsx -e "import('./server/tower-tools/read-db.ts').then(m => { if (!m.lookupsSupported()) { console.error('no SQLite authorizer'); process.exit(1); } })"
-      - run: npm run check
+      - name: Capture the pinned genuine old worker inputs
+        shell: bash
+        env:
+          VALIDATION_ROOT: ${{ runner.temp }}/sqlite-general-old-fixtures
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir "$VALIDATION_ROOT"
+          mkdir -p "$VALIDATION_ROOT"/{home,codex,claude,config,cache,state,data,runtime,tmp,npm,reports}
+          TEST_TMP="$(mktemp -d /tmp/sv.XXXXXX)"
+          TEST_TMP="$(cd "$TEST_TMP" && pwd -P)"
+          printf '%s\n' "$TEST_TMP" > "$VALIDATION_ROOT/test-tmp.txt"
+          env -i PATH="$PATH" HOME="$VALIDATION_ROOT/home" \
+            CODEX_HOME="$VALIDATION_ROOT/codex" CLAUDE_CONFIG_DIR="$VALIDATION_ROOT/claude" \
+            XDG_CONFIG_HOME="$VALIDATION_ROOT/config" XDG_CACHE_HOME="$VALIDATION_ROOT/cache" \
+            XDG_STATE_HOME="$VALIDATION_ROOT/state" XDG_DATA_HOME="$VALIDATION_ROOT/data" \
+            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
+            TMP="$TEST_TMP" TEMP="$TEST_TMP" \
+            npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 NODE_OPTIONS=--max-old-space-size=4096 \
+            SQLITE_VALIDATION_CI=1 VALIDATION_ROOT="$VALIDATION_ROOT" \
+            TOWER_SQLITE_OLD122_ROOT="$VALIDATION_ROOT/old122" \
+            TOWER_SQLITE_OLD124_ROOT="$VALIDATION_ROOT/old124" \
+            /bin/bash --noprofile --norc <<'CAPTURE'
+          set -euo pipefail
+          umask 022
+          node scripts/sqlite-old124-capture.mjs 1.122.0
+          node scripts/sqlite-old124-capture.mjs 1.124.0
+          CAPTURE
+      - name: General tests
+        shell: bash
+        env:
+          VALIDATION_ROOT: ${{ runner.temp }}/sqlite-general-old-fixtures
+        run: |
+          set -euo pipefail
+          TEST_TMP="$(cat "$VALIDATION_ROOT/test-tmp.txt")"
+          # Capture and the full check share canonical private paths, without Actions credentials.
+          env -i PATH="$PATH" HOME="$VALIDATION_ROOT/home" \
+            CODEX_HOME="$VALIDATION_ROOT/codex" CLAUDE_CONFIG_DIR="$VALIDATION_ROOT/claude" \
+            XDG_CONFIG_HOME="$VALIDATION_ROOT/config" XDG_CACHE_HOME="$VALIDATION_ROOT/cache" \
+            XDG_STATE_HOME="$VALIDATION_ROOT/state" XDG_DATA_HOME="$VALIDATION_ROOT/data" \
+            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
+            TMP="$TEST_TMP" TEMP="$TEST_TMP" \
+            npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
+            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 NODE_OPTIONS=--max-old-space-size=4096 \
+            SQLITE_VALIDATION_CI=1 VALIDATION_ROOT="$VALIDATION_ROOT" \
+            TOWER_SQLITE_OLD122_ROOT="$VALIDATION_ROOT/old122" \
+            TOWER_SQLITE_OLD124_ROOT="$VALIDATION_ROOT/old124" \
+            /bin/bash --noprofile --norc <<'CHECK'
+          set -euo pipefail
+          umask 022
+          npm run check
+          CHECK
   test-integrity:
     # Lists removed tests, new skips and changed assertions for the reviewer; fails only on a new unconditional skip.
     if: github.event_name == 'pull_request'

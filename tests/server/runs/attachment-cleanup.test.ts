@@ -1,4 +1,5 @@
 import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
+import { externalStorageFixture, readAutoPromptFixture } from '../remote/external-storage-fixture.js';
 import assert from 'node:assert/strict';
 import fsPromises from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
@@ -14,10 +15,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager, fixtureDocuments, importFixtureRuns } from './sql-fixture.js';
 import { AutoPromptManager } from '../../../server/auto-prompt/manager.js';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
-import { storage, threadBundle } from '../storage/helpers.js';
 import type { Session, Snapshot } from '../../../shared/types.js';
 
 function gate<T = void>() { let resolve!: (value: T) => void; let reject!: (error: Error) => void; const promise = new Promise<T>((ok, fail) => { resolve = ok; reject = fail; }); return { promise, resolve, reject }; }
@@ -31,13 +31,15 @@ async function fixture(t: TestContext, executable?: () => Promise<string>) {
   const directory = await temporaryFixture('tower-cleanup-fixture-');
   const nativeId = randomUUID();
   const session: Session = { id: `codex:${nativeId}`, nativeId, provider: 'codex', cwd: directory, project: 'fixture', title: 'Fixture', status: 'idle', statusReason: '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 0, isSubagent: false, resumable: true };
-  const runs = new RunManager({ stateDir: directory, getSession: id => id === session.id ? session : undefined, refreshSessions: async () => {}, maxConcurrent: 0, findExecutable: executable ?? (async () => '/fixture/codex'), spawnProcess: () => { throw new Error('No native provider allowed'); } });
+  const owners = await externalStorageFixture(t, directory, true, 'normal', false);
+  await importFixtureRuns(owners.storage);
+  const runs = new RunManager({ storage: owners.storage, stateDir: directory, getSession: id => id === session.id ? session : undefined, refreshSessions: async () => {}, maxConcurrent: 0, findExecutable: executable ?? (async () => '/fixture/codex'), spawnProcess: () => { throw new Error('No native provider allowed'); } });
   await runs.start();
   const snapshot = (): Snapshot => ({ sessions: [session], runs: runs.list(), providers: [{ provider: 'codex', available: true, sessionCount: 1 }], scanning: false, updatedAt: session.updatedAt, hostname: 'fixture', version: 'test' });
-  const auto = new AutoPromptManager({ stateDir: directory, snapshot, detail: async () => undefined, refresh: async () => {}, runs, model: async () => { throw new Error('No native router allowed'); } }); await auto.start();
+  const auto = new AutoPromptManager({ repository: owners.autoPrompt, effectGate: owners.effectGate, stateDir: directory, snapshot, detail: async () => undefined, refresh: async () => {}, runs, model: async () => { throw new Error('No native router allowed'); } }); await auto.start(); await auto.startRuntimeEffects();
   const drains: Array<() => void> = [];
-  t.after(async () => { for (const drain of drains) drain(); await auto.close(); await runs.close(); await removeTemporaryFixture(directory); });
-  return { directory, session, runs, auto, snapshot, drains };
+  t.after(async () => { for (const drain of drains) drain(); await auto.close(); await runs.close(); await owners.storage.close(); await removeTemporaryFixture(directory); });
+  return { directory, session, runs, auto, snapshot, drains, storage: owners.storage, autoRepository: owners.autoPrompt, captured: owners.captured };
 }
 async function upload(store: AttachmentStore, scope: string) { const item = await store.upload(scope, 'fixture.txt', 'text/plain', (async function* () { yield Buffer.from('original'); })(), { pending: true }); await expire(store, item.id); return item; }
 
@@ -76,7 +78,7 @@ test('GC retains durable run references but only skips an admission before its d
   await internals(f.runs).cleanupAttachments(); await assert.rejects(store.openVerified(item.id));
   const durable = await upload(store, f.session.id); await f.runs.enqueue(f.session.id, '', { attachmentIds: [durable.id] }); await expire(store, durable.id);
   await internals(f.runs).cleanupAttachments(); assert.equal((await manifest(store, durable.id)).pendingUntil, undefined);
-  const saved = JSON.parse(await readFile(join(f.directory, 'runs.json'), 'utf8')); assert.equal(saved[0].attachments[0].id, durable.id);
+  const saved = JSON.parse(JSON.stringify((await fixtureDocuments(f.runs)).runs)); assert.equal(saved[0].attachments[0].id, durable.id);
 });
 
 test('Auto admission protects its scope without retaining unused originals and releases on failure', async t => {
@@ -94,15 +96,15 @@ test('Auto durable nonterminal entries skip unused originals in their scope unti
   (f.auto as unknown as { pump(): void }).pump = () => {};
   await f.auto.submit({ requestId, provider: 'codex', prompt: '', attachmentIds: [accepted.id], targetSessionId: f.session.id, cwd: f.directory });
   assert.equal(f.auto.get(requestId)?.status, 'queued');
-  assert.equal(JSON.parse(await readFile(join(f.directory, 'auto-prompts.json'), 'utf8'))[0].staged[0].id, accepted.id);
+  assert.equal(JSON.parse(await readAutoPromptFixture(f.autoRepository))[0].staged[0].id, accepted.id);
   await internals(f.auto).cleanupAttachments(); assert.equal((await manifest(store, unused.id)).pendingUntil, 1);
   await f.auto.cancel(requestId); await internals(f.auto).cleanupAttachments(); await assert.rejects(store.openVerified(unused.id));
 });
 
 for (const kind of ['runs', 'auto'] as const) test(`${kind} pause and repeated close wait for the same sweep, and resume rearms only once`, async t => {
-  const f = await fixture(t); const manager = f[kind]; const state = internals(manager); const finished = gate(); let sweeps = 0;
-  state.attachments.sweepPending = async () => { sweeps++; await finished.promise; };
-  const sweep = state.cleanupAttachments(); assert.equal(state.cleanupAttachments(), sweep); assert.equal(sweeps, 1);
+  const f = await fixture(t); const manager = f[kind]; const state = internals(manager); const finished = gate(); const entered = gate(); let sweeps = 0;
+  state.attachments.sweepPending = async () => { sweeps++; entered.resolve(); await finished.promise; };
+  const sweep = state.cleanupAttachments(); assert.equal(state.cleanupAttachments(), sweep); await entered.promise; assert.equal(sweeps, 1);
   let paused = false; const pause = manager.pauseAttachmentCleanup().then(() => { paused = true; });
   assert.equal(state.attachmentCleanupTimer, undefined); await Promise.resolve(); assert.equal(paused, false);
   finished.resolve(); await pause; await state.cleanupAttachments(); assert.equal(sweeps, 1);
@@ -141,14 +143,17 @@ async function lifecycle(f: Awaited<ReturnType<typeof fixture>>, toolsStop: () =
   const noop = new Proxy({}, { get: () => async () => {} });
   const retentionCalls: string[] = [];
   const temporaryCalls: string[] = [];
+  const reviewerCalls: string[] = [];
   const temporary = { quiesce: async () => { temporaryCalls.push("quiesce"); await temporaryStop(); }, resume: () => { temporaryCalls.push("resume"); } };
   const retention = { service: { quiesce: async () => { retentionCalls.push('quiesce'); }, resume: () => { retentionCalls.push('resume'); } } };
-  const context: Record<string, unknown> = { runs: f.runs, autoPrompts: f.auto, retention, temporary, clearInterval, secretExpiry: undefined, expiryTimer: undefined, releaseTimer: undefined, stopTelling: () => {}, paused: false, publishCold: () => {}, storageStatus: { admissionOpen: true },
+  // These lifecycle hooks represent a ready host, after production startup has completed.
+  const context: Record<string, unknown> = { startupComplete: true, runs: f.runs, autoPrompts: f.auto, retention, temporary, clearInterval, secretExpiry: undefined, expiryTimer: undefined, releaseTimer: undefined, stopTelling: () => {}, paused: false, publishCold: () => {}, storageStatus: { admissionOpen: true },
     tools: { ...noop, stop: toolsStop, pause: () => {}, resume: () => {} } };
   for (const name of ['secrets', 'triggers', 'github', 'slack', 'publicAgents', 'skills', 'tasks', 'compactions', 'worktrees', 'reviewer', 'runner', 'permissions', 'sessions', 'terminals', 'ledger']) context[name] = noop;
+  context.reviewer = new Proxy({}, { get: (_, name) => name === 'release' ? () => { reviewerCalls.push('release'); } : async () => {} });
   const lifecycleSource = source.slice(source.indexOf('      onIdle: async () =>'));
   const callback = (name: string) => { const match = lifecycleSource.match(new RegExp(`^      ${name}: (.+),$`, 'm')); assert.ok(match, name); return runInNewContext(`(${match[1]})`, context) as () => Promise<void>; };
-  return { onIdle: callback('onIdle'), quiesce: callback('quiesce'), resume: callback('resume'), retentionCalls, temporaryCalls };
+  return { onIdle: callback('onIdle'), quiesce: callback('quiesce'), resume: callback('resume'), retentionCalls, temporaryCalls, reviewerCalls };
 }
 async function host(f: Awaited<ReturnType<typeof fixture>>, extra: Partial<Parameters<typeof startRunnerHost>[0]>) {
   const sessions = Object.assign(new EventEmitter(), { list: () => [f.session] }) as unknown as SessionService;
@@ -189,6 +194,7 @@ test('failed production quiesce resumes both manager cleanup timers without rele
   try { await requestHandoff(f.directory); await resumed.promise; } finally { console.error = log; }
   assert.equal(released, false); assert.ok(internals(f.runs).attachmentCleanupTimer); assert.ok(internals(f.auto).attachmentCleanupTimer);
   assert.deepEqual(hooks.retentionCalls, ['quiesce', 'resume']); assert.deepEqual(hooks.temporaryCalls, ['quiesce', 'resume']);
+  assert.deepEqual(hooks.reviewerCalls, ['release']);
 });
 
 test('production onIdle drains both GCs before a later flush failure can release the state lock', { timeout: 10_000 }, async t => {
@@ -197,14 +203,12 @@ test('production onIdle drains both GCs before a later flush failure can release
   internals(f.runs).attachments.sweepPending = () => runGC.promise; internals(f.auto).attachments.sweepPending = () => autoGC.promise;
   void internals(f.runs).cleanupAttachments(); void internals(f.auto).cleanupAttachments();
   const hooks = await lifecycle(f, async () => { downstream.resolve(); throw new Error('fixture tool flush failure'); }); let released = 0; let diagnosed = 0; let closeAcks = 0;
-  const bundle = threadBundle('production');
-  const preflight = await storage.preflightStorage({ stateDir: f.directory, bundle });
+  const bundle = f.captured.bundle();
+  const preflight = await f.captured.storage.preflightStorage({ stateDir: f.directory, bundle });
   assert.equal(preflight.supported, true, 'actual supported runtime required');
-  const database = await storage.openStorage({ stateDir: f.directory, bundle });
-  t.after(() => database.close());
-  await database.prepare({ allowMigration: true });
+  const database = f.storage;
   const worker = await host(f, { onIdle: hooks.onIdle, onCloseFailure: () => { diagnosed++; },
-    closeStorage: async () => { const ack = await database.close(); assert.equal(ack.ack, 'closed'); closeAcks++; },
+    closeStorage: async () => { await f.auto.close(); await f.runs.close(); const ack = await database.close(); assert.equal(ack.ack, 'closed'); closeAcks++; },
     releaseStateLock: async () => { assert.equal(closeAcks, 1); released++; } });
   const closing = worker.close(true);
   try {
@@ -229,15 +233,13 @@ for (const autoStarted of [false, true]) test(`production startup failure drains
   const finallyLine = source.slice(offset).split('\n')[1];
   assert.match(finallyLine, /finally \{ await closeStorage\(\); await release\(\); \}/);
   const body = `${line.trim()} ${finallyLine.trim()} throw error;`; let released = false; let closeAcks = 0;
-  const bundle = threadBundle('production');
-  const preflight = await storage.preflightStorage({ stateDir: f.directory, bundle });
+  const bundle = f.captured.bundle();
+  const preflight = await f.captured.storage.preflightStorage({ stateDir: f.directory, bundle });
   assert.equal(preflight.supported, true, 'actual supported runtime required');
-  const database = await storage.openStorage({ stateDir: f.directory, bundle });
-  t.after(() => database.close());
-  await database.prepare({ allowMigration: true });
+  const database = f.storage;
   let retentionPaused = false, temporaryPaused = false;
   const cleanup = runInNewContext(`(async error => { ${body} })`, { runs: f.runs, initializedAutoPrompts: autoStarted ? f.auto : undefined,
-    initializedRetention: { quiesce: async () => { retentionPaused = true; } }, temporary: { quiesce: async () => { temporaryPaused = true; } }, carry: undefined, tools: undefined, sessions: { stop() {} }, closeStorage: async () => { assert.equal((await database.close()).ack, 'closed'); closeAcks++; }, release: async () => { assert.equal(closeAcks, 1); released = true; } }) as (error: Error) => Promise<void>;
+    initializedRetention: { quiesce: async () => { retentionPaused = true; } }, temporary: { quiesce: async () => { temporaryPaused = true; } }, carry: undefined, tools: undefined, sessions: { stop() {} }, closeStorage: async () => { await f.auto.close(); await f.runs.close(); assert.equal((await database.close()).ack, 'closed'); closeAcks++; }, release: async () => { assert.equal(closeAcks, 1); released = true; } }) as (error: Error) => Promise<void>;
   try {
     const failed = assert.rejects(cleanup(new Error('fixture startup failure')), /fixture startup failure/);
     await Promise.resolve(); assert.equal(released, false); runGC.resolve(); await Promise.resolve(); if (autoStarted) assert.equal(released, false);

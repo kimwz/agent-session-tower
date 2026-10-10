@@ -1,3 +1,4 @@
+import { externalStorageFixture } from './external-storage-fixture.js';
 import { RunAdmissionUncertain } from '../../../server/runs/run-records.js';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,7 +18,8 @@ function requestId(at: number, tail = '8abc-0123456789ab'): string {
 async function fixture(t: TestContext, now = () => Date.now()) {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-ledger-'));
   t.after(() => rm(stateDir, { recursive: true, force: true }));
-  const open = async () => { const ledger = new RemoteRequestLedger(stateDir, now); await ledger.start(); return ledger; };
+  let storage: Awaited<ReturnType<typeof externalStorageFixture>> | undefined;
+  const open = async () => { storage ??= await externalStorageFixture(t, stateDir); const ledger = new RemoteRequestLedger(stateDir, now, 20_000, storage.remote, storage.effectGate); await ledger.start(); return ledger; };
   return { stateDir, open };
 }
 const record = (value: { runId: string }): RemoteResult => ({ kind: 'run', runId: value.runId });
@@ -56,12 +58,12 @@ test('a request refused before admission can be sent again with the same ID', as
   const ledger = await f.open();
   const id = requestId(Date.now());
   let attempts = 0;
-  const refuse = async (): Promise<{ runId: string }> => { attempts++; throw Object.assign(new Error('The task queue is full.'), { statusCode: 429 }); };
+  const refuse = async (): Promise<{ runId: string }> => { attempts++; throw Object.assign(new Error('The task queue is full.'), { statusCode: 429, disposition: 'not-admitted' }); };
   await assert.rejects(ledger.once(CONTROLLER, 'enqueue', id, {}, refuse, record, () => undefined), /queue is full/);
-  const handoff = async (): Promise<{ runId: string }> => { attempts++; throw Object.assign(new Error('Replacing the worker.'), { statusCode: 503, disposition: 'handoff' }); };
+  const handoff = async (): Promise<{ runId: string }> => { attempts++; throw Object.assign(new Error('Replacing the worker.'), { statusCode: 503, disposition: 'not-admitted' }); };
   await assert.rejects(ledger.once(CONTROLLER, 'enqueue', id, {}, handoff, record, () => undefined), /Replacing/);
   // Tower's own refusals come before anything is admitted, whatever their status: a missing CLI is fixed and sent again.
-  const missingCli = async (): Promise<{ runId: string }> => { attempts++; throw new RunError('Install the codex CLI and ensure it is in PATH before sending instructions.', 'unavailable'); };
+  const missingCli = async (): Promise<{ runId: string }> => { attempts++; throw new RunError('Install the codex CLI and ensure it is in PATH before sending instructions.', 'unavailable', { disposition: 'not-admitted' }); };
   await assert.rejects(ledger.once(CONTROLLER, 'enqueue', id, {}, missingCli, record, () => undefined), /Install the codex CLI/);
   assert.deepEqual(await ledger.once(CONTROLLER, 'enqueue', id, {}, async () => ({ runId: 'run-1' }), record, () => undefined), { runId: 'run-1' });
   assert.equal(attempts, 3);
@@ -128,7 +130,8 @@ test('remote request IDs must be recent UUIDv7 values, so an old retry is refuse
 test('a full ledger refuses new remote requests instead of forgetting ones that could still be retried', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-ledger-full-'));
   t.after(() => rm(stateDir, { recursive: true, force: true }));
-  const ledger = new RemoteRequestLedger(stateDir, Date.now, 2);
+  const storage = await externalStorageFixture(t, stateDir);
+  const ledger = new RemoteRequestLedger(stateDir, Date.now, 2, storage.remote, storage.effectGate);
   await ledger.start();
   let runs = 0;
   const execute = async () => ({ runId: `run-${++runs}` });
@@ -156,11 +159,11 @@ test('records saved before the issue time was kept still use the time inside the
 test('a refusal that came before anything ran tells the controller it is safe to send again', async t => {
   const f = await fixture(t);
   const ledger = await f.open();
-  await assert.rejects(ledger.once(CONTROLLER, 'enqueue', requestId(Date.now()), {}, async () => { throw new RunError('Install the codex CLI and ensure it is in PATH before sending instructions.', 'unavailable'); }, record, () => undefined),
+  await assert.rejects(ledger.once(CONTROLLER, 'enqueue', requestId(Date.now()), {}, async () => { throw new RunError('Install the codex CLI and ensure it is in PATH before sending instructions.', 'unavailable', { disposition: 'not-admitted' }); }, record, () => undefined),
     (error: Error & { disposition?: string }) => error.disposition === 'not-admitted');
 });
 
-test('whether a failed request may be sent again with its ID follows its status, its disposition and RunError', async t => {
+test('whether a failed request may be sent again with its ID requires a definite admission disposition, including RunError', async t => {
   const f = await fixture(t);
   const ledger = await f.open();
   const plain = (fields: Record<string, unknown>) => Object.assign(new Error('failed'), fields);
@@ -169,15 +172,16 @@ test('whether a failed request may be sent again with its ID follows its status,
     await assert.rejects(ledger.once(CONTROLLER, 'enqueue', id, {}, async () => { throw thrown; }, record, () => undefined));
     return ledger.once(CONTROLLER, 'enqueue', id, {}, async () => ({ runId: 'ran' }), record, () => undefined).then(() => true, () => false);
   };
-  assert.equal(await again(plain({ statusCode: 404 })), true, 'a client error');
-  assert.equal(await again(plain({ statusCode: 0 })), true, 'zero is below 500');
-  assert.equal(await again(plain({ statusCode: null })), true, 'null compares below 500');
+  assert.equal(await again(plain({ statusCode: 404 })), false, 'status alone cannot prove non-admission');
+  assert.equal(await again(plain({ statusCode: 0 })), false, 'zero cannot prove non-admission');
+  assert.equal(await again(plain({ statusCode: null })), false, 'null cannot prove non-admission');
   assert.equal(await again(plain({ statusCode: 599 })), false);
   assert.equal(await again(plain({ statusCode: 503 })), false);
   assert.equal(await again(new Error('no status')), false);
   assert.equal(await again(plain({ statusCode: 503, disposition: 'not-admitted' })), true);
   assert.equal(await again(plain({ statusCode: 404, disposition: 'uncertain' })), false, 'uncertain always wins');
-  assert.equal(await again(new RunError('own refusal', 'unavailable')), true);
+  assert.equal(await again(new RunError('own refusal', 'unavailable')), false);
+  assert.equal(await again(new RunError('definite own refusal', 'unavailable', { disposition: 'not-admitted' })), true);
   assert.equal(await again(Object.assign(new RunError('own but uncertain', 'invalid'), { disposition: 'uncertain' })), false);
 });
 
@@ -190,4 +194,30 @@ test('whether a failed request may be sent again with its ID follows its status,
   const restarted = await f.open();
   await assert.rejects(restarted.once(CONTROLLER,'create',id,{},execute,record,() => undefined), /확실하지/);
   assert.equal(attempts,1);
+});
+
+for (const receiptFailure of ['record', 'sql'] as const) test(`effect success then ${receiptFailure} failure is uncertain and never replayed after restart`, async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-ledger-receipt-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const storage = await externalStorageFixture(t, stateDir, true, receiptFailure === 'sql' ? 'remote-completed-refused' : 'normal');
+  const ledger = new RemoteRequestLedger(stateDir, Date.now, 20_000, storage.remote, storage.effectGate);
+  await ledger.start();
+  const id = requestId(Date.now()); let effects = 0;
+  const execute = async () => { effects++; return { runId: 'effect-1' }; };
+  await assert.rejects(ledger.once(CONTROLLER, 'enqueue', id, {}, execute, value => {
+    if (receiptFailure === 'record') throw new Error('fixture record failure');
+    return record(value);
+  }, () => undefined), (error: Error & { disposition?: string; requestIdentity?: string; cause?: unknown }) => {
+    assert.equal(error.disposition, 'uncertain'); assert.equal(error.requestIdentity, `${CONTROLLER}\nenqueue\n${id}`);
+    assert.ok(error.cause);
+    if (receiptFailure === 'sql') assert.equal((error.cause as { disposition?: string }).disposition, 'not-committed');
+    return true;
+  });
+  assert.equal(effects, 1);
+  await storage.storage.close();
+  const reopened = await externalStorageFixture(t, stateDir, false, receiptFailure === 'sql' ? 'remote-completed-refused' : 'normal');
+  const restarted = new RemoteRequestLedger(stateDir, Date.now, 20_000, reopened.remote, reopened.effectGate);
+  await restarted.start(); effects = 0;
+  await assert.rejects(restarted.once(CONTROLLER, 'enqueue', id, {}, execute, record, () => undefined), { disposition: 'uncertain' });
+  assert.equal(effects, 0);
 });

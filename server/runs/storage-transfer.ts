@@ -1,3 +1,8 @@
+import { permissionsLegacyFiles } from '../permissions/storage-transfer.js';
+import { remoteLegacyFiles } from '../remote/storage-transfer.js';
+import { autoPromptLegacyFiles } from '../auto-prompt/storage-transfer.js';
+import { workflowLegacyFiles } from '../slack/storage-transfer.js';
+import { checkStorageActivation, type OfflineActivationOwner } from '../link/storage-offline.js';
 import { triggersLegacyFiles } from '../triggers/storage-transfer.js';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, opendir } from 'node:fs/promises';
@@ -20,6 +25,10 @@ export async function workerLegacyFiles(stateDir: string, domain: string): Promi
   if (domain === 'triggers') return triggersLegacyFiles(stateDir);
   if (domain === 'runs') return runsLegacyFiles(stateDir);
   if (domain === 'retention') return retentionLegacyFiles(stateDir,domain);
+  if (domain === 'permissions') return permissionsLegacyFiles(stateDir);
+  if (domain === 'remote') return remoteLegacyFiles(stateDir);
+  if (domain === 'auto-prompt') return autoPromptLegacyFiles(stateDir);
+  if (domain === 'automation-workflows') return workflowLegacyFiles(stateDir);
   return 'present';
 }
 /** Raw migration/export evidence is private, immutable and outside settings backup. Never opens native/cold objects. */
@@ -76,7 +85,7 @@ async function seal(parent: string, id: string, files: Record<string, Buffer>, f
 }
 export interface RunsImportInput {
   storage: StorageClient; stateDir: string; evidenceParent: string; commandId: string;
-  update: StorageUpdateInput; repository: RunsRepository;
+  update: StorageUpdateInput; repository: RunsRepository; activation?: OfflineActivationOwner;
 }
 /** Prepared import entry for B. Production A never calls this and refuses before source access. */
 export async function importRuns(input: RunsImportInput): Promise<{ directory: string; manifestSha256: string }> {
@@ -87,7 +96,7 @@ export async function importRuns(input: RunsImportInput): Promise<{ directory: s
   if ((await repository.head()).authority) throw new Error('Runs marker exists; source JSON must never be reimported.');
   if (input.update.stateDir !== input.stateDir || input.update.build.preflight.identity?.sourceHash !== context.identity.sourceHash || input.update.build.manifest?.digest !== context.manifest.digest || input.update.build.version !== context.identity.appVersion) throw new Error('Runs import evidence belongs to another captured build.');
   const check = async () => {
-    const evaluation = await evaluateStorageUpdate(input.update);
+    const evaluation = await checkStorageActivation(input.activation ? { kind: 'offline', owner: input.activation, update: input.update, storage } : { kind: 'normal', update: input.update }, 'runs');
     if (!evaluation.importAllowed || evaluation.verdict !== 'ready') throw new Error(`Runs import held: ${evaluation.code}: ${evaluation.reason}`);
     await repository.gate();
   };

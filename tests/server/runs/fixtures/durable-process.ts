@@ -6,7 +6,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DurableRunManager } from '../../../../server/runs/durable-runner.js';
-import { RunManager } from '../../../../server/runs/manager.js';
+import { RunManager } from '../sql-fixture.js';
 import { startRunnerHost } from '../../../../server/runs/worker.js';
 import { SessionService } from '../../../../server/sessions/service.js';
 import { SessionTasks } from '../../../../server/sessions/tasks.js';

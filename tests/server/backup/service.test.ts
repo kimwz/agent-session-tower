@@ -1,4 +1,6 @@
-import { collectTriggers } from '../../helpers/legacy-trigger-backup.js';
+import { workerSettingsFixture, backupPermissionRule as permissionRule, backupPermissionRequest as permissionRequest, backupWorkflow } from '../remote/external-storage-fixture.js';
+import { empty } from '../../../server/triggers/state.js';
+const collectTriggers = async (stateDir: string) => (await workerSettingsFixture(stateDir)).triggersBackup();
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,35 +9,44 @@ import test, { type TestContext } from 'node:test';
 import { BackupService } from '../../../server/backup/service.js';
 import type { TriggerBackup } from '../../../server/triggers/backup.js';
 import type { SkillBackup } from '../../../server/backup/payload.js';
-import { readPendingWorker, readReport, takeWorkerRestore } from '../../../server/backup/restore-files.js';
+import { readPendingWorker, readReport, takeWorkerRestore as takeOwnedWorkerRestore } from '../../../server/backup/restore-files.js';
 import { ProjectGroupStore } from '../../../server/stores/project-groups.js';
 import { RemoteExclusionStore } from '../../../server/remote/exclusions.js';
 import { DecisionService } from '../../../server/decisions/service.js';
 import { fakeBucket } from '../../helpers/s3.js';
 
+import { applyWorkerFiles as applyOwnedWorkerFiles } from '../../../server/backup/payload.js';
+const takeWorkerRestore = async (stateDir: string) => takeOwnedWorkerRestore(stateDir, (await workerSettingsFixture(stateDir)).owner);
+const applyWorkerFiles = async (stateDir: string, files: Parameters<typeof applyOwnedWorkerFiles>[1]) => applyOwnedWorkerFiles(stateDir, files, (await workerSettingsFixture(stateDir)).owner);
 const PASS = 'correct horse battery';
 const skills: SkillBackup = { bundle: { format: 'agent-session-tower.skills', version: 1, exportedAt: '', from: 'a', skills: [] }, guidance: 'Be brief.', settings: { enabled: true, provider: 'claude' } };
 
 async function computer(t: TestContext, options: { now?: () => number; host?: string; triggers?: () => Promise<TriggerBackup | undefined> } = {}) {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-backup-'));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const settings = await workerSettingsFixture(stateDir);
+  t.after(async () => { await settings.close(); await rm(stateDir, { recursive: true, force: true }); });
   const groups = new ProjectGroupStore(stateDir), exclusions = new RemoteExclusionStore(stateDir), decisions = new DecisionService(stateDir);
   await groups.start(); await exclusions.start(); await decisions.start();
   const handoffs: number[] = [], master: Record<string, unknown>[] = [];
-  const service = new BackupService({ stateDir, triggers: options.triggers ?? (() => collectTriggers(stateDir)), version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => { handoffs.push(Date.now()); return true; },
+  const service = new BackupService({ stateDir, settings: (await workerSettingsFixture(stateDir)).collect, triggers: options.triggers ?? (() => collectTriggers(stateDir)), version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => { handoffs.push(Date.now()); return true; },
     stores: { groups, exclusions, decisions }, master: async body => { master.push(body); }, ...(options.now ? { now: options.now } : {}), host: options.host ?? 'studio' });
   await service.start();
-  return { stateDir, groups, exclusions, decisions, service, handoffs, master };
+  settings.beforeClose.push(async () => { service.close(); await service.flush(); });
+  return { stateDir, settings, groups, exclusions, decisions, service, handoffs, master };
 }
 const RULE = { id: 'rule', name: 'Rule', enabled: true, condition: 'Asked', instructions: 'Answer', replyInstructions: 'Reply', provider: 'codex' };
-const write = (dir: string, name: string, value: unknown) => mkdir(join(dir, name, '..'), { recursive: true }).then(() => writeFile(join(dir, name), JSON.stringify(value), { mode: 0o600 }));
+const write = async (dir: string, name: string, value: unknown) => {
+  await mkdir(join(dir, name, '..'), { recursive: true }); await writeFile(join(dir, name), JSON.stringify(value), { mode: 0o600 });
+  if (name === 'trigger-engine.json') await (await workerSettingsFixture(dir)).seedTriggers({ ...empty(), ...value as object });
+  if (['permissions.json', 'slack-automation.json', 'github-automation.json'].includes(name)) await (await workerSettingsFixture(dir)).seed(name as import('../../../server/backup/payload.js').WorkerSqlFile, value);
+};
 
 test('a backup made on one computer restores on another: web settings now, the worker part at its next start', async t => {
   const a = await computer(t);
-  await write(a.stateDir, 'permissions.json', { version: 1, rules: [{ id: 'r1' }], requests: [{ id: 'a-request' }], codex: [], autoReview: { enabled: true } });
-  await write(a.stateDir, 'slack-automation.json', { rules: [RULE], workflows: [{ id: 'a-work' }] });
+  await write(a.stateDir, 'permissions.json', { version: 1, rules: [permissionRule('r1')], requests: [permissionRequest('a-request')], codex: [], autoReview: { enabled: true, resume: true } });
+  await write(a.stateDir, 'slack-automation.json', { rules: [RULE], workflows: [backupWorkflow('a-work', 'completed')] });
   await write(a.stateDir, 'slack-connection.json', { enabled: true, userToken: 'xoxp-1', appToken: 'xapp-1', account: { teamId: 'T', userId: 'U' } });
-  await write(a.stateDir, 'trigger-engine.json', { version: 1, triggers: [], settings: {}, trustedFolders: ['/work'], secretGrants: {}, fired: {}, cursors: {}, events: [{ id: 'history' }] });
+  await write(a.stateDir, 'trigger-engine.json', { version: 1, triggers: [], settings: {}, trustedFolders: ['/work'], secretGrants: {}, fired: {}, cursors: {}, events: [{ id: 'history', triggerId: 'historic-trigger', status: 'completed', requestId: 'historic-request', input: { instructions: 'Historic report', target: { node: 'local', mode: 'folder', cwd: '/work' }, overlap: 'skip' } }] });
   await write(a.stateDir, 'master/settings.json', { voice: { voiceId: 'abcdefghij' }, session: { sessionId: 'x', provider: 'claude', startedAt: '' } });
   await write(a.stateDir, 'master/elevenlabs-key.json', { apiKey: 'eleven-key-1' });
   await a.groups.set({ cwd: '/work/shop', title: 'Shop', pinned: true });
@@ -46,11 +57,11 @@ test('a backup made on one computer restores on another: web settings now, the w
   assert.doesNotMatch(file.text, /xoxp-1|jev-key|eleven-key/);
 
   const b = await computer(t);
-  await write(b.stateDir, 'permissions.json', { version: 1, rules: [{ id: 'old' }], requests: [{ id: 'b-request' }], codex: [{ path: '/b/rules' }] });
+  await write(b.stateDir, 'permissions.json', { version: 1, rules: [permissionRule('old')], requests: [permissionRequest('b-request')], codex: [{ path: '/b/rules', scope: 'global' }] });
   await b.groups.set({ cwd: '/elsewhere', title: 'Gone', pinned: false });
   await assert.rejects(b.service.check(file.text, 'wrong passphrase'), /암호가 맞지 않거나/);
   const preview = await b.service.check(file.text, PASS);
-  assert.deepEqual(preview.parts, ['triggers', 'permissions', 'slack', 'skills', 'decisions', 'projectGroups', 'remoteExclusions', 'master', 'backup']);
+  assert.deepEqual(preview.parts, ['triggers', 'permissions', 'slack', 'github', 'skills', 'decisions', 'projectGroups', 'remoteExclusions', 'master', 'backup']);
   assert.equal(preview.otherComputer, true, 'another Tower made it, whatever the host name');
   const again = await a.service.check(file.text, PASS);
   assert.equal(again.otherComputer, false, 'its own backup, back on the Tower that made it');
@@ -64,7 +75,7 @@ test('a backup made on one computer restores on another: web settings now, the w
   assert.equal(b.decisions.overview().keyHint, '…1234');
   assert.deepEqual(b.master, [{ voice: { voiceId: 'abcdefghij' }, voiceKey: 'eleven-key-1' }], 'the master session binding stays this computer’s');
   assert.equal(b.handoffs.length, 1, 'the worker is asked to hand over');
-  assert.deepEqual(JSON.parse(await readFile(join(report.before!, 'permissions.json'), 'utf8')).rules, [{ id: 'old' }], 'replaced files are kept aside');
+  assert.deepEqual(JSON.parse(await readFile(join(report.before!, 'permissions.json'), 'utf8')).rules, [permissionRule('old')], 'replaced files are kept aside');
   assert.equal(((await stat(join(b.stateDir, 'restore', 'pending-worker.json'))).mode & 0o777), 0o600);
   // A worker on the other side of the restore sees the backup's exclusions as newer than its own copy.
   const worker = new RemoteExclusionStore(b.stateDir);
@@ -75,15 +86,15 @@ test('a backup made on one computer restores on another: web settings now, the w
   const taken = await takeWorkerRestore(b.stateDir);
   assert.ok(taken);
   assert.deepEqual(taken.restore.skills?.guidance, 'Be brief.');
-  const permissions = JSON.parse(await readFile(join(b.stateDir, 'permissions.json'), 'utf8'));
-  assert.deepEqual(permissions, { version: 1, requests: [{ id: 'b-request' }], codex: [{ path: '/b/rules' }], rules: [{ id: 'r1' }], autoReview: { enabled: true } });
-  assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'slack-automation.json'), 'utf8')), { rules: [RULE], workflows: [] }, 'work under way stays on its computer');
+  const permissions = await (await workerSettingsFixture(b.stateDir)).read('permissions.json');
+  assert.deepEqual(permissions, { version: 1, requests: [permissionRequest('b-request')], codex: [{ path: '/b/rules', scope: 'global' }], rules: [permissionRule('r1')], autoReview: { enabled: true, resume: true } });
+  assert.deepEqual(await (await workerSettingsFixture(b.stateDir)).read('slack-automation.json'), { rules: [RULE], workflows: [] }, 'work under way stays on its computer');
   assert.equal(JSON.parse(await readFile(join(b.stateDir, 'slack-connection.json'), 'utf8')).userToken, 'xoxp-1');
   await taken.finish({ parts: ['triggers', 'skills'], errors: [], skills: { restored: [], skipped: [] } });
   assert.equal(await readPendingWorker(b.stateDir), undefined);
   const done = await readReport(b.stateDir);
   assert.equal(done?.status, 'applied');
-  assert.deepEqual(done?.worker.sort(), ['permissions', 'skills', 'slack', 'triggers']);
+  assert.deepEqual(done?.worker.sort(), ['github', 'permissions', 'skills', 'slack', 'triggers']);
   assert.equal(await takeWorkerRestore(b.stateDir), undefined, 'a later worker has nothing to take');
 });
 
@@ -93,7 +104,7 @@ test('a waiting restore can be cancelled, and a different Slack account never re
   const text = (await a.service.export(PASS)).text;
   const b = await computer(t);
   await write(b.stateDir, 'slack-connection.json', { enabled: true, userToken: 'xoxp-b', account: { teamId: 'T', userId: 'B' } });
-  await write(b.stateDir, 'slack-automation.json', { rules: [], workflows: [{ id: 'w', status: 'running' }] });
+  await write(b.stateDir, 'slack-automation.json', { rules: [], workflows: [backupWorkflow('w')] });
   const waiting = await b.service.apply((await b.service.check(text, PASS)).id);
   await assert.rejects(b.service.cancel('another'), /기다리는 복원이 없습니다/, 'only the restore the page shows is cancelled');
   assert.equal((await b.service.cancel(waiting.id)).status, 'cancelled');
@@ -103,7 +114,7 @@ test('a waiting restore can be cancelled, and a different Slack account never re
   const taken = await takeWorkerRestore(b.stateDir);
   await taken!.finish({ parts: [], errors: [] });
   assert.equal(JSON.parse(await readFile(join(b.stateDir, 'slack-connection.json'), 'utf8')).userToken, 'xoxp-b');
-  assert.match((await readReport(b.stateDir))!.errors.join(' '), /진행 중인 Slack 작업/);
+  assert.match((await readReport(b.stateDir))!.errors.join(' '), /Slack work prevents changing accounts/);
   const before = (await readdir(join(b.stateDir, 'restore'))).filter(name => name.startsWith('before-'));
   assert.ok(before.length >= 1 && before.length <= 3);
 });
@@ -227,9 +238,9 @@ test('a key that may only write still counts as backed up; removing old ones is 
 
 test('a backup from a newer Tower is refused, and worker settings a service would refuse are never written', async t => {
   const a = await computer(t);
-  const newer = new BackupService({ stateDir: a.stateDir, triggers: () => collectTriggers(a.stateDir), version: '9.0.0', skills: async () => structuredClone(skills), restartWorker: async () => true,
+  const newer = new BackupService({ stateDir: a.stateDir, settings: (await workerSettingsFixture(a.stateDir)).collect, triggers: () => collectTriggers(a.stateDir), version: '9.0.0', skills: async () => structuredClone(skills), restartWorker: async () => true,
     stores: { groups: a.groups, exclusions: a.exclusions, decisions: a.decisions }, host: 'studio' });
-  await newer.start();
+  await newer.start(); a.settings.beforeClose.push(async () => { newer.close(); await newer.flush(); });
   const b = await computer(t);
   await assert.rejects(b.service.check((await newer.export(PASS)).text, PASS), /9\.0\.0에서 만든 백업/);
 
@@ -237,15 +248,14 @@ test('a backup from a newer Tower is refused, and worker settings a service woul
   await write(b.stateDir, 'slack-automation.json', { rules: [], workflows: [] });
   await write(b.stateDir, 'public-agents.json', { version: 1, agents: [] });
   await writeFile(join(b.stateDir, 'permissions.json'), '{ not json', { mode: 0o600 });
-  const { applyWorkerFiles } = await import('../../../server/backup/payload.js');
   const result = await applyWorkerFiles(b.stateDir, {
     'slack-connection.json': { enabled: 'yes' },
     'slack-automation.json': { rules: [{ bogus: true }] },
     'public-agents.json': { version: 1, agents: [{ id: '../decisions', slug: 'x', name: 'n' }] },
     'permissions.json': { rules: [] },
   });
-  assert.deepEqual(result.parts, []);
-  assert.equal(result.errors.length, 4);
+  assert.deepEqual(result.parts, ['permissions']);
+  assert.equal(result.errors.length, 3);
   assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'slack-connection.json'), 'utf8')), { enabled: false, language: 'ko' });
   assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'public-agents.json'), 'utf8')), { version: 1, agents: [] });
   assert.equal(await readFile(join(b.stateDir, 'permissions.json'), 'utf8'), '{ not json', 'a file here that cannot be read is left alone');
@@ -255,7 +265,6 @@ test('a restored public agent with another password signs its visitors out, and 
   const b = await computer(t);
   const agent = (password: string, slug = 'A'.repeat(22), conversation = 'visitor') => ({ id: '11111111-1111-4111-8111-111111111111', slug, name: 'Help', scope: 'Answer questions about tea.', cwd: '/work', provider: 'codex', conversation, password, createdAt: '', updatedAt: '' });
   const { parsePublicAgents } = await import('../../../server/public-agents/service.js');
-  const { applyWorkerFiles } = await import('../../../server/backup/payload.js');
   const current = { version: 1, agents: [agent('scrypt$old')] };
   assert.ok(parsePublicAgents(current), 'a public agent this build reads');
   await write(b.stateDir, 'public-agents.json', current);
@@ -293,10 +302,12 @@ test('an upload stopped because Tower shuts down is not a failure, and the next 
     return fetch(input, init);
   };
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-backup-'));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const settings = await workerSettingsFixture(stateDir);
+  t.after(async () => { await settings.close(); await rm(stateDir, { recursive: true, force: true }); });
   const groups = new ProjectGroupStore(stateDir), exclusions = new RemoteExclusionStore(stateDir), decisions = new DecisionService(stateDir);
   await groups.start(); await exclusions.start(); await decisions.start();
-  const service = new BackupService({ stateDir, triggers: () => collectTriggers(stateDir), version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => true, stores: { groups, exclusions, decisions }, fetcher, host: 'studio' });
+  const service = new BackupService({ stateDir, settings: (await workerSettingsFixture(stateDir)).collect, triggers: () => collectTriggers(stateDir), version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => true, stores: { groups, exclusions, decisions }, fetcher, host: 'studio' });
+  settings.beforeClose.push(async () => { service.close(); await service.flush(); });
   await service.start();
   await service.saveSettings({ enabled: true, intervalHours: 24, keep: 3, passphrase: PASS, remote: { endpoint: bucket.endpoint, bucket: 'bucket', prefix: '', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret-key' } });
   const upload = service.upload();
@@ -345,7 +356,7 @@ test('a backup from another computer is flagged, only adds to the folders kept f
 test('a worker that stops after applying files and triggers leaves only the skills for the next one', async t => {
   const a = await computer(t);
   await write(a.stateDir, 'trigger-engine.json', { version: 1, triggers: [], settings: {}, trustedFolders: [], secretGrants: {}, fired: {}, cursors: {} });
-  await write(a.stateDir, 'permissions.json', { version: 1, rules: [{ id: 'backed-up' }], requests: [], codex: [] });
+  await write(a.stateDir, 'permissions.json', { version: 1, rules: [permissionRule('backed-up')], requests: [], codex: [] });
   const text = (await a.service.export(PASS)).text;
   const b = await computer(t);
   await b.service.apply((await b.service.check(text, PASS)).id);
@@ -353,25 +364,25 @@ test('a worker that stops after applying files and triggers leaves only the skil
   assert.ok(first?.restore.triggers);
   await first.applied({ parts: ['triggers'], errors: ['trigger note'] });
   // The owner changes a permission rule; then the worker stops before its skills were done.
-  await write(b.stateDir, 'permissions.json', { version: 1, rules: [{ id: 'changed-since' }], requests: [], codex: [] });
+  await write(b.stateDir, 'permissions.json', { version: 1, rules: [permissionRule('changed-since')], requests: [], codex: [] });
   const second = await takeWorkerRestore(b.stateDir);
   assert.equal(second?.restore.triggers, undefined, 'triggers are not applied again');
   assert.deepEqual(second?.restore.files, {});
   assert.ok(second?.restore.skills, 'the skills are still to do');
-  assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'permissions.json'), 'utf8')).rules, [{ id: 'changed-since' }], 'what changed since is kept');
+  assert.deepEqual((await (await workerSettingsFixture(b.stateDir)).read('permissions.json')).rules, [permissionRule('changed-since')], 'what changed since is kept');
   await second!.finish({ parts: ['skills'], errors: [] });
   const report = await readReport(b.stateDir);
   assert.equal(report?.status, 'applied');
-  assert.deepEqual(report?.worker.sort(), ['permissions', 'skills', 'triggers']);
+  assert.deepEqual(report?.worker.sort(), ['github', 'permissions', 'skills', 'slack', 'triggers']);
   assert.ok(report?.errors.includes('trigger note'));
 });
 
 test("a computer keeps its mark across restarts, so its own backups are its own even under another name", async t => {
   const a = await computer(t);
   const text = (await a.service.export(PASS)).text;
-  const restarted = new BackupService({ stateDir: a.stateDir, triggers: () => collectTriggers(a.stateDir), version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => true,
+  const restarted = new BackupService({ stateDir: a.stateDir, settings: (await workerSettingsFixture(a.stateDir)).collect, triggers: () => collectTriggers(a.stateDir), version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => true,
     stores: { groups: a.groups, exclusions: a.exclusions, decisions: a.decisions }, host: 'renamed' });
-  await restarted.start();
+  await restarted.start(); a.settings.beforeClose.push(async () => { restarted.close(); await restarted.flush(); });
   assert.equal((await restarted.check(text, PASS)).otherComputer, false);
 });
 
@@ -394,4 +405,73 @@ test('restore before uses owner DTO and aborts before changing pending or settin
   assert.deepEqual(await readFile(join(b.stateDir,'backup-settings.json')),settings);
   assert.equal(await readFile(join(b.stateDir,'trigger-engine.json'),'utf8'),'stale JSON');
   assert.deepEqual((await readdir(join(b.stateDir,'restore'))).filter(name => name.startsWith('before-')),before);
+});
+
+
+test('restore keeps live SQL settings A instead of stale legacy B, then commits C through the same owner', async t => {
+  const source = await computer(t), target = await computer(t);
+  const names = ['permissions.json', 'slack-automation.json', 'github-automation.json'] as const;
+  const values = (label: string) => ({
+    'permissions.json': { version: 1, rules: [permissionRule(label)], requests: [], codex: [] },
+    'slack-automation.json': { rules: [{ ...RULE, id: label }], workflows: [] },
+    'github-automation.json': { rules: [{ ...RULE, id: label }], workflows: [] },
+  });
+  const a = values('live-A'), b = values('legacy-B'), c = values('restore-C');
+  for (const name of names) {
+    await source.settings.seed(name, c[name]);
+    await target.settings.seed(name, a[name]);
+    await writeFile(join(target.stateDir, name), JSON.stringify(b[name]), { mode: 0o600 });
+  }
+  const current = await target.settings.collect();
+  const text = (await source.service.export(PASS)).text;
+  const report = await target.service.apply((await target.service.check(text, PASS)).id);
+  assert.equal((await stat(report.before!)).mode & 0o777, 0o700);
+  for (const name of names) {
+    assert.deepEqual(JSON.parse(await readFile(join(report.before!, name), 'utf8')), current[name]);
+    assert.equal((await stat(join(report.before!, name))).mode & 0o777, 0o600);
+  }
+  const taken = await takeOwnedWorkerRestore(target.stateDir, target.settings.owner);
+  assert.ok(taken);
+  await taken.finish({ parts: ['skills'], errors: [] });
+  assert.deepEqual((await readReport(target.stateDir))?.errors, []);
+  assert.deepEqual(await target.settings.collect(), await source.settings.collect());
+  for (const name of names) {
+    assert.deepEqual((await target.settings.read(name)).rules, c[name].rules);
+    assert.equal(await readFile(join(target.stateDir, name), 'utf8'), JSON.stringify(b[name]));
+  }
+  const beforeFiles = Object.fromEntries(await Promise.all(names.map(async name => [name, JSON.parse(await readFile(join(report.before!, name), 'utf8'))])));
+  assert.deepEqual(await applyOwnedWorkerFiles(target.stateDir, beforeFiles, target.settings.owner), { parts: ['permissions', 'slack', 'github'], errors: [] });
+  assert.deepEqual(await target.settings.collect(), current, 'canonical before records restore through the existing SQL owner');
+});
+
+test('SQL capture failure aborts restore before pending, credentials, settings, reports or effects change', async t => {
+  const source = await computer(t), target = await computer(t);
+  await write(source.stateDir, 'slack-connection.json', { enabled: true, userToken: 'incoming-token', account: { teamId: 'T', userId: 'U' } });
+  await write(target.stateDir, 'slack-connection.json', { enabled: true, userToken: 'local-token', account: { teamId: 'T', userId: 'U' } });
+  const text = (await source.service.export(PASS)).text;
+  await target.service.apply((await target.service.check(text, PASS)).id);
+  const checked = await target.service.check(text, PASS);
+  const files = ['backup-settings.json', 'slack-connection.json', 'restore/pending-worker.json', 'restore/latest.json'];
+  const saved = await Promise.all(files.map(name => readFile(join(target.stateDir, name))));
+  const report = await readReport(target.stateDir);
+  const sql = await target.settings.collect();
+  const entries = await readdir(join(target.stateDir, 'restore'));
+  const groups = target.groups.list(), exclusions = target.exclusions.list(), decisions = target.decisions.overview();
+  const master = structuredClone(target.master), handoffs = [...target.handoffs];
+  await target.settings.storage.close();
+  try {
+    await assert.rejects(target.service.apply(checked.id));
+    assert.deepEqual(await Promise.all(files.map(name => readFile(join(target.stateDir, name)))), saved);
+    assert.deepEqual(await readReport(target.stateDir), report);
+    assert.deepEqual(await readdir(join(target.stateDir, 'restore')), entries);
+    assert.deepEqual(target.groups.list(), groups);
+    assert.deepEqual(target.exclusions.list(), exclusions);
+    assert.deepEqual(target.decisions.overview(), decisions);
+    assert.deepEqual(target.master, master);
+    assert.deepEqual(target.handoffs, handoffs);
+  } finally {
+    await target.settings.storage.reopen();
+    await target.settings.storage.prepare({ allowMigration: false });
+  }
+  assert.deepEqual(await target.settings.collect(), sql);
 });

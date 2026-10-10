@@ -5,6 +5,7 @@ export const TRIGGER_STAGE_BYTES = 2 * TRIGGER_INTENT_BYTES;
 /** Released preparation and migration bytes remain stable across cutover. */
 export const triggersSchema: StorageDomainSchema = {
   domain: 'triggers', preparation: { requiredArtifactVersion: '1.124.0', readerContract: 1, writerContract: 1 },
+  cutover: { artifactVersion: '1.125.0', importContract: 1 },
   migrations: [{ version: 1, sql: `
 CREATE TABLE triggers_state (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), revision INTEGER NOT NULL CHECK (revision > 0), logical_bytes INTEGER NOT NULL CHECK (logical_bytes >= 0)) STRICT;
 CREATE TABLE triggers_rows (

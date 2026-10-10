@@ -35,7 +35,7 @@ export class DecisionService {
   /** Each change reads, merges and saves before the next starts, so a removed key never comes back. */
   private changes: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly stateDir: string, private readonly providers: Record<DecisionProviderId, DecisionProvider> = DECISION_PROVIDERS, private readonly fetcher?: typeof fetch) {
+  constructor(private readonly stateDir: string, private readonly providers: Record<DecisionProviderId, DecisionProvider> = DECISION_PROVIDERS, private readonly fetcher?: typeof fetch, private readonly beforeSend?: () => Promise<void>) {
     this.path = join(stateDir, FILE);
   }
 
@@ -67,7 +67,13 @@ export class DecisionService {
   engine(feature: keyof DecisionFeatures): DecisionEngine | undefined {
     const { provider: id, apiKey, features } = this.saved;
     if (!apiKey || !features[feature]) return undefined;
-    if (this.cached?.key !== apiKey || this.cached.provider !== id) this.cached = { key: apiKey, provider: id, engine: this.providers[id].create(apiKey, this.fetcher) };
+    if (this.cached?.key !== apiKey || this.cached.provider !== id) {
+      const engine = this.providers[id].create(apiKey, this.fetcher), beforeSend = this.beforeSend;
+      this.cached = { key: apiKey, provider: id, engine: {
+        provider: engine.provider, label: engine.label,
+        decide: request => engine.decide({ ...request, beforeSend: async () => { await beforeSend?.(); await request.beforeSend?.(); } }),
+      } };
+    }
     return this.cached.engine;
   }
 
@@ -101,7 +107,7 @@ export class DecisionService {
     if (!apiKey) throw new TowerError('conflict', '먼저 API 키를 저장하세요.');
     const engine = this.providers[id].create(apiKey, this.fetcher);
     try {
-      await engine.decide({ state: { message: 'The build finished and every test passed.' }, questions: { finished: { type: 'yesNo', instructions: 'Does the message say that the work finished?' } } });
+      await engine.decide({ beforeSend:this.beforeSend, state: { message: 'The build finished and every test passed.' }, questions: { finished: { type: 'yesNo', instructions: 'Does the message say that the work finished?' } } });
     } catch (error) {
       const kind = error instanceof DecisionError ? error.kind : 'unavailable';
       if (kind === 'unauthorized') throw new TowerError('invalid', `${engine.label}가 API 키를 거부했습니다. 키를 확인하세요.`);

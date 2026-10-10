@@ -3,6 +3,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { actualStorage } from './sql-fixture.js';
+import { RunsRepository } from '../../../server/runs/storage-repository.js';
+import { parseRunDocuments } from '../../../server/runs/storage-codec.js';
 import { RunManager } from '../../../server/runs/manager.js';
 import { parseMessages, towerInstructionsBlock } from '../../../server/sessions/parser.js';
 import type { CodexStdioOptions } from '../../../server/runs/codex-stdio.js';
@@ -21,15 +24,17 @@ async function fixture(t: TestContext, notes?: (run: Run, session: Session) => P
     status: 'completed', statusReason: 'Finished', createdAt: now, updatedAt: now, lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
   const codex: CodexStdioOptions[] = [];
   const claude: string[][] = [];
-  const manager = new RunManager({ stateDir, getSession: id => id === native.id ? native : undefined, refreshSessions: async () => {}, pollMs: 60_000,
+  const initial = saved ? parseRunDocuments({ runs: Buffer.from(JSON.stringify(saved.runs)), created: Buffer.from('[]'), instructions: Buffer.from('{}') }) : undefined;
+  const db = await actualStorage(stateDir, initial);
+  const manager = new RunManager({ stateDir, storage: db, getSession: id => id === native.id ? native : undefined, refreshSessions: async () => {}, pollMs: 60_000,
     findExecutable: async provider => `/fixture/${provider}`,
     spawnProcess: ((_command: string, args: string[]) => { claude.push(args); throw new Error('Fixtures never start providers.'); }) as never,
     openCodexStdio: async options => { codex.push(options); throw new Error('Fixtures never start providers.'); },
     ...(notes ? { firstTurnNotes: notes } : {}), ...(turnNotes ? { turnNotes } : {}) });
   await manager.start();
-  t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
+  t.after(async () => { await manager.close(); await db.close(); await rm(directory, { recursive: true, force: true }); });
   const settled = async (id: string) => { for (let i = 0; i < 200 && manager.list().find(run => run.id === id)?.status === 'queued'; i++) await new Promise(resolve => setTimeout(resolve, 10)); };
-  return { directory, stateDir, manager, native, codex, claude, settled };
+  return { directory, stateDir, db, manager, native, codex, claude, settled };
 }
 
 test('instructions reach the provider beside the request, and never leave the worker', async t => {
@@ -41,7 +46,15 @@ test('instructions reach the provider beside the request, and never leave the wo
   assert.equal(f.codex[0].prompt, 'Look at the Slack request', 'the request is its own block');
   assert.equal(f.codex[0].instructions, 'Coordinator policy');
   assert.ok(f.manager.list().every(item => item.instructions === undefined), 'pages never receive them');
-  assert.doesNotMatch(await readFile(join(f.stateDir, 'runs.json'), 'utf8'), /Coordinator policy/, 'their text never reaches disk, where an older Tower could show it');
+  // Keep periodic manager writes outside the multi-page export, after the refused provider settles.
+  f.manager.holdStorage();
+  try {
+    await f.manager.flushState();
+    assert.equal(f.codex.length, 1, 'the provider was called once');
+    assert.equal(f.manager.list().find(item => item.id === run.id)?.status, 'error');
+    assert.equal(f.manager.busy(), false, 'the provider and manager have settled');
+    assert.doesNotMatch(JSON.stringify((await new RunsRepository(f.db).exportCurrent()).documents.runs), /Coordinator policy/, 'their text never reaches disk, where an older Tower could show it');
+  } finally { f.manager.releaseStorage(); }
 
   const claude = await f.manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Owner reply' }, { origin: { kind: 'owner' }, instructions: { text: 'Receipt' } });
   await f.settled(claude.run.id);
@@ -100,7 +113,7 @@ test('a continuation keeps the instructions its turn could not go without, and i
   const plain = [...internals.runs.values()].find(run => run.scheduled && run.id !== scheduled.id)!;
   assert.equal(plain.instructions, undefined, 'a first turn’s notes do not go on');
   await f.manager.flushState();
-  const saved = await readFile(join(f.stateDir, 'runs.json'), 'utf8');
+  const saved = JSON.stringify((await new RunsRepository(f.db).exportCurrent()).documents.runs);
   assert.doesNotMatch(saved, /Receipt: owner approved/);
   const g = await fixture(t, undefined, { runs: JSON.parse(saved) as unknown[] });
   const restored = new Map(g.manager.list().map(run => [run.id, run]));

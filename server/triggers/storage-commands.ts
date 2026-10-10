@@ -1,3 +1,4 @@
+import { offlineCompletionCommand, offlineAuthorityReceiptCommand } from '../storage/offline-completion.js';
 import type { EngineState } from './state.js';
 import { createHash } from 'node:crypto';
 import { defineStorageDomain, type DomainReadContext, type DomainWriteContext, type StorageDomain } from '../storage/domain.js';
@@ -5,7 +6,40 @@ import type { DomainAuthority, StorageDomainSchema } from '../storage/contract.j
 import { triggersSchema, TRIGGER_STAGE_COUNT, TRIGGER_STAGE_BYTES } from './storage-schema.js';
 import { canonical, object, triggerHash, TRIGGER_CHUNK_BYTES, TRIGGER_INTENT_BYTES, ROW_KINDS, WRAPPER_BYTES, ACCEPT_TRIGGER_BYTES, MAX_TRIGGER_BYTES, projectedJson, rowCost, validateRow, type TriggerRow } from './storage-codec.js';
 
-export interface TriggersHead { storageId: string; authority: DomainAuthority | null; revision: number | null }
+export interface TriggersHead { storageId: string; authority: DomainAuthority | null; revision: number | null; logicalBytes: number | null }
+/** Worker-private fence; never parsed from a public request. */
+export interface TriggerAdmissionLink { storageId: string; generation: number; revision: number; eventId: string; requestId: string; eventSha256: string }
+/** Fixed domain operation on the runs command's connection and transaction. */
+export function linkTriggerAdmissions(context: DomainWriteContext, links: readonly TriggerAdmissionLink[], runs: readonly Record<string, unknown>[]): { revision: number; generation: number } {
+  if (!links.length || links.length > 100) fail('Invalid trigger admission count.');
+  const state = head(context), seen = new Set<string>();
+  for (const link of links) {
+    if (state.storageId !== link.storageId || state.authority?.authority !== 'database' || state.authority.generation !== link.generation || state.revision !== link.revision) fail('Trigger admission authority fence changed.');
+    if (seen.has(link.eventId)) fail('Duplicate trigger admission event.'); seen.add(link.eventId);
+    const row = context.prepare("SELECT kind,id,ordinal,json FROM triggers_rows WHERE kind = 'events' AND id = ?").get(link.eventId) as unknown as TriggerRow | undefined;
+    if (!row || triggerHash(row.json) !== link.eventSha256) fail('Trigger admission event changed.');
+    const otherEvents = context.prepare("SELECT json FROM triggers_rows WHERE kind = 'events' AND id != ?").all(link.eventId) as { json: string }[];
+    if (otherEvents.some(item => object(JSON.parse(item.json)).requestId === link.requestId)) fail('Trigger request belongs to another event.');
+    const event = object(JSON.parse(row.json)), input = object(event.input), target = object(input.target);
+    const candidates = runs.filter(run => run.autoPromptId === link.requestId);
+    if (candidates.length !== 1) fail('Trigger admission needs one fresh run.');
+    const run = candidates[0], origin = object(run.origin);
+    if (event.id !== link.eventId || event.requestId !== link.requestId || event.status !== 'claimed' || input.handler === 'coordinator' || input.remote !== undefined || input.untrustedInput === true || target.node !== 'local' || target.mode !== 'session'
+      || run.status !== 'queued' || run.sessionId !== target.sessionId || origin.kind !== 'trigger' || origin.triggerId !== event.triggerId || origin.eventId !== event.id || origin.controllerId !== undefined) fail('Invalid local session trigger admission.');
+    if (run.needsInstructions === true && !context.prepare("SELECT 1 FROM runs_rows WHERE kind = 'instruction' AND id = ?").get(String(run.id))) fail('Trigger admission instructions are incomplete.');
+    const duplicates = context.prepare("SELECT id,json FROM runs_rows WHERE kind = 'run' AND id != ?").all(String(run.id)) as { id: string; json: string }[];
+    if (duplicates.some(item => object(JSON.parse(item.json)).autoPromptId === link.requestId)) fail('Trigger request already admitted.');
+    const json = canonical({ ...event,status: 'running',updatedAt: context.now,dispatch: { runId: run.id,sessionId: run.sessionId } });
+    put(context,{ ...row,json }); recost(context,{ ...row,json },{});
+  }
+  const groups = context.prepare('SELECT kind,count(*) AS n,sum(logical_bytes) AS bytes FROM triggers_rows GROUP BY kind').all() as { kind: string; n: number; bytes: number }[];
+  const size = WRAPPER_BYTES + groups.reduce((sum,row) => sum + row.bytes + (row.kind === 'settings' ? 0 : Math.max(0,row.n - 1)),0);
+  const old = context.prepare('SELECT logical_bytes FROM triggers_state WHERE singleton = 1').get() as { logical_bytes: number };
+  if (size > MAX_TRIGGER_BYTES && size > old.logical_bytes) fail('Trigger logical history is full.');
+  const revision = state.revision! + 1;
+  context.prepare('UPDATE triggers_state SET revision = ?,logical_bytes = ? WHERE singleton = 1').run(revision,size);
+  return { revision,generation: state.authority!.generation };
+}
 export type TriggerWriteMode = 'grow' | 'settle' | 'import' | 'restore';
 export interface TriggerIntentHeader { mode: TriggerWriteMode; revision: number | null; generation: number | null; manifestSha256?: string; documentsSha256?: string }
 function fail(message: string): never { throw Object.assign(new Error(message), { storageCode: 'domain-failed' }); }
@@ -21,7 +55,7 @@ function head(context: DomainReadContext): TriggersHead {
   } else if (state || context.prepare('SELECT 1 FROM triggers_rows LIMIT 1').get()) fail('Triggers rows exist without authority.');
   const storage = context.prepare("SELECT value FROM storage_meta WHERE key = 'storage_id'").get() as { value: string } | undefined;
   if (!storage || !/^[0-9a-f-]{36}$/.test(storage.value)) fail('Missing trigger storage identity.');
-  return { storageId: storage.value,authority, revision: state?.revision ?? null };
+  return { storageId: storage.value,authority, revision: state?.revision ?? null, logicalBytes: state?.logical_bytes ?? null };
 }
 function current(context: DomainReadContext, input: Record<string, unknown>): TriggersHead {
   const value = head(context);
@@ -43,6 +77,8 @@ function recost(context: DomainWriteContext, row: TriggerRow, ledger: EngineStat
 export function triggersDomainFor(schema: StorageDomainSchema): StorageDomain {
   if (schema.domain !== triggersSchema.domain || canonical(schema.migrations) !== canonical(triggersSchema.migrations) || canonical(schema.preparation) !== canonical(triggersSchema.preparation)) throw new Error('Triggers schema/contract mismatch.');
   return defineStorageDomain({ schema, commands: {
+    offlineAuthorityReceipt: offlineAuthorityReceiptCommand,
+    offlineCompletion: offlineCompletionCommand('triggers_stages'),
     head: { kind: 'read', run: context => head(context) },
     bootstrapHistory: { kind: 'read', run: context => ({ stages: Number((context.prepare('SELECT count(*) AS n FROM triggers_stages').get() as { n: number }).n) }) },
     keys: { kind: 'read', run(context, payload) {
@@ -146,7 +182,11 @@ export function triggersDomainFor(schema: StorageDomainSchema): StorageDomain {
         ? Object.fromEntries((context.prepare("SELECT id,json FROM triggers_rows WHERE kind = 'onceConsumed'").all() as { id: string; json: string }[]).map(row => [row.id,JSON.parse(row.json)])) : {};
       for (const row of changed) recost(context,row,ledger);
       for (const id of consumed) for (const row of context.prepare("SELECT kind,id,ordinal,json FROM triggers_rows WHERE trigger_id = ? AND kind IN ('triggers','tombstones')").all(id) as unknown as TriggerRow[]) recost(context,row,ledger);
-      if (consumed.size) for (const row of context.prepare("SELECT kind,id,ordinal,json FROM triggers_rows WHERE kind = 'revisions'").all() as unknown as TriggerRow[]) recost(context,row,ledger);
+      const recosted = new Set<string>();
+      for (const id of consumed) for (const row of context.prepare("SELECT kind,id,ordinal,json FROM triggers_rows WHERE kind = 'revisions' AND EXISTS (SELECT 1 FROM json_each(triggers_rows.json) WHERE json_extract(value,'$.id') = ?)").all(id) as unknown as TriggerRow[]) {
+        if (recosted.has(row.id)) continue;
+        recosted.add(row.id); recost(context,row,ledger);
+      }
       const groups = context.prepare('SELECT kind,count(*) AS n,sum(logical_bytes) AS bytes,count(DISTINCT ordinal) AS distinct_n,min(ordinal) AS low,max(ordinal) AS high FROM triggers_rows GROUP BY kind').all() as { kind: string; n: number; bytes: number; distinct_n: number; low: number; high: number }[];
       if (groups.find(row => row.kind === 'settings')?.n !== 1 || groups.some(row => row.low !== 0 || row.high !== row.n - 1 || row.distinct_n !== row.n)) fail('Invalid trigger collection order or settings.');
       const size = WRAPPER_BYTES + groups.reduce((sum,row) => sum + row.bytes + (row.kind === 'settings' ? 0 : Math.max(0,row.n - 1)),0);

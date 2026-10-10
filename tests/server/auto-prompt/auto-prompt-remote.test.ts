@@ -1,6 +1,7 @@
+import { externalStorageFixture } from '../remote/external-storage-fixture.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -18,7 +19,8 @@ const session = (id: string, cwd: string): Session => ({ id: `codex:${id}`, nati
 async function fixture(t: TestContext) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'tower-auto-prompt-remote-')));
   const open = join(directory, 'open'), secret = join(directory, 'secret');
-  await Promise.all([mkdir(open), mkdir(join(secret, 'deep'), { recursive: true }), mkdir(join(directory, 'state'))]);
+  await Promise.all([mkdir(open), mkdir(join(secret, 'deep'), { recursive: true }), mkdir(join(directory, 'state'), { mode: 0o700 })]);
+  await chmod(join(directory, 'state'), 0o700);
   const exclusions = new RemoteExclusionStore(join(directory, 'state'));
   await exclusions.start();
   await exclusions.add(secret);
@@ -41,12 +43,13 @@ async function fixture(t: TestContext) {
     },
     enqueue: async () => { throw new Error('Remote fixtures always create.'); },
   };
-  const manager = new AutoPromptManager({ stateDir: join(directory, 'state'), snapshot: () => structuredClone(current), refresh: async () => { await exclusions.reload(); }, runs,
+  const storage = await externalStorageFixture(t, join(directory, 'state'), true, 'normal', false);
+  const manager = new AutoPromptManager({ repository: storage.autoPrompt, effectGate: storage.effectGate, stateDir: join(directory, 'state'), snapshot: () => structuredClone(current), refresh: async () => { await exclusions.reload(); }, runs,
     detail: async id => { const found = current.sessions.find(item => item.id === id); return found ? { session: found, hasMore: false, messages: [] } : undefined; },
     model: async input => { calls.push(input); return respond(input); },
     remote: { prepare: (paths, options) => exclusions.prepare(paths, options), matcher: () => exclusions.matcher(), coordinators: () => coordinators } });
-  await manager.start();
-  t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
+  t.after(async () => { await manager.close(); await storage.storage.close(); await rm(directory, { recursive: true, force: true }); });
+  await manager.start(); await manager.startRuntimeEffects();
   const finished = (id: string) => until(() => { const job = manager.get(id); return job && ['completed', 'error', 'cancelled'].includes(job.status) ? job : undefined; });
   return { directory, open, secret, exclusions, manager, calls, dispatches, finished, coordinators, current, respond: (fn: typeof respond) => { respond = fn; } };
 }

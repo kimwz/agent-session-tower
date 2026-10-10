@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { RunManager } from '../../../server/runs/manager.js';
+import { importFixtureRuns } from '../runs/sql-fixture.js';
 import type { StorageStatus } from '../../../server/storage/contract.js';
 import { storageFs } from '../../../server/storage/paths.js';
 import type { WorkerStorageStatus } from '../../../shared/storage.js';
@@ -120,7 +121,8 @@ test('actual A refuses first import; actual B source backup/marker/receipt; A re
   assert.equal((await new RetentionRepository(ac).head()).authority, null, 'hidden stages do not publish authority');
   assert.equal((await ac.receipt('a-refused-commit')).found, false);
   assert.equal((await ac.gate('core')).open, true, 'retention-only failure leaves healthy core independently proven');
-  const legacy = new RetentionStore(join(stateDir, 'retention'), { storage: ac }); await legacy.start(); assert.equal(legacy.migratedAt, 1234);
+  const legacy = new RetentionStore(join(stateDir, 'retention'), { storage: ac }); await assert.rejects(legacy.start(), /database authority is required/);
+  assert.deepEqual(JSON.parse(await readFile(join(stateDir, 'retention', 'journal.json'), 'utf8')), original.journal);
   await recordPreparationEvidence(stateDir, { context: ac.context!, preflight, prepared, gate: await ac.gate('core') }); await ac.close();
   const { client: bc, update } = await openB(t, stateDir, b);
   assert.equal((await evaluateStorageUpdate(update)).importAllowed, true);
@@ -653,7 +655,7 @@ test('accepted numeric expansion imports, guarded updates, pages and sealed rest
 });
 
 test('actual SQLite corrupt and I/O command errors activate existing intake hold; format refusal keeps core healthy', async t => {
-  const { a, b } = await builds(t);
+  const a = await retentionBuild('1.122.0', await folder(t)), b = await retentionBuild('1.123.0', await folder(t));
   const damagedPath = join(b.directory, 'corrupt.sqlite');
   const damaged = new DatabaseSync(damagedPath);
   damaged.exec('CREATE TABLE damage (value TEXT); INSERT INTO damage VALUES (\'fixture\');'); damaged.close();
@@ -663,14 +665,17 @@ test('actual SQLite corrupt and I/O command errors activate existing intake hold
     const stateDir = await folder(t), evidenceParent = await sources(stateDir);
     await prepareA(stateDir, a);
     const normal = await openB(t, stateDir, b);
-    await importRetention({ storage: normal.client, update: normal.update, stateDir, evidenceParent }); await normal.client.close();
+    await importRetention({ storage: normal.client, update: normal.update, stateDir, evidenceParent });
+    await importFixtureRuns(normal.client); await normal.client.close();
     let effects = 0, unavailable: StorageStatus | undefined;
     let health: WorkerStorageStatus = { state: 'ready', code: 'ready', reason: '', admissionOpen: true, sessionsAvailable: true, healthStatus: 200 };
-    const manager = new RunManager({ stateDir: join(stateDir, 'fixture-runner'), getSession: () => undefined, refreshSessions: async () => {},
-      holdUntilReady: true, findExecutable: async () => { effects++; throw new Error('must not reach provider'); } });
-    await manager.start(); t.after(() => manager.close());
+    let manager: RunManager;
+    t.after(async () => { await manager?.close(); });
     const client = await b.storage.openStorage({ stateDir, bundle: b.bundle(fault), onUnavailable: status => { unavailable = status; manager.holdStorage(); health = { ...health, state: 'unavailable', code: status.failure!.code, reason: status.failure!.message, admissionOpen: false, healthStatus: 503 }; } });
     t.after(() => client.close()); await client.prepare({ allowMigration: false });
+    manager = new RunManager({ stateDir, storage: client, getSession: () => undefined, refreshSessions: async () => {},
+      holdUntilReady: true, findExecutable: async () => { effects++; throw new Error('must not reach provider'); } });
+    await manager.start();
     await assert.rejects(new RetentionStore(join(stateDir, 'retention'), { storage: client }).start(), (error: unknown) => {
       assert.equal((error as { code: string }).code, fault === 'io' ? 'io-error' : 'corrupt'); return true;
     });
@@ -694,7 +699,7 @@ test('actual SQLite corrupt and I/O command errors activate existing intake hold
     } finally { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 
     assert.deepEqual(await readFile(join(stateDir, 'retention', 'journal.json')), Buffer.from(JSON.stringify(documents().journal)), 'no legacy fallback write');
-    await client.close(); await manager.close();
+    await manager.close(); await client.close();
   }
   const stateDir = await folder(t), evidenceParent = await sources(stateDir);
   await prepareA(stateDir, a);
@@ -834,4 +839,50 @@ test('failed current guards reserve their intent until the all-owner cap; receip
   await rollback.prepare({ allowMigration: false });
   await assert.rejects(rollback.write('retention', 'begin', { intent: 'blocked', bytes: 1, chunks: 1, sha256: 'a'.repeat(64) }, 'blocked'), /reservation limit/);
   assert.deepEqual(await new RetentionRepository(rollback).exportCurrent(), before);
+});
+
+test('R6 runtime refuses absent SDK and absent authority without reading valid legacy JSON', async t => {
+  const stateDir = await folder(t), { a } = await builds(t);
+  await sources(stateDir);
+  const journal = await readFile(join(stateDir, 'retention', 'journal.json'));
+  const observations = await readFile(join(stateDir, 'retention-observations.json'));
+  await assert.rejects(new RetentionStore(join(stateDir, 'retention')).start(), /storage is unavailable/);
+  const options = { stateDir, snapshot: () => ({ complete: true, records: [] }), reconcile: (sessions: import('../../../shared/types.js').Session[]) => sessions,
+    runs: () => [], settled: () => new Set<string>(), protectedIds: () => [] };
+  await assert.rejects(new RetentionObserver(options).start(), /storage is unavailable/);
+  const client = await a.storage.openStorage({ stateDir, bundle: a.bundle() }); t.after(() => client.close());
+  await client.prepare({ allowMigration: true });
+  const store = new RetentionStore(join(stateDir, 'retention'), { storage: client });
+  await assert.rejects(store.start(), /database authority is required/);
+  await assert.rejects(store.gateNativeEffects(), /not loaded database authority/);
+  await assert.rejects(new RetentionObserver({ ...options, storage: client }).start(), /database authority is required/);
+  assert.deepEqual(await readFile(join(stateDir, 'retention', 'journal.json')), journal);
+  assert.deepEqual(await readFile(join(stateDir, 'retention-observations.json')), observations);
+  assert.equal((await new RetentionRepository(client).head()).authority, null);
+});
+
+test('R6 explicit journal targets never serialize unrelated projection and preserve policy wrapper metadata', async t => {
+  const stateDir = await folder(t), { a, b } = await builds(t), data = documents();
+  data.journal.policies = false;
+  const evidenceParent = await sources(stateDir, data); await prepareA(stateDir, a);
+  const { client, update } = await openB(t, stateDir, b);
+  await importRetention({ storage: client, update, stateDir, evidenceParent });
+  const store = new RetentionStore(join(stateDir, 'retention'), { storage: client }); await store.start();
+  const view = store as unknown as { entries: Map<string, RetentionJournalEntry> };
+  const unrelated = view.entries.get('operation')!;
+  Object.defineProperty(unrelated, 'toJSON', { value: () => { throw new Error('unrelated projection serialized'); }, configurable: true });
+  const next = { ...data.journal.entries[0], id: 'new-metadata' };
+  await store.putMany([next, { ...next, error: 'last duplicate wins' }]);
+  const previous = store.get(next.id)!;
+  await store.putIfUnchanged([{ previous, next: { ...previous, error: 'conditional' } }], () => true);
+  await store.putIfUnchanged([{ previous, next: { ...previous, error: 'stale must not win' } }], () => true);
+  assert.equal(store.get(next.id)!.error, 'conditional');
+  await store.setPolicy({ id: 'new-policy', archiveRevision: 1 });
+  await store.removeMetadata([next.id, next.id, 'absent']);
+  const current = (await new RetentionRepository(client).exportCurrent()).documents;
+  assert.deepEqual(current.journal.entries, data.journal.entries);
+  assert.deepEqual(current.journal.extra, data.journal.extra);
+  assert.deepEqual(current.journal.policies, [{ id: 'new-policy', archiveRevision: 1 }]);
+  assert.deepEqual(current.observations, data.observations);
+  assert.deepEqual(JSON.parse(await readFile(join(stateDir, 'retention', 'journal.json'), 'utf8')), data.journal, 'SQL writes do not save legacy JSON');
 });

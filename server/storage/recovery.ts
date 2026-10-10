@@ -52,7 +52,7 @@ async function readOwnerFile(path: string, maxBytes: number): Promise<{ bytes: B
     return { bytes: await file.readFile(), generation: generationOf(info) };
   } finally { await file.close(); }
 }
-async function fileSha256(path: string): Promise<string> {
+export async function fileSha256(path: string): Promise<string> {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const hash = createHash('sha256');
@@ -408,11 +408,16 @@ export async function recordRecoveryBarrier(stateDir: string, input: RecoveryInp
     id: snapshot.id, createdAt: snapshot.createdAt, build: snapshot.build, storageId: snapshot.storageId, ownerEpoch: snapshot.ownerEpoch, sha256: snapshot.file.sha256,
     schema: snapshot.schema.map(({ scope, version }) => ({ scope, version })), authority: snapshot.authority.map(({ domain, authority, generation }) => ({ domain, authority, generation })),
   };
+  const known = input.known ? {
+    schema: input.known.schema.map(({ scope, version }) => ({ scope, version })),
+    authority: input.known.authority.map(({ domain, authority, generation }) => ({ domain, authority, generation })),
+    ownerEpoch: input.known.ownerEpoch,
+  } : null;
   const barrier: RecoveryBarrier = {
     format: 'tower-storage-recovery-barrier', version: 1, id, state: 'recorded', reason: input.reason.slice(0, 2000), recordedAt: new Date().toISOString(), recordedBy: { ...input.context.identity },
     snapshot: snapshotFacts,
-    source: { files, known: input.known ?? null, preservedDir: `${id}/source` },
-    scopes: affectedScopes(snapshotFacts, input.known ?? null),
+    source: { files, known, preservedDir: `${id}/source` },
+    scopes: affectedScopes(snapshotFacts, known),
     reconciled: [],
     previous,
   };

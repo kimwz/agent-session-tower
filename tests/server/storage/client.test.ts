@@ -24,7 +24,7 @@ test('the production storage opens, needs an explicit prepare, and keeps WAL/FUL
   assert.equal(prepared.created, true);
   assert.equal(prepared.claimed, true);
   assert.equal(prepared.ownerEpoch, 1);
-  assert.deepEqual(prepared.applied, [{ scope: 'core', version: 1 }, { scope: 'retention', version: 1 }, { scope: 'retention', version: 2 }, { scope: 'runs', version: 1 }, { scope: 'triggers', version: 1 }]);
+  assert.deepEqual(prepared.applied, [{ scope: 'core', version: 1 }, { scope: 'retention', version: 1 }, { scope: 'retention', version: 2 }, { scope: 'runs', version: 1 }, { scope: 'triggers', version: 1 }, { scope: 'permissions', version: 1 }, { scope: 'remote', version: 1 }, { scope: 'auto-prompt', version: 1 }, { scope: 'automation-workflows', version: 1 }]);
   const identity = JSON.parse(await readFile(join(dir, 'storage-recovery', 'identity.json'), 'utf8'));
   assert.deepEqual([identity.state, identity.storageId], ['created', prepared.schema.kind !== 'empty' && prepared.schema.storageId], 'the claim comes after the identity says created');
   assert.ok(!Object.keys(await filesUnder(dir)).some(name => name.startsWith('storage/') || name === 'storage'), 'the database is <state-dir>/state.sqlite, with no storage/ folder');

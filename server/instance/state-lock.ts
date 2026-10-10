@@ -1,6 +1,6 @@
-import { mkdir, readdir, readFile, rename, rmdir, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, rename, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { isSea } from 'node:sea';
 import { processStart } from './process-start.js';
 
@@ -61,7 +61,27 @@ async function ownerRunning(owner: Owner): Promise<boolean> {
  * stale cleanup can only unlink that old marker, never a replacement owner's marker.
  * Plain mkdir + owner.json has an empty-directory race while a new owner writes.
  */
+export interface StrictStateLease { readonly kind: 'offline-strict'; release(): Promise<void> }
+const strictLeases = new WeakMap<StrictStateLease, { stateDir: string; marker: string; released: boolean }>();
+export async function validateStrictStateLease(lease: StrictStateLease, stateDir: string): Promise<void> {
+  const held = strictLeases.get(lease);
+  if (!held || held.released || held.stateDir !== resolve(stateDir)
+    || !(await readdir(join(stateDir, '.instance-lock'))).includes(held.marker)) throw new Error('Offline runtime lease is not held.');
+}
+export async function acquireStrictStateLock(stateDir: string, port = 0): Promise<StrictStateLease> {
+  const acquired = await acquireLock(stateDir, port, true);
+  const lease: StrictStateLease = Object.freeze({ kind: 'offline-strict', release: async () => {
+    const held = strictLeases.get(lease)!;
+    if (held.released) return;
+    await acquired.release(); held.released = true;
+  } });
+  strictLeases.set(lease, { stateDir: resolve(stateDir), marker: acquired.marker, released: false });
+  return lease;
+}
 export async function acquireStateLock(stateDir: string, port: number): Promise<() => Promise<void>> {
+  return (await acquireLock(stateDir, port, false)).release;
+}
+async function acquireLock(stateDir: string, port: number, strict: boolean): Promise<{ marker: string; release: () => Promise<void> }> {
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   const lock = join(stateDir, '.instance-lock');
   const nonce = randomUUID();
@@ -74,12 +94,17 @@ export async function acquireStateLock(stateDir: string, port: number): Promise<
   try {
     for (let attempts = 0; attempts < 8; attempts++) {
       try {
+        if (strict) {
+          const existing = await lstat(lock).catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return undefined; throw error; });
+          if (existing) throw new Error(`Offline runtime lock conflict at ${lock}.`);
+        }
         await rename(prepared, lock);
         acquired = true;
         break;
       } catch (error) {
         if (!['EEXIST', 'ENOTEMPTY', 'EPERM'].includes((error as NodeJS.ErrnoException).code || '')) throw error;
       }
+      if (strict) throw new Error(`Offline runtime lock conflict at ${lock}.`);
       let names: string[];
       try { names = await readdir(lock); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
@@ -111,14 +136,16 @@ export async function acquireStateLock(stateDir: string, port: number): Promise<
     }
   }
   let released = false;
-  return async () => {
+  return { marker, release: async () => {
     if (released) return;
     released = true;
-    await unlink(join(lock, marker)).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
+    let ownMarkerRemoved = true;
+    await unlink(join(lock, marker)).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; ownMarkerRemoved = false; });
+    if (strict && !ownMarkerRemoved) return;
     await rmdir(lock).catch((error: NodeJS.ErrnoException) => {
       if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error.code || '')) throw error;
     });
-  };
+  } };
 }
 
 /** Ports of the Tower web servers that hold this state directory right now. */

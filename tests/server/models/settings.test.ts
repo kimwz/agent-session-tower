@@ -1,3 +1,4 @@
+import { workerSettingsFixture, closeWorkerSettingsFixture } from '../remote/external-storage-fixture.js';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
@@ -12,7 +13,7 @@ import { runModelsCommand } from '../../../server/models/cli.js';
 
 async function stateDir(t: TestContext): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), 'tower-models-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => { await closeWorkerSettingsFixture(directory); await rm(directory, { recursive: true, force: true }); });
   return directory;
 }
 
@@ -88,7 +89,7 @@ test('backups carry the model settings; a restore applies them to the next call 
   const chosen = initialModelSettings();
   chosen.roles['publicAgents.judge'] = { provider: 'codex', claude: {}, codex: { model: 'gpt-6.1-sol', effort: 'low' } };
   await saveModelSettings(from, chosen);
-  const files = await collectWorkerFiles(from);
+  const files = await collectWorkerFiles(from, (await workerSettingsFixture(from)).collect);
   assert.deepEqual(files['models.json'], chosen);
   await readModelSettings(to);
   const result = await applyWorkerFiles(to, { 'models.json': { ...chosen, roles: { ...chosen.roles, 'future.role': { provider: 'claude', claude: {}, codex: {} } } } });

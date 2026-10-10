@@ -8,7 +8,9 @@ import test, { type TestContext } from 'node:test';
 import { CapabilityRegistry, handleMcpRequest, type McpContext } from '../../../server/api/mcp.js';
 import { TowerApi } from '../../../server/api/tower-api.js';
 import { CODEX_HEADER, syncCodex } from '../../../server/permissions/native.js';
+import { noStorageFixture, permissionFixture, closePermissionFixture } from './storage-fixture.js';
 import { PermissionService } from '../../../server/permissions/service.js';
+import { apiTriggerStorageFixture } from '../api/trigger-storage-fixture.js';
 import { TriggerService } from '../../../server/triggers/service.js';
 import { claudeRule, codexRule, ruleIsBroad, ruleProblem } from '../../../shared/permissions.js';
 import type { PermissionOverview } from '../../../shared/permissions.js';
@@ -25,11 +27,11 @@ async function fixture(t: TestContext, effectGate?: () => Promise<void>) {
   git(project, 'init', '-q');
   const sessions = new Map([['claude:one', { cwd: project, provider: 'claude' as const }], ['codex:two', { cwd: project, provider: 'codex' as const }]]);
   const resumed: Array<{ sessionId: string; prompt: string }> = [];
-  const make = () => new PermissionService({ stateDir, effectGate, env: { CODEX_HOME: codexHome }, session: id => sessions.get(id),
+  const make = () => new PermissionService({ stateDir, repository:noStorageFixture(stateDir), effectGate, env: { CODEX_HOME: codexHome }, session: id => sessions.get(id),
     resume: async (sessionId, prompt) => { if (sessionId === 'gone') throw new Error('Session not found.'); resumed.push({ sessionId, prompt }); } });
   const service = make();
   await service.start();
-  t.after(async () => { service.close(); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { service.close(); closePermissionFixture(stateDir); await rm(root, { recursive: true, force: true }); });
   return { root, stateDir, codexHome, project, sessions, service, make, resumed };
 }
 const agent = (sessionId: string, runId = 'run-1') => ({ kind: 'agent', via: 'mcp', sessionId, runId });
@@ -139,22 +141,23 @@ test('requests need a Tower conversation on this computer; the pending list is b
   assert.equal(again.pending(), 50);
 });
 
-test('an unreadable record is set aside, and the owner is told Tower-written rules files may remain', async t => {
-  const f = await fixture(t);
+test('a corrupt SQL row is refused without empty fallback or modifying native rules', async t => {
+  const f=await fixture(t);
+  await f.service.save({ kind:'command',value:'git status',providers:['codex'],scope:'global' });
+  const native=join(f.codexHome,'rules','tower.rules'), before=await readFile(native);
   f.service.close();
-  await writeFile(join(f.stateDir, 'permissions.json'), '{ broken');
-  const again = f.make();
-  await again.start();
-  t.after(() => again.close());
-  const overview = again.overview();
-  assert.match(overview.lost!, /permissions\.json\.unreadable-/);
-  assert.equal((await again.acknowledge()).lost, undefined);
+  permissionFixture(f.stateDir).db.prepare('UPDATE permission_rules SET json=?').run('{ broken');
+  const again=f.make(); await assert.rejects(again.start());
+  assert.deepEqual(await readFile(native),before);
+  assert.equal(permissionFixture(f.stateDir).db.prepare('SELECT json FROM permission_rules').get()!.json,'{ broken');
 });
 
 test('agents reach permissions only through their own keyed requests; owner-only operations stay with the owner', async t => {
   const f = await fixture(t);
   const runs: Run[] = [];
-  const triggers = new TriggerService({ stateDir: f.stateDir, tickMs: 60_000, executor: { submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
+  await mkdir(f.stateDir, { recursive: true, mode: 0o700 });
+  const { storage } = await apiTriggerStorageFixture(t, f.stateDir);
+  const triggers = new TriggerService({ storage, stateDir: f.stateDir, tickMs: 60_000, executor: { submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
     create: async () => { throw new Error('unused'); }, enqueue: async () => { throw new Error('unused'); }, runs: () => runs, session: () => undefined } });
   await triggers.start();
   t.after(() => triggers.close());
@@ -189,9 +192,9 @@ test('a project folder that is, or links to, the Codex home\'s parent never gets
   const global = join(home, '.codex', 'rules', 'tower.rules');
   await writeFile(global, 'prefix_rule(pattern=["keep"], decision="allow")\n');
   await symlink(home, join(root, 'alias'));
-  const service = new PermissionService({ stateDir: join(root, 'state'), env: { CODEX_HOME: join(home, '.codex') }, session: () => undefined });
+  const service = new PermissionService({ stateDir: join(root, 'state'), repository:noStorageFixture(join(root,'state')), env: { CODEX_HOME: join(home, '.codex') }, session: () => undefined });
   await service.start();
-  t.after(() => service.close());
+  t.after(() => { service.close(); closePermissionFixture(join(root,'state')); });
   for (const cwd of [home, join(root, 'alias')]) {
     await assert.rejects(service.save({ kind: 'command', value: 'terraform apply', providers: ['codex'], scope: 'project', cwd }), /모든 프로젝트용 파일과 같습니다/);
     await assert.rejects(syncCodex(join(cwd, '.codex', 'rules', 'tower.rules'), [], cwd, global), /같은 파일이라서/);
@@ -210,23 +213,20 @@ test('review fixes: unreadable characters, one request per conversation, cleanup
   assert.notEqual((codex.request as { id: string }).id, (claude.request as { id: string }).id, 'each conversation hears its own decision');
   assert.deepEqual(f.service.overview().requests.map(request => request.rule.providers), [['codex'], ['claude']]);
 
-  // A record that could not be read leaves Tower's file for every project behind; the next start removes it.
+  // Import rejects malformed scope records; an existing SQL authority never consults stale JSON.
   await f.service.save({ kind: 'command', value: 'terraform plan', providers: ['codex'], scope: 'global' });
-  const global = join(f.codexHome, 'rules', 'tower.rules');
-  assert.match(await readFile(global, 'utf8'), /terraform/);
-  await f.service.flush(); f.service.close();
-  await writeFile(join(f.stateDir, 'permissions.json'), JSON.stringify({ version: 1, rules: [{ id: 'x', kind: 'command', value: 'ls', providers: ['claude'], scope: 'project' }], requests: [], codex: [{ path: '/elsewhere/.codex/rules/tower.rules', scope: 'project' }] }));
-  const again = f.make();
-  await again.start();
-  await again.flush();
-  t.after(() => again.close());
-  await assert.rejects(readFile(global, 'utf8'), { code: 'ENOENT' });
-  assert.equal(again.overview().rules.length, 0, 'a project rule without its folder is dropped, not made global');
-
+  const global=join(f.codexHome,'rules','tower.rules');
+  await mkdir(f.stateDir,{ recursive:true });
+  await writeFile(join(f.stateDir,'permissions.json'),JSON.stringify({ version:1,rules:[{ id:'x',kind:'command',value:'ls',providers:['claude'],scope:'project' }],requests:[],codex:[] }));
+  f.service.close(); const again=f.make(); await again.start(); await again.bootstrapEffects(new Set());
+  t.after(()=>again.close());
+  assert.match(await readFile(global,'utf8'),/terraform/);
+  assert.equal(again.overview().rules.length,1,'SQL authority does not normalize or drop its records using stale JSON');
+  await again.remove(again.overview().rules[0].id);
   // A second Tower (not on the default state folder) never writes the file for every project.
-  const other = new PermissionService({ stateDir: join(f.root, 'other-state'), env: { CODEX_HOME: f.codexHome }, session: () => undefined, globalCodex: false });
+  const other = new PermissionService({ stateDir: join(f.root, 'other-state'), repository:noStorageFixture(join(f.root,'other-state')), env: { CODEX_HOME: f.codexHome }, session: () => undefined, globalCodex: false });
   await other.start();
-  t.after(() => other.close());
+  t.after(() => { other.close(); closePermissionFixture(join(f.root,'other-state')); });
   const saved = await other.save({ kind: 'command', value: 'make build', providers: ['codex'], scope: 'global' });
   await assert.rejects(readFile(global, 'utf8'), { code: 'ENOENT' });
   assert.match(saved.targets.find(target => target.scope === 'global')!.error!, /기본 상태 폴더/);
@@ -242,7 +242,7 @@ test('editing a rule an approval made saves the rule, never decides the finished
 test('decision opt-in is durable; recovery applies rules before recording a request-aware notification', async t => {
   const f = await fixture(t); await f.service.flush(); f.service.close();
   let fail = true; const notified: string[] = [];
-  const make = () => new PermissionService({ stateDir: f.stateDir, env: { CODEX_HOME: f.codexHome }, session: id => f.sessions.get(id),
+  const make = () => new PermissionService({ stateDir: f.stateDir, repository:noStorageFixture(f.stateDir), env: { CODEX_HOME: f.codexHome }, session: id => f.sessions.get(id),
     decision: async request => { if (fail) throw new Error('Fixture enqueue unavailable'); notified.push(request.id); } });
   const service = make(); await service.start(); await service.flush();
   const first = (await service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', providers: ['claude'], reason: 'Fixture' }, agent('claude:one'))).request!;
@@ -265,7 +265,8 @@ test('permission writes queued before pause recheck the hold after the awaited e
   const f = await fixture(t, () => gate());
   await f.service.reconcileNotifications();
   await f.service.save({ kind: 'command', value: 'git status', providers: ['codex'], scope: 'global' });
-  const paths = [join(f.stateDir, 'permissions.json'), join(f.codexHome, 'rules', 'tower.rules')];
+  const paths = [join(f.codexHome, 'rules', 'tower.rules')];
+  const durableBefore=await noStorageFixture(f.stateDir).load();
   const before = await Promise.all(paths.map(path => readFile(path)));
   let reached!: () => void, release!: () => void;
   const entered = new Promise<void>(resolve => { reached = resolve; });
@@ -277,9 +278,10 @@ test('permission writes queued before pause recheck the hold after the awaited e
   const rejected = [first, second].map(work => assert.rejects(work, { kind: 'unavailable' }));
   await entered; f.service.pause(); release(); await Promise.all(rejected);
   assert.deepEqual(await Promise.all(paths.map(path => readFile(path))), before);
+  assert.deepEqual(await noStorageFixture(f.stateDir).load(),durableBefore);
   f.service.resume(); gate = async () => {};
   await f.service.save({ kind: 'command', value: 'git diff', providers: ['codex'], scope: 'global' });
-  assert.match(await readFile(paths[1], 'utf8'), /"diff"/);
+  assert.match(await readFile(paths[0], 'utf8'), /"diff"/);
 });
 
 test('a hold between permission commit and native apply leaves native rules untouched and can reconcile later', async t => {
@@ -312,6 +314,6 @@ test('held permission service preserves only an already running command completi
   assert.equal(result.notify, true); assert.equal(f.service.untoldRuns().length, 1);
   await assert.rejects(f.service.updateRun(asked.request.id, { status: 'running' }), { kind: 'unavailable' });
   await assert.rejects(f.service.requestRun({ command: 'echo new', reason: 'held' }, agent('claude:one')), { kind: 'unavailable' });
-  const persisted = JSON.parse(await readFile(join(f.stateDir, 'permissions.json'), 'utf8'));
-  assert.equal(persisted.requests.find((item: { id: string }) => item.id === asked.request.id).run.exitCode, 7);
+  const persisted = await noStorageFixture(f.stateDir).load();
+  assert.equal(persisted.requests.find((item: { id: string }) => item.id === asked.request.id)!.run!.exitCode, 7);
 });

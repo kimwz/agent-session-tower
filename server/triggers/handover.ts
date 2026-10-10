@@ -5,6 +5,7 @@ import { failure } from './errors.js';
 import type { AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, Session } from '../../shared/types.js';
 import type { RunAdmission } from '../runs/manager.js';
 import { excerpt, KEEP_OPEN } from './text.js';
+import type { TriggerAdmissionLink } from './storage-commands.js';
 
 export const REMOTE_FOLDER_REFUSED = 'This trigger was set up from another computer, and its folder is one this computer keeps out of sharing; it did not run.';
 
@@ -32,6 +33,7 @@ export interface HandoverContext {
   sharing?: { check(path: string): Promise<boolean>; now(path: string): boolean };
   /** Folders the owner chose for a trigger, read as the run is handed over. */
   trustedFolders(): string[];
+  admissionLink?: (eventId: string) => Promise<TriggerAdmissionLink | undefined>;
 }
 
 /** Hands an event to what runs it: its coordinator conversation, Auto Prompt, a new conversation in its folder, or its session. */
@@ -75,7 +77,9 @@ export async function handEvent(event: TriggerEvent, context: HandoverContext): 
   if (!session) return { status: 'error', error: 'The chosen session no longer exists.' };
   if (session.provider !== input.provider) return { status: 'error', error: `The chosen session is a ${session.provider} session, not ${input.provider}.` };
   if (await withheld(session.cwd) || await withheld(executor.session(session.id)?.cwd ?? '')) return refused;
-  const run = await executor.enqueue(session.id, prompt, common, { autoPromptId: event.requestId, origin, unattended, ...admitted(() => executor.session(session.id)?.cwd) });
+  // External/controller targets retain their existing, non-atomic handover contract.
+  const triggerLink = !input.remote && input.target.node === 'local' ? await context.admissionLink?.(event.id) : undefined;
+  const run = await executor.enqueue(session.id, prompt, common, { autoPromptId: event.requestId, origin, unattended, ...(triggerLink ? { triggerLink } : {}), ...admitted(() => executor.session(session.id)?.cwd) });
   return { status: 'running', dispatch: { runId: run.id, sessionId: run.sessionId } };
 }
 

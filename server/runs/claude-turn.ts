@@ -42,6 +42,7 @@ export async function prepareClaudeTurn(host: TurnHost, run: Run, session: Sessi
   if (!(await stat(session.cwd)).isDirectory()) throw new Error('The session working directory no longer exists.');
   const attachments = await host.attachments.resolve(run.sessionId, run.attachments);
   await host.notes.add(run, session, creating);
+  host.touch(run);
   const args = creating ? buildCreateArgs(session, run.model, run.effort) : buildResumeArgs(session, run.model, run.effort);
   const tools = host.runTools(run, session);
   await awaitToolServers(tools);
@@ -123,7 +124,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
   let replyMessage = '';
   /** Messages whose words came as partial text: their complete form adds nothing. */
   const streamedMessages = new Set<string>();
-  const replied = (changed: boolean) => { if (changed) host.notifyOutput(); };
+  const replied = (changed: boolean) => { if (changed) host.notifyOutput(run); };
   let modeNoted = false;
   let contextInput: { model: string; usedTokens: number } | undefined;
   let identitySaved: Promise<void> = Promise.resolve();
@@ -147,7 +148,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
     if (waitTimer) clearTimeout(waitTimer);
     followUpTimer = waitTimer = undefined;
   };
-  const endWait = () => { if (run.backgroundWait) { delete run.backgroundWait; host.changed(); } };
+  const endWait = () => { if (run.backgroundWait) { delete run.backgroundWait; host.changed(run); } };
   const beginTurn = () => {
     if (turnActive) return;
     clearFinishTimer();
@@ -175,16 +176,16 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         if (run.status !== 'running' || child.exitCode !== null || child.stdin.destroyed || child.stdin.writableEnded) { reject(new Error('Provider input is closed.')); return; }
         child.stdin.write(JSON.stringify(message) + '\n', error => error ? reject(error) : resolve());
       }),
-      onApproval: approval => { if (run.status === 'running') { run.approvals = [...(run.approvals || []), approval]; host.changed(); } },
+      onApproval: approval => { if (run.status === 'running') { run.approvals = [...(run.approvals || []), approval]; host.changed(run); } },
       onCancelled: id => {
         if (!run.approvals?.some(approval => approval.id === id)) return;
         run.approvals = run.approvals.filter(approval => approval.id !== id);
         if (!run.approvals.length) delete run.approvals;
-        host.changed();
+        host.changed(run);
       },
       onError: error => { streamError = error.message; host.stop(run.id, owned); },
       // Instructions queued behind this turn can be inserted now; the page is told without waiting for output.
-      onReady: () => host.changed(),
+      onReady: () => host.changed(run),
     });
     const closeInput = () => { inputClosedByTower = true; clearFinishTimer(); clearWaitTimers(); owned.claude?.close(); if (!child.stdin.writableEnded) child.stdin.end(); };
     const idle = () => !turnActive && run.status === 'running' && child.exitCode === null && !child.stdin.writableEnded;
@@ -238,7 +239,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
           : '\n[Tower] Waiting for Claude to take the finished background work.\n');
         arm('wait', waitMaxMs);
       } else run.backgroundWait.tasks = tasks.runningCount;
-      host.changed();
+      host.changed(run);
     };
     const parseEventLine = (line: string): void => {
       if (!line.trim()) return;
@@ -254,7 +255,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         && actualId === session.nativeId) {
         host.registry.confirm(session.id, actualId);
         session.nativeId = actualId;
-        host.changed();
+        host.changed(run);
         identitySaved = host.persistNativeIdentity(run).then(() => {}).catch(error => {
           streamError = `Cannot save the new conversation identity: ${errorMessage(error)}`;
           host.stop(run.id, owned);
@@ -328,7 +329,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         if (contextInput && contextCapacity(capacity) && sawSessionId && !streamError) {
           run.contextUsage = { ...contextInput, contextWindow: capacity, usedPercent: contextInput.usedTokens / capacity * 100,
             updatedAt: new Date().toISOString() };
-          host.changed();
+          host.changed(run);
         }
         sawCompletion = true;
         turnActive = false;
@@ -380,7 +381,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         pendingApproval, pendingSteer: Boolean(pendingSteer), wakeup: wakeups.pending } });
     });
     owned.claude.start(input);
-    host.changed();
+    host.changed(run);
   };
   return { spawn: spawnTurn, start };
 }

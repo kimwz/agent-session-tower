@@ -19,6 +19,9 @@ export interface RegistryHost {
 export class CreatedSessionRegistry {
   /** The records themselves; only the registry changes them. */
   readonly records = new Map<string, CreatedSession>();
+  private readonly touched = new Set<string>();
+  touch(id: string): void { this.touched.add(id); }
+  takeTouched(): string[] { const ids = [...this.touched]; this.touched.clear(); return ids; }
   constructor(private readonly host: RegistryHost) {}
 
   /** Takes over the saved records; answers their content as read, so an unchanged file is not written again. */
@@ -28,6 +31,7 @@ export class CreatedSessionRegistry {
       const origin = restoredSessionOrigin((value as { origin?: unknown }).origin);
       if (origin) value.origin = origin; else delete value.origin;
       this.records.set(value.session.id, value);
+      this.touch(value.session.id);
     }
     return this.serialize();
   }
@@ -37,7 +41,7 @@ export class CreatedSessionRegistry {
   /** Only after a receipt proves the first run was not committed. Never removes a native session. */
   removeUnconfirmed(id: string, runId: string): void {
     const record = this.records.get(id);
-    if (record && !record.confirmed && record.runId === runId) this.records.delete(id);
+    if (record && !record.confirmed && record.runId === runId) { this.records.delete(id); this.touch(id); }
   }
 
   has(id: string): boolean { return this.records.has(id); }
@@ -71,7 +75,7 @@ export class CreatedSessionRegistry {
     if (linked && !created.origin?.untrustedInput) {
       // The mark is permanent: record it so a later ledger cleanup cannot clear it.
       created.origin = { ...(created.origin ?? { kind: 'unknown' as const }), untrustedInput: true };
-      this.host.persist();
+      this.touch(id); this.host.persist();
     }
     return { ...(created.origin ?? { kind: 'unknown' as const, untrustedInput: true }) };
   }
@@ -90,7 +94,7 @@ export class CreatedSessionRegistry {
         created.origin = { kind: 'slack', untrustedInput: true };
       } else if (initial) created.origin = { kind: 'owner', untrustedInput: false };
       else created.origin = { kind: 'unknown', untrustedInput: true };
-      changed++;
+      this.touch(id); changed++;
     }
     if (changed) this.host.persist();
     return changed;
@@ -99,7 +103,7 @@ export class CreatedSessionRegistry {
   /** Once external content is queued for a conversation, it stays marked. */
   markUntrusted(id: string): void {
     const created = this.records.get(id)!;
-    if (!created.origin?.untrustedInput) created.origin = { ...(created.origin ?? { kind: 'unknown' as const }), untrustedInput: true };
+    if (!created.origin?.untrustedInput) { created.origin = { ...(created.origin ?? { kind: 'unknown' as const }), untrustedInput: true }; this.touch(id); }
   }
 
   /** Whether the conversation is one Tower created whose native ID the provider has not confirmed yet. */
@@ -110,6 +114,7 @@ export class CreatedSessionRegistry {
     const created = this.records.get(id);
     if (!created || (created.confirmed && created.session.nativeId !== nativeId)) return false;
     created.confirmed = true; created.session.nativeId = nativeId; created.session.creationPending = false;
+    this.touch(id);
     return true;
   }
 
@@ -125,6 +130,7 @@ export class CreatedSessionRegistry {
       lastRequestAt: run.createdAt, lastMessage: input.prompt.trim().slice(0, 512), messageCount: 0, isSubagent: false, resumable: false, creationPending: true,
     };
     this.records.set(id, { session, runId: run.id, confirmed: false, ...(title ? { title } : {}), origin: sessionOriginOf(origin, untrustedInput) });
+    this.touch(id);
     return session;
   }
 
@@ -136,7 +142,7 @@ export class CreatedSessionRegistry {
   view(id: string, run: (id: string) => Run | undefined, withContext: (session: Session) => Session): Session | undefined {
     const created = this.records.get(id)!;
     const native = created.confirmed ? this.host.native(this.nativeId(id)) : undefined;
-    if (native && !created.seenNative) { created.seenNative = true; this.host.persist(); }
+    if (native && !created.seenNative) { created.seenNative = true; this.touch(id); this.host.persist(); }
     const initialRun = run(created.runId);
     const launchedBy = created.origin?.kind === 'trigger' && created.origin.triggerId ? { launchedBy: { kind: 'trigger' as const, triggerId: created.origin.triggerId } } : {};
     // The folder explicitly chosen at creation remains the project's identity.

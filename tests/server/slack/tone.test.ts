@@ -1,3 +1,4 @@
+import { externalStorageFixture } from '../remote/external-storage-fixture.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -34,12 +35,13 @@ test('tone collection stays disabled, private and account scoped; manual edits s
 test('collection is asynchronous, keeps worker alive, and never enables or sends a generated guide', async t => {
   const { SlackService } = await import('../../../server/slack/service.js');
   const dir = await mkdtemp(join(tmpdir(), 'tower-tone-service-')); let resolve!: (value: unknown) => void;
-  const service = new SlackService({ stateDir: dir, runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('no dispatch'); } }, refresh: async () => {} }, {
+  const storage = await externalStorageFixture(t, dir);
+  const service = new SlackService({ repository: storage.workflows, effectGate: storage.effectGate, stateDir: dir, runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('no dispatch'); } }, refresh: async () => {} }, {
     client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [], reply: async () => { throw new Error('no sending'); }, searchOwnMessages: async () => ['private fixture message'] }),
     model: async request => { assert.match(request.prompt, /private fixture/); return new Promise(done => { resolve = done; }); },
   });
   t.after(async () => { service.close(); await rm(dir, { recursive: true, force: true }); });
-  await service.start(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  await service.start(); await service.startRuntimeEffects(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
   const overview = await service.mutate('tone/collect', {}); assert.equal(overview.tone.status, 'collecting'); assert.equal(service.hasActive(), true);
   // The model is asked once its role is read from the model settings: wait for the call, not a number of turns.
   for (const deadline = Date.now() + 5000; !resolve && Date.now() < deadline;) await new Promise(done => setTimeout(done, 10));

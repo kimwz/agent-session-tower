@@ -1,3 +1,7 @@
+import { permissionsSchema } from '../../../server/permissions/storage-schema.js';
+import { remoteSchema } from '../../../server/remote/storage-schema.js';
+import { autoPromptSchema } from '../../../server/auto-prompt/storage-schema.js';
+import { workflowsSchema } from '../../../server/slack/storage-schema.js';
 import { triggersSchema } from '../../../server/triggers/storage-schema.js';
 import { triggersDomain } from '../../../server/triggers/storage-commands.js';
 import { runsSchema } from '../../../server/runs/storage-schema.js';
@@ -37,22 +41,24 @@ test('limits are chosen within their ranges and refused outside them', () => {
   assert.throws(() => storageLimits({ maxPayloadBytes: 64 * 1024 * 1024 }), RangeError);
 });
 
-test('the production manifest registers actual retention schema/handler with whole preparation-only declarations; schema text changes alter it', () => {
-  assert.deepEqual(STORAGE_DOMAIN_SCHEMAS, [retentionSchema, runsSchema, triggersSchema]);
+test('the production manifest registers actual retention schema/handler with exact current preparation and cutover declarations; schema text changes alter it', () => {
+  assert.deepEqual(STORAGE_DOMAIN_SCHEMAS, [retentionSchema, runsSchema, triggersSchema, permissionsSchema, remoteSchema, autoPromptSchema, workflowsSchema]);
   assert.strictEqual(retentionDomain.schema, retentionSchema);
   assert.strictEqual(runsDomain.schema, runsSchema);
-  assert.equal(retentionSchema.cutover, undefined);
-  assert.equal(runsSchema.cutover, undefined);
-  assert.equal(triggersSchema.cutover,undefined);
-  assert.strictEqual(triggersDomain.schema,triggersSchema);
-  assert.deepEqual(triggersSchema.preparation,{ requiredArtifactVersion: '1.124.0',readerContract: 1,writerContract: 1 });
-  assert.deepEqual(runsSchema.preparation, { requiredArtifactVersion: '1.122.0', readerContract: 1, writerContract: 1 });
+  assert.strictEqual(triggersDomain.schema, triggersSchema);
   const manifest = storageManifest();
   assert.equal(manifest.core.schemaVersion, CORE_MIGRATIONS.length);
-  assert.equal(manifest.domains.length, 3);
-  assert.equal(manifest.domains[0].scope, 'retention');
-  assert.deepEqual(manifest.domains[0].cutover, retentionSchema.cutover);
-  assert.deepEqual(manifest.domains[0].preparation, { requiredArtifactVersion: '1.120.2', readerContract: 1, writerContract: 1 });
+  const expected = [
+    { scope: 'retention', schemaVersion: 2, preparation: { requiredArtifactVersion: '1.120.2', readerContract: 1, writerContract: 1 }, cutover: { artifactVersion: '1.121.0', importContract: 1 } },
+    { scope: 'runs', schemaVersion: 1, preparation: { requiredArtifactVersion: '1.122.0', readerContract: 1, writerContract: 1 }, cutover: { artifactVersion: '1.123.0', importContract: 1 } },
+    { scope: 'triggers', schemaVersion: 1, preparation: { requiredArtifactVersion: '1.124.0', readerContract: 1, writerContract: 1 }, cutover: { artifactVersion: '1.125.0', importContract: 1 } },
+    { scope: 'permissions', schemaVersion: 1, preparation: { requiredArtifactVersion: '1.125.0', readerContract: 1, writerContract: 1 }, cutover: { artifactVersion: '1.125.0', importContract: 1 } },
+    { scope: 'remote', schemaVersion: 1, preparation: { requiredArtifactVersion: '1.125.0', readerContract: 1, writerContract: 1 }, cutover: { artifactVersion: '1.125.0', importContract: 1 } },
+    { scope: 'auto-prompt', schemaVersion: 1, preparation: { requiredArtifactVersion: '1.125.0', readerContract: 1, writerContract: 1 }, cutover: { artifactVersion: '1.125.0', importContract: 1 } },
+    { scope: 'automation-workflows', schemaVersion: 1, preparation: { requiredArtifactVersion: '1.125.0', readerContract: 1, writerContract: 1 }, cutover: { artifactVersion: '1.125.0', importContract: 1 } },
+  ];
+  assert.deepEqual(manifest.domains.map(({ scope, schemaVersion, preparation, cutover }) => ({ scope, schemaVersion, preparation, cutover })), expected);
+  assert.deepEqual(STORAGE_DOMAIN_SCHEMAS.map(({ domain, migrations, preparation, cutover }) => ({ scope: domain, schemaVersion: migrations.length, preparation, cutover })), expected);
   assert.equal(storageManifest().digest, manifest.digest, 'the same declarations give the same digest');
   assert.notEqual(storageManifest([], '0.0.1').digest, manifest.digest);
   const withFixture = storageManifest([fixtureSchema]);
