@@ -124,7 +124,7 @@ export async function lockOwners() {
   if (triggerACapture && manifest.digest !== triggerACapture.identity.manifestDigest) throw new Error('Actual A124 manifest mismatch.');
   if (actualACapture && manifest.digest !== actualACapture.identity.manifestDigest) throw new Error('Actual A122 manifest mismatch.');
   const artifacts: Record<string, StorageThreadArtifact> = {};
-  for (const fault of preparation ? ['normal', 'after-native-hold'] : ['normal', ...(externalDomains ? ['remote-completed-refused', 'inspect-exit-once'] : []), 'before', 'after', 'after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss', ...(runsRelease ? ['after-unsent-compensation'] : []), 'refuse-once', 'corrupt', 'io']) {
+  for (const fault of preparation ? ['normal', 'after-native-hold'] : ['normal', ...(externalDomains ? ['remote-completed-refused', 'inspect-exit-once', 'runs-before'] : []), 'before', 'after', 'after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss', ...(runsRelease ? ['after-unsent-compensation'] : []), 'refuse-once', 'corrupt', 'io']) {
     const entry = `
 import { parentPort } from 'node:worker_threads';
 import { existsSync, writeFileSync } from 'node:fs';
@@ -153,8 +153,8 @@ ${fault === 'inspect-exit-once' ? `parentPort.on('message', message => {
   if (message.op === 'inspect' && existsSync(armed) && !existsSync(consumed)) { writeFileSync(consumed, 'consumed', {flag:'wx',mode:0o600}); process.exit(9); }
 });` : ''}
 const schema = ${retentionCutover ? `{ ...retentionSchema, cutover: { artifactVersion: '1.121.0', importContract: 1 } }` : 'retentionSchema'};
-${!['before', 'after'].includes(fault) ? '' : `let commitId = -1;
-parentPort.on('message', message => { if (message.op === 'write' && message.command === 'commit') { commitId = message.id; ${fault === 'before' ? 'process.exit(9);' : ''} } });
+${!['before', 'after', 'runs-before'].includes(fault) ? '' : `let commitId = -1;
+parentPort.on('message', message => { if (message.op === 'write' && message.command === 'commit'${fault === 'runs-before' ? " && message.domain === 'runs'" : ''}) { commitId = message.id; ${['before', 'runs-before'].includes(fault) ? 'process.exit(9);' : ''} } });
 const post = parentPort.postMessage.bind(parentPort);
 parentPort.postMessage = message => { if (message.id === commitId) process.exit(9); post(message); };`}
 const domain = retentionDomainFor(schema);

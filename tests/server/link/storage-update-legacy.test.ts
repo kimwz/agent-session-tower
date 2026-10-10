@@ -191,7 +191,8 @@ test('legacy helper consumes actual candidate web preflight and backs out on an 
   if (!accepted) {
     assert.equal(result?.code, 'start-failed');
     assert.equal(await currentVersion(state), L);
-    assert.ok(answers.every(answer => answer.code === (build.preflight.supported ? 'prerequisite-required' : 'runtime-unsupported')));
+    assert.ok(answers.every(answer => answer.code === (build.preflight.supported ? 'prerequisite-required' : 'runtime-unsupported')),
+      JSON.stringify({ target: APP_VERSION, managed: true, preflight: build.preflight, result, answers, log }));
   }
   assert.deepEqual(await untouched(state), before, 'even legacy verification changes no original JSON, DB, migration or recovery state');
   assert.equal(existsSync(join(state, 'state.sqlite')), false);

@@ -17,7 +17,7 @@ import { TriggersRepository } from '../../../server/triggers/storage-repository.
 import { TriggerDispatch } from '../../../server/triggers/dispatch.js';
 import { TriggerStore } from '../../../server/triggers/store.js';
 import { retentionBuild } from '../storage/fixtures/retention-build.js';
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Session } from '../../../shared/types.js';
@@ -32,7 +32,7 @@ function fixture() {
   for (const schema of [runsSchema,triggersSchema]) for (const migration of schema.migrations) db.exec(migration.sql);
   const storageId = '10000000-0000-4000-8000-000000000001';
   db.prepare('INSERT INTO storage_meta VALUES (?,?)').run('storage_id',storageId);
-  for (const domain of ['runs','triggers']) db.prepare('INSERT INTO domain_imports VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(domain,'database',1,1,1,'a'.repeat(64),'2026-10-01T00:00:00Z','1.125.0','b'.repeat(64),1);
+  for (const domain of ['runs','triggers']) db.prepare('INSERT INTO domain_imports (domain,authority,generation,reader_contract,writer_contract,manifest_sha256,committed_at,app_version,source_hash,owner_epoch) VALUES (?,?,?,?,?,?,?,?,?,?)').run(domain,'database',1,1,1,'a'.repeat(64),'2026-10-01T00:00:00Z','1.125.0','b'.repeat(64),1);
   db.prepare('INSERT INTO runs_state VALUES (1,1)').run();
   const state = empty();
   const requestId = '40000000-0000-4000-8000-000000000001';
@@ -162,6 +162,7 @@ for (const response of ['known','lost'] as const) test(`actual dispatch local tr
   const directory = await realpath(await mkdtemp(join(tmpdir(),'tower-r4-admission-')));
   t.after(() => rm(directory,{ recursive: true,force: true }));
   const build = await retentionBuild('1.125.0',join(directory,'build'));
+  await mkdir(join(directory,'state'),{ mode: 0o700 });
   const client = await build.storage.openStorage({ stateDir: join(directory,'state'),bundle: build.bundle() });
   t.after(() => client.close()); await client.prepare({ allowMigration: true });
   await new RunsRepository(client).importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'runs-import');

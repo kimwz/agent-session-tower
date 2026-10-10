@@ -132,7 +132,13 @@ test('settings restore preserves local requests, notices, output refs and lost n
   const saved=await repo.load(); assert.deepEqual(saved.requests,state().requests); assert.equal(saved.lost,state().lost); assert.equal(saved.rules[0].value,'git log');
   assert.deepEqual(effects,{ starts:0,notices:0,gates:0 });
   const h=await repo.head(); const malicious={ ...saved,requests:[] };
-  assert.throws(()=>f.command('commit',{ mode:'restore',revision:h.revision,generation:h.authority!.generation,changes:permissionRows(malicious).map(r=>({ ...r,previous:null })) }));
+  f.command('commit',{ mode:'restore',revision:h.revision,generation:h.authority!.generation,changes:permissionRows(malicious).map(r=>({ ...r,previous:null })) });
+  assert.deepEqual((await f.repository().load()).requests,state().requests,'omitted local requests survive settings restore');
+  const current=await repo.head(),local=permissionRows(saved).find(r=>r.kind==='request')!;
+  for (const change of [{ ...local,json:JSON.stringify({ ...request,reason:'altered' }),previous:null },{ ...local,previous:null,remove:true }]) {
+    assert.throws(()=>f.command('commit',{ mode:'restore',revision:current.revision,generation:current.authority!.generation,changes:[change] }));
+    assert.deepEqual(await f.repository().head(),current,'refused request alteration/removal keeps the revision');
+  }
   assert.deepEqual((await f.repository().load()).requests,state().requests);
 });
 

@@ -35,6 +35,16 @@ const triggerStorageSources = [
   'server/triggers/audit.ts', 'server/triggers/errors.ts', 'server/triggers/limits.ts', 'shared/triggers.ts',
 ];
 
+// Current domain runtime imports, copied/compiled without a runtime loader.
+const currentStorageSources = [
+  'server/permissions/storage-schema.ts', 'server/permissions/storage-codec.ts', 'server/permissions/storage-commands.ts',
+  'server/remote/storage-schema.ts', 'server/remote/storage-codec.ts', 'server/remote/storage-commands.ts',
+  'server/remote/storage-rows.ts', 'server/remote/storage-row-commands.ts',
+  'server/auto-prompt/storage-schema.ts', 'server/auto-prompt/storage-codec.ts', 'server/auto-prompt/storage-commands.ts',
+  'server/slack/storage-schema.ts', 'server/slack/storage-codec.ts', 'server/slack/storage-commands.ts',
+  'server/runs/origin.ts', 'shared/models.ts', 'shared/permissions.ts',
+];
+
 test('a checkout trusts only the thread its own first capture bundles from its canonical entry: before it nothing, after it nothing else (a tsx process without the fixture build)', async t => {
   const state = await stateDir(t);
   const script = `
@@ -97,7 +107,7 @@ test('a checkout whose own thread entry changes after its capture reopens with t
   for (const name of ['storage-schema.ts', 'storage-codec.ts', 'storage-commands.ts']) {
     await cp(join(root, 'server/sessions/retention', name), join(checkout, 'server/sessions/retention', name));
   }
-  for (const name of [...runsStorageSources, ...triggerStorageSources]) await cp(join(root, name), join(checkout, name));
+  for (const name of [...runsStorageSources, ...triggerStorageSources, ...currentStorageSources]) await cp(join(root, name), join(checkout, name));
   await cp(join(root, 'shared/app-identity.ts'), join(checkout, 'shared/app-identity.ts'));
   await cp(join(root, 'tsconfig.json'), join(checkout, 'tsconfig.json'));
   await writeFile(join(checkout, 'package.json'), '{"type":"module"}');
@@ -189,7 +199,7 @@ async function compileStorage(out: string): Promise<void> {
   const sources = [
     ...(await readdir(join(root, 'server/storage'), { recursive: true })).filter(name => name.endsWith('.ts') && !name.endsWith('.d.ts')).map(name => join(root, 'server/storage', name)),
     ...['storage-schema.ts', 'storage-codec.ts', 'storage-commands.ts'].map(name => join(root, 'server/sessions/retention', name)),
-    ...[...runsStorageSources, ...triggerStorageSources].map(name => join(root, name)),
+    ...[...runsStorageSources, ...triggerStorageSources, ...currentStorageSources].map(name => join(root, name)),
     join(root, 'shared/app-identity.ts'),
   ];
   await build({ entryPoints: sources, outbase: root, outdir: out, format: 'esm', platform: 'node', target: 'node22', logLevel: 'silent' });

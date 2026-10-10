@@ -14,6 +14,7 @@ import { RunHistory } from '../../../server/runs/run-history.js';
 import { RunManager } from '../../../server/runs/manager.js';
 import { canonical, documentsHash, parseRunDocuments, rowsOf, RUN_SOURCE_BYTES, type RunDocuments } from '../../../server/runs/storage-codec.js';
 import { bootstrapRuns, importRuns, exportRuns, restoreRunsStorage, workerLegacyFiles } from '../../../server/runs/storage-transfer.js';
+import { RemoteRepository } from '../../../server/remote/storage-repository.js';
 import { RemoteRequestLedger } from '../../../server/remote/request-ledger.js';
 import type { Run, Session } from '../../../shared/types.js';
 import type { PermissionRequest } from '../../../shared/permissions.js';
@@ -141,14 +142,21 @@ test('raw runs validation retains unknown fields/markers and rejects malformed, 
 });
 
 for (const fault of ['before','after-native-hold','runs-refuse-compensation-loss']) test(`actual ${fault} response loss holds manager attachments/placeholder/remote ledger and provider until receipt resolution`, async t => {
-  const f = await prepared(t), initial = await f.open(f.b), repo = new RunsRepository(initial);
+  const stateDir = await folder(t);
+  const captured = await retentionBuild('1.125.0',await folder(t),true,true,true);
+  const initial = await captured.storage.openStorage({ stateDir,bundle: captured.bundle() });
+  t.after(() => initial.close()); await initial.prepare({ allowMigration: true });
+  const repo = new RunsRepository(initial);
+  await new RemoteRepository(initial).importPrepared([],'b'.repeat(64),'remote-empty-import',async () => {});
+  const f = { stateDir };
   await repo.importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'empty-import'); await initial.close();
-  const client = await f.open(f.a,fault);
+  const client = await captured.storage.openStorage({ stateDir,bundle: captured.bundle(fault === 'before' ? 'runs-before' : fault) });
+  t.after(() => client.close()); await client.prepare({ allowMigration: false });
   let starts = 0;
   const manager = new RunManager({ stateDir: f.stateDir,storage: client,getSession: () => undefined,refreshSessions: async () => {},findExecutable: async () => '/fixture/codex',
     spawnProcess: () => { starts++; throw new Error('Fixture forbids native launch'); } });
   await manager.start();
-  const ledger = new RemoteRequestLedger(f.stateDir); await ledger.start();
+  const ledger = new RemoteRequestLedger(f.stateDir,Date.now,undefined,new RemoteRepository(client)); await ledger.start();
   const now = Date.now().toString(16).padStart(12,'0'), requestId = `${now.slice(0,8)}-${now.slice(8)}-7123-8abc-0123456789ab`;
   let attempts = 0;
   const execute = async () => { attempts++; return manager.create({ provider: 'codex',cwd: f.stateDir,prompt: 'native-hold-response-lost', attachments: [{ name: 'proof.txt',mimeType: 'text/plain',data: Buffer.from('preserve attachments').toString('base64') }] },{ instructions: { text: 'required',required: true },trustWorkspace: false }); };
@@ -159,10 +167,10 @@ for (const fault of ['before','after-native-hold','runs-refuse-compensation-loss
   assert.ok((await manager.attachment(attachmentId)).content);
   const held = await manager.attachment(attachmentId);
   await assert.rejects(manager.flushState(),(error: { disposition?: string }) => error.disposition === 'uncertain');
+  await client.reopen(); await client.prepare({ allowMigration: false });
   await assert.rejects(ledger.once('controllerfixture','create',requestId,{},execute,value => ({ kind: 'run',runId: value.run.id }),() => undefined),/확실하지/);
   assert.equal(attempts,1); assert.equal(starts,0);
   assert.deepEqual(await manager.attachment(attachmentId),held,'unknown keeps prepared attachment files');
-  await client.reopen(); await client.prepare({ allowMigration: false });
   manager.releaseStorage();
   assert.deepEqual(manager.pendingAdmission(),pending,'SDK prepare/release does not settle the original identity');
   assert.equal(starts,0);
