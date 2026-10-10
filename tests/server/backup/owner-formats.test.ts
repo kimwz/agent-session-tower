@@ -176,7 +176,7 @@ test('trigger restore through a backup: once and archive, through the worker fil
   const file = await (await backupService(t, from)).export(PASS);
 
   // The target consumed the pending reservation itself and archived nothing yet.
-  await (await workerSettingsFixture(to)).seedTriggers(JSON.parse(await read(from, 'trigger-engine.json')));
+  await (await workerSettingsFixture(to)).seedTriggers(await (await workerSettingsFixture(from)).triggerState());
   const local = await engine(t, to, { now: Date.parse('2026-12-01T09:00:05.000Z') });
   let { service: b } = await local.open();
   await b.run(pending.id, OWNER); await b.tick(); local.finish(); await b.tick();

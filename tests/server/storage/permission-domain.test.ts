@@ -104,7 +104,7 @@ test('one guarded permission batch reorders two rules and exactly replaces them 
   const collision=permissionRows({ ...before,rules:[{ ...rule,id:'collision' }] })[0];
   await assert.rejects(repo.update([{ ...collision,previous:null }]));
   assert.deepEqual(await f.repository().load(),before);
-  assert.deepEqual(await repo.head(),head,'failed ordinal collision rolls back the revision too');
+  assert.deepEqual(await f.repository().head(),head,'failed ordinal collision rolls back the revision too');
 });
 
 test('search projection corruption and payload identity corruption refuse load, never empty authority',async t=>{
