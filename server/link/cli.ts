@@ -1,3 +1,7 @@
+import { verifyOfflineServiceSelection, verifyOfflineCompletion, readOfflinePrivateBytes, type OfflineServiceMaintenance } from './storage-offline.js';
+import { acquireStrictStateLock } from '../instance/state-lock.js';
+import { captureStorageBundle, storageBuildContext, openStorage, type StorageClient } from '../storage/index.js';
+import { parseArtifactStorageContract } from './storage-update.js';
 import { runOfflineStorageCommand } from './storage-offline-cli.js';
 import { fileURLToPath } from 'node:url';
 import { userInfo } from 'node:os';
@@ -10,7 +14,7 @@ import { commandEnvironment, lockOwners, type OwnerCommand } from '../instance/s
 import { defaultStateDir } from '../state-dir.js';
 import { decodeJoinCode } from './join-code.js';
 import { displayFingerprint, linkId } from './identity.js';
-import { currentVersion, entryPoint, installService, installVersion, newerVersion, runtimePaths, serviceManager, serviceStatus, START_YOURSELF, startService, stopService, uninstallService, useVersion, versionDirectory, type ServiceManager } from './service.js';
+import { currentVersion, entryPoint, installService, installVersion, newerVersion, runtimePaths, serviceManager, serviceStatus, serviceLabel, serviceUnit, START_YOURSELF, startService, stopService, uninstallService, useVersion, versionDirectory, type ServiceManager } from './service.js';
 import { execFile, spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { promisify } from 'node:util';
@@ -18,6 +22,8 @@ import { promisify } from 'node:util';
 const USAGE = `Usage:
   agent-session-tower join <code> [--state-dir <path>] [--port <number>] [--no-service]
   agent-session-tower service install|uninstall|status [--state-dir <path>] [--port <number>]
+  agent-session-tower service install --state-dir <path> --offline-maintenance <private-owner-input>
+  agent-session-tower storage offline backup|store|restore|activate|reconcile|check --state-dir <path> --input <private-input>
 
 join     Connects this computer to the Tower that made the code. Tower is installed and kept running in the
          background (on macOS from login, on Linux with systemd from boot, and again after a crash) unless it
@@ -38,17 +44,20 @@ export async function runLinkCommand(args: string[]): Promise<void> {
   let stateDir = defaultStateDir();
   let port = 8000;
   let service = true;
+  let maintenance: string | undefined;
   const positional: string[] = [];
   for (let index = 0; index < rest.length; index++) {
     const arg = rest[index];
     if (arg === '--state-dir' && rest[index + 1]) stateDir = resolve(rest[++index]);
     else if (arg === '--port' && rest[index + 1]) port = Number(rest[++index]);
+    else if (arg === '--offline-maintenance' && rest[index + 1] && !maintenance) maintenance = resolve(rest[++index]);
     else if (arg === '--no-service') service = false;
     else if (arg === '--help' || arg === '-h') { console.log(USAGE); return; }
     else if (arg.startsWith('--')) throw new Error(`Unknown option: ${arg}\n\n${USAGE}`);
     else positional.push(arg);
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Port must be between 1 and 65535.');
+  if(maintenance && (!service || command!=='service' || positional.length!==1 || positional[0]!=='install')) throw new Error('Offline maintenance applies only to explicit service install.');
   if (command === 'storage') {
     if (positional[0] === 'verify-update') {
       const [_, kind, by, ...words] = positional;
@@ -76,7 +85,7 @@ export async function runLinkCommand(args: string[]): Promise<void> {
     console.log(JSON.stringify(await get(running.base, '/api/storage/status')));
     return;
   }
-  if (command === 'service') return runService(positional[0], stateDir, port);
+  if (command === 'service') return runService(positional[0], stateDir, port, maintenance);
   if (positional.length !== 1) throw new Error(USAGE);
   const code = decodeJoinCode(positional[0]);
   if (code.expiresAt <= Date.now()) throw new Error('This connection code has expired. Make a new one on the other computer.');
@@ -137,15 +146,70 @@ export async function runLinkCommand(args: string[]): Promise<void> {
   console.log('Work runs with this computer\'s own Claude Code and Codex sign-ins; sign in to them here if you have not yet.');
 }
 
-async function runService(action: string | undefined, stateDir: string, port: number): Promise<void> {
+async function requireStoppedInstalledService(stateDir: string): Promise<void> {
+  const status = await serviceStatus(stateDir);
+  if (status.installed !== true || status.loaded !== false || (await lockOwners(stateDir)).length !== 0
+    || await runningTower(stateDir)) throw new Error('Maintenance requires an already installed, explicitly stopped service.');
+  // serviceStatus deliberately tolerates manager query errors for display. Maintenance needs positive stopped evidence.
+  if (status.manager === 'launchd') {
+    const {stdout} = await promisify(execFile)('launchctl',['print',`gui/${process.getuid?.() ?? 501}`],{timeout:1500,maxBuffer:16*1024*1024});
+    if (!stdout.includes('services = {') || stdout.includes(serviceLabel(stateDir))) throw new Error('Maintenance manager stopped state unknown or loaded.');
+  } else if (status.manager === 'systemd-system' || status.manager === 'systemd-user') {
+    const {stdout} = await promisify(execFile)('systemctl',[...(status.manager==='systemd-user'?['--user']:[]),'show',serviceUnit(stateDir),'--property=LoadState,ActiveState,SubState'],{timeout:1500,maxBuffer:64*1024});
+    const facts=new Map(stdout.trim().split('\n').map(line=>line.split('=',2) as [string,string]));
+    if(facts.get('LoadState')!=='loaded' || facts.get('ActiveState')!=='inactive' || facts.get('SubState')!=='dead') throw new Error('Maintenance manager stopped state unknown or active.');
+  } else throw new Error('Maintenance manager stopped state unknown.');
+}
+
+async function runService(action: string | undefined, stateDir: string, port: number, maintenance?: string): Promise<void> {
   if (action === 'install') {
     const running = await runningTower(stateDir);
     // The service runs as this account, with its home, on 127.0.0.1. A Tower started another way would come back as a
     // different one: reading other sessions, or no longer reachable from other devices. That is refused, not changed.
     if (running && !running.service) refuseTakeover(running);
+    if(maintenance) await requireStoppedInstalledService(stateDir);
+    const request=maintenance ? JSON.parse((await readOfflinePrivateBytes(maintenance)).toString('utf8')) as OfflineServiceMaintenance : undefined;
+    if(maintenance && (!request || request.format!=='tower-offline-service-maintenance' || request.service!==true || request.previousVersion!=='1.124.0'
+      || request.stateDir!==stateDir || request.version!==APP_VERSION || !request.by?.trim() || !request.evidence?.trim())) throw new Error('Exact stopped-service owner maintenance input required.');
+    if(request) {const current=await currentVersion(stateDir);if(current!==request.previousVersion && current!==APP_VERSION) throw new Error('Maintenance previous pointer mismatch.');}
     await installVersion(stateDir, APP_VERSION, line => console.log(line), packageRoot());
-    await useVersion(stateDir, APP_VERSION);
+    if(maintenance && request) {
+      // installVersion may reuse an existing directory. Verify THAT package before current moves.
+      await requireStoppedInstalledService(stateDir);
+      const selectedRoot=resolve(versionDirectory(stateDir,APP_VERSION),'node_modules/agent-session-tower');
+      const record=await verifyOfflineServiceSelection(selectedRoot,request,stateDir,APP_VERSION);
+      const selectedEntry=entryPoint(versionDirectory(stateDir,APP_VERSION));
+      const contractOutput=await promisify(execFile)(process.execPath,[selectedEntry,'--storage-contract'],{timeout:60_000,maxBuffer:16*1024*1024});
+      const contract=parseArtifactStorageContract(contractOutput.stdout,APP_VERSION);
+      if(contract.state!=='contract' || !contract.contract.supported || JSON.stringify(contract.contract.identity)!==JSON.stringify(record.build)
+        || JSON.stringify(contract.contract.manifest)!==JSON.stringify(record.manifest)) throw new Error('Selected package actual SDK contract mismatch.');
+      const checked=await promisify(execFile)(process.execPath,[selectedEntry,'storage','offline','check','--state-dir',stateDir,'--input',request.completionInput.path],{timeout:60_000,maxBuffer:16*1024*1024});
+      const completion=JSON.parse(checked.stdout);
+      if(completion.state!=='complete' || completion.activationId!==record.activationId || completion.effectsStarted!==false
+        || JSON.stringify(completion.identity)!==JSON.stringify(record.build)) throw new Error('Selected package actual SQL completion held.');
+      const lease=await acquireStrictStateLock(resolve(stateDir,'runner-runtime'));
+      let sdk:StorageClient|undefined;
+      try {
+        await verifyOfflineServiceSelection(selectedRoot,request,stateDir,APP_VERSION);
+        const bundle=await captureStorageBundle(), context=storageBuildContext(bundle);
+        if(!context.ok || JSON.stringify(context.identity)!==JSON.stringify(record.build)) throw new Error('Maintenance command SDK differs from selected package.');
+        sdk=await openStorage({stateDir,bundle,limits:{maxPayloadBytes:16*1024*1024}});
+        await sdk.prepare({allowMigration:false});await verifyOfflineCompletion(record,sdk);
+        const closed=await sdk.close();
+        if(!['closed','already-closed','thread-exited'].includes(closed.ack)) throw new Error('Maintenance SDK did not close; pointer retained.');
+        sdk=undefined;
+        const current=await currentVersion(stateDir);
+        if(current!==request.previousVersion && current!==APP_VERSION) throw new Error('Maintenance previous pointer mismatch.');
+        await requireStoppedInstalledService(stateDir);
+        await useVersion(stateDir,APP_VERSION);
+        if(await currentVersion(stateDir)!==APP_VERSION) throw new Error('Maintenance exact candidate was not selected; service not started.');
+      } finally {
+        if(sdk) {const closed=await sdk.close();if(!['closed','already-closed','thread-exited'].includes(closed.ack)) throw new Error('Maintenance SDK did not close; lease retained.');}
+        await lease.release();
+      }
+    } else await useVersion(stateDir, APP_VERSION);
     const version = await currentVersion(stateDir) ?? APP_VERSION;
+    if(maintenance && version!==APP_VERSION) throw new Error('Maintenance pointer changed; service not started.');
     // What the service will start has to start before anything running now is stopped.
     const { stdout } = await promisify(execFile)(process.execPath, [entryPoint(versionDirectory(stateDir, version)), '--version'], { timeout: 60_000 });
     if (stdout.trim() !== version) throw new Error(`The installed Tower ${version} does not start (it reports ${stdout.trim().slice(0, 40) || 'nothing'}). Nothing was changed.`);

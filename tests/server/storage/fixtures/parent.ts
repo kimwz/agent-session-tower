@@ -16,3 +16,6 @@ export { acquireStrictStateLock } from '../../../../server/instance/state-lock.j
 export { PermissionsRepository } from '../../../../server/permissions/storage-repository.js';
 
 export { runOfflineStorageCommand } from '../../../../server/link/storage-offline-cli.js';
+
+export { runLinkCommand } from '../../../../server/link/cli.js';
+export { currentVersion, versionDirectory } from '../../../../server/link/service.js';
