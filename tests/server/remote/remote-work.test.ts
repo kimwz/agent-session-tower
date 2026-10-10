@@ -5,7 +5,8 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager, importFixtureRuns } from '../runs/sql-fixture.js';
+import { externalStorageFixture } from './external-storage-fixture.js';
 import { parseRunOrigin, sameOrigin } from '../../../server/runs/origin.js';
 import { SessionService } from '../../../server/sessions/service.js';
 import { startRunnerHost } from '../../../server/runs/worker.js';
@@ -80,10 +81,16 @@ async function worker(t: TestContext, coordinators: string[] = []) {
     inspectProcesses: async () => ({ claude: new Map(), codex: new Set(), providerRunning: { claude: false, codex: false } }) });
   sessions.list = () => [{ ...session }];
   sessions.get = value => value === session.id ? { ...session } : undefined;
-  const runs = new RunManager({ stateDir, getSession: value => sessions.get(value), refreshSessions: async () => {}, pollMs: 60_000, findExecutable: async () => '/fixture/codex',
+  t.after(async () => { await autoPromptsForClose?.close(); await ledgerForClose?.flush(); await runs.close(); });
+  let autoPromptsForClose: AutoPromptManager | undefined;
+  let ledgerForClose: RemoteRequestLedger | undefined;
+  const sql = await externalStorageFixture(t, stateDir);
+  await importFixtureRuns(sql.storage);
+  const runs = new RunManager({ stateDir, storage: sql.storage, getSession: value => sessions.get(value), refreshSessions: async () => {}, pollMs: 60_000, findExecutable: async () => '/fixture/codex',
     spawnProcess: () => { throw new Error('No provider starts in this fixture.'); }, openCodexStdio: async () => { throw new Error('No provider starts in this fixture.'); } });
   await runs.start();
-  const ledger = new RemoteRequestLedger(stateDir);
+  const ledger = new RemoteRequestLedger(stateDir, Date.now, undefined, sql.remote, sql.effectGate);
+  ledgerForClose = ledger;
   await ledger.start();
   const slack = { sessionMcp: () => undefined, coordinatorSessionIds: () => coordinators, ownerChat: async (_id: string, message: string) => message } as unknown as SlackService;
   const compactions = new SessionCompactions({ stateDir, session: value => runs.getSession(value), runs: () => runs.list(), history: async () => undefined,
@@ -156,16 +163,23 @@ test('a worker keeps following the exclusion list the web process saves after it
     status: 'idle' as const, statusReason: '', createdAt: now, updatedAt: now, lastMessage: '', messageCount: 1, isSubagent: false, resumable: true });
   sessions.list = () => [native('10000000-0000-4000-8000-000000000009', folder), native('10000000-0000-4000-8000-000000000010', other)];
   sessions.refresh = async () => {};
-  const runs = new RunManager({ stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000, findExecutable: async () => '/fixture/codex',
+  t.after(async () => { await autoPromptsForClose?.close(); await ledgerForClose?.flush(); await runs.close(); });
+  let autoPromptsForClose: AutoPromptManager | undefined;
+  let ledgerForClose: RemoteRequestLedger | undefined;
+  const sql = await externalStorageFixture(t, stateDir);
+  await importFixtureRuns(sql.storage);
+  const runs = new RunManager({ stateDir, storage: sql.storage, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000, findExecutable: async () => '/fixture/codex',
     spawnProcess: () => { throw new Error('No provider starts in this fixture.'); }, openCodexStdio: async () => { throw new Error('No provider starts in this fixture.'); } });
   await runs.start();
   const exclusions = new RemoteExclusionStore(stateDir);
   await exclusions.start();
-  const autoPrompts = new AutoPromptManager({ stateDir, runs, snapshot: () => ({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'x', version: 'x', updatedAt: now }),
+  const autoPrompts = new AutoPromptManager({ repository: sql.autoPrompt, effectGate: sql.effectGate, stateDir, runs, snapshot: () => ({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'x', version: 'x', updatedAt: now }),
     detail: async () => undefined, refresh: async () => {}, model: async () => ({ directoryId: 'd1', reason: 'fits' }),
     remote: { prepare: (paths, options) => exclusions.prepare(paths, options), matcher: () => exclusions.matcher(), coordinators: () => new Set() } });
+  autoPromptsForClose = autoPrompts;
   await autoPrompts.start();
-  const ledger = new RemoteRequestLedger(stateDir);
+  const ledger = new RemoteRequestLedger(stateDir, Date.now, undefined, sql.remote, sql.effectGate);
+  ledgerForClose = ledger;
   await ledger.start();
   const host = await startRunnerHost({ stateDir, sessions, runs, autoPrompts, ledger, exclusions });
   const client = new DurableRunManager({ stateDir, pollMs: 10 });

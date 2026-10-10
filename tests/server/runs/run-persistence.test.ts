@@ -10,7 +10,7 @@ import type { CodexBridgeOptions } from '../../../server/runs/codex-bridge.js';
 import { checkedInstructions } from '../../../server/runs/turn-notes.js';
 import { UUID, type CreatedSession } from '../../../server/runs/saved-state.js';
 import type { Run, Session } from '../../../shared/types.js';
-import { actualStorage } from './sql-fixture.js';
+import { actualStorage, stopFixtureWriter } from './sql-fixture.js';
 import { retainedReceipts } from '../../../server/runs/permission-continuation.js';
 import { RunsRepository } from '../../../server/runs/storage-repository.js';
 import { parseRunDocuments } from '../../../server/runs/storage-codec.js';
@@ -213,10 +213,14 @@ async function quiet(t: TestContext) {
   const manager = new RunManager({ stateDir, storage: db, getSession: id => id === session.id ? session : undefined, refreshSessions: async () => {}, pollMs: 60_000, holdUntilReady: true, findExecutable: async () => '/fixture/codex',
     spawnProcess: () => { throw new Error('Native provider launch is forbidden in this fixture.'); } });
   await manager.start();
-  t.after(async () => { await manager.close(); await db.close(); await rm(directory, { recursive: true, force: true }); });
+  const successorOwner: { manager?: RunManager; storage?: typeof db } = {};
+  t.after(async () => {
+    await successorOwner.manager?.close(); await successorOwner.storage?.close();
+    await manager.close(); await db.close(); await rm(directory, { recursive: true, force: true });
+  });
   const internals = manager as unknown as Internals & { scheduleContinuation(run: Run, wakeup: { prompt: string; at: number }): void; drain: { settle(run: Run, target: { delegated: boolean; retryAt: number; stopping?: boolean }): void } };
   const saved = async (): Promise<Run[]> => (await new RunsRepository(db).exportCurrent()).documents.runs;
-  return { directory, stateDir, session, manager, internals, db, saved };
+  return { directory, stateDir, session, manager, internals, db, saved, successorOwner };
 }
 const finishedRun = (id: string, output: string): Run => ({ id, sessionId: `codex:${ID}`, origin: { kind: 'owner' }, prompt: 'Long', status: 'completed', createdAt: new Date().toISOString(), finishedAt: new Date().toISOString(), output });
 
@@ -309,9 +313,12 @@ test('storage-held predecessor carries accepted private instructions and workflo
   await f.manager.flushState();
   assert.equal(f.manager.list().find(r => r.id === accepted.id)?.status, 'queued');
   assert.equal(JSON.stringify((await new RunsRepository(db).exportCurrent()).documents.runs).includes(instructions.text), false);
+  const carried = (await new RunsRepository(db).exportCurrent()).documents;
+  await stopFixtureWriter(f.manager);
+  assert.deepEqual((await new RunsRepository(db).exportCurrent()).documents, carried, 'stopped fixture lease release preserves queued work and private instructions');
   assert.equal((await db.close()).ack, 'closed');
   // The handoff flush is the predecessor's final save; do not call ordinary owner shutdown before restore.
-  const nextDb = await actualStorage(f.stateDir); t.after(() => nextDb.close());
+  const nextDb = await actualStorage(f.stateDir); f.successorOwner.storage = nextDb;
   const provider = join(f.directory, 'provider.mjs');
   const submissions = join(f.directory, 'submissions.jsonl');
   // The existing stdio fixture protocol: production RunManager and Codex adapter
@@ -335,7 +342,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   const successor = new RunManager({ stateDir: f.stateDir, storage: nextDb, getSession: id => id === f.session.id ? f.session : undefined,
     refreshSessions: async () => {}, holdUntilReady: true, pollMs: 10, findExecutable: async () => '/fixture/codex',
     spawnProcess: (_file, _args, options) => spawn(process.execPath, [provider], { ...options, stdio: ['pipe', 'pipe', 'pipe'] }) as ChildProcessWithoutNullStreams });
-  t.after(() => successor.close());
+  f.successorOwner.manager = successor;
   await successor.start();
   const restored = successor.list().find(r => r.id === accepted.id)!;
   assert.equal(restored.status, 'queued');

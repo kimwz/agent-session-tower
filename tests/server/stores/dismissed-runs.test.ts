@@ -8,7 +8,7 @@ import { DismissedRunStore } from '../../../server/stores/dismissed-runs.js';
 import { blockRename, temporaryFiles } from '../../helpers/private-writes.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { projectSessionStates } from '../../../server/sessions/snapshot.js';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager, fixtureDocuments } from '../runs/sql-fixture.js';
 import type { Run, Session, Snapshot } from '../../../shared/types.js';
 import { computeConversationRevision } from '../../../shared/conversation-revision.js';
 import { statusOf } from '../../../shared/errors.js';
@@ -32,13 +32,16 @@ test('dismissal survives restart with private atomic storage and preserves nativ
   const store = new DismissedRunStore(dir);
   await store.start();
   assert.deepEqual(store.visible([failed]), [failed], 'pre-feature history starts visible');
-  const manager = new RunManager({ stateDir: dir, getSession: () => session, refreshSessions: async () => {} });
+  const manager = new RunManager({ stateDir: dir, fixtureInitial: { runs: [failed], created: [], instructions: {} }, getSession: () => session, refreshSessions: async () => {} });
   await manager.start();
   try {
     const before = manager.list();
+    const beforeSql = await fixtureDocuments(manager);
+    const beforeFiles = [...new Set([...(await readdir(dir)), 'dismissed-runs.json'])].sort();
     const rawDocument = await readFile(join(dir, 'runs.json'), 'utf8');
     await store.dismiss(failed.id, before[0]);
     assert.deepEqual(manager.list(), before);
+    assert.deepEqual(await fixtureDocuments(manager), beforeSql);
     assert.equal(await readFile(join(dir, 'runs.json'), 'utf8'), rawDocument);
     assert.equal(await readFile(nativePath, 'utf8'), 'Untouched native conversation\n');
     assert.deepEqual(store.visible(before), []);
@@ -48,7 +51,7 @@ test('dismissal survives restart with private atomic storage and preserves nativ
     await reloaded.start();
     assert.deepEqual(reloaded.visible(before), []);
     await reloaded.dismiss(failed.id, undefined);
-    assert.deepEqual((await readdir(dir)).sort(), ['attachments', 'dismissed-runs.json', 'native.jsonl', 'runs.json']);
+    assert.deepEqual((await readdir(dir)).sort(), beforeFiles);
   } finally { await manager.close(); }
 });
 

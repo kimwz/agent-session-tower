@@ -327,7 +327,17 @@ test('actual product worker promotes update-held once in the same boot; a failed
   assert.ok(proof.status.ownerEpoch! > 0); assert.equal(proof.bootstrap?.found, true);
   if (published.state !== 'present') assert.fail('producer publication required');
   assert.deepEqual(completionProven(published.record, proof), { ok: true }, 'the actual target bootstrap receipt, schema and claim prove the continued completion');
-  const store = new RetentionStore(dirname(journal)); await store.start();
+  // Release the exact fixture child through its existing patient handoff before reusing the inspector SDK.
+  const absentSuccessor = join(root, 'absent-retention-reader-successor');
+  await assert.rejects(lstat(absentSuccessor), { code: 'ENOENT' });
+  const closed = once(child, 'close');
+  assert.equal((await call('requestHandoff', [{ execPath: absentSuccessor, args: ['--runner-worker', state] }, { patient: true }])).error, undefined);
+  await closed;
+  assert.equal(child.exitCode, 0, stderr());
+  const released = await readHandoff(paths.runtime);
+  assert.ok(released?.clean); assert.equal(released.previous, first.instance); assert.equal(released.storageTransition, undefined);
+  await client.reopen(); await client.prepare({ allowMigration: false });
+  const store = new RetentionStore(dirname(journal), { storage: client }); await store.start();
   assert.deepEqual(store.list(), []);
 });
 
