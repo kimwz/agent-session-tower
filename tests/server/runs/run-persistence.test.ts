@@ -76,8 +76,12 @@ test('output waiting for its cadence reaches disk on the cadence alone', async t
   bridge.onOutput('Eventually saved');
   const deadline = Date.now() + 5000;
   for (;;) {
-    await f.internals.flush();
-    if ((await f.saved()).find(item => item.id === run.id)?.output === 'Eventually saved') break;
+    try {
+      if ((await f.saved()).find(item => item.id === run.id)?.output === 'Eventually saved') break;
+    } catch (error) {
+      // The cadence can commit during observation, so export safely refuses concurrent revisions.
+      if (!(error instanceof Error) || error.message !== 'Runs changed while paging current export.') throw error;
+    }
     assert.ok(Date.now() < deadline, 'output was not saved on its cadence');
     await new Promise(resolve => setTimeout(resolve, 10));
   }
