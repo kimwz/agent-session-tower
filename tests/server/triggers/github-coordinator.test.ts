@@ -1,3 +1,4 @@
+import { externalStorageFixture } from '../remote/external-storage-fixture.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm, realpath } from 'node:fs/promises';
@@ -72,7 +73,8 @@ async function fixture(t: TestContext, options: { login?: string; postStatus?: n
     enqueue: async (sessionId: string, prompt: string, _request: unknown, internal: RunAdmission) => record(sessionId, prompt, internal),
   };
   let service: TriggerService | undefined;
-  const coordinator = new GitHubCoordinator({ stateDir: directory, runs: runManager as never, refresh: async () => {},
+  const storage = await externalStorageFixture(t, directory);
+  const coordinator = new GitHubCoordinator({ repository: storage.workflows, effectGate: storage.effectGate, stateDir: directory, runs: runManager as never, refresh: async () => {},
     autoPrompts: { get: id => jobs.get(id), submit: async (request, internal) => { assert.ok(request.provider); submitted.push({ request: { ...request, provider: request.provider }, internal }); const job = { id: request.requestId, provider: request.provider, prompt: request.prompt, routerModel: 'r', status: 'queued' as const, createdAt: '', updatedAt: '' }; jobs.set(job.id, job); return job; } },
     github: (triggerId, fresh) => service!.githubClient(triggerId, fresh) });
   const executor: TriggerExecutor = {
@@ -83,7 +85,7 @@ async function fixture(t: TestContext, options: { login?: string; postStatus?: n
   };
   service = new TriggerService({ stateDir: directory, executor, now: () => clock.now, tickMs: 60_000, ghToken: async () => 'gho_token', githubTransport: () => github });
   await service.start();
-  await coordinator.start();
+  await coordinator.start(); await coordinator.startRuntimeEffects();
   t.after(async () => { coordinator.close(); service!.close(); await service!.settle(); await rm(directory, { recursive: true, force: true }); });
   const settle = async () => { for (let index = 0; index < 5; index++) { await service!.tick(); await coordinator.automation.tick(); } };
   return { directory, project, clock, runs, created, submitted, posts, issues, requested, service, coordinator, settle };

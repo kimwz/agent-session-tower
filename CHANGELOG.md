@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## 1.125.0 — 2026-10-10
+
+- SQLite 도메인 저장소를 통합하고 명시적 오프라인 이관의 전체 백업·완료 영수증·재시작 보류 경계를 연결했습니다.
+- 권한과 외부 요청은 저장 결과가 불확실하면 재전송 없이 보류하며, 모든 도메인 완료 후에만 외부 효과를 시작합니다.
+
 ## [1.124.0] - 2026-10-10
 
 - 트리거 SQLite 준비 스키마와 typed 행 저장·내보내기·복원 경계를 추가했습니다. 이번 릴리스는 모든 도메인의 preparation-only이며 기존 SQL authority는 유지합니다.

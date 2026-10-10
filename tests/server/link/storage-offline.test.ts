@@ -124,7 +124,8 @@ for(const [scope,parent] of Object.entries({retention:'storage-migrations',runs:
     if(scope!=='permissions') assert.deepEqual(await db.read(scope,'bootstrapHistory',{}),{stages:0});
     await inspectOfflineImportHistory(db,stateDir,scope); // normal first import admission remains possible
     await mkdir(join(stateDir,parent,'different-command-id'),{recursive:true,mode:0o700});
-    let imports=0,writes=0;const write=db.write.bind(db);
+    const identity=db.identity; assert.ok(identity,'prepared SDK identity is required');
+  let imports=0,writes=0;const write=db.write.bind(db);
     t.mock.method(db,'write',async(...args:Parameters<typeof db.write>)=>{writes++;return write(...args);});
     const attempt=async()=>{await inspectOfflineImportHistory(db,stateDir,scope);imports++;};
     await assert.rejects(attempt(),/evidence|seal/);assert.equal(imports,0);assert.equal(writes,0);
@@ -140,11 +141,12 @@ test('offline history admission refuses non-authority, unresolved stages and rec
   const build=await retentionBuild('1.125.0',join(root,'artifact'),true,true);
   const stateDir=join(root,'state');await mkdir(stateDir,{mode:0o700});
   const db=await build.storage.openStorage({stateDir,bundle:build.bundle()});t.after(()=>db.close());await db.prepare({allowMigration:true});
+  const identity=db.identity; assert.ok(identity,'prepared SDK identity is required');
   let imports=0,writes=0;
   const write=db.write.bind(db);t.mock.method(db,'write',async(...args:Parameters<typeof db.write>)=>{writes++;return write(...args);});
   const attempt=async()=>{await inspectOfflineImportHistory(db,stateDir,'runs');imports++;};
   const inspection=await db.inspect();
-  const authorityMock=t.mock.method(db,'inspect',async()=>({...inspection,authority:[{domain:'runs',authority:'legacy-exported' as const,generation:1,manifestSha256:'a'.repeat(64),readerContract:1,writerContract:1,committedAt:'fixture',appVersion:'1.125.0',sourceHash:db.identity.sourceHash,ownerEpoch:inspection.ownerEpoch}]}));
+  const authorityMock=t.mock.method(db,'inspect',async()=>({...inspection,authority:[{domain:'runs',authority:'legacy-exported' as const,generation:1,manifestSha256:'a'.repeat(64),readerContract:1,writerContract:1,committedAt:'fixture',appVersion:'1.125.0',sourceHash:identity.sourceHash,ownerEpoch:inspection.ownerEpoch}]}));
   await assert.rejects(attempt(),/prior authority/);authorityMock.mock.restore();
   assert.equal(imports,0);assert.equal(writes,0);
   await db.write('runs','begin',{intent:'unresolved-history',bytes:1,chunks:1,sha256:'a'.repeat(64)},'fixture-history-reserve');

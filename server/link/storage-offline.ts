@@ -8,7 +8,7 @@ import { StorageClient } from '../storage/client.js';
 import type { StorageBuildIdentity, StorageBuildManifest } from '../storage/contract.js';
 import { manifestDigest } from '../storage/schema.js';
 import { privateDirectory, privateFile, sameGeneration, storageLayout, writePrivateDocument } from '../storage/paths.js';
-import { evaluateStorageUpdate, parseArtifactStorageContract, recordPreparationEvidence, type StorageUpdateInput, type StorageUpdateEvaluation } from './storage-update.js';
+import { databaseSupported, evaluateStorageUpdate, parseArtifactStorageContract, recordPreparationEvidence, type StorageUpdateInput, type StorageUpdateEvaluation } from './storage-update.js';
 
 const hash = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 const sha = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
@@ -224,7 +224,11 @@ export async function finishOfflineActivation(owner: OfflineActivationOwner, sto
 }
 export async function verifyOfflineCompletion(record: OfflineActivationRecord, storage: StorageClient): Promise<void> {
   if (record.domains.length !== record.manifest.domains.length || await privateFile(join(record.stateDir,'storage-permissions-pending.json'))) refuse('global store completion/pending intent');
-  if (!same(storage.identity, record.build)) refuse('completion SDK identity');
+  const context=storage.context;
+  if (!context || !same(storage.identity,context.identity)) refuse('completion SDK identity');
+  const inspected=await storage.inspect();
+  const compatible=databaseSupported({format:'tower-artifact-storage-contract',version:1,appVersion:context.identity.appVersion,supported:true,identity:context.identity,manifest:context.manifest},inspected);
+  if (!compatible.ok || context.manifest.domains.length!==record.domains.length || context.manifest.domains.some(d=>!record.domains.some(r=>r.scope===d.scope))) refuse('completion reader/writer/schema contract');
   const core = record.corePrepared;
   if (!core || core.commandId !== `offline-${record.activationId}-prepare` || core.payloadSha256 !== hash(JSON.stringify({ allowMigration: true, storageId: record.storageId }))) refuse('core prepared receipt missing/mismatch');
   const prepared = await storage.receipt(core.commandId);
@@ -243,6 +247,7 @@ export async function verifyOfflineCompletion(record: OfflineActivationRecord, s
   }
   if (inspection.schema.kind !== 'current' || inspection.schema.storageId !== record.storageId) refuse('completion schema identity');
 }
+const verifiedRuntime = new WeakMap<StorageClient,{recordSha256:string;ownerEpoch:number}>();
 /** Restart never infers completion from preparation files or worker ready. */
 export async function offlineBootstrapHeld(stateDir: string, build?: StorageBuildIdentity, storageId?: string, storage?: StorageClient): Promise<boolean> {
   const record = await readOfflineActivation(stateDir);
@@ -251,20 +256,43 @@ export async function offlineBootstrapHeld(stateDir: string, build?: StorageBuil
     const identity = await readStorageIdentity(await storageLayout(stateDir));
     if (identity.state === 'present' && identity.identity.state === 'created') storageId = identity.identity.storageId;
   }
-  if (record.phase !== 'complete' || !build || !same(record.build, build) || storageId !== record.storageId || !storage) return true;
-  try { await verifyOfflineCompletion(record, storage); return false; } catch { return true; }
+  if (record.phase !== 'complete' || !build || storageId !== record.storageId || !storage || !same(build,storage.identity)) return true;
+  try {
+    const inspection=await storage.inspect(), recordSha256=hash(JSON.stringify(record)), previous=verifiedRuntime.get(storage);
+    if(!previous || previous.ownerEpoch!==inspection.ownerEpoch || previous.recordSha256!==recordSha256) {
+      await verifyOfflineCompletion(record,storage);
+      verifiedRuntime.set(storage,{recordSha256,ownerEpoch:inspection.ownerEpoch});
+    } else {
+      // This live owner may have accepted work after startup. Never classify its own running
+      // turns as abandoned imports; stages, durable permission uncertainty and SDK gates still hold.
+      if(await privateFile(join(stateDir,'storage-permissions-pending.json'))) return true;
+      for(const d of record.domains) {
+        if(!(await storage.gate(d.scope)).open) return true;
+        if(d.scope!=='permissions' && (await storage.read<{stages:number}>(d.scope,'bootstrapHistory',{})).stages!==0) return true;
+      }
+    }
+    return false;
+  } catch { return true; }
 }
 
 /** Normal guards remain intact; only a bound, previously finished installation may consume this explicit proof. */
 export async function completedOfflineCandidate(update: StorageUpdateInput): Promise<OfflineActivationRecord | undefined> {
   const record = await readOfflineActivation(update.stateDir);
   if (!record || record.phase !== 'complete') return undefined;
-  await offlineEvaluation(update, record);
+  if(same(update.build.preflight.identity,record.build)) await offlineEvaluation(update,record);
+  else {
+    const evaluated=await evaluateStorageUpdate(update);
+    const context={identity:update.build.preflight.identity,manifest:update.build.manifest};
+    if(!evaluated.importAllowed || !context.identity || !context.manifest || !update.build.preflight.supported || update.build.preflight.state?.problem) refuse('normal successor compatibility/owner state');
+    // Preflight does not inspect live SQL. The successor must open its own SDK and
+    // verifyOfflineCompletion must validate its actual schema/authority before readiness.
+    if(context.identity.manifestDigest!==context.manifest.digest || context.manifest.domains.length!==record.domains.length || context.manifest.domains.some(d=>!record.domains.some(r=>r.scope===d.scope))) refuse('normal successor scope contract');
+  }
   return record;
 }
 export async function evaluateCompletedOffline(update: StorageUpdateInput, storage: StorageClient): Promise<StorageUpdateEvaluation> {
   const record = await completedOfflineCandidate(update);
-  if (!record || await offlineBootstrapHeld(update.stateDir, record.build, record.storageId, storage)) refuse('completed SDK proof held');
-  const evaluation = await offlineEvaluation(update, record);
+  if (!record || await offlineBootstrapHeld(update.stateDir, storage.identity, record.storageId, storage)) refuse('completed SDK proof held');
+  const evaluation = same(storage.identity,record.build) ? await offlineEvaluation(update, record) : await evaluateStorageUpdate(update);
   return { ...evaluation, code:'offline-completion-verified', reason:'Exact offline installation receipts and current storage gates verified.' };
 }

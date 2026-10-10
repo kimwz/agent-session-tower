@@ -1,3 +1,6 @@
+import { RemoteRepository } from '../remote/storage-repository.js';
+import { AutoPromptRepository } from '../auto-prompt/storage-repository.js';
+import { WorkflowRepository } from '../slack/storage-repository.js';
 import { privateFile } from '../storage/paths.js';
 import { PermissionsRepository } from '../permissions/storage-repository.js';
 import { completedOfflineCandidate, evaluateCompletedOffline, offlineBootstrapHeld } from '../link/storage-offline.js';
@@ -361,12 +364,15 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         }
         // Only the owner's own message may carry Slack send approval; the origin decides, never a correlation ID.
         const owner = admitted.origin?.kind === 'owner' && !admitted.delegation;
+        const enqueueOwner = async () => {
         const slackTurn = options.slack && owner ? await options.slack.ownerChat(args[0] as string, args[1] as string) : { prompt: args[1] as string };
         // The same holds in a GitHub coordinator conversation: only the owner's message can approve a comment.
         const turn = options.github && owner ? await options.github.ownerChat(args[0] as string, slackTurn.prompt) : slackTurn;
         // The receipts Tower adds reach the agent as instructions the conversation does not show, and never without them.
         const instructions = [slackTurn.instructions, turn === slackTurn ? undefined : turn.instructions].filter(Boolean).join('\n\n');
-        return options.runs.enqueue(args[0] as string, turn.prompt, args[2] as MessageAttachments, { ...admitted, ...(instructions ? { instructions: { text: instructions, required: true } } : {}) });
+        return await options.runs.enqueue(args[0] as string, turn.prompt, args[2] as MessageAttachments, { ...admitted, ...(instructions ? { instructions: { text: instructions, required: true } } : {}) });
+        };
+        return options.slack && owner ? options.slack.withOwnerTurnAdmission(enqueueOwner) : enqueueOwner();
       }
       case 'steer': {
         const target = (args[1] as { targetRunId?: unknown } | undefined)?.targetRunId;
@@ -992,7 +998,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   }
   const offlineStorageId = (storage: StorageClient) => { const schema = storage.status().schema; return !schema || schema.kind === 'empty' ? undefined : schema.storageId; };
   const permissionIntentHeld=async()=>Boolean(await privateFile(join(stateDir,'storage-permissions-pending.json')));
+  let externalIntentHeld=()=>false;
   const requireEffects = async () => {
+    if(externalIntentHeld()) throw new TowerError('unavailable','External SQL receipt reconciliation remains held.',{disposition:'not-admitted'});
     if(await permissionIntentHeld()) throw new TowerError('unavailable','Permission SQL receipt/effect reconciliation remains held.',{disposition:'not-admitted'});
     if (await offlineBootstrapHeld(stateDir, database?.identity, database ? await offlineStorageId(database) : undefined, database)) throw new TowerError('unavailable', 'Offline bootstrap is incomplete.');
     if (storageStatus.state !== 'ready' || !database || !(await database.gate('core')).open || storageStatus.state !== 'ready') throw new TowerError('unavailable', storageStatus.reason, { disposition: 'not-admitted' });
@@ -1005,7 +1013,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       if (storageStatus.state === 'ready' && database && !await offlineBootstrapHeld(stateDir, database.identity, await offlineStorageId(database), database)) {
         const gate = await database.gate('core');
         const pendingAdmission = runs.pendingAdmission();
-        const permissionPending=await permissionIntentHeld();
+        const permissionPending=await permissionIntentHeld() || externalIntentHeld();
         if (gate.open && !permissionPending && !pendingAdmission && storageStatus.state === 'ready' && generation === storageHoldGeneration) return;
         if (storageStatus.state === 'ready') storageStatus = { ...storageStatus, state: 'recovery-required', code: 'storage-gate-held', reason: permissionPending ? 'Permission SQL receipt/effect reconciliation remains held.' : pendingAdmission ? `Run admission receipt ${pendingAdmission.commandId} remains unresolved.` : gate.reasons.join(', '), admissionOpen: false };
       }
@@ -1161,25 +1169,30 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // The web process saves the remote-sharing exclusion list; this copy follows it on every refresh.
     const exclusions = new RemoteExclusionStore(stateDir);
     await exclusions.start();
-    const ledger = new RemoteRequestLedger(stateDir);
+    const externalRemote=new RemoteRepository(database!);
+    const externalPrompts=new AutoPromptRepository(database!);
+    const externalWorkflows=new WorkflowRepository(database!);
+    externalIntentHeld=()=>[externalRemote,externalPrompts,externalWorkflows].some(repository=>Boolean(repository.pending()));
+    const externalGate=async()=>{ await requireEffects(); for(const repository of [externalRemote,externalPrompts,externalWorkflows]) await repository.gate(); };
+    const ledger = new RemoteRequestLedger(stateDir,Date.now,undefined,externalRemote,externalGate);
     await ledger.start();
     const context = await runnerContext({ stateDir, runs, sessions, exclusions });
     // Remote requests route without excluded folders and without any coordinator conversation, Slack or GitHub.
     let coordinators = (): ReadonlySet<string> => new Set();
-    const autoPrompts = new AutoPromptManager({ stateDir, runs, remote: { prepare: (paths, options) => exclusions.prepare(paths, options), matcher: () => exclusions.matcher(), coordinators: () => coordinators() }, ...context });
+    const autoPrompts = new AutoPromptManager({ stateDir, runs, repository:externalPrompts, effectGate:externalGate, remote: { prepare: (paths, options) => exclusions.prepare(paths, options), matcher: () => exclusions.matcher(), coordinators: () => coordinators() }, ...context });
     initializedAutoPrompts = autoPrompts;
     autoPrompts.holdStorage();
     registerStorageHold(() => autoPrompts.holdStorage(), () => { if (storageStatus.admissionOpen) autoPrompts.releaseStorage(); });
     await startupGate();
     await autoPrompts.start();
     // The owner's fast-judgment settings are read again each time, so a change on the settings page applies at once.
-    const decisions = new DecisionService(stateDir);
-    const slack = new SlackService({ stateDir, runs, autoPrompts, refresh: context.refresh,
+    const decisions = new DecisionService(stateDir,undefined,undefined,externalGate);
+    const slack = new SlackService({ stateDir, runs, autoPrompts, repository:externalWorkflows,effectGate:externalGate, refresh: context.refresh,
       followUpEngine: async () => { await decisions.start(); return decisions.engine('slackFollowUps'); } });
     // GitHub coordinators use a trigger's credentials; the trigger engine starts right after.
     let triggerEngine: TriggerService | undefined;
-    const github = new GitHubCoordinator({ stateDir, runs, autoPrompts, refresh: context.refresh, language: () => slack.language(),
-      github: (triggerId, fresh) => { if (!triggerEngine) throw new Error('Triggers are still starting.'); return triggerEngine.githubClient(triggerId, fresh); } });
+    const github = new GitHubCoordinator({ stateDir, runs, autoPrompts, repository:externalWorkflows,effectGate:externalGate, currentSource:id=>triggerEngine?.githubSource(id), refresh: context.refresh, language: () => slack.language(),
+      github: (triggerId, fresh, beforeSend) => { if (!triggerEngine) throw new Error('Triggers are still starting.'); return triggerEngine.githubClient(triggerId, fresh, beforeSend); } });
     registerStorageHold(() => { github.hold(); }, () => { github.release(); }, () => github.inFlight());
     coordinators = () => new Set([...slack.coordinatorSessionIds(), ...github.coordinatorSessionIds()]);
     // A delegated task's run stays until its coordinator has finished with it, across pruning and restarts.
@@ -1233,7 +1246,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // What each conversation works on, summarized after its turns.
     const tasks = new SessionTasks({ stateDir, sessions: () => visible.allSessions(),
       history: (session, limit, before) => sessions.detail(runs.nativeSessionId(session.id), before, limit),
-      model: async (request, options) => { await requireEffects(); return runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs }); } });
+      model: async (request, options) => { await requireEffects(); return runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs, beforeSpawn:requireEffects }); } });
     await startupGate();
     registerStorageHold(() => { tasks.pause(); }, () => { tasks.resume(); }, () => tasks.inFlight());
     await tasks.start().catch(error => console.error(`Session tasks did not start: ${error instanceof Error ? error.message : String(error)}`));
@@ -1245,7 +1258,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // The master's conversation is looked up here without its mark; marked, the shared rule refuses it.
     const compactions = new SessionCompactions({ stateDir, session: id => { const found = runs.getSession(id); return found && inMasterFolder(stateDir, found.cwd) ? { ...found, master: true } : found; }, runs: () => runs.list(),
       history: (session, before, limit) => sessions.detail(runs.nativeSessionId(session.id), before, limit, { previousUser: false, fullText: true }),
-      model: async (request, options) => { await requireEffects(); return runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs }); },
+      model: async (request, options) => { await requireEffects(); return runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs, beforeSpawn:requireEffects }); },
       create: (input, admission) => runs.create(input, admission),
       refuse: session => coordinators().has(session.id) ? 'Slack·GitHub 코디네이터 대화는 압축할 수 없습니다.' : undefined,
       untrusted: session => runs.sessionOrigin(session.id)?.untrustedInput === true,
@@ -1384,7 +1397,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const expiryTimer = setInterval(() => { void expireRules().catch(() => {}); }, 10 * 60 * 1000);
     expiryTimer.unref();
     reviewer = new PermissionReviewer({ service: permissions,
-      model: async (request, options) => { await requireEffects(); return runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs }); },
+      model: async (request, options) => { await requireEffects(); return runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs, beforeSpawn:requireEffects }); },
       files: { stateDir, server: scope => { const build = thisBuild(); return { command: build.command, args: [...build.args, '--review-files-mcp', scope] }; } },
       sources: {
         runs: () => runs.list(),
@@ -1621,6 +1634,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     let admissionGeneration: number;
     do { admissionGeneration = storageHoldGeneration; await startupGate(); }
     while (admissionGeneration !== storageHoldGeneration || storageStatus.state !== 'ready');
+    await autoPrompts.startRuntimeEffects();
+    await slack.startRuntimeEffects();
+    await github.startRuntimeEffects();
     storageStatus.admissionOpen = true;
     runs.releaseStorage();
     autoPrompts.releaseStorage();

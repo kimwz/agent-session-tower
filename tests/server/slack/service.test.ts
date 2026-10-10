@@ -1,3 +1,4 @@
+import { externalStorageFixture } from '../remote/external-storage-fixture.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile, stat } from 'node:fs/promises';
@@ -10,15 +11,16 @@ import type { Run } from '../../../shared/types.js';
 
 test('Slack connection stays private, admits only personal mentions, and pauses without losing accepted work', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-service-'));
+  const storage = await externalStorageFixture(t, stateDir);
   let socket: SlackSocketOptions | undefined;
   let starts = 0, stops = 0;
-  const service: SlackService = new SlackService({ stateDir, runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not execute'); } }, refresh: async () => {} }, {
+  const service: SlackService = new SlackService({ repository: storage.workflows, effectGate: storage.effectGate, stateDir, runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not execute'); } }, refresh: async () => {} }, {
     client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [], reply: async () => { throw new Error('Must not send'); } }),
     socket: options => { socket = options; return { start: () => { starts++; }, stop: () => { stops++; } }; },
     model: async () => { throw new Error('Must not start a provider'); },
   });
   t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
-  await service.start();
+  await service.start(); await service.startRuntimeEffects();
   const credentials = { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' };
   await service.mutate('connect', credentials);
   assert.equal(starts, 0);
@@ -55,16 +57,17 @@ test('Slack connection stays private, admits only personal mentions, and pauses 
 
 test('self-mention testing is opt-in, persists, and keeps bot, edit, and escaped reply filters', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-self-'));
+  const storage = await externalStorageFixture(t, stateDir);
   let socket: SlackSocketOptions | undefined;
   let socketStarts = 0;
-  const create = () => new SlackService({ stateDir, runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not execute'); } }, refresh: async () => {} }, {
+  const create = () => new SlackService({ repository: storage.workflows, effectGate: storage.effectGate, stateDir, runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not execute'); } }, refresh: async () => {} }, {
     client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [], reply: async () => { throw new Error('Must not send'); } }),
     socket: options => { socket = options; return { start() { socketStarts++; }, stop() {} }; },
     model: async () => { throw new Error('Must not start a provider'); },
   });
   let service = create();
   t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
-  await service.start();
+  await service.start(); await service.startRuntimeEffects();
   await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
   assert.equal(service.overview().allowSelfMentions, false);
   await service.mutate('settings', { enabled: true });
@@ -83,7 +86,7 @@ test('self-mention testing is opt-in, persists, and keeps bot, edit, and escaped
   await service.automation.tick();
   service.close();
   service = create();
-  await service.start();
+  await service.start(); await service.startRuntimeEffects();
   assert.equal(service.overview().allowSelfMentions, true);
   assert.equal(service.overview().enabled, true);
   await send('after-restart');
@@ -104,8 +107,9 @@ test('self-mention testing is opt-in, persists, and keeps bot, edit, and escaped
 
 test('dedicated coordinator exposes scoped MCP during creation and follows later native turns', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-coordinator-'));
+  const storage = await externalStorageFixture(t, stateDir);
   const runs: import('../../../shared/types.js').Run[] = [];
-  const service: SlackService = new SlackService({ stateDir, runs: {
+  const service: SlackService = new SlackService({ repository: storage.workflows, effectGate: storage.effectGate, stateDir, runs: {
     list: () => runs,
     create: async (input, internal) => {
       assert.equal(input.cwd, join(stateDir, 'slack-sessions', service.overview().events[0].id));
@@ -123,19 +127,33 @@ test('dedicated coordinator exposes scoped MCP during creation and follows later
     model: async () => { throw new Error('unexpected classifier'); },
   });
   t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
-  await service.start(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  await service.start(); await service.startRuntimeEffects(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
   await service.mutate('rules', { rules: [{ id: 'r', name: 'Review', enabled: true, condition: 'PR', instructions: 'Review', replyInstructions: 'Propose', provider: 'codex', model: 'gpt-6-astra' }] });
   await service.automation.ingest({ id: 'event', teamId: 'T1', channel: 'G1', user: 'U2', ts: '1', threadTs: '1', text: '<@U1> hello' });
   await service.automation.tick(); assert.deepEqual(service.coordinatorSessionIds(), ['codex:test']);
   runs[0].status = 'completed'; await service.automation.tick(); assert.equal(service.overview().events[0].status, 'completed');
-  runs.push({ ...runs[0], id: 'r2', createdAt: '2026-01-02', status: 'running' });
+  let admitted!: () => void; let release!: () => void;
+  const prepared = new Promise<void>(resolve => { admitted = resolve; });
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  const turn = service.withOwnerTurnAdmission(async () => {
+    await service.ownerChat('codex:test', 'continue'); admitted(); await hold;
+    runs.push({ ...runs[0], id: 'r2', createdAt: '2026-01-02', status: 'running' });
+  });
+  await prepared;
+  const replacing = service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  release(); await turn;
+  await assert.rejects(replacing, /진행 중/);
+  await assert.rejects(service.mutate('disconnect', {}), /진행 중/);
+  await assert.rejects(service.restoreConnection({ enabled: false }), /진행 중/);
+  assert.equal(await service.automation.hasUnfinished(), true);
   assert.equal(service.overview().events[0].status, 'running'); assert.equal(service.hasActive(), true);
 });
 
 test('coordinator result notifications retain the snapshotted model after rule edits', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-model-'));
+  const storage = await externalStorageFixture(t, stateDir);
   const runs: import('../../../shared/types.js').Run[] = [{ id: 'delegated', sessionId: 'work', prompt: '', status: 'completed', createdAt: '', output: 'Done' }];
-  const service = new SlackService({ stateDir, runs: {
+  const service = new SlackService({ repository: storage.workflows, effectGate: storage.effectGate, stateDir, runs: {
     list: () => runs,
     create: async input => {
       const run: import('../../../shared/types.js').Run = { id: 'coordinator', sessionId: 'chat', prompt: '', status: 'completed', createdAt: '', output: '' };
@@ -148,7 +166,7 @@ test('coordinator result notifications retain the snapshotted model after rule e
   });
   let resumed = 0;
   t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
-  await service.start(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  await service.start(); await service.startRuntimeEffects(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
   const rule = { id: 'r', name: 'Review', enabled: true, condition: 'PR', instructions: 'Review', replyInstructions: 'Propose', provider: 'claude', model: 'opus' };
   await service.mutate('rules', { rules: [rule] });
   await service.automation.ingest({ id: 'event', teamId: 'T1', channel: 'G1', user: 'U2', ts: '1', threadTs: '1', text: 'Review' }); await service.automation.tick();
@@ -159,19 +177,20 @@ test('coordinator result notifications retain the snapshotted model after rule e
 
 test('Slack language persists independently of connection and validates authenticated settings input', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-language-'));
-  const options = { stateDir, runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not execute'); } }, refresh: async () => {} };
+  const storage = await externalStorageFixture(t, stateDir);
+  const options = { repository: storage.workflows, effectGate: storage.effectGate, stateDir, runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not execute'); } }, refresh: async () => {} };
   const dependencies = { client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [], reply: async () => { throw new Error('Must not send'); } }) };
   const service = new SlackService(options, dependencies);
   const restarted = new SlackService(options, dependencies);
   t.after(async () => { service.close(); restarted.close(); await rm(stateDir, { recursive: true, force: true }); });
-  await service.start();
+  await service.start(); await service.startRuntimeEffects();
   assert.equal(service.overview().language, 'ko');
   for (const language of ['fr', '', true, null, {}]) await assert.rejects(service.mutate('settings', { language }), /설정/);
   await service.mutate('settings', { language: 'en' });
   await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
   assert.equal(service.overview().language, 'en');
   await service.mutate('disconnect', {});
-  await restarted.start();
+  await restarted.start(); await restarted.startRuntimeEffects();
   assert.equal(restarted.overview().language, 'en');
   await restarted.mutate('settings', { language: 'ko' });
   assert.equal(JSON.parse(await readFile(join(stateDir, 'slack-connection.json'), 'utf8')).language, 'ko');
@@ -179,9 +198,10 @@ test('Slack language persists independently of connection and validates authenti
 
 test('owner reply intent uses the configured ephemeral classifier with only owner text and task metadata', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-consent-'));
+  const storage = await externalStorageFixture(t, stateDir);
   const run: import('../../../shared/types.js').Run = { id: 'coordinator', sessionId: 'chat', prompt: '', status: 'completed', createdAt: '', output: '' };
   let calls = 0;
-  const service = new SlackService({ stateDir, runs: {
+  const service = new SlackService({ repository: storage.workflows, effectGate: storage.effectGate, stateDir, runs: {
     list: () => [run],
     create: async input => ({ run, session: { id: 'chat', nativeId: 'chat', provider: input.provider, cwd: input.cwd, project: 'Slack', title: 'Slack', status: 'completed', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true } }),
   }, autoPrompts: { get: () => undefined, submit: async () => { throw Error('unexpected delegation'); } }, refresh: async () => {} }, {
@@ -195,7 +215,7 @@ test('owner reply intent uses the configured ephemeral classifier with only owne
     },
   });
   t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
-  await service.start(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  await service.start(); await service.startRuntimeEffects(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
   await service.mutate('rules', { rules: [{ id: 'r', name: 'Review', enabled: true, condition: 'PR', instructions: 'Review', replyInstructions: 'Propose', provider: 'claude', model: 'opus' }] });
   await service.automation.ingest({ id: 'event', teamId: 'T1', channel: 'G1', user: 'U2', ts: '1', threadTs: '1', text: '<@U1> hello' });
   await service.automation.tick(); assert.equal(calls, 0);
@@ -205,11 +225,12 @@ test('owner reply intent uses the configured ephemeral classifier with only owne
 
 test('Slack conversations, their delegated work and result resumes all run as Slack external input', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-origin-'));
+  const storage = await externalStorageFixture(t, stateDir);
   type Run = import('../../../shared/types.js').Run;
   type Admission = import('../../../server/runs/manager.js').RunAdmission;
   const runs: Run[] = [{ id: 'delegated', sessionId: 'work', prompt: '', status: 'completed', createdAt: '', output: 'Done' }];
   const admissions: Array<[string, Admission | undefined]> = [];
-  const service = new SlackService({ stateDir, runs: {
+  const service = new SlackService({ repository: storage.workflows, effectGate: storage.effectGate, stateDir, runs: {
     list: () => runs,
     create: async (input, internal) => {
       admissions.push(['create', internal]);
@@ -226,7 +247,7 @@ test('Slack conversations, their delegated work and result resumes all run as Sl
   });
   let delegatedRequest = '';
   t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
-  await service.start(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  await service.start(); await service.startRuntimeEffects(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
   await service.mutate('rules', { rules: [{ id: 'r', name: 'Review', enabled: true, condition: 'PR', instructions: 'Review', replyInstructions: 'Propose', provider: 'codex' }] });
   await service.automation.ingest({ id: 'event', teamId: 'T1', channel: 'G1', user: 'U2', ts: '1', threadTs: '1', text: 'Review' });
   await service.automation.tick();
@@ -246,6 +267,7 @@ test('Slack conversations, their delegated work and result resumes all run as Sl
 
 test('a later message in a handled thread reaches its conversation when the judgment finds it is for the owner', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-follow-'));
+  const storage = await externalStorageFixture(t, stateDir);
   let socket: SlackSocketOptions | undefined;
   const runs: Run[] = [];
   const turns: string[] = [];
@@ -255,7 +277,7 @@ test('a later message in a handled thread reaches its conversation when the judg
     const owner = /merge/.test(JSON.stringify((request.state as { new_message: string }).new_message)) ? 0.92 : 0.05;
     return { audience: { choice: owner >= 0.5 ? 'owner' : 'others', probabilities: { owner, others: 1 - owner }, confidence: 0.9 } } as never;
   } };
-  const service: SlackService = new SlackService({ stateDir, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not delegate'); } }, refresh: async () => {},
+  const service: SlackService = new SlackService({ repository: storage.workflows, effectGate: storage.effectGate, stateDir, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not delegate'); } }, refresh: async () => {},
     followUpEngine: async () => engine,
     runs: { list: () => runs,
       create: (async (request: { prompt: string }) => { const run = { id: 'coordinator-run', sessionId: 'coordinator', prompt: request.prompt, status: 'completed', createdAt: '', output: '' } as Run; runs.push(run); turns.push(request.prompt); return { session: { id: run.sessionId }, run }; }) as never,
@@ -266,7 +288,7 @@ test('a later message in a handled thread reaches its conversation when the judg
     model: async () => { throw new Error('Must not start a provider'); },
   });
   t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
-  await service.start();
+  await service.start(); await service.startRuntimeEffects();
   await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
   await service.mutate('rules', { rules: [{ id: 'review', name: 'Review', enabled: true, condition: 'review', instructions: 'Review it', replyInstructions: 'Say done', provider: 'claude' }] });
   await service.mutate('settings', { enabled: true });
@@ -293,10 +315,11 @@ test('a later message in a handled thread reaches its conversation when the judg
 
 test('the working reaction is a saved setting that marks new mentions at once on their message', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-working-'));
+  const storage = await externalStorageFixture(t, stateDir);
   let socket: SlackSocketOptions | undefined;
   const reactions: string[] = [];
   // Conversations never start here: the reaction goes on before any of that.
-  const create = () => new SlackService({ stateDir, runs: { list: () => [], create: () => new Promise(() => {}) }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not execute'); } }, refresh: async () => {} }, {
+  const create = () => new SlackService({ repository: storage.workflows, effectGate: storage.effectGate, stateDir, runs: { list: () => [], create: () => new Promise(() => {}) }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not execute'); } }, refresh: async () => {} }, {
     client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => new Promise(() => {}), reply: async () => { throw new Error('Must not send'); },
       react: async (channel: string, ts: string, name: string, action: 'add' | 'remove') => { reactions.push(`${action}:${name}:${channel}:${ts}`); } }),
     socket: options => { socket = options; return { start() {}, stop() {} }; },
@@ -304,7 +327,7 @@ test('the working reaction is a saved setting that marks new mentions at once on
   });
   let service = create();
   t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
-  await service.start();
+  await service.start(); await service.startRuntimeEffects();
   await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
   assert.equal(service.overview().workingReaction, undefined, 'off by default');
   for (const workingReaction of ['bad name', 7, ':'.repeat(3)]) await assert.rejects(service.mutate('settings', { workingReaction }), { kind: 'invalid' });
@@ -313,8 +336,29 @@ test('the working reaction is a saved setting that marks new mentions at once on
   await socket!.onEvent({ team_id: 'T1', event_id: 'E1', event: { type: 'message', channel: 'C1', user: 'U2', ts: '100.001', text: '<@U1> deploy dev please' } });
   for (let wait = 0; !reactions.length && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
   assert.deepEqual(reactions, ['add:loading:C1:100.001']);
-  service.close(); service = create(); await service.start();
+  service.close(); service = create(); await service.start(); await service.startRuntimeEffects();
   assert.equal(service.overview().workingReaction, 'loading', 'kept across restarts');
   await service.mutate('settings', { workingReaction: '' });
   assert.equal(service.overview().workingReaction, undefined, 'an empty value turns it off');
+});
+
+test('account authentication preparation serializes a later owner turn admission', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-account-race-'));
+  const storage = await externalStorageFixture(t, stateDir);
+  let prepared!: () => void, release!: () => void;
+  const ready = new Promise<void>(resolve => { prepared = resolve; });
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  let admitted = false;
+  const service = new SlackService({ repository: storage.workflows, effectGate: storage.effectGate, stateDir,
+    runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('must not submit'); } }, refresh: async () => {} }, {
+    client: () => ({ auth: async () => { prepared(); await hold; return { teamId: 'T1', userId: 'U9' }; }, thread: async () => [], reply: async () => { throw new Error('must not send'); } }),
+    model: async () => { throw new Error('must not start'); },
+  });
+  t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
+  await service.start();
+  const update = service.mutate('connect', { appToken: 'xapp-fixture-1234567890', userToken: 'xoxp-fixture-1234567890' });
+  await ready;
+  const turn = service.withOwnerTurnAdmission(async () => { admitted = true; assert.equal(service.overview().account?.userId, 'U9'); });
+  await Promise.resolve(); assert.equal(admitted, false);
+  release(); await update; await turn; assert.equal(admitted, true);
 });

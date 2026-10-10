@@ -150,7 +150,7 @@ jobs:
             'tests/server/triggers/*storage*.test.ts', 'tests/server/permissions/*storage*.test.ts',
             'tests/server/permissions/*sql*.test.ts', 'tests/server/runs/trigger-admission.test.ts',
             'tests/server/remote/*storage*.test.ts', 'tests/server/auto-prompt/*storage*.test.ts',
-            'tests/server/slack/*storage*.test.ts', 'tests/server/link/storage-offline*.test.ts'].flatMap(pattern => globSync(pattern));
+            'tests/server/slack/*storage*.test.ts', 'tests/server/slack/*effect-boundary.test.ts', 'tests/server/triggers/github-effect-boundary.test.ts', 'tests/server/remote/actual-external-storage.test.ts', 'tests/server/link/storage-offline*.test.ts'].flatMap(pattern => globSync(pattern));
           assert.ok(consumers.length, 'storage consumers must match');
           // Follow public storage imports as well as filenames, including newly added I fixtures.
           const imported = ['tests/server/runs/**/*.test.ts', 'tests/server/http/**/*.test.ts',
@@ -297,10 +297,10 @@ jobs:
           npm ci
           node --import tsx scripts/sqlite-runtime-check.mjs supported-floor | tee "$report/runtime.json"
           printf '%s\n' release-version-decision > "$report/stage.txt"
-          if [[ "$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')" == 1.124.0 ]]; then
+          if [[ "$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')" == 1.125.0 ]]; then
             printf '%s\n' already-target > "$report/version-mode.txt"
             printf '%s\n' already-target-official-hooks > "$report/stage.txt"
-            npm version 1.124.0 --allow-same-version --no-git-tag-version
+            npm version 1.125.0 --allow-same-version --no-git-tag-version
             printf '0\n' > "$report/npm-version-exit.txt"
           else
             node --input-type=module <<'FLOOR'
@@ -315,7 +315,7 @@ jobs:
           FLOOR
             printf '%s\n' npm-version > "$report/version-mode.txt"
             printf '%s\n' npm-version-hooks > "$report/stage.txt"
-            npm version 1.124.0 --no-git-tag-version
+            npm version 1.125.0 --no-git-tag-version
             printf '0\n' > "$report/npm-version-exit.txt"
           fi
           node --input-type=module <<'VERSION'
@@ -324,7 +324,7 @@ jobs:
           import { APP_VERSION } from './dist/shared/app-identity.js';
           const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
           const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
-          assert.equal(pkg.version, '1.124.0');
+          assert.equal(pkg.version, '1.125.0');
           assert.equal(lock.version, pkg.version);
           assert.equal(lock.packages[''].version, pkg.version);
           assert.equal(APP_VERSION, pkg.version);

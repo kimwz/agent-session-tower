@@ -4,11 +4,14 @@ import { FOLLOW_UP_ADDRESSED } from './follow-up.js';
 import { validModelId } from '../providers/models.js';
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute } from 'node:path';
 import type { AutoPromptJob, AutoPromptRequest, Run } from '../../shared/types.js';
 import type { SlackFollowUp, SlackMention, SlackMessage, SlackRule, SlackWorkflow } from '../../shared/slack.js';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { WorkflowRepository } from './storage-repository.js';
+import { bootstrapExternal } from '../remote/storage-transfer.js';
+import { canonical } from '../remote/storage-rows.js';
+import { validateSlackRules, type WorkflowChannel } from './storage-codec.js';
+export { validateSlackRules } from './storage-codec.js';
 
 export interface SlackMatchInput { rules: SlackRule[]; mention: SlackMention; thread: SlackMessage[] }
 export interface SlackReplyInput { rule: SlackRule; mention: SlackMention; thread: SlackMessage[]; output: string }
@@ -47,6 +50,8 @@ export const SLACK_CHANNEL: CoordinatorChannel = { label: 'Slack', tools: 'slack
 
 export interface SlackAutomationOptions {
   stateDir: string;
+  repository?: WorkflowRepository;
+  effectGate?: () => Promise<void>;
   /** Slack unless given. */
   channel?: CoordinatorChannel;
   classifyOwnerReply?(message: string, workflow: SlackWorkflow): Promise<unknown>;
@@ -104,15 +109,6 @@ const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v ===
 /** A channel marks a failure that left nothing behind (refused before sending); the owner's permission then still stands. */
 const notSent = (error: unknown) => (error as { notSent?: boolean } | undefined)?.notSent === true;
 const text = (v: unknown, max: number): v is string => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
-export function validateSlackRules(value: unknown): asserts value is SlackRule[] {
-  if (!Array.isArray(value) || value.length > 100 || value.some(rule => !record(rule) || !text(rule.id, 100)
-    || !text(rule.name, 200) || typeof rule.enabled !== 'boolean' || !text(rule.condition, 4000)
-    || !text(rule.instructions, 8000) || !text(rule.replyInstructions, 4000) || !['claude', 'codex'].includes(String(rule.provider))
-    || (rule.model !== undefined && !validModelId(rule.model)) || (rule.autoReply !== undefined && typeof rule.autoReply !== 'boolean')
-    || (rule.cwd !== undefined && (typeof rule.cwd !== 'string' || !isAbsolute(rule.cwd) || rule.cwd.includes('\0') || rule.cwd.length > 4096)))
-    || new Set(value.map(rule => rule.id)).size !== value.length) throw new Error('Slack 처리 지침이 올바르지 않습니다.');
-  if (Buffer.byteLength(JSON.stringify(value)) > MAX_RULE_BYTES) throw new Error('Slack 처리 지침은 합계 100 KB 이하여야 합니다.');
-}
 function validMention(value: unknown): value is SlackMention {
   return record(value) && ['id', 'teamId', 'channel', 'user', 'ts', 'threadTs'].every(key => text(value[key], 200)) && text(value.text, 40_000);
 }
@@ -144,12 +140,23 @@ export class SlackAutomationManager extends EventEmitter {
   private toolOperations = new Map<string, Promise<unknown>>();
   private started = false;
   private held = false;
-  private readonly path: string;
+  private readonly storageChannel: WorkflowChannel;
+  private readonly ordinals = new Map<string, number>();
+  private readonly saved = new Map<string, string>();
+  private nextOrdinal = 0;
+  private effectsStarted = false;
   private readonly channel: CoordinatorChannel;
   constructor(private readonly options: SlackAutomationOptions) {
     super();
     this.channel = options.channel ?? SLACK_CHANNEL;
-    this.path = join(options.stateDir, this.channel.file);
+    if (!['slack','github'].includes(this.channel.tools)) throw new Error('Unsupported workflow storage channel.');
+    this.storageChannel = this.channel.tools as WorkflowChannel;
+    const effects = new Set(['fetchThread','match','submitAutoPrompt','composeReply','sendReply','react','judgeFollowUp','classifyOwnerReply','startConversation','resumeConversation']);
+    this.options = new Proxy(options, { get: (target, name, receiver) => {
+      const value: unknown = Reflect.get(target, name, receiver);
+      if (!effects.has(String(name)) || typeof value !== 'function') return value;
+      return async (...args: unknown[]) => { await this.effectsGate(); return Reflect.apply(value, target, args); };
+    } });
   }
   /** Names the channel and its tools in text agents and the owner read. Slack text is used as written. */
   private say(value: string): string {
@@ -169,71 +176,43 @@ export class SlackAutomationManager extends EventEmitter {
     if (!this.channel.aliases?.length) return slack;
     return `(?:${this.channel.aliases.map(alias => alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`;
   }
-  async start(): Promise<void> {
+  async load(): Promise<void> {
     if (this.started) return;
-    await mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
-    let saved: unknown;
-    try { saved = await readPrivateJson(this.path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    if (saved !== undefined) {
-      if (!record(saved) || !Array.isArray(saved.workflows) || saved.workflows.length > 10_000) throw new Error('Saved Slack automation state is invalid.');
-      validateSlackRules(saved.rules);
-      for (const item of saved.workflows) {
-        if (!record(item) || !validMention(item.mention) || item.id !== slackRequestId(item.mention)
-          || !['received', 'matching', 'ignored', 'dispatching', 'running', 'composing', 'sending', 'completed', 'error', 'admission-uncertain', 'reply-uncertain'].includes(String(item.status))) throw new Error('Saved Slack workflow is invalid.');
-        if (item.mode !== undefined && item.mode !== 'conversation') throw new Error('Saved Slack workflow mode is invalid.');
-        if (item.approvals !== undefined && item.approvals !== 'auto' && item.approvals !== 'owner') throw new Error('Saved Slack workflow approvals are invalid.');
-        if (item.conversationClaimed !== undefined && typeof item.conversationClaimed !== 'boolean') throw new Error('Saved Slack creation claim is invalid.');
-        if (item.repliesHeld !== undefined && item.repliesHeld !== true && item.repliesHeld !== 'unclear') throw new Error('Saved Slack reply hold is invalid.');
-        if (item.delegatedTasks !== undefined && (!Array.isArray(item.delegatedTasks) || item.delegatedTasks.length > 100 || item.delegatedTasks.some(task => !record(task)
-          || !text(task.requestKey, 200) || !text(task.requestId, 200) || !text(task.prompt, 32_000) || !['claude', 'codex'].includes(String(task.provider))
-          || (task.createdSessionId !== undefined && !text(task.createdSessionId, 500))
-          || (task.delegatedFinished !== undefined && typeof task.delegatedFinished !== 'boolean')
-          || (task.model !== undefined && !validModelId(task.model))
-          || (task.cwd !== undefined && (!text(task.cwd, 4096) || !isAbsolute(task.cwd)))))) throw new Error('Saved Slack tasks are invalid.');
-        if (item.replies !== undefined && (!Array.isArray(item.replies) || item.replies.length > 100 || item.replies.some(reply => !record(reply)
-          || !text(reply.requestKey, 200) || !text(reply.text, 4000) || !['proposed', 'sending', 'sent', 'uncertain'].includes(String(reply.status))))) throw new Error('Saved Slack replies are invalid.');
-        if (item.ownerReplySelection !== undefined && (!record(item.ownerReplySelection) || !text(item.ownerReplySelection.requestKey, 200) || !text(item.ownerReplySelection.text, 4000))) throw new Error('Saved Slack owner selection is invalid.');
-        if (item.ownerConditionalReply !== undefined) {
-          const consent = item.ownerConditionalReply;
-          if (!record(consent) || !text(consent.requestId, 200) || !text(consent.requestKey, 200) || !text(consent.text, 4000)
-            || !text(consent.authorizedAt, 100) || !['pending', 'sent', 'blocked', 'cancelled', 'uncertain'].includes(String(consent.status))
-            || (consent.mode !== undefined && consent.mode !== 'composed') || (consent.ruleId !== undefined && !text(consent.ruleId, 100))
-            || (consent.requestIds !== undefined && (!Array.isArray(consent.requestIds) || consent.requestIds.length > 100 || consent.requestIds.some(id => !text(id, 200))))
-            || (consent.instruction !== undefined && !text(consent.instruction, 32000))
-            || (consent.evidence !== undefined && !text(consent.evidence, 4000))) throw new Error('Saved Slack conditional authorization is invalid.');
-        }
-        if (item.reactions !== undefined && (!Array.isArray(item.reactions) || item.reactions.length > MAX_REACTIONS || item.reactions.some(reaction => !record(reaction)
-          || !(typeof reaction.name === 'string' && (this.channel.validReaction ?? validEmoji)(reaction.name)) || !['add', 'remove'].includes(String(reaction.action)) || !text(reaction.at, 100)))) throw new Error('Saved Slack reactions are invalid.');
-        if (item.followUps !== undefined && (!Array.isArray(item.followUps) || item.followUps.length > MAX_FOLLOW_UPS || item.followUps.some(followUp => !record(followUp)
-          || !text(followUp.ts, 200) || !text(followUp.user, 200) || typeof followUp.text !== 'string' || followUp.text.length > MAX_FOLLOW_UP_TEXT || !text(followUp.receivedAt, 100)
-          || !['received', 'pending', 'delivering', 'delivered', 'skipped', 'error', 'uncertain'].includes(String(followUp.status))
-          || (followUp.mentioned !== undefined && typeof followUp.mentioned !== 'boolean')
-          || (followUp.addressed !== undefined && !(typeof followUp.addressed === 'number' && followUp.addressed >= 0 && followUp.addressed <= 1))
-          || (followUp.reason !== undefined && !text(followUp.reason, 1500)) || (followUp.runId !== undefined && !text(followUp.runId, 200))
-          || (followUp.deliveredAt !== undefined && !text(followUp.deliveredAt, 100))))) throw new Error('Saved Slack follow-ups are invalid.');
-        if (item.reactions?.some(reaction => (reaction as { ts?: unknown }).ts !== undefined && !text((reaction as { ts?: unknown }).ts, 200))) throw new Error('Saved Slack reactions are invalid.');
-        if (item.workingMarks !== undefined && (!Array.isArray(item.workingMarks) || item.workingMarks.length > MAX_WORKING_MARKS || item.workingMarks.some(mark => !record(mark)
-          || !text(mark.ts, 200) || !validEmoji(mark.name) || !['add', 'on', 'off'].includes(String(mark.state))
-          || (mark.error !== undefined && !text(mark.error, 1500))))) throw new Error('Saved Slack working marks are invalid.');
-        validateSlackRules(item.rules);
-        if (item.rule) validateSlackRules([item.rule]);
-        if (item.thread !== undefined && !validThread(item.thread)) throw new Error('Saved Slack thread is invalid.');
-      }
-      this.configured = saved.rules;
-      this.items = saved.workflows as unknown as SlackWorkflow[];
-      if (new Set(this.items.map(item => item.id)).size !== this.items.length) throw new Error('Saved Slack workflow IDs are duplicated.');
-      for (const item of this.items) {
-        for (const reply of item.replies ?? []) if (reply.status === 'sending') reply.status = 'uncertain';
-        if (item.status === 'sending') this.update(item, { status: 'reply-uncertain', error: '댓글 전송 결과를 확인할 수 없습니다. 중복 댓글을 막기 위해 다시 보내지 않았습니다.' });
-        else if (item.status === 'matching') item.status = 'received';
-      }
+    if (!this.options.repository) throw new Error('SlackAutomationManager requires its worker SQL repository.');
+    await bootstrapExternal(this.options.repository, this.options.stateDir);
+    const rows = await this.options.repository.loadRows();
+    const source = this.options.repository.source(rows, this.storageChannel);
+    this.configured = source.rules; this.items = source.workflows;
+    for (const row of rows.filter(row => row.channel === this.storageChannel && row.kind === 'workflow')) {
+      this.ordinals.set(row.id, row.ordinal); this.saved.set(row.id, row.json); this.nextOrdinal = Math.max(this.nextOrdinal, row.ordinal + 1);
     }
-    await this.persist(); this.started = true;
+    this.started = true;
   }
+  async start(): Promise<void> { await this.load(); }
+  async startRuntimeEffects(): Promise<void> {
+    if (this.effectsStarted) return;
+    await this.effectsGate();
+    for (const item of this.items) {
+      let changed = false;
+      for (const reply of item.replies ?? []) if (reply.status === 'sending') { reply.status = 'uncertain'; changed = true; }
+      if (item.status === 'sending') { this.update(item, { status: 'reply-uncertain', error: '댓글 전송 결과를 확인할 수 없습니다. 중복 댓글을 막기 위해 다시 보내지 않았습니다.' }); changed = true; }
+      else if (item.status === 'matching') { item.status = 'received'; changed = true; }
+      if (changed) await this.persist(item);
+    }
+    await this.compactHistoryIfNeeded();
+    this.effectsStarted = true;
+  }
+  private async effectsGate(): Promise<void> { if (!this.options.effectGate) throw new Error('Workflow effects require the worker effect gate.'); await this.options.effectGate(); await this.options.repository!.gate(); }
+  async hasUnfinished(): Promise<boolean> { const durable = await this.options.repository!.unfinished(this.storageChannel); return durable || this.hasPending(); }
+  async exportSettings(): Promise<{ rules: SlackRule[] }> {
+    const source = this.options.repository!.source(await this.options.repository!.loadRows(), this.storageChannel);
+    return { rules: source.rules };
+  }
+  async restoreSettings(value: { rules: SlackRule[] }): Promise<void> { await this.setRules(value.rules); }
   rules(): SlackRule[] { return structuredClone(this.configured); }
   list(): SlackWorkflow[] {
     return structuredClone(this.items.map(item => {
-      if (item.status === 'admission-uncertain' || item.mode !== 'conversation' || !item.sessionId) return item;
+      if (['admission-uncertain','reply-uncertain'].includes(item.status) || item.mode !== 'conversation' || !item.sessionId) return item;
       const runs = this.options.getSessionRuns?.(item.sessionId) ?? [];
       const latest = runs.at(-1);
       const failedTask = item.delegatedTasks?.find(task => task.notificationError || task.submissionError);
@@ -244,7 +223,8 @@ export class SlackAutomationManager extends EventEmitter {
         updatedAt: latest.finishedAt ?? latest.startedAt ?? latest.createdAt, error: latest.error ?? item.error } : item;
     }));
   }
-  hasPending(): boolean { return this.list().some(item => !terminal.has(item.status)); }
+  private coordinatorRunning(): boolean { return this.items.some(item => item.mode === 'conversation' && !!item.sessionId && (this.options.getSessionRuns?.(item.sessionId) ?? []).some(run => run.status === 'running' || run.status === 'queued')); }
+  hasPending(): boolean { return this.coordinatorRunning() || this.items.some(item => !terminal.has(item.status) || ['admission-uncertain','reply-uncertain'].includes(item.status) || item.replies?.some(reply => reply.status === 'sending' || reply.status === 'uncertain')); }
   /** Anything already underway: a tick advancing an item, an admission, a tool call, or an unfinished workflow. */
   inFlight(): boolean {
     return Boolean(this.processing) || Boolean(this.marking) || this.admissions.size > 0 || this.toolOperations.size > 0
@@ -282,16 +262,17 @@ export class SlackAutomationManager extends EventEmitter {
    * Saves the current state again and reports failure, so a handoff never leaves an older file behind. A reaction
    * call already underway is waited for first; held, no new one starts.
    */
-  async flush(): Promise<void> { await this.marking?.catch(() => {}); return this.persist(); }
+  async flush(): Promise<void> { await this.marking?.catch(() => {}); return this.writes.then(() => this.options.repository!.gate()); }
   private waiting(item: SlackWorkflow): boolean { return this.held && item.status === 'received' && !item.conversationClaimed; }
   async setRules(rules: SlackRule[]): Promise<void> {
     validateSlackRules(rules);
     const previous = this.configured; this.configured = structuredClone(rules);
-    try { await this.persist(); } catch (error) { this.configured = previous; throw error; }
+    try { const write = this.writes.then(() => this.options.repository!.replaceRules(this.storageChannel, rules)); this.writes = write.catch(() => { this.held = true; }); await write; } catch (error) { this.configured = previous; throw error; }
     this.emit('change');
   }
   /** `rules` replaces the configured rules for this one event, for channels whose rules belong to the trigger. */
   async ingest(mention: SlackMention, rules?: SlackRule[], approvals?: 'auto' | 'owner'): Promise<SlackWorkflow> {
+    await this.options.repository!.gate();
     if (!this.started) throw new Error('Slack automation has not started.');
     if (!validMention(mention)) throw new Error('Slack mention is invalid.');
     const id = slackRequestId(mention);
@@ -302,9 +283,9 @@ export class SlackAutomationManager extends EventEmitter {
     const now = new Date().toISOString();
     if (rules) validateSlackRules(rules);
     const item: SlackWorkflow = { id, ...(this.options.startConversation ? { mode: 'conversation' as const } : {}), mention: structuredClone(mention), rules: (rules ? structuredClone(rules) : this.rules()).filter(rule => rule.enabled), ...(approvals ? { approvals } : {}), status: 'received', createdAt: now, updatedAt: now };
-    this.items.push(item);
-    const admission = this.persist(); this.admissions.set(id, admission);
-    try { await admission; } catch (error) { this.items = this.items.filter(value => value !== item); throw error; }
+    this.items.push(item); this.ordinals.set(id, this.nextOrdinal++);
+    const admission = this.persist(item); this.admissions.set(id, admission);
+    try { await admission; } catch (error) { if (!admissionUncertain(error)) this.items = this.items.filter(value => value !== item); else this.held = true; throw error; }
     finally { this.admissions.delete(id); }
     // Only an admitted request is marked, so a failed save never leaves a reaction without a record.
     if (item.mode === 'conversation') await this.queueMark(item, mention.ts);
@@ -327,13 +308,14 @@ export class SlackAutomationManager extends EventEmitter {
       status: message.mentioned ? 'pending' : 'received', receivedAt: new Date(now).toISOString() };
     const previous = item.followUps;
     item.followUps = [...(previous ?? []), followUp];
-    try { await this.persist(); } catch (error) { item.followUps = previous; throw error; }
+    try { await this.persist(item); } catch (error) { item.followUps = previous; throw error; }
     if (followUp.status === 'pending') await this.queueMark(item, followUp.ts);
     this.emit('change');
     return true;
   }
   async tick(): Promise<void> {
-    if (!this.started) return;
+    if (!this.started || !this.effectsStarted) return;
+    await this.effectsGate();
     // Marks never wait for the conversations: a slow thread fetch or judgment must not delay them.
     const marks = this.sweepMarks().catch(() => {});
     if (this.processing) { await Promise.all([this.processing, marks]); return; }
@@ -365,7 +347,7 @@ export class SlackAutomationManager extends EventEmitter {
       try { await this.advance(item); }
       catch (error) {
         this.update(item, { status: admissionUncertain(error) ? 'admission-uncertain' : item.status === 'sending' ? 'reply-uncertain' : 'error', error: this.say(error instanceof Error ? error.message : 'Slack automation failed.').slice(0, 1500) });
-        await this.persist(); this.emit('change');
+        await this.persist(item); this.emit('change');
       }
     }
   }
@@ -519,7 +501,7 @@ export class SlackAutomationManager extends EventEmitter {
     item.workingMarks = [...(item.workingMarks ?? []), mark];
     // A pass already running must not take it up before it is saved.
     this.unsaved.add(mark);
-    try { await this.persist(); } catch { item.workingMarks = item.workingMarks.filter(value => value !== mark); return; }
+    try { await this.persist(item); } catch { item.workingMarks = item.workingMarks.filter(value => value !== mark); return; }
     finally { this.unsaved.delete(mark); }
     void this.sweepMarks().catch(() => {});
   }
@@ -548,7 +530,7 @@ export class SlackAutomationManager extends EventEmitter {
     // A later removal's outcome replaces an earlier failure to put it on.
     delete mark.error;
     Object.assign(mark, { state: action === 'remove' ? 'off' : 'on' }, error ? { error } : {});
-    try { await this.persist(); } catch { /* Kept in memory; the next save writes it. */ }
+    try { await this.persist(item); } catch { /* Kept in memory; the next save writes it. */ }
     this.emit('change');
   }
   /** Nothing of this conversation is still working: not starting, no turn, no delegated task, no message on its way. */
@@ -564,7 +546,7 @@ export class SlackAutomationManager extends EventEmitter {
    * uncertain is still taken off with a real call.
    */
   private sweepMarks(): Promise<void> {
-    if (!this.started || this.held || this.clearing || !this.options.react) return Promise.resolve();
+    if (!this.effectsStarted || !this.started || this.held || this.clearing || !this.options.react) return Promise.resolve();
     if (this.marking) { this.markAgain = true; return this.marking; }
     this.marking = (async () => {
       do {
@@ -1008,21 +990,40 @@ export class SlackAutomationManager extends EventEmitter {
       && (item.replyTs === ts || (item.replies ?? []).some(reply => reply.ts === ts || reply.status === 'sending')));
   }
   private update(item: SlackWorkflow, patch: Partial<SlackWorkflow>): void { Object.assign(item, patch, { updatedAt: new Date().toISOString() }); }
-  private async save(item: SlackWorkflow, patch: Partial<SlackWorkflow>): Promise<void> { this.update(item, patch); await this.persist(); this.emit('change'); }
-  private persist(): Promise<void> {
-    let data = JSON.stringify({ rules: this.configured, workflows: this.items });
-    if (Buffer.byteLength(data) > MAX_STATE_BYTES) {
-      // Keep every event ID for deduplication and all unfinished execution context.
-      // Historical transcripts can be dropped after a workflow has settled.
-      for (const item of this.items) {
-        if (!terminal.has(item.status)) continue;
-        item.rules = []; delete item.thread; delete item.prompt; delete item.rule;
-        item.mention.text = item.mention.text.trim().slice(0, 500);
-      }
-      data = JSON.stringify({ rules: this.configured, workflows: this.items });
+  private async save(item: SlackWorkflow, patch: Partial<SlackWorkflow>): Promise<void> { this.update(item, patch); await this.persist(item); this.emit('change'); }
+  private async compactHistoryIfNeeded(next?: { id: string; json: string }): Promise<void> {
+    const repository = this.options.repository!;
+    const projectedBytes = async () => (await repository.capacity(this.storageChannel)) + (next ? Buffer.byteLength(next.json) - Buffer.byteLength(this.saved.get(next.id) ?? '') + (this.saved.has(next.id) ? 0 : 1) : 0);
+    if (await projectedBytes() <= MAX_STATE_BYTES) return;
+    const compact = (value: SlackWorkflow) => {
+      value.rules = []; delete value.thread; delete value.prompt; delete value.rule;
+      value.mention.text = value.mention.text.trim().slice(0, 500); return value;
+    };
+    if (next) {
+      const value = JSON.parse(next.json) as SlackWorkflow;
+      if (terminal.has(value.status)) next.json = canonical(compact(value));
+      if (await projectedBytes() <= MAX_STATE_BYTES) return;
     }
-    if (Buffer.byteLength(data) > MAX_STATE_BYTES) return Promise.reject(new Error('Slack 저장 용량이 가득 찼습니다. 진행 중인 작업이 끝난 뒤 다시 시도하세요.'));
-    const write = this.writes.then(() => writePrivateJson(this.path, data));
-    this.writes = write.catch(() => {}); return write;
+    for (const item of this.items) {
+      const previous = this.saved.get(item.id); if (!previous || next?.id === item.id) continue;
+      const value = JSON.parse(previous) as SlackWorkflow; if (!terminal.has(value.status)) continue;
+      const row = repository.row(compact(value), this.storageChannel, this.ordinals.get(item.id)!);
+      if (row.json === previous) continue;
+      await repository.update([{ ...row, previous }]); this.saved.set(item.id, row.json);
+      compact(item);
+      if (await projectedBytes() <= MAX_STATE_BYTES) return;
+    }
+    throw new Error('Slack 저장 용량이 가득 찼습니다. 진행 중인 작업이 끝난 뒤 다시 시도하세요.');
+  }
+  private persist(item: SlackWorkflow): Promise<void> {
+    const row = this.options.repository!.row(structuredClone(item), this.storageChannel, this.ordinals.get(item.id)!);
+    const write = this.writes.then(async () => {
+      await this.compactHistoryIfNeeded(row);
+      await this.options.repository!.update([{ ...row, previous: this.saved.get(item.id) ?? null }]);
+      this.saved.set(item.id, row.json);
+      const value = JSON.parse(row.json) as SlackWorkflow;
+      if (value.thread === undefined && item.thread !== undefined) { item.rules = value.rules; delete item.thread; delete item.prompt; delete item.rule; item.mention.text = value.mention.text; }
+    });
+    this.writes = write.catch(() => { this.held = true; }); return write;
   }
 }

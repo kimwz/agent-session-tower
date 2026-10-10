@@ -74,6 +74,7 @@ export class JevEngine implements DecisionEngine {
     const questions = Object.fromEntries(Object.entries(request.questions).map(([key, question]) => [key, jevQuestion(question)]));
     const timeout = AbortSignal.timeout(this.timeoutMs);
     const signal = request.signal ? AbortSignal.any([request.signal, timeout]) : timeout;
+    await request.beforeSend?.();
     let response: Response;
     try {
       response = await this.fetcher(JEV_ENDPOINT, {

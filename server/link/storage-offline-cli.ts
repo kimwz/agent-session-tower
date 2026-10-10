@@ -1,10 +1,16 @@
+import { RemoteRepository } from '../remote/storage-repository.js';
+import { AutoPromptRepository } from '../auto-prompt/storage-repository.js';
+import { WorkflowRepository } from '../slack/storage-repository.js';
+import { importRemote } from '../remote/storage-transfer.js';
+import { importAutoPrompts } from '../auto-prompt/storage-transfer.js';
+import { importWorkflows } from '../slack/storage-transfer.js';
 import { join, resolve } from 'node:path';
 import { acquireStrictStateLock } from '../instance/state-lock.js';
 import { captureStorageBundle, storageBuildContext, preflightStorage, openStorage, type StorageClient } from '../storage/index.js';
 import { databaseSupported } from './storage-update.js';
 import { readSnapshot, readStorageIdentity } from '../storage/recovery.js';
 import { storageLayout } from '../storage/paths.js';
-import { beginOfflineActivation, decodeOfflineActivation, prepareOfflineActivation, recordOfflineDomainCompletion, verifyProtectedOfflineArtifact, readOfflinePrivateBytes } from './storage-offline.js';
+import { beginOfflineActivation, checkStorageActivation, finishOfflineActivation, decodeOfflineActivation, prepareOfflineActivation, recordOfflineDomainCompletion, verifyProtectedOfflineArtifact, readOfflinePrivateBytes } from './storage-offline.js';
 import { collectOfflineBackup, restoreOfflineBackup } from './storage-offline-backup.js';
 import { workerLegacyFiles, importRuns, holdRunsEvidence } from '../runs/storage-transfer.js';
 import { RunsRepository } from '../runs/storage-repository.js';
@@ -39,7 +45,7 @@ export async function inspectOfflineImportHistory(storage: StorageClient, stateD
 /** Explicit local command. A conflict refuses immediately; no PID cleanup, service stop, provider, or network calls. */
 export async function runOfflineStorageCommand(args: string[]): Promise<unknown> {
   const [action, ...options]=args;
-  if (!['backup','store','restore'].includes(action ?? '')) throw new Error('Usage: storage offline backup|store|restore --state-dir <path> --input <private-file-or-new-backup-root>');
+  if (!['backup','store','restore','activate'].includes(action ?? '')) throw new Error('Usage: storage offline backup|store|restore --state-dir <path> --input <private-file-or-new-backup-root>');
   const values=new Map<string,string>();
   for(let i=0;i<options.length;i+=2) {
     if(!['--state-dir','--input'].includes(options[i]) || !options[i+1] || values.has(options[i])) throw new Error('Offline requires exact --state-dir and --input; no force option.');
@@ -64,7 +70,18 @@ export async function runOfflineStorageCommand(args: string[]): Promise<unknown>
       if(!['closed','already-closed','thread-exited'].includes(closed.ack)) throw new Error('Snapshot SDK did not close.');
       return await collectOfflineBackup({stateDir,root:input,snapshotId:snapshot.id,lease});
     }
-    const payload:unknown=JSON.parse((await readOfflinePrivateBytes(input)).toString('utf8'));
+    let payload:unknown=JSON.parse((await readOfflinePrivateBytes(input)).toString('utf8'));
+    if(action==='activate') {
+      const request=payload as {format?:unknown;activation?:Omit<import('./storage-offline.js').OfflineActivationRecord,'backup'>;backupRoot?:unknown};
+      if(request.format!=='tower-offline-owner' || !request.activation || request.activation.phase!=='pending' || request.activation.stateDir!==stateDir || typeof request.backupRoot!=='string' || resolve(request.backupRoot)!==request.backupRoot) throw new Error('Exact offline scheduled owner input required.');
+      if(!context.ok || JSON.stringify(context.identity)!==JSON.stringify(request.activation.build) || JSON.stringify(context.manifest)!==JSON.stringify(request.activation.manifest)) throw new Error('Offline successor artifact mismatch.');
+      storage=await openStorage({stateDir,bundle,limits:{maxPayloadBytes:16*1024*1024}});
+      const snapshot=await storage.snapshot();
+      const closed=await storage.close();storage=undefined;
+      if(!['closed','already-closed','thread-exited'].includes(closed.ack)) throw new Error('Offline backup SDK did not close.');
+      const backup=await collectOfflineBackup({stateDir,root:request.backupRoot,snapshotId:snapshot.id,lease});
+      payload={...request.activation,backup};
+    }
     if(action==='restore') {
       const activation=decodeOfflineActivation(payload);
       const descriptor=activation.backup;
@@ -85,21 +102,28 @@ export async function runOfflineStorageCommand(args: string[]): Promise<unknown>
     const owner=await beginOfflineActivation({lease,runtimeDir:join(stateDir,'runner-runtime'),record,update});
     storage=await openStorage({stateDir,bundle,limits:{maxPayloadBytes:16*1024*1024}});
     await prepareOfflineActivation(owner,storage,update);
-    // The integrated C/T/P stores share one SDK and emit no runtime effects. E completion is deliberately unavailable here.
-    for(const scope of ['retention','runs','triggers','permissions']) {
+    // All stores share this SDK; completion is verified before any runtime effects.
+    for(const scope of ['retention','runs','triggers','permissions','remote','auto-prompt','automation-workflows']) {
       const authority=(await storage.inspect()).authority.find(a=>a.domain===scope);
       const commandId=`offline-${record.activationId}-${scope}`;
       if(authority && authority.authority!=='database') throw new Error('Offline non-database authority requires owner recovery.');
       if(!authority) {
-        await inspectOfflineImportHistory(storage,stateDir,scope);
+        if(['retention','runs','triggers','permissions'].includes(scope)) await inspectOfflineImportHistory(storage,stateDir,scope);
         if(scope==='retention') await importRetention({storage,stateDir,evidenceParent:join(stateDir,'storage-migrations'),commandId,update,activation:owner});
         if(scope==='runs') await importRuns({storage,stateDir,evidenceParent:join(stateDir,'runs-storage-migrations'),commandId,update,activation:owner,repository:new RunsRepository(storage)});
         if(scope==='triggers') await importTriggers({stateDir,evidenceParent:join(stateDir,'triggers-storage-migrations'),commandId,update,activation:owner,repository:new TriggersRepository(storage),now:Date.now});
         if(scope==='permissions') await importPermissions({stateDir,commandId,update,activation:owner,repository:new PermissionsRepository(storage,stateDir)});
+        if(['remote','auto-prompt','automation-workflows'].includes(scope)) {
+          const repository=scope==='remote' ? new RemoteRepository(storage) : scope==='auto-prompt' ? new AutoPromptRepository(storage) : new WorkflowRepository(storage);
+          const importer=scope==='remote' ? importRemote : scope==='auto-prompt' ? importAutoPrompts : importWorkflows;
+          const sdk=storage;
+          await importer({repository,stateDir,commandId,evidenceParent:join(stateDir,`${scope}-storage-migrations`),checkActivation:async()=>{await checkStorageActivation({kind:'offline',owner,storage:sdk,update},scope);}});
+        }
       }
       await recordOfflineDomainCompletion(owner,storage,scope);
     }
-    return { activationId:record.activationId,state:'held',completedStoreScopes:['retention','runs','triggers','permissions'],remaining:'E integration, final whole-domain completion and graceful scheduled handoff' };
+    await finishOfflineActivation(owner,storage);
+    return { activationId:record.activationId,state:'complete',completedStoreScopes:record.manifest.domains.map(d=>d.scope),effectsStarted:false };
   } finally {
     if(storage) { const result=await storage.close(); if(!['closed','already-closed','thread-exited'].includes(result.ack)) throw new Error('Offline SDK did not close; lease retained.'); }
     await lease.release();

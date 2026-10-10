@@ -12,7 +12,7 @@ const documents = ['runs.json', 'created-sessions.json', 'run-instructions.json'
   'remote-requests.json', 'remote-exclusions.json', 'retention/journal.json', 'retention-observations.json',
   'auto-prompts.json', 'slack-automation.json', 'github-automation.json', 'storage-offline-activation.json', 'storage-permissions-pending.json'] as const;
 const trees = ['storage-contracts', 'storage-migrations', 'runs-storage-migrations', 'triggers-storage-migrations',
-  'permissions-storage-migrations', 'storage-snapshots', 'storage-recovery'] as const;
+  'permissions-storage-migrations', 'remote-storage-migrations', 'auto-prompt-storage-migrations', 'automation-workflows-storage-migrations', 'storage-snapshots', 'storage-recovery'] as const;
 const databases = ['state.sqlite', 'state.sqlite-wal', 'state.sqlite-shm'] as const;
 export interface OfflineInventoryEntry { name: string; kind: 'absent' | 'directory' | 'file'; sha256?: string; bytes?: number }
 export interface OfflineFullBackup {
@@ -40,7 +40,7 @@ function treeFile(root: string, name: string): boolean {
   }
   if (root === 'storage-recovery') return ['identity.json', 'barrier.json'].includes(tail) || /^[\w-]+\/source\/state\.sqlite(?:-wal|-shm)?$/.test(tail);
   if (root === 'storage-snapshots') return /^[\w-]+\/(snapshot\.db|manifest\.json)$/.test(tail);
-  return /^[\w-]+\/(manifest\.json|rows\.ndjson|runs\.json|created-sessions\.json|run-instructions\.json|trigger-engine\.json|permissions\.json|journal\.json|retention-observations\.json)$/.test(tail);
+  return /^[\w-]+\/(manifest\.json|rows\.ndjson|runs\.json|created-sessions\.json|run-instructions\.json|trigger-engine\.json|permissions\.json|remote-requests\.json|auto-prompts\.json|slack-automation\.json|github-automation\.json|journal\.json|retention-observations\.json)$/.test(tail);
 }
 /** Only named product roots are visited. Unexpected files inside an evidence root refuse, never broaden the backup. */
 export async function offlineInventory(stateDir: string): Promise<OfflineInventoryEntry[]> {

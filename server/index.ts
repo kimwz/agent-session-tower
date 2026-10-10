@@ -1,3 +1,4 @@
+import { runOfflineStorageCommand } from './link/storage-offline-cli.js';
 import { storageWebBuild, storageWebHealth, storageWebServing } from './link/storage-web.js';
 import { rollbackPorts } from './runs/storage-control.js';
 import { restartService } from './link/service.js';
@@ -142,6 +143,13 @@ async function main() {
   if (args[0] === '--storage-contract') {
     if (args.length !== 1) throw new Error('Usage: agent-session-tower --storage-contract');
     await printArtifactStorageContract(); return;
+  }
+  if (args[0] === '--offline-owner') {
+    if(args.length!==4 || !args[1] || args[2]!=='--runner-worker' || !args[3]) throw new Error('Offline successor requires exact owner input and final worker state directory.');
+    const stateDir=resolve(args[3]);
+    await runOfflineStorageCommand(['activate','--state-dir',stateDir,'--input',resolve(args[1])]);
+    await runRunnerWorker(stateDir);
+    return;
   }
   if (args[0] === '--runner-worker') {
     if (args.length !== 2 || !args[1]) throw new Error('Runner worker requires a state directory.');

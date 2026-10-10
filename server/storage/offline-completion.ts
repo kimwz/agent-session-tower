@@ -1,7 +1,7 @@
 import type { DomainCommand } from './domain.js';
 
 /** Each owning domain registers this fixed query against its own staging table; core uses prepare receipts separately. */
-export function offlineCompletionCommand(stageTable?: 'retention_stages' | 'runs_stages' | 'triggers_stages'): Extract<DomainCommand, { kind: 'read' }> {
+export function offlineCompletionCommand(stageTable?: 'retention_stages' | 'runs_stages' | 'triggers_stages' | 'remote_stages' | 'auto_prompt_stages' | 'automation_workflows_stages'): Extract<DomainCommand, { kind: 'read' }> {
   return { kind: 'read', run(context, value) {
     const p = value as { commandId?: unknown; inputSha256?: unknown };
     if (!p || typeof p.commandId !== 'string' || typeof p.inputSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(p.inputSha256)) throw new Error('Invalid offline completion identity.');
@@ -10,7 +10,9 @@ export function offlineCompletionCommand(stageTable?: 'retention_stages' | 'runs
     const stages = stageTable ? Number((context.prepare(`SELECT count(*) AS n FROM ${stageTable}`).get() as { n: number }).n) : 0;
     const uncertainSql=context.domain==='permissions' ? "SELECT count(*) AS n FROM permission_requests WHERE run_status='running'"
       : context.domain==='runs' ? "SELECT count(*) AS n FROM runs_rows WHERE kind='run' AND (status='running' OR json_extract(json,'$.steering.state') IN ('sending','uncertain'))"
-      : context.domain==='triggers' ? "SELECT count(*) AS n FROM triggers_rows WHERE kind='events' AND json_extract(json,'$.status') IN ('claimed','uncertain')" : undefined;
+      : context.domain==='triggers' ? "SELECT count(*) AS n FROM triggers_rows WHERE kind='events' AND json_extract(json,'$.status') IN ('claimed','uncertain')" : context.domain==='remote' ? "SELECT count(*) AS n FROM remote_rows WHERE status IN ('claimed','uncertain')"
+      : context.domain==='auto-prompt' ? "SELECT count(*) AS n FROM auto_prompt_rows WHERE status IN ('routing','admission-uncertain','running')"
+      : context.domain==='automation-workflows' ? "SELECT count(*) AS n FROM automation_workflows_rows WHERE status IN ('sending','reply-uncertain','admission-uncertain') OR EXISTS (SELECT 1 FROM automation_workflows_links l WHERE l.channel=automation_workflows_rows.channel AND l.kind=automation_workflows_rows.kind AND l.id=automation_workflows_rows.id AND l.status IN ('sending','uncertain','delivering'))" : undefined;
     const unresolved=stages+(uncertainSql ? Number((context.prepare(uncertainSql).get() as {n:number}).n) : 0);
     if (!authority || authority.authority !== 'database' || authority.manifest_sha256 !== p.inputSha256 || !receipt || receipt.scope !== context.domain || receipt.command !== 'commit' || unresolved !== 0) throw new Error('Offline authority/receipt/staging incomplete.');
     const result = JSON.parse(receipt.result) as { generation?: number };

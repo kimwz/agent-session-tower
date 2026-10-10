@@ -168,9 +168,11 @@ export class TriggerService extends EventEmitter {
    * GitHub access for a trigger's coordinator conversation: the trigger's own credentials (also after it is
    * deleted, while it can be restored), and only while they still act as the trigger's account.
    */
-  githubClient(triggerId: string, fresh = false): Promise<GitHubFetch> {
-    return this.github.clientFor(this.state.triggers.find(item => item.id === triggerId) ?? [...this.state.tombstones].reverse().find(item => item.id === triggerId), fresh);
+  githubClient(triggerId: string, fresh = false, beforeSend?: () => Promise<void>): Promise<GitHubFetch> {
+    return this.github.clientFor(this.githubTrigger(triggerId), fresh, beforeSend);
   }
+  private githubTrigger(id:string) { return this.state.triggers.find(item=>item.id===id) ?? [...this.state.tombstones].reverse().find(item=>item.id===id); }
+  githubSource(id:string) { return this.githubTrigger(id)?.source; }
   private send(request: HttpRequest, usable: (secret: StoredSecret) => boolean): Promise<HttpOutcome> {
     return sendRequest(request, usable, { secrets: this.secrets, budget: this.budget, privateHosts: () => this.state.settings.privateHosts, ownPorts: this.options.ownPorts, resolve: this.options.resolve });
   }

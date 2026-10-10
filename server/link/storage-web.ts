@@ -24,7 +24,7 @@ export async function storageWebHealth(input: { stateDir: string; managed: boole
     if(record) {
       const completed=await completedOfflineCandidate(input);
       const workerProof=completed && worker?.state==='ready' && worker.code==='offline-completion-verified' && worker.admissionOpen
-        && JSON.stringify(worker.identity)===JSON.stringify(completed.build);
+        && JSON.stringify(worker.identity)===JSON.stringify(input.build.preflight.identity);
       evaluation=workerProof ? { ...evaluation,verdict:'ready',code:'offline-completion-verified',reason:'Exact completed installation verified by the current worker SDK.',importAllowed:true }
         : { ...evaluation,verdict:'recovery-required',code:'offline-activation-held',reason:'Offline completion requires current worker SQL proof.',importAllowed:false };
     }

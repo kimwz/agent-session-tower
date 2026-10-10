@@ -1,10 +1,11 @@
+import { externalStorageFixture, readAutoPromptFixture, writeAutoPromptFixture } from '../remote/external-storage-fixture.js';
 import { RunAdmissionUncertain } from '../../../server/runs/run-records.js';
 import { TowerError } from '../../../shared/errors.js';
 import { initialModelSettings } from '../../../shared/models.js';
 import { saveModelSettings } from '../../../server/models/settings.js';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -14,10 +15,6 @@ import type { AutoPromptModelRequest } from '../../../server/auto-prompt/native.
 import type { RunAdmission } from '../../../server/runs/manager.js';
 import type { AttachmentInput, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, Session, Snapshot } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
-import { blockRename, temporaryFiles } from '../../helpers/private-writes.js';
-import { readFileSync } from 'node:fs';
-import fsPromises from 'node:fs/promises';
-import { syncBuiltinESMExports } from 'node:module';
 
 const nativeId = '11111111-1111-4111-8111-111111111111';
 const makeSession = (cwd: string, values: Partial<Session> = {}): Session => ({ id: `codex:${nativeId}`, nativeId, provider: 'codex',
@@ -62,7 +59,8 @@ async function fixture(t: TestContext) {
       return run;
     },
   };
-  const options = { stateDir: directory, snapshot: () => structuredClone(current), refresh: async () => {}, runs,
+  const storage = await externalStorageFixture(t, directory);
+  const options = { repository: storage.autoPrompt, effectGate: storage.effectGate, stateDir: directory, snapshot: () => structuredClone(current), refresh: async () => {}, runs,
     detail: async (id: string) => { const found = current.sessions.find(value => value.id === id); return found ? { session: found, hasMore: false, messages: [
       { id: 'user', role: 'user' as const, text: 'The editor crashes when saving.', timestamp: session.createdAt },
       { id: 'assistant', role: 'assistant' as const, text: 'Fixed the save operation in Editor.tsx.', timestamp: session.updatedAt },
@@ -70,7 +68,7 @@ async function fixture(t: TestContext) {
     model: async (input: AutoPromptModelRequest) => { calls.push(input); return response(input); },
   };
   const manager = new AutoPromptManager(options);
-  await manager.start();
+  await manager.start(); await manager.startRuntimeEffects();
   t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
   const finished = (id: string) => until(() => { const job = manager.get(id); return job && ['completed', 'error', 'cancelled'].includes(job.status) ? job : undefined; });
   return { directory, cwd, other, session, current, managed, calls, dispatches, manager, options, finished,
@@ -277,7 +275,7 @@ test('identical concurrent request IDs share admission and a different payload i
   const repeated = await f.manager.submit(input);
   assert.equal(repeated.runId, f.managed[0].id);
   assert.equal(f.calls.length, 1); assert.equal(f.dispatches.length, 1);
-  assert.equal((await stat(join(f.directory, 'auto-prompts.json'))).mode & 0o777, 0o600);
+  assert.equal((await stat(join(f.directory, 'state.sqlite'))).mode & 0o777, 0o600);
 });
 
 test('a duplicate cannot acknowledge a job while its original durable admission is still pending', async t => {
@@ -293,7 +291,7 @@ test('a duplicate cannot acknowledge a job while its original durable admission 
   const duplicate = f.manager.submit(input).then(value => { duplicateResolved = true; return { value }; }, error => { duplicateResolved = true; return { error }; });
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(duplicateResolved, false);
-  failWrite(new Error('Synthetic storage failure'));
+  failWrite(Object.assign(new Error('Synthetic storage failure'), { disposition: 'not-committed' }));
   assert.ok('error' in await first); assert.ok('error' in await duplicate);
   assert.equal(f.manager.get(input.requestId), undefined);
   assert.equal(f.calls.length, 0); assert.equal(f.dispatches.length, 0);
@@ -319,9 +317,9 @@ test('restarting reconciles persisted dispatch correlation and never reroutes in
   const other = request(f.cwd);
   const stored = [input, other].map(input => ({ fingerprint: createHash('sha256').update(JSON.stringify({ provider: input.provider, cwd: input.cwd, prompt: input.prompt, attachments: [] })).digest('hex'),
     staged: [], job: { id: input.requestId, provider: input.provider, cwd: input.cwd, prompt: input.prompt, routerModel: 'gpt-5.6-sol', status: 'dispatching', createdAt: f.session.createdAt, updatedAt: f.session.updatedAt } }));
-  await writeFile(join(f.directory, 'auto-prompts.json'), JSON.stringify(stored));
+  await writeAutoPromptFixture(f.options.repository, JSON.stringify(stored));
   f.managed.push({ id: randomUUID(), sessionId: f.session.id, prompt: input.prompt, status: 'queued', output: '', createdAt: f.session.updatedAt, autoPromptId: input.requestId });
-  const restarted = new AutoPromptManager(f.options); await restarted.start();
+  const restarted = new AutoPromptManager(f.options); await restarted.start(); await restarted.startRuntimeEffects();
   assert.equal(restarted.get(input.requestId)?.runId, f.managed[0].id);
   assert.equal(restarted.get(other.requestId)?.status, 'error');
   assert.equal((await restarted.submit(input)).status, 'completed');
@@ -347,7 +345,7 @@ test('attachments are staged privately, described to the router, transferred int
   assert.equal(f.dispatches[0].input.prompt, '');
   await f.manager.close();
   assert.deepEqual(await readdir(join(f.directory, 'auto-prompt-staging', 'attachments')), []);
-  const saved = await readFile(join(f.directory, 'auto-prompts.json'), 'utf8');
+  const saved = await readAutoPromptFixture(f.options.repository);
   assert.ok(!saved.includes(attachments[0].data));
 });
 
@@ -443,7 +441,7 @@ for (const provider of ['claude', 'codex'] as const) {
     await f.manager.close();
     const restored = new AutoPromptManager(f.options);
     try {
-      await restored.start();
+      await restored.start(); await restored.startRuntimeEffects();
       assert.equal(restored.get(input.requestId)?.sessionMode, 'new');
       assert.equal(restored.get(input.requestId)?.routingContext, input.routingContext);
     } finally { await restored.close(); }
@@ -509,32 +507,27 @@ test('a retried request saved before origins existed still matches after an upgr
   const saved = await f.finished((await f.manager.submit(input, { origin: { kind: 'owner' } })).id);
   await f.manager.close();
   const path = join(f.directory, 'auto-prompts.json');
-  const entries = JSON.parse(await readFile(path, 'utf8')) as Array<{ fingerprint: string; job: Record<string, unknown> }>;
+  const entries = JSON.parse(await readAutoPromptFixture(f.options.repository)) as Array<{ fingerprint: string; job: Record<string, unknown> }>;
   const legacy = { provider: input.provider, cwd: input.cwd ?? null, prompt: input.prompt, attachments: [] };
   entries[0].fingerprint = createHash('sha256').update(JSON.stringify(legacy)).digest('hex');
   delete entries[0].job.origin;
-  await writeFile(path, JSON.stringify(entries));
+  await writeAutoPromptFixture(f.options.repository, JSON.stringify(entries));
   const restarted = new AutoPromptManager(f.options);
-  await restarted.start();
+  await restarted.start(); await restarted.startRuntimeEffects();
   try {
     assert.equal((await restarted.submit(input, { origin: { kind: 'owner' } })).id, saved.id);
     assert.equal(restarted.get(saved.id)?.origin, undefined);
   } finally { await restarted.close(); }
 });
 
-test('a handoff flush saves routing state again and reports a failed save', async t => {
+test('a handoff flush checks SQL readiness and ignores a blocked stale legacy path', async t => {
   const f = await fixture(t);
   await f.finished((await f.manager.submit(request(f.cwd), { origin: { kind: 'owner' } })).id);
-  // Routing finishes its own cleanup save after the job completes.
-  await until(() => !f.manager.busy());
-  await f.manager.flush();
-  const path = join(f.directory, 'auto-prompts.json');
-  await rm(path, { force: true });
-  await mkdir(path);
-  await assert.rejects(f.manager.flush());
-  await rm(path, { recursive: true, force: true });
-  await f.manager.flush();
-  assert.equal(JSON.parse(await readFile(path, 'utf8')).length, 1);
+  await until(() => !f.manager.busy()); await f.manager.flush();
+  const path = join(f.directory, 'auto-prompts.json'); await mkdir(path);
+  await f.manager.flush(); assert.equal(JSON.parse(await readAutoPromptFixture(f.options.repository)).length, 1);
+  await f.options.repository.storage.close(); await assert.rejects(f.manager.flush());
+  await f.options.repository.storage.reopen(); await f.options.repository.storage.prepare({ allowMigration: false });
 });
 
 test('an accepted suggestion continues the named conversation without asking the router', async t => {
@@ -593,15 +586,15 @@ test('a saved request that names its conversation survives a restart and a corru
   const f = await fixture(t);
   const job = await f.finished((await f.manager.submit(request(f.cwd, { targetSessionId: f.session.id }))).id);
   await f.manager.close();
-  const saved = JSON.parse(await readFile(join(f.directory, 'auto-prompts.json'), 'utf8'));
+  const saved = JSON.parse(await readAutoPromptFixture(f.options.repository));
   assert.equal(saved[0].job.targetSessionId, f.session.id);
   const reopened = new AutoPromptManager(f.options);
-  await reopened.start();
+  await reopened.start(); await reopened.startRuntimeEffects();
   assert.equal(reopened.get(job.id)?.targetSessionId, f.session.id);
   await reopened.close();
   saved[0].job.sessionMode = 'new';
-  await writeFile(join(f.directory, 'auto-prompts.json'), JSON.stringify(saved));
-  await assert.rejects(new AutoPromptManager(f.options).start(), /invalid/);
+  await assert.rejects(writeAutoPromptFixture(f.options.repository, JSON.stringify(saved)), /[Ii]nvalid/);
+  await new AutoPromptManager(f.options).load();
 });
 
 test('a new conversation whose folder is still to be chosen asks the router and needs its model', async t => {
@@ -625,7 +618,7 @@ test('delegation survives routing and restart without changing authority or admi
   await f.manager.close();
   const restored = new AutoPromptManager(f.options);
   try {
-    await restored.start();
+    await restored.start(); await restored.startRuntimeEffects();
     assert.deepEqual(restored.get(job.id)?.delegation, delegation);
     assert.equal((await restored.submit(input, { origin, delegation })).id, job.id);
     assert.equal(f.dispatches.length, 1);
@@ -705,7 +698,7 @@ test('a queued master request keeps its admission snapshot through settings chan
   await f.manager.close();
   const restored = new AutoPromptManager(f.options);
   try {
-    await restored.start();
+    await restored.start(); await restored.startRuntimeEffects();
     assert.deepEqual(restored.get(job.id)?.newSessionModel, { model: 'gpt-6.1-sol' });
     assert.deepEqual(await restored.submit(input), job);
     assert.equal(f.dispatches.length, 1);
@@ -726,60 +719,40 @@ test('Auto Prompt keeps a consumed trigger event identity through both routing d
   }
 });
 
-test('auto-prompts.json holds the compact job list without a trailing newline and no temp files', async t => {
-  const f = await fixture(t);
-  const accepted = await f.manager.submit(request(f.cwd), { origin: { kind: 'owner' } });
-  await f.finished(accepted.id);
-  await until(() => !f.manager.busy());
-  await f.manager.flush();
-  const path = join(f.directory, 'auto-prompts.json');
-  const text = await readFile(path, 'utf8');
-  assert.equal(text, JSON.stringify(JSON.parse(text)), 'compact, with nothing after the JSON');
-  assert.deepEqual((JSON.parse(text) as Array<{ job: { id: string } }>).map(entry => entry.job.id), [accepted.id]);
-  assert.equal((await stat(path)).mode & 0o777, 0o600);
-  assert.deepEqual(await temporaryFiles(f.directory), []);
+test('Auto Prompt row storage exposes compact owner JSON and leaves the legacy runtime file absent', async t => {
+  const f = await fixture(t), accepted = await f.manager.submit(request(f.cwd), { origin: { kind: 'owner' } });
+  await f.finished(accepted.id); await until(() => !f.manager.busy()); await f.manager.flush();
+  const text = await readAutoPromptFixture(f.options.repository);
+  assert.equal(text, JSON.stringify(JSON.parse(text)));
+  assert.deepEqual(JSON.parse(text).map((entry: {job: {id: string}}) => entry.job.id), [accepted.id]);
+  await assert.rejects(stat(join(f.directory, 'auto-prompts.json')), { code: 'ENOENT' });
+  assert.equal((await stat(join(f.directory, 'state.sqlite'))).mode & 0o777, 0o600);
 });
 
-test('a failed save rejects flush with the raw filesystem error and leaves no temp', async t => {
-  const f = await fixture(t);
-  await f.manager.flush();
-  const restore = await blockRename(join(f.directory, 'auto-prompts.json'));
-  const error = await f.manager.flush().then(() => undefined, (caught: unknown) => caught as NodeJS.ErrnoException & { statusCode?: number });
-  assert.ok(error?.code, 'the filesystem error itself');
-  assert.equal(error?.statusCode, undefined);
-  assert.deepEqual(await temporaryFiles(f.directory), []);
-  await restore();
+test('SQL flush refuses a closed actual SDK instead of publishing success', async t => {
+  const f = await fixture(t); await f.manager.flush();
+  await f.options.repository.storage.close();
+  await assert.rejects(f.manager.flush());
+  await f.options.repository.storage.reopen(); await f.options.repository.storage.prepare({ allowMigration: false });
   await f.manager.flush();
 });
 
-test('a save writes the jobs as they were when it was asked for, not when its turn came', async t => {
-  const f = await fixture(t);
-  const path = join(f.directory, 'auto-prompts.json');
-  // Test-only: the first save's rename waits, and what each save wrote is read at its rename.
-  const original = fsPromises.rename;
-  const written: unknown[] = [];
-  let release!: () => void;
+test('a row save captures the job when requested while later mutations await their own durable command', async t => {
+  const f = await fixture(t); let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
-  let gated = false;
-  t.mock.method(fsPromises, 'rename', async (from: Parameters<typeof original>[0], to: Parameters<typeof original>[1]) => {
-    if (to === path) {
-      written.push(JSON.parse(readFileSync(from, 'utf8')));
-      if (!gated) { gated = true; await gate; }
-    }
-    return original(from, to);
+  const repository = f.options.repository, original = repository.update.bind(repository);
+  const written: Array<readonly { json: string }[]> = []; let gated = false;
+  t.mock.method(repository, 'update', async (changes: Parameters<typeof repository.update>[0], id?: string) => {
+    written.push(changes.map(row => ({ json: row.json })));
+    if (!gated && changes.length) { gated = true; await gate; }
+    return original(changes, id);
   });
-  syncBuiltinESMExports();
-  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
-  const first = f.manager.flush();
+  const input = request(f.cwd), submitted = f.manager.submit(input, { origin: { kind: 'owner' } });
   await until(() => gated);
-  const input = request(f.cwd);
-  const submitted = f.manager.submit(input, { origin: { kind: 'owner' } });
-  await until(() => f.manager.get(input.requestId));
-  release();
-  await first;
-  await f.finished((await submitted).id);
-  assert.deepEqual(written[0], [], 'the first save holds no job: the job came after it was asked for');
-  assert.ok(written.slice(1).some(jobs => (jobs as Array<{ job: { id: string } }>).some(entry => entry.job.id === input.requestId)));
+  const accepted = f.manager.get(input.requestId)!; accepted.prompt = 'only a display copy';
+  assert.equal(JSON.parse(written[0][0].json).job.prompt, input.prompt);
+  release(); await f.finished((await submitted).id);
+  assert.equal(JSON.parse(await readAutoPromptFixture(repository))[0].job.prompt, input.prompt);
 });
 
  test('retention failure preserves the accepted durable Auto job and protects its staged scope', async t => {
@@ -798,7 +771,7 @@ test('a save writes the jobs as they were when it was asked for, not when its tu
     assert.equal(job.id, requestId);
   } finally { store.retain = retain; console.error = error; }
   assert.ok(messages.some(message => /Auto Prompt attachment retention failed/.test(message)));
-  const saved = JSON.parse(await readFile(join(f.directory, 'auto-prompts.json'), 'utf8'));
+  const saved = JSON.parse(await readAutoPromptFixture(f.options.repository));
   assert.equal(saved[0].job.id, requestId);
   assert.equal(saved[0].staged[0].id, attachment.id);
   await source.sweepPending(new Set(), new Set([requestId]));
@@ -843,7 +816,7 @@ test('storage hold preserves queued and in-flight router stages without abort, d
     answer(resume(f.session.id));
     await until(() => !f.manager.busy());
     await f.manager.flush();
-    const saved = JSON.parse(await readFile(join(f.directory, 'auto-prompts.json'), 'utf8'));
+    const saved = JSON.parse(await readAutoPromptFixture(f.options.repository));
     assert.equal(saved[0].resumable, true);
     assert.equal(saved[0].selection.decision.sessionId, f.session.id);
     assert.equal(f.calls[0].signal?.aborted, false);
@@ -872,11 +845,11 @@ test('a held successor resumes queued and validated routing checkpoints with the
     answer(resume(f.session.id));
     await until(() => !f.manager.busy());
     await f.manager.flush();
-    const saved = JSON.parse(await readFile(join(f.directory, 'auto-prompts.json'), 'utf8'));
+    const saved = JSON.parse(await readAutoPromptFixture(f.options.repository));
     const decision = saved.find((entry: { job: { id: string } }) => entry.job.id === input.requestId).selection.decision;
     const successor = new AutoPromptManager(f.options);
     successor.holdStorage();
-    await successor.start();
+    await successor.start(); await successor.startRuntimeEffects();
     try {
       assert.equal((await successor.submit(input, { origin: { kind: 'owner' } })).id, input.requestId);
       assert.equal(successor.get(input.requestId)?.status, 'queued');
@@ -909,7 +882,7 @@ test('a proven not-admitted dispatch pauses quietly and revalidates its saved ta
   await f.manager.flush();
   const successor = new AutoPromptManager(f.options);
   successor.holdStorage();
-  await successor.start();
+  await successor.start(); await successor.startRuntimeEffects();
   try {
     f.beforeAdmission(async () => {});
     f.current.sessions[0].closed = true;
@@ -936,7 +909,7 @@ test('a directory model result is saved before a held session stage and is not e
   await until(() => f.calls.length === 1 && !f.manager.busy());
   await f.manager.flush();
   const successor = new AutoPromptManager(f.options);
-  successor.holdStorage(); await successor.start();
+  successor.holdStorage(); await successor.start(); await successor.startRuntimeEffects();
   try {
     successor.releaseStorage();
     await until(() => successor.get(input.requestId)?.status === 'completed');
@@ -955,9 +928,9 @@ test('cancel and close discard safe paused checkpoints without leaving busy wait
   await f.manager.close();
   assert.equal(f.manager.get(closed.id)?.status, 'cancelled');
   assert.equal(f.manager.busy(), false);
-  const saved = JSON.parse(await readFile(join(f.directory, 'auto-prompts.json'), 'utf8'));
+  const saved = JSON.parse(await readAutoPromptFixture(f.options.repository));
   assert.ok(saved.every((entry: { resumable?: boolean; staged: unknown[] }) => entry.resumable === undefined && entry.staged.length === 0));
-  const successor = new AutoPromptManager(f.options); await successor.start();
+  const successor = new AutoPromptManager(f.options); await successor.start(); await successor.startRuntimeEffects();
   try {
     assert.equal(successor.get(cancelled.id)?.status, 'cancelled');
     assert.equal(successor.get(closed.id)?.status, 'cancelled');
@@ -978,10 +951,10 @@ test('unknown run admission preserves Auto Prompt staging and is never recovered
   const accepted = await f.manager.submit(input);
   await until(() => f.manager.get(accepted.id)?.status === 'uncertain');
   assert.equal(f.manager.get(accepted.id)?.runId,undefined,'a memory run is not an admission receipt');
-  const stored = JSON.parse(await readFile(join(f.directory,'auto-prompts.json'),'utf8'));
+  const stored = JSON.parse(await readAutoPromptFixture(f.options.repository));
   assert.ok(stored.find((entry: { job: { id: string } }) => entry.job.id === accepted.id).staged.length);
-  await f.manager.submit(input); assert.equal(dispatches,1);
+  await assert.rejects(f.manager.submit(input), (error: unknown) => (error as {disposition?:string}).disposition === 'uncertain'); assert.equal(dispatches,1);
   await f.manager.close();
-  const restarted = new AutoPromptManager(f.options); await restarted.start();
+  const restarted = new AutoPromptManager(f.options); await restarted.start(); await restarted.startRuntimeEffects();
   assert.equal(restarted.get(accepted.id)?.status,'uncertain'); await restarted.close(); assert.equal(dispatches,1);
 });

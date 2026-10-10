@@ -14,3 +14,5 @@ export * from '../../../../server/link/storage-offline-backup.js';
 export * from '../../../../server/link/storage-offline.js';
 export { acquireStrictStateLock } from '../../../../server/instance/state-lock.js';
 export { PermissionsRepository } from '../../../../server/permissions/storage-repository.js';
+
+export { runOfflineStorageCommand } from '../../../../server/link/storage-offline-cli.js';
