@@ -369,7 +369,7 @@ test('a worker that stops after applying files and triggers leaves only the skil
   assert.equal(second?.restore.triggers, undefined, 'triggers are not applied again');
   assert.deepEqual(second?.restore.files, {});
   assert.ok(second?.restore.skills, 'the skills are still to do');
-  assert.deepEqual(await (await workerSettingsFixture(b.stateDir)).read('permissions.json').rules, [permissionRule('changed-since')], 'what changed since is kept');
+  assert.deepEqual((await (await workerSettingsFixture(b.stateDir)).read('permissions.json')).rules, [permissionRule('changed-since')], 'what changed since is kept');
   await second!.finish({ parts: ['skills'], errors: [] });
   const report = await readReport(b.stateDir);
   assert.equal(report?.status, 'applied');
