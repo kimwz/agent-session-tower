@@ -119,8 +119,73 @@ test('known refusal and unknown SQL result retain prior projection and admit zer
       assert.equal(repository.pending()!.commandId,pending.commandId);
       assert.equal(repository.pending()!.payloadSha256,pending.payloadSha256);
       assert.equal(repository.effectsAvailable(),false);
+      service.pauseForStorage();
+      await assert.rejects(service.bindAfterStorageRetry(),/acknowledgement lost/);
+      await repository.resolvePending();
+      await assert.rejects(service.bindAfterStorageRetry(),/reconciliation/);
+      assert.equal(repository.effectsAvailable(),false);
+      assert.equal(fixture.writes,writes);
+      assert.equal(effects,0,'retry binding must never replay an uncertain effect');
     }
   }
+});
+
+test('same repository retry reloads a stale owner epoch without writes or bootstrap replay', async t => {
+  let effects=0;
+  const queued = { ...request('queued'),review:{ status:'queued' as const,at:now } };
+  const state: PermissionState = { version:1,rules:[rule('retained')],requests:[queued],codex:[],autoReview:{ enabled:true,resume:false } };
+  const { fixture,repository,service } = await setup(t,state,() => { effects++; });
+  const status=fixture.client.status.bind(fixture.client);
+  let epoch=2;
+  t.mock.method(fixture.client,'status',() => ({ ...status(),ownerEpoch:epoch }));
+  const writes=fixture.writes;
+  assert.equal(repository.effectsAvailable(),false);
+  assert.equal(service.nextReview(),undefined);
+  service.pauseForStorage();
+  await service.bindAfterStorageRetry();
+  assert.equal(repository.effectsAvailable(),true);
+  assert.deepEqual(service.overview().requests,[queued]);
+  assert.equal(service.nextReview(),undefined,'binding keeps effects closed until the final release fence');
+  service.resume();
+  assert.equal(service.nextReview()?.id,'queued');
+  assert.deepEqual(service.autoReview(),{ enabled:true,resume:false });
+  assert.equal(fixture.writes,writes);
+  assert.equal(effects,0);
+  epoch=3;
+  const read=fixture.client.read.bind(fixture.client);
+  t.mock.method(fixture.client,'read',async (...args: Parameters<typeof fixture.client.read>) => {
+    const answer=await read(...args);
+    if (args[1]==='keys') epoch++;
+    return answer;
+  });
+  await assert.rejects(service.bindAfterStorageRetry(),/owner changed/);
+  assert.equal(repository.effectsAvailable(),false);
+  assert.equal(service.nextReview(),undefined);
+  assert.equal(fixture.writes,writes);
+  assert.equal(effects,0);
+});
+
+test('review already running stays refused after retry binding when final release fence rejects', async t => {
+  const running = { ...request('running'), rule:{ kind:'command' as const,value:'git status',providers:['claude' as const,'codex' as const],scope:'project' as const,cwd:'/fixture' }, review:{ status:'running' as const,at:now } };
+  const { fixture,repository,service } = await setup(t,{ version:1,rules:[],requests:[running],codex:[],autoReview:{ enabled:true,resume:false } });
+  const status=fixture.client.status.bind(fixture.client);
+  t.mock.method(fixture.client,'status',() => ({ ...status(),ownerEpoch:2 }));
+  service.pauseForStorage();
+  await service.bindAfterStorageRetry();
+  assert.equal(repository.effectsAvailable(),true,'SQL is ready; the final worker fence alone withholds resume');
+  const writes=fixture.writes;
+  let nativeApplications=0;
+  t.mock.method(service as unknown as { apply():Promise<void> },'apply',async () => { nativeApplications++; });
+  // A running reviewer is not cancelled by hold and may deliver this answer after binding.
+  // A rejected final fence never calls the existing synchronous service.resume().
+  await assert.rejects(service.applyReview('running',{ verdict:'approve',scope:'project',reason:'review completed' }),/권한 규칙/);
+  assert.equal(fixture.writes,writes,'no commitRows SQL intent');
+  assert.equal(nativeApplications,0,'no apply/syncCodex native rule effect');
+  assert.equal(service.claudeSettings('/fixture','session'),undefined);
+  const durable=await fixture.repository().load();
+  assert.deepEqual(durable.requests,[running]);
+  assert.deepEqual(durable.rules,[]);
+  assert.deepEqual(durable.codex,[]);
 });
 
 test('owner grant, overlap removal and request decision use one SQL intent', async t => {

@@ -67,6 +67,9 @@ export class PermissionsRepository {
     return h;
   }
   async load(): Promise<PermissionState> {
+    await this.readGate();
+    const epoch=this.storage.status().ownerEpoch;
+    if (epoch===undefined) throw new TowerStoragePermissionHold('Permission snapshot has no current owner claim.');
     const head=await this.head(); if (!head.authority || head.revision===null) throw new Error('Permissions SQL authority is not imported.');
     const fence={ revision:head.revision,generation:head.authority.generation }, rows:PermissionRow[]=[];
     let total=0;
@@ -88,7 +91,9 @@ export class PermissionsRepository {
       }
     }
     const last=await this.head(); if (last.revision!==head.revision || last.authority?.generation!==head.authority.generation) throw new Error('Permissions changed during bounded export.');
-    const state=permissionState(rows); this.rows=new Map(rows.map(r=>[JSON.stringify([r.kind,r.id]),r])); this.loaded=head; this.loadedEpoch=this.storage.status().ownerEpoch; return state;
+    await this.readGate();
+    if (this.storage.status().ownerEpoch!==epoch) throw new TowerStoragePermissionHold('Permission owner changed during bounded export.');
+    const state=permissionState(rows); this.rows=new Map(rows.map(r=>[JSON.stringify([r.kind,r.id]),r])); this.loaded=head; this.loadedEpoch=epoch; return state;
   }
   /** Bounded owner export DTO; the common backup/export owner performs any file effects afterward. */
   async exportCurrent():Promise<{ state:PermissionState; head:PermissionsHead; sha256:string }> {

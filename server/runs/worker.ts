@@ -823,6 +823,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   const startupHolds: Array<() => void | Promise<void>> = [];
   const startupBusy: Array<() => boolean> = [];
   let republishCold: (() => void) | undefined;
+  let bindPermissionsBeforeResume: (() => Promise<void>) | undefined;
   const startupResumes: Array<() => void> = [];
   const registerStorageHold = (hold: () => void | Promise<void>, resume: () => void, busy?: () => boolean) => { if (busy) startupBusy.push(busy); startupHolds.push(hold); startupResumes.push(resume); if (storageStatus.state !== 'ready') { const held = hold(); maintenanceHeld = Promise.all([maintenanceHeld, held]).then(() => undefined); } };
   const unavailable = (reported?: ReturnType<StorageClient['status']>) => {
@@ -1062,7 +1063,14 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
             return status;
           }
           const generation = storageHoldGeneration, fence = heldRollbackFence;
-          if (await attempt(Boolean(database))) { await maintenanceHeld; if (!await releaseAllowed(generation, fence) || generation !== storageHoldGeneration) return storageStatus; for (const resume of startupResumes) resume(); resolve(); }
+          if (await attempt(Boolean(database))) {
+            await maintenanceHeld;
+            if (!await releaseAllowed(generation, fence) || generation !== storageHoldGeneration) return storageStatus;
+            await bindPermissionsBeforeResume?.();
+            if (!await releaseAllowed(generation, fence) || generation !== storageHoldGeneration) return storageStatus;
+            for (const resume of startupResumes) resume();
+            resolve();
+          }
           return storageStatus;
         }
         finally { retrying = false; }
@@ -1453,6 +1461,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       forgetRun: id => runner.forget(id),
       onAutoReviewChange: settings => { if (!settings.enabled) reviewer?.abort(); } });
     await startupGate();
+    bindPermissionsBeforeResume = () => permissions.bindAfterStorageRetry();
     registerStorageHold(() => { permissions.pauseForStorage(); }, () => { permissions.resume(); });
     await permissions.start();
     await closedSessions.start();
@@ -1676,6 +1685,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         const pendingAdmission = runs.pendingAdmission();
         if (pendingAdmission) await runs.resolveAdmission(pendingAdmission.commandId);
         if (runs.pendingAdmission()) return storageStatus;
+        await permissions.bindAfterStorageRetry();
         if (!await releaseAllowed(generation, fence) || generation !== storageHoldGeneration) return storageStatus;
         storageStatus.admissionOpen = true; runs.releaseStorage(); autoPrompts.releaseStorage();
         paused = false; initializedRetention?.resume(); temporary.resume(); runs.resumeAttachmentCleanup(); autoPrompts.resumeAttachmentCleanup();

@@ -156,6 +156,19 @@ export class PermissionService {
   pauseForStorage(): void { if (!this.closed) { this.storagePaused = true; this.closed = true; } }
   resume(): void { this.storagePaused = false; this.closed = false; }
 
+  /** Same worker retry: drain queued writes and bind the current SQL snapshot while effects remain closed. */
+  async bindAfterStorageRetry(): Promise<void> {
+    this.pauseForStorage();
+    await this.serial(async () => {
+      if (this.options.repository) {
+        const state = await this.options.repository.load();
+        await this.options.repository.gate();
+        if (!this.options.repository.effectsAvailable()) throw failure('Permission SQL snapshot remains held.', 'unavailable');
+        this.state = state;
+      } else if (!this.options.noStorageFixture) throw failure('Permission SQL repository is required.', 'unavailable');
+    }, true);
+  }
+
   /**
    * The settings a Claude Code turn Tower starts in `cwd` gets: every project's rules, and those of the project the
    * folder is in (the folder itself or one inside it). Undefined when no rule applies.
