@@ -762,6 +762,7 @@ test('a row save captures the job when requested while later mutations await the
   const accepted = f.manager.get(input.requestId)!; accepted.prompt = 'only a display copy';
   assert.equal(JSON.parse(written[0][0].json).job.prompt, input.prompt);
   release(); await f.finished((await submitted).id);
+  await until(() => !f.manager.busy()); await f.manager.flush();
   assert.equal(JSON.parse(await readAutoPromptFixture(repository))[0].job.prompt, input.prompt);
 });
 
@@ -874,6 +875,7 @@ test('a held successor resumes queued and validated routing checkpoints with the
       assert.equal(f.dispatches.length, 2);
       assert.equal(f.managed.filter(run => run.autoPromptId === input.requestId).length, 1);
       assert.equal(f.managed.filter(run => run.autoPromptId === queuedInput.requestId).length, 1);
+      await until(() => !successor.busy()); await successor.flush();
       const committed = await readAutoPromptFixture(f.options.repository);
       await assert.rejects(f.manager.close(), /External row changed before guarded write/);
       assert.equal(await readAutoPromptFixture(f.options.repository), committed, 'a stale predecessor cannot overwrite the successor');
