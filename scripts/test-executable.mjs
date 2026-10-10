@@ -1,117 +1,161 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { promisify } from 'node:util';
 import { createServer } from 'node:net';
 import { mkdtemp, copyFile, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir, networkInterfaces } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout } from 'node:timers/promises';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const dir = await mkdtemp(join(tmpdir(), 'monitor-executable-check-'));
-const binary = join(dir, process.platform === 'win32' ? 'agent-session-tower.exe' : 'agent-session-tower');
-await copyFile(join(root, 'artifacts', binary.split('/').at(-1)), binary);
-await mkdir(join(dir, 'codex'));
-await mkdir(join(dir, 'claude'));
-await mkdir(join(dir, 'codex', 'sessions'));
-const nativeId = '11111111-1111-4111-8111-111111111111';
-const sessionId = `codex:${nativeId}`;
-const nativeFile = join(dir, 'codex', 'sessions', `rollout-${nativeId}.jsonl`);
-const timestamp = new Date().toISOString();
-const nativeHistory = [
-  { type: 'session_meta', timestamp, payload: { id: nativeId, cwd: dir, timestamp } },
-  { type: 'response_item', timestamp, payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Standalone title fixture' }] } },
-  { type: 'event_msg', timestamp, payload: { type: 'task_complete' } },
-].map(row => JSON.stringify(row)).join('\n') + '\n';
-await writeFile(nativeFile, nativeHistory);
-const failedRun = {
-  id: 'standalone-dismiss-fixture', sessionId, prompt: 'Standalone failure dismissal fixture',
-  status: 'error', createdAt: timestamp, finishedAt: timestamp, output: '', error: 'EXPECTED_TEST_FAILURE',
-};
-const stateDir = join(dir, 'state');
-await mkdir(stateDir, { mode: 0o700 });
-await writeFile(join(stateDir, 'runs.json'), JSON.stringify([failedRun]), { mode: 0o600 });
-await writeFile(join(stateDir, 'created-sessions.json'), '[]', { mode: 0o600 });
-await writeFile(join(stateDir, 'run-instructions.json'), '{}', { mode: 0o600 });
-// A prepared existing installation has complete retention sources as well as run history.
-await mkdir(join(stateDir, 'retention'), { mode: 0o700 });
-await writeFile(join(stateDir, 'retention', 'journal.json'), JSON.stringify({ version: 1, migratedAt: Date.parse(timestamp), entries: [], policies: [] }), { mode: 0o600 });
-await writeFile(join(stateDir, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
-// This existing-history fixture needs the real prior artifact's preparation before B can import it.
-// The helper verifies the protected public A122 bytes; its SQLite owner closes before the SEA starts.
-const { tsImport } = await import('tsx/esm/api');
-const { retentionBuild } = await tsImport('../tests/server/storage/fixtures/retention-build.ts', import.meta.url);
-const { recordPreparationEvidence } = await tsImport('../server/link/storage-update.ts', import.meta.url);
-const a = await retentionBuild('1.122.0', join(dir, 'preparation-a122'));
-const preparation = await a.storage.openStorage({ stateDir, bundle: a.bundle() });
-try {
-  const prepared = await preparation.prepare({ allowMigration: true });
-  const preflight = await a.storage.preflightStorage({ stateDir, bundle: a.bundle() });
-  await recordPreparationEvidence(stateDir, { context: preparation.context, prepared, preflight, gate: await preparation.gate('core') });
-} finally { await preparation.close(); }
-const portProbe = createServer();
-await new Promise(resolve => portProbe.listen(0, '127.0.0.1', resolve));
-const port = portProbe.address().port;
-await new Promise(resolve => portProbe.close(resolve));
-const base = `http://127.0.0.1:${port}`;
-const args = ['--no-open', '--port', String(port), '--state-dir', join(dir, 'state')];
-const env = { ...process.env, HOME: dir, SHELL: '/bin/sh', PATH: '/usr/bin:/bin', CODEX_HOME: join(dir, 'codex'), CLAUDE_CONFIG_DIR: join(dir, 'claude') };
 let child;
 let output = '';
 let completion;
-function start() {
-  child = spawn(binary, args, { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'] });
-  completion = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', code => resolve(code)); });
-  child.stdout.on('data', chunk => { output += chunk; });
-  child.stderr.on('data', chunk => { output += chunk; });
-}
 async function stop() {
   if (!child || child.exitCode !== null) return;
   child.kill('SIGTERM');
   const force = globalThis.setTimeout(() => child.kill('SIGKILL'), 5000);
   try { assert.equal(await completion, 0, output); } finally { clearTimeout(force); }
 }
-async function ready() {
-  for (let attempt = 0; attempt < 150; attempt++) {
-    if (child.exitCode !== null) throw new Error(output);
-    try {
-      const health = await (await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(300) })).json();
-      if (health.application === 'agent-monitor' && health.pid === child.pid) return;
-    } catch { /* Wait for this exact process to bind. */ }
-    await setTimeout(100);
-  }
-  throw new Error(`Executable did not become ready: ${output}`);
-}
-async function discovered() {
-  let last;
-  for (let attempt = 0; attempt < 100; attempt++) {
-    const response = await fetch(`${base}/api/snapshot`);
-    const snapshot = await response.json();
-    last = { status: response.status, error: snapshot.error, storage: snapshot.storage };
-    const session = response.status === 200 && Array.isArray(snapshot.sessions)
-      ? snapshot.sessions.find(session => session.id === sessionId) : undefined;
-    if (session) return session;
-    await setTimeout(100);
-  }
-  throw new Error(`Executable did not discover title fixture: ${JSON.stringify(last)}; ${output}`);
-}
-async function setTitle(title, token) {
-  const response = await fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}/title`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token },
-    body: JSON.stringify({ title }),
-  });
-  assert.equal(response.status, 200);
-  return (await response.json()).session;
-}
-async function setGroup(patch, token) {
-  const response = await fetch(`${base}/api/groups`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token },
-    body: JSON.stringify(patch),
-  });
-  assert.equal(response.status, 200);
-  return (await response.json()).group;
-}
 try {
+  const binary = join(dir, process.platform === 'win32' ? 'agent-session-tower.exe' : 'agent-session-tower');
+  await copyFile(join(root, 'artifacts', binary.split('/').at(-1)), binary);
+  await mkdir(join(dir, 'codex'));
+  await mkdir(join(dir, 'claude'));
+  await mkdir(join(dir, 'codex', 'sessions'));
+  const nativeId = '11111111-1111-4111-8111-111111111111';
+  const sessionId = `codex:${nativeId}`;
+  const nativeFile = join(dir, 'codex', 'sessions', `rollout-${nativeId}.jsonl`);
+  const timestamp = new Date().toISOString();
+  const nativeHistory = [
+    { type: 'session_meta', timestamp, payload: { id: nativeId, cwd: dir, timestamp } },
+    { type: 'response_item', timestamp, payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Standalone title fixture' }] } },
+    { type: 'event_msg', timestamp, payload: { type: 'task_complete' } },
+  ].map(row => JSON.stringify(row)).join('\n') + '\n';
+  await writeFile(nativeFile, nativeHistory);
+  const failedRun = {
+    id: 'standalone-dismiss-fixture', sessionId, prompt: 'Standalone failure dismissal fixture',
+    status: 'error', createdAt: timestamp, finishedAt: timestamp, output: '', error: 'EXPECTED_TEST_FAILURE',
+  };
+  const stateDir = join(dir, 'state');
+  await mkdir(stateDir, { mode: 0o700 });
+  await writeFile(join(stateDir, 'runs.json'), JSON.stringify([failedRun]), { mode: 0o600 });
+  await writeFile(join(stateDir, 'created-sessions.json'), '[]', { mode: 0o600 });
+  await writeFile(join(stateDir, 'run-instructions.json'), '{}', { mode: 0o600 });
+  // A prepared existing installation has complete retention sources as well as run history.
+  await mkdir(join(stateDir, 'retention'), { mode: 0o700 });
+  await writeFile(join(stateDir, 'retention', 'journal.json'), JSON.stringify({ version: 1, migratedAt: Date.parse(timestamp), entries: [], policies: [] }), { mode: 0o600 });
+  await writeFile(join(stateDir, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
+  // The official prior SDK creates the database; only the copied SEA's offline owner
+  // may back it up and complete all seven authorities before the web smoke begins.
+  const { tsImport } = await import('tsx/esm/api');
+  const { protectedOld124 } = await tsImport('../tests/server/storage/fixtures/retention-build.ts', import.meta.url);
+  const a = await protectedOld124();
+  const preparation = await a.storage.openStorage({ stateDir, bundle: a.bundle() });
+  let storageId;
+  try {
+    await preparation.prepare({ allowMigration: true });
+    const schema = (await preparation.inspect()).schema;
+    assert.notEqual(schema.kind, 'empty');
+    storageId = schema.storageId;
+  } finally { await preparation.close(); }
+  const portProbe = createServer();
+  await new Promise(resolve => portProbe.listen(0, '127.0.0.1', resolve));
+  const port = portProbe.address().port;
+  await new Promise(resolve => portProbe.close(resolve));
+  const base = `http://127.0.0.1:${port}`;
+  const args = ['--no-open', '--port', String(port), '--state-dir', join(dir, 'state')];
+  const env = { ...process.env, HOME: dir, SHELL: '/bin/sh', PATH: '/usr/bin:/bin', CODEX_HOME: join(dir, 'codex'), CLAUDE_CONFIG_DIR: join(dir, 'claude') };
+  const storage = await import(pathToFileURL(join(root, 'dist/server/storage/index.js')).href);
+  const { empty, serializeState } = await import(pathToFileURL(join(root, 'dist/server/triggers/state.js')).href);
+  await writeFile(join(stateDir, 'trigger-engine.json'), serializeState(empty()), { mode: 0o600 });
+  await writeFile(join(stateDir, 'permissions.json'), JSON.stringify({ version: 1, rules: [], requests: [], codex: [] }), { mode: 0o600 });
+  const context = storage.storageBuildContext(await storage.captureStorageBundle());
+  assert.equal(context.ok, true, 'actual compiled SDK must be trusted');
+  const artifact = JSON.parse(await readFile(join(root, 'dist/server/storage/generated/thread-bundle.json'), 'utf8'));
+  assert.equal(artifact.sourceHash, context.identity.sourceHash);
+  const command = async commandArgs => {
+    const { stdout } = await promisify(execFile)(binary, commandArgs, { cwd: dir, env, timeout: 120_000, killSignal: 'SIGTERM', maxBuffer: 16 * 1024 * 1024 });
+    return JSON.parse(stdout);
+  };
+  const seaContract = await command(['--storage-contract']);
+  assert.equal(seaContract.supported, true);
+  assert.deepEqual(seaContract.identity, context.identity, 'copied SEA and compiled SDK have the same actual source identity');
+  assert.deepEqual(seaContract.manifest, context.manifest);
+  const hash = async path => createHash('sha256').update(await readFile(path)).digest('hex');
+  const oldEntry = join(a.packageRoot, 'bin/agent-session-tower.mjs');
+  const oldContract = join(a.directory, 'storage-contract.json');
+  const scopes = ['retention', 'runs', 'triggers', 'permissions', 'remote', 'auto-prompt', 'automation-workflows'];
+  assert.deepEqual(context.manifest.domains.map(domain => domain.scope).sort(), [...scopes].sort());
+  const activation = {
+    format: 'tower-offline-activation', version: 1, activationId: 'standalone-all-domains', stateDir, storageId,
+    build: context.identity, manifest: context.manifest,
+    oldArtifact: { identity: a.contract.identity, entry: { path: oldEntry, sha256: await hash(oldEntry) },
+      contract: { path: oldContract, sha256: await hash(oldContract) } },
+    targets: [context.manifest.core.scope, ...scopes], domains: [], phase: 'pending',
+  };
+  const ownerInput = join(dir, 'offline-owner.json');
+  await writeFile(ownerInput, JSON.stringify({ format: 'tower-offline-owner', activation, backupRoot: join(dir, 'consistent-backup') }), { mode: 0o600 });
+  const activated = await command(['storage', 'offline', 'activate', '--state-dir', stateDir, '--input', ownerInput]);
+  assert.deepEqual(activated, { activationId: activation.activationId, state: 'complete',
+    completedStoreScopes: context.manifest.domains.map(domain => domain.scope), effectsStarted: false });
+  const completed = JSON.parse(await readFile(join(stateDir, 'storage-offline-activation.json'), 'utf8'));
+  const completionInput = join(dir, 'offline-completion.json');
+  await writeFile(completionInput, JSON.stringify(completed), { mode: 0o600 });
+  const checked = await command(['storage', 'offline', 'check', '--state-dir', stateDir, '--input', completionInput]);
+  assert.equal(checked.state, 'complete');
+  assert.equal(checked.activationId, activation.activationId);
+  assert.deepEqual(checked.identity, context.identity);
+  assert.equal(checked.effectsStarted, false);
+  function start() {
+    child = spawn(binary, args, { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    completion = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', code => resolve(code)); });
+    child.stdout.on('data', chunk => { output += chunk; });
+    child.stderr.on('data', chunk => { output += chunk; });
+  }
+  async function ready() {
+    for (let attempt = 0; attempt < 150; attempt++) {
+      if (child.exitCode !== null) throw new Error(output);
+      try {
+        const health = await (await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(300) })).json();
+        if (health.application === 'agent-monitor' && health.pid === child.pid) return;
+      } catch { /* Wait for this exact process to bind. */ }
+      await setTimeout(100);
+    }
+    throw new Error(`Executable did not become ready: ${output}`);
+  }
+  async function discovered() {
+    let last;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const response = await fetch(`${base}/api/snapshot`);
+      const snapshot = await response.json();
+      last = { status: response.status, error: snapshot.error, storage: snapshot.storage };
+      const session = response.status === 200 && Array.isArray(snapshot.sessions)
+        ? snapshot.sessions.find(session => session.id === sessionId) : undefined;
+      if (session) return session;
+      await setTimeout(100);
+    }
+    throw new Error(`Executable did not discover title fixture: ${JSON.stringify(last)}; ${output}`);
+  }
+  async function setTitle(title, token) {
+    const response = await fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}/title`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token },
+      body: JSON.stringify({ title }),
+    });
+    assert.equal(response.status, 200);
+    return (await response.json()).session;
+  }
+  async function setGroup(patch, token) {
+    const response = await fetch(`${base}/api/groups`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token },
+      body: JSON.stringify(patch),
+    });
+    assert.equal(response.status, 200);
+    return (await response.json()).group;
+  }
   start();
   await ready();
   const config = JSON.parse(await readFile(join(root, 'dist/executable/sea-config.json'), 'utf8'));
@@ -280,6 +324,5 @@ try {
   assert.equal((await fetch(`${base}/api/snapshot`, { headers: renewedHeaders })).status, 200);
   console.log(`PASS: copied executable alone, minimal PATH, ${Object.keys(config.assets).length} embedded assets, duplicate launch, persistent private session titles and reset, persistent private project group titles/pins and reset without sessions, durable session close/reopen and creation validation, persistent failure dismissal with unchanged lifecycle and raw history, unchanged native history, shutdown/restart, authenticated public-interface binding and persistent 0600 password hash, local bypass, remote sign-in kept across restart, revoked by logout and still revoked after restart, and a new sign-in.`);
 } finally {
-  await stop();
-  await rm(dir, { recursive: true, force: true });
+  try { await stop(); } finally { await rm(dir, { recursive: true, force: true }); }
 }

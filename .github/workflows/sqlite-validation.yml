@@ -152,12 +152,28 @@ jobs:
           export TOWER_SQLITE_OLD124_ROOT="$VALIDATION_ROOT/old124"
           node scripts/sqlite-old124-capture.mjs 1.122.0
           node scripts/sqlite-old124-capture.mjs 1.124.0
-          printf '%s\n' tests/server/runs/storage-diagnostic-worker.test.ts > "$report/test-files.txt"
-          printf '%s\n' diagnostic-single-repro > "$report/stage.txt"
-          node --import tsx --test --test-concurrency=2 --test-reporter=tap --test-name-pattern='^actual trigger startup retry preserves session reads and holds permission review through restored settle on the same worker$' tests/server/runs/storage-diagnostic-worker.test.ts | tee "$report/diagnostic-single-repro.log"
+          printf '%s\n' tests/server/decisions/service.test.ts \
+            tests/server/http/storage-health.test.ts \
+            tests/server/link/storage-update-legacy.test.ts \
+            tests/server/link/storage-web.test.ts \
+            tests/server/permissions/permissions.test.ts \
+            tests/server/runs/run-instructions.test.ts \
+            tests/server/runs/run-manager.test.ts \
+            tests/server/runs/runner-steering.test.ts \
+            tests/server/runs/runner-update-drain.test.ts \
+            tests/server/runs/endpoint-keeper.test.ts \
+            tests/server/slack/backup.test.ts \
+            tests/server/triggers/engine-format.test.ts \
+            tests/server/triggers/github-issue-watch.test.ts \
+            tests/server/triggers/http.test.ts \
+            tests/server/triggers/layering.test.ts > "$report/test-files.txt"
+          files=()
+          while IFS= read -r file; do files+=("$file"); done < "$report/test-files.txt"
+          printf '%s\n' general-known-failures > "$report/stage.txt"
+          node --import tsx --test --test-concurrency=2 --test-reporter=tap "${files[@]}" | tee "$report/diagnostic-single-repro.log"
           printf '0\n' > "$report/suite-exit.txt"
           VALIDATE
-      - name: Preserve residual probe logs, including failures
+      - name: Preserve General known failure logs, including failures
         if: always()
         uses: actions/upload-artifact@v4
         with:

@@ -46,7 +46,15 @@ test('instructions reach the provider beside the request, and never leave the wo
   assert.equal(f.codex[0].prompt, 'Look at the Slack request', 'the request is its own block');
   assert.equal(f.codex[0].instructions, 'Coordinator policy');
   assert.ok(f.manager.list().every(item => item.instructions === undefined), 'pages never receive them');
-  assert.doesNotMatch(JSON.stringify((await new RunsRepository(f.db).exportCurrent()).documents.runs), /Coordinator policy/, 'their text never reaches disk, where an older Tower could show it');
+  // Keep periodic manager writes outside the multi-page export, after the refused provider settles.
+  f.manager.holdStorage();
+  try {
+    await f.manager.flushState();
+    assert.equal(f.codex.length, 1, 'the provider was called once');
+    assert.equal(f.manager.list().find(item => item.id === run.id)?.status, 'failed');
+    assert.equal(f.manager.busy(), false, 'the provider and manager have settled');
+    assert.doesNotMatch(JSON.stringify((await new RunsRepository(f.db).exportCurrent()).documents.runs), /Coordinator policy/, 'their text never reaches disk, where an older Tower could show it');
+  } finally { f.manager.releaseStorage(); }
 
   const claude = await f.manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Owner reply' }, { origin: { kind: 'owner' }, instructions: { text: 'Receipt' } });
   await f.settled(claude.run.id);
