@@ -310,9 +310,11 @@ export class BackupService {
     const { header, passphrase } = item;
     const payload = structuredClone(item.payload);
     const stateDir = this.options.stateDir;
+    if (!this.options.settings) throw new Error('Worker SQL settings owner is unavailable.');
+    const settingsBefore = await this.options.settings();
     const triggersBefore = await collectTriggers(this.options.triggers);
     const targetHasVault = Boolean(await encryptedVaultOf(stateDir));
-    const before = await keepBefore(stateDir, targetHasVault ? REPLACED.filter(name => name !== 'trigger-secrets.json') : REPLACED, new Date(this.now()), triggersBefore);
+    const before = await keepBefore(stateDir, targetHasVault ? REPLACED.filter(name => name !== 'trigger-secrets.json') : REPLACED, new Date(this.now()), triggersBefore, settingsBefore);
     // A worker part still waiting from an earlier restore is replaced by this one.
     await removePendingWorker(stateDir);
     const restoreId = randomUUID(); const pendingSecretImports: string[] = [];

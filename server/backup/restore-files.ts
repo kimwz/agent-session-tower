@@ -4,7 +4,7 @@ import type { TriggerBackup } from '../triggers/backup.js';
 import type { BackupPart, RestoreReport } from '../../shared/backup.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { listPendingSecretImports, stageVaultImport } from '../secrets/imports.js';
-import { applyWorkerFiles, type WorkerSettingsOwner, type WorkerRestore } from './payload.js';
+import { applyWorkerFiles, type WorkerSettingsOwner, type WorkerSqlSettings, type WorkerRestore } from './payload.js';
 
 /** Where restores keep their state: the worker's part waiting for it, the last report, and copies of replaced files. */
 export const restoreDir = (stateDir: string) => join(stateDir, 'restore');
@@ -73,14 +73,21 @@ export async function removePendingWorker(stateDir: string): Promise<boolean> {
 }
 
 /**
- * Copies every file a restore may replace into `restore/before-<stamp>/`, so the owner can put them back by hand.
+ * Keeps SQL settings from the worker DTO and copies other files a restore may replace into `restore/before-<stamp>/`, so the owner can put them back by hand.
  * Only the newest few copies are kept.
  */
-export async function keepBefore(stateDir: string, files: string[], now = new Date(), triggers?: TriggerBackup): Promise<string> {
+export async function keepBefore(stateDir: string, files: string[], now = new Date(), triggers?: TriggerBackup, settings?: WorkerSqlSettings): Promise<string> {
+  if (!settings || ['permissions.json', 'slack-automation.json', 'github-automation.json'].some(name => settings[name as keyof WorkerSqlSettings] === undefined)) {
+    throw new Error('Worker SQL settings DTO is incomplete.');
+  }
   const root = restoreDir(stateDir);
   const target = join(root, `before-${now.toISOString().replace(/[:.]/g, '-')}`);
   await mkdir(target, { recursive: true, mode: 0o700 });
   for (const name of files) {
+    if (name === 'permissions.json' || name === 'slack-automation.json' || name === 'github-automation.json') {
+      await writePrivateJson(join(target, name), JSON.stringify(settings[name]));
+      continue;
+    }
     await cp(join(stateDir, name), join(target, name), { recursive: true, errorOnExist: false, force: true, verbatimSymlinks: true }).catch(error => {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     });

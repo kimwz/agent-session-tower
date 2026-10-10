@@ -381,14 +381,14 @@ test('restore matrix: plaintext and Vault backups onto computers with and withou
   const noVault = await apply(await plaintext(), false);
   assert.equal(noVault.report.status, 'waiting-worker');
   assert.deepEqual(noVault.kinds, []);
-  assert.deepEqual(Object.keys(noVault.pendingWorker!.files), ['trigger-secrets.json']);
+  assert.deepEqual(Object.keys(noVault.pendingWorker!.files), ['trigger-secrets.json', 'permissions.json', 'slack-automation.json', 'github-automation.json']);
   assert.ok(noVault.pendingWorker!.triggers);
 
   // The skills still go to the worker; trigger secrets and triggers wait for the encrypted import.
   const intoVault = await apply(await plaintext(), true);
   assert.equal(intoVault.report.status, 'waiting-worker');
   assert.deepEqual(intoVault.kinds, ['legacy']);
-  assert.deepEqual(Object.keys(intoVault.pendingWorker!.files), []);
+  assert.deepEqual(Object.keys(intoVault.pendingWorker!.files), ['permissions.json', 'slack-automation.json', 'github-automation.json']);
   assert.equal(intoVault.pendingWorker!.triggers, undefined);
   assert.deepEqual(intoVault.plaintextFiles, []);
 

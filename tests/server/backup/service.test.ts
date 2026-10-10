@@ -61,7 +61,7 @@ test('a backup made on one computer restores on another: web settings now, the w
   await b.groups.set({ cwd: '/elsewhere', title: 'Gone', pinned: false });
   await assert.rejects(b.service.check(file.text, 'wrong passphrase'), /암호가 맞지 않거나/);
   const preview = await b.service.check(file.text, PASS);
-  assert.deepEqual(preview.parts, ['triggers', 'permissions', 'slack', 'skills', 'decisions', 'projectGroups', 'remoteExclusions', 'master', 'backup']);
+  assert.deepEqual(preview.parts, ['triggers', 'permissions', 'slack', 'github', 'skills', 'decisions', 'projectGroups', 'remoteExclusions', 'master', 'backup']);
   assert.equal(preview.otherComputer, true, 'another Tower made it, whatever the host name');
   const again = await a.service.check(file.text, PASS);
   assert.equal(again.otherComputer, false, 'its own backup, back on the Tower that made it');
@@ -94,7 +94,7 @@ test('a backup made on one computer restores on another: web settings now, the w
   assert.equal(await readPendingWorker(b.stateDir), undefined);
   const done = await readReport(b.stateDir);
   assert.equal(done?.status, 'applied');
-  assert.deepEqual(done?.worker.sort(), ['permissions', 'skills', 'slack', 'triggers']);
+  assert.deepEqual(done?.worker.sort(), ['github', 'permissions', 'skills', 'slack', 'triggers']);
   assert.equal(await takeWorkerRestore(b.stateDir), undefined, 'a later worker has nothing to take');
 });
 
@@ -373,7 +373,7 @@ test('a worker that stops after applying files and triggers leaves only the skil
   await second!.finish({ parts: ['skills'], errors: [] });
   const report = await readReport(b.stateDir);
   assert.equal(report?.status, 'applied');
-  assert.deepEqual(report?.worker.sort(), ['permissions', 'skills', 'triggers']);
+  assert.deepEqual(report?.worker.sort(), ['github', 'permissions', 'skills', 'slack', 'triggers']);
   assert.ok(report?.errors.includes('trigger note'));
 });
 
@@ -405,4 +405,73 @@ test('restore before uses owner DTO and aborts before changing pending or settin
   assert.deepEqual(await readFile(join(b.stateDir,'backup-settings.json')),settings);
   assert.equal(await readFile(join(b.stateDir,'trigger-engine.json'),'utf8'),'stale JSON');
   assert.deepEqual((await readdir(join(b.stateDir,'restore'))).filter(name => name.startsWith('before-')),before);
+});
+
+
+test('restore keeps live SQL settings A instead of stale legacy B, then commits C through the same owner', async t => {
+  const source = await computer(t), target = await computer(t);
+  const names = ['permissions.json', 'slack-automation.json', 'github-automation.json'] as const;
+  const values = (label: string) => ({
+    'permissions.json': { version: 1, rules: [permissionRule(label)], requests: [], codex: [] },
+    'slack-automation.json': { rules: [{ ...RULE, id: label }], workflows: [] },
+    'github-automation.json': { rules: [{ ...RULE, id: label }], workflows: [] },
+  });
+  const a = values('live-A'), b = values('legacy-B'), c = values('restore-C');
+  for (const name of names) {
+    await source.settings.seed(name, c[name]);
+    await target.settings.seed(name, a[name]);
+    await writeFile(join(target.stateDir, name), JSON.stringify(b[name]), { mode: 0o600 });
+  }
+  const current = await target.settings.collect();
+  const text = (await source.service.export(PASS)).text;
+  const report = await target.service.apply((await target.service.check(text, PASS)).id);
+  assert.equal((await stat(report.before!)).mode & 0o777, 0o700);
+  for (const name of names) {
+    assert.deepEqual(JSON.parse(await readFile(join(report.before!, name), 'utf8')), current[name]);
+    assert.equal((await stat(join(report.before!, name))).mode & 0o777, 0o600);
+  }
+  const taken = await takeOwnedWorkerRestore(target.stateDir, target.settings.owner);
+  assert.ok(taken);
+  await taken.finish({ parts: ['skills'], errors: [] });
+  assert.deepEqual((await readReport(target.stateDir))?.errors, []);
+  assert.deepEqual(await target.settings.collect(), await source.settings.collect());
+  for (const name of names) {
+    assert.deepEqual((await target.settings.read(name)).rules, c[name].rules);
+    assert.equal(await readFile(join(target.stateDir, name), 'utf8'), JSON.stringify(b[name]));
+  }
+  const beforeFiles = Object.fromEntries(await Promise.all(names.map(async name => [name, JSON.parse(await readFile(join(report.before!, name), 'utf8'))])));
+  assert.deepEqual(await applyOwnedWorkerFiles(target.stateDir, beforeFiles, target.settings.owner), { parts: ['permissions', 'slack', 'github'], errors: [] });
+  assert.deepEqual(await target.settings.collect(), current, 'canonical before records restore through the existing SQL owner');
+});
+
+test('SQL capture failure aborts restore before pending, credentials, settings, reports or effects change', async t => {
+  const source = await computer(t), target = await computer(t);
+  await write(source.stateDir, 'slack-connection.json', { enabled: true, userToken: 'incoming-token', account: { teamId: 'T', userId: 'U' } });
+  await write(target.stateDir, 'slack-connection.json', { enabled: true, userToken: 'local-token', account: { teamId: 'T', userId: 'U' } });
+  const text = (await source.service.export(PASS)).text;
+  await target.service.apply((await target.service.check(text, PASS)).id);
+  const checked = await target.service.check(text, PASS);
+  const files = ['backup-settings.json', 'slack-connection.json', 'restore/pending-worker.json', 'restore/latest.json'];
+  const saved = await Promise.all(files.map(name => readFile(join(target.stateDir, name))));
+  const report = await readReport(target.stateDir);
+  const sql = await target.settings.collect();
+  const entries = await readdir(join(target.stateDir, 'restore'));
+  const groups = target.groups.list(), exclusions = target.exclusions.list(), decisions = target.decisions.overview();
+  const master = structuredClone(target.master), handoffs = [...target.handoffs];
+  await target.settings.storage.close();
+  try {
+    await assert.rejects(target.service.apply(checked.id));
+    assert.deepEqual(await Promise.all(files.map(name => readFile(join(target.stateDir, name)))), saved);
+    assert.deepEqual(await readReport(target.stateDir), report);
+    assert.deepEqual(await readdir(join(target.stateDir, 'restore')), entries);
+    assert.deepEqual(target.groups.list(), groups);
+    assert.deepEqual(target.exclusions.list(), exclusions);
+    assert.deepEqual(target.decisions.overview(), decisions);
+    assert.deepEqual(target.master, master);
+    assert.deepEqual(target.handoffs, handoffs);
+  } finally {
+    await target.settings.storage.reopen();
+    await target.settings.storage.prepare({ allowMigration: false });
+  }
+  assert.deepEqual(await target.settings.collect(), sql);
 });
