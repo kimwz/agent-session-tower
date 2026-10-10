@@ -112,7 +112,7 @@ export class TriggerDispatch {
   }
 
   private async submit(event: TriggerEvent): Promise<Partial<TriggerEvent>> {
-    const outcome = await handEvent(event, { executor: this.executor, sharing: this.ports.sharing, trustedFolders: () => this.store.state.trustedFolders });
+    const outcome = await handEvent(event, { executor: this.executor, sharing: this.ports.sharing, trustedFolders: () => this.store.state.trustedFolders,admissionLink: id => this.store.admissionLink(id) });
     // Assigned only once the run really started, so an issue nobody works on is not left assigned.
     const assigned = event.input.issue?.assign && outcome.status === 'running' ? await this.assignIssue(event) : undefined;
     return assigned ? { ...outcome, issueActions: assigned } : outcome;

@@ -41,6 +41,13 @@ export const UPDATE_RESUME_WAIT = 'Tower resumes this conversation on its new ve
  * build's worker writes these files before it hands off and the next one reads them, so their bytes are a contract.
  */
 export class RunHistory {
+  private readonly triggerLinks = new Map<string, import('../triggers/storage-commands.js').TriggerAdmissionLink>();
+  linkTrigger(runId: string, link: import('../triggers/storage-commands.js').TriggerAdmissionLink): void {
+    if (!this.database || !this.repository) throw notAdmitted(new RunError('Atomic trigger admission requires database authority.','unavailable'));
+    if (this.triggerLinks.has(runId)) throw new Error('Trigger admission already reserved.');
+    this.triggerLinks.set(runId,structuredClone(link));
+  }
+  forgetTrigger(runId: string): void { this.triggerLinks.delete(runId); }
   private readonly runsFile: string;
   private readonly createdFile: string;
   /** Instructions a queued turn cannot go without, kept apart from runs.json so no older Tower ever shows them. */
@@ -108,6 +115,7 @@ export class RunHistory {
       newRuns.set(run.id, admitted);
     }
     this.newAdmissions.clear();
+    for (const id of newRunIds) this.triggerLinks.delete(id);
     return { disposition: result, runIds: new Set(current.documents.runs.map(run => run.id)), newRunIds, newRuns };
   }
 
@@ -206,7 +214,10 @@ export class RunHistory {
           before.delete(key);
         }
         for (const row of before.values()) changes.push({ ...row, previous: row.json, remove: true });
-        try { await this.repository!.update(changes,'update',id); }
+        const triggerLinks = changes.filter(row => row.kind === 'run' && row.previous === null && !row.remove).flatMap(row => {
+          const link = this.triggerLinks.get(row.id); return link ? [link] : [];
+        });
+        try { await this.repository!.update(changes,'update',id,triggerLinks.length ? triggerLinks : undefined); }
         catch (error) {
           if (admissionUncertain(error)) {
             const identity = this.repository!.lastIntent!;
@@ -216,7 +227,7 @@ export class RunHistory {
           throw error;
         }
         this.rows = next; this.current = documents;
-        for (const run of documents.runs) this.newAdmissions.delete(run.id);
+        for (const run of documents.runs) { this.newAdmissions.delete(run.id); this.triggerLinks.delete(run.id); }
         this.saved.created = created; this.saved.instructions = instructions; this.saved.runs = data;
         this.instructionsError = undefined; this.persistenceError = undefined;
         return;
