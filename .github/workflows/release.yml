@@ -49,7 +49,7 @@ jobs:
             throw new Error('Published release, package version or package asset does not match the tag');
           }
           const nonProductDelta = fs.readFileSync(`${process.env.RUNNER_TEMP}/non-product-delta.paths`, 'utf8').split('\0').filter(Boolean);
-          const allowedPaths = new Set(['.github/workflows/release.yml', 'tests/server/runs/run-persistence.test.ts']);
+          const allowedPaths = new Set(['.github/workflows/release.yml', '.github/workflows/sqlite-validation.yml', 'tests/server/runs/run-persistence.test.ts']);
           if (nonProductDelta.some(path => !allowedPaths.has(path))) {
             throw new Error('Workflow source differs from the tag outside the allowed CI and regression fixture paths');
           }
