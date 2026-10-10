@@ -1240,11 +1240,14 @@ test('actual trigger startup retry preserves session reads and holds permission 
     try { reply = await live.call('snapshot'); }
     catch (error) { rpcError = String(error); }
     const diagnostic = async () => {
+      let permission: unknown;
+      try { permission = JSON.parse(await readFile(join(state, 'fixture-trigger-permission-diagnostic.json'), 'utf8')); }
+      catch (error) { permission = { readError: String(error) }; }
       let autoPrompt: unknown;
       try { autoPrompt = JSON.parse(await readFile(join(state, 'fixture-trigger-ap-diagnostic.json'), 'utf8')); }
       catch (error) { autoPrompt = { readError: String(error) }; }
       return JSON.stringify({ counts: observed, rpcError, instance: reply?.instance, storage: reply?.snapshot?.storage,
-        autoPrompts: reply?.snapshot?.autoPrompts, fixtureAutoPrompt: autoPrompt, stderr: live.stderr() });
+        autoPrompts: reply?.snapshot?.autoPrompts, fixtureAutoPrompt: autoPrompt, permission, stderr: live.stderr() });
     };
     if (live.child.exitCode !== null) assert.fail(`restored review worker exited (${live.child.exitCode}): ${await diagnostic()}`);
     if (Date.now() > deadline) assert.fail(`restored review did not finish: ${await diagnostic()}`);

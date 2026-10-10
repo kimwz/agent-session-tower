@@ -200,11 +200,31 @@ if (process.env.TOWER_FIXTURE_TRIGGER_RETRY === '1') {
     ? { session, messages: [{ id: 'fixture-word', role: 'user', text: 'Use the restored trigger instructions.', timestamp: at }], hasMore: false }
     : detail.call(this, id, before, limit, options); };
   PermissionService.prototype.reviewModel = async () => ({ provider: 'codex', model: 'fixture-model' });
+  const permissionDiagnosticPath = join(state, 'fixture-trigger-permission-diagnostic.json');
+  const permissionEvents: unknown[] = [];
+  const recordPermission = (service: PermissionService, boundary: string, result?: unknown) => {
+    const overview = service.overview();
+    permissionEvents.push({ boundary, result, autoReview: overview.autoReview, requests: overview.requests });
+    writeFileSync(permissionDiagnosticPath, JSON.stringify(permissionEvents), { mode: 0o600 });
+  };
+  const nextReview = PermissionService.prototype.nextReview;
+  PermissionService.prototype.nextReview = function () {
+    const next = nextReview.call(this);
+    recordPermission(this, 'nextReview', { selected: next?.id ?? null });
+    return next;
+  };
+  const bootstrapEffects = PermissionService.prototype.bootstrapEffects;
+  PermissionService.prototype.bootstrapEffects = async function (closed) {
+    recordPermission(this, 'bootstrapEffects.before', { closed: [...closed] });
+    await bootstrapEffects.call(this, closed);
+    recordPermission(this, 'bootstrapEffects.after');
+  };
   const permissionsStart = PermissionService.prototype.start;
   PermissionService.prototype.start = async function () {
     await permissionsStart.call(this);
     await this.saveAutoReview({ enabled: true, resume: false });
-    await this.request({ kind: 'command', value: 'printf fixture', scope: 'project', providers: ['codex'], reason: 'queued before trigger restoration' }, { kind: 'agent', sessionId: session.id });
+    const requested = await this.request({ kind: 'command', value: 'printf fixture', scope: 'project', providers: ['codex'], reason: 'queued before trigger restoration' }, { kind: 'agent', sessionId: session.id });
+    recordPermission(this, 'start.requested', requested);
   };
   const review = PermissionService.prototype.startReview;
   PermissionService.prototype.startReview = function (id) { bump('review'); return review.call(this, id); };
