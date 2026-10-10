@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import test, { type TestContext } from 'node:test';
 import { type RunAdmission } from '../../../server/runs/manager.js';
 import { RunManager, fixtureDocuments, fixtureReplaceRuns } from './sql-fixture.js';
+import { savedRun } from '../../../server/runs/run-history.js';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { SteeringError, type SteeringInput } from '../../../server/runs/steering.js';
 import type { CodexStdioResult } from '../../../server/runs/codex-stdio.js';
@@ -287,18 +288,25 @@ test('duplicate delivery and an active turn finishing during attachment preparat
 test('restart recovers an unacknowledged sending instruction as uncertain without resubmission', async t => {
   const f = await fixture(t);
   const { first, second } = await f.pair();
-  const saved = f.manager.list().map(run => run.id === second.id ? { ...run, status: 'running', steering: { targetRunId: first.id, state: 'sending', requestedAt: new Date().toISOString() } } : run);
+  const saved = f.manager.list().map(run => savedRun(run.id === second.id ? { ...run, status: 'running', steering: { targetRunId: first.id, state: 'sending', requestedAt: new Date().toISOString() } } : run,
+    { required: false, carried: false, retained: false }));
+  assert.ok(saved.every(run => ['instructions', 'approvals', 'canSteer', 'steerBlocked'].every(key => !(key in run))), 'only the persistable projection enters SQL');
   await f.manager.close();
   await f.manager.close();
   await fixtureReplaceRuns(f.manager, saved as Run[]);
+  let providerEffects = 0;
   const restored = new RunManager({ stateDir: f.stateDir, getSession: () => f.session, refreshSessions: async () => {},
-    spawnProcess: () => { throw new Error('Recovery must not spawn providers'); } });
+    spawnProcess: () => { providerEffects++; throw new Error('Recovery must not spawn providers'); },
+    openCodexStdio: async () => { providerEffects++; throw new Error('Recovery must not open a provider adapter'); } });
   await restored.start();
   try {
     const recovered = restored.list().find(run => run.id === second.id)!;
     assert.equal(recovered.status, 'error'); assert.equal(recovered.steering?.state, 'uncertain');
     assert.equal(recovered.canSteer, false);
     await restored.steer(second.id);
+    await restored.flushState();
+    assert.equal(providerEffects, 0, 'the uncertain instruction is never resubmitted');
+    assert.equal((await fixtureDocuments(restored)).runs.find(run => run.id === second.id)?.steering?.state, 'uncertain');
   } finally { await restored.close(); }
 });
 

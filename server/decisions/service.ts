@@ -67,9 +67,14 @@ export class DecisionService {
   engine(feature: keyof DecisionFeatures): DecisionEngine | undefined {
     const { provider: id, apiKey, features } = this.saved;
     if (!apiKey || !features[feature]) return undefined;
-    if (this.cached?.key !== apiKey || this.cached.provider !== id) this.cached = { key: apiKey, provider: id, engine: this.providers[id].create(apiKey, this.fetcher) };
-    const engine=this.cached.engine, beforeSend=this.beforeSend;
-    return {provider:engine.provider,label:engine.label,decide:request=>engine.decide({...request,beforeSend:async()=>{await beforeSend?.();await request.beforeSend?.();}})};
+    if (this.cached?.key !== apiKey || this.cached.provider !== id) {
+      const engine = this.providers[id].create(apiKey, this.fetcher), beforeSend = this.beforeSend;
+      this.cached = { key: apiKey, provider: id, engine: {
+        provider: engine.provider, label: engine.label,
+        decide: request => engine.decide({ ...request, beforeSend: async () => { await beforeSend?.(); await request.beforeSend?.(); } }),
+      } };
+    }
+    return this.cached.engine;
   }
 
   /** `apiKey: null` forgets the key. A new key is saved as given; `test()` checks it. Changes apply one at a time. */

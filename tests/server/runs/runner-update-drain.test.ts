@@ -198,14 +198,16 @@ test('the next worker keeps queued turns, their instructions and the continuatio
   const plain = await f.manager.enqueue(f.session.id, 'plain follow-up', {}, { origin: owner });
   f.manager.driveUpdateDrain(Date.now() + 61_000);
   await until(() => f.continuation() !== undefined);
+  f.manager.holdStorage();
   await f.manager.flushState();
-  const saved = JSON.parse(JSON.stringify((await fixtureDocuments(f.manager)).runs)) as Record<string, unknown>[];
+  const documents = await fixtureDocuments(f.manager);
+  const saved = JSON.parse(JSON.stringify(documents.runs)) as Record<string, unknown>[];
   assert.equal(JSON.stringify(saved).includes('receipt: approved'), false, 'runs.json never holds instruction text');
-  const kept = JSON.parse(JSON.stringify((await fixtureDocuments(f.manager)).instructions)) as Record<string, { text: string }>;
+  const kept = JSON.parse(JSON.stringify(documents.instructions)) as Record<string, { text: string }>;
   assert.equal(kept[receipt.id]?.text, 'receipt: approved');
 
   let launches = 0;
-  const next = new RunManager({ stateDir: join(f.directory, 'successor-sql'), fixtureInitial: await fixtureDocuments(f.manager), getSession: id => id === f.session.id ? f.session : undefined,
+  const next = new RunManager({ stateDir: join(f.directory, 'successor-sql'), fixtureInitial: documents, getSession: id => id === f.session.id ? f.session : undefined,
     refreshSessions: async () => {}, findExecutable: async () => '/fixture/claude', pollMs: 10, holdUntilReady: true,
     spawnProcess: () => { launches++; throw new Error('fixture: not started'); } });
   t.after(async () => { await next.close(); await f.cleanup(); });
@@ -262,6 +264,7 @@ test('after the switch the interrupted turn resumes before a message queued behi
   f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
   f.manager.driveUpdateDrain(Date.now() + 61_000);
   await until(() => f.run(f.first.id)?.status === 'cancelled');
+  f.manager.holdStorage();
   await f.manager.flushState();
   // A provider that starts and keeps running, so only the first run to launch is running.
   const child = new EventEmitter() as ChildProcessWithoutNullStreams;

@@ -771,24 +771,30 @@ test('a row save captures the job when requested while later mutations await the
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
   f.respond(async () => { await held; return create(); });
-  const requestId = randomUUID();
-  const source = new AttachmentStore(join(f.directory, 'auto-prompt-staging'));
-  const attachment = await source.upload(requestId, 'a.txt', 'text/plain', (async function* () { yield Buffer.from('original'); })(), { pending: true });
-  const store = (f.manager as unknown as { attachments: AttachmentStore }).attachments;
-  const retain = store.retain; store.retain = async () => { throw new Error('retention failed'); };
-  const messages: string[] = []; const error = console.error; console.error = (...values) => { messages.push(values.join(' ')); };
   try {
-    const job = await f.manager.submit(request(f.cwd, { requestId, attachmentIds: [attachment.id] }));
-    assert.equal(job.id, requestId);
-  } finally { store.retain = retain; console.error = error; }
-  assert.ok(messages.some(message => /Auto Prompt attachment retention failed/.test(message)));
-  const saved = JSON.parse(await readAutoPromptFixture(f.options.repository));
-  assert.equal(saved[0].job.id, requestId);
-  assert.equal(saved[0].staged[0].id, attachment.id);
-  await source.sweepPending(new Set(), new Set([requestId]));
-  assert.equal((await source.read(attachment.id, requestId)).content.toString(), 'original');
-  release();
-  assert.equal((await f.finished(requestId)).status, 'completed');
+    const requestId = randomUUID();
+    const source = new AttachmentStore(join(f.directory, 'auto-prompt-staging'));
+    const attachment = await source.upload(requestId, 'a.txt', 'text/plain', (async function* () { yield Buffer.from('original'); })(), { pending: true });
+    const store = (f.manager as unknown as { attachments: AttachmentStore }).attachments;
+    const retain = store.retain; store.retain = async () => { throw new Error('retention failed'); };
+    const messages: string[] = []; const error = console.error; console.error = (...values) => { messages.push(values.join(' ')); };
+    try {
+      const job = await f.manager.submit(request(f.cwd, { requestId, attachmentIds: [attachment.id] }));
+      assert.equal(job.id, requestId);
+    } finally { store.retain = retain; console.error = error; }
+    assert.ok(messages.some(message => /Auto Prompt attachment retention failed/.test(message)));
+    // The held model starts after the routing write; keep it held through the durable export.
+    await until(() => f.calls.length === 1);
+    await f.manager.flush();
+    const saved = JSON.parse(await readAutoPromptFixture(f.options.repository));
+    assert.equal(saved[0].job.id, requestId);
+    assert.equal(saved[0].staged[0].id, attachment.id);
+    await source.sweepPending(new Set(), new Set([requestId]));
+    assert.equal((await source.read(attachment.id, requestId)).content.toString(), 'original');
+    release();
+    assert.equal((await f.finished(requestId)).status, 'completed');
+    assert.equal(f.calls.length, 1);
+  } finally { release(); }
 });
 
  test('a large referenced text file gives the router a bounded excerpt with its original size', async t => {

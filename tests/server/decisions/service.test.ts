@@ -79,6 +79,58 @@ test('the provider is chosen by settings alone, so replacing Jev needs only anot
   assert.equal(service.overview().label, 'Stand-in');
 });
 
+test('a cached engine checks service authority then each request scope immediately before sending', async t => {
+  const events: string[] = [];
+  const sent: unknown[] = [];
+  const denied = new Error('authority fence refused');
+  let allowed = false;
+  let scope = 'blocked';
+  const fetcher: typeof fetch = async (_url, init) => {
+    events.push(`send:${scope}`);
+    sent.push(JSON.parse(String(init?.body)).state);
+    return Response.json({ answers: { finished: { type: 'noul', noul: 0.9 } } });
+  };
+  const service = new DecisionService(await directory(t), DECISION_PROVIDERS, fetcher, async () => {
+    await Promise.resolve();
+    events.push(`service:${scope}`);
+    if (!allowed) throw denied;
+  });
+  await service.start();
+  await service.update({ apiKey: 'fixture-key-0001' });
+  const engine = service.engine('autoPromptSuggestions')!;
+  assert.equal(service.engine('attentionNotifications'), engine, 'composed wrapper is cached too');
+  const questions = { finished: { type: 'yesNo' as const, instructions: 'Is the work finished?' } };
+  await assert.rejects(engine.decide({ state: scope, questions, beforeSend: async () => { events.push('request:blocked'); } }), error => error === denied);
+  assert.deepEqual(events, ['service:blocked']);
+  assert.equal(sent.length, 0, 'authority refusal sends no provider request');
+  allowed = true;
+  scope = 'request-denied';
+  await assert.rejects(engine.decide({ state: scope, questions, beforeSend: async () => {
+    await Promise.resolve();
+    events.push(`request:${scope}`);
+    throw denied;
+  } }), error => error === denied);
+  assert.equal(sent.length, 0, 'request scope refusal sends no provider request');
+  for (const current of ['first', 'second']) {
+    scope = current;
+    assert.equal(service.engine('attentionNotifications'), engine);
+    assert.deepEqual(await engine.decide({ state: current, questions, beforeSend: async () => {
+      await Promise.resolve();
+      events.push(`request:${current}`);
+      assert.equal(scope, current);
+    } }), { finished: { yes: 0.9 } });
+  }
+  scope = 'without-callback';
+  await engine.decide({ state: scope, questions });
+  assert.deepEqual(events, [
+    'service:blocked', 'service:request-denied', 'request:request-denied',
+    'service:first', 'request:first', 'send:first',
+    'service:second', 'request:second', 'send:second',
+    'service:without-callback', 'send:without-callback',
+  ]);
+  assert.deepEqual(sent, ['first', 'second', 'without-callback']);
+});
+
 test('checking a key asks one made-up question and words a refusal for the owner', async t => {
   let answer: () => Promise<unknown> = async () => ({ finished: { yes: 0.9 } });
   const { providers } = standIn(() => answer());
