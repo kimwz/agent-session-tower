@@ -28,6 +28,41 @@ async function fixture(t: TestContext, saved: { created?: unknown[]; runs?: unkn
   if (saved.runs) await writeFile(join(stateDir, 'runs.json'), JSON.stringify(saved.runs), { mode: 0o600 });
   const natives = new Map([NATIVE, OTHER].map(id => [`codex:${id}`, nativeSession(id, directory)]));
   const managers: RunManager[] = [];
+  const sqlObservations: Array<Record<string, unknown>> = [];
+  const observe = (manager: RunManager) => {
+    const client = manager.sqlFixture();
+    const read = client.read.bind(client), write = client.write.bind(client);
+    const fenceValue = (value: unknown) => value === null || typeof value === 'number' ? value : undefined;
+    const record = (op: 'read' | 'write', scope: string, command: string, payload: unknown) => {
+      const fence = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+      const entry: Record<string, unknown> = { op, scope, command,
+        fence: { revision: fenceValue(fence.revision), generation: fenceValue(fence.generation) } };
+      if (sqlObservations.length === 64) sqlObservations.shift();
+      sqlObservations.push(entry);
+      return entry;
+    };
+    const observeResult = <T>(entry: Record<string, unknown>, promise: Promise<T>): Promise<T> => {
+      // Observe existing RPCs only; return their original promise and rejection unchanged.
+      void promise.then(value => {
+        entry.status = 'fulfilled';
+        if (entry.op === 'read' && entry.command === 'head' && value && typeof value === 'object') {
+          const head = value as { revision?: unknown; authority?: { generation?: unknown } | null };
+          entry.head = { revision: fenceValue(head.revision), generation: fenceValue(head.authority?.generation) };
+        }
+      }, error => { entry.status = 'rejected'; entry.error = error instanceof Error ? error.message.slice(0, 1024) : String(error).slice(0, 1024); });
+      return promise;
+    };
+    client.read = <T>(...args: Parameters<typeof client.read>) => {
+      const entry = record('read', args[0], args[1], args[2]);
+      try { return observeResult(entry, read<T>(...args)); }
+      catch (error) { entry.status = 'threw'; entry.error = error instanceof Error ? error.message.slice(0, 1024) : String(error).slice(0, 1024); throw error; }
+    };
+    client.write = <T>(...args: Parameters<typeof client.write>) => {
+      const entry = record('write', args[0], args[1], args[2]);
+      try { return observeResult(entry, write<T>(...args)); }
+      catch (error) { entry.status = 'threw'; entry.error = error instanceof Error ? error.message.slice(0, 1024) : String(error).slice(0, 1024); throw error; }
+    };
+  };
   const open = async () => {
     const initial = managers.length === 0 ? parseRunDocuments({ runs: Buffer.from(JSON.stringify(saved.runs ?? [])), created: Buffer.from(JSON.stringify(saved.created ?? [])), instructions: Buffer.from('{}') }) : undefined;
     const manager = new RunManager({ stateDir, fixtureInitial: initial, getSession: id => natives.get(id), refreshSessions: async () => {}, pollMs: 60_000,
@@ -35,6 +70,7 @@ async function fixture(t: TestContext, saved: { created?: unknown[]; runs?: unkn
       spawnProcess: () => { throw new Error('Provenance fixtures never launch providers.'); },
       openCodexStdio: async () => { throw new Error('Provenance fixtures never launch providers.'); } });
     await manager.start();
+    observe(manager);
     managers.push(manager);
     return manager;
   };
@@ -44,21 +80,25 @@ async function fixture(t: TestContext, saved: { created?: unknown[]; runs?: unkn
     await manager.flushState();
     return (await fixtureDocuments(manager)).created as Array<{ session: { id: string }; origin?: unknown }>;
   };
-  return { directory, stateDir, open, createdFile };
+  return { directory, stateDir, open, createdFile, sqlObservations };
 }
 
 test('a new session records who created it before any provider starts', async t => {
   const f = await fixture(t);
-  const manager = await f.open();
-  const owner = await manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Owner task' }, { origin: { kind: 'owner' } });
-  const workflowId = randomUUID();
-  const slack = await manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Slack thread' }, { origin: { kind: 'slack', workflowId }, untrustedInput: true });
-  const unmarked = await manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Internal caller' });
-  assert.deepEqual(owner.run.origin, { kind: 'owner' });
-  const saved = new Map((await f.createdFile()).map(record => [record.session.id, record.origin]));
-  assert.deepEqual(saved.get(owner.session.id), { kind: 'owner', untrustedInput: false });
-  assert.deepEqual(saved.get(slack.session.id), { kind: 'slack', workflowId, untrustedInput: true });
-  assert.deepEqual(saved.get(unmarked.session.id), { kind: 'unknown', untrustedInput: false });
+  try {
+    const manager = await f.open();
+    const owner = await manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Owner task' }, { origin: { kind: 'owner' } });
+    const workflowId = randomUUID();
+    const slack = await manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Slack thread' }, { origin: { kind: 'slack', workflowId }, untrustedInput: true });
+    const unmarked = await manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Internal caller' });
+    assert.deepEqual(owner.run.origin, { kind: 'owner' });
+    const saved = new Map((await f.createdFile()).map(record => [record.session.id, record.origin]));
+    assert.deepEqual(saved.get(owner.session.id), { kind: 'owner', untrustedInput: false });
+    assert.deepEqual(saved.get(slack.session.id), { kind: 'slack', workflowId, untrustedInput: true });
+    assert.deepEqual(saved.get(unmarked.session.id), { kind: 'unknown', untrustedInput: false });
+  } catch (error) {
+    assert.fail(`${error instanceof Error ? error.stack ?? error.message : String(error)}\nBounded existing SQL RPC observations (last 64):\n${JSON.stringify(f.sqlObservations, null, 2)}`);
+  }
 });
 
 test('external content marks a conversation for good, through owner follow-ups, native IDs and restarts', async t => {

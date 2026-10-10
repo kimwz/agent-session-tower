@@ -63,9 +63,15 @@ jobs:
             tests/server/permissions/one-shot.test.ts tests/server/runs/run-persistence.test.ts \
             tests/server/http/storage-health.test.ts tests/server/link/storage-web.test.ts \
             tests/server/runs/attachment-cleanup.test.ts tests/server/auto-prompt/auto-prompts.test.ts \
-            tests/server/runs/durable-runner.test.ts tests/gates/swallowed-errors.test.ts > "$report/test-files.txt"
+            tests/server/runs/durable-runner.test.ts tests/gates/swallowed-errors.test.ts \
+            tests/server/decisions/jev.test.ts tests/server/link/storage-offline-activation.test.ts \
+            tests/server/link/storage-update-legacy.test.ts tests/server/runs/actual-run-storage.test.ts \
+            tests/server/runs/run-origin.test.ts tests/server/slack/automation.test.ts \
+            tests/server/triggers/storage.test.ts tests/server/triggers/service.test.ts > "$report/test-files.txt"
           files=()
           while IFS= read -r file; do files+=("$file"); done < "$report/test-files.txt"
+          printf '%s\n' jev-cancel-single-repro > "$report/stage.txt"
+          node --import tsx --test --test-concurrency=2 --test-reporter=tap --test-name-pattern='^a slow answer times out and a cancelled one says so$' tests/server/decisions/jev.test.ts
           printf '%s\n' diagnostic-single-repro > "$report/stage.txt"
           node --import tsx --test --test-concurrency=2 --test-reporter=tap --test-name-pattern='^actual trigger startup retry preserves session reads and holds permission review through restored settle on the same worker$' tests/server/runs/storage-diagnostic-worker.test.ts | tee "$report/diagnostic-single-repro.log"
           printf '%s\n' fast-contracts > "$report/stage.txt"
@@ -89,8 +95,77 @@ jobs:
           path: ${{ runner.temp }}/sqlite-validation/reports/
           if-no-files-found: error
 
-  sqlite:
+  residual-probe:
     needs: fast-contracts
+    timeout-minutes: 10
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26.0.0'
+      - name: Install and validate inside a private environment
+        shell: bash
+        env:
+          VALIDATION_ROOT: ${{ runner.temp }}/sqlite-validation
+          VALIDATION_MODE: supported-floor
+          VALIDATION_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$VALIDATION_ROOT"/{home,codex,claude,config,cache,state,data,runtime,tmp,npm,reports}
+          # Keep Unix socket paths short; canonicalize the fresh private tmp directory on macOS.
+          TEST_TMP="$(mktemp -d /tmp/sv.XXXXXX)"
+          TEST_TMP="$(cd "$TEST_TMP" && pwd -P)"
+          # No Actions credentials or provider authentication enter npm, tests or children.
+          env -i PATH="$PATH" HOME="$VALIDATION_ROOT/home" \
+            CODEX_HOME="$VALIDATION_ROOT/codex" CLAUDE_CONFIG_DIR="$VALIDATION_ROOT/claude" \
+            XDG_CONFIG_HOME="$VALIDATION_ROOT/config" XDG_CACHE_HOME="$VALIDATION_ROOT/cache" \
+            XDG_STATE_HOME="$VALIDATION_ROOT/state" XDG_DATA_HOME="$VALIDATION_ROOT/data" \
+            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
+            TMP="$TEST_TMP" TEMP="$TEST_TMP" \
+            npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
+            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 NODE_OPTIONS=--max-old-space-size=4096 \
+            VALIDATION_ROOT="$VALIDATION_ROOT" VALIDATION_MODE="$VALIDATION_MODE" \
+            VALIDATION_SHA="$VALIDATION_SHA" /bin/bash --noprofile --norc <<'VALIDATE'
+          set -euo pipefail
+          # Private 0700 parents isolate fixtures; retain the usual user file-creation mask.
+          umask 022
+          report="$VALIDATION_ROOT/reports"
+          trap 'result=$?; printf "%s\n" "$result" > "$report/exit-code.txt"' EXIT
+          set -x
+          exec > >(tee "$report/stdout.log") 2> >(tee "$report/stderr.log" >&2)
+          printf '%s\n' "$VALIDATION_SHA" > "$report/source-sha.txt"
+          node --version > "$report/node-version.txt"
+          export SQLITE_VALIDATION_CI=1
+          printf '%s\n' npm-ci > "$report/stage.txt"
+          npm ci
+          node --import tsx scripts/sqlite-runtime-check.mjs "$VALIDATION_MODE" | tee "$report/runtime.json"
+          if [[ "$VALIDATION_MODE" == legacy-loader ]]; then
+            node --import tsx --test --test-concurrency=2 --test-reporter=tap tests/server/link/storage-update-legacy.test.ts
+            exit 0
+          fi
+          export TOWER_SQLITE_OLD122_ROOT="$VALIDATION_ROOT/old122"
+          export TOWER_SQLITE_OLD124_ROOT="$VALIDATION_ROOT/old124"
+          node scripts/sqlite-old124-capture.mjs 1.122.0
+          node scripts/sqlite-old124-capture.mjs 1.124.0
+          printf '%s\n' tests/server/runs/storage-diagnostic-worker.test.ts > "$report/test-files.txt"
+          printf '%s\n' diagnostic-single-repro > "$report/stage.txt"
+          node --import tsx --test --test-concurrency=2 --test-reporter=tap --test-name-pattern='^actual trigger startup retry preserves session reads and holds permission review through restored settle on the same worker$' tests/server/runs/storage-diagnostic-worker.test.ts | tee "$report/diagnostic-single-repro.log"
+          printf '0\n' > "$report/suite-exit.txt"
+          VALIDATE
+      - name: Preserve residual probe logs, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-residual-probe-macos-latest-26.0.0
+          path: ${{ runner.temp }}/sqlite-validation/reports/
+          if-no-files-found: error
+
+  sqlite:
+    needs: [fast-contracts, residual-probe]
     timeout-minutes: 25
     strategy:
       fail-fast: false
