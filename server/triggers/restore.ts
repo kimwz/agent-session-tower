@@ -10,7 +10,7 @@ import { MAX_ONCE_RESERVATIONS, MAX_RETAINED_TRIGGERS, MAX_TOMBSTONES } from './
 import { admitCapacity, mergeConsumed, normalizeOnce } from './once.js';
 import { decodeOnceTrigger } from './once-storage.js';
 import type { SecretStore } from './secrets.js';
-import { empty, upgradeState } from './state.js';
+import { beginRowOperations, mergeRowOperations, writeRows, removeRows, orderRows, recordIndexedReplacement, empty, upgradeState } from './state.js';
 import { mutationProjection, type TriggerStore } from './store.js';
 
 export interface RestoreContext { store: TriggerStore; secrets: SecretStore; definitions: TriggerDefinitions; now: () => number }
@@ -89,20 +89,27 @@ export async function restoreFrom(backup: TriggerBackup, context: RestoreContext
     const now = new Date(clock()).toISOString();
     mergeConsumed(state, consumed);
     normalizeOnce(state, clock);
-    if (settings.success) state.settings = settings.data;
+    if (settings.success) { state.settings = settings.data; writeRows(state,'settings','settings'); }
     const localGrants = structuredClone(state.secretGrants), localTrusted = [...state.trustedFolders];
     // Grants of secrets that exist here; the restored triggers below add any they need.
+    removeRows(state,'secretGrants',...Object.keys(state.secretGrants));
+    orderRows(state,'secretGrants',0);
     state.secretGrants = Object.fromEntries(Object.entries(record(backup.secretGrants) ? backup.secretGrants : {})
       .filter(([id, ids]) => secrets.get(id) && Array.isArray(ids)).map(([id, ids]) => [id, ids.filter(item => typeof item === 'string')]));
+    writeRows(state,'secretGrants',...Object.keys(state.secretGrants));
     /** Triggers the backup names whose definition stays this computer's (not readable, over the limit, or refused below). */
     const keptHere = new Set<string>();
     const wanted = new Set([...named, ...incoming.map(item => item.id)]);
     for (const current of [...state.triggers]) {
       if (wanted.has(current.id)) continue;
       if (current.archivedAt) { keptHere.add(current.id); continue; }
+      removeRows(state,'triggers',current.id);
       state.triggers = state.triggers.filter(item => item.id !== current.id);
+      removeRows(state,'tombstones',...state.tombstones.slice(0,Math.max(0,state.tombstones.length + 1 - MAX_TOMBSTONES)).map(item => item.id));
+      writeRows(state,'tombstones',current.id);
       state.tombstones = [...state.tombstones, current].slice(-MAX_TOMBSTONES);
       definitions.cancelQueued(state, current.id, 'The trigger was removed by a restore before this ran.');
+      writeRows(state,'cursors',current.id);
       state.cursors[current.id] = { anchorAt: clock(), turnedOffAt: clock() };
       definitions.log(state, actor, 'delete', current, current.revision, undefined, `Removed by restoring a backup: ${describeTrigger(current)}`);
     }
@@ -121,6 +128,7 @@ export async function restoreFrom(backup: TriggerBackup, context: RestoreContext
       }
       if (current && same(current, trigger)) continue;
       const draft = mutationProjection(state,{ type: 'definition',id: trigger.id });
+      const operations = beginRowOperations(draft);
       try {
         if (current) {
           const next = definitions.replace(draft, current, { name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy }, actor);
@@ -135,14 +143,15 @@ export async function restoreFrom(backup: TriggerBackup, context: RestoreContext
           const next: Trigger = { ...unmarked(trigger), revision: Math.max(trigger.revision, earlier) + 1, createdAt: typeof trigger.createdAt === 'string' ? trigger.createdAt : now, updatedAt: now,
             createdBy: record(trigger.createdBy) ? trigger.createdBy : actor, updatedBy: actor };
           definitions.grantSecrets(draft, next, actor);
+          removeRows(draft,'tombstones',next.id);
           draft.tombstones = draft.tombstones.filter(item => item.id !== next.id);
-          draft.triggers.push(next);
+          draft.triggers.push(next); writeRows(draft,'triggers',next.id);
           definitions.schedule(draft, next);
           if (!next.enabled) delete draft.cursors[next.id].nextAt;
           definitions.trust(draft, next, actor);
           definitions.log(draft, actor, 'restore', next, undefined, next.revision, `Restored from a backup: ${describeTrigger(next)}`);
         }
-        Object.assign(state, draft);
+        Object.assign(state, draft); mergeRowOperations(state,operations);
       } catch (error) {
         errors.push(`트리거 "${trigger.name}": ${error instanceof Error ? error.message : String(error)}`);
         keptHere.add(trigger.id);
@@ -150,23 +159,29 @@ export async function restoreFrom(backup: TriggerBackup, context: RestoreContext
     }
     // A trigger that keeps its definition here keeps what the owner gave it here too: its secrets and its folder's trust.
     const kept = state.triggers.filter(item => keptHere.has(item.id));
-    for (const [id, ids] of Object.entries(localGrants)) for (const trigger of kept) if (secrets.get(id) && ids.includes(trigger.id)) state.secretGrants[id] = [...new Set([...(state.secretGrants[id] ?? []), trigger.id])];
+    for (const [id, ids] of Object.entries(localGrants)) for (const trigger of kept) if (secrets.get(id) && ids.includes(trigger.id)) {
+      state.secretGrants[id] = [...new Set([...(state.secretGrants[id] ?? []),trigger.id])]; writeRows(state,'secretGrants',id);
+    }
     const keptFolders = kept.flatMap(item => item.handler.kind === 'task' && item.handler.target.mode === 'folder' && localTrusted.includes(item.handler.target.cwd) ? [item.handler.target.cwd] : []);
     const trusted = [...new Set([...(Array.isArray(backup.trustedFolders) ? backup.trustedFolders : []).filter(item => typeof item === 'string'), ...keptFolders])].slice(-200);
     // Either computer's GitHub history counts, as far as it belongs to the restored definition.
     for (const trigger of state.triggers) {
       const saved = record(backup.github) ? backup.github[trigger.id] : undefined;
       if (trigger.source.kind !== 'github' || !incoming.some(item => item.id === trigger.id && same(item, trigger)) || !record(saved)) continue;
+      writeRows(state,'cursors',trigger.id);
       const cursor = state.cursors[trigger.id] ??= { anchorAt: clock() };
       const github = mergeGitHub(cursor.github, saved as GitHubCursor);
       if (github) cursor.github = github;
     }
+    if (record(backup.fired)) for (const id of Object.keys(backup.fired)) if (!(id in state.fired)) writeRows(state,'fired',id);
+    orderRows(state,'fired',0);
     state.fired = { ...(record(backup.fired) ? backup.fired : {}), ...state.fired };
     normalizeOnce(state, clock);
     // Preflight validation yields; the guarded SQL batch is the admission authority.
     admitCapacity(state);
     // Restoring trusts exactly the folders the backup trusted (and those of triggers kept here), nothing its triggers add.
-    state.trustedFolders = trusted;
+    const previousTrustedLength = state.trustedFolders.length;
+    state.trustedFolders = trusted; recordIndexedReplacement(state,'trustedFolders',previousTrustedLength);
   }, 'settle');
   return errors;
 }

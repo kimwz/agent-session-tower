@@ -10,6 +10,7 @@ import { TriggersRepository } from '../../../server/triggers/storage-repository.
 import { RunsRepository } from '../../../server/runs/storage-repository.js';
 import { canonical as runCanonical } from '../../../server/runs/storage-codec.js';
 import { TriggerDefinitions } from '../../../server/triggers/definitions.js';
+import { restoreFrom } from '../../../server/triggers/restore.js';
 import { TriggerDispatch } from '../../../server/triggers/dispatch.js';
 import { SecretStore } from '../../../server/triggers/secrets.js';
 import { consumeOnce } from '../../../server/triggers/once.js';
@@ -19,7 +20,7 @@ import { retentionBootstrap } from '../../../server/sessions/retention/storage-t
 import { bootstrapTriggers, exportTriggers, importTriggers, restoreTriggers } from '../../../server/triggers/storage-transfer.js';
 import { TriggerStore } from '../../../server/triggers/store.js';
 import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
-import { empty, pruneState, serializeState, type EngineState } from '../../../server/triggers/state.js';
+import { writeRows, empty, pruneState, serializeState, type EngineState } from '../../../server/triggers/state.js';
 import { ACCEPT_TRIGGER_BYTES, MAX_TRIGGER_BYTES, changesOf, documentsHash, logicalBytes, rowsOf, stateOf } from '../../../server/triggers/storage-codec.js';
 import { collectTriggers } from '../../../server/backup/payload.js';
 import { keepBefore, takeWorkerRestore, writePendingWorker } from '../../../server/backup/restore-files.js';
@@ -103,7 +104,7 @@ test('A cannot import, B actual SDK row commands commit with receipt, indexed pa
   await writeFile(join(f.stateDir,'trigger-engine.json'),'{bad',{ mode: 0o600 });
   const store = new TriggerStore({ stateDir: f.stateDir,storage: current,now,limits: () => undefined,changed: () => {} });
   await store.load(() => {}); assert.deepEqual(store.state.onceConsumed,next.onceConsumed);
-  await store.mutate({ type: 'definition',id: '' },state => { state.trustedFolders.push('/owner'); },'settle');
+  await store.mutate({ type: 'definition',id: '' },state => { const index = state.trustedFolders.length; state.trustedFolders.push('/owner'); writeRows(state,'trustedFolders',String(index)); },'settle');
   assert.equal(await readFile(join(f.stateDir,'trigger-engine.json'),'utf8'),'{bad','SQL writes never read or overwrite stale JSON');
   const parent = join(f.stateDir,'exports'); await mkdir(parent,{ mode: 0o700 });
   const exported = await exportTriggers(owner,parent,'lossless');
@@ -562,7 +563,7 @@ test('actualStorage typed settings/cursor/once batches preserve unrelated rows, 
   const limited = new TriggerStore({ stateDir: f.stateDir,storage: f.client,now,limits: () => ({ acceptBytes: size,maxBytes: size + 2000 }),changed: () => {} });
   await limited.load(() => {}); await limited.flush();
   const beforeGrowth = await f.repository.exportCurrent();
-  await assert.rejects(limited.mutate({ type: 'definition',id: '' },draft => { draft.trustedFolders.push('x'.repeat(3000)); }),{ kind: 'storage-full' });
+  await assert.rejects(limited.mutate({ type: 'definition',id: '' },draft => { const index = draft.trustedFolders.length; draft.trustedFolders.push('x'.repeat(3000)); writeRows(draft,'trustedFolders',String(index)); }),{ kind: 'storage-full' });
   assert.deepEqual(await f.repository.exportCurrent(),beforeGrowth,'capacity refusal leaves ledger/settings/grants and receipt revision unchanged');
   await limited.mutate({ type: 'cursor',id },draft => { draft.cursors[id].lastError = 'x'.repeat(1000); },'settle');
   const settled = (await f.repository.exportCurrent()).documents;
@@ -607,4 +608,153 @@ test('actualStorage eventclaimed/runcommit lost reply refreshes the event revisi
     if (fault === 'before') await assert.rejects(reopened.flush(),/Cannot save triggers/);
     assert.equal(effects,0); assert.equal((await client.receipt('r6-fixed-admission-commit')).found,fault === 'after');
   }
+});
+
+test('raw first-source warnings commit with the import receipt and retain exactly one identical audit across two SQL reopens', async t => {
+  for (const warning of ['older-marker','missing-ledger'] as const) {
+    const f = await actualStorage(t), state = empty();
+    state.triggers = [definition()]; state.cursors[id] = { anchorAt: 1 };
+    if (warning === 'missing-ledger') {
+      state.triggers[0].enabled = true;
+      state.triggers[0].consumed = { at: '2026-10-02T00:00:00Z',eventId: 'consumed-event' };
+    }
+    const source = JSON.parse(serializeState(state));
+    if (warning === 'older-marker') source.triggers[0].onceSchedule = { at: '2026-12-01T00:00:00.000Z',enabled: true,revision: 1 };
+    else delete source.onceConsumed;
+    const bytes = Buffer.from(JSON.stringify(source) + '\n'), path = join(f.stateDir,'trigger-engine.json');
+    await writeFile(path,bytes,{ mode: 0o600 });
+    const update = async () => ({ stateDir: f.stateDir,managed: false,build: { version: f.b.version,manifest: f.b.manifest,
+      preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.b.bundle() }) } });
+    const parent = join(f.stateDir,'triggers-storage-migrations'); await mkdir(parent,{ mode: 0o700 });
+    const commandId = `r6-raw-${warning}`;
+    const sealed = await importTriggers({ repository: f.repository,stateDir: f.stateDir,evidenceParent: parent,commandId,update: await update(),now });
+    const imported = await f.repository.exportCurrent();
+    const match = (entry: EngineState['audit'][number]) => warning === 'older-marker'
+      ? entry.summary.includes('changed by an older engine') : entry.summary.includes('ledger was absent');
+    const audits = imported.documents.audit.filter(match);
+    assert.equal(audits.length,1,'the genuine raw source fact is already durable at first import');
+    assert.equal(audits[0].at,new Date(now()).toISOString());
+    assert.equal((await f.client.receipt(`${commandId}-commit`)).found,true);
+    assert.equal(imported.head.revision,1,'warning and import share one receipt transaction');
+    assert.equal(imported.documents.triggers[0].enabled,warning === 'missing-ledger','first-source warning creation does not reconcile execution');
+    assert.deepEqual(imported.documents.onceConsumed,{},'snapshot recovery still belongs to startup');
+    assert.deepEqual(await readFile(join(sealed.directory,'trigger-engine.json')),bytes);
+    const manifest = JSON.parse(await readFile(join(sealed.directory,'manifest.json'),'utf8'));
+    assert.equal(manifest.files['trigger-engine.json'].sha256,triggerHash(bytes));
+    assert.equal(manifest.canonicalSha256,documentsHash(imported.documents));
+    const bootstrapOnlyAuthority = async () => { throw new Error('prior authority must not evaluate raw source or update'); };
+    await f.client.close();
+    for (let reopen = 0; reopen < 2; reopen++) {
+      const client = await f.open(), repository = new TriggersRepository(client);
+      const store = new TriggerStore({ stateDir: f.stateDir,storage: client,now,limits: () => undefined,changed: () => {} });
+      await store.bootstrapStorage(bootstrapOnlyAuthority);
+      await store.load(loaded => TriggerDispatch.recoverLoaded(loaded,{ runs: () => [],getAutoPrompt: () => undefined }));
+      await store.flush();
+      const durable = (await repository.exportCurrent()).documents;
+      assert.deepEqual(durable.audit.filter(match),audits,'same warning ID/time/bytes, exactly once after every reopen');
+      assert.equal(durable.triggers[0].enabled,false);
+      if (warning === 'missing-ledger') assert.equal(durable.onceConsumed[id].eventId,'consumed-event');
+      await assert.rejects(importTriggers({ repository,stateDir: f.stateDir,evidenceParent: parent,commandId,
+        update: {} as never,now: () => { throw new Error('reimport must not generate a new warning'); } }),/authority exists/);
+      assert.deepEqual(await readFile(path),bytes);
+      assert.equal((await client.receipt(`${commandId}-commit`)).found,true);
+      await client.close();
+    }
+  }
+});
+
+test('explicit owner operations persist recovery, prune, audit eviction, deletion and restore with one commit per batch', async t => {
+  const f = await actualStorage(t), state = empty(), trigger = definition();
+  trigger.source = { kind: 'schedule',schedule: { type: 'interval',everySeconds: 3600 },catchUp: 'latest' };
+  const second = { ...trigger,id: 'second' }, third = { ...trigger,id: 'third' };
+  state.triggers = [trigger,second,third];
+  state.cursors = { [id]: { anchorAt: 1 },second: { anchorAt: 2 },third: { anchorAt: 3 },orphan: { anchorAt: 4 } };
+  const baseEvent = documents().events[0];
+  state.events = [{ ...baseEvent,id: 'recover',status: 'claimed' },...Array.from({ length: 502 },(_,index) => ({ ...baseEvent,id: `finished-${index}`,status: 'completed' as const }))];
+  state.fired = { expired: '2026-08-01T00:00:00Z' };
+  state.recentFires = [{ at: 1,triggerId: id }]; state.secretGrants = { orphan: ['gone'] };
+  state.audit = Array.from({ length: MAX_AUDIT },(_,index) => ({ id: `audit-${index}`,at: '2026-10-01T00:00:00Z',actor: { kind: 'owner' as const,via: 'ui' as const },action: 'settings' as const,triggerId: '',triggerName: '',summary: 'fixture' }));
+  await f.repository.importPrepared(state,'b'.repeat(64),'r6-explicit-seed');
+  const store = new TriggerStore({ stateDir: f.stateDir,storage: f.client,now,limits: () => undefined,changed: () => {} });
+  await store.load(loaded => TriggerDispatch.recoverLoaded(loaded,{ runs: () => [],getAutoPrompt: () => undefined }));
+  await store.flush();
+  let saved = await f.repository.exportCurrent();
+  assert.equal(saved.head.revision,2,'startup recovery and retention commit together');
+  assert.equal(saved.documents.events.length,500);
+  assert.equal(saved.documents.events.some(row => row.id === 'recover'),false,'recovered terminal claim may be pruned but never replayed');
+  assert.deepEqual(saved.documents.fired,{}); assert.deepEqual(saved.documents.recentFires,[]);
+  assert.equal(saved.documents.cursors.orphan,undefined); assert.deepEqual(saved.documents.secretGrants,{});
+  const definitions = new TriggerDefinitions(store,new SecretStore(f.stateDir),now,() => undefined);
+  const immutableEvent = saved.rows.find(row => row.kind === 'events')!;
+  // An untouched finished event has no payload and short instructions; retention does not encode its summary.
+  Object.defineProperty(store.state.events[0],'summary',{ enumerable: true,get: () => assert.fail('unrelated event JSON serialization') });
+  await definitions.updateSettings({ ...store.state.settings,maxConcurrentRuns: 3 },{ kind: 'owner',via: 'ui' });
+  saved = await f.repository.exportCurrent();
+  assert.equal(saved.head.revision,3); assert.equal(saved.documents.audit.length,MAX_AUDIT);
+  assert.equal(saved.documents.audit[0].id,'audit-1');
+  assert.equal(saved.rows.find(row => row.kind === 'events' && row.id === immutableEvent.id)!.json,immutableEvent.json);
+  await definitions.remove(second.id,second.revision,{ kind: 'owner',via: 'ui' });
+  saved = await f.repository.exportCurrent();
+  assert.equal(saved.head.revision,4); assert.deepEqual(saved.documents.triggers.map(row => row.id),[id,'third']);
+  assert.deepEqual(saved.rows.filter(row => row.kind === 'triggers').map(row => row.ordinal),[0,1]);
+  await definitions.restore(second.id,{ kind: 'owner',via: 'ui' });
+  saved = await f.repository.exportCurrent();
+  assert.equal(saved.head.revision,5); assert.deepEqual(saved.documents.triggers.map(row => row.id),[id,'third','second']);
+  assert.deepEqual(saved.documents.tombstones,[]);
+  const db = new DatabaseSync(join(f.stateDir,'state.sqlite'),{ readOnly: true });
+  try {
+    assert.equal((db.prepare("SELECT count(*) AS n FROM operation_receipts WHERE scope = 'triggers' AND command = 'commit'").get() as { n: number }).n,5);
+    assert.equal((db.prepare('SELECT logical_bytes FROM triggers_state').get() as { logical_bytes: number }).logical_bytes,Buffer.byteLength(serializeState(saved.documents)));
+  } finally { db.close(); }
+});
+
+test('refused explicit delete batch rolls back removal, cancellation, tombstone, cursor and audit without publishing local memory', async t => {
+  const f = await actualStorage(t), original = empty(), trigger = definition();
+  trigger.source = { kind: 'schedule',schedule: { type: 'interval',everySeconds: 3600 },catchUp: 'latest' };
+  original.triggers = [trigger,{ ...trigger,id: 'tail' }];
+  original.cursors = { [id]: { anchorAt: 1 },tail: { anchorAt: 2 } }; original.events = documents().events;
+  await f.repository.importPrepared(original,'b'.repeat(64),'r6-refuse-seed');
+  await f.client.close();
+  const db = new DatabaseSync(join(f.stateDir,'state.sqlite'));
+  try { db.exec("CREATE TRIGGER r6_explicit_refusal BEFORE UPDATE ON triggers_state BEGIN SELECT RAISE(ABORT, 'r6 explicit refusal'); END;"); }
+  finally { db.close(); }
+  await f.client.reopen(); await f.client.prepare({ allowMigration: false });
+  const before = await f.repository.exportCurrent();
+  const store = new TriggerStore({ stateDir: f.stateDir,storage: f.client,now,limits: () => undefined,changed: () => {} });
+  await store.load(() => {});
+  const current = store.state, definitions = new TriggerDefinitions(store,new SecretStore(f.stateDir),now,() => undefined);
+  await assert.rejects(definitions.remove(id,trigger.revision,{ kind: 'owner',via: 'ui' }),/r6 explicit refusal/);
+  assert.equal(store.state,current,'SQL refusal never publishes the mutated draft');
+  assert.deepEqual(store.state,original); assert.deepEqual(await f.repository.exportCurrent(),before);
+  const read = new DatabaseSync(join(f.stateDir,'state.sqlite'),{ readOnly: true });
+  try { assert.equal((read.prepare("SELECT count(*) AS n FROM operation_receipts WHERE scope = 'triggers' AND command = 'commit'").get() as { n: number }).n,1,'refused mixed row operations have no commit receipt'); }
+  finally { read.close(); }
+});
+
+test('owner settings restore declares accepted additions and absent deletions while keeping SQL authority and execution evidence', async t => {
+  const f = await actualStorage(t), state = empty(), first = definition();
+  first.source = { kind: 'schedule',schedule: { type: 'interval',everySeconds: 3600 },catchUp: 'latest' };
+  first.handler = { kind: 'task',instructions: 'fixture',provider: 'codex',approvals: 'auto',target: { node: 'local',mode: 'auto' } };
+  const gone = { ...first,id: 'gone' }, added = { ...first,id: 'added' };
+  state.triggers = [first,gone]; state.cursors = { [id]: { anchorAt: 1 },gone: { anchorAt: 2 } };
+  state.fired = { retained: '2026-10-01T00:00:00Z' }; state.trustedFolders = ['/old','/other'];
+  state.onceConsumed = { deleted: { at: '2026-10-01T00:00:00Z' } };
+  state.events = [{ ...documents().events[0],triggerId: gone.id }];
+  await f.repository.importPrepared(state,'b'.repeat(64),'r6-owner-restore-seed');
+  const before = await f.repository.exportCurrent();
+  const store = new TriggerStore({ stateDir: f.stateDir,storage: f.client,now,limits: () => undefined,changed: () => {} });
+  await store.load(() => {});
+  const secrets = new SecretStore(f.stateDir), definitions = new TriggerDefinitions(store,secrets,now,() => undefined);
+  assert.deepEqual(await restoreFrom({ triggers: [first,added],settings: { ...state.settings,maxConcurrentRuns: 3 },trustedFolders: ['/restored'],
+    onceConsumed: { incoming: { at: '2026-10-02T00:00:00Z' } },secretGrants: {},fired: { incoming: '2026-10-02T00:00:00Z' },github: {} },{ store,secrets,definitions,now }),[]);
+  const saved = await f.repository.exportCurrent();
+  assert.equal(saved.head.revision,before.head.revision! + 1,'all owner restore operations commit once');
+  assert.deepEqual(saved.head.authority,before.head.authority,'settings restore does not change generation/manifest');
+  assert.deepEqual(saved.documents.triggers.map(row => row.id),[id,'added']);
+  assert.deepEqual(saved.documents.tombstones.map(row => row.id),['gone']);
+  assert.equal(saved.documents.events[0].status,'cancelled');
+  assert.deepEqual(saved.documents.trustedFolders,['/restored']); assert.equal(saved.documents.settings.maxConcurrentRuns,3);
+  assert.deepEqual(saved.documents.onceConsumed,{ incoming: { at: '2026-10-02T00:00:00Z' },deleted: { at: '2026-10-01T00:00:00Z' } });
+  assert.deepEqual(saved.documents.fired,{ incoming: '2026-10-02T00:00:00Z',retained: '2026-10-01T00:00:00Z' });
+  assert.deepEqual(store.state,saved.documents,'only the successful SQL batch becomes local state');
 });

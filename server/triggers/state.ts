@@ -5,6 +5,7 @@ import type { GitHubCursor } from './github.js';
 import type { ConditionState } from './http.js';
 import { MAX_AUDIT } from './limits.js';
 import { normalizeOnce, readLedger } from './once.js';
+import type { TriggerRowKind } from './storage-codec.js';
 import { decodeOnceTrigger, encodeOnceTrigger } from './once-storage.js';
 
 /** Where a trigger stands between firings. */
@@ -43,6 +44,43 @@ export interface EngineState {
   secretGrants: Record<string, string[]>;
 }
 
+/** Explicit owner declarations, separate from the durable business projection. */
+export interface RowOperations {
+  rows: Map<TriggerRowKind, Map<string, 'write' | 'remove'>>;
+  tails: Map<TriggerRowKind, number>;
+}
+const operations = new WeakMap<EngineState, RowOperations>();
+export function beginRowOperations(state: EngineState): RowOperations {
+  const result: RowOperations = { rows: new Map(), tails: new Map() };
+  operations.set(state,result); return result;
+}
+export function writeRows(state: EngineState, kind: TriggerRowKind, ...ids: string[]): void {
+  const result = operations.get(state); if (!result) return;
+  const rows = result.rows.get(kind) ?? new Map<string,'write' | 'remove'>(); result.rows.set(kind,rows);
+  for (const id of ids) rows.set(id,'write');
+}
+export function removeRows(state: EngineState, kind: TriggerRowKind, ...ids: string[]): void {
+  const result = operations.get(state); if (!result) return;
+  const rows = result.rows.get(kind) ?? new Map<string,'write' | 'remove'>(); result.rows.set(kind,rows);
+  for (const id of ids) rows.set(id,'remove');
+}
+/** Only the affected collection's tail needs new ordinals; untouched JSON is reused. */
+export function orderRows(state: EngineState, kind: TriggerRowKind, from: number): void {
+  const result = operations.get(state); if (result) result.tails.set(kind,Math.min(result.tails.get(kind) ?? Infinity,from));
+}
+export function mergeRowOperations(state: EngineState, incoming: RowOperations): void {
+  for (const [kind,rows] of incoming.rows) for (const [id,operation] of rows)
+    (operation === 'remove' ? removeRows : writeRows)(state,kind,id);
+  for (const [kind,from] of incoming.tails) orderRows(state,kind,from);
+}
+
+/** Producers replacing positional arrays know both their old size and their new members. */
+export function recordIndexedReplacement(state: EngineState, kind: 'trustedFolders' | 'recentFires', previousLength: number, from = 0): void {
+  for (let index = from; index < state[kind].length; index++) writeRows(state,kind,String(index));
+  for (let index = state[kind].length; index < previousLength; index++) removeRows(state,kind,String(index));
+  orderRows(state,kind,from);
+}
+
 const MAX_EVENTS = 500;
 const FIRED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const KEEP_FULL_INPUT = 100;
@@ -63,18 +101,27 @@ export function serializeState(draft: EngineState): string {
 }
 
 /** Trims what a commit saves: old firings, finished history, payloads and grants of gone triggers. */
-export function pruneState(state: EngineState, now: () => number): Set<string> {
-  const touched = new Set<string>();
-  const mark = (kind: string,id: string) => touched.add(JSON.stringify([kind,id]));
-  if (state.recentFires.some(item => item.at <= now() - 60 * 60 * 1000)) state.recentFires.forEach((_,index) => mark('recentFires',String(index)));
+export function pruneState(state: EngineState, now: () => number): RowOperations {
+  const touched: RowOperations = { rows: new Map(),tails: new Map() };
+  const mark = (kind: TriggerRowKind,id: string, operation: 'write' | 'remove' = 'write') => {
+    const rows = touched.rows.get(kind) ?? new Map<string,'write' | 'remove'>(); touched.rows.set(kind,rows); rows.set(id,operation);
+  };
+  const recentLength = state.recentFires.length;
+  const firstExpired = state.recentFires.findIndex(item => item.at <= now() - 60 * 60 * 1000);
+  if (firstExpired !== -1) touched.tails.set('recentFires',firstExpired);
   state.recentFires = state.recentFires.filter(item => item.at > now() - 60 * 60 * 1000);
+  if (touched.tails.has('recentFires')) {
+    for (let index = firstExpired; index < state.recentFires.length; index++) mark('recentFires',String(index));
+    for (let index = state.recentFires.length; index < recentLength; index++) mark('recentFires',String(index),'remove');
+  }
   const known = new Set([...state.triggers, ...state.tombstones].map(trigger => trigger.id));
-  for (const id of Object.keys(state.cursors)) if (!known.has(id)) delete state.cursors[id];
+  for (const id of Object.keys(state.cursors)) if (!known.has(id)) { mark('cursors',id,'remove'); delete state.cursors[id]; }
   const cutoff = now() - FIRED_RETENTION_MS;
-  for (const [key, at] of Object.entries(state.fired)) if (Date.parse(at) < cutoff) delete state.fired[key];
+  for (const [key, at] of Object.entries(state.fired)) if (Date.parse(at) < cutoff) { mark('fired',key,'remove'); delete state.fired[key]; }
   const finished = state.events.filter(event => !UNFINISHED.has(event.status));
   if (finished.length > MAX_EVENTS) {
     const drop = new Set(finished.slice(0, finished.length - MAX_EVENTS).map(event => event.id));
+    for (const id of drop) mark('events',id,'remove');
     state.events = state.events.filter(event => !drop.has(event.id));
   }
   // Once a run was handed over (or never will be), only a short trace of the response it saw is kept.
@@ -89,7 +136,7 @@ export function pruneState(state: EngineState, now: () => number): Set<string> {
   });
   for (const [secretId, triggerIds] of Object.entries(state.secretGrants)) {
     const kept = triggerIds.filter(id => known.has(id));
-    if (kept.length) { if (kept.length !== triggerIds.length) { state.secretGrants[secretId] = kept; mark('secretGrants',secretId); } } else delete state.secretGrants[secretId];
+    if (kept.length) { if (kept.length !== triggerIds.length) { state.secretGrants[secretId] = kept; mark('secretGrants',secretId); } } else { mark('secretGrants',secretId,'remove'); delete state.secretGrants[secretId]; }
   }
   // Older finished runs keep their outcome but not the full instructions they were given.
   const trim = new Set(finished.slice(0,Math.max(0,finished.length - KEEP_FULL_INPUT)).filter(event => event.input.instructions.length > 200).map(event => event.id));
@@ -97,8 +144,8 @@ export function pruneState(state: EngineState, now: () => number): Set<string> {
   return touched;
 }
 
-/** A saved state as the engine takes it over, or undefined when it cannot be read. */
-export function parseState(value: unknown, now: () => number, reconcile = true): EngineState | undefined {
+/** First-source warnings are durable import facts; execution reconciliation still belongs to load. */
+export function parseState(value: unknown, now: () => number, reconcile = true, firstSource = false): EngineState | undefined {
   if (!value || typeof value !== 'object' || (value as EngineState).version !== 1) return undefined;
   const record = (item: unknown): item is Record<string, any> => !!item && typeof item === 'object' && !Array.isArray(item);
   const raw = value as Record<string, unknown>;
@@ -114,7 +161,7 @@ export function parseState(value: unknown, now: () => number, reconcile = true):
   if (Array.isArray(raw.audit) && !raw.audit.every(item => record(item) && typeof item.id === 'string' && typeof item.at === 'string'
     && record(item.actor) && typeof item.actor.kind === 'string' && typeof item.action === 'string' && typeof item.triggerId === 'string'
     && typeof item.triggerName === 'string' && typeof item.summary === 'string')) return undefined;
-  const saved = upgradeState(value as EngineState, reconcile ? now() : 0, reconcile);
+  const saved = upgradeState(value as EngineState, reconcile || firstSource ? now() : 0, reconcile, reconcile || firstSource);
   const state = empty();
   try {
     state.settings = TriggerSettingsSchema.parse(saved.settings ?? {});
@@ -145,7 +192,7 @@ export function parseState(value: unknown, now: () => number, reconcile = true):
       if (Array.isArray(triggerIds)) state.secretGrants[secretId] = triggerIds.filter(item => typeof item === 'string');
     }
   } catch { return undefined; }
-  if (reconcile && saved.onceConsumed === undefined) {
+  if ((reconcile || firstSource) && saved.onceConsumed === undefined) {
     const projection = [...state.triggers, ...state.tombstones, ...Object.values(state.revisions).flat()].find(trigger => OnceConsumptionSchema.safeParse(trigger.consumed).success);
     if (projection) logTrigger(state, now, { kind: 'system', via: 'migration' }, 'consume', projection, projection.revision, projection.revision,
       'The once consumption ledger was absent after a downgrade; retained snapshots were recovered. Deleted IDs beyond legacy retention cannot be recovered.');
@@ -159,13 +206,13 @@ export function parseState(value: unknown, now: () => number, reconcile = true):
  * that does the same (`upgradeWatch`), in triggers, their revisions and deleted ones, and what it had seen goes
  * with it, so no issue it had already seen starts a run.
  */
-export function upgradeState(saved: EngineState, now: number, startup = true): EngineState {
+export function upgradeState(saved: EngineState, now: number, startup = true, sourceWarnings = startup): EngineState {
   const record = (item: unknown): item is Record<string, any> => !!item && typeof item === 'object' && !Array.isArray(item);
   const audit = Array.isArray(saved.audit) ? [...saved.audit] : [];
   const upgrade = (value: unknown) => {
     const decoded = decodeOnceTrigger(value);
     const trigger = decoded.trigger;
-    if (startup && decoded.changed && record(trigger)) audit.push({ id: randomUUID(), at: new Date(now).toISOString(), actor: { kind: 'system', via: 'migration' }, action: 'disable',
+    if (sourceWarnings && decoded.changed && record(trigger)) audit.push({ id: randomUUID(), at: new Date(now).toISOString(), actor: { kind: 'system', via: 'migration' }, action: 'disable',
       triggerId: trigger.id, triggerName: trigger.name, summary: trigger.enabled ? 'An obsolete once marker was removed after a source change by an older engine; inspect the definition.' : 'A reservation changed by an older engine was loaded turned off or its obsolete marker removed; inspect it before rescheduling.' });
     return record(trigger) && record(trigger.source) && trigger.source.kind === 'github'
       ? { ...trigger, source: { ...trigger.source, watch: upgradeWatch(trigger.source.watch, record(trigger.policy) ? trigger.policy.overlap : undefined) } } : trigger;
@@ -184,6 +231,6 @@ export function upgradeState(saved: EngineState, now: number, startup = true): E
   })) : saved.cursors;
   return { ...saved, triggers: Array.isArray(saved.triggers) ? saved.triggers.map(upgrade) as Trigger[] : saved.triggers,
     revisions: record(saved.revisions) ? Object.fromEntries(Object.entries(saved.revisions).map(([id, list]) => [id, Array.isArray(list) ? list.map(upgrade) : list])) as EngineState['revisions'] : saved.revisions,
-    tombstones: Array.isArray(saved.tombstones) ? saved.tombstones.map(upgrade) as Trigger[] : saved.tombstones, cursors: cursors as EngineState['cursors'], audit: startup ? audit.slice(-MAX_AUDIT) : audit };
+    tombstones: Array.isArray(saved.tombstones) ? saved.tombstones.map(upgrade) as Trigger[] : saved.tombstones, cursors: cursors as EngineState['cursors'], audit: sourceWarnings ? audit.slice(-MAX_AUDIT) : audit };
 }
 

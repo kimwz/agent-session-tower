@@ -3,7 +3,7 @@ import { continuedRun, continuedRunById } from '../runs/continuations.js';
 import type { TriggerEvent } from '../../shared/triggers.js';
 import { refused, GitHubError, type GitHubFetch } from './github.js';
 import { handEvent, type HandoverContext, type TriggerExecutor } from './handover.js';
-import { ACTIVE, UNFINISHED, type EngineState } from './state.js';
+import { writeRows, ACTIVE, UNFINISHED, type EngineState } from './state.js';
 import type { TriggerStore } from './store.js';
 import { asksToKeepOpen, issueRef } from './text.js';
 
@@ -23,6 +23,7 @@ export function reconcile(state: EngineState, include: (event: TriggerEvent) => 
   const runs = executor.runs();
   for (const event of state.events) {
     if (event.status !== 'claimed' || !include(event)) continue;
+    writeRows(state,'events',event.id);
     // Handing an event to its coordinator is idempotent, so an unfinished hand-over is simply done again.
     if (event.input.handler === 'coordinator') { Object.assign(event, { status: 'queued', claimedAt: undefined }); continue; }
     const job = executor.getAutoPrompt(event.requestId);
@@ -53,8 +54,9 @@ export class TriggerDispatch {
    */
   static recoverLoaded(state: EngineState, executor: Pick<TriggerExecutor, 'runs' | 'getAutoPrompt'>): void {
     reconcile(state, () => true, executor);
-    for (const position of Object.values(state.cursors)) {
+    for (const [id,position] of Object.entries(state.cursors)) {
       if (!position.polling) continue;
+      writeRows(state,'cursors',id);
       if (position.polling.method === 'POST') position.lastError = 'Tower stopped while a POST was being sent. It may have reached the server and was not sent again.';
       delete position.polling;
     }

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { carriesOutsideContent, type Trigger, type TriggerActor, type TriggerEvent, type TriggerPolicy } from '../../shared/triggers.js';
 import { consumeOnce } from './once.js';
-import { UNFINISHED, type EngineState } from './state.js';
+import { writeRows, recordIndexedReplacement, UNFINISHED, type EngineState } from './state.js';
 
 const MAX_FIRED_PER_TRIGGER = 20_000;
 const MAX_WAITING_PER_TRIGGER = 5;
@@ -31,8 +31,12 @@ export function fire(state: EngineState, trigger: Trigger, dedupKey: string, at:
   if (Object.keys(state.fired).filter(item => item.startsWith(`${trigger.id} `)).length >= MAX_FIRED_PER_TRIGGER) {
     return { capacity: `"${trigger.name}" has ${MAX_FIRED_PER_TRIGGER} runs recorded in the last 30 days; new runs are not accepted until older ones expire.` };
   }
+  writeRows(state,'fired',key);
   state.fired[key] = iso;
+  const previousRecentLength = state.recentFires.length;
+  const firstExpired = state.recentFires.findIndex(item => item.at <= time - 60 * 60 * 1000);
   state.recentFires = [...state.recentFires.filter(item => item.at > time - 60 * 60 * 1000), { at: time, triggerId: trigger.id }];
+  recordIndexedReplacement(state,'recentFires',previousRecentLength,firstExpired === -1 ? previousRecentLength : firstExpired);
   const handler = trigger.handler;
   const untrustedInput = carriesOutsideContent(trigger.source);
   const remote = by?.controllerId ? { controllerId: by.controllerId } : trigger.remoteEdited;
@@ -58,6 +62,7 @@ export function fire(state: EngineState, trigger: Trigger, dedupKey: string, at:
   if (recent.filter(item => item.triggerId === trigger.id).length >= trigger.policy.maxEventsPerHour) {
     event.status = 'skipped';
     event.reason = `Paused: more than ${trigger.policy.maxEventsPerHour} runs in an hour. Turn the trigger on again to resume.`;
+    writeRows(state,'cursors',trigger.id);
     state.cursors[trigger.id] = { ...(state.cursors[trigger.id] ?? { anchorAt: time }), paused: { reason: event.reason, at: iso } };
   } else if (recent.length >= state.settings.maxEventsPerHour) {
     event.status = 'skipped'; event.reason = `Skipped: all triggers together reached ${state.settings.maxEventsPerHour} runs in an hour.`;
@@ -70,7 +75,7 @@ export function fire(state: EngineState, trigger: Trigger, dedupKey: string, at:
   } else if (state.events.filter(item => item.status === 'queued').length >= 50) {
     event.status = 'skipped'; event.reason = 'Skipped: 50 trigger runs are already waiting.';
   }
-  state.events.push(event);
+  state.events.push(event); writeRows(state,'events',event.id);
   if (trigger.source.schedule.type === 'once') {
     if (event.status === 'skipped') event.reason = `${event.reason ?? 'Skipped.'} This once reservation is consumed; create a new reservation to retry.`;
     consumeOnce(state, trigger, event.id, now);

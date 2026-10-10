@@ -5,7 +5,7 @@ import { bootstrapTriggers } from './storage-transfer.js';
 import { canonical, logicalBytes, triggerHash, rowCost, projectedJson, ROW_KINDS, type TriggerChange, type TriggerRow, type TriggerRowKind } from './storage-codec.js';
 import { consumedSnapshot, isolateConsumed, normalizeOnce } from './once.js';
 import { failure } from './errors.js';
-import { empty, pruneState, type EngineState } from './state.js';
+import { beginRowOperations, mergeRowOperations, writeRows, empty, pruneState, type RowOperations, type EngineState } from './state.js';
 import type { TriggerAdmissionLink } from './storage-commands.js';
 
 const MAX_STATE_BYTES = 10_000_000;
@@ -22,6 +22,39 @@ export type TriggerMutation =
 
 const arrayKinds = new Set<TriggerRowKind>(['triggers','tombstones','events','audit','trustedFolders','recentFires']);
 const identityKinds = new Set<TriggerRowKind>(['triggers','tombstones','events','audit']);
+
+/** Encode declared writes only; explicit removals also move the affected tail using saved row JSON. */
+export function rowsForOperations(previous: readonly TriggerRow[], draft: EngineState, operations: RowOperations): TriggerChange[] {
+  const before = new Map(previous.map(row => [canonical([row.kind,row.id]),row]));
+  const batch = new Map<string,TriggerChange>();
+  const kinds = new Set([...operations.rows.keys(),...operations.tails.keys()]);
+  for (const kind of kinds) {
+    const declared = operations.rows.get(kind) ?? new Map<string,'write' | 'remove'>();
+    let tail = operations.tails.get(kind) ?? Infinity;
+    for (const [id,operation] of declared) if (operation === 'remove') {
+      const old = before.get(canonical([kind,id]));
+      if (old) { batch.set(canonical([kind,id]),{ ...old,previous: old.json,previousOrdinal: old.ordinal,remove: true }); tail = Math.min(tail,old.ordinal); }
+    }
+    const collection = draft[kind];
+    const ids = kind === 'settings' ? ['settings'] : arrayKinds.has(kind)
+      ? (collection as unknown[]).map((value,index) => identityKinds.has(kind) ? (value as { id: string }).id : String(index))
+      : Object.keys(collection);
+    for (const [ordinal,id] of ids.entries()) {
+      const operation = declared.get(id);
+      if (operation === 'remove') throw new Error(`Removed trigger row still present: ${kind}/${id}`);
+      if (operation !== 'write' && ordinal < tail) continue;
+      const old = before.get(canonical([kind,id]));
+      if (!old && operation !== 'write') throw new Error(`Undeclared trigger row: ${kind}/${id}`);
+      const value = () => kind === 'settings' ? collection : arrayKinds.has(kind) ? (collection as unknown[])[ordinal] : (collection as Record<string,unknown>)[id];
+      const json = operation === 'write' ? canonical(value()) : old!.json;
+      if (!old || old.ordinal !== ordinal || old.json !== json)
+        batch.set(canonical([kind,id]),{ kind,id,ordinal,json,previous: old?.json ?? null,previousOrdinal: old?.ordinal });
+    }
+    for (const [id,operation] of declared) if (operation === 'write' && !ids.includes(id))
+      throw new Error(`Declared trigger write is absent: ${kind}/${id}`);
+  }
+  return [...batch.values()];
+}
 
 /** An isolated business projection; only declared mutable records are copied, never the whole engine. */
 export function mutationProjection(current: EngineState, mutation: TriggerMutation): EngineState {
@@ -54,7 +87,7 @@ export class TriggerStore {
   private bootstrap?: Promise<void>;
   private rows: TriggerRow[] = [];
   private rowLedger: EngineState['onceConsumed'] = {};
-  private startupTouched = new Set<string>();
+  private startupOperations?: RowOperations;
   private revision?: number;
   /** SQL admissions advance the revision outside this owner's write queue. Read before drafting. */
   private async refreshAdmissionState(): Promise<void> {
@@ -138,83 +171,13 @@ export class TriggerStore {
       this.stateBytes = logicalBytes(this.rows);
       this.locked = undefined; this.storageError = undefined;
       const prepared = mutationProjection(loaded,{ type: 'startup' });
-      this.startupTouched = new Set([
-        ...loaded.triggers.map(item => canonical(['triggers',item.id])),
-        ...Object.keys(loaded.cursors).map(id => canonical(['cursors',id])),
-        ...loaded.events.filter(item => item.status === 'claimed').map(item => canonical(['events',item.id])),
-      ]);
+      this.startupOperations = beginRowOperations(prepared);
       normalizeOnce(prepared,this.options.now); prepare(prepared); this.current = prepared;
     } catch (error) {
       this.locked = `Trigger state is held; original data is preserved: ${error instanceof Error ? error.message : String(error)}`;
       this.storageError = this.locked; this.options.changed();
       throw failure(this.locked,'unavailable');
     }
-  }
-
-  /** Fixed row commands for the declared mutation plus explicit retention removals/ordinal moves.
-   * Unchanged projection records retain identity and never enter JSON encoding or SQL staging.
-   */
-  private rowBatch(mutation: TriggerMutation, draft: EngineState, pruned: ReadonlySet<string>): TriggerChange[] {
-    const batch: TriggerChange[] = [];
-    const rows = new Map(this.rows.map(row => [canonical([row.kind,row.id]),row]));
-    const eventIds = new Set(mutation.type === 'events' ? mutation.ids : []);
-    const cursorIds = new Set(draft.events.filter(event => eventIds.has(event.id)).map(event => event.triggerId));
-    const selected = (kind: TriggerRowKind,id: string): boolean => {
-      if (pruned.has(canonical([kind,id])) || this.startupTouched.has(canonical([kind,id]))) return true;
-      switch (mutation.type) {
-        case 'startup':
-          if (kind === 'events') return this.current.events.some(event => event.id === id && event.status === 'claimed');
-          if (kind === 'cursors') return !!this.current.cursors[id]?.polling || this.current.cursors[id]?.nextAt !== draft.cursors[id]?.nextAt;
-          if (kind === 'triggers') {
-            const old = this.current.triggers.find(item => item.id === id), next = draft.triggers.find(item => item.id === id);
-            return old?.enabled !== next?.enabled || old?.archivedAt !== next?.archivedAt || old?.consumed !== next?.consumed;
-          }
-          return false;
-        case 'restore':
-          if (kind === 'triggers' || kind === 'cursors') return true;
-          if (kind === 'events') return this.current.events.some(event => event.id === id && event.status === 'queued');
-          if (kind === 'settings') return this.current.settings !== draft.settings;
-          if (kind === 'revisions') return this.current.revisions[id] !== draft.revisions[id];
-          if (kind === 'secretGrants') return this.current.secretGrants[id] !== draft.secretGrants[id];
-          if (kind === 'trustedFolders') return this.current.trustedFolders[Number(id)] !== draft.trustedFolders[Number(id)];
-          return false;
-        case 'settings': return kind === 'settings';
-        case 'audit': case 'maintenance': return false;
-        case 'secretGrant': return kind === 'secretGrants' && id === mutation.id;
-        case 'cursor': return kind === 'cursors' && id === mutation.id;
-        case 'events': return kind === 'events' && eventIds.has(id) || kind === 'cursors' && cursorIds.has(id);
-        case 'definition': case 'fire':
-          if (['triggers','revisions','onceConsumed','cursors'].includes(kind)) return id === mutation.id;
-          if (kind === 'events') return mutation.type === 'definition' && this.current.events.some(event => event.id === id && event.triggerId === mutation.id && event.status === 'queued');
-          if (mutation.type === 'fire') return kind === 'recentFires' && this.current.recentFires[Number(id)] !== draft.recentFires[Number(id)];
-          return kind === 'secretGrants' && this.current.secretGrants[id] !== draft.secretGrants[id]
-            || kind === 'trustedFolders' && this.current.trustedFolders[Number(id)] !== draft.trustedFolders[Number(id)];
-      }
-    };
-    for (const kind of ROW_KINDS) {
-      const before = this.current[kind], after = draft[kind];
-      const entries = (value: EngineState[typeof kind]): [string,unknown][] => kind === 'settings' ? [['settings',value]]
-        : arrayKinds.has(kind) ? (value as unknown[]).map((item,index) => [identityKinds.has(kind) ? (item as { id: string }).id : String(index),item])
-        : Object.entries(value);
-      const oldValues = new Map(entries(before));
-      const next = entries(after);
-      for (const [ordinal,[id,value]] of next.entries()) {
-        const old = rows.get(canonical([kind,id]));
-        if (!old || old.ordinal !== ordinal || selected(kind,id)) {
-          const json = canonical(value);
-          if (!old || old.ordinal !== ordinal || old.json !== json) batch.push({ kind,id,ordinal,json,previous: old?.json ?? null,previousOrdinal: old?.ordinal });
-        }
-        oldValues.delete(id);
-      }
-      for (const id of oldValues.keys()) {
-        const old = rows.get(canonical([kind,id]));
-        if (!old) throw new Error(`Missing authoritative trigger row: ${kind}/${id}`);
-        batch.push({ ...old,previous: old.json,previousOrdinal: old.ordinal,remove: true });
-      }
-    }
-    // A definition's historical snapshots can keep their own row bytes when only consumption changes.
-    // The SQL command recosts those projections inside the same transaction.
-    return batch;
   }
 
   /**
@@ -227,11 +190,26 @@ export class TriggerStore {
       await this.refreshAdmissionState();
       if (this.locked || !this.database || !this.repository) throw failure(this.locked ?? 'Triggers SQL authority is unavailable.','unavailable');
       const draft = mutationProjection(this.current,mutation);
+      const operations = beginRowOperations(draft);
+      if (this.startupOperations) mergeRowOperations(draft,this.startupOperations);
+      // Existing caller declarations cover in-place target edits; additions/deletions come from owners.
+      if ('id' in mutation && mutation.id) {
+        if (mutation.type === 'cursor' || mutation.type === 'fire' || mutation.type === 'definition')
+          if (draft.cursors[mutation.id]) writeRows(draft,'cursors',mutation.id);
+        if (mutation.type === 'definition' && draft.triggers.some(item => item.id === mutation.id))
+          writeRows(draft,'triggers',mutation.id);
+      }
+      if (mutation.type === 'settings') writeRows(draft,'settings','settings');
+      if (mutation.type === 'events') for (const id of mutation.ids) {
+        const event = draft.events.find(item => item.id === id);
+        if (event) { writeRows(draft,'events',id); if (draft.cursors[event.triggerId]) writeRows(draft,'cursors',event.triggerId); }
+      }
       // A new attempt to add something starts without the last capacity warning; the change may set it again.
       if (kind === 'grow') this.capacityError = undefined;
       const result = change(draft);
       const pruned = pruneState(draft, this.options.now);
-      const changed = this.rowBatch(mutation,draft,pruned);
+      mergeRowOperations(draft,pruned);
+      const changed = rowsForOperations(this.rows,draft,operations);
       const ledger = consumedSnapshot(draft);
       const byKey = new Map(this.rows.map(row => [canonical([row.kind,row.id]),row]));
       let bytes = this.stateBytes;
@@ -271,7 +249,7 @@ export class TriggerStore {
       this.storageError = undefined;
       this.stateBytes = bytes;
       this.rows = [...byKey.values()];
-      this.rowLedger = ledger; this.startupTouched.clear();
+      this.rowLedger = ledger; this.startupOperations = undefined;
       this.current = draft;
       this.options.changed();
       return result;
