@@ -324,8 +324,10 @@ jobs:
           printf '%s\n' npm-ci > "$report/stage.txt"
           npm ci
           export SQLITE_VALIDATION_CI=1
+          export TOWER_SQLITE_OLD122_ROOT="$VALIDATION_ROOT/old122"
           export TOWER_SQLITE_OLD124_ROOT="$VALIDATION_ROOT/old124"
-          node scripts/sqlite-old124-capture.mjs
+          node scripts/sqlite-old124-capture.mjs 1.122.0
+          node scripts/sqlite-old124-capture.mjs 1.124.0
           node --import tsx scripts/sqlite-runtime-check.mjs supported-floor | tee "$report/runtime.json"
           printf '%s\n' release-version-decision > "$report/stage.txt"
           if [[ "$(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')" == 1.125.0 ]]; then
