@@ -70,6 +70,8 @@ jobs:
             tests/server/triggers/storage.test.ts tests/server/triggers/service.test.ts > "$report/test-files.txt"
           files=()
           while IFS= read -r file; do files+=("$file"); done < "$report/test-files.txt"
+          printf '%s\n' lifecycle-resume-single-repro > "$report/stage.txt"
+          node --import tsx --test --test-concurrency=2 --test-reporter=tap --test-name-pattern='^failed production quiesce resumes both manager cleanup timers without releasing the lock$' tests/server/runs/attachment-cleanup.test.ts
           printf '%s\n' jev-cancel-single-repro > "$report/stage.txt"
           node --import tsx --test --test-concurrency=2 --test-reporter=tap --test-name-pattern='^a slow answer times out and a cancelled one says so$' tests/server/decisions/jev.test.ts
           printf '%s\n' diagnostic-single-repro > "$report/stage.txt"

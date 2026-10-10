@@ -143,14 +143,17 @@ async function lifecycle(f: Awaited<ReturnType<typeof fixture>>, toolsStop: () =
   const noop = new Proxy({}, { get: () => async () => {} });
   const retentionCalls: string[] = [];
   const temporaryCalls: string[] = [];
+  const reviewerCalls: string[] = [];
   const temporary = { quiesce: async () => { temporaryCalls.push("quiesce"); await temporaryStop(); }, resume: () => { temporaryCalls.push("resume"); } };
   const retention = { service: { quiesce: async () => { retentionCalls.push('quiesce'); }, resume: () => { retentionCalls.push('resume'); } } };
-  const context: Record<string, unknown> = { runs: f.runs, autoPrompts: f.auto, retention, temporary, clearInterval, secretExpiry: undefined, expiryTimer: undefined, releaseTimer: undefined, stopTelling: () => {}, paused: false, publishCold: () => {}, storageStatus: { admissionOpen: true },
+  // These lifecycle hooks represent a ready host, after production startup has completed.
+  const context: Record<string, unknown> = { startupComplete: true, runs: f.runs, autoPrompts: f.auto, retention, temporary, clearInterval, secretExpiry: undefined, expiryTimer: undefined, releaseTimer: undefined, stopTelling: () => {}, paused: false, publishCold: () => {}, storageStatus: { admissionOpen: true },
     tools: { ...noop, stop: toolsStop, pause: () => {}, resume: () => {} } };
   for (const name of ['secrets', 'triggers', 'github', 'slack', 'publicAgents', 'skills', 'tasks', 'compactions', 'worktrees', 'reviewer', 'runner', 'permissions', 'sessions', 'terminals', 'ledger']) context[name] = noop;
+  context.reviewer = new Proxy({}, { get: (_, name) => name === 'release' ? () => { reviewerCalls.push('release'); } : async () => {} });
   const lifecycleSource = source.slice(source.indexOf('      onIdle: async () =>'));
   const callback = (name: string) => { const match = lifecycleSource.match(new RegExp(`^      ${name}: (.+),$`, 'm')); assert.ok(match, name); return runInNewContext(`(${match[1]})`, context) as () => Promise<void>; };
-  return { onIdle: callback('onIdle'), quiesce: callback('quiesce'), resume: callback('resume'), retentionCalls, temporaryCalls };
+  return { onIdle: callback('onIdle'), quiesce: callback('quiesce'), resume: callback('resume'), retentionCalls, temporaryCalls, reviewerCalls };
 }
 async function host(f: Awaited<ReturnType<typeof fixture>>, extra: Partial<Parameters<typeof startRunnerHost>[0]>) {
   const sessions = Object.assign(new EventEmitter(), { list: () => [f.session] }) as unknown as SessionService;
@@ -191,6 +194,7 @@ test('failed production quiesce resumes both manager cleanup timers without rele
   try { await requestHandoff(f.directory); await resumed.promise; } finally { console.error = log; }
   assert.equal(released, false); assert.ok(internals(f.runs).attachmentCleanupTimer); assert.ok(internals(f.auto).attachmentCleanupTimer);
   assert.deepEqual(hooks.retentionCalls, ['quiesce', 'resume']); assert.deepEqual(hooks.temporaryCalls, ['quiesce', 'resume']);
+  assert.deepEqual(hooks.reviewerCalls, ['release']);
 });
 
 test('production onIdle drains both GCs before a later flush failure can release the state lock', { timeout: 10_000 }, async t => {
