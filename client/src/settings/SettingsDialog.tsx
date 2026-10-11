@@ -57,13 +57,14 @@ export function sectionLabel(section: SettingsSection, t: (key: string) => strin
  * Every setting of Tower in one dialog: the sections on the left, the chosen one on the right. A section once shown
  * stays mounted, hidden, while the dialog is open, so moving between sections keeps what was being written.
  */
-export function SettingsDialog({ place, sections, attention, context, onPlace, onChanged, onClose }: {
+export function SettingsDialog({ place, sections, attention, context, onPlace, onChanged, onClose, onTriggersHere }: {
   place: SettingsPlace;
   sections: readonly SettingsSection[];
   attention: SettingsAttention;
   context: SettingsContext;
   onPlace: (place: SettingsPlace) => void;
   onChanged: () => void;
+  onTriggersHere?: (here: boolean) => void;
   onClose: () => void;
 }) {
   const { t } = useI18n();
@@ -109,7 +110,7 @@ export function SettingsDialog({ place, sections, attention, context, onPlace, o
       case 'general': return <GeneralSettings canvas={canvas} showHidden={context.showHidden} onShowHiddenChange={context.onShowHiddenChange} />;
       case 'models': return <ModelsPanel token={context.token} providers={context.providers} computers={context.computers} />;
       case 'triggers': return <TriggerPanel token={context.token} overview={context.triggers} providers={context.providers} projects={context.projects}
-        computers={context.computers} targets={context.targets} onOpenSlack={() => setSlack(true)} onOpenPublic={() => setPublicAgents(true)} />;
+        computers={context.computers} targets={context.targets} onOpenSlack={() => setSlack(true)} onOpenPublic={() => setPublicAgents(true)} onShowingHere={onTriggersHere} />;
       case 'skills': return <SkillsPanel token={context.token} cwd={cwd} projects={context.projects.map(([key]) => key)} onClearFolder={clearFolder} onChanged={onChanged} onOpenSession={openSession} />;
       case 'permissions': return <PermissionsPanel token={context.token} cwd={cwd} projects={context.projects.map(([key]) => key)} pending={attention.permissions} onClearFolder={clearFolder} onChanged={onChanged} onOpenSession={openSession} />;
       case 'decisions': return <DecisionPanel token={context.token} />;
