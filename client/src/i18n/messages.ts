@@ -404,6 +404,8 @@ export const english: Record<string, string> = {
   "확인 필요": "Needs you",
   "에이전트가 권한을 요청하면 별도 모델이 이 작업에 대한 소유자의 지시(대화에서 한 말과 질문에 한 답, 적용된 스킬과 지침, 프로젝트 지침)와 작업 내역을 보고, 작업에 필요하고 위험하지 않으면 그 프로젝트에만 허용합니다. 범위가 넓으면 더 좁게 다시 요청하게 하고, 그 밖에는 이유를 남겨 소유자에게 넘깁니다. 위험한 옵션이 든 규칙, 넓은 규칙, 삭제·비밀·네트워크 명령, 소유자 규칙과 겹치는 규칙, 공개 에이전트의 요청은 항상 소유자가 정합니다.": "When an agent asks for a permission, a separate model reads your instructions for that work (what you said in the conversation and your answers to its questions, the skills and guidance that apply, the project's instructions) and the work so far, and allows it for that project only when the task needs it and it is not dangerous. When the rule is wider than needed it asks the agent for a narrower one; otherwise it leaves its reason and hands the request to you. Rules with dangerous options, broad rules, commands that delete, touch secrets or use the network, rules overlapping one of yours, and public agents' requests are always yours to decide.",
   "대화 기록을 처음부터 다 읽지 못해 소유자에게 넘깁니다.": "The conversation's history could not be read from its start, so it is yours to decide.",
+  "대화 기록을 읽지 못해 소유자에게 넘깁니다.": "The conversation's history could not be read, so it is yours to decide.",
+  "읽은 최근 대화에 소유자 요청이 없어 소유자에게 넘깁니다.": "The recent part of the conversation that could be read has no request from you, so it is yours to decide.",
   "소유자가 이 대화에서 한 말이 너무 길어 다 넘길 수 없어 소유자에게 넘깁니다.": "What you said in this conversation is too long to pass on whole, so it is yours to decide.",
   "특수 기호가 들어 있는 규칙은 소유자가 정합니다.": "Rules with special characters are yours to decide.",
   "하위 명령 앞에 옵션이 있는 규칙은 소유자가 정합니다.": "Rules with options before the subcommand are yours to decide.",

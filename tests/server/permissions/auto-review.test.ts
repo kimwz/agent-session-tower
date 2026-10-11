@@ -280,7 +280,7 @@ test('a long conversation whose start is not read is judged by its recent owner 
   silent.wake();
   await silent.flush();
   assert.equal(asked.length, 1);
-  assert.equal(f.service.overview().requests.find(entry => entry.id === second.request.id)!.review!.status, 'skipped');
+  assert.equal(f.service.overview().requests.find(entry => entry.id === second.request.id)!.review!.reason, '읽은 최근 대화에 소유자 요청이 없어 소유자에게 넘깁니다.');
   const triggered = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {}, model,
     sources: sources(f, [], { conversation: async () => ({ messages: agentOnly, complete: false }), sessionTrigger: () => 't1', trigger: () => ({ name: 'issues', instructions: 'Fix the issue and deploy.' }) }) });
   await f.service.request({ kind: 'command', value: 'gh release create', scope: 'project', reason: 'release' }, agent('claude:one', 'r3'));
@@ -317,7 +317,7 @@ test('a conversation that cannot be read at all, or whose owner words are too lo
   let asked = 0;
   const model = async () => { asked += 1; return { verdict: 'approve', rule: null, suggestion: null, reason: 'ok' }; };
   const partial = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {}, model,
-    sources: sources(f, [], { conversation: async () => ({ messages: [], complete: false }) }) });
+    sources: sources(f, [run('r', 'Encode and deliver the videos.', { status: 'running' })], { conversation: async () => ({ messages: [], complete: false }), sessionTrigger: () => 't1', trigger: () => ({ name: 'issues', instructions: 'Fix it.' }) }) });
   const first = await f.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'merge' }, agent('claude:one'));
   partial.wake();
   await partial.flush();
@@ -328,6 +328,7 @@ test('a conversation that cannot be read at all, or whose owner words are too lo
   await cut.flush();
   assert.equal(asked, 0);
   for (const id of [first.request.id, second.request.id]) assert.equal(f.service.overview().requests.find(entry => entry.id === id)!.review!.status, 'skipped');
+  assert.equal(f.service.overview().requests.find(entry => entry.id === first.request.id)!.review!.reason, '대화 기록을 읽지 못해 소유자에게 넘깁니다.', 'nothing read goes to the owner even with a running turn and a trigger');
 });
 
 test('a failed or held review leaves the request to the owner; holding stops new reviews until released', async t => {

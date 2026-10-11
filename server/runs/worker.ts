@@ -31,7 +31,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { homedir, hostname } from 'node:os';
-import type { AutoPromptInput, ChatMessage, NewSessionInput, MessageAttachments, Run, RunApprovalResponse, Session, Snapshot } from '../../shared/types.js';
+import type { AutoPromptInput, NewSessionInput, MessageAttachments, Run, RunApprovalResponse, Session, Snapshot } from '../../shared/types.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { AutoPromptManager } from '../auto-prompt/manager.js';
 import { SlackService } from '../slack/service.js';
