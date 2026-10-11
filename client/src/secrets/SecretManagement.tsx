@@ -10,14 +10,15 @@ export function SecretRuleEditor({ overview, rule, busy, change, onClose }: { ov
   const { t } = useI18n();
   const [groupId, setGroup] = useState(rule?.groupId || overview.groups[0]?.id || '');
   // Keys and fields removed since the rule was saved are dropped, or the rule could never be saved unchanged.
-  const [secretIds, setIds] = useState(() => (rule?.secretIds || []).filter(id => overview.secrets.some(secret => secret.id === id && secret.groupId === rule?.groupId)));
+  const savedIds = (rule?.secretIds || []).filter(id => overview.secrets.some(secret => secret.id === id && secret.groupId === rule?.groupId));
+  const [secretIds, setIds] = useState(savedIds);
   const [hostId, setHost] = useState(rule?.hostId || overview.device?.id || '');
   const [projectId, setProject] = useState(rule?.projectId || overview.groups.find(group => group.id === (rule?.groupId || overview.groups[0]?.id))?.projectId || '');
   const [root, setRoot] = useState(rule?.root || '');
   const [allProjects, setAllProjects] = useState(rule?.allProjects ?? false);
   const [activation, setActivation] = useState(rule?.activation || 'auto');
   const [operations, setOperations] = useState(rule?.operations || [...DEFAULT_SECRET_USE_OPERATIONS]);
-  const [fields, setFields] = useState<Record<string, string[]>>(() => Object.fromEntries(Object.entries(rule?.fields || {}).filter(([id]) => secretIds.includes(id)).map(([id, names]) => [id, names.filter(name => overview.secrets.find(secret => secret.id === id)?.fields?.includes(name))])));
+  const [fields, setFields] = useState<Record<string, string[]>>(Object.fromEntries(Object.entries(rule?.fields || {}).filter(([id]) => savedIds.includes(id)).map(([id, names]) => [id, names.filter(name => overview.secrets.find(secret => secret.id === id)?.fields?.includes(name))])));
   const [enabled, setEnabled] = useState(rule?.enabled ?? true);
   const [ttl, setTtl] = useState(rule?.maxTtlMs ? String(rule.maxTtlMs / 60_000) : '');
   const [expires, setExpires] = useState(rule?.expiresAt ? new Date(rule.expiresAt - new Date(rule.expiresAt).getTimezoneOffset() * 60_000).toISOString().slice(0, 16) : '');
