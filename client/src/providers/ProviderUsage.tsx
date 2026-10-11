@@ -3,7 +3,7 @@ import type { Provider, ProviderHealth, UsageWindow } from '../../../shared/type
 import { ProviderIcon } from '../common/Icons';
 import { absoluteTime, providerLabels, relativeTime } from '../common/lib';
 import { useI18n } from '../i18n/i18n';
-import { usageAheadOfTime, usageElapsedPercent, usagePercent, usageUnavailableReason, usageWindowLabel, usageWindows } from './provider-usage';
+import { accountLabel, usageAheadOfTime, usageElapsedPercent, usagePercent, usageUnavailableReason, usageWindowLabel, usageWindows } from './provider-usage';
 
 export function ProviderUsageMeter({ provider, health }: { provider: Provider; health?: ProviderHealth }) {
   const { t } = useI18n();
@@ -28,6 +28,7 @@ export function ProviderUsageMeter({ provider, health }: { provider: Provider; h
   const elapsed = primary && usageElapsedPercent(primary, now);
   const ahead = !!primary && usageAheadOfTime(primary, elapsed);
   const stale = !!usage?.stale;
+  const account = accountLabel(health?.account);
   const label = primary ? t('{0} 사용', { 0: usageWindowLabel(primary) }) : usage?.status === 'loading' ? t('확인 중') : t('정보 없음');
   return <div ref={container} className={`provider-usage-meter ${provider} ${stale ? 'stale' : ''} ${ahead ? 'ahead' : ''} nodrag nopan nowheel`} onMouseEnter={() => setOpen(true)} onMouseLeave={() => { if (!container.current?.contains(document.activeElement)) setOpen(false); }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false); }}>
     <button type="button" className="usage-trigger" aria-label={t('{0} 계정 사용량: {1}{2}', { 0: providerLabels[provider], 1: primary ? `${percent} ${label}${elapsed === undefined ? '' : t(' · 기간 {0} 경과', { 0: usagePercent(elapsed) })}` : label, 2: stale ? t(' · 이전 정보') : '' })} aria-describedby={open ? id : undefined} aria-expanded={open} onFocus={() => setOpen(true)} onClick={() => setOpen(true)} onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); setOpen(false); } }}>
@@ -39,6 +40,7 @@ export function ProviderUsageMeter({ provider, health }: { provider: Provider; h
     </button>
     {open && <div className="usage-tooltip" id={id} role="tooltip">
       <strong>{t('{0} 계정 사용량', { 0: providerLabels[provider] })}</strong>
+      {account && <p className="usage-account">{t('연결된 계정: {0}', { 0: account })}</p>}
       <p>{t('모든 기기에서 공유하는 계정 한도입니다.')}</p>
       {windows.length ? <dl>{windows.map(window => <UsageWindowDetail key={window.id} window={window} now={now} />)}</dl> : <p className="usage-unavailable">{usageUnavailableReason(usage)}</p>}
       {stale && <p className="usage-stale">{usage?.status === 'loading' ? t('이전 정보 · 새 사용량 확인 중') : t('이전 정보 · 새 사용량을 불러오지 못했습니다.')}</p>}

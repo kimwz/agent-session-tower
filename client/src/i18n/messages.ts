@@ -1350,6 +1350,8 @@ export const english: Record<string, string> = {
   '{0} 계정 사용량: {1}{2}': '{0} account usage: {1}{2}',
   ' · 이전 정보': ' · stale data',
   '{0} 계정 사용량': '{0} account usage',
+  '연결된 계정: {0}': 'Signed in as {0}',
+  'API 키': 'API key',
   '모든 기기에서 공유하는 계정 한도입니다.': 'Account limits are shared across all machines.',
   '초기화: {0}': 'Resets: {0}',
   '초기화 시간 정보 없음': 'Reset time unavailable',

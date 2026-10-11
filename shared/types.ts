@@ -140,12 +140,20 @@ export interface ProviderHealth {
   sessionCount: number;
   error?: string;
   usage?: ProviderUsage;
+  /** The signed-in account, for this computer's own screen only: never sent to a remote controller. */
+  account?: ProviderAccount;
   models?: ModelOption[];
   defaultModel?: string;
   /** Effort levels for models outside the catalog, such as a session's observed full model ID. */
   efforts?: EffortOption[];
   /** The native configuration's effort, used whenever a request does not choose one. */
   defaultEffort?: string;
+}
+export interface ProviderAccount {
+  /** Masked on the server (`ka***@example.com`); the full address never leaves it. */
+  email?: string;
+  /** The native plan id, such as `max` or `plus`; `api_key` for a Codex API key sign-in. */
+  plan?: string;
 }
 export interface UsageWindow {
   id: string;

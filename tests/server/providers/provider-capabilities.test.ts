@@ -3,7 +3,7 @@ import test from 'node:test';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseClaudeUsage, parseCodexUsage, parseCodexModels, parseCodexConfig, readClaudeDefaultEffort, claudeStorage, readClaudeCredential, readClaudeUsage, readCodexCapabilities, ProviderCapabilities, parseSavedUsage } from '../../../server/providers/capabilities.js';
+import { parseClaudeUsage, parseCodexUsage, parseCodexModels, parseCodexConfig, readClaudeDefaultEffort, claudeStorage, readClaudeCredential, readClaudeUsage, readCodexCapabilities, ProviderCapabilities, parseSavedUsage, maskEmail, parseCodexAccount, readClaudeEmail } from '../../../server/providers/capabilities.js';
 import type { ProviderHealth, ProviderUsage } from '../../../shared/types.js';
 
 const now = Date.parse('2026-09-15T00:00:00Z');
@@ -68,7 +68,7 @@ test('the Claude account fingerprint tells sign-ins apart without revealing thei
   const other = await read({ accessToken: 'other-access-token', refreshToken: 'other-refresh-token' });
   assert.notEqual(other.account, first.account);
   const expired = await read({ accessToken: 'other-access-token', refreshToken: 'other-refresh-token', expiresAt: 1 });
-  assert.deepEqual(expired, { reason: 'not_signed_in', account: other.account }); // an expired new sign-in is still told apart
+  assert.deepEqual(expired, { reason: 'not_signed_in', account: other.account, stored: true }); // an expired new sign-in is still told apart
   assert.doesNotMatch(JSON.stringify([first, other, expired].map(item => item.account)), /private|other|token/);
 });
 
@@ -127,7 +127,7 @@ import {appendFileSync} from 'node:fs';
 createInterface({input:process.stdin}).on('line', line => {
   const r=JSON.parse(line); appendFileSync(process.env.RECORDED, JSON.stringify({method:r.method,params:r.params})+'\\n');
   if(r.method==='initialized') return;
-  const result=r.method==='account/rateLimits/read'?{rateLimits:{primary:{usedPercent:19,windowDurationMins:10080}}}:r.method==='config/read'?{config:{model:'second',model_reasoning_effort:'high',api_key:'private'}}:r.method==='model/list'?{data:[{model:r.params.cursor?'second':'first',displayName:'Native',isDefault:!r.params.cursor}],nextCursor:r.params.cursor?null:'next'}:{};
+  const result=r.method==='account/read'?{account:{type:'chatgpt',email:'private.person@example.com',planType:'plus'},requiresOpenaiAuth:true}:r.method==='account/rateLimits/read'?{rateLimits:{primary:{usedPercent:19,windowDurationMins:10080}}}:r.method==='config/read'?{config:{model:'second',model_reasoning_effort:'high',api_key:'private'}}:r.method==='model/list'?{data:[{model:r.params.cursor?'second':'first',displayName:'Native',isDefault:!r.params.cursor}],nextCursor:r.params.cursor?null:'next'}:{};
   process.stdout.write(JSON.stringify({id:r.id,result})+'\\n');
 });
 `);
@@ -137,9 +137,10 @@ createInterface({input:process.stdin}).on('line', line => {
   assert.deepEqual(capabilities.models?.map(model => model.id), ['first', 'second']);
   assert.equal(capabilities.defaultModel, 'second', 'the configured model wins over the catalog default');
   assert.equal(capabilities.defaultEffort, 'high');
+  assert.deepEqual(capabilities.account, { email: 'pr***@example.com', plan: 'plus' });
   assert.doesNotMatch(JSON.stringify(capabilities), /private/);
   const requests = (await readFile(recorded, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-  assert.deepEqual(requests.map(request => request.method), ['initialize', 'initialized', 'account/rateLimits/read', 'model/list', 'model/list', 'config/read']);
+  assert.deepEqual(requests.map(request => request.method), ['initialize', 'initialized', 'account/rateLimits/read', 'account/read', 'model/list', 'model/list', 'config/read']);
 });
 
 test('aborting an unresponsive Codex reader force-kills its child even when SIGTERM is ignored', { timeout: 15000 }, async t => {
@@ -361,4 +362,39 @@ test('a restarted cache drops the saved quota of another or unknown account when
   assert.deepEqual(await run({ account: 'aaaaaaaaaaaaaaaa' }, 'bbbbbbbbbbbbbbbb'), []);
   assert.deepEqual(JSON.parse(await readFile(join(directory, 'provider-usage.json'), 'utf8')).providers, {});
   assert.deepEqual(await run({}, 'aaaaaaaaaaaaaaaa'), []); // saved before accounts were recorded
+});
+
+test('the signed-in account is shown only as a masked email and a plan', async t => {
+  assert.equal(maskEmail('karl@planetariumhq.com'), 'ka***@planetariumhq.com');
+  assert.equal(maskEmail('ab@x.io'), 'a***@x.io');
+  for (const value of ['', '@x.io', 'name@', 'a b@x.io', 3, undefined]) assert.equal(maskEmail(value), undefined);
+  assert.deepEqual(parseCodexAccount({ account: { type: 'apiKey' } }), { plan: 'api_key' });
+  assert.deepEqual(parseCodexAccount({ account: { type: 'chatgpt', email: null, planType: 'team' } }), { plan: 'team' });
+  assert.equal(parseCodexAccount({ account: { type: 'amazonBedrock', usesCodexManagedCredentials: true } }), undefined);
+  assert.equal(parseCodexAccount({ account: null, requiresOpenaiAuth: true }), undefined);
+  assert.equal(parseCodexAccount({ account: { type: 'chatgpt', email: 'x', planType: 'Not a plan!' } }), undefined);
+
+  const stored = await readClaudeCredential({ platform: 'linux', signal: signal(), readJson: async () => ({ claudeAiOauth: { ...credential.claudeAiOauth, subscriptionType: 'max' } }) });
+  assert.equal(stored.stored, true); assert.equal(stored.plan, 'max');
+  const explicit = await readClaudeCredential({ platform: 'linux', signal: signal(), env: { CLAUDE_CODE_OAUTH_TOKEN: 'explicit-oauth-token', CLAUDE_CODE_OAUTH_SCOPES: 'user:profile' }, readJson: async () => credential });
+  assert.equal(explicit.stored, undefined);
+
+  const directory = await mkdtemp(join(tmpdir(), 'tower-claude-profile-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  assert.equal(await readClaudeEmail({ CLAUDE_CONFIG_DIR: directory }), undefined);
+  await writeFile(join(directory, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'first.person@example.com', accountUuid: 'private-uuid' }, projects: {} }));
+  assert.equal(await readClaudeEmail({ CLAUDE_CONFIG_DIR: directory }), 'fi***@example.com');
+  await writeFile(join(directory, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'second.person@example.org' } }));
+  assert.equal(await readClaudeEmail({ CLAUDE_CONFIG_DIR: directory }), 'se***@example.org'); // a new /login shows at the next reading
+
+  const initial: ProviderHealth[] = [{ provider: 'claude', available: true, executable: '/bin/claude', sessionCount: 0 }];
+  const read = async (fromStorage: boolean) => {
+    const cache = new ProviderCapabilities(initial, { health: async () => initial, onChange: () => {}, env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' },
+      claudeCredential: async () => ({ token: 'fixture-token', account: 'aaaaaaaaaaaaaaaa', ...(fromStorage ? { stored: true, plan: 'max' } : {}) }),
+      claudeUsage: async () => ({ status: 'unavailable', windows: [], reason: 'no_data' }), claudeEmail: async () => 'ka***@example.com' });
+    await cache.refresh(); await cache.stop();
+    return cache.list()[0].account;
+  };
+  assert.deepEqual(await read(true), { email: 'ka***@example.com', plan: 'max' });
+  assert.equal(await read(false), undefined, 'an environment token may be another account than the stored profile');
 });

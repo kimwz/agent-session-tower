@@ -1,10 +1,15 @@
-import type { ProviderUsage, UsageWindow } from '../../../shared/types';
+import type { ProviderAccount, ProviderUsage, UsageWindow } from '../../../shared/types';
 import { translate as t } from '../i18n/i18n';
 
 export function usageWindows(usage?: ProviderUsage): UsageWindow[] {
   if (usage?.status !== 'available' && !usage?.stale) return [];
   return (usage?.windows || []).filter(window => Number.isFinite(window.usedPercent) && window.usedPercent >= 0)
     .sort((a, b) => (a.windowMinutes ?? Infinity) - (b.windowMinutes ?? Infinity));
+}
+/** `ka***@example.com · Max`; the server masks the email before it reaches the page. */
+export function accountLabel(account?: ProviderAccount): string | undefined {
+  const plan = account?.plan === 'api_key' ? t('API 키') : account?.plan?.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+  return [account?.email, plan].filter(Boolean).join(' · ') || undefined;
 }
 export function usageWindowLabel(window: UsageWindow): string {
   if (window.id === 'seven_day_sonnet') return t('주간 · Sonnet');
