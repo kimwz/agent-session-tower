@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { empty } from '../server/triggers/state.js';
+import { APP_VERSION } from '../shared/app-identity.js';
 import { performance } from 'node:perf_hooks';
 import { retentionBuild, protectedOld124, currentProductProfile } from '../tests/server/storage/fixtures/retention-build.js';
 import type { StorageClient } from '../server/storage/client.js';
@@ -35,7 +36,7 @@ async function activateCurrentSql(stateDir:string,label:string) {
     try {await writeFile(join(stateDir,name),JSON.stringify(value),{mode:0o600,flag:'wx'});}
     catch(error) {if((error as NodeJS.ErrnoException).code!=='EEXIST') throw error;}
   }
-  const final=await retentionBuild('1.125.0',join(root,`${label}-candidate`),true,true,true,await currentProductProfile());
+  const final=await retentionBuild(APP_VERSION,join(root,`${label}-candidate`),true,true,true,await currentProductProfile());
   const context=final.storage.storageBuildContext(final.bundle());if(!context.ok) throw new Error('Current SQL SDK held.');
   const hash=(bytes:Buffer)=>createHash('sha256').update(bytes).digest('hex');
   const entry=join(oldLegacy.packageRoot,'bin/agent-session-tower.mjs'),contract=join(oldLegacy.directory,'storage-contract.json');

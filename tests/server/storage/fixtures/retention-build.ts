@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { storageManifest } from '../../../../server/storage/schema.js';
+import { APP_VERSION } from '../../../../shared/app-identity.js';
 import { retentionSchema } from '../../../../server/sessions/retention/storage-schema.js';
 import { triggersSchema } from '../../../../server/triggers/storage-schema.js';
 import { permissionsSchema } from '../../../../server/permissions/storage-schema.js';
@@ -16,15 +17,17 @@ import { runsSchema } from '../../../../server/runs/storage-schema.js';
 import { buildIdentityModule, buildIdentityPlugin, STORAGE_BUNDLE_FORMAT, type StorageThreadArtifact } from '../../../../server/storage/thread-bundle.mjs';
 import type * as Parent from './parent.js';
 import { fixtureSchema } from './fixture-domain.js';
+/** The seven-domain artifact profile: 1.125.0 and every later release (the current product build included). */
+const finalRelease = (version: string) => { const [major, minor] = version.split('.').map(Number); return major > 1 || (major === 1 && minor >= 125); };
 export interface OfflineServiceFixture { installed:boolean; loadedAtCheck?:number; ownerAtCheck?:number; readFailure?:boolean; ownerReadFailure?:boolean; managerQueryFailure?:boolean }
 
 /** Actual A/B domain handlers and captured SDK compiled as future artifact versions; no mocked import support. */
-export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0' | '1.122.0' | '1.123.0' | '1.124.0' | '1.125.0' | '1.125.1', output?: string, retentionCutover = version === '1.121.0' || version === '1.123.0' || (version === '1.125.0' || version === '1.125.1'), includePermissions = false, externalDomains = false, product?: {artifact:StorageThreadArtifact;manifest:import('../../../../server/storage/contract.js').StorageBuildManifest;serviceFixture?:OfflineServiceFixture}, threadFaultDomain = false, defaultFault = 'normal') {
+export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0' | '1.122.0' | '1.123.0' | '1.124.0' | '1.125.0' | '1.125.1' | typeof APP_VERSION, output?: string, retentionCutover = version === '1.121.0' || version === '1.123.0' || finalRelease(version), includePermissions = false, externalDomains = false, product?: {artifact:StorageThreadArtifact;manifest:import('../../../../server/storage/contract.js').StorageBuildManifest;serviceFixture?:OfflineServiceFixture}, threadFaultDomain = false, defaultFault = 'normal') {
   const directory = output ?? await mkdtemp(join(tmpdir(), 'tower-retention-artifact-'));
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const root = fileURLToPath(new URL('../../../../', import.meta.url));
   const old = version === '1.120.0';
-  const triggersRelease = version === '1.124.0' || (version === '1.125.0' || version === '1.125.1');
+  const triggersRelease = version === '1.124.0' || finalRelease(version);
   const runsRelease = version === '1.122.0' || version === '1.123.0' || triggersRelease;
   const preparation = !runsRelease && version !== '1.121.0';
   const captureRoot = fileURLToPath(new URL(old ? './retention-a120/' : './retention-a1201/', import.meta.url));
@@ -116,10 +119,10 @@ export async function lockOwners() {
     if (!firstSql(capturedSchema) || firstSql(capturedSchema) !== firstSql(currentSchema)) throw new Error('Old A migration1 changed.');
   }
   const { cutover: _runsCutover, ...runsPreparation } = runsSchema;
-  const runProfile = version === '1.123.0' || (version === '1.125.0' || version === '1.125.1') ? { ...runsSchema,cutover: { artifactVersion: '1.123.0',importContract: 1 } } : runsPreparation;
+  const runProfile = version === '1.123.0' || finalRelease(version) ? { ...runsSchema,cutover: { artifactVersion: '1.123.0',importContract: 1 } } : runsPreparation;
   const { cutover: _triggerCutover, ...triggerPreparation } = triggersSchema;
-  const triggerProfile = (version === '1.125.0' || version === '1.125.1') ? triggersSchema : triggerPreparation;
-  if (externalDomains && version !== '1.125.0' && version !== '1.125.1') throw new Error('External fixture requires final artifact.');
+  const triggerProfile = finalRelease(version) ? triggersSchema : triggerPreparation;
+  if (externalDomains && !finalRelease(version)) throw new Error('External fixture requires final artifact.');
   const manifest = storageManifest(runsRelease ? [schema,runProfile,...(triggersRelease ? [triggerProfile] : []), ...(includePermissions ? [permissionsSchema] : []), ...(externalDomains ? [remoteSchema,autoPromptSchema,workflowsSchema] : []), ...(threadFaultDomain ? [fixtureSchema] : [])] : [schema],version);
   if (triggerACapture && manifest.digest !== triggerACapture.identity.manifestDigest) throw new Error('Actual A124 manifest mismatch.');
   if (actualACapture && manifest.digest !== actualACapture.identity.manifestDigest) throw new Error('Actual A122 manifest mismatch.');
@@ -137,10 +140,10 @@ import { remoteSchema } from './server/remote/storage-schema.js';
 import { autoPromptSchema } from './server/auto-prompt/storage-schema.js';
 import { workflowsSchema } from './server/slack/storage-schema.js';
 import { runsSchema } from './server/runs/storage-schema.js';
-const runsDomain = runsDomainFor(${version === '1.123.0' || (version === '1.125.0' || version === '1.125.1') ? `{ ...runsSchema,cutover: { artifactVersion: '1.123.0',importContract: 1 } }` : '{ ...runsSchema, cutover: undefined }'});` : ''}
+const runsDomain = runsDomainFor(${version === '1.123.0' || finalRelease(version) ? `{ ...runsSchema,cutover: { artifactVersion: '1.123.0',importContract: 1 } }` : '{ ...runsSchema, cutover: undefined }'});` : ''}
 ${triggersRelease ? `import { triggersDomainFor } from './server/triggers/storage-commands.js';
 import { triggersSchema } from './server/triggers/storage-schema.js';
-const triggersDomain = triggersDomainFor(${(version === '1.125.0' || version === '1.125.1') ? `{ ...triggersSchema,cutover: { artifactVersion: '1.125.0',importContract: 1 } }` : '{ ...triggersSchema,cutover: undefined }'});` : ''}
+const triggersDomain = triggersDomainFor(${finalRelease(version) ? `{ ...triggersSchema,cutover: { artifactVersion: '1.125.0',importContract: 1 } }` : '{ ...triggersSchema,cutover: undefined }'});` : ''}
 ${includePermissions ? `import { permissionsDomain } from './server/permissions/storage-commands.js';` : ''}
 ${externalDomains ? `import { remoteDomain } from './server/remote/storage-commands.js';
 import { autoPromptDomain } from './server/auto-prompt/storage-commands.js';
@@ -222,7 +225,7 @@ runStorageThread([domain${runsRelease ? ', runsDomain' : ''}${triggersRelease ? 
     artifacts.normal = actual;
   }
   if(product) {
-    if(version!=='1.125.0' || JSON.stringify(product.manifest)!==JSON.stringify(manifest)) throw new Error('Exact final product profile mismatch.');
+    if(version!==APP_VERSION || JSON.stringify(product.manifest)!==JSON.stringify(manifest)) throw new Error('Exact final product profile mismatch.');
     const artifact=product.artifact, first=`var __TOWER_STORAGE_SOURCE_HASH__ = "${artifact.sourceHash}";\n`;
     if(!artifact.source.startsWith(first) || createHash('sha256').update(artifact.source.slice(first.length)).digest('hex')!==artifact.sourceHash) throw new Error('Product source bytes mismatch.');
     artifacts.normal=artifact;

@@ -267,6 +267,7 @@ export class SecretRuntime {
     else if (action === 'lock') await service.lock();
     else if (action === 'password') await service.changePassword(password('currentPassword'), password('newPassword'));
     else if (action === 'import') { if (!this.options.importPending || typeof input.id !== 'string') throw fail('가져올 암호화 기록이 필요합니다.'); await this.options.importPending(input.id, password('password')); }
+    if (['create', 'update', 'remove', 'project', 'rule', 'attach', 'connect', 'revoke', 'end-task', 'trust', 'untrust'].includes(action) && service.status().locked) throw fail('시크릿 보관함이 잠겨 있습니다. 잠금을 해제한 뒤 다시 시도하세요.', 'locked');
     let target: SecretTarget | undefined; let currentProjectId: string | undefined;
     if (!service.status().locked && typeof input.sessionId === 'string') {
       const startsTask = ['create', 'attach', 'connect'].includes(action);
@@ -304,7 +305,9 @@ export class SecretRuntime {
       }
       await service.project(project);
     } else if (action === 'rule') {
-      const rule = z.object({ id: z.string().optional(), groupId: z.string(), secretIds: z.array(z.string()).max(4096), hostId: z.string(), projectId: z.string().optional(), activation: z.enum(['manual','auto']), operations: z.array(z.enum(SECRET_OPERATIONS)).min(1).max(6), fields: z.record(z.string(), z.array(z.string()).max(2048)).optional(), allProjects: z.boolean().optional(), root: z.string().optional(), maxTtlMs: z.number().int().positive().optional(), expiresAt: z.number().optional(), enabled: z.boolean() }).parse(input);
+      const parsed = z.object({ id: z.string().optional(), groupId: z.string(), secretIds: z.array(z.string()).max(4096), hostId: z.string(), projectId: z.string().optional(), activation: z.enum(['manual','auto']), operations: z.array(z.enum(SECRET_OPERATIONS)).min(1).max(6), fields: z.record(z.string(), z.array(z.string()).max(2048)).optional(), allProjects: z.boolean().optional(), root: z.string().optional(), maxTtlMs: z.number().int().positive().optional(), expiresAt: z.number().optional(), enabled: z.boolean() }).safeParse(input);
+      if (!parsed.success) throw fail(parsed.error.issues.some(issue => issue.path[0] === 'maxTtlMs') ? '작업 내 최대 사용 시간이 올바르지 않습니다.' : '공유 규칙 입력 형식이 올바르지 않습니다.');
+      const rule = parsed.data;
       if (rule.hostId !== service.device().id && !service.peers().some(peer => peer.enabled && peer.device.id === rule.hostId)) throw fail('승인한 시크릿 컴퓨터를 선택하세요.');
       // Remote grants have a finite deadline even if the page leaves it blank.
       if (rule.hostId !== service.device().id) rule.maxTtlMs ??= 8 * 60 * 60_000;

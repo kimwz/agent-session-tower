@@ -1,6 +1,7 @@
 import { randomUUID, randomBytes, generateKeyPairSync, createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
 import type { SecretContext, SecretCreateInput, SecretDevice, SecretGroup, SecretMetadata, SecretOperation, SecretOverview, SecretPeer, SecretProject, SecretRule, SecretTarget, SecretTask, VaultStatus } from '../../shared/secrets.js';
+import { TowerError } from '../../shared/errors.js';
 import { MAX_SECRET_BYTES, SECRET_OPERATIONS, DEFAULT_SECRET_USE_OPERATIONS } from '../../shared/secrets.js';
 import { SecretVault } from './vault.js';
 import { decode } from './crypto.js';
@@ -112,12 +113,35 @@ export class SecretService {
     secret.metadata.version++; secret.metadata.fields = fields ? Object.keys(fields) : undefined;
     secret.metadata.reference = `tower-secret://${this.vault.vaultId}/${secret.metadata.id}@${secret.metadata.version}`; return this.metadata(secret);
   }); }
-  async remove(id: string) { return this.mutate(() => { this.data().secrets = this.data().secrets.filter(secret => secret.metadata.id !== id); this.journal.secrets = this.journal.secrets.filter(secret => secret.metadata.id !== id); this.journal.grants = this.journal.grants.filter(grant => grant.secretId !== id); }); }
+  async remove(id: string) { return this.mutate(() => {
+    this.data().secrets = this.data().secrets.filter(secret => secret.metadata.id !== id); this.journal.secrets = this.journal.secrets.filter(secret => secret.metadata.id !== id); this.journal.grants = this.journal.grants.filter(grant => grant.secretId !== id);
+    this.pruneRules();
+  }); }
+  /** A rule never keeps naming a removed or expired key: the editor could not unselect it and every save would be refused. */
+  private pruneRules() {
+    const live = new Set(this.secrets().map(secret => secret.metadata.id));
+    const prune = (rules: SecretRule[]) => rules.flatMap(rule => {
+      if (rule.secretIds.every(id => live.has(id))) return [rule];
+      const secretIds = rule.secretIds.filter(id => live.has(id)); if (!secretIds.length) return [];
+      return [{ ...rule, secretIds, ...(rule.fields ? { fields: Object.fromEntries(Object.entries(rule.fields).filter(([id]) => live.has(id))) } : {}) }];
+    });
+    this.data().rules = prune(this.data().rules); this.journal.rules = prune(this.journal.rules);
+  }
   async setRule(input: Omit<SecretRule, 'id' | 'revision'> & { id?: string }): Promise<SecretRule> { return this.mutate(() => {
     const group = this.groups().find(group => group.id === input.groupId);
-    if (!group || !input.hostId || (input.root !== undefined && (!isAbsolute(input.root) || normalize(input.root) !== input.root)) || (input.allProjects && (group.scope !== 'global' || input.projectId !== undefined || input.root !== undefined)) || !['manual', 'auto'].includes(input.activation) || !input.operations.length || input.operations.some(operation => !SECRET_OPERATIONS.includes(operation)) || input.secretIds.some(id => !this.secrets().some(secret => secret.metadata.id === id && secret.metadata.groupId === group.id)) || (input.projectId && !this.data().projects.some(project => project.id === input.projectId)) || (group.scope === 'project' && group.projectId !== input.projectId) || (input.maxTtlMs !== undefined && (!Number.isSafeInteger(input.maxTtlMs) || input.maxTtlMs <= 0))) throw new Error('Invalid rule');
-    for (const id of Object.keys(input.fields ?? {})) { const secret = this.secrets().find(secret => secret.metadata.id === id); if (!input.secretIds.includes(id) || !secret) throw new Error('Invalid field selection'); this.selectedFields(secret, input); }
-    const existing = input.id ? this.allRules().find(rule => rule.id === input.id) : undefined; if (input.id && !existing) throw new Error('Unknown rule');
+    const invalid = (message: string) => new TowerError('invalid', message);
+    if (!group) throw invalid('공유 규칙의 그룹을 찾을 수 없습니다.');
+    if (!input.hostId) throw invalid('공유 규칙의 컴퓨터를 선택하세요.');
+    if (input.root !== undefined && (!isAbsolute(input.root) || normalize(input.root) !== input.root)) throw invalid('공유 규칙의 폴더는 절대 경로여야 합니다.');
+    if (input.allProjects && (group.scope !== 'global' || input.projectId !== undefined || input.root !== undefined)) throw invalid('모든 프로젝트 허용은 전역 그룹에서 프로젝트나 폴더 없이만 쓸 수 있습니다.');
+    if (!['manual', 'auto'].includes(input.activation)) throw invalid('공유 규칙의 연결 방식을 선택하세요.');
+    if (!input.operations.length || input.operations.some(operation => !SECRET_OPERATIONS.includes(operation))) throw invalid('공유 규칙의 권한을 하나 이상 선택하세요.');
+    if (!input.secretIds.length || input.secretIds.some(id => !this.secrets().some(secret => secret.metadata.id === id && secret.metadata.groupId === group.id))) throw invalid('공유할 키가 이 그룹에 없습니다. 키를 다시 선택하세요.');
+    if (input.projectId && !this.data().projects.some(project => project.id === input.projectId)) throw invalid('공유 규칙의 프로젝트를 찾을 수 없습니다.');
+    if (group.scope === 'project' && group.projectId !== input.projectId) throw invalid('프로젝트 그룹의 규칙은 그 그룹의 프로젝트에만 쓸 수 있습니다.');
+    if (input.maxTtlMs !== undefined && (!Number.isSafeInteger(input.maxTtlMs) || input.maxTtlMs <= 0)) throw invalid('작업 내 최대 사용 시간이 올바르지 않습니다.');
+    for (const id of Object.keys(input.fields ?? {})) { const secret = this.secrets().find(secret => secret.metadata.id === id); if (!input.secretIds.includes(id) || !secret) throw invalid('선택한 필드가 공유할 키에 없습니다.'); try { this.selectedFields(secret, input); } catch { throw invalid('선택한 필드가 키에 없거나 중복됩니다. 필드를 다시 선택하세요.'); } }
+    const existing = input.id ? this.allRules().find(rule => rule.id === input.id) : undefined; if (input.id && !existing) throw new TowerError('not-found', '수정할 공유 규칙을 찾을 수 없습니다. 화면을 새로고침하세요.');
     const rule: SecretRule = { ...structuredClone(input), id: input.id ?? randomUUID(), revision: (existing?.revision ?? 0) + 1 }; this.data().rules = this.data().rules.filter(item => item.id !== rule.id); this.journal.rules = this.journal.rules.filter(item => item.id !== rule.id); (group.scope === 'task' ? this.journal.rules : this.data().rules).push(rule); return structuredClone(rule);
   }); }
   currentTask(sessionId: string, root?: string, hostId = this.device().id): SecretTarget | undefined {
@@ -163,6 +187,7 @@ export class SecretService {
     this.data().secrets = this.data().secrets.filter(secret => !expired.includes(secret.metadata.id));
     this.journal.secrets = this.journal.secrets.filter(secret => !expired.includes(secret.metadata.id));
     this.journal.grants = this.journal.grants.filter(grant => !expired.includes(grant.secretId));
+    this.pruneRules();
     for (const [id, operation] of Object.entries(this.journal.operations)) {
       const remote = operation.remote === true;
       if (remote ? operation.claimedAt !== undefined && operation.claimedAt + 60_000 < this.now() : !liveRuns.has(operation.runId)) delete this.journal.operations[id];
