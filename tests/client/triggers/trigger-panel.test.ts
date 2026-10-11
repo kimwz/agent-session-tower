@@ -6,7 +6,7 @@ import { blankGitHubSource, blankHttpSource, blankTrigger, eventStatusLabel, sch
 import { setLanguage, translate } from '../../../client/src/i18n/i18n.js';
 import { TriggerTypePicker } from '../../../client/src/triggers/TriggerKinds.js';
 import { blankIssueWatch, switchedWatch, triggerAttention, triggerProblems } from '../../../client/src/triggers/trigger-helpers.js';
-import { keepCurrent, readSeenProblems, unwritten, withSeen } from '../../../client/src/triggers/seen-trigger-problems.js';
+import { keepCurrent, readSeenProblems, withSeen } from '../../../client/src/triggers/seen-trigger-problems.js';
 import { TriggerInputSchema } from '../../../shared/triggers.js';
 
 test('a new scheduled run from the panel is exactly what the server accepts once named and instructed', () => {
@@ -76,9 +76,6 @@ test('an error that went away and comes back with the same text asks again', () 
   assert.equal(triggerAttention(failing, seen), true);
   // Seeing adds to what another tab saw; nothing gone leaves the same list.
   assert.deepEqual(withSeen(['event:x'], ['event:y', 'event:x']), ['event:x', 'event:y']);
-  // A tab still showing the old error does not write it back once another tab saw it go away.
-  assert.deepEqual(unwritten(['error:a:HTTP 503'], new Set(['error:a:HTTP 503'])), []);
-  assert.deepEqual(unwritten(['error:a:HTTP 503', 'event:z'], new Set(['error:a:HTTP 503'])), ['event:z']);
   const same = ['event:x'];
   assert.equal(keepCurrent(same, ['event:x', 'event:y']), same);
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 // Storage keys keep the project's first name so saved user state survives the rename (shared/app-identity.ts LEGACY_APP_NAME).
 const SEEN_PROBLEMS = 'agent-monitor.seen-trigger-problems';
@@ -18,14 +18,6 @@ export function readSeenProblems(value: string | null): string[] {
 export function keepCurrent(seen: string[], current: readonly string[]): string[] {
   const kept = seen.filter(problem => current.includes(problem));
   return kept.length === seen.length ? seen : kept;
-}
-
-/**
- * The problems a page newly sees: those it never wrote before. A page whose overview is behind would otherwise write
- * back a problem another tab already saw go away, and the same problem coming back would not ask again.
- */
-export function unwritten(problems: readonly string[], written: ReadonlySet<string>): string[] {
-  return problems.filter(problem => !written.has(problem));
 }
 
 /** Seeing `problems` adds them to what this browser has seen, so another tab's own seen problems are kept. */
@@ -52,16 +44,13 @@ export function useSeenTriggerProblems() {
     try { localStorage.setItem(SEEN_PROBLEMS, JSON.stringify(next)); } catch { /* Shown again next time. */ }
     setSeen(next);
   }, []);
-  const written = useRef(new Set<string>());
+  // Writes only what is new, so another tab's write never makes this one write again.
   const acknowledge = useCallback((problems: string[]) => {
-    const fresh = unwritten(problems, written.current);
-    if (!fresh.length) return;
-    for (const problem of fresh) written.current.add(problem);
-    store(withSeen(storedProblems(), fresh));
+    const stored = storedProblems();
+    const next = withSeen(stored, problems);
+    if (next.length > stored.length) store(next);
   }, [store]);
   const forgetGone = useCallback((current: string[]) => {
-    // Gone from this page's own overview, a problem can come back and be seen again here.
-    written.current = new Set(keepCurrent([...written.current], current));
     const stored = storedProblems();
     const kept = keepCurrent(stored, current);
     if (kept !== stored) store(kept);

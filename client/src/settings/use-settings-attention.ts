@@ -44,9 +44,10 @@ export function useSettingsAttention(token: string, triggers: TriggerOverview | 
   // Only this page's own overview forgets problems that went away; another tab's write is taken as it is.
   const { forgetGone } = seenTriggers;
   useEffect(() => { if (triggers) forgetGone(triggerProblems(triggers)); }, [triggers, forgetGone]);
-  // Seeing the triggers needs their overview; before it arrives there is nothing to remember. Problems seen already
-  // are not written again on every overview the triggers' panel shows.
-  const acknowledgeTriggers = useCallback(() => { if (attention.triggers && triggers) seenTriggers.acknowledge(triggerProblems(triggers)); },
-    [attention.triggers, triggers, seenTriggers.acknowledge]);
+  // Seeing the triggers needs their overview; before it arrives there is nothing to remember. It changes only with this
+  // page's overview, not with what another tab saw: a tab whose overview is behind must not write back a problem
+  // another tab saw go away, or the same problem coming back would not ask again.
+  const { acknowledge } = seenTriggers;
+  const acknowledgeTriggers = useCallback(() => { if (triggers) acknowledge(triggerProblems(triggers)); }, [triggers, acknowledge]);
   return { attention, refresh, join, acknowledgeTriggers };
 }
