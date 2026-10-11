@@ -152,7 +152,7 @@ The command finds the Tower running for the state directory (`--state-dir` to pi
 
 The machine node shows separate usage indicators for the Claude Code and Codex accounts connected on that machine. Percentages represent **used capacity**, not remaining capacity. These are account-wide limits, so activity on other devices can count toward them.
 
-Hover, focus, or select an indicator to see the available usage windows, such as five hours and one week, and their reset times. Not every provider, plan, or authentication method supplies the same windows. Missing data is shown as unavailable, and older data is marked stale instead of being displayed as a fresh zero.
+Hover, focus, or select an indicator to see the available usage windows, such as five hours and one week, and their reset times. Not every provider, plan, or authentication method supplies the same windows. Missing data is shown as unavailable, and older data is marked stale instead of being displayed as a fresh zero. When you sign in to Claude Code with another account, the Claude indicator follows the new account at the next refresh, normally within a minute; an earlier account's usage is never kept as stale data for it. Tower reads the account Claude Code uses in Tower's own environment, so a shell signed in through a different `CLAUDE_CONFIG_DIR` does not change it.
 
 ## Model selection
 
