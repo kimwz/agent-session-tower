@@ -24,7 +24,9 @@ export type TriggerTargets = (node: string) => { projects: [string, string][]; s
 /** What the triggers tab shows: the list, the kind picker for a new trigger, or the editor. */
 type View = { page: 'list' } | { page: 'pick' } | { page: 'edit'; kind: SourceKind; trigger?: Trigger };
 
-export function TriggerPanel({ token, overview: ownOverview, providers: ownProviders, projects: ownProjects, computers = [], targets, onOpenSlack, onOpenPublic }: Context & { overview?: TriggerOverview; computers?: TriggerComputer[]; targets?: TriggerTargets; onOpenSlack: () => void; onOpenPublic?: () => void }) {
+export function TriggerPanel({ token, overview: ownOverview, providers: ownProviders, projects: ownProjects, computers = [], targets, onOpenSlack, onOpenPublic, onSeen }: Context & { overview?: TriggerOverview; computers?: TriggerComputer[]; targets?: TriggerTargets; onOpenSlack: () => void; onOpenPublic?: () => void;
+  /** Called while this computer's triggers show, which is the owner seeing their problems. */
+  onSeen?: () => void }) {
   const { t } = useI18n();
   const [tab, setTab] = useState<Tab>('triggers');
   const [triggers, setTriggers] = useState<Trigger[] | null>(null);
@@ -63,6 +65,7 @@ export function TriggerPanel({ token, overview: ownOverview, providers: ownProvi
   useEffect(() => { void refresh(); }, [refresh, target ? '' : revisions]);
   // Another computer's triggers are not on this page's live stream; they are asked for again while shown.
   const { active } = useContext(SettingsFrameContext);
+  useEffect(() => { if (active && !node) onSeen?.(); }, [active, node, onSeen]);
   useEffect(() => {
     if (!target || away || !active) return;
     void refresh();

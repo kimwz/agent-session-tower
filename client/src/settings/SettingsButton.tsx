@@ -19,7 +19,7 @@ export function SettingsButton({ context, joined }: { context: SettingsContext; 
   const auth = useAuth();
   const phone = useMediaQuery('(max-width: 680px)');
   const { token } = context;
-  const { attention, refresh, join } = useSettingsAttention(token, context.triggers, joined);
+  const { attention, refresh, join, acknowledgeTriggers } = useSettingsAttention(token, context.triggers, joined);
   const [place, setPlace] = useState<SettingsPlace | null>(null);
   const last = useRef<SettingsSection | undefined>(undefined);
   const sections = useMemo(() => settingsSections(Boolean(auth)), [auth]);
@@ -54,6 +54,6 @@ export function SettingsButton({ context, joined }: { context: SettingsContext; 
       {mark?.count ? <span className={`settings-mark ${mark.urgent ? 'urgent' : ''}`} aria-hidden="true">{markText(mark.count)}</span> : mark?.dot ? <i className="settings-dot" aria-hidden="true" /> : null}
     </button>
     {join.notice && !place && <ControllerJoinNotice notice={join.notice} onDismiss={join.acknowledge} onShow={() => { join.acknowledge(); open('remote', { remoteTab: 'controllers' }); }} />}
-    {place && <SettingsDialog place={place} sections={sections} attention={attention} context={context} onPlace={setPlace} onChanged={refresh} onClose={close} />}
+    {place && <SettingsDialog place={place} sections={sections} attention={attention} context={context} onPlace={setPlace} onChanged={refresh} onClose={close} onTriggersSeen={acknowledgeTriggers} />}
   </div>;
 }

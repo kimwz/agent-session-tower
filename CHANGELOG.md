@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.127.0] - 2026-10-11
+
+- 설정 버튼과 설정의 트리거 메뉴에 붙는 노란 점이 트리거 문제를 확인한 뒤에는 사라집니다. 이 컴퓨터의 트리거 창을 열면 지금 보이는 문제(자동 정지, 트리거 오류, 실패·확인 불가 실행, 저장소 오류)를 본 것으로 이 브라우저에 기억하고, 새로고침 후에도 유지됩니다. 새 오류·확인 불가 실행이나 새 자동 정지가 생기면 다시 표시됩니다. 소유자가 보관한 트리거는 점을 만들지 않습니다(실행 후 자동 보관되는 일회성 예약의 실패는 표시합니다). 오류가 사라졌다가 같은 문구로 다시 생겨도 다시 표시됩니다.
+
 ## [1.126.1] - 2026-10-11
 
 - 마스터 heartbeat 점검이 "조치 필요 없음" 응답을 `Invalid heartbeat noop.` 오류로 실패하던 문제를 고쳤습니다. 모델 지침에 no-op 형태를 명시하고, no-op에 붙은 작업·근거·권고는 효과가 없으므로 버리고 정상 점검으로 기록합니다. 조치(action)의 대상·근거 검증은 그대로입니다.
