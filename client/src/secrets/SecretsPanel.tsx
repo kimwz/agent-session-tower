@@ -10,6 +10,7 @@ import { SecretRegistration, scopeLabels, operationLabels } from './SecretRegist
 import { SecretProjectEditor, SecretRuleEditor, SecretTrustEditor, type SecretComputer } from './SecretManagement';
 import { SecretQuickConnect } from './SecretQuickConnect';
 import { openSettings } from '../settings/settings-open';
+import { ApiError } from '../common/lib';
 import { changeSecrets, isRemoteSecret, localSecretOverview, readSecrets, secretSession } from './secrets-client';
 
 function useSecrets(token: string, active: boolean, sessionId?: string, cwd?: string) {
@@ -30,7 +31,7 @@ function useSecrets(token: string, active: boolean, sessionId?: string, cwd?: st
       const next = await changeSecrets(action, token, { ...body as Record<string, unknown>, ...secretSession(sessionId) });
       if (current === generation.current) { setOverview(next); setLoadError(''); return true; }
       return false;
-    } catch { if (current === generation.current) setError(t('시크릿 요청을 완료하지 못했습니다. 잠금 상태와 입력을 확인하세요.')); return false; }
+    } catch (failure) { if (current === generation.current) setError(secretFailure(failure, t)); return false; }
     finally { if (current === generation.current) { mutating.current = false; setBusy(false); } }
   }, [active, token, sessionId, cwd, t]);
   return { overview, busy, error: error || loadError, change, reload: () => { setError(''); setRevision(value => value + 1); } };
@@ -47,6 +48,12 @@ function useComposerSecrets() {
   return state;
 }
 
+/** The server names why it refused (a locked Vault, which rule field); anything else keeps the generic hint. */
+function secretFailure(failure: unknown, t: (key: string) => string): string {
+  if (failure instanceof ApiError && failure.status === 423) return t('시크릿 보관함이 잠겨 있습니다. 잠금을 해제한 뒤 다시 시도하세요.');
+  if (failure instanceof ApiError && failure.status >= 400 && failure.status < 500 && failure.status !== 401 && failure.message) return t(failure.message);
+  return t('시크릿 요청을 완료하지 못했습니다. 잠금 상태와 입력을 확인하세요.');
+}
 type Editor = { type: 'register' | 'password' | 'trust' | 'import' } | { type: 'rule'; rule?: SecretRule } | { type: 'project'; project?: SecretProject } | { type: 'update'; secret: SecretMetadata };
 export function SecretWorkspace({ overview, token, sessionId, busy, change, computers = [] }: { overview: SecretOverview; token: string; sessionId?: string; busy: boolean; change: SecretChange; computers?: SecretComputer[] }) {
   const { t } = useI18n(); const [editor, setEditor] = useState<Editor>(); const [selected, setSelected] = useState<string[]>([]); const [remove, setRemove] = useState<string>(); const [ending, setEnding] = useState(false);

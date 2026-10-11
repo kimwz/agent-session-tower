@@ -9,14 +9,15 @@ import type { SecretChange } from './SecretAccess';
 export function SecretRuleEditor({ overview, rule, busy, change, onClose }: { overview: SecretOverview; rule?: SecretRule; busy: boolean; change: SecretChange; onClose: () => void }) {
   const { t } = useI18n();
   const [groupId, setGroup] = useState(rule?.groupId || overview.groups[0]?.id || '');
-  const [secretIds, setIds] = useState(rule?.secretIds || []);
+  // Keys and fields removed since the rule was saved are dropped, or the rule could never be saved unchanged.
+  const [secretIds, setIds] = useState(() => (rule?.secretIds || []).filter(id => overview.secrets.some(secret => secret.id === id && secret.groupId === rule?.groupId)));
   const [hostId, setHost] = useState(rule?.hostId || overview.device?.id || '');
   const [projectId, setProject] = useState(rule?.projectId || overview.groups.find(group => group.id === (rule?.groupId || overview.groups[0]?.id))?.projectId || '');
   const [root, setRoot] = useState(rule?.root || '');
   const [allProjects, setAllProjects] = useState(rule?.allProjects ?? false);
   const [activation, setActivation] = useState(rule?.activation || 'auto');
   const [operations, setOperations] = useState(rule?.operations || [...DEFAULT_SECRET_USE_OPERATIONS]);
-  const [fields, setFields] = useState<Record<string, string[]>>(rule?.fields || {});
+  const [fields, setFields] = useState<Record<string, string[]>>(() => Object.fromEntries(Object.entries(rule?.fields || {}).filter(([id]) => secretIds.includes(id)).map(([id, names]) => [id, names.filter(name => overview.secrets.find(secret => secret.id === id)?.fields?.includes(name))])));
   const [enabled, setEnabled] = useState(rule?.enabled ?? true);
   const [ttl, setTtl] = useState(rule?.maxTtlMs ? String(rule.maxTtlMs / 60_000) : '');
   const [expires, setExpires] = useState(rule?.expiresAt ? new Date(rule.expiresAt - new Date(rule.expiresAt).getTimezoneOffset() * 60_000).toISOString().slice(0, 16) : '');
@@ -24,8 +25,10 @@ export function SecretRuleEditor({ overview, rule, busy, change, onClose }: { ov
   const keys = overview.secrets.filter(secret => secret.groupId === groupId);
   return <form className="secret-form" onSubmit={async event => {
     event.preventDefault(); event.stopPropagation();
-    if (await change('rule', { ...(rule ? { id: rule.id } : {}), groupId, secretIds, hostId, ...(projectId && !allProjects ? { projectId } : {}), ...(group?.scope === 'global' && allProjects ? { allProjects: true } : {}), ...(!projectId && !allProjects && root ? { root } : {}), activation, operations, fields, enabled,
-      ...(ttl ? { maxTtlMs: Number(ttl) * 60_000 } : {}), ...(expires ? { expiresAt: Date.parse(expires) } : {}) })) onClose();
+    // A project group's rule always names that group's project.
+    const ruleProject = group?.scope === 'project' ? group.projectId : projectId;
+    if (await change('rule', { ...(rule ? { id: rule.id } : {}), groupId, secretIds, hostId, ...(ruleProject && !allProjects ? { projectId: ruleProject } : {}), ...(group?.scope === 'global' && allProjects ? { allProjects: true } : {}), ...(!ruleProject && !allProjects && root ? { root } : {}), activation, operations, fields, enabled,
+      ...(ttl ? { maxTtlMs: Math.round(Number(ttl) * 60_000) } : {}), ...(expires ? { expiresAt: Date.parse(expires) } : {}) })) onClose();
   }}><h3>{t('공유 규칙')}</h3>
     <label>{t('그룹')}<select autoFocus value={groupId} disabled={busy} required onChange={event => { setGroup(event.target.value); setIds([]); setFields({}); setAllProjects(false); setRoot(''); setProject(overview.groups.find(group => group.id === event.target.value)?.projectId || ''); }}>{overview.groups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
     <fieldset className="secret-choices" disabled={busy}><legend>{t('공유할 키')}</legend>{keys.map(secret => <div key={secret.id}>
@@ -40,7 +43,7 @@ export function SecretRuleEditor({ overview, rule, busy, change, onClose }: { ov
     <label>{t('연결 방식')}<select value={activation} disabled={busy} onChange={event => setActivation(event.target.value as SecretRule['activation'])}><option value="manual">{t('세션마다 직접 연결')}</option><option value="auto">{t('프로젝트 세션에서 항상 사용')}</option></select></label>
     <details className="secret-advanced"><summary>{t('고급 권한 및 만료')}</summary>
     <SecretOperations value={operations} onChange={setOperations} disabled={busy} />
-    <label>{t('작업 내 최대 사용 시간 (분)')}<input type="number" min="1" value={ttl} disabled={busy} onChange={event => setTtl(event.target.value)} /></label>
+    <label>{t('작업 내 최대 사용 시간 (분)')}<input type="number" min="1" step="any" value={ttl} disabled={busy} onChange={event => setTtl(event.target.value)} /></label>
     <label>{t('만료 시각')}<input type="datetime-local" value={expires} disabled={busy} onChange={event => setExpires(event.target.value)} /></label>
     <label className="secret-check"><input type="checkbox" checked={enabled} disabled={busy} onChange={event => setEnabled(event.target.checked)} />{t('규칙 활성화')}</label>
     </details>
