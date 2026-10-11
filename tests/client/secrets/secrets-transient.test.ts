@@ -218,13 +218,13 @@ test('editing an existing global rule preserves its exact root fallback and does
 test('editing a rule whose key or field was removed saves only what still exists, with a whole-millisecond TTL', async () => {
   const overview = { status: { initialized: true, locked: false }, device: { id: 'source', name: 'Source' }, peers: [], projects: [{ id: 'project', name: 'App', bindings: [] }],
     groups: [{ id: 'group', name: 'app', scope: 'project', projectId: 'project' }], secrets: [{ id: 'kept', groupId: 'group', name: 'ENV', kind: 'env', fields: ['A'] }], rules: [], connected: [] };
-  const rule = { id: 'rule', groupId: 'group', hostId: 'source', secretIds: ['kept', 'removed'], fields: { kept: ['A', 'GONE'], removed: ['B'] }, operations: ['env'], activation: 'auto', root: '/app', maxTtlMs: 90_000, enabled: true, revision: 3 };
+  const rule = { id: 'rule', groupId: 'group', hostId: 'source', secretIds: ['kept', 'removed'], fields: { kept: ['A', 'GONE'], removed: ['B'] }, operations: ['env'], activation: 'auto', root: '/app', maxTtlMs: 130_000, enabled: true, revision: 3 };
   const fixture = componentFixture('SecretRuleEditor', 'SecretManagement.tsx', { overview, rule });
   const root = fixture.render();
   const pending = root.props.onSubmit(formEvent); const body = readPayload(fixture);
   assert.deepEqual(body.secretIds, ['kept']); assert.deepEqual(body.fields, { kept: ['A'] });
   assert.equal(body.projectId, 'project', 'a project group rule names its group project'); assert.equal(body.root, undefined);
-  assert.equal(body.maxTtlMs, 90_000);
+  assert.equal(body.maxTtlMs, 130_000);
   fixture.complete(true); await pending; fixture.cleanup();
 });
 

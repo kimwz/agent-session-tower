@@ -267,7 +267,7 @@ export class SecretRuntime {
     else if (action === 'lock') await service.lock();
     else if (action === 'password') await service.changePassword(password('currentPassword'), password('newPassword'));
     else if (action === 'import') { if (!this.options.importPending || typeof input.id !== 'string') throw fail('가져올 암호화 기록이 필요합니다.'); await this.options.importPending(input.id, password('password')); }
-    if (['create', 'update', 'remove', 'project', 'rule', 'trust', 'untrust'].includes(action) && service.status().locked) throw fail('시크릿 보관함이 잠겨 있습니다. 잠금을 해제한 뒤 다시 시도하세요.', 'locked');
+    if (['create', 'update', 'remove', 'project', 'rule', 'attach', 'connect', 'revoke', 'end-task', 'trust', 'untrust'].includes(action) && service.status().locked) throw fail('시크릿 보관함이 잠겨 있습니다. 잠금을 해제한 뒤 다시 시도하세요.', 'locked');
     let target: SecretTarget | undefined; let currentProjectId: string | undefined;
     if (!service.status().locked && typeof input.sessionId === 'string') {
       const startsTask = ['create', 'attach', 'connect'].includes(action);

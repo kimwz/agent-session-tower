@@ -115,10 +115,18 @@ export class SecretService {
   }); }
   async remove(id: string) { return this.mutate(() => {
     this.data().secrets = this.data().secrets.filter(secret => secret.metadata.id !== id); this.journal.secrets = this.journal.secrets.filter(secret => secret.metadata.id !== id); this.journal.grants = this.journal.grants.filter(grant => grant.secretId !== id);
-    // A rule never keeps naming a removed key: the editor could not unselect it and every save would be refused.
-    const prune = (rules: SecretRule[]) => rules.flatMap(rule => { if (!rule.secretIds.includes(id)) return [rule]; const secretIds = rule.secretIds.filter(item => item !== id); if (!secretIds.length) return []; const { [id]: _removed, ...fields } = rule.fields ?? {}; return [{ ...rule, secretIds, ...(rule.fields ? { fields } : {}) }]; });
-    this.data().rules = prune(this.data().rules); this.journal.rules = prune(this.journal.rules);
+    this.pruneRules();
   }); }
+  /** A rule never keeps naming a removed or expired key: the editor could not unselect it and every save would be refused. */
+  private pruneRules() {
+    const live = new Set(this.secrets().map(secret => secret.metadata.id));
+    const prune = (rules: SecretRule[]) => rules.flatMap(rule => {
+      if (rule.secretIds.every(id => live.has(id))) return [rule];
+      const secretIds = rule.secretIds.filter(id => live.has(id)); if (!secretIds.length) return [];
+      return [{ ...rule, secretIds, ...(rule.fields ? { fields: Object.fromEntries(Object.entries(rule.fields).filter(([id]) => live.has(id))) } : {}) }];
+    });
+    this.data().rules = prune(this.data().rules); this.journal.rules = prune(this.journal.rules);
+  }
   async setRule(input: Omit<SecretRule, 'id' | 'revision'> & { id?: string }): Promise<SecretRule> { return this.mutate(() => {
     const group = this.groups().find(group => group.id === input.groupId);
     const invalid = (message: string) => new TowerError('invalid', message);
@@ -179,6 +187,7 @@ export class SecretService {
     this.data().secrets = this.data().secrets.filter(secret => !expired.includes(secret.metadata.id));
     this.journal.secrets = this.journal.secrets.filter(secret => !expired.includes(secret.metadata.id));
     this.journal.grants = this.journal.grants.filter(grant => !expired.includes(grant.secretId));
+    this.pruneRules();
     for (const [id, operation] of Object.entries(this.journal.operations)) {
       const remote = operation.remote === true;
       if (remote ? operation.claimedAt !== undefined && operation.claimedAt + 60_000 < this.now() : !liveRuns.has(operation.runId)) delete this.journal.operations[id];

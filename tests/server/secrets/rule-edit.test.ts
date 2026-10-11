@@ -9,10 +9,10 @@ import { SecretRuntime } from '../../../server/secrets/runtime.js';
 
 const password = 'fixture-rule-edit-password-1234';
 
-async function vault(t: { after: (fn: () => Promise<void>) => void }) {
+async function vault(t: { after: (fn: () => Promise<void>) => void }, now = () => Date.now()) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-secret-rule-edit-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const service = new SecretService({ stateDir: directory }); await service.start(); await service.initialize(password);
+  const service = new SecretService({ stateDir: directory, now }); await service.start(); await service.initialize(password);
   const hostId = service.device().id; const project = await service.project({ name: 'fixture', bindings: [{ hostId, root: '/fixture' }] });
   return { directory, service, hostId, project };
 }
@@ -39,12 +39,25 @@ test('removing a key drops it from every rule, so the rule still saves unchanged
   assert.equal(saved.revision, rule.revision + 1);
 });
 
+test('an expired key leaves its rules at the next sweep, so a rule that named only removed keys stops lingering', async t => {
+  let now = Date.now(); const { service, hostId, project } = await vault(t, () => now);
+  const kept = await service.create({ name: 'kept', kind: 'scalar', scope: 'project', projectId: project.id, value: 'k' });
+  const expiring = await service.create({ name: 'expiring', kind: 'scalar', scope: 'project', projectId: project.id, groupId: kept.groupId, value: 'e', expiresAt: now + 1000 });
+  const shared = await service.setRule({ groupId: kept.groupId, secretIds: [kept.id, expiring.id], hostId, projectId: project.id, activation: 'manual', operations: ['env'], enabled: true });
+  const only = await service.setRule({ groupId: kept.groupId, secretIds: [expiring.id], hostId, projectId: project.id, activation: 'manual', operations: ['env'], enabled: true });
+  now += 2000; await service.sweep(new Set());
+  const rules = service.overview().rules;
+  assert.deepEqual(rules.find(rule => rule.id === shared.id)?.secretIds, [kept.id]);
+  assert.equal(rules.some(rule => rule.id === only.id), false);
+});
+
 test('a refused rule says which field is wrong', async t => {
   const { service, hostId, project } = await vault(t);
   const secret = await service.create({ name: 'token', kind: 'env', scope: 'project', projectId: project.id, value: 'A=1' });
   const other = await service.project({ name: 'other', bindings: [{ hostId, root: '/other' }] });
   const base = { groupId: secret.groupId, secretIds: [secret.id], hostId, projectId: project.id, activation: 'manual' as const, operations: ['env' as const], enabled: true };
   await refusal(service.setRule({ ...base, secretIds: ['gone'] }), 'invalid', '공유할 키가 이 그룹에 없습니다. 키를 다시 선택하세요.');
+  await refusal(service.setRule({ ...base, secretIds: [] }), 'invalid', '공유할 키가 이 그룹에 없습니다. 키를 다시 선택하세요.');
   await refusal(service.setRule({ ...base, maxTtlMs: 1.5 * 60_000 + 0.5 }), 'invalid', '작업 내 최대 사용 시간이 올바르지 않습니다.');
   await refusal(service.setRule({ ...base, projectId: other.id }), 'invalid', '프로젝트 그룹의 규칙은 그 그룹의 프로젝트에만 쓸 수 있습니다.');
   await refusal(service.setRule({ ...base, fields: { [secret.id]: ['MISSING'] } }), 'invalid', '선택한 필드가 키에 없거나 중복됩니다. 필드를 다시 선택하세요.');
