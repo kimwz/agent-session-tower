@@ -10,6 +10,7 @@ const now = Date.parse('2026-09-15T00:00:00Z');
 const reset = '2026-09-16T00:00:00.000Z';
 const signal = () => new AbortController().signal;
 const credential = { claudeAiOauth: { accessToken: 'private-access-token', refreshToken: 'private-refresh-token', scopes: ['user:profile'], expiresAt: Date.now() + 3600000 } };
+const signedIn = (account = 'aaaaaaaaaaaaaaaa') => async () => ({ token: 'fixture-token', account });
 
 test('quota parsers whitelist real windows and never infer primary means five hours', () => {
   const usage = parseCodexUsage({ accountId: 'private-account', rateLimits: { primary: { usedPercent: 30, windowDurationMins: 300 } },
@@ -57,14 +58,25 @@ test('Claude credential roots match native explicit storage override and keychai
   assert.deepEqual(await readClaudeCredential({ platform: 'darwin', signal: signal(), keychain: async () => '{}', readJson: async () => { reads++; return credential; } }), { reason: 'not_signed_in' });
   assert.equal(reads, 0);
   const found = await readClaudeCredential({ env: { CLAUDE_CONFIG_DIR: '/custom/claude' }, platform: 'linux', signal: signal(), readJson: async path => { assert.equal(path, '/custom/claude/.credentials.json'); return credential; } });
-  assert.equal(found.token, 'private-access-token');
+  assert.equal(found.token, 'private-access-token'); assert.match(found.account!, /^[a-f0-9]{16}$/);
+});
+
+test('the Claude account fingerprint tells sign-ins apart without revealing their tokens', async () => {
+  const read = (oauth: object) => readClaudeCredential({ platform: 'linux', signal: signal(), readJson: async () => ({ claudeAiOauth: { ...credential.claudeAiOauth, ...oauth } }) });
+  const first = await read({});
+  assert.equal((await read({ accessToken: 'refreshed-access-token' })).account, first.account); // a new access token of the same sign-in
+  const other = await read({ accessToken: 'other-access-token', refreshToken: 'other-refresh-token' });
+  assert.notEqual(other.account, first.account);
+  const expired = await read({ accessToken: 'other-access-token', refreshToken: 'other-refresh-token', expiresAt: 1 });
+  assert.deepEqual(expired, { reason: 'not_signed_in', account: other.account }); // an expired new sign-in is still told apart
+  assert.doesNotMatch(JSON.stringify([first, other, expired].map(item => item.account)), /private|other|token/);
 });
 
 test('missing, malformed and expired credentials yield safe reasons without auth refresh', async () => {
   const read = (value: unknown) => readClaudeCredential({ platform: 'linux', signal: signal(), readJson: async () => value });
   assert.deepEqual(await read({}), { reason: 'not_signed_in' });
-  assert.deepEqual(await read({ claudeAiOauth: { ...credential.claudeAiOauth, expiresAt: 1 } }), { reason: 'not_signed_in' });
-  assert.deepEqual(await read({ claudeAiOauth: { ...credential.claudeAiOauth, scopes: [] } }), { reason: 'not_supported' });
+  assert.equal((await read({ claudeAiOauth: { ...credential.claudeAiOauth, expiresAt: 1 } })).reason, 'not_signed_in');
+  assert.equal((await read({ claudeAiOauth: { ...credential.claudeAiOauth, scopes: [] } })).reason, 'not_supported');
   assert.deepEqual(await readClaudeCredential({ platform: 'linux', signal: signal(), readJson: async () => { throw Object.assign(new Error('secret path'), { code: 'ENOENT' }); } }), { reason: 'not_signed_in' });
   assert.deepEqual(await readClaudeCredential({ platform: 'darwin', signal: signal(), keychain: async () => '{private-bad-json', readJson: async () => credential }), { reason: 'credentials_unavailable' });
 });
@@ -72,7 +84,7 @@ test('missing, malformed and expired credentials yield safe reasons without auth
 test('explicit Claude auth does not display quota from a different stored account', async () => {
   let reads = 0;
   const options = { platform: 'linux', signal: signal(), readJson: async () => { reads++; return credential; } };
-  assert.deepEqual(await readClaudeCredential({ ...options, env: { CLAUDE_CODE_OAUTH_TOKEN: 'explicit-oauth-token', CLAUDE_CODE_OAUTH_SCOPES: 'user:profile user:inference' } }), { token: 'explicit-oauth-token' });
+  assert.equal((await readClaudeCredential({ ...options, env: { CLAUDE_CODE_OAUTH_TOKEN: 'explicit-oauth-token', CLAUDE_CODE_OAUTH_SCOPES: 'user:profile user:inference' } })).token, 'explicit-oauth-token');
   assert.deepEqual(await readClaudeCredential({ ...options, env: { CLAUDE_CODE_OAUTH_TOKEN: 'explicit-oauth-token' } }), { reason: 'not_supported' });
   for (const env of [{ ANTHROPIC_API_KEY: 'api-secret' }, { ANTHROPIC_AUTH_TOKEN: 'proxy-secret' }, { CLAUDE_CODE_USE_BEDROCK: '1' },
     { CLAUDE_CODE_USE_VERTEX: 'true' }, { ANTHROPIC_BASE_URL: 'https://proxy.example' }, { CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: '4' }, { CLAUDE_CODE_SIMPLE: '1' }]) {
@@ -200,7 +212,9 @@ test('saved quota keeps only whitelisted windows whose reset is still ahead', ()
     codex: { updatedAt: '2026-09-14T23:00:00Z', windows: [{ id: 'primary', usedPercent: 10, resetsAt: '2026-09-14T00:00:00Z' }] },
     other: { updatedAt: '2026-09-14T23:00:00Z', windows: [{ id: 'x', usedPercent: 1, resetsAt: reset }] },
   } }, now);
-  assert.deepEqual(saved, { claude: { status: 'loading', stale: true, updatedAt: '2026-09-14T23:00:00.000Z', windows: [{ id: 'five_hour', usedPercent: 30, windowMinutes: 300, resetsAt: reset }] } });
+  assert.deepEqual(saved, { claude: { usage: { status: 'loading', stale: true, updatedAt: '2026-09-14T23:00:00.000Z', windows: [{ id: 'five_hour', usedPercent: 30, windowMinutes: 300, resetsAt: reset }] } } });
+  assert.equal(parseSavedUsage({ providers: { claude: { updatedAt: '2026-09-14T23:00:00Z', account: 'bbbbbbbbbbbbbbbb', windows: [{ id: 'five_hour', usedPercent: 30, resetsAt: reset }] } } }, now).claude?.account, 'bbbbbbbbbbbbbbbb');
+  assert.equal(parseSavedUsage({ providers: { claude: { updatedAt: '2026-09-14T23:00:00Z', account: 'karl@example.com', windows: [{ id: 'five_hour', usedPercent: 30, resetsAt: reset }] } } }, now).claude?.account, undefined);
   assert.deepEqual(parseSavedUsage('garbage', now), {});
 });
 
@@ -211,12 +225,12 @@ test('a restarted cache shows the last saved quota as stale until a new reading 
   const future = new Date(Date.now() + 3600_000).toISOString();
   const available = (usedPercent: number): ProviderUsage => ({ status: 'available', windows: [{ id: 'five_hour', usedPercent, windowMinutes: 300, resetsAt: future }], updatedAt: new Date().toISOString() });
   let answer: ProviderUsage = available(42);
-  const options = { health: async () => initial, onChange: () => {}, stateDir: directory, env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' }, claudeUsage: async () => answer };
+  const options = { health: async () => initial, onChange: () => {}, stateDir: directory, env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' }, claudeCredential: signedIn(), claudeUsage: async () => answer };
   const first = new ProviderCapabilities(initial, options);
   await first.refresh(); await first.stop();
   const file = JSON.parse(await readFile(join(directory, 'provider-usage.json'), 'utf8'));
   assert.equal(file.providers.claude.windows[0].usedPercent, 42);
-  assert.doesNotMatch(JSON.stringify(file), /token|email/);
+  assert.doesNotMatch(JSON.stringify(file), /token|email/); assert.equal(file.providers.claude.account, 'aaaaaaaaaaaaaaaa');
 
   answer = { status: 'error', windows: [], reason: 'rate_limited' };
   let restored!: () => void;
@@ -239,7 +253,7 @@ test('a sign-in that cannot show usage drops the saved quota of an earlier accou
   const future = new Date(Date.now() + 3600_000).toISOString();
   await writeFile(join(directory, 'provider-usage.json'), JSON.stringify({ version: 1, providers: { claude: { updatedAt: new Date().toISOString(), windows: [{ id: 'five_hour', usedPercent: 87, windowMinutes: 300, resetsAt: future }] } } }));
   const cache = new ProviderCapabilities(initial, { health: async () => initial, onChange: () => {}, stateDir: directory, env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' },
-    claudeUsage: async () => ({ status: 'unavailable', windows: [], reason: 'not_supported' }) });
+    claudeCredential: async () => ({ reason: 'not_supported' }), claudeUsage: async () => ({ status: 'unavailable', windows: [], reason: 'not_supported' }) });
   const updating = new ProviderCapabilities(initial, { health: async () => [{ ...initial[0], available: false }], onChange: () => {}, stateDir: directory });
   await updating.refresh(); await updating.stop();
   assert.equal(updating.list()[0].usage?.windows[0].usedPercent, 87); // a CLI missing while it updates keeps the reading
@@ -263,7 +277,7 @@ test('Claude usage is read at most every three minutes and backs off after 429s'
   let clock = now;
   const calls: number[] = [];
   const answers: ProviderUsage[] = [];
-  const cache = new ProviderCapabilities(initial, { health: async () => initial, onChange: () => {}, env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' }, now: () => clock,
+  const cache = new ProviderCapabilities(initial, { health: async () => initial, onChange: () => {}, env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' }, now: () => clock, claudeCredential: signedIn(),
     claudeUsage: async () => { calls.push(clock); return answers.shift() || { status: 'error', windows: [], reason: 'rate_limited' }; } });
   t.after(() => cache.stop());
   const minutes = async (value: number) => { clock += value * 60_000; await cache.refresh(); };
@@ -290,4 +304,61 @@ test('Claude usage is read at most every three minutes and backs off after 429s'
   await minutes(1); assert.equal(calls.length, 11);
   await minutes(1); assert.equal(calls.length, 12); // a window that has reset is read again at once
   clock -= 3600_000; await cache.refresh(); assert.equal(calls.length, 13); // a clock set back never stretches the wait
+});
+
+test('another Claude sign-in is read at once and never shows the earlier account\'s quota', async t => {
+  const initial: ProviderHealth[] = [{ provider: 'claude', available: true, executable: '/fixture/claude', sessionCount: 0 }];
+  let clock = now;
+  let account = 'aaaaaaaaaaaaaaaa';
+  let expired = false;
+  const calls: string[] = [];
+  const answers: ProviderUsage[] = [];
+  const available = (usedPercent: number): ProviderUsage => ({ status: 'available', windows: [{ id: 'five_hour', usedPercent, resetsAt: new Date(Date.now() + 3600_000).toISOString() }], updatedAt: new Date(clock).toISOString() });
+  const cache = new ProviderCapabilities(initial, { health: async () => initial, onChange: () => {}, env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' }, now: () => clock,
+    claudeCredential: async () => expired ? { reason: 'not_signed_in', account } : { token: 'fixture-token', account },
+    claudeUsage: async credential => { calls.push(credential.account!); return credential.token ? answers.shift() || { status: 'error', windows: [], reason: 'rate_limited' } : { status: 'unavailable', windows: [], reason: credential.reason }; } });
+  t.after(() => cache.stop());
+  const usage = () => cache.list()[0].usage!;
+  const switchTo = async (next: string) => { account = next; clock += 60_000; await cache.refresh(); };
+
+  answers.push(available(100));
+  await cache.refresh();
+  assert.equal(usage().windows[0].usedPercent, 100);
+  answers.push(available(3));
+  await switchTo('bbbbbbbbbbbbbbbb'); // within the three-minute wait of the first account
+  assert.deepEqual(calls, ['aaaaaaaaaaaaaaaa', 'bbbbbbbbbbbbbbbb']); assert.equal(usage().status, 'available'); assert.equal(usage().windows[0].usedPercent, 3);
+
+  await switchTo('cccccccccccccccc'); // the new account's first reading is rate limited
+  assert.equal(usage().reason, 'rate_limited'); assert.deepEqual(usage().windows, []); assert.equal(usage().stale, undefined);
+  clock += 60_000; await cache.refresh(); // and its backoff never brings the earlier quota back
+  assert.equal(calls.length, 3); assert.deepEqual(usage().windows, []);
+
+  answers.push(available(40));
+  await switchTo('dddddddddddddddd');
+  assert.equal(usage().windows[0].usedPercent, 40);
+  expired = true;
+  clock += 60_000; await cache.refresh(); // the same account with an expired token keeps its reading
+  assert.equal(usage().windows[0].usedPercent, 40);
+  clock += 3 * 60_000; await cache.refresh();
+  assert.equal(usage().reason, 'not_signed_in'); assert.equal(usage().stale, true); assert.equal(usage().windows[0].usedPercent, 40);
+  await switchTo('eeeeeeeeeeeeeeee'); // another sign-in whose token has expired
+  assert.equal(usage().reason, 'not_signed_in'); assert.deepEqual(usage().windows, []);
+});
+
+test('a restarted cache drops the saved quota of another or unknown account when the first reading fails', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-usage-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const initial: ProviderHealth[] = [{ provider: 'claude', available: true, executable: '/fixture/claude', sessionCount: 0 }];
+  const future = new Date(Date.now() + 3600_000).toISOString();
+  const run = async (saved: object, account: string) => {
+    await writeFile(join(directory, 'provider-usage.json'), JSON.stringify({ version: 1, providers: { claude: { updatedAt: new Date().toISOString(), windows: [{ id: 'five_hour', usedPercent: 87, windowMinutes: 300, resetsAt: future }], ...saved } } }));
+    const cache = new ProviderCapabilities(initial, { health: async () => initial, onChange: () => {}, stateDir: directory, env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' },
+      claudeCredential: signedIn(account), claudeUsage: async () => ({ status: 'error', windows: [], reason: 'rate_limited' }) });
+    await cache.refresh(); await cache.stop();
+    return cache.list()[0].usage!.windows.map(window => window.usedPercent);
+  };
+  assert.deepEqual(await run({ account: 'aaaaaaaaaaaaaaaa' }, 'aaaaaaaaaaaaaaaa'), [87]);
+  assert.deepEqual(await run({ account: 'aaaaaaaaaaaaaaaa' }, 'bbbbbbbbbbbbbbbb'), []);
+  assert.deepEqual(JSON.parse(await readFile(join(directory, 'provider-usage.json'), 'utf8')).providers, {});
+  assert.deepEqual(await run({}, 'aaaaaaaaaaaaaaaa'), []); // saved before accounts were recorded
 });

@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.127.1] - 2026-10-11
+
+- 터미널에서 Claude를 다른 계정으로 다시 로그인하면 Tower의 Claude 사용량이 다음 갱신(약 1분) 안에 새 계정 기준으로 바뀝니다. 지금까지는 3분 간격·429 대기 동안 이전 계정 값을 그대로 보여 주고, 새 계정 읽기가 실패(429, 토큰 만료)하면 이전 계정 값을 stale로 계속 남겼습니다. 이제 갱신마다 로그인 상태를 확인하고, 같은 계정으로 확인될 때만 이전 값을 이어받습니다. 재시작 후 복원하는 저장값도 같은 계정일 때만 남습니다. 계정 구분에는 토큰에서 만든 짧은 지문만 쓰며, 토큰과 이메일은 저장하지 않습니다.
+
 ## [1.127.0] - 2026-10-11
 
 - 설정 버튼과 설정의 트리거 메뉴에 붙는 노란 점이 트리거 문제를 확인한 뒤에는 사라집니다. 이 컴퓨터의 트리거 창을 열면 지금 보이는 문제(자동 정지, 트리거 오류, 실패·확인 불가 실행, 저장소 오류)를 본 것으로 이 브라우저에 기억하고, 새로고침 후에도 유지됩니다. 새 오류·확인 불가 실행이나 새 자동 정지가 생기면 다시 표시됩니다. 소유자가 보관한 트리거는 점을 만들지 않습니다(실행 후 자동 보관되는 일회성 예약의 실패는 표시합니다). 오류가 사라졌다가 같은 문구로 다시 생겨도 다시 표시됩니다.

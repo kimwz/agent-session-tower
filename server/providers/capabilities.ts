@@ -117,8 +117,14 @@ type CredentialReaderOptions = {
   keychain?: (account: string, service: string, signal: AbortSignal) => Promise<string>;
 };
 
+/** A signed-in Claude account: its token, and an opaque fingerprint that tells a different sign-in apart without keeping either secret. */
+export type ClaudeCredential = { token?: string; account?: string; reason?: Reason };
+// A token refresh also changes it; that only costs one early reading.
+const accountOf = (secret: string): string => createHash('sha256').update(`tower-claude-account:${secret}`).digest('hex').slice(0, 16);
+const ACCOUNT = /^[a-f0-9]{16}$/;
+
 /** Read the same native storage, without refresh, permission changes or copies. */
-export async function readClaudeCredential(options: CredentialReaderOptions): Promise<{ token?: string; reason?: Reason }> {
+export async function readClaudeCredential(options: CredentialReaderOptions): Promise<ClaudeCredential> {
   const env = options.env || process.env;
   // Match native auth precedence: an explicit account must never fall through to
   // the unrelated personal subscription stored on this machine.
@@ -127,7 +133,7 @@ export async function readClaudeCredential(options: CredentialReaderOptions): Pr
     || env.ANTHROPIC_BASE_URL && env.ANTHROPIC_BASE_URL.replace(/\/$/, '') !== 'https://api.anthropic.com') return { reason: 'not_supported' };
   if (env.CLAUDE_CODE_OAUTH_TOKEN) {
     if (!env.CLAUDE_CODE_OAUTH_SCOPES?.split(/\s+/).includes('user:profile')) return { reason: 'not_supported' };
-    return /[\r\n]/.test(env.CLAUDE_CODE_OAUTH_TOKEN) ? { reason: 'credentials_unavailable' } : { token: env.CLAUDE_CODE_OAUTH_TOKEN };
+    return /[\r\n]/.test(env.CLAUDE_CODE_OAUTH_TOKEN) ? { reason: 'credentials_unavailable' } : { token: env.CLAUDE_CODE_OAUTH_TOKEN, account: accountOf(env.CLAUDE_CODE_OAUTH_TOKEN) };
   }
   const storage = claudeStorage(env);
   let credentials: unknown;
@@ -149,9 +155,11 @@ export async function readClaudeCredential(options: CredentialReaderOptions): Pr
   }
   const oauth = object(object(credentials)?.claudeAiOauth);
   if (!oauth || typeof oauth.accessToken !== 'string' || !oauth.accessToken || /[\r\n]/.test(oauth.accessToken)) return { reason: 'not_signed_in' };
-  if (typeof oauth.expiresAt === 'number' && oauth.expiresAt <= Date.now()) return { reason: 'not_signed_in' };
-  if (!Array.isArray(oauth.scopes) || !oauth.scopes.includes('user:profile')) return { reason: 'not_supported' };
-  return { token: oauth.accessToken };
+  // The refresh token outlives each access token, so the fingerprint changes less often.
+  const account = accountOf(typeof oauth.refreshToken === 'string' && oauth.refreshToken ? oauth.refreshToken : oauth.accessToken);
+  if (typeof oauth.expiresAt === 'number' && oauth.expiresAt <= Date.now()) return { reason: 'not_signed_in', account };
+  if (!Array.isArray(oauth.scopes) || !oauth.scopes.includes('user:profile')) return { reason: 'not_supported', account };
+  return { token: oauth.accessToken, account };
 }
 
 /** The effort Claude Code applies without `--effort`: its environment override, then user settings. */
@@ -170,9 +178,10 @@ export function parseCodexConfig(value: unknown): Pick<Capabilities, 'defaultMod
     ...(validEffort(config?.model_reasoning_effort) ? { defaultEffort: config.model_reasoning_effort } : {}) };
 }
 
-export async function readClaudeUsage(options: CredentialReaderOptions & { fetch?: typeof fetch }): Promise<ProviderUsage> {
+/** Reads the signed-in account's quota; `credential` skips reading the native storage again. */
+export async function readClaudeUsage(options: CredentialReaderOptions & { fetch?: typeof fetch; credential?: ClaudeCredential }): Promise<ProviderUsage> {
   options = { ...options, signal: AbortSignal.any([options.signal, AbortSignal.timeout(5000)]) };
-  const credentials = await readClaudeCredential(options);
+  const credentials = options.credential || await readClaudeCredential(options);
   if (!credentials.token) return unavailable(credentials.reason || 'not_signed_in');
   try {
     const response = await (options.fetch || fetch)('https://api.anthropic.com/api/oauth/usage', {
@@ -288,10 +297,11 @@ const CLAUDE_RATE_LIMIT_BACKOFF = [5 * 60_000, 10 * 60_000, 15 * 60_000];
 const USAGE_FILE = 'provider-usage.json';
 const PROVIDERS: readonly Provider[] = ['claude', 'codex'];
 
-/** Last successful quota windows, whitelisted, with no account data; only readings whose reset is still ahead. */
-export function parseSavedUsage(value: unknown, now = Date.now()): Partial<Record<Provider, ProviderUsage>> {
+type SavedUsage = { usage: ProviderUsage; account?: string };
+/** Last successful quota windows, whitelisted, with only the account fingerprint; only readings whose reset is still ahead. */
+export function parseSavedUsage(value: unknown, now = Date.now()): Partial<Record<Provider, SavedUsage>> {
   const saved = object(object(value)?.providers);
-  const result: Partial<Record<Provider, ProviderUsage>> = {};
+  const result: Partial<Record<Provider, SavedUsage>> = {};
   for (const provider of PROVIDERS) {
     const entry = object(saved?.[provider]);
     const updatedAt = timestamp(entry?.updatedAt);
@@ -304,7 +314,8 @@ export function parseSavedUsage(value: unknown, now = Date.now()): Partial<Recor
       const minutes = window.windowMinutes;
       windows.push({ id: window.id, usedPercent: window.usedPercent, ...(typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0 ? { windowMinutes: minutes } : {}), resetsAt });
     }
-    if (windows.length) result[provider] = { status: 'loading', windows, updatedAt, stale: true };
+    if (windows.length) result[provider] = { usage: { status: 'loading', windows, updatedAt, stale: true },
+      ...(typeof entry.account === 'string' && ACCOUNT.test(entry.account) ? { account: entry.account } : {}) };
   }
   return result;
 }
@@ -320,7 +331,8 @@ type CapabilityOptions = {
   unlessUpdating?: <T>(provider: Provider, read: () => Promise<T>) => Promise<T | undefined>;
   /** Keeps the last successful quota readings here, so a restart shows them until a new reading arrives. */
   stateDir?: string;
-  claudeUsage?: (signal: AbortSignal) => Promise<ProviderUsage>;
+  claudeCredential?: (signal: AbortSignal) => Promise<ClaudeCredential>;
+  claudeUsage?: (credential: ClaudeCredential, signal: AbortSignal) => Promise<ProviderUsage>;
   now?: () => number;
 };
 
@@ -335,6 +347,8 @@ export class ProviderCapabilities {
   private claudeUsageAfter = 0;
   private claudeRateLimits = 0;
   private lastClaudeUsage?: ProviderUsage;
+  /** Fingerprint of the account the shown Claude quota belongs to; undefined when unknown. */
+  private claudeAccount?: string;
   private readonly loaded?: Promise<void>;
   private saving: Promise<void> = Promise.resolve();
   private saved = '';
@@ -343,22 +357,24 @@ export class ProviderCapabilities {
     if (options.stateDir) this.loaded = this.load(join(options.stateDir, USAGE_FILE)).catch(() => {});
   }
   private async load(path: string): Promise<void> {
-    let saved: Partial<Record<Provider, ProviderUsage>>;
+    let saved: Partial<Record<Provider, SavedUsage>>;
     try { saved = parseSavedUsage(await readPrivateJson(path, 64_000), this.now()); }
     catch { return; }
     if (this.stopped) return;
+    this.claudeAccount = saved.claude?.account;
     this.providers = this.providers.map(provider => {
-      const usage = saved[provider.provider];
+      const usage = saved[provider.provider]?.usage;
       return usage && !provider.usage?.windows.length ? { ...provider, usage } : provider;
     });
     if (Object.keys(saved).length) this.options.onChange();
   }
   private save(): void {
     if (!this.options.stateDir) return;
-    const providers: Record<string, { windows: UsageWindow[]; updatedAt: string }> = {};
+    const providers: Record<string, { windows: UsageWindow[]; updatedAt: string; account?: string }> = {};
     for (const provider of this.providers) {
       const usage = provider.usage;
-      if (usage?.windows.length && usage.updatedAt) providers[provider.provider] = { windows: usage.windows, updatedAt: usage.updatedAt };
+      if (usage?.windows.length && usage.updatedAt) providers[provider.provider] = { windows: usage.windows, updatedAt: usage.updatedAt,
+        ...(provider.provider === 'claude' && this.claudeAccount ? { account: this.claudeAccount } : {}) };
     }
     const data = JSON.stringify({ version: 1, providers });
     if (data === this.saved) return;
@@ -367,15 +383,27 @@ export class ProviderCapabilities {
     this.saving = this.saving.then(() => writePrivateJson(path, data)).catch(() => { this.saved = ''; });
   }
   private now(): number { return this.options.now ? this.options.now() : Date.now(); }
-  /** Claude usage reads paced on their own: at most one per interval, and longer after 429s. */
-  private async readClaudeUsagePaced(signal: AbortSignal): Promise<ProviderUsage> {
+  /**
+   * Claude usage reads paced on their own: at most one per interval, and longer after 429s.
+   * The local sign-in is checked every time, so another account is read at once and never shown an earlier account's quota.
+   */
+  private async readClaudeUsagePaced(signal: AbortSignal): Promise<{ usage: ProviderUsage; sameAccount: boolean }> {
     const now = this.now();
+    const credential = await (this.options.claudeCredential || (signal => readClaudeCredential({ env: this.options.env, signal })))(signal);
+    if (signal.aborted) return { usage: unavailable('unreachable'), sameAccount: false };
+    const sameAccount = !!credential.account && credential.account === this.claudeAccount;
+    if (!sameAccount) {
+      this.lastClaudeUsage = undefined;
+      this.claudeUsageAfter = 0;
+      this.claudeRateLimits = 0;
+      this.claudeAccount = credential.account;
+    }
     const last = this.lastClaudeUsage;
     // A window that has reset needs a new reading; a clock set back never stretches the wait.
     const waiting = now < this.claudeUsageAfter && this.claudeUsageAfter - now <= CLAUDE_RATE_LIMIT_BACKOFF.at(-1)!;
-    if (last && waiting && !last.windows.some(window => window.resetsAt && Date.parse(window.resetsAt) <= now)) return last;
-    const usage = await (this.options.claudeUsage || (signal => readClaudeUsage({ env: this.options.env, signal })))(signal);
-    if (signal.aborted) return usage;
+    if (last && waiting && !last.windows.some(window => window.resetsAt && Date.parse(window.resetsAt) <= now)) return { usage: last, sameAccount };
+    const usage = await (this.options.claudeUsage || ((credential, signal) => readClaudeUsage({ env: this.options.env, signal, credential })))(credential, signal);
+    if (signal.aborted) return { usage, sameAccount };
     if (usage.reason === 'rate_limited') {
       this.claudeUsageAfter = now + CLAUDE_RATE_LIMIT_BACKOFF[Math.min(this.claudeRateLimits, CLAUDE_RATE_LIMIT_BACKOFF.length - 1)];
       this.claudeRateLimits++;
@@ -384,7 +412,7 @@ export class ProviderCapabilities {
       this.claudeUsageAfter = now + CLAUDE_USAGE_INTERVAL;
     } else this.claudeUsageAfter = 0;
     this.lastClaudeUsage = usage;
-    return usage;
+    return { usage, sameAccount };
   }
   list(): ProviderHealth[] {
     const now = Date.now();
@@ -425,6 +453,8 @@ export class ProviderCapabilities {
       const health = await this.options.health();
       const results = await Promise.all(health.map(async provider => {
         let capabilities: Capabilities;
+        // Only a reading of the same account may keep showing earlier windows.
+        let sameAccount = true;
         try {
           if (!provider.available || !provider.executable) capabilities = { usage: unavailable('not_supported') };
           else if (this.options.read) capabilities = await this.options.read(provider, signal);
@@ -434,15 +464,17 @@ export class ProviderCapabilities {
             capabilities = await (this.options.unlessUpdating ? this.options.unlessUpdating('codex', read) : read()) ?? { usage: previous?.usage ?? { status: 'loading', windows: [] } };
           }
           else {
-            const [usage, defaultEffort] = await Promise.all([this.readClaudeUsagePaced(signal), readClaudeDefaultEffort(this.options.env || process.env)]);
+            const [claude, defaultEffort] = await Promise.all([this.readClaudeUsagePaced(signal), readClaudeDefaultEffort(this.options.env || process.env)]);
+            const usage = claude.usage;
+            sameAccount = claude.sameAccount;
             capabilities = { usage, models: CLAUDE_MODELS.map(copyModel), efforts: CLAUDE_EFFORTS.map(effort => ({ ...effort })), ...(defaultEffort ? { defaultEffort } : {}) };
           }
-        } catch { capabilities = { usage: unavailable('unreachable') }; }
+        } catch { capabilities = { usage: unavailable('unreachable') }; sameAccount = provider.provider !== 'claude'; }
         const previous = this.providers.find(item => item.provider === provider.provider);
         // Usage this sign-in cannot show (an API key, another provider) must not keep an earlier account's quota;
         // a CLI missing for a moment (while it updates) says nothing about the account.
         const unsupported = capabilities.usage?.reason === 'not_supported' && provider.available && !!provider.executable;
-        if (capabilities.usage?.status !== 'available' && !unsupported && !capabilities.usage?.windows.length && previous?.usage?.windows.length) {
+        if (capabilities.usage?.status !== 'available' && sameAccount && !unsupported && !capabilities.usage?.windows.length && previous?.usage?.windows.length) {
           capabilities.usage = { ...capabilities.usage!, windows: previous.usage.windows, updatedAt: previous.usage.updatedAt, stale: true };
         }
         return { ...provider, ...(previous?.models ? { models: previous.models, defaultModel: previous.defaultModel, ...(previous.efforts ? { efforts: previous.efforts } : {}),
