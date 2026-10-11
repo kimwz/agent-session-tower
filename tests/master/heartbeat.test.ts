@@ -72,6 +72,16 @@ test('default enabled 30 minute inspection has no chat/run/voice effect on noop 
   assert.ok(Buffer.byteLength(h.captured()!.prompt) < 60_000);
   assert.match(h.captured()!.systemPrompt, /UNTRUSTED DATA/); assert.equal(h.captured()!.readTools, undefined);
 });
+test('a noop carrying references the schema allows still records progress and has no effect', async t => {
+  for (const extra of [{ taskIds: ['task-1'] }, { evidenceIds: ['task-1:transcript'] }, { recommendation: 'Keep going' }, { taskIds: ['unrelated'], evidenceIds: ['fake'], recommendation: 'Restart it' }, { taskIds: ['task-1', 'task-1'] }]) {
+    const h = await harness(t); h.result({ ...noop, ...extra }); h.advance(); await h.heartbeat.tick();
+    assert.equal(h.heartbeat.status().lastCheck?.state, 'noop'); assert.equal(h.heartbeat.status().lastCheck?.reason, noop.cause);
+    assert.deepEqual(h.posts, []); assert.deepEqual(h.accepted, []); assert.deepEqual(h.heartbeat.status().actions, []);
+    assert.match(h.captured()!.systemPrompt, /A noop leaves taskIds and evidenceIds empty/);
+    h.advance(); await h.heartbeat.tick();
+    assert.deepEqual(JSON.parse(h.captured()!.prompt).previousObservations.map((item: { id: string }) => item.id), ['task-1']);
+  }
+});
 test('action uses only existing master message path and is never repeated for equivalent evidence, including restart', async t => {
   const h = await harness(t); h.result(action); h.advance(); await h.heartbeat.tick();
   assert.equal(h.posts.length, 1); assert.equal(h.accepted.length, 1);
@@ -102,7 +112,7 @@ test('owner stop, master busy, offline, target real approval wait and needsOwner
   }
 });
 test('strict action references reject malicious unrelated tasks and missing evidence; model failure remains internal', async t => {
-  for (const invalid of [{ ...action, taskIds: ['unrelated'] }, { ...action, evidenceIds: ['fake'] }, { ...action, command: 'launch' }]) {
+  for (const invalid of [{ ...action, taskIds: ['unrelated'] }, { ...action, evidenceIds: ['fake'] }, { ...action, command: 'launch' }, { ...action, taskIds: ['task-1', 'task-1'] }]) {
     const h = await harness(t); h.result(invalid); h.advance(); await h.heartbeat.tick(); assert.equal(h.posts.length, 0); assert.equal(h.heartbeat.status().lastCheck?.state, 'failed');
   }
 });

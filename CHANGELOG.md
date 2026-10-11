@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.126.1] - 2026-10-11
+
+- 마스터 heartbeat 점검이 "조치 필요 없음" 응답을 `Invalid heartbeat noop.` 오류로 실패하던 문제를 고쳤습니다. 모델 지침에 no-op 형태를 명시하고, no-op에 붙은 작업·근거·권고는 효과가 없으므로 버리고 정상 점검으로 기록합니다. 조치(action)의 대상·근거 검증은 그대로입니다.
+
 ## [1.126.0] - 2026-10-11
 
 - 권한 자동 검토가 너무 길어 앞부분을 읽지 못한 대화도 소유자에게 바로 넘기지 않습니다. 읽은 최근 구간의 소유자 요청과 작업 흐름으로 판단하고, 기록을 전혀 읽지 못했거나 최근 구간에 소유자 요청(또는 대화를 시작한 트리거)이 없을 때만 소유자에게 넘깁니다.
