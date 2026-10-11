@@ -24,9 +24,9 @@ export type TriggerTargets = (node: string) => { projects: [string, string][]; s
 /** What the triggers tab shows: the list, the kind picker for a new trigger, or the editor. */
 type View = { page: 'list' } | { page: 'pick' } | { page: 'edit'; kind: SourceKind; trigger?: Trigger };
 
-export function TriggerPanel({ token, overview: ownOverview, providers: ownProviders, projects: ownProjects, computers = [], targets, onOpenSlack, onOpenPublic, onShowingHere }: Context & { overview?: TriggerOverview; computers?: TriggerComputer[]; targets?: TriggerTargets; onOpenSlack: () => void; onOpenPublic?: () => void;
-  /** Whether the triggers shown are this computer's, so only their problems count as seen. */
-  onShowingHere?: (here: boolean) => void }) {
+export function TriggerPanel({ token, overview: ownOverview, providers: ownProviders, projects: ownProjects, computers = [], targets, onOpenSlack, onOpenPublic, onSeen }: Context & { overview?: TriggerOverview; computers?: TriggerComputer[]; targets?: TriggerTargets; onOpenSlack: () => void; onOpenPublic?: () => void;
+  /** Called while this computer's triggers show, which is the owner seeing their problems. */
+  onSeen?: () => void }) {
   const { t } = useI18n();
   const [tab, setTab] = useState<Tab>('triggers');
   const [triggers, setTriggers] = useState<Trigger[] | null>(null);
@@ -44,7 +44,6 @@ export function TriggerPanel({ token, overview: ownOverview, providers: ownProvi
   const { projects, sessions } = node && targets ? targets(node) : { projects: ownProjects, sessions: undefined };
   const available = node ? !away : Boolean(ownOverview);
   const target = node || undefined;
-  useEffect(() => { onShowingHere?.(!node); }, [node, onShowingHere]);
   // New triggers and rules start from that computer's Settings › Models.
   useModelSettings(token, computer?.models || !target ? target : undefined);
   // An answer for a computer no longer shown, or older than a later one, is dropped; so is a change's outcome.
@@ -66,6 +65,7 @@ export function TriggerPanel({ token, overview: ownOverview, providers: ownProvi
   useEffect(() => { void refresh(); }, [refresh, target ? '' : revisions]);
   // Another computer's triggers are not on this page's live stream; they are asked for again while shown.
   const { active } = useContext(SettingsFrameContext);
+  useEffect(() => { if (active && !node) onSeen?.(); }, [active, node, onSeen]);
   useEffect(() => {
     if (!target || away || !active) return;
     void refresh();

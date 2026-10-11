@@ -50,13 +50,14 @@ export async function towerOperation<T>(token: string, operation: string, input:
 /**
  * What in the triggers needs a look, each named so that having seen it can be remembered: the store cannot be read,
  * Tower paused a trigger, a trigger is failing, or its last run failed or is unknown. A new pause or run gets a new
- * name, so it asks again. Archived triggers were put away by the owner and ask for nothing.
+ * name, so it asks again. Triggers the owner archived ask for nothing; a one-time schedule Tower archived as it
+ * fired still reports its run.
  */
 export function triggerProblems(overview: TriggerOverview | undefined): string[] {
   if (!overview) return [];
   const problems = overview.storageError ? [`storage:${overview.storageError}`] : [];
   for (const item of overview.triggers) {
-    if (item.archivedAt) continue;
+    if (item.archivedAt && !item.consumed) continue;
     if (item.paused) problems.push(`paused:${item.id}:${item.paused.at}`);
     if (item.error) problems.push(`error:${item.id}:${item.error}`);
     if (item.lastEvent?.status === 'error' || item.lastEvent?.status === 'uncertain') problems.push(`event:${item.lastEvent.id}`);

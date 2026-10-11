@@ -29,10 +29,6 @@ export function SettingsButton({ context, joined }: { context: SettingsContext; 
   // Looking at the remote computers is seeing who joined.
   const remoteShown = place?.section === 'remote' && !(place.list && phone);
   useEffect(() => { if (remoteShown) join.acknowledge(); }, [remoteShown, join.notice?.at]);
-  // Looking at this computer's triggers is seeing their problems, including ones that come up while they show.
-  const [triggersHere, setTriggersHere] = useState(true);
-  const triggersShown = place?.section === 'triggers' && !(place.list && phone) && triggersHere;
-  useEffect(() => { if (triggersShown && attention.triggers) acknowledgeTriggers(); }, [triggersShown, attention.triggers, acknowledgeTriggers]);
 
   const open = useCallback((section?: SettingsSection, extra: Omit<SettingsPlace, 'section'> = {}) => {
     const chosen = initialSection(section, attention, last.current, sections);
@@ -58,6 +54,6 @@ export function SettingsButton({ context, joined }: { context: SettingsContext; 
       {mark?.count ? <span className={`settings-mark ${mark.urgent ? 'urgent' : ''}`} aria-hidden="true">{markText(mark.count)}</span> : mark?.dot ? <i className="settings-dot" aria-hidden="true" /> : null}
     </button>
     {join.notice && !place && <ControllerJoinNotice notice={join.notice} onDismiss={join.acknowledge} onShow={() => { join.acknowledge(); open('remote', { remoteTab: 'controllers' }); }} />}
-    {place && <SettingsDialog place={place} sections={sections} attention={attention} context={context} onPlace={setPlace} onChanged={refresh} onClose={close} onTriggersHere={setTriggersHere} />}
+    {place && <SettingsDialog place={place} sections={sections} attention={attention} context={context} onPlace={setPlace} onChanged={refresh} onClose={close} onTriggersSeen={acknowledgeTriggers} />}
   </div>;
 }

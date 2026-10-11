@@ -41,7 +41,12 @@ export function useSettingsAttention(token: string, triggers: TriggerOverview | 
   useEffect(() => { refreshSkills(); const timer = window.setInterval(refreshSkills, SKILL_POLL); return () => window.clearInterval(timer); }, [refreshSkills]);
   const refresh = useCallback(() => { refreshPermissions(); refreshSkills(); }, [refreshPermissions, refreshSkills]);
   const attention: SettingsAttention = { permissions, skills, triggers: triggerAttention(triggers, seenTriggers.seen), remote: Boolean(join.notice) };
-  // Seeing the triggers needs their overview; before it arrives there is nothing to remember.
-  const acknowledgeTriggers = useCallback(() => { if (triggers) seenTriggers.acknowledge(triggerProblems(triggers)); }, [triggers, seenTriggers.acknowledge]);
+  // Only this page's own overview forgets problems that went away; another tab's write is taken as it is.
+  const { forgetGone } = seenTriggers;
+  useEffect(() => { if (triggers) forgetGone(triggerProblems(triggers)); }, [triggers, forgetGone]);
+  // Seeing the triggers needs their overview; before it arrives there is nothing to remember. Problems seen already
+  // are not written again on every overview the triggers' panel shows.
+  const acknowledgeTriggers = useCallback(() => { if (attention.triggers && triggers) seenTriggers.acknowledge(triggerProblems(triggers)); },
+    [attention.triggers, triggers, seenTriggers.acknowledge]);
   return { attention, refresh, join, acknowledgeTriggers };
 }

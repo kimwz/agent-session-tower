@@ -6,7 +6,7 @@ import { blankGitHubSource, blankHttpSource, blankTrigger, eventStatusLabel, sch
 import { setLanguage, translate } from '../../../client/src/i18n/i18n.js';
 import { TriggerTypePicker } from '../../../client/src/triggers/TriggerKinds.js';
 import { blankIssueWatch, switchedWatch, triggerAttention, triggerProblems } from '../../../client/src/triggers/trigger-helpers.js';
-import { readSeenProblems } from '../../../client/src/triggers/seen-trigger-problems.js';
+import { keepCurrent, readSeenProblems, withSeen } from '../../../client/src/triggers/seen-trigger-problems.js';
 import { TriggerInputSchema } from '../../../shared/triggers.js';
 
 test('a new scheduled run from the panel is exactly what the server accepts once named and instructed', () => {
@@ -60,6 +60,24 @@ test('a trigger problem asks for attention until it is seen, and a new one asks 
   assert.equal(triggerAttention(overview({ lastEvent: { id: 'e3', status: 'completed' as const, occurredAt: '' } }), seen), false);
   assert.equal(triggerAttention({ ...failed, storageError: 'unreadable' }, seen), true);
   assert.equal(triggerAttention(overview({ archivedAt: '2026-10-11T02:00:00Z', lastEvent: { id: 'e4', status: 'error' as const, occurredAt: '' } })), false);
+  // A one-time schedule is archived by Tower as it fires; its failed run still asks.
+  const consumed = { at: '2026-10-11T02:00:00Z', eventId: 'e5' };
+  assert.equal(triggerAttention(overview({ archivedAt: '2026-10-11T02:00:00Z', consumed, lastEvent: { id: 'e5', status: 'error' as const, occurredAt: '' } })), true);
+});
+
+test('an error that went away and comes back with the same text asks again', () => {
+  const trigger = { id: 'a', name: 'Poll', enabled: true, kind: 'http' as const, revision: 1, updatedAt: '', updatedBy: { kind: 'owner' as const, via: 'ui' as const } };
+  const failing = { recent: [], triggers: [{ ...trigger, error: 'HTTP 503' }] };
+  const healthy = { recent: [], triggers: [trigger] };
+  let seen = withSeen([], triggerProblems(failing));
+  assert.equal(triggerAttention(failing, seen), false);
+  seen = keepCurrent(seen, triggerProblems(healthy));
+  assert.deepEqual(seen, []);
+  assert.equal(triggerAttention(failing, seen), true);
+  // Seeing adds to what another tab saw; nothing gone leaves the same list.
+  assert.deepEqual(withSeen(['event:x'], ['event:y', 'event:x']), ['event:x', 'event:y']);
+  const same = ['event:x'];
+  assert.equal(keepCurrent(same, ['event:x', 'event:y']), same);
 });
 
 test('a new GitHub trigger from the panel needs repositories and a checked account before the server accepts it', () => {
