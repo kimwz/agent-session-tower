@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.128.0] - 2026-10-11
+
+- 사용량 링의 툴팁에 연결된 계정을 표시합니다. 마스킹한 이메일(예: `ka***@planetariumhq.com`)과 플랜(Max, Team, Plus, Pro 등, Codex API 키 로그인은 "API 키")만 보여 줍니다. 이메일은 서버에서 마스킹하고 저장하지 않습니다. Claude는 Claude Code의 전역 설정(`~/.claude.json`, `CLAUDE_CONFIG_DIR`가 있으면 그 안)의 로그인 프로필에서 이메일을 읽습니다. 환경 변수 토큰으로 로그인한 경우에는 프로필과 계정이 다를 수 있어 표시하지 않습니다. Codex는 app-server의 계정 조회(토큰 갱신 없음)로 읽습니다. 계정은 그 컴퓨터의 Tower 화면에만 표시하고, 연결된 컴퓨터의 계정은 제어하는 Tower에 보내지 않습니다(#113).
+
 ## [1.127.1] - 2026-10-11
 
 - 터미널에서 Claude를 다른 계정으로 다시 로그인하면 Tower의 Claude 사용량이 다음 갱신(약 1분) 안에 새 계정 기준으로 바뀝니다. 지금까지는 3분 간격·429 대기 동안 이전 계정 값을 그대로 보여 주고, 새 계정 읽기가 실패(429, 토큰 만료)하면 이전 계정 값을 stale로 계속 남겼습니다. 이제 갱신마다 로그인 상태를 확인하고, 같은 계정으로 확인될 때만 이전 값을 이어받습니다. 재시작 후 복원하는 저장값도 같은 계정일 때만 남습니다. 계정 구분에는 토큰에서 만든 짧은 지문만 쓰며, 토큰과 이메일은 저장하지 않습니다.
