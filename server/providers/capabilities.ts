@@ -200,6 +200,7 @@ export async function readClaudeEmail(env: NodeJS.ProcessEnv, home = homedir()):
       claudeProfile = { path, mtimeMs: info.mtimeMs, size: info.size, email };
       return email;
     } finally { await file.close(); }
+  // best-effort: a missing or unreadable profile only leaves the email out.
   } catch { return undefined; }
 }
 
@@ -305,6 +306,7 @@ export async function readCodexCapabilities(executable: string, env: NodeJS.Proc
     const [usage, account, models] = await Promise.all([
       request('account/rateLimits/read', {}).then(parseCodexUsage).catch(error => unavailable(rpcReason(error))),
       // Without refreshToken: reading the account never refreshes the sign-in.
+      // best-effort: a Codex without account/read only leaves the account out.
       request('account/read', {}).then(parseCodexAccount).catch(() => undefined),
       (async () => {
         const data: unknown[] = [];
