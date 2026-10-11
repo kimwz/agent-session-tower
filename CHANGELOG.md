@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.126.0] - 2026-10-11
+
+- 권한 자동 검토가 너무 길어 앞부분을 읽지 못한 대화도 소유자에게 바로 넘기지 않습니다. 읽은 최근 구간의 소유자 요청과 작업 흐름으로 판단하고, 기록을 전혀 읽지 못했거나 최근 구간에 소유자 요청(또는 대화를 시작한 트리거)이 없을 때만 소유자에게 넘깁니다.
+- 대화 기록에 읽을 수 없는 줄이 있어도 그 페이지를 버리지 않고 더 앞부분까지 읽습니다.
+
 ## [1.125.1] - 2026-10-11
 
 - 시크릿 공유 규칙 저장이 거부되면 일반 문구 대신 원인(잠금, 공유할 키, 필드, 프로젝트, 최대 사용 시간 등)을 구분해 보여 줍니다.

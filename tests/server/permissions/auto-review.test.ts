@@ -7,9 +7,9 @@ import test, { type TestContext } from 'node:test';
 import { PermissionReviewer } from '../../../server/permissions/reviewer.js';
 import { noStorageFixture, closePermissionFixture } from './storage-fixture.js';
 import { PermissionService } from '../../../server/permissions/service.js';
-import type { ReviewSources } from '../../../server/permissions/context.js';
+import { readConversation, type ReviewSources } from '../../../server/permissions/context.js';
 import { autoReviewBlock, ruleGuards, ruleIsNarrower, type PermissionRequest } from '../../../shared/permissions.js';
-import type { Run } from '../../../shared/types.js';
+import type { ChatMessage, Run } from '../../../shared/types.js';
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
 const agent = (sessionId: string, runId = 'run-1') => ({ kind: 'agent', via: 'mcp', sessionId, runId });
@@ -254,7 +254,64 @@ test('the reviewer reads the whole conversation, answers, skills, trigger and pr
   assert.match(told[0]!.message, /Tower's permission reviewer allowed `gh pr merge`/);
 });
 
-test('a conversation that cannot be read whole, or whose owner words are too long, goes to the owner without asking the model', async t => {
+test('a long conversation whose start is not read is judged by its recent owner requests, and goes to the owner without any', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const asked: string[] = [];
+  const model = async (request: { prompt: string }) => { asked.push(request.prompt); return { verdict: 'approve', rule: null, suggestion: null, reason: '최근 요청에 따른 단계입니다.' }; };
+  const recent: ChatMessage[] = [{ id: 'a0', role: 'assistant', text: 'Encoding done.', timestamp: '1' }, { id: 'u9', role: 'user', text: 'Pin the hashes and hand over the files.', timestamp: '2' }, { id: 'a1', role: 'assistant', text: 'Pinning hashes.', timestamp: '3' }];
+  const partial = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {}, model,
+    sources: sources(f, [], { conversation: async () => ({ messages: recent, complete: false }) }) });
+  const first = await f.service.request({ kind: 'command', value: 'shasum -a 256', scope: 'project', reason: 'pin hashes' }, agent('claude:one'));
+  partial.wake();
+  await partial.flush();
+  assert.equal(asked.length, 1);
+  const input = JSON.parse(asked[0]!);
+  assert.equal(input.authority.conversationStart, 'not read');
+  assert.deepEqual(input.authority.ownerWords.map((word: { text: string }) => word.text), ['Pin the hashes and hand over the files.']);
+  assert.equal(input.authority.ownerWords[0].task, undefined, 'the first words read need not be the task');
+  assert.equal(f.service.overview().requests.find(entry => entry.id === first.request.id)!.status, 'approved');
+
+  // Only the agent's own messages were read: no request to judge by, unless a trigger started the work.
+  const agentOnly = recent.filter(message => message.role !== 'user');
+  const silent = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {}, model,
+    sources: sources(f, [], { conversation: async () => ({ messages: agentOnly, complete: false }), answers: () => [{ at: '0', question: 'Old?', answer: 'Yes' }] }) });
+  const second = await f.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'merge' }, agent('claude:one', 'r2'));
+  silent.wake();
+  await silent.flush();
+  assert.equal(asked.length, 1);
+  assert.equal(f.service.overview().requests.find(entry => entry.id === second.request.id)!.review!.status, 'skipped');
+  const triggered = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {}, model,
+    sources: sources(f, [], { conversation: async () => ({ messages: agentOnly, complete: false }), sessionTrigger: () => 't1', trigger: () => ({ name: 'issues', instructions: 'Fix the issue and deploy.' }) }) });
+  await f.service.request({ kind: 'command', value: 'gh release create', scope: 'project', reason: 'release' }, agent('claude:one', 'r3'));
+  triggered.wake();
+  await triggered.flush();
+  assert.equal(asked.length, 2);
+  assert.equal(JSON.parse(asked[1]!).authority.trigger.instructions, 'Fix the issue and deploy.');
+  // The owner's turn running now is the request being worked on, even when its prompt is earlier than the part read.
+  const running = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {}, model,
+    sources: sources(f, [run('r', 'Encode and deliver the videos.', { status: 'running' })], { conversation: async () => ({ messages: agentOnly, complete: false }) }) });
+  await f.service.request({ kind: 'command', value: 'shasum -a 512', scope: 'project', reason: 'pin hashes' }, agent('claude:one', 'r4'));
+  running.wake();
+  await running.flush();
+  assert.equal(asked.length, 3);
+  assert.deepEqual(JSON.parse(asked[2]!).authority.ownerWords.map((word: { text: string }) => word.text), ['Encode and deliver the videos.']);
+});
+
+test('the history reader keeps pages with unreadable records and stops at its page limit, both incomplete', async () => {
+  const message = (id: string): ChatMessage => ({ id, role: 'user', text: id, timestamp: '' });
+  const pages = [{ messages: [message('3')], hasMore: true, nextBefore: 2, skipped: 1 }, { messages: [message('2')], hasMore: true, nextBefore: 1 }, { messages: [message('1')], hasMore: false }];
+  const read = await readConversation(async before => pages[before === undefined ? 0 : 3 - before]);
+  assert.deepEqual(read, { messages: [message('1'), message('2'), message('3')], complete: false });
+  assert.equal((await readConversation(async before => pages[before === undefined ? 1 : 3 - before])).complete, true);
+  const endless = await readConversation(async before => ({ messages: [message(String(before))], hasMore: true, nextBefore: (before ?? 1000) - 1 }));
+  assert.equal(endless.messages.length, 50);
+  assert.equal(endless.complete, false);
+  assert.deepEqual(await readConversation(async () => undefined), { messages: [], complete: false });
+  assert.deepEqual(await readConversation(async before => before === undefined ? pages[1] : undefined), { messages: [message('2')], complete: false }, 'a history gone midway keeps what was read');
+});
+
+test('a conversation that cannot be read at all, or whose owner words are too long, goes to the owner without asking the model', async t => {
   const f = await fixture(t);
   await f.service.saveAutoReview(ON);
   let asked = 0;
