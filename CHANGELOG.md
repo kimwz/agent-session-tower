@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.125.1] - 2026-10-11
+
+- 시크릿 공유 규칙 저장이 거부되면 일반 문구 대신 원인(잠금, 공유할 키, 필드, 프로젝트, 최대 사용 시간 등)을 구분해 보여 줍니다.
+- 키를 삭제하면 공유 규칙에서도 빠지고, 편집 화면은 이미 없는 키와 필드를 빼고 저장하므로 기존 규칙을 그대로 저장해도 실패하지 않습니다.
+
 ## [1.125.0] - 2026-10-10
 
 - SQLite 도메인 저장소를 통합하고 명시적 오프라인 이관의 전체 백업·완료 영수증·재시작 보류 경계를 연결했습니다.
