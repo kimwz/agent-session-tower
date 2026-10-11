@@ -8,9 +8,10 @@ export function readSeenProblems(value: string | null): string[] {
   try {
     const parsed: unknown = JSON.parse(value ?? '[]');
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
-  } catch { return []; }
+  } catch { return []; } // best-effort: an unreadable record counts as nothing seen, so the problems show again.
 }
 
+// best-effort: a browser that refuses storage shows the problems again on the next page.
 const storedProblems = () => { try { return readSeenProblems(localStorage.getItem(SEEN_PROBLEMS)); } catch { return []; } };
 
 /**
@@ -24,6 +25,7 @@ export function useSeenTriggerProblems() {
     window.addEventListener('storage', follow);
     return () => window.removeEventListener('storage', follow);
   }, []);
+  // best-effort: a browser that refuses storage keeps the problems seen only on this page.
   const acknowledge = useCallback((problems: string[]) => { try { localStorage.setItem(SEEN_PROBLEMS, JSON.stringify(problems)); } catch { /* Shown again next time. */ } setSeen(problems); }, []);
   return { seen, acknowledge };
 }
