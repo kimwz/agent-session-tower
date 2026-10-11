@@ -228,6 +228,18 @@ test('editing a rule whose key or field was removed saves only what still exists
   fixture.complete(true); await pending; fixture.cleanup();
 });
 
+test('a rule whose selected fields were all removed saves unchanged as an explicit empty selection', async () => {
+  const overview = { status: { initialized: true, locked: false }, device: { id: 'source', name: 'Source' }, peers: [], projects: [{ id: 'project', name: 'App', bindings: [] }],
+    groups: [{ id: 'group', name: 'app', scope: 'project', projectId: 'project' }], secrets: [{ id: 'env', groupId: 'group', name: 'ENV', kind: 'env', fields: ['B'] }], rules: [], connected: [] };
+  const rule = { id: 'rule', groupId: 'group', hostId: 'source', projectId: 'project', secretIds: ['env'], fields: { env: ['A'] }, operations: ['env'], activation: 'manual', enabled: true, revision: 2 };
+  const fixture = componentFixture('SecretRuleEditor', 'SecretManagement.tsx', { overview, rule });
+  const root = fixture.render();
+  assert.equal(descendants(root).find(node => node.type === 'button' && node.props.type === 'submit')!.props.disabled, false);
+  const pending = root.props.onSubmit(formEvent); const body = readPayload(fixture);
+  assert.deepEqual(body.fields, { env: [] }, 'never widened to all fields');
+  fixture.complete(true); await pending; fixture.cleanup();
+});
+
 test('remote and mixed key selections disable attach without silently attaching the local subset, while revoke remains available', async () => {
   const overview = { status: { initialized: true, locked: false }, device: { id: 'local', name: 'Local' }, projects: [], peers: [],
     groups: [{ id: 'group-local', name: 'Local group', scope: 'global' }, { id: 'group-remote', name: 'Source · remote', scope: 'global' }],

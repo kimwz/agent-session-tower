@@ -18,7 +18,10 @@ export function SecretRuleEditor({ overview, rule, busy, change, onClose }: { ov
   const [allProjects, setAllProjects] = useState(rule?.allProjects ?? false);
   const [activation, setActivation] = useState(rule?.activation || 'auto');
   const [operations, setOperations] = useState(rule?.operations || [...DEFAULT_SECRET_USE_OPERATIONS]);
-  const [fields, setFields] = useState<Record<string, string[]>>(Object.fromEntries(Object.entries(rule?.fields || {}).filter(([id]) => savedIds.includes(id)).map(([id, names]) => [id, names.filter(name => overview.secrets.find(secret => secret.id === id)?.fields?.includes(name))])));
+  const savedFields: Record<string, string[]> = Object.fromEntries(Object.entries(rule?.fields || {}).filter(([id]) => savedIds.includes(id)).map(([id, names]) => [id, names.filter(name => overview.secrets.find(secret => secret.id === id)?.fields?.includes(name))]));
+  // A saved selection whose every field is gone stays an explicit empty selection (never all fields), and still saves.
+  const emptied = Object.keys(savedFields).filter(id => !savedFields[id].length);
+  const [fields, setFields] = useState(savedFields);
   const [enabled, setEnabled] = useState(rule?.enabled ?? true);
   const [ttl, setTtl] = useState(rule?.maxTtlMs ? String(rule.maxTtlMs / 60_000) : '');
   const [expires, setExpires] = useState(rule?.expiresAt ? new Date(rule.expiresAt - new Date(rule.expiresAt).getTimezoneOffset() * 60_000).toISOString().slice(0, 16) : '');
@@ -48,7 +51,7 @@ export function SecretRuleEditor({ overview, rule, busy, change, onClose }: { ov
     <label>{t('만료 시각')}<input type="datetime-local" value={expires} disabled={busy} onChange={event => setExpires(event.target.value)} /></label>
     <label className="secret-check"><input type="checkbox" checked={enabled} disabled={busy} onChange={event => setEnabled(event.target.checked)} />{t('규칙 활성화')}</label>
     </details>
-    <div className="secret-actions"><button type="button" onClick={onClose}>{t('취소')}</button><button type="submit" disabled={busy || !groupId || !secretIds.length || !hostId || !operations.length || (group?.scope === 'global' && !allProjects && !projectId && !root) || secretIds.some(id => fields[id]?.length === 0)}>{t('저장')}</button></div>
+    <div className="secret-actions"><button type="button" onClick={onClose}>{t('취소')}</button><button type="submit" disabled={busy || !groupId || !secretIds.length || !hostId || !operations.length || (group?.scope === 'global' && !allProjects && !projectId && !root) || secretIds.some(id => fields[id]?.length === 0 && !emptied.includes(id))}>{t('저장')}</button></div>
   </form>;
 }
 
