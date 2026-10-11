@@ -4,7 +4,8 @@ import type { SkillSummary } from '../../../shared/skills';
 import type { PermissionOverview } from '../../../shared/permissions';
 import { api } from '../common/lib';
 import { permissionOperation } from '../permissions/PermissionsPanel';
-import { triggerAttention } from '../triggers/trigger-helpers';
+import { triggerAttention, triggerProblems } from '../triggers/trigger-helpers';
+import { useSeenTriggerProblems } from '../triggers/seen-trigger-problems';
 import { useControllerJoin } from '../remote/controller-join';
 import { publishSkillSummary } from '../skills/skills-open';
 import type { SettingsAttention } from './settings-sections';
@@ -20,6 +21,7 @@ export function useSettingsAttention(token: string, triggers: TriggerOverview | 
   const [permissions, setPermissions] = useState(0);
   const [skills, setSkills] = useState(0);
   const join = useControllerJoin(joined);
+  const seenTriggers = useSeenTriggerProblems();
   const refreshPermissions = useCallback(() => {
     if (!token || document.hidden) return;
     void permissionOperation<PermissionOverview>(token, 'overview').then(overview => setPermissions(overview.pending)).catch(() => {});
@@ -38,6 +40,8 @@ export function useSettingsAttention(token: string, triggers: TriggerOverview | 
   }, [refreshPermissions]);
   useEffect(() => { refreshSkills(); const timer = window.setInterval(refreshSkills, SKILL_POLL); return () => window.clearInterval(timer); }, [refreshSkills]);
   const refresh = useCallback(() => { refreshPermissions(); refreshSkills(); }, [refreshPermissions, refreshSkills]);
-  const attention: SettingsAttention = { permissions, skills, triggers: triggerAttention(triggers), remote: Boolean(join.notice) };
-  return { attention, refresh, join };
+  const attention: SettingsAttention = { permissions, skills, triggers: triggerAttention(triggers, seenTriggers.seen), remote: Boolean(join.notice) };
+  // Seeing the triggers needs their overview; before it arrives there is nothing to remember.
+  const acknowledgeTriggers = useCallback(() => { if (triggers) seenTriggers.acknowledge(triggerProblems(triggers)); }, [triggers, seenTriggers.acknowledge]);
+  return { attention, refresh, join, acknowledgeTriggers };
 }

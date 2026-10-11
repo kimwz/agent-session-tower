@@ -19,7 +19,7 @@ export function SettingsButton({ context, joined }: { context: SettingsContext; 
   const auth = useAuth();
   const phone = useMediaQuery('(max-width: 680px)');
   const { token } = context;
-  const { attention, refresh, join } = useSettingsAttention(token, context.triggers, joined);
+  const { attention, refresh, join, acknowledgeTriggers } = useSettingsAttention(token, context.triggers, joined);
   const [place, setPlace] = useState<SettingsPlace | null>(null);
   const last = useRef<SettingsSection | undefined>(undefined);
   const sections = useMemo(() => settingsSections(Boolean(auth)), [auth]);
@@ -29,6 +29,9 @@ export function SettingsButton({ context, joined }: { context: SettingsContext; 
   // Looking at the remote computers is seeing who joined.
   const remoteShown = place?.section === 'remote' && !(place.list && phone);
   useEffect(() => { if (remoteShown) join.acknowledge(); }, [remoteShown, join.notice?.at]);
+  // Looking at the triggers is seeing their problems, including ones that come up while they show.
+  const triggersShown = place?.section === 'triggers' && !(place.list && phone);
+  useEffect(() => { if (triggersShown && attention.triggers) acknowledgeTriggers(); }, [triggersShown, attention.triggers, acknowledgeTriggers]);
 
   const open = useCallback((section?: SettingsSection, extra: Omit<SettingsPlace, 'section'> = {}) => {
     const chosen = initialSection(section, attention, last.current, sections);

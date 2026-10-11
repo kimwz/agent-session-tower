@@ -8,7 +8,7 @@ export interface SettingsAttention {
   permissions: number;
   /** Skill proposals ready to review. */
   skills: number;
-  /** A trigger is paused, failing or its store cannot be read. */
+  /** A trigger problem (paused, failing, a failed or unknown run, an unreadable store) not yet seen in this browser. */
   triggers: boolean;
   /** Another Tower started controlling this computer, and no tab has shown it yet. */
   remote: boolean;
