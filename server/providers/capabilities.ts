@@ -5,7 +5,7 @@ import { open } from 'node:fs/promises';
 import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import type { EffortOption, ModelOption, Provider, ProviderHealth, ProviderUsage, UsageWindow } from '../../shared/types.js';
+import type { EffortOption, ModelOption, Provider, ProviderAccount, ProviderHealth, ProviderUsage, UsageWindow } from '../../shared/types.js';
 import { CLAUDE_EFFORT_LEVELS, validEffort, validModelId } from './models.js';
 import { APP_TITLE, APP_VERSION, LEGACY_APP_NAME } from '../../shared/app-identity.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
@@ -13,7 +13,7 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 const execute = promisify(execFile);
 const MAX_JSON = 2 * 1024 * 1024;
 type Json = Record<string, unknown>;
-export type Capabilities = Pick<ProviderHealth, 'usage' | 'models' | 'defaultModel' | 'efforts' | 'defaultEffort'>;
+export type Capabilities = Pick<ProviderHealth, 'usage' | 'account' | 'models' | 'defaultModel' | 'efforts' | 'defaultEffort'>;
 type Reason = 'not_signed_in' | 'not_supported' | 'credentials_unavailable' | 'rate_limited' | 'unreachable' | 'no_data';
 const object = (value: unknown): Json | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Json : undefined;
 const timestamp = (value: unknown): string | undefined => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : undefined;
@@ -33,6 +33,24 @@ export const CLAUDE_MODELS: readonly ModelOption[] = [
   { id: 'haiku', label: 'Haiku 5.5', efforts: [...CLAUDE_EFFORTS], defaultEffort: 'medium' },
 ];
 const copyModel = (model: ModelOption): ModelOption => ({ ...model, ...(model.efforts ? { efforts: model.efforts.map(effort => ({ ...effort })) } : {}) });
+
+/** `ka***@example.com`: enough for the owner to tell accounts apart, without the address itself. */
+export function maskEmail(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length > 320 || /\s/.test(value)) return undefined;
+  const at = value.lastIndexOf('@');
+  if (at < 1 || at === value.length - 1) return undefined;
+  return `${value.slice(0, at > 2 ? 2 : 1)}***${value.slice(at)}`;
+}
+const planId = (value: unknown): string | undefined => typeof value === 'string' && /^[a-z0-9_]{1,40}$/.test(value) ? value : undefined;
+const accountOrNone = (email?: string, plan?: string): ProviderAccount | undefined =>
+  email || plan ? { ...(email ? { email } : {}), ...(plan ? { plan } : {}) } : undefined;
+
+/** The masked email and plan of Codex's sign-in; tokens and other account details stay private. */
+export function parseCodexAccount(value: unknown): ProviderAccount | undefined {
+  const account = object(object(value)?.account);
+  if (account?.type === 'apiKey') return { plan: 'api_key' };
+  return account?.type === 'chatgpt' ? accountOrNone(maskEmail(account.email), planId(account.planType)) : undefined;
+}
 
 /** Copy only quota windows; account identity, credit balances and tokens stay private. */
 export function parseCodexUsage(value: unknown, now = Date.now()): ProviderUsage {
@@ -117,8 +135,11 @@ type CredentialReaderOptions = {
   keychain?: (account: string, service: string, signal: AbortSignal) => Promise<string>;
 };
 
-/** A signed-in Claude account: its token, and an opaque fingerprint that tells a different sign-in apart without keeping either secret. */
-export type ClaudeCredential = { token?: string; account?: string; reason?: Reason };
+/**
+ * A signed-in Claude account: its token, and an opaque fingerprint that tells a different sign-in apart without keeping either secret.
+ * `stored` marks a sign-in from Claude Code's own storage, whose profile its global configuration describes; `plan` is its subscription.
+ */
+export type ClaudeCredential = { token?: string; account?: string; reason?: Reason; stored?: boolean; plan?: string };
 // A token refresh also changes it; that only costs one early reading.
 const accountOf = (secret: string): string => createHash('sha256').update(`tower-claude-account:${secret}`).digest('hex').slice(0, 16);
 const ACCOUNT = /^[a-f0-9]{16}$/;
@@ -157,9 +178,30 @@ export async function readClaudeCredential(options: CredentialReaderOptions): Pr
   if (!oauth || typeof oauth.accessToken !== 'string' || !oauth.accessToken || /[\r\n]/.test(oauth.accessToken)) return { reason: 'not_signed_in' };
   // The refresh token outlives each access token, so the fingerprint changes less often.
   const account = accountOf(typeof oauth.refreshToken === 'string' && oauth.refreshToken ? oauth.refreshToken : oauth.accessToken);
-  if (typeof oauth.expiresAt === 'number' && oauth.expiresAt <= Date.now()) return { reason: 'not_signed_in', account };
-  if (!Array.isArray(oauth.scopes) || !oauth.scopes.includes('user:profile')) return { reason: 'not_supported', account };
-  return { token: oauth.accessToken, account };
+  const plan = planId(oauth.subscriptionType);
+  const stored = { account, stored: true, ...(plan ? { plan } : {}) };
+  if (typeof oauth.expiresAt === 'number' && oauth.expiresAt <= Date.now()) return { reason: 'not_signed_in', ...stored };
+  if (!Array.isArray(oauth.scopes) || !oauth.scopes.includes('user:profile')) return { reason: 'not_supported', ...stored };
+  return { token: oauth.accessToken, ...stored };
+}
+
+const MAX_CLAUDE_CONFIG = 32 * 1024 * 1024;
+let claudeProfile: { path: string; mtimeMs: number; size: number; email?: string } | undefined;
+/** The masked email of Claude Code's signed-in profile, from its global configuration; parsed again only after the file changes. */
+export async function readClaudeEmail(env: NodeJS.ProcessEnv, home = homedir()): Promise<string | undefined> {
+  const path = join(env.CLAUDE_CONFIG_DIR || home, '.claude.json');
+  try {
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const info = await file.stat();
+      if (!info.isFile() || info.size > MAX_CLAUDE_CONFIG) return undefined;
+      if (claudeProfile?.path === path && claudeProfile.mtimeMs === info.mtimeMs && claudeProfile.size === info.size) return claudeProfile.email;
+      const email = maskEmail(object(object(JSON.parse(await file.readFile('utf8')))?.oauthAccount)?.emailAddress);
+      claudeProfile = { path, mtimeMs: info.mtimeMs, size: info.size, email };
+      return email;
+    } finally { await file.close(); }
+  // best-effort: a missing or unreadable profile only leaves the email out.
+  } catch { return undefined; }
 }
 
 /** The effort Claude Code applies without `--effort`: its environment override, then user settings. */
@@ -261,8 +303,11 @@ export async function readCodexCapabilities(executable: string, env: NodeJS.Proc
   try {
     await request('initialize', { clientInfo: { name: LEGACY_APP_NAME, title: APP_TITLE, version: APP_VERSION }, capabilities: { experimentalApi: true, requestAttestation: false } });
     child.stdin.write(JSON.stringify({ method: 'initialized' }) + '\n');
-    const [usage, models] = await Promise.all([
+    const [usage, account, models] = await Promise.all([
       request('account/rateLimits/read', {}).then(parseCodexUsage).catch(error => unavailable(rpcReason(error))),
+      // Without refreshToken: reading the account never refreshes the sign-in.
+      // best-effort: a Codex without account/read only leaves the account out.
+      request('account/read', {}).then(parseCodexAccount).catch(() => undefined),
       (async () => {
         const data: unknown[] = [];
         let cursor: string | undefined;
@@ -279,7 +324,7 @@ export async function readCodexCapabilities(executable: string, env: NodeJS.Proc
       })().catch(() => ({})),
     ]);
     const config = await request('config/read', {}).then(parseCodexConfig).catch(() => ({}));
-    return { usage, ...models, ...config };
+    return { usage, ...(account ? { account } : {}), ...models, ...config };
   } catch (error) { return { usage: unavailable(rpcReason(error)) }; }
   finally {
     signal.removeEventListener('abort', aborted);
@@ -333,6 +378,7 @@ type CapabilityOptions = {
   stateDir?: string;
   claudeCredential?: (signal: AbortSignal) => Promise<ClaudeCredential>;
   claudeUsage?: (credential: ClaudeCredential, signal: AbortSignal) => Promise<ProviderUsage>;
+  claudeEmail?: (env: NodeJS.ProcessEnv) => Promise<string | undefined>;
   now?: () => number;
 };
 
@@ -387,10 +433,16 @@ export class ProviderCapabilities {
    * Claude usage reads paced on their own: at most one per interval, and longer after 429s.
    * The local sign-in is checked every time, so another account is read at once and never shown an earlier account's quota.
    */
-  private async readClaudeUsagePaced(signal: AbortSignal): Promise<{ usage: ProviderUsage; sameAccount: boolean }> {
+  private async readClaudeUsagePaced(signal: AbortSignal): Promise<{ usage: ProviderUsage; sameAccount: boolean; account?: ProviderAccount }> {
     const now = this.now();
     const credential = await (this.options.claudeCredential || (signal => readClaudeCredential({ env: this.options.env, signal })))(signal);
     if (signal.aborted) return { usage: unavailable('unreachable'), sameAccount: false };
+    // An environment token can belong to another account than the profile Claude Code keeps in its configuration.
+    const account = credential.stored ? accountOrNone(await (this.options.claudeEmail || readClaudeEmail)(this.options.env || process.env), credential.plan) : undefined;
+    const paced = await this.readClaudeQuota(credential, now, signal);
+    return { ...paced, ...(account ? { account } : {}) };
+  }
+  private async readClaudeQuota(credential: ClaudeCredential, now: number, signal: AbortSignal): Promise<{ usage: ProviderUsage; sameAccount: boolean }> {
     const sameAccount = !!credential.account && credential.account === this.claudeAccount;
     if (!sameAccount) {
       this.lastClaudeUsage = undefined;
@@ -419,7 +471,7 @@ export class ProviderCapabilities {
     return this.providers.map(provider => {
       const usage = provider.usage;
       const expired = usage?.windows.some(window => window.resetsAt && Date.parse(window.resetsAt) <= now);
-      return { ...provider, ...(provider.models ? { models: provider.models.map(copyModel) } : {}),
+      return { ...provider, ...(provider.models ? { models: provider.models.map(copyModel) } : {}), ...(provider.account ? { account: { ...provider.account } } : {}),
         ...(provider.efforts ? { efforts: provider.efforts.map(effort => ({ ...effort })) } : {}),
         ...(usage ? { usage: { ...usage, windows: usage.windows.map(window => ({ ...window })), ...(expired ? { status: 'unavailable' as const, stale: true, reason: 'no_data' } : {}) } } : {}) };
     });
@@ -461,13 +513,14 @@ export class ProviderCapabilities {
           else if (provider.provider === 'codex') {
             const read = () => readCodexCapabilities(provider.executable!, this.options.env || process.env, signal);
             const previous = this.providers.find(item => item.provider === 'codex');
-            capabilities = await (this.options.unlessUpdating ? this.options.unlessUpdating('codex', read) : read()) ?? { usage: previous?.usage ?? { status: 'loading', windows: [] } };
+            capabilities = await (this.options.unlessUpdating ? this.options.unlessUpdating('codex', read) : read())
+              ?? { usage: previous?.usage ?? { status: 'loading', windows: [] }, ...(previous?.account ? { account: previous.account } : {}) };
           }
           else {
             const [claude, defaultEffort] = await Promise.all([this.readClaudeUsagePaced(signal), readClaudeDefaultEffort(this.options.env || process.env)]);
             const usage = claude.usage;
             sameAccount = claude.sameAccount;
-            capabilities = { usage, models: CLAUDE_MODELS.map(copyModel), efforts: CLAUDE_EFFORTS.map(effort => ({ ...effort })), ...(defaultEffort ? { defaultEffort } : {}) };
+            capabilities = { usage, ...(claude.account ? { account: claude.account } : {}), models: CLAUDE_MODELS.map(copyModel), efforts: CLAUDE_EFFORTS.map(effort => ({ ...effort })), ...(defaultEffort ? { defaultEffort } : {}) };
           }
         } catch { capabilities = { usage: unavailable('unreachable') }; sameAccount = provider.provider !== 'claude'; }
         const previous = this.providers.find(item => item.provider === provider.provider);

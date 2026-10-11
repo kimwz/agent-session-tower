@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { usageAheadOfTime, usageElapsedPercent, usagePercent, usageUnavailableReason, usageWindowLabel, usageWindows } from '../../../client/src/providers/provider-usage.js';
+import { accountLabel, usageAheadOfTime, usageElapsedPercent, usagePercent, usageUnavailableReason, usageWindowLabel, usageWindows } from '../../../client/src/providers/provider-usage.js';
 import { clearHostPosition, HOST_HEIGHT } from '../../../client/src/graph/graph-layout.js';
 import { setLanguage } from '../../../client/src/i18n/i18n.js';
 import type { ProviderUsage } from '../../../shared/types.js';
@@ -55,4 +55,15 @@ test('adding host usage clears saved project frames without rewriting manual pos
   assert.deepEqual(clearHostPosition(savedHost, [{ ...frame, position: { x: 0, y: 185 } }]), savedHost);
   const stacked = clearHostPosition(savedHost, [frame, { ...frame, position: { x: 0, y: -300 } }]);
   assert.ok(stacked.y + HOST_HEIGHT < -300);
+});
+
+test('the account label joins the masked email and a readable plan', () => {
+  setLanguage('en');
+  assert.equal(accountLabel({ email: 'ka***@example.com', plan: 'max' }), 'ka***@example.com · Max');
+  assert.equal(accountLabel({ plan: 'api_key' }), 'API key');
+  assert.equal(accountLabel({ plan: 'self_serve_business_prolite' }), 'Self Serve Business Prolite');
+  assert.equal(accountLabel({ email: 'ka***@example.com' }), 'ka***@example.com');
+  assert.equal(accountLabel({}), undefined);
+  assert.equal(accountLabel(), undefined);
+  setLanguage('ko');
 });

@@ -41,6 +41,7 @@
 .usage-tooltip dl > .ahead .usage-bar b { background: #ec8a7d; }
 .usage-tooltip > small { color: #8ba0bb; }
 .usage-tooltip .usage-stale { color: #e1b776; }
+.usage-tooltip .usage-account { color: #c9d8ea; overflow-wrap: anywhere; }
 
 /* CPU, RAM and disk rings under a computer's version */
 .system-rings { position: relative; margin-top: 5px; }

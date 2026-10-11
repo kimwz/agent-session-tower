@@ -154,6 +154,8 @@ The machine node shows separate usage indicators for the Claude Code and Codex a
 
 Hover, focus, or select an indicator to see the available usage windows, such as five hours and one week, and their reset times. Not every provider, plan, or authentication method supplies the same windows. Missing data is shown as unavailable, and older data is marked stale instead of being displayed as a fresh zero. When you sign in to Claude Code with another account, the Claude indicator follows the new account at the next refresh, normally within a minute; an earlier account's usage is never kept as stale data for it. Tower reads the account Claude Code uses in Tower's own environment, so a shell signed in through a different `CLAUDE_CONFIG_DIR` does not change it.
 
+The details also name the signed-in account: a masked email such as `ka***@example.com` and the plan (for example Max, Team, Plus or Pro; a Codex API key sign-in shows "API key"). Tower masks the email before it leaves the server and never stores it. A Claude sign-in through an environment token shows no account, because the profile Claude Code keeps may belong to another account. The account is shown only on the computer's own Tower page; a controlling Tower does not receive the accounts of joined computers.
+
 ## Model selection
 
 The chat composer lets you choose a model for the next request. **Agent default** sends no model override and follows the native agent or session configuration. An explicit selection is saved with the request, so queued requests and retries keep their chosen model.

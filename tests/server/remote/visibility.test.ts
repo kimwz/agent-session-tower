@@ -24,7 +24,7 @@ const base = (): Snapshot => ({
   ],
   runs: [run('r-open', 'codex:open', { origin: { kind: 'trigger', triggerId: 'daily' }, canSteer: false, steerBlocked: 'origin' }), run('r-secret', 'codex:secret'), run('r-deep', 'codex:deep'), run('r-coordinator', 'codex:coordinator')],
   providers: [{ provider: 'codex', available: true, sessionCount: 7, executable: '/Users/me/bin/codex', error: 'raw provider error',
-    usage: { status: 'available', windows: [{ id: 'week', usedPercent: 12 }], reason: 'raw usage reason' } }],
+    usage: { status: 'available', windows: [{ id: 'week', usedPercent: 12 }], reason: 'raw usage reason' }, account: { email: 'ow***@example.com', plan: 'pro' } }],
   groups: [{ cwd: '/work/open', title: 'Open', pinned: true, hidden: true }, { cwd: '/work/secret', title: 'Secret', pinned: true }, { cwd: '/work/secret/deep', title: 'Deep', pinned: false }],
   autoPrompts: [],
   repositories: [
@@ -66,6 +66,7 @@ test('providers are summarized: counts follow what is visible, and local paths a
   const [provider] = remoteSnapshot(base(), scope(), 'controller-a1b2c3d4e5f6').providers;
   assert.equal(provider.sessionCount, 3);
   assert.equal(provider.executable, undefined);
+  assert.equal(provider.account, undefined, 'the signed-in account stays on its own computer\'s screen');
   assert.equal(provider.error, undefined);
   assert.equal(provider.usage?.reason, undefined);
   assert.deepEqual(provider.usage?.windows, [{ id: 'week', usedPercent: 12 }]);
