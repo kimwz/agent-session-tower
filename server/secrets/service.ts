@@ -132,7 +132,7 @@ export class SecretService {
     if (input.projectId && !this.data().projects.some(project => project.id === input.projectId)) throw invalid('공유 규칙의 프로젝트를 찾을 수 없습니다.');
     if (group.scope === 'project' && group.projectId !== input.projectId) throw invalid('프로젝트 그룹의 규칙은 그 그룹의 프로젝트에만 쓸 수 있습니다.');
     if (input.maxTtlMs !== undefined && (!Number.isSafeInteger(input.maxTtlMs) || input.maxTtlMs <= 0)) throw invalid('작업 내 최대 사용 시간이 올바르지 않습니다.');
-    for (const id of Object.keys(input.fields ?? {})) { const secret = this.secrets().find(secret => secret.metadata.id === id); if (!input.secretIds.includes(id) || !secret) throw invalid('선택한 필드가 공유할 키에 없습니다.'); try { this.selectedFields(secret, input); } catch { throw invalid('선택한 필드가 키에 없습니다. 필드를 다시 선택하세요.'); } }
+    for (const id of Object.keys(input.fields ?? {})) { const secret = this.secrets().find(secret => secret.metadata.id === id); if (!input.secretIds.includes(id) || !secret) throw invalid('선택한 필드가 공유할 키에 없습니다.'); try { this.selectedFields(secret, input); } catch { throw invalid('선택한 필드가 키에 없거나 중복됩니다. 필드를 다시 선택하세요.'); } }
     const existing = input.id ? this.allRules().find(rule => rule.id === input.id) : undefined; if (input.id && !existing) throw new TowerError('not-found', '수정할 공유 규칙을 찾을 수 없습니다. 화면을 새로고침하세요.');
     const rule: SecretRule = { ...structuredClone(input), id: input.id ?? randomUUID(), revision: (existing?.revision ?? 0) + 1 }; this.data().rules = this.data().rules.filter(item => item.id !== rule.id); this.journal.rules = this.journal.rules.filter(item => item.id !== rule.id); (group.scope === 'task' ? this.journal.rules : this.data().rules).push(rule); return structuredClone(rule);
   }); }

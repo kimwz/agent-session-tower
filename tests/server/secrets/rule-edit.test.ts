@@ -47,7 +47,7 @@ test('a refused rule says which field is wrong', async t => {
   await refusal(service.setRule({ ...base, secretIds: ['gone'] }), 'invalid', '공유할 키가 이 그룹에 없습니다. 키를 다시 선택하세요.');
   await refusal(service.setRule({ ...base, maxTtlMs: 1.5 * 60_000 + 0.5 }), 'invalid', '작업 내 최대 사용 시간이 올바르지 않습니다.');
   await refusal(service.setRule({ ...base, projectId: other.id }), 'invalid', '프로젝트 그룹의 규칙은 그 그룹의 프로젝트에만 쓸 수 있습니다.');
-  await refusal(service.setRule({ ...base, fields: { [secret.id]: ['MISSING'] } }), 'invalid', '선택한 필드가 키에 없습니다. 필드를 다시 선택하세요.');
+  await refusal(service.setRule({ ...base, fields: { [secret.id]: ['MISSING'] } }), 'invalid', '선택한 필드가 키에 없거나 중복됩니다. 필드를 다시 선택하세요.');
   await refusal(service.setRule({ ...base, groupId: 'gone' }), 'invalid', '공유 규칙의 그룹을 찾을 수 없습니다.');
   await refusal(service.setRule({ ...base, id: 'gone' }), 'not-found', '수정할 공유 규칙을 찾을 수 없습니다. 화면을 새로고침하세요.');
 });

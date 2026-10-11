@@ -127,7 +127,7 @@ export const english: Record<string, string> = {
   "프로젝트 그룹의 규칙은 그 그룹의 프로젝트에만 쓸 수 있습니다.": "A project group's rule can only name that group's project.",
   "작업 내 최대 사용 시간이 올바르지 않습니다.": "The maximum use time in a task is not valid.",
   "선택한 필드가 공유할 키에 없습니다.": "A selected field belongs to a key that is not shared.",
-  "선택한 필드가 키에 없습니다. 필드를 다시 선택하세요.": "A selected field is no longer in the key. Choose the fields again.",
+  "선택한 필드가 키에 없거나 중복됩니다. 필드를 다시 선택하세요.": "A selected field is missing from the key or repeated. Choose the fields again.",
   "수정할 공유 규칙을 찾을 수 없습니다. 화면을 새로고침하세요.": "The sharing rule to edit no longer exists. Refresh the page.",
   "공유 규칙 입력 형식이 올바르지 않습니다.": "The sharing rule input is not valid.",
   "시크릿 보관함이 잠겨 있습니다. 잠금을 해제한 뒤 다시 시도하세요.": "The secret vault is locked. Unlock it and try again.",
