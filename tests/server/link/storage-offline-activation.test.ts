@@ -9,6 +9,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { APP_VERSION } from '../../../shared/app-identity.js';
 import { retentionBuild, protectedOld124, currentProductProfile, type OfflineServiceFixture } from '../storage/fixtures/retention-build.js';
 import { RemoteRepository } from '../../../server/remote/storage-repository.js';
 import { empty } from '../../../server/triggers/state.js';
@@ -23,7 +24,7 @@ async function fixture(t:TestContext,fault='normal',product?:Parameters<typeof r
   const stateDir=join(root,'state');await mkdir(stateDir,{mode:0o700});
   const full=process.env.TOWER_SQLITE_OLD124_ROOT ? await protectedOld124() : undefined;
   const old=full ?? await retentionBuild('1.124.0',join(root,'old-sdk'));
-  const final=await retentionBuild('1.125.0',join(root,'final-sdk'),true,true,true,product,false,fault);
+  const final=await retentionBuild(product ? APP_VERSION : '1.125.0',join(root,'final-sdk'),true,true,true,product,false,fault);
   const oldDb=await old.storage.openStorage({stateDir,bundle:old.bundle()});
   await oldDb.prepare({allowMigration:true});
   const schema=(await oldDb.inspect()).schema;assert.notEqual(schema.kind,'empty');
@@ -218,7 +219,7 @@ for(const partial of [false,true]) test(`full restore explicit current SDK recov
 });
 
 async function selectedPackage(f:Awaited<ReturnType<typeof fixture>>) {
-  const selectedRoot=join(f.final.storage.versionDirectory(f.stateDir,'1.125.0'),'node_modules','agent-session-tower');await mkdir(selectedRoot,{recursive:true,mode:0o700});
+  const selectedRoot=join(f.final.storage.versionDirectory(f.stateDir,f.final.version),'node_modules','agent-session-tower');await mkdir(selectedRoot,{recursive:true,mode:0o700});
   for(const member of ['package.json','bin','dist/server','dist/shared','dist/client']) await cp(join(process.cwd(),member),join(selectedRoot,member),{recursive:true});
   const files:Record<string,string>={};
   async function visit(directory:string,prefix='') {
@@ -248,8 +249,8 @@ test(`full actual selected service package ${boundary} validates actual SDK and 
   const record=await f.final.storage.readOfflineActivation(f.stateDir);assert.ok(record);
   const completionInput=join(f.root,'completion.json');await writeFile(completionInput,JSON.stringify(record),{mode:0o600});
   const {selectedRoot,files}=await selectedPackage(f);
-  const request={format:'tower-offline-service-maintenance' as const,service:true as const,previousVersion:'1.124.0',stateDir:f.stateDir,version:'1.125.0',by:'owner',evidence:'Explicit stopped-service fixture',publishedPackageSHA256:'a'.repeat(64),files,completionInput:{path:completionInput,sha256:digest(await readFile(completionInput))}};
-  await f.final.storage.verifyOfflineServiceSelection(selectedRoot,request,f.stateDir,'1.125.0');
+  const request={format:'tower-offline-service-maintenance' as const,service:true as const,previousVersion:'1.124.0',stateDir:f.stateDir,version:f.final.version,by:'owner',evidence:'Explicit stopped-service fixture',publishedPackageSHA256:'a'.repeat(64),files,completionInput:{path:completionInput,sha256:digest(await readFile(completionInput))}};
+  await f.final.storage.verifyOfflineServiceSelection(selectedRoot,request,f.stateDir,f.final.version);
   const entry=join(selectedRoot,'bin/agent-session-tower.mjs');
   const contract=JSON.parse((await promisify(execFile)(process.execPath,[entry,'--storage-contract'],{timeout:60_000,maxBuffer:16*1024*1024})).stdout);
   assert.equal(contract.supported,true);assert.deepEqual(contract.identity,record.build);
@@ -278,13 +279,13 @@ test(`full actual selected service package ${boundary} validates actual SDK and 
   assert.equal(await f.final.storage.currentVersion(f.stateDir),'1.124.0');
   await writeFile(approval,JSON.stringify(request),{mode:0o600});
   await f.final.storage.runLinkCommand(command);
-  assert.equal(await f.final.storage.currentVersion(f.stateDir),'1.125.0');
+  assert.equal(await f.final.storage.currentVersion(f.stateDir),f.final.version);
   const started=JSON.parse(await readFile(join(f.stateDir,'offline-service-fixture-start.json'),'utf8'));
-  assert.equal(started.version,'1.125.0');assert.equal(started.input.start,true);
+  assert.equal(started.version,f.final.version);assert.equal(started.input.start,true);
   const readySdk=await f.final.storage.openStorage({stateDir:f.stateDir,bundle:f.final.bundle()});
   try {
     await readySdk.prepare({allowMigration:false});
-    const ready=await f.final.storage.evaluateCompletedOffline({stateDir:f.stateDir,managed:true,build:{version:'1.125.0',manifest:f.final.manifest,preflight:await f.final.storage.preflightStorage({stateDir:f.stateDir,bundle:f.final.bundle()})}},readySdk);
+    const ready=await f.final.storage.evaluateCompletedOffline({stateDir:f.stateDir,managed:true,build:{version:f.final.version,manifest:f.final.manifest,preflight:await f.final.storage.preflightStorage({stateDir:f.stateDir,bundle:f.final.bundle()})}},readySdk);
     assert.equal(ready.verdict,'ready');assert.equal(ready.code,'offline-completion-verified');
   } finally {await readySdk.close();}
   await writeFile(approval,JSON.stringify({...request,service:false}),{mode:0o600});
@@ -292,8 +293,8 @@ test(`full actual selected service package ${boundary} validates actual SDK and 
   await assert.rejects(f.final.storage.runLinkCommand([...command,'--no-service']),/Offline maintenance/);
   // The pre-existing selected directory can contain different bytes despite the same version string.
   await writeFile(join(selectedRoot,'dist/server/index.js'),'wrong already-installed version',{mode:0o600});
-  await assert.rejects(f.final.storage.verifyOfflineServiceSelection(selectedRoot,request,f.stateDir,'1.125.0'),/bytes changed/);
-  await assert.rejects(f.final.storage.verifyOfflineServiceSelection(selectedRoot,{...request,by:''},f.stateDir,'1.125.0'),/approval/);
+  await assert.rejects(f.final.storage.verifyOfflineServiceSelection(selectedRoot,request,f.stateDir,f.final.version),/bytes changed/);
+  await assert.rejects(f.final.storage.verifyOfflineServiceSelection(selectedRoot,{...request,by:''},f.stateDir,f.final.version),/approval/);
   const source=await readFile('server/link/cli.ts','utf8');
   const service=source.slice(source.indexOf('async function runService'));
   assert.ok(service.indexOf('verifyOfflineServiceSelection')<service.indexOf('await useVersion'));

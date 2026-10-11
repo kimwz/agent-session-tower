@@ -30,6 +30,7 @@ import { createMonitorServer } from '../../../server/http/server.js';
 import { empty, serializeState } from '../../../server/triggers/state.js';
 import { triggerBackupOf } from '../../../server/triggers/backup.js';
 import type { Trigger } from '../../../shared/triggers.js';
+import { APP_VERSION } from '../../../shared/app-identity.js';
 import { listPendingSecretImports } from '../../../server/secrets/imports.js';
 
 import { PermissionsRepository } from '../../../server/permissions/storage-repository.js';
@@ -101,7 +102,7 @@ async function prepareRetentionA(root: string, stateDir: string): Promise<void> 
 
 /** Current seven-domain handlers and manifest; historical A captures remain separate. */
 async function futureBWorker(t: TestContext, root: string, triggerRetry = false): Promise<string> {
-  const b = await retentionBuild('1.125.0',join(root,'future-b-artifact'),true,true,true);
+  const b = await retentionBuild(APP_VERSION,join(root,'future-b-artifact'),true,true,true);
   assert.deepEqual(b.manifest, contextOf('production').manifest, 'B worker must declare the current seven-domain contract');
   const captured = b.bundle();
   const generated = await mkdtemp(join(dirname(fileURLToPath(import.meta.url)),'future-b-worker-'));
@@ -120,7 +121,7 @@ async function futureBWorker(t: TestContext, root: string, triggerRetry = false)
           writeFileSync(join(state, 'fixture-review-prompt.json'), request.prompt, { mode: 0o600 });
           return { verdict: 'owner', rule: null, scope: null, suggestion: null, reason: 'fixture model only', missing: [] };
         }`, loader: 'ts' }));
-      builder.onLoad({ filter: /[\\/]shared[\\/]app-identity\.ts$/ },async args => ({ contents: (await readFile(args.path,'utf8')).replace(/export const APP_VERSION = '[^']+';/,"export const APP_VERSION = '1.125.0';"),loader: 'ts' })); } },
+      builder.onLoad({ filter: /[\\/]shared[\\/]app-identity\.ts$/ },async args => ({ contents: (await readFile(args.path,'utf8')).replace(/export const APP_VERSION = '[^']+';/,`export const APP_VERSION = '${b.manifest.appVersion}';`),loader: 'ts' })); } },
     buildIdentityPlugin(buildIdentityModule({ contexts: [{ sourceHash: captured.sourceHash,manifest: b.manifest }],artifact: JSON.stringify({ format: 'tower-storage-thread-bundle/2',source: captured.source,sourceHash: captured.sourceHash }) })),
   ] });
   return entry;
@@ -171,7 +172,7 @@ async function prepareCurrentCold(root: string, stateDir: string): Promise<void>
   const contract = join(root, 'cold-old-contract.json');
   await writeFile(contract, JSON.stringify(artifactStorageContract(oldContext, await old.storage.preflightStorage({ stateDir, bundle: old.bundle() }))), { mode: 0o600 });
   const context = contextOf('production');
-  const current = await retentionBuild('1.125.0', join(root, 'cold-current-artifact'), true, true, true,
+  const current = await retentionBuild(APP_VERSION, join(root, 'cold-current-artifact'), true, true, true,
     { artifact: artifactOf('production'), manifest: context.manifest });
   const entry = join(packageRoot, 'bin/agent-session-tower.mjs');
   const hash = async (path: string) => createHash('sha256').update(await readFile(path)).digest('hex');
@@ -981,7 +982,7 @@ test('a durable owner hold accepted at the actual bootstrap success response par
   assert.equal(committed.error, undefined);
   const runsAuthority = (committed.result as { authority: { domain: string; authority: string; generation: number; appVersion: string }[] }).authority.find(domain => domain.domain === 'runs');
   assert.ok(runsAuthority);
-  assert.equal(runsAuthority.authority, 'database'); assert.equal(runsAuthority.generation, 1); assert.equal(runsAuthority.appVersion, '1.125.0');
+  assert.equal(runsAuthority.authority, 'database'); assert.equal(runsAuthority.generation, 1); assert.equal(runsAuthority.appVersion, APP_VERSION);
   const at = new Date().toISOString(), identity = first.snapshot!.storage!.identity!;
   const fence = { id: 'bootstrap-new-owner-hold', attempt: 1 };
   const record: RollbackRecord = { format: 'tower-storage-rollback', version: 1, id: fence.id,
@@ -1268,7 +1269,7 @@ test('actual trigger startup retry preserves session reads and holds permission 
   assert.equal((backup.result as { triggers: Trigger[] }).triggers[0].handler.kind, 'task');
   const web = createMonitorServer({ port: 0, clientDir: root, service: true, backend: {
     storageStatus: () => reply?.snapshot?.storage,
-    snapshot: () => ({ sessions: reply!.snapshot!.sessions, runs: reply!.snapshot!.runs, providers: [], scanning: false, hostname: 'fixture', version: '1.125.0', updatedAt: new Date().toISOString() }),
+    snapshot: () => ({ sessions: reply!.snapshot!.sessions, runs: reply!.snapshot!.runs, providers: [], scanning: false, hostname: 'fixture', version: APP_VERSION, updatedAt: new Date().toISOString() }),
     detail: async () => undefined, enqueue: async () => { throw new Error('No fixture intake'); }, cancel: async () => {}, subscribe: () => () => {} } });
   await new Promise<void>(resolve => web.server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { web.dispose(); web.server.closeAllConnections(); await new Promise<void>(resolve => web.server.close(() => resolve())); });
