@@ -111,13 +111,14 @@ async function futureBWorker(t: TestContext, root: string, triggerRetry = false)
   await build({ entryPoints: [fileURLToPath(new URL('./fixtures/storage-diagnostic-worker.ts',import.meta.url))],outfile: entry,bundle: true,packages: 'external',platform: 'node',format: 'esm',target: 'node22',logLevel: 'silent',plugins: [
     { name: 'future-b125-worker-profile',setup(builder) {
       if (triggerRetry) builder.onLoad({ filter: /[\\/]server[\\/]auto-prompt[\\/]native\.ts$/ }, () => ({ contents: `
+        import { publishTriggerCounts } from ${JSON.stringify(fileURLToPath(new URL('./fixtures/trigger-counts.ts', import.meta.url)))};
         import { readFileSync, writeFileSync } from 'node:fs';
         import { join } from 'node:path';
         export async function runAutoPromptModel(request) {
           const state = process.argv.at(-1);
           const path = join(state, 'fixture-trigger-counts.json');
           const counts = JSON.parse(readFileSync(path, 'utf8')); counts.model++;
-          writeFileSync(path, JSON.stringify(counts), { mode: 0o600 });
+          publishTriggerCounts(path, counts);
           writeFileSync(join(state, 'fixture-review-prompt.json'), request.prompt, { mode: 0o600 });
           return { verdict: 'owner', rule: null, scope: null, suggestion: null, reason: 'fixture model only', missing: [] };
         }`, loader: 'ts' }));

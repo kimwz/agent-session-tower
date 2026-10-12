@@ -362,3 +362,171 @@ test('account authentication preparation serializes a later owner turn admission
   await Promise.resolve(); assert.equal(admitted, false);
   release(); await update; await turn; assert.equal(admitted, true);
 });
+
+test('runtime polling recovers its own errors, keeps socket failures and exposes held gates safely', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-poll-'));
+  const storage = await externalStorageFixture(t, stateDir);
+  let gateFailure: unknown;
+  let socket!: SlackSocketOptions;
+  const service = new SlackService({ stateDir, repository: storage.workflows,
+    effectGate: async () => { if (gateFailure) throw gateFailure; await storage.effectGate(); },
+    runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw Error('Must not execute'); } }, refresh: async () => {},
+  }, { client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [{ user: 'U2', ts: '2', text: 'fixture failure' }], reply: async () => { throw Error('Must not send'); } }),
+    socket: options => { socket = options; return { start() {}, stop() {} }; },
+    model: async () => { throw Error('fixture classifier failed'); } });
+  t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  await service.start(); await service.startRuntimeEffects();
+  await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  await service.mutate('settings', { enabled: true });
+  socket.onStatus!('connected');
+  let finished = 0;
+  const tick = service.automation.tick.bind(service.automation);
+  service.automation.tick = async () => { try { await tick(); } finally { finished++; } };
+  const wait = async (condition: () => boolean) => {
+    const deadline = Date.now() + 5000;
+    while (!condition() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.ok(condition(), JSON.stringify(service.overview()));
+  };
+  gateFailure = Object.assign(new Error('secret=xoxp-test-1234567890 https://private/token'), { code: 'EACCES' });
+  t.mock.timers.tick(1000); await wait(() => !!service.overview().error);
+  assert.match(service.overview().error!, /EACCES/);
+  assert.equal(service.projection()?.error, service.overview().error);
+  assert.doesNotMatch(service.overview().error!, /secret|xoxp|https/);
+  const before = finished; t.mock.timers.tick(1000); await wait(() => finished > before);
+  assert.match(service.overview().error!, /EACCES/, 'persistent failure remains visible');
+  socket.onStatus!('connected');
+  assert.match(service.overview().error!, /EACCES/, 'socket recovery cannot clear a polling error');
+  socket.onStatus!('error', 'socket unavailable');
+  assert.match(service.overview().error!, /socket unavailable/);
+  assert.match(service.overview().error!, /EACCES/);
+  gateFailure = undefined;
+  t.mock.timers.tick(1000); await wait(() => service.overview().error === 'socket unavailable');
+  socket.onStatus!('connected'); assert.equal(service.overview().error, undefined);
+  const { TowerError } = await import('../../../shared/errors.js');
+  gateFailure = new TowerError('unavailable', 'Permission SQL receipt/effect reconciliation remains held.', { disposition: 'not-admitted' });
+  t.mock.timers.tick(1000); await wait(() => !!service.overview().error);
+  assert.match(service.overview().error!, /보류.*permission-reconciliation/);
+  const beforeHold = finished; t.mock.timers.tick(1000); await wait(() => finished > beforeHold);
+  assert.match(service.projection()!.error!, /보류/, 'even a persistent hold remains visible');
+  const { StorageCommandError } = await import('../../../server/storage/contract.js');
+  gateFailure = new StorageCommandError({ phase: 'command', code: 'not-ready', message: 'secret xoxp-test-1234567890', disposition: 'not-committed', retryable: false });
+  t.mock.timers.tick(1000); await wait(() => !!service.overview().error?.includes('not-ready'));
+  assert.match(service.overview().error!, /보류.*not-ready\/not-committed/);
+  assert.doesNotMatch(service.overview().error!, /secret|xoxp/);
+  gateFailure = new StorageCommandError({ phase: 'command', code: 'sqlite-error', message: 'private path /secret', disposition: 'unknown', retryable: false });
+  t.mock.timers.tick(1000); await wait(() => !!service.overview().error?.includes('sqlite-error'));
+  assert.match(service.overview().error!, /확인하지 못.*sqlite-error\/unknown/);
+  assert.doesNotMatch(service.overview().error!, /보류|secret|private/);
+  gateFailure = undefined;
+  await service.automation.ingest({ id: 'EvPoll', teamId: 'T1', channel: 'C1', user: 'U2', ts: '1', threadTs: '1', text: 'fixture' });
+  t.mock.timers.tick(1000); await wait(() => !service.overview().error && service.overview().events[0].status === 'ignored');
+  assert.equal(service.projection()!.error, undefined);
+  const rules = [{ id: 'r', name: 'fixture', enabled: true, condition: 'PR', instructions: 'review', replyInstructions: 'propose', provider: 'codex' }];
+  const failure = t.mock.method(storage.workflows, 'replaceRules', async () => { throw Object.assign(Error('fixture write failed'), { code: 'EIO' }); });
+  await assert.rejects(service.mutate('rules', { rules }), /fixture write failed/);
+  failure.mock.restore();
+  t.mock.timers.tick(1000); await wait(() => !!service.overview().error);
+  assert.match(service.overview().error!, /automation-held/, 'a recovered gate does not imply automation resumed');
+  const beforeInternalHold = finished; t.mock.timers.tick(1000); await wait(() => finished > beforeInternalHold);
+  assert.match(service.projection()!.error!, /automation-held/);
+  service.releaseNewWork();
+  t.mock.timers.tick(1000); await wait(() => !service.overview().error);
+  await service.mutate('rules', { rules });
+  await service.automation.ingest({ id: 'EvFailed', teamId: 'T1', channel: 'C1', user: 'U2', ts: '2', threadTs: '2', text: 'fixture failure' });
+  t.mock.timers.tick(1000); await wait(() => service.overview().events.some(item => item.status === 'error'));
+  assert.equal(service.overview().error, undefined, 'successful polling does not rewrite the actual workflow failure');
+  assert.match(service.overview().events.find(item => item.status === 'error')!.error!, /fixture classifier failed/);
+  gateFailure = Object.assign(Error('fixture error'), { code: 'EACCES' });
+  t.mock.timers.tick(1000); await wait(() => !!service.overview().error);
+  gateFailure = undefined;
+  await service.mutate('disconnect', {});
+  assert.equal(service.overview().error, undefined, 'discard diagnostics when the account is removed');
+});
+
+
+test('a closed runtime discards late results', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-slow-poll-'));
+  const storage = await externalStorageFixture(t, stateDir);
+  const service = new SlackService({ stateDir, repository: storage.workflows, effectGate: storage.effectGate,
+    runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw Error('Must not execute'); } }, refresh: async () => {},
+  }, { client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [], reply: async () => { throw Error('Must not send'); } }) });
+  t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  await service.start(); await service.startRuntimeEffects();
+  await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  let reject!: (error: unknown) => void;
+  const pending = new Promise<void>((_, failure) => { reject = failure; });
+  let calls = 0;
+  service.automation.tick = () => { calls++; return pending; };
+  t.mock.timers.tick(1000);
+  assert.equal(calls, 1);
+  service.close();
+  reject(new Error('late failure'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(service.overview().error, undefined, 'a retired timer cannot publish results');
+  let changes = 0;
+  service.on('change', () => { changes++; });
+  await service.resume();
+  service.automation.tick = async () => { calls++; throw null; };
+  t.mock.timers.tick(1000); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(service.overview().error, 'Slack 작업 상태를 확인하지 못했습니다. (internal/unknown)');
+  const afterFailure = changes;
+  t.mock.timers.tick(1000); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(changes, afterFailure, 'unchanged poll failures do not emit each second');
+  service.automation.tick = async () => {};
+  t.mock.timers.tick(1000); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(service.overview().error, undefined);
+});
+
+
+test('slow polls keep subsequent ticks and cannot overwrite newer diagnostics', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-poll-order-'));
+  const storage = await externalStorageFixture(t, stateDir);
+  const service = new SlackService({ stateDir, repository: storage.workflows, effectGate: storage.effectGate,
+    runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw Error('Must not execute'); } }, refresh: async () => {},
+  }, { client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [], reply: async () => { throw Error('Must not send'); } }) });
+  t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  await service.start(); await service.startRuntimeEffects();
+  await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  let finish!: () => void;
+  service.automation.tick = () => new Promise<void>(resolve => { finish = resolve; });
+  t.mock.timers.tick(1000);
+  let calls = 0;
+  service.automation.tick = async () => { calls++; throw Object.assign(Error('fixture'), { code: 'EACCES' }); };
+  t.mock.timers.tick(1000); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 1, 'the next tick still sweeps marks while earlier drain is pending');
+  assert.match(service.overview().error!, /EACCES/);
+  finish(); await new Promise(resolve => setImmediate(resolve));
+  assert.match(service.overview().error!, /EACCES/, 'an earlier success cannot erase the newer failure');
+  service.automation.tick = async () => {};
+  t.mock.timers.tick(1000); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(service.overview().error, undefined);
+});
+
+test('overlapping slow failures remain visible even while later polls are pending', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-poll-slow-failure-'));
+  const storage = await externalStorageFixture(t, stateDir);
+  const service = new SlackService({ stateDir, repository: storage.workflows, effectGate: storage.effectGate,
+    runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw Error('Must not execute'); } }, refresh: async () => {},
+  }, { client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [], reply: async () => { throw Error('Must not send'); } }) });
+  t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  await service.start(); await service.startRuntimeEffects();
+  await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  const polls: { resolve: () => void; reject: (error: unknown) => void }[] = [];
+  service.automation.tick = () => new Promise<void>((resolve, reject) => { polls.push({ resolve, reject }); });
+  t.mock.timers.tick(2000);
+  polls[0].reject(Object.assign(Error('fixture'), { code: 'EACCES' }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(service.overview().error!, /EACCES/, 'a later pending poll must not hide a completed failure');
+  t.mock.timers.tick(1000);
+  polls[2].reject(Object.assign(Error('fixture'), { code: 'EACCES' }));
+  await new Promise(resolve => setImmediate(resolve));
+  polls[1].resolve(); await new Promise(resolve => setImmediate(resolve));
+  assert.match(service.overview().error!, /EACCES/, 'an identical newer error still fences an older success');
+  t.mock.timers.tick(1000);
+  polls[3].resolve(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(service.overview().error, undefined);
+});

@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.128.1] - 2026-10-12
+
+- Slack 작업 상태 점검 오류를 연결 오류와 분리하고, 점검이 회복되면 해당 오류만 해제합니다. 작업 접수가 보류되거나 자동화 내부 보류가 남으면 계속 표시하며, 비밀값을 제외한 안전한 오류 종류를 표시합니다. 느린 점검의 중복 실행과 종료 후 늦은 결과 반영을 막습니다.
+
 ## [1.128.0] - 2026-10-11
 
 - 사용량 링의 툴팁에 연결된 계정을 표시합니다. 마스킹한 이메일(예: `ka***@planetariumhq.com`)과 플랜(Max, Team, Plus, Pro 등, Codex API 키 로그인은 "API 키")만 보여 줍니다. 이메일은 서버에서 마스킹하고 저장하지 않습니다. Claude는 Claude Code의 전역 설정(`~/.claude.json`, `CLAUDE_CONFIG_DIR`가 있으면 그 안)의 로그인 프로필에서 이메일을 읽습니다. 환경 변수 토큰으로 로그인한 경우에는 프로필과 계정이 다를 수 있어 표시하지 않습니다. Codex는 app-server의 계정 조회(토큰 갱신 없음)로 읽습니다. 계정은 그 컴퓨터의 Tower 화면에만 표시하고, 연결된 컴퓨터의 계정은 제어하는 Tower에 보내지 않습니다(#113).

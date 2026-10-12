@@ -1,3 +1,4 @@
+import { publishTriggerCounts } from './trigger-counts.js';
 import { DatabaseSync } from 'node:sqlite';
 import { RetentionStore } from '../../../../server/sessions/retention/store.js';
 import { SessionService } from '../../../../server/sessions/service.js';
@@ -181,9 +182,9 @@ if (process.env.TOWER_FIXTURE_TRIGGER_RETRY === '1') {
   const countsPath = join(state, 'fixture-trigger-counts.json');
   const bump = (key: 'start' | 'review' | 'apply') => {
     const counts = JSON.parse(readFileSync(countsPath, 'utf8')); counts[key]++;
-    writeFileSync(countsPath, JSON.stringify(counts), { mode: 0o600 });
+    publishTriggerCounts(countsPath, counts);
   };
-  writeFileSync(countsPath, JSON.stringify({ start: 0, review: 0, model: 0, apply: 0, settled: false }), { mode: 0o600 });
+  publishTriggerCounts(countsPath, { start: 0, review: 0, model: 0, apply: 0, settled: false });
   const at = '2026-10-01T00:00:00.000Z';
   const session: Session = { id: 'codex:fixture-trigger-review', nativeId: 'fixture-trigger-review', provider: 'codex', title: 'Trigger review',
     cwd: join(state, 'project'), project: 'fixture', status: 'completed', statusReason: 'Fixture', createdAt: at, updatedAt: at,
@@ -297,7 +298,7 @@ if (process.env.TOWER_FIXTURE_TRIGGER_RETRY === '1') {
     }
     const result = await start.call(this, options);
     const counts = JSON.parse(readFileSync(countsPath, 'utf8')); counts.settled = true;
-    writeFileSync(countsPath, JSON.stringify(counts), { mode: 0o600 });
+    publishTriggerCounts(countsPath, counts);
     return result;
   };
 }
