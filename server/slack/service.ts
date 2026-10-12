@@ -20,7 +20,7 @@ import { SlackSocket, type SlackSocketOptions } from './socket.js';
 import { judgeSlackFollowUp } from './follow-up.js';
 import type { DecisionEngine } from '../decisions/engine.js';
 import type { WorkflowRepository } from './storage-repository.js';
-import { TowerError } from '../../shared/errors.js';
+import { STATUS, TowerError } from '../../shared/errors.js';
 
 type Account = { teamId: string; userId: string; teamName?: string; userName?: string };
 type Settings = { enabled: boolean; allowSelfMentions?: boolean; language?: 'ko' | 'en'; workingReaction?: string; appToken?: string; userToken?: string; account?: Account };
@@ -41,13 +41,27 @@ const FOLLOW_UP_JUDGMENT_MS = 10_000;
 const invalid = (message: string) => new TowerError('invalid', message);
 const slackOrigin = (workflowId: string): RunOrigin => ({ kind: 'slack', workflowId });
 
+/** Keep a useful diagnosis without copying messages, paths, tokens or arbitrary remote error codes. */
+const pollCodes = new Set(['EACCES', 'EPERM', 'ENOSPC', 'EIO', 'ENOENT', 'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED']);
+function pollFailure(error: unknown): string {
+  const held = error instanceof TowerError && error.kind === 'unavailable' && error.disposition === 'not-admitted';
+  const reason = error instanceof TowerError && error.message === 'Permission SQL receipt/effect reconciliation remains held.' ? 'permission-reconciliation'
+    : error instanceof TowerError && error.message === 'External SQL receipt reconciliation remains held.' ? 'external-reconciliation'
+    : error instanceof TowerError && Object.hasOwn(STATUS, error.kind) ? error.kind
+    : error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' && pollCodes.has(error.code) ? error.code : 'unknown';
+  return `${held ? 'Slack 작업 상태 점검이 보류되었습니다.' : 'Slack 작업 상태를 확인하지 못했습니다.'} (${reason}${held ? '/not-admitted' : ''})`;
+}
+
 /** Credentials and event processing belong to the execution worker, never the web process. */
 export class SlackService extends EventEmitter {
   private settings: Settings = { enabled: false };
   private socket?: Pick<SlackSocket, 'start' | 'stop'>;
   private timer?: ReturnType<typeof setInterval>;
   private status = 'disconnected';
-  private error?: string;
+  private socketError?: string;
+  private pollError?: string;
+  private polling = false;
+  private get error(): string | undefined { return [this.socketError, this.pollError].filter(Boolean).join('\n') || undefined; }
   private operations: Promise<unknown> = Promise.resolve();
   private changedAt = new Date().toISOString();
   readonly tone: SlackToneStore;
@@ -159,10 +173,23 @@ export class SlackService extends EventEmitter {
   }
   private startTicking() {
     if (this.timer) clearInterval(this.timer);
-    this.timer = setInterval(() => {
-      if (this.settings.userToken) void this.automation.tick().catch(() => { this.error = 'Slack 작업 상태를 확인하지 못했습니다.'; this.emit('change'); });
-    }, 1000);
-    this.timer.unref();
+    const timer = setInterval(() => { if (this.settings.userToken) void this.poll(timer); }, 1000);
+    this.timer = timer;
+    timer.unref();
+  }
+  private async poll(timer: ReturnType<typeof setInterval>): Promise<void> {
+    if (this.polling) return;
+    this.polling = true;
+    let error: string | undefined;
+    try {
+      await this.automation.tick();
+      if (this.automation.newWorkHeld()) error = 'Slack 작업 상태 점검이 보류되었습니다. (automation-held)';
+    } catch (failure) { error = pollFailure(failure); }
+    finally { this.polling = false; }
+    // A result from a retired runtime cannot clear or replace the current runtime's diagnosis.
+    if (this.timer !== timer || this.pollError === error) return;
+    this.pollError = error;
+    this.emit('change');
   }
   /** Stops receiving and advancing mentions without discarding anything, for a worker handoff. */
   pause() { this.socket?.stop(); this.socket = undefined; if (this.timer) clearInterval(this.timer); this.timer = undefined; }
@@ -326,12 +353,12 @@ export class SlackService extends EventEmitter {
   }
   private async restartSocket(): Promise<void> {
     await this.effectsGate();
-    this.socket?.stop(); this.socket = undefined; this.error = undefined;
+    this.socket?.stop(); this.socket = undefined; this.socketError = undefined;
     this.status = this.settings.userToken ? 'paused' : 'disconnected';
     if (!this.settings.enabled || !this.settings.appToken || !this.settings.account) return;
     const account = this.settings.account;
     this.socket = (this.dependencies.socket ?? (options => new SlackSocket(options)))({ appToken: this.settings.appToken,
-      onStatus: (status, error) => { this.status = status; if (error || status === 'connected') this.error = error; this.emit('change'); },
+      onStatus: (status, error) => { this.status = status; if (error || status === 'connected') this.socketError = error; this.emit('change'); },
       onEvent: async payload => {
         if (!payload.event || typeof payload.event !== 'object' || Array.isArray(payload.event)) return;
         const event = payload.event as Record<string, unknown>;
@@ -352,5 +379,5 @@ export class SlackService extends EventEmitter {
     await this.effectsGate();
     this.socket.start();
   }
-  close() { this.socket?.stop(); if (this.timer) clearInterval(this.timer); }
+  close() { this.pause(); }
 }

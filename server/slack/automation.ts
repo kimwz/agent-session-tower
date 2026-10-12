@@ -255,6 +255,7 @@ export class SlackAutomationManager extends EventEmitter {
     return ids;
   }
   /** During a worker handoff, newly received mentions wait for the successor instead of starting here. */
+  newWorkHeld(): boolean { return this.held; }
   hold(): void { this.held = true; }
   /** A forced update that gave up: new mentions start here again. */
   release(): void { this.held = false; }
