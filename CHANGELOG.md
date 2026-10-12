@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.129.0] - 2026-10-12
+
+- 로그인한 소유자가 에이전트가 만든 로컬 세션의 특정 프로젝트·현재 작업에 시크릿 브로커만 승인하고 철회할 수 있습니다. 다음 소유자 턴에 같은 대화로 연결되며, 일반 Tower 권한이나 세션 생성 출처는 바뀌지 않습니다. 키별 권한은 별도로 검사하고 외부 입력·상속·다른 루트·새 작업·만료·잠금·철회 시 사용을 차단합니다.
+
 ## [1.128.1] - 2026-10-12
 
 - Slack 작업 상태 점검 오류를 연결 오류와 분리하고, 점검이 회복되면 해당 오류만 해제합니다. 작업 접수가 보류되거나 자동화 내부 보류가 남으면 계속 표시하며, 비밀값을 제외한 안전한 오류 종류를 표시합니다. 느린 점검의 중복 실행과 종료 후 늦은 결과 반영을 막습니다.
