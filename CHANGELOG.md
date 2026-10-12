@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.129.1] - 2026-10-12
+
+- 배포 중인 Tower의 웹과 실행 워커 버전을 맞추기 위한 버전 전용 패치 릴리스입니다. 제품 동작 변경은 없습니다.
+
 ## [1.129.0] - 2026-10-12
 
 - 로그인한 소유자가 에이전트가 만든 로컬 세션의 특정 프로젝트·현재 작업에 시크릿 브로커만 승인하고 철회할 수 있습니다. 다음 소유자 턴에 같은 대화로 연결되며, 일반 Tower 권한이나 세션 생성 출처는 바뀌지 않습니다. 키별 권한은 별도로 검사하고 외부 입력·상속·다른 루트·새 작업·만료·잠금·철회 시 사용을 차단합니다.
