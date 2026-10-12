@@ -66,6 +66,7 @@ export class SlackService extends EventEmitter {
   private socketError?: string;
   private pollError?: string;
   private pollSequence = 0;
+  private appliedPoll = 0;
   private get error(): string | undefined { return [this.socketError, this.pollError].filter(Boolean).join('\n') || undefined; }
   private operations: Promise<unknown> = Promise.resolve();
   private changedAt = new Date().toISOString();
@@ -190,7 +191,9 @@ export class SlackService extends EventEmitter {
       if (this.automation.newWorkHeld()) error = 'Slack 작업 상태 점검이 보류되었습니다. (automation-held)';
     } catch (failure) { error = pollFailure(failure); }
     // A result from a retired runtime cannot clear or replace the current runtime's diagnosis.
-    if (this.timer !== timer || sequence !== this.pollSequence || this.pollError === error) return;
+    if (this.timer !== timer || sequence < this.appliedPoll) return;
+    this.appliedPoll = sequence;
+    if (this.pollError === error) return;
     this.pollError = error;
     this.emit('change');
   }

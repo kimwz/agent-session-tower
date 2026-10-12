@@ -470,7 +470,7 @@ test('a closed runtime discards late results', async t => {
   await service.resume();
   service.automation.tick = async () => { calls++; throw null; };
   t.mock.timers.tick(1000); await new Promise(resolve => setImmediate(resolve));
-  assert.match(service.overview().error!, /unknown/);
+  assert.equal(service.overview().error, 'Slack 작업 상태를 확인하지 못했습니다. (internal/unknown)');
   const afterFailure = changes;
   t.mock.timers.tick(1000); await new Promise(resolve => setImmediate(resolve));
   assert.equal(changes, afterFailure, 'unchanged poll failures do not emit each second');
@@ -502,5 +502,31 @@ test('slow polls keep subsequent ticks and cannot overwrite newer diagnostics', 
   assert.match(service.overview().error!, /EACCES/, 'an earlier success cannot erase the newer failure');
   service.automation.tick = async () => {};
   t.mock.timers.tick(1000); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(service.overview().error, undefined);
+});
+
+test('overlapping slow failures remain visible even while later polls are pending', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-poll-slow-failure-'));
+  const storage = await externalStorageFixture(t, stateDir);
+  const service = new SlackService({ stateDir, repository: storage.workflows, effectGate: storage.effectGate,
+    runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw Error('Must not execute'); } }, refresh: async () => {},
+  }, { client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [], reply: async () => { throw Error('Must not send'); } }) });
+  t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  await service.start(); await service.startRuntimeEffects();
+  await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  const polls: { resolve: () => void; reject: (error: unknown) => void }[] = [];
+  service.automation.tick = () => new Promise<void>((resolve, reject) => { polls.push({ resolve, reject }); });
+  t.mock.timers.tick(2000);
+  polls[0].reject(Object.assign(Error('fixture'), { code: 'EACCES' }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(service.overview().error!, /EACCES/, 'a later pending poll must not hide a completed failure');
+  t.mock.timers.tick(1000);
+  polls[2].reject(Object.assign(Error('fixture'), { code: 'EACCES' }));
+  await new Promise(resolve => setImmediate(resolve));
+  polls[1].resolve(); await new Promise(resolve => setImmediate(resolve));
+  assert.match(service.overview().error!, /EACCES/, 'an identical newer error still fences an older success');
+  t.mock.timers.tick(1000);
+  polls[3].resolve(); await new Promise(resolve => setImmediate(resolve));
   assert.equal(service.overview().error, undefined);
 });
