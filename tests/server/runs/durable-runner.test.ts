@@ -37,7 +37,7 @@ import { RetentionArchive } from '../../../server/sessions/retention/archive.js'
 import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
 import { worktreeCleanupVisible } from '../../../server/worktrees/janitor.js';
 
-async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector, hostOptions?: (parts: { stateDir: string; sessions: SessionService; runs: RunManager }) => Promise<Partial<RunnerHostOptions>>, fault?: { onUnavailable: (status: ReturnType<import('../../../server/storage/client.js').StorageClient['status']>, runs: RunManager) => void }, beforeExecutable?: () => Promise<void>) {
+async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector, hostOptions?: (parts: { stateDir: string; sessions: SessionService; runs: RunManager }) => Promise<Partial<RunnerHostOptions>>, fault?: { onUnavailable: (status: ReturnType<import('../../../server/storage/client.js').StorageClient['status']>, runs: RunManager) => void }, beforeExecutable?: () => Promise<void>, holdUntilReady = false) {
   const directory = await realpath(await temporaryFixture('tower-durable-fixture-'));
   const stateDir = join(directory, 'state');
   const id = '10000000-0000-4000-8000-000000000001';
@@ -57,7 +57,7 @@ async function fixture(workerClosed = false, withRetention = false, retentionUna
   let starts = 0;
   let resolveDone!: () => void;
   const done = new Promise<void>(resolve => { resolveDone = resolve; });
-  const runs: RunManager = new RunManager({ ...(fault ? { fixtureThreadFault: true, fixtureOnUnavailable: status => fault.onUnavailable(status, runs) } : {}), stateDir, getSession: value => sessions.get(value), refreshSessions: async () => {}, pollMs: 10,
+  const runs: RunManager = new RunManager({ ...(fault ? { fixtureThreadFault: true, fixtureOnUnavailable: status => fault.onUnavailable(status, runs) } : {}), stateDir, holdUntilReady, getSession: value => sessions.get(value), refreshSessions: async () => {}, pollMs: 10,
     findExecutable: async () => { await beforeExecutable?.(); return '/fixture/codex'; },
     spawnProcess: () => { throw new Error('Native provider launch is forbidden in this fixture.'); },
     openCodexBridge: async options => {
@@ -2306,4 +2306,41 @@ test('a locked broker session refuses unproved RPC and direct Auto Prompt admiss
   assert.equal(resolve(owner, f.session).servers?.tower_secrets, undefined, 'locked approval has no broker MCP even for the authenticated owner turn');
   await until(() => f.starts() === 1);
   assert.notEqual(f.runs.list().find(run => run.id === owner.id)?.towerTools, 'broker-only', 'locked approval exposes no broker-only tools');
+});
+
+
+test('a scoped broker caller cannot promote owner proof across sessions or through new session creation', async t => {
+  const capabilities = new CapabilityRegistry();
+  let target!: Session;
+  const parent: import('../../../shared/types.js').Run = { id: '12345678-1234-4234-8234-123456789aa1', sessionId: 'codex:scoped-broker-parent',
+    prompt: 'Scoped project task', origin: { kind: 'owner' }, brokerOwnerAuthorized: true, towerTools: 'broker-only', status: 'running', createdAt: '', output: '' };
+  const f = await fixture(false, false, undefined, undefined, async ({ stateDir, sessions, runs }) => {
+    const original = sessions.list()[0]!;
+    const cwd = join(stateDir, 'other-approved-project'); await mkdir(cwd, { mode: 0o700 });
+    target = { ...original, id: 'codex:10000000-0000-4000-8000-000000000002', nativeId: '10000000-0000-4000-8000-000000000002', cwd, project: 'other-approved-project' };
+    sessions.list = () => [original, target]; sessions.get = id => id === target.id ? { ...target } : id === original.id ? { ...original } : undefined;
+    const listed = runs.list.bind(runs);
+    // Metadata models the already-running scoped parent; no native provider is launched for it.
+    runs.list = () => [...listed(), { ...parent }];
+    const secrets = { initialized: () => false, brokerAdmissionRequired: (session: Session) => session.id === target.id,
+      brokerApproval: (session: Session) => session.id === target.id ? { id: 'other-project-approval', sessionId: session.id, root: session.cwd, taskId: 'other-project-task' } : undefined } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
+    return { capabilities, secrets };
+  }, undefined, undefined, true);
+  t.after(f.cleanup);
+  const client = await f.connect();
+  const token = capabilities.issue({ kind: 'caller-run', runId: parent.id, sessionId: parent.sessionId });
+  const before = f.runs.list().length;
+  for (const brokerOwnerAuthorized of [undefined, true]) await assert.rejects(client.enqueue(target.id, 'Move scoped authority into another task', {}, { callerCapability: token, ...(brokerOwnerAuthorized ? { brokerOwnerAuthorized } : {}) }), { kind: 'forbidden' });
+  assert.equal(f.runs.list().length, before, 'scoped or forged proof never appends another approved session run');
+  const created = await client.create({ provider: 'codex', cwd: join(f.stateDir, 'new-project'), prompt: 'Ordinary delegated creation' }, { callerCapability: token, brokerOwnerAuthorized: true });
+  assert.equal(created.run.brokerOwnerAuthorized, undefined, 'a broker-only caller cannot manufacture generic owner proof through creation');
+  assert.equal(f.runs.list().find(run => run.id === created.run.id)?.brokerOwnerAuthorized, undefined);
+  assert.deepEqual(created.run.origin, { kind: 'owner' }, 'existing ordinary local-agent creation semantics stay unchanged');
+  parent.towerTools = 'attached';
+  const delegated = await client.enqueue(target.id, 'Verified attached owner parent', {}, { callerCapability: token });
+  assert.equal(delegated.brokerOwnerAuthorized, true);
+  assert.equal(delegated.delegation?.parentRunId, parent.id);
+  const authenticated = await client.enqueue(target.id, 'Authenticated master or owner admission', {}, { brokerOwnerAuthorized: true });
+  assert.equal(authenticated.brokerOwnerAuthorized, true);
+  assert.equal(f.starts(), 0, 'the admission fixture holds all provider launches');
 });

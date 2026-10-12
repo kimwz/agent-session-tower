@@ -264,7 +264,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     const proofFromCaller = () => {
       const current = caller?.kind === 'caller-run' ? findRun(caller.runId) : undefined;
       return caller?.kind === 'caller-run' && !!current && current.sessionId === caller.sessionId && current.status === 'running' && current.origin?.kind === 'owner'
-        && !current.origin.controllerId && current.brokerOwnerAuthorized === true && (current.towerTools === 'attached' || current.towerTools === 'broker-only');
+        && !current.origin.controllerId && current.brokerOwnerAuthorized === true && current.towerTools === 'attached';
     };
     // A reporting credential can replace an untrusted transport claim only with its own live owner's proof.
     const brokerOwnerAuthorized = proofFromCaller();
