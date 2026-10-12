@@ -819,3 +819,66 @@ test('locked official reopen retains durable cleanup until unlock and no-vault r
     assert.notEqual(after.approval.taskId, before.approval.taskId);
   } finally { await f.cleanup(); }
 });
+
+test('broker admission protection remains value-free while locked, across startup and project root changes', async () => {
+  const f = await fixture(); let restartedRuntime: SecretRuntime | undefined;
+  try {
+    f.origins.set(f.session.id, { kind: 'agent', untrustedInput: false });
+    assert.equal(f.runtime.brokerAdmissionRequired(f.session), false, 'fresh vault has no protected broker history');
+    await f.initialize();
+    const approved = await f.runtime.control('approve-broker', { sessionId: f.session.id, root: f.projectRoot, taskId: null, taskLabel: 'Locked admission', ttlMs: 60000 }); assert.ok('approval' in approved && approved.approval);
+    await f.service.create({ scope: 'global', name: 'FAKE_PRIVATE_INDEX_CHECK', kind: 'scalar', value: canary });
+    assert.equal(f.runtime.brokerAdmissionRequired(f.session), true);
+    await f.runtime.control('lock', {});
+    assert.equal(f.runtime.brokerApproval(f.session), undefined, 'locked refusal metadata never authorizes a capability');
+    assert.equal(f.runtime.brokerAdmissionRequired(f.session), true);
+    assert.equal(f.service.brokerAdmissionRequired(f.session.id), true);
+    f.sessions.set(f.session.id, { ...f.session, cwd: f.directory });
+    assert.equal(f.runtime.brokerAdmissionRequired(f.sessions.get(f.session.id)), true, 'moving root cannot permit unproved input into the same protected conversation');
+    const indexText = JSON.stringify(f.service.vault.index);
+    assert.ok(indexText.includes(approved.approval.id)); assert.ok(indexText.includes('brokerApprovals'));
+    assert.equal(indexText.includes(canary), false); assert.equal(indexText.includes(password), false);
+    const restarted = new SecretService({ stateDir: f.stateDir, now: f.now }); await restarted.start();
+    const registry = { list: () => [...f.runs.values()], getSession: (id: string) => f.sessions.get(id), sessionOrigin: (id: string) => f.origins.get(id) };
+    restartedRuntime = new SecretRuntime({ stateDir: f.stateDir, service: restarted, runs: registry });
+    assert.equal(restarted.status().locked, true);
+    assert.equal(restartedRuntime.brokerAdmissionRequired(f.sessions.get(f.session.id)), true);
+    assert.equal(restartedRuntime.brokerApproval(f.sessions.get(f.session.id)), undefined);
+    f.sessions.set(f.session.id, f.session);
+    await f.runtime.control('unlock', { password });
+    assert.equal(f.runtime.brokerAdmissionRequired(f.session), true);
+    assert.deepEqual((await f.list(f.tokenFor(f.addRun('proven-after-lock')))).secrets, []);
+    await f.runtime.control('revoke-broker', { sessionId: f.session.id, approvalId: approved.approval.id });
+    assert.equal(f.runtime.brokerAdmissionRequired(f.session), false);
+    await f.runtime.control('lock', {}); assert.equal(f.service.brokerAdmissionRequired(f.session.id), undefined);
+    assert.equal(f.runtime.brokerAdmissionRequired(f.session), true, 'plaintext revoked metadata cannot establish trusted absence while locked');
+  } finally { restartedRuntime?.close(); await f.cleanup(); }
+});
+
+test('missing, legacy and malformed locked broker indexes protect only local agent main-session admissions', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize(); f.origins.set(f.session.id, { kind: 'agent', untrustedInput: false });
+    await f.runtime.control('approve-broker', { sessionId: f.session.id, root: f.projectRoot, taskId: null, taskLabel: 'Unknown locked index', ttlMs: 60000 });
+    await f.runtime.control('lock', {});
+    const original = structuredClone(f.service.vault.index) as Record<string, unknown>;
+    const legacy = { ...original }; delete legacy.brokerApprovals;
+    for (const index of [undefined, legacy, { ...original, brokerApprovals: [] }, { ...original, brokerApprovals: 'malformed' }, { ...original, brokerApprovals: [{ id: 'invalid' }] }, { ...original, policy: { deviceId: 'invalid', tasks: [] } }]) {
+      f.service.vault.index = index;
+      assert.equal(f.service.brokerAdmissionRequired(f.session.id), undefined);
+      assert.equal(f.runtime.brokerAdmissionRequired(f.session), true, 'unknown metadata never establishes absence of protection');
+      for (const patch of [{ node: 'remote' }, { isSubagent: true }, { launchedByAgent: true }, { parentId: 'parent' }, { master: true }]) assert.equal(f.runtime.brokerAdmissionRequired({ ...f.session, ...patch }), false);
+      for (const origin of [{ kind: 'owner' as const, untrustedInput: false }, { kind: 'agent' as const, untrustedInput: true }, { kind: 'agent' as const, untrustedInput: false, controllerId: 'remote' }]) {
+        f.origins.set(f.session.id, origin); assert.equal(f.runtime.brokerAdmissionRequired(f.session), false);
+      }
+      f.origins.set(f.session.id, { kind: 'agent', untrustedInput: false });
+      assert.equal(f.runtime.brokerApproval(f.session), undefined);
+    }
+    f.service.vault.index = original;
+    f.advance(60001);
+    assert.equal(f.service.brokerAdmissionRequired(f.session.id), undefined, 'plaintext expired metadata cannot establish trusted absence while locked');
+    assert.equal(f.runtime.brokerAdmissionRequired(f.session), true);
+    await f.runtime.control('unlock', { password });
+    assert.equal(f.runtime.brokerAdmissionRequired(f.session), false, 'the unlocked encrypted journal establishes expiry');
+  } finally { await f.cleanup(); }
+});

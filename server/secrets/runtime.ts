@@ -112,6 +112,15 @@ export class SecretRuntime {
     if (inMasterFolder(this.options.stateDir, session.cwd) || inMasterFolder(this.options.stateDir, cwd)) throw fail('마스터 폴더의 세션은 프로젝트 브로커 승인을 받을 수 없습니다.', 'forbidden');
     return { ...session, cwd };
   }
+  /** Admission protection survives locks/root changes; it confers no secret or tool authority. */
+  brokerAdmissionRequired(session: Session | undefined): boolean {
+    if (!session) return false;
+    const known = this.options.service.brokerAdmissionRequired(session.id);
+    if (known !== undefined) return known;
+    // An old or unavailable metadata index cannot establish absence of a protected agent conversation.
+    const provenance = this.options.runs.sessionOrigin(session.id);
+    return this.options.service.status().initialized && !session.node && !session.master && !session.isSubagent && !session.launchedByAgent && !session.parentId && !session.launchedBy && provenance?.kind === 'agent' && provenance.untrustedInput === false && !provenance.controllerId;
+  }
   brokerApproval(session: Session | undefined): SecretBrokerApproval | undefined {
     if (!session || this.blocked || this.options.service.status().locked) return;
     try { const current = this.options.runs.getSession(session.id); if (!current) return; const candidate = this.candidate(current); return this.options.service.brokerApproval(candidate.id, candidate.cwd); }

@@ -452,9 +452,10 @@ test('a resumed approved agent session receives fresh broker-only MCP configurat
   let approved = false;
   const resolver = runToolResolver({ stateDir: '/fixture/state', runs: { sessionOrigin: () => ({ kind: 'agent', untrustedInput: false }) }, capabilities,
     secrets: { initialized: () => true, brokerApproval: () => approved ? { id: 'fixture-approval', sessionId: session.id, hostId: 'fixture-host', root: session.cwd, taskId: 'fixture-task', taskLabel: 'Deploy', createdAt: 1, expiresAt: 9999999999999 } : undefined } });
-  const turn = (id: string): Run => ({ id, sessionId: session.id, prompt: '', status: 'running', origin: { kind: 'owner' }, createdAt: '', output: '' });
+  const turn = (id: string): Run => ({ id, sessionId: session.id, prompt: '', status: 'running', origin: { kind: 'owner' }, brokerOwnerAuthorized: true, createdAt: '', output: '' });
   assert.equal(resolver(turn('before'), session).servers?.tower_secrets, undefined);
   approved = true;
+  assert.equal(resolver({ ...turn('unproved'), brokerOwnerAuthorized: undefined }, session).servers?.tower_secrets, undefined);
   const tools = resolver(turn('approved'), session);
   assert.equal(tools.towerTools, 'broker-only');
   const f = await fixture(t, 'complete', { mcpServers: tools.servers });

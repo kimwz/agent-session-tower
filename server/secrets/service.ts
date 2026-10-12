@@ -15,7 +15,7 @@ interface Journal { brokerApprovals: SecretBrokerApproval[]; groups: SecretGroup
 export interface ResolvedSecret { metadata: SecretMetadata; bytes: Buffer; fields?: Record<string, string> }
 export interface SecretDispatchUse { ref: string; operation: SecretOperation; value: ResolvedSecret }
 /** Written in plain text at every unlocked save: the policy to list names by while locked, and the sources it cannot reach then. */
-interface LockedIndex { policy: PolicyState; sources: string[] }
+interface LockedIndex { policy: PolicyState; sources: string[]; brokerApprovals: SecretBrokerApproval[] }
 const policySecret = (secret: StoredSecret): PolicySecret => ({ metadata: secret.metadata, fieldNames: secret.fields ? Object.keys(secret.fields) : undefined });
 const emptyJournal = (): Journal => ({ brokerApprovals: [], groups: [], rules: [], tasks: [], secrets: [], grants: [], operations: Object.create(null) });
 export class SecretService {
@@ -74,7 +74,7 @@ export class SecretService {
 
   private projectId(hostId: string, root: string) { return projectId(this.data(), hostId, root); }
   /** Live view for authorization: grants issued during an evaluation land in the journal it reads. */
-  private lockedIndex(): LockedIndex { return { policy: this.policy(), sources: this.data().peers.filter(peer => peer.enabled && peer.direction === 'controller').map(peer => peer.device.id) }; }
+  private lockedIndex(): LockedIndex { return { brokerApprovals: structuredClone(this.journal.brokerApprovals), policy: this.policy(), sources: this.data().peers.filter(peer => peer.enabled && peer.direction === 'controller').map(peer => peer.device.id) }; }
   private policy(): PolicyState { const data = this.data(); return { deviceId: data.device.id, projects: data.projects, groups: this.groups(), rules: this.allRules(), secrets: this.secrets().map(policySecret), tasks: this.journal.tasks, grants: this.journal.grants }; }
   private groups() { return [...this.data().groups, ...this.journal.groups]; }
   private allRules() { return [...this.data().rules, ...this.journal.rules]; }
@@ -147,6 +147,27 @@ export class SecretService {
   currentTask(sessionId: string, root?: string, hostId = this.device().id): SecretTarget | undefined {
     const task = [...this.journal.tasks].reverse().find(task => task.sessionId === sessionId && task.hostId === hostId && (root === undefined || task.root === root) && task.status === 'open' && (task.expiresAt === undefined || task.expiresAt > this.now()));
     return task ? { hostId, sessionId, root: task.root, taskId: task.id, projectId: this.projectId(hostId, task.root) } : undefined;
+  }
+  /** Refusal metadata only: a locked index can protect admission, never authorize broker use. */
+  brokerAdmissionRequired(sessionId: string): boolean | undefined {
+    if (!this.status().initialized) return false;
+    let hostId: string, tasks: SecretTask[], approvals: SecretBrokerApproval[];
+    if (!this.status().locked) { hostId = this.device().id; tasks = this.journal.tasks; approvals = this.journal.brokerApprovals; }
+    else {
+      const index = this.vault.index as Partial<LockedIndex> | undefined;
+      const id = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9-]{36}$/.test(value);
+      const name = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 512;
+      const root = (value: unknown): value is string => typeof value === 'string' && isAbsolute(value) && normalize(value) === value;
+      const time = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+      if (!index || !index.policy || !id(index.policy.deviceId) || index.policy.deviceId !== this.vault.vaultId || !Array.isArray(index.policy.tasks) || index.policy.tasks.length > 10000 || !Array.isArray(index.brokerApprovals) || index.brokerApprovals.length > 10000) return;
+      if (index.policy.tasks.some(task => !task || !id(task.id) || !id(task.hostId) || !name(task.sessionId) || !root(task.root) || !['open', 'closed'].includes(task.status) || !time(task.createdAt) || (task.expiresAt !== undefined && !time(task.expiresAt)))) return;
+      if (index.brokerApprovals.some(approval => !approval || !id(approval.id) || !id(approval.hostId) || !name(approval.sessionId) || !root(approval.root) || !id(approval.taskId) || !name(approval.taskLabel) || !time(approval.createdAt) || !time(approval.expiresAt) || approval.expiresAt <= approval.createdAt || approval.expiresAt - approval.createdAt > 8 * 60 * 60_000)) return;
+      hostId = index.policy.deviceId; tasks = index.policy.tasks; approvals = index.brokerApprovals;
+    }
+    const protectedSession = approvals.some(approval => approval.hostId === hostId && approval.sessionId === sessionId && approval.expiresAt > this.now() && tasks.some(task => task.id === approval.taskId && task.hostId === hostId && task.sessionId === sessionId && task.root === approval.root && task.status === 'open' && (task.expiresAt === undefined || task.expiresAt > this.now())));
+    // The plaintext index has freshness, not integrity: a positive only strengthens refusal.
+    // Absence while locked can never prove that untrusted input is safe for this conversation.
+    return protectedSession ? true : this.status().locked ? undefined : false;
   }
   /** Connection approval is independent of every secret policy and stays in the encrypted journal. */
   brokerApproval(sessionId: string, root: string): SecretBrokerApproval | undefined {

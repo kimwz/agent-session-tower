@@ -179,8 +179,9 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   const brokerAdmission = (sessionId: string, admitted: RunAdmission) => {
     const session = options.runs.getSession(sessionId);
     const approved = session && options.secrets?.brokerApproval(session);
+    const protectedSession = session && options.secrets?.brokerAdmissionRequired(session);
     const activeBroker = options.runs.list().some(run => run.sessionId === sessionId && run.status === 'running' && run.towerTools === 'broker-only');
-    if ((approved || activeBroker) && (admitted.brokerOwnerAuthorized !== true || admitted.origin?.kind !== 'owner' || admitted.origin.controllerId || admitted.untrustedInput)) {
+    if ((protectedSession || approved || activeBroker) && (admitted.brokerOwnerAuthorized !== true || admitted.origin?.kind !== 'owner' || admitted.origin.controllerId || admitted.untrustedInput)) {
       throw new TowerError('forbidden', 'This broker-connected session requires verified owner admission.', { disposition: 'not-admitted' });
     }
   };
@@ -246,9 +247,10 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       if (!targetSessionId) return;
       const target = options.runs.getSession(targetSessionId);
       const currentApproval = target && options.secrets?.brokerApproval(target);
+      const protectedSession = target && options.secrets?.brokerAdmissionRequired(target);
       const brokerTurn = options.runs.list().some(run => run.sessionId === targetSessionId && run.status === 'running' && run.towerTools === 'broker-only');
       if (approvalId && currentApproval?.id !== approvalId) throw new TowerError('forbidden', 'Broker connection approval changed before admission.', { disposition: 'not-admitted' });
-      if ((currentApproval || brokerTurn) && !proven) throw new TowerError('forbidden', 'This broker-connected session requires verified owner admission.', { disposition: 'not-admitted' });
+      if ((protectedSession || currentApproval || brokerTurn) && !proven) throw new TowerError('forbidden', 'This broker-connected session requires verified owner admission.', { disposition: 'not-admitted' });
     };
     if (token === undefined) {
       const validate = () => { heartbeatValidate(); brokerTargetValidate(admitted.brokerOwnerAuthorized === true); };
