@@ -469,3 +469,24 @@ test('a resumed approved agent session receives fresh broker-only MCP configurat
   await next.run.start(); await next.run.done;
   assert.equal(next.sent.find(frame => frame.method === 'thread/resume')!.params.config.mcp_servers.tower_secrets, undefined);
 });
+
+test('broker admission is rechecked after the resumed native identity is persisted before turn/start', async t => {
+  let protectedSession = false;
+  const f = await fixture(t, 'complete', { onSession: async () => { await Promise.resolve(); protectedSession = true; },
+    validateBeforeSubmit: () => { if (protectedSession) throw new Error('Broker owner proof changed during handshake'); } });
+  await assert.rejects(f.run.start(), /Broker owner proof changed/); await f.run.done;
+  assert.equal(f.sent.filter(frame => frame.method === 'thread/resume').length, 1);
+  assert.equal(f.sent.some(frame => frame.method === 'turn/start'), false);
+  assert.equal(f.finished[0].status, 'error');
+});
+
+test('stdio steering invokes the private broker guard before writing its native request', async t => {
+  const f = await fixture(t, 'steer-ok'); await f.run.start();
+  await assert.rejects(f.run.steer!({ id: 'denied', prompt: 'Unproved instruction', validate: () => { throw new Error('Broker owner proof required'); } }), { disposition: 'rejected' });
+  assert.equal(f.sent.some(frame => frame.method === 'turn/steer'), false);
+  assert.equal(f.run.canSteer!(), true);
+  let checked = 0;
+  await f.run.steer!({ id: 'allowed', prompt: 'Verified instruction', validate: () => { checked++; } });
+  assert.equal(checked, 1);
+  assert.deepEqual(Object.keys(f.sent.find(frame => frame.method === 'turn/steer')!.params).sort(), ['clientUserMessageId', 'expectedTurnId', 'input', 'threadId']);
+});

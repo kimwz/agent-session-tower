@@ -55,6 +55,7 @@ export async function prepareCodexTurn(host: TurnHost, run: Run, session: Sessio
     ...codexReviewer(run, creating, Boolean(mcpServers?.tower_slack)),
     ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
     prompt: attachmentPrompt(run.prompt, attachments),
+    validateBeforeSubmit: () => host.validateBrokerRun(run),
     ...(run.instructions?.text ? { instructions: run.instructions.text } : {}),
     imagePaths: imagePaths(attachments),
     onSession: async id => {
@@ -67,6 +68,7 @@ export async function prepareCodexTurn(host: TurnHost, run: Run, session: Sessio
         try { if (!await host.persistNativeIdentity(run)) return; }
         catch (error) { throw new Error(`Cannot save the new conversation identity: ${errorMessage(error)}`); }
       }
+      host.validateBrokerRun(run);
     },
     onStarted: (_turnId, startedAt) => {
       if (FINISHED.has(run.status)) return;

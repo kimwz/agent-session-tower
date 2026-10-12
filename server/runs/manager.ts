@@ -293,7 +293,7 @@ export class RunManager extends EventEmitter {
       get options() { return manager.options; }, registry: this.registry, attachments: this.attachments, notes: this.notes,
       changed: (...runs) => this.changed(...runs), touch: run => this.touch(run.id), append: (run, text) => this.append(run, text), notifyOutput: run => { this.touch(run.id); this.notifyOutput(); }, flush: () => this.flush(), persistNativeIdentity: run => this.persistNativeIdentity(run),
       stopping: () => this.stopping, updating: () => this.updating, stop: (id, owned) => this.stopOwned(id, owned),
-      prepareLaunch: run => this.prepareLaunch(run), refusedAtLaunch: (run, session) => this.refusedAtLaunch(run, session),
+      prepareLaunch: run => this.prepareLaunch(run), refusedAtLaunch: (run, session) => this.refusedAtLaunch(run, session), validateBrokerRun: run => this.validateBrokerRun(run),
       release: sessionId => { this.reservedSessions.delete(sessionId); }, exited: exit => this.exited(exit),
       runTools: (run, session) => this.runTools(run, session), executable: provider => this.executable(provider),
       getSession: id => this.getSession(id), isWorking: session => this.isWorking(session),
@@ -320,6 +320,11 @@ export class RunManager extends EventEmitter {
     await this.permissions.verifyBeforeLaunch(run);
   }
 
+  private validateBrokerRun(run: Run): void {
+    this.options.validateBrokerAdmission?.(run.sessionId, { origin: run.origin, brokerOwnerAuthorized: run.brokerOwnerAuthorized,
+      ...(this.sessionOrigin(run.sessionId)?.untrustedInput ? { untrustedInput: true } : {}) });
+  }
+
   /** Checked again at the last moment before a provider is started, after every asynchronous step. */
   private refusedAtLaunch(run: Run, session: Session): boolean {
     if (this.storageHeld || this.pendingAdmission()) { this.reservedSessions.delete(session.id); return true; }
@@ -331,6 +336,7 @@ export class RunManager extends EventEmitter {
       this.changed(run);
       return true;
     }
+    this.validateBrokerRun(run);
     const reason = run.status === 'queued' ? this.launchGate?.(run) : undefined;
     if (!reason) return false;
     run.status = 'cancelled'; run.error = reason; run.finishedAt = new Date().toISOString();
@@ -351,6 +357,8 @@ export class RunManager extends EventEmitter {
   setRunToolResolver(resolver: NonNullable<RunnerOptions['resolveRunTools']>): void {
     this.options.resolveRunTools = resolver;
   }
+  hasActiveBrokerTurn(sessionId: string): boolean { return [...this.runs.values()].some(run => run.sessionId === sessionId && run.status === 'running' && run.towerTools === 'broker-only'); }
+
   setBrokerAdmissionValidator(validate: NonNullable<RunnerOptions['validateBrokerAdmission']>): void {
     this.options.validateBrokerAdmission = validate;
   }
@@ -739,6 +747,7 @@ export class RunManager extends EventEmitter {
     if (this.stopping || run.status !== 'queued' || run.steering || run.scheduled || this.admissions.has(run.id) || this.bridged.has(run.id)) return undefined;
     const target = [...this.runs.values()].find(item => item.sessionId === run.sessionId && item.status === 'running' && !item.steering);
     if (!target) return undefined;
+    try { this.validateBrokerRun(run); } catch { return { blocked: 'origin' }; }
     // Inserted text reaches the running turn alone: instructions it must not go without would be lost.
     if (run.instructions?.required) return { blocked: 'instructions' };
     if (run.model && run.model !== (target.model ?? this.getSession(run.sessionId)?.model)) return { blocked: 'model' };
@@ -794,6 +803,7 @@ export class RunManager extends EventEmitter {
       if (this.stopping || selected.target.status !== 'running' || !selected.adapter.canSteer?.()) throw new SteeringError('The active turn finished before delivery.', 'rejected');
       // Saving yielded; an automatic insert goes only while the turn is still just waiting.
       if (options.whileWaiting && !selected.target.backgroundWait) throw new SteeringError('The waiting turn resumed before delivery.', 'rejected');
+      this.validateBrokerRun(run);
       const prompt = attachmentPrompt(run.prompt, attachments);
       submitted = true;
       this.drain.noteHandedOver(run);
@@ -806,7 +816,7 @@ export class RunManager extends EventEmitter {
         void delivery.then(() => this.settleSteer(run, selected.target.id), error => this.settleSteer(run, selected.target.id, error)).catch(() => {});
         return this.list().find(item => item.id === runId)!;
       }
-      const sending = selected.adapter.steer!({ id: run.id, prompt, imagePaths: imagePaths(attachments) });
+      const sending = selected.adapter.steer!({ id: run.id, prompt, imagePaths: imagePaths(attachments), validate: () => this.validateBrokerRun(run) });
       // Codex takes one insert at a time: other queued instructions show they wait for this one. Its outcome is
       // recorded even if telling the page fails.
       try { this.changed(run); } finally { await sending; }

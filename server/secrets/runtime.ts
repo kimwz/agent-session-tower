@@ -116,8 +116,8 @@ export class SecretRuntime {
   brokerAdmissionRequired(session: Session | undefined): boolean {
     if (!session) return false;
     const known = this.options.service.brokerAdmissionRequired(session.id);
-    if (known !== undefined) return known;
-    // An old or unavailable metadata index cannot establish absence of a protected agent conversation.
+    if (known === true || (!this.blocked && known !== undefined)) return known;
+    // An old/unavailable index or an unfinished unlock cannot establish absence of protection.
     const provenance = this.options.runs.sessionOrigin(session.id);
     return this.options.service.status().initialized && !session.node && !session.master && !session.isSubagent && !session.launchedByAgent && !session.parentId && !session.launchedBy && provenance?.kind === 'agent' && provenance.untrustedInput === false && !provenance.controllerId;
   }

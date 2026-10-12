@@ -30,6 +30,7 @@ export async function prepareBridgeTurn(host: TurnHost, run: Run, session: Sessi
     // The desktop app shows every block it is sent: a turn goes there only without instructions it must have, and without
     // its notes.
     threadId: session.nativeId, runId: run.id, prompt: attachmentPrompt(run.prompt, attachments),
+    validateBeforeSubmit: () => host.validateBrokerRun(run),
     ...(ownerOrigin(run.origin) ? { approvalsReviewer: 'auto_review' as const } : {}),
     ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
     ...(attachments.length ? { imagePaths: imagePaths(attachments) } : {}),

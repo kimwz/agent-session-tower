@@ -882,3 +882,29 @@ test('missing, legacy and malformed locked broker indexes protect only local age
     assert.equal(f.runtime.brokerAdmissionRequired(f.session), false, 'the unlocked encrypted journal establishes expiry');
   } finally { await f.cleanup(); }
 });
+
+test('unfinished unlock never treats the temporarily empty journal as trusted absence of broker protection', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize(); f.origins.set(f.session.id, { kind: 'agent', untrustedInput: false });
+    await f.runtime.control('approve-broker', { sessionId: f.session.id, root: f.projectRoot, taskId: null, taskLabel: 'Delayed unlock fixture', ttlMs: 60000 });
+    await f.runtime.control('lock', {});
+    let resumeJournal!: () => void; let journalStarted!: () => void;
+    const delayed = new Promise<void>(resolve => { resumeJournal = resolve; });
+    const started = new Promise<void>(resolve => { journalStarted = resolve; });
+    const originalJournal = f.service.vault.journal.bind(f.service.vault);
+    f.service.vault.journal = async () => { journalStarted(); await delayed; return originalJournal(); };
+    const unlocking = f.runtime.control('unlock', { password });
+    await started;
+    try {
+      assert.equal(f.service.status().locked, false, 'synthetic gap is after key opens but before journal restoration');
+      assert.equal(f.service.brokerAdmissionRequired(f.session.id), false, 'the service has not yet restored the approval journal');
+      assert.equal(f.runtime.brokerAdmissionRequired(f.session), true, 'runtime initialization fence protects admission during the gap');
+      assert.equal(f.runtime.brokerApproval(f.session), undefined, 'initialization fence still prevents capability issuance');
+      assert.equal(f.runtime.brokerAdmissionRequired({ ...f.session, isSubagent: true }), false, 'unknown-state fallback stays limited to local agent main sessions');
+    } finally { resumeJournal(); }
+    await unlocking;
+    assert.equal(f.runtime.brokerAdmissionRequired(f.session), true);
+    assert.ok(f.runtime.brokerApproval(f.session));
+  } finally { await f.cleanup(); }
+});
