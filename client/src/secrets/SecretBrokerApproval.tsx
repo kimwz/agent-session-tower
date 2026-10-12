@@ -19,6 +19,7 @@ export function SecretBrokerApproval({ token, sessionId, onChanged, onBlocked, o
     setAccess(undefined); setError(''); setLoadError(''); setBusy(false); sending.current = false; callbacks.current.onBlocked(false);
     if (remote || !token) return () => { controller.abort(); generation.current++; };
     const load = async () => {
+      if (sending.current) return;
       const beforeMutation = mutationVersion.current;
       try {
         const next = await api<SecretBrokerAccess>(`/api/secrets/broker-access?sessionId=${encodeURIComponent(sessionId)}`, { signal: controller.signal });
