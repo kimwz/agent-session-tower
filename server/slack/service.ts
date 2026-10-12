@@ -21,6 +21,7 @@ import { judgeSlackFollowUp } from './follow-up.js';
 import type { DecisionEngine } from '../decisions/engine.js';
 import type { WorkflowRepository } from './storage-repository.js';
 import { TowerError } from '../../shared/errors.js';
+import { StorageCommandError } from '../storage/contract.js';
 
 type Account = { teamId: string; userId: string; teamName?: string; userName?: string };
 type Settings = { enabled: boolean; allowSelfMentions?: boolean; language?: 'ko' | 'en'; workingReaction?: string; appToken?: string; userToken?: string; account?: Account };
@@ -43,14 +44,17 @@ const slackOrigin = (workflowId: string): RunOrigin => ({ kind: 'slack', workflo
 
 /** Keep a useful diagnosis without copying messages, paths, tokens or arbitrary remote error codes. */
 const pollKinds = new Set(['unavailable', 'storage-full', 'internal', 'upstream', 'forbidden', 'locked']);
-const pollCodes = new Set(['EACCES', 'EPERM', 'ENOSPC', 'EIO', 'ENOENT', 'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED']);
+const pollCodes = new Set(['EACCES', 'EPERM', 'ENOSPC', 'EIO', 'ENOENT', 'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'not-ready', 'not-prepared', 'deadline-exceeded', 'thread-exited', 'sqlite-error', 'queue-full', 'no-space', 'io-error']);
 function pollFailure(error: unknown): string {
-  const held = error instanceof TowerError && error.kind === 'unavailable' && error.disposition === 'not-admitted';
+  const held = (error instanceof TowerError && error.kind === 'unavailable' && error.disposition === 'not-admitted')
+    || (error instanceof StorageCommandError && ['not-ready', 'not-prepared'].includes(error.code) && error.disposition === 'not-committed');
+  const disposition = error && typeof error === 'object' && 'disposition' in error && typeof error.disposition === 'string'
+    && ['not-admitted', 'not-committed', 'unknown', 'uncertain', 'committed', 'handoff', 'rejected'].includes(error.disposition) ? error.disposition : undefined;
   const reason = error instanceof TowerError && error.message === 'Permission SQL receipt/effect reconciliation remains held.' ? 'permission-reconciliation'
     : error instanceof TowerError && error.message === 'External SQL receipt reconciliation remains held.' ? 'external-reconciliation'
     : error instanceof TowerError && pollKinds.has(error.kind) ? error.kind
     : error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' && pollCodes.has(error.code) ? error.code : 'internal/unknown';
-  return `${held ? 'Slack 작업 상태 점검이 보류되었습니다.' : 'Slack 작업 상태를 확인하지 못했습니다.'} (${reason}${held ? '/not-admitted' : ''})`;
+  return `${held ? 'Slack 작업 상태 점검이 보류되었습니다.' : 'Slack 작업 상태를 확인하지 못했습니다.'} (${reason}${disposition ? `/${disposition}` : ''})`;
 }
 
 /** Credentials and event processing belong to the execution worker, never the web process. */

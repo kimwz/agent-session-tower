@@ -409,6 +409,15 @@ test('runtime polling recovers its own errors, keeps socket failures and exposes
   assert.match(service.overview().error!, /보류.*permission-reconciliation/);
   const beforeHold = finished; t.mock.timers.tick(1000); await wait(() => finished > beforeHold);
   assert.match(service.projection()!.error!, /보류/, 'even a persistent hold remains visible');
+  const { StorageCommandError } = await import('../../../server/storage/contract.js');
+  gateFailure = new StorageCommandError({ phase: 'command', code: 'not-ready', message: 'secret xoxp-test-1234567890', disposition: 'not-committed', retryable: false });
+  t.mock.timers.tick(1000); await wait(() => !!service.overview().error?.includes('not-ready'));
+  assert.match(service.overview().error!, /보류.*not-ready\/not-committed/);
+  assert.doesNotMatch(service.overview().error!, /secret|xoxp/);
+  gateFailure = new StorageCommandError({ phase: 'command', code: 'sqlite-error', message: 'private path /secret', disposition: 'unknown', retryable: false });
+  t.mock.timers.tick(1000); await wait(() => !!service.overview().error?.includes('sqlite-error'));
+  assert.match(service.overview().error!, /확인하지 못.*sqlite-error\/unknown/);
+  assert.doesNotMatch(service.overview().error!, /보류|secret|private/);
   gateFailure = undefined;
   await service.automation.ingest({ id: 'EvPoll', teamId: 'T1', channel: 'C1', user: 'U2', ts: '1', threadTs: '1', text: 'fixture' });
   t.mock.timers.tick(1000); await wait(() => !service.overview().error && service.overview().events[0].status === 'ignored');
