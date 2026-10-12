@@ -49,7 +49,7 @@ function pollFailure(error: unknown): string {
   const reason = error instanceof TowerError && error.message === 'Permission SQL receipt/effect reconciliation remains held.' ? 'permission-reconciliation'
     : error instanceof TowerError && error.message === 'External SQL receipt reconciliation remains held.' ? 'external-reconciliation'
     : error instanceof TowerError && pollKinds.has(error.kind) ? error.kind
-    : error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' && pollCodes.has(error.code) ? error.code : 'unknown';
+    : error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' && pollCodes.has(error.code) ? error.code : 'internal/unknown';
   return `${held ? 'Slack 작업 상태 점검이 보류되었습니다.' : 'Slack 작업 상태를 확인하지 못했습니다.'} (${reason}${held ? '/not-admitted' : ''})`;
 }
 
@@ -61,7 +61,7 @@ export class SlackService extends EventEmitter {
   private status = 'disconnected';
   private socketError?: string;
   private pollError?: string;
-  private polling = false;
+  private pollSequence = 0;
   private get error(): string | undefined { return [this.socketError, this.pollError].filter(Boolean).join('\n') || undefined; }
   private operations: Promise<unknown> = Promise.resolve();
   private changedAt = new Date().toISOString();
@@ -179,16 +179,14 @@ export class SlackService extends EventEmitter {
     timer.unref();
   }
   private async poll(timer: ReturnType<typeof setInterval>): Promise<void> {
-    if (this.polling) return;
-    this.polling = true;
+    const sequence = ++this.pollSequence;
     let error: string | undefined;
     try {
       await this.automation.tick();
       if (this.automation.newWorkHeld()) error = 'Slack 작업 상태 점검이 보류되었습니다. (automation-held)';
     } catch (failure) { error = pollFailure(failure); }
-    finally { this.polling = false; }
     // A result from a retired runtime cannot clear or replace the current runtime's diagnosis.
-    if (this.timer !== timer || this.pollError === error) return;
+    if (this.timer !== timer || sequence !== this.pollSequence || this.pollError === error) return;
     this.pollError = error;
     this.emit('change');
   }
@@ -312,7 +310,7 @@ export class SlackService extends EventEmitter {
       const next = { language: this.settings.language, enabled: false, appToken: body.appToken, userToken: body.userToken, account };
       await this.releaseAccount(async () => {
         await writePrivateJson(this.path, JSON.stringify(next));
-        this.settings = next;
+        this.settings = next; this.pollError = undefined;
         await this.tone.load(`${account.teamId}:${account.userId}`);
       });
     } else if (action === 'settings') {
@@ -332,7 +330,7 @@ export class SlackService extends EventEmitter {
       if (await this.automation.hasUnfinished()) throw invalid('진행 중인 Slack 작업이 끝난 뒤 연결을 해제하세요. 새 멘션 감시는 지금 끌 수 있습니다.');
       await this.releaseAccount(async () => {
         await writePrivateJson(this.path, JSON.stringify({ enabled: false, language: this.settings.language }));
-        this.settings = { enabled: false, language: this.settings.language };
+        this.settings = { enabled: false, language: this.settings.language }; this.pollError = undefined;
         await this.tone.load('');
       });
     } else throw invalid('지원하지 않는 Slack 설정입니다.');
