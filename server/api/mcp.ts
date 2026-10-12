@@ -141,15 +141,16 @@ export async function handleMcpRequest(context: McpContext, token: string, body:
   // Admission may prepare files asynchronously. Recheck the credential at its commit point, without
   // keeping this transient gate on an already admitted durable job.
   const controllerId = run.origin.controllerId;
+  const brokerOwnerAuthorized = run.brokerOwnerAuthorized === true && !controllerId;
   const validate = () => {
     const current = context.run(capability.runId);
     if (context.capabilities.resolve(token) !== capability || !current || current.sessionId !== capability.sessionId
       || current.status !== 'running' || current.origin?.kind !== 'owner' || current.towerTools !== 'attached'
-      || current.origin.controllerId !== controllerId) {
+      || current.origin.controllerId !== controllerId || (brokerOwnerAuthorized && current.brokerOwnerAuthorized !== true)) {
       throw new TowerError('forbidden', 'The calling turn lost its Tower authority before admission. Nothing was submitted.', { disposition: 'not-admitted' });
     }
   };
   // A turn started from a controlling computer keeps to what that computer may see and change.
   return context.api.call(operation, input, { kind: 'agent', via: 'mcp', sessionId: capability.sessionId, runId: run.id, ...(run.origin.controllerId ? { controllerId: run.origin.controllerId } : {}) },
-    typeof requestKey === 'string' ? requestKey : undefined, { delegation: delegationOf(run), validate });
+    typeof requestKey === 'string' ? requestKey : undefined, { delegation: delegationOf(run), ...(brokerOwnerAuthorized ? { brokerOwnerAuthorized: true } : {}), validate });
 }

@@ -7,6 +7,7 @@ import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { CALLER_CAPABILITY_HEADER } from '../../../server/runs/session-mcp.js';
 import { ownerSecretControl } from '../../../server/link/secret-routes.js';
+import type { RequestContext } from '../../../server/http/request-context.js';
 
 test('broker approval needs a real owner login and preserves HTTP boundaries on loopback', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-broker-http-'));
@@ -50,4 +51,28 @@ test('broker control preserves expected task identity and rejects remote routing
   assert.deepEqual(calls, [['control', ['approve-broker', input]]]);
   await assert.rejects(ownerSecretControl(undefined, worker, 'approve-broker', { ...input, nodeId: 'remote' }), /이 컴퓨터/);
   assert.equal(calls.length, 1);
+});
+
+test('broker admission proof comes from owner authentication or verified master, never message input or loopback', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-broker-admission-http-'));
+  const { auth, cookie } = await createRemoteAuthFixture(dir);
+  const contexts: Array<RequestContext | undefined> = [];
+  const masterCredential = 'fixture-master-credential';
+  const app = createMonitorServer({ port: 0, clientDir: dir, auth, master: { callerSecret: masterCredential, handle: async () => false }, backend: {
+    snapshot: () => ({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'fixture', version: 'fixture', updatedAt: '' }),
+    detail: async () => undefined, cancel: async () => {}, subscribe: () => () => {},
+    enqueue: async (_id, _prompt, _attachments, context) => { contexts.push(context); return { id: 'fixture-run' } as never; },
+  } });
+  await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { app.dispose(); auth.close(); await auth.flush(); app.server.closeAllConnections(); await new Promise<void>(resolve => app.server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`;
+  const { token } = await (await fetch(`${base}/api/bootstrap`)).json();
+  const post = (extra: Record<string, string> = {}) => fetch(`${base}/api/sessions/codex:fixture/messages`, { method: 'POST', headers: { 'content-type': 'application/json', 'X-Agent-Monitor-Token': token, ...extra }, body: JSON.stringify({ prompt: 'Fixture continuation', brokerOwnerAuthorized: true }) });
+  assert.equal((await post()).status, 202); assert.equal(contexts.at(-1)?.brokerOwnerAuthorized, undefined);
+  assert.equal((await post({ cookie })).status, 202); assert.equal(contexts.at(-1)?.brokerOwnerAuthorized, true);
+  assert.equal((await post({ 'X-Tower-Master': masterCredential })).status, 202); assert.equal(contexts.at(-1)?.brokerOwnerAuthorized, true);
+  for (const headers of [{ cookie, 'X-Tower-Agent': 'local' }, { cookie, 'X-Tower-Master': 'invalid' }, { cookie, [CALLER_CAPABILITY_HEADER]: 'a'.repeat(64) }] as Record<string, string>[]) {
+    assert.equal((await post(headers)).status, 202); assert.equal(contexts.at(-1)?.brokerOwnerAuthorized, undefined);
+  }
+  assert.equal(contexts.at(-1)?.callerCapability, 'a'.repeat(64));
 });

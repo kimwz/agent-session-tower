@@ -50,6 +50,7 @@ interface RunnerOptions {
    * a credential inside them may be bound to the run itself.
    */
   resolveRunTools?: (run: Run, session: Session) => RunTools;
+  validateBrokerAdmission?: (sessionId: string, admission: RunAdmission) => void;
   /** True when a ledger outside the run registry links any of these IDs of one session to external content. */
   isExternallyLinked?: (sessionIds: readonly string[]) => boolean;
   getSession: (id: string) => Session | undefined;
@@ -96,6 +97,8 @@ interface RunnerOptions {
 }
 /** Internal admission data is never accepted from the public message endpoint. */
 export interface RunAdmission {
+  /** Trusted transport proof only; origin/reporting credentials alone never establish it. */
+  brokerOwnerAuthorized?: boolean;
   /** Only local session triggers; committed with the fresh run and the runs receipt. */
   triggerLink?: import('../triggers/storage-commands.js').TriggerAdmissionLink;
   heartbeat?: HeartbeatAdmission;
@@ -348,6 +351,9 @@ export class RunManager extends EventEmitter {
   setRunToolResolver(resolver: NonNullable<RunnerOptions['resolveRunTools']>): void {
     this.options.resolveRunTools = resolver;
   }
+  setBrokerAdmissionValidator(validate: NonNullable<RunnerOptions['validateBrokerAdmission']>): void {
+    this.options.validateBrokerAdmission = validate;
+  }
 
   setExternalLinkResolver(resolver: NonNullable<RunnerOptions['isExternallyLinked']>): void {
     this.options.isExternallyLinked = resolver;
@@ -569,6 +575,7 @@ export class RunManager extends EventEmitter {
       const createdAt = new Date().toISOString();
       const origin = internal.origin ?? { kind: 'unknown' as const };
       const run: Run = { id: randomUUID(), sessionId: id, origin, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}), ...(effort ? { effort } : {}),
+        ...(internal.brokerOwnerAuthorized === true ? { brokerOwnerAuthorized: true } : {}),
         ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
         ...(approvalsReviewer ? { codexApprovalsReviewer: approvalsReviewer } : {}),
         ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
@@ -671,6 +678,7 @@ export class RunManager extends EventEmitter {
       this.validateAdmission(prompt, hasAttachments);
       const session = this.getSession(sessionId);
       this.validateSession(session);
+      this.options.validateBrokerAdmission?.(sessionId, internal);
       if (internal.untrustedInput) this.admitUntrusted(sessionId);
       const model = requestedModel(request.model);
       const effort = requestedEffort(request.effort, session.provider);
@@ -680,7 +688,7 @@ export class RunManager extends EventEmitter {
       try {
         // Maintenance may have started while executable/attachment preparation yielded.
         while (this.retentionHeld(sessionId) || this.coldSessionIds.has(this.nativeSessionId(sessionId))) await this.awaitRetentionAdmission(sessionId);
-        this.assertRetentionAdmission(sessionId); this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.();
+        this.assertRetentionAdmission(sessionId); this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); this.options.validateBrokerAdmission?.(sessionId, internal); internal.validate?.();
         if (internal.heartbeat) this.validateHeartbeat(sessionId, prompt, internal.heartbeat); }
       catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
       if (internal.untrustedInput) {
@@ -688,6 +696,7 @@ export class RunManager extends EventEmitter {
         this.registry.markUntrusted(sessionId);
       }
       const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), ...(internal.heartbeat ? { heartbeat: structuredClone(internal.heartbeat) } : {}), prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
+        ...(internal.brokerOwnerAuthorized === true ? { brokerOwnerAuthorized: true } : {}),
         ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
         ...(model ? { model } : {}), ...(effort ? { effort } : {}),
         ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),
@@ -737,6 +746,8 @@ export class RunManager extends EventEmitter {
     // An inserted instruction runs with the active turn's tools and approvals. Tools follow origin and
     // session alone, so the same origin in the same session is exactly the same authority.
     if (!sameOrigin(run.origin, target.origin)) return { blocked: 'origin' };
+    // An inserted message inherits the turn's tools and ability to delegate broker authority.
+    if ((target.brokerOwnerAuthorized === true || target.towerTools === 'broker-only') && run.brokerOwnerAuthorized !== true) return { blocked: 'origin' };
     const adapter = this.stdio.get(target.id) ?? this.bridged.get(target.id) ?? this.owned.get(target.id)?.claude;
     return adapter?.canSteer?.() && adapter.steer ? { target, adapter } : { blocked: 'starting' };
   }

@@ -79,7 +79,7 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
     const provenance = options.runs.sessionOrigin(session.id);
     if (provenance?.untrustedInput) return { required: false, towerTools: 'external-input' };
     if (provenance && provenance.kind !== 'owner') {
-      const approval = provenance.kind === 'agent' && !provenance.controllerId && !origin.controllerId
+      const approval = run.brokerOwnerAuthorized === true && provenance.kind === 'agent' && !provenance.controllerId && !origin.controllerId
         && !session.isSubagent && !session.launchedByAgent && !session.parentId && !session.launchedBy
         ? options.secrets?.brokerApproval(session) : undefined;
       if (!approval) return { required: false, towerTools: 'not-owner-session' };

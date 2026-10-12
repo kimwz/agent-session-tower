@@ -74,6 +74,22 @@ async function fixture(t: TestContext, options: { external?: boolean; onSteer?: 
 const secretTools = () => ({ required: true, towerTools: 'attached' as const, instructions: SECRET_USE_INSTRUCTIONS,
   servers: { tower_secrets: { command: '/fixture/secret-tool', args: [] } } });
 
+for (const towerTools of ['broker-only', 'attached'] as const) test(`ordinary owner-origin instructions cannot enter an authenticated ${towerTools} turn`, async t => {
+  const f = await fixture(t, { resolveRunTools: () => ({ required: true, towerTools }) });
+  const first = await f.manager.enqueue(f.session.id, 'Approved fixture work', {}, { origin: { kind: 'owner' }, brokerOwnerAuthorized: true });
+  await until(() => f.controls.length === 1 && f.read(first.id).status === 'running');
+  const unproved = await f.manager.enqueue(f.session.id, 'Ordinary local request', {}, { origin: { kind: 'owner' } });
+  assert.equal(f.read(unproved.id).canSteer, false);
+  await assert.rejects(f.manager.steer(unproved.id, { targetRunId: first.id }));
+  assert.equal(f.inputs.length, 0);
+  const approved = await f.manager.enqueue(f.session.id, 'Verified parent continuation', {}, { origin: { kind: 'owner' }, brokerOwnerAuthorized: true });
+  await until(() => Boolean(f.read(approved.id).canSteer));
+  await f.manager.steer(approved.id, { targetRunId: first.id });
+  assert.equal(f.inputs.length, 1);
+  assert.equal(f.read(approved.id).brokerOwnerAuthorized, true);
+  assert.equal(f.read(first.id).brokerOwnerAuthorized, true);
+});
+
 test('private tool changes reach only the active owner turn, with no new run or visible history', async t => {
   const f = await fixture(t, { resolveRunTools: secretTools });
   f.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, f.session.id);

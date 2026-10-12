@@ -337,7 +337,8 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       const localAgent = !masterCall && identity.local && req.headers['x-tower-agent'] === 'local';
       const callerContext = (): RequestContext | undefined => {
         const capability = req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()];
-        if (capability === undefined) return undefined;
+        const ownerProof = masterCall || (!req.headers['x-tower-agent'] && !req.headers['x-tower-master'] && capability === undefined && Boolean(auth?.session(sessionId, identity.ip)));
+        if (capability === undefined) return ownerProof ? { brokerOwnerAuthorized: true } : undefined;
         if (!identity.local || typeof capability !== 'string' || !/^[a-f\d]{64}$/.test(capability)) {
           throw new TowerError('forbidden', 'A calling turn must use its local reporting credential.');
         }

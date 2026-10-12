@@ -9,6 +9,7 @@ import { SECRET_OPERATIONS } from '../../shared/secrets.js';
 import type { Capability } from '../api/mcp.js';
 import type { SessionOrigin } from '../runs/origin.js';
 import { callWorkerTools, serveToolBridge } from '../mcp/stdio.js';
+import { inMasterFolder } from '../runs/subscription.js';
 import { SecretBroker } from './broker.js';
 import { parseSecretCli } from './cli.js';
 import { parseDotenv } from './dotenv.js';
@@ -107,7 +108,9 @@ export class SecretRuntime {
   private candidate(session: Session): Session & { cwd: string } {
     const provenance = this.options.runs.sessionOrigin(session.id);
     if (session.closed || session.node || session.master || session.creationPending || session.isSubagent || session.launchedByAgent || session.parentId || session.launchedBy || provenance?.untrustedInput !== false || provenance?.controllerId || provenance?.kind !== 'agent' || this.closedSessions.has(session.id)) throw fail('외부 입력이나 상속 없는 로컬 agent 생성 주 세션만 승인할 수 있습니다.', 'forbidden');
-    return { ...session, cwd: realpathSync(session.cwd) };
+    const cwd = realpathSync(session.cwd);
+    if (inMasterFolder(this.options.stateDir, session.cwd) || inMasterFolder(this.options.stateDir, cwd)) throw fail('마스터 폴더의 세션은 프로젝트 브로커 승인을 받을 수 없습니다.', 'forbidden');
+    return { ...session, cwd };
   }
   brokerApproval(session: Session | undefined): SecretBrokerApproval | undefined {
     if (!session || this.blocked || this.options.service.status().locked) return;
@@ -132,7 +135,7 @@ export class SecretRuntime {
   private validateBrokerContext(context: SecretContext): void {
     if (!context.brokerApprovalId) return;
     const run = this.options.runs.list().find(item => item.id === context.runId);
-    if (this.blocked || !run || run.sessionId !== context.sessionId || run.status !== 'running' || run.origin?.kind !== 'owner' || run.origin.controllerId || run.towerTools !== 'broker-only') throw fail('이 브로커 승인은 현재 소유자 실행에서만 사용할 수 있습니다.', 'forbidden');
+    if (this.blocked || !run || run.sessionId !== context.sessionId || run.status !== 'running' || run.origin?.kind !== 'owner' || run.origin.controllerId || run.brokerOwnerAuthorized !== true || run.towerTools !== 'broker-only') throw fail('이 브로커 승인은 현재 소유자 실행에서만 사용할 수 있습니다.', 'forbidden');
     const session = this.options.runs.getSession(context.sessionId);
     if (!session || this.candidate(session).cwd !== context.root) throw fail('승인된 프로젝트 세션이 변경되었습니다.', 'forbidden');
     this.options.service.checkBrokerApproval(context);
@@ -159,7 +162,7 @@ export class SecretRuntime {
   private async ownerRun(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<{ run: Run; session: Session & { cwd: string } }> {
     if (this.blocked) throw fail('보관함 잠금 해제를 완료하지 못했습니다.', 'unavailable');
     const run = this.options.runs.list().find(item => item.id === capability.runId);
-    if (!run || run.sessionId !== capability.sessionId || run.status !== 'running' || run.origin?.kind !== 'owner' || (capability.approvalId ? run.towerTools !== 'broker-only' || !!run.origin.controllerId : run.towerTools !== 'attached')) throw fail('이 시크릿 도구는 발급받은 실행 중에만 사용할 수 있습니다.', 'forbidden');
+    if (!run || run.sessionId !== capability.sessionId || run.status !== 'running' || run.origin?.kind !== 'owner' || (capability.approvalId ? run.towerTools !== 'broker-only' || run.brokerOwnerAuthorized !== true || !!run.origin.controllerId : run.towerTools !== 'attached')) throw fail('이 시크릿 도구는 발급받은 실행 중에만 사용할 수 있습니다.', 'forbidden');
     return { run, session: await this.session(run.sessionId, capability.approvalId) };
   }
   async authorizeCapability(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<void> {
@@ -253,6 +256,26 @@ export class SecretRuntime {
       if (target) await this.endTask(target);
       await this.applyClosures();
     }
+  }
+  /** Called only after the official session store committed a reopen; retired authority never returns. */
+  async reopenSession(sessionId: string): Promise<void> {
+    const session = this.options.runs.getSession(sessionId);
+    if (!session || session.closed || await this.options.isClosed?.(sessionId)) throw fail('공식 재열기를 완료한 세션이 필요합니다.', 'forbidden');
+    await this.closures;
+    const pending = (await this.readClosures()).includes(closureId(sessionId));
+    if (!this.closedSessions.has(sessionId) && !pending) return;
+    if (this.options.service.status().initialized) {
+      // Also repairs a close intent whose previous write failed; locked reopen waits for unlock's cleanup.
+      await this.recordClosure(sessionId);
+      if (!this.options.service.status().locked) {
+        const target = this.options.service.currentTask(sessionId);
+        if (target) await this.endTask(target);
+        await this.applyClosures();
+      }
+    }
+    const current = this.options.runs.getSession(sessionId);
+    if (!current || current.closed || await this.options.isClosed?.(sessionId)) throw fail('세션이 다시 종료되었습니다.', 'forbidden');
+    this.closedSessions.delete(sessionId);
   }
   private closurePath(): string { return join(this.options.stateDir, 'secret-close-intents.json'); }
   private async readClosures(): Promise<string[]> {

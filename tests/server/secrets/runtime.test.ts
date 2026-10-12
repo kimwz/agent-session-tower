@@ -22,7 +22,7 @@ const sessionRecord = (cwd: string, patch: Partial<Session> = {}): Session => ({
   lastMessage: '', messageCount: 0, isSubagent: false, resumable: true, ...patch,
 });
 const runRecord = (sessionId: string, id: string, patch: Partial<Run> = {}): Run => ({
-  id, sessionId, origin: { kind: 'owner' }, towerTools: 'attached', prompt: 'Use the connected key by reference.', status: 'running',
+  id, sessionId, origin: { kind: 'owner' }, towerTools: 'attached', brokerOwnerAuthorized: true, prompt: 'Use the connected key by reference.', status: 'running',
   createdAt: new Date().toISOString(), output: '', ...patch,
 });
 
@@ -734,5 +734,88 @@ test('an open task must close before the same approved session can move to anoth
     assert.deepEqual((await f.list(newToken)).secrets, []);
     f.sessions.set(f.session.id, f.session);
     await assert.rejects(f.list(oldToken), 'returning to root A cannot revive the retired approval');
+  } finally { await f.cleanup(); }
+});
+
+test('approved agent broker tools require immutable owner admission proof rather than an owner origin label', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize(); f.origins.set(f.session.id, { kind: 'agent', untrustedInput: false });
+    const approved = await f.runtime.control('approve-broker', { sessionId: f.session.id, root: f.projectRoot, taskId: null, taskLabel: 'Proof fixture', ttlMs: 60000 }); assert.ok('approval' in approved && approved.approval);
+    for (const brokerOwnerAuthorized of [undefined, false]) {
+      const run = f.addRun('unproven-' + String(brokerOwnerAuthorized), f.session, { brokerOwnerAuthorized });
+      assert.equal(f.resolver(run, f.session).servers?.tower_secrets, undefined);
+      run.towerTools = 'broker-only';
+      const forged = f.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: f.session.id, approvalId: approved.approval.id });
+      await assert.rejects(f.list(forged));
+      await assert.rejects(handleMcpRequest(f.context, forged, { method: 'tools/list' }));
+    }
+    const run = f.addRun('proven-owner'); const token = f.tokenFor(run);
+    assert.deepEqual((await f.list(token)).secrets, []);
+    run.origin = { kind: 'agent' };
+    await assert.rejects(f.list(token));
+    run.origin = { kind: 'owner' }; run.brokerOwnerAuthorized = false;
+    await assert.rejects(f.list(token));
+    f.origins.set(f.session.id, { kind: 'owner', untrustedInput: false });
+    const ordinary = f.addRun('ordinary-owner-without-new-proof', f.session, { brokerOwnerAuthorized: undefined });
+    const ordinaryToken = f.tokenFor(ordinary); assert.deepEqual((await f.list(ordinaryToken)).secrets, []);
+  } finally { await f.cleanup(); }
+});
+
+test('master folder identity is excluded even without a display flag and through canonical aliases', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize(); f.origins.set(f.session.id, { kind: 'agent', untrustedInput: false });
+    const master = join(f.stateDir, 'master-session'); await mkdir(master);
+    const child = join(master, 'child'); await mkdir(child);
+    const alias = join(f.directory, 'master-alias'); await symlink(master, alias);
+    for (const cwd of [master, child, alias]) {
+      const record = { ...f.session, cwd, master: false }; f.sessions.set(record.id, record);
+      const access = await f.runtime.brokerAccess(record.id); assert.equal(access.eligible, false); assert.match(access.reason!, /마스터/);
+      await assert.rejects(f.runtime.control('approve-broker', { sessionId: record.id, root: await realpath(cwd), taskId: null, taskLabel: 'Master denial', ttlMs: 60000 }));
+      assert.equal(f.resolver(f.addRun('master-' + cwd, record), record).servers?.tower_secrets, undefined);
+    }
+  } finally { await f.cleanup(); }
+});
+
+test('official reopen clears the transient fence but requires a new task approval and never revives old capabilities', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize(); f.origins.set(f.session.id, { kind: 'agent', untrustedInput: false });
+    const input = { sessionId: f.session.id, root: f.projectRoot, taskId: null, taskLabel: 'Reopen fixture', ttlMs: 60000 };
+    const before = await f.runtime.control('approve-broker', input); assert.ok('approval' in before && before.approval);
+    const oldToken = f.tokenFor(f.addRun('before-reopen'));
+    f.session.closed = true; await f.runtime.endSession(f.session.id);
+    await assert.rejects(f.runtime.reopenSession(f.session.id));
+    f.session.closed = false; await f.runtime.reopenSession(f.session.id);
+    assert.equal((await f.runtime.brokerAccess(f.session.id)).eligible, true);
+    assert.equal(f.runtime.brokerApproval(f.session), undefined);
+    await assert.rejects(f.list(oldToken));
+    const after = await f.runtime.control('approve-broker', input); assert.ok('approval' in after && after.approval);
+    assert.notEqual(after.approval.id, before.approval.id); assert.notEqual(after.approval.taskId, before.approval.taskId);
+    await assert.rejects(f.list(oldToken));
+    assert.deepEqual((await f.list(f.tokenFor(f.addRun('after-reopen')))).secrets, []);
+  } finally { await f.cleanup(); }
+});
+
+test('locked official reopen retains durable cleanup until unlock and no-vault reopen retains no permanent fence', async () => {
+  const f = await fixture();
+  try {
+    f.origins.set(f.session.id, { kind: 'agent', untrustedInput: false });
+    f.session.closed = true; await f.runtime.endSession(f.session.id); f.session.closed = false;
+    await f.runtime.reopenSession(f.session.id);
+    assert.equal((await f.runtime.brokerAccess(f.session.id)).eligible, true);
+    await f.initialize();
+    const input = { sessionId: f.session.id, root: f.projectRoot, taskId: null, taskLabel: 'Locked reopen', ttlMs: 60000 };
+    const before = await f.runtime.control('approve-broker', input); assert.ok('approval' in before && before.approval);
+    const token = f.tokenFor(f.addRun('locked-before-reopen'));
+    await f.runtime.control('lock', {}); f.session.closed = true; await f.runtime.endSession(f.session.id);
+    f.session.closed = false; await f.runtime.reopenSession(f.session.id);
+    const closed = await f.runtime.brokerAccess(f.session.id); assert.equal(closed.eligible, false);
+    await f.runtime.control('unlock', { password });
+    assert.equal((await f.runtime.brokerAccess(f.session.id)).eligible, true);
+    await assert.rejects(f.list(token));
+    const after = await f.runtime.control('approve-broker', input); assert.ok('approval' in after && after.approval);
+    assert.notEqual(after.approval.taskId, before.approval.taskId);
   } finally { await f.cleanup(); }
 });

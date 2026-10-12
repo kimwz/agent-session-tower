@@ -33,6 +33,7 @@ export function validEntry(value: unknown): value is Entry {
     && !!job && typeof entry?.fingerprint === 'string' && /^[a-f\d]{64}$/.test(entry.fingerprint)
     && Array.isArray(entry.staged) && entry.staged.length <= 10 && entry.staged.every(item => attachmentMetadata(item))
     && (job.delegation === undefined || isSavedDelegation(job.delegation))
+    && (job.brokerOwnerAuthorized === undefined || typeof job.brokerOwnerAuthorized === 'boolean')
     && (job.origin === undefined || !!parseRunOrigin(job.origin))
     && (job.untrustedInput === undefined || job.untrustedInput === true)
     && typeof job.id === 'string' && UUID.test(job.id) && ['claude', 'codex'].includes(String(job.provider))

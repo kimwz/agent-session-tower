@@ -358,8 +358,10 @@ test('a scoped agent-session approval attaches only broker tools to a new local 
   const resolver = runToolResolver({ stateDir: f.stateDir, capabilities: f.capabilities, runs: { sessionOrigin: () => provenance },
     secrets: { initialized: () => true, brokerApproval: s => s.id === approval.sessionId ? approval : undefined } });
   const target = session('codex:delegated');
-  const turn = (origin: Run['origin'] = { kind: 'owner' }) => ({ ...f.ownerTurn(target.id), origin });
+  const turn = (origin: Run['origin'] = { kind: 'owner' }) => ({ ...f.ownerTurn(target.id), brokerOwnerAuthorized: true, origin });
   const run = turn();
+  assert.equal(resolver({ ...run, brokerOwnerAuthorized: undefined }, target).servers?.tower_secrets, undefined);
+  assert.equal(resolver({ ...run, brokerOwnerAuthorized: false }, target).servers?.tower_secrets, undefined);
   const tools = resolver(run, target);
   assert.equal(tools.towerTools, 'broker-only');
   assert.equal(tools.required, true);
@@ -397,4 +399,12 @@ test('broker-only capabilities never admit generic Tower tools and revalidate di
   allowed = true;
   run.origin = { kind: 'owner', controllerId: 'remote' };
   await assert.rejects(handleMcpRequest(context, token, { method: 'tools/list' }), /Tower tools work only/);
+});
+
+test('MCP admission rechecks captured broker owner proof after preparing an Auto Prompt', async t => {
+  let run!: Run;
+  const f = await fixture(t, async internal => { run.brokerOwnerAuthorized = false; internal.validate?.(); });
+  run = f.ownerTurn('codex:mine'); run.brokerOwnerAuthorized = true;
+  await assert.rejects(handleMcpRequest(f.context, f.token(run), { method: 'tools/call', name: 'autoPrompt_submit', arguments: { requestId: randomUUID(), provider: 'codex', prompt: 'Exact task' } }), /lost its Tower authority/);
+  assert.equal(f.submitted.length, 0);
 });
