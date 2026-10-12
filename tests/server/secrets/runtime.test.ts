@@ -710,3 +710,29 @@ test('concurrent approval requests compare and create one exact security task at
     }
   } finally { await f.cleanup(); }
 });
+
+test('an open task must close before the same approved session can move to another project root', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize(); f.origins.set(f.session.id, { kind: 'agent', untrustedInput: false });
+    const input = { sessionId: f.session.id, root: f.projectRoot, taskId: null, taskLabel: 'Root A fixture', ttlMs: 60000 };
+    const approved = await f.runtime.control('approve-broker', input); assert.ok('approval' in approved && approved.approval);
+    const oldToken = f.tokenFor(f.addRun('root-a-old-capability'));
+    assert.deepEqual((await f.list(oldToken)).secrets, []);
+    const rootB = join(f.directory, 'project-b'); await mkdir(rootB);
+    f.sessions.set(f.session.id, { ...f.session, cwd: rootB });
+    const nextInput = { ...input, root: rootB, taskLabel: 'Root B fixture' };
+    await assert.rejects(f.runtime.control('approve-broker', nextInput), /작업|프로젝트/);
+    assert.equal(f.service.currentTask(f.session.id, rootB), undefined, 'denied root change creates no task');
+    await assert.rejects(f.list(oldToken));
+    await f.service.closeTask(approved.approval.taskId);
+    const next = await f.runtime.control('approve-broker', nextInput); assert.ok('approval' in next && next.approval);
+    assert.notEqual(next.approval.taskId, approved.approval.taskId);
+    assert.equal(next.approval.root, rootB);
+    await assert.rejects(f.list(oldToken));
+    const newToken = f.tokenFor(f.addRun('root-b-new-capability'), f.sessions.get(f.session.id));
+    assert.deepEqual((await f.list(newToken)).secrets, []);
+    f.sessions.set(f.session.id, f.session);
+    await assert.rejects(f.list(oldToken), 'returning to root A cannot revive the retired approval');
+  } finally { await f.cleanup(); }
+});

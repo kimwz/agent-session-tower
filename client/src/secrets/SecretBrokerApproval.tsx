@@ -10,46 +10,48 @@ export function SecretBrokerApproval({ token, sessionId, onChanged, onBlocked, o
 }) {
   const { t } = useI18n();
   const [access, setAccess] = useState<SecretBrokerAccess>();
-  const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
-  const generation = useRef(0); const sending = useRef(false);
+  const [error, setError] = useState(''); const [loadError, setLoadError] = useState(''); const [busy, setBusy] = useState(false);
+  const generation = useRef(0); const mutationVersion = useRef(0); const sending = useRef(false);
   const callbacks = useRef({ onChanged, onBlocked }); callbacks.current = { onChanged, onBlocked };
   const remote = Boolean(secretSession(sessionId).nodeId);
   useEffect(() => {
     const current = ++generation.current; const controller = new AbortController();
-    setAccess(undefined); setError(''); setBusy(false); sending.current = false; callbacks.current.onBlocked(false);
+    setAccess(undefined); setError(''); setLoadError(''); setBusy(false); sending.current = false; callbacks.current.onBlocked(false);
     if (remote || !token) return () => { controller.abort(); generation.current++; };
     const load = async () => {
+      const beforeMutation = mutationVersion.current;
       try {
         const next = await api<SecretBrokerAccess>(`/api/secrets/broker-access?sessionId=${encodeURIComponent(sessionId)}`, { signal: controller.signal });
-        if (!controller.signal.aborted && generation.current === current && !sending.current) {
-          setAccess(next); callbacks.current.onBlocked(next.requiresApproval && (!next.approval || !next.eligible || next.locked));
+        if (!controller.signal.aborted && generation.current === current && beforeMutation === mutationVersion.current && !sending.current) {
+          setAccess(next); setLoadError(''); callbacks.current.onBlocked(next.requiresApproval && (!next.approval || !next.eligible || next.locked));
         }
       } catch {
-        if (!controller.signal.aborted && generation.current === current) setError(t('브로커 연결 승인 상태를 확인하지 못했습니다.'));
+        if (!controller.signal.aborted && generation.current === current && beforeMutation === mutationVersion.current) setLoadError(t('브로커 연결 승인 상태를 확인하지 못했습니다.'));
       }
     };
     void load(); const timer = window.setInterval(() => void load(), 10_000);
     return () => { controller.abort(); window.clearInterval(timer); generation.current++; };
   }, [sessionId, token, remote, t]);
-  if (remote || (!access?.requiresApproval && !access?.approval && !error)) return null;
-  if (!access) return <p role="alert" className="secret-error">{error}</p>;
+  const message = error || loadError;
+  if (remote || (!access?.requiresApproval && !access?.approval && !message)) return null;
+  if (!access) return <p role="alert" className="secret-error">{message}</p>;
   const change = async (action: 'approve-broker' | 'revoke-broker', fields: Record<string, unknown>) => {
     if (sending.current) return;
-    const current = generation.current; sending.current = true; setBusy(true); setError('');
+    const current = generation.current; mutationVersion.current++; sending.current = true; setBusy(true); setError('');
     try {
       const next = await api<SecretBrokerAccess>(`/api/secrets/${action}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token },
         body: JSON.stringify({ sessionId, ...fields }),
       });
       if (generation.current !== current) return;
-      setAccess(next); callbacks.current.onBlocked(next.requiresApproval && (!next.approval || !next.eligible || next.locked)); callbacks.current.onChanged();
+      setAccess(next); setLoadError(''); callbacks.current.onBlocked(next.requiresApproval && (!next.approval || !next.eligible || next.locked)); callbacks.current.onChanged();
     } catch (failure) {
       if (generation.current === current) setError(failure instanceof Error ? failure.message : t('연결 승인을 완료하지 못했습니다. 현재 상태를 확인하세요.'));
     } finally { if (generation.current === current) { sending.current = false; setBusy(false); } }
   };
   return <section className="secret-task" aria-label={t('이 작업의 브로커 연결 승인')}>
     <SecretBrokerApprovalForm access={access} busy={busy} approve={fields => void change('approve-broker', fields)} revoke={() => void change('revoke-broker', { approvalId: access.approval!.id })} />
-    {error && <p role="alert" className="secret-error">{error}</p>}
+    {message && <p role="alert" className="secret-error">{message}</p>}
     {access.locked && <button type="button" onClick={onManage}>{t('보관함 보안 설정 열기')}</button>}
   </section>;
 }

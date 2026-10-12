@@ -111,7 +111,11 @@ export class SecretRuntime {
   }
   brokerApproval(session: Session | undefined): SecretBrokerApproval | undefined {
     if (!session || this.blocked || this.options.service.status().locked) return;
-    try { const current = this.options.runs.getSession(session.id); if (!current) return; const candidate = this.candidate(current); return this.options.service.brokerApproval(candidate.id, candidate.cwd); } catch { return; }
+    try { const current = this.options.runs.getSession(session.id); if (!current) return; const candidate = this.candidate(current); return this.options.service.brokerApproval(candidate.id, candidate.cwd); }
+    catch (error) {
+      if (!(error instanceof TowerError)) console.warn('Tower denied broker access because the session identity could not be verified.');
+      return;
+    }
   }
   private async session(id: string, approvalId?: string): Promise<Session & { cwd: string }> {
     const session = this.options.runs.getSession(id);

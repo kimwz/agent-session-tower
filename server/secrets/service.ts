@@ -159,6 +159,11 @@ export class SecretService {
     return this.mutate(() => {
       validate();
       if (!input.sessionId || !isAbsolute(input.root) || normalize(input.root) !== input.root || !input.taskLabel.trim() || input.taskLabel.length > 256 || !Number.isSafeInteger(input.ttlMs) || input.ttlMs <= 0 || input.ttlMs > 8 * 60 * 60_000) throw new TowerError('invalid', '브로커 승인 입력이 올바르지 않습니다.');
+      // A session has one open security task across all roots; a project move requires closing it first.
+      let bound: SecretTask | undefined;
+      try { bound = sessionTask(this.journal, input.sessionId, this.device().id, input.root); }
+      catch (error) { throw new TowerError('conflict', '현재 시크릿 작업을 종료한 뒤 다른 프로젝트를 승인하세요.', { cause: error }); }
+      if (bound?.expiresAt !== undefined && bound.expiresAt <= this.now()) throw new TowerError('conflict', '만료된 시크릿 작업을 종료한 뒤 새 작업을 승인하세요.');
       const current = this.currentTask(input.sessionId, input.root);
       if ((current?.taskId ?? null) !== input.taskId) throw new TowerError('conflict', '시크릿 작업이 변경되었습니다. 화면을 새로고침하세요.');
       const existing = this.brokerApproval(input.sessionId, input.root);

@@ -60,7 +60,7 @@ test('storage health keeps identity at 503; verification holds stay 200 and reco
 
 
 test('candidate HTTP health independently preflights a captured web attached to a JSON-only worker without opening storage', async t => {
-  const dir = await mkdtemp(join(tmpdir(), 'tower-candidate-health-'));
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'tower-candidate-health-')));
   const build = storageWebBuild(dir, APP_VERSION);
   const candidate = await build();
   let mismatched = false;
