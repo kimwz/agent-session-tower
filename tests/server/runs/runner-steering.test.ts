@@ -28,6 +28,7 @@ async function fixture(t: TestContext, options: { external?: boolean; onSteer?: 
     project: 'fixture', status: options.external ? 'working' : 'completed', statusReason: 'Fixture', createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true, model: 'model-a' };
   const inputs: SteeringInput[] = [];
+  let nativeStarts = 0;
   const controls: { finish(result?: CodexStdioResult): void }[] = [];
   const manager: RunManager = new RunManager({ stateDir, getSession: id => id === session.id ? session : undefined,
     refreshSessions: async () => {}, latestUserMessage: options.nativeHistory ? id => latestNativeUserMessage(manager, id, async nativeId => {
@@ -43,7 +44,7 @@ async function fixture(t: TestContext, options: { external?: boolean; onSteer?: 
       };
       controls.push({ finish });
       await options.onOpen?.(controls.length);
-      return { start: async () => { await config.onSession(ID); active = true; config.onStarted?.('fixture-turn'); },
+      return { start: async () => { nativeStarts++; await config.onSession(ID); active = true; config.onStarted?.('fixture-turn'); },
         done: done.promise, close: () => finish({ status: 'cancelled' }), cancel: async () => finish({ status: 'cancelled' }),
         respondToApproval: async () => {}, canSteer: () => active && !inserting,
         // Like the Codex adapters, one insert at a time.
@@ -68,11 +69,27 @@ async function fixture(t: TestContext, options: { external?: boolean; onSteer?: 
     await until(() => controls.length === 1 && read(first.id).status === 'running');
     return first;
   };
-  return { manager, session, controls, inputs, read, pair, running, stateDir, published };
+  return { manager, session, controls, inputs, read, pair, running, stateDir, published, nativeStarts: () => nativeStarts };
 }
 
 const secretTools = () => ({ required: true, towerTools: 'attached' as const, instructions: SECRET_USE_INSTRUCTIONS,
   servers: { tower_secrets: { command: '/fixture/secret-tool', args: [] } } });
+
+for (const towerTools of ['broker-only', 'attached'] as const) test(`ordinary owner-origin instructions cannot enter an authenticated ${towerTools} turn`, async t => {
+  const f = await fixture(t, { resolveRunTools: () => ({ required: true, towerTools }) });
+  const first = await f.manager.enqueue(f.session.id, 'Approved fixture work', {}, { origin: { kind: 'owner' }, brokerOwnerAuthorized: true });
+  await until(() => f.controls.length === 1 && f.read(first.id).status === 'running');
+  const unproved = await f.manager.enqueue(f.session.id, 'Ordinary local request', {}, { origin: { kind: 'owner' } });
+  assert.equal(f.read(unproved.id).canSteer, false);
+  await assert.rejects(f.manager.steer(unproved.id, { targetRunId: first.id }));
+  assert.equal(f.inputs.length, 0);
+  const approved = await f.manager.enqueue(f.session.id, 'Verified parent continuation', {}, { origin: { kind: 'owner' }, brokerOwnerAuthorized: true });
+  await until(() => Boolean(f.read(approved.id).canSteer));
+  await f.manager.steer(approved.id, { targetRunId: first.id });
+  assert.equal(f.inputs.length, 1);
+  assert.equal(f.read(approved.id).brokerOwnerAuthorized, true);
+  assert.equal(f.read(first.id).brokerOwnerAuthorized, true);
+});
 
 test('private tool changes reach only the active owner turn, with no new run or visible history', async t => {
   const f = await fixture(t, { resolveRunTools: secretTools });
@@ -604,4 +621,54 @@ test('a permission continuation whose native history cannot be read completely i
   assert.equal(f.read(resume.id).output, 'Scheduled continuation not started: The latest native user instruction could not be verified.');
   f.controls[0].finish(); await until(() => f.read(parent.id).status === 'completed');
   assert.equal(f.controls.length, 1);
+});
+
+
+for (const brokerOwnerAuthorized of [undefined, true]) test(`queued instruction rechecks broker protection before native launch (proof ${brokerOwnerAuthorized})`, async t => {
+  const f = await fixture(t, { external: true });
+  let protectedSession = false;
+  f.manager.setBrokerAdmissionValidator((_id, admission) => { if (protectedSession && admission.brokerOwnerAuthorized !== true) throw new Error('Broker owner proof required at delivery'); });
+  const queued = await f.manager.enqueue(f.session.id, 'Queued before connection approval', {}, { origin: { kind: 'owner' }, ...(brokerOwnerAuthorized ? { brokerOwnerAuthorized } : {}) });
+  assert.equal(f.controls.length, 0);
+  protectedSession = true; f.session.status = 'completed';
+  await f.manager.markReady();
+  if (brokerOwnerAuthorized) {
+    await until(() => f.controls.length === 1 && f.read(queued.id).status === 'running');
+    assert.equal(f.read(queued.id).brokerOwnerAuthorized, true);
+  } else {
+    await until(() => f.read(queued.id).status === 'error');
+    assert.equal(f.nativeStarts(), 0, 'pre-approval unproved history never reaches native start');
+    assert.equal(f.read(queued.id).startedAt, undefined);
+  }
+});
+
+test('queued steering rechecks newly protected session after its durable flush before provider delivery', async t => {
+  const f = await fixture(t);
+  let protectedSession = false;
+  f.manager.setBrokerAdmissionValidator((_id, admission) => { if (protectedSession && admission.brokerOwnerAuthorized !== true) throw new Error('Broker owner proof required at delivery'); });
+  const pair = await f.pair();
+  const internal = f.manager as unknown as { flush(): Promise<void> };
+  const original = internal.flush.bind(f.manager);
+  let flushCount = 0;
+  internal.flush = async () => { await original(); if (++flushCount === 2) protectedSession = true; };
+  await assert.rejects(f.manager.steer(pair.second.id, { targetRunId: pair.first.id }), /Broker owner proof/);
+  assert.equal(f.inputs.length, 0);
+  assert.equal(f.read(pair.second.id).status, 'queued');
+  assert.equal(f.read(pair.second.id).steerBlocked, 'origin');
+});
+
+
+test('a pre-approval internal permission continuation cannot launch with missing broker proof', async t => {
+  const f = await fixture(t);
+  let protectedSession = false;
+  f.manager.setBrokerAdmissionValidator((_id, admission) => { if (protectedSession && admission.brokerOwnerAuthorized !== true) throw new Error('Broker owner proof required at delivery'); });
+  const parent = await f.running({ kind: 'owner' });
+  const resume = await f.manager.permissionDecision(permissionRequest(f, parent.id), 'Approved before broker connection.');
+  assert.equal(resume.brokerOwnerAuthorized, undefined);
+  const baselineInputs = f.inputs.length;
+  protectedSession = true;
+  f.controls[0].finish();
+  await until(() => f.read(resume.id).status === 'error');
+  assert.equal(f.nativeStarts(), 1, 'only the original pre-approval parent started');
+  assert.equal(f.inputs.length, baselineInputs, 'no further native insert after protection began');
 });

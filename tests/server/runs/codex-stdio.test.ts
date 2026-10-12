@@ -5,6 +5,9 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { CapabilityRegistry } from '../../../server/api/mcp.js';
+import { runToolResolver } from '../../../server/api/run-tools.js';
+import type { Run, Session } from '../../../shared/types.js';
 import type { RunApproval } from '../../../shared/types.js';
 import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioResult } from '../../../server/runs/codex-stdio.js';
 import { until } from '../../helpers/until.ts';
@@ -440,4 +443,50 @@ test('the agent\'s words go out by message as they stream, and what it did not s
   assert.ok(replies.every(([id]) => id === 'message:0'));
   assert.equal(replies.at(-1)![2], true, 'the message is complete');
   assert.equal(replies.filter(([, , done]) => done).length, 1);
+});
+
+
+test('a resumed approved agent session receives fresh broker-only MCP configuration', async t => {
+  const session: Session = { id: `codex:${ID}`, nativeId: ID, provider: 'codex', title: 'Fixture', cwd: '/fixture', project: 'fixture', status: 'idle', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true };
+  const capabilities = new CapabilityRegistry();
+  let approved = false;
+  const resolver = runToolResolver({ stateDir: '/fixture/state', runs: { sessionOrigin: () => ({ kind: 'agent', untrustedInput: false }) }, capabilities,
+    secrets: { initialized: () => true, brokerApproval: () => approved ? { id: 'fixture-approval', sessionId: session.id, hostId: 'fixture-host', root: session.cwd, taskId: 'fixture-task', taskLabel: 'Deploy', createdAt: 1, expiresAt: 9999999999999 } : undefined } });
+  const turn = (id: string): Run => ({ id, sessionId: session.id, prompt: '', status: 'running', origin: { kind: 'owner' }, brokerOwnerAuthorized: true, createdAt: '', output: '' });
+  assert.equal(resolver(turn('before'), session).servers?.tower_secrets, undefined);
+  approved = true;
+  assert.equal(resolver({ ...turn('unproved'), brokerOwnerAuthorized: undefined }, session).servers?.tower_secrets, undefined);
+  const tools = resolver(turn('approved'), session);
+  assert.equal(tools.towerTools, 'broker-only');
+  const f = await fixture(t, 'complete', { mcpServers: tools.servers });
+  await f.run.start(); await f.run.done;
+  const config = f.sent.find(frame => frame.method === 'thread/resume')!.params.config.mcp_servers;
+  assert.deepEqual(config.tower_secrets, tools.servers!.tower_secrets);
+  for (const name of ['tower', 'tower_local', 'tower_master']) assert.equal(config[name], undefined);
+  approved = false;
+  const removed = resolver(turn('revoked'), session);
+  const next = await fixture(t, 'complete', { mcpServers: removed.servers });
+  await next.run.start(); await next.run.done;
+  assert.equal(next.sent.find(frame => frame.method === 'thread/resume')!.params.config.mcp_servers.tower_secrets, undefined);
+});
+
+test('broker admission is rechecked after the resumed native identity is persisted before turn/start', async t => {
+  let protectedSession = false;
+  const f = await fixture(t, 'complete', { onSession: async () => { await Promise.resolve(); protectedSession = true; },
+    validateBeforeSubmit: () => { if (protectedSession) throw new Error('Broker owner proof changed during handshake'); } });
+  await assert.rejects(f.run.start(), /Broker owner proof changed/); await f.run.done;
+  assert.equal(f.sent.filter(frame => frame.method === 'thread/resume').length, 1);
+  assert.equal(f.sent.some(frame => frame.method === 'turn/start'), false);
+  assert.equal(f.finished[0].status, 'error');
+});
+
+test('stdio steering invokes the private broker guard before writing its native request', async t => {
+  const f = await fixture(t, 'steer-ok'); await f.run.start();
+  await assert.rejects(f.run.steer!({ id: 'denied', prompt: 'Unproved instruction', validate: () => { throw new Error('Broker owner proof required'); } }), { disposition: 'rejected' });
+  assert.equal(f.sent.some(frame => frame.method === 'turn/steer'), false);
+  assert.equal(f.run.canSteer!(), true);
+  let checked = 0;
+  await f.run.steer!({ id: 'allowed', prompt: 'Verified instruction', validate: () => { checked++; } });
+  assert.equal(checked, 1);
+  assert.deepEqual(Object.keys(f.sent.find(frame => frame.method === 'turn/steer')!.params).sort(), ['clientUserMessageId', 'expectedTurnId', 'input', 'threadId']);
 });

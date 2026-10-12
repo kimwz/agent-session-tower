@@ -9,4 +9,6 @@ export interface SteeringInput {
   id: string;
   prompt: string;
   imagePaths?: readonly string[];
+  /** Internal synchronous admission check immediately before native submission. */
+  validate?(): void;
 }

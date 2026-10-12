@@ -36,6 +36,7 @@ function componentFixture(component = 'SecretRegistration', file = 'SecretRegist
     if (name === 'react-dom') return { createPortal: (node: unknown) => node };
     if (name === 'lucide-react') return { KeyRound: () => null, LockKeyhole: () => null, X: () => null, Check: () => null, FileKey: () => null, Search: () => null };
     if (name === './SecretQuickConnect') return {};
+    if (name === './SecretBrokerApproval') return {};
     if (name === '../settings/settings-open') return { openSettings() {} };
     if (name === '../settings/SettingsPane') return { SettingsFrameContext: {}, useSettingsGuard() {} };
     if (name === './SecretRecovery' || name === './SecretAccess' || name === './SecretManagement') return {};

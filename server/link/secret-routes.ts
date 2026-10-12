@@ -49,6 +49,10 @@ export async function ownerRemoteTarget(nodes: RemoteNodes | undefined, worker: 
 
 /** Owner assignment only: carry a fixed notice to its verified remote worker before reading the overview. */
 export async function ownerSecretControl(nodes: RemoteNodes | undefined, worker: Worker, action: string, input: Record<string, unknown>): Promise<unknown> {
+  if (['broker-access', 'approve-broker', 'revoke-broker'].includes(action)) {
+    if (input.nodeId !== undefined) throw fail('브로커 승인은 이 컴퓨터의 세션만 지원합니다.', 'invalid');
+    return worker.secretCall('control', [action, input]);
+  }
   z.boolean().optional().parse(input.notifySession);
   const target = typeof input.sessionId === 'string' && action !== 'lock' ? await ownerRemoteTarget(nodes, worker, input, ['create','attach','connect'].includes(action)) : undefined;
   const { target: _target, hostId: _host, taskId: _task, projectRoot: _root, ...safe } = input;

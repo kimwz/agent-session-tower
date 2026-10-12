@@ -590,3 +590,22 @@ for (const mode of ['ok', 'rejected', 'mismatch', 'lost', 'timeout']) {
     assert.equal(fake.requests.filter(request => request.method === 'turn/steer').length, 1);
   });
 }
+
+test('broker admission changed during desktop resume blocks native queue admission', async t => {
+  let protectedSession = false;
+  const fake = await fixture(t, (request, fake) => { if (request.method === 'thread/resume') { protectedSession = true; fake.reply(request, { thread: { id: request.params.threadId } }); return true; } });
+  const run = await open(fake, 'broker-guard', undefined, undefined, undefined, { validateBeforeSubmit: () => { if (protectedSession) throw new Error('Broker owner proof required'); } });
+  t.after(() => run.bridge.close());
+  await assert.rejects(run.bridge.start(), /Broker owner proof required/); await run.bridge.done;
+  assert.equal(fake.requests.some(request => request.method === 'thread/queue/add'), false);
+});
+
+test('broker admission changed during desktop state read blocks queue/start', async t => {
+  let protectedSession = false;
+  const fake = await fixture(t, (request, fake) => { if (request.method === 'thread/read') { protectedSession = true; fake.reply(request, { thread: { id: request.params.threadId, status: { type: 'idle' } } }); return true; } });
+  const run = await open(fake, 'broker-state-guard', undefined, undefined, undefined, { validateBeforeSubmit: () => { if (protectedSession) throw new Error('Broker owner proof required'); } });
+  t.after(() => run.bridge.close());
+  await assert.rejects(run.bridge.start(), /Broker owner proof required/); await run.bridge.done;
+  assert.equal(fake.requests.filter(request => request.method === 'thread/queue/add').length, 1);
+  assert.equal(fake.requests.some(request => request.method === 'thread/queue/start'), false);
+});

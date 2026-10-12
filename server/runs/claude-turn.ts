@@ -172,6 +172,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
   };
   const start = (): void => {
     owned.claude = new ClaudeControl({
+      validateBeforeSubmit: () => host.validateBrokerRun(run),
       write: message => new Promise<void>((resolve, reject) => {
         if (run.status !== 'running' || child.exitCode !== null || child.stdin.destroyed || child.stdin.writableEnded) { reject(new Error('Provider input is closed.')); return; }
         child.stdin.write(JSON.stringify(message) + '\n', error => error ? reject(error) : resolve());

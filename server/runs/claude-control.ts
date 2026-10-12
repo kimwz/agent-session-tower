@@ -27,6 +27,8 @@ function questionInteraction(input: Message): RunApproval['interaction'] {
 
 interface ClaudeControlOptions {
   write(message: Message): Promise<void>;
+  /** Internal synchronous broker check after initialization, immediately before first user input. */
+  validateBeforeSubmit?(): void;
   onApproval(approval: RunApproval): void;
   onCancelled(id: string): void;
   onError(error: Error): void;
@@ -80,7 +82,11 @@ export class ClaudeControl {
       this.initialized = true;
       if (this.timer) clearTimeout(this.timer);
       const input = this.input; this.input = undefined;
-      if (input) void this.send(input);
+      if (input) {
+        try { this.options.validateBeforeSubmit?.(); }
+        catch (error) { this.fail(error instanceof Error ? error : new Error('Broker admission changed before input submission.')); return true; }
+        void this.send(input);
+      }
       this.options.onReady?.();
       return true;
     }
@@ -181,13 +187,14 @@ export class ClaudeControl {
     pending.reject(new SteeringError(message, 'uncertain'));
   }
 
-  steer(input: Message): Promise<void> {
+  steer(input: Message, validate?: () => void): Promise<void> {
     const id = input.uuid;
     if (!this.canSteer() || !validId(id) || !validId(this.sessionId) || input.session_id !== this.sessionId
       || input.type !== 'user' || input.parent_tool_use_id != null || !record(input.message) || input.message.role !== 'user') {
       return Promise.reject(new SteeringError('Claude Code is not ready to receive this instruction in the running conversation.', 'rejected'));
     }
     if (this.submittedSteers.has(id)) return Promise.reject(new SteeringError('This instruction was already submitted and will not be sent again.', 'uncertain'));
+    try { validate?.(); } catch (error) { return Promise.reject(new SteeringError(error instanceof Error ? error.message : 'Broker admission changed before steering.', 'rejected')); }
     this.submittedSteers.add(id);
     // Register before write: a replay can arrive before the write callback.
     return new Promise<void>((resolve, reject) => {

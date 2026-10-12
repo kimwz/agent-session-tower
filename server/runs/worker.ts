@@ -176,6 +176,16 @@ const READS_DURING_HANDOFF = new Set(['snapshot', 'sessionHistory', 'attachment'
 /** Hosts an already-started engine, including one adopted during an in-place upgrade. */
 export async function startRunnerHost(options: RunnerHostOptions) {
   let capabilities = options.capabilities ?? new CapabilityRegistry();
+  const brokerAdmission = (sessionId: string, admitted: RunAdmission) => {
+    const session = options.runs.getSession(sessionId);
+    const approved = session && options.secrets?.brokerApproval(session);
+    const protectedSession = session && options.secrets?.brokerAdmissionRequired(session);
+    const activeBroker = options.runs.hasActiveBrokerTurn(sessionId);
+    if ((protectedSession || approved || activeBroker) && (admitted.brokerOwnerAuthorized !== true || admitted.origin?.kind !== 'owner' || admitted.origin.controllerId || admitted.untrustedInput)) {
+      throw new TowerError('forbidden', 'This broker-connected session requires verified owner admission.', { disposition: 'not-admitted' });
+    }
+  };
+  options.runs.setBrokerAdmissionValidator(brokerAdmission);
   options.runs.setRunToolResolver(runToolResolver({ stateDir: options.stateDir, runs: options.runs, slack: options.slack, github: options.github, capabilities, secrets: options.secrets }));
   const paths = await runnerPaths(options.stateDir);
   const release = options.releaseStateLock ?? await acquireStateLock(paths.runtime, 0);
@@ -231,13 +241,37 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     const heartbeatValidate = () => {
       if (admitted.heartbeat && (!options.api || options.api.heartbeatBlocked(admitted.heartbeat.sessionIds))) throw new TowerError('conflict', 'Heartbeat permission preconditions changed.', { disposition: 'not-admitted' });
     };
-    if (token === undefined) return { ...admitted, ...(admitted.heartbeat ? { validate: heartbeatValidate } : {}) };
+    const targetApproval = targetSessionId && options.runs.getSession(targetSessionId);
+    const approvalId = targetApproval ? options.secrets?.brokerApproval(targetApproval)?.id : undefined;
+    const brokerTargetValidate = (proven: boolean) => {
+      if (!targetSessionId) return;
+      const target = options.runs.getSession(targetSessionId);
+      const currentApproval = target && options.secrets?.brokerApproval(target);
+      const protectedSession = target && options.secrets?.brokerAdmissionRequired(target);
+      const brokerTurn = options.runs.hasActiveBrokerTurn(targetSessionId);
+      if (approvalId && currentApproval?.id !== approvalId) throw new TowerError('forbidden', 'Broker connection approval changed before admission.', { disposition: 'not-admitted' });
+      if ((protectedSession || currentApproval || brokerTurn) && !proven) throw new TowerError('forbidden', 'This broker-connected session requires verified owner admission.', { disposition: 'not-admitted' });
+    };
+    if (token === undefined) {
+      const validate = () => { heartbeatValidate(); brokerTargetValidate(admitted.brokerOwnerAuthorized === true); };
+      validate();
+      return { ...admitted, ...(targetSessionId || admitted.heartbeat ? { validate } : {}) };
+    }
     if (typeof token !== 'string' || admitted.origin?.controllerId) throw new TowerError('forbidden', 'Invalid local calling-turn credential.');
     const caller = capabilities.resolve(token);
     const callingRun = caller?.kind === 'caller-run' ? findRun(caller.runId) : undefined;
     const corrective = callingRun?.heartbeat;
+    const proofFromCaller = () => {
+      const current = caller?.kind === 'caller-run' ? findRun(caller.runId) : undefined;
+      return caller?.kind === 'caller-run' && !!current && current.sessionId === caller.sessionId && current.status === 'running' && current.origin?.kind === 'owner'
+        && !current.origin.controllerId && current.brokerOwnerAuthorized === true && current.towerTools === 'attached';
+    };
+    // A reporting credential can replace an untrusted transport claim only with its own live owner's proof.
+    const brokerOwnerAuthorized = proofFromCaller();
     const validate = () => {
       heartbeatValidate(); callerDelegation(capabilities, findRun, token);
+      if (brokerOwnerAuthorized && !proofFromCaller()) throw new TowerError('forbidden', 'Calling turn lost its owner admission before commit.', { disposition: 'not-admitted' });
+      brokerTargetValidate(brokerOwnerAuthorized && proofFromCaller());
       if (corrective) {
         const current = findRun(callingRun!.id);
         const target = targetSessionId && options.runs.getSession(targetSessionId);
@@ -253,7 +287,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       }
     };
     validate();
-    return { ...admitted, ...(corrective ? { origin: { kind: 'agent' as const } } : {}), delegation: callerDelegation(capabilities, findRun, token), validate };
+    return { ...admitted, brokerOwnerAuthorized, ...(corrective ? { origin: { kind: 'agent' as const } } : {}), delegation: callerDelegation(capabilities, findRun, token), validate };
   };
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
   const dispatch = async (method: string, args: unknown[]) => {
@@ -330,6 +364,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
           else if (options.retentionUnavailable) throw new TowerError('unavailable', options.retentionUnavailable);
         }
         const updated = await options.closedSessions.set(session, args[1]);
+        if (!args[1]) await options.secrets?.reopenSession(session.id);
         changed();
         return updated;
       }
@@ -419,10 +454,10 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'terminalResize': if (options.terminals) return options.terminals.resize(args[0] as string, args[1], args[2]); break;
       case 'terminalClose': if (options.terminals) return options.terminals.close(args[0] as string); break;
       case 'submitAutoPrompt': if (options.autoPrompts) {
-        const admitted = admit(args[1]);
+        const admitted = admit(args[1], (args[0] as AutoPromptInput)?.targetSessionId);
         const autoPrompts = options.autoPrompts;
         const request = args[0] as AutoPromptInput;
-        return remote(admitted, 'autoPrompt', request, undefined, async () => { context ??= await runnerContext(options); await context.refresh(); return autoPrompts.submit(request, { origin: admitted.origin, ...(admitted.delegation ? { delegation: admitted.delegation, validate: admitted.validate } : {}) }); },
+        return remote(admitted, 'autoPrompt', request, undefined, async () => { context ??= await runnerContext(options); await context.refresh(); return autoPrompts.submit(request, { origin: admitted.origin, ...(admitted.brokerOwnerAuthorized === true ? { brokerOwnerAuthorized: true } : {}), ...(admitted.delegation ? { delegation: admitted.delegation } : {}), ...(admitted.validate ? { validate: admitted.validate } : {}) }); },
           value => ({ kind: 'autoPrompt', jobId: value.id }), result => result.kind === 'autoPrompt' ? autoPrompts.get(result.jobId) : undefined);
       } break;
       case 'cancelAutoPrompt': if (options.autoPrompts) return options.autoPrompts.cancel(args[0] as string); break;
@@ -462,13 +497,13 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       } break;
       case 'api': if (options.api) {
         // The owner here, or the owner at a controlling computer: then it sees and changes only what is shared.
-        const admitted = args[2] === undefined ? undefined : admit(args[2]);
+        const admitted = args[2] === undefined ? undefined : admit(args[2], args[0] === 'autoPrompt.submit' ? record(args[1]).targetSessionId as string | undefined : undefined);
         const controllerId = admitted?.origin?.controllerId;
         const operation = args[0] as OperationName;
         if (!Object.hasOwn(OPERATIONS, operation)) throw new TowerError('not-found', 'Unknown API operation.');
         const validate = () => { admitted?.validate?.(); const storage = options.storage?.(); if (OPERATIONS[operation].write && storage && !storage.admissionOpen) throw new TowerError('unavailable', storage.reason, { disposition: 'not-admitted' }); };
         validate();
-        return options.api.call(args[0], args[1], controllerId ? { kind: 'owner', via: 'remote', controllerId } : { kind: 'owner', via: 'ui' }, admitted?.requestId, { delegation: admitted?.delegation, validate });
+        return options.api.call(args[0], args[1], controllerId ? { kind: 'owner', via: 'remote', controllerId } : { kind: 'owner', via: 'ui' }, admitted?.requestId, { delegation: admitted?.delegation, brokerOwnerAuthorized: admitted?.brokerOwnerAuthorized, validate });
       } break;
       case 'slackTool': if (options.slack) return options.slack.tool(args[0] as string, args[1] as string, args[2] as Record<string, unknown>); break;
       case 'skillsOverview': if (options.skills) return options.skills.overview(record(args[0])); break;
@@ -504,7 +539,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       return target.call(args[0], args[1], args[2], args[3], { ...previous, validate });
     };
   } });
-  const mcp = { api: mcpApi(), capabilities, secretTools: options.secrets ? SECRET_TOOLS : undefined, secretTool: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>) => options.secrets!.tool(capability, name, args) : undefined, slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
+  const mcp = { api: mcpApi(), capabilities, secretTools: options.secrets ? SECRET_TOOLS : undefined, secretAuthorize: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>) => options.secrets!.authorizeCapability(capability) : undefined, secretTool: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>) => options.secrets!.tool(capability, name, args) : undefined, slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
     githubTool: options.github ? (workflowId: string, name: string, args: Record<string, unknown>) => options.github!.tool(workflowId, name, args) : undefined,
     heartbeatAllowed: (run: Run) => { const origin = options.runs.sessionOrigin(run.sessionId); return !origin?.untrustedInput && (!origin || origin.kind === 'owner'); },
     run: (runId: string) => options.runs.list().find(run => run.id === runId) };
@@ -696,9 +731,11 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       Object.assign(options, next);
       capabilities = options.capabilities ?? capabilities;
       Object.assign(mcp, { api: mcpApi(), capabilities, secretTools: options.secrets ? SECRET_TOOLS : undefined,
+        secretAuthorize: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>) => options.secrets!.authorizeCapability(capability) : undefined,
         secretTool: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>) => options.secrets!.tool(capability, name, args) : undefined,
         slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
         githubTool: options.github ? (workflowId: string, name: string, args: Record<string, unknown>) => options.github!.tool(workflowId, name, args) : undefined });
+      options.runs.setBrokerAdmissionValidator(brokerAdmission);
       options.runs.setRunToolResolver(runToolResolver({ stateDir: options.stateDir, runs: options.runs, slack: options.slack, github: options.github, capabilities, secrets: options.secrets }));
       options.autoPrompts?.on('change', changed); options.triggers?.on('change', changed); options.publicAgents?.on('change', changed);
       changed();
@@ -720,10 +757,11 @@ async function sessionHistory(sessions: SessionService, [nativeId, before, limit
  * turn's agent asked for. Trigger and Slack origins are assigned inside the worker, never over RPC.
  */
 function admission(value: unknown): RunAdmission {
-  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown; requestId?: unknown; heartbeat?: unknown } : {};
+  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown; requestId?: unknown; heartbeat?: unknown; brokerOwnerAuthorized?: unknown } : {};
   const origin = input.origin === undefined ? { kind: 'owner' as const } : parseRunOrigin(input.origin);
   if (!origin || (origin.kind !== 'owner' && origin.kind !== 'agent')) throw new TowerError('invalid', 'The web connection can only admit owner or agent work.');
   if (input.requestId !== undefined && (typeof input.requestId !== 'string' || !/^[a-f\d-]{36}$/i.test(input.requestId))) throw new TowerError('invalid', 'Invalid request ID.');
+  if (input.brokerOwnerAuthorized !== undefined && typeof input.brokerOwnerAuthorized !== 'boolean') throw new TowerError('invalid', 'Invalid broker owner admission proof.');
   let heartbeat: HeartbeatAdmission | undefined;
   if (input.heartbeat !== undefined) {
     const value = record(input.heartbeat);
@@ -744,6 +782,7 @@ function admission(value: unknown): RunAdmission {
     heartbeat = value as unknown as HeartbeatAdmission;
   }
   return { ...(heartbeat ? { heartbeat } : {}), ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin,
+    ...(input.brokerOwnerAuthorized === true && origin.kind === 'owner' && !origin.controllerId ? { brokerOwnerAuthorized: true } : {}),
     ...(typeof input.requestId === 'string' ? { requestId: input.requestId.toLowerCase() } : {}) };
 }
 

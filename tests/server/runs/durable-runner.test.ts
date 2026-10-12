@@ -37,7 +37,7 @@ import { RetentionArchive } from '../../../server/sessions/retention/archive.js'
 import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
 import { worktreeCleanupVisible } from '../../../server/worktrees/janitor.js';
 
-async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector, hostOptions?: (parts: { stateDir: string; sessions: SessionService; runs: RunManager }) => Promise<Partial<RunnerHostOptions>>, fault?: { onUnavailable: (status: ReturnType<import('../../../server/storage/client.js').StorageClient['status']>, runs: RunManager) => void }) {
+async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector, hostOptions?: (parts: { stateDir: string; sessions: SessionService; runs: RunManager }) => Promise<Partial<RunnerHostOptions>>, fault?: { onUnavailable: (status: ReturnType<import('../../../server/storage/client.js').StorageClient['status']>, runs: RunManager) => void }, beforeExecutable?: () => Promise<void>, holdUntilReady = false) {
   const directory = await realpath(await temporaryFixture('tower-durable-fixture-'));
   const stateDir = join(directory, 'state');
   const id = '10000000-0000-4000-8000-000000000001';
@@ -57,8 +57,8 @@ async function fixture(workerClosed = false, withRetention = false, retentionUna
   let starts = 0;
   let resolveDone!: () => void;
   const done = new Promise<void>(resolve => { resolveDone = resolve; });
-  const runs: RunManager = new RunManager({ ...(fault ? { fixtureThreadFault: true, fixtureOnUnavailable: status => fault.onUnavailable(status, runs) } : {}), stateDir, getSession: value => sessions.get(value), refreshSessions: async () => {}, pollMs: 10,
-    findExecutable: async () => '/fixture/codex',
+  const runs: RunManager = new RunManager({ ...(fault ? { fixtureThreadFault: true, fixtureOnUnavailable: status => fault.onUnavailable(status, runs) } : {}), stateDir, holdUntilReady, getSession: value => sessions.get(value), refreshSessions: async () => {}, pollMs: 10,
+    findExecutable: async () => { await beforeExecutable?.(); return '/fixture/codex'; },
     spawnProcess: () => { throw new Error('Native provider launch is forbidden in this fixture.'); },
     openCodexBridge: async options => {
       bridge = options;
@@ -2140,4 +2140,207 @@ test('held typed API permits verified reads and rejects invalid, write and unava
   status.sessionsAvailable = false;
   await assert.rejects(client.api('sessions.list', {}));
   assert.deepEqual(calls, ['runs.list']);
+});
+
+
+test('worker broker admission preserves only authenticated owner and verified live-parent proof', async t => {
+  const capabilities = new CapabilityRegistry();
+  let approved = false;
+  const secrets = { initialized: () => false, brokerAdmissionRequired: () => false, brokerApproval: (session: Session) => approved ? { id: 'fixture-approval', sessionId: session.id, root: session.cwd } : undefined } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
+  const f = await fixture(false, false, undefined, undefined, async () => ({ capabilities, secrets })); t.after(f.cleanup);
+  const client = await f.connect();
+  const unmarked = await client.enqueue(f.session.id, 'Unmarked owner origin');
+  await until(() => f.starts() === 1);
+  assert.equal(unmarked.brokerOwnerAuthorized, undefined);
+  approved = true;
+  const reporting = capabilities.issue({ kind: 'caller-run', runId: unmarked.id, sessionId: unmarked.sessionId });
+  const before = f.runs.list().length;
+  for (const admission of [{}, { callerCapability: reporting }, { callerCapability: reporting, brokerOwnerAuthorized: true }, { callerCapability: 'f'.repeat(64), brokerOwnerAuthorized: true }, { origin: { kind: 'owner' as const, controllerId: 'c'.repeat(32) }, brokerOwnerAuthorized: true }]) {
+    await assert.rejects(client.enqueue(f.session.id, 'Unproved broker instruction', {}, admission), { kind: 'forbidden' });
+  }
+  assert.equal(f.runs.list().length, before, 'refused broker instructions never enter history');
+  const owner = await client.enqueue(f.session.id, 'Authenticated owner', {}, { brokerOwnerAuthorized: true });
+  assert.equal(owner.brokerOwnerAuthorized, true);
+  await f.runs.cancel(owner.id);
+  f.finish();
+  await until(() => f.runs.list().find(run => run.id === unmarked.id)?.status === 'completed');
+  const proven = await client.enqueue(f.session.id, 'Verified master or logged-in owner', {}, { brokerOwnerAuthorized: true });
+  await until(() => f.runs.list().find(run => run.id === proven.id)?.status === 'running');
+  const parent = capabilities.issue({ kind: 'caller-run', runId: proven.id, sessionId: proven.sessionId });
+  await assert.rejects(client.enqueue(f.session.id, 'Desktop bridge has no attached authority', {}, { callerCapability: parent, brokerOwnerAuthorized: true }), { kind: 'forbidden' });
+  // The fixture's bridge intentionally carries no live MCP tools; model an attached parent only in its worker metadata.
+  const listed = f.runs.list.bind(f.runs);
+  f.runs.list = () => listed().map(run => run.id === proven.id ? { ...run, towerTools: 'attached' } : run);
+  const child = await client.enqueue(f.session.id, 'Verified delegated instruction', {}, { callerCapability: parent });
+  assert.equal(child.brokerOwnerAuthorized, true);
+  assert.equal(child.delegation?.parentRunId, proven.id);
+  await f.runs.cancel(proven.id);
+  assert.equal(f.runs.list().find(run => run.id === child.id)?.brokerOwnerAuthorized, true, 'accepted work retains its independent proof after parent completion');
+  await f.runs.cancel(child.id);
+});
+
+test('worker rechecks live parent proof after asynchronous preparation before history admission', async t => {
+  const capabilities = new CapabilityRegistry();
+  let wait = false, preparing = false;
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const secrets = { initialized: () => false, brokerAdmissionRequired: () => false, brokerApproval: (session: Session) => ({ id: 'fixture-approval', sessionId: session.id, root: session.cwd }) } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
+  const f = await fixture(false, false, undefined, undefined, async () => ({ capabilities, secrets }), undefined, async () => { if (wait) { preparing = true; await held; } }); t.after(f.cleanup);
+  const client = await f.connect();
+  const parent = await client.enqueue(f.session.id, 'Authenticated parent', {}, { brokerOwnerAuthorized: true });
+  await until(() => f.starts() === 1);
+  const token = capabilities.issue({ kind: 'caller-run', runId: parent.id, sessionId: parent.sessionId });
+  const listed = f.runs.list.bind(f.runs);
+  f.runs.list = () => listed().map(run => run.id === parent.id ? { ...run, towerTools: 'attached' } : run);
+  const count = f.runs.list().length;
+  wait = true;
+  const child = client.enqueue(f.session.id, 'Delayed delegated broker instruction', {}, { callerCapability: token });
+  const rejected = assert.rejects(child, { kind: 'forbidden' });
+  await until(() => preparing);
+  f.finish();
+  await until(() => f.runs.list().find(run => run.id === parent.id)?.status === 'completed');
+  release(); await rejected;
+  assert.equal(f.runs.list().length, count, 'expired caller proof does not append a run after awaiting');
+});
+
+
+test('official reopen finishes the worker closure write before releasing the secret session fence', async t => {
+  let f: Awaited<ReturnType<typeof fixture>>;
+  const reopened: string[] = [];
+  const secrets = { initialized: () => false, brokerAdmissionRequired: () => false, brokerApproval: () => undefined, reopenSession: async (id: string) => {
+    assert.equal(f.closedSessions!.closedIds().has(id), false, 'closure store has committed reopening before the secret hook');
+    reopened.push(id);
+  } } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
+  f = await fixture(true, false, undefined, undefined, async () => ({ secrets })); t.after(f.cleanup);
+  const client = await f.connect();
+  await client.setClosed(f.session.id, true);
+  assert.deepEqual(reopened, []);
+  await client.setClosed(f.session.id, false);
+  assert.deepEqual(reopened, [f.session.id]);
+  assert.equal(f.starts(), 0, 'official reopening creates no provider work');
+});
+
+test('worker binds owner admission to the observed approval through asynchronous preparation', async t => {
+  let approvalId: string | undefined = 'observed-approval';
+  let preparing = false;
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const secrets = { initialized: () => false, brokerAdmissionRequired: () => false, brokerApproval: (session: Session) => approvalId ? { id: approvalId, sessionId: session.id, root: session.cwd } : undefined } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
+  const f = await fixture(false, false, undefined, undefined, async () => ({ secrets }), undefined, async () => { preparing = true; await held; }); t.after(f.cleanup);
+  const client = await f.connect();
+  const count = f.runs.list().length;
+  const admitted = client.enqueue(f.session.id, 'Observed owner approval', {}, { brokerOwnerAuthorized: true });
+  const rejected = assert.rejects(admitted, { kind: 'forbidden' });
+  await until(() => preparing);
+  approvalId = 'replacement-approval';
+  release(); await rejected;
+  assert.equal(f.runs.list().length, count);
+  assert.equal(f.starts(), 0);
+});
+
+test('direct Auto Prompt dispatch cannot bypass the RunManager broker gate and retains accepted proof', async t => {
+  const { AutoPromptManager } = await import('../../../server/auto-prompt/manager.js');
+  const { externalStorageFixture } = await import('../remote/external-storage-fixture.js');
+  const secrets = { initialized: () => false, brokerAdmissionRequired: () => false, brokerApproval: (session: Session) => ({ id: 'fixture-approval', sessionId: session.id, root: session.cwd }) } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
+  const f = await fixture(false, false, undefined, undefined, async () => ({ secrets }));
+  let manager: import('../../../server/auto-prompt/manager.js').AutoPromptManager | undefined;
+  t.after(async () => { await manager?.close(); await f.cleanup(); });
+  const directory = join(f.directory, 'auto-prompt-proof-fixture'); await mkdir(directory, { mode: 0o700 });
+  const storage = await externalStorageFixture(t, directory, true, 'normal', false);
+  manager = new AutoPromptManager({ stateDir: directory, repository: storage.autoPrompt, effectGate: storage.effectGate,
+    runs: f.runs, refresh: async () => {}, snapshot: () => ({ sessions: [f.session], runs: f.runs.list(), providers: [{ provider: 'codex', available: true, sessionCount: 1 }], scanning: false, updatedAt: '', hostname: 'fixture', version: 'fixture' }),
+    detail: async () => ({ session: f.session, messages: [], hasMore: false }), model: async () => { throw new Error('Explicit target must not invoke a model'); } });
+  await manager.start(); await manager.startRuntimeEffects();
+  const input = (id: string) => ({ requestId: id, provider: 'codex' as const, prompt: 'Continue exact approved task', cwd: f.directory, targetSessionId: f.session.id });
+  const before = f.runs.list().length;
+  const blocked = await manager.submit(input('12345678-1234-4234-8234-123456789aba'), { origin: { kind: 'owner' }, delegation: { parentRunId: '12345678-1234-4234-8234-123456789ab1', rootRunId: '12345678-1234-4234-8234-123456789ab2' } });
+  await until(() => manager!.get(blocked.id)?.status === 'error');
+  assert.match(manager.get(blocked.id)!.error!, /verified owner admission/);
+  assert.equal(f.runs.list().length, before, 'origin and lineage cannot manufacture broker owner proof');
+  const owner = await manager.submit(input('12345678-1234-4234-8234-123456789abb'), { origin: { kind: 'owner' }, brokerOwnerAuthorized: true });
+  await until(() => manager!.get(owner.id)?.status === 'completed');
+  assert.equal(manager.get(owner.id)!.brokerOwnerAuthorized, true);
+  assert.equal(f.runs.list().find(run => run.autoPromptId === owner.id)?.brokerOwnerAuthorized, true);
+  await assert.rejects(manager.submit(input(owner.id), { origin: { kind: 'owner' } }), { kind: 'conflict' }, 'a retry cannot replace accepted proof by origin alone');
+});
+
+test('typed API transport passes only internal owner proof and keeps broker target admission scoped', async t => {
+  const admitted: unknown[] = [];
+  const api = { call: async (_name: unknown, _input: unknown, _actor: unknown, _key: unknown, context: unknown) => { admitted.push(context); return { accepted: true }; } } as unknown as TowerApi;
+  const secrets = { initialized: () => false, brokerAdmissionRequired: () => false, brokerApproval: (session: Session) => ({ id: 'fixture-approval', sessionId: session.id, root: session.cwd }) } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
+  const f = await fixture(false, false, undefined, undefined, async () => ({ secrets, api })); t.after(f.cleanup);
+  const client = await f.connect();
+  const input = { requestId: '12345678-1234-4234-8234-123456789aba', provider: 'codex', prompt: 'Exact task', cwd: f.directory, targetSessionId: f.session.id, brokerOwnerAuthorized: true };
+  await assert.rejects(client.api('autoPrompt.submit', input), { kind: 'forbidden' });
+  assert.equal(admitted.length, 0, 'public input fields cannot inject private proof');
+  await client.api('autoPrompt.submit', input, { brokerOwnerAuthorized: true });
+  assert.equal((admitted[0] as { brokerOwnerAuthorized?: boolean }).brokerOwnerAuthorized, true);
+});
+
+
+test('a locked broker session refuses unproved RPC and direct Auto Prompt admission before history mutation', async t => {
+  const { AutoPromptManager } = await import('../../../server/auto-prompt/manager.js');
+  const { externalStorageFixture } = await import('../remote/external-storage-fixture.js');
+  const secrets = { initialized: () => false, brokerAdmissionRequired: () => true, brokerApproval: () => undefined } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
+  const f = await fixture(false, false, undefined, undefined, async () => ({ secrets }));
+  let manager: import('../../../server/auto-prompt/manager.js').AutoPromptManager | undefined;
+  t.after(async () => { await manager?.close(); await f.cleanup(); });
+  f.runs.sessionOrigin = () => ({ kind: 'agent', untrustedInput: false });
+  const client = await f.connect();
+  const before = f.runs.list().length;
+  await assert.rejects(client.enqueue(f.session.id, 'Locked unproved instruction'), { kind: 'forbidden' });
+  const directory = join(f.directory, 'locked-auto-prompt-proof-fixture'); await mkdir(directory, { mode: 0o700 });
+  const storage = await externalStorageFixture(t, directory, true, 'normal', false);
+  manager = new AutoPromptManager({ stateDir: directory, repository: storage.autoPrompt, effectGate: storage.effectGate,
+    runs: f.runs, refresh: async () => {}, snapshot: () => ({ sessions: [f.session], runs: f.runs.list(), providers: [{ provider: 'codex', available: true, sessionCount: 1 }], scanning: false, updatedAt: '', hostname: 'fixture', version: 'fixture' }),
+    detail: async () => ({ session: f.session, messages: [], hasMore: false }), model: async () => { throw new Error('Explicit target must not invoke a model'); } });
+  await manager.start(); await manager.startRuntimeEffects();
+  const rejected = await manager.submit({ requestId: '12345678-1234-4234-8234-123456789abd', provider: 'codex', prompt: 'Locked routed instruction', cwd: f.directory, targetSessionId: f.session.id }, { origin: { kind: 'owner' } });
+  await until(() => manager!.get(rejected.id)?.status === 'error');
+  assert.match(manager.get(rejected.id)!.error!, /verified owner admission/);
+  assert.equal(f.runs.list().length, before, 'lock never permits history taint that would gain authority after unlock');
+  const owner = await client.enqueue(f.session.id, 'Authenticated owner while locked', {}, { brokerOwnerAuthorized: true });
+  assert.equal(owner.brokerOwnerAuthorized, true);
+  const { runToolResolver } = await import('../../../server/api/run-tools.js');
+  const resolve = runToolResolver({ stateDir: f.stateDir, runs: f.runs, capabilities: new CapabilityRegistry(), secrets });
+  assert.equal(resolve(owner, f.session).servers?.tower_secrets, undefined, 'locked approval has no broker MCP even for the authenticated owner turn');
+  await until(() => f.starts() === 1);
+  assert.notEqual(f.runs.list().find(run => run.id === owner.id)?.towerTools, 'broker-only', 'locked approval exposes no broker-only tools');
+});
+
+
+test('a scoped broker caller cannot promote owner proof across sessions or through new session creation', async t => {
+  const capabilities = new CapabilityRegistry();
+  let target!: Session;
+  const parent: import('../../../shared/types.js').Run = { id: '12345678-1234-4234-8234-123456789aa1', sessionId: 'codex:scoped-broker-parent',
+    prompt: 'Scoped project task', origin: { kind: 'owner' }, brokerOwnerAuthorized: true, towerTools: 'broker-only', status: 'running', createdAt: '', output: '' };
+  const f = await fixture(false, false, undefined, undefined, async ({ stateDir, sessions, runs }) => {
+    const original = sessions.list()[0]!;
+    const cwd = join(stateDir, 'other-approved-project'); await mkdir(cwd, { mode: 0o700 });
+    target = { ...original, id: 'codex:10000000-0000-4000-8000-000000000002', nativeId: '10000000-0000-4000-8000-000000000002', cwd, project: 'other-approved-project' };
+    sessions.list = () => [original, target]; sessions.get = id => id === target.id ? { ...target } : id === original.id ? { ...original } : undefined;
+    const listed = runs.list.bind(runs);
+    // Metadata models the already-running scoped parent; no native provider is launched for it.
+    runs.list = () => [...listed(), { ...parent }];
+    const secrets = { initialized: () => false, brokerAdmissionRequired: (session: Session) => session.id === target.id,
+      brokerApproval: (session: Session) => session.id === target.id ? { id: 'other-project-approval', sessionId: session.id, root: session.cwd, taskId: 'other-project-task' } : undefined } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
+    return { capabilities, secrets };
+  }, undefined, undefined, true);
+  t.after(f.cleanup);
+  const client = await f.connect();
+  const token = capabilities.issue({ kind: 'caller-run', runId: parent.id, sessionId: parent.sessionId });
+  const before = f.runs.list().length;
+  for (const brokerOwnerAuthorized of [undefined, true]) await assert.rejects(client.enqueue(target.id, 'Move scoped authority into another task', {}, { callerCapability: token, ...(brokerOwnerAuthorized ? { brokerOwnerAuthorized } : {}) }), { kind: 'forbidden' });
+  assert.equal(f.runs.list().length, before, 'scoped or forged proof never appends another approved session run');
+  const created = await client.create({ provider: 'codex', cwd: join(f.stateDir, 'new-project'), prompt: 'Ordinary delegated creation' }, { callerCapability: token, brokerOwnerAuthorized: true });
+  assert.equal(created.run.brokerOwnerAuthorized, undefined, 'a broker-only caller cannot manufacture generic owner proof through creation');
+  assert.equal(f.runs.list().find(run => run.id === created.run.id)?.brokerOwnerAuthorized, undefined);
+  assert.deepEqual(created.run.origin, { kind: 'owner' }, 'existing ordinary local-agent creation semantics stay unchanged');
+  parent.towerTools = 'attached';
+  const delegated = await client.enqueue(target.id, 'Verified attached owner parent', {}, { callerCapability: token });
+  assert.equal(delegated.brokerOwnerAuthorized, true);
+  assert.equal(delegated.delegation?.parentRunId, parent.id);
+  const authenticated = await client.enqueue(target.id, 'Authenticated master or owner admission', {}, { brokerOwnerAuthorized: true });
+  assert.equal(authenticated.brokerOwnerAuthorized, true);
+  assert.equal(f.starts(), 0, 'the admission fixture holds all provider launches');
 });

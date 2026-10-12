@@ -13,7 +13,7 @@ import { until } from '../../helpers/until.ts';
 
 const nativeId = '10000000-0000-4000-8000-000000000001';
 
-async function fixture(options: { holdInit?: boolean } = {}) {
+async function fixture(options: { holdInit?: boolean; brokerOwnerAuthorized?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-claude-steering-'));
   const session: Session = { id: `claude:${nativeId}`, nativeId, provider: 'claude', title: 'Fixture', cwd: directory,
     project: 'fixture', status: 'completed', statusReason: 'Done', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -40,8 +40,9 @@ async function fixture(options: { holdInit?: boolean } = {}) {
   const published = new Map<string, Run>();
   manager.on('change', () => { for (const run of manager.list()) published.set(run.id, run); });
   await manager.start();
-  const first = await manager.enqueue(session.id, 'original work');
-  const followup = await manager.enqueue(session.id, 'change the direction');
+  const admission = options.brokerOwnerAuthorized === true ? { origin: { kind: 'owner' as const }, brokerOwnerAuthorized: true } : {};
+  const first = await manager.enqueue(session.id, 'original work', {}, admission);
+  const followup = await manager.enqueue(session.id, 'change the direction', {}, admission);
   if (!options.holdInit) await until(() => manager.list().find(run => run.id === followup.id)?.canSteer === true);
   return { manager, session, directory, child, received, emit, exit, first, followup, launches: () => launches, published, heldInit,
     run: (id: string) => manager.list().find(run => run.id === id)!,
@@ -136,4 +137,23 @@ test('restored steering validates shape and converts in-flight delivery to uncer
   // Whether it could be inserted belonged to the worker that saved it.
   assert.equal(manager.list()[0].steerBlocked, undefined);
   assert.equal(manager.list()[0].canSteer, false);
+});
+
+
+for (const brokerOwnerAuthorized of [undefined, true]) test(`fake native initialization rechecks broker owner proof before first input (${brokerOwnerAuthorized})`, async t => {
+  const f = await fixture({ holdInit: true, brokerOwnerAuthorized }); t.after(f.cleanup);
+  await until(() => f.heldInit.length === 1);
+  f.manager.setBrokerAdmissionValidator((_id, admission) => { if (admission.brokerOwnerAuthorized !== true) throw new Error('Broker owner proof required after initialization'); });
+  f.heldInit[0]();
+  if (brokerOwnerAuthorized) {
+    await until(() => f.received.filter(frame => frame.type === 'user').length === 1);
+    const input = f.received.find(frame => frame.type === 'user')!;
+    assert.deepEqual(Object.keys(input).sort(), ['message', 'parent_tool_use_id', 'session_id', 'type']);
+    assert.equal(input.message.content[0].text, 'original work');
+    assert.equal(f.run(f.first.id).brokerOwnerAuthorized, true);
+  } else {
+    await until(() => f.run(f.first.id).status === 'error');
+    assert.equal(f.received.filter(frame => frame.type === 'user').length, 0);
+    assert.match(f.run(f.first.id).error!, /Broker owner proof/);
+  }
 });

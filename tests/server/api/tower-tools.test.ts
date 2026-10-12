@@ -350,3 +350,61 @@ test('a master run-scoped MCP Auto Prompt gets its role in code without changing
   const regular = f.ownerTurn('codex:ordinary');
   await assert.rejects(handleMcpRequest(f.context, f.token(regular), { method: 'tools/call', name: 'autoPrompt_submit', arguments: { ...input, requestId: randomUUID() } }), /provider/);
 });
+
+test('a scoped agent-session approval attaches only broker tools to a new local owner turn', async t => {
+  const f = await fixture(t);
+  let approval = { id: 'approval-1', sessionId: 'codex:delegated', hostId: 'host', root: '/project', taskId: 'task', taskLabel: 'Deploy', createdAt: 1, expiresAt: 9999999999999 };
+  let provenance: SessionOrigin = { kind: 'agent', untrustedInput: false };
+  const resolver = runToolResolver({ stateDir: f.stateDir, capabilities: f.capabilities, runs: { sessionOrigin: () => provenance },
+    secrets: { initialized: () => true, brokerApproval: s => s.id === approval.sessionId ? approval : undefined } });
+  const target = session('codex:delegated');
+  const turn = (origin: Run['origin'] = { kind: 'owner' }) => ({ ...f.ownerTurn(target.id), brokerOwnerAuthorized: true, origin });
+  const run = turn();
+  assert.equal(resolver({ ...run, brokerOwnerAuthorized: undefined }, target).servers?.tower_secrets, undefined);
+  assert.equal(resolver({ ...run, brokerOwnerAuthorized: false }, target).servers?.tower_secrets, undefined);
+  const tools = resolver(run, target);
+  assert.equal(tools.towerTools, 'broker-only');
+  assert.equal(tools.required, true);
+  for (const name of ['tower', 'tower_local', 'tower_master']) assert.equal(tools.servers?.[name], undefined);
+  const capability = f.capabilities.resolve(tools.servers!.tower_secrets.env!.TOWER_SECRET_CAPABILITY);
+  assert.deepEqual(capability, { kind: 'secret-run', runId: run.id, sessionId: target.id, approvalId: approval.id });
+  assert.equal(provenance.kind, 'agent', 'original creation provenance stays unchanged');
+  for (const changed of [{ isSubagent: true }, { parentId: 'parent' }, { launchedByAgent: true }, { launchedBy: { kind: 'trigger' as const, triggerId: 'fixture' } }]) {
+    assert.equal(resolver(turn(), { ...target, ...changed }).servers?.tower_secrets, undefined);
+  }
+  assert.equal(resolver(turn({ kind: 'agent' }), target).servers?.tower_secrets, undefined);
+  assert.equal(resolver(turn({ kind: 'owner', controllerId: 'remote' }), target).servers?.tower_secrets, undefined);
+  provenance = { kind: 'agent', untrustedInput: true };
+  assert.equal(resolver(turn(), target).towerTools, 'external-input');
+  provenance = { kind: 'agent', controllerId: 'remote', untrustedInput: false };
+  assert.equal(resolver(turn(), target).servers?.tower_secrets, undefined);
+  approval = { ...approval, sessionId: 'another' };
+  assert.equal(resolver(turn(), target).servers?.tower_secrets, undefined);
+});
+
+test('broker-only capabilities never admit generic Tower tools and revalidate discovery', async t => {
+  const f = await fixture(t);
+  const run = f.ownerTurn('codex:delegated', 'broker-only');
+  let allowed = true;
+  let checks = 0;
+  const context = { ...f.context, secretTools: [{ name: 'secrets_list' }], secretTool: async () => ({}), secretAuthorize: async () => { checks++; if (!allowed) throw new Error('Approval revoked'); } };
+  const token = f.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: run.sessionId, approvalId: 'approval' });
+  assert.deepEqual(await handleMcpRequest(context, token, { method: 'tools/list' }), { tools: context.secretTools });
+  assert.equal(checks, 1);
+  await assert.rejects(handleMcpRequest(context, f.token(run), { method: 'tools/list' }), /Tower tools work only/);
+  const unbound = f.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: run.sessionId });
+  await assert.rejects(handleMcpRequest(context, unbound, { method: 'tools/list' }), /Tower tools work only/);
+  allowed = false;
+  await assert.rejects(handleMcpRequest(context, token, { method: 'tools/list' }), /Approval revoked/);
+  allowed = true;
+  run.origin = { kind: 'owner', controllerId: 'remote' };
+  await assert.rejects(handleMcpRequest(context, token, { method: 'tools/list' }), /Tower tools work only/);
+});
+
+test('MCP admission rechecks captured broker owner proof after preparing an Auto Prompt', async t => {
+  let run!: Run;
+  const f = await fixture(t, async internal => { run.brokerOwnerAuthorized = false; internal.validate?.(); });
+  run = f.ownerTurn('codex:mine'); run.brokerOwnerAuthorized = true;
+  await assert.rejects(handleMcpRequest(f.context, f.token(run), { method: 'tools/call', name: 'autoPrompt_submit', arguments: { requestId: randomUUID(), provider: 'codex', prompt: 'Exact task' } }), /lost its Tower authority/);
+  assert.equal(f.submitted.length, 0);
+});

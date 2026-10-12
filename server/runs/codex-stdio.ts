@@ -36,6 +36,8 @@ export interface CodexStdioOptions {
   /** The master: Codex accepts only a ChatGPT sign-in and OpenAI's own service, checked before anything is sent. */
   subscriptionOnly?: boolean;
   prompt: string;
+  /** Internal synchronous broker boundary check after native discovery, before submitting input. */
+  validateBeforeSubmit?(): void;
   imagePaths?: readonly string[];
   spawnProcess?: SpawnProcess;
   onSession(id: string): void | Promise<void>;
@@ -139,6 +141,7 @@ class StdioRun implements CodexStdioRun {
 
   async steer(input: SteeringInput): Promise<void> {
     if (!this.canSteer()) throw new SteeringError('There is no active owned Codex turn available for steering.', 'rejected');
+    try { input.validate?.(); } catch (error) { throw new SteeringError(message(error), 'rejected'); }
     const turnId = this.turnId!;
     this.steeringPending = true;
     try {
@@ -220,6 +223,7 @@ class StdioRun implements CodexStdioRun {
     this.threadId = id;
     await this.options.onSession(id);
     if (this.result || this.cancelRequested) { if (!this.result) this.finish({ status: 'cancelled' }); return; }
+    this.options.validateBeforeSubmit?.();
     this.submitted = true;
     const started = await this.request('turn/start', {
       threadId: id,

@@ -105,7 +105,7 @@ export class UpdateDrain {
 
   /** Inserts the wrap-up request into a running turn. A request that surely did not reach it is removed and tried again. */
   private sendWrapUp(target: Run, state: UpdateTarget): void {
-    const wrapUp: Run = { id: randomUUID(), sessionId: target.sessionId, origin: target.origin ?? { kind: 'unknown' }, prompt: WRAP_UP_NOTICE, status: 'queued',
+    const wrapUp: Run = { id: randomUUID(), sessionId: target.sessionId, origin: target.origin ?? { kind: 'unknown' }, ...(target.brokerOwnerAuthorized === true ? { brokerOwnerAuthorized: true } : {}), prompt: WRAP_UP_NOTICE, status: 'queued',
       createdAt: new Date().toISOString(), updateWrapUp: true,
       output: 'Asking the running turn to wrap up for a Tower update.', ...(target.model ? { model: target.model } : {}), ...(target.effort ? { effort: target.effort } : {}) };
     this.host.runs.set(wrapUp.id, wrapUp);

@@ -205,6 +205,8 @@ export interface Run {
   /** Set only in a controller's page, for an item of a joined computer: that computer's id. Servers never send it. */
   node?: string;
   origin?: RunOrigin;
+  /** Server-verified owner admission for explicitly approved agent-session broker access. */
+  brokerOwnerAuthorized?: boolean;
   delegation?: RunDelegation;
   /** Authenticated internal heartbeat admission, never selectable in a public message body. */
   heartbeat?: import('./master.js').HeartbeatAdmission;
@@ -216,7 +218,7 @@ export interface Run {
    */
   unattended?: boolean;
   /** For a turn the owner started: whether Tower's tools reached it, and if not, why. */
-  towerTools?: 'attached' | 'desktop-app' | 'external-input' | 'not-owner-session' | 'remote';
+  towerTools?: 'attached' | 'broker-only' | 'desktop-app' | 'external-input' | 'not-owner-session' | 'remote';
   prompt: string;
   /**
    * What Tower tells the agent for this turn beside the request: policy, receipts, hints. The provider receives it as
@@ -368,6 +370,8 @@ export interface AutoPromptDecision {
   reason: string;
 }
 export interface AutoPromptJob {
+  /** Verified transport admission retained with this exact job; absent never acquires it. */
+  brokerOwnerAuthorized?: boolean;
   /** Role defaults captured on admission, used only when routing creates a new session. */
   newSessionModel?: { model?: string; effort?: string };
   /** Set only in a controller's page, for an item of a joined computer: that computer's id. Servers never send it. */
