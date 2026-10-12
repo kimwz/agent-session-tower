@@ -504,7 +504,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       return target.call(args[0], args[1], args[2], args[3], { ...previous, validate });
     };
   } });
-  const mcp = { api: mcpApi(), capabilities, secretTools: options.secrets ? SECRET_TOOLS : undefined, secretTool: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>) => options.secrets!.tool(capability, name, args) : undefined, slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
+  const mcp = { api: mcpApi(), capabilities, secretTools: options.secrets ? SECRET_TOOLS : undefined, secretAuthorize: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>) => options.secrets!.authorizeCapability(capability) : undefined, secretTool: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>) => options.secrets!.tool(capability, name, args) : undefined, slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
     githubTool: options.github ? (workflowId: string, name: string, args: Record<string, unknown>) => options.github!.tool(workflowId, name, args) : undefined,
     heartbeatAllowed: (run: Run) => { const origin = options.runs.sessionOrigin(run.sessionId); return !origin?.untrustedInput && (!origin || origin.kind === 'owner'); },
     run: (runId: string) => options.runs.list().find(run => run.id === runId) };
@@ -696,6 +696,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       Object.assign(options, next);
       capabilities = options.capabilities ?? capabilities;
       Object.assign(mcp, { api: mcpApi(), capabilities, secretTools: options.secrets ? SECRET_TOOLS : undefined,
+        secretAuthorize: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>) => options.secrets!.authorizeCapability(capability) : undefined,
         secretTool: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>) => options.secrets!.tool(capability, name, args) : undefined,
         slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
         githubTool: options.github ? (workflowId: string, name: string, args: Record<string, unknown>) => options.github!.tool(workflowId, name, args) : undefined });

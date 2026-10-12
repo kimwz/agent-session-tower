@@ -9,6 +9,7 @@ import { SecretAccess, SecretPassword, type SecretChange } from './SecretAccess'
 import { SecretRegistration, scopeLabels, operationLabels } from './SecretRegistration';
 import { SecretProjectEditor, SecretRuleEditor, SecretTrustEditor, type SecretComputer } from './SecretManagement';
 import { SecretQuickConnect } from './SecretQuickConnect';
+import { SecretBrokerApproval } from './SecretBrokerApproval';
 import { openSettings } from '../settings/settings-open';
 import { ApiError } from '../common/lib';
 import { changeSecrets, isRemoteSecret, localSecretOverview, readSecrets, secretSession } from './secrets-client';
@@ -123,7 +124,7 @@ export function SecretsPanel({ token, computers = [] }: { token: string; compute
 }
 
 export function SecretComposer({ token, sessionId, cwd }: { token: string; sessionId: string; cwd?: string }) {
-  const { t } = useI18n(); const [open, setOpen] = useState(false); const state = useComposerSecrets(); const dialog = useRef<HTMLDialogElement>(null);
+  const { t } = useI18n(); const [open, setOpen] = useState(false); const [brokerBlocked, setBrokerBlocked] = useState(false); const state = useComposerSecrets(); const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => { setOpen(false); }, [sessionId]);
   useEffect(() => {
     if (!open) return; const opener = document.activeElement as HTMLElement | null; const element = dialog.current; element?.showModal();
@@ -135,7 +136,10 @@ export function SecretComposer({ token, sessionId, cwd }: { token: string; sessi
     <button className="attach-button secret-composer-button" type="button" disabled={!token} aria-label={t('시크릿 연결')} title={t('시크릿 연결')} onClick={() => setOpen(true)}><KeyRound size={16} aria-hidden="true" />{!!keys.length && <span>{keys.length}</span>}</button>
     {open && createPortal(<dialog ref={dialog} className="secret-dialog secret-quick-dialog" aria-label={t('시크릿 연결')} onCancel={event => { event.preventDefault(); setOpen(false); }} onClick={event => { if (event.target === event.currentTarget) setOpen(false); }} onClose={() => setOpen(false)}>
       <header><h2><KeyRound size={18} />{t('시크릿 연결')}</h2><button type="button" className="icon-button" aria-label={t('닫기')} onClick={() => setOpen(false)}><X size={18} /></button></header>
-      <div className="secret-dialog-body">{state.error && <p role="alert" className="secret-error">{state.error}<button type="button" onClick={state.reload}>{t('다시 시도')}</button></p>}{state.overview ? <SecretQuickConnect key={sessionId} overview={state.overview} busy={state.busy} change={state.change} onConnected={() => setOpen(false)} onManage={() => { setOpen(false); openSettings({ section: 'secrets' }); }} /> : <p role="status">{t('불러오는 중…')}</p>}</div>
+      <div className="secret-dialog-body">
+        <SecretBrokerApproval token={token} sessionId={sessionId} onChanged={state.reload} onBlocked={setBrokerBlocked} onManage={() => { setOpen(false); openSettings({ section: 'secrets' }); }} />
+        {!brokerBlocked && <>{state.error && <p role="alert" className="secret-error">{state.error}<button type="button" onClick={state.reload}>{t('다시 시도')}</button></p>}{state.overview ? <SecretQuickConnect key={sessionId} overview={state.overview} busy={state.busy} change={state.change} onConnected={() => setOpen(false)} onManage={() => { setOpen(false); openSettings({ section: 'secrets' }); }} /> : <p role="status">{t('불러오는 중…')}</p>}</>}
+      </div>
     </dialog>, document.body)}
   </>;
 }

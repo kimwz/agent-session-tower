@@ -23,7 +23,9 @@ export interface SecretMetadata {
 export interface SecretDevice { id: string; name: string; signingKey: string; encryptionKey: string; fingerprint: string }
 export interface SecretPeer { device: SecretDevice; routeId: string; direction: 'node' | 'controller'; enabled: boolean }
 export interface SecretTarget { hostId: string; sessionId: string; taskId: string; root: string; projectId?: string }
-export interface SecretContext extends SecretTarget { runId: string }
+export interface SecretBrokerApproval { id: string; hostId: string; sessionId: string; root: string; taskId: string; taskLabel: string; createdAt: number; expiresAt: number }
+export interface SecretBrokerAccess { sessionId: string; root?: string; taskId: string | null; eligible: boolean; requiresApproval: boolean; reason?: string; approval?: SecretBrokerApproval; locked: boolean }
+export interface SecretContext extends SecretTarget { runId: string; brokerApprovalId?: string }
 export interface SecretTask {
   id: string; hostId: string; sessionId: string; root: string; status: 'open' | 'closed';
   createdAt: number; closedAt?: number; expiresAt?: number; excluded: string[];

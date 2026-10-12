@@ -40,7 +40,8 @@ export function steerBlockedNote(reason: NonNullable<Run['steerBlocked']>): stri
 
 /** Why an owner turn has no Tower tools. Agents can manage triggers only in turns that have them. */
 export function towerToolsNote(reason: NonNullable<Run['towerTools']>): string {
-  return reason === 'desktop-app' ? t('이 턴은 열려 있는 Codex 앱에서 실행되어 Tower 도구가 없습니다.')
+  return reason === 'broker-only' ? t('이 작업에 승인된 시크릿 브로커만 연결했습니다. 사용할 키의 권한은 별도로 확인합니다.')
+    : reason === 'desktop-app' ? t('이 턴은 열려 있는 Codex 앱에서 실행되어 Tower 도구가 없습니다.')
     : reason === 'external-input' ? t('외부 내용이 들어온 대화라 Tower 도구를 연결하지 않았습니다.')
     : reason === 'remote' ? t('다른 컴퓨터에서 보낸 턴이라 이 코디네이터 대화의 도구를 연결하지 않았습니다.')
     : t('자동화가 만든 대화라 Tower 도구를 연결하지 않았습니다.');

@@ -412,9 +412,11 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         const answer = await towerUpdate(body.version as string | undefined);
         return json(res, answer.status, answer.body);
       }
-      const secretAction = path.match(/^\/api\/secrets\/(overview|initialize|unlock|lock|password|create|update|remove|project|rule|attach|connect|revoke|end-task|trust|untrust|preview|import)$/);
-      if (secretAction && ((secretAction[1] === 'overview' && req.method === 'GET') || (secretAction[1] !== 'overview' && req.method === 'POST'))) {
-        if (masterCall || localAgent) return json(res, 403, { error: '시크릿 보관함 관리는 소유자의 전용 화면에서만 가능합니다.' });
+      const secretAction = path.match(/^\/api\/secrets\/(overview|broker-access|approve-broker|revoke-broker|initialize|unlock|lock|password|create|update|remove|project|rule|attach|connect|revoke|end-task|trust|untrust|preview|import)$/);
+      if (secretAction && ((['overview', 'broker-access'].includes(secretAction[1]) && req.method === 'GET') || (!['overview', 'broker-access'].includes(secretAction[1]) && req.method === 'POST'))) {
+        const brokerAccess = ['broker-access', 'approve-broker', 'revoke-broker'].includes(secretAction[1]);
+        if (masterCall || localAgent || (brokerAccess && (req.headers['x-tower-master'] !== undefined || req.headers['x-tower-agent'] !== undefined || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()] !== undefined))) return json(res, 403, { error: '시크릿 보관함 관리는 소유자의 전용 화면에서만 가능합니다.' });
+        if (brokerAccess && req.method === 'POST' && !auth?.session(sessionId, identity.ip)) return json(res, 401, { error: '브로커 승인은 로그인한 소유자의 Tower 화면에서만 가능합니다.' });
         // Only an explicitly configured HTTPS origin proves a secure reverse-proxy endpoint.
         // Forwarded protocol headers supplied by a caller cannot permit sensitive input.
         if (!identity.local && !secureOrigin && !('encrypted' in req.socket && req.socket.encrypted)) return json(res, 403, { error: '원격 시크릿 관리는 인증된 HTTPS 접속에서만 가능합니다.' });

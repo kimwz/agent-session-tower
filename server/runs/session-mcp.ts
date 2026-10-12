@@ -26,7 +26,7 @@ export interface RunTools {
   env?: Record<string, string>;
   required: boolean;
   /** For an owner turn: whether Tower's own tools are attached, and if not, why. */
-  towerTools?: 'attached' | 'external-input' | 'not-owner-session' | 'remote';
+  towerTools?: 'attached' | 'broker-only' | 'external-input' | 'not-owner-session' | 'remote';
   /** Claude turns: whether Claude in Chrome is this turn's strong-defense browser (`--chrome`); otherwise `--no-chrome`. */
   claudeChrome?: boolean;
 }

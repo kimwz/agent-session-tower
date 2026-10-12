@@ -12,7 +12,7 @@ import { TowerError } from '../../shared/errors.js';
 export type Capability = { kind: 'owner-run'; runId: string; sessionId: string } | { kind: 'slack-workflow'; workflowId: string } | { kind: 'github-workflow'; workflowId: string }
   /** Reports who started work through the local HTTP API; grants no API or owner approval rights. */
   | { kind: 'caller-run'; runId: string; sessionId: string }
-  | { kind: 'secret-run'; runId: string; sessionId: string }
+  | { kind: 'secret-run'; runId: string; sessionId: string; approvalId?: string }
   /** The standing key of the session lookup tools every agent here gets (see session-tools.ts). */
   | { kind: 'session-reader' };
 const MAX_CAPABILITIES = 2000;
@@ -84,6 +84,7 @@ export interface McpContext {
   slackTool?(workflowId: string, name: string, args: Record<string, unknown>): Promise<unknown>;
   githubTool?(workflowId: string, name: string, args: Record<string, unknown>): Promise<unknown>;
   secretTools?: unknown[];
+  secretAuthorize?(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<void>;
   secretTool?(capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>): Promise<unknown>;
 }
 
@@ -121,11 +122,13 @@ export async function handleMcpRequest(context: McpContext, token: string, body:
   // The credential works only for its own run, only while that run works, and only if Tower's tools were
   // actually attached to it (not a turn forwarded to the desktop app).
   const run = context.run(capability.runId);
-  if (!run || run.sessionId !== capability.sessionId || run.status !== 'running' || run.origin?.kind !== 'owner' || run.towerTools !== 'attached') {
+  if (!run || run.sessionId !== capability.sessionId || run.status !== 'running' || run.origin?.kind !== 'owner' || (run.towerTools !== 'attached' && !(capability.kind === 'secret-run' && run.towerTools === 'broker-only' && capability.approvalId && !run.origin.controllerId))) {
     throw new TowerError('forbidden', 'Tower tools work only during the turn you started from Tower that they were given to.');
   }
   if (capability.kind === 'secret-run') {
     if (!context.secretTool || !context.secretTools) throw new TowerError('unavailable', '시크릿 도구를 사용할 수 없습니다.');
+    if (run.towerTools === 'broker-only' && !context.secretAuthorize) throw new TowerError('unavailable', '시크릿 승인 검사를 사용할 수 없습니다.');
+    await context.secretAuthorize?.(capability);
     if (body.method === 'tools/list') return { tools: context.secretTools };
     if (body.method !== 'tools/call' || typeof body.name !== 'string') throw new TowerError('not-found', '알 수 없는 시크릿 도구입니다.');
     return context.secretTool(capability, body.name, body.arguments && typeof body.arguments === 'object' && !Array.isArray(body.arguments) ? body.arguments as Record<string, unknown> : {});

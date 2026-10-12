@@ -68,12 +68,14 @@ export function maskSecretOutput(text: string, values: readonly Buffer[]): strin
 export class SecretBroker {
   private active = 0;
   private readonly sourceFailures = new Map<string, SourceFailure[]>();
+  private remoteContext(context: SecretContext): SecretContext { const { brokerApprovalId: _localApproval, ...target } = context; return target; }
   private subject(context: SecretContext): string { return JSON.stringify([context.hostId, context.taskId, context.runId]); }
   unavailableSources(context: SecretContext): SourceFailure[] { return structuredClone(this.sourceFailures.get(this.subject(context)) ?? []); }
-  constructor(private readonly options: { stateDir: string; service: SecretService; remote?: RemoteSecretBroker }) {}
+  constructor(private readonly options: { stateDir: string; service: SecretService; remote?: RemoteSecretBroker; validate?: (context: SecretContext) => void }) {}
   inFlight(): boolean { return this.active > 0; }
 
   async list(context: SecretContext): Promise<SecretMetadata[]> {
+    this.options.validate?.(context);
     const local = await this.options.service.list(context);
     this.options.service.checkTask(context);
     const failures: SourceFailure[] = [];
@@ -82,7 +84,7 @@ export class SecretBroker {
       try {
         if (!this.options.remote) throw failure('원격 원본에 연결할 수 없습니다.', 'unavailable');
         this.options.service.checkTask(context);
-        const result = await this.options.remote.request(peer.device.id, context, 'list', {});
+        const result = await this.options.remote.request(peer.device.id, this.remoteContext(context), 'list', {});
         this.options.service.checkTask(context);
         if (!Array.isArray(result) || result.length > 4096 || result.some(item => !plain(item)
           || Object.keys(item).some(key => !['id', 'name', 'groupId', 'kind', 'version', 'reference', 'fields', 'expiresAt', 'operations', 'activation', 'sourceHostId'].includes(key))
@@ -99,16 +101,21 @@ export class SecretBroker {
     this.options.service.checkTask(context);
     if (this.sourceFailures.size >= 256) this.sourceFailures.delete(this.sourceFailures.keys().next().value!);
     this.sourceFailures.set(this.subject(context), failures);
+    this.options.validate?.(context);
     return [...local, ...remote.flat()];
   }
 
   private async resolve(context: SecretContext, reference: string, operation: SecretOperation): Promise<Resolved> {
+    this.options.validate?.(context);
     const match = /^tower-secret:\/\/([^/]+)\/([^@/#]+)@(\d+)(?:#.+)?$/.exec(reference);
     if (!match) throw failure('유효한 시크릿 참조가 필요합니다.');
-    if (match[1] === this.options.service.device().id) return this.options.service.resolve(context, reference, operation);
+    if (match[1] === this.options.service.device().id) {
+      const value = await this.options.service.resolve(context, reference, operation);
+      try { this.options.validate?.(context); return value; } catch (error) { value.bytes.fill(0); throw error; }
+    }
     this.options.service.checkTask(context, match[2]);
     if (!this.options.remote) throw failure('시크릿 원본 컴퓨터에 연결할 수 없습니다.', 'unavailable');
-    const answer = await this.options.remote.request(match[1], context, 'resolve', { reference, operation }) as Resolved;
+    const answer = await this.options.remote.request(match[1], this.remoteContext(context), 'resolve', { reference, operation }) as Resolved;
     try {
       this.options.service.checkTask(context, match[2]);
       if (!plain(answer) || !Buffer.isBuffer(answer.bytes) || answer.bytes.length > MAX_INPUT_BYTES || !plain(answer.metadata)
@@ -118,11 +125,13 @@ export class SecretBroker {
         || (answer.fields !== undefined && (!plain(answer.fields) || Object.keys(answer.fields).length > 2048
           || Object.entries(answer.fields).some(([key, value]) => !ENV_NAME.test(key) || typeof value !== 'string')
           || Object.values(answer.fields).reduce((total, value) => total + Buffer.byteLength(value), 0) > MAX_INPUT_BYTES))) throw failure('원격 시크릿 응답이 올바르지 않습니다.', 'upstream');
+      this.options.validate?.(context);
       return { ...answer, metadata: { ...answer.metadata, sourceHostId: match[1] } };
     } catch (error) { if (Buffer.isBuffer(answer?.bytes)) answer.bytes.fill(0); throw error; }
   }
 
   async run(context: SecretContext, supplied: SecretRunInput): Promise<SecretRunResult> {
+    this.options.validate?.(context);
     const input = validateSecretRunInput(supplied), timeoutMs = input.timeoutMs ?? 60_000;
     const digest = createHash('sha256').update(JSON.stringify(input)).digest('hex');
     this.active++;
@@ -186,7 +195,7 @@ export class SecretBroker {
           try { if (current.metadata.id !== item.value.metadata.id || current.metadata.version !== item.value.metadata.version || !current.bytes.equals(item.value.bytes) || JSON.stringify(current.fields) !== JSON.stringify(item.value.fields)) throw failure('시크릿 권한 또는 값이 변경되었습니다.', 'forbidden'); }
           finally { current.bytes.fill(0); }
         }
-        const dispatched = await this.options.service.dispatch(context, used, () => this.consume(input, args, cwd, env, stdin, timeoutMs, values));
+        const dispatched = await this.options.service.dispatch(context, used, () => this.consume(input, args, cwd, env, stdin, timeoutMs, values), () => this.options.validate?.(context));
         result = await dispatched.result;
       } catch { result = genericResult(input.operationId); }
       finally {
@@ -252,7 +261,7 @@ export class SecretBroker {
       const a = await this.resolve(context, left, 'compare'); values.push(a.bytes);
       const b = await this.resolve(context, right, 'compare'); values.push(b.bytes);
       return (await this.options.service.dispatch(context, [{ ref: left, operation: 'compare', value: a }, { ref: right, operation: 'compare', value: b }],
-        () => ({ equal: a.bytes.length === b.bytes.length && timingSafeEqual(a.bytes, b.bytes) }))).result;
+        () => ({ equal: a.bytes.length === b.bytes.length && timingSafeEqual(a.bytes, b.bytes) }), () => this.options.validate?.(context))).result;
     } finally { for (const value of values) value.fill(0); this.active--; }
   }
 
@@ -268,7 +277,7 @@ export class SecretBroker {
             const fingerprint = createHmac('sha256', key).update(JSON.stringify(['tower-secret-fingerprint-v1', this.options.service.device().id, domain, value.metadata.id])).update(value.bytes).digest('hex');
             return { algorithm: 'HMAC-SHA256' as const, fingerprint };
           } finally { key.fill(0); }
-        })).result;
+        }, () => this.options.validate?.(context))).result;
       } finally { value.bytes.fill(0); }
     } finally { this.active--; }
   }

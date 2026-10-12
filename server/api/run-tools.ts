@@ -8,6 +8,7 @@ import { CALLER_CAPABILITY_ENV, NO_RUN_TOOLS, type RunTools, type SessionMcpServ
 import type { SlackService } from '../slack/service.js';
 import type { GitHubCoordinator } from '../triggers/github-coordinator.js';
 import type { CapabilityRegistry } from './mcp.js';
+import type { SecretBrokerApproval } from '../../shared/secrets.js';
 import { SESSION_TOOLS_SERVER, sessionToolServer } from './session-tools.js';
 
 /** How to start this build's own entry, so a tool server always matches the worker that answers it. */
@@ -40,7 +41,7 @@ export function sessionBrowsers(stateDir: string, runs: Pick<RunManager, 'sessio
  * the master's folder also get the master's page tools. Those other turns, whoever started them, get the browsers
  * (see browser/tools.ts).
  */
-export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp'>; github?: Pick<GitHubCoordinator, 'sessionWorkflow'>; capabilities: CapabilityRegistry; secrets?: { initialized(): boolean }; browsers?: () => BrowserEnvironment }) {
+export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp'>; github?: Pick<GitHubCoordinator, 'sessionWorkflow'>; capabilities: CapabilityRegistry; secrets?: { initialized(): boolean; brokerApproval(session: Session): SecretBrokerApproval | undefined }; browsers?: () => BrowserEnvironment }) {
   const lookups = { [SESSION_TOOLS_SERVER]: sessionToolServer(options.stateDir, thisBuild()) };
   const withBrowsers = (session: Session, tools: RunTools): RunTools => {
     const browsers = sessionBrowsers(options.stateDir, options.runs, session, options.browsers?.());
@@ -77,7 +78,16 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
     if (origin?.kind !== 'owner') return NO_RUN_TOOLS;
     const provenance = options.runs.sessionOrigin(session.id);
     if (provenance?.untrustedInput) return { required: false, towerTools: 'external-input' };
-    if (provenance && provenance.kind !== 'owner') return { required: false, towerTools: 'not-owner-session' };
+    if (provenance && provenance.kind !== 'owner') {
+      const approval = provenance.kind === 'agent' && !provenance.controllerId && !origin.controllerId
+        && !session.isSubagent && !session.launchedByAgent && !session.parentId && !session.launchedBy
+        ? options.secrets?.brokerApproval(session) : undefined;
+      if (!approval) return { required: false, towerTools: 'not-owner-session' };
+      const build = thisBuild();
+      return { servers: { tower_secrets: { command: build.command, args: [...build.args, '--secrets-mcp', options.stateDir],
+        env: { TOWER_SECRET_CAPABILITY: options.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: session.id, approvalId: approval.id }), TOWER_SECRET_STATE_DIR: options.stateDir } } },
+        required: true, towerTools: 'broker-only' };
+    }
     // Bound to this run: a later turn, even in the same conversation, gets its own credential.
     const tower = toolServer(options.stateDir, '--tower-mcp', [], options.capabilities.issue({ kind: 'owner-run', runId: run.id, sessionId: session.id }));
     const servers: SessionMcpServers = { tower };

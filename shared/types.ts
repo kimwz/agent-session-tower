@@ -216,7 +216,7 @@ export interface Run {
    */
   unattended?: boolean;
   /** For a turn the owner started: whether Tower's tools reached it, and if not, why. */
-  towerTools?: 'attached' | 'desktop-app' | 'external-input' | 'not-owner-session' | 'remote';
+  towerTools?: 'attached' | 'broker-only' | 'desktop-app' | 'external-input' | 'not-owner-session' | 'remote';
   prompt: string;
   /**
    * What Tower tells the agent for this turn beside the request: policy, receipts, hints. The provider receives it as
