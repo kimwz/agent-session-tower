@@ -809,7 +809,7 @@ export class RunManager extends EventEmitter {
       this.drain.noteHandedOver(run);
       if (selected.adapter instanceof ClaudeControl) {
         const delivery = selected.adapter.steer({ type: 'user', uuid: run.id, session_id: this.getSession(run.sessionId)!.nativeId, parent_tool_use_id: null,
-          message: { role: 'user', content: [{ type: 'text', text: prompt }, ...claudeImageBlocks(attachments)] } });
+          message: { role: 'user', content: [{ type: 'text', text: prompt }, ...claudeImageBlocks(attachments)] } }, () => this.validateBrokerRun(run));
         // Claude confirms only when it takes the instruction at its next step, which can be minutes away, so the
         // answer is that it was handed over and the run records how it ends.
         this.admissions.delete(run.id);
