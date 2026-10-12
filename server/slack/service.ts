@@ -20,7 +20,7 @@ import { SlackSocket, type SlackSocketOptions } from './socket.js';
 import { judgeSlackFollowUp } from './follow-up.js';
 import type { DecisionEngine } from '../decisions/engine.js';
 import type { WorkflowRepository } from './storage-repository.js';
-import { STATUS, TowerError } from '../../shared/errors.js';
+import { TowerError } from '../../shared/errors.js';
 
 type Account = { teamId: string; userId: string; teamName?: string; userName?: string };
 type Settings = { enabled: boolean; allowSelfMentions?: boolean; language?: 'ko' | 'en'; workingReaction?: string; appToken?: string; userToken?: string; account?: Account };
@@ -42,12 +42,13 @@ const invalid = (message: string) => new TowerError('invalid', message);
 const slackOrigin = (workflowId: string): RunOrigin => ({ kind: 'slack', workflowId });
 
 /** Keep a useful diagnosis without copying messages, paths, tokens or arbitrary remote error codes. */
+const pollKinds = new Set(['unavailable', 'storage-full', 'internal', 'upstream', 'forbidden', 'locked']);
 const pollCodes = new Set(['EACCES', 'EPERM', 'ENOSPC', 'EIO', 'ENOENT', 'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED']);
 function pollFailure(error: unknown): string {
   const held = error instanceof TowerError && error.kind === 'unavailable' && error.disposition === 'not-admitted';
   const reason = error instanceof TowerError && error.message === 'Permission SQL receipt/effect reconciliation remains held.' ? 'permission-reconciliation'
     : error instanceof TowerError && error.message === 'External SQL receipt reconciliation remains held.' ? 'external-reconciliation'
-    : error instanceof TowerError && Object.hasOwn(STATUS, error.kind) ? error.kind
+    : error instanceof TowerError && pollKinds.has(error.kind) ? error.kind
     : error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' && pollCodes.has(error.code) ? error.code : 'unknown';
   return `${held ? 'Slack 작업 상태 점검이 보류되었습니다.' : 'Slack 작업 상태를 확인하지 못했습니다.'} (${reason}${held ? '/not-admitted' : ''})`;
 }

@@ -379,7 +379,7 @@ test('runtime polling recovers its own errors, keeps socket failures and exposes
   await service.start(); await service.startRuntimeEffects();
   await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
   await service.mutate('settings', { enabled: true });
-  socket.onStatus('connected');
+  socket.onStatus!('connected');
   const wait = async (condition: () => boolean) => {
     const deadline = Date.now() + 5000;
     while (!condition() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
@@ -392,14 +392,14 @@ test('runtime polling recovers its own errors, keeps socket failures and exposes
   assert.doesNotMatch(service.overview().error!, /secret|xoxp|https/);
   t.mock.timers.tick(1000); await new Promise(resolve => setTimeout(resolve, 20));
   assert.match(service.overview().error!, /EACCES/, 'persistent failure remains visible');
-  socket.onStatus('connected');
+  socket.onStatus!('connected');
   assert.match(service.overview().error!, /EACCES/, 'socket recovery cannot clear a polling error');
-  socket.onStatus('error', 'socket unavailable');
+  socket.onStatus!('error', 'socket unavailable');
   assert.match(service.overview().error!, /socket unavailable/);
   assert.match(service.overview().error!, /EACCES/);
   gateFailure = undefined;
   t.mock.timers.tick(1000); await wait(() => service.overview().error === 'socket unavailable');
-  socket.onStatus('connected'); assert.equal(service.overview().error, undefined);
+  socket.onStatus!('connected'); assert.equal(service.overview().error, undefined);
   const { TowerError } = await import('../../../shared/errors.js');
   gateFailure = new TowerError('unavailable', 'Permission SQL receipt/effect reconciliation remains held.', { disposition: 'not-admitted' });
   t.mock.timers.tick(1000); await wait(() => !!service.overview().error);
