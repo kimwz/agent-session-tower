@@ -150,6 +150,7 @@ export const english: Record<string, string> = {
   "저장한 시크릿을 모두 이 세션에서 쓸 수 있습니다.": "Every saved secret is already available in this session.",
   "최근 사용 · {0}": "Last used · {0}",
   "아직 사용하지 않음": "Not used yet",
+  "검토 없음": "Not reviewed",
   "검토 없음(소유자 세션)": "Not reviewed (your session)",
   "검토 통과": "Review passed",
   "검토 실패(허용됨)": "Review failed (allowed)",
