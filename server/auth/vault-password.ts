@@ -116,6 +116,8 @@ export class VaultPassword {
       };
       if (serves && current) await step(() => this.secrets!('tower-prune', { credentialId: current }));
       const prepared = await auth.prepareCredentials(username, newPassword);
+      // Without an account no wrapper opens anything; leftovers could leave no room for the new one.
+      if (serves && !current) await step(() => this.secrets!('tower-prune', { credentialId: prepared.credentialId }));
       const wrapped = serves && (await step(() => this.secrets!('tower-wrap', { password: newPassword, credentialId: prepared.credentialId })) as { wrapped?: unknown } | undefined)?.wrapped === true;
       await prepared.commit();
       if (serves) await this.secrets!('tower-prune', { credentialId: prepared.credentialId }).catch(() => console.warn('Tower could not remove the vault key wrapper of the previous Tower password; the next change or value-view unlock removes it.'));

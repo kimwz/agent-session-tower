@@ -522,13 +522,14 @@ export class SecretRuntime {
         let unlocked = false;
         try { await this.open(async () => { await service.unlock(recoveryPassword); unlocked = true; }); }
         catch (error) { if (unlocked) throw error; throw fail('복구 비밀번호(기존 보관함 비밀번호)가 올바르지 않습니다.'); }
-        await service.towerWrap(password, credentialId);
+        await service.towerPrune(credentialId); await service.towerWrap(password, credentialId);
       }
     } else {
       let current = false;
       // best-effort: a wrapper that does not unwrap the open key is made again below.
       if (service.vault.hasTower(credentialId)) { try { await service.towerUnlock(password, credentialId); current = true; } catch { /* Made again below. */ } }
-      if (!current) await service.towerWrap(password, credentialId);
+      // Other credentials' wrappers never open it (only this one is tried), and two of them would leave no room for it.
+      if (!current) { await service.towerPrune(credentialId); await service.towerWrap(password, credentialId); }
     }
     await service.towerPrune(credentialId);
     return { generation: service.lockGeneration };

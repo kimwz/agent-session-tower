@@ -37,7 +37,7 @@ export const WORKER_PENDING = '새 실행 워커 적용 대기 중입니다. 진
 export function secretFailure(failure: unknown, t: (key: string) => string): string {
   if (workerPending(failure)) return t(WORKER_PENDING);
   // Only the Tower-password check answers this to the page's own request; a lost sign-in has the login screen.
-  if (failureCode(failure) === 'login-required') return t('Tower 비밀번호가 맞지 않습니다.');
+  if (failureCode(failure) === 'login-required' && failure instanceof ApiError && failure.status === 401) return t('Tower 비밀번호가 맞지 않습니다.');
   if (failure instanceof ApiError && failure.status === 423) return t('시크릿 보관함이 잠겨 있습니다. 잠금을 해제한 뒤 다시 시도하세요.');
   // A 503 names a joined computer that is not connected now.
   if (failure instanceof ApiError && ((failure.status >= 400 && failure.status < 500 && failure.status !== 401) || failure.status === 503) && failure.message) return t(failure.message);

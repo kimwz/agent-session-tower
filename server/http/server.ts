@@ -313,7 +313,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       const publicAsset = (req.method === 'GET' || req.method === 'HEAD') && (path === '/' || APP_SHELL.has(path) || path.startsWith('/assets/'));
       if (req.method === 'GET' && path === '/api/auth/status') return json(res, 200, authStatus());
       const login = req.method === 'POST' && path === '/api/auth/login';
-      if (!authenticated && !login && !publicAsset) return json(res, 401, { error: '로그인이 필요합니다.' });
+      if (!authenticated && !login && !publicAsset) return json(res, 401, { error: '로그인이 필요합니다.', ...(/^\/api\/secrets\/(value|value-update|view-lock)$/.test(path) ? { code: 'login-required' } : {}) });
       const adminRoute = ['/api/auth/overview', '/api/auth/credentials', '/api/auth/unblock'].includes(path);
       if (adminRoute && !identity.local) return json(res, 403, { error: '계정 관리는 로컬 접속에서만 사용할 수 있습니다.' });
       if (path === '/mcp') {
@@ -359,7 +359,8 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         // Keystrokes and resize events have their own per-terminal byte/request budget.
         // Reading Tower state is not a mutation; only changes count against the request budget.
         const read = path.match(/^\/api\/(?:nodes\/[a-f0-9]{32}\/)?v1\/([a-z][a-zA-Z]*\.[a-zA-Z]+)$/)?.[1];
-        const readOnly = read !== undefined && isOperationName(read) && !OPERATIONS[read].write;
+        // Reading one saved value needs a value-view grant and changes nothing; it does not use up the page's changes.
+        const readOnly = (read !== undefined && isOperationName(read) && !OPERATIONS[read].write) || path === '/api/secrets/value';
         if (!uploadProgressPath(path) && !login && !readOnly && path !== SUGGESTION_PATH && path !== SCOPE_PATH && !/^\/api\/(nodes\/[a-f0-9]{32}\/)?workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
           // The master agent's own calls count apart, so they never use up the owner's budget (or the other way round).
           // The page where voice is on reports every few seconds, and turns voice off; each has a budget of its own,

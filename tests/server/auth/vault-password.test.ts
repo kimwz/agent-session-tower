@@ -24,10 +24,10 @@ type Auth = NonNullable<ConstructorParameters<typeof VaultPassword>[0]>;
 type Refusal = Error & { kind?: string; code?: string };
 const refused = (kind: string, code?: string) => (error: Refusal) => error.kind === kind && error.code === code && !/fixture-tower-password|fixture-vault-password/.test(error.message);
 
-async function fixture(t: TestContext, options: { vault?: 'open' | 'locked' | 'none'; valueView?: boolean } = {}) {
+async function fixture(t: TestContext, options: { vault?: 'open' | 'locked' | 'none'; valueView?: boolean; account?: boolean } = {}) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'tower-vault-password-')));
   const authDir = join(directory, 'auth'), stateDir = join(directory, 'state');
-  const store = new AuthStore(authDir); await store.start(); await store.setCredentials(USER, password(0));
+  const store = new AuthStore(authDir); await store.start(); if (options.account !== false) await store.setCredentials(USER, password(0));
   // Sign-in writes finish before the folder goes (hooks run in the order they were added).
   t.after(async () => { await store.flush(); store.close(); await rm(directory, { recursive: true, force: true }); });
   const service = options.vault === 'none' ? await secretService(stateDir) : await vaults.open(stateDir);
@@ -53,7 +53,7 @@ async function fixture(t: TestContext, options: { vault?: 'open' | 'locked' | 'n
     },
   };
   const vault = new VaultPassword(auth, secrets); t.after(() => vault.close());
-  if (options.vault !== 'none') { await runtime.control('tower-wrap', { password: password(0), credentialId: store.currentCredentialId() }); if (options.vault === 'locked') await service.lock(); }
+  if (options.vault !== 'none' && options.account !== false) { await runtime.control('tower-wrap', { password: password(0), credentialId: store.currentCredentialId() }); if (options.vault === 'locked') await service.lock(); }
   const signIn = async (value: string) => { const { sessionId } = await store.login(IP, USER, value); assert.ok(sessionId); return { token: sessionId, ip: IP, local: false } satisfies Viewer; };
   /** The next change fails at `at` (`before tower-wrap#1`, `after commit#1`, …), or nowhere. */
   const failing = (at?: string) => { failAt = at; seen.clear(); };
@@ -184,6 +184,14 @@ test('a change while the vault is locked asks for the recovery password once; wi
   const signedIn = await older.signIn(password(1));
   await assert.rejects(older.vault.viewUnlock(signedIn, { password: password(1) }, () => {}), refused('unavailable', 'worker-update-pending'));
   assert.equal((await older.vault.view({ status: { initialized: true, locked: true }, peers: [], secrets: [] }, signedIn) as SecretSettingsView).status.towerPassword, undefined);
+});
+
+test('setting up an account clears wrappers no credentials name, so the new one always fits', { timeout: 120_000 }, async t => {
+  const f = await fixture(t, { account: false });
+  for (const id of ['a', 'b']) await f.service.towerWrap(password(9), id.repeat(64));
+  assert.equal(await f.vault.changeCredentials(USER, password(1)), 'rewrapped');
+  const current = f.store.currentCredentialId()!;
+  assert.equal(f.service.vault.hasTower(current), true); assert.equal(f.service.vault.hasTower('a'.repeat(64)), false);
 });
 
 test('without a login account value viewing is refused with how to set one up', async () => {

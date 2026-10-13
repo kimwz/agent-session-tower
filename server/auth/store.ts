@@ -120,7 +120,8 @@ export class AuthStore {
     let committed = false;
     return { credentialId: credentialIdOf(credentials.salt), commit: () => this.serial(async () => {
       if (committed) return;
-      await writePrivateJson(join(this.stateDir, 'auth.json'), JSON.stringify(credentials));
+      // Synced with its folder: the vault wrappers of other credentials are pruned (and synced) right after this.
+      await writePrivateJson(join(this.stateDir, 'auth.json'), JSON.stringify(credentials), { syncDirectory: true });
       this.credentials = credentials; committed = true;
       this.revokeAll();
     }) };

@@ -20,6 +20,8 @@ import { FixtureRuns, vaultTemplate } from '../../helpers/secrets.js';
 const RECOVERY = 'fixture-value-http-recovery';
 const TOWER = 'fixture-password-123';
 const CANARY = 'VALUE_VIEW_HTTP_CANARY_481';
+/** A file an atomic write renamed away while the state was scanned. */
+const gone = (error: NodeJS.ErrnoException): string => { if (error.code === 'ENOENT') return ''; throw error; };
 const vaults = vaultTemplate(RECOVERY);
 before(() => vaults.ready());
 after(() => vaults.dispose());
@@ -105,11 +107,13 @@ test('a signed-in browser reads and edits values only after unlocking value view
   const reopened = await f.remote('/api/secrets/view-unlock', { password: TOWER });
   assert.deepEqual([reopened.status, reopened.body.valueView, f.service.status().locked], [200, true, false]);
   assert.equal((await read(2)).body.value, `${CANARY}_EDITED`);
+  // Reading values changes nothing: more than a minute's change budget (30) of reads all answer.
+  for (let n = 0; n < 31; n++) assert.equal((await read(2)).status, 200);
   // Signed out: the cookie no longer reaches anything.
   assert.equal((await f.remote('/api/auth/logout', {})).status, 200);
-  assert.equal((await read(2)).status, 401);
+  assert.deepEqual(code(await read(2)), [401, 'login-required']);
   // No password in any file of this Tower's state.
-  const files = async (directory: string): Promise<string> => (await Promise.all((await readdir(directory, { withFileTypes: true })).map(entry => entry.isDirectory() ? files(join(directory, entry.name)) : readFile(join(directory, entry.name), 'utf8')))).join('');
+  const files = async (directory: string): Promise<string> => (await Promise.all((await readdir(directory, { withFileTypes: true })).map(entry => entry.isDirectory() ? files(join(directory, entry.name)) : readFile(join(directory, entry.name), 'utf8').catch(gone)))).join('');
   const stored = await files(f.root); assert.equal(stored.includes(TOWER), false); assert.equal(stored.includes(CANARY), false);
 });
 

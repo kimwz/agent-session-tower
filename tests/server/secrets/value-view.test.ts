@@ -67,6 +67,17 @@ test('view-unlock: an open vault gets, checks or remakes the current wrapper; a 
   await f.control('view-unlock', { password: TOWER, credentialId: idB }); assert.equal(f.migrations(), 3, 'the next unlock needs no recovery');
 });
 
+test('two wrappers of other credentials (a backup taken mid-change, a reset login) leave room for the current one', { timeout: 120_000 }, async t => {
+  const f = await fixture(t); const idC = 'c'.repeat(64);
+  const others = async () => { await f.service.towerPrune(idA); await f.service.towerWrap(OTHER, idA); await f.service.towerWrap(OTHER, idB); };
+  await others();
+  await f.control('view-unlock', { password: TOWER, credentialId: idC });
+  assert.deepEqual((await f.wrappers()).map(item => item.credentialId), [idC], 'open: the others go before the current one is made');
+  await others(); await f.control('lock');
+  await f.control('view-unlock', { password: TOWER, credentialId: idC, recoveryPassword: RECOVERY });
+  assert.deepEqual((await f.wrappers()).map(item => item.credentialId), [idC], 'locked: the recovery password opens it and the same room is made');
+});
+
 test('value and value-update answer only in the unlocked generation, at the shown version, in one serial change', { timeout: 60_000 }, async t => {
   const f = await fixture(t);
   const scalar = await f.service.create({ name: 'scalar', kind: 'scalar', value: 'SCALAR_VALUE' });
