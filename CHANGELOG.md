@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.129.2] - 2026-10-13
+
+- 실행 중인 턴이 있는 세션에 메시지를 보내 대기 상태가 되면 실행 워커가 멈추던 문제를 고쳤습니다. 1.129.0부터 대기 메시지를 끼워 넣을 수 있는지 판단할 때 세션 출처를 확인했는데, 이 확인이 Slack 연결 세션을 찾으며 다시 실행 목록을 읽어 끝없이 반복됐습니다. 그동안 워커가 응답하지 못해 화면에 "세션 표시 정보를 불러오지 못했습니다"(`connect ECONNREFUSED …/rpc.sock`)가 표시됐습니다.
+
 ## [1.129.1] - 2026-10-12
 
 - 배포 중인 Tower의 웹과 실행 워커 버전을 맞추기 위한 버전 전용 패치 릴리스입니다. 제품 동작 변경은 없습니다.
