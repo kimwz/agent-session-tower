@@ -66,6 +66,8 @@ export function sameScope(a: SessionScope, b: SessionScope): boolean {
 
 const ACTIVE_RUN = new Set<Run['status']>(['running', 'queued']);
 const SETTLED_JOB = new Set<AutoPromptJob['status']>(['completed', 'error', 'cancelled']);
+/** Turns a chat lists only to match them with its messages. */
+const MATCHED_ONLY = new Set<Run['status']>(['completed', 'cancelled']);
 
 /** Every session id a run or job may name it by: its own, and `provider:nativeId`. */
 function aliasIndex(sessions: Session[]): Map<string, Session> {
@@ -85,8 +87,14 @@ function aliasIndex(sessions: Session[]): Map<string, Session> {
  * - sessions a running or queued turn or an unsettled Auto Prompt job names, with their ancestors;
  * - the whole family of the focused session.
  * A family root whose unsent members are busy carries `familyActive`.
+ *
+ * With them go the records the page uses: every running or queued turn, the turns of the sessions it holds, and
+ * turns of sessions not known yet. A chat shows the prompts of its turns at work or failed (and restores a failed
+ * one for retry), and matches its other turns against its messages; so a completed or cancelled turn outside the
+ * focused family carries a preview. Every Auto Prompt job is listed, without its routing context and,
+ * once settled, with a preview of its prompt; the page reads neither.
  */
-export function sessionSelector(snapshot: Pick<Snapshot, 'sessions' | 'runs' | 'autoPrompts'>, now: number): (scope: SessionScope) => Session[] {
+export function pageSelector(snapshot: Pick<Snapshot, 'sessions' | 'runs' | 'autoPrompts'>, now: number): (scope: SessionScope) => PageRecords {
   const { sessions } = snapshot;
   const { byId, roots } = familyIndex(sessions);
   const aliases = aliasIndex(sessions);
@@ -128,8 +136,38 @@ export function sessionSelector(snapshot: Pick<Snapshot, 'sessions' | 'runs' | '
       if (!kept.has(session.id) && (focusRoot === undefined || root !== focusRoot)) continue;
       result.push(root === session.id && activeRoots.has(session.id) ? { ...session, familyActive: true } : session);
     }
-    return result;
+    const sent = new Set(result.map(session => session.id));
+    const runs: Run[] = [];
+    for (const run of snapshot.runs) {
+      if (ACTIVE_RUN.has(run.status)) { runs.push(run); continue; }
+      const owner = aliases.get(run.sessionId);
+      if (!owner) runs.push(run);
+      else if (sent.has(owner.id)) runs.push(MATCHED_ONLY.has(run.status) && (focusRoot === undefined || roots.get(owner.id) !== focusRoot) ? withPreview(run) : run);
+    }
+    return { sessions: result, runs, ...(snapshot.autoPrompts ? { autoPrompts: snapshot.autoPrompts.map(listedJob) } : {}) };
   };
+}
+
+/** What a page with a given scope holds; the rest of the snapshot is sent as it is. */
+export interface PageRecords { sessions: Session[]; runs: Run[]; autoPrompts?: AutoPromptJob[] }
+
+/** How much of a prompt a page holds where it only lists the record. */
+export const PROMPT_PREVIEW = 200;
+
+function preview(text: string): string {
+  if (text.length <= PROMPT_PREVIEW) return text;
+  // A cut between the halves of a surrogate pair would leave half a character.
+  const end = /[\uD800-\uDBFF]/.test(text[PROMPT_PREVIEW - 1]) ? PROMPT_PREVIEW - 1 : PROMPT_PREVIEW;
+  return text.slice(0, end);
+}
+
+function withPreview<T extends { prompt: string }>(item: T): T {
+  return typeof item.prompt === 'string' && item.prompt.length > PROMPT_PREVIEW ? { ...item, prompt: preview(item.prompt) } : item;
+}
+
+function listedJob(job: AutoPromptJob): AutoPromptJob {
+  const { routingContext: _routingContext, ...listed } = job;
+  return SETTLED_JOB.has(job.status) ? withPreview(listed) : listed;
 }
 
 /** Counts, folders and canvas history over every main session, as the page would compute them from all of them. */

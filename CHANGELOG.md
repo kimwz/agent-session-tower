@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.130.0] - 2026-10-13
+
+- 페이지가 받는 상태를 줄였습니다. 기본 화면(1일)의 첫 응답이 압축 기준 약 167 KB에서 70 KB대로 줄어듭니다.
+  - 범위를 지정한 스냅샷(`/api/snapshot?scoped=1`, 실시간 스트림)은 진행 중·대기 중인 실행과 화면에 있는 세션의 실행만 보냅니다. 완료·취소된 실행은 열어 둔 채팅의 것이 아니면 프롬프트 앞 200자만 보냅니다. 실패한 실행은 '다시 작성'할 수 있도록 원문을 그대로 보냅니다.
+  - Auto Prompt 기록에서 화면이 쓰지 않는 라우팅 맥락(`routingContext`)을 빼고, 끝난 작업의 프롬프트는 앞 200자만 보냅니다.
+  - 마스터 설정은 화면이 이미 가진 제공자 목록을 쓰고, 연결된 컴퓨터의 작업 공간 페이지는 `/api/link`에서 컴퓨터 이름을 읽습니다. 둘 다 더 이상 전체 스냅샷(세션 1,000여 개, 약 2 MB)을 받지 않습니다.
+  - 범위 없이 요청하는 도구·연결 컴퓨터·마스터는 지금처럼 전체 상태를 받습니다.
+
 ## [1.129.2] - 2026-10-13
 
 - 실행 중인 턴이 있는 세션에 메시지를 보내 대기 상태가 되면 실행 워커가 멈추던 문제를 고쳤습니다. 1.129.0부터 대기 메시지를 끼워 넣을 수 있는지 판단할 때 세션 출처를 확인했는데, 이 확인이 Slack 연결 세션을 찾으며 다시 실행 목록을 읽어 끝없이 반복됐습니다. 그동안 워커가 응답하지 못해 화면에 "세션 표시 정보를 불러오지 못했습니다"(`connect ECONNREFUSED …/rpc.sock`)가 표시됐습니다.

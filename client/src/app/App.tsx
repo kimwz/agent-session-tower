@@ -22,6 +22,7 @@ import type { RepositoryAction, RepositoryStatus } from '../../../shared/reposit
 import { Graph } from '../graph/Graph';
 import { BrandMark, ProviderIcon } from '../common/Icons';
 import { useMediaQuery } from '../common/use-media-query';
+import { ProvidersContext } from '../common/providers-context';
 import { api, providerLabels, recoverRefusedConnection, sessionTitle, sortSessions } from '../common/lib';
 import { listShows } from '../../../shared/session-activity';
 import { getMainSessionId, getMainSessions } from '../../../shared/session-family';
@@ -459,6 +460,6 @@ function TowerApp() {
     <AutoPromptDialog visible={showAutoPrompt} initialCwd={autoPromptCwd} initialNode={autoPromptNode === '' ? undefined : autoPromptNode ?? (autoPromptCwd ? undefined : selectedSession?.node)} providers={snapshot?.providers || []} hosts={hosts} projects={projects} sessions={sessions} jobs={view?.autoPrompts || []} token={token} connected={connection === 'connected'} onClose={closeAutoPrompt} onNavigate={openAutoPromptSession} onRefresh={refresh} />
     {issueCwd && <IssueDialog key={issueCwd} cwd={issueCwd} providers={snapshot?.providers || []} hosts={hosts} token={token} connected={connection === 'connected'} onClose={closeIssue} onCreated={sessionCreated} />}
     {showNewSession && <NewSessionDialog providers={snapshot?.providers || []} hosts={hosts} projects={projects} initialCwd={newSessionCwd || (selectedSession?.master ? undefined : selectedSession?.cwd) || (project !== 'all' ? project : undefined)} draft={newSessionDraft} token={token} connected={connection === 'connected'} onClose={closeNewSession} onCreated={sessionCreated} />}
-    {token && <Suspense fallback={null}><MasterDock token={token} controls={masterControls} sessionId={activeChatId ?? null} /></Suspense>}
+    {token && <ProvidersContext.Provider value={snapshot?.providers || []}><Suspense fallback={null}><MasterDock token={token} controls={masterControls} sessionId={activeChatId ?? null} /></Suspense></ProvidersContext.Provider>}
   </div>;
 }
