@@ -2,6 +2,8 @@
 export const TASK_NOTICE = 'Background task';
 /** How Tower's own messages to Claude begin. Tower sends one only to hand over finished background work. */
 export const TOWER_NOTICE = '[Agent Session Tower]';
+/** Starts Tower's message to the master when work it handed out ends: Tower's own words, never the owner's. */
+export const REPORT_MARK = '[Tower report]';
 
 const FAILED = /^(failed|killed|error)$/i;
 

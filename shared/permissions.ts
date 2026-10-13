@@ -202,6 +202,16 @@ export function ruleProblem(rule: Pick<PermissionRuleInput, 'kind' | 'value' | '
 }
 
 /**
+ * A Claude file rule whose path starts with one slash is relative to the project (Claude Code's rule syntax); an
+ * absolute path takes two. One that starts at a top-level system folder was meant to be absolute: the rule with `//`.
+ */
+export function absoluteFileRule(rule: Pick<PermissionRuleInput, 'kind' | 'value'>): string | undefined {
+  if (rule.kind !== 'claude') return undefined;
+  const match = /^([A-Za-z]+)\(\/(Users|home|private|tmp|var|Volumes|opt|etc)(\/[^)]*)?\)$/.exec(rule.value.trim());
+  return match && FILE_TOOLS.has(match[1]!) ? `${match[1]}(//${match[2]}${match[3] ?? ''})` : undefined;
+}
+
+/**
  * Whether a rule allows far more than one kind of action: a bare program that runs other programs, or a whole tool.
  * Such rules are allowed (the owner decides), but the owner is warned first.
  */
