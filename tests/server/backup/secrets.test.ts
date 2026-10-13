@@ -7,6 +7,7 @@ import { mkdtemp, readFile, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SecretService } from '../../../server/secrets/service.js';
+import { secretService } from '../../helpers/secrets.js';
 import { SecretStore } from '../../../server/triggers/secrets.js';
 import { BackupService } from '../../../server/backup/service.js';
 import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
@@ -20,7 +21,7 @@ const takeWorkerRestore = async (stateDir: string) => takeOwnedWorkerRestore(sta
 const VAULT_PASSWORD = 'fixture-vault-password';
 const BACKUP_PASSWORD = 'fixture-backup-password';
 const legacy = { id: 'legacy-identifier', name: 'HTTP token', origin: 'https://example.com', value: 'LEGACY_CANARY_VALUE', createdAt: '2026-10-02T00:00:00.000Z' };
-async function vault(stateDir: string) { const service = new SecretService({ stateDir }); await service.start(); await service.initialize(VAULT_PASSWORD); return service; }
+async function vault(stateDir: string) { const service = await secretService(stateDir, { password: VAULT_PASSWORD }); return service; }
 async function backup(stateDir: string) {
   const store = { backupValue: () => ({}), restore: async () => undefined };
   const service = new BackupService({ stateDir, settings: (await workerSettingsFixture(stateDir)).collect, triggers: () => collectTriggers(stateDir), version: '1.100.2', skills: async () => ({ bundle: { format: 'agent-session-tower.skills', version: 1, exportedAt: '', from: 'fixture', skills: [] }, guidance: '', settings: { enabled: false, provider: 'codex' } }), restartWorker: async () => true, stores: { groups: store, exclusions: store, decisions: store } });

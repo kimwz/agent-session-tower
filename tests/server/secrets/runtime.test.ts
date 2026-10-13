@@ -11,6 +11,7 @@ import { runToolResolver } from '../../../server/api/run-tools.js';
 import type { SessionOrigin } from '../../../server/runs/origin.js';
 import { SecretRuntime, SECRET_TOOLS } from '../../../server/secrets/runtime.js';
 import { SecretService } from '../../../server/secrets/service.js';
+import { secretService } from '../../helpers/secrets.js';
 import { runSecretsCommand } from '../../../server/secrets/cli.js';
 import { SECRET_USE_INSTRUCTIONS } from '../../../server/secrets/notices.js';
 
@@ -352,7 +353,7 @@ test('owner password and secret control bypass generic ledger; restart is locked
       if (!name.endsWith('.json')) continue;
       assert.doesNotMatch(await readFile(join(f.stateDir, 'secrets', name), 'utf8'), new RegExp(`${canary}|${password}|changed-fixture-password-1234|${token}`));
     }
-    const restarted = new SecretService({ stateDir: f.stateDir }); await restarted.start();
+    const restarted = await secretService(f.stateDir);
     assert.equal(restarted.status().locked, true);
     await assert.rejects(restarted.unlock(password)); await restarted.unlock('changed-fixture-password-1234');
     assert.deepEqual(f.ledger, []);
@@ -472,7 +473,7 @@ test('locked session closure survives runtime restart and removes task-only secr
     assert.equal(hashes.length, 1); assert.match(hashes[0], /^[a-f0-9]{64}$/);
     for (const privateInput of [f.session.id, f.session.nativeId, canary, password, token, secret.id, target.taskId]) assert.equal(closureText.includes(privateInput), false);
     const { stat } = await import('node:fs/promises'); assert.equal((await stat(closurePath)).mode & 0o777, 0o600);
-    const restarted = new SecretService({ stateDir: f.stateDir, now: f.now }); await restarted.start(); assert.equal(restarted.status().locked, true);
+    const restarted = await secretService(f.stateDir, { now: f.now }); assert.equal(restarted.status().locked, true);
     const registry = { list: () => [...f.runs.values()], getSession: (id: string) => f.sessions.get(id), sessionOrigin: (id: string) => f.origins.get(id) };
     restartedRuntime = new SecretRuntime({ stateDir: f.stateDir, service: restarted, runs: registry });
     const capabilities = new CapabilityRegistry(); const context: McpContext = { capabilities, run: id => f.runs.get(id), secretTools: SECRET_TOOLS, secretTool: (capability, name, args) => restartedRuntime!.tool(capability, name, args) };
@@ -838,7 +839,7 @@ test('broker admission protection remains value-free while locked, across startu
     const indexText = JSON.stringify(f.service.vault.index);
     assert.ok(indexText.includes(approved.approval.id)); assert.ok(indexText.includes('brokerApprovals'));
     assert.equal(indexText.includes(canary), false); assert.equal(indexText.includes(password), false);
-    const restarted = new SecretService({ stateDir: f.stateDir, now: f.now }); await restarted.start();
+    const restarted = await secretService(f.stateDir, { now: f.now });
     const registry = { list: () => [...f.runs.values()], getSession: (id: string) => f.sessions.get(id), sessionOrigin: (id: string) => f.origins.get(id) };
     restartedRuntime = new SecretRuntime({ stateDir: f.stateDir, service: restarted, runs: registry });
     assert.equal(restarted.status().locked, true);

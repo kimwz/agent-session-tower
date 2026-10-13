@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SecretService } from '../../../server/secrets/service.js';
+import { secretService } from '../../helpers/secrets.js';
 import { parseDotenv } from '../../../server/secrets/dotenv.js';
 import { SecretVault } from '../../../server/secrets/vault.js';
 import { collectEncryptedVault, listPendingSecretImports, stageVaultImport } from '../../../server/backup/secrets.js';
@@ -17,7 +18,7 @@ test('dotenv preserves literals, empty values and multiline; duplicate assignmen
 test('encrypted vault: policy, selected fields, fixed expiry, revoke, restart lock and password change', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'tower-vault-domain-')); let now = 1000;
   try {
-    const service = new SecretService({ stateDir: directory, now: () => now }); await service.start(); await service.initialize(password);
+    const service = await secretService(directory, { password, now: () => now });
     const hostId = service.device().id; const project = await service.project({ name: 'fixture', bindings: [{ hostId, root: '/fixture' }] });
     const target = await service.ensureTask('session', '/fixture'); const context = { ...target, runId: 'run' };
     const metadata = await service.create({ name: 'bundle', kind: 'env', scope: 'project', projectId: project.id, value: 'A=CANARY_DOMAIN_VALUE\nB=hidden' });
@@ -31,14 +32,14 @@ test('encrypted vault: policy, selected fields, fixed expiry, revoke, restart lo
     assert.equal((await readFile(join(directory, 'secrets/vault.json'), 'utf8')).includes('CANARY_DOMAIN_VALUE'), false);
     assert.equal((await readFile(join(directory, 'secrets/journal.json'), 'utf8')).includes('session'), false);
     await service.changePassword(password, 'changed-password-1234'); await service.lock(); await assert.rejects(service.unlock(password)); await service.unlock('changed-password-1234');
-    const restarted = new SecretService({ stateDir: directory }); await restarted.start(); assert.equal(restarted.status().locked, true); await restarted.unlock('changed-password-1234'); assert.equal(restarted.overview().secrets.length, 1);
+    const restarted = await secretService(directory); assert.equal(restarted.status().locked, true); await restarted.unlock('changed-password-1234'); assert.equal(restarted.overview().secrets.length, 1);
     const path = join(directory, 'secrets/vault.json'); const envelope = JSON.parse(await readFile(path, 'utf8')); envelope.kdf.memory = 99999999; await writeFile(path, JSON.stringify(envelope)); await assert.rejects(new SecretService({ stateDir: directory }).start());
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 test('discover-only and operation ledger do not disclose values or rerun operations', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'tower-vault-ledger-'));
   try {
-    const service = new SecretService({ stateDir: directory }); await service.start(); await service.initialize(password);
+    const service = await secretService(directory, { password });
     const target = await service.ensureTask('session', '/fixture'); const context = { ...target, runId: 'run' };
     const secret = await service.create({ name: 'key', kind: 'scalar', scope: 'global', value: 'canary', target, connect: true, operations: ['discover'] });
     assert.equal((await service.list(context)).length, 1); await assert.rejects(service.resolve(context, secret.reference, 'env'));
@@ -49,11 +50,11 @@ test('discover-only and operation ledger do not disclose values or rerun operati
 test('binary file bytes survive encrypted storage and encrypted import preserves target identity', async () => {
   const sourceDir = await mkdtemp(join(tmpdir(), 'tower-vault-source-')); const targetDir = await mkdtemp(join(tmpdir(), 'tower-vault-target-'));
   try {
-    const source = new SecretService({ stateDir: sourceDir }); await source.start(); await source.initialize(password);
+    const source = await secretService(sourceDir, { password });
     const target = await source.ensureTask('session', '/fixture'); const context = { ...target, runId: 'run' }; const bytes = Buffer.from([0, 255, 13, 10, 128]);
     const metadata = await source.create({ name: 'binary', kind: 'file', scope: 'global', content: bytes.toString('base64'), target, connect: true });
     assert.deepEqual((await source.resolve(context, metadata.reference, 'file')).bytes, bytes);
-    const recipient = new SecretService({ stateDir: targetDir }); await recipient.start(); await recipient.initialize('recipient-password-1234'); const identity = recipient.device();
+    const recipient = await secretService(targetDir, { password: 'recipient-password-1234' }); const identity = recipient.device();
     await recipient.importEncryptedVault((await source.exportEncryptedVault())!, password); assert.deepEqual(recipient.device(), identity); assert.equal(recipient.overview().secrets.length, 1); assert.equal(recipient.overview().rules.length, 0); assert.equal(recipient.overview().secrets[0].reference.startsWith(`tower-secret://${identity.id}/`), true);
     await recipient.importEncryptedVault((await source.exportEncryptedVault())!, password); assert.equal(recipient.overview().secrets.length, 1);
   } finally { await rm(sourceDir, { recursive: true, force: true }); await rm(targetDir, { recursive: true, force: true }); }
@@ -61,16 +62,16 @@ test('binary file bytes survive encrypted storage and encrypted import preserves
 test('authenticated ciphertext tampering and symlink vault input fail closed', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'tower-vault-tamper-'));
   try {
-    const service = new SecretService({ stateDir: directory }); await service.start(); await service.initialize(password); await service.lock();
+    const service = await secretService(directory, { password }); await service.lock();
     const path = join(directory, 'secrets/vault.json'); const envelope = JSON.parse(await readFile(path, 'utf8')); const bytes = Buffer.from(envelope.payload.ciphertext, 'base64'); bytes[0] ^= 1; envelope.payload.ciphertext = bytes.toString('base64'); await writeFile(path, JSON.stringify(envelope));
-    const restarted = new SecretService({ stateDir: directory }); await restarted.start(); await assert.rejects(restarted.unlock(password)); assert.equal(restarted.status().locked, true);
+    const restarted = await secretService(directory); await assert.rejects(restarted.unlock(password)); assert.equal(restarted.status().locked, true);
     const { symlink } = await import('node:fs/promises'); await rm(path); await symlink(join(directory, 'external'), path); await writeFile(join(directory, 'external'), '{}'); await assert.rejects(new SecretService({ stateDir: directory }).start());
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 test('separate discover and manual use rules, task-only backup exclusion, journal-first failure recovery', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'tower-vault-commit-'));
   try {
-    const service = new SecretService({ stateDir: directory }); await service.start(); await service.initialize(password);
+    const service = await secretService(directory, { password });
     const target = await service.ensureTask('session', '/fixture'); const context = { ...target, runId: 'run' };
     const secret = await service.create({ name: 'split', kind: 'scalar', scope: 'global', value: 'value' });
     await service.setRule({ groupId: secret.groupId, secretIds: [secret.id], hostId: target.hostId, root: target.root, activation: 'auto', operations: ['discover'], enabled: true });
@@ -86,7 +87,7 @@ test('separate discover and manual use rules, task-only backup exclusion, journa
     assert.equal(remote.projectId, remoteProject.id); await service.closeTask(remote.taskId); await assert.rejects(service.ensureRemoteTask(remote));
     const originalWrite = service.vault.write.bind(service.vault); service.vault.write = async (name, bytes) => { if (name === 'vault.json') throw new Error('fixture atomic failure'); await originalWrite(name, bytes); };
     await assert.rejects(service.revoke(target, [secret.id])); assert.equal(service.status().locked, true);
-    const restarted = new SecretService({ stateDir: directory }); await restarted.start(); await restarted.unlock(password); await assert.rejects(restarted.resolve(context, secret.reference, 'env'));
+    const restarted = await secretService(directory); await restarted.unlock(password); await assert.rejects(restarted.resolve(context, secret.reference, 'env'));
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 test('dotenv closes double quotes after even backslashes and preserves odd escaped quotes', () => {
@@ -100,7 +101,7 @@ test('dotenv closes double quotes after even backslashes and preserves odd escap
 test('sweep discards expired remote task payload and claims while keeping active local claims and fixed task identity', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'tower-vault-sweep-')); let now = 1000;
   try {
-    const service = new SecretService({ stateDir: directory, now: () => now }); await service.start(); await service.initialize(password);
+    const service = await secretService(directory, { password, now: () => now });
     const local = await service.bindRun('owner-session', '/local', new Date(now).toISOString()); const active = { ...local, runId: 'live-local-run' }; const dead = { ...local, runId: 'ended-local-run' }; const fingerprint = 'b'.repeat(64);
     await service.beginOperation(active, 'local-active', fingerprint); await service.finishOperation(active, 'local-active', fingerprint, { stdout: '[REDACTED]' });
     await service.beginOperation(active, 'remote-id:local-owner-operation', fingerprint); await service.beginOperation(dead, 'local-ended', fingerprint);
@@ -120,7 +121,7 @@ test('sweep discards expired remote task payload and claims while keeping active
 test('explicit dotenv field grants reject duplicates and stale selections after value rotation', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'tower-vault-field-policy-'));
   try {
-    const service = new SecretService({ stateDir: directory }); await service.start(); await service.initialize(password);
+    const service = await secretService(directory, { password });
     const target = await service.ensureTask('session', '/fixture'); const context = { ...target, runId: 'run' };
     const secret = await service.create({ name: 'selected bundle', kind: 'env', scope: 'global', value: 'A=approved-a\nB=approved-b\nC=UNAPPROVED_C_CANARY' });
     const policy = { groupId: secret.groupId, secretIds: [secret.id], hostId: target.hostId, root: target.root, activation: 'manual' as const, operations: ['discover', 'env', 'file', 'pipe'] as const, enabled: true };

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { deferredSecretParts, importPendingSecret, listPendingSecretImports, stagePendingImport } from '../../../server/secrets/imports.js';
 import { SecretService } from '../../../server/secrets/service.js';
+import { secretService } from '../../helpers/secrets.js';
 import type { TriggerBackup } from '../../../server/triggers/backup.js';
 
 const triggers: TriggerBackup = { triggers: [], settings: {}, trustedFolders: [], secretGrants: {}, fired: {}, github: {} };
@@ -23,7 +24,7 @@ test('with a Vault on either side, trigger secrets and triggers wait for an encr
 test('a legacy import is opened by the injected opener and removed only after it committed', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-secret-imports-'));
   t.after(() => rm(stateDir, { recursive: true, force: true }));
-  const target = new SecretService({ stateDir }); await target.start(); await target.initialize('fixture vault password 1');
+  const target = await secretService(stateDir, { password: 'fixture vault password 1' });
   const record = { id: 'legacy-1', name: 'Token', origin: 'https://example.com', value: 'IMPORTED', createdAt: '2026-10-01T00:00:00.000Z' };
   const id = await stagePendingImport(stateDir, { version: 1, kind: 'legacy', content: 'opaque' });
   const opened: Array<[string, string]> = [];

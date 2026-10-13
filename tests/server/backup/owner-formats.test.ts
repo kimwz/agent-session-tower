@@ -17,6 +17,7 @@ import { readPendingWorker, readReport, takeWorkerRestore as takeOwnedWorkerRest
 import { BackupService } from '../../../server/backup/service.js';
 import { decryptBackup } from '../../../server/backup/crypto.js';
 import { SecretService } from '../../../server/secrets/service.js';
+import { secretService } from '../../helpers/secrets.js';
 import { SecretStore } from '../../../server/triggers/secrets.js';
 import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
 import type { TriggerBackup } from '../../../server/triggers/backup.js';
@@ -52,7 +53,7 @@ const read = async (stateDir: string, name: string) => name === 'trigger-engine.
   ? serializeState(await (await workerSettingsFixture(stateDir)).triggerState()) : sqlFile(name)
   ? JSON.stringify(await (await workerSettingsFixture(stateDir)).read(name)) : readFile(join(stateDir, name), 'utf8');
 const mode = async (path: string) => (await stat(path)).mode & 0o777;
-async function vault(stateDir: string) { const service = new SecretService({ stateDir }); await service.start(); await service.initialize(VAULT_PASSWORD); return service; }
+async function vault(stateDir: string) { const service = await secretService(stateDir, { password: VAULT_PASSWORD }); return service; }
 
 async function backupService(t: TestContext, stateDir: string) {
   const store = (value: unknown) => ({ backupValue: () => structuredClone(value), restore: async () => undefined });
@@ -406,7 +407,7 @@ test('restore matrix: plaintext and Vault backups onto computers with and withou
   assert.equal(vaultIntoNone.report.status, 'waiting-worker');
   assert.deepEqual(vaultIntoNone.kinds, ['vault', 'legacy']);
   assert.equal(vaultIntoNone.pendingWorker!.triggers, undefined);
-  const none = new SecretService({ stateDir: vaultIntoNone.target }); await none.start();
+  const none = await secretService(vaultIntoNone.target);
   for (const id of vaultIntoNone.report.pendingSecretImports!) await assert.rejects(importPendingSecret(vaultIntoNone.target, id, VAULT_PASSWORD, none), /Unlock the target Vault/);
   assert.deepEqual((await listPendingSecretImports(vaultIntoNone.target)).sort(), [...vaultIntoNone.report.pendingSecretImports!].sort(), 'nothing changed meanwhile');
   for (const result of [noVault, intoVault, vaultIntoVault, vaultIntoNone]) assert.equal(JSON.stringify(result.pendingWorker ?? {}).includes('LEGACY_CANARY'), result === noVault, 'plaintext only on the path that never had a Vault');

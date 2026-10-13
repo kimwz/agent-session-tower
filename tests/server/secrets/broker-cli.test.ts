@@ -8,6 +8,7 @@ import type { SecretContext, SecretMetadata, SecretOperation, SecretRunInput } f
 import { SecretBroker, maskSecretOutput } from '../../../server/secrets/broker.js';
 import { parseSecretCli, runSecretsCommand } from '../../../server/secrets/cli.js';
 import { SecretService } from '../../../server/secrets/service.js';
+import { secretService } from '../../helpers/secrets.js';
 import type { RemoteSecretBroker } from '../../../server/secrets/remote.js';
 
 const canary = 'SYNTHETIC-sensitive-canary-42';
@@ -119,7 +120,7 @@ test('revocation and lock during staging prevent spawn and temp files are still 
   for (const reason of ['revoke', 'lock']) {
     const f = await fixture();
     try {
-      const ref = f.add(canary, 'file'); const marker = join(f.root, 'executed');
+    const ref = f.add(canary, 'file'); const marker = join(f.root, 'executed');
       f.onResolve(count => { if (count === 2) { if (reason === 'revoke') f.denied.add(ref); else f.locked(true); } });
       const input = command(`require('fs').writeFileSync(process.argv[1],'executed')`, { files: { KEY: ref } }); input.args!.push(marker);
       const result = await new SecretBroker({ stateDir: f.stateDir, service: f.service }).run(f.context, input);
@@ -194,9 +195,8 @@ test('standalone CLI refuses missing/forged capability and never derives auth fr
 });
 
 test('encrypted domain fixture denies forged task and revoked policy through the actual broker', async () => {
-  const f = await fixture(); const service = new SecretService({ stateDir: f.stateDir });
+  const f = await fixture(); const service = await secretService(f.stateDir, { password: 'fixture-strong-password-42' });
   try {
-    await service.start(); await service.initialize('fixture-strong-password-42');
     const target = await service.ensureTask('fixture-session', f.root), context = { ...target, runId: 'owner-run' };
     const metadata = await service.create({ name: 'fixture-token', kind: 'scalar', scope: 'global', value: canary, target, connect: true, operations: ['env', 'discover', 'compare', 'fingerprint'] });
     const broker = new SecretBroker({ stateDir: f.stateDir, service });
@@ -215,9 +215,8 @@ test('encrypted domain fixture denies forged task and revoked policy through the
 });
 
 test('final dispatch denies local changes completed while a later remote reference is reauthorized', { timeout: 20000 }, async () => {
-  const f = await fixture(); let now = Date.now(); const service = new SecretService({ stateDir: f.stateDir, now: () => now });
+  const f = await fixture(); let now = Date.now(); const service = await secretService(f.stateDir, { password: 'fixture-dispatch-password-42', now: () => now });
   try {
-    await service.start(); await service.initialize('fixture-dispatch-password-42');
     for (const mode of ['revoke', 'policy', 'expiry', 'rotation', 'fields'] as const) {
       const target = await service.ensureTask(`dispatch-${mode}`, f.root), context = { ...target, runId: `run-${mode}` };
       const local = await service.create({ name: `local-${mode}`, kind: mode === 'fields' ? 'env' : 'scalar', scope: 'task', target, connect: true,
@@ -249,9 +248,8 @@ test('final dispatch denies local changes completed while a later remote referen
 });
 
 test('final dispatch checks every remote reference recipient exclusion after the last remote await', async () => {
-  const f = await fixture(), service = new SecretService({ stateDir: f.stateDir });
+  const f = await fixture(), service = await secretService(f.stateDir, { password: 'fixture-recipient-dispatch-password' });
   try {
-    await service.start(); await service.initialize('fixture-recipient-dispatch-password');
     const target = await service.ensureTask('recipient-dispatch', f.root), context = { ...target, runId: 'recipient-run' };
     const first = 'tower-secret://remote/first@1', second = 'tower-secret://remote/second@1'; let secondRequests = 0;
     const remote = { request: async (_host: string, _context: SecretContext, _operation: string, payload: { reference: string }) => {
@@ -267,12 +265,11 @@ test('final dispatch checks every remote reference recipient exclusion after the
 });
 
 test('owner revocation commits while a dispatched consumer is still running', async () => {
-  const f = await fixture(), service = new SecretService({ stateDir: f.stateDir });
+  const f = await fixture(), service = await secretService(f.stateDir, { password: 'fixture-dispatch-queue-password' });
   let finish!: () => void; const consumer = new Promise<void>(resolve => { finish = resolve; });
   let timer: NodeJS.Timeout | undefined;
   let dispatch: ReturnType<SecretService['dispatch']> | undefined, revoke: Promise<void> | undefined;
   try {
-    await service.start(); await service.initialize('fixture-dispatch-queue-password');
     const target = await service.ensureTask('dispatch-queue', f.root), context = { ...target, runId: 'dispatch-queue-run' };
     const secret = await service.create({ name: 'queue key', kind: 'scalar', scope: 'task', target, connect: true, value: canary, operations: ['env'] });
     const value = await service.resolve(context, secret.reference, 'env');
@@ -323,9 +320,8 @@ test('compare and domain fingerprint disclose only their derived result', async 
 });
 
 test('comparison denies local authority changes committed while resolving its remote operand', { timeout: 20000 }, async () => {
-  const f = await fixture(); let now = Date.now(); const service = new SecretService({ stateDir: f.stateDir, now: () => now });
+  const f = await fixture(); let now = Date.now(); const service = await secretService(f.stateDir, { password: 'fixture-compare-authority-password', now: () => now });
   try {
-    await service.start(); await service.initialize('fixture-compare-authority-password');
     for (const mode of ['revoke', 'policy', 'expiry', 'rotation', 'fields'] as const) {
       const target = await service.ensureTask(`compare-${mode}`, f.root), context = { ...target, runId: `compare-run-${mode}` };
       const local = await service.create({ name: `compare-${mode}`, kind: mode === 'fields' ? 'env' : 'scalar', scope: 'task', target, connect: true,
@@ -349,9 +345,8 @@ test('comparison denies local authority changes committed while resolving its re
 });
 
 test('comparison checks the earlier remote operand recipient exclusion after resolving the later operand', async () => {
-  const f = await fixture(), service = new SecretService({ stateDir: f.stateDir });
+  const f = await fixture(), service = await secretService(f.stateDir, { password: 'fixture-compare-recipient-password' });
   try {
-    await service.start(); await service.initialize('fixture-compare-recipient-password');
     const target = await service.ensureTask('compare-recipient', f.root), context = { ...target, runId: 'compare-recipient-run' };
     const first = 'tower-secret://remote/first@1', second = 'tower-secret://remote/second@1';
     const remote = { request: async (_host: string, _context: SecretContext, _operation: string, payload: { reference: string }) => {

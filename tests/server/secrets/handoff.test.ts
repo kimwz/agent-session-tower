@@ -4,10 +4,8 @@ import { mkdtemp, mkdir, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { SecretService } from '../../../server/secrets/service.js';
 import { SecretRuntime } from '../../../server/secrets/runtime.js';
-import type { Run, Session } from '../../../shared/types.js';
-import type { SessionOrigin } from '../../../server/runs/origin.js';
+import { FixtureRuns, secretService } from '../../helpers/secrets.js';
 
 const PASSWORD = 'fixture-handoff-password';
 const CANARY = 'HANDOFF_VALUE_CANARY_8172';
@@ -16,19 +14,12 @@ async function fixture(t: TestContext) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'tower-secret-handoff-'))); t.after(() => rm(directory, { recursive: true, force: true }));
   const stateDir = join(directory, 'state'), root = join(directory, 'project');
   await Promise.all([stateDir, root].map(path => mkdir(path)));
-  const service = new SecretService({ stateDir }); await service.start(); await service.initialize(PASSWORD);
+  const service = await secretService(stateDir, { password: PASSWORD });
   const target = await service.ensureTask('codex:session-a', root);
   await service.create({ name: 'API_KEY', kind: 'scalar', scope: 'global', value: CANARY, allProjects: true, target, activation: 'manual', connect: true });
   /** The next worker's view of the same state folder: it starts locked, as every worker does. */
-  const successor = async () => { const next = new SecretService({ stateDir }); await next.start(); return next; };
+  const successor = () => secretService(stateDir);
   return { directory, stateDir, root, service, target, successor };
-}
-
-class FixtureRuns {
-  readonly sessions = new Map<string, Session>();
-  add(id: string, root: string) { const at = new Date().toISOString(); this.sessions.set(id, { id, nativeId: id.slice(6), provider: 'codex', title: 'fixture', cwd: root, project: 'fixture', status: 'idle', statusReason: '', createdAt: at, updatedAt: at, lastMessage: '', messageCount: 0, isSubagent: false, resumable: true }); }
-  list(): Run[] { return []; } getSession(id: string) { return this.sessions.get(id); }
-  sessionOrigin(_id: string): SessionOrigin { return { kind: 'owner', untrustedInput: false }; }
 }
 
 test('an open vault handed to the next worker opens it without the password, with its tasks and connections', async t => {
@@ -84,7 +75,7 @@ test('a handoff that does not open this very vault leaves it locked', async t =>
 test('adopting a handoff completes it like a password unlock: archives made while locked are applied', async t => {
   const f = await fixture(t);
   const carry = f.service.handoff()!;
-  const runs = new FixtureRuns(); runs.add('codex:session-a', f.root);
+  const runs = new FixtureRuns(); runs.session('codex:session-a', f.root);
   // The successor starts locked; the owner archives the session before the vault is open.
   const next = await f.successor();
   const runtime = new SecretRuntime({ stateDir: f.stateDir, service: next, runs }); t.after(() => runtime.close());

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { kindOf } from '../../../shared/errors.js';
 import { SecretService } from '../../../server/secrets/service.js';
+import { secretService } from '../../helpers/secrets.js';
 import { SecretRuntime } from '../../../server/secrets/runtime.js';
 
 const password = 'fixture-rule-edit-password-1234';
@@ -12,7 +13,7 @@ const password = 'fixture-rule-edit-password-1234';
 async function vault(t: { after: (fn: () => Promise<void>) => void }, now = () => Date.now()) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-secret-rule-edit-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const service = new SecretService({ stateDir: directory, now }); await service.start(); await service.initialize(password);
+  const service = await secretService(directory, { password, now });
   const hostId = service.device().id; const project = await service.project({ name: 'fixture', bindings: [{ hostId, root: '/fixture' }] });
   return { directory, service, hostId, project };
 }

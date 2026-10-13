@@ -4,11 +4,12 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SecretService } from '../../../server/secrets/service.js';
+import { secretService } from '../../helpers/secrets.js';
 
 const password = 'owner-connect-fixture-password';
 async function fixture(run: (service: SecretService, setTime: (time: number) => void) => Promise<void>) {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-owner-connect-')); let now = 1000;
-  try { const service = new SecretService({ stateDir, now: () => now }); await service.start(); await service.initialize(password); await run(service, time => { now = time; }); }
+  try { const service = await secretService(stateDir, { password, now: () => now }); await run(service, time => { now = time; }); }
   finally { await rm(stateDir, { recursive: true, force: true }); }
 }
 test('owner can click a saved global key in another project without giving other sessions automatic access', async () => fixture(async service => {

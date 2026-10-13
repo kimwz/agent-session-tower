@@ -5,31 +5,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { createHash, randomUUID } from 'node:crypto';
-import { SecretService } from '../../../server/secrets/service.js';
+import { createHash } from 'node:crypto';
 import { SecretRuntime } from '../../../server/secrets/runtime.js';
 import { MAX_SECRET_BYTES, type SecretContext, type SecretMetadata, type SecretOverview, type SecretRunResult } from '../../../shared/secrets.js';
-import type { Run, Session, Snapshot } from '../../../shared/types.js';
-import type { SessionOrigin } from '../../../server/runs/origin.js';
-import type { Capability } from '../../../server/api/mcp.js';
+import type { Snapshot } from '../../../shared/types.js';
 import { createMonitorServer, type Backend } from '../../../server/http/server.js';
 import { createRemoteRouter } from '../../../server/remote/router.js';
 import { RemoteExclusionStore } from '../../../server/remote/exclusions.js';
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
+import { FixtureRuns, secretService } from '../../helpers/secrets.js';
 const VISIBLE = 'VISIBLE_INTEGRATION_CANARY_732';
 const HIDDEN = 'HIDDEN_INTEGRATION_CANARY_928';
 const PASSWORD = 'fixture-integration-vault-password';
-class FixtureRuns {
-  readonly sessions = new Map<string, Session>(); readonly running: Run[] = [];
-  add(root: string): Extract<Capability, { kind: 'secret-run' }> {
-    const sessionId = `codex:${randomUUID()}`; const runId = randomUUID(); const at = new Date().toISOString();
-    this.sessions.set(sessionId, { id: sessionId, nativeId: sessionId.slice(6), provider: 'codex', title: 'fixture', cwd: root, project: 'fixture', status: 'working', statusReason: '', createdAt: at, updatedAt: at, lastMessage: '', messageCount: 0, isSubagent: false, resumable: true });
-    this.running.push({ id: runId, sessionId, prompt: 'fixture owner task', status: 'running', createdAt: at, startedAt: at, output: '', origin: { kind: 'owner' }, towerTools: 'attached' });
-    return { kind: 'secret-run', runId, sessionId };
-  }
-  list() { return this.running; } getSession(id: string) { return this.sessions.get(id); }
-  sessionOrigin(_id: string): SessionOrigin { return { kind: 'owner', untrustedInput: false }; }
-}
 async function storedText(directory: string): Promise<string> {
   let text = '';
   for (const entry of await readdir(directory, { withFileTypes: true })) text += entry.isDirectory() ? await storedText(join(directory, entry.name)) : await readFile(join(directory, entry.name), 'utf8');
@@ -38,7 +25,7 @@ async function storedText(directory: string): Promise<string> {
 async function pair(t: TestContext) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-secret-integration-'))); t.after(() => rm(root, { recursive: true, force: true }));
   const stateA = join(root, 'state-a'), stateB = join(root, 'state-b'), projectA = join(root, 'project-a'), projectB = join(root, 'project-b'); await Promise.all([stateA, stateB, projectA, projectB].map(path => mkdir(path)));
-  let now = Date.now(); const a = new SecretService({ stateDir: stateA, now: () => now }), b = new SecretService({ stateDir: stateB }); await a.start(); await b.start(); await a.initialize(PASSWORD); await b.initialize(PASSWORD);
+  let now = Date.now(); const a = await secretService(stateA, { password: PASSWORD, now: () => now }), b = await secretService(stateB, { password: PASSWORD });
   const runsA = new FixtureRuns(), runsB = new FixtureRuns(); const capB = runsB.add(projectB);
   const source = new SecretRuntime({ stateDir: stateA, service: a, runs: runsA }); const recipient = new SecretRuntime({ stateDir: stateB, service: b, runs: runsB }); t.after(() => { source.close(); recipient.close(); });
   await source.control('trust', { device: b.device(), direction: 'node', routeId: 'node-b' }); await recipient.control('trust', { device: a.device(), direction: 'controller', routeId: 'controller-a' });
@@ -151,7 +138,7 @@ test('two encrypted vaults deliver an exact 1MiB remote file through a bounded s
 
 const snapshot: Snapshot = { sessions: [], runs: [], providers: [], scanning: false, hostname: 'fixture', version: 'fixture', updatedAt: '' };
 test('owner HTTP secret API requires sign-in and page token; generic remote router exposes no secret management', { timeout: 15000 }, async t => {
-  const stateDir = await mkdtemp(join(tmpdir(), 'tower-secret-http-integration-')); t.after(() => rm(stateDir, { recursive: true, force: true })); const service = new SecretService({ stateDir }); await service.start(); const runtime = new SecretRuntime({ stateDir, service, runs: new FixtureRuns() }); t.after(() => runtime.close());
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-secret-http-integration-')); t.after(() => rm(stateDir, { recursive: true, force: true })); const service = await secretService(stateDir); const runtime = new SecretRuntime({ stateDir, service, runs: new FixtureRuns() }); t.after(() => runtime.close());
   const auth = await createRemoteAuthFixture(stateDir); const masterSecret = 'a'.repeat(64); let secretCalls = 0;
   const backend: Backend = { snapshot: () => snapshot, detail: async () => undefined, enqueue: async () => { throw new Error('No native provider may run in this fixture'); }, cancel: async () => {}, subscribe: () => () => {}, secrets: async (action, input) => { secretCalls++; return runtime.control(action, input); } };
   const monitor = createMonitorServer({ port: 0, clientDir: stateDir, auth: auth.auth, remote: { origins: auth.origins }, backend, master: { callerSecret: masterSecret, handle: async () => false } });

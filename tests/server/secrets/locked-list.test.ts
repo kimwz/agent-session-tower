@@ -4,13 +4,10 @@ import { mkdtemp, mkdir, readFile, rm, realpath, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { SecretService } from '../../../server/secrets/service.js';
 import { SecretRuntime } from '../../../server/secrets/runtime.js';
+import { FixtureRuns, secretService } from '../../helpers/secrets.js';
 import { SECRET_LOCKED_UNINDEXED, SECRET_LOCKED_USE, SECRET_NO_VAULT } from '../../../server/secrets/notices.js';
 import type { SecretContext, SecretMetadata } from '../../../shared/secrets.js';
-import type { Run, Session } from '../../../shared/types.js';
-import type { Capability } from '../../../server/api/mcp.js';
-import type { SessionOrigin } from '../../../server/runs/origin.js';
 import { statusOf } from '../../../shared/errors.js';
 
 const PASSWORD = 'fixture-locked-list-password';
@@ -21,14 +18,14 @@ async function fixture(t: TestContext) {
   const stateDir = join(directory, 'state'), root = join(directory, 'project'), other = join(directory, 'other');
   await Promise.all([stateDir, root, other].map(path => mkdir(path)));
   let now = Date.now(); const clock = { advance: (ms: number) => { now += ms; } };
-  const service = new SecretService({ stateDir, now: () => now }); await service.start(); await service.initialize(PASSWORD);
+  const service = await secretService(stateDir, { password: PASSWORD, now: () => now });
   const host = service.device().id;
   const project = await service.project({ name: 'fixture', bindings: [{ hostId: host, root }] });
   const otherProject = await service.project({ name: 'other', bindings: [{ hostId: host, root: other }] });
   const startedAt = new Date(now).toISOString();
   const target = await service.bindRun('codex:session-a', root, startedAt);
   const context: SecretContext = { ...target, runId: 'run-a' };
-  return { now: () => now, stateDir, root, service, host, project, otherProject, target, context, startedAt, clock, restart: async () => { const next = new SecretService({ stateDir, now: () => now }); await next.start(); return next; } };
+  return { now: () => now, stateDir, root, service, host, project, otherProject, target, context, startedAt, clock, restart: () => secretService(stateDir, { now: () => now }) };
 }
 
 /** Every rule shape that decides discovery or operations, so locked and unlocked evaluation are held to one outcome. */
@@ -121,18 +118,6 @@ test('a failed index write never leaves an older index listing names, in memory 
   assert.equal((await f.restart()).lockedList(f.target.sessionId, f.root, f.startedAt, f.target), undefined, 'an index from an earlier save is not trusted');
 });
 
-class FixtureRuns {
-  readonly sessions = new Map<string, Session>(); readonly running: Run[] = [];
-  add(root: string, sessionId = `codex:${randomUUID()}`): Extract<Capability, { kind: 'secret-run' }> {
-    const runId = randomUUID(); const at = new Date().toISOString();
-    this.sessions.set(sessionId, { id: sessionId, nativeId: sessionId.slice(6), provider: 'codex', title: 'fixture', cwd: root, project: 'fixture', status: 'working', statusReason: '', createdAt: at, updatedAt: at, lastMessage: '', messageCount: 0, isSubagent: false, resumable: true });
-    this.running.push({ id: runId, sessionId, prompt: 'fixture owner task', status: 'running', createdAt: at, startedAt: at, output: '', origin: { kind: 'owner' }, towerTools: 'attached' });
-    return { kind: 'secret-run', runId, sessionId };
-  }
-  list() { return this.running; } getSession(id: string) { return this.sessions.get(id); }
-  sessionOrigin(_id: string): SessionOrigin { return { kind: 'owner', untrustedInput: false }; }
-}
-
 test('locked tools list names and turn any use into an unlock request; ineligible runs are still refused', async t => {
   const f = await fixture(t); await scenario(f);
   const runs = new FixtureRuns(); const runtime = new SecretRuntime({ stateDir: f.stateDir, service: f.service, runs }); t.after(() => runtime.close());
@@ -176,7 +161,7 @@ test('without an index the locked list says names are unknown, and a vault-less 
   assert.deepEqual(names(listed.secrets), ['AFTER_UPGRADE']);
 
   const emptyState = join(f.stateDir, '..', 'empty-state'); await mkdir(emptyState);
-  const empty = new SecretService({ stateDir: emptyState }); await empty.start();
+  const empty = await secretService(emptyState);
   const emptyRuntime = new SecretRuntime({ stateDir: emptyState, service: empty, runs }); t.after(() => emptyRuntime.close());
   assert.deepEqual((await emptyRuntime.tool(capability, 'secrets_list', {}) as { secrets: unknown[] }).secrets, []);
   await assert.rejects(emptyRuntime.tool(capability, 'secrets_run', { operationId: 'no-vault', command: process.execPath, env: { KEY: 'NAME' } }), (error: Error) => statusOf(error) === 404 && error.message === SECRET_NO_VAULT);
