@@ -117,7 +117,8 @@ export class PermissionContinuations {
     if (approved && continuation.status === 'queued') { await this.checkUserMessage(continuation); await this.host.flush(); }
     // Persisted intent precedes any notice. A failed/uncertain insert never becomes a separate native turn.
     if (!stopped && target.status === 'running' && !this.host.stopping() && (!approved || continuation.status === 'queued')) {
-      const notice: Run = { id: randomUUID(), sessionId: target.sessionId, origin: target.origin ?? { kind: 'unknown' }, ...(target.brokerOwnerAuthorized === true ? { brokerOwnerAuthorized: true } : {}),
+      // The turn's own origin and delegation: an insert goes only into a turn of the same authority (RunManager.steering).
+      const notice: Run = { id: randomUUID(), sessionId: target.sessionId, origin: target.origin ?? { kind: 'unknown' }, ...(target.delegation ? { delegation: { ...target.delegation } } : {}),
         prompt: `${TOWER_NOTICE} [Permission decision ${request.id}] ${approved ? 'The permission rule was approved and applies from the next provider turn. Bring the current step to a safe stopping point and end this turn normally. Tower will resume unfinished work in a fresh turn; do not repeat completed actions.' : prompt}`,
         status: 'queued', createdAt: now, output: '', permissionNotice: { targetRunId: target.id } };
       this.host.runs.set(notice.id, notice); this.host.admit(notice.id); this.host.changed(notice); await this.host.flush(); this.host.unadmit(notice.id);

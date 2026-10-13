@@ -84,8 +84,8 @@ export interface PermissionServiceOptions {
    * another (a development or test Tower) would replace that Tower's rules.
    */
   globalCodex?: boolean;
-  /** Sends the owner's decision to the requesting conversation as the owner's next message. */
-  resume?(sessionId: string, prompt: string): Promise<void>;
+  /** Sends the owner's decision to the requesting conversation (`request.sessionId`) as its next message. */
+  resume?(request: PermissionRequest, prompt: string): Promise<void>;
   /** Like resume, for a decided request; `undelivered` runs if a notice that seemed handed over never reaches the turn. */
   decision?(request: PermissionRequest, prompt: string, options: { undelivered(): void }): Promise<unknown>;
   /** Why the reviewer may not decide requests from this conversation (a public agent's, for one); undefined when it may. */
@@ -773,7 +773,7 @@ export class PermissionService {
     // The decision stands whether or not the conversation can take a message now.
     // A run's own message comes with its result; a refused run is said now.
     if (run) return { ...this.overview(), ...extra };
-    const note = await (request.rule.kind === 'run' ? this.requireEffects().then(() => this.options.resume?.(request.sessionId, decisionMessage(request.rule, rule))) : this.deliverNotification(request.id)).then(() => undefined, error => error instanceof Error ? error.message : String(error));
+    const note = await (request.rule.kind === 'run' ? this.requireEffects().then(() => this.options.resume?.(structuredClone(request), decisionMessage(request.rule, rule))) : this.deliverNotification(request.id)).then(() => undefined, error => error instanceof Error ? error.message : String(error));
     return { ...this.overview(), ...extra, resumed: note ? { error: note } : { sent: true } };
   }
 
@@ -796,7 +796,7 @@ export class PermissionService {
       if (notify) await notify(structuredClone(request), request.notification.message, { undelivered: () => {
         void this.reopenForOwner(id, UNDELIVERED).catch(error => console.error(`Permission request could not go back to the owner: ${error instanceof Error ? error.message : String(error)}`));
       } });
-      else if (this.options.resume) await this.options.resume(request.sessionId, request.notification.message);
+      else if (this.options.resume) await this.options.resume(structuredClone(request), request.notification.message);
       else return;
       {
         const batch = new PermissionBatch(this.state);

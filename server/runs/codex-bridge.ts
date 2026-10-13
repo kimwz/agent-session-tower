@@ -17,8 +17,6 @@ export interface CodexBridgeOptions {
   threadId: string;
   runId: string;
   prompt: string;
-  /** Internal synchronous broker boundary check after native discovery, before submitting input. */
-  validateBeforeSubmit?(): void;
   imagePaths?: readonly string[];
   model?: string;
   effort?: string;
@@ -196,7 +194,6 @@ class BridgeRun implements CodexBridgeRun {
 
   async steer(input: SteeringInput): Promise<void> {
     if (!this.canSteer()) throw new SteeringError('There is no active owned Codex turn available for steering.', 'rejected');
-    try { input.validate?.(); } catch (error) { throw new SteeringError(message(error), 'rejected'); }
     const turnId = this.turnId!;
     this.steeringPending = true;
     try {
@@ -235,7 +232,6 @@ class BridgeRun implements CodexBridgeRun {
       catch { this.reviewerNotice = '[Tower] The Codex app did not accept Auto approval review. Approval requests will wait for you in the Codex app.\n'; }
       if (this.cancelRequested || this.settled) { this.finish({ status: 'cancelled' }); return; }
     }
-    this.options.validateBeforeSubmit?.();
     this.submitted = true;
     const added = await this.rpc.request<{ queuedSubmission: { id: string; clientUserMessageId: string } }>('thread/queue/add', {
       threadId: this.options.threadId, clientUserMessageId: this.options.runId,
@@ -347,7 +343,6 @@ class BridgeRun implements CodexBridgeRun {
       const state = await this.rpc.request<{ thread: { status: { type: string } } }>('thread/read', { threadId: this.options.threadId, includeTurns: false });
       if (this.settled || this.turnId || this.cancelRequested || this.withdrawing || state.thread.status.type === 'active') return;
       try {
-        this.options.validateBeforeSubmit?.();
         const started = await this.rpc.request<{ turn: Turn }>('thread/queue/start', { threadId: this.options.threadId, queuedSubmissionId: this.queueId });
         if (!this.settled) this.acceptTurn(started.turn);
       } catch (error) {

@@ -7,7 +7,6 @@ import { openSettings } from '../settings/settings-open';
 import type { SecretChange } from './SecretAccess';
 import { SecretPaste } from './SecretPaste';
 import { SecretAvailable, SecretSessionState } from './SecretAvailable';
-import { SecretBrokerApproval } from './SecretBrokerApproval';
 import { SecretSessionPoller } from './session-poller';
 import { postSecret, readSecretSession, secretFailure, secretLoadFailure, secretSession, sessionBlocked, usedSecrets } from './secrets-client';
 
@@ -120,8 +119,6 @@ export function SecretChatDialog({ state, tab }: { state: ComposerSecrets; tab: 
         <SecretPaste view={view} sessionId={state.sessionId} cwd={state.cwd} busy={state.busy} change={state.change} onConnected={() => { setConnected(true); state.show('available'); }} />
       </> : <>
         {connected && <p role="status" className="secret-notice-line">{t('이 세션에 연결했습니다.')}</p>}
-        {/* Kept until the broker approval is removed (PR2). */}
-        <SecretBrokerApproval token={state.token} sessionId={state.sessionId} onChanged={state.reload} onManage={() => manage()} />
         {view ? <SecretAvailable view={view} busy={state.busy} change={state.change} onPaste={() => choose('paste')} onSharing={manage} /> : !state.error && <p role="status">{t('불러오는 중…')}</p>}
       </>}
     </div>

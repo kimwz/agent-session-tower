@@ -37,7 +37,14 @@ export interface RunnerSnapshot {
   coordinators?: string[];
   /** While the owner's forced update waits for running turns to wrap up. */
   updateDrain?: UpdateDrainStatus;
+  /**
+   * Secret uses the reviewer refused lately, for the web's owner notifications only; never part of a page or peer view.
+   * Absent from workers that predate it and while none were refused.
+   */
+  secretBlocks?: SecretBlockNotice[];
 }
+/** One refused secret use: the owner is told once per `key`, with the session and the reason. Values never appear. */
+export interface SecretBlockNotice { key: string; sessionId: string; at: number; reason: string; secrets: string[] }
 export interface UpdateDrainStatus { startedAt: string; deadline: string; running: number }
 /** How long a forced update lets running turns wrap up before stopping them. */
 export const FORCE_UPDATE_DEADLINE_MS = 10 * 60 * 1000;

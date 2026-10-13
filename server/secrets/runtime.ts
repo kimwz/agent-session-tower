@@ -1,21 +1,22 @@
 import { createHash, createPublicKey, randomUUID } from 'node:crypto';
-import { realpathSync } from 'node:fs';
 import { realpath, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { Run, Session } from '../../shared/types.js';
-import type { SecretAvailable, SecretBrokerAccess, SecretBrokerApproval, SecretContext, SecretDevice, SecretDisconnected, SecretMetadata, SecretPeer, SecretSessionError, SecretSessionView, SecretSettingsView, SecretTarget, SecretUsage, VaultStatus } from '../../shared/secrets.js';
+import type { SecretAvailable, SecretContext, SecretSubjectMode, SecretDevice, SecretDisconnected, SecretMetadata, SecretPeer, SecretSessionError, SecretSessionView, SecretSettingsView, SecretTarget, SecretUsage, VaultStatus } from '../../shared/secrets.js';
 import { SECRET_OPERATIONS } from '../../shared/secrets.js';
 import type { Capability } from '../api/mcp.js';
 import type { SessionOrigin } from '../runs/origin.js';
 import { callWorkerTools, serveToolBridge } from '../mcp/stdio.js';
-import { inMasterFolder } from '../runs/subscription.js';
+import { secretSubject, type KnownRun, type SecretStage, type SecretSubject } from './access.js';
 import { SecretBroker, remoteListing } from './broker.js';
 import { parseSecretCli } from './cli.js';
 import { parseDotenv } from './dotenv.js';
 import { RemoteSecretBroker, wireMetadata, type RemoteSecretRequest, type RemoteSecretResponse } from './remote.js';
 import { ownerConnection, ownerCreate, ownerInput, ownerSession, ownerSharingChange, secretUsage, VIEW_USAGE } from './owner-input.js';
 import { SecretService } from './service.js';
+import type { SecretUseReviewer } from './reviewer.js';
+import type { SecretBlockNotice } from '../runs/runner-protocol.js';
 import { SECRET_LOCKED_LIST, SECRET_LOCKED_UNINDEXED, SECRET_LOCKED_USE, SECRET_NO_VAULT, SECRET_USE_INSTRUCTIONS } from './notices.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { TowerError, kindOf, type ErrorKind } from '../../shared/errors.js';
@@ -44,10 +45,11 @@ export const SECRET_TOOLS = Object.entries(schemas).map(([name, input]) => {
 const SESSION_ERRORS = ['uninitialized', 'locked', 'not-eligible', 'session-closed', 'source-unavailable', 'worker-update-pending'] as const satisfies readonly SecretSessionError[];
 /** Errors that stay until the owner does something; the page stops polling on them. */
 const PERMANENT: ReadonlySet<SecretSessionError> = new Set(['uninitialized', 'not-eligible', 'session-closed']);
-const BROKER_ACTIONS = new Set(['broker-access', 'approve-broker', 'revoke-broker']);
 const MUTATIONS = new Set(['create', 'update', 'remove', 'sharing', 'session-connect', 'session-disconnect', 'session-reallow', 'trust', 'untrust']);
 /** How long a session view waits for a source's answer before listing it as unavailable. */
 const VIEW_REMOTE_MS = 5000;
+/** How long a refused use stays in the worker's report for the owner's notice; the web announces each once. */
+const BLOCK_NOTICE_MS = 60 * 60_000;
 const taskId = z.string().regex(/^[a-f0-9-]{36}$/);
 /** A joined computer's session as its web verified it: the task an owner change applies to. */
 const remoteTarget = z.object({ hostId: z.string().min(1).max(256), sessionId: z.string().min(1).max(512), root: z.string().min(1).max(8192), taskId, projectId: z.string().optional() });
@@ -62,7 +64,7 @@ const remoteSubject = z.union([z.object({ error: z.enum(SESSION_ERRORS) }).stric
 export type RemoteSessionSubject = z.output<typeof remoteSubject>;
 /** A committed owner change for a joined computer's session, which its web announces there before reading the view. */
 export interface SecretReceipt { connectedTarget: SecretTarget }
-export type SecretControlResult = SecretSettingsView | SecretSessionView | SecretBrokerAccess | SecretReceipt | { fields: string[] };
+export type SecretControlResult = SecretSettingsView | SecretSessionView | SecretReceipt | { fields: string[] };
 const closedView = (status: VaultStatus, error: SecretSessionError): SecretSessionView => ({ status, available: [], connectable: [], usage: [], unavailableSources: [], updatePendingSources: [], error, permanent: PERMANENT.has(error) });
 const closureId = (sessionId: string) => createHash('sha256').update('tower-secret-session-close-v1:' + sessionId).digest('hex');
 interface Runs { list(): Run[]; getSession(id: string): Session | undefined; sessionOrigin(id: string): SessionOrigin | undefined }
@@ -85,6 +87,12 @@ export class SecretRuntime {
     isClosed?: (id: string) => Promise<boolean>;
     /** Explicit chat assignment only; owner input and secret material never reach the callback. */
     onConnect?: (sessionId: string) => void;
+    /** Reviews each use of a session the owner did not open before its values are resolved. */
+    reviewer?: Pick<SecretUseReviewer, 'review' | 'inFlight'>;
+    /** The worker's effects gate; reviewed uses check it after their review and before their consumer starts. */
+    effects?: () => Promise<void>;
+    /** Its synchronous part (no hold now), checked inside the turn that starts a reviewed use's consumer. */
+    effectsReady?: () => boolean;
   }) {
     const service = options.service;
     const accepted = new Map<string, SecretContext>();
@@ -111,10 +119,16 @@ export class SecretRuntime {
         return service.resolve(trusted, payload.reference, payload.operation);
       },
     });
-    this.broker = new SecretBroker({ stateDir: options.stateDir, service, remote: this.remote, validate: context => this.validateBrokerContext(context) });
+    this.broker = new SecretBroker({ stateDir: options.stateDir, service, remote: this.remote, validate: context => this.validateBrokerContext(context), ...(options.reviewer ? { reviewer: options.reviewer } : {}), ...(options.effects ? { effects: options.effects } : {}), ...(options.effectsReady ? { effectsReady: options.effectsReady } : {}) });
   }
   initialized(): boolean { return this.options.service.status().initialized; }
-  inFlight(): boolean { return this.housekeeping > 0 || this.broker.inFlight() || this.remote.inFlight() > 0 || this.remote.pending() > 0; }
+  /** A review runs inside a broker call; it is counted on its own too, so a handoff waits for it (at most its deadline). */
+  inFlight(): boolean { return this.housekeeping > 0 || this.broker.inFlight() || this.options.reviewer?.inFlight() === true || this.remote.inFlight() > 0 || this.remote.pending() > 0; }
+  /** Every use refused in the last hour, from the session usage records; the web tells the owner of each once. Empty while locked. */
+  blocks(): SecretBlockNotice[] {
+    if (this.blocked) return [];
+    return this.options.service.blocks(Date.now() - BLOCK_NOTICE_MS).map(block => ({ key: `secret-block:${block.operationId}:${block.at}`, sessionId: block.sessionId, at: block.at, reason: block.reason, secrets: block.secrets }));
+  }
   pause(): void { this.paused = true; }
   resume(): void { this.paused = false; }
   async sweep(): Promise<void> {
@@ -135,98 +149,56 @@ export class SecretRuntime {
     catch { console.warn('Tower could not queue a private secret-connection notice; credentials remain discoverable when needed.'); }
   }
 
-  private candidate(session: Session): Session & { cwd: string } {
-    const provenance = this.options.runs.sessionOrigin(session.id);
-    if (session.closed || session.node || session.master || session.creationPending || session.isSubagent || session.launchedByAgent || session.parentId || session.launchedBy || provenance?.untrustedInput !== false || provenance?.controllerId || provenance?.kind !== 'agent' || this.closedSessions.has(session.id)) throw fail('외부 입력이나 상속 없는 로컬 agent 생성 주 세션만 승인할 수 있습니다.', 'forbidden');
-    const cwd = realpathSync(session.cwd);
-    if (inMasterFolder(this.options.stateDir, session.cwd) || inMasterFolder(this.options.stateDir, cwd)) throw fail('마스터 폴더의 세션은 프로젝트 브로커 승인을 받을 수 없습니다.', 'forbidden');
-    return { ...session, cwd };
+  /** Who a session of this computer is for secret use now (see access.ts), with `run` the turn asking, if any. */
+  subject(session: Session, run: KnownRun | undefined, stage: SecretStage): SecretSubject {
+    if (this.closedSessions.has(session.id)) return { mode: 'none', reason: 'closed' };
+    const runs = this.options.runs;
+    let known: Map<string, Run> | undefined;
+    return secretSubject({ run, session, provenance: runs.sessionOrigin(session.id), stage,
+      lookup: id => { const found = runs.getSession(id); return found && { session: found, provenance: runs.sessionOrigin(id) }; },
+      findRun: id => (known ??= new Map(runs.list().map(item => [item.id, item]))).get(id) });
   }
-  /** Admission protection survives locks/root changes; it confers no secret or tool authority. */
-  brokerAdmissionRequired(session: Session | undefined): boolean {
-    if (!session) return false;
-    const known = this.options.service.brokerAdmissionRequired(session.id);
-    if (known === true || (!this.blocked && known !== undefined)) return known;
-    // An old/unavailable index or an unfinished unlock cannot establish absence of protection.
-    const provenance = this.options.runs.sessionOrigin(session.id);
-    return this.options.service.status().initialized && !session.node && !session.master && !session.isSubagent && !session.launchedByAgent && !session.parentId && !session.launchedBy && provenance?.kind === 'agent' && provenance.untrustedInput === false && !provenance.controllerId;
-  }
-  brokerApproval(session: Session | undefined): SecretBrokerApproval | undefined {
-    if (!session || this.blocked || this.options.service.status().locked) return;
-    try { const current = this.options.runs.getSession(session.id); if (!current) return; const candidate = this.candidate(current); return this.options.service.brokerApproval(candidate.id, candidate.cwd); }
-    catch (error) {
-      if (!(error instanceof TowerError)) console.warn('Tower denied broker access because the session identity could not be verified.');
-      return;
-    }
-  }
-  private async session(id: string, approvalId?: string): Promise<Session & { cwd: string }> {
+  /** A live session of this computer that may use secrets at `stage`, in its canonical folder; `run` is the turn asking, if any. */
+  private async session(id: string, run: KnownRun | undefined, stage: SecretStage): Promise<Session & { cwd: string; subject: SecretSubjectMode }> {
     const session = this.options.runs.getSession(id);
-    const provenance = session && this.options.runs.sessionOrigin(session.id);
     if (!session || session.closed || await this.options.isClosed?.(session.id) || (await this.readClosures()).includes(closureId(session.id))) throw fail('이 프로젝트 세션은 종료되었습니다.', 'forbidden');
-    if (approvalId) {
-      const candidate = this.candidate(session), approval = this.brokerApproval(candidate);
-      if (!approval || approval.id !== approvalId) throw fail('이 작업의 브로커 승인이 만료되거나 철회되었습니다.', 'forbidden');
-      return candidate;
-    }
-    if (session.isSubagent || session.launchedByAgent || session.parentId || session.launchedBy || provenance?.untrustedInput || (provenance && provenance.kind !== 'owner')) throw fail('소유자의 프로젝트 세션에서만 시크릿을 연결할 수 있습니다.', 'forbidden');
-    return { ...session, cwd: await realpath(session.cwd) };
+    const cwd = await realpath(session.cwd);
+    const subject = this.subject(session, run, stage);
+    if (subject.mode === 'none') throw fail('이 세션에서는 시크릿을 사용할 수 없습니다.', 'forbidden');
+    return { ...session, cwd, subject: subject.mode };
   }
+  /** Checked again at once before each use and consumer start: the turn still runs and its session may still use secrets. */
   private validateBrokerContext(context: SecretContext): void {
-    if (!context.brokerApprovalId) return;
+    if (this.blocked) throw fail('보관함 잠금 해제를 완료하지 못했습니다.', 'unavailable');
     const run = this.options.runs.list().find(item => item.id === context.runId);
-    if (this.blocked || !run || run.sessionId !== context.sessionId || run.status !== 'running' || run.origin?.kind !== 'owner' || run.origin.controllerId || run.brokerOwnerAuthorized !== true || run.towerTools !== 'broker-only') throw fail('이 브로커 승인은 현재 소유자 실행에서만 사용할 수 있습니다.', 'forbidden');
-    const session = this.options.runs.getSession(context.sessionId);
-    if (!session || this.candidate(session).cwd !== context.root) throw fail('승인된 프로젝트 세션이 변경되었습니다.', 'forbidden');
-    this.options.service.checkBrokerApproval(context);
+    const session = run && this.options.runs.getSession(run.sessionId);
+    if (!run || !session || run.sessionId !== context.sessionId || run.status !== 'running' || this.subject(session, run, 'use').mode === 'none') throw fail('이 시크릿 도구는 발급받은 실행 중에만 사용할 수 있습니다.', 'forbidden');
   }
-  async brokerAccess(sessionId: string): Promise<SecretBrokerAccess> {
-    const locked = this.options.service.status().locked;
-    const result: SecretBrokerAccess = { sessionId, taskId: null, eligible: false, requiresApproval: this.options.runs.sessionOrigin(sessionId)?.kind === 'agent', locked };
-    const session = this.options.runs.getSession(sessionId);
-    if (!session) return { ...result, reason: '세션을 찾을 수 없습니다.' };
-    try {
-      if (await this.options.isClosed?.(sessionId) || (await this.readClosures()).includes(closureId(sessionId))) throw fail('종료한 세션은 승인할 수 없습니다.', 'forbidden');
-      const candidate = this.candidate(session);
-      return { ...result, root: candidate.cwd, eligible: true, ...(!locked ? { taskId: this.options.service.currentTask(sessionId, candidate.cwd)?.taskId ?? null, approval: this.brokerApproval(candidate) } : {}) };
-    } catch (error) { return { ...result, reason: error instanceof TowerError ? error.message : '프로젝트 경로를 확인할 수 없습니다.' }; }
-  }
-  async target(sessionId: string): Promise<SecretTarget> {
-    const approval = this.brokerApproval(this.options.runs.getSession(sessionId));
-    const session = await this.session(sessionId, approval?.id);
-    if (approval) { const target = this.options.service.currentTask(session.id, session.cwd); if (!target || target.taskId !== approval.taskId) throw fail('승인한 작업을 찾을 수 없습니다.', 'forbidden'); return target; }
-    return this.options.service.ensureTask(session.id, session.cwd);
-  }
-  async peekTarget(sessionId: string): Promise<SecretTarget | undefined> { const session = await this.session(sessionId, this.brokerApproval(this.options.runs.getSession(sessionId))?.id); return this.options.service.currentTask(session.id, session.cwd); }
+  async target(sessionId: string): Promise<SecretTarget> { const session = await this.session(sessionId, undefined, 'issue'); return this.options.service.ensureTask(session.id, session.cwd); }
+  async peekTarget(sessionId: string): Promise<SecretTarget | undefined> { const session = await this.session(sessionId, undefined, 'issue'); return this.options.service.currentTask(session.id, session.cwd); }
   async remoteTarget(sessionId: string, create = true): Promise<SecretTarget | undefined> { return create ? this.target(sessionId) : this.peekTarget(sessionId); }
-  private async ownerRun(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<{ run: Run; session: Session & { cwd: string } }> {
+  /**
+   * The running turn a credential was issued for, and its session as it may use secrets now (see access.ts); decided again
+   * on every call, whoever started the turn and whatever other tools it has. A credential never serves another run.
+   */
+  private async runSubject(capability: Extract<Capability, { kind: 'secret-run' }>, stage: SecretStage = 'use'): Promise<{ run: Run; session: Session & { cwd: string; subject: SecretSubjectMode } }> {
     if (this.blocked) throw fail('보관함 잠금 해제를 완료하지 못했습니다.', 'unavailable');
     const run = this.options.runs.list().find(item => item.id === capability.runId);
-    if (!run || run.sessionId !== capability.sessionId || run.status !== 'running' || run.origin?.kind !== 'owner' || (capability.approvalId ? run.towerTools !== 'broker-only' || run.brokerOwnerAuthorized !== true || !!run.origin.controllerId : run.towerTools !== 'attached')) throw fail('이 시크릿 도구는 발급받은 실행 중에만 사용할 수 있습니다.', 'forbidden');
-    return { run, session: await this.session(run.sessionId, capability.approvalId) };
+    if (!run || run.sessionId !== capability.sessionId || run.status !== 'running') throw fail('이 시크릿 도구는 발급받은 실행 중에만 사용할 수 있습니다.', 'forbidden');
+    return { run, session: await this.session(run.sessionId, run, stage) };
   }
-  async authorizeCapability(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<void> {
-    const { run, session } = await this.ownerRun(capability);
-    if (capability.approvalId) {
-      const target = this.options.service.currentTask(session.id, session.cwd);
-      if (!target) throw fail('승인한 시크릿 작업이 종료되었습니다.', 'forbidden');
-      this.validateBrokerContext({ ...target, runId: run.id, brokerApprovalId: capability.approvalId });
-    }
-  }
+  /** The gate for every request: the tools are listed even before a new session's creation is confirmed; using them waits for it. */
+  async authorizeCapability(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<void> { await this.runSubject(capability, 'discover'); }
   async context(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<SecretContext> {
-    const { run, session } = await this.ownerRun(capability);
+    const { run, session } = await this.runSubject(capability);
     let target = this.runTasks.get(run.id);
-    if (!target) {
-      if (capability.approvalId) { const approval = this.brokerApproval(session); if (!approval || approval.id !== capability.approvalId) throw fail('브로커 승인이 변경되었습니다.', 'forbidden'); target = this.options.service.currentTask(session.id, session.cwd); if (!target || target.taskId !== approval.taskId) throw fail('승인한 시크릿 작업이 변경되었습니다.', 'forbidden'); }
-      else target = await this.options.service.bindRun(session.id, session.cwd, run.startedAt ?? run.createdAt);
-      this.runTasks.set(run.id, target);
-    }
+    if (!target) { target = await this.options.service.bindRun(session.id, session.cwd, run.startedAt ?? run.createdAt); this.runTasks.set(run.id, target); }
     if (target.root !== session.cwd) throw fail('실행의 프로젝트 경로가 변경되었습니다.', 'forbidden');
     const current = this.options.service.currentTask(session.id, session.cwd, target.hostId);
     // Project registration can change during a run, but its original task identity must never change.
     if (current?.taskId === target.taskId) { target = { ...target, projectId: current.projectId }; this.runTasks.set(run.id, target); }
     // list/resolve revalidate the task; a closed task is never replaced for this run.
-    const context = { ...target, runId: run.id, ...(capability.approvalId ? { brokerApprovalId: capability.approvalId } : {}) };
-    this.validateBrokerContext(context); return context;
+    return { ...target, runId: run.id, subject: session.subject };
   }
   async tool(capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>): Promise<unknown> {
     const input = schemas[name as keyof typeof schemas];
@@ -261,7 +233,7 @@ export class SecretRuntime {
   }
   /** Names stay listable while locked; using one asks the agent to get the owner's unlock. */
   private async lockedTool(capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>): Promise<unknown> {
-    const { run, session } = await this.ownerRun(capability);
+    const { run, session } = await this.runSubject(capability);
     const argv = name === 'secrets_cli' ? schemas.secrets_cli.parse(args).argv : [];
     const listing = name === 'secrets_list' || (argv[0] === 'list' && parseSecretCli(argv).kind === 'list');
     if (!this.options.service.status().initialized) { if (listing) return { secrets: [], unavailableSources: [], usage: descriptions.secrets_cli }; throw fail(SECRET_NO_VAULT, 'not-found'); }
@@ -359,12 +331,15 @@ export class SecretRuntime {
   /** Every saved secret the owner may connect to a session, shared or not; no values. */
   private connectable(): SecretMetadata[] { return this.options.service.settings().secrets.map(({ sharing: _sharing, legacy: _legacy, withheld: _withheld, ...metadata }) => metadata); }
   private recentUsage(sessionId: string): SecretUsage[] { return this.options.service.usage({ sessionId }).reverse().slice(0, VIEW_USAGE); }
-  /** The owner session a view reads, with its open task in its current folder; reads only, and says why there is none. */
-  private async viewSession(sessionId: string): Promise<{ session: Session & { cwd: string }; task?: SecretTarget } | { error: SecretSessionError }> {
+  /**
+   * The owner session a view reads, with its open task in its current folder and how a turn the owner starts there uses
+   * secrets; reads only, and says why there is none.
+   */
+  private async viewSession(sessionId: string): Promise<{ session: Session & { cwd: string; subject: SecretSubjectMode }; task?: SecretTarget } | { error: SecretSessionError }> {
     const found = this.options.runs.getSession(sessionId);
     if (!found || found.closed || this.closedSessions.has(found.id) || await this.options.isClosed?.(found.id) || (await this.readClosures()).includes(closureId(found.id))) return { error: 'session-closed' };
-    let session: Session & { cwd: string };
-    try { session = await this.session(found.id, this.brokerApproval(found)?.id); }
+    let session: Session & { cwd: string; subject: SecretSubjectMode };
+    try { session = await this.session(found.id, { origin: { kind: 'owner' }, sessionId: found.id }, 'issue'); }
     catch (error) { if (kindOf(error) === 'forbidden' || (error as NodeJS.ErrnoException).code === 'ENOENT') return { error: 'not-eligible' }; throw error; }
     const open = this.options.service.currentTask(session.id);
     return { session, ...(open?.root === session.cwd ? { task: open } : {}) };
@@ -388,7 +363,7 @@ export class SecretRuntime {
       const local = service.available(probe);
       const remote = await this.remoteAvailable(probe, task);
       const disconnected = [...(task ? service.disconnectedTemporary(task.taskId, service.exclusions(task.taskId)) : []), ...remote.disconnected];
-      return { status, available: [...local, ...remote.available], connectable: this.connectable(), usage: this.recentUsage(session.id), unavailableSources: remote.unavailable, updatePendingSources: remote.updatePending, disconnected };
+      return { status, available: [...local, ...remote.available], connectable: this.connectable(), usage: this.recentUsage(session.id), unavailableSources: remote.unavailable, updatePendingSources: remote.updatePending, disconnected, subject: session.subject };
     } catch (error) { if (service.status().locked) return closedView(service.status(), 'locked'); throw error; }
   }
   /**
@@ -464,17 +439,6 @@ export class SecretRuntime {
    */
   async control(action: string, input: Record<string, unknown>, remote?: unknown): Promise<SecretControlResult> {
     const service = this.options.service;
-    if (BROKER_ACTIONS.has(action)) {
-      if (remote !== undefined) throw fail('로컬 프로젝트 세션에서만 브로커를 승인할 수 있습니다.', 'forbidden');
-      if (action === 'broker-access') { const parsed = z.object({ sessionId: z.string().min(1).max(512) }).strict().parse(input); return this.brokerAccess(parsed.sessionId); }
-      if (service.status().locked) throw fail('시크릿 보관함을 잠금 해제한 뒤 브로커 연결을 승인하세요.', 'locked');
-      if (action === 'revoke-broker') { const parsed = z.object({ sessionId: z.string().min(1).max(512), approvalId: z.string().uuid() }).strict().parse(input); await service.revokeBroker(parsed.sessionId, parsed.approvalId); return this.brokerAccess(parsed.sessionId); }
-      const parsed = z.object({ sessionId: z.string().min(1).max(512), root: z.string().min(1).max(4096), taskId: z.string().uuid().nullable(), taskLabel: z.string().trim().min(1).max(256), ttlMs: z.number().int().positive().max(8 * 60 * 60_000) }).strict().parse(input);
-      const access = await this.brokerAccess(parsed.sessionId);
-      if (!access.eligible || access.root !== parsed.root || access.taskId !== parsed.taskId) throw fail('승인할 세션의 프로젝트 또는 작업이 변경되었습니다.', 'conflict');
-      await service.approveBroker(parsed, () => { const session = this.options.runs.getSession(parsed.sessionId); if (!session || this.candidate(session).cwd !== parsed.root) throw fail('승인할 세션이 변경되었습니다.', 'forbidden'); });
-      return this.brokerAccess(parsed.sessionId);
-    }
     if (action === 'settings') return this.settingsView();
     if (action === 'session') {
       const { sessionId, nodeId } = ownerInput(ownerSession, input);

@@ -56,12 +56,21 @@ export function continuedRunById(runs: readonly Run[], id: string | undefined): 
  * instructions it could not go without (a first turn's notes do not go on), unattended, model and effort. A permission
  * continuation also keeps the Codex reviewer its thread chose (`reviewer`).
  */
-export function inheritedRunFields(after: Run, options: { reviewer?: boolean } = {}): Pick<Run, 'origin' | 'brokerOwnerAuthorized' | 'delegation' | 'heartbeat' | 'heartbeatRootRunId' | 'instructions' | 'codexApprovalsReviewer' | 'unattended' | 'model' | 'effort'> {
+export function inheritedRunFields(after: Run, options: { reviewer?: boolean } = {}): Pick<Run, 'origin' | 'delegation' | 'heartbeat' | 'heartbeatRootRunId' | 'instructions' | 'codexApprovalsReviewer' | 'unattended' | 'model' | 'effort'> {
   return { origin: after.origin ?? { kind: 'unknown' },
-    ...(after.brokerOwnerAuthorized === true ? { brokerOwnerAuthorized: true } : {}),
     ...(after.heartbeat ? { heartbeat: structuredClone(after.heartbeat), heartbeatRootRunId: after.heartbeatRootRunId ?? after.id } : {}),
     ...(after.delegation ? { delegation: { ...after.delegation } } : {}),
     ...(after.instructions?.required ? { instructions: { ...after.instructions } } : {}),
     ...(options.reviewer && after.codexApprovalsReviewer ? { codexApprovalsReviewer: after.codexApprovalsReviewer } : {}),
     ...(after.unattended ? { unattended: true } : {}), ...(after.model ? { model: after.model } : {}), ...(after.effort ? { effort: after.effort } : {}) };
+}
+
+/**
+ * What a Tower notice that starts a turn of its own about `about`'s work (a permissions_run result or refusal) is admitted
+ * as: that work's origin and calling turn, so it runs with the same authority and secret review, never as the owner's own
+ * turn. A run no longer known, or one from before origins, leaves the owner's admission notices always had.
+ */
+export function noticeAdmission(about: Run | undefined): Pick<Run, 'origin' | 'delegation' | 'unattended'> {
+  if (!about?.origin) return { origin: { kind: 'owner' } };
+  return { origin: about.origin, ...(about.delegation ? { delegation: { ...about.delegation } } : {}), ...(about.unattended ? { unattended: true } : {}) };
 }

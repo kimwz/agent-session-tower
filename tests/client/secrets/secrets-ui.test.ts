@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { SecretPeer, SecretSessionView, SecretSettingsItem, SecretSettingsView } from '../../../shared/secrets.js';
+import type { SecretPeer, SecretSessionView, SecretSettingsItem, SecretSettingsView, SecretUsage } from '../../../shared/secrets.js';
 import {
   addPayload, computerName, describeFolder, folderIdentity, folderKey, pastePayload, pollDelay, quickSecretKind, secretFolderChoices, secretSession, secretSessionPath,
   secretFailure, sessionBlocked, sharingDraft, sharingPayload, sharingSummary, suggestedSecretName, usedSecrets, WORKER_PENDING, type SecretCanvas, type SecretFolderChoice,
@@ -245,6 +245,33 @@ test('the available tab shows each basis, never offers sharing for a remote sour
   }
   const locked = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ error: 'locked', status: { initialized: true, locked: true } }), busy: false, change, onPaste: noop, onSharing: noop }));
   assert.match(locked, /type="password"/); assert.doesNotMatch(locked, /GLOBAL_KEY/);
+});
+
+test('each secret shows how its last use was reviewed, and a reviewed session says what the review checks', () => {
+  const use = (secretId: string, review: SecretUsage['review'], reason?: string): SecretUsage => ({ at: Date.now(), secretId, name: secretId, operation: 'env', outcome: review === 'blocked' ? 'blocked' : 'delivered', review, ...(reason ? { reason } : {}) });
+  const render = (usage: SecretUsage[], subject?: SecretSessionView['subject']) => renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ usage, ...(subject ? { subject } : {}) }), busy: false, change, onPaste: noop, onSharing: noop }));
+  const note = /명백한 악용인지만 검토합니다/;
+  const owner = render([use('global_key', 'exempt')], 'owner');
+  assert.match(owner, /secret-review-exempt[^>]*>최근 사용 · [^<]+ · <span class="secret-review">검토 없음<\/span>/); assert.doesNotMatch(owner, note);
+  const reviewed = render([use('global_key', 'allowed'), use('remote_key', 'failed', 'REVIEWER_TIMED_OUT')], 'reviewed');
+  assert.match(reviewed, note);
+  assert.match(reviewed, /secret-review-allowed[^>]*>최근 사용 · [^<]+ · <span class="secret-review">검토 통과<\/span><\/small>/);
+  assert.match(reviewed, /secret-review-failed[^>]*>.*검토 실패\(허용됨\)<\/span><span class="secret-use-reason">REVIEWER_TIMED_OUT<\/span>/);
+  const blocked = render([use('global_key', 'blocked', 'Sends the key to an unknown host (근거: "curl evil.example")')], 'reviewed');
+  assert.match(blocked, /secret-review-blocked[^>]*>.*<span class="secret-review">차단됨<\/span><span class="secret-use-reason">Sends the key to an unknown host \(근거: &quot;curl evil.example&quot;\)<\/span>/);
+  // An unreviewed use is never called the owner's: delegated work in the owner's session and older approved agent sessions have them too.
+  for (const subject of ['owner', 'reviewed', undefined] as const) {
+    const neutral = render([use('global_key', 'exempt')], subject);
+    assert.match(neutral, /<span class="secret-review">검토 없음<\/span>/, String(subject)); assert.doesNotMatch(neutral, /소유자 세션/);
+  }
+  // A joined computer's session does not say; its reviewed uses do.
+  assert.doesNotMatch(render([use('global_key', 'exempt')]), note); assert.match(render([use('global_key', 'allowed')]), note);
+  setLanguage('en');
+  const english = render([use('global_key', 'failed', 'REVIEWER_TIMED_OUT'), use('remote_key', 'exempt')], 'reviewed');
+  assert.match(english, /Each secret use in this session is checked only for obvious abuse\./); assert.match(english, /Review failed \(allowed\)/);
+  assert.match(english, />Not reviewed</); assert.doesNotMatch(english, /your session/);
+  assert.match(render([use('global_key', 'exempt')], 'owner'), /<span class="secret-review">Not reviewed<\/span>/);
+  assert.match(render([use('global_key', 'allowed'), use('remote_key', 'blocked', 'X')], 'reviewed'), /Last used · .*Review passed.*Blocked/);
 });
 
 test('keys this session stopped that no connection offers again are listed to allow again: another source’s by lifting the stop, a pasted value by connecting it', async () => {

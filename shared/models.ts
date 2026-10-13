@@ -47,6 +47,8 @@ const cliDefault = (provider: ModelProvider): RoleSetting => ({ provider, claude
 export const BUILTIN_ROLES = [
   { id: 'autoPrompt.router', kind: 'auto', label: 'Auto Prompt 라우팅', description: '요청을 보낼 폴더와 세션을 고릅니다.', follow: true, initial: follow() },
   { id: 'permissions.reviewer', kind: 'auto', label: '권한 자동 리뷰어', description: '에이전트의 권한 요청을 검토합니다.', initial: { provider: 'claude', ...structuredClone(STRONG) } },
+  // Attack-only checks that must answer within 30 seconds: a fast model without thinking.
+  { id: 'secrets.reviewer', kind: 'auto', label: '시크릿 사용 검토', description: '소유자가 열지 않은 세션이 시크릿을 쓰기 전에 명백한 공격만 막습니다.', initial: { provider: 'claude', claude: { model: 'sonnet', effort: EFFORT_OFF }, codex: { model: 'gpt-5.6-terra' } } },
   { id: 'skills.advisor', kind: 'auto', label: '스킬 제안', description: '세션을 요약해 스킬을 제안합니다.', initial: { provider: 'claude', claude: { model: 'sonnet' }, codex: { model: 'gpt-5.6-terra' } } },
   { id: 'slack.match', kind: 'auto', label: 'Slack 멘션 매칭', description: '멘션에 맞는 규칙을 고릅니다.', follow: true, initial: follow() },
   { id: 'slack.replyIntent', kind: 'auto', label: 'Slack 답장 의도', description: '소유자 답장이 무엇을 원하는지 판단합니다. 규칙에 모델이 있으면 그 모델을 씁니다.', follow: true, initial: follow() },

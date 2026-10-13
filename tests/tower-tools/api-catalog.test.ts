@@ -109,16 +109,3 @@ test('retention routes describe their owner-only access and separate cold backup
 });
 
 
-test('scoped broker routes document owner authentication separately from secret access', async () => {
-  const catalog = apiCatalog();
-  assert.match(catalog, /Scoped secret broker connection \(owner pages only; master, local agents and run-capability callers are refused\)/);
-  assert.match(catalog, /GET \/api\/secrets\/broker-access\?sessionId=/);
-  assert.match(catalog, /reads create no task or grant and disclose no secret values/);
-  assert.match(catalog, /POST \/api\/secrets\/approve-broker \{sessionId, root, taskId:uuid\|null, taskLabel, ttlMs\}/);
-  assert.match(catalog, /real logged-in owner session cookie; loopback automatic authentication or the page token alone is insufficient/);
-  assert.match(catalog, /This connection approval grants no secret access/);
-  assert.match(catalog, /POST \/api\/secrets\/revoke-broker \{sessionId, approvalId:uuid\}/);
-  assert.match(catalog, /later approval does not revive them/);
-  const withoutBroker = catalog.split('\n').filter(line => !/\/api\/secrets\/(broker-access|approve-broker|revoke-broker)/.test(line)).join('\n');
-  assert.deepEqual(await missingFrom(withoutBroker), ['/api/secrets/broker-access', '/api/secrets/approve-broker', '/api/secrets/revoke-broker']);
-});

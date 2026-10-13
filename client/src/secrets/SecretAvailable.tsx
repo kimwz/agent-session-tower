@@ -1,12 +1,29 @@
 import { useState } from 'react';
 import { KeyRound, Link2, Plus, RotateCcw, Search, Settings2, Unlink } from 'lucide-react';
-import type { SecretBasis, SecretSessionError, SecretSessionView } from '../../../shared/secrets';
+import type { SecretBasis, SecretSessionError, SecretSessionView, SecretUsage } from '../../../shared/secrets';
 import { useI18n } from '../i18n/i18n';
 import { relativeTime } from '../common/lib';
 import { SecretAccess, type SecretChange } from './SecretAccess';
 import { kindLabels, secretMatches, usedSecrets } from './secrets-client';
 
 const basisLabels: Record<SecretBasis, string> = { global: 'GLOBAL', folder: '이 폴더', session: '이 세션', legacy: '기존 규칙', remote: '원격 원본' };
+const reviewLabels: Record<SecretUsage['review'], string> = { exempt: '검토 없음', allowed: '검토 통과', failed: '검토 실패(허용됨)', blocked: '차단됨' };
+
+/**
+ * A secret's last use here: when, how its review ended, and why it was refused or allowed unreviewed. An unreviewed use
+ * is not called the owner's: delegated work in the owner's session is reviewed, and records of 1.129–1.132 also come
+ * from broker-approved agent sessions.
+ */
+function SecretLastUse({ use }: { use?: SecretUsage }) {
+  const { t } = useI18n();
+  if (!use) return <small className="secret-use">{t('아직 사용하지 않음')}</small>;
+  const review = use.outcome === 'blocked' ? 'blocked' : use.review;
+  return <small className={`secret-use secret-review-${review}`}>
+    {t('최근 사용 · {0}', { 0: relativeTime(new Date(use.at).toISOString()) })} · <span className="secret-review">{t(reviewLabels[review])}</span>
+    {/* The reviewer's or Tower's own words, shown as given. */}
+    {use.reason && (review === 'blocked' || review === 'failed') && <span className="secret-use-reason">{use.reason}</span>}
+  </small>;
+}
 const stateLabels: Record<SecretSessionError, [string, string]> = {
   uninitialized: ['보관함 없음', '시크릿 보관함이 아직 없습니다. 비밀번호를 정해 만들면 시크릿을 연결할 수 있습니다.'],
   locked: ['잠김', '시크릿 보관함이 잠겨 있습니다. 잠금을 해제하면 이 세션에서 쓸 수 있습니다.'],
@@ -40,6 +57,8 @@ export function SecretAvailable({ view, busy, change, onPaste, onSharing }: {
   // During a worker handoff the vault can still be unlocked here.
   const vaultClosed = view.error === 'locked' || view.error === 'uninitialized' || (view.error === 'worker-update-pending' && view.status.initialized && view.status.locked);
   const disconnected = view.disconnected ?? [];
+  // A joined computer's session does not say; its reviewed uses do.
+  const reviewed = view.subject ? view.subject === 'reviewed' : view.usage.some(use => use.review !== 'exempt');
   return <div className="secret-available">
     <SecretSessionState error={view.error} />
     {vaultClosed && (view.status.initialized || view.error !== 'worker-update-pending') && <SecretAccess status={view.status} busy={busy} change={change} />}
@@ -48,6 +67,7 @@ export function SecretAvailable({ view, busy, change, onPaste, onSharing }: {
     {!!view.updatePendingSources.length && <p role="status" className="secret-source-notice">{t('원본 컴퓨터 {0}곳이 업데이트를 기다리고 있어 그 시크릿은 아직 표시하지 않습니다.', { 0: view.updatePendingSources.length })}</p>}
     {/* During a worker handoff only the vault's status is known; nothing here can change yet. */}
     {!vaultClosed && view.error !== 'worker-update-pending' && <>
+      {reviewed && <p className="secret-hint secret-review-note">{t('이 세션은 시크릿을 쓸 때마다 명백한 악용인지만 검토합니다.')}</p>}
       <div className="secret-actions secret-available-actions">
         <button type="button" aria-expanded={picking} disabled={busy} onClick={() => setPicking(value => !value)}><Link2 size={14} aria-hidden="true" />{t('기존 시크릿 연결')}</button>
         <button type="button" disabled={busy} onClick={onPaste}><Plus size={14} aria-hidden="true" />{t('새 시크릿 추가')}</button>
@@ -66,7 +86,7 @@ export function SecretAvailable({ view, busy, change, onPaste, onSharing }: {
         return <li key={secret.id} className="secret-item">
           <div className="secret-item-name"><strong><KeyRound size={12} aria-hidden="true" />{secret.name}</strong><small>{t(kindLabels[secret.kind])}{secret.fields?.length ? ` · ${secret.fields.join(', ')}` : ''}</small></div>
           <div className="secret-sharing">{secret.basis.map(basis => <span key={basis} className={`secret-chip secret-basis-${basis}`} title={remote && basis === 'remote' ? secret.sourceHostId : undefined}>{t(basisLabels[basis])}</span>)}</div>
-          <small className="secret-use">{use ? t(use.outcome === 'blocked' ? '최근 사용 차단 · {0}' : '최근 사용 · {0}', { 0: relativeTime(new Date(use.at).toISOString()) }) : t('아직 사용하지 않음')}</small>
+          <SecretLastUse use={use} />
           <div className="secret-item-actions">
             {saved && <button type="button" disabled={busy} aria-label={t('{0} 공유 설정', { 0: secret.name })} onClick={() => onSharing(secret.id)}><Settings2 size={14} aria-hidden="true" />{t('공유 설정')}</button>}
             <button type="button" disabled={busy} aria-label={t('{0} 이 세션에서 끊기', { 0: secret.name })} onClick={() => void change('session-disconnect', { secretIds: [secret.id] })}><Unlink size={14} aria-hidden="true" />{t('이 세션에서 끊기')}</button>

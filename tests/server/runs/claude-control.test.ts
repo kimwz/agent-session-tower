@@ -3,14 +3,13 @@ import test from 'node:test';
 import { ClaudeControl } from '../../../server/runs/claude-control.js';
 import type { RunApproval } from '../../../shared/types.js';
 
-function fixture(timeout = 5000, steerTimeout = 5000, validateBeforeSubmit?: () => void) {
+function fixture(timeout = 5000, steerTimeout = 5000) {
   const written: Record<string, any>[] = [];
   const approvals: RunApproval[] = [];
   const cancelled: string[] = [];
   const errors: Error[] = [];
   let failWrites = false;
   const control = new ClaudeControl({
-    validateBeforeSubmit,
     write: async message => { if (failWrites) throw new Error('private transport error'); written.push(message); },
     onApproval: approval => approvals.push(approval), onCancelled: id => cancelled.push(id), onError: error => errors.push(error), initializeTimeoutMs: timeout, steerTimeoutMs: steerTimeout,
   });
@@ -217,38 +216,4 @@ test('malformed or ambiguous questions cannot fall back to a generic allow butto
     const f = fixture(); t.after(() => f.control.close()); f.initialize(); askQuestions(f, input);
     assert.equal(f.approvals.length, 0); assert.equal(f.errors.length, 1); assert.equal(f.written.length, 2);
   }
-});
-
-
-test('broker protection changed while initialization waited prevents the first native user write', async t => {
-  let protectedSession = false;
-  const f = fixture(5000, 5000, () => { if (protectedSession) throw new Error('Broker owner proof required'); }); t.after(() => f.control.close());
-  await Promise.resolve(); protectedSession = true;
-  f.initialize();
-  assert.equal(f.written.filter(message => message.type === 'user').length, 0);
-  assert.equal(f.errors.length, 1);
-  assert.match(f.errors[0].message, /Broker owner proof/);
-  assert.equal(f.control.canSteer(), false);
-});
-
-test('the current owner proof submits one clean native message after initialization', t => {
-  let checks = 0;
-  const f = fixture(5000, 5000, () => { checks++; }); t.after(() => f.control.close());
-  f.initialize(); f.initialize();
-  assert.equal(checks, 1);
-  assert.deepEqual(f.written.filter(message => message.type === 'user'), [f.input]);
-  assert.equal(f.written.some(message => 'validateBeforeSubmit' in message || 'brokerOwnerAuthorized' in message), false);
-});
-
-test('private steering validation rejects before writing and never enters the native payload', async t => {
-  const f = fixture(); t.after(() => f.control.close()); f.initialize();
-  const input = { ...f.input, uuid: 'broker-steer' };
-  const before = f.written.length;
-  await assert.rejects(f.control.steer(input, () => { throw new Error('Broker owner proof required'); }), { disposition: 'rejected' });
-  assert.equal(f.written.length, before);
-  let checks = 0;
-  const accepted = f.control.steer(input, () => { checks++; });
-  assert.equal(checks, 1);
-  assert.deepEqual(f.written.at(-1), { ...input, priority: 'next' });
-  f.control.handle({ ...input, isReplay: true }); await accepted;
 });

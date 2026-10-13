@@ -13,6 +13,7 @@ import { runAutoPromptModel } from '../auto-prompt/native.js';
 import { resolveModel } from '../models/settings.js';
 import { requestedEffort, requestedModel } from '../providers/models.js';
 import type { RunManager } from '../runs/manager.js';
+import { PUBLIC_TRIGGER_PREFIX } from '../runs/origin.js';
 import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { SlackProjection } from '../triggers/service.js';
 import {
@@ -20,8 +21,6 @@ import {
 } from './prompts.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
-/** Trigger IDs of public agents' runs; the launch gate and the trigger list tell them apart by this prefix. */
-export const PUBLIC_TRIGGER_PREFIX = 'public:';
 /** The intake agent's context budget in tokens; its conversation is compacted at half of it. */
 export const CONTEXT_TOKENS = 100_000;
 const COMPACT_AT_PERCENT = 50;

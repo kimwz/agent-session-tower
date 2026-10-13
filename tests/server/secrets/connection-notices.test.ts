@@ -152,8 +152,6 @@ test('nothing new reaches an execution worker that predates per-secret sharing',
   assert.deepEqual(old.calls.slice(2).map(call => call.args), [['overview', {}], ['overview', {}]]);
   const silent = worker(() => { throw new Error('fixture overview failed'); }, false);
   await assert.rejects(ownerSecretControl(undefined, silent, 'settings', {}), (error: Error & { code?: string }) => error.code === WORKER_UPDATE_PENDING);
-  const broker = await ownerSecretControl(undefined, old, 'broker-access', { sessionId: 'codex:local' });
-  assert.deepEqual(old.calls.at(-1)?.args, ['broker-access', { sessionId: 'codex:local' }]); assert.ok(broker);
 });
 
 test('a relay poll passes on only the features this worker knows, and a joined computer answers a view only with a new worker', async () => {

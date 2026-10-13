@@ -24,7 +24,7 @@ import { managedByService } from '../link/update.js';
 import type { HeartbeatAdmission } from '../../shared/master.js';
 import { newWorkerSession } from '../models/worker.js';
 import { latestNativeUserMessage } from './native-user-message.js';
-import { heartbeatRunProtected } from './continuations.js';
+import { heartbeatRunProtected, noticeAdmission } from './continuations.js';
 import { installLaunchShims, launchMarksDir } from '../sessions/launch-marks.js';
 import { finishedAutomationSessionIds } from '../../shared/automation-sessions.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -49,14 +49,14 @@ import { WorktreeJanitor } from '../worktrees/janitor.js';
 import { openCodexBridgeRun } from './codex-bridge.js';
 import { RunManager, type RunAdmission } from './manager.js';
 import { inMasterFolder, withoutMasterFolder } from './subscription.js';
-import { parseRunOrigin } from './origin.js';
+import { parseRunOrigin, PUBLIC_TRIGGER_PREFIX } from './origin.js';
 import { autoUpdateEnabled, ToolUpdates } from '../updates/tools.js';
 import { defaultStateDir } from '../state-dir.js';
 import { join, resolve } from 'node:path';
 import { parseSuccessor, readHandoff, readHandoffCarry, spawnSuccessor, writeHandoff, type SuccessorCommand } from './handoff.js';
 import { REMOTE_FOLDER_REFUSED, TriggerService } from '../triggers/service.js';
 import { GitHubCoordinator } from '../triggers/github-coordinator.js';
-import { PUBLIC_TRIGGER_PREFIX, PublicAgentService } from '../public-agents/service.js';
+import { PublicAgentService } from '../public-agents/service.js';
 import { TowerApi } from '../api/tower-api.js';
 import { callerDelegation, CapabilityRegistry, handleMcpRequest } from '../api/mcp.js';
 import { sessionToolsKey } from '../api/session-tools.js';
@@ -72,6 +72,7 @@ import { SessionTasks } from '../sessions/tasks.js';
 import { SessionCompactions } from '../sessions/compaction/service.js';
 import { SecretService } from '../secrets/service.js';
 import { SecretRuntime, SECRET_TOOLS } from '../secrets/runtime.js';
+import { SecretUseReviewer } from '../secrets/reviewer.js';
 import { SECRET_CONNECTION_INSTRUCTIONS } from '../secrets/notices.js';
 import { SecretStore } from '../triggers/secrets.js';
 import { listPendingSecretImports, importPendingSecret } from '../secrets/imports.js';
@@ -89,7 +90,7 @@ import { skillHomes } from '../skills/files.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
 import { modelRoleNotes } from '../models/notes.js';
 import { keepEndpoint } from './endpoint-keeper.js';
-import { FORCE_UPDATE_DEADLINE_MS, FORCE_UPDATE_GIVE_UP_MS, MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
+import { FORCE_UPDATE_DEADLINE_MS, FORCE_UPDATE_GIVE_UP_MS, MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SecretBlockNotice, type SessionHistoryPage } from './runner-protocol.js';
 import { TowerError, statusOf } from '../../shared/errors.js';
 import { sseSink } from '../http/sinks.js';
 import { RetentionService } from '../sessions/retention/service.js';
@@ -155,6 +156,8 @@ export interface RunnerHostOptions {
   startSuccessor?: (command: SuccessorCommand, nonce: string, carry?: Buffer) => void;
   /** State only the successor may receive (the open vault key), taken right before it is started. */
   handoffCarry?: () => Buffer | undefined;
+  /** Secret uses refused lately, reported to the web for the owner's notifications. */
+  secretBlocks?: () => SecretBlockNotice[];
   onHandedOff?: () => void;
   handoffHoldMs?: number;
   /** The proof a predecessor gave this worker when it started it. */
@@ -175,16 +178,6 @@ const READS_DURING_HANDOFF = new Set(['snapshot', 'sessionHistory', 'attachment'
 /** Hosts an already-started engine, including one adopted during an in-place upgrade. */
 export async function startRunnerHost(options: RunnerHostOptions) {
   let capabilities = options.capabilities ?? new CapabilityRegistry();
-  const brokerAdmission = (sessionId: string, admitted: RunAdmission) => {
-    const session = options.runs.getSession(sessionId);
-    const approved = session && options.secrets?.brokerApproval(session);
-    const protectedSession = session && options.secrets?.brokerAdmissionRequired(session);
-    const activeBroker = options.runs.hasActiveBrokerTurn(sessionId);
-    if ((protectedSession || approved || activeBroker) && (admitted.brokerOwnerAuthorized !== true || admitted.origin?.kind !== 'owner' || admitted.origin.controllerId || admitted.untrustedInput)) {
-      throw new TowerError('forbidden', 'This broker-connected session requires verified owner admission.', { disposition: 'not-admitted' });
-    }
-  };
-  options.runs.setBrokerAdmissionValidator(brokerAdmission);
   options.runs.setRunToolResolver(runToolResolver({ stateDir: options.stateDir, runs: options.runs, slack: options.slack, github: options.github, capabilities, secrets: options.secrets }));
   const paths = await runnerPaths(options.stateDir);
   const release = options.releaseStateLock ?? await acquireStateLock(paths.runtime, 0);
@@ -206,6 +199,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   const changed = () => { revision++; };
   const snapshot = (): RunnerSnapshot => {
     const sessions = options.runs.sessionList(options.sessions.list());
+    const secretBlocks = options.secretBlocks?.() ?? [];
     return { instance, revision: ++revision, runs: options.runs.list(), sessions,
       nativeIds: Object.fromEntries(sessions.map(session => [session.id, options.runs.nativeSessionId(session.id)])),
       settled: [...options.runs.settledRunIds()], autoPrompts: options.autoPrompts?.list() ?? [], version: APP_VERSION,
@@ -215,7 +209,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       ...(options.handoffNonce ? { handoff: options.handoffNonce } : {}),
       ...(options.triggers ? { triggers: options.triggers.overview() } : {}),
       coordinators: [...new Set([...(options.slack?.coordinatorSessionIds() ?? []), ...(options.github?.coordinatorSessionIds() ?? [])])],
-      ...(forced ? { updateDrain: options.runs.updateDrainStatus() } : {}) };
+      ...(forced ? { updateDrain: options.runs.updateDrainStatus() } : {}),
+      ...(secretBlocks.length ? { secretBlocks } : {}) };
   };
   const coordinator = (sessionId: string) => Boolean(options.slack?.coordinatorSessionIds().includes(sessionId) || options.github?.sessionWorkflow(sessionId));
   /** A paired controller's request: refused for coordinator conversations, and run once per request ID. */
@@ -240,37 +235,13 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     const heartbeatValidate = () => {
       if (admitted.heartbeat && (!options.api || options.api.heartbeatBlocked(admitted.heartbeat.sessionIds))) throw new TowerError('conflict', 'Heartbeat permission preconditions changed.', { disposition: 'not-admitted' });
     };
-    const targetApproval = targetSessionId && options.runs.getSession(targetSessionId);
-    const approvalId = targetApproval ? options.secrets?.brokerApproval(targetApproval)?.id : undefined;
-    const brokerTargetValidate = (proven: boolean) => {
-      if (!targetSessionId) return;
-      const target = options.runs.getSession(targetSessionId);
-      const currentApproval = target && options.secrets?.brokerApproval(target);
-      const protectedSession = target && options.secrets?.brokerAdmissionRequired(target);
-      const brokerTurn = options.runs.hasActiveBrokerTurn(targetSessionId);
-      if (approvalId && currentApproval?.id !== approvalId) throw new TowerError('forbidden', 'Broker connection approval changed before admission.', { disposition: 'not-admitted' });
-      if ((protectedSession || currentApproval || brokerTurn) && !proven) throw new TowerError('forbidden', 'This broker-connected session requires verified owner admission.', { disposition: 'not-admitted' });
-    };
-    if (token === undefined) {
-      const validate = () => { heartbeatValidate(); brokerTargetValidate(admitted.brokerOwnerAuthorized === true); };
-      validate();
-      return { ...admitted, ...(targetSessionId || admitted.heartbeat ? { validate } : {}) };
-    }
+    if (token === undefined) return { ...admitted, ...(admitted.heartbeat ? { validate: heartbeatValidate } : {}) };
     if (typeof token !== 'string' || admitted.origin?.controllerId) throw new TowerError('forbidden', 'Invalid local calling-turn credential.');
     const caller = capabilities.resolve(token);
     const callingRun = caller?.kind === 'caller-run' ? findRun(caller.runId) : undefined;
     const corrective = callingRun?.heartbeat;
-    const proofFromCaller = () => {
-      const current = caller?.kind === 'caller-run' ? findRun(caller.runId) : undefined;
-      return caller?.kind === 'caller-run' && !!current && current.sessionId === caller.sessionId && current.status === 'running' && current.origin?.kind === 'owner'
-        && !current.origin.controllerId && current.brokerOwnerAuthorized === true && current.towerTools === 'attached';
-    };
-    // A reporting credential can replace an untrusted transport claim only with its own live owner's proof.
-    const brokerOwnerAuthorized = proofFromCaller();
     const validate = () => {
       heartbeatValidate(); callerDelegation(capabilities, findRun, token);
-      if (brokerOwnerAuthorized && !proofFromCaller()) throw new TowerError('forbidden', 'Calling turn lost its owner admission before commit.', { disposition: 'not-admitted' });
-      brokerTargetValidate(brokerOwnerAuthorized && proofFromCaller());
       if (corrective) {
         const current = findRun(callingRun!.id);
         const target = targetSessionId && options.runs.getSession(targetSessionId);
@@ -286,7 +257,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       }
     };
     validate();
-    return { ...admitted, brokerOwnerAuthorized, ...(corrective ? { origin: { kind: 'agent' as const } } : {}), delegation: callerDelegation(capabilities, findRun, token), validate };
+    return { ...admitted, ...(corrective ? { origin: { kind: 'agent' as const } } : {}), delegation: callerDelegation(capabilities, findRun, token), validate };
   };
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
   const dispatch = async (method: string, args: unknown[]) => {
@@ -453,10 +424,10 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'terminalResize': if (options.terminals) return options.terminals.resize(args[0] as string, args[1], args[2]); break;
       case 'terminalClose': if (options.terminals) return options.terminals.close(args[0] as string); break;
       case 'submitAutoPrompt': if (options.autoPrompts) {
-        const admitted = admit(args[1], (args[0] as AutoPromptInput)?.targetSessionId);
+        const admitted = admit(args[1]);
         const autoPrompts = options.autoPrompts;
         const request = args[0] as AutoPromptInput;
-        return remote(admitted, 'autoPrompt', request, undefined, async () => { context ??= await runnerContext(options); await context.refresh(); return autoPrompts.submit(request, { origin: admitted.origin, ...(admitted.brokerOwnerAuthorized === true ? { brokerOwnerAuthorized: true } : {}), ...(admitted.delegation ? { delegation: admitted.delegation } : {}), ...(admitted.validate ? { validate: admitted.validate } : {}) }); },
+        return remote(admitted, 'autoPrompt', request, undefined, async () => { context ??= await runnerContext(options); await context.refresh(); return autoPrompts.submit(request, { origin: admitted.origin, ...(admitted.delegation ? { delegation: admitted.delegation } : {}), ...(admitted.validate ? { validate: admitted.validate } : {}) }); },
           value => ({ kind: 'autoPrompt', jobId: value.id }), result => result.kind === 'autoPrompt' ? autoPrompts.get(result.jobId) : undefined);
       } break;
       case 'cancelAutoPrompt': if (options.autoPrompts) return options.autoPrompts.cancel(args[0] as string); break;
@@ -502,13 +473,13 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       } break;
       case 'api': if (options.api) {
         // The owner here, or the owner at a controlling computer: then it sees and changes only what is shared.
-        const admitted = args[2] === undefined ? undefined : admit(args[2], args[0] === 'autoPrompt.submit' ? record(args[1]).targetSessionId as string | undefined : undefined);
+        const admitted = args[2] === undefined ? undefined : admit(args[2]);
         const controllerId = admitted?.origin?.controllerId;
         const operation = args[0] as OperationName;
         if (!Object.hasOwn(OPERATIONS, operation)) throw new TowerError('not-found', 'Unknown API operation.');
         const validate = () => { admitted?.validate?.(); const storage = options.storage?.(); if (OPERATIONS[operation].write && storage && !storage.admissionOpen) throw new TowerError('unavailable', storage.reason, { disposition: 'not-admitted' }); };
         validate();
-        return options.api.call(args[0], args[1], controllerId ? { kind: 'owner', via: 'remote', controllerId } : { kind: 'owner', via: 'ui' }, admitted?.requestId, { delegation: admitted?.delegation, brokerOwnerAuthorized: admitted?.brokerOwnerAuthorized, validate });
+        return options.api.call(args[0], args[1], controllerId ? { kind: 'owner', via: 'remote', controllerId } : { kind: 'owner', via: 'ui' }, admitted?.requestId, { delegation: admitted?.delegation, validate });
       } break;
       case 'slackTool': if (options.slack) return options.slack.tool(args[0] as string, args[1] as string, args[2] as Record<string, unknown>); break;
       case 'skillsOverview': if (options.skills) return options.skills.overview(record(args[0])); break;
@@ -740,7 +711,6 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         secretTool: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>) => options.secrets!.tool(capability, name, args) : undefined,
         slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
         githubTool: options.github ? (workflowId: string, name: string, args: Record<string, unknown>) => options.github!.tool(workflowId, name, args) : undefined });
-      options.runs.setBrokerAdmissionValidator(brokerAdmission);
       options.runs.setRunToolResolver(runToolResolver({ stateDir: options.stateDir, runs: options.runs, slack: options.slack, github: options.github, capabilities, secrets: options.secrets }));
       options.autoPrompts?.on('change', changed); options.triggers?.on('change', changed); options.publicAgents?.on('change', changed);
       changed();
@@ -762,11 +732,11 @@ async function sessionHistory(sessions: SessionService, [nativeId, before, limit
  * turn's agent asked for. Trigger and Slack origins are assigned inside the worker, never over RPC.
  */
 function admission(value: unknown): RunAdmission {
-  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown; requestId?: unknown; heartbeat?: unknown; brokerOwnerAuthorized?: unknown } : {};
+  // An older web may still send `brokerOwnerAuthorized`; nothing reads it any more.
+  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown; requestId?: unknown; heartbeat?: unknown } : {};
   const origin = input.origin === undefined ? { kind: 'owner' as const } : parseRunOrigin(input.origin);
   if (!origin || (origin.kind !== 'owner' && origin.kind !== 'agent')) throw new TowerError('invalid', 'The web connection can only admit owner or agent work.');
   if (input.requestId !== undefined && (typeof input.requestId !== 'string' || !/^[a-f\d-]{36}$/i.test(input.requestId))) throw new TowerError('invalid', 'Invalid request ID.');
-  if (input.brokerOwnerAuthorized !== undefined && typeof input.brokerOwnerAuthorized !== 'boolean') throw new TowerError('invalid', 'Invalid broker owner admission proof.');
   let heartbeat: HeartbeatAdmission | undefined;
   if (input.heartbeat !== undefined) {
     const value = record(input.heartbeat);
@@ -787,7 +757,6 @@ function admission(value: unknown): RunAdmission {
     heartbeat = value as unknown as HeartbeatAdmission;
   }
   return { ...(heartbeat ? { heartbeat } : {}), ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin,
-    ...(input.brokerOwnerAuthorized === true && origin.kind === 'owner' && !origin.controllerId ? { brokerOwnerAuthorized: true } : {}),
     ...(typeof input.requestId === 'string' ? { requestId: input.requestId.toLowerCase() } : {}) };
 }
 
@@ -1075,6 +1044,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     if (await offlineBootstrapHeld(stateDir, database?.identity, database ? await offlineStorageId(database) : undefined, database)) throw new TowerError('unavailable', 'Offline bootstrap is incomplete.');
     if (storageStatus.state !== 'ready' || !database || !(await database.gate('core')).open || storageStatus.state !== 'ready') throw new TowerError('unavailable', storageStatus.reason, { disposition: 'not-admitted' });
   };
+  /** What `requireEffects` knows without waiting (no file or database probe): false while storage is held. */
+  const effectsReady = () => domainsReady && !externalIntentHeld() && storageStatus.state === 'ready' && Boolean(database);
   const startupGate = async () => {
     const generation = storageHoldGeneration;
     // Park at this await, before the next startup effect. Retrying the whole startup would replay restores
@@ -1332,7 +1303,18 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const secretService = new SecretService({ stateDir });
     await secretService.start();
     const secretStore = new SecretStore(stateDir, { vault: secretService });
-    const secrets = new SecretRuntime({ stateDir, service: secretService, runs,
+    // Uses by sessions the owner did not open are checked for obvious attacks first; a storage hold refuses them.
+    const secretReviewer = new SecretUseReviewer({ stateDir, gate: requireEffects,
+      model: (request, options) => runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs, beforeSpawn: options.beforeSpawn }),
+      sources: {
+        subject: context => {
+          const origin = runs.list().find(item => item.id === context.runId)?.origin ?? runs.sessionOrigin(context.sessionId);
+          return { ...(origin ? { origin: { kind: origin.kind, workflowId: origin.workflowId, triggerId: origin.triggerId, controllerId: origin.controllerId } } : {}), outsideInput: runs.sessionOrigin(context.sessionId)?.untrustedInput === true };
+        },
+        // One page from the end: the review reads only the last few messages.
+        conversation: async sessionId => (await sessions.detail(runs.nativeSessionId(sessionId), undefined, 40, { previousUser: false }))?.messages ?? [],
+      } });
+    const secrets = new SecretRuntime({ stateDir, service: secretService, runs, reviewer: secretReviewer, effects: requireEffects, effectsReady,
       onConnect: sessionId => runs.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, sessionId),
       isClosed: async id => { const saved = new ClosedSessionStore(stateDir); await saved.start(); return saved.closedIds().has(id); },
       migrate: () => secretStore.migrate(), pendingImports: () => listPendingSecretImports(stateDir),
@@ -1446,9 +1428,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       if (!now?.run || now.run.delivered || !now.run.notify) return 'done';
       // The result reaches the conversation as the work it already was; a turn that can no longer be found is not guessed at.
       const run = request.runId ? runs.list().find(item => item.id === request.runId) : undefined;
-      const origin = run?.origin;
       // Nobody left to tell, or the owner closed the conversation: nothing is sent, and it is not tried again.
-      if (!origin || !runs.getSession(request.sessionId) || await closedNow(request.sessionId)) { await permissions.markTold(request.id); return 'done'; }
+      if (!run?.origin || !runs.getSession(request.sessionId) || await closedNow(request.sessionId)) { await permissions.markTold(request.id); return 'done'; }
       // Sent only once the conversation has nothing running or waiting, so a close meanwhile is seen before it starts a turn.
       const own = runs.list().filter(item => item.sessionId === request.sessionId);
       if (own.some(item => item.status === 'running' || (item.status === 'queued' && !item.scheduled))) return 'later';
@@ -1457,7 +1438,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       if (own.some(item => item.status === 'queued' && item.scheduled)) { await permissions.markTold(request.id); return 'done'; }
       const result = now.run.status === 'failed' ? `실패: ${now.run.error ?? '알 수 없는 이유'}` : now.run.timedOut ? '시간 제한으로 중단됨' : `종료 코드 ${now.run.exitCode ?? now.run.signal ?? '?'}${now.run.error ? `, ${now.run.error}` : ''}`;
       await runs.enqueue(request.sessionId, `${TOWER_NOTICE} 한 번 실행을 요청한 명령이 끝났습니다 (${result}). permissions_runResult에 id "${request.id}"를 주면 출력을 받습니다.`, {},
-        { origin, ...(run?.unattended ? { unattended: true } : {}) });
+        noticeAdmission(run));
       await permissions.markTold(request.id);
       return 'done';
     };
@@ -1491,7 +1472,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const permissions: PermissionService = new PermissionService({ stateDir, repository: permissionRepository, effectGate: requireEffects,
       requestGate: async request => { await closedSessions.start(); permissionAdmission(request); }, requestAdmission: permissionAdmission, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),
       decision: async (request, prompt, options) => runs.permissionDecision(request, prompt, { ...options, closed: await closedNow(request.sessionId) }),
-      resume: async (sessionId, prompt) => { await runs.enqueue(sessionId, prompt, {}, { origin: { kind: 'owner' } }); },
+      // Told to the work that asked, with its authority and review; a run no longer known is told as the owner's, as before.
+      resume: async (request, prompt) => { await runs.enqueue(request.sessionId, prompt, {}, noticeAdmission(request.runId ? runs.list().find(item => item.id === request.runId) : undefined)); },
       // A public agent's requests always wait for the owner: its conversations carry outsiders' words.
       autoReviewSkip: request => {
         const origin = runs.sessionOrigin(request.sessionId);
@@ -1737,7 +1719,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       await requireEffects();
       return settings;
     };
-    const hostOptions: RunnerHostOptions = { settingsBackup, stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, compactions, api, secrets, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce, storage: () => storageStatus, retryStorage: () => retryNormal!(), storageRecovery, storageControl: control, closeStorage, onCloseFailure: () => unavailable(), handoffCarry: () => secrets.handoff(),
+    const hostOptions: RunnerHostOptions = { settingsBackup, stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, compactions, api, secrets, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce, storage: () => storageStatus, retryStorage: () => retryNormal!(), storageRecovery, storageControl: control, closeStorage, onCloseFailure: () => unavailable(), handoffCarry: () => secrets.handoff(), secretBlocks: () => secrets.blocks(),
       onIdle: async () => { clearInterval(releaseTimer); await retention?.service.quiesce(); await temporary.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); clearInterval(secretExpiry); secrets.close(); stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await tasks.close(); await compactions.close(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
       inFlight: () => secrets.inFlight() || restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || compactions.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       // A forced update waits only for a compaction creating its session; one still reading or summarizing stops with the worker.

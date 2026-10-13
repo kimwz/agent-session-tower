@@ -25,9 +25,10 @@ export interface SecretMetadata {
 export interface SecretDevice { id: string; name: string; signingKey: string; encryptionKey: string; fingerprint: string }
 export interface SecretPeer { device: SecretDevice; routeId: string; direction: 'node' | 'controller'; enabled: boolean }
 export interface SecretTarget { hostId: string; sessionId: string; taskId: string; root: string; projectId?: string }
-export interface SecretBrokerApproval { id: string; hostId: string; sessionId: string; root: string; taskId: string; taskLabel: string; createdAt: number; expiresAt: number }
-export interface SecretBrokerAccess { sessionId: string; root?: string; taskId: string | null; eligible: boolean; requiresApproval: boolean; reason?: string; approval?: SecretBrokerApproval; locked: boolean }
-export interface SecretContext extends SecretTarget { runId: string; brokerApprovalId?: string }
+/** Who is using a secret: the owner's own session (no review) or any other session (attack-only review before values resolve). */
+export type SecretSubjectMode = 'owner' | 'reviewed';
+/** `subject` unset is reviewed: only `'owner'` is exempt. */
+export interface SecretContext extends SecretTarget { runId: string; subject?: SecretSubjectMode }
 export interface SecretTask {
   id: string; hostId: string; sessionId: string; root: string; status: 'open' | 'closed';
   createdAt: number; closedAt?: number; expiresAt?: number;
@@ -60,6 +61,11 @@ export interface SecretSessionView {
   error?: SecretSessionError; permanent?: boolean;
   /** Keys this session stopped that `connectable` does not offer again: its own temporary values and other sources' keys. */
   disconnected?: SecretDisconnected[];
+  /**
+   * How a turn the owner starts in this session uses secrets; work another turn delegates is reviewed wherever it runs.
+   * Absent for a joined computer's session, which that computer decides.
+   */
+  subject?: SecretSubjectMode;
 }
 /** `remote`: another source's key, re-allowed by lifting this session's stop; otherwise a value kept with this session, connected again. */
 export interface SecretDisconnected extends SecretMetadata { remote: boolean }
@@ -88,4 +94,8 @@ export interface SecretRunInput {
   operationId: string; command: string; args?: string[]; cwd?: string; timeoutMs?: number;
   env?: Record<string, string>; envBundle?: string; stdin?: string; files?: Record<string, string>;
 }
-export interface SecretRunResult { operationId: string; exitCode: number | null; stdout: string; stderr: string; timedOut?: boolean }
+export interface SecretRunResult {
+  operationId: string; exitCode: number | null; stdout: string; stderr: string; timedOut?: boolean;
+  /** Set when the secret-use reviewer refused the request; no value was resolved and no consumer started. */
+  blocked?: { code: 'SECRET_USE_BLOCKED'; reason: string };
+}

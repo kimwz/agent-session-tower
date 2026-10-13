@@ -12,8 +12,10 @@ import { CapabilityRegistry, callerDelegation, handleMcpRequest, towerTools, typ
 import { runToolResolver } from '../../../server/api/run-tools.js';
 import { TowerApi } from '../../../server/api/tower-api.js';
 import { TriggerService } from '../../../server/triggers/service.js';
-import type { SessionOrigin } from '../../../server/runs/origin.js';
+import { PUBLIC_TRIGGER_PREFIX, type SessionOrigin } from '../../../server/runs/origin.js';
+import { secretSubject, type KnownSession, type SecretStage } from '../../../server/secrets/access.js';
 import type { AutoPromptJob, Run, Session } from '../../../shared/types.js';
+import { TowerError } from '../../../shared/errors.js';
 
 const session = (id: string): Session => ({ id, nativeId: id.split(':')[1], provider: 'codex', title: 'Mine', cwd: '/project', project: 'project', status: 'idle', statusReason: '',
   createdAt: '', updatedAt: '', lastMessage: '', messageCount: 1, isSubagent: false, resumable: true });
@@ -351,60 +353,133 @@ test('a master run-scoped MCP Auto Prompt gets its role in code without changing
   await assert.rejects(handleMcpRequest(f.context, f.token(regular), { method: 'tools/call', name: 'autoPrompt_submit', arguments: { ...input, requestId: randomUUID() } }), /provider/);
 });
 
-test('a scoped agent-session approval attaches only broker tools to a new local owner turn', async t => {
+test('every turn in a session that may use secrets gets its own secret broker next to its other tools, and nothing more', async t => {
   const f = await fixture(t);
-  let approval = { id: 'approval-1', sessionId: 'codex:delegated', hostId: 'host', root: '/project', taskId: 'task', taskLabel: 'Deploy', createdAt: 1, expiresAt: 9999999999999 };
-  let provenance: SessionOrigin = { kind: 'agent', untrustedInput: false };
-  const resolver = runToolResolver({ stateDir: f.stateDir, capabilities: f.capabilities, runs: { sessionOrigin: () => provenance },
-    secrets: { initialized: () => true, brokerApproval: s => s.id === approval.sessionId ? approval : undefined } });
-  const target = session('codex:delegated');
-  const turn = (origin: Run['origin'] = { kind: 'owner' }) => ({ ...f.ownerTurn(target.id), brokerOwnerAuthorized: true, origin });
-  const run = turn();
-  assert.equal(resolver({ ...run, brokerOwnerAuthorized: undefined }, target).servers?.tower_secrets, undefined);
-  assert.equal(resolver({ ...run, brokerOwnerAuthorized: false }, target).servers?.tower_secrets, undefined);
-  const tools = resolver(run, target);
-  assert.equal(tools.towerTools, 'broker-only');
-  assert.equal(tools.required, true);
-  for (const name of ['tower', 'tower_local', 'tower_master']) assert.equal(tools.servers?.[name], undefined);
-  const capability = f.capabilities.resolve(tools.servers!.tower_secrets.env!.TOWER_SECRET_CAPABILITY);
-  assert.deepEqual(capability, { kind: 'secret-run', runId: run.id, sessionId: target.id, approvalId: approval.id });
-  assert.equal(provenance.kind, 'agent', 'original creation provenance stays unchanged');
-  for (const changed of [{ isSubagent: true }, { parentId: 'parent' }, { launchedByAgent: true }, { launchedBy: { kind: 'trigger' as const, triggerId: 'fixture' } }]) {
-    assert.equal(resolver(turn(), { ...target, ...changed }).servers?.tower_secrets, undefined);
+  const PUBLIC = `${PUBLIC_TRIGGER_PREFIX}agent`, WORKFLOW = '11111111-1111-4111-8111-111111111111', CONTROLLER = 'c'.repeat(32);
+  const known = new Map<string, KnownSession>(), started = new Map<string, Run>();
+  const add = (id: string, patch: Partial<Session> = {}, provenance?: SessionOrigin) => { const record = { ...session(id), ...patch }; known.set(id, { session: record, ...(provenance ? { provenance } : {}) }); return record; };
+  let initialized = true;
+  const secrets = { initialized: () => initialized, subject: (target: Session, run: Run | undefined, stage: SecretStage) =>
+    secretSubject({ run, session: target, provenance: known.get(target.id)?.provenance, stage, lookup: id => known.get(id), findRun: id => started.get(id) }) };
+  const options = { stateDir: f.stateDir, capabilities: f.capabilities, runs: { sessionOrigin: (id: string) => known.get(id)?.provenance }, browsers: () => ({ playwright: true, claudeInChrome: false }),
+    slack: { sessionMcp: (id: string) => id === 'codex:slack' ? { tower_slack: { command: 'node', args: ['index.js', '--slack-mcp', f.stateDir, WORKFLOW] } } : undefined },
+    github: { sessionWorkflow: (id: string) => id === 'codex:github' ? 'github-workflow' : undefined } };
+  const resolver = runToolResolver({ ...options, secrets });
+  const turn = (target: Session, origin: Run['origin'], delegation?: Run['delegation']): Run => {
+    const run: Run = { id: randomUUID(), sessionId: target.id, prompt: '', status: 'queued', createdAt: '', output: '', origin, ...(delegation ? { delegation } : {}) };
+    started.set(run.id, run); return run;
+  };
+  const owner = { kind: 'owner' as const };
+  const names = (tools: ReturnType<typeof resolver>) => Object.keys(tools.servers ?? {}).sort();
+  const capability = (tools: ReturnType<typeof resolver>) => f.capabilities.resolve(tools.servers!.tower_secrets.env!.TOWER_SECRET_CAPABILITY);
+
+  const native = add('codex:native'), mine = add('codex:mine', {}, { kind: 'owner', untrustedInput: false });
+  const ownTurn = turn(native, owner), ownTools = resolver(ownTurn, native);
+  assert.deepEqual([names(ownTools), ownTools.required, ownTools.towerTools], [['browser', 'browser_light', 'tower', 'tower_local', 'tower_secrets', 'tower_sessions'], true, 'attached']);
+  assert.deepEqual(capability(ownTools), { kind: 'secret-run', runId: ownTurn.id, sessionId: native.id }, 'bound to this run, with nothing else to present');
+  assert.deepEqual(ownTools.servers!.tower_secrets.args.slice(-2), ['--secrets-mcp', f.stateDir]);
+  const next = resolver(turn(native, owner), native);
+  assert.notEqual(next.servers!.tower_secrets.env!.TOWER_SECRET_CAPABILITY, ownTools.servers!.tower_secrets.env!.TOWER_SECRET_CAPABILITY, 'each turn its own credential');
+  initialized = false;
+  assert.deepEqual([names(resolver(turn(mine, owner), mine)).includes('tower_secrets'), resolver(turn(mine, owner), mine).required], [true, false], 'without a vault yet, the turn does not wait for it');
+  initialized = true;
+
+  // Other turns gain only the secret broker: the same Tower tools as without it, and they never wait for it.
+  for (const [label, target, origin] of [
+    ['agent turn', mine, { kind: 'agent' }], ['trigger turn', mine, { kind: 'trigger', triggerId: 'daily' }], ['unknown turn', native, { kind: 'unknown' }],
+    ['outside content', add('codex:issue', {}, { kind: 'owner', untrustedInput: true }), owner],
+    ['delegated session', add('codex:delegated', {}, { kind: 'agent', untrustedInput: false }), owner],
+    ['scheduled session', add('codex:scheduled', {}, { kind: 'trigger', triggerId: 'daily', untrustedInput: false }), { kind: 'trigger', triggerId: 'daily' }],
+    ['subagent', add('codex:child', { isSubagent: true, parentId: native.id }), owner],
+  ] as [string, Session, Run['origin']][]) {
+    const tools = resolver(turn(target, origin), target), plain = runToolResolver(options)(turn(target, origin), target);
+    assert.deepEqual(names(tools), [...names(plain), 'tower_secrets'].sort(), label);
+    assert.deepEqual([tools.required, tools.towerTools], [false, plain.towerTools], label);
+    assert.equal(capability(tools)?.kind, 'secret-run', label);
   }
-  assert.equal(resolver(turn({ kind: 'agent' }), target).servers?.tower_secrets, undefined);
-  assert.equal(resolver(turn({ kind: 'owner', controllerId: 'remote' }), target).servers?.tower_secrets, undefined);
-  provenance = { kind: 'agent', untrustedInput: true };
-  assert.equal(resolver(turn(), target).towerTools, 'external-input');
-  provenance = { kind: 'agent', controllerId: 'remote', untrustedInput: false };
-  assert.equal(resolver(turn(), target).servers?.tower_secrets, undefined);
-  approval = { ...approval, sessionId: 'another' };
-  assert.equal(resolver(turn(), target).servers?.tower_secrets, undefined);
+  assert.deepEqual(names(resolver(turn(mine, { kind: 'agent' }), mine)), ['browser', 'browser_light', 'tower_secrets', 'tower_sessions'], 'an agent’s turn: no owner or master tools');
+
+  // Workflow conversations keep their tools and add the broker.
+  const slack = add('codex:slack', {}, { kind: 'slack', workflowId: WORKFLOW, untrustedInput: true });
+  const slackTools = resolver(turn(slack, { kind: 'slack', workflowId: WORKFLOW }), slack);
+  assert.deepEqual([names(slackTools), slackTools.required], [['browser', 'browser_light', 'tower_secrets', 'tower_sessions', 'tower_slack'], true]);
+  assert.deepEqual(f.capabilities.resolve(slackTools.servers!.tower_slack.env!.TOWER_MCP_CAPABILITY), { kind: 'slack-workflow', workflowId: WORKFLOW });
+  const github = add('codex:github', {}, { kind: 'trigger', triggerId: 'gh', untrustedInput: true });
+  const githubTools = resolver(turn(github, { kind: 'trigger', triggerId: 'gh' }), github);
+  assert.deepEqual([names(githubTools), githubTools.required], [['browser', 'browser_light', 'tower_github', 'tower_secrets', 'tower_sessions'], true]);
+  const remoteSlack = resolver(turn(slack, { kind: 'owner', controllerId: CONTROLLER }), slack);
+  assert.deepEqual([names(remoteSlack), remoteSlack.towerTools, remoteSlack.required], [['browser', 'browser_light', 'tower_secrets'], 'remote', false], 'a controller’s turn never gets the coordinator’s tools');
+  const remoteOwner = resolver(turn(native, { kind: 'owner', controllerId: CONTROLLER }), native);
+  assert.deepEqual(names(remoteOwner), ['browser', 'browser_light', 'tower', 'tower_secrets']);
+
+  // A new conversation's first turn: its provider fixes the tools before the creation is confirmed.
+  const creating = add('codex:creating', { creationPending: true }, { kind: 'owner', untrustedInput: false });
+  const firstTools = resolver(turn(creating, owner), creating);
+  assert.deepEqual([names(firstTools).includes('tower_secrets'), firstTools.required], [true, true]);
+  const creatingSlack = add('codex:creating-slack', { creationPending: true }, { kind: 'slack', workflowId: WORKFLOW, untrustedInput: true });
+  assert.ok(resolver(turn(creatingSlack, { kind: 'slack', workflowId: WORKFLOW }), creatingSlack).servers?.tower_secrets);
+
+  // The master follows the same rules: the owner's requests are the owner's, its own agent turns are reviewed.
+  const master = add('claude:master', { cwd: join(f.stateDir, 'master-session') }, { kind: 'owner', untrustedInput: false });
+  const masterTools = resolver(turn(master, owner), master);
+  assert.deepEqual([names(masterTools), masterTools.required], [['browser', 'browser_light', 'tower', 'tower_master', 'tower_secrets', 'tower_sessions'], true]);
+  const heartbeat: Run = { ...turn(master, { kind: 'agent' }), heartbeat: { checkId: 'check', updatedAt: '', sessionIds: [master.id], targets: [{ taskId: 'task', sessionId: 'codex:worker', nativeRequestId: 'u', latestRunId: 'run' }] } };
+  assert.deepEqual(Object.keys(resolver(heartbeat, master).servers!).sort(), ['tower_master', 'tower_secrets'], 'nothing else beside the heartbeat’s own tools');
+
+  // Turns another turn started with its calling credential: admitted as the owner's, reviewed as delegated work.
+  const ownerCaller = turn(native, owner);
+  const delegated = turn(mine, owner, { parentRunId: ownerCaller.id, rootRunId: ownerCaller.id });
+  assert.deepEqual([names(resolver(delegated, mine)).includes('tower_secrets'), resolver(delegated, mine).required], [true, true], 'the same tools as before');
+
+  // No secret broker at all: public agents, their children and the turns they start, and turns without a secrets runtime.
+  const publicSession = add('codex:public', { launchedBy: { kind: 'trigger', triggerId: PUBLIC } }, { kind: 'trigger', triggerId: PUBLIC, untrustedInput: true });
+  const publicChild = add('codex:public-child', { isSubagent: true, parentId: publicSession.id });
+  const publicRun = turn(publicSession, { kind: 'trigger', triggerId: PUBLIC, eventId: 'request' });
+  assert.deepEqual(names(resolver(publicRun, publicSession)), ['browser', 'browser_light', 'tower_sessions']);
+  assert.equal(resolver(turn(publicChild, owner), publicChild).servers?.tower_secrets, undefined);
+  assert.equal(resolver(turn(mine, { kind: 'trigger', triggerId: PUBLIC }), mine).servers?.tower_secrets, undefined);
+  const opened = add('codex:opened-by-public', { creationPending: true }, { kind: 'owner', untrustedInput: false });
+  for (const target of [opened, mine]) {
+    const tools = resolver(turn(target, owner, { parentRunId: publicRun.id, rootRunId: publicRun.id }), target);
+    assert.equal(tools.servers?.tower_secrets, undefined, `${target.id}: started with a public agent’s calling credential`);
+    assert.ok(tools.servers?.tower, 'its other tools are unchanged');
+  }
+  assert.equal(resolver(turn(mine, owner, { parentRunId: 'left-history', rootRunId: 'left-history' }), mine).servers?.tower_secrets, undefined, 'a calling turn the server no longer knows');
+  assert.equal(runToolResolver(options)(turn(mine, { kind: 'agent' }), mine).servers?.tower_secrets, undefined);
 });
 
-test('broker-only capabilities never admit generic Tower tools and revalidate discovery', async t => {
+test('a secret credential is checked by the secrets runtime on every request, whatever Tower tools its turn has, and opens nothing else', async t => {
   const f = await fixture(t);
-  const run = f.ownerTurn('codex:delegated', 'broker-only');
+  const run: Run = { id: randomUUID(), sessionId: 'codex:delegated', prompt: '', status: 'running', createdAt: '', output: '', origin: { kind: 'agent' } };
+  f.runs.push(run);
   let allowed = true;
-  let checks = 0;
-  const context = { ...f.context, secretTools: [{ name: 'secrets_list' }], secretTool: async () => ({}), secretAuthorize: async () => { checks++; if (!allowed) throw new Error('Approval revoked'); } };
-  const token = f.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: run.sessionId, approvalId: 'approval' });
+  const checked: unknown[] = [], called: unknown[] = [];
+  const context = { ...f.context, secretTools: [{ name: 'secrets_list' }], secretTool: async (...args: unknown[]) => { called.push(args); return {}; },
+    secretAuthorize: async (capability: unknown) => { checked.push(capability); if (!allowed) throw new TowerError('forbidden', 'Not here'); } };
+  const capability = { kind: 'secret-run' as const, runId: run.id, sessionId: run.sessionId };
+  const token = f.capabilities.issue(capability);
   assert.deepEqual(await handleMcpRequest(context, token, { method: 'tools/list' }), { tools: context.secretTools });
-  assert.equal(checks, 1);
-  await assert.rejects(handleMcpRequest(context, f.token(run), { method: 'tools/list' }), /Tower tools work only/);
-  const unbound = f.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: run.sessionId });
-  await assert.rejects(handleMcpRequest(context, unbound, { method: 'tools/list' }), /Tower tools work only/);
+  await handleMcpRequest(context, token, { method: 'tools/call', name: 'secrets_list', arguments: {} });
+  assert.deepEqual(checked, [capability, capability], 'decided again for each request');
+  assert.deepEqual(called, [[capability, 'secrets_list', {}]]);
+  for (const towerTools of [undefined, 'desktop-app', 'external-input', 'not-owner-session', 'remote', 'attached'] as const) {
+    run.towerTools = towerTools;
+    assert.deepEqual(await handleMcpRequest(context, token, { method: 'tools/list' }), { tools: context.secretTools }, String(towerTools));
+  }
   allowed = false;
-  await assert.rejects(handleMcpRequest(context, token, { method: 'tools/list' }), /Approval revoked/);
+  await assert.rejects(handleMcpRequest(context, token, { method: 'tools/list' }), /Not here/);
   allowed = true;
-  run.origin = { kind: 'owner', controllerId: 'remote' };
-  await assert.rejects(handleMcpRequest(context, token, { method: 'tools/list' }), /Tower tools work only/);
-});
-
-test('MCP admission rechecks captured broker owner proof after preparing an Auto Prompt', async t => {
-  let run!: Run;
-  const f = await fixture(t, async internal => { run.brokerOwnerAuthorized = false; internal.validate?.(); });
-  run = f.ownerTurn('codex:mine'); run.brokerOwnerAuthorized = true;
-  await assert.rejects(handleMcpRequest(f.context, f.token(run), { method: 'tools/call', name: 'autoPrompt_submit', arguments: { requestId: randomUUID(), provider: 'codex', prompt: 'Exact task' } }), /lost its Tower authority/);
-  assert.equal(f.submitted.length, 0);
+  checked.length = 0;
+  await assert.rejects(handleMcpRequest(context, f.capabilities.issue({ ...capability, sessionId: 'codex:other' }), { method: 'tools/list' }), { kind: 'forbidden' });
+  const other = f.ownerTurn(run.sessionId);
+  await assert.rejects(handleMcpRequest(context, f.capabilities.issue({ ...capability, runId: randomUUID() }), { method: 'tools/list' }), { kind: 'forbidden' }, 'no such run');
+  run.status = 'completed';
+  await assert.rejects(handleMcpRequest(context, token, { method: 'tools/list' }), { kind: 'forbidden' }, 'another running turn in the session does not revive it');
+  assert.deepEqual(checked, [], 'refused before the runtime is asked');
+  run.status = 'running';
+  await assert.rejects(handleMcpRequest({ ...context, secretAuthorize: undefined }, token, { method: 'tools/list' }), { kind: 'unavailable' }, 'never without the runtime’s check');
+  // Tower's own tools keep their owner gate: an agent turn's owner credential, or an owner turn's credential once not attached.
+  await assert.rejects(handleMcpRequest(context, f.token(run), { method: 'tools/list' }), /Tower tools work only/);
+  other.towerTools = 'not-owner-session';
+  await assert.rejects(handleMcpRequest(context, f.token(other), { method: 'tools/list' }), /Tower tools work only/);
 });

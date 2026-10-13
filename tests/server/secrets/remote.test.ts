@@ -59,6 +59,18 @@ test('signed request and sealed signed response deliver Buffer exactly once with
   } finally { f.target.close(); f.source.close(); }
 });
 
+test('who is asking stays on this computer: only the task’s identity crosses the wire', async () => {
+  let seen: SecretContext | undefined;
+  const f = fixtures({ handle: ctx => { seen = ctx; return []; } });
+  try {
+    const pending = f.target.request(f.a.device.id, { ...f.ctx, subject: 'reviewed' }, 'list');
+    const [request] = f.target.poll('controller-a'); assert.ok(request);
+    assert.deepEqual(request.context, f.ctx);
+    f.target.deliver('controller-a', await f.source.answer('node-b', request));
+    assert.deepEqual(await pending, []); assert.deepEqual(seen, f.ctx);
+  } finally { f.target.close(); f.source.close(); }
+});
+
 test('public link identity clone cannot forge requests, decode responses or substitute a wrong peer', async () => {
   const f = fixtures(), clone = identity();
   try {

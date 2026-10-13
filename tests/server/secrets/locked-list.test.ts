@@ -112,6 +112,27 @@ test('the plaintext index holds names but no value or password, and a foreign in
   await upgraded.unlock(PASSWORD); await upgraded.lock(); assert.ok(upgraded.lockedList(f.target.sessionId, f.root, f.startedAt));
 });
 
+test('broker approvals that 1.129–1.132 kept in the journal and the index are read past, and go at the next save', async t => {
+  const f = await fixture(t);
+  await f.service.create({ name: 'SHARED_GLOBAL', kind: 'scalar', value: CANARY, sharing: { global: true, folders: [] } });
+  const approval = { id: randomUUID(), hostId: f.host, sessionId: f.target.sessionId, root: f.root, taskId: f.target.taskId, taskLabel: 'Deploy', createdAt: f.now(), expiresAt: f.now() + 3_600_000 };
+  const key = f.service.vault.exportKey()!;
+  try {
+    const payload = f.service.vault.unlockWithKey(key);
+    await f.service.vault.save(payload, { ...await f.service.vault.journal() as object, brokerApprovals: [approval] }, { ...f.service.vault.index as object, brokerApprovals: [approval] });
+  } finally { key.fill(0); }
+  await f.service.lock();
+  const index = join(f.stateDir, 'secrets', 'index.json');
+  assert.match(await readFile(index, 'utf8'), /brokerApprovals/);
+  const restarted = await f.restart();
+  assert.deepEqual(names(restarted.lockedList(f.target.sessionId, f.root, f.startedAt, f.target)!.secrets), ['SHARED_GLOBAL'], 'an older index still lists names while locked');
+  await restarted.unlock(PASSWORD);
+  assert.doesNotMatch(await readFile(index, 'utf8'), /brokerApprovals/, 'unlocking rewrites the index without them');
+  assert.deepEqual(names(await restarted.list(f.context)), ['SHARED_GLOBAL']);
+  await restarted.flush();
+  assert.equal('brokerApprovals' in (await restarted.vault.journal() as object), false);
+});
+
 test('a failed index write never leaves an older index listing names, in memory or after restart', async t => {
   const f = await fixture(t); await scenario(f);
   const path = join(f.stateDir, 'secrets', 'index.json'); const previous = await readFile(path, 'utf8');

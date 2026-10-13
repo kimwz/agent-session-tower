@@ -75,20 +75,40 @@ async function fixture(t: TestContext, options: { external?: boolean; onSteer?: 
 const secretTools = () => ({ required: true, towerTools: 'attached' as const, instructions: SECRET_USE_INSTRUCTIONS,
   servers: { tower_secrets: { command: '/fixture/secret-tool', args: [] } } });
 
-for (const towerTools of ['broker-only', 'attached'] as const) test(`ordinary owner-origin instructions cannot enter an authenticated ${towerTools} turn`, async t => {
-  const f = await fixture(t, { resolveRunTools: () => ({ required: true, towerTools }) });
-  const first = await f.manager.enqueue(f.session.id, 'Approved fixture work', {}, { origin: { kind: 'owner' }, brokerOwnerAuthorized: true });
-  await until(() => f.controls.length === 1 && f.read(first.id).status === 'running');
-  const unproved = await f.manager.enqueue(f.session.id, 'Ordinary local request', {}, { origin: { kind: 'owner' } });
-  assert.equal(f.read(unproved.id).canSteer, false);
-  await assert.rejects(f.manager.steer(unproved.id, { targetRunId: first.id }));
+test('an instruction from another turn’s calling credential is never inserted into a turn it did not start', async t => {
+  const f = await fixture(t, { resolveRunTools: secretTools });
+  const caller = { parentRunId: randomUUID(), rootRunId: randomUUID() };
+  const owner = await f.running({ kind: 'owner' });
+  // Admitted as the owner's, but its secret use is reviewed: it must not ride the owner turn's credential.
+  const delegated = await f.manager.enqueue(f.session.id, 'Delegated instruction', {}, { origin: { kind: 'owner' }, delegation: caller });
+  await delay(5);
+  assert.equal(f.read(delegated.id).canSteer, false);
+  assert.equal(f.read(delegated.id).steerBlocked, 'origin');
+  await assert.rejects(f.manager.steer(delegated.id, { targetRunId: owner.id }));
   assert.equal(f.inputs.length, 0);
-  const approved = await f.manager.enqueue(f.session.id, 'Verified parent continuation', {}, { origin: { kind: 'owner' }, brokerOwnerAuthorized: true });
-  await until(() => Boolean(f.read(approved.id).canSteer));
-  await f.manager.steer(approved.id, { targetRunId: first.id });
-  assert.equal(f.inputs.length, 1);
-  assert.equal(f.read(approved.id).brokerOwnerAuthorized, true);
-  assert.equal(f.read(first.id).brokerOwnerAuthorized, true);
+  const typed = await f.manager.enqueue(f.session.id, 'Owner instruction', {}, { origin: { kind: 'owner' } });
+  await until(() => Boolean(f.read(typed.id).canSteer));
+  await f.manager.steer(typed.id, { targetRunId: owner.id });
+  assert.deepEqual(f.inputs.map(input => input.prompt), ['Owner instruction'], 'the owner’s own message still joins the owner’s turn');
+  f.controls[0].finish(); await until(() => f.read(owner.id).status === 'completed');
+  await until(() => f.controls.length === 2 && f.read(delegated.id).status === 'running');
+  assert.deepEqual(f.read(delegated.id).delegation, caller, 'it runs as its own turn');
+});
+
+test('an instruction from the same calling turn joins the delegated turn it started', async t => {
+  const f = await fixture(t, { resolveRunTools: secretTools });
+  const caller = { parentRunId: randomUUID(), rootRunId: randomUUID() };
+  const first = await f.manager.enqueue(f.session.id, 'Delegated work', {}, { origin: { kind: 'owner' }, delegation: caller });
+  await until(() => f.controls.length === 1 && f.read(first.id).status === 'running');
+  const other = await f.manager.enqueue(f.session.id, 'Another caller', {}, { origin: { kind: 'owner' }, delegation: { ...caller, parentRunId: randomUUID() } });
+  const same = await f.manager.enqueue(f.session.id, 'Same caller follow-up', {}, { origin: { kind: 'owner' }, delegation: { ...caller } });
+  await until(() => Boolean(f.read(same.id).canSteer));
+  assert.equal(f.read(other.id).steerBlocked, 'origin', 'another calling turn, even under the same root');
+  await f.manager.steer(same.id, { targetRunId: first.id });
+  assert.deepEqual(f.inputs.map(input => input.prompt), ['Same caller follow-up']);
+  const typed = await f.manager.enqueue(f.session.id, 'Owner instruction', {}, { origin: { kind: 'owner' } });
+  await delay(5);
+  assert.equal(f.read(typed.id).steerBlocked, 'origin', 'the owner’s own message does not join delegated work either');
 });
 
 test('private tool changes reach only the active owner turn, with no new run or visible history', async t => {
@@ -150,13 +170,40 @@ test('unconfirmed hidden delivery is not resent and holds worker lifetime until 
   assert.equal(f.inputs.length, 1);
 });
 
-test('secret notices exclude automation and turns without the actual secret MCP', async t => {
-  const automation = await fixture(t, { resolveRunTools: secretTools });
-  await automation.running({ kind: 'trigger', triggerId: 'fixture' });
-  automation.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, automation.session.id); await delay(5); assert.equal(automation.inputs.length, 0);
+test('secret notices reach every turn with the secret broker, whoever started it, and no turn without it', async t => {
+  for (const origin of [{ kind: 'agent' }, { kind: 'slack', workflowId: '11111111-1111-4111-8111-111111111111' }, { kind: 'trigger', triggerId: 'fixture' }] as const) {
+    const f = await fixture(t, { resolveRunTools: secretTools });
+    await f.running(origin);
+    f.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, f.session.id);
+    await until(() => f.inputs.length === 1);
+    assert.equal(f.inputs[0].prompt, towerInstructionsBlock(SECRET_CONNECTION_INSTRUCTIONS), origin.kind);
+  }
+  const outsider = await fixture(t, { resolveRunTools: run => run.origin?.triggerId?.startsWith('public:') ? { required: false } : secretTools() });
+  await outsider.running({ kind: 'trigger', triggerId: 'public:agent' });
+  outsider.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, outsider.session.id); await delay(5); assert.equal(outsider.inputs.length, 0, 'a turn the broker was not given');
   const missing = await fixture(t, { resolveRunTools: () => ({ required: false, towerTools: 'attached', instructions: SECRET_USE_INSTRUCTIONS }) });
   await missing.running({ kind: 'owner' }); missing.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, missing.session.id);
   await delay(5); assert.equal(missing.inputs.length, 0);
+});
+
+test('a turn given the secret broker is told of a connection even once the resolver would no longer give it one', async t => {
+  // A delegated turn's calling turn can leave the run history; asked again, the resolver refuses the unknown caller,
+  // but the credential the running turn holds still works.
+  const callers = new Set<string>();
+  const f = await fixture(t, { resolveRunTools: run => !run.delegation || callers.has(run.delegation.parentRunId) ? secretTools() : { required: false } });
+  const caller = { parentRunId: randomUUID(), rootRunId: randomUUID() }; callers.add(caller.parentRunId);
+  const delegated = await f.manager.enqueue(f.session.id, 'Delegated work', {}, { origin: { kind: 'owner' }, delegation: caller });
+  await until(() => f.controls.length === 1 && f.read(delegated.id).status === 'running');
+  callers.delete(caller.parentRunId);
+  f.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, f.session.id);
+  await until(() => f.inputs.length === 1);
+  assert.equal(f.inputs[0].prompt, towerInstructionsBlock(SECRET_CONNECTION_INSTRUCTIONS));
+  f.controls[0].finish(); await until(() => f.read(delegated.id).status === 'completed');
+  // A later turn composed without the broker is not told.
+  const next = await f.manager.enqueue(f.session.id, 'Later delegated work', {}, { origin: { kind: 'owner' }, delegation: caller });
+  await until(() => f.controls.length === 2 && f.read(next.id).status === 'running');
+  f.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, f.session.id); await delay(5);
+  assert.equal(f.inputs.length, 1);
 });
 
 test('queued same-session instruction is persisted before delivery and follows original completion', async t => {
@@ -404,6 +451,21 @@ test('permission approval persists one protected next turn and a turn-only notic
   assert.equal(f.controls.length, 2);
 });
 
+test('Tower’s own notices reach a delegated turn: a permission decision and an update’s wrap-up request carry its delegation', async t => {
+  const f = await fixture(t);
+  const caller = { parentRunId: randomUUID(), rootRunId: randomUUID() };
+  const parent = await f.manager.enqueue(f.session.id, 'Delegated work', {}, { origin: { kind: 'owner' }, delegation: caller });
+  await until(() => f.controls.length === 1 && f.read(parent.id).status === 'running');
+  const resume = await f.manager.permissionDecision(permissionRequest(f, parent.id), 'Approved for the next provider turn.');
+  assert.equal(f.inputs.length, 1); assert.match(f.inputs[0].prompt, /next provider turn/);
+  assert.deepEqual(f.manager.list().find(run => run.permissionNotice)?.delegation, caller);
+  assert.deepEqual(f.read(resume.id).delegation, caller);
+  f.manager.beginUpdateDrain(Date.now() + 60000, () => false); f.manager.driveUpdateDrain();
+  await until(() => f.inputs.length === 2);
+  assert.match(f.inputs[1].prompt, /about to restart to apply an update/);
+  f.manager.endUpdateDrain(); f.controls[0].finish(); await until(() => f.read(parent.id).status === 'completed');
+});
+
 test('approvals of steering aliases merge into one next turn with separate durable receipts', async t => {
   const f = await fixture(t); const { first, second } = await f.pair(); await f.manager.steer(second.id);
   const one = permissionRequest(f, second.id); const two = permissionRequest(f, first.id);
@@ -621,54 +683,4 @@ test('a permission continuation whose native history cannot be read completely i
   assert.equal(f.read(resume.id).output, 'Scheduled continuation not started: The latest native user instruction could not be verified.');
   f.controls[0].finish(); await until(() => f.read(parent.id).status === 'completed');
   assert.equal(f.controls.length, 1);
-});
-
-
-for (const brokerOwnerAuthorized of [undefined, true]) test(`queued instruction rechecks broker protection before native launch (proof ${brokerOwnerAuthorized})`, async t => {
-  const f = await fixture(t, { external: true });
-  let protectedSession = false;
-  f.manager.setBrokerAdmissionValidator((_id, admission) => { if (protectedSession && admission.brokerOwnerAuthorized !== true) throw new Error('Broker owner proof required at delivery'); });
-  const queued = await f.manager.enqueue(f.session.id, 'Queued before connection approval', {}, { origin: { kind: 'owner' }, ...(brokerOwnerAuthorized ? { brokerOwnerAuthorized } : {}) });
-  assert.equal(f.controls.length, 0);
-  protectedSession = true; f.session.status = 'completed';
-  await f.manager.markReady();
-  if (brokerOwnerAuthorized) {
-    await until(() => f.controls.length === 1 && f.read(queued.id).status === 'running');
-    assert.equal(f.read(queued.id).brokerOwnerAuthorized, true);
-  } else {
-    await until(() => f.read(queued.id).status === 'error');
-    assert.equal(f.nativeStarts(), 0, 'pre-approval unproved history never reaches native start');
-    assert.equal(f.read(queued.id).startedAt, undefined);
-  }
-});
-
-test('queued steering rechecks newly protected session after its durable flush before provider delivery', async t => {
-  const f = await fixture(t);
-  let protectedSession = false;
-  f.manager.setBrokerAdmissionValidator((_id, admission) => { if (protectedSession && admission.brokerOwnerAuthorized !== true) throw new Error('Broker owner proof required at delivery'); });
-  const pair = await f.pair();
-  const internal = f.manager as unknown as { flush(): Promise<void> };
-  const original = internal.flush.bind(f.manager);
-  let flushCount = 0;
-  internal.flush = async () => { await original(); if (++flushCount === 2) protectedSession = true; };
-  await assert.rejects(f.manager.steer(pair.second.id, { targetRunId: pair.first.id }), /Broker owner proof/);
-  assert.equal(f.inputs.length, 0);
-  assert.equal(f.read(pair.second.id).status, 'queued');
-  assert.equal(f.read(pair.second.id).steerBlocked, 'origin');
-});
-
-
-test('a pre-approval internal permission continuation cannot launch with missing broker proof', async t => {
-  const f = await fixture(t);
-  let protectedSession = false;
-  f.manager.setBrokerAdmissionValidator((_id, admission) => { if (protectedSession && admission.brokerOwnerAuthorized !== true) throw new Error('Broker owner proof required at delivery'); });
-  const parent = await f.running({ kind: 'owner' });
-  const resume = await f.manager.permissionDecision(permissionRequest(f, parent.id), 'Approved before broker connection.');
-  assert.equal(resume.brokerOwnerAuthorized, undefined);
-  const baselineInputs = f.inputs.length;
-  protectedSession = true;
-  f.controls[0].finish();
-  await until(() => f.read(resume.id).status === 'error');
-  assert.equal(f.nativeStarts(), 1, 'only the original pre-approval parent started');
-  assert.equal(f.inputs.length, baselineInputs, 'no further native insert after protection began');
 });

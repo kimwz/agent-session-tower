@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, lstat, mkdir, mkdtemp, open, realpath, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { isAbsolute, join, relative, resolve as absolute, sep } from 'node:path';
@@ -7,6 +7,7 @@ import { SECRET_OPERATIONS, type SecretContext, type SecretMetadata, type Secret
 import type { ResolvedSecret, SecretDispatchUse, SecretService } from './service.js';
 import type { RemoteSecretBroker } from './remote.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
+import { reviewedScript, reviewUses, type SecretReview, type SecretReviewRequest, type SecretReviewUse, type SecretUseReviewer } from './reviewer.js';
 
 type SourceFailure = { sourceHostId: string; code: 'SECRET_SOURCE_UNAVAILABLE' };
 type Resolved = ResolvedSecret;
@@ -16,6 +17,19 @@ const OUTPUT_BYTES = 512 * 1024;
 const MAX_TIMEOUT = 10 * 60_000;
 const MAX_INPUT_BYTES = 1024 * 1024;
 const genericResult = (operationId: string, stderr = '시크릿 사용 또는 프로그램 실행을 완료하지 못했습니다. 권한·잠금·참조·실행 경로를 확인하세요.'): SecretRunResult => ({ operationId, exitCode: null, stdout: '', stderr });
+const BLOCKED = 'SECRET_USE_BLOCKED' as const;
+const blockedText = (reason: string) => `시크릿 사용 검토에서 막혔습니다(${BLOCKED}): ${reason} 시크릿 값은 꺼내지 않았습니다.`;
+/** A run the reviewer refused, kept as its operation's result: a retry with the same ID gets it back and nothing runs. */
+const blockedResult = (operationId: string, reason: string): SecretRunResult => ({ operationId, exitCode: null, stdout: '',
+  stderr: `${blockedText(reason)} 프로그램도 실행하지 않았습니다. 같은 operationId로 다시 요청하면 이 결과를 그대로 돌려줍니다.`, blocked: { code: BLOCKED, reason } });
+/** A compare or fingerprint the reviewer refused; `code` names it for callers in this process, the message for agents. */
+export function secretUseBlocked(reason: string): TowerError & { code: typeof BLOCKED } { return Object.assign(new TowerError('forbidden', blockedText(reason)), { code: BLOCKED }); }
+/** How a use was reviewed: the owner's own sessions are exempt. */
+type Verdict = { review: 'exempt' } | SecretReview;
+/** A reviewed use refused by code, whatever the review said; its message is what the agent reads. */
+class SecretUseRefused extends TowerError {}
+const HELD = '실행 환경이 저장소 복구나 작업 인계를 기다리는 중이라 시크릿을 사용하지 않았습니다. 잠시 후 새 operationId로 다시 요청하세요.';
+const clip = (text: string, max: number) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
 function plain(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value))
     && Object.values(Object.getOwnPropertyDescriptors(value)).every(descriptor => 'value' in descriptor && descriptor.enumerable);
@@ -81,20 +95,85 @@ export function maskSecretOutput(text: string, values: readonly Buffer[]): strin
 export class SecretBroker {
   private active = 0;
   private readonly sourceFailures = new Map<string, SourceFailure[]>();
-  private remoteContext(context: SecretContext): SecretContext { const { brokerApprovalId: _localApproval, ...target } = context; return target; }
   private subject(context: SecretContext): string { return JSON.stringify([context.hostId, context.taskId, context.runId]); }
   unavailableSources(context: SecretContext): SourceFailure[] { return structuredClone(this.sourceFailures.get(this.subject(context)) ?? []); }
-  constructor(private readonly options: { stateDir: string; service: SecretService; remote?: RemoteSecretBroker; validate?: (context: SecretContext) => void }) {}
+  /**
+   * `reviewer` checks each use of a session the owner did not open (any `subject` but `'owner'`) before any value is resolved.
+   * `effects` is the worker's effects gate: such a use checks it after its review, whatever the review said, and again
+   * before the consumer starts; `effectsReady` is its synchronous part, checked inside the turn that starts the consumer.
+   * A storage hold refuses the use.
+   */
+  constructor(private readonly options: { stateDir: string; service: SecretService; remote?: RemoteSecretBroker; validate?: (context: SecretContext) => void; reviewer?: Pick<SecretUseReviewer, 'review'>; effects?: () => Promise<void>; effectsReady?: () => boolean }) {}
   inFlight(): boolean { return this.active > 0; }
   /**
    * Each secret and operation just handed to a consumer, kept with the session that used it; a remote source's secret is
    * kept here, where it was used. Values never reach the record, and failing to keep it does not undo the use.
    */
-  private async delivered(context: SecretContext, uses: readonly SecretDispatchUse[]): Promise<void> {
+  private async delivered(context: SecretContext, uses: readonly SecretDispatchUse[], verdict: Verdict): Promise<void> {
     const at = Date.now(); const entries = new Map<string, SecretUsage>();
-    for (const use of uses) entries.set(JSON.stringify([use.value.metadata.id, use.operation]), { at, secretId: use.value.metadata.id, name: use.value.metadata.name, operation: use.operation, outcome: 'delivered', review: 'exempt' });
+    const review = verdict.review === 'failed' ? { review: 'failed' as const, reason: verdict.reason } : { review: verdict.review === 'allowed' ? 'allowed' as const : 'exempt' as const };
+    for (const use of uses) entries.set(JSON.stringify([use.value.metadata.id, use.operation]), { at, secretId: use.value.metadata.id, name: use.value.metadata.name, operation: use.operation, outcome: 'delivered', ...review });
     try { await this.options.service.recordUsage({ hostId: context.hostId, sessionId: context.sessionId }, [...entries.values()]); }
     catch { console.warn('Tower could not record a secret use; the use itself went ahead.'); }
+  }
+  /** Names and kinds of what this session may use here, to tell the reviewer which secrets a request names. */
+  private described(context: SecretContext): { reference: string; name: string; kind: string }[] {
+    try { return this.options.service.available({ hostId: context.hostId, sessionId: context.sessionId, root: context.root, taskId: context.taskId }).map(item => ({ reference: item.reference, name: item.name, kind: item.kind })); }
+    catch { return []; } // best-effort: the review only reads names; using the secret is authorized on its own later
+  }
+  /**
+   * Only the owner's own sessions are exempt; any other use is reviewed, one whose subject is unset included (no reviewer
+   * here: a failed review, allowed). A review that could not start (a hold) and a hold after any review both refuse the use.
+   */
+  private async review(context: SecretContext, request: Omit<SecretReviewRequest, 'context' | 'secrets'>): Promise<Verdict> {
+    if (context.subject === 'owner') return { review: 'exempt' };
+    let review: SecretReview;
+    if (!this.options.reviewer) review = { review: 'failed', reason: '시크릿 사용 검토기를 사용할 수 없어 검토 없이 허용했습니다.' };
+    else {
+      try { review = await this.options.reviewer.review({ ...request, context, secrets: this.described(context) }); }
+      catch (error) { throw new SecretUseRefused('unavailable', HELD, { cause: error }); }
+    }
+    if (review.review !== 'blocked') await this.effects(context);
+    return review;
+  }
+  /** Reviewed uses only: the worker's effects gate. A hold refuses the use; owners' sessions keep working as before. */
+  private async effects(context: SecretContext): Promise<void> {
+    if (context.subject === 'owner' || !this.options.effects) return;
+    try { await this.options.effects(); }
+    catch (error) { throw new SecretUseRefused('unavailable', HELD, { cause: error }); }
+  }
+  /** The last checks, inside the dispatch turn (no await between them and the start): the caller's, then a hold. */
+  private dispatchChecks(context: SecretContext, more?: () => void): () => void {
+    return () => {
+      this.options.validate?.(context);
+      more?.();
+      if (context.subject !== 'owner' && this.options.effectsReady && !this.options.effectsReady()) throw new SecretUseRefused('unavailable', HELD);
+    };
+  }
+  /** Why a use was refused, as the agent, the session's record and the owner's notice say it. */
+  private static why(review: Extract<SecretReview, { review: 'blocked' }>): string { return `${review.reason} (근거: "${clip(review.evidence, 200)}")`; }
+  /**
+   * A refused operation's record, value-free, under its operation ID: the session's chat shows it and the owner is told
+   * once. Failing to keep it does not undo the refusal.
+   */
+  private async refused(context: SecretContext, operationId: string, uses: readonly SecretReviewUse[], reason: string): Promise<void> {
+    const at = Date.now(); const entries = new Map<string, SecretUsage>();
+    const names = new Map(this.described(context).map(item => [item.reference.split('#')[0], item.name]));
+    for (const use of uses) {
+      const secretId = clip(/^tower-secret:\/\/[^/]+\/([^@/#]+)@/.exec(use.reference)?.[1] ?? use.reference, 256);
+      entries.set(JSON.stringify([secretId, use.operation]), { at, secretId, name: clip(names.get(use.reference.split('#')[0]) ?? secretId, 256), operation: use.operation, outcome: 'blocked', review: 'blocked', reason: clip(reason, 2000) });
+    }
+    try { await this.options.service.recordUsage({ hostId: context.hostId, sessionId: context.sessionId }, [...entries.values()], operationId); }
+    catch { console.warn('Tower could not record a refused secret use; the use stayed refused.'); }
+  }
+  /** Reviews a compare or fingerprint before its values are resolved; a refusal is recorded and thrown. */
+  private async screen(context: SecretContext, request: Omit<SecretReviewRequest, 'context' | 'secrets'>): Promise<Verdict> {
+    this.options.validate?.(context);
+    const review = await this.review(context, request);
+    if (review.review !== 'blocked') return review;
+    const reason = SecretBroker.why(review);
+    await this.refused(context, `${request.operation}:${randomUUID()}`, reviewUses(request), reason);
+    throw secretUseBlocked(reason);
   }
 
   async list(context: SecretContext): Promise<SecretMetadata[]> {
@@ -107,7 +186,7 @@ export class SecretBroker {
       try {
         if (!this.options.remote) throw failure('원격 원본에 연결할 수 없습니다.', 'unavailable');
         this.options.service.checkTask(context);
-        const result = await this.options.remote.request(peer.device.id, this.remoteContext(context), 'list', {});
+        const result = await this.options.remote.request(peer.device.id, context, 'list', {});
         this.options.service.checkTask(context);
         return remoteListing(result, peer.device.id).filter(item => { try { this.options.service.checkTask(context, item.id); return true; } catch { return false; } });
       } catch { failures.push({ sourceHostId: peer.device.id, code: 'SECRET_SOURCE_UNAVAILABLE' }); return []; }
@@ -129,7 +208,7 @@ export class SecretBroker {
     }
     this.options.service.checkTask(context, match[2]);
     if (!this.options.remote) throw failure('시크릿 원본 컴퓨터에 연결할 수 없습니다.', 'unavailable');
-    const answer = await this.options.remote.request(match[1], this.remoteContext(context), 'resolve', { reference, operation }) as Resolved;
+    const answer = await this.options.remote.request(match[1], context, 'resolve', { reference, operation }) as Resolved;
     try {
       this.options.service.checkTask(context, match[2]);
       if (!plain(answer) || !Buffer.isBuffer(answer.bytes) || answer.bytes.length > MAX_INPUT_BYTES || !plain(answer.metadata)
@@ -156,72 +235,98 @@ export class SecretBroker {
         throw failure('이 요청의 전달 상태가 불확실합니다. 같은 요청을 다시 실행하지 않았습니다.', 'conflict');
       }
       const values: Buffer[] = [];
-      let deliveredBytes = 0;
-      let temporary: string | undefined;
+      const scratch: { temporary?: string } = {};
       let result: SecretRunResult;
       try {
         const cwd = await realpath(input.cwd ?? context.root), root = await realpath(context.root);
         const nested = relative(root, cwd);
         if (nested === '..' || nested.startsWith(`..${sep}`) || isAbsolute(nested)) throw failure('현재 프로젝트 안에서만 실행할 수 있습니다.', 'forbidden');
-        const env: NodeJS.ProcessEnv = {};
-        for (const key of ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TMPDIR', 'SYSTEMROOT']) if (process.env[key]) env[key] = process.env[key];
-        const put = (name: string, value: string) => {
-          if (!ENV_NAME.test(name) || /^(TOWER_|AGENT_MONITOR_|CODEX_HOME$|CLAUDE_CONFIG_DIR$)/.test(name) || value.includes('\0')) throw failure('이 환경변수 이름 또는 값은 사용할 수 없습니다.');
-          env[name] = value; values.push(Buffer.from(value));
-        };
-        const used: SecretDispatchUse[] = [];
-        const get = async (ref: string, operation: SecretOperation) => {
-          const value = await this.resolve(context, ref, operation);
-          deliveredBytes += value.bytes.length;
-          if (deliveredBytes > 8 * MAX_INPUT_BYTES) { value.bytes.fill(0); throw failure('연결한 시크릿 전체 크기가 너무 큽니다.'); }
-          used.push({ ref, operation, value }); values.push(value.bytes);
-          if (value.fields) values.push(...Object.values(value.fields).map(field => Buffer.from(field)));
-          return value;
-        };
-        if (input.envBundle) {
-          const bundle = await get(input.envBundle, 'env');
-          if (!bundle.fields) throw failure('환경변수 묶음 참조가 필요합니다.');
-          for (const [name, value] of Object.entries(bundle.fields)) put(name, value);
-        }
-        for (const [name, ref] of Object.entries(input.env ?? {})) {
-          const value = await get(ref, 'env'); if (value.fields) throw failure('단일 환경변수에는 값 또는 field 참조를 사용하세요.'); put(name, value.bytes.toString('utf8'));
-        }
-        let stdin: Buffer | undefined;
-        if (input.stdin) stdin = (await get(input.stdin, 'pipe')).bytes;
-        const paths = new Map<string, string>();
-        for (const [name, ref] of Object.entries(input.files ?? {})) {
-          const stateWithinProject = relative(root, absolute(this.options.stateDir));
-          if (!stateWithinProject || (stateWithinProject !== '..' && !stateWithinProject.startsWith(`..${sep}`) && !isAbsolute(stateWithinProject))) throw failure('프로젝트 밖의 비공개 상태 경로가 필요합니다.');
-          const value = await get(ref, 'file');
-          if (!temporary) temporary = await mkdtemp(join(await privateConsumerDirectory(this.options.stateDir), 'consumer-'));
-          if (await realpath(temporary) !== temporary || (await lstat(temporary)).isSymbolicLink()) throw failure('비공개 임시 경로가 올바르지 않습니다.');
-          const path = join(temporary, name), file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-          try { await file.writeFile(value.bytes); } finally { await file.close(); }
-          paths.set(name, path);
-        }
-        const args = (input.args ?? []).map(arg => arg.replace(/\{secret-file:([A-Za-z_][A-Za-z0-9_]*)\}/g, (_whole, name: string) => {
-          const path = paths.get(name); if (!path) throw failure('연결하지 않은 시크릿 파일 참조입니다.'); return path;
-        }));
-        if (temporary) { await privateConsumerDirectory(this.options.stateDir); if (await realpath(temporary) !== temporary) throw failure('비공개 임시 경로가 올바르지 않습니다.'); }
-        // Staging files and fetching another secret can await owner policy changes. Re-authorize each use before spawning.
-        for (const item of used) {
-          const current = await this.resolve(context, item.ref, item.operation);
-          try { if (current.metadata.id !== item.value.metadata.id || current.metadata.version !== item.value.metadata.version || !current.bytes.equals(item.value.bytes) || JSON.stringify(current.fields) !== JSON.stringify(item.value.fields)) throw failure('시크릿 권한 또는 값이 변경되었습니다.', 'forbidden'); }
-          finally { current.bytes.fill(0); }
-        }
-        const { result: consumer } = await this.options.service.dispatch(context, used, () => this.consume(input, args, cwd, env, stdin, timeoutMs, values), () => this.options.validate?.(context));
-        // Only a consumer that started was given the values; one that could not start (say, a missing program) used nothing.
-        if (await consumer.started) await this.delivered(context, used);
-        result = await consumer.result;
-      } catch { result = genericResult(input.operationId); }
+        // The review, its check of the script and the run all use this one canonical folder: a folder link re-pointed
+        // meanwhile cannot make the reviewed script another than the one that runs.
+        const canonical = { ...input, cwd };
+        // Reviewed before any value is resolved or file written. A refusal is this operation's result for good.
+        const review = await this.review(context, { operation: 'run', input: canonical });
+        if (review.review === 'blocked') {
+          const reason = SecretBroker.why(review);
+          await this.refused(context, input.operationId, reviewUses({ operation: 'run', input }), reason);
+          result = blockedResult(input.operationId, reason);
+        } else result = await this.execute(context, canonical, cwd, root, timeoutMs, review, values, scratch);
+      } catch (error) { result = genericResult(input.operationId, error instanceof SecretUseRefused ? error.message : undefined); }
       finally {
-        try { if (temporary) await rm(temporary, { recursive: true, force: true }); }
+        try { if (scratch.temporary) await rm(scratch.temporary, { recursive: true, force: true }); }
         catch { result = genericResult(input.operationId, '비공개 임시 파일을 정리하지 못했습니다.'); }
         for (const value of values) value.fill(0);
       }
       await this.options.service.finishOperation(context, input.operationId, digest, result!);
       return result!;
     } finally { this.active--; }
+  }
+
+  /** Resolves, stages and re-authorizes each use, then starts the consumer; `values` and `scratch` are cleaned up by `run`. */
+  private async execute(context: SecretContext, input: SecretRunInput, cwd: string, root: string, timeoutMs: number, review: Exclude<Verdict, { review: 'blocked' }>, values: Buffer[], scratch: { temporary?: string }): Promise<SecretRunResult> {
+    let deliveredBytes = 0;
+    const env: NodeJS.ProcessEnv = {};
+    for (const key of ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TMPDIR', 'SYSTEMROOT']) if (process.env[key]) env[key] = process.env[key];
+    const put = (name: string, value: string) => {
+      if (!ENV_NAME.test(name) || /^(TOWER_|AGENT_MONITOR_|CODEX_HOME$|CLAUDE_CONFIG_DIR$)/.test(name) || value.includes('\0')) throw failure('이 환경변수 이름 또는 값은 사용할 수 없습니다.');
+      env[name] = value; values.push(Buffer.from(value));
+    };
+    const used: SecretDispatchUse[] = [];
+    const get = async (ref: string, operation: SecretOperation) => {
+      const value = await this.resolve(context, ref, operation);
+      deliveredBytes += value.bytes.length;
+      if (deliveredBytes > 8 * MAX_INPUT_BYTES) { value.bytes.fill(0); throw failure('연결한 시크릿 전체 크기가 너무 큽니다.'); }
+      used.push({ ref, operation, value }); values.push(value.bytes);
+      if (value.fields) values.push(...Object.values(value.fields).map(field => Buffer.from(field)));
+      return value;
+    };
+    if (input.envBundle) {
+      const bundle = await get(input.envBundle, 'env');
+      if (!bundle.fields) throw failure('환경변수 묶음 참조가 필요합니다.');
+      for (const [name, value] of Object.entries(bundle.fields)) put(name, value);
+    }
+    for (const [name, ref] of Object.entries(input.env ?? {})) {
+      const value = await get(ref, 'env'); if (value.fields) throw failure('단일 환경변수에는 값 또는 field 참조를 사용하세요.'); put(name, value.bytes.toString('utf8'));
+    }
+    let stdin: Buffer | undefined;
+    if (input.stdin) stdin = (await get(input.stdin, 'pipe')).bytes;
+    const paths = new Map<string, string>();
+    for (const [name, ref] of Object.entries(input.files ?? {})) {
+      const stateWithinProject = relative(root, absolute(this.options.stateDir));
+      if (!stateWithinProject || (stateWithinProject !== '..' && !stateWithinProject.startsWith(`..${sep}`) && !isAbsolute(stateWithinProject))) throw failure('프로젝트 밖의 비공개 상태 경로가 필요합니다.');
+      const value = await get(ref, 'file');
+      if (!scratch.temporary) scratch.temporary = await mkdtemp(join(await privateConsumerDirectory(this.options.stateDir), 'consumer-'));
+      const temporary = scratch.temporary;
+      if (await realpath(temporary) !== temporary || (await lstat(temporary)).isSymbolicLink()) throw failure('비공개 임시 경로가 올바르지 않습니다.');
+      const path = join(temporary, name), file = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      try { await file.writeFile(value.bytes); } finally { await file.close(); }
+      paths.set(name, path);
+    }
+    const args = (input.args ?? []).map(arg => arg.replace(/\{secret-file:([A-Za-z_][A-Za-z0-9_]*)\}/g, (_whole, name: string) => {
+      const path = paths.get(name); if (!path) throw failure('연결하지 않은 시크릿 파일 참조입니다.'); return path;
+    }));
+    if (scratch.temporary) { await privateConsumerDirectory(this.options.stateDir); if (await realpath(scratch.temporary) !== scratch.temporary) throw failure('비공개 임시 경로가 올바르지 않습니다.'); }
+    // Staging files and fetching another secret can await owner policy changes. Re-authorize each use before spawning.
+    for (const item of used) {
+      const current = await this.resolve(context, item.ref, item.operation);
+      try { if (current.metadata.id !== item.value.metadata.id || current.metadata.version !== item.value.metadata.version || !current.bytes.equals(item.value.bytes) || JSON.stringify(current.fields) !== JSON.stringify(item.value.fields)) throw failure('시크릿 권한 또는 값이 변경되었습니다.', 'forbidden'); }
+      finally { current.bytes.fill(0); }
+    }
+    // The code the review read is the code that runs: checked now, and again inside the dispatch turn, since that turn
+    // may wait behind other saves. A script changed meanwhile gets a review of its own under a new ID.
+    const reviewed = review.review !== 'exempt' && review.script !== undefined ? review.script : undefined;
+    const check = reviewed !== undefined ? await reviewedScript(input, context.root, this.options.stateDir, reviewed) : undefined;
+    const sameCode = () => {
+      const problem = check?.();
+      if (problem === 'too-large') throw new SecretUseRefused('conflict', '검토한 뒤 실행할 스크립트가 16 MiB보다 커져 검토한 내용과 같은지 확인할 수 없어 실행하지 않았습니다. 새 operationId로 다시 요청하세요.');
+      if (problem) throw new SecretUseRefused('conflict', `검토하는 동안 실행할 스크립트가 바뀌어 실행하지 않았습니다${reviewed ? `(${reviewed.path})` : ''}. 새 operationId로 다시 요청하면 바뀐 내용으로 다시 검토합니다.`);
+    };
+    sameCode();
+    await this.effects(context);
+    const { result: consumer } = await this.options.service.dispatch(context, used, () => this.consume(input, args, cwd, env, stdin, timeoutMs, values), this.dispatchChecks(context, sameCode));
+    // Only a consumer that started was given the values; one that could not start (say, a missing program) used nothing.
+    if (await consumer.started) await this.delivered(context, used, review);
+    return consumer.result;
   }
 
   /** The consumer's masked result, and whether its process started at all (`started` settles first). */
@@ -281,11 +386,13 @@ export class SecretBroker {
     this.active++;
     const values: Buffer[] = [];
     try {
+      const review = await this.screen(context, { operation: 'compare', references: [left, right] });
       const a = await this.resolve(context, left, 'compare'); values.push(a.bytes);
       const b = await this.resolve(context, right, 'compare'); values.push(b.bytes);
       const uses: SecretDispatchUse[] = [{ ref: left, operation: 'compare', value: a }, { ref: right, operation: 'compare', value: b }];
-      const { result } = await this.options.service.dispatch(context, uses, () => ({ equal: a.bytes.length === b.bytes.length && timingSafeEqual(a.bytes, b.bytes) }), () => this.options.validate?.(context));
-      await this.delivered(context, uses);
+      await this.effects(context);
+      const { result } = await this.options.service.dispatch(context, uses, () => ({ equal: a.bytes.length === b.bytes.length && timingSafeEqual(a.bytes, b.bytes) }), this.dispatchChecks(context));
+      await this.delivered(context, uses, review);
       return result;
     } finally { for (const value of values) value.fill(0); this.active--; }
   }
@@ -294,17 +401,19 @@ export class SecretBroker {
     if (!/^[A-Za-z0-9._:-]{1,80}$/.test(domain)) throw failure('fingerprint domain이 올바르지 않습니다.');
     this.active++;
     try {
+      const review = await this.screen(context, { operation: 'fingerprint', references: [reference], domain });
       const value = await this.resolve(context, reference, 'fingerprint');
       try {
         const uses: SecretDispatchUse[] = [{ ref: reference, operation: 'fingerprint', value }];
+        await this.effects(context);
         const { result } = await this.options.service.dispatch(context, uses, () => {
           const key = this.options.service.fingerprintKey();
           try {
             const fingerprint = createHmac('sha256', key).update(JSON.stringify(['tower-secret-fingerprint-v1', this.options.service.device().id, domain, value.metadata.id])).update(value.bytes).digest('hex');
             return { algorithm: 'HMAC-SHA256' as const, fingerprint };
           } finally { key.fill(0); }
-        }, () => this.options.validate?.(context));
-        await this.delivered(context, uses);
+        }, this.dispatchChecks(context));
+        await this.delivered(context, uses, review);
         return result;
       } finally { value.bytes.fill(0); }
     } finally { this.active--; }

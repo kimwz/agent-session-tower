@@ -13,7 +13,7 @@ import { until } from '../../helpers/until.ts';
 
 const nativeId = '10000000-0000-4000-8000-000000000001';
 
-async function fixture(options: { holdInit?: boolean; brokerOwnerAuthorized?: boolean } = {}) {
+async function fixture(options: { holdInit?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-claude-steering-'));
   const session: Session = { id: `claude:${nativeId}`, nativeId, provider: 'claude', title: 'Fixture', cwd: directory,
     project: 'fixture', status: 'completed', statusReason: 'Done', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -40,9 +40,8 @@ async function fixture(options: { holdInit?: boolean; brokerOwnerAuthorized?: bo
   const published = new Map<string, Run>();
   manager.on('change', () => { for (const run of manager.list()) published.set(run.id, run); });
   await manager.start();
-  const admission = options.brokerOwnerAuthorized === true ? { origin: { kind: 'owner' as const }, brokerOwnerAuthorized: true } : {};
-  const first = await manager.enqueue(session.id, 'original work', {}, admission);
-  const followup = await manager.enqueue(session.id, 'change the direction', {}, admission);
+  const first = await manager.enqueue(session.id, 'original work');
+  const followup = await manager.enqueue(session.id, 'change the direction');
   if (!options.holdInit) await until(() => manager.list().find(run => run.id === followup.id)?.canSteer === true);
   return { manager, session, directory, child, received, emit, exit, first, followup, launches: () => launches, published, heldInit,
     run: (id: string) => manager.list().find(run => run.id === id)!,
@@ -51,12 +50,15 @@ async function fixture(options: { holdInit?: boolean; brokerOwnerAuthorized?: bo
 
 test('an external link lookup that reads the run list does not recurse through steering', async t => {
   const f = await fixture(); t.after(f.cleanup);
-  // Slack's linked sessions read the run list, whose steering state checks the session origin again (1.129.0 hang).
+  // Slack's linked sessions read the run list; steering state once checked the session origin again (1.129.0 hang).
+  // That check went with the broker approval, so a listing asks for no origin at all and the cycle cannot form.
   let lookups = 0;
-  f.manager.setBrokerAdmissionValidator(() => {});
   f.manager.setExternalLinkResolver(() => { lookups++; return f.manager.list().some(run => run.autoPromptId === 'linked'); });
   assert.equal(f.run(f.followup.id).canSteer, true);
-  assert.ok(lookups > 0 && lookups < 10, `bounded lookups: ${lookups}`);
+  assert.equal(lookups, 0);
+  // An origin asked for elsewhere still lists runs inside the lookup without recursing.
+  f.manager.sessionOrigin(f.session.id);
+  assert.equal(lookups, 1);
 });
 
 test('a message queued before Claude is ready is published as insertable once it is', async t => {
@@ -147,23 +149,4 @@ test('restored steering validates shape and converts in-flight delivery to uncer
   // Whether it could be inserted belonged to the worker that saved it.
   assert.equal(manager.list()[0].steerBlocked, undefined);
   assert.equal(manager.list()[0].canSteer, false);
-});
-
-
-for (const brokerOwnerAuthorized of [undefined, true]) test(`fake native initialization rechecks broker owner proof before first input (${brokerOwnerAuthorized})`, async t => {
-  const f = await fixture({ holdInit: true, brokerOwnerAuthorized }); t.after(f.cleanup);
-  await until(() => f.heldInit.length === 1);
-  f.manager.setBrokerAdmissionValidator((_id, admission) => { if (admission.brokerOwnerAuthorized !== true) throw new Error('Broker owner proof required after initialization'); });
-  f.heldInit[0]();
-  if (brokerOwnerAuthorized) {
-    await until(() => f.received.filter(frame => frame.type === 'user').length === 1);
-    const input = f.received.find(frame => frame.type === 'user')!;
-    assert.deepEqual(Object.keys(input).sort(), ['message', 'parent_tool_use_id', 'session_id', 'type']);
-    assert.equal(input.message.content[0].text, 'original work');
-    assert.equal(f.run(f.first.id).brokerOwnerAuthorized, true);
-  } else {
-    await until(() => f.run(f.first.id).status === 'error');
-    assert.equal(f.received.filter(frame => frame.type === 'user').length, 0);
-    assert.match(f.run(f.first.id).error!, /Broker owner proof/);
-  }
 });

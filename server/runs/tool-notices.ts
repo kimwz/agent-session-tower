@@ -10,7 +10,6 @@ export interface ToolNoticeHost {
   runs(): Iterable<Run>;
   run(id: string): Run | undefined;
   getSession(id: string): Session | undefined;
-  runTools(run: Run, session: Session): RunTools;
   stopping(): boolean;
   updating(): boolean;
   /** A run of the session is being admitted or inserted right now. */
@@ -22,13 +21,28 @@ export interface ToolNoticeHost {
 }
 
 /**
- * Private notices about the owner's tools (a secret connection made or changed) for the owner's running turns. They go
- * into the running turn only, never as a new run or visible history, and an uncertain send is never repeated.
+ * Private notices about a turn's tools (the owner connected a secret to its conversation) for every running turn that has
+ * the secret broker, whoever started it. They go into the running turn only, never as a new run or visible history, and an
+ * uncertain send is never repeated.
  */
 export class ToolNotices {
   private readonly pending = new Map<string, string>();
   private readonly sendingIds = new Set<string>();
+  /**
+   * Turns whose tools included the secret broker when they were composed. Asking the resolver again could answer
+   * otherwise (a calling turn pruned from history) while the credential the turn holds still works.
+   */
+  private readonly brokers = new Set<string>();
   constructor(private readonly host: ToolNoticeHost) {}
+
+  /** Records a turn's tools as they were composed for its provider; turns that ended are forgotten here. */
+  composed(run: Run, tools: RunTools): void {
+    for (const id of this.brokers) {
+      const status = this.host.run(id)?.status;
+      if (status !== 'queued' && status !== 'running') this.brokers.delete(id);
+    }
+    if (tools.servers?.tower_secrets) this.brokers.add(run.id); else this.brokers.delete(run.id);
+  }
 
   /** Being sent now: a handoff waits for an uncertain hidden send to settle. */
   get sending(): number { return this.sendingIds.size; }
@@ -48,8 +62,7 @@ export class ToolNotices {
 
   private eligible(run: Run): boolean {
     const session = this.host.getSession(run.sessionId);
-    return Boolean(session && !session.closed && !run.ownerStopped && run.origin?.kind === 'owner'
-      && run.towerTools === 'attached' && this.host.runTools(run, session).servers?.tower_secrets);
+    return Boolean(session && !session.closed && !run.ownerStopped && this.brokers.has(run.id));
   }
 
   flush(): void {

@@ -15,7 +15,7 @@ import type { Attachment, AutoPromptJob, AutoPromptInput, NewSessionInput, Messa
 import type { RunAdmission } from './manager.js';
 import type { WorkspaceTerminalBackend } from '../workspace-terminals.js';
 import { markMaster, subscriptionOnly } from './subscription.js';
-import { FORCE_UPDATE_DEADLINE_MS, MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths, type RunnerCapability, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage, type UpdateDrainStatus } from './runner-protocol.js';
+import { FORCE_UPDATE_DEADLINE_MS, MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths, type RunnerCapability, type RunnerReply, type RunnerSnapshot, type SecretBlockNotice, type SessionHistoryPage, type UpdateDrainStatus } from './runner-protocol.js';
 import { readHandoff } from './handoff.js';
 import type { TriggerOverview } from '../../shared/triggers.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
@@ -46,6 +46,12 @@ export function skillsCapability(operation: string, args: unknown[]): 'skills' |
   if (operation === 'skillsImportPlan' && withTargets(args[0])) return 'skillTargets';
   return operation === 'skillsExport' || operation === 'skillsImportPlan' || operation === 'skillsMutate' && ['adopt', 'guidance', 'import'].includes(String(args[0])) ? 'towerSkills' : 'skills';
 }
+
+/**
+ * What the web admits work with. `brokerOwnerAuthorized` (see http/request-context.ts) is passed on only for a worker of
+ * 1.129–1.132, which requires it for sessions an owner connected to the secret broker (#116); a newer worker ignores it.
+ */
+export type WebAdmission = RunAdmission & { brokerOwnerAuthorized?: boolean };
 
 export class DurableRunManager extends EventEmitter {
   private paths?: Awaited<ReturnType<typeof runnerPaths>>;
@@ -298,7 +304,7 @@ export class DurableRunManager extends EventEmitter {
     for (const item of input.attachments ?? []) if (typeof item?.data === 'string') total += Buffer.byteLength(item.data, 'base64');
     if (total > MAX_TOTAL_ATTACHMENT_BYTES) throw unavailable();
   }
-  async create(input: NewSessionInput, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
+  async create(input: NewSessionInput, internal: WebAdmission = {}): Promise<{ session: Session; run: Run }> {
     this.requireAttachmentReferences(input);
     this.requireModelRole(input);
     internal.validate?.();
@@ -306,7 +312,7 @@ export class DurableRunManager extends EventEmitter {
     this.requireSubscription(input.cwd);
     return this.call('create', [input, { autoPromptId: internal.autoPromptId, ...(internal.brokerOwnerAuthorized === true ? { brokerOwnerAuthorized: true } : {}), ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]) as Promise<{ session: Session; run: Run }>;
   }
-  async enqueue(id: string, prompt: string, attachments: MessageAttachments = {}, internal: RunAdmission = {}): Promise<Run> {
+  async enqueue(id: string, prompt: string, attachments: MessageAttachments = {}, internal: WebAdmission = {}): Promise<Run> {
     internal.validate?.();
     if (internal.heartbeat && !this.supports('heartbeatAdmission')) throw new TowerError('unavailable', '실행 워커가 heartbeat 안전 검사를 지원할 때까지 조치하지 않습니다.', { disposition: 'not-admitted' });
     this.requireOrigins(internal);
@@ -337,8 +343,15 @@ export class DurableRunManager extends EventEmitter {
   }
   autoPromptList(): AutoPromptJob[] { return structuredClone(this.snapshot?.autoPrompts ?? []); }
   triggerOverview(): TriggerOverview | undefined { return this.snapshot?.triggers && structuredClone(this.snapshot.triggers); }
+  /** Secret uses the worker refused lately, for owner notifications only; none from a worker that predates them. */
+  secretBlocks(): SecretBlockNotice[] {
+    const blocks: unknown = this.snapshot?.secretBlocks;
+    if (!Array.isArray(blocks)) return [];
+    return blocks.filter((block): block is SecretBlockNotice => !!block && typeof block === 'object' && typeof block.key === 'string' && typeof block.sessionId === 'string'
+      && Number.isSafeInteger(block.at) && typeof block.reason === 'string' && Array.isArray(block.secrets) && block.secrets.every((name: unknown) => typeof name === 'string')).map(block => structuredClone(block));
+  }
   /** Tower operations run in the worker; an outdated worker is told apart from a real error. */
-  async api(operation: string, input: unknown, internal?: Pick<RunAdmission, 'origin' | 'requestId' | 'callerCapability' | 'brokerOwnerAuthorized'>): Promise<unknown> {
+  async api(operation: string, input: unknown, internal?: Pick<WebAdmission, 'origin' | 'requestId' | 'callerCapability' | 'brokerOwnerAuthorized'>): Promise<unknown> {
     if (operation === 'autoPrompt.submit') this.requireModelRole(input);
     if (!this.supports('triggers')) throw new TowerError('unavailable', 'The execution worker has not updated yet. Triggers become available once it hands over to the new version.');
     if (operation.startsWith('models.') && !this.supports('models')) throw new TowerError('unavailable', 'The execution worker has not updated yet. Model settings become available once it hands over to the new version.', { disposition: 'not-admitted' });
@@ -384,7 +397,7 @@ export class DurableRunManager extends EventEmitter {
     return this.call('publicVisit', [action, slug, input]) as Promise<{ state: PublicVisitorState; token?: string }>;
   }
   getAutoPrompt(id: string): AutoPromptJob | undefined { return this.autoPromptList().find(job => job.id === id.toLowerCase()); }
-  async submitAutoPrompt(input: AutoPromptInput, internal: Pick<RunAdmission, 'origin' | 'requestId' | 'callerCapability' | 'brokerOwnerAuthorized'> = {}): Promise<AutoPromptJob> {
+  async submitAutoPrompt(input: AutoPromptInput, internal: Pick<WebAdmission, 'origin' | 'requestId' | 'callerCapability' | 'brokerOwnerAuthorized'> = {}): Promise<AutoPromptJob> {
     this.requireAttachmentReferences(input);
     this.requireModelRole(input);
     this.requireOrigins(internal);

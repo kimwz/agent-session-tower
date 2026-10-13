@@ -25,7 +25,8 @@ async function fixture() {
   const denied = new Set<string>();
   let onResolve: ((count: number) => void) | undefined;
   let onFinish: (() => Promise<void>) | undefined;
-  const context: SecretContext = { hostId: 'fixture', sessionId: 'session', taskId: randomUUID(), runId: 'run', root };
+  // The runtime always names the subject; these tests use the owner's own session, which is not reviewed.
+  const context: SecretContext = { hostId: 'fixture', sessionId: 'session', taskId: randomUUID(), runId: 'run', root, subject: 'owner' };
   const device = { id: 'fixture', name: 'fixture', signingKey: '', encryptionKey: '', fingerprint: '' };
   let peers: unknown[] = [];
   const usage: { target: unknown; entries: SecretUsage[] }[] = [];
