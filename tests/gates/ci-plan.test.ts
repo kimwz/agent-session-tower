@@ -18,7 +18,7 @@ test('CI assigns every current and new file exactly once per full lane and rejec
 test('CI gate rejects missing, duplicate, wrong identity, failed and lost actual-large receipts', () => {
   const lanes = plan();
   const receipts = lanes.map(l => ({ id: l.id, sha: 'sha', node: l.node, platform: l.os.startsWith('mac') ? 'darwin' : 'linux',
-    files: l.files, exit: 0, large: l.large, started: 1000, finished: 2000, sea: l.sea, benchmark: l.benchmark, foundation: l.kind === 'compat' || l.shard === 0,
+    files: l.files, exit: 0, large: l.large, started: 1000, finished: 2000, sea: l.sea, benchmark: l.benchmark, foundation: l.foundation,
     arch: 'arm64', pathNode: l.node, input: { commit: 'sha', tree: 'tree', dirty: false },
     ...(l.files.includes(largeFile) ? { cap: { canonicalBytes: l.large ? 133_000_000 : 33_000_000, count: l.large ? 6_000_000 : 1_500_000 } } : {}) }));
   assert.equal(validateReceipts(lanes, receipts, 'sha').testWindowSeconds, 1);

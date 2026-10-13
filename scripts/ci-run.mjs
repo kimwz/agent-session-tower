@@ -22,19 +22,19 @@ if (action === 'prepare') {
   mkdirSync(jobDir, { recursive: true, mode: 0o700 });
   const root = realpathSync(mkdtempSync(join(jobDir, 'private-')));
   const tmp = realpathSync(mkdtempSync('/tmp/tci-'));
-  for (const name of ['home', 'codex', 'claude', 'config', 'cache', 'state', 'data', 'runtime', 'npm', 'reports']) mkdirSync(join(root, name), { mode: 0o700 });
+  for (const name of ['home', 'codex', 'claude', 'config', 'cache', 'state', 'data', 'runtime', 'npm', 'reports', 'fixture-builds']) mkdirSync(join(root, name), { mode: 0o700 });
   const env = { PATH: process.env.PATH, HOME: join(root, 'home'), CODEX_HOME: join(root, 'codex'), CLAUDE_CONFIG_DIR: join(root, 'claude'),
     XDG_CONFIG_HOME: join(root, 'config'), XDG_CACHE_HOME: join(root, 'cache'), XDG_STATE_HOME: join(root, 'state'),
     XDG_DATA_HOME: join(root, 'data'), XDG_RUNTIME_DIR: join(root, 'runtime'), TMPDIR: tmp, TMP: tmp, TEMP: tmp,
     npm_config_cache: join(root, 'npm'), TOWER_AUTO_UPDATE: '0', TSX_DISABLE_CACHE: '1', NODE_DISABLE_COMPILE_CACHE: '1',
     NODE_OPTIONS: '--max-old-space-size=4096', SQLITE_VALIDATION_CI: '1', VALIDATION_ROOT: root,
     TOWER_SQLITE_OLD122_ROOT: join(root, 'old122'), TOWER_SQLITE_OLD124_ROOT: join(root, 'old124'),
-    SQLITE_RETENTION_LARGE: lane.large ? '1' : '0' };
+    TOWER_FIXTURE_COMPILE_CACHE: join(root, 'fixture-builds'), SQLITE_RETENTION_LARGE: lane.large ? '1' : '0' };
   const setup = { admitted: Date.now(), env, sha: process.env.GITHUB_SHA, id };
   setup.input = testedInput('.', false);
   const pathNode = spawnSync('node', ['-p', 'process.versions.node'], { env, encoding: 'utf8' });
   assert.equal(pathNode.status, 0); assert.equal(pathNode.stdout.trim(), lane.node, 'child PATH must use the lane Node');
-  await run('npm', ['ci', '--no-audit', '--no-fund'], env);
+  await run('npm', ['ci', '--foreground-scripts', '--no-audit', '--no-fund'], env);
   if (process.platform === 'darwin') createRequire(resolve('package.json'))('node-pty');
   if (id !== 'checks') {
     await run(process.execPath, ['scripts/sqlite-old124-capture.mjs', '1.122.0'], env);
@@ -58,16 +58,20 @@ if (action === 'prepare') {
   try {
     await run(process.execPath, ['--import', 'tsx', 'scripts/sqlite-runtime-check.mjs', 'supported-floor'], env);
     if (lane.major === '24') await run(process.execPath, ['--import', 'tsx', '-e', "import('./server/tower-tools/read-db.ts').then(m=>{if(!m.lookupsSupported())throw new Error('SQLite authorizer unavailable')})"], env);
-    await run(process.execPath, ['--import', 'tsx', '--test', '--test-concurrency=4', '--test-reporter=tap', ...lane.files], env);
+    await run(process.execPath, ['--import', 'tsx', '--test', process.platform === 'darwin' ? '--test-concurrency=2' : '--test-concurrency=4', '--test-reporter=tap', ...lane.files], env);
     if (lane.files.includes('tests/server/sessions/retention-storage.test.ts')) receipt.cap = JSON.parse(readFileSync(join(env.VALIDATION_ROOT, 'reports', 'canonical-cap.json'), 'utf8'));
-    if (lane.kind === 'compat' || lane.shard === 0) await run(process.execPath, ['--import', 'tsx', 'scripts/sqlite-foundation-benchmark.mjs', '20'], env);
-    receipt.foundation = lane.kind === 'compat' || lane.shard === 0;
+    if (lane.foundation) await run(process.execPath, ['--import', 'tsx', 'scripts/sqlite-foundation-benchmark.mjs', '20'], env);
+    receipt.foundation = lane.foundation;
     if (lane.benchmark) { await run(process.execPath, ['--import', 'tsx', 'scripts/test-benchmark-retention-storage.ts', join(env.VALIDATION_ROOT, 'reports', 'retention-benchmark.json')], env); receipt.benchmark = true; }
     if (lane.sea) {
       await run(process.execPath, ['scripts/test-executable.mjs'], env);
       await run(resolve('artifacts/agent-session-tower'), ['--storage-contract'], env);
       await run(process.execPath, ['--import', 'tsx', '--test', '--test-reporter=tap', '--test-name-pattern=^final actual CLI source and optional Node26 SEA', offlineFile], { ...env, TOWER_SQLITE_FINAL_BINARY: resolve('artifacts/agent-session-tower') });
-      receipt.sea = true;
+      const proof = JSON.parse(readFileSync(join(env.VALIDATION_ROOT, 'reports', 'sea-offline-identity.json'), 'utf8'));
+    assert.equal(proof.binarySHA256, createHash('sha256').update(readFileSync('artifacts/agent-session-tower')).digest('hex'));
+    assert.equal(proof.compiledSourceSHA256, createHash('sha256').update(readFileSync('dist/executable/monitor.mjs')).digest('hex'));
+    assert.equal(proof.effectsStarted, false);
+    receipt.sea = true;
     }
     receipt.exit = 0;
   } finally {
@@ -78,9 +82,14 @@ if (action === 'prepare') {
   }
 } else if (action === 'checks') {
   const setup = JSON.parse(readFileSync(meta, 'utf8')), { env } = setup;
+  const started = Date.now();
   await run('npm', ['run', 'typecheck'], env);
   if (process.env.GITHUB_EVENT_NAME === 'pull_request') await run(process.execPath, ['--import', 'tsx', 'scripts/test-integrity.ts'], env);
   const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
+  const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+  assert.equal(lock.version, version); assert.equal(lock.packages[''].version, version);
+  const { APP_VERSION } = await import('../dist/shared/app-identity.js');
+  assert.equal(APP_VERSION, version);
   const tag = spawnSync('git', ['ls-remote', '--exit-code', '--tags', 'origin', `refs/tags/v${version}`], { env, encoding: 'utf8' });
   if (tag.status === 0) {
     await run('git', ['fetch', '--no-tags', 'origin', `refs/tags/v${version}:refs/tags/v${version}`], env);
@@ -89,7 +98,7 @@ if (action === 'prepare') {
     await run(process.execPath, ['scripts/release.mjs', 'prepare'], { ...env, TZ: 'Asia/Seoul' });
     await run('git', ['diff', '--exit-code', '--', 'shared/app-identity.ts'], env);
   } else throw new Error('Cannot determine release tag presence');
-  const receipt = { id, sha: setup.sha, input: setup.input, admitted: setup.admitted, ready: setup.ready, started: Date.now(), finished: Date.now(), exit: 1 };
+  const receipt = { id, sha: setup.sha, input: setup.input, admitted: setup.admitted, ready: setup.ready, started, finished: Date.now(), exit: 1 };
   await run(process.execPath, ['--import', 'tsx', '--test', 'tests/shared/app-identity.test.ts'], env);
   receipt.finished = Date.now(); writeFileSync(join(jobDir, 'receipt.json'), JSON.stringify(receipt));
 } else if (action === 'legacy') {

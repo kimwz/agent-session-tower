@@ -592,7 +592,7 @@ test('a later part that fails before any sound is asked for once more; one that 
 
 test('an answer prepared for v3 is made with v3 to its end when the model changes to Eleven v4 Turbo; the next is untagged v4', async t => {
   const long = Array.from({ length: 30 }, (_, index) => `${index + 1}번째 문장은 조금 길게 이어지는 설명입니다.`).join(' ');
-  const h = await harness(t, { steps: [long, '다음 답입니다.'], settings: { voice: { model: 'eleven_v3_conversational' } } });
+  const h = await harness(t, { steps: [long, '다음 답입니다.'], settings: { voice: { model: 'eleven_v3_conversational' } }, timing: { playMs: 60_000 } });
   const { fetchAudio } = await audioServer(t, h.voice);
   const session = on(h);
   h.labs.chunks = [mp3('a'), Buffer.from('b')];

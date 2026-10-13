@@ -211,11 +211,12 @@ remoteDomain.commands.mutate = { ...mutate, run(context, payload) {
   return mutate.run(context, payload);
 } };` : ''}
 runStorageThread([domain${runsRelease ? ', runsDomain' : ''}${triggersRelease ? ', triggersDomain' : ''}${includePermissions ? ', permissionsDomain' : ''}${externalDomains ? ', remoteDomain, autoPromptDomain, workflowsDomain' : ''}${threadFaultDomain ? ', fixtureDomain' : ''}]);`;
-    const profile = JSON.stringify({ root, version, preparation, retentionCutover, includePermissions, externalDomains, threadFaultDomain, manifest: manifest.digest, capture, actualACapture, triggerACapture });
+    const profile = JSON.stringify({ root, version, preparation, retentionCutover, includePermissions, externalDomains, threadFaultDomain, manifest: manifest.digest, capture, actualACapture, triggerACapture, product: product && { sourceHash: product.artifact.sourceHash, serviceFixture: product.serviceFixture } });
+    // Product normal bytes are validated and replaced below on every call; only generated fault strings are reused.
     const body = await fixtureCompileCache.compile(entry, directory, profile, async contents => {
       const result = await build({ stdin: { contents, resolveDir: root, sourcefile: 'retention-fixture-thread.ts', loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'cjs', target: 'node22', plugins: [versionPlugin], logLevel: 'silent' });
       return result.outputFiles[0].text;
-    }, reuseThreads && !product);
+    }, reuseThreads);
     const sourceHash = createHash('sha256').update(body).digest('hex');
     artifacts[fault] = { format: STORAGE_BUNDLE_FORMAT, sourceHash, source: `var __TOWER_STORAGE_SOURCE_HASH__ = "${sourceHash}";\n${body}` };
   }

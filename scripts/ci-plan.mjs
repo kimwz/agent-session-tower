@@ -11,14 +11,23 @@ export function inventory(root = '.') {
   return walk('tests').sort();
 }
 
-export function shards(files, costs, count) {
+export function projectedSeconds(files, costs, concurrency, tails = {}) {
+  const slots = Array.from({ length: concurrency }, () => 0);
+  for (const file of [...files].sort()) {
+    const next = slots.indexOf(Math.min(...slots));
+    slots[next] += Math.max(costs[file] ?? 1, 1) + 1;
+  }
+  return Math.max(...slots) + files.reduce((sum, file) => sum + (tails[file] ?? 0), 0);
+}
+
+export function shards(files, costs, count, concurrency = 4, tails = {}) {
   assert.ok(Number.isInteger(count) && count > 0);
   assert.equal(new Set(files).size, files.length, 'duplicate inventory');
-  const bins = Array.from({ length: count }, () => ({ files: [], cost: 0 }));
+  const bins = Array.from({ length: count }, () => ({ files: [] }));
   const cost = file => Math.max(costs[file] ?? 1, 1) + 1;
-  for (const file of [...files].sort((a, b) => cost(b) - cost(a) || a.localeCompare(b))) {
-    const bin = bins.reduce((best, candidate) => candidate.cost < best.cost ? candidate : best);
-    bin.files.push(file); bin.cost += cost(file);
+  for (const file of [...files].sort((a, b) => cost(b) - cost(a) || (a < b ? -1 : a > b ? 1 : 0))) {
+    const bin = bins.find(candidate => !candidate.files.length) ?? bins.reduce((best, candidate) => projectedSeconds([...candidate.files, file], costs, concurrency, tails) < projectedSeconds([...best.files, file], costs, concurrency, tails) ? candidate : best);
+    bin.files.push(file);
   }
   assert.ok(bins.every(bin => bin.files.length), 'empty shard');
   return bins.map(bin => bin.files.sort());
@@ -41,18 +50,21 @@ export function plan(root = '.') {
     const index = os === 'macos-latest' ? 0 : major === '22' ? 1 : 2;
     const costs = Object.fromEntries(Object.entries(weights).map(([file, values]) => [file, values[index]]));
     // The designated full lane also retains the largest numeric expansion and comparison benchmark.
-    if (major === '24') costs[largeFile] = (costs[largeFile] ?? 0) + 90;
-    const assigned = shards(files, costs, count);
+    const concurrency = os === 'macos-latest' ? 2 : 4;
+    const tails = major === '24' ? { [largeFile]: 90 } : major === '26' ? { [offlineFile]: 30 } : {};
+    const assigned = shards(files, costs, count, concurrency, tails);
+    const cheapest = assigned.map(selected => projectedSeconds(selected, costs, concurrency, tails));
+    const foundation = cheapest.indexOf(Math.min(...cheapest));
     assigned.forEach((selected, shard) => lanes.push({ id: `${os.startsWith('mac') ? 'mac' : 'linux'}-${major}-${shard}`,
-      os, node: versions[major], kind: 'full', major, shard, count, files: selected,
+      os, node: versions[major], foundation: shard === foundation, kind: 'full', major, shard, count, files: selected,
       large: major === '24' && selected.includes(largeFile), sea: major === '26' && selected.includes(offlineFile),
       benchmark: major === '24' && selected.includes(largeFile) }));
   }
   for (const major of ['24', '26']) {
-    const selected = [...new Set([...files.filter(path => path.startsWith('tests/server/storage/')), ...consumers,
+    const selected = [...new Set([...files.filter(path => path.startsWith('tests/server/storage/')), ...consumers, ...files.filter(path => /storage-offline-service-\d+\.test\.ts$/.test(path)),
       ...(major === '26' ? residual : [])])].sort();
     assert.ok(selected.every(path => files.includes(path)), 'compatibility file missing');
-    lanes.push({ id: `mac-${major}`, os: 'macos-latest', node: versions[major], major, kind: 'compat', files: selected,
+    lanes.push({ id: `mac-${major}`, os: 'macos-latest', node: versions[major], major, kind: 'compat', foundation: true, files: selected,
       large: false, sea: major === '26', benchmark: false });
   }
   return lanes;
@@ -77,7 +89,7 @@ export function validateReceipts(lanes, receipts, sha) {
     }
     assert.equal(receipt.sea, lane.sea, 'missing actual SEA qualification');
     assert.equal(receipt.benchmark, lane.benchmark, 'missing retention benchmark');
-    assert.equal(receipt.foundation, lane.kind === 'compat' || lane.shard === 0, 'missing core durability sample');
+    assert.equal(receipt.foundation, lane.foundation, 'missing core durability sample');
     if (lane.os.startsWith('mac')) {
       assert.equal(receipt.arch, 'arm64', 'wrong Mac architecture');
       assert.equal(receipt.pathNode, lane.node, 'child Node differs');
