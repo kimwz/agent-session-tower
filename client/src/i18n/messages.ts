@@ -146,6 +146,7 @@ export const english: Record<string, string> = {
   "공유하지 않은 시크릿도 이 세션에만 연결할 수 있습니다. 공유 범위는 바뀌지 않습니다.": "Unshared secrets can be connected to this session only. Their sharing does not change.",
   "{0} 이 세션에 연결": "Connect {0} to this session",
   "저장한 시크릿이 없습니다.": "No saved secrets.",
+  "저장한 시크릿을 모두 이 세션에서 쓸 수 있습니다.": "Every saved secret is already available in this session.",
   "최근 사용 차단 · {0}": "Last use blocked · {0}",
   "최근 사용 · {0}": "Last used · {0}",
   "아직 사용하지 않음": "Not used yet",

@@ -3,12 +3,12 @@ import type { SecretSettingsView } from '../../../shared/secrets';
 import { useI18n } from '../i18n/i18n';
 import type { SecretChange } from './SecretAccess';
 import { SecretFolderPicker } from './SecretSharingEditor';
-import { addPayload, quickSecretKind, readSecretFile, suggestedSecretName, type QuickSecretFormat, type SecretFolderChoice } from './secrets-client';
+import { addPayload, quickSecretKind, readSecretFile, suggestedSecretName, type QuickSecretFormat, type SecretCanvas } from './secrets-client';
 
 export const formatLabels: Record<string, string> = { scalar: '단일 값으로 저장합니다', env: '.env로 저장합니다', file: '비공개 파일로 저장합니다' };
 
 /** A secret saved from the settings: a name, its value or file, and optionally where it is shared. */
-export function SecretAddForm({ view, choices, busy, change, onClose }: { view: SecretSettingsView; choices: readonly SecretFolderChoice[]; busy: boolean; change: SecretChange; onClose: () => void }) {
+export function SecretAddForm({ view, canvas, busy, change, onClose }: { view: SecretSettingsView; canvas: SecretCanvas; busy: boolean; change: SecretChange; onClose: () => void }) {
   const { t } = useI18n();
   const [raw, setRaw] = useState(''); const [name, setName] = useState(''); const [format, setFormat] = useState<QuickSecretFormat>('auto'); const [fileName, setFileName] = useState('');
   const [global, setGlobal] = useState(false); const [keys, setKeys] = useState<string[]>([]);
@@ -42,7 +42,7 @@ export function SecretAddForm({ view, choices, busy, change, onClose }: { view: 
     <fieldset><legend>{t('공유 (선택)')}</legend>
       <label className="secret-check secret-global-check"><input type="checkbox" checked={global} disabled={disabled} onChange={event => setGlobal(event.target.checked)} />
         <span><strong>GLOBAL</strong><small>{t('모든 컴퓨터의 모든 폴더에서 자동으로 사용합니다.')}</small></span></label>
-      <SecretFolderPicker view={view} choices={choices} keys={keys} onKeys={setKeys} disabled={disabled} />
+      <SecretFolderPicker view={view} canvas={canvas} keys={keys} onKeys={setKeys} disabled={disabled} />
       {!global && !keys.length && <p className="secret-hint">{t('아무것도 고르지 않으면 공유하지 않습니다. 채팅의 ‘기존 시크릿 연결’로 세션마다 연결할 수 있습니다.')}</p>}
     </fieldset>
     {error && <p role="alert" className="secret-error">{error}</p>}

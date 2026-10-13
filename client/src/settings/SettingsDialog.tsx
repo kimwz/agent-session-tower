@@ -18,7 +18,7 @@ import { AccountSection } from '../auth/AccountPanel';
 import { GeneralSettings } from './GeneralSettings';
 import { BackupPanel } from '../backup/BackupPanel';
 import { SecretsPanel } from '../secrets/SecretsPanel';
-import type { SecretFolderChoice } from '../secrets/secrets-client';
+import type { SecretCanvas } from '../secrets/secrets-client';
 import { ModelsPanel } from '../models/ModelsPanel';
 import { SettingsFrameContext, type SettingsFrame, type SettingsGuard } from './SettingsPane';
 import { markText, sectionMark, type SettingsAttention, type SettingsSection } from './settings-sections';
@@ -30,8 +30,8 @@ export interface SettingsContext {
   providers: ProviderHealth[];
   /** Folders of this computer, with their names. */
   projects: [string, string][];
-  /** Canvas folders of every computer, with their names and computers, for secret sharing. */
-  secretFolders: SecretFolderChoice[];
+  /** Canvas folders and computer names of every computer, for secret sharing. */
+  secretCanvas: SecretCanvas;
   computers: TriggerComputer[];
   targets: TriggerTargets;
   controlledBy: string[];
@@ -119,7 +119,7 @@ export function SettingsDialog({ place, sections, attention, context, onPlace, o
       case 'decisions': return <DecisionPanel token={context.token} />;
       case 'remote': return <RemotePanel token={context.token} projects={context.projects} controlledBy={context.controlledBy} initialTab={place.remoteTab} />;
       case 'notifications': return <NotificationPanel token={context.token} />;
-      case 'secrets': return <SecretsPanel token={context.token} computers={context.computers} folders={context.secretFolders} focus={place.section === 'secrets' ? place.secretId : undefined} />;
+      case 'secrets': return <SecretsPanel token={context.token} computers={context.computers} canvas={context.secretCanvas} focus={place.section === 'secrets' ? place.secretId : undefined} />;
       case 'backup': return <BackupPanel token={context.token} />;
       case 'account': return <AccountSection />;
     }

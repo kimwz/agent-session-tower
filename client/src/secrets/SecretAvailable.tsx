@@ -4,7 +4,7 @@ import type { SecretBasis, SecretSessionError, SecretSessionView } from '../../.
 import { useI18n } from '../i18n/i18n';
 import { relativeTime } from '../common/lib';
 import { SecretAccess, type SecretChange } from './SecretAccess';
-import { secretMatches, usedSecrets } from './secrets-client';
+import { kindLabels, secretMatches, usedSecrets } from './secrets-client';
 
 const basisLabels: Record<SecretBasis, string> = { global: 'GLOBAL', folder: '이 폴더', session: '이 세션', legacy: '기존 규칙', remote: '원격 원본' };
 const stateLabels: Record<SecretSessionError, [string, string]> = {
@@ -33,8 +33,10 @@ export function SecretAvailable({ view, busy, change, onPaste, onSharing }: {
 }) {
   const { t } = useI18n(); const [picking, setPicking] = useState(false); const [query, setQuery] = useState('');
   const used = new Map(usedSecrets(view.usage).map(use => [use.secretId, use]));
-  const connected = new Set(view.available.filter(secret => secret.basis.includes('session')).map(secret => secret.id));
-  const candidates = view.connectable.filter(secret => secretMatches(secret, query));
+  // Only what this session cannot use now, including a secret disconnected here, is offered for connecting.
+  const available = new Set(view.available.map(secret => secret.id));
+  const unconnected = view.connectable.filter(secret => !available.has(secret.id));
+  const candidates = unconnected.filter(secret => secretMatches(secret, query));
   const vaultClosed = view.error === 'locked' || view.error === 'uninitialized';
   return <div className="secret-available">
     <SecretSessionState error={view.error} />
@@ -48,17 +50,16 @@ export function SecretAvailable({ view, busy, change, onPaste, onSharing }: {
       {picking && <section className="secret-connect" aria-label={t('기존 시크릿 연결')}>
         <label className="secret-search"><Search size={15} aria-hidden="true" /><input type="search" autoFocus aria-label={t('저장된 시크릿 검색')} placeholder={t('이름이나 환경 변수 검색')} value={query} onChange={event => setQuery(event.target.value)} /></label>
         <p className="secret-hint">{t('공유하지 않은 시크릿도 이 세션에만 연결할 수 있습니다. 공유 범위는 바뀌지 않습니다.')}</p>
-        {candidates.length ? <ul>{candidates.map(secret => <li key={secret.id} className="secret-row"><span><strong>{secret.name}</strong><small>{secret.kind}{secret.fields?.length ? ` · ${secret.fields.join(', ')}` : ''}</small></span>
-          {connected.has(secret.id) ? <span className="secret-badge">{t('연결됨')}</span>
-            : <button type="button" disabled={busy} aria-label={t('{0} 이 세션에 연결', { 0: secret.name })} onClick={() => void change('session-connect', { secretIds: [secret.id] })}>{t('연결하기')}</button>}
-        </li>)}</ul> : <p className="secret-empty">{t(view.connectable.length ? '검색 결과가 없습니다.' : '저장한 시크릿이 없습니다.')}</p>}
+        {candidates.length ? <ul>{candidates.map(secret => <li key={secret.id} className="secret-row"><span><strong>{secret.name}</strong><small>{t(kindLabels[secret.kind])}{secret.fields?.length ? ` · ${secret.fields.join(', ')}` : ''}</small></span>
+          <button type="button" disabled={busy} aria-label={t('{0} 이 세션에 연결', { 0: secret.name })} onClick={() => void change('session-connect', { secretIds: [secret.id] })}>{t('연결하기')}</button>
+        </li>)}</ul> : <p className="secret-empty">{t(!view.connectable.length ? '저장한 시크릿이 없습니다.' : !unconnected.length ? '저장한 시크릿을 모두 이 세션에서 쓸 수 있습니다.' : '검색 결과가 없습니다.')}</p>}
       </section>}
       {view.available.length ? <ul className="secret-list">{view.available.map(secret => {
         const use = used.get(secret.id); const remote = secret.basis.includes('remote');
         // Only saved secrets of this vault have sharing; a value pasted for this session alone does not.
         const saved = !remote && view.connectable.some(entry => entry.id === secret.id);
         return <li key={secret.id} className="secret-item">
-          <div className="secret-item-name"><strong><KeyRound size={12} aria-hidden="true" />{secret.name}</strong><small>{secret.kind}{secret.fields?.length ? ` · ${secret.fields.join(', ')}` : ''}</small></div>
+          <div className="secret-item-name"><strong><KeyRound size={12} aria-hidden="true" />{secret.name}</strong><small>{t(kindLabels[secret.kind])}{secret.fields?.length ? ` · ${secret.fields.join(', ')}` : ''}</small></div>
           <div className="secret-sharing">{secret.basis.map(basis => <span key={basis} className={`secret-chip secret-basis-${basis}`} title={remote && basis === 'remote' ? secret.sourceHostId : undefined}>{t(basisLabels[basis])}</span>)}</div>
           <small className="secret-use">{use ? t(use.outcome === 'blocked' ? '최근 사용 차단 · {0}' : '최근 사용 · {0}', { 0: relativeTime(new Date(use.at).toISOString()) }) : t('아직 사용하지 않음')}</small>
           <div className="secret-item-actions">

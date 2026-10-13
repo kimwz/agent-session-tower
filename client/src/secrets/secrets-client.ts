@@ -41,6 +41,8 @@ export function isRemoteSecret(secret: SecretMetadata, localDeviceId?: string): 
   return !!secret.sourceHostId && secret.sourceHostId !== localDeviceId;
 }
 
+/** How each kind is named on screen (translation keys). */
+export const kindLabels: Record<SecretKind, string> = { scalar: '단일 값', env: '.env', file: '파일' };
 export type QuickSecretFormat = 'auto' | SecretKind;
 /** A display hint only; the server validates dotenv syntax and preserves literal values. */
 export function quickSecretKind(raw: string, format: QuickSecretFormat): SecretKind {
@@ -87,6 +89,11 @@ export function addPayload(input: { raw: string; format: QuickSecretFormat; name
 
 /** A canvas folder the sharing editor offers: its key, the canvas's label for it, and the computer it is on. */
 export interface SecretFolderChoice { key: string; label: string; computer: string }
+/** A computer of the canvas: this one without `node`, a joined one with it. */
+export interface SecretCanvasHost { node?: string; name: string }
+/** The canvas as secret sharing sees it: every folder of every computer, and every computer's name. */
+export interface SecretCanvas { folders: readonly SecretFolderChoice[]; hosts: readonly SecretCanvasHost[] }
+export const emptyCanvas: SecretCanvas = { folders: [], hosts: [] };
 /** Every canvas folder of every computer (`projectGroupChoices` across hosts), named with its computer. */
 export function secretFolderChoices(projects: readonly (readonly [string, string])[], hosts: readonly { node?: string; name: string }[]): SecretFolderChoice[] {
   return projects.map(([key, label]) => ({ key, label, computer: hosts.find(host => host.node === nodeOf(key))?.name ?? '' }));
@@ -109,25 +116,35 @@ export function folderIdentity(view: SecretHosts, key: string): SecretFolder | u
   return peer ? { hostId: peer.device.id, root: localPart(key) } : undefined;
 }
 const lastSegment = (path: string) => path.split('/').filter(Boolean).at(-1) || path;
-function computerName(view: SecretHosts, hostId: string): string | undefined {
-  return view.device?.id === hostId ? view.device.name : view.peers.find(peer => peer.device.id === hostId)?.device.name;
+/**
+ * A vault host's name as the canvas shows it, so one computer reads the same in every list; the vault's own device
+ * name only for a computer the canvas does not know.
+ */
+export function computerName(view: SecretHosts, hostId: string, hosts: readonly SecretCanvasHost[]): string | undefined {
+  if (view.device?.id === hostId) return hosts.find(host => !host.node)?.name || view.device.name;
+  const peer = view.peers.find(candidate => candidate.device.id === hostId);
+  return peer && peerName(peer, hosts);
+}
+export function peerName(peer: SecretPeer, hosts: readonly SecretCanvasHost[]): string {
+  return (peer.direction === 'node' && hosts.find(host => host.node === peer.routeId)?.name) || peer.device.name;
 }
 /** A folder as the owner reads it: the canvas label, its path and its computer; no `key` when it cannot be saved again. */
 export interface FolderView { key?: string; label: string; root: string; computer: string }
-export function describeFolder(view: SecretHosts, folder: SecretFolder, choices: readonly SecretFolderChoice[]): FolderView {
+export function describeFolder(view: SecretHosts, folder: SecretFolder, canvas: SecretCanvas): FolderView {
   const key = folderKey(view, folder);
-  const choice = key ? choices.find(item => item.key === key) : undefined;
-  return { ...(key ? { key } : {}), label: choice?.label || lastSegment(folder.root), root: folder.root, computer: computerName(view, folder.hostId) || choice?.computer || folder.hostId };
+  const choice = key ? canvas.folders.find(item => item.key === key) : undefined;
+  return { ...(key ? { key } : {}), label: choice?.label || lastSegment(folder.root), root: folder.root, computer: computerName(view, folder.hostId, canvas.hosts) || choice?.computer || folder.hostId };
 }
 export function describeChoice(choice: SecretFolderChoice): FolderView {
   return { key: choice.key, label: choice.label, root: localPart(choice.key), computer: choice.computer };
 }
 /** A chosen canvas key as the canvas lists it, or from its path once the canvas no longer does. */
-export function describeKey(view: SecretHosts, key: string, choices: readonly SecretFolderChoice[]): { folder: FolderView; listed: boolean } {
-  const choice = choices.find(item => item.key === key);
+export function describeKey(view: SecretHosts, key: string, canvas: SecretCanvas): { folder: FolderView; listed: boolean } {
+  const choice = canvas.folders.find(item => item.key === key);
   if (choice) return { folder: describeChoice(choice), listed: true };
   const identity = folderIdentity(view, key);
-  return { folder: identity ? describeFolder(view, identity, choices) : { key, label: lastSegment(localPart(key)), root: localPart(key), computer: '' }, listed: false };
+  const computer = canvas.hosts.find(host => host.node === nodeOf(key))?.name ?? '';
+  return { folder: identity ? describeFolder(view, identity, canvas) : { key, label: lastSegment(localPart(key)), root: localPart(key), computer }, listed: false };
 }
 
 /** What a settings row shows of a secret's sharing; the server decides what it allows. */
@@ -142,11 +159,11 @@ export interface SharingSummary {
   /** Its rules also limit operations, fields or time. */
   limited: boolean;
 }
-export function sharingSummary(view: SecretHosts, item: SecretSettingsItem, choices: readonly SecretFolderChoice[]): SharingSummary {
+export function sharingSummary(view: SecretHosts, item: SecretSettingsItem, canvas: SecretCanvas): SharingSummary {
   const legacy: SecretLegacySummary | undefined = item.sharing ? undefined : item.legacy;
   const sharing: Pick<SecretSharing, 'global' | 'folders'> = item.sharing ?? { global: !!legacy?.global.length, folders: legacy?.folders ?? [] };
-  return { legacy: !!legacy, withheld: !!item.withheld, global: sharing.global, globalComputers: legacy?.global.map(host => computerName(view, host.hostId) || host.hostId) ?? [],
-    folders: sharing.folders.map(folder => describeFolder(view, folder, choices)), limited: !!legacy?.limited };
+  return { legacy: !!legacy, withheld: !!item.withheld, global: sharing.global, globalComputers: legacy?.global.map(host => computerName(view, host.hostId, canvas.hosts) || host.hostId) ?? [],
+    folders: sharing.folders.map(folder => describeFolder(view, folder, canvas)), limited: !!legacy?.limited };
 }
 
 /**
@@ -155,12 +172,12 @@ export function sharingSummary(view: SecretHosts, item: SecretSettingsItem, choi
  */
 export interface SharingDraft { global: boolean; keys: string[]; kept: SecretFolder[]; dropped: FolderView[] }
 /** Starts from the stored sharing, or for a legacy secret from what its rules share. */
-export function sharingDraft(view: SecretHosts, item: SecretSettingsItem, choices: readonly SecretFolderChoice[]): SharingDraft {
-  const summary = sharingSummary(view, item, choices);
+export function sharingDraft(view: SecretHosts, item: SecretSettingsItem, canvas: SecretCanvas): SharingDraft {
+  const summary = sharingSummary(view, item, canvas);
   const stored = item.sharing ? item.sharing.folders : item.legacy?.folders ?? [];
   const unknown = stored.filter(folder => !folderKey(view, folder));
   return { global: summary.global, keys: [...new Set(summary.folders.flatMap(folder => folder.key ? [folder.key] : []))],
-    kept: item.sharing ? unknown.map(({ hostId, root }) => ({ hostId, root })) : [], dropped: item.sharing ? [] : unknown.map(folder => describeFolder(view, folder, choices)) };
+    kept: item.sharing ? unknown.map(({ hostId, root }) => ({ hostId, root })) : [], dropped: item.sharing ? [] : unknown.map(folder => describeFolder(view, folder, canvas)) };
 }
 /** Saving replaces the sharing with what the editor shows; a legacy secret has revision 0. */
 export function sharingPayload(item: SecretSettingsItem, draft: Pick<SharingDraft, 'global' | 'keys' | 'kept'>) {

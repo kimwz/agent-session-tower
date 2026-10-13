@@ -4,12 +4,13 @@ import type { SecretDevice, SecretSettingsView } from '../../../shared/secrets';
 import { useI18n } from '../i18n/i18n';
 import { copyText } from '../common/lib';
 import type { SecretChange } from './SecretAccess';
+import { peerName, type SecretCanvasHost } from './secrets-client';
 
 export type AdvancedEditor = 'trust' | 'import' | 'password';
 
 /** Rarely needed vault management, folded away below the list: trusted computers, a pending import, the vault password. */
-export function SecretAdvanced({ view, busy, change, open, onToggle, onEdit }: {
-  view: SecretSettingsView; busy: boolean; change: SecretChange; open: boolean; onToggle: (open: boolean) => void; onEdit: (editor: AdvancedEditor) => void;
+export function SecretAdvanced({ view, hosts, busy, change, open, onToggle, onEdit }: {
+  view: SecretSettingsView; hosts: readonly SecretCanvasHost[]; busy: boolean; change: SecretChange; open: boolean; onToggle: (open: boolean) => void; onEdit: (editor: AdvancedEditor) => void;
 }) {
   const { t } = useI18n();
   return <details className="secret-advanced" open={open} onToggle={event => onToggle(event.currentTarget.open)}>
@@ -17,7 +18,7 @@ export function SecretAdvanced({ view, busy, change, open, onToggle, onEdit }: {
     <section className="secret-advanced-section" aria-label={t('연결된 컴퓨터')}>
       <div className="secret-section-head"><h3>{t('연결된 컴퓨터')}</h3><button type="button" disabled={busy} onClick={() => onEdit('trust')}>{t('컴퓨터 승인')}</button></div>
       <p>{t('승인한 컴퓨터의 폴더를 공유 범위로 고를 수 있고, GLOBAL은 승인한 컴퓨터에도 적용됩니다.')}</p>
-      {view.peers.length ? <ul>{view.peers.map(peer => <li className="secret-row" key={peer.device.id}><span><strong>{peer.device.name}</strong><small>{t(peer.direction === 'node' ? '내가 연결한 컴퓨터' : '나를 연결한 컴퓨터')}</small><code>{peer.device.fingerprint}</code></span>
+      {view.peers.length ? <ul>{view.peers.map(peer => <li className="secret-row" key={peer.device.id}><span><strong>{peerName(peer, hosts)}</strong><small>{t(peer.direction === 'node' ? '내가 연결한 컴퓨터' : '나를 연결한 컴퓨터')}</small><code>{peer.device.fingerprint}</code></span>
         <button type="button" disabled={busy} onClick={() => void change('untrust', { id: peer.device.id })}>{t('승인 해제')}</button></li>)}</ul>
         : <p className="secret-empty">{t('승인한 컴퓨터가 없습니다.')}</p>}
     </section>

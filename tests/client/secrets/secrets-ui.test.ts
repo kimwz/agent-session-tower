@@ -4,8 +4,8 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { SecretPeer, SecretSessionView, SecretSettingsItem, SecretSettingsView } from '../../../shared/secrets.js';
 import {
-  addPayload, describeFolder, folderIdentity, folderKey, pastePayload, pollDelay, quickSecretKind, secretFolderChoices, secretSession, secretSessionPath,
-  secretFailure, sessionBlocked, sharingDraft, sharingPayload, sharingSummary, suggestedSecretName, usedSecrets, WORKER_PENDING, type SecretFolderChoice,
+  addPayload, computerName, describeFolder, folderIdentity, folderKey, pastePayload, pollDelay, quickSecretKind, secretFolderChoices, secretSession, secretSessionPath,
+  secretFailure, sessionBlocked, sharingDraft, sharingPayload, sharingSummary, suggestedSecretName, usedSecrets, WORKER_PENDING, type SecretCanvas, type SecretFolderChoice,
 } from '../../../client/src/secrets/secrets-client.js';
 import { ApiError } from '../../../client/src/common/lib.js';
 import { SecretAccess } from '../../../client/src/secrets/SecretAccess.js';
@@ -23,8 +23,8 @@ const noop = () => {};
 const change = async () => true;
 const node = 'a'.repeat(32);
 const other = 'b'.repeat(32);
-const device = { id: 'source', name: '원본 맥', signingKey: 'public-signing', encryptionKey: 'public-encryption', fingerprint: 'public-fingerprint' };
-const peer: SecretPeer = { device: { ...device, id: 'peer-device', name: '빌드 서버' }, routeId: node, direction: 'node', enabled: true };
+const device = { id: 'source', name: 'This computer', signingKey: 'public-signing', encryptionKey: 'public-encryption', fingerprint: 'public-fingerprint' };
+const peer: SecretPeer = { device: { ...device, id: 'peer-device', name: 'build-vault' }, routeId: node, direction: 'node', enabled: true };
 const controller: SecretPeer = { device: { ...device, id: 'controller-device', name: '상위 Tower' }, routeId: other, direction: 'controller', enabled: true };
 const reference = (id: string) => `tower-secret://vault/${id}@1`;
 const item = (id: string, patch: Partial<SecretSettingsItem> = {}): SecretSettingsItem => ({ id, name: id.toUpperCase(), groupId: 'tower', kind: 'scalar', version: 1, reference: reference(id), sourceHostId: device.id, ...patch });
@@ -43,6 +43,8 @@ const choices: SecretFolderChoice[] = [
   { key: `@${node}//srv/app`, label: 'app', computer: '빌드 서버' },
   { key: `@${other}//elsewhere`, label: 'elsewhere', computer: '모르는 컴퓨터' },
 ];
+/** The canvas names computers differently from the vault's stored device names; the canvas name is the one shown. */
+const canvas: SecretCanvas = { folders: choices, hosts: [{ name: '원본 맥' }, { node, name: '빌드 서버' }, { node: other, name: '모르는 컴퓨터' }] };
 const sessionView = (patch: Partial<SecretSessionView> = {}): SecretSessionView => ({
   status: { initialized: true, locked: false },
   available: [
@@ -84,24 +86,35 @@ test('settings get every canvas folder of every computer, named with its compute
 });
 
 test('a row summary names folders by canvas label, path and computer, and an unknown computer by its raw ID', () => {
-  const folders = sharingSummary(view, view.secrets[1]!, choices).folders;
+  const folders = sharingSummary(view, view.secrets[1]!, canvas).folders;
   assert.deepEqual(folders, [{ key: '/work/app', label: 'app', root: '/work/app', computer: '원본 맥' }, { key: `@${node}//srv/app`, label: 'app', root: '/srv/app', computer: '빌드 서버' }]);
-  assert.deepEqual(describeFolder(view, { hostId: 'gone-device', root: '/old/app' }, choices), { label: 'app', root: '/old/app', computer: 'gone-device' });
-  const legacy = sharingSummary(view, view.secrets[3]!, choices);
+  assert.deepEqual(describeFolder(view, { hostId: 'gone-device', root: '/old/app' }, canvas), { label: 'app', root: '/old/app', computer: 'gone-device' });
+  const legacy = sharingSummary(view, view.secrets[3]!, canvas);
   assert.equal(legacy.legacy, true); assert.equal(legacy.global, true); assert.deepEqual(legacy.globalComputers, ['원본 맥']); assert.equal(legacy.limited, true);
-  assert.equal(sharingSummary(view, view.secrets[4]!, choices).withheld, true);
+  assert.equal(sharingSummary(view, view.secrets[4]!, canvas).withheld, true);
+});
+
+test('one computer reads the same everywhere: the canvas name first, the vault device name only when the canvas does not know it', () => {
+  assert.deepEqual(sharingSummary(view, view.secrets[1]!, canvas).folders.map(folder => folder.computer), ['원본 맥', '빌드 서버']);
+  assert.deepEqual(sharingSummary(view, view.secrets[1]!, { folders: [], hosts: [] }).folders.map(folder => folder.computer), ['This computer', 'build-vault']);
+  assert.deepEqual(sharingSummary(view, view.secrets[3]!, canvas).globalComputers, ['원본 맥']);
+  assert.equal(computerName(view, controller.device.id, canvas.hosts), '상위 Tower', 'a controller is not on this canvas');
+  assert.equal(computerName(view, 'gone-device', canvas.hosts), undefined);
+  const editor = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: view.secrets[1]!, canvas, busy: false, change, onClose: noop }));
+  const list = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view, canvas, busy: false, change }));
+  for (const markup of [editor, list]) { assert.match(markup, /원본 맥/); assert.doesNotMatch(markup, /This computer|build-vault/); }
 });
 
 test('the sharing editor starts from stored sharing or the legacy summary and saves folders as canvas keys with the revision', () => {
-  const shared = sharingDraft(view, view.secrets[1]!, choices);
+  const shared = sharingDraft(view, view.secrets[1]!, canvas);
   assert.deepEqual(shared, { global: false, keys: ['/work/app', `@${node}//srv/app`], kept: [], dropped: [] });
   assert.deepEqual(sharingPayload(view.secrets[1]!, shared), { secretId: 'folder_key', revision: 1, global: false, folders: [{ cwd: '/work/app' }, { cwd: `@${node}//srv/app` }] });
-  const legacy = sharingDraft(view, view.secrets[3]!, choices);
+  const legacy = sharingDraft(view, view.secrets[3]!, canvas);
   assert.equal(legacy.global, true); assert.deepEqual(legacy.keys, []); assert.deepEqual(legacy.kept, []); assert.deepEqual(legacy.dropped.map(folder => folder.root), ['/old/app']);
   assert.deepEqual(sharingPayload(view.secrets[3]!, { global: true, keys: [], kept: [] }), { secretId: 'legacy_key', revision: 0, global: true, folders: [] }, 'a legacy secret saves with revision 0');
   assert.equal(sharingPayload(view.secrets[0]!, { global: false, keys: [], kept: [] }).revision, 3);
   const away = item('away_key', { sharing: { revision: 7, global: false, folders: [{ hostId: device.id, root: '/work/app' }, { hostId: 'gone-device', root: '/old/app' }] } });
-  const draft = sharingDraft(view, away, choices);
+  const draft = sharingDraft(view, away, canvas);
   assert.deepEqual(draft.kept, [{ hostId: 'gone-device', root: '/old/app' }], 'a stored folder of a computer no longer trusted is kept as it was received');
   assert.deepEqual(sharingPayload(away, draft).folders, [{ cwd: '/work/app' }, { hostId: 'gone-device', root: '/old/app' }]);
 });
@@ -152,7 +165,7 @@ test('the session view is read every 10 s while open and 60 s while closed, and 
 });
 
 test('settings list every secret once with its masked value, sharing summary and row actions, never a value or reference', () => {
-  const markup = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view, choices, busy: false, change }));
+  const markup = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view, canvas, busy: false, change }));
   for (const name of ['GLOBAL_KEY', 'FOLDER_KEY', 'LONELY_KEY', 'LEGACY_KEY', 'WITHHELD_KEY']) assert.equal(markup.split(`<strong>${name}</strong>`).length, 2, name);
   assert.match(markup, /GLOBAL/); assert.match(markup, /공유 안 함/); assert.match(markup, /빌드 서버/); assert.match(markup, /title="app · \/srv\/app · 빌드 서버"/);
   assert.match(markup, /기존 규칙/); assert.match(markup, /GLOBAL · 원본 맥/); assert.match(markup, /기존 규칙에 사용 방식·필드·기간 제한이 있습니다/);
@@ -161,36 +174,37 @@ test('settings list every secret once with its masked value, sharing summary and
   assert.match(markup, /시크릿 추가/); assert.match(markup, /잠금 해제됨/); assert.match(markup, />잠그기</); assert.match(markup, /<details class="secret-advanced"/);
   assert.doesNotMatch(markup, /tower-secret:\/\/|public-signing|public-encryption/);
   assert.doesNotMatch(markup, /프로젝트 자동 연결|공유 규칙|프로젝트 등록|규칙 추가/, 'no second tab, project registration or rule editor');
-  const locked = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { ...view, status: { initialized: true, locked: true } }, choices, busy: false, change }));
+  const locked = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { ...view, status: { initialized: true, locked: true } }, canvas, busy: false, change }));
   assert.doesNotMatch(locked, /GLOBAL_KEY/); assert.match(locked, /잠금 해제/);
 });
 
 test('a pending import opens the advanced section; a remote secret stays read-only', () => {
-  const markup = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { ...view, status: { initialized: true, locked: false, pendingImports: 1, pendingImportIds: ['backup'] }, secrets: [item('remote', { sourceHostId: 'peer-device', sharing: { revision: 1, global: true, folders: [] } })] }, choices, busy: false, change }));
-  assert.match(markup, /<details class="secret-advanced" open=""/); assert.match(markup, /보관함 가져오기/); assert.match(markup, /보관함 비밀번호 변경/); assert.match(markup, /빌드 서버/);
+  const markup = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { ...view, status: { initialized: true, locked: false, pendingImports: 1, pendingImportIds: ['backup'] }, secrets: [item('remote', { sourceHostId: 'peer-device', sharing: { revision: 1, global: true, folders: [] } })] }, canvas, busy: false, change }));
+  assert.match(markup, /<details class="secret-advanced" open=""/); assert.match(markup, /보관함 가져오기/); assert.match(markup, /보관함 비밀번호 변경/); assert.match(markup, /<strong>빌드 서버<\/strong>/); assert.doesNotMatch(markup, /build-vault/);
   assert.match(markup, /원본에서 관리/); assert.doesNotMatch(markup, />공유 편집<|>값 교체<|>삭제</);
 });
 
 test('the sharing editor offers every computer’s folders with path and computer, keeps chosen folders off the canvas and refuses untrusted computers', () => {
   const selected = item('picked', { sharing: { revision: 4, global: false, folders: [{ hostId: device.id, root: '/work/app' }, { hostId: device.id, root: '/hidden/folder' }] } });
-  const markup = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: selected, choices, busy: false, change, onClose: noop }));
+  const markup = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: selected, canvas, busy: false, change, onClose: noop }));
   assert.match(markup, /폴더 이름, 경로, 컴퓨터 검색/); assert.match(markup, /\/srv\/app/); assert.match(markup, /빌드 서버/);
   assert.match(markup, /folder<\/strong><small>\/hidden\/folder<\/small><small>원본 맥<\/small><small>캔버스에 없음/, 'a chosen folder the canvas no longer lists stays removable');
   assert.match(markup, /aria-label="folder 선택 해제"/);
   assert.match(markup, /disabled=""[^>]*\/><span><strong>elsewhere<\/strong><small>\/elsewhere<\/small><small>모르는 컴퓨터 · 시크릿 연결을 승인하지 않은 컴퓨터/);
   assert.doesNotMatch(markup, /기존 규칙/);
-  const legacy = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: view.secrets[3]!, choices, busy: false, change, onClose: noop }));
+  const legacy = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: view.secrets[3]!, canvas, busy: false, change, onClose: noop }));
   assert.match(legacy, /기존 규칙/); assert.match(legacy, /type="checkbox" checked=""/); assert.match(legacy, /사용 방식·필드·기간 제한은 저장하면 사라집니다/);
   assert.match(legacy, /승인이 해제된 컴퓨터의 폴더는 저장하면 빠집니다/); assert.match(legacy, /gone-device/);
-  const away = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: item('away', { sharing: { revision: 1, global: false, folders: [{ hostId: 'gone-device', root: '/old/app' }] } }), choices, busy: false, change, onClose: noop }));
+  const away = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: item('away', { sharing: { revision: 1, global: false, folders: [{ hostId: 'gone-device', root: '/old/app' }] } }), canvas, busy: false, change, onClose: noop }));
   assert.match(away, /승인을 해제한 컴퓨터의 폴더입니다/); assert.match(away, /aria-label="app 선택 해제"/); assert.doesNotMatch(away, /저장하면 빠집니다/);
-  const withheld = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: view.secrets[4]!, choices, busy: false, change, onClose: noop }));
+  const withheld = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: view.secrets[4]!, canvas, busy: false, change, onClose: noop }));
   assert.match(withheld, /구버전에서 규칙이 바뀌었습니다/);
 });
 
 test('the available tab shows each basis, never offers sharing for a remote source, and tells each state apart', () => {
   const markup = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ usage: [{ at: Date.now(), secretId: 'global_key', name: 'GLOBAL_KEY', operation: 'env', outcome: 'delivered', review: 'exempt' }] }), busy: false, change, onPaste: noop, onSharing: noop }));
-  assert.match(markup, />GLOBAL</); assert.match(markup, />이 세션</); assert.match(markup, />원격 원본</); assert.match(markup, /최근 사용 · /); assert.match(markup, /아직 사용하지 않음/);
+  assert.match(markup, />GLOBAL</); assert.match(markup, />이 세션</); assert.match(markup, />원격 원본</);
+  assert.match(markup, /GLOBAL_KEY<\/strong><small>단일 값<\/small>/); assert.doesNotMatch(markup, />scalar</, 'the same kind labels as the settings'); assert.match(markup, /최근 사용 · /); assert.match(markup, /아직 사용하지 않음/);
   assert.match(markup, /aria-label="GLOBAL_KEY 공유 설정"/); assert.doesNotMatch(markup, /REMOTE_KEY 공유 설정/); assert.match(markup, /REMOTE_KEY 이 세션에서 끊기/);
   const temporary = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ connectable: [] }), busy: false, change, onPaste: noop, onSharing: noop }));
   assert.doesNotMatch(temporary, /공유 설정/, 'a value pasted for this session alone has no sharing to edit');
@@ -234,7 +248,7 @@ test('remote approval chooses a known connection by name while still requiring p
 
 test('secret controls have English translations while key names remain exact', () => {
   setLanguage('en');
-  const settings = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view, choices, busy: false, change }));
+  const settings = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view, canvas, busy: false, change }));
   assert.match(settings, /Edit sharing/); assert.match(settings, /Replace value/); assert.match(settings, /Not shared/); assert.match(settings, /Earlier rules/); assert.match(settings, /Add secret/); assert.match(settings, /FOLDER_KEY/);
   const available = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ error: 'worker-update-pending' }), busy: false, change, onPaste: noop, onSharing: noop }));
   assert.match(available, /Waiting for the new execution worker/); assert.match(available, /Connect a saved secret/); assert.match(available, /This session/);
@@ -251,6 +265,6 @@ test('pending encrypted vault restores remain waiting and direct the owner to Se
 });
 
 test('partial remote source failure is shown as a generic alert without reflecting server error details', () => {
-  const markup = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { ...view, status: { ...view.status, error: 'source-private-error-canary' } }, choices, busy: false, change }));
+  const markup = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { ...view, status: { ...view.status, error: 'source-private-error-canary' } }, canvas, busy: false, change }));
   assert.match(markup, /role="alert"/); assert.match(markup, /원본 컴퓨터의 연결과 잠금 상태/); assert.doesNotMatch(markup, /source-private-error-canary/);
 });

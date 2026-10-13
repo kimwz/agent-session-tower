@@ -168,7 +168,7 @@ test('closing a pending quick dialog prevents its response from closing a later 
 
 test('a secret added in the settings is saved without a session, with the folders picked, and its value cleared at once', async () => {
   const { sent, change, answer } = changes(); let closed = false;
-  const add = fixture('SecretAddForm.tsx', 'SecretAddForm', { view: settingsView, choices: [], busy: false, change, onClose() { closed = true; } });
+  const add = fixture('SecretAddForm.tsx', 'SecretAddForm', { view: settingsView, canvas: { folders: [], hosts: [] }, busy: false, change, onClose() { closed = true; } });
   find(add.render(), element => element.type === 'input' && element.props.maxLength === 128).props.onChange({ target: { value: 'DEPLOY_KEY' } });
   find(add.render(), byType('textarea')).props.onChange({ target: { value: 'FAKE_ADD_CANARY' } });
   find(add.render(), element => element.type === stub('./SecretSharingEditor', 'SecretFolderPicker')).props.onKeys(['/work/app', `@${node}//srv/app`]);
@@ -180,7 +180,7 @@ test('a secret added in the settings is saved without a session, with the folder
 
 test('registration accepts empty uploaded file bytes and sends their canonical empty base64', async () => {
   const { sent, change, answer } = changes();
-  const add = fixture('SecretAddForm.tsx', 'SecretAddForm', { view: settingsView, choices: [], busy: false, change, onClose() {} });
+  const add = fixture('SecretAddForm.tsx', 'SecretAddForm', { view: settingsView, canvas: { folders: [], hosts: [] }, busy: false, change, onClose() {} });
   find(add.render(), element => element.type === 'select').props.onChange({ target: { value: 'file' } });
   await find(add.render(), element => element.type === 'input' && element.props.type === 'file').props.onChange({ target: { files: [{ name: 'empty.bin', size: 0, arrayBuffer: async () => new ArrayBuffer(0) }] }, currentTarget: { value: '' } });
   await tick();
@@ -193,7 +193,7 @@ test('registration accepts empty uploaded file bytes and sends their canonical e
 test('saving sharing sends the stored revision, GLOBAL and the picked folders as canvas keys', async () => {
   const { sent, change, answer } = changes(); let closed = false;
   const stored = { ...settingsView.secrets[0]!, sharing: { revision: 5, global: false, folders: [{ hostId: 'source', root: '/work/app' }, { hostId: 'gone', root: '/old' }] } };
-  const editor = fixture('SecretSharingEditor.tsx', 'SecretSharingEditor', { view: settingsView, item: stored, choices: [], busy: false, change, onClose() { closed = true; } });
+  const editor = fixture('SecretSharingEditor.tsx', 'SecretSharingEditor', { view: settingsView, item: stored, canvas: { folders: [], hosts: [] }, busy: false, change, onClose() { closed = true; } });
   const picker = () => find(editor.render(), element => element.type === editor.exports.SecretFolderPicker);
   assert.deepEqual(picker().props.keys, ['/work/app']);
   find(editor.render(), element => element.type === 'input' && element.props.type === 'checkbox').props.onChange({ target: { checked: true } });
@@ -203,16 +203,31 @@ test('saving sharing sends the stored revision, GLOBAL and the picked folders as
     'a folder of a computer no longer trusted stays as it was received');
   answer(); await tick(); assert.equal(closed, true); editor.cleanup();
   const removing = changes();
-  const trimmed = fixture('SecretSharingEditor.tsx', 'SecretSharingEditor', { view: settingsView, item: stored, choices: [], busy: false, change: removing.change, onClose() {} });
+  const trimmed = fixture('SecretSharingEditor.tsx', 'SecretSharingEditor', { view: settingsView, item: stored, canvas: { folders: [], hosts: [] }, busy: false, change: removing.change, onClose() {} });
   find(trimmed.render(), element => element.props['aria-label'] === 'old 선택 해제').props.onClick();
   find(trimmed.render(), byType('form')).props.onSubmit(formEvent);
   assert.deepEqual(removing.sent[0]![1].folders, [{ cwd: '/work/app' }]);
   removing.answer(); await tick(); trimmed.cleanup();
   const legacy = changes();
-  const prefilled = fixture('SecretSharingEditor.tsx', 'SecretSharingEditor', { view: settingsView, item: settingsView.secrets[1], choices: [], busy: false, change: legacy.change, onClose() {} });
+  const prefilled = fixture('SecretSharingEditor.tsx', 'SecretSharingEditor', { view: settingsView, item: settingsView.secrets[1], canvas: { folders: [], hosts: [] }, busy: false, change: legacy.change, onClose() {} });
   find(prefilled.render(), byType('form')).props.onSubmit(formEvent);
   assert.deepEqual(legacy.sent, [['sharing', { secretId: 'legacy_key', revision: 0, global: false, folders: [{ cwd: `@${node}//srv/app` }] }]], 'what the rules shared, exactly as shown');
   legacy.answer(); await tick(); prefilled.cleanup();
+});
+
+test('connecting a saved secret offers only those this session cannot use now, named by kind as in the settings', () => {
+  const { sent, change } = changes();
+  const available = fixture('SecretAvailable.tsx', 'SecretAvailable', { view: sessionView(), busy: false, change, onPaste() {}, onSharing() {} });
+  find(available.render(), element => element.props['aria-expanded'] === false).props.onClick();
+  const root = available.render();
+  const offered = descendants(root).filter(element => typeof element.props['aria-label'] === 'string' && element.props['aria-label'].endsWith(' 이 세션에 연결')).map(element => element.props['aria-label']);
+  assert.deepEqual(offered, ['LONELY_KEY 이 세션에 연결'], 'GLOBAL_KEY is already available here; a secret disconnected here is not, so it is offered');
+  assert.ok(descendants(root).some(element => element.type === 'small' && text(element) === '단일 값'));
+  assert.ok(!descendants(root).some(element => element.type === 'small' && text(element) === 'scalar'));
+  const everything = fixture('SecretAvailable.tsx', 'SecretAvailable', { view: sessionView({ connectable: [sessionView().connectable[1]!] }), busy: false, change, onPaste() {}, onSharing() {} });
+  find(everything.render(), element => element.props['aria-expanded'] === false).props.onClick();
+  assert.ok(descendants(everything.render()).some(element => text(element) === '저장한 시크릿을 모두 이 세션에서 쓸 수 있습니다.'));
+  assert.deepEqual(sent, []);
 });
 
 test('the available tab changes the session only through its buttons', async () => {
@@ -279,13 +294,13 @@ test('switching tabs and closing the dialog never change the session; sharing op
 });
 
 test('settings opened for one secret open its sharing editor once, and only for a secret this vault owns', () => {
-  const opened = fixture('SecretSettings.tsx', 'SecretSettingsWorkspace', { view: settingsView, choices: [], busy: false, change: async () => true, focus: 'legacy_key' });
+  const opened = fixture('SecretSettings.tsx', 'SecretSettingsWorkspace', { view: settingsView, canvas: { folders: [], hosts: [] }, busy: false, change: async () => true, focus: 'legacy_key' });
   opened.render();
   const editor = opened.render();
   assert.equal(editor.type, stub('./SecretSharingEditor', 'SecretSharingEditor')); assert.equal(editor.props.item.id, 'legacy_key');
   editor.props.onClose();
   assert.notEqual(opened.render().type, stub('./SecretSharingEditor', 'SecretSharingEditor'), 'closing it stays closed');
-  const remote = fixture('SecretSettings.tsx', 'SecretSettingsWorkspace', { view: settingsView, choices: [], busy: false, change: async () => true, focus: 'remote_key' });
+  const remote = fixture('SecretSettings.tsx', 'SecretSettingsWorkspace', { view: settingsView, canvas: { folders: [], hosts: [] }, busy: false, change: async () => true, focus: 'remote_key' });
   remote.render();
   assert.notEqual(remote.render().type, stub('./SecretSharingEditor', 'SecretSharingEditor'));
 });
@@ -295,7 +310,7 @@ test('the settings read their view once when shown, and a stale sharing save rel
   const client = { ...secretsClient,
     readSecretSettings: async () => { reads++; return settingsView; },
     postSecret: async (action: string, _token: string, body: unknown) => { posted.push([action, body]); throw new ApiError('conflict', 409); } };
-  const panel = fixture('SecretsPanel.tsx', 'SecretsPanel', { token: 'token', folders: [] }, { context: { active: true }, real: { './secrets-client': client } });
+  const panel = fixture('SecretsPanel.tsx', 'SecretsPanel', { token: 'token' }, { context: { active: true }, real: { './secrets-client': client } });
   panel.render(); await tick(); panel.render(); panel.render();
   assert.equal(reads, 1, 'never polled');
   const workspace = () => find(panel.render(), element => element.type === stub('./SecretSettings', 'SecretSettingsWorkspace'));
@@ -308,11 +323,11 @@ test('the settings read their view once when shown, and a stale sharing save rel
 });
 
 test('the settings dialog hands every computer’s folders and the asked secret to the secrets section', () => {
-  const secretFolders = [{ key: `@${node}//srv/app`, label: 'app', computer: 'Build server' }];
-  const context = { token: 'token', providers: [], projects: [], secretFolders, computers: [], targets: () => ({ projects: [], sessions: [] }), controlledBy: [], showHidden: false, onShowHiddenChange() {}, onOpenSession() {} };
+  const secretCanvas = { folders: [{ key: `@${node}//srv/app`, label: 'app', computer: 'Build server' }], hosts: [{ name: 'Mac' }, { node, name: 'Build server' }] };
+  const context = { token: 'token', providers: [], projects: [], secretCanvas, computers: [], targets: () => ({ projects: [], sessions: [] }), controlledBy: [], showHidden: false, onShowHiddenChange() {}, onOpenSession() {} };
   const dialog = fixture('settings/SettingsDialog.tsx', 'SettingsDialog', { place: { section: 'secrets', secretId: 'folder_key' }, sections: ['secrets'], attention: {}, context, onPlace() {}, onChanged() {}, onClose() {} }, { globals: { document: { body: {}, activeElement: null } } });
   const panel = find(dialog.render(), element => element.type === stub('../secrets/SecretsPanel', 'SecretsPanel'));
-  assert.equal(panel.props.folders, secretFolders); assert.equal(panel.props.focus, 'folder_key'); assert.equal(panel.props.token, 'token');
+  assert.equal(panel.props.canvas, secretCanvas); assert.equal(panel.props.focus, 'folder_key'); assert.equal(panel.props.token, 'token');
 });
 
 test('pending import sends only the selected ID and transient source password and clears input immediately', async () => {
