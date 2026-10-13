@@ -1,5 +1,6 @@
-import { constants } from 'node:fs';
-import { open, realpath } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { constants, type Stats } from 'node:fs';
+import { lstat, open, realpath } from 'node:fs/promises';
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { AutoPromptModelRequest } from '../auto-prompt/native.js';
 import { resolveModel } from '../models/settings.js';
@@ -9,6 +10,7 @@ import { TOWER_INSTRUCTIONS } from '../sessions/parser.js';
 import type { ResolvedModel } from '../../shared/models.js';
 import type { SecretContext, SecretOperation, SecretRunInput } from '../../shared/secrets.js';
 import type { ChatMessage, RunOrigin } from '../../shared/types.js';
+import { TowerError } from '../../shared/errors.js';
 
 /**
  * The secret-use reviewer: before a session the owner did not open gets a secret value, an independent model looks for
@@ -34,10 +36,20 @@ const MIN_EVIDENCE = 4;
 const INTERPRETER = /^(?:python[\d.]*|node|nodejs|bash|sh|zsh|dash|ruby|perl|php|lua|tsx|ts-node|deno|bun)$/;
 const INLINE = new Set(['-c', '-e', '--eval', '-p', '--print', '-m', '-r', '--require', '--import']);
 
+/**
+ * The file a reviewed run executes as the review saw it: its canonical path and the SHA-256 of its whole content (null
+ * when it was not read). `null` instead of a binding: the run executes no file of the project.
+ */
+export interface SecretScriptBinding { path: string; sha256: string | null }
+
+/**
+ * `script` is set once the review gathered its input: the broker compares it with the file right before the run starts,
+ * so code changed during the review never runs on that review.
+ */
 export type SecretReview =
-  | { review: 'allowed' }
+  | { review: 'allowed'; script?: SecretScriptBinding | null }
   | { review: 'blocked'; reason: string; evidence: string }
-  | { review: 'failed'; reason: string };
+  | { review: 'failed'; reason: string; script?: SecretScriptBinding | null };
 
 /** One use a request asks for: how the value is handed over, and which secret. */
 export interface SecretReviewUse { binding: string; reference: string; operation: SecretOperation }
@@ -100,8 +112,18 @@ const bytes = (text: string) => Buffer.byteLength(text);
 export interface SecretReviewFacts {
   request: SecretReviewRequest;
   subject: { origin?: Pick<RunOrigin, 'kind' | 'workflowId' | 'triggerId' | 'controllerId'>; outsideInput?: boolean };
-  script?: { path: string; text?: string; truncated?: boolean; omitted?: string };
+  script?: SecretScriptExcerpt;
   conversation: readonly ChatMessage[];
+}
+/** What the model is told of the script (`path` as the run names it), and what binds the run to it. */
+export interface SecretScriptExcerpt { path: string; text?: string; truncated?: boolean; omitted?: string; binding?: SecretScriptBinding }
+
+/** Every string in a value scrubbed, keys and structure kept. */
+function scrubbed<T>(value: T): T {
+  if (typeof value === 'string') return scrubCredentials(value) as T;
+  if (Array.isArray(value)) return value.map(scrubbed) as T;
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, scrubbed(item)])) as T;
+  return value;
 }
 
 /**
@@ -131,7 +153,8 @@ export function secretReviewInput(facts: SecretReviewFacts): { prompt: string; h
     conversation.unshift({ role: message.role, ...(message.toolName ? { tool: message.toolName } : {}), text });
   }
   const origin = subject.origin;
-  const value = {
+  // Everything given is scrubbed alike, paths and read results included: an argument may carry a token wherever it lands.
+  const value = scrubbed({
     request: {
       operation: request.operation,
       ...(input ? {
@@ -150,7 +173,7 @@ export function secretReviewInput(facts: SecretReviewFacts): { prompt: string; h
       : { path: facts.script.path, notRead: facts.script.omitted ?? 'not read' } } : {}),
     recentConversation: conversation,
     notes: ['Credential-looking text was replaced with [REDACTED] before review.', 'Secret values are never shown here.'],
-  };
+  });
   const strings: string[] = [];
   const collect = (item: unknown): void => {
     if (typeof item === 'string') strings.push(item);
@@ -162,48 +185,75 @@ export function secretReviewInput(facts: SecretReviewFacts): { prompt: string; h
   return { prompt, haystack: [prompt, ...strings].join('\n') };
 }
 
-/**
- * The script a run executes, when it lies inside the project: the first path argument of an interpreter, or the
- * program itself when it is a file there. Credential files and Tower's state are named but never read.
- */
-export async function scriptExcerpt(input: Pick<SecretRunInput, 'command' | 'args' | 'cwd'>, root: string, denied: readonly string[]): Promise<SecretReviewFacts['script']> {
+/** The file a run executes: the first path argument of an interpreter, or the program itself when it is a path. */
+function scriptCandidate(input: Pick<SecretRunInput, 'command' | 'args'>): string | undefined {
   const program = basename(input.command);
-  let candidate: string | undefined;
-  if (INTERPRETER.test(program)) {
-    const args = input.args ?? [];
-    for (let index = 0; index < args.length; index++) {
-      const arg = args[index]!;
-      if (INLINE.has(arg)) return undefined;
-      if (arg.startsWith('-')) continue;
-      if (index === 0 && arg === 'run' && /^(?:deno|bun)$/.test(program)) continue;
-      candidate = arg; break;
-    }
-  } else if (input.command.includes('/')) candidate = input.command;
+  if (!INTERPRETER.test(program)) return input.command.includes('/') ? input.command : undefined;
+  const args = input.args ?? [];
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (INLINE.has(arg)) return undefined;
+    if (arg.startsWith('-')) continue;
+    if (index === 0 && arg === 'run' && /^(?:deno|bun)$/.test(program)) continue;
+    return arg;
+  }
+  return undefined;
+}
+
+const sameFile = (a: Pick<Stats, 'dev' | 'ino'>, b: Pick<Stats, 'dev' | 'ino'>) => a.dev === b.dev && a.ino === b.ino;
+
+/**
+ * The script a run executes, when it lies inside the project: its first 16 KB, and a hash of all of it that binds the
+ * run to what was reviewed. Credential files and Tower's state are named but never read; so is a file that is swapped
+ * while it is checked (it is opened without following a link and must be the very file checked, still at its path).
+ * `hooks` is for tests.
+ */
+export async function scriptExcerpt(input: Pick<SecretRunInput, 'command' | 'args' | 'cwd'>, root: string, denied: readonly string[], hooks: { beforeOpen?(real: string): Promise<void> } = {}): Promise<SecretScriptExcerpt | undefined> {
+  const candidate = scriptCandidate(input);
   if (!candidate) return undefined;
+  let identity = resolve(input.cwd ?? root, candidate);
   let file: Awaited<ReturnType<typeof open>> | undefined;
   try {
     const top = await realpath(root);
     const path = resolve(await realpath(input.cwd ?? root), candidate);
     const real = await realpath(path);
+    identity = real;
     const nested = relative(top, real);
     if (!nested || nested === '..' || nested.startsWith(`..${sep}`) || isAbsolute(nested)) return undefined;
-    if (isDenied(path, denied) || isDenied(real, denied)) return { path: candidate, omitted: 'credential file or Tower state; not read' };
-    file = await open(real, constants.O_RDONLY | constants.O_NONBLOCK);
-    const stat = await file.stat();
-    if (!stat.isFile()) return undefined;
-    const buffer = Buffer.alloc(SCRIPT_BYTES);
-    const { bytesRead } = await file.read(buffer, 0, SCRIPT_BYTES, 0);
-    const text = new TextDecoder('utf-8').decode(buffer.subarray(0, bytesRead));
-    if (text.includes('\0')) return { path: candidate, omitted: 'not text' };
-    return { path: candidate, text, ...(stat.size > SCRIPT_BYTES ? { truncated: true } : {}) };
-  } catch { return { path: candidate, omitted: 'could not be read' }; }
+    const notRead = (omitted: string): SecretScriptExcerpt => ({ path: candidate, omitted, binding: { path: real, sha256: null } });
+    if (isDenied(path, denied) || isDenied(real, denied)) return notRead('credential file or Tower state; not read');
+    const checked = await lstat(real);
+    if (!checked.isFile()) return undefined;
+    await hooks.beforeOpen?.(real);
+    file = await open(real, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    const opened = await file.stat();
+    if (!opened.isFile() || !sameFile(opened, checked) || await realpath(path) !== real || !sameFile(await lstat(real), opened)) return notRead('changed while it was checked; not read');
+    const hash = createHash('sha256'); const head: Buffer[] = []; const chunk = Buffer.alloc(64 * 1024);
+    let position = 0, kept = 0;
+    for (;;) {
+      const { bytesRead } = await file.read(chunk, 0, chunk.length, position);
+      if (!bytesRead) break;
+      hash.update(chunk.subarray(0, bytesRead));
+      if (kept < SCRIPT_BYTES) { const take = Math.min(SCRIPT_BYTES - kept, bytesRead); head.push(Buffer.from(chunk.subarray(0, take))); kept += take; }
+      position += bytesRead;
+    }
+    const binding = { path: real, sha256: hash.digest('hex') };
+    const text = new TextDecoder('utf-8').decode(Buffer.concat(head));
+    if (text.includes('\0')) return { path: candidate, omitted: 'not text', binding };
+    return { path: candidate, text, ...(position > SCRIPT_BYTES ? { truncated: true } : {}), binding };
+  } catch { return { path: candidate, omitted: 'could not be read', binding: { path: identity, sha256: null } }; }
   finally { await file?.close(); }
+}
+
+/** The file a run would execute now, as `scriptExcerpt` binds it; compared with the review's right before the run starts. */
+export async function scriptBinding(input: Pick<SecretRunInput, 'command' | 'args' | 'cwd'>, root: string, stateDir: string): Promise<SecretScriptBinding | null> {
+  return (await scriptExcerpt(input, root, await deniedPaths(stateDir)))?.binding ?? null;
 }
 
 /** The model's answer as a review: a block stands only with a reason and evidence found in its input. */
 export function reviewVerdict(answer: unknown, haystack: string): SecretReview {
   const value = answer as Record<string, unknown> | undefined;
-  if (!value || typeof value !== 'object' || !['allow', 'block'].includes(String(value.decision)) || typeof value.reason !== 'string' || typeof value.evidence !== 'string') {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || (value.decision !== 'allow' && value.decision !== 'block') || typeof value.reason !== 'string' || typeof value.evidence !== 'string') {
     return { review: 'failed', reason: '검토 모델이 올바른 형식으로 답하지 않아 검토 없이 허용했습니다.' };
   }
   if (value.decision === 'allow') return { review: 'allowed' };
@@ -256,13 +306,16 @@ export interface SecretUseReviewerOptions {
   maxWaiting?: number;
 }
 
-/** Reviews secret uses two at a time, each within one deadline that includes its wait for a turn. */
+/**
+ * Reviews secret uses two at a time. One deadline covers the wait for a turn, the effects gate and the model's answer;
+ * a model run stopped at the deadline keeps its turn, and counts as in flight, until its process has ended.
+ */
 export class SecretUseReviewer {
   private active = 0;
   private readonly waiting: (() => void)[] = [];
   constructor(private readonly options: SecretUseReviewerOptions) {}
 
-  /** Reviews running or waiting for a turn: a worker handoff waits for them (each ends within its deadline). */
+  /** Reviews running, waiting for a turn, or still ending their model run: a worker handoff waits for them. */
   inFlight(): boolean { return this.active > 0 || this.waiting.length > 0; }
 
   async review(request: SecretReviewRequest): Promise<SecretReview> {
@@ -272,8 +325,16 @@ export class SecretUseReviewer {
     }
     const late: SecretReview = { review: 'failed', reason: '검토 차례를 기다리는 동안 시간이 다 되어 검토 없이 허용했습니다.' };
     if (!await this.enter(deadline)) return late;
-    try { return Date.now() >= deadline ? late : await this.decide(request, deadline); }
-    finally { this.leave(); }
+    let ending: Promise<unknown> | undefined;
+    try {
+      if (Date.now() >= deadline) return late;
+      const decided = await this.decide(request, deadline);
+      ending = decided.ending;
+      return decided.review;
+    } finally {
+      // The turn is given back only once the model run has ended, answered or stopped.
+      if (ending) void ending.then(() => this.leave()); else this.leave();
+    }
   }
 
   private enter(deadline: number): Promise<boolean> {
@@ -292,35 +353,46 @@ export class SecretUseReviewer {
   /** Hands the turn to the next waiting review, if any. */
   private leave(): void { const next = this.waiting.shift(); if (next) next(); else this.active--; }
 
-  private async decide(request: SecretReviewRequest, deadline: number): Promise<SecretReview> {
+  /** The review, and `ending`: settles once the model run (if one started) has ended. Throws when the gate refuses. */
+  private async decide(request: SecretReviewRequest, deadline: number): Promise<{ review: SecretReview; ending?: Promise<unknown> }> {
     const { gate } = this.options;
-    await gate?.();
-    const late: SecretReview = { review: 'failed', reason: '검토 모델이 30초 안에 답하지 않아 검토 없이 허용했습니다.' };
-    if (Date.now() >= deadline) return late;
-    const refusals = new WeakSet<object>();
-    const beforeSpawn = async () => {
-      try { await gate?.(); }
-      catch (error) { const refusal = error instanceof Error ? error : new Error(String(error)); refusals.add(refusal); throw refusal; }
-    };
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const expired = new Promise<'expired'>(resolve => { timer = setTimeout(() => { controller.abort(); resolve('expired'); }, Math.max(0, deadline - Date.now())); });
-    const work = (async () => {
-      const [model, input] = await Promise.all([this.options.resolve?.() ?? resolveModel(this.options.stateDir, 'secrets.reviewer'), this.facts(request).then(secretReviewInput)]);
-      // Past the deadline the review has already been answered; no model starts for it.
-      if (controller.signal.aborted || Date.now() >= deadline) throw new Error('Review deadline passed.');
-      const answer = await this.options.model({ ...model, systemPrompt: SECRET_REVIEW_SYSTEM, prompt: input.prompt, schema: SECRET_REVIEW_SCHEMA as unknown as Record<string, unknown>, signal: controller.signal },
-        { timeoutMs: Math.max(1, deadline - Date.now()), beforeSpawn });
-      return reviewVerdict(answer, input.haystack);
-    })().then(review => ({ review }), (error: unknown) => ({ error }));
     try {
-      const settled = await Promise.race([work, expired]);
-      if (settled === 'expired') return late;
-      if ('review' in settled) return settled.review;
+      if (gate) {
+        // A hold, or a gate that does not answer in time, refuses the use: never a failed review that allows it.
+        const checked = await Promise.race([gate().then(() => ({ open: true as const }), (error: unknown) => ({ error })), expired]);
+        if (checked === 'expired') throw new TowerError('unavailable', '실행 환경 확인이 시간 안에 끝나지 않아 시크릿을 사용하지 않았습니다.');
+        if ('error' in checked) throw checked.error;
+      }
+      const refusals = new WeakSet<object>();
+      const beforeSpawn = async () => {
+        try { await gate?.(); }
+        catch (error) { const refusal = error instanceof Error ? error : new Error(String(error)); refusals.add(refusal); throw refusal; }
+      };
+      // Undefined until the input is gathered; then the file the run executes, as the model is shown it.
+      let script: SecretScriptBinding | null | undefined;
+      const bound = (review: SecretReview): SecretReview => review.review === 'blocked' || script === undefined ? review : { ...review, script };
+      const ending = (async () => {
+        const [model, facts] = await Promise.all([this.options.resolve?.() ?? resolveModel(this.options.stateDir, 'secrets.reviewer'), this.facts(request)]);
+        script = facts.script?.binding ?? null;
+        const input = secretReviewInput(facts);
+        // Past the deadline the review has already been answered; no model starts for it.
+        if (controller.signal.aborted || Date.now() >= deadline) throw new Error('Review deadline passed.');
+        const answer = await this.options.model({ ...model, systemPrompt: SECRET_REVIEW_SYSTEM, prompt: input.prompt, schema: SECRET_REVIEW_SCHEMA as unknown as Record<string, unknown>, signal: controller.signal },
+          { timeoutMs: Math.max(1, deadline - Date.now()), beforeSpawn });
+        return reviewVerdict(answer, input.haystack);
+      })().then(review => ({ review }), (error: unknown) => ({ error }));
+      const late: SecretReview = { review: 'failed', reason: '검토 모델이 30초 안에 답하지 않아 검토 없이 허용했습니다.' };
+      const settled = await Promise.race([ending, expired]);
+      // Answered at the deadline while the model run is still being stopped: its turn is kept until that ends.
+      if (settled === 'expired') return { review: bound(late), ending };
+      if ('review' in settled) return { review: bound(settled.review) };
       if (settled.error instanceof Error && refusals.has(settled.error)) throw settled.error;
-      if (Date.now() >= deadline) return late;
+      if (Date.now() >= deadline) return { review: bound(late) };
       const message = (settled.error instanceof Error ? settled.error.message : String(settled.error)).replace(/^Auto Prompt: /, '');
-      return { review: 'failed', reason: `검토 모델을 실행하지 못해 검토 없이 허용했습니다: ${clip(message, 200)}` };
+      return { review: bound({ review: 'failed', reason: `검토 모델을 실행하지 못해 검토 없이 허용했습니다: ${clip(message, 200)}` }) };
     } finally { clearTimeout(timer); }
   }
 

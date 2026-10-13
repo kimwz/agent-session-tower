@@ -1344,7 +1344,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         // One page from the end: the review reads only the last few messages.
         conversation: async sessionId => (await sessions.detail(runs.nativeSessionId(sessionId), undefined, 40, { previousUser: false }))?.messages ?? [],
       } });
-    const secrets = new SecretRuntime({ stateDir, service: secretService, runs, reviewer: secretReviewer,
+    const secrets = new SecretRuntime({ stateDir, service: secretService, runs, reviewer: secretReviewer, effects: requireEffects,
       onConnect: sessionId => runs.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, sessionId),
       isClosed: async id => { const saved = new ClosedSessionStore(stateDir); await saved.start(); return saved.closedIds().has(id); },
       migrate: () => secretStore.migrate(), pendingImports: () => listPendingSecretImports(stateDir),

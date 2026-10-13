@@ -388,8 +388,8 @@ export class SecretService {
     const hostId = subject.hostId ?? this.data().device.id;
     return this.journal.usage.filter(entry => entry.hostId === hostId && entry.sessionId === subject.sessionId).map(({ hostId: _hostId, sessionId: _sessionId, operationId: _operationId, ...entry }) => structuredClone(entry));
   }
-  /** This computer's blocked operations since `since`, oldest first, the latest `limit` of them; empty while locked. */
-  blocks(since: number, limit = 20): SecretBlock[] {
+  /** This computer's blocked operations since `since`, oldest first (the usage records bound how many); empty while locked. */
+  blocks(since: number): SecretBlock[] {
     if (this.vault.locked || !this.permanent) return [];
     const hostId = this.permanent.device.id; const found = new Map<string, SecretBlock>();
     for (const entry of this.journal.usage) {
@@ -400,7 +400,7 @@ export class SecretService {
       if (!block.secrets.includes(entry.name)) block.secrets.push(entry.name);
       found.set(key, block);
     }
-    return [...found.values()].sort((a, b) => a.at - b.at).slice(-limit);
+    return [...found.values()].sort((a, b) => a.at - b.at);
   }
   async importLegacy(records: Legacy[]) { return this.mutate(() => { for (const record of records) { if (!record.id || typeof record.name !== 'string' || typeof record.origin !== 'string' || typeof record.createdAt !== 'string' || !Number.isFinite(Date.parse(record.createdAt)) || typeof record.value !== 'string' || Buffer.byteLength(record.value) > MAX_SECRET_BYTES) throw new Error('Invalid legacy secret'); const existing = this.data().legacy.find(item => item.id === record.id); if (existing && JSON.stringify(existing) !== JSON.stringify(record)) throw new Error('Legacy secret conflict'); if (!existing) this.data().legacy.push(structuredClone(record)); } }); }
   legacyList() { return this.data().legacy.map(({ value: _value, ...metadata }) => metadata); }

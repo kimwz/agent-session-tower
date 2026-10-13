@@ -7,7 +7,7 @@ import { SECRET_OPERATIONS, type SecretContext, type SecretMetadata, type Secret
 import type { ResolvedSecret, SecretDispatchUse, SecretService } from './service.js';
 import type { RemoteSecretBroker } from './remote.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
-import { reviewUses, type SecretReview, type SecretReviewRequest, type SecretReviewUse, type SecretUseReviewer } from './reviewer.js';
+import { reviewUses, scriptBinding, type SecretReview, type SecretReviewRequest, type SecretReviewUse, type SecretScriptBinding, type SecretUseReviewer } from './reviewer.js';
 
 type SourceFailure = { sourceHostId: string; code: 'SECRET_SOURCE_UNAVAILABLE' };
 type Resolved = ResolvedSecret;
@@ -26,6 +26,10 @@ const blockedResult = (operationId: string, reason: string): SecretRunResult => 
 export function secretUseBlocked(reason: string): TowerError & { code: typeof BLOCKED } { return Object.assign(new TowerError('forbidden', blockedText(reason)), { code: BLOCKED }); }
 /** How a use was reviewed: the owner's own sessions are exempt. */
 type Verdict = { review: 'exempt' } | SecretReview;
+/** A reviewed use refused by code, whatever the review said; its message is what the agent reads. */
+class SecretUseRefused extends TowerError {}
+const HELD = '실행 환경이 저장소 복구나 작업 인계를 기다리는 중이라 시크릿을 사용하지 않았습니다. 잠시 후 새 operationId로 다시 요청하세요.';
+const sameScript = (a: SecretScriptBinding | null, b: SecretScriptBinding | null) => a?.path === b?.path && a?.sha256 === b?.sha256;
 const clip = (text: string, max: number) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
 function plain(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value))
@@ -95,8 +99,12 @@ export class SecretBroker {
   private remoteContext(context: SecretContext): SecretContext { const { brokerApprovalId: _localApproval, ...target } = context; return target; }
   private subject(context: SecretContext): string { return JSON.stringify([context.hostId, context.taskId, context.runId]); }
   unavailableSources(context: SecretContext): SourceFailure[] { return structuredClone(this.sourceFailures.get(this.subject(context)) ?? []); }
-  /** `reviewer` checks each use of a session the owner did not open (`subject: 'reviewed'`) before any value is resolved. */
-  constructor(private readonly options: { stateDir: string; service: SecretService; remote?: RemoteSecretBroker; validate?: (context: SecretContext) => void; reviewer?: Pick<SecretUseReviewer, 'review'> }) {}
+  /**
+   * `reviewer` checks each use of a session the owner did not open (`subject: 'reviewed'`) before any value is resolved.
+   * `effects` is the worker's effects gate: such a use checks it after its review, whatever the review said, and again
+   * right before the consumer starts; a storage hold refuses it.
+   */
+  constructor(private readonly options: { stateDir: string; service: SecretService; remote?: RemoteSecretBroker; validate?: (context: SecretContext) => void; reviewer?: Pick<SecretUseReviewer, 'review'>; effects?: () => Promise<void> }) {}
   inFlight(): boolean { return this.active > 0; }
   /**
    * Each secret and operation just handed to a consumer, kept with the session that used it; a remote source's secret is
@@ -114,11 +122,26 @@ export class SecretBroker {
     try { return this.options.service.available({ hostId: context.hostId, sessionId: context.sessionId, root: context.root, taskId: context.taskId }).map(item => ({ reference: item.reference, name: item.name, kind: item.kind })); }
     catch { return []; } // best-effort: the review only reads names; using the secret is authorized on its own later
   }
-  /** The owner's own sessions are exempt; any other session's use is reviewed (no reviewer here: a failed review, allowed). */
+  /**
+   * The owner's own sessions are exempt; any other session's use is reviewed (no reviewer here: a failed review, allowed).
+   * A review that could not start (a hold) and a hold after any review both refuse the use.
+   */
   private async review(context: SecretContext, request: Omit<SecretReviewRequest, 'context' | 'secrets'>): Promise<Verdict> {
     if (context.subject !== 'reviewed') return { review: 'exempt' };
-    if (!this.options.reviewer) return { review: 'failed', reason: '시크릿 사용 검토기를 사용할 수 없어 검토 없이 허용했습니다.' };
-    return this.options.reviewer.review({ ...request, context, secrets: this.described(context) });
+    let review: SecretReview;
+    if (!this.options.reviewer) review = { review: 'failed', reason: '시크릿 사용 검토기를 사용할 수 없어 검토 없이 허용했습니다.' };
+    else {
+      try { review = await this.options.reviewer.review({ ...request, context, secrets: this.described(context) }); }
+      catch (error) { throw new SecretUseRefused('unavailable', HELD, { cause: error }); }
+    }
+    if (review.review !== 'blocked') await this.effects(context);
+    return review;
+  }
+  /** Reviewed uses only: the worker's effects gate. A hold refuses the use; owners' sessions keep working as before. */
+  private async effects(context: SecretContext): Promise<void> {
+    if (context.subject !== 'reviewed' || !this.options.effects) return;
+    try { await this.options.effects(); }
+    catch (error) { throw new SecretUseRefused('unavailable', HELD, { cause: error }); }
   }
   /** Why a use was refused, as the agent, the session's record and the owner's notice say it. */
   private static why(review: Extract<SecretReview, { review: 'blocked' }>): string { return `${review.reason} (근거: "${clip(review.evidence, 200)}")`; }
@@ -218,7 +241,7 @@ export class SecretBroker {
           await this.refused(context, input.operationId, reviewUses({ operation: 'run', input }), reason);
           result = blockedResult(input.operationId, reason);
         } else result = await this.execute(context, input, cwd, root, timeoutMs, review, values, scratch);
-      } catch { result = genericResult(input.operationId); }
+      } catch (error) { result = genericResult(input.operationId, error instanceof SecretUseRefused ? error.message : undefined); }
       finally {
         try { if (scratch.temporary) await rm(scratch.temporary, { recursive: true, force: true }); }
         catch { result = genericResult(input.operationId, '비공개 임시 파일을 정리하지 못했습니다.'); }
@@ -230,7 +253,7 @@ export class SecretBroker {
   }
 
   /** Resolves, stages and re-authorizes each use, then starts the consumer; `values` and `scratch` are cleaned up by `run`. */
-  private async execute(context: SecretContext, input: SecretRunInput, cwd: string, root: string, timeoutMs: number, review: Verdict, values: Buffer[], scratch: { temporary?: string }): Promise<SecretRunResult> {
+  private async execute(context: SecretContext, input: SecretRunInput, cwd: string, root: string, timeoutMs: number, review: Exclude<Verdict, { review: 'blocked' }>, values: Buffer[], scratch: { temporary?: string }): Promise<SecretRunResult> {
     let deliveredBytes = 0;
     const env: NodeJS.ProcessEnv = {};
     for (const key of ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TMPDIR', 'SYSTEMROOT']) if (process.env[key]) env[key] = process.env[key];
@@ -279,6 +302,11 @@ export class SecretBroker {
       try { if (current.metadata.id !== item.value.metadata.id || current.metadata.version !== item.value.metadata.version || !current.bytes.equals(item.value.bytes) || JSON.stringify(current.fields) !== JSON.stringify(item.value.fields)) throw failure('시크릿 권한 또는 값이 변경되었습니다.', 'forbidden'); }
       finally { current.bytes.fill(0); }
     }
+    // The code the review read is the code that runs: a script changed meanwhile gets a review of its own under a new ID.
+    if (review.review !== 'exempt' && review.script !== undefined && !sameScript(await scriptBinding(input, context.root, this.options.stateDir), review.script)) {
+      throw new SecretUseRefused('conflict', `검토하는 동안 실행할 스크립트가 바뀌어 실행하지 않았습니다${review.script ? `(${review.script.path})` : ''}. 새 operationId로 다시 요청하면 바뀐 내용으로 다시 검토합니다.`);
+    }
+    await this.effects(context);
     const { result: consumer } = await this.options.service.dispatch(context, used, () => this.consume(input, args, cwd, env, stdin, timeoutMs, values), () => this.options.validate?.(context));
     // Only a consumer that started was given the values; one that could not start (say, a missing program) used nothing.
     if (await consumer.started) await this.delivered(context, used, review);
@@ -346,6 +374,7 @@ export class SecretBroker {
       const a = await this.resolve(context, left, 'compare'); values.push(a.bytes);
       const b = await this.resolve(context, right, 'compare'); values.push(b.bytes);
       const uses: SecretDispatchUse[] = [{ ref: left, operation: 'compare', value: a }, { ref: right, operation: 'compare', value: b }];
+      await this.effects(context);
       const { result } = await this.options.service.dispatch(context, uses, () => ({ equal: a.bytes.length === b.bytes.length && timingSafeEqual(a.bytes, b.bytes) }), () => this.options.validate?.(context));
       await this.delivered(context, uses, review);
       return result;
@@ -360,6 +389,7 @@ export class SecretBroker {
       const value = await this.resolve(context, reference, 'fingerprint');
       try {
         const uses: SecretDispatchUse[] = [{ ref: reference, operation: 'fingerprint', value }];
+        await this.effects(context);
         const { result } = await this.options.service.dispatch(context, uses, () => {
           const key = this.options.service.fingerprintKey();
           try {
