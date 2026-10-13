@@ -217,11 +217,14 @@ export class AutoPromptManager extends EventEmitter {
       ...(input.codexApprovalsReviewer ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}) };
     const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
     const unattended = internal.unattended === true;
-    const fingerprint = hash({ ...request, origin, ...(delegation ? { delegation } : {}), ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}) });
+    const admitted = { ...request, origin, ...(delegation ? { delegation } : {}), ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}) };
+    const fingerprint = hash(admitted);
     const previous = this.entries.get(input.requestId);
     const admitting = this.admissions.get(input.requestId);
-    // Jobs saved before origins existed were fingerprinted without one; a retry of the same request still matches.
-    const matches = (entry: { fingerprint: string }, legacy: boolean) => entry.fingerprint === fingerprint || (legacy && entry.fingerprint === hash(request));
+    // Jobs saved before origins existed were fingerprinted without one; a retry of the same request still matches. So do
+    // jobs 1.129–1.132 fingerprinted with the owner's broker proof (#116), which grants nothing here.
+    const legacyProof = !origin.controllerId && !untrustedInput ? hash({ ...admitted, brokerOwnerAuthorized: true }) : undefined;
+    const matches = (entry: { fingerprint: string }, legacy: boolean) => entry.fingerprint === fingerprint || entry.fingerprint === legacyProof || (legacy && entry.fingerprint === hash(request));
     if ((previous && !matches(previous, previous.job.origin === undefined)) || (admitting && admitting.fingerprint !== fingerprint)) throw new RunError('같은 요청 ID에 다른 지시문이나 출처를 사용할 수 없습니다.', 'conflict');
     if (admitting) return admitting.promise;
     if (previous?.job.status === 'uncertain') throw new RunError(previous.job.error ?? '이전 요청의 실행 여부가 불확실합니다. 자동으로 다시 제출하지 않습니다.', 'conflict', { disposition: 'uncertain' });

@@ -530,19 +530,31 @@ test('a retried request saved before origins existed still matches after an upgr
   } finally { await restarted.close(); }
 });
 
-test('a job 1.129–1.132 saved with broker owner proof still loads, and dispatches without it', async t => {
+test('a job 1.129–1.132 saved with broker owner proof still loads, dispatches without it, and matches its retry', async t => {
   const f = await fixture(t);
+  const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  // What Auto Prompt hashes for an owner's request to a named session; 1.129–1.132 appended the proof it was admitted with.
+  const admitted = (input: AutoPromptRequest) => ({ provider: input.provider, cwd: input.cwd, prompt: input.prompt, attachments: [], targetSessionId: input.targetSessionId, origin: { kind: 'owner' } });
+  const current = request(f.cwd, { targetSessionId: f.session.id, prompt: 'Saved by this build' });
+  await f.finished((await f.manager.submit(current, { origin: { kind: 'owner' } })).id);
   await f.manager.close();
+  const entries = JSON.parse(await readAutoPromptFixture(f.options.repository)) as Array<{ fingerprint: string }>;
+  assert.equal(entries[0].fingerprint, hash(admitted(current)), 'the fixture hashes a request as Auto Prompt does');
   const input = request(f.cwd, { targetSessionId: f.session.id, prompt: 'Queued by an older worker' });
-  await writeAutoPromptFixture(f.options.repository, JSON.stringify([{ fingerprint: createHash('sha256').update('older').digest('hex'), staged: [], resumable: true,
+  await writeAutoPromptFixture(f.options.repository, JSON.stringify([...entries, { fingerprint: hash({ ...admitted(input), brokerOwnerAuthorized: true }), staged: [], resumable: true,
     job: { id: input.requestId, brokerOwnerAuthorized: true, origin: { kind: 'owner' }, provider: input.provider, cwd: input.cwd, targetSessionId: f.session.id, prompt: input.prompt,
       routerModel: 'gpt-5.6-sol', status: 'queued', createdAt: f.session.createdAt, updatedAt: f.session.updatedAt } }]));
   const restarted = new AutoPromptManager(f.options);
   await restarted.start(); await restarted.startRuntimeEffects();
   try {
     await until(() => restarted.get(input.requestId)?.status === 'completed');
-    assert.deepEqual(f.dispatches.map(dispatch => [dispatch.action, dispatch.sessionId]), [['resume', f.session.id]]);
-    assert.equal('brokerOwnerAuthorized' in f.dispatches[0].internal!, false);
+    assert.deepEqual(f.dispatches.map(dispatch => [dispatch.action, dispatch.input.prompt]).at(-1), ['resume', input.prompt]);
+    assert.equal('brokerOwnerAuthorized' in f.dispatches.at(-1)!.internal!, false);
+    const dispatched = f.dispatches.length;
+    assert.equal((await restarted.submit(input, { origin: { kind: 'owner' } })).id, input.requestId, 'the same request retried after the upgrade');
+    assert.equal(f.dispatches.length, dispatched, 'and nothing runs again');
+    await assert.rejects(restarted.submit({ ...input, prompt: 'Another instruction' }, { origin: { kind: 'owner' } }), /다른 지시문이나 출처/);
+    await assert.rejects(restarted.submit(input, { origin: { kind: 'slack', workflowId: randomUUID() } }), /다른 지시문이나 출처/);
   } finally { await restarted.close(); }
 });
 
