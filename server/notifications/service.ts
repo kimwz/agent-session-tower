@@ -7,6 +7,7 @@ import { TowerError } from '../../shared/errors.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { generateVapidKeys, sendPush, type PushResult, type PushTarget, type VapidKeys } from './web-push.js';
 import type { TurnAttention, TurnAttentionInput } from './attention.js';
+import type { SecretBlockNotice } from '../runs/runner-protocol.js';
 
 export type NotificationKind = keyof NotificationEvents;
 export interface NotificationEvent { key: string; kind: NotificationKind; at: number; run: Run; approval?: RunApproval }
@@ -24,6 +25,8 @@ export interface NotificationContext {
    * turn announced. A failure or a slow answer announces the turn as before.
    */
   attention?(input: TurnAttentionInput, signal: AbortSignal): Promise<TurnAttention | undefined>;
+  /** Secret uses the worker's reviewer refused lately; each is announced once, to devices that want to hear what waits on them. */
+  secretBlocks?(): readonly SecretBlockNotice[];
 }
 interface Device extends NotificationDevice { endpoint: string; keys: PushTarget['keys'] }
 interface Saved { vapid: VapidKeys; devices: Device[]; delivered?: { since: string; keys: string[] } }
@@ -132,6 +135,17 @@ export function notificationMessage(event: NotificationEvent, context: Notificat
   const detail = clip(event.approval ? waitingDetail(event.approval) : run.status === 'error' ? run.error || '' : run.output, 160);
   return { title: project ? `${project} · ${status}` : status, body: [conversation, detail].filter(Boolean).join('\n'), url, tag: `session:${session?.id ?? run.sessionId}` };
 }
+/** A refused secret use: the conversation, why, and which secrets; it opens the conversation. */
+export function secretBlockMessage(block: SecretBlockNotice, context: NotificationContext, language: NotificationLanguage): NotificationPayload {
+  const session = context.session(block.sessionId);
+  const project = session ? context.project(session) : '';
+  const ko = language === 'ko';
+  const status = ko ? '시크릿 사용 차단' : 'Secret use blocked';
+  const names = block.secrets.length ? `${ko ? '시크릿' : 'Secrets'}: ${clip(block.secrets.slice(0, 3).join(', '), 80)}${block.secrets.length > 3 ? ` +${block.secrets.length - 3}` : ''}` : '';
+  return { title: project ? `${project} · ${status}` : status,
+    body: [clip(session?.customTitle || session?.agentName || session?.title || '', 80), clip(block.reason, 160), names].filter(Boolean).join('\n'),
+    url: `/?session=${encodeURIComponent(session?.id ?? block.sessionId)}`, tag: block.key };
+}
 function defaultVariant(event: NotificationEvent): NotificationVariant {
   if (event.kind === 'triggerStarted') return 'started';
   if (event.approval) return event.approval.interaction?.type === 'questions' ? 'question' : 'approval';
@@ -217,20 +231,34 @@ export class NotificationService {
     if (this.closed || !this.saved) return;
     const handled = new Set([...this.delivered, ...this.judging.keys()]);
     const events = pendingEvents(this.context.runs(), this.cutoff, handled, this.now());
-    for (const event of events) {
-      this.judging.set(event.key, event.at);
-      const work = this.handle(event).catch(error => console.error(`A notification was not sent: ${error instanceof Error ? error.message : String(error)}`))
-        .finally(() => {
-          if (this.stopped) return;
-          this.judging.delete(event.key);
-          this.delivered.add(event.key);
-          this.processing.delete(work);
-          void this.save().catch(error => console.error(`Notification state was not saved: ${error instanceof Error ? error.message : String(error)}`));
-        });
-      this.processing.add(work);
+    for (const event of events) this.track(event.key, event.at, () => this.handle(event));
+    for (const block of this.context.secretBlocks?.() ?? []) {
+      if (block.at <= this.cutoff || handled.has(block.key)) continue;
+      handled.add(block.key);
+      this.track(block.key, block.at, () => this.deliverBlock(block));
     }
     // The mark moves forward even when nothing happened, so a restart does not announce old work again.
     if (this.now() - this.lastSave > 60_000) void this.save().catch(error => console.error(`Notification state was not saved: ${error instanceof Error ? error.message : String(error)}`));
+  }
+
+  /** One event being handled: once it ends, sent or not, it is handled for good. */
+  private track(key: string, at: number, handle: () => Promise<void>): void {
+    this.judging.set(key, at);
+    const work = handle().catch(error => console.error(`A notification was not sent: ${error instanceof Error ? error.message : String(error)}`))
+      .finally(() => {
+        if (this.stopped) return;
+        this.judging.delete(key);
+        this.delivered.add(key);
+        this.processing.delete(work);
+        void this.save().catch(error => console.error(`Notification state was not saved: ${error instanceof Error ? error.message : String(error)}`));
+      });
+    this.processing.add(work);
+  }
+
+  /** A refused secret use waits on the owner like an approval: devices that want those hear of it. */
+  private async deliverBlock(block: SecretBlockNotice): Promise<void> {
+    const devices = this.saved!.devices.filter(device => device.events.runWaiting);
+    await Promise.all(devices.map(device => this.send(device, secretBlockMessage(block, this.context, device.language))));
   }
 
   /** Decides whether an event still deserves a push, then sends it to the devices that chose its kind. */

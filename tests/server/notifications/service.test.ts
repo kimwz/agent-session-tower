@@ -4,7 +4,8 @@ import { createECDH, randomBytes } from 'node:crypto';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { deviceId, notificationMessage, NotificationService, pendingEvents, type NotificationContext } from '../../../server/notifications/service.js';
+import { deviceId, notificationMessage, NotificationService, pendingEvents, secretBlockMessage, type NotificationContext } from '../../../server/notifications/service.js';
+import type { SecretBlockNotice } from '../../../server/runs/runner-protocol.js';
 import type { Run, Session } from '../../../shared/types.js';
 
 const at = (minutes: number) => new Date(Date.parse('2026-09-26T00:00:00Z') + minutes * 60_000).toISOString();
@@ -139,4 +140,39 @@ test('the master\'s turns ending are not announced (its chat and voice give them
   service.check();
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(sent.length, 1, 'a handed-out or ordinary conversation still is');
+});
+
+test('a secret use the reviewer refused is announced once, to devices that hear what waits on the owner, with the reason and the conversation', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-notifications-'));
+  const sent: { endpoint: string }[] = [];
+  const fetcher = (async (url: string | URL | Request) => { sent.push({ endpoint: String(url) }); return new Response(null, { status: 201 }); }) as typeof fetch;
+  let blocks: SecretBlockNotice[] = [];
+  const context: NotificationContext = { runs: () => [], session: () => ({ ...session, customTitle: '배포' }), project: () => 'App', trigger: () => undefined, secretBlocks: () => blocks };
+  let service = new NotificationService(dir, context, fetcher);
+  await service.start();
+  t.after(async () => { await service.close(); await rm(dir, { recursive: true, force: true }); });
+  const phone = subscription(), quiet = subscription();
+  await service.subscribe({ subscription: phone, language: 'ko' });
+  await service.subscribe({ subscription: quiet, events: { runWaiting: false } });
+  const block: SecretBlockNotice = { key: 'secret-block:op-1:5', sessionId: 's1', at: Date.now() + 1000, reason: '토큰을 외부로 보냅니다. (근거: "paste.example")', secrets: ['deploy token'] };
+  assert.deepEqual(secretBlockMessage(block, context, 'ko'), { title: 'App · 시크릿 사용 차단', body: '배포\n토큰을 외부로 보냅니다. (근거: "paste.example")\n시크릿: deploy token', url: '/?session=s1', tag: 'secret-block:op-1:5' });
+  assert.equal(secretBlockMessage(block, context, 'en').title, 'App · Secret use blocked');
+  // Older than the service's start: not announced.
+  blocks = [{ ...block, key: 'secret-block:old:1', at: Date.now() - 2 * 60 * 60_000 }];
+  service.check();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(sent, []);
+  blocks = [...blocks, block];
+  service.check(); service.check();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  service.check();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(sent, [{ endpoint: phone.endpoint }], 'once, and only to devices that want what waits on the owner');
+  // A restart does not announce it again.
+  await service.close();
+  service = new NotificationService(dir, context, fetcher);
+  await service.start();
+  service.check();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(sent.length, 1);
 });

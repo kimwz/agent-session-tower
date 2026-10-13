@@ -17,6 +17,8 @@ import { parseDotenv } from './dotenv.js';
 import { RemoteSecretBroker, wireMetadata, type RemoteSecretRequest, type RemoteSecretResponse } from './remote.js';
 import { ownerConnection, ownerCreate, ownerInput, ownerSession, ownerSharingChange, secretUsage, VIEW_USAGE } from './owner-input.js';
 import { SecretService } from './service.js';
+import type { SecretUseReviewer } from './reviewer.js';
+import type { SecretBlockNotice } from '../runs/runner-protocol.js';
 import { SECRET_LOCKED_LIST, SECRET_LOCKED_UNINDEXED, SECRET_LOCKED_USE, SECRET_NO_VAULT, SECRET_USE_INSTRUCTIONS } from './notices.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { TowerError, kindOf, type ErrorKind } from '../../shared/errors.js';
@@ -49,6 +51,8 @@ const BROKER_ACTIONS = new Set(['broker-access', 'approve-broker', 'revoke-broke
 const MUTATIONS = new Set(['create', 'update', 'remove', 'sharing', 'session-connect', 'session-disconnect', 'trust', 'untrust']);
 /** How long a session view waits for a source's answer before listing it as unavailable. */
 const VIEW_REMOTE_MS = 5000;
+/** How long a refused use stays in the worker's report for the owner's notice; the web announces each once. */
+const BLOCK_NOTICE_MS = 60 * 60_000;
 const taskId = z.string().regex(/^[a-f0-9-]{36}$/);
 /** A joined computer's session as its web verified it: the task an owner change applies to. */
 const remoteTarget = z.object({ hostId: z.string().min(1).max(256), sessionId: z.string().min(1).max(512), root: z.string().min(1).max(8192), taskId, projectId: z.string().optional() });
@@ -84,6 +88,8 @@ export class SecretRuntime {
     isClosed?: (id: string) => Promise<boolean>;
     /** Explicit chat assignment only; owner input and secret material never reach the callback. */
     onConnect?: (sessionId: string) => void;
+    /** Reviews each use of a session the owner did not open before its values are resolved. */
+    reviewer?: Pick<SecretUseReviewer, 'review' | 'inFlight'>;
   }) {
     const service = options.service;
     const accepted = new Map<string, SecretContext>();
@@ -110,10 +116,16 @@ export class SecretRuntime {
         return service.resolve(trusted, payload.reference, payload.operation);
       },
     });
-    this.broker = new SecretBroker({ stateDir: options.stateDir, service, remote: this.remote, validate: context => this.validateBrokerContext(context) });
+    this.broker = new SecretBroker({ stateDir: options.stateDir, service, remote: this.remote, validate: context => this.validateBrokerContext(context), ...(options.reviewer ? { reviewer: options.reviewer } : {}) });
   }
   initialized(): boolean { return this.options.service.status().initialized; }
-  inFlight(): boolean { return this.housekeeping > 0 || this.broker.inFlight() || this.remote.inFlight() > 0 || this.remote.pending() > 0; }
+  /** A review runs inside a broker call; it is counted on its own too, so a handoff waits for it (at most its deadline). */
+  inFlight(): boolean { return this.housekeeping > 0 || this.broker.inFlight() || this.options.reviewer?.inFlight() === true || this.remote.inFlight() > 0 || this.remote.pending() > 0; }
+  /** Uses refused in the last hour, from the session usage records; the web tells the owner of each once. Empty while locked. */
+  blocks(): SecretBlockNotice[] {
+    if (this.blocked) return [];
+    return this.options.service.blocks(Date.now() - BLOCK_NOTICE_MS).map(block => ({ key: `secret-block:${block.operationId}:${block.at}`, sessionId: block.sessionId, at: block.at, reason: block.reason, secrets: block.secrets }));
+  }
   pause(): void { this.paused = true; }
   resume(): void { this.paused = false; }
   async sweep(): Promise<void> {
