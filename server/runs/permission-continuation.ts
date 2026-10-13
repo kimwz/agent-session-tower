@@ -130,10 +130,13 @@ export class PermissionContinuations {
           const timer = setTimeout(() => finish(sending()), 30_000); timer.unref();
           this.host.events.on('change', check); check();
         });
-        if (!approved && (notice.steering?.state === 'delivered' || sending())) { delete continuation.error; this.host.changed(continuation); await this.host.flush(); }
-        // Claude takes a notice at its next step, which a long tool call or reply can put minutes away, and the turn
-        // waits for it. The decision is not held that long: should Claude end without taking it, it fails then.
-        if (!approved && sending()) this.lateFailure(notice, continuation, options.undelivered);
+        if (!approved && (notice.steering?.state === 'delivered' || sending())) {
+          delete continuation.error; this.host.changed(continuation);
+          // Claude takes a notice at its next step, which a long tool call or reply can put minutes away, and the turn
+          // waits for it. The decision is not held that long: should Claude end without taking it, it fails then.
+          if (sending()) this.lateFailure(notice, continuation, options.undelivered);
+          await this.host.flush();
+        }
       }
       catch (error) { if (admissionUncertain(error)) throw error; if (notice.status === 'queued') { notice.status = 'cancelled'; notice.finishedAt = new Date().toISOString(); this.host.changed(notice); await this.host.flush(); } }
     }
@@ -150,9 +153,11 @@ export class PermissionContinuations {
       if (notice.steering?.state === 'delivered') return;
       continuation.error = 'Permission decision notice could not be delivered to its requesting turn.';
       this.host.changed(continuation);
-      void this.host.flush().catch(() => {}).then(() => undelivered?.());
+      // The owner is asked even if the failed receipt could not be saved.
+      void this.host.flush().catch(error => console.error(`Permission notice receipt could not be saved: ${error instanceof Error ? error.message : String(error)}`)).then(() => undelivered?.());
     };
     this.host.events.on('change', check);
+    check();
   }
 
   /** Before a permission continuation starts: a newer native owner instruction, or a finished goal, supersedes it. */

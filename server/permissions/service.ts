@@ -790,7 +790,9 @@ export class PermissionService {
       const notify = this.options.decision ?? fallback;
       await this.requireRequestEffects(request);
       // A reviewer's request sent back that its agent never hears waits for the owner (reopenForOwner leaves others alone).
-      if (notify) await notify(structuredClone(request), request.notification.message, { undelivered: () => { void this.reopenForOwner(id, UNDELIVERED).catch(() => {}); } });
+      if (notify) await notify(structuredClone(request), request.notification.message, { undelivered: () => {
+        void this.reopenForOwner(id, UNDELIVERED).catch(error => console.error(`Permission request could not go back to the owner: ${error instanceof Error ? error.message : String(error)}`));
+      } });
       else if (this.options.resume) await this.options.resume(request.sessionId, request.notification.message);
       else return;
       {

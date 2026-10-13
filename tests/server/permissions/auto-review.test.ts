@@ -486,7 +486,7 @@ test('a narrower-rule answer handed to the agent that it never takes goes back t
   undelivered!();
   await until(() => item().status === 'pending');
   assert.deepEqual([item().review!.verdict, item().decidedBy], ['owner', undefined]);
-  assert.match(item().review!.reason, /에이전트에게 전하지 못해/);
+  assert.match(item().review!.reason ?? '', /에이전트에게 전하지 못해/);
 });
 
 test('an owner rule saved beside an overlapping rule the reviewer allowed replaces it, so nothing of the owner’s is denied', async t => {
