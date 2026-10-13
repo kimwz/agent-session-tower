@@ -457,6 +457,7 @@ export const english: Record<string, string> = {
   "프로젝트 전체나 패턴으로 된 파일 규칙은 소유자가 정합니다.": "File rules for the whole project or a pattern are yours to decide.",
   "숨김 폴더(.git, .claude, .ssh 같은)의 파일 규칙은 소유자가 정합니다.": "File rules in hidden folders (.git, .claude, .ssh …) are yours to decide.",
   "검토에 넘길 소유자 지시가 너무 길어 소유자에게 넘깁니다.": "Your instructions are too long to review, so it is yours to decide.",
+  "소유자 지시(최신 메시지·스킬·프로젝트 지침)가 검토 입력 한도보다 길어 전부 넘길 수 없어 소유자에게 넘깁니다.": "Your instructions (newest message, skills, project instructions) exceed the review input limit and cannot be passed on whole, so it is yours to decide.",
   "에이전트에게 전하지 못해 소유자에게 넘깁니다": "the agent could not be told, so it is yours to decide",
   "자동 검토 설정을 저장했습니다.": "Saved the auto-review setting.",
   "자동 검토를 껐습니다.": "Turned auto-review off.",

@@ -2,12 +2,13 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { issueRequest } from '../../shared/issues.js';
+import { REPORT_MARK } from '../../shared/task-notification.js';
 import { apiCatalog } from '../tower-tools/api-catalog.js';
 
 /** How a spoken request starts in the master session, so the master answers it to be heard. */
 export const VOICE_MARK = '[voice]';
 /** How news of finished work starts in the master session. */
-export const REPORT_MARK = '[Tower report]';
+export { REPORT_MARK };
 
 /**
  * The master's guide, which Claude Code (CLAUDE.md) and Codex (AGENTS.md) read from the master's folder whenever they
