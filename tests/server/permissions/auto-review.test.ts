@@ -404,6 +404,23 @@ test('the owner\'s words are budgeted in time order, so old answers kept as sent
   assert.ok(!words.some(word => word.kind === 'answer as sent'), 'the old answers are the oldest words and go first');
 });
 
+test('one owner message longer than the whole input reaches the model with its start and its closing restriction', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const prompts: string[] = [];
+  const reviewer = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {},
+    sources: sources(f, [], { answers: () => [{ at: '2026-10-13T09:20:00.000Z', question: 'Go on?', answer: 'Yes' }],
+      conversation: async () => ({ complete: true, messages: [{ id: 'big', role: 'user', text: `Prepare the release. ${'log '.repeat(120_000)} Do not publish.`, timestamp: '2026-10-13T09:00:00.000Z' }] }) }),
+    model: async request => { prompts.push(request.prompt); return { verdict: 'owner', rule: null, suggestion: null, reason: '게시 금지', missing: [] }; } });
+  await f.service.request({ kind: 'command', value: 'npm publish', scope: 'project', reason: 'publish' }, agent('claude:one'));
+  reviewer.wake();
+  await reviewer.flush();
+  assert.equal(prompts.length, 1, 'never handed to the owner for length');
+  const words = JSON.parse(prompts[0]!).authority.ownerWords as { text: string; shortened?: string }[];
+  const big = words.find(word => word.text.startsWith('Prepare the release.'))!;
+  assert.ok(big.text.endsWith('Do not publish.') && big.shortened, 'start and end kept, marked');
+});
+
 test('a full read\'s hidden Tower instructions stay out of the recent conversation', async t => {
   const f = await fixture(t);
   await f.service.saveAutoReview(ON);
