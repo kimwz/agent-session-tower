@@ -55,8 +55,11 @@ function bytes(value: unknown, size?: number): Buffer {
   return decoded;
 }
 function wire(value: unknown, limit: number): void { if (Buffer.byteLength(canonical(value)) > limit) fail('SECRET_REMOTE_TOO_LARGE'); }
+/** What a request says about its task on the wire; local facts (who is asking, approvals) never leave this computer. */
+const WIRE_CONTEXT = ['hostId', 'sessionId', 'taskId', 'root', 'projectId', 'runId'] as const;
+const wireContext = (context: SecretContext) => Object.fromEntries(WIRE_CONTEXT.filter(key => context[key] !== undefined).map(key => [key, context[key]])) as unknown as SecretContext;
 function contextValid(value: unknown): value is SecretContext {
-  return record(value) && Object.keys(value).every(k => ['hostId', 'sessionId', 'taskId', 'root', 'projectId', 'runId'].includes(k))
+  return record(value) && Object.keys(value).every(k => (WIRE_CONTEXT as readonly string[]).includes(k))
     && ['hostId', 'sessionId', 'taskId', 'root', 'runId'].every(k => short(value[k], k === 'root' ? 8192 : 1024))
     && (value.projectId === undefined || short(value.projectId));
 }
@@ -125,10 +128,11 @@ export class RemoteSecretBroker {
     if (operation === 'available' && !this.supports(peerId, 'available')) return Promise.reject(refusal('SECRET_REMOTE_UNSUPPORTED'));
     try {
       const device = this.options.device(), peer = this.peer(peerId);
-      if (peer.direction !== 'controller' || !contextValid(context) || context.hostId !== device.id || !OPERATIONS.includes(operation)) return fail();
+      const sent = wireContext(context);
+      if (peer.direction !== 'controller' || !contextValid(sent) || sent.hostId !== device.id || !OPERATIONS.includes(operation)) return fail();
       const createdAt = this.now();
       const body = { version: 1 as const, id: randomUUID(), nonce: randomUUID(), from: device.id, to: peerId, createdAt,
-        expiresAt: createdAt + Math.min(MAX_TTL, Math.max(1, options.timeoutMs ?? this.options.timeoutMs ?? MAX_TTL)), context: Object.fromEntries(Object.entries(context).filter(([, value]) => value !== undefined)) as unknown as SecretContext, operation, payload: encode(payload) };
+        expiresAt: createdAt + Math.min(MAX_TTL, Math.max(1, options.timeoutMs ?? this.options.timeoutMs ?? MAX_TTL)), context: sent, operation, payload: encode(payload) };
       wire(body, MAX_REQUEST);
       const request: RemoteSecretRequest = { ...body, signature: sign(null, Buffer.from(canonical(body)), this.options.deviceKeys().signingPrivateKey).toString('base64url') };
       return new Promise((resolve, reject) => {

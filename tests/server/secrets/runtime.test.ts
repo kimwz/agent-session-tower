@@ -8,7 +8,7 @@ import type { Run, Session } from '../../../shared/types.js';
 import type { SecretMetadata, SecretRunResult, SecretSessionView, SecretSettingsView } from '../../../shared/secrets.js';
 import { CapabilityRegistry, handleMcpRequest, type McpContext, type Capability } from '../../../server/api/mcp.js';
 import { runToolResolver } from '../../../server/api/run-tools.js';
-import type { SessionOrigin } from '../../../server/runs/origin.js';
+import { PUBLIC_TRIGGER_PREFIX, type SessionOrigin } from '../../../server/runs/origin.js';
 import { SecretRuntime, SECRET_TOOLS } from '../../../server/secrets/runtime.js';
 import { SecretService } from '../../../server/secrets/service.js';
 import { editPayload, legacyRecord, legacyRule, stored, storedSecret, storedTask } from '../../helpers/secrets.js';
@@ -295,40 +295,59 @@ test('closed task refuses an already bound run even after a new run creates a fr
   } finally { await f.cleanup(); }
 });
 
-test('resolver and runtime refuse trigger, agent, subagent, foreign session, external-input and forged capabilities', async () => {
+test('a secret credential works for its own running turn whenever its session may use secrets, whoever started the turn', async () => {
   const f = await fixture();
   try {
     await f.initialize();
-    for (const kind of ['trigger', 'agent', 'slack', 'unknown'] as const) {
-      const run = f.addRun(`run-${kind}`, f.session, { origin: { kind, ...(kind === 'trigger' ? { triggerId: 'fixture-trigger' } : {}) } });
-      assert.equal(f.resolver(run, f.session).servers?.tower_secrets, undefined);
-      const forced = f.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: run.sessionId });
-      await assert.rejects(f.list(forced), { kind: 'forbidden' });
+    await f.runtime.control('create', { name: 'SHARED', kind: 'scalar', value: canary, sharing: { global: true, folders: [] } });
+    const capability = (run: Run): Extract<Capability, { kind: 'secret-run' }> => ({ kind: 'secret-run', runId: run.id, sessionId: run.sessionId });
+    const issue = (run: Run) => f.capabilities.issue(capability(run));
+    const listed = async (run: Run) => (await f.list(issue(run))).secrets.map(item => item.name);
+    const add = (id: string, patch: Partial<Session>, origin?: SessionOrigin) => { const session = sessionRecord(f.projectRoot, { id, ...patch }); f.sessions.set(id, session); if (origin) f.origins.set(id, origin); return session; };
+    // The owner's conversation: exempt from review, for any turn in it, whatever Tower tools that turn has.
+    for (const [kind, towerTools] of [['owner', 'attached'], ['agent', undefined], ['trigger', undefined], ['slack', undefined], ['unknown', undefined], ['owner', 'external-input'], ['owner', 'remote']] as const) {
+      const run = f.addRun(`run-${kind}-${towerTools}`, f.session, { origin: { kind, ...(kind === 'trigger' ? { triggerId: 'fixture-trigger' } : {}) }, towerTools });
+      assert.deepEqual(await listed(run), ['SHARED'], `${kind} ${towerTools}`);
+      assert.equal((await f.runtime.context(capability(run))).subject, 'owner');
     }
-    const restrictions: Partial<Session>[] = [ { isSubagent: true }, { launchedByAgent: true }, { parentId: 'root' }, { launchedBy: { kind: 'trigger', triggerId: 'fixture-trigger' } } ];
-    for (const [index, patch] of restrictions.entries()) {
-      const session = sessionRecord(f.projectRoot, { id: `child-${index}`, ...patch }); f.sessions.set(session.id, session); f.origins.set(session.id, { kind: 'owner', untrustedInput: false });
-      const run = f.addRun(`run-child-${index}`, session);
-      assert.equal(f.resolver(run, session).servers?.tower_secrets, undefined);
-      await assert.rejects(f.list(f.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: session.id })), { kind: 'forbidden' });
-      await assert.rejects(f.runtime.target(session.id), { kind: 'forbidden' });
-    }
-    const owner = f.addRun('run-owner');
     f.origins.set(f.session.id, { kind: 'owner', untrustedInput: true });
-    assert.equal(f.resolver(owner, f.session).towerTools, 'external-input');
-    await assert.rejects(f.list(f.capabilities.issue({ kind: 'secret-run', runId: owner.id, sessionId: owner.sessionId })), { kind: 'forbidden' });
-    f.origins.set(f.session.id, { kind: 'trigger', untrustedInput: false, triggerId: 'fixture-trigger' });
-    assert.equal(f.resolver(owner, f.session).towerTools, 'not-owner-session');
-    await assert.rejects(f.runtime.target(f.session.id), { kind: 'forbidden' });
+    assert.equal((await f.runtime.context(capability(f.addRun('run-outside')))).subject, 'owner', 'outside content keeps the owner’s conversation exempt');
     f.origins.set(f.session.id, { kind: 'owner', untrustedInput: false });
-    const token = f.tokenFor(owner);
+    // Any other session here is reviewed: delegated, scheduled, Slack, native children and launched work.
+    for (const [session, origin] of [
+      [add('codex:delegated', {}, { kind: 'agent', untrustedInput: false }), { kind: 'agent' }], [add('codex:scheduled', {}, { kind: 'trigger', triggerId: 'daily', untrustedInput: false }), { kind: 'trigger', triggerId: 'daily' }],
+      [add('codex:slack', {}, { kind: 'slack', untrustedInput: true }), { kind: 'slack', workflowId: '11111111-1111-4111-8111-111111111111' }], [add('codex:delegated-owner', {}, { kind: 'agent', untrustedInput: false }), { kind: 'owner' }],
+      [add('codex:child', { isSubagent: true, parentId: f.session.id }), { kind: 'owner' }], [add('codex:exec', { launchedByAgent: true, parentId: f.session.id }), { kind: 'agent' }],
+      [add('codex:triggered', { launchedBy: { kind: 'trigger', triggerId: 'daily' } }), { kind: 'trigger', triggerId: 'daily' }],
+    ] as [Session, Run['origin']][]) {
+      const run = f.addRun(`run-${session.id}`, session, { origin, towerTools: undefined });
+      assert.deepEqual(await listed(run), ['SHARED'], session.id);
+      assert.equal((await f.runtime.context(capability(run))).subject, 'reviewed', session.id);
+      assert.equal((await f.runtime.target(session.id)).root, f.projectRoot, 'the owner may connect a key to it as well');
+    }
+    // No secrets at all: public agents and their children, the master, closed and joined-computer sessions.
+    const PUBLIC = `${PUBLIC_TRIGGER_PREFIX}agent`;
+    const publicSession = add('codex:public', { launchedBy: { kind: 'trigger', triggerId: PUBLIC } }, { kind: 'trigger', triggerId: PUBLIC, untrustedInput: true });
+    const master = join(f.stateDir, 'master-session'); await mkdir(master);
+    for (const [session, origin] of [
+      [publicSession, { kind: 'trigger', triggerId: PUBLIC, eventId: 'request' }], [add('codex:public-child', { isSubagent: true, parentId: publicSession.id }), { kind: 'owner' }],
+      [f.session, { kind: 'trigger', triggerId: PUBLIC }], [add('codex:master', { cwd: master }, { kind: 'owner', untrustedInput: false }), { kind: 'owner' }],
+      [add('codex:node', { node: 'joined' }, { kind: 'owner', untrustedInput: false }), { kind: 'owner' }], [add('codex:orphan', { parentId: 'codex:unknown' }), { kind: 'owner' }],
+    ] as [Session, Run['origin']][]) {
+      const run = f.addRun(`run-none-${session.id}-${origin?.kind}`, session, { origin });
+      await assert.rejects(f.list(issue(run)), { kind: 'forbidden' }, session.id);
+      await assert.rejects(handleMcpRequest(f.context, issue(run), { method: 'tools/list' }), { kind: 'forbidden' }, session.id);
+    }
+    await assert.rejects(f.runtime.target(publicSession.id), { kind: 'forbidden' });
+    // Bound to one running turn of one session.
+    const owner = f.addRun('run-bound'); const token = issue(owner);
     await assert.rejects(f.list('f'.repeat(64)), { kind: 'forbidden' });
-    await assert.rejects(f.list(f.capabilities.issue({ kind: 'secret-run', runId: owner.id, sessionId: 'forged-session' })), { kind: 'forbidden' });
+    await assert.rejects(f.list(f.capabilities.issue({ kind: 'secret-run', runId: owner.id, sessionId: 'codex:delegated' })), { kind: 'forbidden' });
     await assert.rejects(f.call(token, 'secrets_list', { sessionId: 'forged', cwd: '/forged' }));
     await assert.rejects(f.list(f.capabilities.issue({ kind: 'session-reader' })), { kind: 'not-found' });
-    for (const towerTools of ['desktop-app', 'external-input', 'not-owner-session', 'remote'] as const) {
-      owner.towerTools = towerTools; await assert.rejects(f.list(token), { kind: 'forbidden' });
-    }
+    f.addRun('run-next');
+    owner.status = 'completed'; await assert.rejects(f.list(token), { kind: 'forbidden' }, 'another running turn in the session does not revive it');
+    owner.status = 'running'; f.session.closed = true; await assert.rejects(f.list(token), { kind: 'forbidden' });
     assert.deepEqual(f.ledger, []);
   } finally { await f.cleanup(); }
 });
@@ -503,7 +522,7 @@ test('locked session closure survives runtime restart and removes task-only secr
     const restarted = await secretService(f.stateDir, { now: f.now }); assert.equal(restarted.status().locked, true);
     const registry = { list: () => [...f.runs.values()], getSession: (id: string) => f.sessions.get(id), sessionOrigin: (id: string) => f.origins.get(id) };
     restartedRuntime = new SecretRuntime({ stateDir: f.stateDir, service: restarted, runs: registry });
-    const capabilities = new CapabilityRegistry(); const context: McpContext = { capabilities, run: id => f.runs.get(id), secretTools: SECRET_TOOLS, secretTool: (capability, name, args) => restartedRuntime!.tool(capability, name, args) };
+    const capabilities = new CapabilityRegistry(); const context: McpContext = { capabilities, run: id => f.runs.get(id), secretTools: SECRET_TOOLS, secretAuthorize: capability => restartedRuntime!.authorizeCapability(capability), secretTool: (capability, name, args) => restartedRuntime!.tool(capability, name, args) };
     await assert.rejects(handleMcpRequest(context, token, { method: 'tools/call', name: 'secrets_list', arguments: {} }), { kind: 'forbidden' });
     await restartedRuntime.control('unlock', { password });
     await assert.rejects(readFile(closurePath), { code: 'ENOENT' });
@@ -603,15 +622,18 @@ test('a session view says why a session has nothing, and which states stop polli
     assert.deepEqual(await view(), ['uninitialized', true, 0]);
     await f.initialize(); await f.runtime.control('create', { name: 'SHARED', kind: 'scalar', value: canary, sharing: { global: true, folders: [] } });
     assert.deepEqual(await view(), [undefined, undefined, 1]);
-    const child = sessionRecord(f.projectRoot, { id: 'codex:child', isSubagent: true }); f.sessions.set(child.id, child); f.origins.set(child.id, { kind: 'owner', untrustedInput: false });
+    const child = sessionRecord(f.projectRoot, { id: 'codex:child', isSubagent: true, parentId: f.session.id }); f.sessions.set(child.id, child);
     const agent = sessionRecord(f.projectRoot, { id: 'codex:agent' }); f.sessions.set(agent.id, agent); f.origins.set(agent.id, { kind: 'agent', untrustedInput: false });
+    const triggerId = `${PUBLIC_TRIGGER_PREFIX}agent`;
+    const outsider = sessionRecord(f.projectRoot, { id: 'codex:public' }); f.sessions.set(outsider.id, outsider); f.origins.set(outsider.id, { kind: 'trigger', triggerId, untrustedInput: true });
     const gone = sessionRecord(join(f.directory, 'deleted-folder'), { id: 'codex:gone' }); f.sessions.set(gone.id, gone); f.origins.set(gone.id, { kind: 'owner', untrustedInput: false });
-    assert.deepEqual(await view(child.id), ['not-eligible', true, 0]);
-    assert.deepEqual(await view(agent.id), ['not-eligible', true, 0], 'an agent session without a broker approval');
+    assert.deepEqual(await view(child.id), [undefined, undefined, 1], 'a native child may use what its folder shares');
+    assert.deepEqual(await view(agent.id), [undefined, undefined, 1], 'so may an agent’s session');
+    assert.deepEqual(await view(outsider.id), ['not-eligible', true, 0], 'a public agent’s session');
     assert.deepEqual(await view(gone.id), ['not-eligible', true, 0], 'a folder that no longer exists');
     assert.deepEqual(await view('codex:unknown'), ['session-closed', true, 0]);
     f.session.closed = true; assert.deepEqual(await view(), ['session-closed', true, 0]); f.session.closed = false;
-    assert.deepEqual(await f.runtime.sessionSubject(child.id), { error: 'not-eligible' });
+    assert.deepEqual(await f.runtime.sessionSubject(outsider.id), { error: 'not-eligible' });
     await f.runtime.control('lock', {});
     assert.deepEqual(await view(), ['locked', false, 0]);
     assert.deepEqual(await f.runtime.sessionSubject(f.session.id), { error: 'locked' });
@@ -692,32 +714,6 @@ test('broker approval creates one exact task, preserves provenance and does not 
   } finally { await f.cleanup(); }
 });
 
-test('approved tokens fail closed across lock, expiry, revoke and reapprove', async () => {
-  const f = await fixture();
-  try {
-    await f.initialize(); f.origins.set(f.session.id, { kind: 'agent', untrustedInput: false });
-    const input = { sessionId: f.session.id, root: f.projectRoot, taskId: null, taskLabel: 'Fixture', ttlMs: 60000 };
-    const approved = await f.runtime.control('approve-broker', input); assert.ok('approval' in approved && approved.approval);
-    const token = f.tokenFor(f.addRun('approval-lifetime'));
-    await f.runtime.control('lock', {});
-    await assert.rejects(f.list(token));
-    assert.equal(f.runtime.brokerApproval(f.session), undefined);
-    await f.runtime.control('unlock', { password });
-    assert.deepEqual((await f.list(token)).secrets, []);
-    await f.runtime.control('revoke-broker', { sessionId: f.session.id, approvalId: approved.approval.id });
-    await assert.rejects(f.list(token));
-    await assert.rejects(handleMcpRequest(f.context, token, { method: 'tools/list' }));
-    const again = await f.runtime.control('approve-broker', { ...input, taskId: approved.approval.taskId });
-    assert.ok('approval' in again && again.approval); assert.notEqual(again.approval.id, approved.approval.id);
-    await assert.rejects(f.list(token), 'reapproval cannot revive the old capability');
-    const next = f.tokenFor(f.addRun('new-approval-token'));
-    assert.deepEqual((await f.list(next)).secrets, []);
-    f.advance(60001);
-    await assert.rejects(f.list(next));
-    await assert.rejects(handleMcpRequest(f.context, next, { method: 'tools/list' }));
-  } finally { await f.cleanup(); }
-});
-
 test('broker approvals reject inherited, external, remote, closed and changed root identities', async () => {
   const f = await fixture();
   try {
@@ -747,36 +743,27 @@ test('broker approvals reject inherited, external, remote, closed and changed ro
   } finally { await f.cleanup(); }
 });
 
-test('closing a task invalidates its approval and a new task cannot inherit a token', async () => {
-  const f = await fixture();
-  try {
-    await f.initialize(); f.origins.set(f.session.id, { kind: 'agent', untrustedInput: false });
-    const input = { sessionId: f.session.id, root: f.projectRoot, taskId: null, taskLabel: 'Fixture', ttlMs: 60000 };
-    const first = await f.runtime.control('approve-broker', input); assert.ok('approval' in first && first.approval);
-    const token = f.tokenFor(f.addRun('first-task-token'));
-    await f.service.closeTask(first.approval.taskId);
-    await assert.rejects(f.list(token));
-    const next = await f.runtime.control('approve-broker', input); assert.ok('approval' in next && next.approval);
-    assert.notEqual(first.approval.taskId, next.approval.taskId);
-    await assert.rejects(f.list(token));
-    const nextToken = f.tokenFor(f.addRun('next-task-token')); assert.deepEqual((await f.list(nextToken)).secrets, []);
-  } finally { await f.cleanup(); }
-});
-
 test('dispatch rechecks current run and session synchronously before spawning a fixture consumer', async () => {
   const f = await fixture();
   try {
     await f.initialize(); f.origins.set(f.session.id, { kind: 'agent', untrustedInput: false });
-    await f.runtime.control('approve-broker', { sessionId: f.session.id, root: f.projectRoot, taskId: null, taskLabel: 'Fixture', ttlMs: 60000 });
-    const run = f.addRun('dispatch-race'); const token = f.tokenFor(run);
     const dispatch = f.service.dispatch.bind(f.service);
-    f.service.dispatch = (context, uses, start, validate) => {
-      f.origins.set(f.session.id, { kind: 'agent', untrustedInput: true });
-      return dispatch(context, uses, () => { assert.fail('consumer must not start after provenance changes'); return start(); }, validate);
-    };
-    const result = await f.call(token, 'secrets_run', { operationId: 'fixture-dispatch-race', command: process.execPath, args: ['-e', "process.stdout.write('fixture consumer')"] }) as SecretRunResult;
-    assert.equal(result.exitCode, null); assert.equal(result.stdout, '');
-    assert.match(result.stderr, /완료하지 못했습니다/);
+    for (const [index, change] of (['run ended', 'session closed', 'became a public agent'] as const).entries()) {
+      const run = f.addRun(`dispatch-race-${index}`, f.session, { origin: { kind: 'agent' }, towerTools: undefined });
+      const token = f.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: run.sessionId });
+      let started = false;
+      f.service.dispatch = (context, uses, start, validate) => {
+        if (change === 'run ended') run.status = 'completed';
+        else if (change === 'session closed') f.sessions.set(f.session.id, { ...f.session, closed: true });
+        else f.origins.set(f.session.id, { kind: 'trigger', triggerId: `${PUBLIC_TRIGGER_PREFIX}agent`, untrustedInput: true });
+        return dispatch(context, uses, () => { started = true; return start(); }, validate);
+      };
+      const result = await f.call(token, 'secrets_run', { operationId: `fixture-dispatch-race-${index}`, command: process.execPath, args: ['-e', "process.stdout.write('fixture consumer')"] }) as SecretRunResult;
+      assert.equal(started, false, `${change}: the consumer never starts`);
+      assert.equal(result.exitCode, null); assert.equal(result.stdout, '');
+      assert.match(result.stderr, /완료하지 못했습니다/);
+      f.sessions.set(f.session.id, f.session); f.origins.set(f.session.id, { kind: 'agent', untrustedInput: false });
+    }
   } finally { await f.cleanup(); }
 });
 
@@ -787,7 +774,7 @@ test('broker service independently denies revoked approval at list, resolve, cla
     const approved = await f.runtime.control('approve-broker', { sessionId: f.session.id, root: f.projectRoot, taskId: null, taskLabel: 'Fixture', ttlMs: 60000 }); assert.ok('approval' in approved && approved.approval);
     const run = f.addRun('service-approval'); f.tokenFor(run);
     const capability: Extract<Capability, { kind: 'secret-run' }> = { kind: 'secret-run', runId: run.id, sessionId: f.session.id, approvalId: approved.approval.id };
-    const context = await f.runtime.context(capability);
+    const context = { ...await f.runtime.context(capability), brokerApprovalId: approved.approval.id };
     const secret = await f.service.create({ kind: 'scalar', name: 'FIXTURE_ONLY', value: canary, temporary: true }, context);
     await f.service.revokeBroker(f.session.id, approved.approval.id);
     await assert.rejects(f.service.list(context));
@@ -833,35 +820,10 @@ test('an open task must close before the same approved session can move to anoth
     assert.notEqual(next.approval.taskId, approved.approval.taskId);
     assert.equal(next.approval.root, rootB);
     await assert.rejects(f.list(oldToken));
-    const newToken = f.tokenFor(f.addRun('root-b-new-capability'), f.sessions.get(f.session.id));
+    f.advance(10); const newToken = f.tokenFor(f.addRun('root-b-new-capability', f.sessions.get(f.session.id), { startedAt: new Date(f.now()).toISOString() }), f.sessions.get(f.session.id));
     assert.deepEqual((await f.list(newToken)).secrets, []);
     f.sessions.set(f.session.id, f.session);
     await assert.rejects(f.list(oldToken), 'returning to root A cannot revive the retired approval');
-  } finally { await f.cleanup(); }
-});
-
-test('approved agent broker tools require immutable owner admission proof rather than an owner origin label', async () => {
-  const f = await fixture();
-  try {
-    await f.initialize(); f.origins.set(f.session.id, { kind: 'agent', untrustedInput: false });
-    const approved = await f.runtime.control('approve-broker', { sessionId: f.session.id, root: f.projectRoot, taskId: null, taskLabel: 'Proof fixture', ttlMs: 60000 }); assert.ok('approval' in approved && approved.approval);
-    for (const brokerOwnerAuthorized of [undefined, false]) {
-      const run = f.addRun('unproven-' + String(brokerOwnerAuthorized), f.session, { brokerOwnerAuthorized });
-      assert.equal(f.resolver(run, f.session).servers?.tower_secrets, undefined);
-      run.towerTools = 'broker-only';
-      const forged = f.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: f.session.id, approvalId: approved.approval.id });
-      await assert.rejects(f.list(forged));
-      await assert.rejects(handleMcpRequest(f.context, forged, { method: 'tools/list' }));
-    }
-    const run = f.addRun('proven-owner'); const token = f.tokenFor(run);
-    assert.deepEqual((await f.list(token)).secrets, []);
-    run.origin = { kind: 'agent' };
-    await assert.rejects(f.list(token));
-    run.origin = { kind: 'owner' }; run.brokerOwnerAuthorized = false;
-    await assert.rejects(f.list(token));
-    f.origins.set(f.session.id, { kind: 'owner', untrustedInput: false });
-    const ordinary = f.addRun('ordinary-owner-without-new-proof', f.session, { brokerOwnerAuthorized: undefined });
-    const ordinaryToken = f.tokenFor(ordinary); assert.deepEqual((await f.list(ordinaryToken)).secrets, []);
   } finally { await f.cleanup(); }
 });
 
@@ -897,7 +859,7 @@ test('official reopen clears the transient fence but requires a new task approva
     const after = await f.runtime.control('approve-broker', input); assert.ok('approval' in after && after.approval);
     assert.notEqual(after.approval.id, before.approval.id); assert.notEqual(after.approval.taskId, before.approval.taskId);
     await assert.rejects(f.list(oldToken));
-    assert.deepEqual((await f.list(f.tokenFor(f.addRun('after-reopen')))).secrets, []);
+    f.advance(10); assert.deepEqual((await f.list(f.tokenFor(f.addRun('after-reopen', f.session, { startedAt: new Date(f.now()).toISOString() })))).secrets, []);
   } finally { await f.cleanup(); }
 });
 

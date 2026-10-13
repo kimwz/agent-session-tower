@@ -119,19 +119,21 @@ export async function handleMcpRequest(context: McpContext, token: string, body:
     if (!context.githubTool) throw new TowerError('unavailable', 'GitHub conversations are unavailable.');
     return context.githubTool(capability.workflowId, body.name, (body.arguments ?? {}) as Record<string, unknown>);
   }
-  // The credential works only for its own run, only while that run works, and only if Tower's tools were
-  // actually attached to it (not a turn forwarded to the desktop app).
   const run = context.run(capability.runId);
-  if (!run || run.sessionId !== capability.sessionId || run.status !== 'running' || run.origin?.kind !== 'owner' || (run.towerTools !== 'attached' && !(capability.kind === 'secret-run' && run.towerTools === 'broker-only' && capability.approvalId && !run.origin.controllerId))) {
-    throw new TowerError('forbidden', 'Tower tools work only during the turn you started from Tower that they were given to.');
-  }
   if (capability.kind === 'secret-run') {
-    if (!context.secretTool || !context.secretTools) throw new TowerError('unavailable', '시크릿 도구를 사용할 수 없습니다.');
-    if (run.towerTools === 'broker-only' && !context.secretAuthorize) throw new TowerError('unavailable', '시크릿 승인 검사를 사용할 수 없습니다.');
-    await context.secretAuthorize?.(capability);
+    // Any turn it was issued for, while that turn works, whoever started it and whatever other tools it has. Whether
+    // its session may use secrets is decided again for every request by the secrets runtime (secrets/access.ts).
+    if (!run || run.sessionId !== capability.sessionId || run.status !== 'running') throw new TowerError('forbidden', '이 시크릿 도구는 발급받은 실행 중에만 사용할 수 있습니다.');
+    if (!context.secretTool || !context.secretTools || !context.secretAuthorize) throw new TowerError('unavailable', '시크릿 도구를 사용할 수 없습니다.');
+    await context.secretAuthorize(capability);
     if (body.method === 'tools/list') return { tools: context.secretTools };
     if (body.method !== 'tools/call' || typeof body.name !== 'string') throw new TowerError('not-found', '알 수 없는 시크릿 도구입니다.');
     return context.secretTool(capability, body.name, body.arguments && typeof body.arguments === 'object' && !Array.isArray(body.arguments) ? body.arguments as Record<string, unknown> : {});
+  }
+  // The credential works only for its own run, only while that run works, and only if Tower's tools were
+  // actually attached to it (not a turn forwarded to the desktop app).
+  if (!run || run.sessionId !== capability.sessionId || run.status !== 'running' || run.origin?.kind !== 'owner' || run.towerTools !== 'attached') {
+    throw new TowerError('forbidden', 'Tower tools work only during the turn you started from Tower that they were given to.');
   }
   if (body.method === 'tools/list') return { tools: towerTools() };
   const operation = typeof body.name === 'string' ? operationOf(body.name) : undefined;

@@ -14,6 +14,7 @@ import { TowerApi } from '../../../server/api/tower-api.js';
 import { TriggerService } from '../../../server/triggers/service.js';
 import type { SessionOrigin } from '../../../server/runs/origin.js';
 import type { AutoPromptJob, Run, Session } from '../../../shared/types.js';
+import { TowerError } from '../../../shared/errors.js';
 
 const session = (id: string): Session => ({ id, nativeId: id.split(':')[1], provider: 'codex', title: 'Mine', cwd: '/project', project: 'project', status: 'idle', statusReason: '',
   createdAt: '', updatedAt: '', lastMessage: '', messageCount: 1, isSubagent: false, resumable: true });
@@ -382,23 +383,40 @@ test('a scoped agent-session approval attaches only broker tools to a new local 
   assert.equal(resolver(turn(), target).servers?.tower_secrets, undefined);
 });
 
-test('broker-only capabilities never admit generic Tower tools and revalidate discovery', async t => {
+test('a secret credential is checked by the secrets runtime on every request, whatever Tower tools its turn has, and opens nothing else', async t => {
   const f = await fixture(t);
-  const run = f.ownerTurn('codex:delegated', 'broker-only');
+  const run: Run = { id: randomUUID(), sessionId: 'codex:delegated', prompt: '', status: 'running', createdAt: '', output: '', origin: { kind: 'agent' } };
+  f.runs.push(run);
   let allowed = true;
-  let checks = 0;
-  const context = { ...f.context, secretTools: [{ name: 'secrets_list' }], secretTool: async () => ({}), secretAuthorize: async () => { checks++; if (!allowed) throw new Error('Approval revoked'); } };
-  const token = f.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: run.sessionId, approvalId: 'approval' });
+  const checked: unknown[] = [], called: unknown[] = [];
+  const context = { ...f.context, secretTools: [{ name: 'secrets_list' }], secretTool: async (...args: unknown[]) => { called.push(args); return {}; },
+    secretAuthorize: async (capability: unknown) => { checked.push(capability); if (!allowed) throw new TowerError('forbidden', 'Not here'); } };
+  const capability = { kind: 'secret-run' as const, runId: run.id, sessionId: run.sessionId };
+  const token = f.capabilities.issue(capability);
   assert.deepEqual(await handleMcpRequest(context, token, { method: 'tools/list' }), { tools: context.secretTools });
-  assert.equal(checks, 1);
-  await assert.rejects(handleMcpRequest(context, f.token(run), { method: 'tools/list' }), /Tower tools work only/);
-  const unbound = f.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: run.sessionId });
-  await assert.rejects(handleMcpRequest(context, unbound, { method: 'tools/list' }), /Tower tools work only/);
+  await handleMcpRequest(context, token, { method: 'tools/call', name: 'secrets_list', arguments: {} });
+  assert.deepEqual(checked, [capability, capability], 'decided again for each request');
+  assert.deepEqual(called, [[capability, 'secrets_list', {}]]);
+  for (const towerTools of [undefined, 'desktop-app', 'external-input', 'not-owner-session', 'remote', 'attached'] as const) {
+    run.towerTools = towerTools;
+    assert.deepEqual(await handleMcpRequest(context, token, { method: 'tools/list' }), { tools: context.secretTools }, String(towerTools));
+  }
   allowed = false;
-  await assert.rejects(handleMcpRequest(context, token, { method: 'tools/list' }), /Approval revoked/);
+  await assert.rejects(handleMcpRequest(context, token, { method: 'tools/list' }), /Not here/);
   allowed = true;
-  run.origin = { kind: 'owner', controllerId: 'remote' };
-  await assert.rejects(handleMcpRequest(context, token, { method: 'tools/list' }), /Tower tools work only/);
+  checked.length = 0;
+  await assert.rejects(handleMcpRequest(context, f.capabilities.issue({ ...capability, sessionId: 'codex:other' }), { method: 'tools/list' }), { kind: 'forbidden' });
+  const other = f.ownerTurn(run.sessionId);
+  await assert.rejects(handleMcpRequest(context, f.capabilities.issue({ ...capability, runId: randomUUID() }), { method: 'tools/list' }), { kind: 'forbidden' }, 'no such run');
+  run.status = 'completed';
+  await assert.rejects(handleMcpRequest(context, token, { method: 'tools/list' }), { kind: 'forbidden' }, 'another running turn in the session does not revive it');
+  assert.deepEqual(checked, [], 'refused before the runtime is asked');
+  run.status = 'running';
+  await assert.rejects(handleMcpRequest({ ...context, secretAuthorize: undefined }, token, { method: 'tools/list' }), { kind: 'unavailable' }, 'never without the runtime’s check');
+  // Tower's own tools keep their owner gate: an agent turn's owner credential, or an owner turn's credential once not attached.
+  await assert.rejects(handleMcpRequest(context, f.token(run), { method: 'tools/list' }), /Tower tools work only/);
+  other.towerTools = 'not-owner-session';
+  await assert.rejects(handleMcpRequest(context, f.token(other), { method: 'tools/list' }), /Tower tools work only/);
 });
 
 test('MCP admission rechecks captured broker owner proof after preparing an Auto Prompt', async t => {
