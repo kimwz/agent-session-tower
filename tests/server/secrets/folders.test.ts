@@ -61,7 +61,7 @@ async function nodeRoute(path: string, options: { trusted?: boolean; excluded?: 
   let status = 0; let body = '';
   const res = { writeHead(code: number) { status = code; }, end(value: string) { body = value; } } as unknown as Http2ServerResponse;
   const calls: string[] = [];
-  await handleSecretLink(req, res, 'controller-route', { secretCall: async operation => {
+  await handleSecretLink(req, res, 'controller-route', { supports: () => true, secretCall: async operation => {
     calls.push(operation); return options.trusted === false ? [] : [{ ...peer('controller-route', 'controller-device'), direction: 'controller' }];
   } }, { excluded: options.excluded });
   return { status, body: JSON.parse(body) as { root?: string; error?: string }, calls };
@@ -88,7 +88,7 @@ test('the controller asks a joined computer over its link and turns each answer 
   const session = connect(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
   t.after(() => { session.destroy(); server.close(); });
   const nodes = { session: (id: string) => id === NODE_A ? session : undefined, list: () => [{ id: NODE_A, status: 'connected', features: [SECRET_SHARING_FEATURE] }, { id: NODE_B, status: 'offline', features: [SECRET_SHARING_FEATURE] }] } as unknown as RemoteNodes;
-  const sources = folderSources(nodes, { secretCall: async operation => { if (operation === 'peers') return PEERS; throw new Error('Vault locked'); } });
+  const sources = folderSources(nodes, { supports: () => true, secretCall: async operation => { if (operation === 'peers') return PEERS; throw new Error('Vault locked'); } });
   assert.deepEqual(sources.features(NODE_A), [SECRET_SHARING_FEATURE]); assert.equal(sources.features(NODE_B), undefined, 'a disconnected computer has no features to go by');
   assert.equal(await sources.ask(NODE_A, '/ok'), '/real/ok');
   for (const path of ['/file', '/hidden']) await assert.rejects(sources.ask(NODE_A, path), { kind: 'invalid', message: /찾을 수 없거나 폴더가 아닙니다/ });

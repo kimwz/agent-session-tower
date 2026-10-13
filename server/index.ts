@@ -53,6 +53,7 @@ import { startSecretsMcp } from './secrets/runtime.js';
 import { runSecretsCommand } from './secrets/cli.js';
 import { SecretRelay } from './link/secret-relay.js';
 import { handleSecretLink, ownerSecretControl } from './link/secret-routes.js';
+import { SECRET_SHARING_FEATURE } from './secrets/folders.js';
 import type { SecretPeer } from '../shared/secrets.js';
 import type { RemoteSecretResponse } from './secrets/remote.js';
 import { overlapsRepository } from '../shared/repositories.js';
@@ -389,6 +390,7 @@ async function main() {
       runs: dismissedRuns.visible(managed), autoPrompts: runs.autoPromptList(), scanning: history.indexing, hostname: hostname(), version: APP_VERSION,
       ...(runs.triggerOverview() ? { triggers: runs.triggerOverview() } : {}),
       ...(runs.supports('compaction') ? { compaction: true as const } : {}),
+      ...(runs.supports('secretSharing') ? { secretSharing: true as const } : {}),
       ...(runs.runnerVersion() ? { runnerVersion: runs.runnerVersion() } : {}),
       ...(componentVersions ? { componentVersions } : {}),
       // Only an older worker is waiting to be replaced; a newer one left by an update that was undone stays as it is.
@@ -551,7 +553,7 @@ async function main() {
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
     // and updating do not.
-    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : []), ...(runs.supports('secrets') ? ['secrets'] : []), ...(runs.supports('compaction') ? ['compaction'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
+    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : []), ...(runs.supports('secrets') ? ['secrets'] : []), ...(runs.supports('secretSharing') ? [SECRET_SHARING_FEATURE] : []), ...(runs.supports('compaction') ? ['compaction'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
     handle: async (req, res, principal) => {
       if (await handleSecretLink(req, res, principal.controllerId, runs, { excluded: path => exclusions.excludesNow(path) })) return;
       return remoteRouter.handle(req, res, principal);
@@ -567,7 +569,12 @@ async function main() {
     } });
   secretRouteKnown = (direction, id) => direction === 'node' ? Boolean(controllerLinks?.list().some(node => node.id === id)) : direction === 'controller' && Boolean(nodeLinks?.list().some(controller => controller.id === id && controller.state === 'paired'));
   if (nodeLinks) {
-    nodeLinks.on('disconnected', (controllerId: string) => remoteRouter.disconnect(controllerId));
+    nodeLinks.on('disconnected', (controllerId: string) => {
+      remoteRouter.disconnect(controllerId);
+      // What that controller's relay said its worker serves no longer holds.
+      // best-effort: an unconfirmed relay also lapses by itself within 30 seconds.
+      if (runs.supports('secretSharing')) void runs.secretCall('peer-offline', [controllerId]).catch(() => {});
+    });
     controlledBy = () => nodeLinks.list().filter(item => item.status === 'connected').map(item => item.name);
     nodeLinks.on('change', changed);
     controllerName = id => nodeLinks.list().find(item => item.id === id)?.name;
@@ -719,7 +726,8 @@ async function main() {
   void towerUpdates.start().catch(error => console.error(`Automatic updates are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   if (remoteNodes) {
     secretRelay = new SecretRelay({ nodes: remoteNodes, peers: async () => runs.supports('secrets') ? await runs.secretCall('peers') as SecretPeer[] : [],
-      workerAnswer: (id, request) => runs.secretCall('answer', [id, request]) as Promise<RemoteSecretResponse> });
+      workerAnswer: (id, request) => runs.secretCall('answer', [id, request]) as Promise<RemoteSecretResponse>,
+      features: () => runs.supports('secretSharing') ? ['available'] : [] });
     secretRelay.start();
   }
   capabilities.start();

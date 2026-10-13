@@ -1,13 +1,13 @@
 import { randomUUID, randomBytes, generateKeyPairSync, createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
-import type { SecretAvailable, SecretBrokerApproval, SecretContext, SecretCreateInput, SecretDevice, SecretFolder, SecretGroup, SecretMetadata, SecretOperation, SecretOverview, SecretPeer, SecretProject, SecretRule, SecretSettingsView, SecretSharing, SecretTarget, SecretTask, SecretUsage, VaultStatus } from '../../shared/secrets.js';
+import type { SecretAvailable, SecretBrokerApproval, SecretContext, SecretCreateInput, SecretDevice, SecretFolder, SecretGroup, SecretMetadata, SecretOperation, SecretPeer, SecretProject, SecretRule, SecretSettingsView, SecretSharing, SecretTarget, SecretTask, SecretUsage, VaultStatus } from '../../shared/secrets.js';
 import { TowerError } from '../../shared/errors.js';
 import { MAX_SECRET_BYTES, SECRET_OPERATIONS } from '../../shared/secrets.js';
 import { SecretVault } from './vault.js';
 import { decode } from './crypto.js';
 import { parseDotenv } from './dotenv.js';
 import { authorize, available, covered, openTask, servedHosts, sessionTask, withheld, type Decision, type PolicySecret, type PolicyState } from './policy.js';
-import { legacySummary, projectId, validSelection, withoutSecrets } from './legacy-policy.js';
+import { legacySummary, projectId, withoutSecrets } from './legacy-policy.js';
 import { wireMetadata } from './remote.js';
 interface StoredSecret {
   metadata: SecretMetadata; value: string; encoding?: 'base64'; fields?: Record<string, string>;
@@ -86,14 +86,6 @@ export class SecretService {
   peers() { return structuredClone(this.data().peers); }
   async trustPeer(peer: SecretPeer) { return this.mutate(() => { if (!peer.device.id || peer.device.id === this.device().id || !peer.device.signingKey || !peer.device.encryptionKey) throw new Error('Invalid peer'); const existing = this.data().peers.find(item => item.device.id === peer.device.id); if (existing && (existing.device.signingKey !== peer.device.signingKey || existing.device.encryptionKey !== peer.device.encryptionKey)) throw new Error('Peer key changed'); this.data().peers = [...this.data().peers.filter(item => item.device.id !== peer.device.id), structuredClone(peer)]; }); }
   async removePeer(deviceId: string) { return this.mutate(() => { this.data().peers = this.data().peers.filter(peer => peer.device.id !== deviceId); }); }
-  async project(input: { id?: string; name: string; bindings: { hostId: string; root: string }[] }) { return this.mutate(() => {
-    if (typeof input.name !== 'string' || !input.name.trim() || input.name.length > 256 || !Array.isArray(input.bindings) || !input.bindings.length || input.bindings.length > 100 || input.bindings.some(binding => !binding.hostId || !isAbsolute(binding.root) || normalize(binding.root) !== binding.root)) throw new Error('Invalid project');
-    if (input.id && !this.data().projects.some(project => project.id === input.id)) throw new Error('Unknown project');
-    if (input.bindings.some(binding => this.data().projects.some(project => project.id !== input.id && project.bindings.some(other => other.hostId === binding.hostId && other.root === binding.root)))) throw new Error('Project binding already exists');
-    const project: SecretProject = { id: input.id ?? randomUUID(), name: input.name, bindings: structuredClone(input.bindings) };
-    this.data().projects = [...this.data().projects.filter(item => item.id !== project.id), project]; return structuredClone(project);
-  }); }
-
   private projectId(hostId: string, root: string) { return projectId(this.data(), hostId, root); }
   private lockedIndex(): LockedIndex { return { format: 2, brokerApprovals: structuredClone(this.journal.brokerApprovals), policy: this.policy(), sources: this.data().peers.filter(peer => peer.enabled && peer.direction === 'controller').map(peer => peer.device.id) }; }
   private policy(): PolicyState { const data = this.data(); return { deviceId: data.device.id, servedHosts: servedHosts(data.device.id, data.peers), projects: data.projects, groups: this.groups(), rules: this.allRules(), secrets: this.secrets().map(policySecret), tasks: this.journal.tasks }; }
@@ -108,7 +100,6 @@ export class SecretService {
     if (!data.towerGroupId || !data.groups.some(group => group.id === data.towerGroupId)) { data.towerGroupId = randomUUID(); data.groups.push({ id: data.towerGroupId, name: 'Tower', scope: 'global' }); }
     return data.towerGroupId;
   }
-  overview(target?: SecretTarget): SecretOverview { if (this.vault.locked) return { status: this.status(), peers: [], projects: [], groups: [], secrets: [], rules: [], connected: [] }; const data = this.data(); const task = target ? this.journal.tasks.find(task => task.id === target.taskId) : undefined; return { status: this.status(), device: this.device(), peers: this.peers(), projects: structuredClone(data.projects), groups: structuredClone(this.groups()), secrets: this.secrets().map(secret => this.metadata(secret)), rules: structuredClone(this.allRules()), target, task: structuredClone(task), connected: task ? [...task.connected] : [] }; }
   /** Saved secrets with their sharing, or a summary of the rules they still follow; no values. */
   settings(): SecretSettingsView {
     if (this.vault.locked) return { status: this.status(), peers: [], secrets: [] };
@@ -179,25 +170,6 @@ export class SecretService {
     this.data().rules = withoutSecrets(this.data().rules, gone); this.journal.rules = withoutSecrets(this.journal.rules, gone);
     for (const task of this.journal.tasks) task.connected = task.connected.filter(id => live.has(id));
   }
-  /** Edits the rules that secrets saved before sharing follow; a secret with sharing never joins a rule. */
-  async setRule(input: Omit<SecretRule, 'id' | 'revision'> & { id?: string }): Promise<SecretRule> { return this.mutate(() => {
-    const group = this.groups().find(group => group.id === input.groupId);
-    const invalid = (message: string) => new TowerError('invalid', message);
-    if (!group) throw invalid('공유 규칙의 그룹을 찾을 수 없습니다.');
-    if (!input.hostId) throw invalid('공유 규칙의 컴퓨터를 선택하세요.');
-    if (input.root !== undefined && (!isAbsolute(input.root) || normalize(input.root) !== input.root)) throw invalid('공유 규칙의 폴더는 절대 경로여야 합니다.');
-    if (input.allProjects && (group.scope !== 'global' || input.projectId !== undefined || input.root !== undefined)) throw invalid('모든 프로젝트 허용은 전역 그룹에서 프로젝트나 폴더 없이만 쓸 수 있습니다.');
-    if (!['manual', 'auto'].includes(input.activation)) throw invalid('공유 규칙의 연결 방식을 선택하세요.');
-    if (!input.operations.length || input.operations.some(operation => !SECRET_OPERATIONS.includes(operation))) throw invalid('공유 규칙의 권한을 하나 이상 선택하세요.');
-    if (!input.secretIds.length || input.secretIds.some(id => !this.secrets().some(secret => secret.metadata.id === id && secret.metadata.groupId === group.id))) throw invalid('공유할 키가 이 그룹에 없습니다. 키를 다시 선택하세요.');
-    if (input.secretIds.some(id => this.secrets().find(secret => secret.metadata.id === id)?.sharing)) throw invalid('공유 범위로 관리하는 키는 규칙에 넣을 수 없습니다. 키의 공유 범위를 편집하세요.');
-    if (input.projectId && !this.data().projects.some(project => project.id === input.projectId)) throw invalid('공유 규칙의 프로젝트를 찾을 수 없습니다.');
-    if (group.scope === 'project' && group.projectId !== input.projectId) throw invalid('프로젝트 그룹의 규칙은 그 그룹의 프로젝트에만 쓸 수 있습니다.');
-    if (input.maxTtlMs !== undefined && (!Number.isSafeInteger(input.maxTtlMs) || input.maxTtlMs <= 0)) throw invalid('작업 내 최대 사용 시간이 올바르지 않습니다.');
-    for (const id of Object.keys(input.fields ?? {})) { const secret = this.secrets().find(secret => secret.metadata.id === id); if (!input.secretIds.includes(id) || !secret) throw invalid('선택한 필드가 공유할 키에 없습니다.'); if (!validSelection(policySecret(secret), input)) throw invalid('선택한 필드가 키에 없거나 중복됩니다. 필드를 다시 선택하세요.'); }
-    const existing = input.id ? this.allRules().find(rule => rule.id === input.id) : undefined; if (input.id && !existing) throw new TowerError('not-found', '수정할 공유 규칙을 찾을 수 없습니다. 화면을 새로고침하세요.');
-    const rule: SecretRule = { ...structuredClone(input), id: input.id ?? randomUUID(), revision: (existing?.revision ?? 0) + 1 }; this.data().rules = this.data().rules.filter(item => item.id !== rule.id); this.journal.rules = this.journal.rules.filter(item => item.id !== rule.id); (group.scope === 'task' ? this.journal.rules : this.data().rules).push(rule); return structuredClone(rule);
-  }); }
   currentTask(sessionId: string, root?: string, hostId = this.device().id): SecretTarget | undefined {
     const task = [...this.journal.tasks].reverse().find(task => task.sessionId === sessionId && task.hostId === hostId && (root === undefined || task.root === root) && task.status === 'open' && (task.expiresAt === undefined || task.expiresAt > this.now()));
     return task ? { hostId, sessionId, root: task.root, taskId: task.id, projectId: this.projectId(hostId, task.root) } : undefined;
@@ -306,9 +278,12 @@ export class SecretService {
       this.join(task, id);
     }
   }); }
-  /** Stops secrets in one session whatever allows them there, connection, sharing or rules, until the owner connects them again. */
+  /**
+   * Stops secrets in one session whatever allows them there, connection, sharing or rules, until the owner connects them
+   * again. Like a connection, a remote session's first one starts its task here.
+   */
   async disconnectSession(target: SecretTarget, secretIds: string[]): Promise<void> { return this.mutate(() => {
-    const task = this.task(target.hostId === this.device().id ? target : { ...target, projectId: this.projectId(target.hostId, target.root) });
+    const task = this.ownerTask(target);
     task.connected = task.connected.filter(id => !secretIds.includes(id)); task.excluded = [...new Set([...task.excluded, ...secretIds])];
   }); }
   async closeTask(taskId: string) { return this.mutate(() => { const task = this.journal.tasks.find(task => task.id === taskId); if (!task) throw new Error('Unknown task'); this.endTask(task); }); }

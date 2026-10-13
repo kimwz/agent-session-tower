@@ -1,6 +1,7 @@
 /** Shared fixtures for secret tests: a vault on a temporary state folder and owner run registries. No personal state is read. */
 import { randomUUID } from 'node:crypto';
 import { SecretService } from '../../server/secrets/service.js';
+import type { PolicyState } from '../../server/secrets/policy.js';
 import { parseDotenv } from '../../server/secrets/dotenv.js';
 import type { Capability } from '../../server/api/mcp.js';
 import type { SessionOrigin } from '../../server/runs/origin.js';
@@ -47,6 +48,25 @@ export async function editPayload(service: SecretService, password: string, edit
   edit(payload);
   await service.vault.save(payload, await service.vault.journal(), service.vault.index);
   await service.lock(); await service.unlock(password);
+}
+
+/**
+ * What the vault's last save keeps for authorization, without values: rules, projects, tasks with their connections and
+ * exclusions, and every secret's metadata, temporary ones included. Read from the plaintext name index every save writes.
+ */
+export function stored(service: SecretService): PolicyState {
+  const index = service.vault.index as { format?: number; policy?: PolicyState } | undefined;
+  if (index?.format !== 2 || !index.policy) throw new Error('The fixture vault has no current index');
+  return structuredClone(index.policy);
+}
+/** One stored task by ID. */
+export function storedTask(service: SecretService, taskId: string) { return stored(service).tasks.find(task => task.id === taskId); }
+/** Whether a secret, saved or temporary, is still stored. */
+export function storedSecret(service: SecretService, secretId: string): boolean { return stored(service).secrets.some(secret => secret.metadata.id === secretId); }
+/** A project registered as builds before per-secret sharing did, for rules to name. */
+export async function addProject(service: SecretService, password: string, project: SecretProject): Promise<SecretProject> {
+  await editPayload(service, password, payload => { payload.projects.push(structuredClone(project)); });
+  return project;
 }
 
 /** A secret as builds before per-secret sharing saved it: in a group and governed by rules, without sharing. */

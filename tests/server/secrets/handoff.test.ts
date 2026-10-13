@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { SecretRuntime } from '../../../server/secrets/runtime.js';
-import { FixtureRuns, secretService } from '../../helpers/secrets.js';
+import { FixtureRuns, secretService, storedTask } from '../../helpers/secrets.js';
 
 const PASSWORD = 'fixture-handoff-password';
 const CANARY = 'HANDOFF_VALUE_CANARY_8172';
@@ -30,9 +30,9 @@ test('an open vault handed to the next worker opens it without the password, wit
   assert.equal(next.status().locked, true);
   await next.adopt(carry);
   assert.equal(next.status().locked, false);
-  assert.deepEqual(next.overview().secrets.map(secret => secret.name), ['API_KEY']);
+  assert.deepEqual(next.settings().secrets.map(secret => secret.name), ['API_KEY']);
   assert.equal(next.currentTask('codex:session-a', f.root)?.taskId, f.target.taskId, 'the session keeps its task across the handoff');
-  assert.deepEqual(next.overview(f.target).connected.length, 1);
+  assert.deepEqual(storedTask(next, f.target.taskId)?.connected.length, 1);
   // Nothing about the key reaches the state folder.
   for (const name of ['vault.json', 'journal.json', 'index.json']) {
     const bytes = await readFile(join(f.stateDir, 'secrets', name), 'utf8');

@@ -413,8 +413,9 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         const answer = await towerUpdate(body.version as string | undefined);
         return json(res, answer.status, answer.body);
       }
-      const secretAction = path.match(/^\/api\/secrets\/(overview|broker-access|approve-broker|revoke-broker|initialize|unlock|lock|password|create|update|remove|project|rule|attach|connect|revoke|end-task|trust|untrust|preview|import)$/);
-      if (secretAction && ((['overview', 'broker-access'].includes(secretAction[1]) && req.method === 'GET') || (!['overview', 'broker-access'].includes(secretAction[1]) && req.method === 'POST'))) {
+      const secretAction = path.match(/^\/api\/secrets\/(settings|session|session-connect|session-disconnect|sharing|broker-access|approve-broker|revoke-broker|initialize|unlock|lock|password|create|update|remove|trust|untrust|preview|import)$/);
+      const secretRead = secretAction && ['settings', 'session', 'broker-access'].includes(secretAction[1]);
+      if (secretAction && ((secretRead && req.method === 'GET') || (!secretRead && req.method === 'POST'))) {
         const brokerAccess = ['broker-access', 'approve-broker', 'revoke-broker'].includes(secretAction[1]);
         if (masterCall || localAgent || (brokerAccess && (req.headers['x-tower-master'] !== undefined || req.headers['x-tower-agent'] !== undefined || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()] !== undefined))) return json(res, 403, { error: '시크릿 보관함 관리는 소유자의 전용 화면에서만 가능합니다.' });
         if (brokerAccess && req.method === 'POST' && !auth?.session(sessionId, identity.ip)) return json(res, 401, { error: '브로커 승인은 로그인한 소유자의 Tower 화면에서만 가능합니다.' });
@@ -424,7 +425,12 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         if (!backend.secrets) return json(res, 503, { error: '시크릿 보관함을 사용할 수 없습니다.' });
         const input = req.method === 'GET' ? Object.fromEntries(url.searchParams) : await readJson(req, 3 * 1024 * 1024);
         if (!input || typeof input !== 'object' || Array.isArray(input)) return json(res, 400, { error: '시크릿 입력이 올바르지 않습니다.' });
-        return json(res, 200, await backend.secrets(secretAction[1], input));
+        try { return json(res, 200, await backend.secrets(secretAction[1], input)); }
+        catch (error) {
+          // An older execution worker was not asked; the page shows that the new one is pending.
+          if ((error as { code?: unknown }).code === 'worker-update-pending') return json(res, 503, { error: (error as Error).message, code: 'worker-update-pending' });
+          throw error;
+        }
       }
       if (path === '/api/slack' && req.method === 'GET') {
         if (!backend.slackOverview) return json(res, 503, { error: 'Slack 연동을 사용할 수 없습니다.' });
