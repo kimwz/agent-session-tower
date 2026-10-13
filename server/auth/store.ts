@@ -12,6 +12,11 @@ export const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
 const KDF = { N: 131072, r: 8, p: 1, maxmem: 192 * 1024 * 1024 };
 interface Credentials { version: 1; username: string; algorithm: 'scrypt'; salt: string; hash: string; N: number; r: number; p: number }
 interface Security { version: 1; attempts: LoginAttempt[]; failures: Record<string, number>; blockedIps: BlockedIp[] }
+type AttemptStatus = 'success' | 'failure' | 'blocked' | 'unconfigured';
+/** New credentials, computed but not saved: `commit` saves them and signs everyone out; once committed, it does nothing more. */
+export interface PreparedCredentials { credentialId: string; commit(): Promise<void> }
+/** Names the vault's Tower password wrapper made for these credentials; a hash of their salt, not a secret. */
+const credentialIdOf = (salt: string) => createHash('sha256').update(`tower-credential-v1:${salt}`).digest('hex');
 export function canonicalIp(address: string): string {
   if (!isIP(address)) throw new Error('Invalid client IP address.');
   if (isIP(address) === 4) return address;
@@ -89,6 +94,7 @@ export class AuthStore {
   }
   configured(): boolean { return !!this.credentials; }
   username(): string | undefined { return this.credentials?.username; }
+  currentCredentialId(): string | undefined { return this.credentials && credentialIdOf(this.credentials.salt); }
   private serial<T>(work: () => Promise<T>): Promise<T> {
     if (!this.started || this.closed || this.persistenceError) return Promise.reject(new Error('Authentication store is not running.'));
     if (this.pending >= 16) return Promise.reject(new TowerError('rate-limited', 'Too many authentication requests.'));
@@ -101,44 +107,64 @@ export class AuthStore {
     return result;
   }
   async setCredentials(username: string, password: string): Promise<void> {
+    await (await this.prepareCredentials(username, password)).commit();
+  }
+  /** The vault coordinator wraps the vault key for `credentialId` between preparing and committing a password change. */
+  async prepareCredentials(username: string, password: string): Promise<PreparedCredentials> {
     username = username.trim();
     if (!validUsername(username) || password.length < 12 || password.length > 256) throw new TowerError('invalid', 'Username must be 1–64 characters and password must be 12–256 characters.');
-    return this.serial(async () => {
+    const credentials = await this.serial(async (): Promise<Credentials> => {
       const salt = randomBytes(32).toString('hex');
-      const credentials: Credentials = { version: 1, username, algorithm: 'scrypt', salt, hash: (await derive(password, salt)).toString('hex'), N: KDF.N, r: KDF.r, p: KDF.p };
-      await writePrivateJson(join(this.stateDir, 'auth.json'), JSON.stringify(credentials));
-      this.credentials = credentials;
-      this.revokeAll();
+      return { version: 1, username, algorithm: 'scrypt', salt, hash: (await derive(password, salt)).toString('hex'), N: KDF.N, r: KDF.r, p: KDF.p };
     });
+    let committed = false;
+    return { credentialId: credentialIdOf(credentials.salt), commit: () => this.serial(async () => {
+      if (committed) return;
+      // Synced with its folder: the vault wrappers of other credentials are pruned (and synced) right after this.
+      await writePrivateJson(join(this.stateDir, 'auth.json'), JSON.stringify(credentials), { syncDirectory: true });
+      this.credentials = credentials; committed = true;
+      this.revokeAll();
+    }) };
   }
-  login(ip: string, username: string, password: string): Promise<{ status: 'success' | 'failure' | 'blocked' | 'unconfigured'; sessionId?: string }> {
+  login(ip: string, username: string, password: string): Promise<{ status: AttemptStatus; sessionId?: string }> {
     ip = canonicalIp(ip);
     return this.serial(async () => {
-      if (!this.credentials) return { status: 'unconfigured' };
-      let result: LoginAttempt['result'];
-      if (this.security.blockedIps.some(entry => entry.ip === ip)) result = 'blocked';
-      else {
-        const key = await derive(password.length <= 256 ? password : '', this.credentials.salt);
-        result = timingSafeEqual(key, Buffer.from(this.credentials.hash, 'hex')) && username === this.credentials.username && password.length <= 256 ? 'success' : 'failure';
-        if (result === 'failure') {
-          this.security.failures[ip] = Math.min(LIMIT, (this.security.failures[ip] ?? 0) + 1);
-          if (this.security.failures[ip] === LIMIT) {
-            this.security.blockedIps.push({ ip, blockedAt: new Date().toISOString(), failures: LIMIT });
-            result = 'blocked';
-            for (const [key, session] of this.sessions) if (session.ip === ip) this.revoke(key);
-          }
-        }
-      }
-      this.security.attempts.unshift({ id: randomUUID(), at: new Date().toISOString(), ip, username: username.slice(0, 64), result });
-      this.security.attempts.length = Math.min(HISTORY, this.security.attempts.length);
-      await this.persistSecurity();
-      if (this.closed) throw new Error('Authentication store is closed.');
+      const result = await this.attempt(ip, password, username);
       if (result !== 'success') return { status: result };
       const token = randomBytes(32).toString('base64url');
       this.remember(sessionKey(token), ip, Date.now() + SESSION_MS);
       this.persistSessions();
       return { status: 'success', sessionId: token };
     });
+  }
+  /** Checks the Tower password as a sign-in would, failures counting toward the same IP block, without signing anyone in. */
+  verifyPassword(ip: string, password: string): Promise<{ status: AttemptStatus }> {
+    ip = canonicalIp(ip);
+    return this.serial(async () => ({ status: await this.attempt(ip, password) }));
+  }
+  /** One recorded attempt; without `username`, only the password is checked. */
+  private async attempt(ip: string, password: string, username?: string): Promise<AttemptStatus> {
+    if (!this.credentials) return 'unconfigured';
+    username ??= this.credentials.username;
+    let result: LoginAttempt['result'];
+    if (this.security.blockedIps.some(entry => entry.ip === ip)) result = 'blocked';
+    else {
+      const key = await derive(password.length <= 256 ? password : '', this.credentials.salt);
+      result = timingSafeEqual(key, Buffer.from(this.credentials.hash, 'hex')) && username === this.credentials.username && password.length <= 256 ? 'success' : 'failure';
+      if (result === 'failure') {
+        this.security.failures[ip] = Math.min(LIMIT, (this.security.failures[ip] ?? 0) + 1);
+        if (this.security.failures[ip] === LIMIT) {
+          this.security.blockedIps.push({ ip, blockedAt: new Date().toISOString(), failures: LIMIT });
+          result = 'blocked';
+          for (const [key, session] of this.sessions) if (session.ip === ip) this.revoke(key);
+        }
+      }
+    }
+    this.security.attempts.unshift({ id: randomUUID(), at: new Date().toISOString(), ip, username: username.slice(0, 64), result });
+    this.security.attempts.length = Math.min(HISTORY, this.security.attempts.length);
+    await this.persistSecurity();
+    if (this.closed) throw new Error('Authentication store is closed.');
+    return result;
   }
   session(token: string, ip: string): boolean {
     if (!token) return false;

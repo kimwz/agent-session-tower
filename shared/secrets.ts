@@ -37,7 +37,15 @@ export interface SecretTask {
   /** The owner's explicit connections to this session, with every operation and field. */
   connected: string[];
 }
-export interface VaultStatus { initialized: boolean; locked: boolean; pendingImports?: number; pendingImportIds?: string[]; error?: string }
+export interface VaultStatus {
+  initialized: boolean; locked: boolean; pendingImports?: number; pendingImportIds?: string[]; error?: string;
+  /**
+   * Set by the web while the vault is locked and the account and worker support it: `ready` when the Tower (login)
+   * password opens it, `missing` when the vault (recovery) password is needed once with it. Absent: the vault password opens it.
+   */
+  towerPassword?: SecretTowerPassword;
+}
+export type SecretTowerPassword = 'ready' | 'missing';
 
 /** Canonical folder identity: the computer's vault device ID and the folder's real path. */
 export interface SecretFolder { hostId: string; root: string }
@@ -78,7 +86,13 @@ export interface SecretSettingsView {
   status: VaultStatus; device?: SecretDevice; peers: SecretPeer[]; secrets: SecretSettingsItem[];
   /** The attached worker predates per-secret sharing: only the vault's status is known, and only lock/unlock work. */
   workerUpdatePending?: boolean;
+  /** This signed-in browser unlocked value viewing with the Tower password, and the vault has not been locked since. */
+  valueView?: boolean;
 }
+/** One saved value, for the owner's value view only: `value` for text, `content` (base64) for a file or an uploaded .env. */
+export interface SecretValue { id: string; version: number; kind: SecretKind; value?: string; content?: string }
+/** Why value viewing (`view-unlock`, `value`, `value-update`) answered no; the HTTP error's `code`. */
+export type SecretViewError = 'needs-recovery' | 'view-locked' | 'account-required' | 'login-required';
 export interface SecretCreateInput {
   name: string; kind: SecretKind; value?: string;
   /** Canonical base64 of an uploaded file; dotenv uploads also preserve these original bytes. */

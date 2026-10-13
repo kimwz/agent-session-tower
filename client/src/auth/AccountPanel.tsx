@@ -6,6 +6,11 @@ import { api } from '../common/lib';
 import { locale, translateMessage, useI18n } from '../i18n/i18n';
 import { authPost, useAuth } from './AuthGate';
 
+/** Saving the login also says what became of the secret vault's link to its password. */
+type CredentialsAnswer = AuthOverview & { vault?: 'rewrapped' | 'locked' | 'unavailable' };
+/** A vault that was locked could not be linked to the new password: its next unlock needs the recovery password once. */
+const VAULT_LOCKED = '시크릿 보관함이 잠겨 있어 새 비밀번호를 연결하지 못했습니다. 다음 잠금 해제 때 복구(보관함) 비밀번호를 한 번 입력하세요.';
+
 /** Account management on a page of this computer itself; elsewhere, signing out. */
 export function AccountSection() {
   const { t } = useI18n();
@@ -35,6 +40,7 @@ export function AccountPanel({ token, onChanged }: { token: string; onChanged: (
   const [confirmation, setConfirmation] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [vault, setVault] = useState<CredentialsAnswer['vault']>();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const inFlight = useRef(false);
@@ -47,20 +53,21 @@ export function AccountPanel({ token, onChanged }: { token: string; onChanged: (
   const { active } = useContext(SettingsFrameContext);
   useEffect(() => { if (active) void refresh(); }, [refresh, active]);
   useEffect(() => { if (overview) setUsername(overview.username || ''); }, [overview?.username]);
-  async function mutate(path: string, body: unknown) {
-    if (inFlight.current) return false;
-    inFlight.current = true; setBusy(true); setError(''); setNotice('');
-    try { setOverview(await authPost<AuthOverview>(path, token, body)); return true; }
-    catch (error) { setError(error instanceof Error ? error.message : String(error)); return false; }
+  async function mutate<T extends AuthOverview>(path: string, body: unknown): Promise<T | undefined> {
+    if (inFlight.current) return undefined;
+    inFlight.current = true; setBusy(true); setError(''); setNotice(''); setVault(undefined);
+    try { const next = await authPost<T>(path, token, body); setOverview(next); return next; }
+    catch (error) { setError(error instanceof Error ? error.message : String(error)); return undefined; }
     finally { inFlight.current = false; setBusy(false); }
   }
   async function save(event: FormEvent) {
     event.preventDefault();
     if (password !== confirmation) { setError(t('비밀번호가 일치하지 않습니다.')); return; }
-    if (await mutate('/api/auth/credentials', { username, password })) { setPassword(''); setConfirmation(''); setNotice(t('계정을 저장했습니다. 기존 원격 로그인은 해제됩니다.')); await onChanged(); }
+    const saved = await mutate<CredentialsAnswer>('/api/auth/credentials', { username, password });
+    if (saved) { setPassword(''); setConfirmation(''); setNotice(t('계정을 저장했습니다. 기존 원격 로그인은 해제됩니다.')); setVault(saved.vault); await onChanged(); }
   }
   return <SettingsPane title={t('계정 관리')} scope="auth-panel" description={t('원격 접속용 아이디와 비밀번호, 차단된 IP')}
-    actions={<button className="icon-button" title={t('새로고침')} aria-label={t('새로고침')} disabled={loading || busy} onClick={() => void refresh()}><RefreshCw size={17} className={loading ? 'spin' : ''} /></button>}><p className="auth-hint">{t('로컬 접속은 로그인 없이 사용할 수 있습니다. 계정 관리는 서버 컴퓨터에서만 가능합니다.')}</p>{error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}{notice && <p role="status">{notice}</p>}{!overview ? loading && <LoaderCircle className="spin" aria-label={t('연결 중')} /> : <><section><h3>{overview.configured ? t('계정 변경') : t('계정 설정')}</h3><form className="auth-form auth-credentials" onSubmit={save}><label>{t('아이디')}<input required autoComplete="username" maxLength={64} value={username} onChange={event => setUsername(event.target.value)} /></label><label>{t('새 비밀번호')}<input required type="password" maxLength={256} autoComplete="new-password" minLength={12} value={password} onChange={event => setPassword(event.target.value)} /></label><label>{t('비밀번호 확인')}<input required type="password" maxLength={256} autoComplete="new-password" minLength={12} value={confirmation} onChange={event => setConfirmation(event.target.value)} /></label><p className="auth-hint">{t('비밀번호는 12자 이상으로 입력하세요. 검증용 해시만 저장됩니다.')}</p><button className="primary-button" disabled={busy || loading}>{busy && <LoaderCircle className="spin" size={14} />}{t('계정 저장')}</button></form></section><section><h3>{t('차단된 IP')} <span className="auth-count">{overview.blockedIps.length}</span></h3><p className="auth-hint">{t('같은 IP에서 누적 {0}회 실패하면 영구 차단됩니다. 성공해도 실패 횟수는 초기화되지 않습니다.', { 0: overview.attemptLimit })}</p><p className="auth-hint">{t('서버를 재시작해도 차단은 유지됩니다. 차단을 해제하면 해당 IP의 실패 횟수도 초기화됩니다.')}</p><AccountRecords overview={overview} busy={busy || loading} onUnblock={ip => void mutate('/api/auth/unblock', { ip })} /></section></>}</SettingsPane>;
+    actions={<button className="icon-button" title={t('새로고침')} aria-label={t('새로고침')} disabled={loading || busy} onClick={() => void refresh()}><RefreshCw size={17} className={loading ? 'spin' : ''} /></button>}><p className="auth-hint">{t('로컬 접속은 로그인 없이 사용할 수 있습니다. 계정 관리는 서버 컴퓨터에서만 가능합니다.')}</p>{error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}{notice && <p role="status">{notice}</p>}{vault === 'locked' && <p role="status" className="auth-warning">{t(VAULT_LOCKED)}</p>}{vault === 'rewrapped' && <p role="status" className="auth-hint">{t('시크릿 보관함도 새 비밀번호로 열 수 있습니다.')}</p>}{!overview ? loading && <LoaderCircle className="spin" aria-label={t('연결 중')} /> : <><section><h3>{overview.configured ? t('계정 변경') : t('계정 설정')}</h3><form className="auth-form auth-credentials" onSubmit={save}><label>{t('아이디')}<input required autoComplete="username" maxLength={64} value={username} onChange={event => setUsername(event.target.value)} /></label><label>{t('새 비밀번호')}<input required type="password" maxLength={256} autoComplete="new-password" minLength={12} value={password} onChange={event => setPassword(event.target.value)} /></label><label>{t('비밀번호 확인')}<input required type="password" maxLength={256} autoComplete="new-password" minLength={12} value={confirmation} onChange={event => setConfirmation(event.target.value)} /></label><p className="auth-hint">{t('비밀번호는 12자 이상으로 입력하세요. 검증용 해시만 저장됩니다.')}</p><button className="primary-button" disabled={busy || loading}>{busy && <LoaderCircle className="spin" size={14} />}{t('계정 저장')}</button></form></section><section><h3>{t('차단된 IP')} <span className="auth-count">{overview.blockedIps.length}</span></h3><p className="auth-hint">{t('같은 IP에서 누적 {0}회 실패하면 영구 차단됩니다. 성공해도 실패 횟수는 초기화되지 않습니다.', { 0: overview.attemptLimit })}</p><p className="auth-hint">{t('서버를 재시작해도 차단은 유지됩니다. 차단을 해제하면 해당 IP의 실패 횟수도 초기화됩니다.')}</p><AccountRecords overview={overview} busy={busy || loading} onUnblock={ip => void mutate('/api/auth/unblock', { ip })} /></section></>}</SettingsPane>;
 }
 export function AccountRecords({ overview, busy, onUnblock }: { overview: AuthOverview; busy: boolean; onUnblock: (ip: string) => void }) {
   const { t } = useI18n();

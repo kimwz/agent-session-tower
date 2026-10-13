@@ -8,7 +8,7 @@ import { peerName, type SecretCanvasHost } from './secrets-client';
 
 export type AdvancedEditor = 'trust' | 'import' | 'password';
 
-/** Rarely needed vault management, folded away below the list: trusted computers, a pending import, the vault password. */
+/** Rarely needed vault management, folded away below the list: trusted computers, a pending import, the recovery password. */
 export function SecretAdvanced({ view, hosts, busy, change, open, onToggle, onEdit }: {
   view: SecretSettingsView; hosts: readonly SecretCanvasHost[]; busy: boolean; change: SecretChange; open: boolean; onToggle: (open: boolean) => void; onEdit: (editor: AdvancedEditor) => void;
 }) {
@@ -24,8 +24,9 @@ export function SecretAdvanced({ view, hosts, busy, change, open, onToggle, onEd
     </section>
     {!!view.status.pendingImports && <section className="secret-advanced-section"><h3>{t('가져오기 대기 중')}</h3><p>{t('암호화한 시크릿 보관함의 가져오기가 대기 중입니다.')}</p>
       <div className="secret-actions"><button type="button" disabled={busy || !view.status.pendingImportIds?.length} onClick={() => onEdit('import')}>{t('보관함 가져오기')}</button></div></section>}
-    <section className="secret-advanced-section"><h3>{t('보관함 비밀번호')}</h3><p>{t('이 컴퓨터의 시크릿은 보관함 비밀번호로 암호화됩니다.')}</p>
-      <div className="secret-actions"><button type="button" disabled={busy} onClick={() => onEdit('password')}>{t('보관함 비밀번호 변경')}</button></div></section>
+    {/* The earlier vault password (owner decision D4): it opens the vault when the Tower password cannot. */}
+    <section className="secret-advanced-section"><h3>{t('복구 비밀번호')}</h3><p>{t('기존 보관함 비밀번호입니다. Tower 비밀번호로 열 수 없을 때 이 비밀번호로 보관함을 엽니다.')}</p>
+      <div className="secret-actions"><button type="button" disabled={busy} onClick={() => onEdit('password')}>{t('복구 비밀번호 변경')}</button></div></section>
   </details>;
 }
 

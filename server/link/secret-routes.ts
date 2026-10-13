@@ -116,6 +116,8 @@ async function remoteSessionSubject(nodes: RemoteNodes | undefined, worker: Work
 
 /** Owner changes of one session; for a joined computer's session they start its task there and are viewed from it. */
 const SESSION_CHANGES = ['create', 'session-connect', 'session-disconnect'];
+/** Value viewing and the Tower password's wrappers of the vault key, which a worker with `secretValueView` serves. */
+const VALUE_VIEW_ACTIONS = ['view-unlock', 'value', 'value-update', 'tower-status', 'tower-wrap', 'tower-prune'];
 export const WORKER_UPDATE_PENDING = 'worker-update-pending';
 /** The attached worker predates per-secret sharing (`secretSharing`): nothing new is sent to it. */
 const workerUpdatePending = () => Object.assign(new TowerError('unavailable', '새 실행 워커 적용 대기: 진행 중인 작업이 끝나 실행 워커가 바뀌면 시크릿을 관리할 수 있습니다.'), { code: WORKER_UPDATE_PENDING });
@@ -139,6 +141,7 @@ async function canonicalInput(nodes: RemoteNodes | undefined, worker: Worker, ac
  * is verified over its link here; a connection made there is announced to it with a fixed notice before the view is read.
  */
 export async function ownerSecretControl(nodes: RemoteNodes | undefined, worker: Worker, action: string, input: Record<string, unknown>): Promise<unknown> {
+  if (VALUE_VIEW_ACTIONS.includes(action) && !worker.supports('secretValueView')) throw workerUpdatePending();
   if (!worker.supports('secretSharing')) {
     // Locking and unlocking stay possible during a handoff, so the settings and the session read the vault's status from
     // the older worker's `overview` (which every build before 1.131 serves) to offer them; nothing else is sent to it.

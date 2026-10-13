@@ -58,7 +58,7 @@ async function changingAuthority(service: SecretService, target: SecretTarget, m
   const value = mode === 'fields' ? `VISIBLE=${canary}\nPRIVATE=PRIVATE_CHANGE_CANARY` : canary;
   if (mode === 'revoke' || mode === 'rotation') {
     const local = await service.create({ name: `local-${mode}`, kind: 'scalar', value, temporary: true }, target);
-    return { local, change: async () => { if (mode === 'revoke') await service.disconnectSession(target, [local.id]); else await service.update({ id: local.id, value: 'ROTATED_CHANGE_CANARY' }); } };
+    return { local, change: async () => { if (mode === 'revoke') await service.disconnectSession(target, [local.id]); else await service.update({ id: local.id, expectedVersion: local.version, value: 'ROTATED_CHANGE_CANARY' }); } };
   }
   if (mode === 'policy') {
     const local = await service.create({ name: 'local-policy', kind: 'scalar', value, sharing: { global: false, folders: [{ hostId: target.hostId, root: target.root }] } });

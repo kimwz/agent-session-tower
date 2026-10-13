@@ -527,6 +527,7 @@ export class DurableRunManager extends EventEmitter {
     }
     if (reply.error) {
       const error = fromStatus(reply.error.statusCode, reply.error.message, reply.error.disposition ? { disposition: reply.error.disposition as Disposition } : {});
+      if (typeof reply.error.code === 'string') Object.assign(error, { code: reply.error.code });
       if (reply.error.commitDisposition) Object.assign(error, { commitDisposition: reply.error.commitDisposition });
       if (reply.error.admission) Object.assign(error, { admission: reply.error.admission });
       const transition = reply.error.proofTransition;

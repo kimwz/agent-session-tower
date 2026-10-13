@@ -69,7 +69,8 @@ export const AUTH_REQUIRED_EVENT = 'tower:auth-required';
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
   if (!response.ok) {
-    if (response.status === 401 && !path.startsWith('/api/auth/') && typeof window !== 'undefined') window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+    // A refused password is not a lost sign-in: the login and the Tower-password check for secret values answer 401 too.
+    if (response.status === 401 && !path.startsWith('/api/auth/') && path !== '/api/secrets/view-unlock' && typeof window !== 'undefined') window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
     let message = t("요청을 처리하지 못했습니다 ({0})", { 0: response.status });
     let disposition: string | undefined;
     let code: string | undefined;

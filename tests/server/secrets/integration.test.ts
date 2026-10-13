@@ -304,7 +304,7 @@ test('owner HTTP secret API requires sign-in and page token; generic remote rout
   // An older worker is asked only for the vault's status; the page learns that a new one is pending.
   sharing = false;
   const pending = await secureFetch('/api/secrets/settings', { headers: { cookie: auth.cookie } });
-  assert.equal(pending.status, 200); assert.deepEqual(await pending.json(), { status: { initialized: false, locked: true, pendingImports: 0, pendingImportIds: [] }, peers: [], secrets: [], workerUpdatePending: true });
+  assert.equal(pending.status, 200); assert.deepEqual(await pending.json(), { status: { initialized: false, locked: true, pendingImports: 0, pendingImportIds: [] }, peers: [], secrets: [], workerUpdatePending: true, valueView: false });
   assert.equal(secretCalls, 1);
   assert.equal((await post('initialize', { password: PASSWORD })).status, 503); assert.equal(secretCalls, 1);
   sharing = true;
@@ -345,19 +345,21 @@ test('every secret route refuses the master, local agents and run capabilities b
   const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { cookie: auth.cookie } })).json() as { token: string };
   const owner = { cookie: auth.cookie, 'X-Agent-Monitor-Token': token, 'Content-Type': 'application/json' };
   const READS = ['settings', 'session?sessionId=codex%3Afixture'];
-  const WRITES = ['sharing', 'create', 'session-connect', 'session-disconnect', 'session-reallow', 'update', 'remove', 'unlock', 'lock', 'password', 'import', 'trust', 'untrust', 'preview', 'initialize'];
+  const WRITES = ['sharing', 'create', 'session-connect', 'session-disconnect', 'session-reallow', 'remove', 'unlock', 'lock', 'password', 'import', 'trust', 'untrust', 'preview', 'initialize', 'view-unlock', 'value', 'value-update', 'view-lock'];
   // On this computer the owner's own page reaches the worker; the same page request naming another caller does not.
   assert.equal((await fetch(`${base}/api/secrets/settings`, { headers: { cookie: auth.cookie } })).status, 200); assert.deepEqual(calls, ['settings']); calls.length = 0;
   const callers: Record<string, string>[] = [{ 'x-tower-master': masterSecret }, { 'x-tower-master': 'not-the-master' }, { 'x-tower-agent': 'local' }, { [CALLER_CAPABILITY_HEADER]: 'b'.repeat(64) }];
   for (const caller of callers) {
     for (const read of READS) assert.equal((await fetch(`${base}/api/secrets/${read}`, { headers: { cookie: auth.cookie, ...caller } })).status, 403, `${read} with ${Object.keys(caller)[0]}`);
     // Changes count against the page's request budget; the verified master and local agents have budgets of their own.
-    const writes = caller['x-tower-master'] === masterSecret || caller['x-tower-agent'] ? WRITES : ['sharing', 'create', 'session-connect', 'unlock', 'update'];
+    const writes = caller['x-tower-master'] === masterSecret || caller['x-tower-agent'] ? WRITES : ['sharing', 'create', 'session-connect', 'unlock', 'value'];
     for (const action of writes) assert.equal((await fetch(`${base}/api/secrets/${action}`, { method: 'POST', headers: { ...owner, ...caller }, body: '{}' })).status, 403, `${action} with ${Object.keys(caller)[0]}`);
   }
   // The broker approval routes of 1.129–1.132 are gone, for the owner's page too.
   assert.equal((await fetch(`${base}/api/secrets/broker-access?sessionId=codex%3Afixture`, { headers: { cookie: auth.cookie } })).status, 404);
   for (const action of ['approve-broker', 'revoke-broker']) assert.equal((await fetch(`${base}/api/secrets/${action}`, { method: 'POST', headers: owner, body: '{}' })).status, 404, action);
+  // Values change only through value viewing: the route that changed them without it is gone.
+  assert.equal((await fetch(`${base}/api/secrets/update`, { method: 'POST', headers: owner, body: '{}' })).status, 404);
   assert.deepEqual(calls, []);
 });
 

@@ -1,6 +1,6 @@
 import { randomUUID, randomBytes, generateKeyPairSync, createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
-import type { SecretAvailable, SecretContext, SecretCreateInput, SecretDevice, SecretDisconnected, SecretFolder, SecretGroup, SecretMetadata, SecretOperation, SecretPeer, SecretProject, SecretRule, SecretSettingsView, SecretSharing, SecretTarget, SecretTask, SecretUsage, VaultStatus } from '../../shared/secrets.js';
+import type { SecretAvailable, SecretContext, SecretCreateInput, SecretDevice, SecretDisconnected, SecretFolder, SecretGroup, SecretMetadata, SecretOperation, SecretPeer, SecretProject, SecretRule, SecretSettingsView, SecretSharing, SecretTarget, SecretTask, SecretUsage, SecretValue, VaultStatus } from '../../shared/secrets.js';
 import { TowerError } from '../../shared/errors.js';
 import { MAX_SECRET_BYTES, SECRET_OPERATIONS } from '../../shared/secrets.js';
 import { SecretVault } from './vault.js';
@@ -54,6 +54,16 @@ export class SecretService {
     await this.vault.initialize(password, data, data.device.id); this.permanent = data; this.journal = emptyJournal(); await this.vault.save(data, this.journal, this.lockedIndex());
   }); }
   async unlock(password: string) { return this.serialize(async () => this.opened(await this.vault.unlock(password) as Permanent)); }
+  /** Opens with the Tower password like `unlock`; an open vault is only checked against it. True when this call opened the vault. */
+  async towerUnlock(password: string, credentialId: string): Promise<boolean> { return this.serialize(async () => {
+    const payload = await this.vault.unlockTower(password, credentialId); if (payload === undefined) return false;
+    await this.opened(payload as Permanent); return true;
+  }); }
+  // Queued with saves: a save spreads the envelope it started from, so a wrapper written meanwhile would be lost.
+  async towerWrap(password: string, credentialId: string) { return this.serialize(() => this.vault.towerWrap(password, credentialId)); }
+  async towerPrune(credentialId: string) { return this.serialize(() => this.vault.towerPrune(credentialId)); }
+  /** Changes at every lock and open: value viewing unlocked in one generation is over once it changes. */
+  get lockGeneration(): string { return this.vault.lockGeneration; }
   /** What the successor worker needs to open this vault without the password; undefined while locked. */
   handoff(): Buffer | undefined {
     const key = this.vault.exportKey(); if (!key) return;
@@ -144,8 +154,20 @@ export class SecretService {
     if (task) this.join(task, id);
     return this.metadata(secret);
   }); }
-  async update(input: { id: string; value?: string; content?: string }): Promise<SecretMetadata> { return this.mutate(() => {
-    const secret = this.secrets().find(item => item.metadata.id === input.id); if (!secret) throw new Error('Unknown secret');
+  /** One saved or temporary value for the owner's value view, at the version the page shows: text as `value`, a file or an uploaded .env as base64 `content`. */
+  async value(secretId: string, expectedVersion: number): Promise<SecretValue> { return this.serialize(async () => {
+    this.data(); const secret = this.versioned(secretId, expectedVersion);
+    return { id: secret.metadata.id, version: secret.metadata.version, kind: secret.metadata.kind, ...(secret.encoding === 'base64' ? { content: secret.value } : { value: secret.value }) };
+  }); }
+  private versioned(id: string, expectedVersion: number): StoredSecret {
+    const secret = this.secrets().find(item => item.metadata.id === id);
+    if (!secret) throw new TowerError('not-found', '이 키를 찾을 수 없습니다. 화면을 새로고침하세요.');
+    if (secret.metadata.version !== expectedVersion) throw Object.assign(new TowerError('conflict', '다른 곳에서 이 키의 값이 바뀌었습니다. 화면을 새로고침한 뒤 다시 시도하세요.'), { code: 'conflict' });
+    return secret;
+  }
+  /** Replaces a value only at the version the owner saw; the compare and the change are one save. */
+  async update(input: { id: string; expectedVersion: number; value?: string; content?: string }): Promise<SecretMetadata> { return this.mutate(() => {
+    const secret = this.versioned(input.id, input.expectedVersion);
     const binary = secret.metadata.kind === 'file' || (secret.metadata.kind === 'env' && input.value === undefined);
     const supplied = binary ? input.content : input.value; if (typeof supplied !== 'string') throw new Error('Invalid secret value');
     const bytes = binary ? decode(supplied) : Buffer.from(supplied); if (bytes.length > MAX_SECRET_BYTES) throw new Error('Invalid secret value');

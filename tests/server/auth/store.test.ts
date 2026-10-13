@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AuthStore, canonicalIp, isLoopbackAddress, sessionKey } from '../../../server/auth/store.js';
 import { statusOf } from '../../../shared/errors.js';
+import { blockRename } from '../../helpers/private-writes.js';
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'tower-auth-'));
@@ -139,4 +140,57 @@ test('sign-ins survive a restart until they expire, log out, or the password cha
     store = await restart(store);
     assert.equal(store.configured(), true);
   } finally { store.close(); await store.flush(); await rm(f.dir, { recursive: true, force: true }); }
+});
+test('verifying the password counts toward the same IP block as sign-ins and signs nobody in', async () => {
+  const f = await fixture();
+  try {
+    assert.deepEqual(await f.store.verifyPassword('192.0.2.1', 'password-test-123'), { status: 'unconfigured' });
+    await f.store.setCredentials('admin', 'password-test-123');
+    const signedIn = (await f.store.login('192.0.2.1', 'admin', 'password-test-123')).sessionId!;
+    await f.store.flush(); const sessions = await readFile(join(f.dir, 'auth-sessions.json'), 'utf8');
+    assert.deepEqual(await f.store.verifyPassword('::ffff:192.0.2.1', 'password-test-123'), { status: 'success' });
+    await f.store.flush(); assert.equal(await readFile(join(f.dir, 'auth-sessions.json'), 'utf8'), sessions, 'no sign-in was added');
+    assert.deepEqual({ ...f.store.overview().attempts[0], id: '', at: '' }, { id: '', at: '', ip: '192.0.2.1', username: 'admin', result: 'success' });
+    const blockedSession = (await f.store.login('192.0.2.2', 'admin', 'password-test-123')).sessionId!;
+    for (let i = 0; i < 3; i++) assert.equal((await f.store.login('192.0.2.2', 'admin', 'wrong')).status, 'failure');
+    assert.deepEqual(await f.store.verifyPassword('192.0.2.2', 'wrong-password-1'), { status: 'failure' });
+    assert.deepEqual(await f.store.verifyPassword('192.0.2.2', 'wrong-password-2'), { status: 'blocked' });
+    assert.equal(f.store.session(blockedSession, '192.0.2.2'), false, 'a block reached by verifying signs that IP out');
+    assert.equal((await f.store.login('192.0.2.2', 'admin', 'password-test-123')).status, 'blocked');
+    assert.deepEqual(await f.store.verifyPassword('192.0.2.2', 'password-test-123'), { status: 'blocked' });
+    assert.deepEqual(f.store.overview().blockedIps.map(entry => entry.ip), ['192.0.2.2']);
+    assert.equal(f.store.session(signedIn, '192.0.2.1'), true);
+    assert.deepEqual(await f.store.verifyPassword('192.0.2.1', 'password-test-123'), { status: 'success' });
+  } finally { await f.cleanup(); }
+});
+test('prepared credentials change nothing until committed; the commit saves them and signs everyone out once', async () => {
+  const f = await fixture();
+  try {
+    assert.equal(f.store.currentCredentialId(), undefined);
+    await assert.rejects(f.store.prepareCredentials('admin', 'short'), error => statusOf(error) === 400);
+    await f.store.setCredentials('admin', 'password-test-123');
+    const current = f.store.currentCredentialId()!; assert.match(current, /^[a-f0-9]{64}$/);
+    const signedIn = (await f.store.login('192.0.2.1', 'admin', 'password-test-123')).sessionId!;
+    const saved = await readFile(join(f.dir, 'auth.json'), 'utf8');
+    const revoked: string[] = []; f.store.onRevoke(key => revoked.push(key));
+    const prepared = await f.store.prepareCredentials(' admin ', 'new-password-test');
+    assert.match(prepared.credentialId, /^[a-f0-9]{64}$/); assert.notEqual(prepared.credentialId, current);
+    // A change abandoned before its commit (the vault could not be wrapped) leaves everything as it was.
+    assert.equal(await readFile(join(f.dir, 'auth.json'), 'utf8'), saved); assert.equal(f.store.currentCredentialId(), current);
+    assert.equal(f.store.session(signedIn, '192.0.2.1'), true);
+    assert.equal((await f.store.login('192.0.2.1', 'admin', 'new-password-test')).status, 'failure');
+    const restore = await blockRename(join(f.dir, 'auth.json'));
+    await assert.rejects(prepared.commit());
+    await restore();
+    assert.equal(await readFile(join(f.dir, 'auth.json'), 'utf8'), saved); assert.equal(f.store.currentCredentialId(), current);
+    assert.equal(f.store.session(signedIn, '192.0.2.1'), true); assert.deepEqual(revoked, []);
+    await prepared.commit();
+    assert.equal(f.store.currentCredentialId(), prepared.credentialId); assert.deepEqual(revoked, [sessionKey(signedIn)]);
+    const fresh = (await f.store.login('192.0.2.1', 'admin', 'new-password-test')).sessionId!;
+    await prepared.commit();
+    assert.equal(f.store.session(fresh, '192.0.2.1'), true, 'a repeated commit signs nobody out again');
+    f.store.close(); await f.store.flush();
+    const restarted = new AuthStore(f.dir); await restarted.start();
+    try { assert.equal(restarted.currentCredentialId(), prepared.credentialId, 'the credential ID follows auth.json'); } finally { restarted.close(); await restarted.flush(); }
+  } finally { await f.cleanup(); }
 });

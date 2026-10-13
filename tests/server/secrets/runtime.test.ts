@@ -107,13 +107,14 @@ test('a chat value is value-free, committed and announced before its view, and u
     await f.runtime.control('preview', { value: 'FAKE_KEY=FAKE_VALUE' });
     await assert.rejects(f.runtime.control('session-connect', { sessionId: f.session.id, secretIds: ['missing'] }));
     const id = view.available[0].id;
-    await f.runtime.control('update', { id, value: 'FAKE_REPLACEMENT' });
+    await f.service.update({ id, expectedVersion: 1, value: 'FAKE_REPLACEMENT' });
+    await assert.rejects(f.runtime.control('update', { id, value: 'FAKE_REPLACEMENT' }), { kind: 'not-found' }, 'values change only through value-update');
     await f.runtime.control('session-disconnect', { sessionId: f.session.id, secretIds: [id] });
     await f.runtime.control('lock', {});
     await f.runtime.control('unlock', { password });
     const shared = await f.runtime.control('create', { name: 'FAKE_SHARED', kind: 'scalar', value: 'FAKE_GLOBAL', sharing: { global: true, folders: [] } }) as SecretSettingsView;
     const sharedId = shared.secrets.find(secret => secret.name === 'FAKE_SHARED')!.id;
-    await f.runtime.control('update', { id: sharedId, value: 'FAKE_GLOBAL_UPDATED' });
+    await f.service.update({ id: sharedId, expectedVersion: 1, value: 'FAKE_GLOBAL_UPDATED' });
     await f.runtime.control('sharing', { secretId: sharedId, revision: 1, global: false, folders: [] });
     assert.deepEqual(f.notices, [f.session.id]);
     assert.doesNotMatch(JSON.stringify(f.notices), /CANARY_RUNTIME_VALUE|fixture-runtime-password/);
@@ -588,7 +589,7 @@ test('rotated values and rules an older build edits apply to an open task at onc
     const initial = await f.list(token); assert.equal(initial.secrets[0].id, secret.id);
     const capability = f.capabilities.resolve(token) as Extract<Capability, { kind: 'secret-run' }>;
     const context = await f.runtime.context(capability); const deadline = storedTask(f.service, context.taskId)!.createdAt + 100;
-    f.advance(25); await f.runtime.control('update', { id: secret.id, value: 'ROTATED_RUNTIME_CANARY' });
+    f.advance(25); await f.service.update({ id: secret.id, expectedVersion: secret.version, value: 'ROTATED_RUNTIME_CANARY' });
     const updated = f.service.settings().secrets[0]; assert.equal(updated.version, secret.version + 1);
     assert.equal((await f.list(token)).secrets[0].version, updated.version, 'a rotated value needs no reapproval');
     assert.equal((await f.service.resolve(context, updated.reference, 'env')).bytes.toString(), 'ROTATED_RUNTIME_CANARY');

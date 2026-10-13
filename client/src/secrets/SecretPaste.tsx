@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { MIN_VAULT_PASSWORD, type SecretSessionView } from '../../../shared/secrets';
 import { useI18n } from '../i18n/i18n';
-import type { SecretChange } from './SecretAccess';
-import { pastePayload, quickSecretKind, readSecretFile, sessionBlocked, suggestedSecretName, type PasteDestination, type QuickSecretFormat } from './secrets-client';
+import { SecretUnlockFields, type SecretChange } from './SecretAccess';
+import { pastePayload, quickSecretKind, readSecretFile, sessionBlocked, suggestedSecretName, unlockMode, unlockReady, unlockRequest, type PasteDestination, type QuickSecretFormat } from './secrets-client';
 
 const kindNotes: Record<string, string> = { scalar: '단일 값으로 연결합니다', env: '.env로 연결합니다', file: '비공개 파일로 연결합니다' };
 
@@ -17,26 +17,34 @@ export function SecretPaste({ view, sessionId, cwd, busy, change, onConnected }:
   const [raw, setRaw] = useState(''); const [name, setName] = useState(''); const [format, setFormat] = useState<QuickSecretFormat>('auto');
   const [save, setSave] = useState(false); const [destination, setDestination] = useState<Exclude<PasteDestination, 'session'>>('none');
   const [fileName, setFileName] = useState(''); const [reading, setReading] = useState(false); const [submitting, setSubmitting] = useState(false);
-  const [password, setPassword] = useState(''); const [confirmation, setConfirmation] = useState(''); const [error, setError] = useState('');
+  const [password, setPassword] = useState(''); const [confirmation, setConfirmation] = useState(''); const [recoveryPassword, setRecoveryPassword] = useState(''); const [error, setError] = useState('');
+  // As in `SecretAccess`: the owner's switch to the recovery password alone, and the server asking for it as well.
+  const [recovery, setRecovery] = useState(false); const [asked, setAsked] = useState(false);
   const generation = useRef(0); const sending = useRef(false);
   useEffect(() => () => { generation.current++; }, []);
   const setup = !!view && !view.status.initialized; const needsAccess = !!view && (setup || view.status.locked);
+  const mode = unlockMode(view?.status.towerPassword, { recovery, asked });
   const blocked = sessionBlocked(view?.error);
   const disabled = busy || submitting || reading;
   const kind = quickSecretKind(raw, format);
   const hasInput = format === 'file' ? !!fileName : raw.length > 0;
-  const accessReady = !!password && (!setup || (password.length >= MIN_VAULT_PASSWORD && password === confirmation));
+  const accessReady = setup ? password.length >= MIN_VAULT_PASSWORD && password === confirmation : unlockReady(mode, password, recoveryPassword);
   const ready = !disabled && !!view && (hasInput ? !blocked : needsAccess) && (!needsAccess || accessReady);
   const clearValue = () => { generation.current++; setRaw(''); setFileName(''); };
   const submit = async () => {
     if (sending.current || !ready) return;
     sending.current = true; setSubmitting(true); setError('');
     const payload = hasInput ? pastePayload({ raw, format, name, fileName, destination: save ? destination : 'session', sessionId, cwd }) : undefined;
-    const accessPassword = password;
-    clearValue(); setPassword(''); setConfirmation('');
+    const accessPassword = password; const [action, body]: [string, Record<string, string>] = setup ? ['initialize', { password }] : unlockRequest(mode, password, recoveryPassword);
+    clearValue(); setPassword(''); setConfirmation(''); setRecoveryPassword('');
     const current = generation.current;
+    // Only the recovery password is missing: the Tower password just typed stays, and both are sent next.
+    const refused = (code: string) => {
+      if (code !== 'needs-recovery' || mode !== 'tower') return false;
+      setAsked(true); setPassword(accessPassword); return true;
+    };
     try {
-      if (needsAccess && !await change(setup ? 'initialize' : 'unlock', { password: accessPassword })) return;
+      if (needsAccess && !await change(action, body, refused)) return;
       if (payload && await change('create', payload) && current === generation.current) { setName(''); onConnected(); }
     } finally { sending.current = false; if (current === generation.current) setSubmitting(false); }
   };
@@ -63,8 +71,11 @@ export function SecretPaste({ view, sessionId, cwd, busy, change, onConnected }:
       <p>{t('저장한 시크릿은 다른 세션에서 ‘기존 시크릿 연결’로 다시 쓸 수 있습니다. 공유 범위는 설정에서 바꿀 수 있습니다.')}</p>
     </fieldset>}
     {needsAccess && <div className="secret-inline-access"><strong>{t(setup ? '처음 한 번, 보관함 비밀번호를 정하세요' : '보관함 잠금 해제')}</strong><p>{t(setup ? '이 세션의 값도 비밀번호로 암호화합니다. 12자 이상 입력하세요.' : '비밀번호를 입력하면 붙여넣은 값과 저장한 시크릿을 사용할 수 있습니다.')}</p>
-      <label>{t('비밀번호')}<input type="password" autoComplete={setup ? 'new-password' : 'current-password'} value={password} required minLength={setup ? MIN_VAULT_PASSWORD : undefined} disabled={disabled} onChange={event => setPassword(event.target.value)} /></label>
-      {setup && <label>{t('비밀번호 확인')}<input type="password" autoComplete="new-password" required value={confirmation} disabled={disabled} onChange={event => setConfirmation(event.target.value)} /></label>}</div>}
+      {setup ? <>
+        <label>{t('비밀번호')}<input type="password" autoComplete="new-password" value={password} required minLength={MIN_VAULT_PASSWORD} disabled={disabled} onChange={event => setPassword(event.target.value)} /></label>
+        <label>{t('비밀번호 확인')}<input type="password" autoComplete="new-password" required value={confirmation} disabled={disabled} onChange={event => setConfirmation(event.target.value)} /></label>
+      </> : <SecretUnlockFields mode={mode} password={password} recoveryPassword={recoveryPassword} disabled={disabled} onPassword={setPassword} onRecoveryPassword={setRecoveryPassword}
+        onRecovery={next => { setPassword(''); setRecoveryPassword(''); setRecovery(next); }} />}</div>}
     {error && <p role="alert" className="secret-error">{error}</p>}
     <button type="submit" className="secret-primary" disabled={!ready}>{t(label)}</button>
   </form>;

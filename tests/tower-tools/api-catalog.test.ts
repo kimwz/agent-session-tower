@@ -24,7 +24,8 @@ const NOT_FOR_AGENTS = new Map<string, string>([
   ['/api/master/voice/audio/{}', 'audio a page plays'],
   ...['on', 'off', 'presence', 'token', 'usage', 'request', 'activity', 'finished', 'played', 'progress', 'missed'].map(action => [`/api/master/voice/${action}`, 'the page\'s microphone and speaker'] as [string, string]),
   ['/api/nodes/{}/{}', 'the joined-computer prefix; every route takes it through node'],
-  ...['settings','session','sharing','session-connect','session-disconnect','session-reallow','initialize','unlock','lock','password','create','update','remove','trust','untrust','preview','import'].map(action => [`/api/secrets/${action}`, 'dedicated owner Vault input; agents use run-scoped reference-only secret MCP tools'] as [string, string]),
+  ...['settings','session','sharing','session-connect','session-disconnect','session-reallow','initialize','unlock','lock','password','create','remove','trust','untrust','preview','import','view-unlock','value','value-update','view-lock'].map(action => [`/api/secrets/${action}`, 'dedicated owner Vault input; agents use run-scoped reference-only secret MCP tools'] as [string, string]),
+  ['/api/auth/credentials', 'the login password also opens the secret vault; only the owner\'s own page changes it'],
 ]);
 
 /** `(a|b)` alternatives expanded, and parameters (`{id}` or a capturing pattern) written `{}`. */
@@ -92,6 +93,11 @@ test('a route left out of the catalog is noticed, whether matched by literal, pa
   assert.ok((await missingFrom(without(catalog, /\/api\/backup\/\(run/))).includes('/api/backup/run'));
 });
 
+
+test('agents are not offered the login password change or the vault\'s value routes', () => {
+  const listed = catalogRoutes(apiCatalog());
+  for (const route of ['/api/auth/credentials', '/api/secrets/view-unlock', '/api/secrets/value', '/api/secrets/value-update', '/api/secrets/view-lock', '/api/secrets/update']) assert.equal(listed.has(route), false, route);
+});
 
 test('the catalog scanner recognizes the camelCase operation matcher', () => {
   assert.deepEqual(sourceRoutes(String.raw`const operation = path.match(/^\/api\/v1\/([a-z][a-zA-Z]*\.[a-zA-Z]+)$/);`), ['/api/v1/{}']);

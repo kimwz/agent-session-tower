@@ -2,10 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { SecretPeer, SecretSessionView, SecretSettingsItem, SecretSettingsView, SecretUsage } from '../../../shared/secrets.js';
+import type { SecretPeer, SecretSessionView, SecretSettingsItem, SecretSettingsView, SecretUsage, SecretValue } from '../../../shared/secrets.js';
 import {
-  addPayload, computerName, describeFolder, folderIdentity, folderKey, pastePayload, pollDelay, quickSecretKind, secretFolderChoices, secretSession, secretSessionPath,
-  secretFailure, sessionBlocked, sharingDraft, sharingPayload, sharingSummary, suggestedSecretName, usedSecrets, WORKER_PENDING, type SecretCanvas, type SecretFolderChoice,
+  addPayload, computerName, describeFolder, filePreview, fileSize, folderIdentity, folderKey, pastePayload, pollDelay, quickSecretKind, secretFolderChoices, secretSession, secretSessionPath,
+  secretFailure, sessionBlocked, sharingDraft, sharingPayload, sharingSummary, suggestedSecretName, unlockMode, unlockRequest, usedSecrets, valueText, WORKER_PENDING,
+  type SecretCanvas, type SecretFolderChoice,
 } from '../../../client/src/secrets/secrets-client.js';
 import { ApiError } from '../../../client/src/common/lib.js';
 import { SecretAccess } from '../../../client/src/secrets/SecretAccess.js';
@@ -14,6 +15,7 @@ import { SecretSharingEditor } from '../../../client/src/secrets/SecretSharingEd
 import { SecretAvailable } from '../../../client/src/secrets/SecretAvailable.js';
 import { SecretPaste } from '../../../client/src/secrets/SecretPaste.js';
 import { SecretTrustEditor, parseSecretDevice } from '../../../client/src/secrets/SecretAdvanced.js';
+import { SecretValueForm, SecretValuePanel, SecretValueShown } from '../../../client/src/secrets/SecretValueView.js';
 import { getLanguage, setLanguage } from '../../../client/src/i18n/i18n.js';
 
 const original = getLanguage();
@@ -198,7 +200,8 @@ test('settings list every secret once with its masked value, sharing summary and
   assert.match(markup, /GLOBAL/); assert.match(markup, /공유 안 함/); assert.match(markup, /빌드 서버/); assert.match(markup, /title="app · \/srv\/app · 빌드 서버"/);
   assert.match(markup, /기존 규칙/); assert.match(markup, /GLOBAL · 원본 맥/); assert.match(markup, /기존 규칙에 사용 방식·필드·기간 제한이 있습니다/);
   assert.match(markup, /구버전에서 규칙이 바뀌었습니다. 공유를 다시 저장하세요/);
-  assert.match(markup, /••••••••/); assert.match(markup, />공유 편집</); assert.match(markup, />값 교체</); assert.match(markup, />삭제</);
+  assert.match(markup, /••••••••/); assert.match(markup, />공유 편집</); assert.match(markup, />삭제</);
+  assert.match(markup, /aria-label="GLOBAL_KEY 값 보기"[^>]*>보기</); assert.match(markup, /aria-label="GLOBAL_KEY 값 수정"[^>]*>수정</); assert.doesNotMatch(markup, /값 교체/);
   assert.match(markup, /시크릿 추가/); assert.match(markup, /잠금 해제됨/); assert.match(markup, />잠그기</); assert.match(markup, /<details class="secret-advanced"/);
   assert.doesNotMatch(markup, /tower-secret:\/\/|public-signing|public-encryption/);
   assert.doesNotMatch(markup, /프로젝트 자동 연결|공유 규칙|프로젝트 등록|규칙 추가/, 'no second tab, project registration or rule editor');
@@ -208,8 +211,8 @@ test('settings list every secret once with its masked value, sharing summary and
 
 test('a pending import opens the advanced section; a remote secret stays read-only', () => {
   const markup = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { ...view, status: { initialized: true, locked: false, pendingImports: 1, pendingImportIds: ['backup'] }, secrets: [item('remote', { sourceHostId: 'peer-device', sharing: { revision: 1, global: true, folders: [] } })] }, canvas, busy: false, change }));
-  assert.match(markup, /<details class="secret-advanced" open=""/); assert.match(markup, /보관함 가져오기/); assert.match(markup, /보관함 비밀번호 변경/); assert.match(markup, /<strong>빌드 서버<\/strong>/); assert.doesNotMatch(markup, /build-vault/);
-  assert.match(markup, /원본에서 관리/); assert.doesNotMatch(markup, />공유 편집<|>값 교체<|>삭제</);
+  assert.match(markup, /<details class="secret-advanced" open=""/); assert.match(markup, /보관함 가져오기/); assert.match(markup, />복구 비밀번호<\/h3>/); assert.match(markup, />복구 비밀번호 변경</); assert.match(markup, /<strong>빌드 서버<\/strong>/); assert.doesNotMatch(markup, /build-vault/);
+  assert.match(markup, /원본에서 관리/); assert.doesNotMatch(markup, />공유 편집<|>보기<|>수정<|>삭제</, 'another vault’s value is read and changed at its source');
 });
 
 test('the sharing editor offers every computer’s folders with path and computer, keeps chosen folders off the canvas and refuses untrusted computers', () => {
@@ -313,6 +316,101 @@ test('password setup requires confirmation and 12 characters while locked vault 
   assert.match(locked, /잠금 해제/); assert.match(locked, /autoComplete="current-password"/); assert.doesNotMatch(locked, /비밀번호 확인/);
 });
 
+test('a locked vault shows the Tower password, it with the recovery password and why, or the vault password, in settings and the chat', () => {
+  const status = (towerPassword?: 'ready' | 'missing') => ({ initialized: true, locked: true, ...(towerPassword ? { towerPassword } : {}) });
+  const render = (towerPassword?: 'ready' | 'missing') => renderToStaticMarkup(createElement(SecretAccess, { status: status(towerPassword), busy: false, change }));
+  const fields = (markup: string) => markup.match(/type="password"/g)?.length ?? 0;
+  const ready = render('ready');
+  assert.equal(fields(ready), 1); assert.match(ready, /<label>Tower 비밀번호<input type="password"/); assert.match(ready, /Tower에 로그인하는 비밀번호로/);
+  assert.match(ready, /class="secret-unlock-switch"[^>]*>복구 비밀번호로 열기</); assert.doesNotMatch(ready, /기존 보관함 비밀번호/);
+  const missing = render('missing');
+  assert.equal(fields(missing), 2); assert.match(missing, /<label>Tower 비밀번호<input/); assert.match(missing, /<label>복구 비밀번호\(기존 보관함 비밀번호\)<input type="password" autoComplete="off"/);
+  assert.match(missing, /아직 이 Tower 비밀번호와 연결되지 않았습니다/); assert.match(missing, />복구 비밀번호로 열기</);
+  const vault = render();
+  assert.equal(fields(vault), 1); assert.match(vault, /보관함 비밀번호를 입력하세요/); assert.doesNotMatch(vault, /Tower|복구 비밀번호|secret-unlock-switch/, 'without Tower-password support nothing changes');
+  const chat = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ error: 'locked', status: status('missing'), available: [] }), busy: false, change, onPaste: noop, onSharing: noop }));
+  assert.equal(fields(chat), 2); assert.match(chat, /복구 비밀번호로 열기/);
+  const paste = renderToStaticMarkup(createElement(SecretPaste, { view: sessionView({ error: 'locked', status: status('ready') }), sessionId: 's', busy: false, change, onConnected: noop }));
+  assert.match(paste, /<label>Tower 비밀번호<input type="password"/); assert.match(paste, />복구 비밀번호로 열기</);
+  setLanguage('en');
+  const english = render('missing').replace(/<[^>]*>/g, ' ');
+  assert.match(english, /Tower password/); assert.match(english, /Recovery password \(the earlier vault password\)/); assert.match(english, /Open with the recovery password/);
+  assert.doesNotMatch(english, /[가-힣]/);
+});
+
+test('the unlock request follows the mode: the Tower password turns on value viewing, the recovery password alone only opens the vault', () => {
+  assert.equal(unlockMode(undefined, { recovery: true, asked: true }), 'vault');
+  assert.equal(unlockMode('ready', {}), 'tower'); assert.equal(unlockMode('ready', { asked: true }), 'both'); assert.equal(unlockMode('missing', {}), 'both');
+  assert.equal(unlockMode('ready', { recovery: true }), 'recovery'); assert.equal(unlockMode('missing', { recovery: true, asked: true }), 'recovery');
+  assert.deepEqual(unlockRequest('tower', 'T', 'R'), ['view-unlock', { password: 'T' }]);
+  assert.deepEqual(unlockRequest('both', 'T', 'R'), ['view-unlock', { password: 'T', recoveryPassword: 'R' }]);
+  assert.deepEqual(unlockRequest('recovery', 'R', ''), ['unlock', { password: 'R' }]); assert.deepEqual(unlockRequest('vault', 'V', ''), ['unlock', { password: 'V' }]);
+  const t = (key: string) => key;
+  assert.equal(secretFailure(new ApiError('Login required', 401, undefined, 'login-required'), t), 'Tower 비밀번호가 맞지 않습니다.');
+  // A blocked IP answers 403 with the same code: its own words say why the right password is refused.
+  assert.equal(secretFailure(new ApiError('이 IP는 로그인 5회 실패로 차단되었습니다. 로컬 계정 관리에서 해제하세요.', 403, undefined, 'login-required'), t), '이 IP는 로그인 5회 실패로 차단되었습니다. 로컬 계정 관리에서 해제하세요.');
+  assert.equal(secretFailure(new ApiError('로컬 계정 관리에서 Tower 계정을 먼저 설정하세요.', 409, undefined, 'account-required'), t), '로컬 계정 관리에서 Tower 계정을 먼저 설정하세요.');
+});
+
+const base64 = (bytes: Uint8Array | string) => Buffer.from(bytes).toString('base64');
+const textValue = (patch: Partial<SecretValue>): SecretValue => ({ id: 'folder_key', version: 4, kind: 'scalar', ...patch });
+
+test('each row’s value is masked with show and edit, and value viewing adds one lock to the header', () => {
+  const closed = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view, canvas, busy: false, change }));
+  assert.equal(closed.match(/>보기</g)?.length, view.secrets.length); assert.equal(closed.match(/>수정</g)?.length, view.secrets.length);
+  assert.doesNotMatch(closed, /값 보기 잠그기/, 'nothing to lock before value viewing is on');
+  const open = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { ...view, valueView: true }, canvas, busy: false, change }));
+  assert.equal(open.match(/>값 보기 잠그기</g)?.length, 1); assert.ok(open.indexOf('값 보기 잠그기') < open.indexOf('class="secret-list"'), 'in the list header');
+  assert.doesNotMatch(open, /secret-value-panel|<pre/, 'masked until the owner asks');
+});
+
+test('a shown value is text in a read-only block; a file shows its size, a short UTF-8 preview and saving', () => {
+  const scalar = renderToStaticMarkup(createElement(SecretValueShown, { name: 'API_KEY', value: textValue({ value: 'FAKE <value>\nsecond line' }) }));
+  assert.match(scalar, /<pre class="secret-value-text" role="region" tabindex="0" aria-label="API_KEY 값">FAKE &lt;value&gt;\nsecond line<\/pre>/); assert.doesNotMatch(scalar, /<textarea|<input/, 'read-only');
+  const env = renderToStaticMarkup(createElement(SecretValueShown, { name: 'APP_ENV', value: textValue({ kind: 'env', content: base64('A=FAKE_ONE\nB=FAKE_TWO') }) }));
+  assert.match(env, /<pre[^>]*>A=FAKE_ONE\nB=FAKE_TWO<\/pre>/, 'an uploaded .env reads as its text');
+  const text = renderToStaticMarkup(createElement(SecretValueShown, { name: 'key.pem', value: textValue({ kind: 'file', content: base64('-----BEGIN FAKE-----\n') }) }));
+  assert.match(text, /파일 · 21 B/); assert.match(text, /<pre[^>]*>-----BEGIN FAKE-----\n<\/pre>/); assert.match(text, />파일로 저장</);
+  const binary = renderToStaticMarkup(createElement(SecretValueShown, { name: 'blob.bin', value: textValue({ kind: 'file', content: base64(new Uint8Array([0xff, 0xfe, 0x00, 0x41])) }) }));
+  assert.match(binary, /파일 · 4 B/); assert.doesNotMatch(binary, /<pre/); assert.match(binary, /미리 볼 수 없습니다/); assert.match(binary, />파일로 저장</);
+  const large = renderToStaticMarkup(createElement(SecretValueShown, { name: 'big.txt', value: textValue({ kind: 'file', content: base64('a'.repeat(64 * 1024 + 1)) }) }));
+  assert.match(large, /파일 · 64\.0 KiB/); assert.doesNotMatch(large, /<pre/);
+});
+
+test('a file previews as text only when it is valid UTF-8 without NUL bytes and at most 64 KiB', () => {
+  assert.deepEqual(filePreview(base64('héllo')), { size: 6, text: 'héllo' });
+  assert.deepEqual(filePreview(base64('a'.repeat(64 * 1024))), { size: 64 * 1024, text: 'a'.repeat(64 * 1024) });
+  assert.deepEqual(filePreview(base64('a'.repeat(64 * 1024 + 1))), { size: 64 * 1024 + 1 });
+  assert.deepEqual(filePreview(base64(new Uint8Array([0xc3, 0x28]))), { size: 2 }, 'invalid UTF-8');
+  assert.deepEqual(filePreview(base64('a\0b')), { size: 3 }, 'NUL bytes are binary');
+  assert.deepEqual(filePreview(''), { size: 0, text: '' });
+  assert.equal(fileSize(1023), '1023 B'); assert.equal(fileSize(1536), '1.5 KiB'); assert.equal(fileSize(1024 * 1024), '1.0 MiB');
+  assert.equal(valueText(textValue({ value: 'plain', content: base64('ignored') })), 'plain');
+});
+
+test('an opened row asks for the Tower password while value viewing is off, then shows the value; editing has its own form', () => {
+  const secret = view.secrets[0]!;
+  const prompt = renderToStaticMarkup(createElement(SecretValuePanel, { secret, slot: { id: secret.id, edit: false }, valueView: false, busy: false, onUnlock: async () => {}, onClose: noop }));
+  assert.match(prompt, /<form class="secret-form secret-value-panel" aria-label="GLOBAL_KEY 값 보기">/); assert.match(prompt, /<label>Tower 비밀번호<input type="password" autofocus="" autoComplete="current-password"/);
+  assert.match(prompt, /disabled="">확인</, 'nothing to send before the password is typed');
+  const loading = renderToStaticMarkup(createElement(SecretValuePanel, { secret, slot: { id: secret.id, edit: false, loading: true }, valueView: true, busy: false, onUnlock: async () => {}, onClose: noop }));
+  assert.match(loading, /불러오는 중…/);
+  const shown = renderToStaticMarkup(createElement(SecretValuePanel, { secret, slot: { id: secret.id, edit: false, value: textValue({ value: 'FAKE_SHOWN' }) }, valueView: true, busy: false, onUnlock: async () => {}, onClose: noop }));
+  assert.match(shown, /<pre[^>]*>FAKE_SHOWN<\/pre>/);
+  assert.equal(renderToStaticMarkup(createElement(SecretValuePanel, { secret, slot: { id: secret.id, edit: true, value: textValue({ value: 'FAKE_SHOWN' }) }, valueView: true, busy: false, onUnlock: async () => {}, onClose: noop })), '');
+  const form = renderToStaticMarkup(createElement(SecretValueForm, { secret, value: textValue({ value: 'FAKE_CURRENT' }), busy: false, change, onClose: noop }));
+  assert.match(form, /시크릿 값 수정 · GLOBAL_KEY/); assert.match(form, /<textarea[^>]*>FAKE_CURRENT<\/textarea>/, 'prefilled with the current value'); assert.match(form, /class="secret-save" disabled="">저장</, 'nothing to save until it changes');
+  const file = renderToStaticMarkup(createElement(SecretValueForm, { secret: { ...secret, kind: 'file' }, value: textValue({ kind: 'file', content: base64('FAKE_FILE') }), busy: false, change, onClose: noop }));
+  assert.match(file, /현재 파일 · 9 B/); assert.match(file, /<label>새 파일 선택<input autofocus="" type="file"/); assert.doesNotMatch(file, /FAKE_FILE|<textarea/); assert.match(file, /disabled="">저장</);
+  setLanguage('en');
+  const english = [renderToStaticMarkup(createElement(SecretValuePanel, { secret, slot: { id: secret.id, edit: false }, valueView: false, busy: false, onUnlock: async () => {}, onClose: noop })),
+    renderToStaticMarkup(createElement(SecretValueShown, { name: 'blob.bin', value: textValue({ kind: 'file', content: base64(new Uint8Array([0xff])) }) })),
+    renderToStaticMarkup(createElement(SecretValueForm, { secret: { ...secret, kind: 'file' }, value: textValue({ kind: 'file', content: '' }), busy: false, change, onClose: noop })),
+    renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { ...view, valueView: true }, canvas, busy: false, change }))];
+  for (const markup of english) assert.doesNotMatch(markup.replace(/<[^>]*>/g, ' ').replace(/원본 맥|빌드 서버|상위 Tower/g, ''), /[가-힣]/);
+  assert.match(english[0]!, /Enter your Tower password to view or edit values/); assert.match(english[1]!, /Save as file/); assert.match(english[3]!, /Lock value viewing/);
+});
+
 test('peer public code parsing drops extra properties and rejects malformed codes without reflecting pasted data', () => {
   assert.deepEqual(parseSecretDevice(JSON.stringify({ ...device, password: 'private-canary' })), device);
   assert.throws(() => parseSecretDevice(JSON.stringify({ id: 'source', password: 'private-canary' })), /Invalid public device/);
@@ -327,7 +425,7 @@ test('remote approval chooses a known connection by name while still requiring p
 test('secret controls have English translations while key names remain exact', () => {
   setLanguage('en');
   const settings = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view, canvas, busy: false, change }));
-  assert.match(settings, /Edit sharing/); assert.match(settings, /Replace value/); assert.match(settings, /Not shared/); assert.match(settings, /Earlier rules/); assert.match(settings, /Add secret/); assert.match(settings, /FOLDER_KEY/);
+  assert.match(settings, /Edit sharing/); assert.match(settings, /aria-label="Show value of FOLDER_KEY"[^>]*>View</); assert.match(settings, /aria-label="Edit value of FOLDER_KEY"[^>]*>Edit</); assert.match(settings, /Not shared/); assert.match(settings, /Earlier rules/); assert.match(settings, /Add secret/); assert.match(settings, /FOLDER_KEY/);
   const available = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ error: 'worker-update-pending' }), busy: false, change, onPaste: noop, onSharing: noop }));
   assert.match(available, /Waiting for the new execution worker/); assert.doesNotMatch(available, /Connect a saved secret/, 'nothing can change until the handoff');
   const usable = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView(), busy: false, change, onPaste: noop, onSharing: noop }));

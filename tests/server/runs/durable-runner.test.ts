@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
+import { TowerError } from '../../../shared/errors.js';
 import { RunManager, fixtureDocuments, importFixtureRetention, importFixtureTriggers, fixtureTriggerText, stopFixtureWriter, fixtureCommandError } from './sql-fixture.js';
 import { SessionService } from '../../../server/sessions/service.js';
 import { startRunnerHost, type RunnerHostOptions } from '../../../server/runs/worker.js';
@@ -2150,6 +2151,17 @@ test('the owner proof a web passes on for older workers reaches this worker and 
   assert.equal('brokerOwnerAuthorized' in run, false);
   assert.equal('brokerOwnerAuthorized' in f.runs.list().find(item => item.id === run.id)!, false, 'nothing keeps or grants by it');
   await f.runs.cancel(run.id);
+});
+
+test('a worker refusal keeps its own code across the RPC; a system error code stays in the worker', async t => {
+  const secrets = { initialized: () => false, subject: () => ({ mode: 'reviewed' }), control: async (action: string) => {
+    if (action === 'named') throw Object.assign(new TowerError('conflict', 'Named refusal.'), { code: 'needs-recovery' });
+    throw Object.assign(new Error('System failure.'), { code: 'ENOENT' });
+  } } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
+  const f = await fixture(false, false, undefined, undefined, async () => ({ secrets })); t.after(f.cleanup);
+  const client = await f.connect();
+  await assert.rejects(client.secretCall('control', ['named', {}]), (error: Error & { kind?: string; code?: string }) => error.kind === 'conflict' && error.code === 'needs-recovery' && error.message === 'Named refusal.');
+  await assert.rejects(client.secretCall('control', ['system', {}]), (error: Error & { code?: string }) => error.message === 'System failure.' && error.code === undefined);
 });
 
 test('official reopen finishes the worker closure write before releasing the secret session fence', async t => {
