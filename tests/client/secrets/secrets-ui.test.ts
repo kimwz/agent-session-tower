@@ -199,7 +199,7 @@ test('the paste tab shows the paste input first, even before vault setup, and co
   assert.match(ready, /placeholder="SESSION_SECRET"/);
 });
 
-test('password setup requires confirmation and 12 characters while a locked vault offers unlock', () => {
+test('password setup requires confirmation and 12 characters while locked vault offers owner-only unlock', () => {
   const setup = renderToStaticMarkup(createElement(SecretAccess, { status: { initialized: false, locked: true }, busy: false, change }));
   assert.match(setup, /시크릿 보관함 만들기/); assert.match(setup, /minLength="12"/); assert.match(setup, /비밀번호 확인/); assert.match(setup, /type="submit" disabled/);
   const locked = renderToStaticMarkup(createElement(SecretAccess, { status: { initialized: true, locked: true }, busy: false, change }));
@@ -211,7 +211,7 @@ test('peer public code parsing drops extra properties and rejects malformed code
   assert.throws(() => parseSecretDevice(JSON.stringify({ id: 'source', password: 'private-canary' })), /Invalid public device/);
 });
 
-test('approving a computer chooses a known connection by name while still requiring public-code fingerprint verification', () => {
+test('remote approval chooses a known connection by name while still requiring public-code fingerprint verification', () => {
   const markup = renderToStaticMarkup(createElement(SecretTrustEditor, { device, busy: false, change, onClose: noop, computers: [{ node: 'connected-id', name: '테스트 서버', connected: true }, { node: 'offline-id', name: '꺼진 서버', connected: false }] }));
   assert.match(markup, /연결된 컴퓨터/); assert.match(markup, /테스트 서버/); assert.match(markup, /value="offline-id" disabled/); assert.match(markup, /이 컴퓨터의 공개 코드 복사/);
   assert.doesNotMatch(markup, /원격 연결 ID/); assert.match(markup, /지문 확인/); assert.match(markup, /disabled="">컴퓨터 승인/);
@@ -235,7 +235,7 @@ test('pending encrypted vault restores remain waiting and direct the owner to Se
   assert.doesNotMatch(markup, /복원을 적용했습니다|복원을 취소했습니다/);
 });
 
-test('a partial source failure is a generic alert that never reflects server error details', () => {
+test('partial remote source failure is shown as a generic alert without reflecting server error details', () => {
   const markup = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { ...view, status: { ...view.status, error: 'source-private-error-canary' } }, choices, busy: false, change }));
   assert.match(markup, /role="alert"/); assert.match(markup, /원본 컴퓨터의 연결과 잠금 상태/); assert.doesNotMatch(markup, /source-private-error-canary/);
 });

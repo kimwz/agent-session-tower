@@ -150,12 +150,15 @@ test('a locked vault unlocks inline first, and unlock alone sends only the passw
   both.answer(); await tick(); paste.cleanup();
 });
 
-test('a paste that cannot reach this session is not sent, and closing a pending paste never reports it connected later', async () => {
+test('a paste that cannot reach this session is not sent', () => {
   const blocked = changes();
   const closedSession = fixture('SecretPaste.tsx', 'SecretPaste', { view: sessionView({ error: 'session-closed', permanent: true }), sessionId: 's', busy: false, change: blocked.change, onConnected() {} });
   find(closedSession.render(), byType('textarea')).props.onChange({ target: { value: 'FAKE' } });
   assert.equal(find(closedSession.render(), element => element.type === 'button' && element.props.type === 'submit').props.disabled, true);
   find(closedSession.render(), byType('form')).props.onSubmit(formEvent); assert.deepEqual(blocked.sent, []);
+});
+
+test('closing a pending quick dialog prevents its response from closing a later dialog', async () => {
   const { change, answer } = changes(); let connected = false;
   const paste = fixture('SecretPaste.tsx', 'SecretPaste', { view: sessionView(), sessionId: 's', busy: false, change, onConnected() { connected = true; } });
   find(paste.render(), byType('textarea')).props.onChange({ target: { value: 'FAKE_PENDING' } });
@@ -175,7 +178,7 @@ test('a secret added in the settings is saved without a session, with the folder
   answer(); await tick(); assert.equal(closed, true); add.cleanup();
 });
 
-test('an added empty file is accepted as its canonical empty base64 and named after the file', async () => {
+test('registration accepts empty uploaded file bytes and sends their canonical empty base64', async () => {
   const { sent, change, answer } = changes();
   const add = fixture('SecretAddForm.tsx', 'SecretAddForm', { view: settingsView, choices: [], busy: false, change, onClose() {} });
   find(add.render(), element => element.type === 'select').props.onChange({ target: { value: 'file' } });
@@ -317,7 +320,7 @@ test('pending import sends only the selected ID and transient source password an
   answer(); await pending; fixtureImport.cleanup();
 });
 
-test('value replacement submits the existing ID and new value without putting it in metadata or leaving it on screen', async () => {
+test('value rotation submits the existing ID and new value without putting it in metadata or leaving it on screen', async () => {
   const { sent, change, answer } = changes();
   const secret = { id: 'key', name: 'TOKEN', kind: 'scalar', version: 3, groupId: 'group', reference: 'tower-secret://v/key@3' };
   const editor = fixture('SecretRecovery.tsx', 'SecretValueEditor', { secret, busy: false, change, onClose() {} });
