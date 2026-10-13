@@ -5,7 +5,7 @@ import { autoReviewBlock, MAX_REVIEW_REASON, MAX_REVIEWED_FILES, type Permission
 import { writePrivateJson } from '../stores/private-json.js';
 import { REVIEW_SCHEMA, REVIEW_SYSTEM, ReviewSkip, reviewInput, type ReviewSources } from './context.js';
 import { changedFiles, deniedPaths, folderBinding, readLog, reviewedFiles, REVIEW_TOOL_NAMES, REVIEW_TOOLS_SERVER, reviewScope, type ReadEntry } from './inspect.js';
-import type { PermissionReviewResult, PermissionService } from './service.js';
+import { UNDELIVERED, type PermissionReviewResult, type PermissionService } from './service.js';
 
 /** Long enough to read the scripts a command runs, and the ones they start, before deciding. */
 const REVIEW_TIMEOUT_MS = 6 * 60 * 1000;
@@ -19,7 +19,7 @@ export interface PermissionReviewerOptions {
   sources: ReviewSources;
   model(request: AutoPromptModelRequest, options: { timeoutMs: number }): Promise<unknown>;
   /** Tells the requesting conversation what the reviewer decided, as the work it already was (never as the owner). */
-  notify(request: PermissionRequest, message: string): Promise<void>;
+  notify(request: PermissionRequest, message: string, options: { undelivered(): void }): Promise<void>;
   /** Whether a message can reach the requesting conversation; a request sent back to an agent nobody can tell waits for the owner. */
   reachable(request: PermissionRequest): boolean;
   /** The reviewer's read-only file tools: where their scratch files go, and how to start this build's tool server. */
@@ -171,7 +171,7 @@ export class PermissionReviewer {
     if (outcome?.message && service.autoReview().resume) await service.deliverNotification(outcome.request.id, this.options.notify).catch(async error => {
       console.error(`Permission review could not reach its conversation: ${error instanceof Error ? error.message : String(error)}`);
       // An agent never told to ask again would wait for good: the owner decides instead.
-      if (outcome.request.status === 'withdrawn') await service.reopenForOwner(outcome.request.id, '에이전트에게 전하지 못해 소유자에게 넘깁니다');
+      if (outcome.request.status === 'withdrawn') await service.reopenForOwner(outcome.request.id, UNDELIVERED);
     });
   }
 }

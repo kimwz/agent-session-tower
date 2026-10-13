@@ -1485,7 +1485,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     if(!database) throw new TowerError('unavailable','Permission SDK owner is unavailable.');
     const permissions: PermissionService = new PermissionService({ stateDir, repository: permissionRepository, effectGate: requireEffects,
       requestGate: async request => { await closedSessions.start(); permissionAdmission(request); }, requestAdmission: permissionAdmission, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),
-      decision: async (request, prompt) => runs.permissionDecision(request, prompt, { closed: await closedNow(request.sessionId) }),
+      decision: async (request, prompt, options) => runs.permissionDecision(request, prompt, { ...options, closed: await closedNow(request.sessionId) }),
       resume: async (sessionId, prompt) => { await runs.enqueue(sessionId, prompt, {}, { origin: { kind: 'owner' } }); },
       // A public agent's requests always wait for the owner: its conversations carry outsiders' words.
       autoReviewSkip: request => {
@@ -1550,7 +1550,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       },
       // The decision reaches the conversation as the work it already was: the requesting turn's origin and approvals.
       reachable: request => Boolean(request.runId && runs.list().find(item => item.id === request.runId)?.origin),
-      notify: (request, message) => runs.permissionDecision(request, `${TOWER_NOTICE} ${message}`).then(() => undefined) });
+      notify: (request, message, options) => runs.permissionDecision(request, `${TOWER_NOTICE} ${message}`, options).then(() => undefined) });
     let startupComplete = false;
     registerStorageHold(() => { reviewer.hold(); }, () => { if (startupComplete) reviewer.release(); }, () => reviewer.inFlight());
     // Review writes create pending receipts, so they must wait until every startup admission gate has passed.

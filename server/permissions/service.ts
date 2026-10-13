@@ -86,7 +86,8 @@ export interface PermissionServiceOptions {
   globalCodex?: boolean;
   /** Sends the owner's decision to the requesting conversation as the owner's next message. */
   resume?(sessionId: string, prompt: string): Promise<void>;
-  decision?(request: PermissionRequest, prompt: string): Promise<unknown>;
+  /** Like resume, for a decided request; `undelivered` runs if a notice that seemed handed over never reaches the turn. */
+  decision?(request: PermissionRequest, prompt: string, options: { undelivered(): void }): Promise<unknown>;
   /** Why the reviewer may not decide requests from this conversation (a public agent's, for one); undefined when it may. */
   autoReviewSkip?(request: PermissionRequest): string | undefined;
   /** A request is waiting for Tower's reviewer. */
@@ -781,14 +782,17 @@ export class PermissionService {
     for (const request of [...this.state.requests]) if (request.notification?.state === 'pending') await this.deliverNotification(request.id).catch(() => {});
   }
 
-  async deliverNotification(id: string, fallback?: (request: PermissionRequest, message: string) => Promise<unknown>): Promise<void> {
+  async deliverNotification(id: string, fallback?: (request: PermissionRequest, message: string, options: { undelivered(): void }) => Promise<unknown>): Promise<void> {
     await this.serial(async () => {
       const request = this.state.requests.find(item => item.id === id);
       if (!request || request.notification?.state !== 'pending') return;
       if (request.status === 'approved' && this.targets(request.cwd).some(target => target.error)) throw failure('Permission rules could not be applied; continuation was not admitted.', 'unavailable');
       const notify = this.options.decision ?? fallback;
       await this.requireRequestEffects(request);
-      if (notify) await notify(structuredClone(request), request.notification.message);
+      // A reviewer's request sent back that its agent never hears waits for the owner (reopenForOwner leaves others alone).
+      if (notify) await notify(structuredClone(request), request.notification.message, { undelivered: () => {
+        void this.reopenForOwner(id, UNDELIVERED).catch(error => console.error(`Permission request could not go back to the owner: ${error instanceof Error ? error.message : String(error)}`));
+      } });
       else if (this.options.resume) await this.options.resume(request.sessionId, request.notification.message);
       else return;
       {
@@ -931,6 +935,9 @@ function reviewMessage(request: PermissionRequest, allowed?: PermissionRuleInput
   const instead = request.review?.suggestion ? ` Ask for this instead: ${request.review.suggestion}` : ' Ask for a narrower rule that covers only what the task needs.';
   return `Tower's permission reviewer did not allow \`${request.rule.value}\` as asked, and withdrew the request.${why}${instead} If the task still needs it, send the narrower request suggested above (permissions_run for an exact one-time command, permissions_request for a rule); do not look for another way around the refusal.`;
 }
+
+/** Why a request the reviewer sent back waits for the owner after all. */
+export const UNDELIVERED = '에이전트에게 전하지 못해 소유자에게 넘깁니다';
 
 const REVIEW_NOTE = 'Tower\'s permission reviewer checks this request against the owner\'s instructions for this task first; the owner can also decide it. Do not look for another way around the refusal. An allowed rule applies from your next turn: say in your reply what waits on this permission and end your turn, or go on with other work first. The decision is sent to this conversation; permissions_list also shows it.';
 

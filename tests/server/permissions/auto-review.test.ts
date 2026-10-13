@@ -10,6 +10,7 @@ import { PermissionService } from '../../../server/permissions/service.js';
 import { readConversation, type ReviewSources } from '../../../server/permissions/context.js';
 import { autoReviewBlock, ruleGuards, ruleIsNarrower, type PermissionRequest } from '../../../shared/permissions.js';
 import type { ChatMessage, Run } from '../../../shared/types.js';
+import { until } from '../../helpers/until.ts';
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
 const agent = (sessionId: string, runId = 'run-1') => ({ kind: 'agent', via: 'mcp', sessionId, runId });
@@ -468,6 +469,24 @@ test('a narrower-rule answer the agent could not be sent goes back to the owner'
   await reviewer.flush();
   const item = f.service.overview().requests.find(entry => entry.id === request.id)!;
   assert.deepEqual([item.status, item.review!.verdict, item.decidedBy], ['pending', 'owner', undefined]);
+});
+
+test('a narrower-rule answer handed to the agent that it never takes goes back to the owner then', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  let undelivered: (() => void) | undefined;
+  const reviewer = new PermissionReviewer({ service: f.service, sources: sources(f, []), reachable: () => true,
+    notify: async (_request, _message, options) => { undelivered = options.undelivered; },
+    model: async () => ({ verdict: 'narrow', rule: null, suggestion: 'gh release create v1', reason: '더 좁게' }) });
+  const { request } = await f.service.request({ kind: 'command', value: 'gh release', scope: 'project', reason: 'release' }, agent('claude:one'));
+  reviewer.wake();
+  await reviewer.flush();
+  const item = () => f.service.overview().requests.find(entry => entry.id === request.id)!;
+  assert.equal(item().status, 'withdrawn');
+  undelivered!();
+  await until(() => item().status === 'pending');
+  assert.deepEqual([item().review!.verdict, item().decidedBy], ['owner', undefined]);
+  assert.match(item().review!.reason ?? '', /에이전트에게 전하지 못해/);
 });
 
 test('an owner rule saved beside an overlapping rule the reviewer allowed replaces it, so nothing of the owner’s is denied', async t => {

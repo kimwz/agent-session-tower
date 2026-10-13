@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.130.1] - 2026-10-13
+
+- 권한 자동 검토가 일시적인 OpenAI 오류 때문에 실패하던 문제를 고쳤습니다. Codex는 503 같은 오류가 나면 스스로 다시 시도하면서 `Reconnecting... 2/5` 알림을 보내는데, Tower가 이 알림을 실패로 처리해 "Codex routing failed or returned an unsupported event"로 소유자에게 넘겼습니다. 이제 재시도가 끝날 때까지 기다리고, 실제로 실패하면 Codex가 알려 준 원인(예: `unexpected status 503`)을 사유에 적습니다. Auto Prompt 라우팅 등 Codex로 판단하는 다른 기능도 같습니다.
+- 검토가 "더 좁게 다시 요청"으로 판단했을 때, 에이전트가 그 안내를 30초 안에 받았는지 확인되지 않으면 "에이전트에게 전하지 못해 소유자에게 넘깁니다"로 소유자에게 넘기던 문제를 고쳤습니다. Claude는 이런 안내를 다음 단계에서야 받으므로, 긴 작업 중이면 30초를 넘길 수 있습니다. 이제 아직 전달 중이면 전달된 것으로 보고, 턴이 안내를 받지 않고 끝났을 때만 소유자에게 넘깁니다.
+
 ## [1.130.0] - 2026-10-13
 
 - 페이지가 받는 상태를 줄였습니다. 기본 화면(1일)의 첫 응답이 압축 기준 약 167 KB에서 70 KB대로 줄어듭니다.

@@ -948,7 +948,10 @@ export const english: Record<string, string> = {
   'Auto Prompt: Claude Code가 지원하지 않는 라우팅 이벤트를 반환했습니다 ({0}).': 'Auto Prompt: Claude Code returned an unsupported routing event ({0}).',
   'Auto Prompt: Codex가 지원하지 않는 라우팅 설정을 보고했습니다. CLI 호환성을 확인하세요.': 'Auto Prompt: Codex reported an unsupported routing configuration. Check CLI compatibility.',
   'Auto Prompt: Codex가 라우팅 중 도구 실행을 시도했습니다.': 'Auto Prompt: Codex attempted a tool operation during routing.',
+  'Auto Prompt: Codex가 끝내지 못했습니다({0}). 해당 CLI의 로그인과 호환성을 확인하세요.': 'Auto Prompt: Codex could not finish ({0}). Check native sign-in and CLI compatibility.',
+  // Reasons saved before 1.130.1.
   'Auto Prompt: Codex 라우팅이 실패했거나 지원하지 않는 이벤트를 반환했습니다. 해당 CLI의 로그인과 호환성을 확인하세요.': 'Auto Prompt: Codex routing failed or returned an unsupported event. Check native sign-in and CLI compatibility.',
+  'Auto Prompt: Codex가 지원하지 않는 라우팅 이벤트를 반환했습니다 ({0}).': 'Auto Prompt: Codex returned an unsupported routing event ({0}).',
   'Auto Prompt: 라우팅 출력이 허용 크기를 초과했습니다.': 'Auto Prompt: native routing output exceeded its limit.',
   'Auto Prompt: 해당 CLI가 라우팅 입력을 더 이상 받지 않습니다.': 'Auto Prompt: native CLI stopped accepting routing input.',
   'Auto Prompt: 해당 CLI에 종료되지 않은 라우팅 프로세스가 남아 있습니다.': 'Auto Prompt: native CLI left an unfinished routing process.',

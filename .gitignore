@@ -17,3 +17,5 @@ VALIDATION.md
 .env
 .env.*
 !.env.example
+# storage-diagnostic-worker.test.ts roots its temporary state beside itself (it needs this checkout's dependencies).
+tests/**/tw-receipt-*/
