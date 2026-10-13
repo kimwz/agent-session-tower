@@ -114,7 +114,7 @@ test('with a Vault, collectWorkerFiles leaves out trigger-secrets.json even when
   const stateDir = await dir(t);
   await workerFiles(stateDir);
   const secrets = await vault(stateDir);
-  await secrets.create({ name: 'deploy', kind: 'scalar', scope: 'global', value: 'PERMANENT_CANARY' });
+  await secrets.create({ name: 'deploy', kind: 'scalar', value: 'PERMANENT_CANARY' });
   const files = await collectWorkerFiles(stateDir);
   assert.equal(files['trigger-secrets.json'], undefined);
   assert.deepEqual(Object.keys(files), ['permissions.json', 'models.json', 'slack-connection.json', 'slack-tone.json', 'slack-automation.json', 'github-automation.json', 'public-agents.json']);

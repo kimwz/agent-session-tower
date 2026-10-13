@@ -1,7 +1,12 @@
 import { createCipheriv, createDecipheriv, createHash, createPrivateKey, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes, randomUUID, sign, verify } from 'node:crypto';
-import type { SecretContext, SecretDevice, SecretPeer } from '../../shared/secrets.js';
+import type { SecretContext, SecretDevice, SecretMetadata, SecretPeer } from '../../shared/secrets.js';
 
 export type RemoteSecretOperation = 'list' | 'resolve' | 'close';
+/** Listed metadata in the key set every paired build accepts; anything else, such as why a secret is available, stays local. */
+const WIRE_METADATA = ['id', 'name', 'groupId', 'kind', 'version', 'reference', 'fields', 'expiresAt', 'operations', 'sourceHostId'] as const;
+export function wireMetadata(item: SecretMetadata): SecretMetadata {
+  return Object.fromEntries(WIRE_METADATA.filter(key => item[key] !== undefined).map(key => [key, structuredClone(item[key])])) as unknown as SecretMetadata;
+}
 export interface RemoteSecretRequest {
   version: 1; id: string; nonce: string; from: string; to: string; createdAt: number; expiresAt: number;
   context: SecretContext; operation: RemoteSecretOperation; payload: unknown; signature: string;

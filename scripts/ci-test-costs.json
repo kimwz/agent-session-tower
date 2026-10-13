@@ -260,6 +260,8 @@
   "tests/server/secrets/remote.test.ts": [0.118, 0.049, 0.077],
   "tests/server/secrets/rule-edit.test.ts": [15.099, 6.557, 10.664],
   "tests/server/secrets/runtime.test.ts": [187.449, 89.791, 129.465],
+  "tests/server/secrets/sharing-policy.test.ts": [0.5, 0.3, 0.4],
+  "tests/server/secrets/sharing-storage.test.ts": [56, 26, 36],
   "tests/server/secrets/vault-domain.test.ts": [96.526, 39.957, 64.738],
   "tests/server/secrets/vault-quarantine.test.ts": [11.293, 5.233, 7.849],
   "tests/server/sessions/agent-launched.test.ts": [2.51, 2.293, 2.315],

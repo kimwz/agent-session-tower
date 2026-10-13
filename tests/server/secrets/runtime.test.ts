@@ -11,6 +11,7 @@ import { runToolResolver } from '../../../server/api/run-tools.js';
 import type { SessionOrigin } from '../../../server/runs/origin.js';
 import { SecretRuntime, SECRET_TOOLS } from '../../../server/secrets/runtime.js';
 import { SecretService } from '../../../server/secrets/service.js';
+import { editPayload, legacyRecord, legacyRule } from '../../helpers/secrets.js';
 import { secretService } from '../../helpers/secrets.js';
 import { runSecretsCommand } from '../../../server/secrets/cli.js';
 import { SECRET_USE_INSTRUCTIONS } from '../../../server/secrets/notices.js';
@@ -106,9 +107,11 @@ test('explicit assignment is value-free, committed before its receipt, and unrel
     await f.runtime.control('revoke', { sessionId: f.session.id, secretIds: [id] });
     await f.runtime.control('lock', {});
     await f.runtime.control('unlock', { password });
-    const automatic = await f.runtime.control('create', { sessionId: f.session.id, scope: 'task', name: 'FAKE_TASK_AUTO', kind: 'scalar', value: 'FAKE_TASK', activation: 'auto', connect: true }) as SecretOverview;
-    const taskSecret = automatic.secrets.find(secret => secret.name === 'FAKE_TASK_AUTO')!;
-    await f.runtime.control('rule', { ...automatic.rules.find(rule => rule.groupId === taskSecret.groupId)!, enabled: false });
+    await f.runtime.control('create', { sessionId: f.session.id, scope: 'task', name: 'FAKE_TASK_AUTO', kind: 'scalar', value: 'FAKE_TASK', activation: 'auto', connect: true });
+    const ruled = legacyRecord(f.service.device().id, { name: 'FAKE_RULED', groupId: 'legacy-group', value: 'FAKE_RULED_VALUE' });
+    await editPayload(f.service, password, payload => { payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(ruled); payload.rules.push(legacyRule({ groupId: 'legacy-group', secretIds: [ruled.metadata.id], hostId: f.service.device().id, allProjects: true })); });
+    const { revision: _revision, ...rule } = f.service.overview().rules[0];
+    await f.runtime.control('rule', { ...rule, enabled: false });
     const shared = await f.runtime.control('create', { scope: 'global', name: 'FAKE_SHARED', kind: 'scalar', value: 'FAKE_GLOBAL' }) as SecretOverview;
     await f.runtime.control('update', { id: shared.secrets.find(secret => secret.name === 'FAKE_SHARED')!.id, value: 'FAKE_GLOBAL_UPDATED' });
     assert.deepEqual(f.notices, [f.session.id]);
@@ -129,7 +132,9 @@ test('expiry, remote availability and task closure stay silent while the broker 
     const run = f.addRun('notice-expiry');
     await f.runtime.sweep();
     assert.equal(f.service.currentTask(f.session.id), undefined);
-    const saved = await f.runtime.control('create', { sessionId: f.session.id, scope: 'task', name: 'FAKE_EXPIRING', kind: 'scalar', value: canary, connect: true, expiresAt: f.now() + 100 }) as SecretOverview;
+    const expiring = legacyRecord(f.service.device().id, { name: 'FAKE_EXPIRING', groupId: 'legacy-group', value: canary, expiresAt: f.now() + 100 });
+    await editPayload(f.service, password, payload => { payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(expiring); });
+    const saved = await f.runtime.control('connect', { sessionId: f.session.id, secretIds: [expiring.metadata.id] }) as SecretOverview;
     const token = f.tokenFor(run);
     assert.equal((await f.list(token)).secrets.length, 1);
     f.advance(150); await f.runtime.sweep();
@@ -147,9 +152,10 @@ test('automatic project keys stay discoverable without notifying any session', a
   const f = await fixture();
   try {
     await f.initialize();
-    await f.runtime.control('create', { sessionId: f.session.id, scope: 'project', currentProject: true, name: 'FAKE_AUTO', kind: 'env', value: 'TOKEN=FAKE_TOKEN\nOTHER=FAKE_OTHER', activation: 'auto', connect: true });
+    await f.runtime.control('create', { sessionId: f.session.id, scope: 'project', currentProject: true, name: 'FAKE_AUTO', kind: 'env', value: 'TOKEN=FAKE_TOKEN\nOTHER=FAKE_OTHER', activation: 'auto' });
+    assert.deepEqual(f.service.overview(await f.runtime.peekTarget(f.session.id)).connected, [], 'shared with the folder, not connected');
     const run = f.addRun('notice-automatic'); const secrets = (await f.list(f.tokenFor(run))).secrets;
-    assert.equal(secrets[0].activation, 'auto');
+    assert.deepEqual(secrets.map(secret => [secret.name, secret.fields]), [['FAKE_AUTO', ['TOKEN', 'OTHER']]]);
     assert.deepEqual(f.notices, []);
   } finally { await f.cleanup(); }
 });
@@ -163,7 +169,7 @@ test('invalid chat markers and receipt modes fail before task creation or secret
     await assert.rejects(f.runtime.control('create', { ...input, notifySession: true }, undefined, true));
     assert.equal(f.service.currentTask(f.session.id), undefined);
     assert.deepEqual(f.service.overview().secrets, []);
-    await f.service.create({ scope: 'global', name: 'FAKE_UNGRANTED', kind: 'scalar', value: 'fixture-only' });
+    await f.service.create({ name: 'FAKE_UNGRANTED', kind: 'scalar', value: 'fixture-only' });
     assert.deepEqual(f.notices, []);
   } finally { await f.cleanup(); }
 });
@@ -218,15 +224,17 @@ test('quick project save uses the verified canonical session root and works with
     const input = { sessionId: f.session.id, scope: 'project', currentProject: true, kind: 'scalar', name: 'QUICK_PROJECT', value: 'FAKE_QUICK_PROJECT', connect: true,
       projectRoot: '/forged', hostId: 'forged-host', taskId: 'forged-task', projectId: 'forged-project', target: { root: '/forged' } };
     const first = await f.runtime.control('create', input) as SecretOverview;
-    assert.equal(first.projects.length, 1); assert.equal(first.projects[0].bindings[0].root, f.projectRoot);
-    assert.equal(first.projects[0].bindings[0].hostId, f.service.device().id);
-    assert.equal(first.target?.projectId, first.projects[0].id); assert.equal(first.connected.length, 1);
+    assert.deepEqual(first.projects, [], 'the session folder is shared without registering a project');
+    assert.deepEqual(f.service.settings().secrets.map(secret => secret.sharing), [{ revision: 1, global: false, folders: [{ hostId: f.service.device().id, root: f.projectRoot }] }]);
+    assert.equal(first.connected.length, 1);
     assert.equal((await f.list(token)).secrets[0].name, 'QUICK_PROJECT');
     const second = await f.runtime.control('create', { ...input, name: 'ANOTHER_PROJECT_KEY' }) as SecretOverview;
-    assert.equal(second.projects.length, 1); assert.equal(second.connected.length, 2);
+    assert.deepEqual(second.projects, []); assert.equal(second.connected.length, 2);
     const fresh = sessionRecord(f.alias, { id: 'codex:fresh-picker-session', nativeId: 'fresh-picker-session' }); f.sessions.set(fresh.id, fresh); f.origins.set(fresh.id, { kind: 'owner', untrustedInput: false });
     const picker = await f.runtime.control('overview', { sessionId: fresh.id, projectRoot: '/forged' }) as SecretOverview;
-    assert.equal(picker.currentProjectId, first.projects[0].id); assert.equal(picker.target, undefined); assert.equal(f.service.currentTask(fresh.id, f.projectRoot), undefined);
+    assert.equal(picker.target, undefined); assert.equal(f.service.currentTask(fresh.id, f.projectRoot), undefined);
+    const freshRun = f.addRun('fresh-picker-run', fresh);
+    assert.deepEqual((await f.list(f.tokenFor(freshRun, fresh))).secrets.map(secret => secret.name).sort(), ['ANOTHER_PROJECT_KEY', 'QUICK_PROJECT'], 'another session in the folder uses both without a connection');
     await assert.rejects(f.runtime.control('create', { ...input, sessionId: undefined }));
     await assert.rejects(f.runtime.control('create', { ...input, scope: 'global' }));
     assert.deepEqual(f.ledger, []);
@@ -316,23 +324,24 @@ test('MCP lists automatic keys without values, manual attach works, and revoke p
   try {
     await f.initialize(); const run = f.addRun('run-list'); const token = f.tokenFor(run);
     await f.runtime.control('create', { name: 'AUTOMATIC_KEY', kind: 'scalar', scope: 'global', allProjects: true, value: canary, activation: 'auto', operations: ['discover', 'env'] });
-    await f.runtime.control('create', { name: 'MANUAL_KEY', kind: 'scalar', scope: 'global', allProjects: true, value: 'MANUAL_RUNTIME_CANARY', activation: 'manual', operations: ['discover', 'env'] });
+    await f.runtime.control('create', { name: 'MANUAL_KEY', kind: 'scalar', scope: 'global', value: 'MANUAL_RUNTIME_CANARY', activation: 'manual', operations: ['discover', 'env'] });
     const all = f.service.overview().secrets; const automatic = all.find(key => key.name === 'AUTOMATIC_KEY')!; const manual = all.find(key => key.name === 'MANUAL_KEY')!;
     const tools = await handleMcpRequest(f.context, token, { method: 'tools/list' }) as { tools: { name: string }[] };
     assert.ok(tools.tools.some(tool => tool.name === 'secrets_list')); assert.ok(tools.tools.some(tool => tool.name === 'secrets_cli'));
     assert.doesNotMatch(JSON.stringify(tools), /CANARY_RUNTIME|MANUAL_RUNTIME_CANARY/);
     const first = await f.list(token);
-    assert.deepEqual(first.secrets.map(key => key.name), ['AUTOMATIC_KEY']); assert.equal(first.secrets[0].activation, 'auto'); assert.deepEqual(first.secrets[0].operations, ['discover', 'env']);
+    assert.deepEqual(first.secrets.map(key => key.name), ['AUTOMATIC_KEY'], 'a saved key without sharing waits for a connection'); assert.equal(first.secrets[0].activation, undefined); assert.deepEqual(first.secrets[0].operations, ['discover', 'env', 'pipe', 'file', 'compare', 'fingerprint']);
     assert.doesNotMatch(JSON.stringify(first), /CANARY_RUNTIME|MANUAL_RUNTIME_CANARY|"value"|"content"/);
     await f.runtime.control('attach', { sessionId: f.session.id, secretIds: [manual.id] });
     assert.deepEqual((await f.list(token)).secrets.map(key => key.name).sort(), ['AUTOMATIC_KEY', 'MANUAL_KEY']);
     await f.runtime.control('revoke', { sessionId: f.session.id, secretIds: [automatic.id, manual.id] });
     assert.deepEqual((await f.list(token)).secrets, []);
-    await assert.rejects(f.runtime.control('attach', { sessionId: f.session.id, secretIds: [manual.id] }), /revoked/i);
     run.status = 'completed'; const followupToken = f.tokenFor(f.addRun('run-revoked-followup'));
     assert.deepEqual((await f.list(followupToken)).secrets, []);
     const cliList = await f.call(followupToken, 'secrets_cli', { argv: ['list', '--json'] }) as { secrets: unknown[] };
     assert.deepEqual(cliList.secrets, []); assert.deepEqual(f.ledger, []);
+    await f.runtime.control('attach', { sessionId: f.session.id, secretIds: [manual.id] });
+    assert.deepEqual((await f.list(followupToken)).secrets.map(key => key.name), ['MANUAL_KEY'], 'connecting again lifts only that key’s stop');
   } finally { await f.cleanup(); }
 });
 
@@ -448,7 +457,7 @@ test('session archival cleans stored tasks without granting child or automation 
     }
     const run = f.addRun('active-archived-run');
     const target = await f.runtime.target(f.session.id);
-    const secret = await f.service.create({ name: 'archived task key', kind: 'scalar', scope: 'task', value: canary, target });
+    const secret = await f.service.create({ name: 'archived task key', kind: 'scalar', value: canary, temporary: true }, target);
     f.session.closed = true;
     await rm(f.projectRoot, { recursive: true, force: true });
     await f.runtime.endSession(f.session.id);
@@ -494,38 +503,30 @@ test('locked session closure survives runtime restart and removes task-only secr
   } finally { restartedRuntime?.close(); await f.cleanup(); }
 });
 
-test('rotated versions and broadened rules require explicit owner reapproval without extending the original deadline', async () => {
+test('rotated values and edited rules apply to an open task at once, and a rule time limit counts from the task', async () => {
   const f = await fixture();
   try {
     await f.initialize(); const run = f.addRun('run-pinned-grant'); const token = f.tokenFor(run);
-    await f.runtime.control('create', { name: 'PINNED_KEY', kind: 'scalar', scope: 'global', value: canary, activation: 'auto', allProjects: true, operations: ['discover', 'env'] });
-    const secret = f.service.overview().secrets[0]; const initialRule = f.service.overview().rules[0];
-    await f.runtime.control('rule', { ...initialRule, maxTtlMs: 100 });
+    const record = legacyRecord(f.service.device().id, { name: 'PINNED_KEY', groupId: 'legacy-group', value: canary }); const secret = record.metadata;
+    await editPayload(f.service, password, payload => { payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(record); payload.rules.push(legacyRule({ groupId: 'legacy-group', secretIds: [secret.id], hostId: f.service.device().id, allProjects: true, activation: 'auto', operations: ['discover', 'env'], maxTtlMs: 100 })); });
     const initial = await f.list(token); assert.equal(initial.secrets[0].id, secret.id);
     const capability = f.capabilities.resolve(token) as Extract<Capability, { kind: 'secret-run' }>;
-    const context = await f.runtime.context(capability); const deadline = f.now() + 100;
+    const context = await f.runtime.context(capability); const deadline = f.service.overview(context).task!.createdAt + 100;
     f.advance(25); await f.runtime.control('update', { id: secret.id, value: 'ROTATED_RUNTIME_CANARY' });
     const updated = f.service.overview().secrets[0]; assert.equal(updated.version, secret.version + 1);
-    assert.deepEqual((await f.list(token)).secrets, []);
-    await assert.rejects(f.service.resolve(context, updated.reference, 'env'), /Grant denied/);
-    await f.runtime.control('attach', { sessionId: f.session.id, secretIds: [secret.id] });
-    assert.equal((await f.list(token)).secrets[0].version, updated.version);
+    assert.equal((await f.list(token)).secrets[0].version, updated.version, 'a rotated value needs no reapproval');
     assert.equal((await f.service.resolve(context, updated.reference, 'env')).bytes.toString(), 'ROTATED_RUNTIME_CANARY');
     f.advance(25); const rule = f.service.overview().rules[0];
     await f.runtime.control('rule', { ...rule, operations: ['discover', 'env', 'fingerprint'] });
-    assert.deepEqual((await f.list(token)).secrets, []);
-    await assert.rejects(f.service.resolve(context, updated.reference, 'fingerprint'), /Grant denied/);
-    await f.runtime.control('attach', { sessionId: f.session.id, secretIds: [secret.id] });
     assert.ok((await f.list(token)).secrets[0].operations?.includes('fingerprint'));
     assert.equal((await f.service.resolve(context, updated.reference, 'fingerprint')).bytes.toString(), 'ROTATED_RUNTIME_CANARY');
     f.advance(deadline - f.now() - 1);
     assert.equal((await f.list(token)).secrets.length, 1);
-    f.advance(2);
-    assert.deepEqual((await f.list(token)).secrets, []);
-    await assert.rejects(f.service.resolve(context, updated.reference, 'env'), /Grant denied/);
+    f.advance(1);
+    assert.deepEqual((await f.list(token)).secrets, [], 'editing the rule never restarts its time limit');
+    await assert.rejects(f.service.resolve(context, updated.reference, 'env'), /access denied/);
     await f.runtime.control('attach', { sessionId: f.session.id, secretIds: [secret.id] });
-    assert.deepEqual((await f.list(token)).secrets, [], 'reapproving an expired grant does not extend its deadline');
-    await assert.rejects(f.service.resolve(context, updated.reference, 'env'), /Grant denied/);
+    assert.equal((await f.list(token)).secrets[0]?.id, secret.id, 'only the owner’s explicit connection opens it past the limit');
   } finally { await f.cleanup(); }
 });
 
@@ -573,7 +574,7 @@ test('broker approval creates one exact task, preserves provenance and does not 
     assert.equal(approval.root, f.projectRoot);
     assert.deepEqual(f.origins.get(f.session.id), { kind: 'agent', untrustedInput: false });
     assert.deepEqual(f.service.overview().secrets, []);
-    await f.service.create({ scope: 'global', name: 'FAKE_UNGRANTED', kind: 'scalar', value: 'fixture-only' });
+    await f.service.create({ name: 'FAKE_UNGRANTED', kind: 'scalar', value: 'fixture-only' });
     await assert.rejects(f.runtime.control('approve-broker', input), /변경/);
     const replay = await f.runtime.control('approve-broker', { ...input, taskId: approval.taskId, ttlMs: 120000 });
     assert.ok('approval' in replay && replay.approval);
@@ -686,7 +687,7 @@ test('broker service independently denies revoked approval at list, resolve, cla
     const run = f.addRun('service-approval'); f.tokenFor(run);
     const capability: Extract<Capability, { kind: 'secret-run' }> = { kind: 'secret-run', runId: run.id, sessionId: f.session.id, approvalId: approved.approval.id };
     const context = await f.runtime.context(capability);
-    const secret = await f.service.create({ scope: 'task', kind: 'scalar', name: 'FIXTURE_ONLY', value: canary, target: context, connect: true });
+    const secret = await f.service.create({ kind: 'scalar', name: 'FIXTURE_ONLY', value: canary, temporary: true }, context);
     await f.service.revokeBroker(f.session.id, approved.approval.id);
     await assert.rejects(f.service.list(context));
     await assert.rejects(f.service.resolve(context, secret.reference, 'env'));
@@ -828,7 +829,7 @@ test('broker admission protection remains value-free while locked, across startu
     assert.equal(f.runtime.brokerAdmissionRequired(f.session), false, 'fresh vault has no protected broker history');
     await f.initialize();
     const approved = await f.runtime.control('approve-broker', { sessionId: f.session.id, root: f.projectRoot, taskId: null, taskLabel: 'Locked admission', ttlMs: 60000 }); assert.ok('approval' in approved && approved.approval);
-    await f.service.create({ scope: 'global', name: 'FAKE_PRIVATE_INDEX_CHECK', kind: 'scalar', value: canary });
+    await f.service.create({ name: 'FAKE_PRIVATE_INDEX_CHECK', kind: 'scalar', value: canary });
     assert.equal(f.runtime.brokerAdmissionRequired(f.session), true);
     await f.runtime.control('lock', {});
     assert.equal(f.runtime.brokerApproval(f.session), undefined, 'locked refusal metadata never authorizes a capability');

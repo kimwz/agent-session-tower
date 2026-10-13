@@ -16,7 +16,7 @@ async function fixture(t: TestContext) {
   await Promise.all([stateDir, root].map(path => mkdir(path)));
   const service = await secretService(stateDir, { password: PASSWORD });
   const target = await service.ensureTask('codex:session-a', root);
-  await service.create({ name: 'API_KEY', kind: 'scalar', scope: 'global', value: CANARY, allProjects: true, target, activation: 'manual', connect: true });
+  await service.create({ name: 'API_KEY', kind: 'scalar', value: CANARY, sharing: { global: true, folders: [] }, connect: 'session' }, target);
   /** The next worker's view of the same state folder: it starts locked, as every worker does. */
   const successor = () => secretService(stateDir);
   return { directory, stateDir, root, service, target, successor };

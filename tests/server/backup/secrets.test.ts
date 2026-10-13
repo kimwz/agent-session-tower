@@ -46,7 +46,7 @@ test('migration refuses a symlink and preserves the original records', async t =
 test('backup carries only encrypted permanent vault and restore waits for explicit source password', async t => {
   const sourceDir = await mkdtemp(join(tmpdir(), 'tower-backup-vault-source-')); const targetDir = await mkdtemp(join(tmpdir(), 'tower-backup-vault-target-')); t.after(async () => { await Promise.all([closeWorkerSettingsFixture(sourceDir), closeWorkerSettingsFixture(targetDir)]); await Promise.all([rm(sourceDir, { recursive: true, force: true }), rm(targetDir, { recursive: true, force: true })]); });
   const source = await vault(sourceDir); await source.importLegacy([legacy]);
-  const target = await source.ensureTask('fixture-session', '/fixture'); await source.create({ name: 'ephemeral', kind: 'scalar', scope: 'task', value: 'EPHEMERAL_CANARY', target });
+  const target = await source.ensureTask('fixture-session', '/fixture'); await source.create({ name: 'ephemeral', kind: 'scalar', value: 'EPHEMERAL_CANARY', temporary: true }, target);
   await writeFile(join(sourceDir, 'trigger-secrets.json'), JSON.stringify([{ ...legacy, value: 'STALE_PLAINTEXT_CANARY' }])); assert.equal((await collectWorkerFiles(sourceDir))['trigger-secrets.json'], undefined);
   const sourceBackup = await backup(sourceDir); const file = await sourceBackup.export(BACKUP_PASSWORD); const { payload } = await decryptBackup(file.text, BACKUP_PASSWORD); const worker = (payload as { worker: { files: Record<string, unknown>; encryptedVault?: string } }).worker;
   assert.equal(worker.files['trigger-secrets.json'], undefined); assert.equal(worker.encryptedVault, await collectEncryptedVault(sourceDir)); assert.equal(JSON.stringify(payload).includes('journal.json'), false);

@@ -13,7 +13,7 @@ import { createMonitorServer, type Backend } from '../../../server/http/server.j
 import { createRemoteRouter } from '../../../server/remote/router.js';
 import { RemoteExclusionStore } from '../../../server/remote/exclusions.js';
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
-import { FixtureRuns, secretService } from '../../helpers/secrets.js';
+import { FixtureRuns, editPayload, legacyRecord, secretService } from '../../helpers/secrets.js';
 const VISIBLE = 'VISIBLE_INTEGRATION_CANARY_732';
 const HIDDEN = 'HIDDEN_INTEGRATION_CANARY_928';
 const PASSWORD = 'fixture-integration-vault-password';
@@ -45,36 +45,38 @@ async function pair(t: TestContext) {
     if (!done) { recipient.remote.close(); throw new Error('Fixture relay did not settle within its bounded poll window'); }
     return observed;
   }
-  return { root, stateA, stateB, projectA, projectB, a, b, source, recipient, runsB, capB, logical, local, wires, errors, relay, advance: (ms: number) => { now += ms; } };
+  /** Shared from A to B's project folder: what B's sessions there may use automatically. */
+  const toB = { global: false, folders: [{ hostId: b.device().id, root: projectB }] };
+  return { root, stateA, stateB, projectA, projectB, a, b, source, recipient, runsB, capB, logical, local, toB, wires, errors, relay, advance: (ms: number) => { now += ms; } };
 }
-test('two encrypted runtimes relay source-authoritative selected fields, manual grants and signed task closure', { timeout: 20000 }, async t => {
+test('two encrypted runtimes relay source-authoritative selected fields, owner connections and signed task closure', { timeout: 20000 }, async t => {
   const f = await pair(t);
-  const bundle = await f.a.create({ name: 'source env bundle', kind: 'env', scope: 'project', projectId: f.logical.id, value: `VISIBLE=${VISIBLE}\nHIDDEN=${HIDDEN}` });
+  // A key saved before per-secret sharing, in a logical project's group, follows A's rules for B.
+  const record = legacyRecord(f.a.device().id, { name: 'source env bundle', groupId: 'logical-group', kind: 'env', value: `VISIBLE=${VISIBLE}\nHIDDEN=${HIDDEN}` }); const bundle = record.metadata;
+  await editPayload(f.a, PASSWORD, payload => { payload.groups.push({ id: 'logical-group', name: 'Logical', scope: 'project', projectId: f.logical.id }); payload.secrets.push(record); });
   await f.source.control('rule', { groupId: bundle.groupId, secretIds: [bundle.id], hostId: f.b.device().id, projectId: f.logical.id, activation: 'auto', operations: ['discover', 'env'], fields: { [bundle.id]: ['VISIBLE'] }, enabled: true });
   const listed = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(listed.unavailableSources, []); assert.equal(listed.secrets.length, 1); assert.deepEqual(listed.secrets[0].fields, ['VISIBLE']); assert.equal(JSON.stringify(listed).includes(VISIBLE), false); assert.equal(JSON.stringify(listed).includes(HIDDEN), false);
   const context = await f.recipient.context(f.capB); assert.equal(context.projectId, f.local.id); const sourceContext = await f.a.ensureRemoteTask(context); assert.equal(sourceContext.projectId, f.logical.id); assert.equal(f.a.overview(sourceContext).task?.expiresAt! - f.a.overview(sourceContext).task?.createdAt!, 8 * 60 * 60_000);
   const result = await f.relay(f.recipient.tool(f.capB, 'secrets_run', { operationId: 'env-bundle-1', command: process.execPath, args: ['-e', "console.log(process.env.VISIBLE ? 'visible-present' : 'visible-missing'); console.log(process.env.HIDDEN === undefined ? 'hidden-absent' : 'hidden-leaked'); console.log(process.env.VISIBLE)"], envBundle: bundle.reference })) as SecretRunResult;
   assert.equal(result.exitCode, 0); assert.match(result.stdout, /visible-present\nhidden-absent\n\[REDACTED\]/); assert.equal(JSON.stringify(result).includes(VISIBLE), false);
   const deniedField = await f.relay(f.recipient.tool(f.capB, 'secrets_run', { operationId: 'forbidden-field', command: process.execPath, args: ['-e', "console.log('must-not-run')"], env: { HIDDEN: `${bundle.reference}#HIDDEN` } })) as SecretRunResult; assert.equal(deniedField.exitCode, null); assert.equal(deniedField.stdout, '');
-  const manual = await f.a.create({ name: 'manual scalar', kind: 'scalar', scope: 'project', projectId: f.logical.id, value: VISIBLE });
-  await f.a.setRule({ groupId: manual.groupId, secretIds: [manual.id], hostId: f.b.device().id, projectId: f.logical.id, activation: 'manual', operations: ['discover', 'env'], enabled: true, maxTtlMs: 60000 });
-  const beforeAttach = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[] }; assert.equal(beforeAttach.secrets.some(secret => secret.id === manual.id), false);
-  await f.a.attach(sourceContext, [manual.id]); const afterAttach = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[] }; assert.equal(afterAttach.secrets.some(secret => secret.id === manual.id), true);
-  await f.a.revoke(sourceContext, [bundle.id]); const revoked = await f.relay(f.recipient.tool(f.capB, 'secrets_run', { operationId: 'revoked-use', command: process.execPath, args: ['-e', "console.log('must-not-run')"], envBundle: bundle.reference })) as SecretRunResult; assert.equal(revoked.exitCode, null); assert.equal(revoked.stdout, '');
+  const unshared = await f.a.create({ name: 'unshared scalar', kind: 'scalar', value: VISIBLE });
+  const beforeConnect = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[] }; assert.equal(beforeConnect.secrets.some(secret => secret.id === unshared.id), false);
+  await f.a.connectSession(sourceContext, [unshared.id]); const afterConnect = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[] }; assert.equal(afterConnect.secrets.some(secret => secret.id === unshared.id), true);
+  await f.a.disconnectSession(sourceContext, [bundle.id]); const revoked = await f.relay(f.recipient.tool(f.capB, 'secrets_run', { operationId: 'revoked-use', command: process.execPath, args: ['-e', "console.log('must-not-run')"], envBundle: bundle.reference })) as SecretRunResult; assert.equal(revoked.exitCode, null); assert.equal(revoked.stdout, '');
   await f.relay(f.recipient.endSession(f.capB.sessionId)); assert.equal(f.a.overview(sourceContext).task?.status, 'closed'); assert.equal(f.b.overview(context).task?.status, 'closed'); await assert.rejects(f.recipient.tool(f.capB, 'secrets_list', {})); assert.equal(f.runsB.list()[0].status, 'running');
   assert.deepEqual(f.errors, []); assert.equal(JSON.stringify(f.wires).includes(VISIBLE), false); assert.equal(JSON.stringify(f.wires).includes(HIDDEN), false); assert.equal(f.b.overview().secrets.length, 0); assert.equal(f.runsB.list()[0].output, '');
   const disk = await storedText(f.stateA) + await storedText(f.stateB); assert.equal(disk.includes(VISIBLE), false); assert.equal(disk.includes(HIDDEN), false); assert.equal(disk.includes(PASSWORD), false);
 });
 test('source lock, offline relay and task expiry fail closed while owner run remains active', { timeout: 15000 }, async t => {
-  const f = await pair(t); const secret = await f.a.create({ name: 'remote scalar', kind: 'scalar', scope: 'project', projectId: f.logical.id, value: VISIBLE }); await f.a.setRule({ groupId: secret.groupId, secretIds: [secret.id], hostId: f.b.device().id, projectId: f.logical.id, activation: 'auto', operations: ['discover', 'env'], enabled: true, maxTtlMs: 60000 });
+  const f = await pair(t); await f.a.create({ name: 'remote scalar', kind: 'scalar', value: VISIBLE, sharing: f.toB });
   await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})); const fixedTask = (await f.recipient.context(f.capB)).taskId; await f.a.lock(); const locked = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(locked.secrets, []); assert.equal(locked.unavailableSources.length, 1);
   await f.a.unlock(PASSWORD); const offline = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {}), true) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(offline.secrets, []); assert.equal(offline.unavailableSources.length, 1);
   f.advance(8 * 60 * 60_000 + 1); const expired = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(expired.secrets, []); assert.equal(expired.unavailableSources.length, 1); assert.equal(f.runsB.list()[0].status, 'running'); assert.equal(f.b.overview().secrets.length, 0); assert.equal((await f.recipient.context(f.capB)).taskId, fixedTask);
 });
-test('recipient task revocation filters remote owner overview and lists and blocks use without revoking source grants', { timeout: 20000 }, async t => {
+test('recipient task revocation filters remote owner overview and lists and blocks use without changing the source sharing', { timeout: 20000 }, async t => {
   const f = await pair(t);
-  const secret = await f.a.create({ name: 'B can revoke this remote key', kind: 'scalar', scope: 'project', projectId: f.logical.id, value: VISIBLE });
-  await f.a.setRule({ groupId: secret.groupId, secretIds: [secret.id], hostId: f.b.device().id, projectId: f.logical.id, activation: 'auto', operations: ['discover', 'env'], enabled: true });
+  const secret = await f.a.create({ name: 'B can revoke this remote key', kind: 'scalar', value: VISIBLE, sharing: f.toB });
   const context = await f.recipient.context(f.capB);
   const overview = await f.relay(f.recipient.overview(context));
   assert.equal(overview.secrets.some(item => item.id === secret.id && item.sourceHostId === f.a.device().id), true);
@@ -96,8 +98,7 @@ test('recipient task revocation filters remote owner overview and lists and bloc
 
 test('recipient task closure or revocation while a sealed response is in flight denies remote consumption', { timeout: 20000 }, async t => {
   const f = await pair(t);
-  const secret = await f.a.create({ name: 'inflight remote key', kind: 'scalar', scope: 'project', projectId: f.logical.id, value: VISIBLE });
-  await f.a.setRule({ groupId: secret.groupId, secretIds: [secret.id], hostId: f.b.device().id, projectId: f.logical.id, activation: 'auto', operations: ['discover', 'env', 'compare'], enabled: true });
+  const secret = await f.a.create({ name: 'inflight remote key', kind: 'scalar', value: VISIBLE, sharing: f.toB });
   for (const mode of ['revoke', 'close'] as const) {
     const cap = f.runsB.add(f.projectB), context = await f.recipient.context(cap);
     const pending = f.recipient.broker.compare(context, secret.reference, secret.reference);
@@ -106,7 +107,7 @@ test('recipient task closure or revocation while a sealed response is in flight 
     for (let count = 0; !request && count < 100; count++) { request = f.recipient.remote.poll('controller-a')[0]; if (!request) await new Promise(resolve => setTimeout(resolve, 1)); }
     assert.ok(request);
     const response = await f.source.remote.answer('node-b', request);
-    if (mode === 'revoke') await f.b.revoke(context, [secret.id]); else await f.b.closeTask(context.taskId);
+    if (mode === 'revoke') await f.b.disconnectSession(context, [secret.id]); else await f.b.closeTask(context.taskId);
     f.recipient.remote.deliver('controller-a', response); await denied;
     assert.equal(f.recipient.remote.pending(), 0); assert.equal(f.runsB.list().find(run => run.id === cap.runId)?.status, 'running');
   }
@@ -114,9 +115,8 @@ test('recipient task closure or revocation while a sealed response is in flight 
 
 test('two encrypted vaults deliver an exact 1MiB remote file through a bounded sealed envelope', { timeout: 30000 }, async t => {
   const f = await pair(t), payload = Buffer.alloc(MAX_SECRET_BYTES, 0xa5);
-  const secret = await f.a.create({ name: 'maximum fixture file', kind: 'file', scope: 'project', projectId: f.logical.id, content: payload.toString('base64') });
-  await assert.rejects(f.a.create({ name: 'oversized fixture file', kind: 'file', scope: 'project', projectId: f.logical.id, content: Buffer.alloc(MAX_SECRET_BYTES + 1).toString('base64') }));
-  await f.a.setRule({ groupId: secret.groupId, secretIds: [secret.id], hostId: f.b.device().id, projectId: f.logical.id, activation: 'auto', operations: ['discover', 'file'], enabled: true });
+  const secret = await f.a.create({ name: 'maximum fixture file', kind: 'file', content: payload.toString('base64'), sharing: f.toB });
+  await assert.rejects(f.a.create({ name: 'oversized fixture file', kind: 'file', content: Buffer.alloc(MAX_SECRET_BYTES + 1).toString('base64'), sharing: f.toB }));
   for (let use = 0; use < 4; use++) {
     const result = await f.relay(f.recipient.tool(f.capB, 'secrets_run', { operationId: `maximum-remote-file-${use}`, command: process.execPath,
       args: ['-e', "const v=require('fs').readFileSync(process.argv[1]);console.log(v.length+':'+require('crypto').createHash('sha256').update(v).digest('hex'));", '{secret-file:MAXIMUM}'], files: { MAXIMUM: secret.reference } })) as SecretRunResult;
