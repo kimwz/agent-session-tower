@@ -207,6 +207,7 @@ export const english: Record<string, string> = {
   "GLOBAL로 저장하면 이 보관함이 시크릿을 제공하는 모든 컴퓨터에 적용됩니다.": "Saved as GLOBAL, it applies to every computer this vault serves secrets to.",
   "GLOBAL이 켜져 있으면 모든 폴더에 공유됩니다. 고른 폴더는 GLOBAL을 끄면 적용됩니다.": "With GLOBAL on it is shared with every folder. The chosen folders apply once GLOBAL is off.",
   "승인이 해제된 컴퓨터의 폴더는 저장하면 빠집니다.": "Folders of computers no longer approved are dropped when you save.",
+  "승인을 해제한 컴퓨터의 폴더입니다. 그대로 두면 다시 승인했을 때 적용되고, 빼면 공유에서 지워집니다.": "These folders are on a computer no longer approved. Kept, they apply again once it is approved; removed, they leave the sharing.",
   "공유 설정이 다른 곳에서 바뀌었습니다. 지금 저장된 내용을 불러왔으니 확인한 뒤 다시 저장하세요.": "The sharing was changed elsewhere. What is stored now has been loaded; check it and save again.",
   "등록한 시크릿과 각 시크릿의 공유 범위를 관리합니다.": "Manage saved secrets and where each one is shared.",
   "공유 편집 · {0}": "Edit sharing · {0}",

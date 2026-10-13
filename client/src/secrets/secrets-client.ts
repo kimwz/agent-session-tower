@@ -27,7 +27,8 @@ export const WORKER_PENDING = '새 실행 워커 적용 대기 중입니다. 진
 export function secretFailure(failure: unknown, t: (key: string) => string): string {
   if (workerPending(failure)) return t(WORKER_PENDING);
   if (failure instanceof ApiError && failure.status === 423) return t('시크릿 보관함이 잠겨 있습니다. 잠금을 해제한 뒤 다시 시도하세요.');
-  if (failure instanceof ApiError && failure.status >= 400 && failure.status < 500 && failure.status !== 401 && failure.message) return t(failure.message);
+  // A 503 names a joined computer that is not connected now.
+  if (failure instanceof ApiError && ((failure.status >= 400 && failure.status < 500 && failure.status !== 401) || failure.status === 503) && failure.message) return t(failure.message);
   return t('시크릿 요청을 완료하지 못했습니다. 잠금 상태와 입력을 확인하세요.');
 }
 export function secretLoadFailure(failure: unknown, t: (key: string) => string): string {
@@ -148,16 +149,23 @@ export function sharingSummary(view: SecretHosts, item: SecretSettingsItem, choi
     folders: sharing.folders.map(folder => describeFolder(view, folder, choices)), limited: !!legacy?.limited };
 }
 
-/** The sharing editor's state: GLOBAL, the chosen canvas keys, and stored folders of computers this vault no longer knows. */
-export interface SharingDraft { global: boolean; keys: string[]; unresolved: FolderView[] }
+/**
+ * The sharing editor's state: GLOBAL, the chosen canvas keys, stored folders of a computer this vault no longer trusts
+ * (kept as `{hostId, root}` until removed), and a legacy secret's folders on such a computer, which saving drops.
+ */
+export interface SharingDraft { global: boolean; keys: string[]; kept: SecretFolder[]; dropped: FolderView[] }
 /** Starts from the stored sharing, or for a legacy secret from what its rules share. */
 export function sharingDraft(view: SecretHosts, item: SecretSettingsItem, choices: readonly SecretFolderChoice[]): SharingDraft {
   const summary = sharingSummary(view, item, choices);
-  return { global: summary.global, keys: [...new Set(summary.folders.flatMap(folder => folder.key ? [folder.key] : []))], unresolved: summary.folders.filter(folder => !folder.key) };
+  const stored = item.sharing ? item.sharing.folders : item.legacy?.folders ?? [];
+  const unknown = stored.filter(folder => !folderKey(view, folder));
+  return { global: summary.global, keys: [...new Set(summary.folders.flatMap(folder => folder.key ? [folder.key] : []))],
+    kept: item.sharing ? unknown.map(({ hostId, root }) => ({ hostId, root })) : [], dropped: item.sharing ? [] : unknown.map(folder => describeFolder(view, folder, choices)) };
 }
 /** Saving replaces the sharing with what the editor shows; a legacy secret has revision 0. */
-export function sharingPayload(item: SecretSettingsItem, draft: Pick<SharingDraft, 'global' | 'keys'>) {
-  return { secretId: item.id, revision: item.sharing?.revision ?? 0, global: draft.global, folders: draft.keys.map(cwd => ({ cwd })) };
+export function sharingPayload(item: SecretSettingsItem, draft: Pick<SharingDraft, 'global' | 'keys' | 'kept'>) {
+  return { secretId: item.id, revision: item.sharing?.revision ?? 0, global: draft.global,
+    folders: [...draft.keys.map(cwd => ({ cwd })), ...draft.kept.map(({ hostId, root }) => ({ hostId, root }))] };
 }
 export function folderMatches(folder: FolderView, query: string): boolean {
   const term = query.trim().toLocaleLowerCase();

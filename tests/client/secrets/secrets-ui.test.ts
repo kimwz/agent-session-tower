@@ -5,8 +5,9 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { SecretPeer, SecretSessionView, SecretSettingsItem, SecretSettingsView } from '../../../shared/secrets.js';
 import {
   addPayload, describeFolder, folderIdentity, folderKey, pastePayload, pollDelay, quickSecretKind, secretFolderChoices, secretSession, secretSessionPath,
-  sessionBlocked, sharingDraft, sharingPayload, sharingSummary, suggestedSecretName, usedSecrets, type SecretFolderChoice,
+  secretFailure, sessionBlocked, sharingDraft, sharingPayload, sharingSummary, suggestedSecretName, usedSecrets, WORKER_PENDING, type SecretFolderChoice,
 } from '../../../client/src/secrets/secrets-client.js';
+import { ApiError } from '../../../client/src/common/lib.js';
 import { SecretAccess } from '../../../client/src/secrets/SecretAccess.js';
 import { SecretSettingsWorkspace } from '../../../client/src/secrets/SecretSettings.js';
 import { SecretSharingEditor } from '../../../client/src/secrets/SecretSharingEditor.js';
@@ -93,12 +94,24 @@ test('a row summary names folders by canvas label, path and computer, and an unk
 
 test('the sharing editor starts from stored sharing or the legacy summary and saves folders as canvas keys with the revision', () => {
   const shared = sharingDraft(view, view.secrets[1]!, choices);
-  assert.deepEqual(shared, { global: false, keys: ['/work/app', `@${node}//srv/app`], unresolved: [] });
+  assert.deepEqual(shared, { global: false, keys: ['/work/app', `@${node}//srv/app`], kept: [], dropped: [] });
   assert.deepEqual(sharingPayload(view.secrets[1]!, shared), { secretId: 'folder_key', revision: 1, global: false, folders: [{ cwd: '/work/app' }, { cwd: `@${node}//srv/app` }] });
   const legacy = sharingDraft(view, view.secrets[3]!, choices);
-  assert.equal(legacy.global, true); assert.deepEqual(legacy.keys, []); assert.deepEqual(legacy.unresolved.map(folder => folder.root), ['/old/app']);
-  assert.deepEqual(sharingPayload(view.secrets[3]!, { global: true, keys: [] }), { secretId: 'legacy_key', revision: 0, global: true, folders: [] }, 'a legacy secret saves with revision 0');
-  assert.equal(sharingPayload(view.secrets[0]!, { global: false, keys: [] }).revision, 3);
+  assert.equal(legacy.global, true); assert.deepEqual(legacy.keys, []); assert.deepEqual(legacy.kept, []); assert.deepEqual(legacy.dropped.map(folder => folder.root), ['/old/app']);
+  assert.deepEqual(sharingPayload(view.secrets[3]!, { global: true, keys: [], kept: [] }), { secretId: 'legacy_key', revision: 0, global: true, folders: [] }, 'a legacy secret saves with revision 0');
+  assert.equal(sharingPayload(view.secrets[0]!, { global: false, keys: [], kept: [] }).revision, 3);
+  const away = item('away_key', { sharing: { revision: 7, global: false, folders: [{ hostId: device.id, root: '/work/app' }, { hostId: 'gone-device', root: '/old/app' }] } });
+  const draft = sharingDraft(view, away, choices);
+  assert.deepEqual(draft.kept, [{ hostId: 'gone-device', root: '/old/app' }], 'a stored folder of a computer no longer trusted is kept as it was received');
+  assert.deepEqual(sharingPayload(away, draft).folders, [{ cwd: '/work/app' }, { hostId: 'gone-device', root: '/old/app' }]);
+});
+
+test('a refused save names its reason: a disconnected joined computer, an outdated worker, or the generic hint', () => {
+  const t = (key: string) => key;
+  assert.equal(secretFailure(new ApiError('그 컴퓨터가 지금 연결되어 있지 않습니다.', 503), t), '그 컴퓨터가 지금 연결되어 있지 않습니다.');
+  assert.equal(secretFailure(new ApiError('ignored', 503, undefined, 'worker-update-pending'), t), WORKER_PENDING);
+  assert.equal(secretFailure(new ApiError('internal detail', 500), t), '시크릿 요청을 완료하지 못했습니다. 잠금 상태와 입력을 확인하세요.');
+  assert.equal(secretFailure(new ApiError('폴더가 아닙니다.', 400), t), '폴더가 아닙니다.');
 });
 
 test('a chat paste is temporary and connected by default; saving keeps it in the vault with the chosen sharing', () => {
@@ -169,6 +182,8 @@ test('the sharing editor offers every computer’s folders with path and compute
   const legacy = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: view.secrets[3]!, choices, busy: false, change, onClose: noop }));
   assert.match(legacy, /기존 규칙/); assert.match(legacy, /type="checkbox" checked=""/); assert.match(legacy, /사용 방식·필드·기간 제한은 저장하면 사라집니다/);
   assert.match(legacy, /승인이 해제된 컴퓨터의 폴더는 저장하면 빠집니다/); assert.match(legacy, /gone-device/);
+  const away = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: item('away', { sharing: { revision: 1, global: false, folders: [{ hostId: 'gone-device', root: '/old/app' }] } }), choices, busy: false, change, onClose: noop }));
+  assert.match(away, /승인을 해제한 컴퓨터의 폴더입니다/); assert.match(away, /aria-label="app 선택 해제"/); assert.doesNotMatch(away, /저장하면 빠집니다/);
   const withheld = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: view.secrets[4]!, choices, busy: false, change, onClose: noop }));
   assert.match(withheld, /구버전에서 규칙이 바뀌었습니다/);
 });

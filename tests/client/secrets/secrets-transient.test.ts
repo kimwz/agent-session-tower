@@ -192,14 +192,22 @@ test('registration accepts empty uploaded file bytes and sends their canonical e
 
 test('saving sharing sends the stored revision, GLOBAL and the picked folders as canvas keys', async () => {
   const { sent, change, answer } = changes(); let closed = false;
-  const editor = fixture('SecretSharingEditor.tsx', 'SecretSharingEditor', { view: settingsView, item: settingsView.secrets[0], choices: [], busy: false, change, onClose() { closed = true; } });
+  const stored = { ...settingsView.secrets[0]!, sharing: { revision: 5, global: false, folders: [{ hostId: 'source', root: '/work/app' }, { hostId: 'gone', root: '/old' }] } };
+  const editor = fixture('SecretSharingEditor.tsx', 'SecretSharingEditor', { view: settingsView, item: stored, choices: [], busy: false, change, onClose() { closed = true; } });
   const picker = () => find(editor.render(), element => element.type === editor.exports.SecretFolderPicker);
   assert.deepEqual(picker().props.keys, ['/work/app']);
   find(editor.render(), element => element.type === 'input' && element.props.type === 'checkbox').props.onChange({ target: { checked: true } });
   picker().props.onKeys(['/work/app', `@${node}//srv/app`]);
   find(editor.render(), byType('form')).props.onSubmit(formEvent);
-  assert.deepEqual(sent, [['sharing', { secretId: 'folder_key', revision: 5, global: true, folders: [{ cwd: '/work/app' }, { cwd: `@${node}//srv/app` }] }]]);
+  assert.deepEqual(sent, [['sharing', { secretId: 'folder_key', revision: 5, global: true, folders: [{ cwd: '/work/app' }, { cwd: `@${node}//srv/app` }, { hostId: 'gone', root: '/old' }] }]],
+    'a folder of a computer no longer trusted stays as it was received');
   answer(); await tick(); assert.equal(closed, true); editor.cleanup();
+  const removing = changes();
+  const trimmed = fixture('SecretSharingEditor.tsx', 'SecretSharingEditor', { view: settingsView, item: stored, choices: [], busy: false, change: removing.change, onClose() {} });
+  find(trimmed.render(), element => element.props['aria-label'] === 'old 선택 해제').props.onClick();
+  find(trimmed.render(), byType('form')).props.onSubmit(formEvent);
+  assert.deepEqual(removing.sent[0]![1].folders, [{ cwd: '/work/app' }]);
+  removing.answer(); await tick(); trimmed.cleanup();
   const legacy = changes();
   const prefilled = fixture('SecretSharingEditor.tsx', 'SecretSharingEditor', { view: settingsView, item: settingsView.secrets[1], choices: [], busy: false, change: legacy.change, onClose() {} });
   find(prefilled.render(), byType('form')).props.onSubmit(formEvent);

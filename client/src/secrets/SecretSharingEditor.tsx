@@ -4,7 +4,7 @@ import type { SecretSettingsItem, SecretSettingsView } from '../../../shared/sec
 import { useI18n } from '../i18n/i18n';
 import type { SecretChange } from './SecretAccess';
 import {
-  describeChoice, describeKey, folderIdentity, folderMatches, sharingDraft, sharingPayload,
+  describeChoice, describeFolder, describeKey, folderIdentity, folderMatches, sharingDraft, sharingPayload,
   type FolderView, type SecretFolderChoice, type SharingSummary,
 } from './secrets-client';
 
@@ -70,11 +70,11 @@ export function SecretSharingEditor({ view, item, choices, busy, change, onClose
 }) {
   const { t } = useI18n();
   const [initial] = useState(() => sharingDraft(view, item, choices));
-  const [global, setGlobal] = useState(initial.global); const [keys, setKeys] = useState(initial.keys);
+  const [global, setGlobal] = useState(initial.global); const [keys, setKeys] = useState(initial.keys); const [kept, setKept] = useState(initial.kept);
   const legacy = !item.sharing && item.legacy;
   return <form className="secret-form secret-sharing-editor" onSubmit={async event => {
     event.preventDefault(); event.stopPropagation();
-    if (await change('sharing', sharingPayload(item, { global, keys }))) onClose();
+    if (await change('sharing', sharingPayload(item, { global, keys, kept }))) onClose();
   }}>
     <h3>{t('공유 편집')} · {item.name}</h3>
     {legacy && <div className="secret-notice"><span className="secret-badge secret-legacy">{t('기존 규칙')}</span>
@@ -88,10 +88,13 @@ export function SecretSharingEditor({ view, item, choices, busy, change, onClose
     <fieldset><legend>{t('폴더')}</legend>
       {global && <p className="secret-hint">{t('GLOBAL이 켜져 있으면 모든 폴더에 공유됩니다. 고른 폴더는 GLOBAL을 끄면 적용됩니다.')}</p>}
       <SecretFolderPicker view={view} choices={choices} keys={keys} onKeys={setKeys} disabled={busy} />
-      {!!initial.unresolved.length && <div className="secret-unresolved"><p>{t('승인이 해제된 컴퓨터의 폴더는 저장하면 빠집니다.')}</p>
-        <ul className="secret-chip-list">{initial.unresolved.map(folder => <li key={`${folder.computer}:${folder.root}`} className="secret-chip secret-chip-muted" title={folderTitle(folder)}><FolderChipBody folder={folder} /></li>)}</ul></div>}
+      {!!kept.length && <div className="secret-unresolved"><p>{t('승인을 해제한 컴퓨터의 폴더입니다. 그대로 두면 다시 승인했을 때 적용되고, 빼면 공유에서 지워집니다.')}</p>
+        <ul className="secret-chip-list">{kept.map(folder => { const shown = describeFolder(view, folder, choices); return <li key={`${folder.hostId}:${folder.root}`} className="secret-chip secret-chip-muted" title={folderTitle(shown)}><FolderChipBody folder={shown} />
+          <button type="button" disabled={busy} aria-label={t('{0} 선택 해제', { 0: shown.label })} onClick={() => setKept(kept.filter(item => item !== folder))}><X size={12} /></button></li>; })}</ul></div>}
+      {!!initial.dropped.length && <div className="secret-unresolved"><p>{t('승인이 해제된 컴퓨터의 폴더는 저장하면 빠집니다.')}</p>
+        <ul className="secret-chip-list">{initial.dropped.map(folder => <li key={`${folder.computer}:${folder.root}`} className="secret-chip secret-chip-muted" title={folderTitle(folder)}><FolderChipBody folder={folder} /></li>)}</ul></div>}
     </fieldset>
-    {!global && !keys.length && <p className="secret-hint">{t('아무것도 고르지 않으면 공유하지 않습니다. 채팅의 ‘기존 시크릿 연결’로 세션마다 연결할 수 있습니다.')}</p>}
+    {!global && !keys.length && !kept.length && <p className="secret-hint">{t('아무것도 고르지 않으면 공유하지 않습니다. 채팅의 ‘기존 시크릿 연결’로 세션마다 연결할 수 있습니다.')}</p>}
     <div className="secret-actions"><button type="button" onClick={onClose}>{t('취소')}</button><button type="submit" className="secret-save" disabled={busy}>{t('저장')}</button></div>
   </form>;
 }
