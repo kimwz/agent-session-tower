@@ -139,6 +139,11 @@ export class RemoteSecretBroker {
     const confirmed = Array.isArray(features) ? OPERATIONS.filter(operation => operation === 'available' && features.includes(operation)) : [];
     if (peer && confirmed.length) this.features.set(controllerRouteId, { deviceId: peer.device.id, features: confirmed, at: this.now() });
     else this.features.delete(controllerRouteId);
+    // A read queued while this source confirmed reads is refused here once it no longer does, never handed to its relay.
+    for (const [id, pending] of this.waiting) {
+      if (pending.request.operation !== 'available' || pending.peer.routeId !== controllerRouteId || this.supports(pending.peer.device.id, 'available')) continue;
+      this.waiting.delete(id); clearTimeout(pending.timer); pending.reject(refusal('SECRET_REMOTE_UNSUPPORTED'));
+    }
     return [...this.waiting.values()].filter(p => p.request.expiresAt > this.now() && this.options.peers().some(peer => peer.enabled && peer.direction === 'controller' && peer.routeId === controllerRouteId && peer.device.id === p.peer.device.id && peer.device.signingKey === p.peer.device.signingKey && peer.device.encryptionKey === p.peer.device.encryptionKey))
       .slice(0, 8).map(p => structuredClone(p.request));
   }

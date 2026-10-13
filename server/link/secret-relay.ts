@@ -10,7 +10,8 @@ export interface SecretRelayOptions {
   workerAnswer: (nodeRouteId: string, request: RemoteSecretRequest) => Promise<RemoteSecretResponse>;
   /** Remote operations the attached worker serves beyond the first protocol (`available`), told to each node on every poll. */
   features?: () => string[];
-  onError?: (nodeRouteId: string, code: 'SECRET_RELAY_UNAVAILABLE') => void;
+  /** `SECRET_RELAY_UNSUPPORTED`: a node asked for an operation the attached worker no longer serves; it was not passed on. */
+  onError?: (nodeRouteId: string, code: 'SECRET_RELAY_UNAVAILABLE' | 'SECRET_RELAY_UNSUPPORTED') => void;
 }
 /** The controller web process forwards envelopes; it never holds Vault keys or resolved values. */
 export class SecretRelay {
@@ -41,6 +42,8 @@ export class SecretRelay {
         || !Array.isArray(answer.json.requests) || answer.json.requests.length > 8) throw new Error('SECRET_RELAY_UNAVAILABLE');
       for (const request of answer.json.requests) {
         if (this.stopped) return;
+        // The worker may have been replaced since this poll said what it serves; an older one is never handed a read.
+        if ((request as Partial<RemoteSecretRequest> | null)?.operation === 'available' && !(this.options.features?.() ?? []).includes('available')) { this.options.onError?.(id, 'SECRET_RELAY_UNSUPPORTED'); continue; }
         try {
           const response = await this.options.workerAnswer(id, request as RemoteSecretRequest);
           if (this.stopped) return;
