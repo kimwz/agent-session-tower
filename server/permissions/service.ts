@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { resolveModel } from '../models/settings.js';
 import type { ResolvedModel } from '../../shared/models.js';
 import {
-  CONVERSATION_RULE_HOURS, DEFAULT_AUTO_REVIEW, MAX_RUN_SECONDS, autoReviewBlock, waitingForOwner, claudeRule, codexRule, normalizeCommand, ruleGuards, ruleIsNarrower, rulesOverlap, ruleProblem, sameRule,
+  absoluteFileRule, CONVERSATION_RULE_HOURS, DEFAULT_AUTO_REVIEW, MAX_RUN_SECONDS, autoReviewBlock, waitingForOwner, claudeRule, codexRule, normalizeCommand, ruleGuards, ruleIsNarrower, rulesOverlap, ruleProblem, sameRule,
   type PermissionAutoReview, type PermissionOverview, type PermissionProvider, type PermissionRequest, type PermissionReview, type PermissionReviewVerdict,
   type PermissionRule, type PermissionRuleInput, type PermissionRun, type PermissionRunOutput, type PermissionTarget, type ReviewedFile, MAX_REVIEW_REASON,
 } from '../../shared/permissions.js';
@@ -425,6 +425,9 @@ export class PermissionService {
       if (!caller.sessionId || !session?.cwd) throw failure('권한 요청은 Tower에서 시작한 대화에서만 보낼 수 있습니다.', 'forbidden');
       const provider: PermissionProvider = session.provider === 'codex' ? 'codex' : 'claude';
       if (input.scope === 'conversation' && provider !== 'claude') throw failure('Codex 대화에는 대화 한정 규칙을 줄 수 없습니다. project 범위로 요청하거나 permissions_run으로 한 번 실행을 요청하세요.');
+      // Saved as asked it would never match the file meant (2026-10-13: Edit(/Users/…) was allowed and still refused).
+      const absolute = absoluteFileRule(input);
+      if (absolute) throw failure(`Claude 파일 규칙에서 /로 시작하는 경로는 프로젝트 기준 상대 경로입니다. 절대 경로는 //로 시작해 다시 요청하세요: ${absolute}`);
       const rule = await this.checked(clean({ kind: input.kind, value: input.value, providers: input.kind === 'claude' || input.scope === 'conversation' ? ['claude'] : input.providers ?? [provider], scope: input.scope,
         ...(input.scope !== 'global' ? { cwd: session.cwd } : {}), ...(input.scope === 'conversation' ? { sessionId: caller.sessionId, expiresAt: this.expiry() } : {}) }));
       // A rule for every project, for this project or for this conversation already covers what the request asks for.
