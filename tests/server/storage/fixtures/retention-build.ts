@@ -237,7 +237,16 @@ runStorageThread([domain${runsRelease ? ', runsDomain' : ''}${triggersRelease ? 
     artifacts.normal=artifact;
   }
   const parentPath = join(directory, 'parent.mjs');
-  await build({ entryPoints: [join(root, 'tests/server/storage/fixtures/parent.ts')], outfile: parentPath, bundle: true, platform: 'node', format: 'esm', target: 'node22', logLevel: 'silent', plugins: [versionPlugin, buildIdentityPlugin(buildIdentityModule({ artifact:JSON.stringify(artifacts[defaultFault]), contexts: Object.values(artifacts).map(artifact => ({ sourceHash: artifact.sourceHash, manifest })) }))] });
+  // Compile only immutable parent code once. Every fixture still imports a private module and private identity.
+  await writeFile(join(directory, 'identity-profile.mjs'), buildIdentityModule({ artifact: JSON.stringify(artifacts[defaultFault]), contexts: Object.values(artifacts).map(artifact => ({ sourceHash: artifact.sourceHash, manifest })) }));
+  const parentProfile = JSON.stringify({ root, version, preparation, retentionCutover, includePermissions, externalDomains, threadFaultDomain, capture, actualACapture, triggerACapture, serviceFixture: product?.serviceFixture });
+  const parentBody = await fixtureCompileCache.compile('private-parent-module', directory, `parent:${parentProfile}`, async () => {
+    const result = await build({ entryPoints: [join(root, 'tests/server/storage/fixtures/parent.ts')], write: false, bundle: true, platform: 'node', format: 'esm', target: 'node22', logLevel: 'silent', external: ['tower-fixture-private-identity'], plugins: [versionPlugin, buildIdentityPlugin('export { BUILD_STORAGE } from "tower-fixture-private-identity";')] });
+    const body = result.outputFiles[0].text;
+    assert.ok(body.includes('"tower-fixture-private-identity"'), 'private identity import was not retained');
+    return body.replaceAll('"tower-fixture-private-identity"', '"./identity-profile.mjs"');
+  }, reuseThreads);
+  await writeFile(parentPath, parentBody);
   const storage = await import(pathToFileURL(parentPath).href) as typeof Parent;
   const bundle = (fault = defaultFault) => {
     const captured = storage.storageBundleFromArtifact(JSON.stringify(artifacts[fault]), 'artifact');

@@ -31,7 +31,9 @@ test('cached fixture bytes match fresh compilation for every fault and each priv
   t.after(() => rm(root, { recursive: true, force: true }));
   const a = await retentionBuild('1.123.0', join(root, 'one'));
   const b = await retentionBuild('1.123.0', join(root, 'two'));
+  const parentBefore = await readFile(join(b.directory, 'parent.mjs'), 'utf8');
   const fresh = await retentionBuild('1.123.0', b.directory, true, false, false, undefined, false, 'normal', false);
+  assert.equal(await readFile(join(b.directory, 'parent.mjs'), 'utf8'), parentBefore, 'cached parent bytes match cold compilation');
   assert.notEqual(a.storage, b.storage, 'mutable module hooks are private');
   for (const fault of ['normal', 'before', 'after', 'after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss', 'after-unsent-compensation', 'refuse-once', 'corrupt', 'io']) {
     const cached = b.bundle(fault), cold = fresh.bundle(fault);
@@ -75,7 +77,9 @@ test('product fault cache matches cold bytes while the actual normal artifact re
   const product = { ...await currentProductProfile(), serviceFixture: { installed: true, loadedAtCheck: 3 } };
   const a = await retentionBuild(APP_VERSION, join(root, 'one'), true, true, true, product);
   const b = await retentionBuild(APP_VERSION, join(root, 'two'), true, true, true, product);
+  const parentBefore = await readFile(join(b.directory, 'parent.mjs'), 'utf8');
   const fresh = await retentionBuild(APP_VERSION, b.directory, true, true, true, product, false, 'normal', false);
+  assert.equal(await readFile(join(b.directory, 'parent.mjs'), 'utf8'), parentBefore, 'cached parent bytes match cold compilation');
   assert.notEqual(a.storage, b.storage);
   assert.equal(b.bundle().sourceHash, product.artifact.sourceHash);
   for (const fault of ['normal', 'remote-completed-refused', 'inspect-exit-once', 'runs-before', 'before', 'after', 'after-native-hold', 'after-steer-hold', 'runs-refuse-compensation-loss', 'after-unsent-compensation', 'refuse-once', 'corrupt', 'io']) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { openSync, closeSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { openSync, closeSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { plan, validateReceipts } from './ci-plan.mjs';
 import { testedInput } from './ci-input.mjs';
@@ -19,9 +19,10 @@ const run = (node, args, cwd, env, log) => new Promise((accept, reject) => {
 if (action === 'prepare') {
   mkdirSync(record, { recursive: true, mode: 0o700 });
   const input = testedInput();
+  const executionRoot = mkdtempSync('/private/tmp/tower-ci-worktrees-');
   const lanes = plan().filter(l => l.os === 'macos-latest').map(lane => ({ ...lane,
-    cwd: join(record, `worktree-${lane.id}`), nodePath: resolve(toolchains, `node-v${lane.node}-darwin-arm64`, 'bin', 'node') }));
-  const batch = { input, admitted: Date.now(), lanes };
+    cwd: join(executionRoot, `worktree-${lane.id}`), nodePath: resolve(toolchains, `node-v${lane.node}-darwin-arm64`, 'bin', 'node') }));
+  const batch = { input, executionRoot, admitted: Date.now(), lanes };
   writeFileSync(manifestPath, JSON.stringify(batch, null, 2));
   for (const lane of lanes) {
     git(['worktree', 'add', '--detach', lane.cwd, input.commit]);
@@ -29,7 +30,7 @@ if (action === 'prepare') {
     assert.equal(execFileSync(lane.nodePath, ['-p', 'process.versions.node'], { encoding: 'utf8' }).trim(), lane.node);
   }
   const results = await Promise.allSettled(lanes.map(lane => run(lane.nodePath, ['scripts/ci-run.mjs', 'prepare', lane.id], lane.cwd,
-    { PATH: `${resolve(lane.nodePath, '..')}:${process.env.PATH}`, GITHUB_SHA: input.commit, RUNNER_TEMP: join(record, 'jobs') }, join(record, `${lane.id}-prepare.log`))));
+    { PATH: `${resolve(lane.nodePath, '..')}:/usr/bin:/bin:/usr/sbin:/sbin`, GITHUB_SHA: input.commit, RUNNER_TEMP: join(record, 'jobs') }, join(record, `${lane.id}-prepare.log`))));
   batch.ready = Date.now(); batch.prepareExit = results.every(r => r.status === 'fulfilled') ? 0 : 1;
   writeFileSync(manifestPath, JSON.stringify(batch, null, 2));
   for (const result of results) if (result.status === 'rejected') console.error(result.reason.message);
@@ -40,7 +41,7 @@ if (action === 'prepare') {
   assert.deepEqual(testedInput(), batch.input, 'parent source changed since prepare');
   const testStarted = Date.now();
   const results = await Promise.allSettled(batch.lanes.map(lane => run(lane.nodePath, ['scripts/ci-run.mjs', 'test', lane.id], lane.cwd,
-    { PATH: `${resolve(lane.nodePath, '..')}:${process.env.PATH}`, GITHUB_SHA: batch.input.commit, RUNNER_TEMP: join(record, 'jobs') }, join(record, `${lane.id}-test.log`))));
+    { PATH: `${resolve(lane.nodePath, '..')}:/usr/bin:/bin:/usr/sbin:/sbin`, GITHUB_SHA: batch.input.commit, RUNNER_TEMP: join(record, 'jobs') }, join(record, `${lane.id}-test.log`))));
   for (const result of results) if (result.status === 'rejected') console.error(result.reason.message);
   assert.ok(results.every(r => r.status === 'fulfilled'), 'a local test process failed');
   const receipts = batch.lanes.map(lane => JSON.parse(readFileSync(join(record, 'jobs', `ci-${lane.id}`, 'receipt.json'), 'utf8')));

@@ -299,11 +299,14 @@ process.send({ready:true});`);
       if (failure === 'foreign') return { ...proof, worker: { ...proof.worker, sourceHash: 'f'.repeat(64) } };
       if (failure === 'database') throw new Error('Database closed/corrupt/barrier');
       if (failure === 'stale') throw Object.assign(new Error('Stale rollback fence'), { statusCode: 409 });
-      if (failure === 'late') await delay(250);
+      if (failure === 'late') t.mock.timers.setTime(Date.now() + 10_001);
       if (failure === 'abort-return') cancelled.abort();
       return proof;
     } } };
-    const result = await storageWebServing(failing, { intervalMs: 5, timeoutMs: failure === 'late' ? 200 : 1000, signal: cancelled.signal });
+    // Real SDK/process proofs remain; only the deliberately late proof policy uses a virtual clock.
+    if (failure === 'late') t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    const result = await storageWebServing(failing, { intervalMs: 5, timeoutMs: failure === 'late' ? 10_000 : 1000, signal: cancelled.signal });
+    if (failure === 'late') t.mock.timers.reset();
     assert.ok(result && 'record' in result && result.record.handoff?.state === 'unknown', failure);
     assert.equal(calls, 2, `${failure} stops observation`);
     const retained = await readRollbackRecord(state);
