@@ -12,7 +12,7 @@ import { SecretSessionPoller } from './session-poller';
 import { postSecret, readSecretSession, secretFailure, secretLoadFailure, secretSession, sessionBlocked, usedSecrets } from './secrets-client';
 
 /** Actions on this session's task; their answer is the session view. Vault setup and unlock answer with the settings view. */
-const SESSION_ACTIONS = new Set(['create', 'session-connect', 'session-disconnect']);
+const SESSION_ACTIONS = new Set(['create', 'session-connect', 'session-disconnect', 'session-reallow']);
 
 /** One session's secret view, read by `SecretSessionPoller`; nothing here connects anything until a button asks. */
 function useSecretSession(token: string, sessionId: string, open: boolean) {
@@ -41,7 +41,7 @@ function useSecretSession(token: string, sessionId: string, open: boolean) {
         if (poller.current === current) current.apply(next);
       } else {
         await postSecret<unknown>(action, token, body);
-        if (poller.current === current) current.wake();
+        if (poller.current === current) current.release(true);
       }
       return poller.current === current;
     } catch (failure) {

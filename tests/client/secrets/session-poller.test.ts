@@ -64,6 +64,19 @@ test('a read that started before a mutation never overwrites the mutation’s an
   instance.stop();
 });
 
+test('a read asked for during a mutation waits for its end, so it cannot land before the mutation’s answer', async () => {
+  const { instance, timers, reads, shown } = poller(true);
+  instance.start(); reads[0]!.resolve(view()); await tick();
+  instance.hold(); instance.wake(); instance.setOpen(false); instance.setOpen(true);
+  assert.equal(reads.length, 1, 'focus and reopening during the mutation read nothing yet'); assert.deepEqual(timers.waits(), []);
+  instance.release(); assert.equal(reads.length, 2, 'the deferred read starts when the mutation ends');
+  reads[1]!.resolve(view()); await tick(); assert.equal(shown.length, 2);
+  instance.hold(); instance.release(true); assert.equal(reads.length, 3, 'a mutation without a view of its own asks for one');
+  instance.hold(); instance.wake(); const answer = view({ usage: [] }); instance.apply(answer);
+  assert.equal(reads.length, 3, 'a mutation’s answer replaces the deferred read'); assert.equal(shown.at(-1), answer);
+  instance.stop();
+});
+
 test('a failed read is reported and reading carries on; a stopped poller ignores late answers', async () => {
   const { instance, timers, reads, shown, errors } = poller(true);
   instance.start(); reads[0]!.reject(new Error('offline')); await tick();

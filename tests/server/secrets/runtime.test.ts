@@ -662,6 +662,23 @@ test('a session view shows this session’s recent uses, newest first, and what 
   } finally { await f.cleanup(); }
 });
 
+test('a value pasted for one session and disconnected there is offered to connect again, and comes back only in that session', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize();
+    const pasted = (await f.runtime.control('create', { sessionId: f.session.id, name: 'PASTED', kind: 'scalar', value: canary, connect: 'session', temporary: true }) as SecretSessionView).available[0]!;
+    const stopped = await f.runtime.control('session-disconnect', { sessionId: f.session.id, secretIds: [pasted.id] }) as SecretSessionView;
+    assert.deepEqual([stopped.available, stopped.connectable], [[], []]);
+    assert.deepEqual(stopped.disconnected?.map(item => [item.name, item.remote, item.sourceHostId]), [['PASTED', false, f.service.device().id]]);
+    assert.deepEqual((await f.runtime.control('session-reallow', { sessionId: f.session.id, secretIds: [pasted.id] }) as SecretSessionView).available, [], 'allowing again never connects this vault’s own value');
+    const back = await f.runtime.control('session-connect', { sessionId: f.session.id, secretIds: [pasted.id] }) as SecretSessionView;
+    assert.deepEqual([back.available.map(item => [item.name, item.basis]), back.disconnected], [[['PASTED', ['session']]], []]);
+    const other = sessionRecord(f.projectRoot, { id: 'codex:other-paste' }); f.sessions.set(other.id, other); f.origins.set(other.id, { kind: 'owner', untrustedInput: false });
+    await assert.rejects(f.runtime.control('session-connect', { sessionId: other.id, secretIds: [pasted.id] }));
+    assert.doesNotMatch(JSON.stringify([stopped, back]), new RegExp(canary));
+  } finally { await f.cleanup(); }
+});
+
 test('the owner view of a joined computer’s session reads this vault for what that computer reported, and starts nothing', async () => {
   const f = await fixture();
   try {

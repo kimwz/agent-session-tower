@@ -1,6 +1,6 @@
 import { randomUUID, randomBytes, generateKeyPairSync, createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
-import type { SecretAvailable, SecretBrokerApproval, SecretContext, SecretCreateInput, SecretDevice, SecretFolder, SecretGroup, SecretMetadata, SecretOperation, SecretPeer, SecretProject, SecretRule, SecretSettingsView, SecretSharing, SecretTarget, SecretTask, SecretUsage, VaultStatus } from '../../shared/secrets.js';
+import type { SecretAvailable, SecretBrokerApproval, SecretContext, SecretCreateInput, SecretDevice, SecretDisconnected, SecretFolder, SecretGroup, SecretMetadata, SecretOperation, SecretPeer, SecretProject, SecretRule, SecretSettingsView, SecretSharing, SecretTarget, SecretTask, SecretUsage, VaultStatus } from '../../shared/secrets.js';
 import { TowerError } from '../../shared/errors.js';
 import { MAX_SECRET_BYTES, SECRET_OPERATIONS } from '../../shared/secrets.js';
 import { SecretVault } from './vault.js';
@@ -296,6 +296,21 @@ export class SecretService {
     const task = this.ownerTask(target);
     task.connected = task.connected.filter(id => !secretIds.includes(id)); task.excluded = [...new Set([...task.excluded, ...secretIds])];
   }); }
+  /**
+   * Lifts this session's stop on keys of other sources, so each source decides their use again with its own sharing and
+   * connections. This vault's own keys come back only by connecting them; their IDs are ignored here.
+   */
+  async reallowSession(target: SecretTarget, secretIds: string[]): Promise<void> { return this.mutate(() => {
+    const task = this.ownerTask(target); const own = new Set(this.secrets().map(secret => secret.metadata.id));
+    task.excluded = task.excluded.filter(id => own.has(id) || !secretIds.includes(id));
+  }); }
+  /** What an open task stops, of any source; reads only. */
+  exclusions(taskId: string): string[] { const task = this.journal.tasks.find(task => task.id === taskId && task.status === 'open'); return task ? [...task.excluded] : []; }
+  /** This vault's values kept only with this task that `excluded` names: they come back by connecting them again. */
+  disconnectedTemporary(taskId: string, excluded: readonly string[]): SecretDisconnected[] {
+    return this.secrets().filter(secret => excluded.includes(secret.metadata.id) && this.temporaryTask(secret) === taskId)
+      .map(secret => ({ ...wireMetadata(secret.metadata), sourceHostId: this.device().id, remote: false }));
+  }
   async closeTask(taskId: string) { return this.mutate(() => { const task = this.journal.tasks.find(task => task.id === taskId); if (!task) throw new Error('Unknown task'); this.endTask(task); }); }
 
   async closeSessions(hashes: string[]): Promise<void> { return this.mutate(() => {

@@ -53,7 +53,7 @@ import { startSecretsMcp } from './secrets/runtime.js';
 import { runSecretsCommand } from './secrets/cli.js';
 import { SecretRelay } from './link/secret-relay.js';
 import { handleSecretLink, ownerSecretControl } from './link/secret-routes.js';
-import { SECRET_SHARING_FEATURE } from './secrets/folders.js';
+import { SECRET_EXCLUSIONS_FEATURE, SECRET_SHARING_FEATURE } from './secrets/folders.js';
 import type { SecretPeer } from '../shared/secrets.js';
 import type { RemoteSecretResponse } from './secrets/remote.js';
 import { overlapsRepository } from '../shared/repositories.js';
@@ -554,7 +554,7 @@ async function main() {
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
     // and updating do not.
-    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : []), ...(runs.supports('secrets') ? ['secrets'] : []), ...(runs.supports('secretSharing') ? [SECRET_SHARING_FEATURE] : []), ...(runs.supports('compaction') ? ['compaction'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
+    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : []), ...(runs.supports('secrets') ? ['secrets'] : []), ...(runs.supports('secretSharing') ? [SECRET_SHARING_FEATURE] : []), ...(runs.supports('secretExclusions') ? [SECRET_EXCLUSIONS_FEATURE] : []), ...(runs.supports('compaction') ? ['compaction'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
     handle: async (req, res, principal) => {
       if (await handleSecretLink(req, res, principal.controllerId, runs, { excluded: path => exclusions.excludesNow(path) })) return;
       return remoteRouter.handle(req, res, principal);

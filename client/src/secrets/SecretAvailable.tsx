@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { KeyRound, Link2, Plus, Search, Settings2, Unlink } from 'lucide-react';
+import { KeyRound, Link2, Plus, RotateCcw, Search, Settings2, Unlink } from 'lucide-react';
 import type { SecretBasis, SecretSessionError, SecretSessionView } from '../../../shared/secrets';
 import { useI18n } from '../i18n/i18n';
 import { relativeTime } from '../common/lib';
@@ -37,14 +37,17 @@ export function SecretAvailable({ view, busy, change, onPaste, onSharing }: {
   const available = new Set(view.available.map(secret => secret.id));
   const unconnected = view.connectable.filter(secret => !available.has(secret.id));
   const candidates = unconnected.filter(secret => secretMatches(secret, query));
-  const vaultClosed = view.error === 'locked' || view.error === 'uninitialized';
+  // During a worker handoff the vault can still be unlocked here.
+  const vaultClosed = view.error === 'locked' || view.error === 'uninitialized' || (view.error === 'worker-update-pending' && view.status.initialized && view.status.locked);
+  const disconnected = view.disconnected ?? [];
   return <div className="secret-available">
     <SecretSessionState error={view.error} />
-    {vaultClosed && <SecretAccess status={view.status} busy={busy} change={change} />}
+    {vaultClosed && (view.status.initialized || view.error !== 'worker-update-pending') && <SecretAccess status={view.status} busy={busy} change={change} />}
     {!!view.unavailableSources.length && view.error !== 'source-unavailable' && <p role="status" className="secret-source-notice">{t('원본 컴퓨터 {0}곳에 연결하지 못해 그곳의 시크릿은 빠져 있습니다.', { 0: view.unavailableSources.length })}</p>}
     {/* Answering sources on an older build: not a connection failure, and they appear once they update. */}
     {!!view.updatePendingSources.length && <p role="status" className="secret-source-notice">{t('원본 컴퓨터 {0}곳이 업데이트를 기다리고 있어 그 시크릿은 아직 표시하지 않습니다.', { 0: view.updatePendingSources.length })}</p>}
-    {!vaultClosed && <>
+    {/* During a worker handoff only the vault's status is known; nothing here can change yet. */}
+    {!vaultClosed && view.error !== 'worker-update-pending' && <>
       <div className="secret-actions secret-available-actions">
         <button type="button" aria-expanded={picking} disabled={busy} onClick={() => setPicking(value => !value)}><Link2 size={14} aria-hidden="true" />{t('기존 시크릿 연결')}</button>
         <button type="button" disabled={busy} onClick={onPaste}><Plus size={14} aria-hidden="true" />{t('새 시크릿 추가')}</button>
@@ -70,6 +73,16 @@ export function SecretAvailable({ view, busy, change, onPaste, onSharing }: {
           </div>
         </li>;
       })}</ul> : <p className="secret-empty">{t('이 세션에서 사용할 수 있는 시크릿이 없습니다. 붙여넣거나 저장한 시크릿을 연결하세요.')}</p>}
+      {/* A value kept with this session comes back by connecting it; another source's key by lifting this session's stop, its source deciding the rest. */}
+      {!!disconnected.length && <section className="secret-disconnected" aria-label={t('이 세션에서 끊은 시크릿')}>
+        <h4>{t('이 세션에서 끊은 시크릿')}</h4>
+        <ul className="secret-list">{disconnected.map(secret => {
+          const remote = secret.remote;
+          return <li key={secret.id} className="secret-row"><span><strong>{secret.name}</strong><small>{t(kindLabels[secret.kind])}{remote ? ` · ${t('원격 원본')}` : ` · ${t('이 세션에만')}`}</small></span>
+            <button type="button" disabled={busy} aria-label={t('{0} 다시 허용', { 0: secret.name })} onClick={() => void change(remote ? 'session-reallow' : 'session-connect', { secretIds: [secret.id] })}><RotateCcw size={14} aria-hidden="true" />{t('다시 허용')}</button>
+          </li>;
+        })}</ul>
+      </section>}
     </>}
   </div>;
 }

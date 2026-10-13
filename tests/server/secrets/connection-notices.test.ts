@@ -6,7 +6,7 @@ import { Readable } from 'node:stream';
 import type { RemoteNodes } from '../../../server/link/nodes.js';
 import type { SecretPeer, SecretTarget } from '../../../shared/secrets.js';
 import { handleSecretLink, ownerSecretControl, WORKER_UPDATE_PENDING } from '../../../server/link/secret-routes.js';
-import { SECRET_SHARING_FEATURE } from '../../../server/secrets/folders.js';
+import { SECRET_EXCLUSIONS_FEATURE, SECRET_SHARING_FEATURE } from '../../../server/secrets/folders.js';
 
 const NODE = 'f'.repeat(32);
 const taskId = '9b979f3e-c6eb-4acf-b5b7-388cd7b2197b';
@@ -47,6 +47,9 @@ test('the paired connection notice accepts only fixed target metadata from an ap
     assert.doesNotMatch(invalid.answer, /OWNER_INPUT_MUST_NOT_BECOME_INSTRUCTIONS/);
   }
   assert.equal((await incoming({ sessionId: target.sessionId, taskId }, true, true)).status, 403);
+  // The keys a controller connected, whose stop in this session ends with the notice.
+  const lifting = await incoming({ sessionId: target.sessionId, taskId, secretIds: ['source-key'] });
+  assert.equal(lifting.status, 200); assert.deepEqual(lifting.calls.at(-1), { operation: 'connection-notice', args: [target.sessionId, taskId, ['source-key']] });
 });
 
 test('invalid chat input fails before a joined computer is asked to start a task', async () => {
@@ -105,6 +108,12 @@ test('remote connections are announced, disconnections and other changes are not
   await ownerSecretControl(link.nodes, fake, 'unlock', { nodeId: NODE, sessionId: target.sessionId, password: 'fixture' });
   assert.equal(link.notices.length, 1);
   assert.deepEqual(link.events, ['target:true', 'notice', 'subject', 'target:true', 'subject']);
+  assert.deepEqual(link.notices, [{ sessionId: target.sessionId, taskId }], 'a computer that does not report exclusions gets the notice it knows');
+  // One that reports them also lifts its own stop on the keys connected; a new value has none to lift.
+  const lifting = await node(t, { features: [SECRET_SHARING_FEATURE, SECRET_EXCLUSIONS_FEATURE] });
+  await ownerSecretControl(lifting.nodes, fake, 'session-connect', { nodeId: NODE, sessionId: target.sessionId, secretIds: ['fake'] });
+  await ownerSecretControl(lifting.nodes, fake, 'create', { nodeId: NODE, sessionId: target.sessionId, name: 'NEW', kind: 'scalar', value: 'v', connect: 'session', temporary: true });
+  assert.deepEqual(lifting.notices, [{ sessionId: target.sessionId, taskId, secretIds: ['fake'] }, { sessionId: target.sessionId, taskId }]);
   const refused = worker(({ operation }) => { if (operation === 'peers') return [peer('node')]; throw new Error('fixture mutation refused'); });
   await assert.rejects(ownerSecretControl(link.nodes, refused, 'session-connect', { nodeId: NODE, sessionId: target.sessionId, secretIds: ['fake'] }), /mutation refused/);
   assert.equal(link.notices.length, 1);
@@ -129,14 +138,20 @@ test('viewing a joined computer’s session never starts a task there, and asks 
 
 test('nothing new reaches an execution worker that predates per-secret sharing', async () => {
   const old = worker(({ args }) => ({ status: { initialized: true, locked: args[0] === 'lock' }, projects: [], groups: [], secrets: [{ id: 'old' }], rules: [] }), false);
-  for (const action of ['settings', 'session', 'sharing', 'create', 'session-connect', 'session-disconnect', 'update', 'remove', 'trust', 'untrust', 'password', 'import', 'initialize', 'preview']) {
+  for (const action of ['sharing', 'create', 'session-connect', 'session-disconnect', 'session-reallow', 'update', 'remove', 'trust', 'untrust', 'password', 'import', 'initialize', 'preview']) {
     await assert.rejects(ownerSecretControl(undefined, old, action, { sessionId: 'codex:local', secretIds: ['x'], name: 'x', kind: 'scalar', value: 'v' }), (error: Error & { code?: string; kind?: string }) => error.code === WORKER_UPDATE_PENDING && error.kind === 'unavailable');
   }
   assert.equal(old.calls.length, 0);
   // The owner can still lock or unlock during the handoff; the answer carries only the older worker's status.
-  assert.deepEqual(await ownerSecretControl(undefined, old, 'lock', { sessionId: 'codex:local' }), { status: { initialized: true, locked: true }, peers: [], secrets: [] });
-  assert.deepEqual(await ownerSecretControl(undefined, old, 'unlock', { password: 'fixture-password', sessionId: 'codex:local' }), { status: { initialized: true, locked: false }, peers: [], secrets: [] });
+  assert.deepEqual(await ownerSecretControl(undefined, old, 'lock', { sessionId: 'codex:local' }), { status: { initialized: true, locked: true }, peers: [], secrets: [], workerUpdatePending: true });
+  assert.deepEqual(await ownerSecretControl(undefined, old, 'unlock', { password: 'fixture-password', sessionId: 'codex:local' }), { status: { initialized: true, locked: false }, peers: [], secrets: [], workerUpdatePending: true });
   assert.deepEqual(old.calls.map(call => call.args), [['lock', {}], ['unlock', { password: 'fixture-password' }]]);
+  // Settings and sessions read only the vault's status, from the older worker's overview, so lock and unlock are offered.
+  assert.deepEqual(await ownerSecretControl(undefined, old, 'settings', {}), { status: { initialized: true, locked: false }, peers: [], secrets: [], workerUpdatePending: true });
+  assert.deepEqual(await ownerSecretControl(undefined, old, 'session', { sessionId: 'codex:local', nodeId: NODE }), { status: { initialized: true, locked: false }, available: [], connectable: [], usage: [], unavailableSources: [], updatePendingSources: [], error: WORKER_UPDATE_PENDING, permanent: false });
+  assert.deepEqual(old.calls.slice(2).map(call => call.args), [['overview', {}], ['overview', {}]]);
+  const silent = worker(() => { throw new Error('fixture overview failed'); }, false);
+  await assert.rejects(ownerSecretControl(undefined, silent, 'settings', {}), (error: Error & { code?: string }) => error.code === WORKER_UPDATE_PENDING);
   const broker = await ownerSecretControl(undefined, old, 'broker-access', { sessionId: 'codex:local' });
   assert.deepEqual(old.calls.at(-1)?.args, ['broker-access', { sessionId: 'codex:local' }]); assert.ok(broker);
 });
@@ -151,7 +166,8 @@ test('a relay poll passes on only the features this worker knows, and a joined c
   };
   assert.deepEqual((await ask('/secret-relay', { 'x-tower-secret-features': 'available, list,unknown' })).calls, [{ operation: 'poll', args: [NODE, ['available']] }]);
   assert.deepEqual((await ask('/secret-relay', {})).calls, [{ operation: 'poll', args: [NODE, []] }]);
-  assert.deepEqual((await ask(`/secret-session?sessionId=${encodeURIComponent(target.sessionId)}`, {})).calls, [{ operation: 'session-subject', args: [target.sessionId] }]);
+  assert.deepEqual((await ask(`/secret-session?sessionId=${encodeURIComponent(target.sessionId)}`, {})).calls, [{ operation: 'session-subject', args: [target.sessionId, false] }]);
+  assert.deepEqual((await ask(`/secret-session?sessionId=${encodeURIComponent(target.sessionId)}&exclusions=1`, {})).calls, [{ operation: 'session-subject', args: [target.sessionId, true] }], 'only a controller that reads exclusions gets them');
   const older = await ask(`/secret-session?sessionId=${encodeURIComponent(target.sessionId)}`, {}, false);
   assert.equal(older.status, 503); assert.deepEqual(older.calls, []);
 });
