@@ -4,7 +4,7 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.130.3] - 2026-10-13
+## [1.130.3] - 2026-10-14
 
 - 권한 자동 검토가 긴 대화에서 "소유자가 이 대화에서 한 말이 너무 길어 다 넘길 수 없어 소유자에게 넘깁니다"로 모델에 묻지도 않고 넘기던 문제를 고쳤습니다. 마스터처럼 오래 이어진 대화는 매번 이렇게 넘어갔습니다(2026-10-13 SORI 조회의 소스 읽기·문법 확인·읽기 전용 조회 세 건).
   - 소유자의 말이 검토 한도(250KB)를 넘으면 가장 최근 말부터 담고, 대화 앞부분을 읽지 못한 경우처럼 최근 요청으로 판단합니다. 담긴 부분에 소유자 요청이 없을 때만 지금처럼 소유자에게 넘깁니다.
