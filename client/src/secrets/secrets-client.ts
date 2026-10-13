@@ -179,10 +179,17 @@ export function sharingDraft(view: SecretHosts, item: SecretSettingsItem, canvas
   return { global: summary.global, keys: [...new Set(summary.folders.flatMap(folder => folder.key ? [folder.key] : []))],
     kept: item.sharing ? unknown.map(({ hostId, root }) => ({ hostId, root })) : [], dropped: item.sharing ? [] : unknown.map(folder => describeFolder(view, folder, canvas)) };
 }
-/** Saving replaces the sharing with what the editor shows; a legacy secret has revision 0. */
-export function sharingPayload(item: SecretSettingsItem, draft: Pick<SharingDraft, 'global' | 'keys' | 'kept'>) {
+/**
+ * Saving replaces the sharing with what the editor shows; a legacy secret has revision 0. A folder already in the
+ * stored sharing goes back as the `{hostId, root}` it was received as, so the server keeps it without resolving it
+ * again (its computer may be offline, the folder gone); only newly picked folders, and every folder of a legacy
+ * secret, are sent as canvas keys to be resolved.
+ */
+export function sharingPayload(view: SecretHosts, item: SecretSettingsItem, draft: Pick<SharingDraft, 'global' | 'keys' | 'kept'>) {
+  const saved = new Map((item.sharing?.folders ?? []).flatMap(folder => { const key = folderKey(view, folder); return key ? [[key, folder] as const] : []; }));
+  const pair = ({ hostId, root }: SecretFolder) => ({ hostId, root });
   return { secretId: item.id, revision: item.sharing?.revision ?? 0, global: draft.global,
-    folders: [...draft.keys.map(cwd => ({ cwd })), ...draft.kept.map(({ hostId, root }) => ({ hostId, root }))] };
+    folders: [...draft.keys.map(key => { const folder = saved.get(key); return folder ? pair(folder) : { cwd: key }; }), ...draft.kept.map(pair)] };
 }
 export function folderMatches(folder: FolderView, query: string): boolean {
   const term = query.trim().toLocaleLowerCase();

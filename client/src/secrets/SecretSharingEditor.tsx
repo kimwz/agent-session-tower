@@ -74,7 +74,7 @@ export function SecretSharingEditor({ view, item, canvas, busy, change, onClose 
   const legacy = !item.sharing && item.legacy;
   return <form className="secret-form secret-sharing-editor" onSubmit={async event => {
     event.preventDefault(); event.stopPropagation();
-    if (await change('sharing', sharingPayload(item, { global, keys, kept }))) onClose();
+    if (await change('sharing', sharingPayload(view, item, { global, keys, kept }))) onClose();
   }}>
     <h3>{t('공유 편집')} · {item.name}</h3>
     {legacy && <div className="secret-notice"><span className="secret-badge secret-legacy">{t('기존 규칙')}</span>

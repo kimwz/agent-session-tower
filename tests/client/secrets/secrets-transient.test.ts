@@ -199,14 +199,14 @@ test('saving sharing sends the stored revision, GLOBAL and the picked folders as
   find(editor.render(), element => element.type === 'input' && element.props.type === 'checkbox').props.onChange({ target: { checked: true } });
   picker().props.onKeys(['/work/app', `@${node}//srv/app`]);
   find(editor.render(), byType('form')).props.onSubmit(formEvent);
-  assert.deepEqual(sent, [['sharing', { secretId: 'folder_key', revision: 5, global: true, folders: [{ cwd: '/work/app' }, { cwd: `@${node}//srv/app` }, { hostId: 'gone', root: '/old' }] }]],
-    'a folder of a computer no longer trusted stays as it was received');
+  assert.deepEqual(sent, [['sharing', { secretId: 'folder_key', revision: 5, global: true, folders: [{ hostId: 'source', root: '/work/app' }, { cwd: `@${node}//srv/app` }, { hostId: 'gone', root: '/old' }] }]],
+    'saved folders stay as they were received; only the newly picked one is a canvas key');
   answer(); await tick(); assert.equal(closed, true); editor.cleanup();
   const removing = changes();
   const trimmed = fixture('SecretSharingEditor.tsx', 'SecretSharingEditor', { view: settingsView, item: stored, canvas: { folders: [], hosts: [] }, busy: false, change: removing.change, onClose() {} });
   find(trimmed.render(), element => element.props['aria-label'] === 'old 선택 해제').props.onClick();
   find(trimmed.render(), byType('form')).props.onSubmit(formEvent);
-  assert.deepEqual(removing.sent[0]![1].folders, [{ cwd: '/work/app' }]);
+  assert.deepEqual(removing.sent[0]![1].folders, [{ hostId: 'source', root: '/work/app' }]);
   removing.answer(); await tick(); trimmed.cleanup();
   const legacy = changes();
   const prefilled = fixture('SecretSharingEditor.tsx', 'SecretSharingEditor', { view: settingsView, item: settingsView.secrets[1], canvas: { folders: [], hosts: [] }, busy: false, change: legacy.change, onClose() {} });
