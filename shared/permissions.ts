@@ -207,7 +207,7 @@ export function ruleProblem(rule: Pick<PermissionRuleInput, 'kind' | 'value' | '
  */
 export function absoluteFileRule(rule: Pick<PermissionRuleInput, 'kind' | 'value'>): string | undefined {
   if (rule.kind !== 'claude') return undefined;
-  const match = /^([A-Za-z]+)\(\/(Users|home|private|tmp|var|Volumes|opt|etc)(\/[^)]*)?\)$/.exec(rule.value.trim());
+  const match = /^([A-Za-z]+)\(\/(Users|home|private|Volumes)(\/[^)]*)?\)$/.exec(rule.value.trim());
   return match && FILE_TOOLS.has(match[1]!) ? `${match[1]}(//${match[2]}${match[3] ?? ''})` : undefined;
 }
 
