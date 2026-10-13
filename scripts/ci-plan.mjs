@@ -50,7 +50,7 @@ export function plan(root = '.') {
     const index = os === 'macos-latest' ? 0 : major === '22' ? 1 : 2;
     const costs = Object.fromEntries(Object.entries(weights).map(([file, values]) => [file, values[index]]));
     // The designated full lane also retains the largest numeric expansion and comparison benchmark.
-    const concurrency = os === 'macos-latest' ? 3 : 4;
+    const concurrency = os === 'macos-latest' ? 2 : 4;
     const tails = major === '24' ? { [largeFile]: 90 } : major === '26' ? { [offlineFile]: 30 } : {};
     const assigned = shards(files, costs, count, concurrency, tails);
     const cheapest = assigned.map(selected => projectedSeconds(selected, costs, concurrency, tails));

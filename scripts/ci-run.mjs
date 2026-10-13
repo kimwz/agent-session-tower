@@ -27,7 +27,7 @@ if (action === 'prepare') {
     XDG_CONFIG_HOME: join(root, 'config'), XDG_CACHE_HOME: join(root, 'cache'), XDG_STATE_HOME: join(root, 'state'),
     XDG_DATA_HOME: join(root, 'data'), XDG_RUNTIME_DIR: join(root, 'runtime'), TMPDIR: tmp, TMP: tmp, TEMP: tmp,
     npm_config_cache: join(root, 'npm'), TOWER_AUTO_UPDATE: '0', TSX_DISABLE_CACHE: '1', NODE_DISABLE_COMPILE_CACHE: '1',
-    NODE_OPTIONS: process.platform === 'darwin' ? '--max-old-space-size=1536' : '--max-old-space-size=4096', SQLITE_VALIDATION_CI: '1', VALIDATION_ROOT: root,
+    NODE_OPTIONS: '--max-old-space-size=4096', SQLITE_VALIDATION_CI: '1', VALIDATION_ROOT: root,
     TOWER_SQLITE_OLD122_ROOT: join(root, 'old122'), TOWER_SQLITE_OLD124_ROOT: join(root, 'old124'),
     TOWER_FIXTURE_COMPILE_CACHE: join(root, 'fixture-builds'), SQLITE_RETENTION_LARGE: lane.large ? '1' : '0' };
   const setup = { admitted: Date.now(), env, sha: process.env.GITHUB_SHA, id };
@@ -58,7 +58,7 @@ if (action === 'prepare') {
   try {
     await run(process.execPath, ['--import', 'tsx', 'scripts/sqlite-runtime-check.mjs', 'supported-floor'], env);
     if (lane.major === '24') await run(process.execPath, ['--import', 'tsx', '-e', "import('./server/tower-tools/read-db.ts').then(m=>{if(!m.lookupsSupported())throw new Error('SQLite authorizer unavailable')})"], env);
-    await run(process.execPath, ['--import', 'tsx', '--test', process.platform === 'darwin' ? (lane.kind === 'full' ? '--test-concurrency=3' : '--test-concurrency=2') : '--test-concurrency=4', '--test-reporter=tap', ...lane.files], env);
+    await run(process.execPath, ['--import', 'tsx', '--test', process.platform === 'darwin' ? '--test-concurrency=2' : '--test-concurrency=4', '--test-reporter=tap', ...lane.files], env);
     if (lane.files.includes('tests/server/sessions/retention-storage.test.ts')) receipt.cap = JSON.parse(readFileSync(join(env.VALIDATION_ROOT, 'reports', 'canonical-cap.json'), 'utf8'));
     if (lane.foundation) await run(process.execPath, ['--import', 'tsx', 'scripts/sqlite-foundation-benchmark.mjs', '20'], env);
     receipt.foundation = lane.foundation;
