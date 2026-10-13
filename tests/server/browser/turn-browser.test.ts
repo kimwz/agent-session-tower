@@ -158,7 +158,8 @@ test('every tool call\'s login changes are saved at once, so a browser that dies
   browser.saveSoon();
   current = { cookies: [cookie('a', '1'), cookie('b', '2')], origins: [] };
   browser.saveSoon();
-  await new Promise(resolve => setTimeout(resolve, 100));
+  const deadline = Date.now() + 5_000;
+  while (!(await readState(dir)).cookies.some(c => c.name === 'b') && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
   assert.deepEqual((await readState(dir)).cookies.map(c => c.name).sort(), ['a', 'b'], 'a call finishing during a save gets one more');
   context.emit('close');
   await browser.shutdown();

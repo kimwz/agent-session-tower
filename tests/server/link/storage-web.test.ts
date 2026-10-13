@@ -100,9 +100,12 @@ test('serving target web resumes only the durable owner rollback through the rea
   let allowHandoff = false;
   const script = join(root, 'successor.mjs');
   const successorArtifactFile = join(root, 'successor-artifact.json');
+  let releaseQuiesce!: () => void;
+  const quiesceProof = new Promise<void>(resolve => { releaseQuiesce = resolve; });
+  t.after(() => releaseQuiesce());
   const host = await startRunnerHost({ stateDir: state, sessions, runs, inFlight: () => !allowHandoff,
     storageControl: (action, input, dispatch) => { hostDispatch = dispatch; return control(action, input); },
-    quiesce: async () => { await delay(400); }, closeStorage: async () => { await stopFixtureWriter(runs); await client.close(); },
+    quiesce: async () => { await delay(400); await quiesceProof; }, closeStorage: async () => { await stopFixtureWriter(runs); await client.close(); },
     startSuccessor: (_command, nonce) => {
       launchTimer = setTimeout(() => {
         void (async () => {
@@ -155,7 +158,7 @@ test('serving target web resumes only the durable owner rollback through the rea
     spawn: () => { throw new Error('Only the owned successor may start'); } });
   await manager.start();
   const paths = await runnerPaths(state);
-  t.after(async () => { clearTimeout(launchTimer); await manager.close(); await host.close(); sessions.stop(); await runs.close(); await rm(paths.directory, { recursive: true, force: true }); });
+  t.after(async () => { clearTimeout(launchTimer); releaseQuiesce(); await manager.close(); await host.close(); sessions.stop(); await runs.close(); await rm(paths.directory, { recursive: true, force: true }); });
   const ports = rollbackPorts((action, input) => manager.storageControl(action, input), async () => {});
   const switched = await runRollback({ stateDir: state, managed: true, running: { version, manifest, preflight }, ports, serialize }, { target, by: 'owner', reason: 'existing owned operation' });
   assert.equal(switched.state, 'switched'); assert.equal(held, true); assert.equal(handoffs, 0);
@@ -241,7 +244,7 @@ process.send({ready:true});`);
       return answer;
     } catch (error) {
       const transition = (error as { proofTransition?: { reason: string } }).proofTransition;
-      if (transition) { transitions.add(transition.reason); if (transition.reason === 'draining') drains++; }
+      if (transition) { transitions.add(transition.reason); if (transition.reason === 'draining') { drains++; releaseQuiesce(); } }
       throw error;
     }
   }, async () => { assert.fail('target web does not restart for continuation'); });
@@ -299,11 +302,12 @@ process.send({ready:true});`);
       if (failure === 'foreign') return { ...proof, worker: { ...proof.worker, sourceHash: 'f'.repeat(64) } };
       if (failure === 'database') throw new Error('Database closed/corrupt/barrier');
       if (failure === 'stale') throw Object.assign(new Error('Stale rollback fence'), { statusCode: 409 });
-      if (failure === 'late') await delay(250);
+      if (failure === 'late') await delay(10_100);
       if (failure === 'abort-return') cancelled.abort();
       return proof;
     } } };
-    const result = await storageWebServing(failing, { intervalMs: 5, timeoutMs: failure === 'late' ? 200 : 1000, signal: cancelled.signal });
+    // Keep this active-process case on a real clock; its initial RPC must complete before the delayed proof.
+    const result = await storageWebServing(failing, { intervalMs: 5, timeoutMs: failure === 'late' ? 10_000 : 1000, signal: cancelled.signal });
     assert.ok(result && 'record' in result && result.record.handoff?.state === 'unknown', failure);
     assert.equal(calls, 2, `${failure} stops observation`);
     const retained = await readRollbackRecord(state);

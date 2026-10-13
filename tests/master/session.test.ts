@@ -89,7 +89,7 @@ async function harness(t: test.TestContext, options: { bound?: boolean; createSt
   const session = await open();
   // Reports Tower took: each became a turn of the master session.
   const reports = () => runs.filter(run => run.sessionId === MASTER && run.prompt.startsWith('[Tower report]')).map(run => ({ body: { prompt: run.prompt } }));
-  return { dir, session, settings, runs, jobs, posted, finish, reports, open, tick, history, outcomes, setMessageStatus: (status: number) => { messageStatus = status; }, setPageSize: (size: number) => { pageSize = size; } };
+  return { dir, session, settings, tower, runs, jobs, posted, finish, reports, open, tick, history, outcomes, setMessageStatus: (status: number) => { messageStatus = status; }, setPageSize: (size: number) => { pageSize = size; } };
 }
 
 test('the first message starts the master session in its own folder, with its guide; a second start needs "replace"', async t => {
@@ -276,13 +276,27 @@ test('a report Tower could not take just then (a web or worker changing over) wa
   h.runs.push(run);
   h.finish(run, 'Done.');
   h.setMessageStatus(503);
-  for (let round = 0; round < 20; round++) { await h.session.follow(); await new Promise(resolve => setTimeout(resolve, 5)); }
+  // Keep one genuine HTTP handoff/retry. Repeated held-report policy is independent of transport delay.
+  await h.session.follow();
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const call = h.tower.call.bind(h.tower);
+  let held = true, refused = 0;
+  t.mock.method(h.tower, 'call', async (...args: Parameters<typeof call>) => {
+    if (held && args[0] === 'POST' && args[1].endsWith('/messages')) {
+      refused++;
+      return { status: 503, body: { error: 'handoff', disposition: 'not-admitted' }, state: 'not-admitted' as const };
+    }
+    return call(...args);
+  });
+  for (let round = 0; round < 20; round++) { t.mock.timers.setTime(Date.now() + 5); await h.session.follow(); }
+  assert.equal(refused, 20, 'all held policy attempts were exercised');
   assert.equal(h.session.failedReports(), 0);
   assert.equal(h.session.activeTasks(), 1);
-  h.setMessageStatus(202);
-  await new Promise(resolve => setTimeout(resolve, 5));
+  h.setMessageStatus(202); held = false;
+  t.mock.timers.setTime(Date.now() + 5);
   await h.session.follow();
   assert.equal(h.reports().length, 1);
+  t.mock.timers.reset();
 });
 
 test('a spoken request whose sending is in doubt is not sent again by its key; a refused one can be said again', async t => {

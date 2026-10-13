@@ -3,92 +3,94 @@ on:
   push:
     branches: [main]
   pull_request:
+permissions:
+  contents: read
 jobs:
-  check:
-    # Tower runs on macOS and on Linux; both check the same way.
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest]
-        node: [22]
-        include:
-          # Quick lookups need SQLite's authorizer (Node.js 24.10+); 22 stays as the engines minimum.
-          - os: ubuntu-latest
-            node: 24
-    runs-on: ${{ matrix.os }}
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - id: plan
+        run: |
+          node --input-type=module -e "import('./scripts/ci-plan.mjs').then(m=>console.log('matrix='+JSON.stringify({include:m.plan().filter(l=>l.os==='ubuntu-latest').map(({id,os,node,shard})=>({id,os,node,shard}))})))" >> "$GITHUB_OUTPUT"
+      - name: Mark owner Mac and combined evidence as pending
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SOURCE_SHA" -f state=pending -f context='macOS (owner Mac)' -f description='Awaiting exact-tree owner Mac results'
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SOURCE_SHA" -f state=pending -f context='validation (all platforms)' -f description='Awaiting complete Mac and Linux results'
+  test:
+    name: Linux ${{ matrix.node }} shard ${{ matrix.shard }}
+    needs: plan
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
       - uses: actions/setup-node@v7
+        with: { node-version: '${{ matrix.node }}' }
+      - name: Install, build and prepare private fixture inputs
+        run: node scripts/ci-run.mjs prepare '${{ matrix.id }}'
+      - name: All assigned tests and runtime qualifications
+        run: node scripts/ci-run.mjs test '${{ matrix.id }}'
+      - name: Preserve actual result including failure
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          node-version: ${{ matrix.node }}
-          cache: npm
-      - run: npm ci
-      # Linux servers often have no compiler: terminals then use node-pty's prebuilt twin, which is what is checked here.
-      - if: runner.os == 'Linux'
-        run: rm -rf node_modules/node-pty
-      # Fails if this Node cannot run the lookup tests, so they are never silently skipped.
-      - if: matrix.node == 24
-        run: node --import tsx -e "import('./server/tower-tools/read-db.ts').then(m => { if (!m.lookupsSupported()) { console.error('no SQLite authorizer'); process.exit(1); } })"
-      - name: Capture the pinned genuine old worker inputs
-        shell: bash
-        env:
-          VALIDATION_ROOT: ${{ runner.temp }}/sqlite-general-old-fixtures
-        run: |
-          set -euo pipefail
-          umask 077
-          mkdir "$VALIDATION_ROOT"
-          mkdir -p "$VALIDATION_ROOT"/{home,codex,claude,config,cache,state,data,runtime,tmp,npm,reports}
-          TEST_TMP="$(mktemp -d /tmp/sv.XXXXXX)"
-          TEST_TMP="$(cd "$TEST_TMP" && pwd -P)"
-          printf '%s\n' "$TEST_TMP" > "$VALIDATION_ROOT/test-tmp.txt"
-          env -i PATH="$PATH" HOME="$VALIDATION_ROOT/home" \
-            CODEX_HOME="$VALIDATION_ROOT/codex" CLAUDE_CONFIG_DIR="$VALIDATION_ROOT/claude" \
-            XDG_CONFIG_HOME="$VALIDATION_ROOT/config" XDG_CACHE_HOME="$VALIDATION_ROOT/cache" \
-            XDG_STATE_HOME="$VALIDATION_ROOT/state" XDG_DATA_HOME="$VALIDATION_ROOT/data" \
-            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
-            TMP="$TEST_TMP" TEMP="$TEST_TMP" \
-            npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 NODE_OPTIONS=--max-old-space-size=4096 \
-            SQLITE_VALIDATION_CI=1 VALIDATION_ROOT="$VALIDATION_ROOT" \
-            TOWER_SQLITE_OLD122_ROOT="$VALIDATION_ROOT/old122" \
-            TOWER_SQLITE_OLD124_ROOT="$VALIDATION_ROOT/old124" \
-            /bin/bash --noprofile --norc <<'CAPTURE'
-          set -euo pipefail
-          umask 022
-          node scripts/sqlite-old124-capture.mjs 1.122.0
-          node scripts/sqlite-old124-capture.mjs 1.124.0
-          CAPTURE
-      - name: General tests
-        shell: bash
-        env:
-          VALIDATION_ROOT: ${{ runner.temp }}/sqlite-general-old-fixtures
-        run: |
-          set -euo pipefail
-          TEST_TMP="$(cat "$VALIDATION_ROOT/test-tmp.txt")"
-          # Capture and the full check share canonical private paths, without Actions credentials.
-          env -i PATH="$PATH" HOME="$VALIDATION_ROOT/home" \
-            CODEX_HOME="$VALIDATION_ROOT/codex" CLAUDE_CONFIG_DIR="$VALIDATION_ROOT/claude" \
-            XDG_CONFIG_HOME="$VALIDATION_ROOT/config" XDG_CACHE_HOME="$VALIDATION_ROOT/cache" \
-            XDG_STATE_HOME="$VALIDATION_ROOT/state" XDG_DATA_HOME="$VALIDATION_ROOT/data" \
-            XDG_RUNTIME_DIR="$VALIDATION_ROOT/runtime" TMPDIR="$TEST_TMP" \
-            TMP="$TEST_TMP" TEMP="$TEST_TMP" \
-            npm_config_cache="$VALIDATION_ROOT/npm" TOWER_AUTO_UPDATE=0 \
-            TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 NODE_OPTIONS=--max-old-space-size=4096 \
-            SQLITE_VALIDATION_CI=1 VALIDATION_ROOT="$VALIDATION_ROOT" \
-            TOWER_SQLITE_OLD122_ROOT="$VALIDATION_ROOT/old122" \
-            TOWER_SQLITE_OLD124_ROOT="$VALIDATION_ROOT/old124" \
-            /bin/bash --noprofile --norc <<'CHECK'
-          set -euo pipefail
-          umask 022
-          npm run check
-          CHECK
-  test-integrity:
-    # Lists removed tests, new skips and changed assertions for the reviewer; fails only on a new unconditional skip.
-    if: github.event_name == 'pull_request'
+          name: ci-${{ matrix.id }}
+          path: |
+            ${{ runner.temp }}/ci-${{ matrix.id }}/receipt.json
+            ${{ runner.temp }}/ci-${{ matrix.id }}/private-*/reports/
+          if-no-files-found: error
+  checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with: { fetch-depth: 2 }
+        with: { persist-credentials: false, fetch-depth: 2 }
       - uses: actions/setup-node@v7
-        with: { node-version: 22, cache: npm }
-      - run: npm ci --ignore-scripts
-      - run: node --import tsx scripts/test-integrity.ts
+        with: { node-version: '26.0.0' }
+      - run: node scripts/ci-run.mjs prepare checks
+      - name: Typecheck, release identity and test integrity
+        run: node scripts/ci-run.mjs checks checks
+      - uses: actions/setup-node@v7
+        with: { node-version: '22.13.0' }
+      - name: Actual unsupported legacy-loader verdict
+        run: node scripts/ci-run.mjs legacy checks
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-checks
+          path: ${{ runner.temp }}/ci-checks/receipt.json
+          if-no-files-found: error
+  validation-gate:
+    name: Linux validation gate (Mac requires owner evidence)
+    if: always()
+    needs: [plan, test, checks]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'ci-*', path: ci-results }
+      - name: Validate Linux inventory, real results and whole test window
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/ci-gate.mjs ci-results
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-timing
+          path: ci-timing.json
+          if-no-files-found: error
