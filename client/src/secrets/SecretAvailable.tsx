@@ -11,15 +11,15 @@ const reviewLabels: Record<SecretUsage['review'], string> = { exempt: '검토 �
 
 /**
  * A secret's last use here: when, how its review ended, and why it was refused or allowed unreviewed. An unreviewed use
- * is called the owner's only in a session the view says is the owner's: older records also come from approved agent
- * sessions (1.129–1.132).
+ * is not called the owner's: delegated work in the owner's session is reviewed, and records of 1.129–1.132 also come
+ * from broker-approved agent sessions.
  */
-function SecretLastUse({ use, owner }: { use?: SecretUsage; owner: boolean }) {
+function SecretLastUse({ use }: { use?: SecretUsage }) {
   const { t } = useI18n();
   if (!use) return <small className="secret-use">{t('아직 사용하지 않음')}</small>;
   const review = use.outcome === 'blocked' ? 'blocked' : use.review;
   return <small className={`secret-use secret-review-${review}`}>
-    {t('최근 사용 · {0}', { 0: relativeTime(new Date(use.at).toISOString()) })} · <span className="secret-review">{t(review === 'exempt' && owner ? '검토 없음(소유자 세션)' : reviewLabels[review])}</span>
+    {t('최근 사용 · {0}', { 0: relativeTime(new Date(use.at).toISOString()) })} · <span className="secret-review">{t(reviewLabels[review])}</span>
     {/* The reviewer's or Tower's own words, shown as given. */}
     {use.reason && (review === 'blocked' || review === 'failed') && <span className="secret-use-reason">{use.reason}</span>}
   </small>;
@@ -86,7 +86,7 @@ export function SecretAvailable({ view, busy, change, onPaste, onSharing }: {
         return <li key={secret.id} className="secret-item">
           <div className="secret-item-name"><strong><KeyRound size={12} aria-hidden="true" />{secret.name}</strong><small>{t(kindLabels[secret.kind])}{secret.fields?.length ? ` · ${secret.fields.join(', ')}` : ''}</small></div>
           <div className="secret-sharing">{secret.basis.map(basis => <span key={basis} className={`secret-chip secret-basis-${basis}`} title={remote && basis === 'remote' ? secret.sourceHostId : undefined}>{t(basisLabels[basis])}</span>)}</div>
-          <SecretLastUse use={use} owner={view.subject === 'owner'} />
+          <SecretLastUse use={use} />
           <div className="secret-item-actions">
             {saved && <button type="button" disabled={busy} aria-label={t('{0} 공유 설정', { 0: secret.name })} onClick={() => onSharing(secret.id)}><Settings2 size={14} aria-hidden="true" />{t('공유 설정')}</button>}
             <button type="button" disabled={busy} aria-label={t('{0} 이 세션에서 끊기', { 0: secret.name })} onClick={() => void change('session-disconnect', { secretIds: [secret.id] })}><Unlink size={14} aria-hidden="true" />{t('이 세션에서 끊기')}</button>

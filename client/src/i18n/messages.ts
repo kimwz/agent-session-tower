@@ -151,7 +151,6 @@ export const english: Record<string, string> = {
   "최근 사용 · {0}": "Last used · {0}",
   "아직 사용하지 않음": "Not used yet",
   "검토 없음": "Not reviewed",
-  "검토 없음(소유자 세션)": "Not reviewed (your session)",
   "검토 통과": "Review passed",
   "검토 실패(허용됨)": "Review failed (allowed)",
   "이 세션은 시크릿을 쓸 때마다 명백한 악용인지만 검토합니다.": "Each secret use in this session is checked only for obvious abuse.",

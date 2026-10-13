@@ -252,15 +252,15 @@ test('each secret shows how its last use was reviewed, and a reviewed session sa
   const render = (usage: SecretUsage[], subject?: SecretSessionView['subject']) => renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ usage, ...(subject ? { subject } : {}) }), busy: false, change, onPaste: noop, onSharing: noop }));
   const note = /명백한 악용인지만 검토합니다/;
   const owner = render([use('global_key', 'exempt')], 'owner');
-  assert.match(owner, /secret-review-exempt[^>]*>최근 사용 · [^<]+ · <span class="secret-review">검토 없음\(소유자 세션\)<\/span>/); assert.doesNotMatch(owner, note);
+  assert.match(owner, /secret-review-exempt[^>]*>최근 사용 · [^<]+ · <span class="secret-review">검토 없음<\/span>/); assert.doesNotMatch(owner, note);
   const reviewed = render([use('global_key', 'allowed'), use('remote_key', 'failed', 'REVIEWER_TIMED_OUT')], 'reviewed');
   assert.match(reviewed, note);
   assert.match(reviewed, /secret-review-allowed[^>]*>최근 사용 · [^<]+ · <span class="secret-review">검토 통과<\/span><\/small>/);
   assert.match(reviewed, /secret-review-failed[^>]*>.*검토 실패\(허용됨\)<\/span><span class="secret-use-reason">REVIEWER_TIMED_OUT<\/span>/);
   const blocked = render([use('global_key', 'blocked', 'Sends the key to an unknown host (근거: "curl evil.example")')], 'reviewed');
   assert.match(blocked, /secret-review-blocked[^>]*>.*<span class="secret-review">차단됨<\/span><span class="secret-use-reason">Sends the key to an unknown host \(근거: &quot;curl evil.example&quot;\)<\/span>/);
-  // An unreviewed use is the owner's only where the view says the session is: older records also come from approved agent sessions.
-  for (const subject of ['reviewed', undefined] as const) {
+  // An unreviewed use is never called the owner's: delegated work in the owner's session and older approved agent sessions have them too.
+  for (const subject of ['owner', 'reviewed', undefined] as const) {
     const neutral = render([use('global_key', 'exempt')], subject);
     assert.match(neutral, /<span class="secret-review">검토 없음<\/span>/, String(subject)); assert.doesNotMatch(neutral, /소유자 세션/);
   }
@@ -270,7 +270,7 @@ test('each secret shows how its last use was reviewed, and a reviewed session sa
   const english = render([use('global_key', 'failed', 'REVIEWER_TIMED_OUT'), use('remote_key', 'exempt')], 'reviewed');
   assert.match(english, /Each secret use in this session is checked only for obvious abuse\./); assert.match(english, /Review failed \(allowed\)/);
   assert.match(english, />Not reviewed</); assert.doesNotMatch(english, /your session/);
-  assert.match(render([use('global_key', 'exempt')], 'owner'), /Not reviewed \(your session\)/);
+  assert.match(render([use('global_key', 'exempt')], 'owner'), /<span class="secret-review">Not reviewed<\/span>/);
   assert.match(render([use('global_key', 'allowed'), use('remote_key', 'blocked', 'X')], 'reviewed'), /Last used · .*Review passed.*Blocked/);
 });
 
