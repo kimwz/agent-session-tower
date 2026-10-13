@@ -239,6 +239,20 @@ test('available and availableFor read without creating tasks or ledger entries',
   assert.throws(() => f.service.available({ ...target, root: '/elsewhere' }), /Task identity denied/);
 });
 
+test('a node’s existing task is admitted without coverage, only with its own identity from a trusted node', async t => {
+  const f = await fixture(t);
+  await f.service.trustPeer({ device: { ...f.service.device(), id: NODE }, routeId: 'node', direction: 'node', enabled: true });
+  const secret = await f.service.create({ name: 'shared', kind: 'scalar', value: 's', sharing: { global: false, folders: [{ hostId: NODE, root: '/node' }] } });
+  const remote = { hostId: NODE, sessionId: 'node-session', root: '/node', taskId: randomUUID(), runId: 'node-run' };
+  const admitted = await f.service.ensureRemoteTask(remote);
+  await f.service.setSharing(secret.id, 1, { global: false, folders: [] });
+  assert.deepEqual(await f.service.ensureRemoteTask(remote), admitted, 'a close or list for the task it already has still reaches it');
+  assert.deepEqual(await f.service.list(admitted), []);
+  for (const other of [{ ...remote, sessionId: 'other-session' }, { ...remote, root: '/node/sub' }]) await assert.rejects(f.service.ensureRemoteTask(other), /Task identity denied/);
+  await assert.rejects(f.service.ensureRemoteTask({ ...remote, taskId: randomUUID() }), /Remote task denied/, 'a new task still needs coverage');
+  await f.service.removePeer(NODE); await assert.rejects(f.service.ensureRemoteTask(remote), /Remote task denied/);
+});
+
 test('disconnecting stops a key in that session whatever allows it, and connecting again lifts the stop', async t => {
   const f = await fixture(t);
   const ruled = legacyRecord(f.host, { name: 'ruled', groupId: 'g', value: 'r' });

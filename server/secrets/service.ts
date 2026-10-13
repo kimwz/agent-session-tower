@@ -280,14 +280,16 @@ export class SecretService {
 
   async ensureTask(sessionId: string, canonicalRoot: string, hostId?: string, runStartedAt?: number): Promise<SecretTarget> { return this.mutate(() => { hostId ??= this.device().id; if (!sessionId || !isAbsolute(canonicalRoot) || normalize(canonicalRoot) !== canonicalRoot) throw new Error('Invalid task identity'); let task = sessionTask(this.journal, sessionId, hostId, canonicalRoot, runStartedAt); if (!task) { if (this.journal.tasks.length >= 10000) throw new Error('Task count limit'); task = { id: randomUUID(), hostId, sessionId, root: canonicalRoot, status: 'open', createdAt: this.now(), excluded: [], connected: [] }; this.journal.tasks.push(task); } return { hostId, sessionId, root: canonicalRoot, taskId: task.id, projectId: this.projectId(hostId, canonicalRoot) }; }); }
   /**
-   * A trusted node's task on this source. Automatic use enters only a folder `covered` here; `owner` is for a session the
-   * owner acted on, which its node already verified, and enters any folder.
+   * A trusted node's task on this source. Automatic use starts one only in a folder `covered` here; `owner` is for a session
+   * the owner acted on, which its node already verified, and starts one in any folder. A task that exists is admitted with
+   * its own identity whatever is shared now, so its close still arrives; each use is authorized on its own.
    */
   async ensureRemoteTask(context: SecretContext, options: { owner?: boolean } = {}): Promise<SecretContext> { return this.mutate(() => ({ ...context, ...this.remoteTask(context, options.owner === true) })); }
   private remoteTask(target: SecretTarget, owner: boolean): SecretTarget {
-    if (!this.data().peers.some(peer => peer.enabled && peer.device.id === target.hostId) || !canonicalRoot(target.root) || !/^[a-f0-9-]{36}$/.test(target.taskId) || !target.sessionId || (!owner && !covered(this.policy(), target.hostId, target.root, target.taskId, this.now()))) throw new Error('Remote task denied');
+    const existing = this.journal.tasks.some(task => task.id === target.taskId);
+    if (!this.data().peers.some(peer => peer.enabled && peer.device.id === target.hostId) || !canonicalRoot(target.root) || !/^[a-f0-9-]{36}$/.test(target.taskId) || !target.sessionId || (!owner && !existing && !covered(this.policy(), target.hostId, target.root, target.taskId, this.now()))) throw new Error('Remote task denied');
     const { hostId, sessionId, root, taskId } = target; const trusted = { hostId, sessionId, root, taskId, projectId: this.projectId(hostId, root) };
-    if (this.journal.tasks.some(task => task.id === taskId)) { this.task(trusted); return trusted; }
+    if (existing) { this.task(trusted); return trusted; }
     if (this.journal.tasks.length >= 10000) throw new Error('Task count limit');
     this.journal.tasks.push({ id: taskId, hostId, sessionId, root, status: 'open', createdAt: this.now(), expiresAt: this.now() + REMOTE_TASK_MS, excluded: [], connected: [] }); return trusted;
   }

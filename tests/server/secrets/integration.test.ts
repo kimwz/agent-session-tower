@@ -96,6 +96,19 @@ test('recipient task revocation filters remote owner overview and lists and bloc
   assert.equal(f.runsB.list()[0].status, 'running'); assert.equal(f.b.overview().secrets.length, 0); assert.deepEqual(f.errors, []);
 });
 
+test('after the source revokes the last share, the node lists nothing and still closes its source task', { timeout: 20000 }, async t => {
+  const f = await pair(t);
+  const secret = await f.a.create({ name: 'revoked share', kind: 'scalar', value: VISIBLE, sharing: f.toB });
+  const listed = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[] };
+  assert.deepEqual(listed.secrets.map(item => item.id), [secret.id]);
+  const context = await f.recipient.context(f.capB);
+  await f.a.setSharing(secret.id, 1, { global: false, folders: [] });
+  const after = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[]; unavailableSources: unknown[] };
+  assert.deepEqual([after.secrets, after.unavailableSources], [[], []], 'the source still answers for the task it already has');
+  await f.relay(f.recipient.endSession(f.capB.sessionId));
+  assert.equal(f.a.overview(context).task?.status, 'closed'); assert.deepEqual(f.errors, []);
+});
+
 test('recipient task closure or revocation while a sealed response is in flight denies remote consumption', { timeout: 20000 }, async t => {
   const f = await pair(t);
   const secret = await f.a.create({ name: 'inflight remote key', kind: 'scalar', value: VISIBLE, sharing: f.toB });
