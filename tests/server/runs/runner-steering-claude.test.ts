@@ -49,6 +49,16 @@ async function fixture(options: { holdInit?: boolean; brokerOwnerAuthorized?: bo
     cleanup: async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); } };
 }
 
+test('an external link lookup that reads the run list does not recurse through steering', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  // Slack's linked sessions read the run list, whose steering state checks the session origin again (1.129.0 hang).
+  let lookups = 0;
+  f.manager.setBrokerAdmissionValidator(() => {});
+  f.manager.setExternalLinkResolver(() => { lookups++; return f.manager.list().some(run => run.autoPromptId === 'linked'); });
+  assert.equal(f.run(f.followup.id).canSteer, true);
+  assert.ok(lookups > 0 && lookups < 10, `bounded lookups: ${lookups}`);
+});
+
 test('a message queued before Claude is ready is published as insertable once it is', async t => {
   const f = await fixture({ holdInit: true }); t.after(f.cleanup);
   // The answer to the message carries this state; nothing else changes while Claude starts.
