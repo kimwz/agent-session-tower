@@ -19,7 +19,8 @@ export type SecretSubject = { mode: SecretSubjectMode } | { mode: 'none'; reason
 export type SecretStage = 'issue' | 'discover' | 'use';
 /** A session the server knows, with the provenance Tower recorded if it created it. */
 export interface KnownSession { session: Session; provenance?: SessionOrigin }
-type KnownRun = Pick<Run, 'origin' | 'delegation' | 'sessionId'>;
+/** What decides a turn's part: who started it and from which calling turn. */
+export type KnownRun = Pick<Run, 'origin' | 'delegation' | 'sessionId'>;
 
 /** Parents and calling turns followed; a longer or circular chain is refused, not guessed. */
 const MAX_ANCESTORS = 16;

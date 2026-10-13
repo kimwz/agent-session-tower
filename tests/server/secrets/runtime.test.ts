@@ -699,6 +699,23 @@ test('a session view shows this session’s recent uses, newest first, and what 
   } finally { await f.cleanup(); }
 });
 
+test('a session view says whether a turn the owner starts there uses secrets unreviewed', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize();
+    const subject = async (session: Session) => (await f.runtime.control('session', { sessionId: session.id }) as SecretSessionView).subject;
+    assert.equal(await subject(f.session), 'owner');
+    const agent = sessionRecord(f.alias, { id: 'codex:agent-made' }); f.sessions.set(agent.id, agent); f.origins.set(agent.id, { kind: 'agent', untrustedInput: false });
+    const slack = sessionRecord(f.alias, { id: 'codex:slack-made' }); f.sessions.set(slack.id, slack); f.origins.set(slack.id, { kind: 'slack', untrustedInput: true });
+    assert.deepEqual([await subject(agent), await subject(slack)], ['reviewed', 'reviewed']);
+    // A conversation started outside Tower has no provenance; the owner's own turn in it is the owner's.
+    const native = sessionRecord(f.alias, { id: 'codex:native' }); f.sessions.set(native.id, native);
+    assert.equal(await subject(native), 'owner');
+    const child = sessionRecord(f.alias, { id: 'codex:native-child', parentId: native.id }); f.sessions.set(child.id, child);
+    assert.equal(await subject(child), 'reviewed');
+  } finally { await f.cleanup(); }
+});
+
 test('a value pasted for one session and disconnected there is offered to connect again, and comes back only in that session', async () => {
   const f = await fixture();
   try {

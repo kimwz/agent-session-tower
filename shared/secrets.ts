@@ -60,6 +60,11 @@ export interface SecretSessionView {
   error?: SecretSessionError; permanent?: boolean;
   /** Keys this session stopped that `connectable` does not offer again: its own temporary values and other sources' keys. */
   disconnected?: SecretDisconnected[];
+  /**
+   * How a turn the owner starts in this session uses secrets; work another turn delegates is reviewed wherever it runs.
+   * Absent for a joined computer's session, which that computer decides.
+   */
+  subject?: SecretSubjectMode;
 }
 /** `remote`: another source's key, re-allowed by lifting this session's stop; otherwise a value kept with this session, connected again. */
 export interface SecretDisconnected extends SecretMetadata { remote: boolean }

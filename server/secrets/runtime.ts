@@ -8,7 +8,7 @@ import { SECRET_OPERATIONS } from '../../shared/secrets.js';
 import type { Capability } from '../api/mcp.js';
 import type { SessionOrigin } from '../runs/origin.js';
 import { callWorkerTools, serveToolBridge } from '../mcp/stdio.js';
-import { secretSubject, type SecretStage, type SecretSubject } from './access.js';
+import { secretSubject, type KnownRun, type SecretStage, type SecretSubject } from './access.js';
 import { SecretBroker, remoteListing } from './broker.js';
 import { parseSecretCli } from './cli.js';
 import { parseDotenv } from './dotenv.js';
@@ -150,7 +150,7 @@ export class SecretRuntime {
   }
 
   /** Who a session of this computer is for secret use now (see access.ts), with `run` the turn asking, if any. */
-  subject(session: Session, run: Run | undefined, stage: SecretStage): SecretSubject {
+  subject(session: Session, run: KnownRun | undefined, stage: SecretStage): SecretSubject {
     if (this.closedSessions.has(session.id)) return { mode: 'none', reason: 'closed' };
     const runs = this.options.runs;
     let known: Map<string, Run> | undefined;
@@ -159,7 +159,7 @@ export class SecretRuntime {
       findRun: id => (known ??= new Map(runs.list().map(item => [item.id, item]))).get(id) });
   }
   /** A live session of this computer that may use secrets at `stage`, in its canonical folder; `run` is the turn asking, if any. */
-  private async session(id: string, run: Run | undefined, stage: SecretStage): Promise<Session & { cwd: string; subject: SecretSubjectMode }> {
+  private async session(id: string, run: KnownRun | undefined, stage: SecretStage): Promise<Session & { cwd: string; subject: SecretSubjectMode }> {
     const session = this.options.runs.getSession(id);
     if (!session || session.closed || await this.options.isClosed?.(session.id) || (await this.readClosures()).includes(closureId(session.id))) throw fail('이 프로젝트 세션은 종료되었습니다.', 'forbidden');
     const cwd = await realpath(session.cwd);
@@ -331,12 +331,15 @@ export class SecretRuntime {
   /** Every saved secret the owner may connect to a session, shared or not; no values. */
   private connectable(): SecretMetadata[] { return this.options.service.settings().secrets.map(({ sharing: _sharing, legacy: _legacy, withheld: _withheld, ...metadata }) => metadata); }
   private recentUsage(sessionId: string): SecretUsage[] { return this.options.service.usage({ sessionId }).reverse().slice(0, VIEW_USAGE); }
-  /** The owner session a view reads, with its open task in its current folder; reads only, and says why there is none. */
-  private async viewSession(sessionId: string): Promise<{ session: Session & { cwd: string }; task?: SecretTarget } | { error: SecretSessionError }> {
+  /**
+   * The owner session a view reads, with its open task in its current folder and how a turn the owner starts there uses
+   * secrets; reads only, and says why there is none.
+   */
+  private async viewSession(sessionId: string): Promise<{ session: Session & { cwd: string; subject: SecretSubjectMode }; task?: SecretTarget } | { error: SecretSessionError }> {
     const found = this.options.runs.getSession(sessionId);
     if (!found || found.closed || this.closedSessions.has(found.id) || await this.options.isClosed?.(found.id) || (await this.readClosures()).includes(closureId(found.id))) return { error: 'session-closed' };
-    let session: Session & { cwd: string };
-    try { session = await this.session(found.id, undefined, 'issue'); }
+    let session: Session & { cwd: string; subject: SecretSubjectMode };
+    try { session = await this.session(found.id, { origin: { kind: 'owner' }, sessionId: found.id }, 'issue'); }
     catch (error) { if (kindOf(error) === 'forbidden' || (error as NodeJS.ErrnoException).code === 'ENOENT') return { error: 'not-eligible' }; throw error; }
     const open = this.options.service.currentTask(session.id);
     return { session, ...(open?.root === session.cwd ? { task: open } : {}) };
@@ -360,7 +363,7 @@ export class SecretRuntime {
       const local = service.available(probe);
       const remote = await this.remoteAvailable(probe, task);
       const disconnected = [...(task ? service.disconnectedTemporary(task.taskId, service.exclusions(task.taskId)) : []), ...remote.disconnected];
-      return { status, available: [...local, ...remote.available], connectable: this.connectable(), usage: this.recentUsage(session.id), unavailableSources: remote.unavailable, updatePendingSources: remote.updatePending, disconnected };
+      return { status, available: [...local, ...remote.available], connectable: this.connectable(), usage: this.recentUsage(session.id), unavailableSources: remote.unavailable, updatePendingSources: remote.updatePending, disconnected, subject: session.subject };
     } catch (error) { if (service.status().locked) return closedView(service.status(), 'locked'); throw error; }
   }
   /**
