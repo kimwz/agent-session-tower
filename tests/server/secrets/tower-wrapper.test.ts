@@ -8,6 +8,7 @@ import { SecretService } from '../../../server/secrets/service.js';
 import { SecretVault } from '../../../server/secrets/vault.js';
 import { encrypt, passwordKey } from '../../../server/secrets/crypto.js';
 import { stageVaultImport } from '../../../server/secrets/imports.js';
+import { SecretVault1130 } from './fixtures/vault-995f869.js';
 
 const recovery = 'fixture-password-1234';
 const tower = 'tower-password-1234';
@@ -113,5 +114,54 @@ test('malformed Tower wrappers are ignored with a warning; the vault password op
     assert.equal(restarted.vault.hasTower(idA), false);
     await restarted.unlock(recovery); await restarted.towerWrap(tower, idA);
     assert.deepEqual((await f.envelope()).tower!.wrappers.map(item => item.credentialId), [idA]);
+  } finally { await f.cleanup(); }
+});
+
+test('a vault saved and re-passworded by 1.130.2 keeps its Tower password wrappers: new, old and new again', async () => {
+  const f = await fixture('frozen');
+  try {
+    const kept = await f.service.create({ name: 'kept by every build', kind: 'scalar', value: 'FROZEN_ROUND_TRIP' });
+    await f.service.towerWrap(tower, idA); const wrappers = (await f.envelope()).tower;
+    // The older build opens, saves and changes the vault password through its own `{ ...envelope }` paths.
+    const old = new SecretVault1130(f.directory); await old.start();
+    const payload = await old.unlock(recovery) as { secrets: { metadata: { id: string; name: string } }[] };
+    payload.secrets.find(secret => secret.metadata.id === kept.id)!.metadata.name = 'renamed by 1.130.2';
+    await old.save(payload, await old.journal(), old.index);
+    await old.changePassword(recovery, 'changed-by-1130-password');
+    assert.deepEqual((await f.envelope()).tower, wrappers);
+    // This build reads what the older one wrote: its change, its vault password, and the Tower password wrapper.
+    const restarted = await started(f.directory);
+    assert.equal(restarted.vault.hasTower(idA), true);
+    assert.equal(await restarted.towerUnlock(tower, idA), true);
+    assert.equal(restarted.settings().secrets.find(secret => secret.id === kept.id)?.name, 'renamed by 1.130.2');
+    await restarted.lock(); await restarted.unlock('changed-by-1130-password');
+    assert.equal(await restarted.towerUnlock(tower, idA), false, 'the wrapper unwraps the key the older build kept');
+  } finally { await f.cleanup(); }
+});
+
+test('Tower password wrappers requested while a save is paused between its files wait for it: payload and wrappers both survive a restart', async () => {
+  const f = await fixture('barrier');
+  try {
+    await f.service.towerWrap('previous-tower-password', idB);
+    // The save writes the journal, then pauses before vault.json until released.
+    const vault = f.service.vault as unknown as { write(name: string, bytes: Buffer): Promise<void> };
+    const write = vault.write.bind(vault); let reached!: () => void; let release!: () => void;
+    const paused = new Promise<void>(resolve => { reached = resolve; }); const gate = new Promise<void>(resolve => { release = resolve; });
+    let held = false;
+    vault.write = async (name, bytes) => { if (name === 'vault.json' && !held) { held = true; reached(); await gate; } return write(name, bytes); };
+    const saving = f.service.create({ name: 'saved across the barrier', kind: 'scalar', value: 'BARRIER_PAYLOAD' });
+    await paused;
+    const wrapping = f.service.towerWrap(tower, idA); const pruning = f.service.towerPrune(idA);
+    // Give an unserialized write every chance to run ahead of the paused save.
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.deepEqual((await f.envelope()).tower!.wrappers.map(item => item.credentialId), [idB], 'nothing was written while the save was paused');
+    release();
+    const saved = await saving; await wrapping; await pruning;
+    assert.deepEqual((await f.envelope()).tower!.wrappers.map(item => item.credentialId), [idA]);
+    const restarted = await started(f.directory);
+    assert.equal(await restarted.towerUnlock(tower, idA), true);
+    assert.equal(restarted.settings().secrets.find(secret => secret.id === saved.id)?.name, 'saved across the barrier');
+    await restarted.lock(); await restarted.unlock(recovery);
+    assert.equal(restarted.settings().secrets.some(secret => secret.id === saved.id), true);
   } finally { await f.cleanup(); }
 });
