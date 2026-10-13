@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { after, before } from 'node:test';
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -8,10 +8,14 @@ import type { SecretContext, SecretMetadata, SecretOperation, SecretRunInput, Se
 import { SecretBroker, maskSecretOutput } from '../../../server/secrets/broker.js';
 import { parseSecretCli, runSecretsCommand } from '../../../server/secrets/cli.js';
 import { SecretService } from '../../../server/secrets/service.js';
-import { editPayload, legacyRecord, legacyRule, secretService } from '../../helpers/secrets.js';
+import { editPayload, legacyRecord, legacyRule, vaultTemplate } from '../../helpers/secrets.js';
 import type { RemoteSecretBroker } from '../../../server/secrets/remote.js';
 
 const canary = 'SYNTHETIC-sensitive-canary-42';
+/** One vault initialized for this file and copied open into each test that uses a real one. */
+const vault = vaultTemplate('fixture-broker-vault-password');
+before(() => vault.ready());
+after(() => vault.dispose());
 async function fixture() {
   const stateDir = await realpath(await mkdtemp(join(tmpdir(), 'tower-broker-fixture-')));
   const root = join(stateDir, 'project'); await mkdir(root);
@@ -49,7 +53,7 @@ async function fixture() {
 function command(script: string, extra: Partial<SecretRunInput> = {}): SecretRunInput { return { operationId: randomUUID(), command: process.execPath, args: ['-e', script], ...extra }; }
 type AuthorityChange = 'revoke' | 'policy' | 'expiry' | 'rotation' | 'fields';
 /** A local key allowed one way, and the change that withdraws it: disconnection, sharing, value expiry, rotation, or a rule narrowed to one field. */
-async function changingAuthority(service: SecretService, password: string, target: SecretTarget, mode: AuthorityChange, operations: SecretOperation[], clock: { now: () => number; advance: (ms: number) => void }) {
+async function changingAuthority(service: SecretService, target: SecretTarget, mode: AuthorityChange, operations: SecretOperation[], clock: { now: () => number; advance: (ms: number) => void }) {
   const value = mode === 'fields' ? `VISIBLE=${canary}\nPRIVATE=PRIVATE_CHANGE_CANARY` : canary;
   if (mode === 'revoke' || mode === 'rotation') {
     const local = await service.create({ name: `local-${mode}`, kind: 'scalar', value, temporary: true }, target);
@@ -62,9 +66,9 @@ async function changingAuthority(service: SecretService, password: string, targe
   // Keys saved before per-secret sharing follow their rules: one expires, the other's rule narrows its fields.
   const record = legacyRecord(target.hostId, { name: `local-${mode}`, groupId: 'legacy-group', kind: mode === 'fields' ? 'env' : 'scalar', value, ...(mode === 'expiry' ? { expiresAt: clock.now() + 100 } : {}) });
   const rule = legacyRule({ groupId: 'legacy-group', secretIds: [record.metadata.id], hostId: target.hostId, root: target.root, activation: 'auto', operations });
-  await editPayload(service, password, payload => { if (!payload.groups.some(group => group.id === 'legacy-group')) payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(record); payload.rules.push(rule); });
+  await editPayload(service, payload => { if (!payload.groups.some(group => group.id === 'legacy-group')) payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(record); payload.rules.push(rule); });
   // Only an older build edits rules now: it narrows this one while the vault stays open to it.
-  const narrow = () => editPayload(service, password, payload => { payload.rules = payload.rules.map(item => item.id === rule.id ? { ...item, fields: { [record.metadata.id]: ['VISIBLE'] }, revision: item.revision + 1 } : item); });
+  const narrow = () => editPayload(service, payload => { payload.rules = payload.rules.map(item => item.id === rule.id ? { ...item, fields: { [record.metadata.id]: ['VISIBLE'] }, revision: item.revision + 1 } : item); });
   return { local: record.metadata, change: async () => { if (mode === 'expiry') clock.advance(101); else await narrow(); } };
 }
 
@@ -242,7 +246,7 @@ test('standalone CLI refuses missing/forged capability and never derives auth fr
 });
 
 test('encrypted domain fixture denies forged task and revoked policy through the actual broker', async () => {
-  const password = 'fixture-strong-password-42'; const f = await fixture(); const service = await secretService(f.stateDir, { password });
+  const f = await fixture(); const service = await vault.open(f.stateDir);
   try {
     const target = await service.ensureTask('fixture-session', f.root), context = { ...target, runId: 'owner-run' };
     const metadata = await service.create({ name: 'fixture-token', kind: 'scalar', value: canary, connect: 'session' }, target);
@@ -250,7 +254,7 @@ test('encrypted domain fixture denies forged task and revoked policy through the
     await assert.rejects(broker.run({ ...context, taskId: randomUUID() }, command(`console.log('no')`, { env: { TOKEN: metadata.reference } })));
     const used = await broker.run(context, command(`console.log(process.env.TOKEN)`, { env: { TOKEN: metadata.reference } })); assert.equal(used.stdout.trim(), '[REDACTED]');
     const record = legacyRecord(service.device().id, { name: 'selected-fields', groupId: 'legacy-group', kind: 'env', value: `TOKEN=${canary}\nPRIVATE=unselected-canary` }); const dotenv = record.metadata;
-    await editPayload(service, password, payload => { payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(record); payload.rules.push(legacyRule({ groupId: 'legacy-group', secretIds: [dotenv.id], hostId: target.hostId, root: target.root, activation: 'auto', operations: ['env', 'discover'], fields: { [dotenv.id]: ['TOKEN'] } })); });
+    await editPayload(service, payload => { payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(record); payload.rules.push(legacyRule({ groupId: 'legacy-group', secretIds: [dotenv.id], hostId: target.hostId, root: target.root, activation: 'auto', operations: ['env', 'discover'], fields: { [dotenv.id]: ['TOKEN'] } })); });
     const partial = await broker.run(context, command(`console.log(JSON.stringify({token:process.env.TOKEN,private:process.env.PRIVATE??'ABSENT'}));`, { envBundle: dotenv.reference }));
     assert.deepEqual(JSON.parse(partial.stdout), { token: '[REDACTED]', private: 'ABSENT' });
     await service.disconnectSession(target, [metadata.id]); const denied = await broker.run(context, command(`console.log('should not run')`, { env: { TOKEN: metadata.reference } })); assert.equal(denied.exitCode, null); assert.equal(denied.stdout, '');
@@ -261,11 +265,11 @@ test('encrypted domain fixture denies forged task and revoked policy through the
 });
 
 test('final dispatch denies local changes completed while a later remote reference is reauthorized', { timeout: 20000 }, async () => {
-  const password = 'fixture-dispatch-password-42'; const f = await fixture(); let now = Date.now(); const service = await secretService(f.stateDir, { password, now: () => now });
+  const f = await fixture(); let now = Date.now(); const service = await vault.open(f.stateDir, { now: () => now });
   try {
     for (const mode of ['revoke', 'policy', 'expiry', 'rotation', 'fields'] as const) {
       const target = await service.ensureTask(`dispatch-${mode}`, f.root), context = { ...target, runId: `run-${mode}` };
-      const { local, change } = await changingAuthority(service, password, target, mode, ['discover', 'env'], { now: () => now, advance: ms => { now += ms; } });
+      const { local, change } = await changingAuthority(service, target, mode, ['discover', 'env'], { now: () => now, advance: ms => { now += ms; } });
       const ref = 'tower-secret://remote/second@1'; let requests = 0;
       const remote = { request: async () => {
         if (++requests === 2) await change();
@@ -283,7 +287,7 @@ test('final dispatch denies local changes completed while a later remote referen
 });
 
 test('final dispatch checks every remote reference recipient exclusion after the last remote await', async () => {
-  const f = await fixture(), service = await secretService(f.stateDir, { password: 'fixture-recipient-dispatch-password' });
+  const f = await fixture(), service = await vault.open(f.stateDir);
   try {
     const target = await service.ensureTask('recipient-dispatch', f.root), context = { ...target, runId: 'recipient-run' };
     const first = 'tower-secret://remote/first@1', second = 'tower-secret://remote/second@1'; let secondRequests = 0;
@@ -300,7 +304,7 @@ test('final dispatch checks every remote reference recipient exclusion after the
 });
 
 test('owner revocation commits while a dispatched consumer is still running', async () => {
-  const f = await fixture(), service = await secretService(f.stateDir, { password: 'fixture-dispatch-queue-password' });
+  const f = await fixture(), service = await vault.open(f.stateDir);
   let finish!: () => void; const consumer = new Promise<void>(resolve => { finish = resolve; });
   let timer: NodeJS.Timeout | undefined;
   let dispatch: ReturnType<SecretService['dispatch']> | undefined, revoke: Promise<void> | undefined;
@@ -355,11 +359,11 @@ test('compare and domain fingerprint disclose only their derived result', async 
 });
 
 test('comparison denies local authority changes committed while resolving its remote operand', { timeout: 20000 }, async () => {
-  const password = 'fixture-compare-authority-password'; const f = await fixture(); let now = Date.now(); const service = await secretService(f.stateDir, { password, now: () => now });
+  const f = await fixture(); let now = Date.now(); const service = await vault.open(f.stateDir, { now: () => now });
   try {
     for (const mode of ['revoke', 'policy', 'expiry', 'rotation', 'fields'] as const) {
       const target = await service.ensureTask(`compare-${mode}`, f.root), context = { ...target, runId: `compare-run-${mode}` };
-      const { local, change } = await changingAuthority(service, password, target, mode, ['compare'], { now: () => now, advance: ms => { now += ms; } });
+      const { local, change } = await changingAuthority(service, target, mode, ['compare'], { now: () => now, advance: ms => { now += ms; } });
       const ref = 'tower-secret://remote/right@1';
       const remote = { request: async () => {
         await change();
@@ -371,7 +375,7 @@ test('comparison denies local authority changes committed while resolving its re
 });
 
 test('comparison checks the earlier remote operand recipient exclusion after resolving the later operand', async () => {
-  const f = await fixture(), service = await secretService(f.stateDir, { password: 'fixture-compare-recipient-password' });
+  const f = await fixture(), service = await vault.open(f.stateDir);
   try {
     const target = await service.ensureTask('compare-recipient', f.root), context = { ...target, runId: 'compare-recipient-run' };
     const first = 'tower-secret://remote/first@1', second = 'tower-secret://remote/second@1';

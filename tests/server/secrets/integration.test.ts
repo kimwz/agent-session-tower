@@ -1,4 +1,4 @@
-import test, { type TestContext } from 'node:test';
+import test, { after, before, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, readdir, rm, realpath, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -15,7 +15,7 @@ import { RemoteExclusionStore } from '../../../server/remote/exclusions.js';
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import { ownerSecretControl } from '../../../server/link/secret-routes.js';
 import { CALLER_CAPABILITY_HEADER } from '../../../server/runs/session-mcp.js';
-import { FixtureRuns, editPayload, legacyRecord, legacyRule, secretService, stored, storedTask } from '../../helpers/secrets.js';
+import { FixtureRuns, editPayload, legacyRecord, legacyRule, secretService, stored, storedTask, vaultTemplate } from '../../helpers/secrets.js';
 const VISIBLE = 'VISIBLE_INTEGRATION_CANARY_732';
 const HIDDEN = 'HIDDEN_INTEGRATION_CANARY_928';
 const PASSWORD = 'fixture-integration-vault-password';
@@ -24,16 +24,20 @@ async function storedText(directory: string): Promise<string> {
   for (const entry of await readdir(directory, { withFileTypes: true })) text += entry.isDirectory() ? await storedText(join(directory, entry.name)) : await readFile(join(directory, entry.name), 'utf8');
   return text;
 }
+/** Source A's and recipient B's vaults, initialized once for this file and copied open into each test. */
+const vaults = { a: vaultTemplate(PASSWORD), b: vaultTemplate(PASSWORD) };
+before(() => Promise.all([vaults.a.ready(), vaults.b.ready()]));
+after(() => Promise.all([vaults.a.dispose(), vaults.b.dispose()]));
 async function pair(t: TestContext) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-secret-integration-'))); t.after(() => rm(root, { recursive: true, force: true }));
   const stateA = join(root, 'state-a'), stateB = join(root, 'state-b'), projectA = join(root, 'project-a'), projectB = join(root, 'project-b'); await Promise.all([stateA, stateB, projectA, projectB].map(path => mkdir(path)));
-  let now = Date.now(); const a = await secretService(stateA, { password: PASSWORD, now: () => now }), b = await secretService(stateB, { password: PASSWORD });
+  let now = Date.now(); const a = await vaults.a.open(stateA, { now: () => now }), b = await vaults.b.open(stateB);
   const runsA = new FixtureRuns(), runsB = new FixtureRuns(); const capB = runsB.add(projectB);
   const source = new SecretRuntime({ stateDir: stateA, service: a, runs: runsA }); const recipient = new SecretRuntime({ stateDir: stateB, service: b, runs: runsB }); t.after(() => { source.close(); recipient.close(); });
   await source.control('trust', { device: b.device(), direction: 'node', routeId: 'node-b' }); await recipient.control('trust', { device: a.device(), direction: 'controller', routeId: 'controller-a' });
   // Projects registered by builds before per-secret sharing, for the rules of keys saved then.
   const logical = { id: randomUUID(), name: 'shared logical project', bindings: [{ hostId: a.device().id, root: projectA }, { hostId: b.device().id, root: projectB }] }, local = { id: randomUUID(), name: 'B local project', bindings: [{ hostId: b.device().id, root: projectB }] };
-  await editPayload(a, PASSWORD, payload => { payload.projects.push(logical); }); await editPayload(b, PASSWORD, payload => { payload.projects.push(local); });
+  await editPayload(a, payload => { payload.projects.push(logical); }); await editPayload(b, payload => { payload.projects.push(local); });
   const wires: unknown[] = []; const errors: unknown[] = [];
   /** A's relay polling B as a build that serves reads does (`features`), answering each request until `pending` settles. */
   async function relay<T>(pending: Promise<T>, offline = false, features: string[] = ['available']): Promise<T> {
@@ -60,7 +64,7 @@ test('two encrypted runtimes relay source-authoritative selected fields, owner c
   const f = await pair(t);
   // A key saved before per-secret sharing, in a logical project's group, follows A's rules for B.
   const record = legacyRecord(f.a.device().id, { name: 'source env bundle', groupId: 'logical-group', kind: 'env', value: `VISIBLE=${VISIBLE}\nHIDDEN=${HIDDEN}` }); const bundle = record.metadata;
-  await editPayload(f.a, PASSWORD, payload => {
+  await editPayload(f.a, payload => {
     payload.groups.push({ id: 'logical-group', name: 'Logical', scope: 'project', projectId: f.logical.id }); payload.secrets.push(record);
     payload.rules.push(legacyRule({ groupId: bundle.groupId, secretIds: [bundle.id], hostId: f.b.device().id, projectId: f.logical.id, activation: 'auto', operations: ['discover', 'env'], fields: { [bundle.id]: ['VISIBLE'] }, maxTtlMs: 8 * 60 * 60_000 }));
   });
@@ -79,8 +83,8 @@ test('two encrypted runtimes relay source-authoritative selected fields, owner c
 });
 test('source lock, offline relay and task expiry fail closed while owner run remains active', { timeout: 15000 }, async t => {
   const f = await pair(t); await f.a.create({ name: 'remote scalar', kind: 'scalar', value: VISIBLE, sharing: f.toB });
-  await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})); const fixedTask = (await f.recipient.context(f.capB)).taskId; await f.a.lock(); const locked = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(locked.secrets, []); assert.equal(locked.unavailableSources.length, 1);
-  await f.a.unlock(PASSWORD); const offline = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {}), true) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(offline.secrets, []); assert.equal(offline.unavailableSources.length, 1);
+  await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})); const fixedTask = (await f.recipient.context(f.capB)).taskId; const carry = f.a.handoff()!; await f.a.lock(); const locked = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(locked.secrets, []); assert.equal(locked.unavailableSources.length, 1);
+  await f.a.adopt(carry); const offline = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {}), true) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(offline.secrets, []); assert.equal(offline.unavailableSources.length, 1);
   f.advance(8 * 60 * 60_000 + 1); const expired = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(expired.secrets, []); assert.equal(expired.unavailableSources.length, 1); assert.equal(f.runsB.list()[0].status, 'running'); assert.equal(stored(f.b).secrets.length, 0); assert.equal((await f.recipient.context(f.capB)).taskId, fixedTask);
 });
 test('recipient session disconnection filters the session view and lists and blocks use without changing the source sharing', { timeout: 20000 }, async t => {

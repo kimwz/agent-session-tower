@@ -134,7 +134,7 @@ test('expiry, remote availability and task closure stay silent while the broker 
     await f.runtime.sweep();
     assert.equal(f.service.currentTask(f.session.id), undefined);
     const expiring = legacyRecord(f.service.device().id, { name: 'FAKE_EXPIRING', groupId: 'legacy-group', value: canary, expiresAt: f.now() + 100 });
-    await editPayload(f.service, password, payload => { payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(expiring); });
+    await editPayload(f.service, payload => { payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(expiring); });
     await f.runtime.control('session-connect', { sessionId: f.session.id, secretIds: [expiring.metadata.id] });
     const target = (await f.runtime.peekTarget(f.session.id))!; f.notices.length = 0;
     const token = f.tokenFor(run);
@@ -526,7 +526,7 @@ test('rotated values and rules an older build edits apply to an open task at onc
   try {
     await f.initialize(); const run = f.addRun('run-pinned-grant'); const token = f.tokenFor(run);
     const record = legacyRecord(f.service.device().id, { name: 'PINNED_KEY', groupId: 'legacy-group', value: canary }); const secret = record.metadata;
-    await editPayload(f.service, password, payload => { payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(record); payload.rules.push(legacyRule({ groupId: 'legacy-group', secretIds: [secret.id], hostId: f.service.device().id, allProjects: true, activation: 'auto', operations: ['discover', 'env'], maxTtlMs: 100 })); });
+    await editPayload(f.service, payload => { payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(record); payload.rules.push(legacyRule({ groupId: 'legacy-group', secretIds: [secret.id], hostId: f.service.device().id, allProjects: true, activation: 'auto', operations: ['discover', 'env'], maxTtlMs: 100 })); });
     const initial = await f.list(token); assert.equal(initial.secrets[0].id, secret.id);
     const capability = f.capabilities.resolve(token) as Extract<Capability, { kind: 'secret-run' }>;
     const context = await f.runtime.context(capability); const deadline = storedTask(f.service, context.taskId)!.createdAt + 100;
@@ -534,7 +534,7 @@ test('rotated values and rules an older build edits apply to an open task at onc
     const updated = f.service.settings().secrets[0]; assert.equal(updated.version, secret.version + 1);
     assert.equal((await f.list(token)).secrets[0].version, updated.version, 'a rotated value needs no reapproval');
     assert.equal((await f.service.resolve(context, updated.reference, 'env')).bytes.toString(), 'ROTATED_RUNTIME_CANARY');
-    f.advance(25); await editPayload(f.service, password, payload => { payload.rules[0]!.operations = ['discover', 'env', 'fingerprint']; payload.rules[0]!.revision++; });
+    f.advance(25); await editPayload(f.service, payload => { payload.rules[0]!.operations = ['discover', 'env', 'fingerprint']; payload.rules[0]!.revision++; });
     assert.ok((await f.list(token)).secrets[0].operations?.includes('fingerprint'));
     assert.equal((await f.service.resolve(context, updated.reference, 'fingerprint')).bytes.toString(), 'ROTATED_RUNTIME_CANARY');
     f.advance(deadline - f.now() - 1);
@@ -581,7 +581,7 @@ test('the settings view lists sharing, rule summaries and pending imports withou
   try {
     await f.initialize();
     const legacy = legacyRecord(f.service.device().id, { name: 'RULED', groupId: 'legacy-group', value: canary });
-    await editPayload(f.service, password, payload => { payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(legacy); payload.rules.push(legacyRule({ groupId: 'legacy-group', secretIds: [legacy.metadata.id], hostId: f.service.device().id, allProjects: true })); });
+    await editPayload(f.service, payload => { payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(legacy); payload.rules.push(legacyRule({ groupId: 'legacy-group', secretIds: [legacy.metadata.id], hostId: f.service.device().id, allProjects: true })); });
     await f.runtime.control('create', { name: 'SHARED', kind: 'scalar', value: canary, sharing: { global: true, folders: [] } });
     const view = await f.runtime.control('settings', {}) as SecretSettingsView;
     assert.deepEqual(view.status, { initialized: true, locked: false, pendingImports: 0, pendingImportIds: [] });

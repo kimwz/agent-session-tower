@@ -40,7 +40,7 @@ test('keys saved before sharing keep 1.130.2 decisions, manual rules being the o
     legacyRule({ groupId: 'g', secretIds: [fields.metadata.id], hostId: f.host, root: '/p', operations: ['discover', 'env', 'file'], fields: { [fields.metadata.id]: ['B'] } }),
     legacyRule({ groupId: 'g', secretIds: [allProjects.metadata.id], hostId: f.host, allProjects: true, activation: 'auto', operations: ['discover', 'env', 'compare'] }),
     legacyRule({ groupId: 'g', secretIds: [otherRoot.metadata.id], hostId: f.host, root: '/other' }), legacyRule({ groupId: 'pg', secretIds: [boundary.metadata.id], hostId: f.host, root: '/other' })];
-  await editPayload(f.service, PASSWORD, payload => { payload.projects.push(project); payload.groups.push({ id: 'g', name: 'G', scope: 'global' }, { id: 'pg', name: 'PG', scope: 'project', projectId: project.id }); payload.secrets.push(...keys); payload.rules.push(...rules); });
+  await editPayload(f.service, payload => { payload.projects.push(project); payload.groups.push({ id: 'g', name: 'G', scope: 'global' }, { id: 'pg', name: 'PG', scope: 'project', projectId: project.id }); payload.secrets.push(...keys); payload.rules.push(...rules); });
   const subject = await context(f.service, 'session', '/p');
   const task = storedTask(f.service, subject.taskId)!;
   const before = { deviceId: f.host, projects: [project], groups: [{ id: 'g', name: 'G', scope: 'global' as const }, { id: 'pg', name: 'PG', scope: 'project' as const, projectId: project.id }],
@@ -64,7 +64,7 @@ test('sharing one key out of a shared rule leaves every other key’s decision, 
   const [edited, kept, alone] = ['edited', 'kept', 'alone'].map(name => legacyRecord(f.host, { name, groupId: 'g', value: `A=${name}\nB=${name}\n`, kind: 'env' }));
   const shared = legacyRule({ groupId: 'g', secretIds: [edited.metadata.id, kept.metadata.id], hostId: f.host, root: '/p', activation: 'auto', operations: ['discover', 'env'], fields: { [edited.metadata.id]: ['A'], [kept.metadata.id]: ['B'] }, revision: 3 });
   const only = legacyRule({ groupId: 'g', secretIds: [alone.metadata.id], hostId: f.host, root: '/p' });
-  await editPayload(f.service, PASSWORD, payload => { payload.groups.push({ id: 'g', name: 'G', scope: 'global' }); payload.secrets.push(edited, kept, alone); payload.rules.push(shared, only); });
+  await editPayload(f.service, payload => { payload.groups.push({ id: 'g', name: 'G', scope: 'global' }); payload.secrets.push(edited, kept, alone); payload.rules.push(shared, only); });
   const subject = await context(f.service, 'session', '/p');
   const keptBefore = (await f.service.list(subject)).find(item => item.id === kept.metadata.id);
   assert.deepEqual(keptBefore?.fields, ['B']);
@@ -101,7 +101,7 @@ test('sharing edits are revisioned, validated and limited to computers this vaul
 test('an older build’s round trip: it reads, edits rules and saves; the upgrade follows its rules and withholds an edited key it named', async t => {
   const f = await fixture(t);
   const legacy = legacyRecord(f.host, { name: 'legacy', groupId: 'g', value: 'legacy-value' }), edited = legacyRecord(f.host, { name: 'edited', groupId: 'g', value: 'edited-value' });
-  await editPayload(f.service, PASSWORD, payload => { payload.groups.push({ id: 'g', name: 'G', scope: 'global' }); payload.secrets.push(legacy, edited); payload.rules.push(legacyRule({ groupId: 'g', secretIds: [legacy.metadata.id, edited.metadata.id], hostId: f.host, root: '/a' })); });
+  await editPayload(f.service, payload => { payload.groups.push({ id: 'g', name: 'G', scope: 'global' }); payload.secrets.push(legacy, edited); payload.rules.push(legacyRule({ groupId: 'g', secretIds: [legacy.metadata.id, edited.metadata.id], hostId: f.host, root: '/a' })); });
   await f.service.setSharing(edited.metadata.id, 0, { global: true, folders: [] });
   const atA = await context(f.service, 'session-a', '/a'), atB = await context(f.service, 'session-b', '/b');
   assert.deepEqual(names(await f.service.list(atA)), ['edited', 'legacy']); assert.deepEqual(names(await f.service.list(atB)), ['edited']);
@@ -109,7 +109,7 @@ test('an older build’s round trip: it reads, edits rules and saves; the upgrad
   const saved = await payloadOf(f.service);
   assert.deepEqual(saved.rules.map(rule => rule.secretIds), [[legacy.metadata.id]]);
   assert.deepEqual(saved.secrets.find(item => item.metadata.id === edited.metadata.id)?.sharing, { revision: 1, global: true, folders: [] });
-  await editPayload(f.service, PASSWORD, payload => {
+  await editPayload(f.service, payload => {
     payload.rules[0] = { ...payload.rules[0], root: '/b', revision: payload.rules[0].revision + 1 };
     payload.rules.push(legacyRule({ groupId: 'g', secretIds: [edited.metadata.id], hostId: f.host, root: '/a' }));
   });
@@ -256,7 +256,7 @@ test('a node’s existing task is admitted without coverage, only with its own i
 test('disconnecting stops a key in that session whatever allows it, and connecting again lifts the stop', async t => {
   const f = await fixture(t);
   const ruled = legacyRecord(f.host, { name: 'ruled', groupId: 'g', value: 'r' });
-  await editPayload(f.service, PASSWORD, payload => { payload.groups.push({ id: 'g', name: 'G', scope: 'global' }); payload.secrets.push(ruled); payload.rules.push(legacyRule({ groupId: 'g', secretIds: [ruled.metadata.id], hostId: f.host, allProjects: true, activation: 'auto' })); });
+  await editPayload(f.service, payload => { payload.groups.push({ id: 'g', name: 'G', scope: 'global' }); payload.secrets.push(ruled); payload.rules.push(legacyRule({ groupId: 'g', secretIds: [ruled.metadata.id], hostId: f.host, allProjects: true, activation: 'auto' })); });
   const shared = await f.service.create({ name: 'shared', kind: 'scalar', value: 's', sharing: { global: true, folders: [{ hostId: f.host, root: '/p' }] } });
   const subject = await context(f.service, 'session', '/p'), other = await context(f.service, 'other', '/p');
   await f.service.connectSession(subject, [ruled.metadata.id, shared.id]);

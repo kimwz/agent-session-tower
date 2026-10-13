@@ -21,7 +21,7 @@ async function vault(t: { after: (fn: () => Promise<void>) => void }, now = () =
   const legacy = async (inputs: { name: string; value: string; kind?: 'scalar' | 'env'; expiresAt?: number }[], rules: (ids: string[]) => SecretRule[]) => {
     const records = inputs.map(input => legacyRecord(hostId, { ...input, groupId }));
     const written = rules(records.map(record => record.metadata.id));
-    await editPayload(service, password, payload => {
+    await editPayload(service, payload => {
       payload.projects.push(project); payload.groups.push({ id: groupId, name: 'Project', scope: 'project', projectId: project.id });
       payload.secrets.push(...records); payload.rules.push(...written);
     });

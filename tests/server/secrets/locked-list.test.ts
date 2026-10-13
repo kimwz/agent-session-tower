@@ -21,7 +21,7 @@ async function fixture(t: TestContext) {
   const service = await secretService(stateDir, { password: PASSWORD, now: () => now });
   const host = service.device().id;
   const project = { id: randomUUID(), name: 'fixture', bindings: [{ hostId: host, root }] }, otherProject = { id: randomUUID(), name: 'other', bindings: [{ hostId: host, root: other }] };
-  await editPayload(service, PASSWORD, payload => { payload.projects.push(project, otherProject); });
+  await editPayload(service, payload => { payload.projects.push(project, otherProject); });
   const startedAt = new Date(now).toISOString();
   const target = await service.bindRun('codex:session-a', root, startedAt);
   const context: SecretContext = { ...target, runId: 'run-a' };
@@ -36,7 +36,7 @@ async function scenario(f: Awaited<ReturnType<typeof fixture>>) {
   const keys = { global: legacy('GLOBAL_AUTO', 'legacy-global'), manual: legacy('PROJECT_MANUAL', 'legacy-project'), other: legacy('OTHER_PROJECT', 'legacy-other'), expiring: legacy('EXPIRING', 'legacy-project', { expiresAt: f.now() + 60_000 }),
     dotenv: legacy('DOTENV', 'legacy-project', { kind: 'env', value: `A=${CANARY}\nB=${CANARY}\n` }), overlap: legacy('OVERLAP', 'legacy-project'), disabled: legacy('DISABLED', 'legacy-project'), deadline: legacy('DEADLINE', 'legacy-project') };
   const rule = (key: ReturnType<typeof legacy>, extra: Partial<SecretRule>) => legacyRule({ groupId: key.metadata.groupId, secretIds: [key.metadata.id], hostId: host, ...extra });
-  await editPayload(service, PASSWORD, payload => {
+  await editPayload(service, payload => {
     payload.groups.push({ id: 'legacy-global', name: 'Global', scope: 'global' }, { id: 'legacy-project', name: 'Project', scope: 'project', projectId: project.id }, { id: 'legacy-other', name: 'Other', scope: 'project', projectId: otherProject.id });
     payload.secrets.push(...Object.values(keys));
     payload.rules.push(rule(keys.global, { allProjects: true, activation: 'auto', operations: ['discover', 'env'] }), rule(keys.manual, { projectId: project.id }), rule(keys.other, { projectId: otherProject.id, activation: 'auto' }),
@@ -57,7 +57,7 @@ async function scenario(f: Awaited<ReturnType<typeof fixture>>) {
   await service.disconnectSession(target, [revoked.id]);
   // An older build put this shared key back into a rule, so its sharing waits for the owner.
   const withheld = await service.create({ name: 'WITHHELD', kind: 'scalar', value: CANARY, sharing: { global: true, folders: [] } });
-  await editPayload(service, PASSWORD, payload => { payload.rules.push(legacyRule({ groupId: withheld.groupId, secretIds: [withheld.id], hostId: host, allProjects: true, activation: 'auto' })); });
+  await editPayload(service, payload => { payload.rules.push(legacyRule({ groupId: withheld.groupId, secretIds: [withheld.id], hostId: host, allProjects: true, activation: 'auto' })); });
 }
 
 const names = (list: SecretMetadata[]) => list.map(item => item.name).sort();

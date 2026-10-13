@@ -21,7 +21,7 @@ test('encrypted vault: policy, selected fields, fixed expiry, revoke, restart lo
     const service = await secretService(directory, { password, now: () => now });
     const hostId = service.device().id; const project = { id: randomUUID(), name: 'fixture', bindings: [{ hostId, root: '/fixture' }] };
     const record = legacyRecord(hostId, { name: 'bundle', groupId: 'project-group', kind: 'env', value: 'A=CANARY_DOMAIN_VALUE\nB=hidden' }); const metadata = record.metadata;
-    await editPayload(service, password, payload => {
+    await editPayload(service, payload => {
       payload.projects.push(project); payload.groups.push({ id: 'project-group', name: 'Project', scope: 'project', projectId: project.id }); payload.secrets.push(record);
       payload.rules.push(legacyRule({ groupId: metadata.groupId, secretIds: [metadata.id], hostId, projectId: project.id, activation: 'auto', operations: ['discover', 'env'], fields: { [metadata.id]: ['A'] }, maxTtlMs: 100 }));
     });
@@ -45,7 +45,7 @@ test('discover-only and operation ledger do not disclose values or rerun operati
     const service = await secretService(directory, { password });
     const target = await service.ensureTask('session', '/fixture'); const context = { ...target, runId: 'run' };
     const record = legacyRecord(service.device().id, { name: 'key', groupId: 'global-group', value: 'canary' }); const secret = record.metadata;
-    await editPayload(service, password, payload => { payload.groups.push({ id: 'global-group', name: 'Global', scope: 'global' }); payload.secrets.push(record); payload.rules.push(legacyRule({ groupId: 'global-group', secretIds: [secret.id], hostId: target.hostId, root: target.root, operations: ['discover'] })); });
+    await editPayload(service, payload => { payload.groups.push({ id: 'global-group', name: 'Global', scope: 'global' }); payload.secrets.push(record); payload.rules.push(legacyRule({ groupId: 'global-group', secretIds: [secret.id], hostId: target.hostId, root: target.root, operations: ['discover'] })); });
     assert.equal((await service.list(context)).length, 1); await assert.rejects(service.resolve(context, secret.reference, 'env'));
     const fingerprint = 'a'.repeat(64); assert.equal((await service.beginOperation(context, 'op', fingerprint)).fresh, true); assert.equal((await service.beginOperation(context, 'op', fingerprint)).fresh, false);
     await assert.rejects(service.beginOperation({ ...context, runId: 'other' }, 'op', fingerprint)); await service.finishOperation(context, 'op', fingerprint, { stdout: '[REDACTED]' }); assert.equal((await service.beginOperation(context, 'op', fingerprint)).state, 'done');
@@ -80,7 +80,7 @@ test('separate discover and manual use rules, task-only backup exclusion, journa
     const target = await service.ensureTask('session', '/fixture'); const context = { ...target, runId: 'run' };
     const record = legacyRecord(service.device().id, { name: 'split', groupId: 'global-group', value: 'value' }); const secret = record.metadata;
     const remoteId = '11111111-1111-4111-8111-111111111111'; const remoteProject = { id: randomUUID(), name: 'remote', bindings: [{ hostId: remoteId, root: '/remote' }] };
-    await editPayload(service, password, payload => {
+    await editPayload(service, payload => {
       payload.projects.push(remoteProject); payload.groups.push({ id: 'global-group', name: 'Global', scope: 'global' }); payload.secrets.push(record);
       payload.rules.push(legacyRule({ groupId: secret.groupId, secretIds: [secret.id], hostId: target.hostId, root: target.root, activation: 'auto', operations: ['discover'] }), legacyRule({ groupId: secret.groupId, secretIds: [secret.id], hostId: target.hostId, root: target.root, operations: ['env'] }));
     });
@@ -114,7 +114,7 @@ test('sweep discards expired remote task payload and claims while keeping active
     await service.beginOperation(active, 'local-active', fingerprint); await service.finishOperation(active, 'local-active', fingerprint, { stdout: '[REDACTED]' });
     await service.beginOperation(active, 'remote-id:local-owner-operation', fingerprint); await service.beginOperation(dead, 'local-ended', fingerprint);
     const remoteHost = '11111111-1111-4111-8111-111111111111'; await service.trustPeer({ device: { ...service.device(), id: remoteHost }, routeId: 'fixture', direction: 'node', enabled: true });
-    await editPayload(service, password, payload => { payload.projects.push({ id: randomUUID(), name: 'remote', bindings: [{ hostId: remoteHost, root: '/remote' }] }); });
+    await editPayload(service, payload => { payload.projects.push({ id: randomUUID(), name: 'remote', bindings: [{ hostId: remoteHost, root: '/remote' }] }); });
     const remote = await service.ensureRemoteTask({ hostId: remoteHost, sessionId: 'remote-session', taskId: '22222222-2222-4222-8222-222222222222', root: '/remote', projectId: 'untrusted-project', runId: 'remote-run' }, { owner: true });
     const ephemeral = await service.create({ name: 'remote temporary', kind: 'scalar', value: 'SWEEP_EPHEMERAL_CANARY', temporary: true }, remote);
     assert.equal((await service.resolve(remote, ephemeral.reference, 'env')).bytes.toString(), 'SWEEP_EPHEMERAL_CANARY'); await service.beginOperation(remote, `remote-id:${remoteHost}:request`, fingerprint); await service.beginOperation(remote, `remote-nonce:${remoteHost}:nonce`, fingerprint);
@@ -135,8 +135,8 @@ test('dotenv field selections of rules deny duplicates and stale selections afte
     const record = legacyRecord(service.device().id, { name: 'selected bundle', groupId: 'global-group', kind: 'env', value: 'A=approved-a\nB=approved-b\nC=UNAPPROVED_C_CANARY' }); const secret = record.metadata;
     // Rules change only as an older build writes them; the policy reads each selection as it stands.
     const rule = legacyRule({ groupId: secret.groupId, secretIds: [secret.id], hostId: target.hostId, root: target.root, operations: ['discover', 'env', 'file', 'pipe'], fields: { [secret.id]: ['A', 'B'] } });
-    await editPayload(service, password, payload => { payload.groups.push({ id: 'global-group', name: 'Global', scope: 'global' }); payload.secrets.push(record); payload.rules.push(rule); });
-    const select = (fields?: string[]) => editPayload(service, password, payload => { const saved = payload.rules.find(item => item.id === rule.id)!; if (fields) saved.fields = { [secret.id]: fields }; else delete saved.fields; });
+    await editPayload(service, payload => { payload.groups.push({ id: 'global-group', name: 'Global', scope: 'global' }); payload.secrets.push(record); payload.rules.push(rule); });
+    const select = (fields?: string[]) => editPayload(service, payload => { const saved = payload.rules.find(item => item.id === rule.id)!; if (fields) saved.fields = { [secret.id]: fields }; else delete saved.fields; });
     const partial = await service.resolve(context, secret.reference, 'env'); assert.equal(partial.bytes.length, 0); assert.deepEqual(partial.fields, { A: 'approved-a', B: 'approved-b' }); await assert.rejects(service.resolve(context, secret.reference, 'file'), /Whole dotenv/);
     // A rotated value keeps the selection without an owner reapproval; fields outside it stay closed.
     const replacedHidden = await service.update({ id: secret.id, value: 'A=approved-a\nB=approved-b\nD=NEW_UNAPPROVED_D_CANARY' }); const stillPartial = await service.resolve(context, replacedHidden.reference, 'env'); assert.equal(stillPartial.bytes.length, 0); assert.deepEqual(stillPartial.fields, { A: 'approved-a', B: 'approved-b' }); await assert.rejects(service.resolve(context, replacedHidden.reference, 'file'), /Whole dotenv/); await assert.rejects(service.resolve(context, replacedHidden.reference + '#D', 'env'));

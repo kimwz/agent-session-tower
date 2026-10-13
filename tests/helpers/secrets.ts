@@ -1,5 +1,8 @@
 /** Shared fixtures for secret tests: a vault on a temporary state folder and owner run registries. No personal state is read. */
 import { randomUUID } from 'node:crypto';
+import { cp, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { SecretService } from '../../server/secrets/service.js';
 import type { PolicyState } from '../../server/secrets/policy.js';
 import { parseDotenv } from '../../server/secrets/dotenv.js';
@@ -14,6 +17,31 @@ export async function secretService(stateDir: string, options: { password?: stri
   await service.start();
   if (options.password !== undefined) await service.initialize(options.password);
   return service;
+}
+
+/**
+ * A vault initialized once and copied for each test that wants a fresh, open one. A copy opens with the template's key, as
+ * a worker handoff does, so only the template pays for the password derivation (about a second each on CI). Copies keep
+ * the template's vault and device identity: a test that needs two distinct vaults takes two templates.
+ */
+export function vaultTemplate(password: string) {
+  let made: Promise<{ directory: string; carry: Buffer }> | undefined;
+  const ready = () => made ??= (async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'tower-secret-template-'));
+    const service = await secretService(directory, { password }); const carry = service.handoff()!; await service.lock();
+    return { directory, carry };
+  })();
+  return {
+    /** Makes the template now, e.g. in a `before` hook, so no single test's deadline pays for it. */
+    async ready() { await ready(); },
+    async open(stateDir: string, options: { now?: () => number } = {}): Promise<SecretService> {
+      const { directory, carry } = await ready();
+      await cp(join(directory, 'secrets'), join(stateDir, 'secrets'), { recursive: true });
+      const service = await secretService(stateDir, options); await service.adopt(Buffer.from(carry));
+      return service;
+    },
+    async dispose() { if (made) { const { directory, carry } = await made; carry.fill(0); await rm(directory, { recursive: true, force: true }); } },
+  };
 }
 
 const session = (id: string, root: string, status: Session['status']): Session => {
@@ -42,12 +70,20 @@ export interface StoredRecord { metadata: SecretMetadata; value: string; encodin
 /** The encrypted permanent payload as any build reads it; builds keep the keys they do not know. */
 export interface StoredPayload { device: SecretDevice; projects: SecretProject[]; groups: SecretGroup[]; secrets: StoredRecord[]; rules: SecretRule[]; [key: string]: unknown }
 
-/** Rewrites the permanent payload as another build would write it, then reopens the vault so the service reads it. */
-export async function editPayload(service: SecretService, password: string, edit: (payload: StoredPayload) => void): Promise<void> {
-  const payload = await service.vault.decryptImport((await service.exportEncryptedVault())!, password) as StoredPayload;
-  edit(payload);
-  await service.vault.save(payload, await service.vault.journal(), service.vault.index);
-  await service.lock(); await service.unlock(password);
+/**
+ * Rewrites the permanent payload as another build would write it, then reopens the vault so the service reads it. The open
+ * vault's own key reads and reopens it, as a worker handoff does: a password derivation costs about a second on CI.
+ */
+export async function editPayload(service: SecretService, edit: (payload: StoredPayload) => void): Promise<void> {
+  await service.exportEncryptedVault(); // Waits for writes already queued.
+  const carry = service.handoff(), key = service.vault.exportKey();
+  if (!carry || !key) throw new Error('The fixture vault is locked');
+  try {
+    const payload = service.vault.unlockWithKey(key) as StoredPayload;
+    edit(payload);
+    await service.vault.save(payload, await service.vault.journal(), service.vault.index);
+    await service.lock(); await service.adopt(carry);
+  } finally { key.fill(0); carry.fill(0); }
 }
 
 /**
@@ -64,8 +100,8 @@ export function storedTask(service: SecretService, taskId: string) { return stor
 /** Whether a secret, saved or temporary, is still stored. */
 export function storedSecret(service: SecretService, secretId: string): boolean { return stored(service).secrets.some(secret => secret.metadata.id === secretId); }
 /** A project registered as builds before per-secret sharing did, for rules to name. */
-export async function addProject(service: SecretService, password: string, project: SecretProject): Promise<SecretProject> {
-  await editPayload(service, password, payload => { payload.projects.push(structuredClone(project)); });
+export async function addProject(service: SecretService, project: SecretProject): Promise<SecretProject> {
+  await editPayload(service, payload => { payload.projects.push(structuredClone(project)); });
   return project;
 }
 

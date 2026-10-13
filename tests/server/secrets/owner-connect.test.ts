@@ -29,7 +29,7 @@ test('owner can connect a saved key to one session without giving other sessions
 test('an owner connection opens every field and operation of a rule-governed key, while its rule alone keeps its limits', async () => fixture(async (service, setTime) => {
   const target = await service.ensureTask('chosen', '/fixture'); const context = { ...target, runId: 'run' };
   const bundle = legacyRecord(service.device().id, { name: 'bundle', groupId: 'legacy-group', kind: 'env', value: 'VISIBLE=FAKE_VISIBLE\nHIDDEN=FAKE_HIDDEN' });
-  await editPayload(service, password, payload => {
+  await editPayload(service, payload => {
     payload.groups.push({ id: 'legacy-group', name: 'Legacy', scope: 'global' }); payload.secrets.push(bundle);
     payload.rules.push(legacyRule({ groupId: 'legacy-group', secretIds: [bundle.metadata.id], hostId: target.hostId, root: target.root, operations: ['discover', 'env'], fields: { [bundle.metadata.id]: ['VISIBLE'] }, maxTtlMs: 100 }));
   });
@@ -44,7 +44,7 @@ test('an owner connection opens every field and operation of a rule-governed key
 test('an owner connection never edits rules, even disabled or expired ones', async () => fixture(async service => {
   const target = await service.ensureTask('chosen', '/fixture'); const context = { ...target, runId: 'run' };
   const records = [{ enabled: false }, { enabled: true, expiresAt: 999 }].map(policy => ({ policy, record: legacyRecord(service.device().id, { name: 'restricted', groupId: 'legacy-group', value: 'FAKE_RESTRICTED' }) }));
-  await editPayload(service, password, payload => {
+  await editPayload(service, payload => {
     payload.groups.push({ id: 'legacy-group', name: 'Legacy', scope: 'global' });
     for (const { policy, record } of records) { payload.secrets.push(record); payload.rules.push(legacyRule({ groupId: 'legacy-group', secretIds: [record.metadata.id], hostId: target.hostId, root: target.root, operations: ['discover'], ...policy })); }
   });

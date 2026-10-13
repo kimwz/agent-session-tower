@@ -26,10 +26,10 @@ try {
   await service.create({ name: 'global-token', kind: 'scalar', value: 'FIXTURE_GLOBAL_VALUE', sharing: { global: true, folders: [] } });
   await service.create({ name: 'folder-env', kind: 'env', value: 'TOKEN=FIXTURE_FOLDER_VALUE\n', sharing: { global: false, folders: [{ hostId: host, root: '/fixture/project' }, { hostId: NODE, root: '/fixture/node' }] } });
   await service.create({ name: 'unshared-file', kind: 'file', content: Buffer.from('FIXTURE_FILE_VALUE').toString('base64') });
-  const project = await addProject(service, SHARING_VAULT_PASSWORD, { id: 'fixture-project', name: 'fixture', bindings: [{ hostId: host, root: '/fixture/project' }] });
+  const project = await addProject(service, { id: 'fixture-project', name: 'fixture', bindings: [{ hostId: host, root: '/fixture/project' }] });
   const ruled = legacyRecord(host, { name: 'ruled-token', groupId: 'fixture-project-group', value: 'FIXTURE_RULED_VALUE' });
   const edited = legacyRecord(host, { name: 'edited-token', groupId: 'fixture-project-group', value: 'FIXTURE_EDITED_VALUE' });
-  await editPayload(service, SHARING_VAULT_PASSWORD, payload => {
+  await editPayload(service, payload => {
     payload.groups.push({ id: 'fixture-project-group', name: 'Project', scope: 'project', projectId: project.id }); payload.secrets.push(ruled, edited);
     payload.rules.push(legacyRule({ groupId: 'fixture-project-group', secretIds: [ruled.metadata.id, edited.metadata.id], hostId: host, projectId: project.id, activation: 'auto' }));
   });
