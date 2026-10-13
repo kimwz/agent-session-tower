@@ -149,6 +149,7 @@ export class RunManager extends EventEmitter {
   private readonly runs = new Map<string, Run>();
   private readonly touchedRuns = new Set<string>();
   private retainedMarkers = new Set<string>();
+  private resolvingLinks = 0;
   private touch(...ids: string[]): void { for (const id of ids) this.touchedRuns.add(id); }
   private readonly answers = new OwnerAnswers();
   private readonly owned = new Map<string, OwnedProcess>();
@@ -401,7 +402,9 @@ export class RunManager extends EventEmitter {
    */
   sessionOrigin(id: string): SessionOrigin | undefined {
     id = this.monitorSessionId(id);
-    return this.registry.origin(id, this.options.isExternallyLinked?.([id, this.nativeSessionId(id)]) === true);
+    // The resolver reads the run list, whose steering state asks for origins again: that nested listing skips steering.
+    this.resolvingLinks++;
+    try { return this.registry.origin(id, this.options.isExternallyLinked?.([id, this.nativeSessionId(id)]) === true); } finally { this.resolvingLinks--; }
   }
 
   /** Fills provenance for sessions created before it was recorded (see CreatedSessionRegistry.backfill). */
@@ -743,6 +746,7 @@ export class RunManager extends EventEmitter {
    * said when no turn runs there or the instruction is not one the owner could insert (scheduled, being admitted).
    */
   private steering(run: Run): { target: Run; adapter: SteerableAdapter } | { blocked: SteerBlock } | undefined {
+    if (this.resolvingLinks) return undefined;
     if (this.retentionHeld(run.sessionId) || this.permissions.noticeBlocked(run)) return undefined;
     if (this.stopping || run.status !== 'queued' || run.steering || run.scheduled || this.admissions.has(run.id) || this.bridged.has(run.id)) return undefined;
     const target = [...this.runs.values()].find(item => item.sessionId === run.sessionId && item.status === 'running' && !item.steering);
