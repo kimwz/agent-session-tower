@@ -24,7 +24,7 @@ import { managedByService } from '../link/update.js';
 import type { HeartbeatAdmission } from '../../shared/master.js';
 import { newWorkerSession } from '../models/worker.js';
 import { latestNativeUserMessage } from './native-user-message.js';
-import { heartbeatRunProtected } from './continuations.js';
+import { heartbeatRunProtected, noticeAdmission } from './continuations.js';
 import { installLaunchShims, launchMarksDir } from '../sessions/launch-marks.js';
 import { finishedAutomationSessionIds } from '../../shared/automation-sessions.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -1428,9 +1428,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       if (!now?.run || now.run.delivered || !now.run.notify) return 'done';
       // The result reaches the conversation as the work it already was; a turn that can no longer be found is not guessed at.
       const run = request.runId ? runs.list().find(item => item.id === request.runId) : undefined;
-      const origin = run?.origin;
       // Nobody left to tell, or the owner closed the conversation: nothing is sent, and it is not tried again.
-      if (!origin || !runs.getSession(request.sessionId) || await closedNow(request.sessionId)) { await permissions.markTold(request.id); return 'done'; }
+      if (!run?.origin || !runs.getSession(request.sessionId) || await closedNow(request.sessionId)) { await permissions.markTold(request.id); return 'done'; }
       // Sent only once the conversation has nothing running or waiting, so a close meanwhile is seen before it starts a turn.
       const own = runs.list().filter(item => item.sessionId === request.sessionId);
       if (own.some(item => item.status === 'running' || (item.status === 'queued' && !item.scheduled))) return 'later';
@@ -1439,7 +1438,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       if (own.some(item => item.status === 'queued' && item.scheduled)) { await permissions.markTold(request.id); return 'done'; }
       const result = now.run.status === 'failed' ? `실패: ${now.run.error ?? '알 수 없는 이유'}` : now.run.timedOut ? '시간 제한으로 중단됨' : `종료 코드 ${now.run.exitCode ?? now.run.signal ?? '?'}${now.run.error ? `, ${now.run.error}` : ''}`;
       await runs.enqueue(request.sessionId, `${TOWER_NOTICE} 한 번 실행을 요청한 명령이 끝났습니다 (${result}). permissions_runResult에 id "${request.id}"를 주면 출력을 받습니다.`, {},
-        { origin, ...(run?.unattended ? { unattended: true } : {}) });
+        noticeAdmission(run));
       await permissions.markTold(request.id);
       return 'done';
     };

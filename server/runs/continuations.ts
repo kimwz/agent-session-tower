@@ -64,3 +64,11 @@ export function inheritedRunFields(after: Run, options: { reviewer?: boolean } =
     ...(options.reviewer && after.codexApprovalsReviewer ? { codexApprovalsReviewer: after.codexApprovalsReviewer } : {}),
     ...(after.unattended ? { unattended: true } : {}), ...(after.model ? { model: after.model } : {}), ...(after.effort ? { effort: after.effort } : {}) };
 }
+
+/**
+ * What a Tower notice that starts a turn of its own about `about`'s work (a permissions_run result) is admitted as: that
+ * work's origin and calling turn, so it runs with the same authority and secret review, never as the owner's own turn.
+ */
+export function noticeAdmission(about: Run): Pick<Run, 'origin' | 'delegation' | 'unattended'> {
+  return { origin: about.origin ?? { kind: 'unknown' }, ...(about.delegation ? { delegation: { ...about.delegation } } : {}), ...(about.unattended ? { unattended: true } : {}) };
+}

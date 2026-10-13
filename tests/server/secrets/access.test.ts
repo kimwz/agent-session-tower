@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { Run, RunDelegation, RunOrigin, Session } from '../../../shared/types.js';
 import { secretSubject, type KnownSession, type SecretStage, type SecretSubject } from '../../../server/secrets/access.js';
 import { PUBLIC_TRIGGER_PREFIX, type SessionOrigin } from '../../../server/runs/origin.js';
+import { noticeAdmission } from '../../../server/runs/continuations.js';
 
 const CONTROLLER = 'c'.repeat(32);
 const PUBLIC = `${PUBLIC_TRIGGER_PREFIX}agent-1`;
@@ -181,4 +182,20 @@ test('a parent the server does not know, or a circular chain, refuses rather tha
   for (let depth = 0; depth <= 20; depth++) f.add(`codex:depth-${depth}`, depth ? { parentId: `codex:depth-${depth - 1}` } : {}, depth ? undefined : { kind: 'owner', untrustedInput: false });
   assert.equal(f.mode('codex:depth-5', { kind: 'owner' }), 'reviewed');
   assert.equal(f.mode('codex:depth-20', { kind: 'owner' }), 'none:unknown-parent', 'a chain longer than any real one');
+});
+
+test('a permissions_run result notice is admitted as the work it reports to: a delegated run’s notice is reviewed', () => {
+  const f = fixture();
+  f.add('codex:caller', {}, { kind: 'owner', untrustedInput: false });
+  f.add('codex:worker', {}, { kind: 'owner', untrustedInput: false });
+  const caller = f.turn('caller-run', 'codex:caller', { kind: 'owner' });
+  const delegated: Run = { id: 'delegated-run', sessionId: 'codex:worker', origin: { kind: 'owner' }, delegation: { parentRunId: caller, rootRunId: caller },
+    prompt: 'Delegated work', status: 'completed', createdAt: '', output: '' };
+  f.runs.set(delegated.id, delegated);
+  const notice = noticeAdmission(delegated);
+  assert.deepEqual(notice, { origin: { kind: 'owner' }, delegation: { parentRunId: caller, rootRunId: caller } });
+  assert.equal(f.mode('codex:worker', notice.origin, { run: notice }), 'reviewed', 'not the owner’s own turn');
+  const own = noticeAdmission({ ...delegated, id: 'own-run', delegation: undefined, unattended: true });
+  assert.deepEqual(own, { origin: { kind: 'owner' }, unattended: true });
+  assert.equal(f.mode('codex:worker', own.origin, { run: own }), 'owner');
 });
