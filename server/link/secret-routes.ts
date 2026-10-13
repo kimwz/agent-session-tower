@@ -2,9 +2,9 @@ import type { IncomingMessage } from 'node:http';
 import type { Http2ServerRequest, Http2ServerResponse } from 'node:http2';
 import { isAbsolute } from 'node:path';
 import { readJson, errorStatus } from '../http/requests.js';
-import type { SecretPeer, SecretSettingsView, SecretTarget, VaultStatus } from '../../shared/secrets.js';
+import type { SecretPeer, SecretSessionView, SecretSettingsView, SecretTarget, VaultStatus } from '../../shared/secrets.js';
 import { REMOTE_SECRET_MAX_RESPONSE_BYTES } from '../secrets/remote.js';
-import { canonicalFolders, realFolder, SECRET_SHARING_FEATURE, type FolderSources } from '../secrets/folders.js';
+import { canonicalFolders, realFolder, SECRET_EXCLUSIONS_FEATURE, SECRET_SHARING_FEATURE, type FolderSources } from '../secrets/folders.js';
 import { ownerConnection, ownerCreate, ownerInput, ownerSession } from '../secrets/owner-input.js';
 import type { SecretReceipt } from '../secrets/runtime.js';
 import type { RunnerCapability } from '../runs/runner-protocol.js';
@@ -39,8 +39,9 @@ export async function handleSecretLink(req: Http2ServerRequest, res: Http2Server
       const body = await readJson(req as unknown as IncomingMessage, REMOTE_SECRET_MAX_RESPONSE_BYTES + 1024) as { response?: unknown };
       reply(200, await worker.secretCall('deliver', [controllerId, body.response]));
     } else if (url.pathname === '/secret-connection-notice' && req.method === 'POST') {
-      const input = z.object({ sessionId: z.string().min(1).max(1024), taskId: z.string().uuid() }).strict().parse(await readJson(req as unknown as IncomingMessage, 4096));
-      reply(200, await worker.secretCall('connection-notice', [input.sessionId, input.taskId]));
+      // `secretIds`: the keys connected, whose stop in this session ends (sent only to a computer advertising `secretExclusions`).
+      const input = z.object({ sessionId: z.string().min(1).max(1024), taskId: z.string().uuid(), secretIds: z.array(z.string().min(1).max(256)).max(4096).optional() }).strict().parse(await readJson(req as unknown as IncomingMessage, 1024 * 1024));
+      reply(200, await worker.secretCall('connection-notice', [input.sessionId, input.taskId, ...(input.secretIds ? [input.secretIds] : [])]));
     } else if (url.pathname === '/secret-device' && req.method === 'GET') reply(200, await worker.secretCall('device'));
     else if (url.pathname === '/secret-folder' && req.method === 'GET') {
       // Only the real path of an existing folder: no listing, and a folder kept from controllers is not found.
@@ -50,7 +51,8 @@ export async function handleSecretLink(req: Http2ServerRequest, res: Http2Server
     }
     else if (url.pathname === '/secret-session' && req.method === 'GET' && url.searchParams.get('sessionId')) {
       if (!worker.supports('secretSharing')) throw fail('실행 워커가 아직 새 버전으로 바뀌지 않았습니다.', 'unavailable');
-      reply(200, await worker.secretCall('session-subject', [url.searchParams.get('sessionId')]));
+      // `exclusions=1`: the controller reads them; an older one refuses a subject with fields it does not know.
+      reply(200, await worker.secretCall('session-subject', [url.searchParams.get('sessionId'), url.searchParams.get('exclusions') === '1']));
     }
     else if (url.pathname === '/secret-target' && req.method === 'GET' && url.searchParams.get('sessionId')) { const target = await worker.secretCall('target', [url.searchParams.get('sessionId'), url.searchParams.get('create') !== 'false']); reply(target ? 200 : 204, target); }
     else reply(404, { error: '알 수 없는 시크릿 전달 요청입니다.' });
@@ -103,8 +105,9 @@ async function remoteSessionSubject(nodes: RemoteNodes | undefined, worker: Work
   const node = nodes.list().find(item => item.id === input.nodeId && item.status === 'connected'); const link = nodes.session(input.nodeId);
   if (!node || !link) return { error: 'source-unavailable' };
   if (!node.features.includes(SECRET_SHARING_FEATURE)) return { error: 'worker-update-pending' };
+  const exclusions = worker.supports('secretExclusions') ? '&exclusions=1' : '';
   // best-effort: a computer that does not answer is shown as unavailable, and the page asks again.
-  const response = await linkRequest(link, 'GET', `/secret-session?sessionId=${encodeURIComponent(input.sessionId)}`, undefined, 8000, { maxBytes: 256 * 1024 }).catch(() => undefined);
+  const response = await linkRequest(link, 'GET', `/secret-session?sessionId=${encodeURIComponent(input.sessionId)}${exclusions}`, undefined, 8000, { maxBytes: 1024 * 1024 }).catch(() => undefined);
   const subject = response?.json as { hostId?: unknown; error?: unknown } | undefined;
   if (response?.status === 404) return { error: 'session-closed' };
   if (response?.status !== 200 || !subject || typeof subject !== 'object') return { error: 'source-unavailable' };
@@ -142,10 +145,17 @@ export async function ownerSecretControl(nodes: RemoteNodes | undefined, worker:
     return worker.secretCall('control', [action, input]);
   }
   if (!worker.supports('secretSharing')) {
-    // Locking and unlocking stay possible during a handoff; their answer carries only the status an older worker gives.
+    // Locking and unlocking stay possible during a handoff, so the settings and the session read the vault's status from
+    // the older worker's `overview` (which every build before 1.131 serves) to offer them; nothing else is sent to it.
+    if (action === 'settings' || action === 'session') {
+      const answer = await worker.secretCall('control', ['overview', {}]).catch(() => { throw workerUpdatePending(); }) as { status?: VaultStatus };
+      const status = answer.status ?? { initialized: true, locked: true };
+      if (action === 'settings') return { status, peers: [], secrets: [], workerUpdatePending: true } satisfies SecretSettingsView;
+      return { status, available: [], connectable: [], usage: [], unavailableSources: [], updatePendingSources: [], error: WORKER_UPDATE_PENDING, permanent: false } satisfies SecretSessionView;
+    }
     if (action !== 'lock' && action !== 'unlock') throw workerUpdatePending();
     const answer = await worker.secretCall('control', [action, action === 'unlock' ? { password: input.password } : {}]) as { status?: VaultStatus };
-    return { status: answer.status ?? { initialized: true, locked: true }, peers: [], secrets: [] } satisfies SecretSettingsView;
+    return { status: answer.status ?? { initialized: true, locked: true }, peers: [], secrets: [], workerUpdatePending: true } satisfies SecretSettingsView;
   }
   const { target: _target, hostId: _host, taskId: _task, projectRoot: _root, ...page } = input;
   const remote = page.nodeId !== undefined;
@@ -161,11 +171,14 @@ export async function ownerSecretControl(nodes: RemoteNodes | undefined, worker:
   const connected = (await worker.secretCall('control', [action, safe, target]) as Partial<SecretReceipt>).connectedTarget;
   if (!connected || connected.hostId !== target.hostId || connected.sessionId !== target.sessionId || connected.taskId !== target.taskId) throw fail('연결한 원격 작업의 완료 기록을 확인할 수 없습니다.', 'unavailable');
   if (action !== 'session-disconnect') {
-    // An uncertain insert is never sent a second time, and cannot undo the committed connection.
+    // An uncertain insert is never sent a second time, and cannot undo the committed connection. A computer that reports
+    // exclusions also lifts its own stop on the keys connected; the view read next shows whether it did.
     try {
       const link = nodes?.session(nodeId);
       if (!link) throw fail('원격 알림 연결이 종료되었습니다.', 'unavailable');
-      const response = await linkRequest(link, 'POST', '/secret-connection-notice', { sessionId: connected.sessionId, taskId: connected.taskId }, 8000, { maxBytes: 4096 });
+      const lifts = action === 'session-connect' && nodes?.list().find(item => item.id === nodeId)?.features.includes(SECRET_EXCLUSIONS_FEATURE);
+      const secretIds = lifts ? { secretIds: ownerInput(ownerConnection, safe).secretIds } : {};
+      const response = await linkRequest(link, 'POST', '/secret-connection-notice', { sessionId: connected.sessionId, taskId: connected.taskId, ...secretIds }, 8000, { maxBytes: 4096 });
       if (response.status !== 200) throw fail('원격 알림을 확인하지 못했습니다.', 'unavailable');
     } catch { console.warn('Tower could not confirm the remote secret-connection notice; credentials remain discoverable when needed.'); }
   }

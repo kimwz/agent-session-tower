@@ -475,10 +475,14 @@ export async function startRunnerHost(options: RunnerHostOptions) {
           if (!session || coordinator(session.id)) throw new TowerError('not-found', 'Not found.');
           await options.exclusions?.reload();
           if (options.exclusions && await options.exclusions.excludesNow(session.cwd)) throw new TowerError('not-found', 'Not found.');
-          if (operation === 'session-subject') return secrets.sessionSubject(session.id);
+          if (operation === 'session-subject') return secrets.sessionSubject(session.id, args[2] === true);
           if (operation === 'connection-notice') {
             const target = await secrets.peekTarget(session.id);
             if (!target || target.taskId !== args[2]) throw new TowerError('forbidden', 'Secret task no longer matches.');
+            // The controller connected these keys: this session's own stop on them ends with that explicit choice.
+            const secretIds = Array.isArray(args[3]) ? args[3].filter((id): id is string => typeof id === 'string') : [];
+            try { if (secretIds.length) await secrets.reallowFromController(target, secretIds); }
+            catch { console.warn('Tower could not lift this session\'s stop on the keys its controller connected; the controller\'s view still offers them.'); }
             secrets.notifyConnection(target);
             return { notified: true };
           }

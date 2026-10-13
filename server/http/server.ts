@@ -413,7 +413,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         const answer = await towerUpdate(body.version as string | undefined);
         return json(res, answer.status, answer.body);
       }
-      const secretAction = path.match(/^\/api\/secrets\/(settings|session|session-connect|session-disconnect|sharing|broker-access|approve-broker|revoke-broker|initialize|unlock|lock|password|create|update|remove|trust|untrust|preview|import)$/);
+      const secretAction = path.match(/^\/api\/secrets\/(settings|session|session-connect|session-disconnect|session-reallow|sharing|broker-access|approve-broker|revoke-broker|initialize|unlock|lock|password|create|update|remove|trust|untrust|preview|import)$/);
       const secretRead = secretAction && ['settings', 'session', 'broker-access'].includes(secretAction[1]);
       if (secretAction && ((secretRead && req.method === 'GET') || (!secretRead && req.method === 'POST'))) {
         const brokerAccess = ['broker-access', 'approve-broker', 'revoke-broker'].includes(secretAction[1]);

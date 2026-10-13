@@ -11,8 +11,9 @@ export interface SessionPollerOptions {
 
 /**
  * Reads one session's secret view: every 10 s while its dialog is open, every 60 s while closed, never after a permanent
- * state until the dialog opens again or the window regains focus. Only reads; mutations hand their answer to `apply`,
- * and a read that started before a mutation is dropped so it cannot undo the mutation's answer.
+ * state until the dialog opens again or the window regains focus. Only reads; mutations hand their answer to `apply`.
+ * A read that started before a mutation is dropped, and one asked for during it waits for its end, so neither can undo
+ * the mutation's answer.
  */
 export class SecretSessionPoller {
   private open: boolean;
@@ -21,6 +22,9 @@ export class SecretSessionPoller {
   private reading?: AbortController;
   private version = 0;
   private stopped = false;
+  /** A mutation is on its way; `deferred` records a read asked for meanwhile. */
+  private held = false;
+  private deferred = false;
   private readonly timers: NonNullable<SessionPollerOptions['timers']>;
 
   constructor(private readonly options: SessionPollerOptions) {
@@ -37,16 +41,21 @@ export class SecretSessionPoller {
   }
   /** The window regained focus. */
   wake(): void { this.read(); }
-  /** A mutation is on its way: nothing read until then may land. */
-  hold(): void { this.version++; this.cancel(); }
+  /** A mutation is on its way: nothing read until then may land, and no read starts before it ends. */
+  hold(): void { this.version++; this.cancel(); this.held = true; this.deferred = false; }
   /** A mutation's answer. */
-  apply(view: SecretSessionView): void { this.version++; this.cancel(); this.show(view); }
-  /** A mutation failed; reading carries on from the last state. */
-  release(): void { this.schedule(); }
+  apply(view: SecretSessionView): void { this.held = false; this.deferred = false; this.version++; this.cancel(); this.show(view); }
+  /** A mutation ended without a view: reading carries on, at once when asked (`readNow`) or a read was asked for meanwhile. */
+  release(readNow = false): void {
+    const read = readNow || this.deferred;
+    this.held = false; this.deferred = false;
+    if (read) this.read(); else this.schedule();
+  }
   stop(): void { this.stopped = true; this.cancel(); }
 
   private read(): void {
     if (this.stopped) return;
+    if (this.held) { this.deferred = true; return; }
     this.cancel();
     const reading = new AbortController(); const version = this.version;
     this.reading = reading;
