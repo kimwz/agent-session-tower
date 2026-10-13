@@ -143,6 +143,9 @@ test('the opened family keeps whole prompts, by any id its session is known by',
   const select = pageSelector({ sessions, runs }, NOW);
   const page = select({ days: 1, closed: false, focus: 'child' });
   assert.deepEqual(page.runs.map(item => [item.sessionId, item.prompt.length]), [['root', long.length], ['child', long.length], ['other', PROMPT_PREVIEW]]);
+  // A turn may name its session as `provider:nativeId`, and the page may focus it that way.
+  const aliased = pageSelector({ sessions, runs: [{ ...run('claude:root', 'completed'), prompt: long }] }, NOW)({ days: 1, closed: false, focus: 'claude:child' });
+  assert.deepEqual(aliased.runs.map(item => item.prompt.length), [long.length]);
   // Out of focus, the old root and its turns leave the page.
   assert.deepEqual(select({ days: 1, closed: false }).runs.map(item => item.sessionId), ['other']);
 });

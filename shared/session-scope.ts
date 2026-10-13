@@ -120,6 +120,7 @@ export function pageSelector(snapshot: Pick<Snapshot, 'sessions' | 'runs' | 'aut
     const root = roots.get(session.id)!;
     if (root !== session.id && (session.status === 'working' || session.activeProcess || busy.has(session.id))) activeRoots.add(root);
   }
+  const autoPrompts = snapshot.autoPrompts?.map(listedJob);
   return scope => {
     const kept = new Set(always);
     const cutoff = scope.days === undefined ? -Infinity : now - scope.days * 86_400_000;
@@ -145,7 +146,7 @@ export function pageSelector(snapshot: Pick<Snapshot, 'sessions' | 'runs' | 'aut
       const focused = owner ? focusRoot !== undefined && roots.get(owner.id) === focusRoot : run.sessionId === scope.focus;
       runs.push(MATCHED_ONLY.has(run.status) && !focused ? withPreview(run) : run);
     }
-    return { sessions: result, runs, ...(snapshot.autoPrompts ? { autoPrompts: snapshot.autoPrompts.map(listedJob) } : {}) };
+    return { sessions: result, runs, ...(autoPrompts ? { autoPrompts } : {}) };
   };
 }
 
