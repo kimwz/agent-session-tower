@@ -15,6 +15,8 @@ const PREVIEW_CHARS = 1_000;
 const KILL_GRACE_MS = 5_000;
 /** Runs at once on this computer; one conversation's run one after another. */
 const MAX_RUNNING = 4;
+/** A start the storage gate refused for a moment is tried again after this, not only when a storage hold ends. */
+const DEFER_RETRY_MS = 10_000;
 
 /** What the OS reports as a process's start time; undefined when there is no such process. */
 export async function processStart(pid: number): Promise<string | undefined> {
@@ -61,8 +63,9 @@ export interface RunnerOptions {
   now?: () => Date;
   /** Adds to a run's environment for its conversation (how the commands it starts are known as that conversation's). */
   env?(group: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
-  /* Asked before every start attempt: false discards revoked/review work; defer preserves proven unstarted work until releaseStorage. */
+  /* Asked before every start attempt: false discards revoked/review work; defer keeps proven unstarted work for a later attempt. */
   beforeStart?(id: string): Promise<boolean | 'defer'>;
+  deferRetryMs?: number;
   /** Calls launch synchronously after its final current-policy check; refusal never requeues a running receipt. */
   beforeLaunch?(id: string, command: string, cwd: string, timeoutSeconds: number, launch: () => void): Promise<void>;
 }
@@ -80,13 +83,18 @@ export class PermissionRunner {
   private storageHeld = false;
   private storageResume = 0;
   private readonly deferred = new Set<string>();
+  private deferTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly dir: string;
 
   private now(): string { return (this.options.now?.() ?? new Date()).toISOString(); }
 
   constructor(private readonly options: RunnerOptions) { this.dir = join(options.stateDir, 'permission-runs'); }
 
-  inFlight(): boolean { return this.running.size > 0 || this.queue.length > 0 || this.gate !== undefined; }
+  /**
+   * Work under way or about to start. A deferred run is not: it is saved as waiting, and a successor worker starts it, so
+   * it never holds a worker handoff (2026-10-13: one deferred run held the handoff for hours).
+   */
+  inFlight(): boolean { return this.active() || this.queue.some(item => !this.deferred.has(item.id)); }
   /** Executing/pre-start checks and recovery, excluding durable waiting work. */
   active(): boolean { return this.running.size > 0 || this.gate !== undefined; }
   holdStorage(): void { this.storageHeld = true; }
@@ -123,13 +131,20 @@ export class PermissionRunner {
         .then(result => {
           if (result === 'defer') {
             this.queue.unshift(item);
-            if (resume === this.storageResume) this.deferred.add(item.id);
+            if (resume === this.storageResume) { this.deferred.add(item.id); this.retryDeferred(); }
           }
         })
         .catch(error => console.error(`A permission run failed: ${error instanceof Error ? error.message : String(error)}`))
         .finally(() => { this.running.delete(item.id); this.groups.delete(item.id); this.pump(); });
       this.running.set(item.id, work);
     }
+  }
+
+  /** A gate refusal need not end with a storage hold: deferred runs are tried again shortly (a hold waits for its release). */
+  private retryDeferred(): void {
+    if (this.deferTimer) return;
+    this.deferTimer = setTimeout(() => { this.deferTimer = undefined; if (this.storageHeld) return; this.deferred.clear(); this.pump(); }, this.options.deferRetryMs ?? DEFER_RETRY_MS);
+    this.deferTimer.unref?.();
   }
 
   async output(id: string): Promise<PermissionRunOutput | undefined> {

@@ -24,7 +24,7 @@ const until = async (check: () => boolean, ms = 10_000) => {
 };
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'], effectGate?: () => Promise<void>, requestAdmission?: () => void, autoReviewSkip?: () => string | undefined) {
+async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'], effectGate?: () => Promise<void>, requestAdmission?: () => void, autoReviewSkip?: () => string | undefined, runnerOptions: Partial<RunnerOptions> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'tower-one-shot-'));
   const stateDir = join(root, 'state');
   const project = join(root, 'project');
@@ -34,7 +34,7 @@ async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'
   let clock = new Date('2026-09-30T00:00:00.000Z');
   const finished: string[] = [];
   let service!: PermissionService;
-  const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 300, now: () => clock, beforeStart, beforeLaunch: (id, command, cwd, timeout, launch) => service.launchReviewed(id, command, cwd, timeout, launch) });
+  const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 300, now: () => clock, beforeStart, beforeLaunch: (id, command, cwd, timeout, launch) => service.launchReviewed(id, command, cwd, timeout, launch), ...runnerOptions });
   const make = () => new PermissionService({ stateDir, repository:noStorageFixture(stateDir), effectGate, requestAdmission, autoReviewSkip, env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), now: () => clock,
     startRun: request => runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600, request.sessionId),
     onRunFinished: request => finished.push(request.id), runOutput: id => runner.output(id), forgetRun: id => runner.forget(id) });
@@ -524,7 +524,7 @@ for (const defer of [false, true]) for (const stale of [false, true]) test(`stor
   releaseCheck();
   await f.runner.flush();
   assert.equal(f.runner.active(), false);
-  assert.equal(f.runner.inFlight(), true);
+  assert.equal(f.runner.inFlight(), false, 'deferred work waits saved; it never holds a worker handoff');
   assert.equal(service.overview().requests.find(r => r.id === asked.request.id)!.run!.status, 'waiting');
   assert.equal(checks, 1, 'no hot retries while held');
   if (stale) f.tick(60 * 60 * 1000);
@@ -584,7 +584,7 @@ for (const changed of [false, true]) test(`actual confirmReviewed file await pre
   if (changed) await writeFile(path, 'changed');
   release(); await f.runner.flush();
   assert.equal(service.overview().requests.find(r => r.id === asked.request.id)!.run!.status, 'waiting');
-  assert.equal(f.runner.inFlight(), true);
+  assert.equal(f.runner.inFlight(), false, 'kept for after the hold without holding a worker handoff');
   service.resume(); f.runner.releaseStorage(); await f.runner.flush();
   if (changed) {
     await assert.rejects(readFile(join(f.project, 'executions')), { code: 'ENOENT' });
@@ -604,7 +604,7 @@ for (const stale of [false, true]) test(`actual first running record gate preser
   if (stale) { await service.startReview(asked.request.id!); await service.applyReview(asked.request.id!, { verdict: 'approve', reason: 'fixture' }); }
   else await service.decide(asked.request.id!, true);
   await checking; service.pauseForStorage(); f.runner.holdStorage(); release(); await f.runner.flush();
-  assert.equal(f.runner.inFlight(), true);
+  assert.equal(f.runner.inFlight(), false, 'kept for after the hold without holding a worker handoff');
   assert.equal(service.overview().requests.find(r => r.id === asked.request.id)!.run!.status, 'waiting');
   if (stale) f.tick(60 * 60 * 1000);
   service.resume(); f.runner.releaseStorage(); await f.runner.flush();
@@ -629,6 +629,21 @@ test('actual initial record unknown write followed by storage refusal never requ
   await assert.rejects(readFile(join(f.project, 'executions')), { code: 'ENOENT' });
   const durable = await noStorageFixture(f.stateDir).load();
   assert.equal(durable.requests.find((r: { id: string }) => r.id === asked.request.id)!.run!.status, 'running');
+});
+
+test('a start the effect gate refuses for a moment is tried again without a storage hold, and never holds a handoff meanwhile', async t => {
+  let service!: PermissionService;
+  let refuse = true, checks = 0;
+  const f = await fixture(t, async id => { checks++; return refuse ? 'defer' : service.confirmReviewed(id); }, undefined, undefined, undefined, { deferRetryMs: 100 });
+  service = f.service;
+  const asked = await service.requestRun({ command: 'echo once >> executions', reason: 'fixture' }, agent('claude:one'));
+  await service.decide(asked.request.id!, true);
+  // Seen live (2026-10-13): one such run kept the worker from handing off for hours and never started.
+  await until(() => checks >= 2 && !f.runner.inFlight());
+  assert.equal(service.overview().requests.find(r => r.id === asked.request.id)!.run!.status, 'waiting');
+  refuse = false;
+  await until(() => service.overview().requests.find(r => r.id === asked.request.id)!.run!.status === 'done');
+  assert.equal(await readFile(join(f.project, 'executions'), 'utf8'), 'once\n');
 });
 
 test('ordinary permission pause and close never claim storage prewrite deferral', async t => {
