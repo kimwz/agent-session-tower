@@ -1,6 +1,7 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { access, appendFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { symlinkSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SecretBroker } from '../../../server/secrets/broker.js';
@@ -263,6 +264,25 @@ test('code changed while it was reviewed never runs on that review; a new operat
   // Unchanged code runs as reviewed.
   assert.equal((await run('steady-1', 'a.js')).exitCode, 0);
   assert.equal(await readFile(f.marker, 'utf8'), 'a');
+});
+
+test('a working folder link re-pointed before the review reads the script cannot make it review one script and run another', async t => {
+  const f = await fixture(t);
+  const write = (name: string) => `require('node:fs').writeFileSync(${JSON.stringify(f.marker)}, ${JSON.stringify(name)})\n`;
+  for (const name of ['a', 'b']) { await mkdir(join(f.root, name)); await writeFile(join(f.root, name, 'deploy.js'), write(name)); }
+  const link = join(f.root, 'current'); await symlink(join(f.root, 'a'), link);
+  const models: string[] = [];
+  const reviewer = new SecretUseReviewer({ stateDir: f.stateDir, resolve: async () => ({ provider: 'claude' }), sources: { subject: () => ({}), conversation: async () => [] },
+    model: async request => { const parsed = JSON.parse(request.prompt); models.push(`${parsed.request?.cwd ?? ''} ${parsed.script?.text ?? ''}`); return { decision: 'allow', reason: '배포', evidence: '' }; } });
+  const broker = new SecretBroker({ stateDir: f.stateDir, service: f.service, reviewer });
+  // The broker has resolved the folder; the link moves before the reviewer gathers its evidence.
+  const available = f.service.available.bind(f.service);
+  f.service.available = (...args) => { unlinkSync(link); symlinkSync(join(f.root, 'b'), link); f.service.available = available; return available(...args); };
+  const result = await broker.run(f.context, { operationId: 'relinked-folder', command: process.execPath, args: ['deploy.js'], cwd: link, env: { TOKEN: f.secret.reference } });
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.equal(await readFile(f.marker, 'utf8'), 'a');
+  assert.equal(models.length, 1);
+  assert.match(models[0]!, /"a"/, 'the review read the script that ran'); assert.doesNotMatch(models[0]!, /"b"/);
 });
 
 test('every use refused in the last hour is reported, not only the latest few', async t => {

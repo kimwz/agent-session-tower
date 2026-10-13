@@ -241,13 +241,16 @@ export class SecretBroker {
         const cwd = await realpath(input.cwd ?? context.root), root = await realpath(context.root);
         const nested = relative(root, cwd);
         if (nested === '..' || nested.startsWith(`..${sep}`) || isAbsolute(nested)) throw failure('현재 프로젝트 안에서만 실행할 수 있습니다.', 'forbidden');
+        // The review, its check of the script and the run all use this one canonical folder: a folder link re-pointed
+        // meanwhile cannot make the reviewed script another than the one that runs.
+        const canonical = { ...input, cwd };
         // Reviewed before any value is resolved or file written. A refusal is this operation's result for good.
-        const review = await this.review(context, { operation: 'run', input });
+        const review = await this.review(context, { operation: 'run', input: canonical });
         if (review.review === 'blocked') {
           const reason = SecretBroker.why(review);
           await this.refused(context, input.operationId, reviewUses({ operation: 'run', input }), reason);
           result = blockedResult(input.operationId, reason);
-        } else result = await this.execute(context, input, cwd, root, timeoutMs, review, values, scratch);
+        } else result = await this.execute(context, canonical, cwd, root, timeoutMs, review, values, scratch);
       } catch (error) { result = genericResult(input.operationId, error instanceof SecretUseRefused ? error.message : undefined); }
       finally {
         try { if (scratch.temporary) await rm(scratch.temporary, { recursive: true, force: true }); }
