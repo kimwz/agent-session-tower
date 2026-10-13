@@ -23,7 +23,7 @@ const overview: SecretOverview = {
   groups: [{ id: 'group', name: '배포 키', scope: 'global' }],
   secrets: [{ id: 'secret', name: 'API_TOKEN', groupId: 'group', kind: 'scalar', version: 1, reference: 'tower-secret://vault/secret@1' }],
   rules: [{ id: 'rule', groupId: 'group', secretIds: ['secret'], hostId: device.id, activation: 'auto', operations: ['discover'], enabled: true, revision: 1 }],
-  connected: ['secret'], task: { id: 'task', hostId: device.id, sessionId: 'session', root: '/work', status: 'open', createdAt: 1, excluded: [] },
+  connected: ['secret'], task: { id: 'task', hostId: device.id, sessionId: 'session', root: '/work', status: 'open', createdAt: 1, excluded: [], connected: [] },
 };
 const form: Registration = { name: 'API_TOKEN', kind: 'scalar', scope: 'task', groupId: '', groupName: '배포 키', projectId: '', activation: 'manual', operations: ['discover', 'env'], connect: true };
 

@@ -1,4 +1,4 @@
-import { DEFAULT_SECRET_USE_OPERATIONS, type SecretCreateInput, type SecretKind, type SecretMetadata, type SecretOverview, type SecretScope } from '../../../shared/secrets';
+import { DEFAULT_SECRET_USE_OPERATIONS, type SecretCreateRequest, type SecretKind, type SecretMetadata, type SecretOverview, type SecretScope } from '../../../shared/secrets';
 import { api } from '../common/lib';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { localPart, nodeOf } from '../remote/scope';
@@ -16,11 +16,11 @@ export const postSecret = <T,>(action: string, token: string, body: unknown) => 
 export const changeSecrets = (action: string, token: string, body: unknown) => postSecret<SecretOverview>(action, token, body);
 
 export interface Registration {
-  name: string; kind: SecretCreateInput['kind']; scope: SecretScope; groupId: string; groupName: string;
-  projectId: string; allProjects?: boolean; activation: 'manual' | 'auto'; operations: SecretCreateInput['operations']; connect: boolean;
+  name: string; kind: SecretCreateRequest['kind']; scope: SecretScope; groupId: string; groupName: string;
+  projectId: string; allProjects?: boolean; activation: 'manual' | 'auto'; operations: SecretCreateRequest['operations']; connect: boolean;
 }
 /** Transient values are added only at submission and never enter the conversation draft. */
-export function registrationPayload(form: Registration, raw: string, sessionId?: string): SecretCreateInput & { sessionId?: string; nodeId?: string } {
+export function registrationPayload(form: Registration, raw: string, sessionId?: string): SecretCreateRequest & { sessionId?: string; nodeId?: string } {
   return { name: form.name.trim(), kind: form.kind, scope: form.scope,
     ...(form.kind === 'file' ? { content: raw } : { value: raw }),
     ...(form.groupId ? { groupId: form.groupId } : { groupName: form.groupName.trim() || form.name.trim() }),
@@ -48,7 +48,7 @@ export function quickSecretKind(raw: string, format: QuickSecretFormat): SecretK
   const first = raw.replace(/^\uFEFF/, '').split(/\r?\n/).find(line => line.trim() && !line.trimStart().startsWith('#'));
   return first && /^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=/.test(first.trimStart()) ? 'env' : 'scalar';
 }
-export function quickSecretPayload(overview: SecretOverview, raw: string, format: QuickSecretFormat, name: string, destination: string, fileName = ''): SecretCreateInput & { currentProject?: boolean; notifySession: true } {
+export function quickSecretPayload(overview: SecretOverview, raw: string, format: QuickSecretFormat, name: string, destination: string, fileName = ''): SecretCreateRequest & { currentProject?: boolean; notifySession: true } {
   const kind = quickSecretKind(raw, format);
   const group = overview.groups.find(group => `group:${group.id}` === destination) ?? overview.groups.find(group =>
     (destination === 'global' && group.scope === 'global' && group.name === 'Global') ||

@@ -4,7 +4,7 @@ import { realpath, unlink } from 'node:fs/promises';
 import { isAbsolute, normalize, join } from 'node:path';
 import { z } from 'zod';
 import type { Run, Session } from '../../shared/types.js';
-import type { SecretBrokerAccess, SecretBrokerApproval, SecretContext, SecretCreateInput, SecretDevice, SecretOverview, SecretPeer, SecretTarget } from '../../shared/secrets.js';
+import type { SecretBrokerAccess, SecretBrokerApproval, SecretContext, SecretDevice, SecretOverview, SecretPeer, SecretTarget } from '../../shared/secrets.js';
 import { SECRET_OPERATIONS } from '../../shared/secrets.js';
 import type { Capability } from '../api/mcp.js';
 import type { SessionOrigin } from '../runs/origin.js';

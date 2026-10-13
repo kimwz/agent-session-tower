@@ -1,6 +1,6 @@
 import { randomUUID, randomBytes, generateKeyPairSync, createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
-import type { SecretBrokerApproval, SecretContext, SecretCreateInput, SecretDevice, SecretGroup, SecretMetadata, SecretOperation, SecretOverview, SecretPeer, SecretProject, SecretRule, SecretTarget, SecretTask, VaultStatus } from '../../shared/secrets.js';
+import type { SecretBrokerApproval, SecretContext, SecretCreateRequest, SecretDevice, SecretGroup, SecretMetadata, SecretOperation, SecretOverview, SecretPeer, SecretProject, SecretRule, SecretTarget, SecretTask, VaultStatus } from '../../shared/secrets.js';
 import { TowerError } from '../../shared/errors.js';
 import { MAX_SECRET_BYTES, SECRET_OPERATIONS, DEFAULT_SECRET_USE_OPERATIONS } from '../../shared/secrets.js';
 import { SecretVault } from './vault.js';
@@ -51,7 +51,7 @@ export class SecretService {
     } finally { key?.fill(0); }
   }); }
   private async opened(data: Permanent) {
-    try { this.permanent = data; this.journal = { ...emptyJournal(), ...((await this.vault.journal() as Journal | undefined) ?? {}) }; this.data(); } catch (error) { this.vault.lock(); this.permanent = undefined; throw error; }
+    try { this.permanent = data; this.journal = { ...emptyJournal(), ...((await this.vault.journal() as Journal | undefined) ?? {}) }; this.data(); for (const task of this.journal.tasks) task.connected ??= []; } catch (error) { this.vault.lock(); this.permanent = undefined; throw error; }
     // Vaults saved by older builds have no index yet; listing while locked works from the next lock on.
     await this.vault.writeIndex(this.lockedIndex()).catch(() => console.warn('Tower could not refresh the secret name index; names stay unlisted while locked until the next save.'));
   }
@@ -81,7 +81,7 @@ export class SecretService {
   private secrets() { return [...this.data().secrets, ...this.journal.secrets]; }
   private metadata(secret: StoredSecret): SecretMetadata { return structuredClone(secret.metadata); }
   overview(target?: SecretTarget): SecretOverview { if (this.vault.locked) return { status: this.status(), peers: [], projects: [], groups: [], secrets: [], rules: [], connected: [] }; const data = this.data(); return { status: this.status(), device: this.device(), peers: this.peers(), projects: structuredClone(data.projects), groups: structuredClone(this.groups()), secrets: this.secrets().map(secret => this.metadata(secret)), rules: structuredClone(this.allRules()), target, task: target ? structuredClone(this.journal.tasks.find(task => task.id === target.taskId)) : undefined, connected: target ? this.journal.grants.filter(grant => grant.taskId === target.taskId).map(grant => grant.secretId) : [] }; }
-  async create(input: SecretCreateInput): Promise<SecretMetadata> { return this.mutate(() => {
+  async create(input: SecretCreateRequest): Promise<SecretMetadata> { return this.mutate(() => {
     if (this.secrets().length >= 4096) throw new Error('Secret count limit');
     if (!input.name.trim() || input.name.length > 256 || !['scalar', 'env', 'file'].includes(input.kind) || !['global', 'project', 'task'].includes(input.scope)) throw new Error('Invalid secret');
     const supplied = input.kind === 'scalar' ? input.value : input.kind === 'env' && input.value !== undefined ? input.value : input.content;
@@ -195,7 +195,7 @@ export class SecretService {
       let taskId = current?.taskId;
       if (!taskId) {
         if (this.journal.tasks.length >= 10000) throw new Error('Task count limit');
-        const task: SecretTask = { id: randomUUID(), hostId: this.device().id, sessionId: input.sessionId, root: input.root, status: 'open', createdAt: this.now(), excluded: [] };
+        const task: SecretTask = { id: randomUUID(), hostId: this.device().id, sessionId: input.sessionId, root: input.root, status: 'open', createdAt: this.now(), excluded: [], connected: [] };
         this.journal.tasks.push(task); taskId = task.id;
       }
       const approval: SecretBrokerApproval = { id: randomUUID(), hostId: this.device().id, sessionId: input.sessionId, root: input.root, taskId, taskLabel: input.taskLabel.trim(), createdAt: this.now(), expiresAt: this.now() + input.ttlMs };
@@ -221,13 +221,13 @@ export class SecretService {
     return this.ensureTask(sessionId, root, undefined, started);
   }
 
-  async ensureTask(sessionId: string, canonicalRoot: string, hostId?: string, runStartedAt?: number): Promise<SecretTarget> { return this.mutate(() => { hostId ??= this.device().id; if (!sessionId || !isAbsolute(canonicalRoot) || normalize(canonicalRoot) !== canonicalRoot) throw new Error('Invalid task identity'); let task = sessionTask(this.journal, sessionId, hostId, canonicalRoot, runStartedAt); if (!task) { if (this.journal.tasks.length >= 10000) throw new Error('Task count limit'); task = { id: randomUUID(), hostId, sessionId, root: canonicalRoot, status: 'open', createdAt: this.now(), excluded: [] }; this.journal.tasks.push(task); } return { hostId, sessionId, root: canonicalRoot, taskId: task.id, projectId: this.projectId(hostId, canonicalRoot) }; }); }
+  async ensureTask(sessionId: string, canonicalRoot: string, hostId?: string, runStartedAt?: number): Promise<SecretTarget> { return this.mutate(() => { hostId ??= this.device().id; if (!sessionId || !isAbsolute(canonicalRoot) || normalize(canonicalRoot) !== canonicalRoot) throw new Error('Invalid task identity'); let task = sessionTask(this.journal, sessionId, hostId, canonicalRoot, runStartedAt); if (!task) { if (this.journal.tasks.length >= 10000) throw new Error('Task count limit'); task = { id: randomUUID(), hostId, sessionId, root: canonicalRoot, status: 'open', createdAt: this.now(), excluded: [], connected: [] }; this.journal.tasks.push(task); } return { hostId, sessionId, root: canonicalRoot, taskId: task.id, projectId: this.projectId(hostId, canonicalRoot) }; }); }
   async ensureRemoteTask(context: SecretContext): Promise<SecretContext> { return this.mutate(() => {
     if (!this.data().peers.some(peer => peer.enabled && peer.device.id === context.hostId) || !this.projectId(context.hostId, context.root) || !isAbsolute(context.root) || normalize(context.root) !== context.root || !/^[a-f0-9-]{36}$/.test(context.taskId) || !context.sessionId) throw new Error('Remote task denied');
     context = { ...context, projectId: this.projectId(context.hostId, context.root) };
     const existing = this.journal.tasks.find(task => task.id === context.taskId);
     if (existing) { this.task(context); return context; }
-    this.journal.tasks.push({ id: context.taskId, hostId: context.hostId, sessionId: context.sessionId, root: context.root, status: 'open', createdAt: this.now(), expiresAt: this.now() + 8 * 60 * 60_000, excluded: [] }); return context;
+    this.journal.tasks.push({ id: context.taskId, hostId: context.hostId, sessionId: context.sessionId, root: context.root, status: 'open', createdAt: this.now(), expiresAt: this.now() + 8 * 60 * 60_000, excluded: [], connected: [] }); return context;
   }); }
   private task(target: SecretTarget): SecretTask { this.checkBrokerApproval(target); return openTask(this.policy(), target, this.now()); }
   /** Recipient-side task closure and exclusions also apply to remotely owned secrets. */
@@ -298,7 +298,7 @@ export class SecretService {
     const open = bound ? undefined : sessionTask(state, sessionId, state.deviceId, root, Date.parse(runStartedAt));
     const target = bound ?? (open && { hostId: state.deviceId, sessionId, root, taskId: open.id });
     const task = target ? openTask(state, { ...target, projectId: projectId(state, target.hostId, target.root) }, now)
-      : { id: '', hostId: state.deviceId, sessionId, root, status: 'open' as const, createdAt: now, excluded: [] };
+      : { id: '', hostId: state.deviceId, sessionId, root, status: 'open' as const, createdAt: now, excluded: [], connected: [] };
     return { secrets: discoverable(state, task, now, 'assume'), sources };
   }
   async resolve(context: SecretContext, ref: string, operation: SecretOperation): Promise<ResolvedSecret> { return this.mutate(() => this.resolved(context, ref, operation, true)); }
