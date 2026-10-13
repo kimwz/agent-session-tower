@@ -1080,6 +1080,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     if (await offlineBootstrapHeld(stateDir, database?.identity, database ? await offlineStorageId(database) : undefined, database)) throw new TowerError('unavailable', 'Offline bootstrap is incomplete.');
     if (storageStatus.state !== 'ready' || !database || !(await database.gate('core')).open || storageStatus.state !== 'ready') throw new TowerError('unavailable', storageStatus.reason, { disposition: 'not-admitted' });
   };
+  /** What `requireEffects` knows without waiting (no file or database probe): false while storage is held. */
+  const effectsReady = () => domainsReady && !externalIntentHeld() && storageStatus.state === 'ready' && Boolean(database);
   const startupGate = async () => {
     const generation = storageHoldGeneration;
     // Park at this await, before the next startup effect. Retrying the whole startup would replay restores
@@ -1348,7 +1350,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         // One page from the end: the review reads only the last few messages.
         conversation: async sessionId => (await sessions.detail(runs.nativeSessionId(sessionId), undefined, 40, { previousUser: false }))?.messages ?? [],
       } });
-    const secrets = new SecretRuntime({ stateDir, service: secretService, runs, reviewer: secretReviewer,
+    const secrets = new SecretRuntime({ stateDir, service: secretService, runs, reviewer: secretReviewer, effects: requireEffects, effectsReady,
       onConnect: sessionId => runs.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, sessionId),
       isClosed: async id => { const saved = new ClosedSessionStore(stateDir); await saved.start(); return saved.closedIds().has(id); },
       migrate: () => secretStore.migrate(), pendingImports: () => listPendingSecretImports(stateDir),

@@ -1,10 +1,10 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SecretBroker } from '../../../server/secrets/broker.js';
-import type { SecretReview, SecretReviewRequest } from '../../../server/secrets/reviewer.js';
+import { SecretUseReviewer, type SecretReview, type SecretReviewRequest } from '../../../server/secrets/reviewer.js';
 import { SecretRuntime } from '../../../server/secrets/runtime.js';
 import type { SecretService } from '../../../server/secrets/service.js';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
@@ -38,12 +38,15 @@ async function fixture(t: test.TestContext, subject: SecretSubjectMode | 'unset'
   const resolve = service.resolve.bind(service);
   service.resolve = async (...args: Parameters<SecretService['resolve']>) => { resolves++; return resolve(...args); };
   const reviewer = new FakeReviewer();
-  const broker = new SecretBroker({ stateDir, service, reviewer });
+  /** The worker's effects gate: each call is counted, and throws while `held` says so. */
+  const gate = { calls: 0, held: (_call: number) => false };
+  const effects = async () => { if (gate.held(++gate.calls)) throw new Error('storage held'); };
+  const broker = new SecretBroker({ stateDir, service, reviewer, effects });
   const marker = join(base, 'consumer-ran');
   /** Writes the marker when it runs, and prints the value it got (masked in the result). */
   const input = (operationId: string, extra: Partial<SecretRunInput> = {}): SecretRunInput => ({ operationId, command: process.execPath,
     args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran'); process.stdout.write(String(process.env.TOKEN))`], env: { TOKEN: secret.reference }, ...extra });
-  return { base, stateDir, root, service, context, secret, reviewer, broker, marker, input, resolves: () => resolves };
+  return { base, stateDir, root, service, context, secret, reviewer, broker, gate, marker, input, resolves: () => resolves };
 }
 const exists = (path: string) => access(path).then(() => true, () => false);
 
@@ -137,7 +140,7 @@ test('a refused review start (a storage hold) refuses the use without resolving 
   const result = await f.broker.run(f.context, f.input('held-1'));
   assert.equal(result.exitCode, null); assert.equal(result.blocked, undefined);
   assert.equal(f.resolves(), 0); assert.equal(await exists(f.marker), false);
-  await assert.rejects(f.broker.compare(f.context, f.secret.reference, f.secret.reference), /storage held/);
+  await assert.rejects(f.broker.compare(f.context, f.secret.reference, f.secret.reference), (error: Error) => kindOf(error) === 'unavailable' && /저장소 복구나 작업 인계를 기다리는/.test(error.message));
   assert.equal(f.resolves(), 0);
 });
 
@@ -183,4 +186,117 @@ test('the web takes refused uses only from a worker that reports them, and only 
   const block = { key: 'secret-block:op:1', sessionId: 's', at: 1, reason: 'r', secrets: ['n'] };
   set({ secretBlocks: [block, { ...block, at: 'soon' }, { ...block, secrets: [1] }, null] });
   assert.deepEqual(manager.secretBlocks(), [block]);
+});
+
+const HELD = '실행 환경이 저장소 복구나 작업 인계를 기다리는 중이라 시크릿을 사용하지 않았습니다. 잠시 후 새 operationId로 다시 요청하세요.';
+
+test('a storage hold refuses a reviewed use after any review, allowed or failed, before any value is resolved', async t => {
+  const answers: SecretReview[] = [{ review: 'allowed' }, { review: 'failed', reason: '검토 요청이 너무 많이 밀려 검토 없이 허용했습니다.' }, { review: 'failed', reason: '검토 차례를 기다리는 동안 시간이 다 되어 검토 없이 허용했습니다.' }];
+  for (const [index, answer] of answers.entries()) {
+    const f = await fixture(t);
+    f.reviewer.answer = async () => answer;
+    f.gate.held = () => true;
+    const result = await f.broker.run(f.context, f.input(`held-after-${index}`));
+    assert.deepEqual([result.exitCode, result.stderr, result.blocked], [null, HELD, undefined]);
+    assert.equal(f.resolves(), 0); assert.equal(await exists(f.marker), false);
+    assert.deepEqual(f.service.usage({ sessionId: f.context.sessionId }), []);
+    await assert.rejects(f.broker.compare(f.context, f.secret.reference, f.secret.reference), (error: Error) => kindOf(error) === 'unavailable' && error.message === HELD);
+    assert.equal(f.resolves(), 0);
+  }
+  // A review that cannot start (the reviewer's own gate) refuses the same way.
+  const f = await fixture(t);
+  f.reviewer.answer = async () => { throw new Error('storage held'); };
+  assert.equal((await f.broker.run(f.context, f.input('held-review'))).stderr, HELD);
+  // The owner's own sessions are not held back by it, as before.
+  const owner = await fixture(t, 'owner');
+  owner.gate.held = () => true;
+  assert.equal((await owner.broker.run(owner.context, owner.input('owner-held'))).exitCode, 0);
+  assert.equal(owner.gate.calls, 0);
+});
+
+test('a hold that starts after the review stops the consumer right before it starts', async t => {
+  const f = await fixture(t);
+  f.gate.held = call => call > 1;
+  const result = await f.broker.run(f.context, f.input('held-before-dispatch'));
+  assert.deepEqual([result.exitCode, result.stderr], [null, HELD]);
+  assert.equal(f.gate.calls, 2);
+  assert.equal(await exists(f.marker), false, 'the consumer never started');
+  assert.deepEqual(f.service.usage({ sessionId: f.context.sessionId }), [], 'nothing was delivered');
+  const g = await fixture(t);
+  g.gate.held = call => call > 1;
+  await assert.rejects(g.broker.fingerprint(g.context, g.secret.reference), (error: Error) => error.message === HELD);
+  assert.deepEqual(g.service.usage({ sessionId: g.context.sessionId }), []);
+});
+
+test('code changed while it was reviewed never runs on that review; a new operation is reviewed again', async t => {
+  const f = await fixture(t);
+  const marker = (name: string) => `require('node:fs').writeFileSync(${JSON.stringify(f.marker)}, ${JSON.stringify(name)})\n`;
+  let change: (() => Promise<void>) | undefined;
+  const models: string[] = [];
+  const reviewer = new SecretUseReviewer({ stateDir: f.stateDir, resolve: async () => ({ provider: 'claude' }), sources: { subject: () => ({}), conversation: async () => [] },
+    model: async request => { models.push(JSON.parse(request.prompt).script?.text ?? ''); const next = change; change = undefined; await next?.(); return { decision: 'allow', reason: '배포', evidence: '' }; } });
+  const broker = new SecretBroker({ stateDir: f.stateDir, service: f.service, reviewer });
+  const run = (operationId: string, script: string) => broker.run(f.context, { operationId, command: process.execPath, args: [script], cwd: f.root, env: { TOKEN: f.secret.reference } });
+  const changed = /검토하는 동안 실행할 스크립트가 바뀌어 실행하지 않았습니다.*새 operationId로 다시 요청하면 바뀐 내용으로 다시 검토합니다/;
+  // Edited in place during the review.
+  await writeFile(join(f.root, 'deploy.js'), marker('reviewed'));
+  change = () => writeFile(join(f.root, 'deploy.js'), marker('swapped'));
+  const refused = await run('changed-1', 'deploy.js');
+  assert.match(refused.stderr, changed); assert.equal(refused.exitCode, null);
+  assert.equal(await exists(f.marker), false);
+  assert.deepEqual(await run('changed-1', 'deploy.js'), refused, 'the same request gets the same refusal back');
+  assert.equal(models.length, 1);
+  // A new operation reviews what is there now, and runs it.
+  assert.equal((await run('changed-2', 'deploy.js')).exitCode, 0);
+  assert.match(models[1]!, /swapped/);
+  assert.equal(await readFile(f.marker, 'utf8'), 'swapped');
+  await rm(f.marker);
+  // A link pointed elsewhere during the review.
+  await writeFile(join(f.root, 'a.js'), marker('a')); await writeFile(join(f.root, 'b.js'), marker('b'));
+  await symlink(join(f.root, 'a.js'), join(f.root, 'current.js'));
+  change = async () => { await unlink(join(f.root, 'current.js')); await symlink(join(f.root, 'b.js'), join(f.root, 'current.js')); };
+  assert.match((await run('relinked-1', 'current.js')).stderr, changed);
+  // A script that did not exist when it was reviewed.
+  change = () => writeFile(join(f.root, 'later.js'), marker('later'));
+  assert.match((await run('appeared-1', 'later.js')).stderr, changed);
+  assert.equal(await exists(f.marker), false);
+  // Unchanged code runs as reviewed.
+  assert.equal((await run('steady-1', 'a.js')).exitCode, 0);
+  assert.equal(await readFile(f.marker, 'utf8'), 'a');
+});
+
+test('every use refused in the last hour is reported, not only the latest few', async t => {
+  const f = await fixture(t);
+  f.reviewer.answer = async () => ({ review: 'blocked', reason: '유출', evidence: 'paste' });
+  for (let index = 0; index < 25; index++) await f.broker.run(f.context, f.input(`many-${index}`));
+  assert.equal(f.service.blocks(0).length, 25);
+  const runtime = new SecretRuntime({ stateDir: f.stateDir, service: f.service, runs: new FixtureRuns() });
+  t.after(() => runtime.close());
+  assert.deepEqual(runtime.blocks().map(block => block.key.split(':')[1]), Array.from({ length: 25 }, (_, index) => `many-${index}`));
+});
+
+test('a hold or a script swap while the run waits for its dispatch turn is caught inside that turn', async t => {
+  const f = await fixture(t);
+  const write = (name: string) => `require('node:fs').writeFileSync(${JSON.stringify(f.marker)}, ${JSON.stringify(name)})\n`;
+  await writeFile(join(f.root, 'deploy.js'), write('reviewed'));
+  const reviewer = new SecretUseReviewer({ stateDir: f.stateDir, resolve: async () => ({ provider: 'claude' }), sources: { subject: () => ({}), conversation: async () => [] },
+    model: async () => ({ decision: 'allow', reason: '배포', evidence: '' }) });
+  let ready = true, effectsCalls = 0;
+  // The last asynchronous gate before dispatch is where the wait for the dispatch turn begins: the swap lands after it.
+  const effects = async () => { if (++effectsCalls === 2) await writeFile(join(f.root, 'deploy.js'), write('swapped')); };
+  const broker = new SecretBroker({ stateDir: f.stateDir, service: f.service, reviewer, effects, effectsReady: () => ready });
+  const run = (operationId: string) => broker.run(f.context, { operationId, command: process.execPath, args: ['deploy.js'], cwd: f.root, env: { TOKEN: f.secret.reference } });
+  const swapped = await run('queued-swap');
+  assert.match(swapped.stderr, /검토하는 동안 실행할 스크립트가 바뀌어 실행하지 않았습니다/);
+  assert.equal(await exists(f.marker), false);
+  // Storage held by then: the synchronous check inside the dispatch turn refuses.
+  ready = false; effectsCalls = 10;
+  const held = await run('queued-hold');
+  assert.deepEqual([held.exitCode, held.stderr], [null, HELD]);
+  assert.equal(await exists(f.marker), false);
+  await assert.rejects(broker.fingerprint(f.context, f.secret.reference), (error: Error) => error.message === HELD);
+  assert.deepEqual(f.service.usage({ sessionId: f.context.sessionId }), [], 'nothing was delivered');
+  // The owner's sessions do not depend on it.
+  const owner = new SecretBroker({ stateDir: f.stateDir, service: f.service, reviewer, effects, effectsReady: () => false });
+  assert.equal((await owner.run({ ...f.context, subject: 'owner' }, { operationId: 'owner-queued', command: process.execPath, args: ['deploy.js'], cwd: f.root })).exitCode, 0);
 });
