@@ -404,21 +404,42 @@ test('the owner\'s words are budgeted in time order, so old answers kept as sent
   assert.ok(!words.some(word => word.kind === 'answer as sent'), 'the old answers are the oldest words and go first');
 });
 
-test('one owner message longer than the whole input reaches the model with its start and its closing restriction', async t => {
+test('an owner message is given whole or not at all: a long newest one reaches the model whole; one past the input limit is named as the reason', async t => {
   const f = await fixture(t);
   await f.service.saveAutoReview(ON);
   const prompts: string[] = [];
-  const reviewer = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {},
-    sources: sources(f, [], { answers: () => [{ at: '2026-10-13T09:20:00.000Z', question: 'Go on?', answer: 'Yes' }],
-      conversation: async () => ({ complete: true, messages: [{ id: 'big', role: 'user', text: `Prepare the release. ${'log '.repeat(120_000)} Do not publish.`, timestamp: '2026-10-13T09:00:00.000Z' }] }) }),
-    model: async request => { prompts.push(request.prompt); return { verdict: 'owner', rule: null, suggestion: null, reason: '게시 금지', missing: [] }; } });
+  const model = async (request: { prompt: string }) => { prompts.push(request.prompt); return { verdict: 'owner', rule: null, suggestion: null, reason: '게시 금지', missing: [] }; };
+  const message = (size: number) => `Prepare the release. ${'log '.repeat(size)} Mid-way: do not publish. ${'log '.repeat(size)} Thanks.`;
+  const whole = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {}, model,
+    sources: sources(f, [], { conversation: async () => ({ complete: true, messages: [{ id: 'big', role: 'user', text: message(40_000), timestamp: '2026-10-13T09:00:00.000Z' }] }) }) });
   await f.service.request({ kind: 'command', value: 'npm publish', scope: 'project', reason: 'publish' }, agent('claude:one'));
+  whole.wake();
+  await whole.flush();
+  assert.equal(prompts.length, 1, 'longer than the owner budget, still given');
+  assert.ok(JSON.parse(prompts[0]!).authority.ownerWords.at(-1).text.includes('Mid-way: do not publish.'), 'never cut: a restriction anywhere in it stays');
+  const huge = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {}, model,
+    sources: sources(f, [], { conversation: async () => ({ complete: true, messages: [{ id: 'big', role: 'user', text: message(70_000), timestamp: '2026-10-13T09:00:00.000Z' }] }) }) });
+  const second = await f.service.request({ kind: 'command', value: 'gh release create', scope: 'project', reason: 'release' }, agent('claude:one', 'r2'));
+  huge.wake();
+  await huge.flush();
+  assert.equal(prompts.length, 1);
+  assert.match(f.service.overview().requests.find(item => item.id === second.request.id)!.review!.reason!, /검토 입력 한도보다 길어/);
+});
+
+test('the input is measured in bytes, as the model call is: a long Korean conversation still fits', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const prompts: string[] = [];
+  const korean = Array.from({ length: 200 }, (_, index): ChatMessage => ({ id: `k${index}`, role: 'user', text: `${index}번째 요청: ${'가'.repeat(1_500)}`, timestamp: `2026-10-0${1 + index % 9}T00:00:00.000Z` }));
+  const reviewer = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {},
+    sources: sources(f, [], { conversation: async () => ({ complete: true, messages: [...korean, { id: 'ask', role: 'user', text: '릴리스 PR을 머지해 주세요.', timestamp: '2026-10-13T09:00:00.000Z' }] }) }),
+    model: async request => { prompts.push(request.prompt); return { verdict: 'approve', rule: null, suggestion: null, reason: 'ok' }; } });
+  await f.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'merge' }, agent('claude:one'));
   reviewer.wake();
   await reviewer.flush();
-  assert.equal(prompts.length, 1, 'never handed to the owner for length');
-  const words = JSON.parse(prompts[0]!).authority.ownerWords as { text: string; shortened?: string }[];
-  const big = words.find(word => word.text.startsWith('Prepare the release.'))!;
-  assert.ok(big.text.endsWith('Do not publish.') && big.shortened, 'start and end kept, marked');
+  assert.equal(prompts.length, 1);
+  assert.ok(Buffer.byteLength(prompts[0]!) <= 500_000, 'under the native router\'s 512,000-byte limit');
+  assert.equal(JSON.parse(prompts[0]!).authority.ownerWords.at(-1).text, '릴리스 PR을 머지해 주세요.');
 });
 
 test('a full read\'s hidden Tower instructions stay out of the recent conversation', async t => {
@@ -447,7 +468,7 @@ test('an input still too long after the context goes keeps the owner\'s newest r
   reviewer.wake();
   await reviewer.flush();
   assert.equal(prompts.length, 1);
-  assert.ok(prompts[0]!.length <= 450_000);
+  assert.ok(Buffer.byteLength(prompts[0]!) <= 500_000);
   const input = JSON.parse(prompts[0]!);
   assert.equal(input.authority.ownerWords.at(-1).text, 'Merge the release PR.');
   assert.equal(input.authority.conversationStart, 'not read');
@@ -560,7 +581,7 @@ test('an agent the reviewer cannot tell is never sent back for a narrower rule; 
   assert.match(item.review!.reason!, /gh release create v1/);
 
   const huge = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {}, model: async () => { throw new Error('never asked'); },
-    sources: sources(f, [], { authority: async () => ({ skills: Array.from({ length: 12 }, (_, index) => ({ name: `s${index}`, description: '', body: 'x'.repeat(40_000) })) }) }) });
+    sources: sources(f, [], { authority: async () => ({ skills: Array.from({ length: 13 }, (_, index) => ({ name: `s${index}`, description: '', body: 'x'.repeat(40_000) })) }) }) });
   const big = await f.service.request({ kind: 'command', value: 'gh release create', scope: 'project', reason: 'release' }, agent('claude:one', 'r2'));
   huge.wake();
   await huge.flush();
