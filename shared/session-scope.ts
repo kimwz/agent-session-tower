@@ -141,8 +141,9 @@ export function pageSelector(snapshot: Pick<Snapshot, 'sessions' | 'runs' | 'aut
     for (const run of snapshot.runs) {
       if (ACTIVE_RUN.has(run.status)) { runs.push(run); continue; }
       const owner = aliases.get(run.sessionId);
-      if (!owner) runs.push(run);
-      else if (sent.has(owner.id)) runs.push(MATCHED_ONLY.has(run.status) && (focusRoot === undefined || roots.get(owner.id) !== focusRoot) ? withPreview(run) : run);
+      if (owner && !sent.has(owner.id)) continue;
+      const focused = owner ? focusRoot !== undefined && roots.get(owner.id) === focusRoot : run.sessionId === scope.focus;
+      runs.push(MATCHED_ONLY.has(run.status) && !focused ? withPreview(run) : run);
     }
     return { sessions: result, runs, ...(snapshot.autoPrompts ? { autoPrompts: snapshot.autoPrompts.map(listedJob) } : {}) };
   };

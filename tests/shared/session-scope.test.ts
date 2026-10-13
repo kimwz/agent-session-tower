@@ -127,7 +127,9 @@ test('a page holds the turns of the sessions it holds, every turn at work, and t
   assert.equal(prompt('b'), long.slice(0, PROMPT_PREVIEW));
   assert.equal(prompt('d'), long);
   assert.equal(prompt('e'), long);
-  assert.equal(prompt('f'), long);
+  // A turn of a session not known yet is kept; it is whole only while its chat is open.
+  assert.equal(prompt('f'), long.slice(0, PROMPT_PREVIEW));
+  assert.equal(select({ days: 1, closed: false, focus: 'claude:new-one' }).runs.find(item => item.id === 'f')!.prompt, long);
   // A failed turn is shown with its prompt and can be written again, even before its chat's focus arrives.
   assert.equal(prompt('g'), long);
   // The complete snapshot's runs are not changed.

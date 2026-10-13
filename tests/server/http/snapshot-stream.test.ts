@@ -224,10 +224,10 @@ test('opening a chat sends the whole prompts of its finished turns as a patch; t
   const client = new SseClient(response, () => stream.detach(client));
   stream.attach(client, true, '', { closed: false });
   const prompts = () => Object.fromEntries(replay(response).runs.map(run => [run.id, run.prompt.length]));
-  assert.deepEqual(prompts(), { r1: PROMPT_PREVIEW, r2: PROMPT_PREVIEW, r3: prompt.length });
+  assert.deepEqual(prompts(), { r1: PROMPT_PREVIEW, r2: PROMPT_PREVIEW, r3: PROMPT_PREVIEW });
   stream.setScope(client, { closed: false, focus: 's1' });
   const opened = events(response).at(-1)!;
   assert.equal(opened.event, 'patch');
   assert.deepEqual((opened.data as SnapshotPatch).runs?.upsert?.map(run => run.id), ['r1']);
-  assert.deepEqual(prompts(), { r1: prompt.length, r2: PROMPT_PREVIEW, r3: prompt.length });
+  assert.deepEqual(prompts(), { r1: prompt.length, r2: PROMPT_PREVIEW, r3: PROMPT_PREVIEW });
 });
