@@ -84,8 +84,9 @@ else {
   if (mode === 'startup-error') send({type:'item.completed',item:{type:'error',message:'Unknown unsupported isolation setting.'}});
   // Codex 0.162 before retrying a model request it lost (seen live: a 503 during a permission review).
   if (mode === 'retry-notice') send({type:'error',message:'Reconnecting... 2/5 (unexpected status 503 Service Unavailable: An error occurred while processing your request.)'});
-  if (mode === 'retries-exhausted') { send({type:'error',message:'unexpected status 503 Service Unavailable:\\n\\tAn error occurred while processing your request.'}); send({type:'turn.failed',error:{message:'unexpected status 503'}}); process.exit(1); }
+  if (mode === 'retries-exhausted') { send({type:'error',message:'Reconnecting... 5/5 (unexpected status 503 Service Unavailable)'}); send({type:'error',message:'unexpected status 503 Service Unavailable:\\n\\tAn error occurred while processing your request.'}); send({type:'turn.failed',error:{message:'unexpected status 503'}}); process.exit(1); }
   if (mode === 'turn-failed') { send({type:'turn.failed',error:{message:"You've hit your usage limit."}}); process.exit(1); }
+  if (mode === 'long-failure') { send({type:'turn.failed',error:{message:'x'.repeat(500)}}); process.exit(1); }
   if (mode === 'unknown-event') send({type:'fixture.unknown',text:'private response content'});
   if (mode === 'tools') send({type:'item.started',item:{type:'command_execution',command:'exit'}});
   if (mode === 'review-read') { const item = {id:'item_0',type:'mcp_tool_call',server:'tower_review',tool:'read_file',arguments:{path:'/x/child.mjs'},result:null,error:null,status:'in_progress'};
@@ -300,6 +301,8 @@ test('Codex retrying a lost model request is no failure; the turn\u0027s end dec
   await assert.rejects(runAutoPromptModel(exhausted.request, exhausted.dependencies), /Codex could not finish \(unexpected status 503 Service Unavailable: An error occurred while processing your request\.\)/);
   const failed = await fixture(t, 'codex', 'turn-failed');
   await assert.rejects(runAutoPromptModel(failed.request, failed.dependencies), /Codex could not finish \(You've hit your usage limit\.\)/);
+  const long = await fixture(t, 'codex', 'long-failure');
+  await assert.rejects(runAutoPromptModel(long.request, long.dependencies), (error: Error) => error.message.includes(`(${'x'.repeat(199)}…)`) && !error.message.includes('x'.repeat(200)));
   const unknown = await fixture(t, 'codex', 'unknown-event');
   await assert.rejects(runAutoPromptModel(unknown.request, unknown.dependencies), (error: Error) => /unsupported routing event \(fixture\.unknown\)/.test(error.message) && !/private/.test(error.message));
 });

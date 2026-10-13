@@ -148,7 +148,7 @@ export class PermissionContinuations {
   /** A notice still on its way: if it ends without Claude taking it, its receipt fails and `undelivered` runs. */
   private lateFailure(notice: Run, continuation: Run, undelivered?: () => void): void {
     const check = () => {
-      if (notice.steering?.state === 'sending' && notice.status === 'running') return;
+      if (notice.steering?.state === 'sending') return;
       this.host.events.off('change', check);
       if (notice.steering?.state === 'delivered') return;
       continuation.error = 'Permission decision notice could not be delivered to its requesting turn.';

@@ -308,7 +308,8 @@ function collect(options: AutoPromptModelRequest, dependencies: AutoPromptNative
       // per attempt; the turn's own end still decides, and running out of retries fails it.
       else if (frame.type === 'error' && typeof frame.message === 'string' && frame.message.startsWith(CODEX_RETRY_NOTICE)) return;
       else if (frame.type === 'error' || frame.type === 'turn.failed') {
-        stop(failure(`Codex could not finish (${codexError(frame.type === 'error' ? frame.message : record(frame.error) ? frame.error.message : undefined)}). Check native sign-in and CLI compatibility.`));
+        const reason = frame.type === 'error' ? frame.message : frame.error?.message;
+        stop(failure(`Codex could not finish (${codexError(reason)}). Check native sign-in and CLI compatibility.`));
       } else if (!['thread.started', 'turn.started'].includes(frame.type)) stop(failure(`Codex returned an unsupported routing event (${eventName(frame.type)}).`));
     };
     child.stdout.on('data', (chunk: string) => {
