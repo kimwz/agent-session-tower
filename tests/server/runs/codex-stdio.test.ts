@@ -446,25 +446,24 @@ test('the agent\'s words go out by message as they stream, and what it did not s
 });
 
 
-test('a resumed approved agent session receives fresh broker-only MCP configuration', async t => {
+test('a resumed agent session receives fresh secret MCP configuration, and loses it once it may not use secrets', async t => {
   const session: Session = { id: `codex:${ID}`, nativeId: ID, provider: 'codex', title: 'Fixture', cwd: '/fixture', project: 'fixture', status: 'idle', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true };
   const capabilities = new CapabilityRegistry();
-  let approved = false;
+  let eligible = false;
   const resolver = runToolResolver({ stateDir: '/fixture/state', runs: { sessionOrigin: () => ({ kind: 'agent', untrustedInput: false }) }, capabilities,
-    secrets: { initialized: () => true, brokerApproval: () => approved ? { id: 'fixture-approval', sessionId: session.id, hostId: 'fixture-host', root: session.cwd, taskId: 'fixture-task', taskLabel: 'Deploy', createdAt: 1, expiresAt: 9999999999999 } : undefined } });
-  const turn = (id: string): Run => ({ id, sessionId: session.id, prompt: '', status: 'running', origin: { kind: 'owner' }, brokerOwnerAuthorized: true, createdAt: '', output: '' });
+    secrets: { initialized: () => true, subject: () => eligible ? { mode: 'reviewed' } : { mode: 'none', reason: 'closed' } } });
+  const turn = (id: string): Run => ({ id, sessionId: session.id, prompt: '', status: 'running', origin: { kind: 'owner' }, createdAt: '', output: '' });
   assert.equal(resolver(turn('before'), session).servers?.tower_secrets, undefined);
-  approved = true;
-  assert.equal(resolver({ ...turn('unproved'), brokerOwnerAuthorized: undefined }, session).servers?.tower_secrets, undefined);
-  const tools = resolver(turn('approved'), session);
-  assert.equal(tools.towerTools, 'broker-only');
+  eligible = true;
+  const tools = resolver(turn('eligible'), session);
+  assert.equal(tools.towerTools, 'not-owner-session');
   const f = await fixture(t, 'complete', { mcpServers: tools.servers });
   await f.run.start(); await f.run.done;
   const config = f.sent.find(frame => frame.method === 'thread/resume')!.params.config.mcp_servers;
   assert.deepEqual(config.tower_secrets, tools.servers!.tower_secrets);
   for (const name of ['tower', 'tower_local', 'tower_master']) assert.equal(config[name], undefined);
-  approved = false;
-  const removed = resolver(turn('revoked'), session);
+  eligible = false;
+  const removed = resolver(turn('closed'), session);
   const next = await fixture(t, 'complete', { mcpServers: removed.servers });
   await next.run.start(); await next.run.done;
   assert.equal(next.sent.find(frame => frame.method === 'thread/resume')!.params.config.mcp_servers.tower_secrets, undefined);

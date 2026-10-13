@@ -321,6 +321,7 @@ test('a secret credential works for its own running turn whenever its session ma
       [add('codex:triggered', { launchedBy: { kind: 'trigger', triggerId: 'daily' } }), { kind: 'trigger', triggerId: 'daily' }],
     ] as [Session, Run['origin']][]) {
       const run = f.addRun(`run-${session.id}`, session, { origin, towerTools: undefined });
+      assert.deepEqual((await f.list(f.tokenFor(run, session))).secrets.map(item => item.name), ['SHARED'], `${session.id}: the credential its turn was given`);
       assert.deepEqual(await listed(run), ['SHARED'], session.id);
       assert.equal((await f.runtime.context(capability(run))).subject, 'reviewed', session.id);
       assert.equal((await f.runtime.target(session.id)).root, f.projectRoot, 'the owner may connect a key to it as well');
@@ -335,6 +336,7 @@ test('a secret credential works for its own running turn whenever its session ma
       [add('codex:node', { node: 'joined' }, { kind: 'owner', untrustedInput: false }), { kind: 'owner' }], [add('codex:orphan', { parentId: 'codex:unknown' }), { kind: 'owner' }],
     ] as [Session, Run['origin']][]) {
       const run = f.addRun(`run-none-${session.id}-${origin?.kind}`, session, { origin });
+      assert.equal(f.resolver(run, session).servers?.tower_secrets, undefined, session.id);
       await assert.rejects(f.list(issue(run)), { kind: 'forbidden' }, session.id);
       await assert.rejects(handleMcpRequest(f.context, issue(run), { method: 'tools/list' }), { kind: 'forbidden' }, session.id);
     }
@@ -703,7 +705,7 @@ test('broker approval creates one exact task, preserves provenance and does not 
     assert.ok('approval' in replay && replay.approval);
     assert.deepEqual(replay.approval, approval, 'a duplicate approval never rotates a token or extends TTL');
     const run = f.addRun('approved-broker-run'); const tools = f.resolver(run, f.session);
-    assert.equal(tools.towerTools, 'broker-only'); run.towerTools = tools.towerTools;
+    assert.equal(tools.towerTools, 'not-owner-session'); run.towerTools = tools.towerTools;
     assert.ok(tools.servers?.tower_secrets);
     assert.equal(tools.servers?.tower, undefined); assert.equal(tools.servers?.tower_master, undefined);
     assert.equal(tools.servers?.tower_slack, undefined); assert.equal(tools.servers?.tower_github, undefined);

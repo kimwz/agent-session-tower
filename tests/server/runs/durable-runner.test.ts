@@ -2146,7 +2146,7 @@ test('held typed API permits verified reads and rejects invalid, write and unava
 test('worker broker admission preserves only authenticated owner and verified live-parent proof', async t => {
   const capabilities = new CapabilityRegistry();
   let approved = false;
-  const secrets = { initialized: () => false, brokerAdmissionRequired: () => false, brokerApproval: (session: Session) => approved ? { id: 'fixture-approval', sessionId: session.id, root: session.cwd } : undefined } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
+  const secrets = { initialized: () => false, subject: () => ({ mode: 'reviewed' }), brokerAdmissionRequired: () => false, brokerApproval: (session: Session) => approved ? { id: 'fixture-approval', sessionId: session.id, root: session.cwd } : undefined } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
   const f = await fixture(false, false, undefined, undefined, async () => ({ capabilities, secrets })); t.after(f.cleanup);
   const client = await f.connect();
   const unmarked = await client.enqueue(f.session.id, 'Unmarked owner origin');
@@ -2184,7 +2184,7 @@ test('worker rechecks live parent proof after asynchronous preparation before hi
   let wait = false, preparing = false;
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
-  const secrets = { initialized: () => false, brokerAdmissionRequired: () => false, brokerApproval: (session: Session) => ({ id: 'fixture-approval', sessionId: session.id, root: session.cwd }) } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
+  const secrets = { initialized: () => false, subject: () => ({ mode: 'reviewed' }), brokerAdmissionRequired: () => false, brokerApproval: (session: Session) => ({ id: 'fixture-approval', sessionId: session.id, root: session.cwd }) } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
   const f = await fixture(false, false, undefined, undefined, async () => ({ capabilities, secrets }), undefined, async () => { if (wait) { preparing = true; await held; } }); t.after(f.cleanup);
   const client = await f.connect();
   const parent = await client.enqueue(f.session.id, 'Authenticated parent', {}, { brokerOwnerAuthorized: true });
@@ -2207,7 +2207,7 @@ test('worker rechecks live parent proof after asynchronous preparation before hi
 test('official reopen finishes the worker closure write before releasing the secret session fence', async t => {
   let f: Awaited<ReturnType<typeof fixture>>;
   const reopened: string[] = [];
-  const secrets = { initialized: () => false, brokerAdmissionRequired: () => false, brokerApproval: () => undefined, reopenSession: async (id: string) => {
+  const secrets = { initialized: () => false, subject: () => ({ mode: 'reviewed' }), brokerAdmissionRequired: () => false, brokerApproval: () => undefined, reopenSession: async (id: string) => {
     assert.equal(f.closedSessions!.closedIds().has(id), false, 'closure store has committed reopening before the secret hook');
     reopened.push(id);
   } } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
@@ -2225,7 +2225,7 @@ test('worker binds owner admission to the observed approval through asynchronous
   let preparing = false;
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
-  const secrets = { initialized: () => false, brokerAdmissionRequired: () => false, brokerApproval: (session: Session) => approvalId ? { id: approvalId, sessionId: session.id, root: session.cwd } : undefined } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
+  const secrets = { initialized: () => false, subject: () => ({ mode: 'reviewed' }), brokerAdmissionRequired: () => false, brokerApproval: (session: Session) => approvalId ? { id: approvalId, sessionId: session.id, root: session.cwd } : undefined } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
   const f = await fixture(false, false, undefined, undefined, async () => ({ secrets }), undefined, async () => { preparing = true; await held; }); t.after(f.cleanup);
   const client = await f.connect();
   const count = f.runs.list().length;
@@ -2241,7 +2241,7 @@ test('worker binds owner admission to the observed approval through asynchronous
 test('direct Auto Prompt dispatch cannot bypass the RunManager broker gate and retains accepted proof', async t => {
   const { AutoPromptManager } = await import('../../../server/auto-prompt/manager.js');
   const { externalStorageFixture } = await import('../remote/external-storage-fixture.js');
-  const secrets = { initialized: () => false, brokerAdmissionRequired: () => false, brokerApproval: (session: Session) => ({ id: 'fixture-approval', sessionId: session.id, root: session.cwd }) } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
+  const secrets = { initialized: () => false, subject: () => ({ mode: 'reviewed' }), brokerAdmissionRequired: () => false, brokerApproval: (session: Session) => ({ id: 'fixture-approval', sessionId: session.id, root: session.cwd }) } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
   const f = await fixture(false, false, undefined, undefined, async () => ({ secrets }));
   let manager: import('../../../server/auto-prompt/manager.js').AutoPromptManager | undefined;
   t.after(async () => { await manager?.close(); await f.cleanup(); });
@@ -2267,7 +2267,7 @@ test('direct Auto Prompt dispatch cannot bypass the RunManager broker gate and r
 test('typed API transport passes only internal owner proof and keeps broker target admission scoped', async t => {
   const admitted: unknown[] = [];
   const api = { call: async (_name: unknown, _input: unknown, _actor: unknown, _key: unknown, context: unknown) => { admitted.push(context); return { accepted: true }; } } as unknown as TowerApi;
-  const secrets = { initialized: () => false, brokerAdmissionRequired: () => false, brokerApproval: (session: Session) => ({ id: 'fixture-approval', sessionId: session.id, root: session.cwd }) } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
+  const secrets = { initialized: () => false, subject: () => ({ mode: 'reviewed' }), brokerAdmissionRequired: () => false, brokerApproval: (session: Session) => ({ id: 'fixture-approval', sessionId: session.id, root: session.cwd }) } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
   const f = await fixture(false, false, undefined, undefined, async () => ({ secrets, api })); t.after(f.cleanup);
   const client = await f.connect();
   const input = { requestId: '12345678-1234-4234-8234-123456789aba', provider: 'codex', prompt: 'Exact task', cwd: f.directory, targetSessionId: f.session.id, brokerOwnerAuthorized: true };
@@ -2281,7 +2281,7 @@ test('typed API transport passes only internal owner proof and keeps broker targ
 test('a locked broker session refuses unproved RPC and direct Auto Prompt admission before history mutation', async t => {
   const { AutoPromptManager } = await import('../../../server/auto-prompt/manager.js');
   const { externalStorageFixture } = await import('../remote/external-storage-fixture.js');
-  const secrets = { initialized: () => false, brokerAdmissionRequired: () => true, brokerApproval: () => undefined } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
+  const secrets = { initialized: () => false, subject: () => ({ mode: 'reviewed' }), brokerAdmissionRequired: () => true, brokerApproval: () => undefined } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
   const f = await fixture(false, false, undefined, undefined, async () => ({ secrets }));
   let manager: import('../../../server/auto-prompt/manager.js').AutoPromptManager | undefined;
   t.after(async () => { await manager?.close(); await f.cleanup(); });
@@ -2301,9 +2301,6 @@ test('a locked broker session refuses unproved RPC and direct Auto Prompt admiss
   assert.equal(f.runs.list().length, before, 'lock never permits history taint that would gain authority after unlock');
   const owner = await client.enqueue(f.session.id, 'Authenticated owner while locked', {}, { brokerOwnerAuthorized: true });
   assert.equal(owner.brokerOwnerAuthorized, true);
-  const { runToolResolver } = await import('../../../server/api/run-tools.js');
-  const resolve = runToolResolver({ stateDir: f.stateDir, runs: f.runs, capabilities: new CapabilityRegistry(), secrets });
-  assert.equal(resolve(owner, f.session).servers?.tower_secrets, undefined, 'locked approval has no broker MCP even for the authenticated owner turn');
   await until(() => f.starts() === 1);
   assert.notEqual(f.runs.list().find(run => run.id === owner.id)?.towerTools, 'broker-only', 'locked approval exposes no broker-only tools');
 });
@@ -2322,7 +2319,7 @@ test('a scoped broker caller cannot promote owner proof across sessions or throu
     const listed = runs.list.bind(runs);
     // Metadata models the already-running scoped parent; no native provider is launched for it.
     runs.list = () => [...listed(), { ...parent }];
-    const secrets = { initialized: () => false, brokerAdmissionRequired: (session: Session) => session.id === target.id,
+    const secrets = { initialized: () => false, subject: () => ({ mode: 'reviewed' }), brokerAdmissionRequired: (session: Session) => session.id === target.id,
       brokerApproval: (session: Session) => session.id === target.id ? { id: 'other-project-approval', sessionId: session.id, root: session.cwd, taskId: 'other-project-task' } : undefined } as unknown as import('../../../server/secrets/runtime.js').SecretRuntime;
     return { capabilities, secrets };
   }, undefined, undefined, true);
