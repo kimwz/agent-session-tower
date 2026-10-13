@@ -15,7 +15,7 @@ import type { Attachment, AutoPromptJob, AutoPromptInput, NewSessionInput, Messa
 import type { RunAdmission } from './manager.js';
 import type { WorkspaceTerminalBackend } from '../workspace-terminals.js';
 import { markMaster, subscriptionOnly } from './subscription.js';
-import { FORCE_UPDATE_DEADLINE_MS, MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths, type RunnerCapability, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage, type UpdateDrainStatus } from './runner-protocol.js';
+import { FORCE_UPDATE_DEADLINE_MS, MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths, type RunnerCapability, type RunnerReply, type RunnerSnapshot, type SecretBlockNotice, type SessionHistoryPage, type UpdateDrainStatus } from './runner-protocol.js';
 import { readHandoff } from './handoff.js';
 import type { TriggerOverview } from '../../shared/triggers.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
@@ -337,6 +337,13 @@ export class DurableRunManager extends EventEmitter {
   }
   autoPromptList(): AutoPromptJob[] { return structuredClone(this.snapshot?.autoPrompts ?? []); }
   triggerOverview(): TriggerOverview | undefined { return this.snapshot?.triggers && structuredClone(this.snapshot.triggers); }
+  /** Secret uses the worker refused lately, for owner notifications only; none from a worker that predates them. */
+  secretBlocks(): SecretBlockNotice[] {
+    const blocks: unknown = this.snapshot?.secretBlocks;
+    if (!Array.isArray(blocks)) return [];
+    return blocks.filter((block): block is SecretBlockNotice => !!block && typeof block === 'object' && typeof block.key === 'string' && typeof block.sessionId === 'string'
+      && Number.isSafeInteger(block.at) && typeof block.reason === 'string' && Array.isArray(block.secrets) && block.secrets.every((name: unknown) => typeof name === 'string')).map(block => structuredClone(block));
+  }
   /** Tower operations run in the worker; an outdated worker is told apart from a real error. */
   async api(operation: string, input: unknown, internal?: Pick<RunAdmission, 'origin' | 'requestId' | 'callerCapability' | 'brokerOwnerAuthorized'>): Promise<unknown> {
     if (operation === 'autoPrompt.submit') this.requireModelRole(input);

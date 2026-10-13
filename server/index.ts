@@ -428,6 +428,7 @@ async function main() {
     session: id => { const found = runs.getSession(id); return found && titles.apply(found); },
     project: session => groups.list().find(group => group.cwd === session.cwd)?.title || session.project,
     trigger: id => runs.triggerOverview()?.triggers.find(item => item.id === id)?.name,
+    secretBlocks: () => runs.secretBlocks(),
     attention: async (input, signal) => {
       const engine = decisions.engine('attentionNotifications');
       if (!engine) return undefined;

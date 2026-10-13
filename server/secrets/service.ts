@@ -22,7 +22,10 @@ interface Permanent {
   /** The global group without rules that saved secrets with sharing belong to, so every build finds their group. */
   towerGroupId?: string;
 }
-interface UsageRecord extends SecretUsage { hostId: string; sessionId: string }
+/** `operationId`: the blocked operation a record belongs to, for the owner's one notice of it; kept here, never in views. */
+interface UsageRecord extends SecretUsage { hostId: string; sessionId: string; operationId?: string }
+/** One blocked operation of a session, for the owner's notice: what was refused and why, without values. */
+export interface SecretBlock { operationId: string; sessionId: string; at: number; reason: string; secrets: string[] }
 interface Journal { brokerApprovals: SecretBrokerApproval[]; groups: SecretGroup[]; rules: SecretRule[]; tasks: SecretTask[]; secrets: StoredSecret[]; usage: UsageRecord[]; operations: Record<string, { taskId: string; runId: string; fingerprint: string; state: 'pending' | 'done'; remote: boolean; claimedAt?: number; result?: unknown }> }
 export interface ResolvedSecret { metadata: SecretMetadata; bytes: Buffer; fields?: Record<string, string> }
 export interface SecretDispatchUse { ref: string; operation: SecretOperation; value: ResolvedSecret }
@@ -373,16 +376,31 @@ export class SecretService {
   async beginOperation(context: SecretContext, id: string, fingerprint: string): Promise<{ state: 'pending' | 'done'; fresh: boolean; result?: unknown }> { return this.mutate(() => { this.task(context); if (!context.runId || !/^[A-Za-z0-9._:-]{1,200}$/.test(id) || !/^[a-f0-9]{64}$/.test(fingerprint)) throw new Error('Invalid operation'); const existing = this.journal.operations[id]; if (existing) { if (existing.taskId !== context.taskId || existing.runId !== context.runId || existing.fingerprint !== fingerprint) throw new Error('Operation identity conflict'); return { state: existing.state, fresh: false, result: structuredClone(existing.result) }; } if (Object.keys(this.journal.operations).length >= 10000) throw new Error('Operation ledger full'); this.journal.operations[id] = { taskId: context.taskId, runId: context.runId, fingerprint, state: 'pending', remote: context.hostId !== this.device().id, claimedAt: this.now() }; return { state: 'pending', fresh: true }; }); }
   async finishOperation(context: SecretContext, id: string, fingerprint: string, result: unknown) { return this.mutate(() => { const existing = this.journal.operations[id]; if (!existing || existing.taskId !== context.taskId || existing.runId !== context.runId || existing.fingerprint !== fingerprint || existing.state !== 'pending') throw new Error('Operation identity conflict'); if (Buffer.byteLength(JSON.stringify(result)) > 3 * MAX_SECRET_BYTES) throw new Error('Operation result too large'); existing.state = 'done'; existing.result = structuredClone(result); }); }
   /** Keeps the latest uses, value-free and encrypted, so each session's chat shows what it used. */
-  async recordUsage(target: Pick<SecretTarget, 'hostId' | 'sessionId'>, entries: readonly SecretUsage[]): Promise<void> { return this.mutate(() => {
+  async recordUsage(target: Pick<SecretTarget, 'hostId' | 'sessionId'>, entries: readonly SecretUsage[], operationId?: string): Promise<void> { return this.mutate(() => {
+    if (operationId !== undefined && !/^[A-Za-z0-9._:-]{1,200}$/.test(operationId)) throw new Error('Invalid secret usage');
     for (const entry of entries) {
       if (!SECRET_OPERATIONS.includes(entry.operation) || !['delivered', 'blocked'].includes(entry.outcome) || !['exempt', 'allowed', 'blocked', 'failed'].includes(entry.review) || !Number.isSafeInteger(entry.at) || typeof entry.secretId !== 'string' || typeof entry.name !== 'string' || (entry.reason !== undefined && (typeof entry.reason !== 'string' || entry.reason.length > 2000))) throw new Error('Invalid secret usage');
-      this.journal.usage.push({ ...structuredClone(entry), hostId: target.hostId, sessionId: target.sessionId });
+      this.journal.usage.push({ ...structuredClone(entry), hostId: target.hostId, sessionId: target.sessionId, ...(operationId ? { operationId } : {}) });
     }
     this.journal.usage.splice(0, Math.max(0, this.journal.usage.length - USAGE_LIMIT));
   }); }
   usage(subject: { hostId?: string; sessionId: string }): SecretUsage[] {
     const hostId = subject.hostId ?? this.data().device.id;
-    return this.journal.usage.filter(entry => entry.hostId === hostId && entry.sessionId === subject.sessionId).map(({ hostId: _hostId, sessionId: _sessionId, ...entry }) => structuredClone(entry));
+    return this.journal.usage.filter(entry => entry.hostId === hostId && entry.sessionId === subject.sessionId).map(({ hostId: _hostId, sessionId: _sessionId, operationId: _operationId, ...entry }) => structuredClone(entry));
+  }
+  /** This computer's blocked operations since `since`, oldest first, the latest `limit` of them; empty while locked. */
+  blocks(since: number, limit = 20): SecretBlock[] {
+    if (this.vault.locked || !this.permanent) return [];
+    const hostId = this.permanent.device.id; const found = new Map<string, SecretBlock>();
+    for (const entry of this.journal.usage) {
+      if (entry.outcome !== 'blocked' || !entry.operationId || entry.hostId !== hostId || entry.at < since) continue;
+      // One operation's records share its time; an operation ID used again later is another block.
+      const key = JSON.stringify([entry.operationId, entry.at]);
+      const block = found.get(key) ?? { operationId: entry.operationId, sessionId: entry.sessionId, at: entry.at, reason: entry.reason ?? '', secrets: [] };
+      if (!block.secrets.includes(entry.name)) block.secrets.push(entry.name);
+      found.set(key, block);
+    }
+    return [...found.values()].sort((a, b) => a.at - b.at).slice(-limit);
   }
   async importLegacy(records: Legacy[]) { return this.mutate(() => { for (const record of records) { if (!record.id || typeof record.name !== 'string' || typeof record.origin !== 'string' || typeof record.createdAt !== 'string' || !Number.isFinite(Date.parse(record.createdAt)) || typeof record.value !== 'string' || Buffer.byteLength(record.value) > MAX_SECRET_BYTES) throw new Error('Invalid legacy secret'); const existing = this.data().legacy.find(item => item.id === record.id); if (existing && JSON.stringify(existing) !== JSON.stringify(record)) throw new Error('Legacy secret conflict'); if (!existing) this.data().legacy.push(structuredClone(record)); } }); }
   legacyList() { return this.data().legacy.map(({ value: _value, ...metadata }) => metadata); }

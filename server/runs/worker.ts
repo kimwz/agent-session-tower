@@ -72,6 +72,7 @@ import { SessionTasks } from '../sessions/tasks.js';
 import { SessionCompactions } from '../sessions/compaction/service.js';
 import { SecretService } from '../secrets/service.js';
 import { SecretRuntime, SECRET_TOOLS } from '../secrets/runtime.js';
+import { SecretUseReviewer } from '../secrets/reviewer.js';
 import { SECRET_CONNECTION_INSTRUCTIONS } from '../secrets/notices.js';
 import { SecretStore } from '../triggers/secrets.js';
 import { listPendingSecretImports, importPendingSecret } from '../secrets/imports.js';
@@ -89,7 +90,7 @@ import { skillHomes } from '../skills/files.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
 import { modelRoleNotes } from '../models/notes.js';
 import { keepEndpoint } from './endpoint-keeper.js';
-import { FORCE_UPDATE_DEADLINE_MS, FORCE_UPDATE_GIVE_UP_MS, MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
+import { FORCE_UPDATE_DEADLINE_MS, FORCE_UPDATE_GIVE_UP_MS, MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SecretBlockNotice, type SessionHistoryPage } from './runner-protocol.js';
 import { TowerError, statusOf } from '../../shared/errors.js';
 import { sseSink } from '../http/sinks.js';
 import { RetentionService } from '../sessions/retention/service.js';
@@ -155,6 +156,8 @@ export interface RunnerHostOptions {
   startSuccessor?: (command: SuccessorCommand, nonce: string, carry?: Buffer) => void;
   /** State only the successor may receive (the open vault key), taken right before it is started. */
   handoffCarry?: () => Buffer | undefined;
+  /** Secret uses refused lately, reported to the web for the owner's notifications. */
+  secretBlocks?: () => SecretBlockNotice[];
   onHandedOff?: () => void;
   handoffHoldMs?: number;
   /** The proof a predecessor gave this worker when it started it. */
@@ -206,6 +209,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   const changed = () => { revision++; };
   const snapshot = (): RunnerSnapshot => {
     const sessions = options.runs.sessionList(options.sessions.list());
+    const secretBlocks = options.secretBlocks?.() ?? [];
     return { instance, revision: ++revision, runs: options.runs.list(), sessions,
       nativeIds: Object.fromEntries(sessions.map(session => [session.id, options.runs.nativeSessionId(session.id)])),
       settled: [...options.runs.settledRunIds()], autoPrompts: options.autoPrompts?.list() ?? [], version: APP_VERSION,
@@ -215,7 +219,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       ...(options.handoffNonce ? { handoff: options.handoffNonce } : {}),
       ...(options.triggers ? { triggers: options.triggers.overview() } : {}),
       coordinators: [...new Set([...(options.slack?.coordinatorSessionIds() ?? []), ...(options.github?.coordinatorSessionIds() ?? [])])],
-      ...(forced ? { updateDrain: options.runs.updateDrainStatus() } : {}) };
+      ...(forced ? { updateDrain: options.runs.updateDrainStatus() } : {}),
+      ...(secretBlocks.length ? { secretBlocks } : {}) };
   };
   const coordinator = (sessionId: string) => Boolean(options.slack?.coordinatorSessionIds().includes(sessionId) || options.github?.sessionWorkflow(sessionId));
   /** A paired controller's request: refused for coordinator conversations, and run once per request ID. */
@@ -1328,7 +1333,18 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const secretService = new SecretService({ stateDir });
     await secretService.start();
     const secretStore = new SecretStore(stateDir, { vault: secretService });
-    const secrets = new SecretRuntime({ stateDir, service: secretService, runs,
+    // Uses by sessions the owner did not open are checked for obvious attacks first; a storage hold refuses them.
+    const secretReviewer = new SecretUseReviewer({ stateDir, gate: requireEffects,
+      model: (request, options) => runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs, beforeSpawn: options.beforeSpawn }),
+      sources: {
+        subject: context => {
+          const origin = runs.list().find(item => item.id === context.runId)?.origin ?? runs.sessionOrigin(context.sessionId);
+          return { ...(origin ? { origin: { kind: origin.kind, workflowId: origin.workflowId, triggerId: origin.triggerId, controllerId: origin.controllerId } } : {}), outsideInput: runs.sessionOrigin(context.sessionId)?.untrustedInput === true };
+        },
+        // One page from the end: the review reads only the last few messages.
+        conversation: async sessionId => (await sessions.detail(runs.nativeSessionId(sessionId), undefined, 40, { previousUser: false }))?.messages ?? [],
+      } });
+    const secrets = new SecretRuntime({ stateDir, service: secretService, runs, reviewer: secretReviewer,
       onConnect: sessionId => runs.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, sessionId),
       isClosed: async id => { const saved = new ClosedSessionStore(stateDir); await saved.start(); return saved.closedIds().has(id); },
       migrate: () => secretStore.migrate(), pendingImports: () => listPendingSecretImports(stateDir),
@@ -1733,7 +1749,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       await requireEffects();
       return settings;
     };
-    const hostOptions: RunnerHostOptions = { settingsBackup, stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, compactions, api, secrets, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce, storage: () => storageStatus, retryStorage: () => retryNormal!(), storageRecovery, storageControl: control, closeStorage, onCloseFailure: () => unavailable(), handoffCarry: () => secrets.handoff(),
+    const hostOptions: RunnerHostOptions = { settingsBackup, stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, compactions, api, secrets, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce, storage: () => storageStatus, retryStorage: () => retryNormal!(), storageRecovery, storageControl: control, closeStorage, onCloseFailure: () => unavailable(), handoffCarry: () => secrets.handoff(), secretBlocks: () => secrets.blocks(),
       onIdle: async () => { clearInterval(releaseTimer); await retention?.service.quiesce(); await temporary.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); clearInterval(secretExpiry); secrets.close(); stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await tasks.close(); await compactions.close(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
       inFlight: () => secrets.inFlight() || restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || compactions.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       // A forced update waits only for a compaction creating its session; one still reading or summarizing stops with the worker.
