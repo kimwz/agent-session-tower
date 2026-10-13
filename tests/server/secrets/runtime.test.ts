@@ -326,16 +326,22 @@ test('a secret credential works for its own running turn whenever its session ma
       assert.equal((await f.runtime.context(capability(run))).subject, 'reviewed', session.id);
       assert.equal((await f.runtime.target(session.id)).root, f.projectRoot, 'the owner may connect a key to it as well');
     }
-    // No secrets at all: public agents and their children, the master, closed and joined-computer sessions.
+    // The master's conversation follows the same rules.
+    const masterFolder = join(f.stateDir, 'master-session'); await mkdir(masterFolder);
+    const master = add('codex:master', { cwd: masterFolder, master: true }, { kind: 'owner', untrustedInput: false });
+    assert.equal((await f.runtime.context(capability(f.addRun('run-master', master)))).subject, 'owner');
+    assert.equal((await f.runtime.context(capability(f.addRun('run-master-agent', master, { origin: { kind: 'agent' }, delegation: { parentRunId: 'run-master', rootRunId: 'run-master' } })))).subject, 'reviewed');
+    // No secrets at all: public agents, their children and the turns they start, closed and joined-computer sessions.
     const PUBLIC = `${PUBLIC_TRIGGER_PREFIX}agent`;
     const publicSession = add('codex:public', { launchedBy: { kind: 'trigger', triggerId: PUBLIC } }, { kind: 'trigger', triggerId: PUBLIC, untrustedInput: true });
-    const master = join(f.stateDir, 'master-session'); await mkdir(master);
-    for (const [session, origin] of [
-      [publicSession, { kind: 'trigger', triggerId: PUBLIC, eventId: 'request' }], [add('codex:public-child', { isSubagent: true, parentId: publicSession.id }), { kind: 'owner' }],
-      [f.session, { kind: 'trigger', triggerId: PUBLIC }], [add('codex:master', { cwd: master }, { kind: 'owner', untrustedInput: false }), { kind: 'owner' }],
+    const outsider = f.addRun('run-public', publicSession, { origin: { kind: 'trigger', triggerId: PUBLIC, eventId: 'request' } });
+    for (const [session, origin, delegation] of [
+      [publicSession, outsider.origin], [add('codex:public-child', { isSubagent: true, parentId: publicSession.id }), { kind: 'owner' }],
+      [f.session, { kind: 'trigger', triggerId: PUBLIC }], [f.session, { kind: 'owner' }, { parentRunId: outsider.id, rootRunId: outsider.id }],
+      [add('codex:opened-by-public', {}, { kind: 'owner', untrustedInput: false }), { kind: 'owner' }, { parentRunId: outsider.id, rootRunId: outsider.id }],
       [add('codex:node', { node: 'joined' }, { kind: 'owner', untrustedInput: false }), { kind: 'owner' }], [add('codex:orphan', { parentId: 'codex:unknown' }), { kind: 'owner' }],
-    ] as [Session, Run['origin']][]) {
-      const run = f.addRun(`run-none-${session.id}-${origin?.kind}`, session, { origin });
+    ] as [Session, Run['origin'], Run['delegation']?][]) {
+      const run = f.addRun(`run-none-${session.id}-${origin?.kind}-${Boolean(delegation)}`, session, { origin, ...(delegation ? { delegation } : {}) });
       assert.equal(f.resolver(run, session).servers?.tower_secrets, undefined, session.id);
       await assert.rejects(f.list(issue(run)), { kind: 'forbidden' }, session.id);
       await assert.rejects(handleMcpRequest(f.context, issue(run), { method: 'tools/list' }), { kind: 'forbidden' }, session.id);
@@ -351,6 +357,37 @@ test('a secret credential works for its own running turn whenever its session ma
     owner.status = 'completed'; await assert.rejects(f.list(token), { kind: 'forbidden' }, 'another running turn in the session does not revive it');
     owner.status = 'running'; f.session.closed = true; await assert.rejects(f.list(token), { kind: 'forbidden' });
     assert.deepEqual(f.ledger, []);
+  } finally { await f.cleanup(); }
+});
+
+test('a new conversation’s first turn lists its secret tools at once and uses them once the creation is confirmed', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize();
+    await f.runtime.control('create', { name: 'SHARED', kind: 'scalar', value: canary, sharing: { global: true, folders: [] } });
+    f.session.creationPending = true;
+    const run = f.addRun('run-creating'); const token = f.tokenFor(run);
+    assert.deepEqual(await handleMcpRequest(f.context, token, { method: 'tools/list' }), { tools: SECRET_TOOLS }, 'the provider connects before the creation is confirmed');
+    await assert.rejects(f.list(token), { kind: 'forbidden' });
+    assert.equal(((await f.runtime.control('session', { sessionId: f.session.id })) as SecretSessionView).available.length, 1, 'the owner sees what it will use');
+    f.session.creationPending = false;
+    assert.deepEqual((await f.list(token)).secrets.map(item => item.name), ['SHARED']);
+  } finally { await f.cleanup(); }
+});
+
+test('a turn started with another turn’s calling credential is reviewed, and keeps its credential after that turn leaves history', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize();
+    await f.runtime.control('create', { name: 'SHARED', kind: 'scalar', value: canary, sharing: { global: true, folders: [] } });
+    const caller = f.addRun('run-caller');
+    const delegated = f.addRun('run-delegated', f.session, { delegation: { parentRunId: caller.id, rootRunId: caller.id } });
+    const token = f.tokenFor(delegated);
+    const capability = f.capabilities.resolve(token) as Extract<Capability, { kind: 'secret-run' }>;
+    assert.equal((await f.runtime.context(capability)).subject, 'reviewed', 'admitted as the owner’s, but not typed by the owner');
+    f.runs.delete(caller.id);
+    assert.deepEqual((await f.list(token)).secrets.map(item => item.name), ['SHARED'], 'what was checked when it was issued cannot change');
+    assert.equal(f.resolver(f.addRun('run-late', f.session, { delegation: { parentRunId: caller.id, rootRunId: caller.id } }), f.session).servers?.tower_secrets, undefined, 'a new turn is not issued one');
   } finally { await f.cleanup(); }
 });
 
@@ -857,7 +894,7 @@ test('master folder identity is excluded even without a display flag and through
       const record = { ...f.session, cwd, master: false }; f.sessions.set(record.id, record);
       const access = await f.runtime.brokerAccess(record.id); assert.equal(access.eligible, false); assert.match(access.reason!, /마스터/);
       await assert.rejects(f.runtime.control('approve-broker', { sessionId: record.id, root: await realpath(cwd), taskId: null, taskLabel: 'Master denial', ttlMs: 60000 }));
-      assert.equal(f.resolver(f.addRun('master-' + cwd, record), record).servers?.tower_secrets, undefined);
+      assert.ok(f.resolver(f.addRun('master-' + cwd, record), record).servers?.tower_secrets, 'for secret use the master follows the same rules');
     }
   } finally { await f.cleanup(); }
 });

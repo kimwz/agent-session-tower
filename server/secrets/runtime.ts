@@ -10,7 +10,7 @@ import type { Capability } from '../api/mcp.js';
 import type { SessionOrigin } from '../runs/origin.js';
 import { callWorkerTools, serveToolBridge } from '../mcp/stdio.js';
 import { inMasterFolder } from '../runs/subscription.js';
-import { secretSubject, type SecretSubject } from './access.js';
+import { secretSubject, type SecretStage, type SecretSubject } from './access.js';
 import { SecretBroker, remoteListing } from './broker.js';
 import { parseSecretCli } from './cli.js';
 import { parseDotenv } from './dotenv.js';
@@ -148,17 +148,14 @@ export class SecretRuntime {
     catch { console.warn('Tower could not queue a private secret-connection notice; credentials remain discoverable when needed.'); }
   }
 
-  /**
-   * Who a session of this computer is for secret use now (see access.ts), with `run` the turn asking, if any. `root` is
-   * the session's folder with links followed when the caller has it; otherwise it is resolved here, best effort.
-   */
-  subject(session: Session, run?: Run, root?: string): SecretSubject {
+  /** Who a session of this computer is for secret use now (see access.ts), with `run` the turn asking, if any. */
+  subject(session: Session, run: Run | undefined, stage: SecretStage): SecretSubject {
     if (this.closedSessions.has(session.id)) return { mode: 'none', reason: 'closed' };
     const runs = this.options.runs;
-    // best-effort: for a folder that no longer resolves, the folder as written decides; nothing there can use a secret anyway.
-    if (root === undefined) { try { root = realpathSync(session.cwd); } catch { root = undefined; } }
-    return secretSubject({ run, session, provenance: runs.sessionOrigin(session.id), stateDir: this.options.stateDir, ...(root !== undefined ? { root } : {}),
-      lookup: id => { const found = runs.getSession(id); return found && { session: found, provenance: runs.sessionOrigin(id) }; } });
+    let known: Map<string, Run> | undefined;
+    return secretSubject({ run, session, provenance: runs.sessionOrigin(session.id), stage,
+      lookup: id => { const found = runs.getSession(id); return found && { session: found, provenance: runs.sessionOrigin(id) }; },
+      findRun: id => (known ??= new Map(runs.list().map(item => [item.id, item]))).get(id) });
   }
   private candidate(session: Session): Session & { cwd: string } {
     const provenance = this.options.runs.sessionOrigin(session.id);
@@ -184,12 +181,12 @@ export class SecretRuntime {
       return;
     }
   }
-  /** A live session of this computer that may use secrets now, in its canonical folder; `run` is the turn asking, if any. */
-  private async session(id: string, run?: Run): Promise<Session & { cwd: string; subject: SecretSubjectMode }> {
+  /** A live session of this computer that may use secrets at `stage`, in its canonical folder; `run` is the turn asking, if any. */
+  private async session(id: string, run: Run | undefined, stage: SecretStage): Promise<Session & { cwd: string; subject: SecretSubjectMode }> {
     const session = this.options.runs.getSession(id);
     if (!session || session.closed || await this.options.isClosed?.(session.id) || (await this.readClosures()).includes(closureId(session.id))) throw fail('이 프로젝트 세션은 종료되었습니다.', 'forbidden');
     const cwd = await realpath(session.cwd);
-    const subject = this.subject(session, run, cwd);
+    const subject = this.subject(session, run, stage);
     if (subject.mode === 'none') throw fail('이 세션에서는 시크릿을 사용할 수 없습니다.', 'forbidden');
     return { ...session, cwd, subject: subject.mode };
   }
@@ -198,7 +195,7 @@ export class SecretRuntime {
     if (this.blocked) throw fail('보관함 잠금 해제를 완료하지 못했습니다.', 'unavailable');
     const run = this.options.runs.list().find(item => item.id === context.runId);
     const session = run && this.options.runs.getSession(run.sessionId);
-    if (!run || !session || run.sessionId !== context.sessionId || run.status !== 'running' || this.subject(session, run, context.root).mode === 'none') throw fail('이 시크릿 도구는 발급받은 실행 중에만 사용할 수 있습니다.', 'forbidden');
+    if (!run || !session || run.sessionId !== context.sessionId || run.status !== 'running' || this.subject(session, run, 'use').mode === 'none') throw fail('이 시크릿 도구는 발급받은 실행 중에만 사용할 수 있습니다.', 'forbidden');
   }
   async brokerAccess(sessionId: string): Promise<SecretBrokerAccess> {
     const locked = this.options.service.status().locked;
@@ -211,20 +208,21 @@ export class SecretRuntime {
       return { ...result, root: candidate.cwd, eligible: true, ...(!locked ? { taskId: this.options.service.currentTask(sessionId, candidate.cwd)?.taskId ?? null, approval: this.brokerApproval(candidate) } : {}) };
     } catch (error) { return { ...result, reason: error instanceof TowerError ? error.message : '프로젝트 경로를 확인할 수 없습니다.' }; }
   }
-  async target(sessionId: string): Promise<SecretTarget> { const session = await this.session(sessionId); return this.options.service.ensureTask(session.id, session.cwd); }
-  async peekTarget(sessionId: string): Promise<SecretTarget | undefined> { const session = await this.session(sessionId); return this.options.service.currentTask(session.id, session.cwd); }
+  async target(sessionId: string): Promise<SecretTarget> { const session = await this.session(sessionId, undefined, 'issue'); return this.options.service.ensureTask(session.id, session.cwd); }
+  async peekTarget(sessionId: string): Promise<SecretTarget | undefined> { const session = await this.session(sessionId, undefined, 'issue'); return this.options.service.currentTask(session.id, session.cwd); }
   async remoteTarget(sessionId: string, create = true): Promise<SecretTarget | undefined> { return create ? this.target(sessionId) : this.peekTarget(sessionId); }
   /**
    * The running turn a credential was issued for, and its session as it may use secrets now (see access.ts); decided again
    * on every call, whoever started the turn and whatever other tools it has. A credential never serves another run.
    */
-  private async runSubject(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<{ run: Run; session: Session & { cwd: string; subject: SecretSubjectMode } }> {
+  private async runSubject(capability: Extract<Capability, { kind: 'secret-run' }>, stage: SecretStage = 'use'): Promise<{ run: Run; session: Session & { cwd: string; subject: SecretSubjectMode } }> {
     if (this.blocked) throw fail('보관함 잠금 해제를 완료하지 못했습니다.', 'unavailable');
     const run = this.options.runs.list().find(item => item.id === capability.runId);
     if (!run || run.sessionId !== capability.sessionId || run.status !== 'running') throw fail('이 시크릿 도구는 발급받은 실행 중에만 사용할 수 있습니다.', 'forbidden');
-    return { run, session: await this.session(run.sessionId, run) };
+    return { run, session: await this.session(run.sessionId, run, stage) };
   }
-  async authorizeCapability(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<void> { await this.runSubject(capability); }
+  /** The gate for every request: the tools are listed even before a new session's creation is confirmed; using them waits for it. */
+  async authorizeCapability(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<void> { await this.runSubject(capability, 'discover'); }
   async context(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<SecretContext> {
     const { run, session } = await this.runSubject(capability);
     let target = this.runTasks.get(run.id);
@@ -372,7 +370,7 @@ export class SecretRuntime {
     const found = this.options.runs.getSession(sessionId);
     if (!found || found.closed || this.closedSessions.has(found.id) || await this.options.isClosed?.(found.id) || (await this.readClosures()).includes(closureId(found.id))) return { error: 'session-closed' };
     let session: Session & { cwd: string };
-    try { session = await this.session(found.id); }
+    try { session = await this.session(found.id, undefined, 'issue'); }
     catch (error) { if (kindOf(error) === 'forbidden' || (error as NodeJS.ErrnoException).code === 'ENOENT') return { error: 'not-eligible' }; throw error; }
     const open = this.options.service.currentTask(session.id);
     return { session, ...(open?.root === session.cwd ? { task: open } : {}) };

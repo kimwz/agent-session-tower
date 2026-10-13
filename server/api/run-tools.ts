@@ -48,9 +48,12 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
     const browsers = sessionBrowsers(options.stateDir, options.runs, session, options.browsers?.());
     return { ...tools, servers: { ...tools.servers, ...browsers.servers }, claudeChrome: browsers.claudeChrome };
   };
-  /** The secret broker, bound to this run alone: a later turn, even in the same conversation, gets its own credential. */
+  /**
+   * The secret broker, bound to this run alone: a later turn, even in the same conversation, gets its own credential. A new
+   * conversation's first turn gets it too; its secrets wait for the creation to be confirmed.
+   */
   const secretTools = (run: Run, session: Session): SessionMcpServers => {
-    if (!options.secrets || options.secrets.subject(session, run).mode === 'none') return {};
+    if (!options.secrets || options.secrets.subject(session, run, 'issue').mode === 'none') return {};
     const build = thisBuild();
     return { tower_secrets: { command: build.command, args: [...build.args, '--secrets-mcp', options.stateDir],
       env: { TOWER_SECRET_CAPABILITY: options.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: session.id }), TOWER_SECRET_STATE_DIR: options.stateDir } } };
