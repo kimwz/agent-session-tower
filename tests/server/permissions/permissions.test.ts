@@ -26,9 +26,9 @@ async function fixture(t: TestContext, effectGate?: () => Promise<void>) {
   await mkdir(project);
   git(project, 'init', '-q');
   const sessions = new Map([['claude:one', { cwd: project, provider: 'claude' as const }], ['codex:two', { cwd: project, provider: 'codex' as const }]]);
-  const resumed: Array<{ sessionId: string; prompt: string }> = [];
+  const resumed: Array<{ sessionId: string; runId?: string; prompt: string }> = [];
   const make = () => new PermissionService({ stateDir, repository:noStorageFixture(stateDir), effectGate, env: { CODEX_HOME: codexHome }, session: id => sessions.get(id),
-    resume: async (sessionId, prompt) => { if (sessionId === 'gone') throw new Error('Session not found.'); resumed.push({ sessionId, prompt }); } });
+    resume: async (request, prompt) => { if (request.sessionId === 'gone') throw new Error('Session not found.'); resumed.push({ sessionId: request.sessionId, ...(request.runId ? { runId: request.runId } : {}), prompt }); } });
   const service = make();
   await service.start();
   t.after(async () => { service.close(); closePermissionFixture(stateDir); await rm(root, { recursive: true, force: true }); });
@@ -126,6 +126,15 @@ test('an agent asks once; the owner allows it as edited, and the requesting conv
   const denied = await f.service.decide((refused.request as { id: string }).id, false, undefined, true);
   assert.equal(denied.rules.length, 1, 'a refusal adds nothing');
   assert.match(f.resumed[1].prompt, /refused .*`terraform apply`/);
+});
+
+test('a refused one-time run is told to the turn that asked for it, so the worker admits the notice as that turn’s work', async t => {
+  const f = await fixture(t);
+  const asked = await f.service.requestRun({ command: 'echo refused', reason: 'check' }, agent('claude:one', 'delegated-run'));
+  const decided = await f.service.decide(asked.request.id!, false, undefined, true);
+  assert.deepEqual(decided.resumed, { sent: true });
+  assert.deepEqual(f.resumed.map(({ sessionId, runId }) => ({ sessionId, runId })), [{ sessionId: 'claude:one', runId: 'delegated-run' }]);
+  assert.match(f.resumed[0].prompt, /echo refused/);
 });
 
 test('requests need a Tower conversation on this computer; the pending list is bounded; state survives a restart', async t => {

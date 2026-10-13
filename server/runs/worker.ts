@@ -1472,7 +1472,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const permissions: PermissionService = new PermissionService({ stateDir, repository: permissionRepository, effectGate: requireEffects,
       requestGate: async request => { await closedSessions.start(); permissionAdmission(request); }, requestAdmission: permissionAdmission, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),
       decision: async (request, prompt, options) => runs.permissionDecision(request, prompt, { ...options, closed: await closedNow(request.sessionId) }),
-      resume: async (sessionId, prompt) => { await runs.enqueue(sessionId, prompt, {}, { origin: { kind: 'owner' } }); },
+      // Told to the work that asked, with its authority and review; a run no longer known is told as the owner's, as before.
+      resume: async (request, prompt) => { await runs.enqueue(request.sessionId, prompt, {}, noticeAdmission(request.runId ? runs.list().find(item => item.id === request.runId) : undefined)); },
       // A public agent's requests always wait for the owner: its conversations carry outsiders' words.
       autoReviewSkip: request => {
         const origin = runs.sessionOrigin(request.sessionId);

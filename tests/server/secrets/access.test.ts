@@ -184,7 +184,7 @@ test('a parent the server does not know, or a circular chain, refuses rather tha
   assert.equal(f.mode('codex:depth-20', { kind: 'owner' }), 'none:unknown-parent', 'a chain longer than any real one');
 });
 
-test('a permissions_run result notice is admitted as the work it reports to: a delegated run’s notice is reviewed', () => {
+test('a permissions_run result or refusal notice is admitted as the work it reports to: a delegated run’s notice is reviewed', () => {
   const f = fixture();
   f.add('codex:caller', {}, { kind: 'owner', untrustedInput: false });
   f.add('codex:worker', {}, { kind: 'owner', untrustedInput: false });
@@ -198,4 +198,6 @@ test('a permissions_run result notice is admitted as the work it reports to: a d
   const own = noticeAdmission({ ...delegated, id: 'own-run', delegation: undefined, unattended: true });
   assert.deepEqual(own, { origin: { kind: 'owner' }, unattended: true });
   assert.equal(f.mode('codex:worker', own.origin, { run: own }), 'owner');
+  // A refusal whose run is no longer known, or predates origins, is told as the owner's, as before.
+  for (const gone of [undefined, { ...delegated, origin: undefined }]) assert.deepEqual(noticeAdmission(gone), { origin: { kind: 'owner' } });
 });
