@@ -606,6 +606,10 @@ test('accepted numeric expansion imports, guarded updates, pages and sealed rest
   const canonical = JSON.stringify(JSON.parse(source));
   assert.ok(Buffer.byteLength(canonical) > 32_000_000);
   if (count === 6_000_000) assert.ok(Buffer.byteLength(canonical) > 132_000_000);
+  if (process.env.SQLITE_VALIDATION_CI === '1' && process.env.VALIDATION_ROOT) {
+    await writeFile(join(process.env.VALIDATION_ROOT, 'reports', 'canonical-cap.json'), JSON.stringify({ count,
+      sourceBytes: Buffer.byteLength(source), canonicalBytes: Buffer.byteLength(canonical), large: process.env.SQLITE_RETENTION_LARGE === '1' }));
+  }
   await writeFile(join(stateDir, 'retention', 'journal.json'), source, { mode: 0o600 });
   await prepareA(stateDir, a);
   const { client, update } = await openB(t, stateDir, b);

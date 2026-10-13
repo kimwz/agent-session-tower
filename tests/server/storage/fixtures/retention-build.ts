@@ -17,12 +17,13 @@ import { runsSchema } from '../../../../server/runs/storage-schema.js';
 import { buildIdentityModule, buildIdentityPlugin, STORAGE_BUNDLE_FORMAT, type StorageThreadArtifact } from '../../../../server/storage/thread-bundle.mjs';
 import type * as Parent from './parent.js';
 import { fixtureSchema } from './fixture-domain.js';
+import { fixtureCompileCache } from './compile-cache.js';
 /** The seven-domain artifact profile: 1.125.0 and every later release (the current product build included). */
 const finalRelease = (version: string) => { const [major, minor] = version.split('.').map(Number); return major > 1 || (major === 1 && minor >= 125); };
 export interface OfflineServiceFixture { installed:boolean; loadedAtCheck?:number; ownerAtCheck?:number; readFailure?:boolean; ownerReadFailure?:boolean; managerQueryFailure?:boolean }
 
 /** Actual A/B domain handlers and captured SDK compiled as future artifact versions; no mocked import support. */
-export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0' | '1.122.0' | '1.123.0' | '1.124.0' | '1.125.0' | '1.125.1' | typeof APP_VERSION, output?: string, retentionCutover = version === '1.121.0' || version === '1.123.0' || finalRelease(version), includePermissions = false, externalDomains = false, product?: {artifact:StorageThreadArtifact;manifest:import('../../../../server/storage/contract.js').StorageBuildManifest;serviceFixture?:OfflineServiceFixture}, threadFaultDomain = false, defaultFault = 'normal') {
+export async function retentionBuild(version: '1.120.0' | '1.120.1' | '1.120.2' | '1.121.0' | '1.122.0' | '1.123.0' | '1.124.0' | '1.125.0' | '1.125.1' | typeof APP_VERSION, output?: string, retentionCutover = version === '1.121.0' || version === '1.123.0' || finalRelease(version), includePermissions = false, externalDomains = false, product?: {artifact:StorageThreadArtifact;manifest:import('../../../../server/storage/contract.js').StorageBuildManifest;serviceFixture?:OfflineServiceFixture}, threadFaultDomain = false, defaultFault = 'normal', reuseThreads = true) {
   const directory = output ?? await mkdtemp(join(tmpdir(), 'tower-retention-artifact-'));
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const root = fileURLToPath(new URL('../../../../', import.meta.url));
@@ -210,8 +211,12 @@ remoteDomain.commands.mutate = { ...mutate, run(context, payload) {
   return mutate.run(context, payload);
 } };` : ''}
 runStorageThread([domain${runsRelease ? ', runsDomain' : ''}${triggersRelease ? ', triggersDomain' : ''}${includePermissions ? ', permissionsDomain' : ''}${externalDomains ? ', remoteDomain, autoPromptDomain, workflowsDomain' : ''}${threadFaultDomain ? ', fixtureDomain' : ''}]);`;
-    const result = await build({ stdin: { contents: entry, resolveDir: root, sourcefile: 'retention-fixture-thread.ts', loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'cjs', target: 'node22', plugins: [versionPlugin], logLevel: 'silent' });
-    const body = result.outputFiles[0].text, sourceHash = createHash('sha256').update(body).digest('hex');
+    const profile = JSON.stringify({ root, version, preparation, retentionCutover, includePermissions, externalDomains, threadFaultDomain, manifest: manifest.digest, capture, actualACapture, triggerACapture });
+    const body = await fixtureCompileCache.compile(entry, directory, profile, async contents => {
+      const result = await build({ stdin: { contents, resolveDir: root, sourcefile: 'retention-fixture-thread.ts', loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'cjs', target: 'node22', plugins: [versionPlugin], logLevel: 'silent' });
+      return result.outputFiles[0].text;
+    }, reuseThreads && !product);
+    const sourceHash = createHash('sha256').update(body).digest('hex');
     artifacts[fault] = { format: STORAGE_BUNDLE_FORMAT, sourceHash, source: `var __TOWER_STORAGE_SOURCE_HASH__ = "${sourceHash}";\n${body}` };
   }
   if (actualACapture) {
