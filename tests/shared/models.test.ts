@@ -26,6 +26,9 @@ test('every role starts with what its call used before the roles existed', () =>
     assert.deepEqual(table('codex')[id], { provider: 'codex', model: 'gpt-5.6-sol' }, id);
   }
   assert.deepEqual(table()['permissions.reviewer'], { provider: 'claude', model: 'opus' });
+  // New with the secret-use reviewer: attack-only checks within 30 seconds, so a fast model without thinking.
+  assert.deepEqual(table()['secrets.reviewer'], { provider: 'claude', model: 'sonnet', effort: 'off' });
+  assert.deepEqual(resolveRole(settings, 'secrets.reviewer', { provider: 'codex' }), { provider: 'claude', model: 'sonnet', effort: 'off' }, 'a fixed role ignores the work provider');
   assert.deepEqual(table()['skills.advisor'], { provider: 'claude', model: 'sonnet' });
   assert.deepEqual(resolveRole(settings, 'skills.advisor', { provider: 'codex' }), { provider: 'claude', model: 'sonnet' }, 'a fixed role ignores the work provider');
   assert.deepEqual(table()['voice.firstReply'], { provider: 'claude', model: 'haiku', effort: 'off' });
@@ -38,7 +41,7 @@ test('every role starts with what its call used before the roles existed', () =>
   for (const id of ['master.session', 'issues.register', 'chat.new', 'autoPrompt.new', 'publicAgents.new']) assert.deepEqual(table()[id], { provider: 'claude' }, id);
   for (const id of ['triggers.new', 'slack.newRule', 'github.newRule']) assert.deepEqual(table()[id], { provider: 'codex' }, id);
   assert.deepEqual(table()['master.heartbeat'], table()['master.session']);
-  assert.equal(BUILTIN_ROLES.length, follow.length + 15, 'a new role gets a line here');
+  assert.equal(BUILTIN_ROLES.length, follow.length + 16, 'a new role gets a line here');
 });
 
 test('saved settings are read leniently, submitted ones strictly', () => {
