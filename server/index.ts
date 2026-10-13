@@ -553,7 +553,7 @@ async function main() {
     // and updating do not.
     features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : []), ...(runs.supports('secrets') ? ['secrets'] : []), ...(runs.supports('compaction') ? ['compaction'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
     handle: async (req, res, principal) => {
-      if (await handleSecretLink(req, res, principal.controllerId, runs)) return;
+      if (await handleSecretLink(req, res, principal.controllerId, runs, { excluded: path => exclusions.excludesNow(path) })) return;
       return remoteRouter.handle(req, res, principal);
     },
     update: {

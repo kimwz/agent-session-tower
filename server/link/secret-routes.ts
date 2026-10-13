@@ -1,8 +1,10 @@
 import type { IncomingMessage } from 'node:http';
 import type { Http2ServerRequest, Http2ServerResponse } from 'node:http2';
+import { isAbsolute } from 'node:path';
 import { readJson, errorStatus } from '../http/requests.js';
 import type { SecretPeer, SecretTarget } from '../../shared/secrets.js';
 import { REMOTE_SECRET_MAX_RESPONSE_BYTES } from '../secrets/remote.js';
+import { realFolder, type FolderSources } from '../secrets/folders.js';
 import type { RemoteNodes } from './nodes.js';
 import { linkRequest } from './transport.js';
 import { z } from 'zod';
@@ -11,10 +13,13 @@ import { TowerError, type ErrorKind } from '../../shared/errors.js';
 interface Worker { secretCall(operation: string, args?: unknown[]): Promise<unknown> }
 const fail = (message: string, kind: ErrorKind = 'forbidden') => new TowerError(kind, message);
 
-/** Paired TLS callers can relay envelopes and ask for a verified task, never manage the Vault. */
-export async function handleSecretLink(req: Http2ServerRequest, res: Http2ServerResponse, controllerId: string, worker: Worker): Promise<boolean> {
+/**
+ * Paired TLS callers can relay envelopes, ask for a verified task and canonicalize this computer's folders, never manage
+ * the Vault. `excluded` names folders this computer keeps from its controllers.
+ */
+export async function handleSecretLink(req: Http2ServerRequest, res: Http2ServerResponse, controllerId: string, worker: Worker, options: { excluded?: (path: string) => Promise<boolean> } = {}): Promise<boolean> {
   const url = new URL(req.url ?? '/', 'https://tower.invalid');
-  if (!['/secret-relay', '/secret-target', '/secret-device', '/secret-connection-notice'].includes(url.pathname)) return false;
+  if (!['/secret-relay', '/secret-target', '/secret-device', '/secret-connection-notice', '/secret-folder'].includes(url.pathname)) return false;
   const reply = (status: number, body: unknown) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
   try {
     const peers = await worker.secretCall('peers') as SecretPeer[];
@@ -27,10 +32,38 @@ export async function handleSecretLink(req: Http2ServerRequest, res: Http2Server
       const input = z.object({ sessionId: z.string().min(1).max(1024), taskId: z.string().uuid() }).strict().parse(await readJson(req as unknown as IncomingMessage, 4096));
       reply(200, await worker.secretCall('connection-notice', [input.sessionId, input.taskId]));
     } else if (url.pathname === '/secret-device' && req.method === 'GET') reply(200, await worker.secretCall('device'));
+    else if (url.pathname === '/secret-folder' && req.method === 'GET') {
+      // Only the real path of an existing folder: no listing, and a folder kept from controllers is not found.
+      const path = url.searchParams.get('path');
+      if (!path || await options.excluded?.(path)) reply(404, { error: '폴더를 찾을 수 없습니다.' });
+      else reply(200, { root: await realFolder(path) });
+    }
     else if (url.pathname === '/secret-target' && req.method === 'GET' && url.searchParams.get('sessionId')) { const target = await worker.secretCall('target', [url.searchParams.get('sessionId'), url.searchParams.get('create') !== 'false']); reply(target ? 200 : 204, target); }
     else reply(404, { error: '알 수 없는 시크릿 전달 요청입니다.' });
   } catch (error) { reply(errorStatus(error), { error: '시크릿 전달 요청을 처리할 수 없습니다. 잠금·컴퓨터 승인·연결 상태를 확인하세요.' }); }
   return true;
+}
+
+/** Folder canonicalization for the owner's sharing: this worker's vault, and joined computers over their links. */
+export function folderSources(nodes: RemoteNodes | undefined, worker: Worker): FolderSources {
+  return {
+    deviceId: async () => {
+      try { return (await worker.secretCall('device') as { id: string }).id; }
+      catch { throw fail('시크릿 보관함이 잠겨 있습니다. 잠금을 해제한 뒤 다시 시도하세요.', 'locked'); }
+    },
+    peers: async () => await worker.secretCall('peers') as SecretPeer[],
+    features: node => nodes?.list().find(item => item.id === node && item.status === 'connected')?.features,
+    ask: async (node, path) => {
+      const link = nodes?.session(node);
+      if (!link) throw fail('합류 컴퓨터가 연결되어 있지 않아 폴더를 확인할 수 없습니다. 연결된 뒤 다시 저장하세요.', 'unavailable');
+      const answer = await linkRequest(link, 'GET', `/secret-folder?path=${encodeURIComponent(path)}`, undefined, 8000, { maxBytes: 16 * 1024 });
+      const root = (answer.json as { root?: unknown } | undefined)?.root;
+      if (answer.status === 200 && typeof root === 'string' && isAbsolute(root)) return root;
+      if (answer.status === 400 || answer.status === 404) throw fail(`합류 컴퓨터에서 폴더를 찾을 수 없거나 폴더가 아닙니다: ${path}`, 'invalid');
+      if (answer.status === 403) throw fail('합류 컴퓨터가 이 컴퓨터를 시크릿용으로 신뢰하지 않았거나 그 컴퓨터의 보관함이 잠겨 있습니다.', 'invalid');
+      throw fail('합류 컴퓨터에서 폴더를 확인하지 못했습니다. 잠시 후 다시 저장하세요.', 'unavailable');
+    },
+  };
 }
 
 /** Resolve the page's remote selection against the pinned link and separately approved secret device. */
