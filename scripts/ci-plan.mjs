@@ -38,7 +38,8 @@ export function plan(root = '.') {
   const weights = JSON.parse(readFileSync(join(root, 'scripts/ci-test-costs.json'), 'utf8'));
   const lanes = [];
   for (const [os, major, count] of [['ubuntu-latest', '22', 4], ['ubuntu-latest', '24', 4], ['ubuntu-latest', '26', 4], ['macos-latest', '22', 3]]) {
-    const costs = { ...weights[os === 'macos-latest' ? 'mac' : major === '22' ? 'linux22' : 'linux24'] };
+    const index = os === 'macos-latest' ? 0 : major === '22' ? 1 : 2;
+    const costs = Object.fromEntries(Object.entries(weights).map(([file, values]) => [file, values[index]]));
     // The designated full lane also retains the largest numeric expansion and comparison benchmark.
     if (major === '24') costs[largeFile] = (costs[largeFile] ?? 0) + 90;
     const assigned = shards(files, costs, count);
