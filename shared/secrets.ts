@@ -53,7 +53,11 @@ export interface SecretUsage {
 export type SecretSessionError = 'uninitialized' | 'locked' | 'not-eligible' | 'session-closed' | 'source-unavailable' | 'worker-update-pending';
 export interface SecretSessionView {
   status: VaultStatus; available: SecretAvailable[]; connectable: SecretMetadata[]; usage: SecretUsage[];
-  unavailableSources: string[]; error?: SecretSessionError; permanent?: boolean;
+  /** Sources (vault device IDs) that could not be reached; their secrets are missing from `available`. */
+  unavailableSources: string[];
+  /** Sources that answer but run a build without per-secret sharing reads yet; their secrets are not listed until they update. */
+  updatePendingSources: string[];
+  error?: SecretSessionError; permanent?: boolean;
 }
 /**
  * A settings row: `sharing` once created or edited with sharing, otherwise the `legacy` summary of its rules.

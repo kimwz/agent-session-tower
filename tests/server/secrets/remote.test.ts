@@ -227,8 +227,10 @@ test('a node sends reads only to a source its relay confirmed within 30 s, and t
     workerAnswer: (id, request) => f.source.answer(id, request), onError: () => assert.fail('fixture relay failed') });
   try {
     await assert.rejects(node.request(f.a.device.id, f.ctx, 'available'), { code: 'SECRET_REMOTE_UNSUPPORTED' }, 'never sent before a confirmation');
+    assert.equal(node.declines(f.a.device.id, 'available'), false, 'a source that never polled is unreachable, not older');
     await relay.pump(); assert.equal(node.supports(f.a.device.id, 'available'), false, 'an older relay sends no header');
-    features = ['available']; await relay.pump(); assert.equal(node.supports(f.a.device.id, 'available'), true);
+    assert.equal(node.declines(f.a.device.id, 'available'), true, 'it polled without confirming reads: an older build');
+    features = ['available']; await relay.pump(); assert.equal(node.supports(f.a.device.id, 'available'), true); assert.equal(node.declines(f.a.device.id, 'available'), false);
     const pending = node.request(f.a.device.id, f.ctx, 'available');
     await relay.pump();
     assert.deepEqual(await pending, [{ id: 'listed', name: 'listed' }]);
@@ -236,7 +238,10 @@ test('a node sends reads only to a source its relay confirmed within 30 s, and t
     clock += 30_001; assert.equal(node.supports(f.a.device.id, 'available'), false, 'a confirmation older than 30 s no longer counts');
     await relay.pump(); assert.equal(node.supports(f.a.device.id, 'available'), true);
     features = []; await relay.pump(); assert.equal(node.supports(f.a.device.id, 'available'), false, 'a relay of an older worker withdraws it');
+    assert.equal(node.declines(f.a.device.id, 'available'), true);
+    clock += 30_001; assert.equal(node.declines(f.a.device.id, 'available'), false, 'a poll older than 30 s says nothing about it any more');
     features = ['available']; await relay.pump(); node.forget('controller-a'); assert.equal(node.supports(f.a.device.id, 'available'), false, 'the link went away');
+    assert.equal(node.declines(f.a.device.id, 'available'), false, 'nor is it older: it is gone');
     await relay.pump(); f.bPeers.splice(0, 1, { ...f.bPeers[0]!, device: { ...f.a.device, id: randomUUID() } });
     assert.equal(node.supports(f.a.device.id, 'available'), false, 'a source no longer trusted on that route');
   } finally { relay.close(); node.close(); f.target.close(); f.source.close(); session.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); }

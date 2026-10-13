@@ -653,7 +653,7 @@ test('the owner view of a joined computer’s session reads this vault for what 
     assert.deepEqual(view.available.map(item => [item.name, item.basis]), [['GLOBAL', ['global']], ['NODE_FOLDER', ['folder']]]);
     assert.deepEqual(view.usage, usage); assert.deepEqual(view.connectable.map(item => item.name), ['GLOBAL', 'NODE_FOLDER']);
     assert.deepEqual(await readFile(join(f.stateDir, 'secrets/journal.json')), journal, 'no task for the joined computer’s session');
-    assert.deepEqual(await f.runtime.control('session', { sessionId: 'codex:remote', nodeId: 'fixture-node' }, { error: 'worker-update-pending' }), { status: { initialized: true, locked: false }, available: [], connectable: [], usage: [], unavailableSources: [], error: 'worker-update-pending', permanent: false });
+    assert.deepEqual(await f.runtime.control('session', { sessionId: 'codex:remote', nodeId: 'fixture-node' }, { error: 'worker-update-pending' }), { status: { initialized: true, locked: false }, available: [], connectable: [], usage: [], unavailableSources: [], updatePendingSources: [], error: 'worker-update-pending', permanent: false });
     await assert.rejects(f.runtime.control('session', { sessionId: 'codex:remote', nodeId: 'fixture-node' }, { ...subject, usage: [{ value: canary }] }), { kind: 'invalid' });
     await assert.rejects(f.runtime.control('session', { sessionId: 'codex:remote', nodeId: 'fixture-node' }), { kind: 'invalid' });
     await assert.rejects(f.runtime.control('session', { sessionId: 'codex:other', nodeId: 'fixture-node' }, subject), { kind: 'unavailable' });

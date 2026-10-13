@@ -61,7 +61,7 @@ export type RemoteSessionSubject = z.output<typeof remoteSubject>;
 /** A committed owner change for a joined computer's session, which its web announces there before reading the view. */
 export interface SecretReceipt { connectedTarget: SecretTarget }
 export type SecretControlResult = SecretSettingsView | SecretSessionView | SecretBrokerAccess | SecretReceipt | { fields: string[] };
-const closedView = (status: VaultStatus, error: SecretSessionError): SecretSessionView => ({ status, available: [], connectable: [], usage: [], unavailableSources: [], error, permanent: PERMANENT.has(error) });
+const closedView = (status: VaultStatus, error: SecretSessionError): SecretSessionView => ({ status, available: [], connectable: [], usage: [], unavailableSources: [], updatePendingSources: [], error, permanent: PERMANENT.has(error) });
 const closureId = (sessionId: string) => createHash('sha256').update('tower-secret-session-close-v1:' + sessionId).digest('hex');
 interface Runs { list(): Run[]; getSession(id: string): Session | undefined; sessionOrigin(id: string): SessionOrigin | undefined }
 
@@ -383,14 +383,19 @@ export class SecretRuntime {
       const probe = { sessionId: session.id, root: session.cwd, taskId: task?.taskId ?? randomUUID() };
       const local = service.available(probe);
       const remote = await this.remoteAvailable(probe, task);
-      return { status, available: [...local, ...remote.available], connectable: this.connectable(), usage: this.recentUsage(session.id), unavailableSources: remote.unavailable };
+      return { status, available: [...local, ...remote.available], connectable: this.connectable(), usage: this.recentUsage(session.id), unavailableSources: remote.unavailable, updatePendingSources: remote.updatePending };
     } catch (error) { if (service.status().locked) return closedView(service.status(), 'locked'); throw error; }
   }
-  private async remoteAvailable(probe: { sessionId: string; root: string; taskId: string }, task?: SecretTarget): Promise<{ available: SecretAvailable[]; unavailable: string[] }> {
+  /**
+   * Each source's secrets for this session, read only from a source whose relay confirmed reads. A source whose relay
+   * polled lately without confirming them runs an older build (`updatePending`); any other one did not answer (`unavailable`).
+   */
+  private async remoteAvailable(probe: { sessionId: string; root: string; taskId: string }, task?: SecretTarget): Promise<{ available: SecretAvailable[]; unavailable: string[]; updatePending: string[] }> {
     const service = this.options.service; const context: SecretContext = { hostId: service.device().id, ...probe, runId: 'owner-view' };
-    const unavailable: string[] = [];
+    const unavailable: string[] = [], updatePending: string[] = [];
     const sources = service.peers().filter(peer => peer.enabled && peer.direction === 'controller');
     const lists = await Promise.all(sources.map(async peer => {
+      if (this.remote.declines(peer.device.id, 'available')) { updatePending.push(peer.device.id); return []; }
       try {
         // Only a source whose relay confirmed reads is asked; `list` would start a task there.
         const listed = remoteListing(await this.remote.request(peer.device.id, context, 'available', {}, { timeoutMs: VIEW_REMOTE_MS }), peer.device.id);
@@ -399,7 +404,7 @@ export class SecretRuntime {
           .map(item => ({ ...item, basis: ['remote' as const], operations: item.operations ?? [] }));
       } catch { unavailable.push(peer.device.id); return []; }
     }));
-    return { available: lists.flat(), unavailable };
+    return { available: lists.flat(), unavailable, updatePending };
   }
   /** The owner view of a joined computer's session, from what that computer reported (`subject`) and this vault. */
   private remoteSessionView(sessionId: string, subject: RemoteSessionSubject): SecretSessionView {
@@ -410,7 +415,7 @@ export class SecretRuntime {
     if (subject.sessionId !== sessionId) throw fail('원격 세션을 확인할 수 없습니다.', 'unavailable');
     try {
       const available = service.availableFor({ hostId: subject.hostId, sessionId, root: subject.root, taskId: subject.taskId ?? randomUUID(), runId: 'owner-view' });
-      return { status, available, connectable: this.connectable(), usage: subject.usage, unavailableSources: [] };
+      return { status, available, connectable: this.connectable(), usage: subject.usage, unavailableSources: [], updatePendingSources: [] };
     } catch (error) { if (service.status().locked) return closedView(service.status(), 'locked'); throw error; }
   }
   /** This computer's session for its controller's owner view (`/secret-session`); reads only. */

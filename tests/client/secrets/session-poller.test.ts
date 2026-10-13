@@ -12,7 +12,7 @@ class Timers {
   waits() { return [...this.queue.values()].map(timer => timer.ms); }
   fire() { const [id, timer] = [...this.queue][0]!; this.queue.delete(id); timer.run(); }
 }
-const view = (patch: Partial<SecretSessionView> = {}): SecretSessionView => ({ status: { initialized: true, locked: false }, available: [], connectable: [], usage: [], unavailableSources: [], ...patch });
+const view = (patch: Partial<SecretSessionView> = {}): SecretSessionView => ({ status: { initialized: true, locked: false }, available: [], connectable: [], usage: [], unavailableSources: [], updatePendingSources: [], ...patch });
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 function poller(open: boolean) {

@@ -42,6 +42,8 @@ export function SecretAvailable({ view, busy, change, onPaste, onSharing }: {
     <SecretSessionState error={view.error} />
     {vaultClosed && <SecretAccess status={view.status} busy={busy} change={change} />}
     {!!view.unavailableSources.length && view.error !== 'source-unavailable' && <p role="status" className="secret-source-notice">{t('원본 컴퓨터 {0}곳에 연결하지 못해 그곳의 시크릿은 빠져 있습니다.', { 0: view.unavailableSources.length })}</p>}
+    {/* Answering sources on an older build: not a connection failure, and they appear once they update. */}
+    {!!view.updatePendingSources.length && <p role="status" className="secret-source-notice">{t('원본 컴퓨터 {0}곳이 업데이트를 기다리고 있어 그 시크릿은 아직 표시하지 않습니다.', { 0: view.updatePendingSources.length })}</p>}
     {!vaultClosed && <>
       <div className="secret-actions secret-available-actions">
         <button type="button" aria-expanded={picking} disabled={busy} onClick={() => setPicking(value => !value)}><Link2 size={14} aria-hidden="true" />{t('기존 시크릿 연결')}</button>

@@ -52,7 +52,7 @@ const sessionView = (patch: Partial<SecretSessionView> = {}): SecretSessionView 
     { id: 'remote_key', name: 'REMOTE_KEY', groupId: 'tower', kind: 'scalar', version: 1, reference: reference('remote_key'), sourceHostId: 'peer-device', basis: ['remote'], operations: ['env'] },
   ],
   connectable: [{ id: 'lonely_key', name: 'LONELY_KEY', groupId: 'tower', kind: 'scalar', version: 1, reference: reference('lonely_key') }, { id: 'global_key', name: 'GLOBAL_KEY', groupId: 'tower', kind: 'scalar', version: 1, reference: reference('global_key') }],
-  usage: [], unavailableSources: [], ...patch,
+  usage: [], unavailableSources: [], updatePendingSources: [], ...patch,
 });
 
 test('joined-session requests address the source vault and pass only canonical session and node identities', () => {
@@ -267,4 +267,20 @@ test('pending encrypted vault restores remain waiting and direct the owner to Se
 test('partial remote source failure is shown as a generic alert without reflecting server error details', () => {
   const markup = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { ...view, status: { ...view.status, error: 'source-private-error-canary' } }, canvas, busy: false, change }));
   assert.match(markup, /role="alert"/); assert.match(markup, /원본 컴퓨터의 연결과 잠금 상태/); assert.doesNotMatch(markup, /source-private-error-canary/);
+});
+
+test('sources that could not be reached and sources waiting for an update get separate notices', () => {
+  const previous = getLanguage(); setLanguage('ko');
+  try {
+    const render = (patch: Partial<SecretSessionView>) => renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView(patch), busy: false, change, onPaste: noop, onSharing: noop }));
+    const both = render({ unavailableSources: ['offline-device'], updatePendingSources: ['older-device', 'another-older-device'] });
+    assert.match(both, /원본 컴퓨터 1곳에 연결하지 못해 그곳의 시크릿은 빠져 있습니다/);
+    assert.match(both, /원본 컴퓨터 2곳이 업데이트를 기다리고 있어 그 시크릿은 아직 표시하지 않습니다/);
+    const older = render({ updatePendingSources: ['older-device'] });
+    assert.match(older, /원본 컴퓨터 1곳이 업데이트를 기다리고/); assert.doesNotMatch(older, /연결하지 못해/, 'an older source is not a connection failure');
+    const offline = render({ unavailableSources: ['offline-device'] });
+    assert.match(offline, /연결하지 못해/); assert.doesNotMatch(offline, /업데이트를 기다리고/);
+    setLanguage('en');
+    assert.match(render({ updatePendingSources: ['older-device'] }), /1 source computer\(s\) are waiting for an update; their secrets are not shown yet\./);
+  } finally { setLanguage(previous); }
 });

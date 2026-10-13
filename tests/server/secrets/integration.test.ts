@@ -114,14 +114,18 @@ test('a joined computer’s session view lists a source’s keys only once its r
   await f.a.create({ name: 'unshared on A', kind: 'scalar', value: VISIBLE });
   const sourceJournal = await readFile(join(f.stateA, 'secrets', 'journal.json')), recipientJournal = await readFile(join(f.stateB, 'secrets', 'journal.json'));
   const before = f.wires.length;
-  const unconfirmed = await f.recipient.control('session', { sessionId: f.capB.sessionId }) as SecretSessionView;
-  assert.deepEqual([unconfirmed.available, unconfirmed.unavailableSources, unconfirmed.error], [[], [f.a.device().id], undefined]);
+  // No poll from A at all: it is unreachable, as far as B can tell.
+  const offline = await f.recipient.control('session', { sessionId: f.capB.sessionId }) as SecretSessionView;
+  assert.deepEqual([offline.available, offline.unavailableSources, offline.updatePendingSources, offline.error], [[], [f.a.device().id], [], undefined]);
   assert.equal(f.wires.length, before); assert.equal(f.recipient.remote.pending(), 0, 'nothing was sent to a source that did not confirm reads');
-  const olderRelay = await f.relay(f.recipient.control('session', { sessionId: f.capB.sessionId }), false, []) as SecretSessionView;
-  assert.deepEqual(olderRelay.unavailableSources, [f.a.device().id], 'an older source’s relay confirms nothing, and `list` is never used instead');
+  // A's relay polls without the header: an older source, waiting for its update, never asked and never read with `list` instead.
+  assert.deepEqual(f.recipient.remote.poll('controller-a', []), []);
+  const older = await f.recipient.control('session', { sessionId: f.capB.sessionId }) as SecretSessionView;
+  assert.deepEqual([older.available, older.unavailableSources, older.updatePendingSources], [[], [], [f.a.device().id]]);
+  assert.equal(f.wires.length, before); assert.equal(f.recipient.remote.pending(), 0);
   f.confirm(); const view = await f.relay(f.recipient.control('session', { sessionId: f.capB.sessionId })) as SecretSessionView;
   assert.deepEqual(view.available.map(item => [item.name, item.basis, item.sourceHostId, item.operations.length]), [['shared with B', ['remote'], f.a.device().id, 6]]);
-  assert.deepEqual(view.unavailableSources, []); assert.deepEqual(view.connectable, [], 'only this vault’s own keys are connectable here');
+  assert.deepEqual([view.unavailableSources, view.updatePendingSources], [[], []]); assert.deepEqual(view.connectable, [], 'only this vault’s own keys are connectable here');
   assert.deepEqual(f.wires.filter(wire => typeof wire === 'object' && wire !== null && 'operation' in wire).map(wire => (wire as { operation: string }).operation), ['available']);
   assert.deepEqual(await readFile(join(f.stateA, 'secrets', 'journal.json')), sourceJournal, 'the source started no task and claimed nothing');
   assert.deepEqual(await readFile(join(f.stateB, 'secrets', 'journal.json')), recipientJournal, 'neither did the joined computer');

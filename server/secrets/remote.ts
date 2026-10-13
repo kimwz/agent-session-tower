@@ -97,8 +97,8 @@ const refusal = (code: string) => Object.assign(new Error(code), { code });
 export class RemoteSecretBroker {
   private readonly waiting = new Map<string, Pending>();
   private readonly answering = new Set<string>();
-  /** What each source's relay said its worker serves, by controller route, as of its last poll. */
-  private readonly features = new Map<string, { deviceId: string; features: string[]; at: number }>();
+  /** Each source's last relay poll, by controller route: when, and what it said its worker serves (nothing from older relays). */
+  private readonly polls = new Map<string, { deviceId: string; features: string[]; at: number }>();
   private readonly now: () => number;
   constructor(private readonly options: RemoteSecretBrokerOptions) { this.now = options.now ?? Date.now; }
   private peer(id: string, route?: { id: string; direction: SecretPeer['direction'] }): SecretPeer {
@@ -106,15 +106,19 @@ export class RemoteSecretBroker {
     if (peers.length !== 1) return fail();
     return peers[0]!;
   }
-  /** Whether this source's relay confirmed `feature` recently, for the peer trusted on that route now. */
-  supports(peerId: string, feature: 'available'): boolean {
+  /** This source's relay poll within the last 30 s, for the peer trusted on that route now. */
+  private recentPoll(peerId: string) {
     try {
-      const peer = this.peer(peerId); const known = this.features.get(peer.routeId);
-      return peer.direction === 'controller' && !!known && known.deviceId === peer.device.id && known.features.includes(feature) && this.now() - known.at <= FEATURE_TTL;
-    } catch { return false; } // best-effort: without one trusted peer there is nothing confirmed
+      const peer = this.peer(peerId); const known = this.polls.get(peer.routeId);
+      return peer.direction === 'controller' && known && known.deviceId === peer.device.id && this.now() - known.at <= FEATURE_TTL ? known : undefined;
+    } catch { return undefined; } // best-effort: without one trusted peer there is no poll to go by
   }
+  /** Whether this source's relay confirmed `feature` recently. */
+  supports(peerId: string, feature: 'available'): boolean { return this.recentPoll(peerId)?.features.includes(feature) ?? false; }
+  /** Whether this source's relay polled recently without confirming `feature`: it answers, but its build predates it. */
+  declines(peerId: string, feature: 'available'): boolean { const poll = this.recentPoll(peerId); return !!poll && !poll.features.includes(feature); }
   /** The source's link went away: what its relay said no longer holds. */
-  forget(controllerRouteId: string): void { this.features.delete(controllerRouteId); }
+  forget(controllerRouteId: string): void { this.polls.delete(controllerRouteId); }
   request(peerId: string, context: SecretContext, operation: RemoteSecretOperation, payload: unknown = {}, options: { timeoutMs?: number } = {}): Promise<unknown> {
     if (this.waiting.size >= MAX_PENDING) return Promise.reject(refusal('SECRET_REMOTE_BUSY'));
     // An older source refuses an operation it does not know only after its full deadline; never send it one.
@@ -137,8 +141,8 @@ export class RemoteSecretBroker {
   poll(controllerRouteId: string, features?: unknown): RemoteSecretRequest[] {
     const peer = this.options.peers().find(peer => peer.enabled && peer.direction === 'controller' && peer.routeId === controllerRouteId);
     const confirmed = Array.isArray(features) ? OPERATIONS.filter(operation => operation === 'available' && features.includes(operation)) : [];
-    if (peer && confirmed.length) this.features.set(controllerRouteId, { deviceId: peer.device.id, features: confirmed, at: this.now() });
-    else this.features.delete(controllerRouteId);
+    if (peer) this.polls.set(controllerRouteId, { deviceId: peer.device.id, features: confirmed, at: this.now() });
+    else this.polls.delete(controllerRouteId);
     // A read queued while this source confirmed reads is refused here once it no longer does, never handed to its relay.
     for (const [id, pending] of this.waiting) {
       if (pending.request.operation !== 'available' || pending.peer.routeId !== controllerRouteId || this.supports(pending.peer.device.id, 'available')) continue;

@@ -140,6 +140,7 @@ export const english: Record<string, string> = {
   "새 실행 워커 적용 대기": "Waiting for the new execution worker",
   "새 실행 워커 적용 대기 중입니다. 진행 중인 작업이 끝나면 다시 시도하세요.": "Waiting for the new execution worker to take over. Try again once running work finishes.",
   "원본 컴퓨터 {0}곳에 연결하지 못해 그곳의 시크릿은 빠져 있습니다.": "{0} source computer(s) could not be reached; their secrets are missing.",
+  "원본 컴퓨터 {0}곳이 업데이트를 기다리고 있어 그 시크릿은 아직 표시하지 않습니다.": "{0} source computer(s) are waiting for an update; their secrets are not shown yet.",
   "기존 시크릿 연결": "Connect a saved secret",
   "새 시크릿 추가": "Add a new secret",
   "이름이나 환경 변수 검색": "Search names or environment variables",

@@ -96,7 +96,7 @@ const sessionView = (patch: Partial<SecretSessionView> = {}): SecretSessionView 
   status: { initialized: true, locked: false },
   available: [{ id: 'global_key', name: 'GLOBAL_KEY', groupId: 'tower', kind: 'scalar', version: 1, reference: 'r', basis: ['global'], operations: ['env'] }],
   connectable: [{ id: 'lonely_key', name: 'LONELY_KEY', groupId: 'tower', kind: 'scalar', version: 1, reference: 'r' }, { id: 'global_key', name: 'GLOBAL_KEY', groupId: 'tower', kind: 'scalar', version: 1, reference: 'r' }],
-  usage: [], unavailableSources: [], ...patch,
+  usage: [], unavailableSources: [], updatePendingSources: [], ...patch,
 });
 const settingsView: SecretSettingsView = { status: { initialized: true, locked: false }, device, peers: [{ device: { ...device, id: 'peer' }, routeId: node, direction: 'node', enabled: true }],
   secrets: [{ id: 'folder_key', name: 'FOLDER_KEY', groupId: 'tower', kind: 'scalar', version: 1, reference: 'r', sourceHostId: 'source', sharing: { revision: 5, global: false, folders: [{ hostId: 'source', root: '/work/app' }] } },
