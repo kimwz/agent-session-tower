@@ -82,6 +82,11 @@ else {
   send({type:'thread.started',thread_id:'fixture-only'}); send({type:'turn.started'});
   if (mode === 'safe-warning') send({type:'item.completed',item:{type:'error',message:'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable \u0060features.code_mode_host\u0060 and install \u0060codex-code-mode-host\u0060.'}});
   if (mode === 'startup-error') send({type:'item.completed',item:{type:'error',message:'Unknown unsupported isolation setting.'}});
+  // Codex 0.162 before retrying a model request it lost (seen live: a 503 during a permission review).
+  if (mode === 'retry-notice') send({type:'error',message:'Reconnecting... 2/5 (unexpected status 503 Service Unavailable: An error occurred while processing your request.)'});
+  if (mode === 'retries-exhausted') { send({type:'error',message:'unexpected status 503 Service Unavailable:\\n\\tAn error occurred while processing your request.'}); send({type:'turn.failed',error:{message:'unexpected status 503'}}); process.exit(1); }
+  if (mode === 'turn-failed') { send({type:'turn.failed',error:{message:"You've hit your usage limit."}}); process.exit(1); }
+  if (mode === 'unknown-event') send({type:'fixture.unknown',text:'private response content'});
   if (mode === 'tools') send({type:'item.started',item:{type:'command_execution',command:'exit'}});
   if (mode === 'review-read') { const item = {id:'item_0',type:'mcp_tool_call',server:'tower_review',tool:'read_file',arguments:{path:'/x/child.mjs'},result:null,error:null,status:'in_progress'};
     send({type:'item.started',item}); send({type:'item.completed',item:{...item,result:{content:[{type:'text',text:'{}'}]},status:'completed'}}); }
@@ -286,6 +291,17 @@ test('Codex accepts only the known fail-closed code-mode startup warning', async
   assert.deepEqual(await runAutoPromptModel(safe.request, safe.dependencies), DECISION);
   const unknown = await fixture(t, 'codex', 'startup-error');
   await assert.rejects(runAutoPromptModel(unknown.request, unknown.dependencies), /unsupported routing configuration/);
+});
+
+test('Codex retrying a lost model request is no failure; the turn\u0027s end decides, and a failure names Codex\u0027s reason', async t => {
+  const retried = await fixture(t, 'codex', 'retry-notice');
+  assert.deepEqual(await runAutoPromptModel(retried.request, retried.dependencies), DECISION);
+  const exhausted = await fixture(t, 'codex', 'retries-exhausted');
+  await assert.rejects(runAutoPromptModel(exhausted.request, exhausted.dependencies), /Codex could not finish \(unexpected status 503 Service Unavailable: An error occurred while processing your request\.\)/);
+  const failed = await fixture(t, 'codex', 'turn-failed');
+  await assert.rejects(runAutoPromptModel(failed.request, failed.dependencies), /Codex could not finish \(You've hit your usage limit\.\)/);
+  const unknown = await fixture(t, 'codex', 'unknown-event');
+  await assert.rejects(runAutoPromptModel(unknown.request, unknown.dependencies), (error: Error) => /unsupported routing event \(fixture\.unknown\)/.test(error.message) && !/private/.test(error.message));
 });
 
 test('native interpreter PATH retains only absolute entries and Finder fallback locations', async t => {

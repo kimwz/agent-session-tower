@@ -53,6 +53,13 @@ const record = (value: unknown): value is Record<string, any> => !!value && type
 const failure = (message: string) => new Error(`Auto Prompt: ${message}`);
 const cancelled = () => Object.assign(failure('routing was cancelled.'), { name: 'AbortError' });
 const eventName = (value: unknown): string => typeof value === 'string' && /^[a-zA-Z0-9_.-]{1,64}$/.test(value) ? value : 'unknown';
+/** How Codex (0.162) starts the error event it sends before each automatic retry of a model request. */
+const CODEX_RETRY_NOTICE = 'Reconnecting... ';
+/** Codex's own error text, on one line and short: it names the cause (an HTTP status, a usage limit) for the owner. */
+const codexError = (value: unknown): string => {
+  const text = typeof value === 'string' ? value.replace(/[\p{Cc}\p{Cf}]+/gu, ' ').replace(/\s+/g, ' ').trim() : '';
+  return !text ? 'no reason given' : text.length > 200 ? `${text.slice(0, 199)}…` : text;
+};
 const CLAUDE_RETRY_ERRORS = new Set([
   'authentication_failed', 'oauth_org_not_allowed', 'account_on_hold', 'billing_error',
   'rate_limit', 'overloaded', 'invalid_request', 'model_not_found', 'server_error', 'unknown', 'max_output_tokens',
@@ -297,7 +304,12 @@ function collect(options: AutoPromptModelRequest, dependencies: AutoPromptNative
         if (!record(frame.item) || !(['reasoning', 'agent_message'].includes(frame.item.type) || readTool)) { stop(failure('Codex attempted a tool operation during routing.')); return; }
         if (frame.type === 'item.completed' && frame.item.type === 'agent_message' && typeof frame.item.text === 'string') finalText = frame.item.text;
       } else if (frame.type === 'turn.completed') completed = true;
-      else if (!['thread.started', 'turn.started'].includes(frame.type)) stop(failure('Codex routing failed or returned an unsupported event. Check native sign-in and CLI compatibility.'));
+      // Codex retries a dropped or refused model request itself (a 503, a lost stream) and says so with an error event
+      // per attempt; the turn's own end still decides, and running out of retries fails it.
+      else if (frame.type === 'error' && typeof frame.message === 'string' && frame.message.startsWith(CODEX_RETRY_NOTICE)) return;
+      else if (frame.type === 'error' || frame.type === 'turn.failed') {
+        stop(failure(`Codex could not finish (${codexError(frame.type === 'error' ? frame.message : record(frame.error) ? frame.error.message : undefined)}). Check native sign-in and CLI compatibility.`));
+      } else if (!['thread.started', 'turn.started'].includes(frame.type)) stop(failure(`Codex returned an unsupported routing event (${eventName(frame.type)}).`));
     };
     child.stdout.on('data', (chunk: string) => {
       bytes += Buffer.byteLength(chunk);

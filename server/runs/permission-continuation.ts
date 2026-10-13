@@ -26,6 +26,12 @@ export interface PermissionHost {
   shown(run: Run): Run;
 }
 
+export interface DecisionOptions {
+  closed?: boolean;
+  /** Runs once if a refusal notice counted as handed over still never reaches the turn. */
+  undelivered?: () => void;
+}
+
 /**
  * A decision about an agent's permission request, carried to its turn: an approval continues the work in a fresh
  * provider turn after the requesting one ends (never an insert), and a refusal is told to the running turn. Every
@@ -64,7 +70,7 @@ export class PermissionContinuations {
   }
 
   /** Records a decision about a permission request; the same request answers with the same delivery while it is under way. */
-  decide(request: PermissionRequest, prompt: string, options: { closed?: boolean } = {}): Promise<Run> {
+  decide(request: PermissionRequest, prompt: string, options: DecisionOptions = {}): Promise<Run> {
     const pending = this.deliveries.get(request.id);
     if (pending) return pending;
     const delivery = this.record(request, prompt, options);
@@ -74,7 +80,7 @@ export class PermissionContinuations {
   }
 
   /** Records a permission decision once; approval needs a fresh provider turn, never an insert. */
-  private async record(request: PermissionRequest, prompt: string, options: { closed?: boolean } = {}): Promise<Run> {
+  private async record(request: PermissionRequest, prompt: string, options: DecisionOptions = {}): Promise<Run> {
     const existing = [...this.host.runs.values()].find(run => run.permissionRequestIds?.includes(request.id));
     const revision = `${request.status}:${request.decidedAt ?? request.createdAt}`;
     const reopenedDecision = existing?.error && existing.permissionDecisionRevisions?.[request.id]?.startsWith('withdrawn:')
@@ -117,22 +123,36 @@ export class PermissionContinuations {
       this.host.runs.set(notice.id, notice); this.host.admit(notice.id); this.host.changed(notice); await this.host.flush(); this.host.unadmit(notice.id);
       try {
         await this.host.steer(notice.id, { targetRunId: target.id });
+        const sending = () => notice.steering?.state === 'sending' && target.status === 'running' && !this.host.stopping();
         if (!approved && notice.steering?.state === 'sending') await new Promise<void>((resolve, reject) => {
           const finish = (delivered: boolean) => { clearTimeout(timer); this.host.events.off('change', check); if (delivered) resolve(); else reject(new Error('Permission decision notice delivery could not be confirmed.')); };
-          const check = () => {
-            if (notice.steering?.state === 'sending' && target.status === 'running' && !this.host.stopping()) return;
-            finish(notice.steering?.state === 'delivered');
-          };
-          const timer = setTimeout(() => finish(false), 30_000); timer.unref();
+          const check = () => { if (!sending()) finish(notice.steering?.state === 'delivered'); };
+          const timer = setTimeout(() => finish(sending()), 30_000); timer.unref();
           this.host.events.on('change', check); check();
         });
-        if (!approved && notice.steering?.state === 'delivered') { delete continuation.error; this.host.changed(continuation); await this.host.flush(); }
+        if (!approved && (notice.steering?.state === 'delivered' || sending())) { delete continuation.error; this.host.changed(continuation); await this.host.flush(); }
+        // Claude takes a notice at its next step, which a long tool call or reply can put minutes away, and the turn
+        // waits for it. The decision is not held that long: should Claude end without taking it, it fails then.
+        if (!approved && sending()) this.lateFailure(notice, continuation, options.undelivered);
       }
       catch (error) { if (admissionUncertain(error)) throw error; if (notice.status === 'queued') { notice.status = 'cancelled'; notice.finishedAt = new Date().toISOString(); this.host.changed(notice); await this.host.flush(); } }
     }
     if (!approved && continuation.error) throw new RunError(continuation.error, 'conflict');
     this.host.pump();
     return this.host.shown(continuation);
+  }
+
+  /** A notice still on its way: if it ends without Claude taking it, its receipt fails and `undelivered` runs. */
+  private lateFailure(notice: Run, continuation: Run, undelivered?: () => void): void {
+    const check = () => {
+      if (notice.steering?.state === 'sending' && notice.status === 'running') return;
+      this.host.events.off('change', check);
+      if (notice.steering?.state === 'delivered') return;
+      continuation.error = 'Permission decision notice could not be delivered to its requesting turn.';
+      this.host.changed(continuation);
+      void this.host.flush().catch(() => {}).then(() => undelivered?.());
+    };
+    this.host.events.on('change', check);
   }
 
   /** Before a permission continuation starts: a newer native owner instruction, or a finished goal, supersedes it. */

@@ -34,7 +34,7 @@ import { sessionEnv, type LaunchMarks } from './turn-env.js';
 import { ToolNotices } from './tool-notices.js';
 import { errorMessage, FINISHED, finishedTime, MAX_OUTPUT, MAX_PROMPT, notAdmitted, RunError, shown, admissionUncertain } from './run-records.js';
 import { MAX_RUNS, RunHistory, SCHEDULED_OUTPUT } from './run-history.js';
-import { PermissionContinuations, retainedReceipts } from './permission-continuation.js';
+import { PermissionContinuations, retainedReceipts, type DecisionOptions } from './permission-continuation.js';
 import { inheritedRunFields, heartbeatRunProtected } from './continuations.js';
 import { CreatedSessionRegistry } from './session-registry.js';
 import { UPDATE_WAIT, UpdateDrain } from './update-drain.js';
@@ -381,7 +381,7 @@ export class RunManager extends EventEmitter {
   });
 
   /** Records the owner's decision about an agent's permission request (see permission-continuation.ts). */
-  permissionDecision(request: PermissionRequest, prompt: string, options: { closed?: boolean } = {}): Promise<Run> { return this.permissions.decide(request, prompt, options); }
+  permissionDecision(request: PermissionRequest, prompt: string, options: DecisionOptions = {}): Promise<Run> { return this.permissions.decide(request, prompt, options); }
 
   private readonly toolNotices = new ToolNotices({
     runs: () => this.runs.values(), run: id => this.runs.get(id), getSession: id => this.getSession(id), runTools: (run, session) => this.runTools(run, session),
