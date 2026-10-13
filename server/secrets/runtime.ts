@@ -4,7 +4,7 @@ import { realpath, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { Run, Session } from '../../shared/types.js';
-import type { SecretAvailable, SecretBrokerAccess, SecretBrokerApproval, SecretContext, SecretDevice, SecretMetadata, SecretPeer, SecretSessionError, SecretSessionView, SecretSettingsView, SecretTarget, SecretUsage, VaultStatus } from '../../shared/secrets.js';
+import type { SecretAvailable, SecretBrokerAccess, SecretBrokerApproval, SecretContext, SecretDevice, SecretDisconnected, SecretMetadata, SecretPeer, SecretSessionError, SecretSessionView, SecretSettingsView, SecretTarget, SecretUsage, VaultStatus } from '../../shared/secrets.js';
 import { SECRET_OPERATIONS } from '../../shared/secrets.js';
 import type { Capability } from '../api/mcp.js';
 import type { SessionOrigin } from '../runs/origin.js';
@@ -45,17 +45,19 @@ const SESSION_ERRORS = ['uninitialized', 'locked', 'not-eligible', 'session-clos
 /** Errors that stay until the owner does something; the page stops polling on them. */
 const PERMANENT: ReadonlySet<SecretSessionError> = new Set(['uninitialized', 'not-eligible', 'session-closed']);
 const BROKER_ACTIONS = new Set(['broker-access', 'approve-broker', 'revoke-broker']);
-const MUTATIONS = new Set(['create', 'update', 'remove', 'sharing', 'session-connect', 'session-disconnect', 'trust', 'untrust']);
+const MUTATIONS = new Set(['create', 'update', 'remove', 'sharing', 'session-connect', 'session-disconnect', 'session-reallow', 'trust', 'untrust']);
 /** How long a session view waits for a source's answer before listing it as unavailable. */
 const VIEW_REMOTE_MS = 5000;
 const taskId = z.string().regex(/^[a-f0-9-]{36}$/);
 /** A joined computer's session as its web verified it: the task an owner change applies to. */
 const remoteTarget = z.object({ hostId: z.string().min(1).max(256), sessionId: z.string().min(1).max(512), root: z.string().min(1).max(8192), taskId, projectId: z.string().optional() });
 const remoteSubject = z.union([z.object({ error: z.enum(SESSION_ERRORS) }).strict(),
-  z.object({ hostId: z.string().min(1).max(256), sessionId: z.string().min(1).max(512), root: z.string().min(1).max(8192), taskId: taskId.optional(), usage: z.array(secretUsage).max(VIEW_USAGE) }).strict()]);
+  z.object({ hostId: z.string().min(1).max(256), sessionId: z.string().min(1).max(512), root: z.string().min(1).max(8192), taskId: taskId.optional(), usage: z.array(secretUsage).max(VIEW_USAGE),
+    excluded: z.array(z.string().min(1).max(256)).max(4096).optional() }).strict()]);
 /**
- * A joined computer's session as that computer reports it for its controller's owner view: canonical folder, open task
- * and recent uses, or why it has none. Reading it starts nothing on either computer.
+ * A joined computer's session as that computer reports it for its controller's owner view: canonical folder, open task,
+ * the keys that task stops (`excluded`, absent before 1.132) and recent uses, or why it has none. Reading it starts
+ * nothing on either computer.
  */
 export type RemoteSessionSubject = z.output<typeof remoteSubject>;
 /** A committed owner change for a joined computer's session, which its web announces there before reading the view. */
@@ -369,7 +371,9 @@ export class SecretRuntime {
   }
   /**
    * What a session of this computer may use now: this vault's secrets and those of each source that confirmed it answers
-   * reads; any other source is listed as unavailable. Neither this vault nor a source starts a task for it.
+   * reads. A source that polls without confirming reads is listed as waiting for its update, one that does not answer as
+   * unavailable. Keys the session stopped that only a re-allow can bring back are `disconnected`. Neither this vault nor
+   * a source starts a task for it.
    */
   private async sessionView(sessionId: string): Promise<SecretSessionView> {
     const service = this.options.service; const status = service.status();
@@ -383,28 +387,33 @@ export class SecretRuntime {
       const probe = { sessionId: session.id, root: session.cwd, taskId: task?.taskId ?? randomUUID() };
       const local = service.available(probe);
       const remote = await this.remoteAvailable(probe, task);
-      return { status, available: [...local, ...remote.available], connectable: this.connectable(), usage: this.recentUsage(session.id), unavailableSources: remote.unavailable, updatePendingSources: remote.updatePending };
+      const disconnected = [...(task ? service.disconnectedTemporary(task.taskId, service.exclusions(task.taskId)) : []), ...remote.disconnected];
+      return { status, available: [...local, ...remote.available], connectable: this.connectable(), usage: this.recentUsage(session.id), unavailableSources: remote.unavailable, updatePendingSources: remote.updatePending, disconnected };
     } catch (error) { if (service.status().locked) return closedView(service.status(), 'locked'); throw error; }
   }
   /**
    * Each source's secrets for this session, read only from a source whose relay confirmed reads. A source whose relay
    * polled lately without confirming them runs an older build (`updatePending`); any other one did not answer (`unavailable`).
    */
-  private async remoteAvailable(probe: { sessionId: string; root: string; taskId: string }, task?: SecretTarget): Promise<{ available: SecretAvailable[]; unavailable: string[]; updatePending: string[] }> {
+  private async remoteAvailable(probe: { sessionId: string; root: string; taskId: string }, task?: SecretTarget): Promise<{ available: SecretAvailable[]; unavailable: string[]; updatePending: string[]; disconnected: SecretDisconnected[] }> {
     const service = this.options.service; const context: SecretContext = { hostId: service.device().id, ...probe, runId: 'owner-view' };
-    const unavailable: string[] = [], updatePending: string[] = [];
+    const unavailable: string[] = [], updatePending: string[] = [], disconnected: SecretDisconnected[] = [];
+    const excluded = task ? service.exclusions(task.taskId) : [];
     const sources = service.peers().filter(peer => peer.enabled && peer.direction === 'controller');
     const lists = await Promise.all(sources.map(async peer => {
       if (this.remote.declines(peer.device.id, 'available')) { updatePending.push(peer.device.id); return []; }
       try {
         // Only a source whose relay confirmed reads is asked; `list` would start a task there.
         const listed = remoteListing(await this.remote.request(peer.device.id, context, 'available', {}, { timeoutMs: VIEW_REMOTE_MS }), peer.device.id);
-        // best-effort: a key this session stopped, or a task that ended meanwhile, is simply not listed.
-        return listed.filter(item => { try { if (task) service.checkTask(task, item.id); return true; } catch { return false; } })
+        // A key this session stopped is offered to re-allow; one of a task that ended meanwhile is simply not listed (best-effort).
+        return listed.filter(item => {
+          if (excluded.includes(item.id)) { disconnected.push({ ...wireMetadata(item), remote: true }); return false; }
+          try { if (task) service.checkTask(task); return true; } catch { return false; }
+        })
           .map(item => ({ ...item, basis: ['remote' as const], operations: item.operations ?? [] }));
       } catch { unavailable.push(peer.device.id); return []; }
     }));
-    return { available: lists.flat(), unavailable, updatePending };
+    return { available: lists.flat(), unavailable, updatePending, disconnected };
   }
   /** The owner view of a joined computer's session, from what that computer reported (`subject`) and this vault. */
   private remoteSessionView(sessionId: string, subject: RemoteSessionSubject): SecretSessionView {
@@ -414,19 +423,25 @@ export class SecretRuntime {
     if ('error' in subject) return closedView(status, subject.error);
     if (subject.sessionId !== sessionId) throw fail('원격 세션을 확인할 수 없습니다.', 'unavailable');
     try {
-      const available = service.availableFor({ hostId: subject.hostId, sessionId, root: subject.root, taskId: subject.taskId ?? randomUUID(), runId: 'owner-view' });
-      return { status, available, connectable: this.connectable(), usage: subject.usage, unavailableSources: [], updatePendingSources: [] };
+      // Keys stopped on either computer: the joined computer refuses what its own task stops, whatever this vault allows.
+      const stopped = subject.taskId ? [...service.exclusions(subject.taskId), ...subject.excluded ?? []] : [];
+      const available = service.availableFor({ hostId: subject.hostId, sessionId, root: subject.root, taskId: subject.taskId ?? randomUUID(), runId: 'owner-view' }).filter(item => !stopped.includes(item.id));
+      // Saved keys stay connectable; a connection made here lifts the joined computer's stop too.
+      const disconnected = subject.taskId ? service.disconnectedTemporary(subject.taskId, stopped) : [];
+      return { status, available, connectable: this.connectable(), usage: subject.usage, unavailableSources: [], updatePendingSources: [], disconnected };
     } catch (error) { if (service.status().locked) return closedView(service.status(), 'locked'); throw error; }
   }
-  /** This computer's session for its controller's owner view (`/secret-session`); reads only. */
-  async sessionSubject(sessionId: string): Promise<RemoteSessionSubject> {
+  /** This computer's session for its controller's owner view (`/secret-session`), with its exclusions when the controller reads them; reads only. */
+  async sessionSubject(sessionId: string, exclusions = false): Promise<RemoteSessionSubject> {
     const service = this.options.service; const status = service.status();
     if (!status.initialized) return { error: 'uninitialized' };
     if (status.locked || this.blocked) return { error: 'locked' };
     const subject = await this.viewSession(sessionId);
     if ('error' in subject) return subject;
-    return { hostId: service.device().id, sessionId: subject.session.id, root: subject.session.cwd, ...(subject.task ? { taskId: subject.task.taskId } : {}), usage: this.recentUsage(subject.session.id) };
+    return { hostId: service.device().id, sessionId: subject.session.id, root: subject.session.cwd, ...(subject.task ? { taskId: subject.task.taskId, ...(exclusions ? { excluded: service.exclusions(subject.task.taskId) } : {}) } : {}), usage: this.recentUsage(subject.session.id) };
   }
+  /** A controller connected these keys to this computer's session: this session stops them no more; their source decides. */
+  async reallowFromController(target: SecretTarget, secretIds: string[]): Promise<void> { await this.options.service.reallowSession(target, secretIds); }
   /** The session an owner change applies to: this computer's, whose task the change may start, or a joined computer's as its web verified it. */
   private async ownerTarget(input: { sessionId: string; nodeId?: string }, remote: unknown): Promise<SecretTarget> {
     if (input.nodeId === undefined) {
@@ -480,10 +495,14 @@ export class SecretRuntime {
       const secret = { name, kind, value, content, ...(sharing ? { sharing } : {}), ...(connect ? { connect } : {}), ...(temporary ? { temporary } : {}) };
       if (sessionId === undefined) await service.create(secret);
       else { const target = await this.ownerTarget({ sessionId, nodeId }, remote); await service.create(secret, target); return this.changed(target, nodeId !== undefined, true); }
-    } else if (action === 'session-connect' || action === 'session-disconnect') {
+    } else if (action === 'session-connect' || action === 'session-disconnect' || action === 'session-reallow') {
       const { sessionId, nodeId, secretIds } = ownerInput(ownerConnection, input);
+      // Another source's key is stopped by the session's own computer, and re-allowed there.
+      if (action === 'session-reallow' && nodeId !== undefined) throw fail('다른 원본의 시크릿은 그 세션이 있는 컴퓨터에서 다시 허용하세요.');
       const target = await this.ownerTarget({ sessionId, nodeId }, remote);
-      if (action === 'session-connect') await service.connectSession(target, secretIds); else await service.disconnectSession(target, secretIds);
+      if (action === 'session-connect') await service.connectSession(target, secretIds);
+      else if (action === 'session-disconnect') await service.disconnectSession(target, secretIds);
+      else await service.reallowSession(target, secretIds);
       return this.changed(target, nodeId !== undefined, action === 'session-connect');
     } else if (action === 'sharing') {
       const { secretId, revision, global, folders, kept } = ownerInput(ownerSharingChange, input);

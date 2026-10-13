@@ -47,7 +47,7 @@ export type QuickSecretFormat = 'auto' | SecretKind;
 /** A display hint only; the server validates dotenv syntax and preserves literal values. */
 export function quickSecretKind(raw: string, format: QuickSecretFormat): SecretKind {
   if (format !== 'auto') return format;
-  const first = raw.replace(/^﻿/, '').split(/\r?\n/).find(line => line.trim() && !line.trimStart().startsWith('#'));
+  const first = raw.replace(/^\uFEFF/, '').split(/\r?\n/).find(line => line.trim() && !line.trimStart().startsWith('#'));
   return first && /^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=/.test(first.trimStart()) ? 'env' : 'scalar';
 }
 /** The name used when the owner leaves it empty: the file's name, a dotenv's first variable, or a generic one. */

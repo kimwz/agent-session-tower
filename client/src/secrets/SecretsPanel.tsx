@@ -7,25 +7,25 @@ import type { SecretComputer } from './SecretAdvanced';
 import { SecretSettingsWorkspace } from './SecretSettings';
 import { postSecret, readSecretSettings, secretFailure, secretLoadFailure, sharingConflict, emptyCanvas, type SecretCanvas } from './secrets-client';
 
-/** The settings view, read when the section is shown and replaced by every change's answer; never polled. */
+/** The settings view, read when the section is shown and replaced by every change's answer; never polled. A read is dropped once a change started after it. */
 function useSecretSettings(token: string, active: boolean) {
   const { t } = useI18n();
   const [view, setView] = useState<SecretSettingsView>(); const [busy, setBusy] = useState(false);
   const [error, setError] = useState(''); const [loadError, setLoadError] = useState(''); const [notice, setNotice] = useState(''); const [revision, setRevision] = useState(0);
-  const generation = useRef(0); const mutating = useRef(false);
+  const generation = useRef(0); const mutating = useRef(false); const changes = useRef(0);
   useEffect(() => { generation.current++; setView(undefined); setError(''); setLoadError(''); setNotice(''); setBusy(false); mutating.current = false; }, [token]);
   useEffect(() => {
     if (!active || !token) return;
-    const controller = new AbortController(); const current = generation.current;
+    const controller = new AbortController(); const current = generation.current; const started = changes.current;
     readSecretSettings(controller.signal).then(next => {
-      if (!controller.signal.aborted && current === generation.current && !mutating.current) { setView(next); setLoadError(''); }
+      if (!controller.signal.aborted && current === generation.current && started === changes.current && !mutating.current) { setView(next); setLoadError(''); }
     }, failure => { if (!controller.signal.aborted && current === generation.current) setLoadError(secretLoadFailure(failure, t)); });
     return () => controller.abort();
   }, [token, active, revision, t]);
   const reload = useCallback(() => { setError(''); setRevision(value => value + 1); }, []);
   const change: SecretChange = useCallback(async (action, body) => {
     if (mutating.current || !active || !token) return false;
-    const current = generation.current; mutating.current = true; setBusy(true); setError(''); setNotice('');
+    const current = generation.current; mutating.current = true; changes.current++; setBusy(true); setError(''); setNotice('');
     try {
       const next = await postSecret<SecretSettingsView>(action, token, body);
       if (current !== generation.current) return false;

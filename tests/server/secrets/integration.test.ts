@@ -108,6 +108,66 @@ test('recipient session disconnection filters the session view and lists and blo
   assert.equal(f.runsB.list()[0].status, 'running'); assert.equal(stored(f.b).secrets.length, 0); assert.deepEqual(f.errors, []);
 });
 
+test('a key disconnected in a session of the joined computer is offered there to allow again, and the source still decides its use', { timeout: 20000 }, async t => {
+  const f = await pair(t);
+  const secret = await f.a.create({ name: 'remote key to allow again', kind: 'scalar', value: VISIBLE, sharing: f.toB });
+  const own = await f.b.create({ name: 'B own key', kind: 'scalar', value: VISIBLE, sharing: { global: true, folders: [] } });
+  await f.recipient.context(f.capB); f.confirm();
+  const session = { sessionId: f.capB.sessionId };
+  const stopped = await f.relay(f.recipient.control('session-disconnect', { ...session, secretIds: [secret.id, own.id] })) as SecretSessionView;
+  assert.deepEqual(stopped.available, []);
+  assert.deepEqual(stopped.disconnected?.map(item => [item.id, item.remote, item.sourceHostId]), [[secret.id, true, f.a.device().id]], 'this vault’s saved key is offered among the connectable ones instead');
+  assert.deepEqual(stopped.connectable.map(item => item.id), [own.id]);
+  f.confirm(); const allowed = await f.relay(f.recipient.control('session-reallow', { ...session, secretIds: [secret.id, own.id] })) as SecretSessionView;
+  assert.deepEqual(allowed.available.map(item => [item.id, item.basis]), [[secret.id, ['remote']]], 'only another source’s key is allowed again; this vault’s own comes back by connecting it');
+  assert.deepEqual(allowed.disconnected, []);
+  const listed = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[] };
+  assert.deepEqual(listed.secrets.map(item => item.id), [secret.id]);
+  // Allowing again lifts only this session's stop: once the source stops sharing, the key is neither listed nor offered.
+  await f.relay(f.recipient.control('session-disconnect', { ...session, secretIds: [secret.id] }));
+  await f.a.setSharing(secret.id, 1, { global: false, folders: [] });
+  f.confirm(); const unshared = await f.relay(f.recipient.control('session', session)) as SecretSessionView;
+  assert.deepEqual([unshared.available, unshared.disconnected], [[], []]);
+  await assert.rejects(f.recipient.control('session-reallow', { ...session, nodeId: 'node-a', secretIds: [secret.id] }), { kind: 'invalid' });
+  assert.equal(JSON.stringify([stopped, allowed]).includes(VISIBLE), false); assert.deepEqual(f.errors, []);
+});
+
+test('the source sees what the joined computer’s session stopped, and connecting a key there lifts that stop', { timeout: 20000 }, async t => {
+  const f = await pair(t);
+  const secret = await f.a.create({ name: 'stopped on B', kind: 'scalar', value: VISIBLE, sharing: f.toB });
+  const own = await f.b.create({ name: 'B local key', kind: 'scalar', value: VISIBLE, sharing: { global: true, folders: [] } });
+  const context = await f.recipient.context(f.capB); f.confirm();
+  await f.relay(f.recipient.control('session-disconnect', { sessionId: f.capB.sessionId, secretIds: [secret.id, own.id] }));
+  // A controller that does not ask for exclusions gets the subject an older build knows.
+  assert.equal('excluded' in (await f.recipient.sessionSubject(f.capB.sessionId) as object), false);
+  const subject = await f.recipient.sessionSubject(f.capB.sessionId, true);
+  assert.deepEqual((subject as { excluded?: string[] }).excluded, [secret.id, own.id]);
+  const remote = { sessionId: f.capB.sessionId, nodeId: 'node-b' };
+  const view = await f.source.control('session', remote, subject) as SecretSessionView;
+  assert.deepEqual(view.available, [], 'the joined computer refuses what its session stopped');
+  assert.deepEqual(view.connectable.map(item => item.id), [secret.id], 'so it is offered for connecting');
+  const { excluded: _excluded, ...older } = subject as { excluded?: string[] };
+  assert.deepEqual((await f.source.control('session', remote, older) as SecretSessionView).available.map(item => item.id), [secret.id], 'a joined computer that reports none');
+  // Connecting it at the source, then the notice the web sends with the keys connected.
+  const target = (await f.recipient.remoteTarget(f.capB.sessionId))!;
+  assert.deepEqual(await f.source.control('session-connect', { ...remote, secretIds: [secret.id] }, target), { connectedTarget: { hostId: target.hostId, sessionId: target.sessionId, root: target.root, taskId: target.taskId } });
+  await f.recipient.reallowFromController(target, [secret.id, own.id]);
+  const after = await f.recipient.sessionSubject(f.capB.sessionId, true);
+  assert.deepEqual((after as { excluded?: string[] }).excluded, [own.id], 'its own keys stay stopped; only connecting them here brings them back');
+  assert.deepEqual((await f.source.control('session', remote, after) as SecretSessionView).available.map(item => [item.id, item.basis]), [[secret.id, ['session', 'folder']]]);
+  const used = await f.relay(f.recipient.broker.compare(context, secret.reference, secret.reference));
+  assert.ok(used); assert.deepEqual(f.errors, []);
+});
+
+test('a source that confirmed reads but does not answer is listed as unavailable, not as waiting for its update', { timeout: 20000 }, async t => {
+  const f = await pair(t);
+  await f.a.create({ name: 'silent source key', kind: 'scalar', value: VISIBLE, sharing: f.toB });
+  f.confirm();
+  // Nobody relays the read: it times out.
+  const view = await f.recipient.control('session', { sessionId: f.capB.sessionId }) as SecretSessionView;
+  assert.deepEqual([view.available, view.unavailableSources, view.updatePendingSources, view.error], [[], [f.a.device().id], [], undefined]);
+});
+
 test('a joined computer’s session view lists a source’s keys only once its relay confirmed reads, and starts no task on either computer', { timeout: 20000 }, async t => {
   const f = await pair(t);
   const shared = await f.a.create({ name: 'shared with B', kind: 'scalar', value: VISIBLE, sharing: { global: true, folders: [] } });
@@ -198,7 +258,10 @@ test('owner HTTP secret API requires sign-in and page token; generic remote rout
     secretCalls++;
     if (operation === 'peers') return runtime.peers();
     if (operation === 'device') return runtime.device();
-    assert.equal(operation, 'control'); return runtime.control(String(args[0]), args[1] as Record<string, unknown>, args[2]);
+    assert.equal(operation, 'control');
+    // An older worker answers its `overview`, of which the web reads only the status.
+    if (!sharing && args[0] === 'overview') return { status: (await runtime.control('settings', {}) as SecretSettingsView).status, projects: [], groups: [], rules: [], secrets: [{ id: 'old' }] };
+    return runtime.control(String(args[0]), args[1] as Record<string, unknown>, args[2]);
   } };
   const backend: Backend = { snapshot: () => snapshot, detail: async () => undefined, enqueue: async () => { throw new Error('No native provider may run in this fixture'); }, cancel: async () => {}, subscribe: () => () => {}, secrets: (action, input) => ownerSecretControl(undefined, worker, action, input) };
   const monitor = createMonitorServer({ port: 0, clientDir: stateDir, auth: auth.auth, remote: { origins: auth.origins }, backend, master: { callerSecret: masterSecret, handle: async () => false } });
@@ -236,11 +299,12 @@ test('owner HTTP secret API requires sign-in and page token; generic remote rout
   for (const removed of ['overview', 'rule', 'project', 'attach', 'connect', 'revoke', 'end-task']) assert.equal((await post(removed, {})).status, 404);
   assert.equal((await post('settings', {})).status, 404, 'views are read with GET'); assert.equal((await post('session', {})).status, 404);
   assert.equal(secretCalls, 0);
-  // An older worker is never asked; the page learns that a new one is pending.
+  // An older worker is asked only for the vault's status; the page learns that a new one is pending.
   sharing = false;
   const pending = await secureFetch('/api/secrets/settings', { headers: { cookie: auth.cookie } });
-  assert.equal(pending.status, 503); assert.equal((await pending.json() as { code: string }).code, 'worker-update-pending');
-  assert.equal((await post('initialize', { password: PASSWORD })).status, 503); assert.equal(secretCalls, 0);
+  assert.equal(pending.status, 200); assert.deepEqual(await pending.json(), { status: { initialized: false, locked: true, pendingImports: 0, pendingImportIds: [] }, peers: [], secrets: [], workerUpdatePending: true });
+  assert.equal(secretCalls, 1);
+  assert.equal((await post('initialize', { password: PASSWORD })).status, 503); assert.equal(secretCalls, 1);
   sharing = true;
   assert.equal((await post('initialize', { password: PASSWORD })).status, 200);
   const created = await post('create', { name: 'HTTP key', kind: 'scalar', value: VISIBLE, sharing: { global: false, folders: [{ cwd: link }] } });

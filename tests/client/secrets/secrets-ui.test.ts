@@ -247,6 +247,29 @@ test('the available tab shows each basis, never offers sharing for a remote sour
   assert.match(locked, /type="password"/); assert.doesNotMatch(locked, /GLOBAL_KEY/);
 });
 
+test('keys this session stopped that no connection offers again are listed to allow again: another source’s by lifting the stop, a pasted value by connecting it', async () => {
+  const calls: [string, unknown][] = [];
+  const record = async (action: string, body: unknown) => { calls.push([action, body]); return true; };
+  const disconnected = [{ id: 'remote_stopped', name: 'REMOTE_STOPPED', groupId: 'g', kind: 'scalar' as const, version: 1, reference: reference('remote_stopped'), sourceHostId: 'peer-device', remote: true },
+    { id: 'pasted_stopped', name: 'PASTED_STOPPED', groupId: 'g', kind: 'env' as const, version: 1, reference: reference('pasted_stopped'), sourceHostId: device.id, remote: false }];
+  const markup = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ disconnected }), busy: false, change: record, onPaste: noop, onSharing: noop }));
+  assert.match(markup, /이 세션에서 끊은 시크릿/); assert.match(markup, /REMOTE_STOPPED<\/strong><small>단일 값 · 원격 원본/); assert.match(markup, /PASTED_STOPPED<\/strong><small>\.env · 이 세션에만/);
+  assert.match(markup, /aria-label="REMOTE_STOPPED 다시 허용"/); assert.match(markup, /aria-label="PASTED_STOPPED 다시 허용"/);
+  assert.doesNotMatch(renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView(), busy: false, change, onPaste: noop, onSharing: noop })), /이 세션에서 끊은 시크릿/);
+});
+
+test('while the worker handoff is pending, settings and chat still offer the vault’s lock or unlock, and nothing else', () => {
+  const pending = (locked: boolean): SecretSettingsView => ({ status: { initialized: true, locked }, peers: [], secrets: [], workerUpdatePending: true });
+  const locked = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: pending(true), canvas, busy: false, change }));
+  assert.match(locked, /새 실행 워커 적용 대기 중입니다/); assert.match(locked, /type="password"/); assert.doesNotMatch(locked, /시크릿 추가|등록한 시크릿이 없습니다|고급/);
+  const open = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: pending(false), canvas, busy: false, change }));
+  assert.match(open, /잠그기/); assert.doesNotMatch(open, /type="password"|시크릿 추가|등록한 시크릿이 없습니다/);
+  const none = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { ...pending(false), status: { initialized: false, locked: true } }, canvas, busy: false, change }));
+  assert.doesNotMatch(none, /type="password"|잠그기/, 'a vault is never set up through an older worker');
+  const chat = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ error: 'worker-update-pending', status: { initialized: true, locked: true }, available: [], connectable: [] }), busy: false, change, onPaste: noop, onSharing: noop }));
+  assert.match(chat, /새 실행 워커 적용 대기/); assert.match(chat, /type="password"/);
+});
+
 test('the paste tab shows the paste input first, even before vault setup, and connects to this session by default', () => {
   const setup = renderToStaticMarkup(createElement(SecretPaste, { view: sessionView({ status: { initialized: false, locked: true }, error: 'uninitialized', permanent: true }), sessionId: 's', busy: false, change, onConnected: noop }));
   assert.ok(setup.indexOf('시크릿 붙여넣기') < setup.indexOf('비밀번호 확인'));
@@ -281,7 +304,10 @@ test('secret controls have English translations while key names remain exact', (
   const available = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ error: 'worker-update-pending' }), busy: false, change, onPaste: noop, onSharing: noop }));
   assert.match(available, /Waiting for the new execution worker/); assert.match(available, /Connect a saved secret/); assert.match(available, /This session/);
   const visible = (markup: string) => markup.replace(/<[^>]*>/g, ' ');
-  for (const markup of [settings, available]) assert.doesNotMatch(visible(markup).replace(/원본 맥|빌드 서버|상위 Tower/g, ''), /[가-힣]/, 'every control is translated; computer names stay as they are');
+  const pending = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { status: { initialized: true, locked: false }, peers: [], secrets: [], workerUpdatePending: true }, canvas, busy: false, change }));
+  const stopped = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ disconnected: [{ id: 'x', name: 'X_KEY', groupId: 'g', kind: 'scalar', version: 1, reference: reference('x'), remote: true }] }), busy: false, change, onPaste: noop, onSharing: noop }));
+  assert.match(pending, /only lock and unlock/); assert.match(stopped, /Allow again/);
+  for (const markup of [settings, available, pending, stopped]) assert.doesNotMatch(visible(markup).replace(/원본 맥|빌드 서버|상위 Tower/g, ''), /[가-힣]/, 'every control is translated; computer names stay as they are');
 });
 
 test('pending encrypted vault restores remain waiting and direct the owner to Secrets settings', async () => {

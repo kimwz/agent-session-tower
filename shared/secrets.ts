@@ -58,13 +58,21 @@ export interface SecretSessionView {
   /** Sources that answer but run a build without per-secret sharing reads yet; their secrets are not listed until they update. */
   updatePendingSources: string[];
   error?: SecretSessionError; permanent?: boolean;
+  /** Keys this session stopped that `connectable` does not offer again: its own temporary values and other sources' keys. */
+  disconnected?: SecretDisconnected[];
 }
+/** `remote`: another source's key, re-allowed by lifting this session's stop; otherwise a value kept with this session, connected again. */
+export interface SecretDisconnected extends SecretMetadata { remote: boolean }
 /**
  * A settings row: `sharing` once created or edited with sharing, otherwise the `legacy` summary of its rules.
  * `withheld` means an older build named the secret in a rule again, so its GLOBAL and folder sharing waits for the owner.
  */
 export interface SecretSettingsItem extends SecretMetadata { sharing?: SecretSharing; legacy?: SecretLegacySummary; withheld?: boolean }
-export interface SecretSettingsView { status: VaultStatus; device?: SecretDevice; peers: SecretPeer[]; secrets: SecretSettingsItem[] }
+export interface SecretSettingsView {
+  status: VaultStatus; device?: SecretDevice; peers: SecretPeer[]; secrets: SecretSettingsItem[];
+  /** The attached worker predates per-secret sharing: only the vault's status is known, and only lock/unlock work. */
+  workerUpdatePending?: boolean;
+}
 export interface SecretCreateInput {
   name: string; kind: SecretKind; value?: string;
   /** Canonical base64 of an uploaded file; dotenv uploads also preserve these original bytes. */

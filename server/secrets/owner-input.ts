@@ -16,9 +16,13 @@ export const ownerSharingChange = z.object({ secretId: z.string().min(1).max(256
 export const ownerCreate = z.object({
   name: z.string().trim().min(1).max(256), kind: z.enum(['scalar', 'env', 'file']), value: z.string().optional(), content: z.string().optional(),
   sharing: ownerSharing.optional(), sessionId: sessionId.optional(), nodeId: nodeId.optional(), connect: z.literal('session').optional(), temporary: z.boolean().optional(),
-}).refine(input => (input.sessionId === undefined) === (input.connect === undefined) && (input.sessionId !== undefined || (input.nodeId === undefined && !input.temporary))
+})
+  // A session is named exactly when the value is connected to it.
+  .refine(input => (input.sessionId === undefined) === (input.connect === undefined))
+  // A joined computer and a value kept only with its session both need that session.
+  .refine(input => input.sessionId !== undefined || (input.nodeId === undefined && !input.temporary))
   // A value kept only with its session is never shared; refused before a task starts for it.
-  && !(input.temporary && input.sharing && (input.sharing.global || input.sharing.folders.length)));
+  .refine(input => !(input.temporary && input.sharing && (input.sharing.global || input.sharing.folders.length)));
 export const secretUsage = z.object({
   at: z.number().int().nonnegative(), secretId: z.string().min(1).max(256), name: z.string().max(256), operation: z.enum(SECRET_OPERATIONS),
   outcome: z.enum(['delivered', 'blocked']), review: z.enum(['exempt', 'allowed', 'blocked', 'failed']), reason: z.string().max(2000).optional(),

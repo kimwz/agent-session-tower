@@ -29,6 +29,7 @@ export function SecretSettingsWorkspace({ view, canvas, computers = [], busy, ch
   }, [focus, unlocked, view]);
   const closeEditor = () => setEditor(undefined);
   useSettingsGuard({ escape: () => { if (editor) { closeEditor(); return true; } if (remove) { setRemove(undefined); return true; } return false; } });
+  if (view.workerUpdatePending) return <SecretWorkerPending view={view} busy={busy} change={change} />;
   if (!unlocked) return <SecretAccess status={view.status} busy={busy} change={change} />;
   const item = editor && 'id' in editor ? view.secrets.find(secret => secret.id === editor.id) : undefined;
   if (editor?.type === 'add') return <SecretAddForm view={view} canvas={canvas} busy={busy} change={change} onClose={closeEditor} />;
@@ -53,6 +54,16 @@ export function SecretSettingsWorkspace({ view, canvas, computers = [], busy, ch
       onSharing={() => setEditor({ type: 'sharing', id: secret.id })} onValue={() => setEditor({ type: 'value', id: secret.id })} onRemove={() => setRemove(secret.id)} />)}</ul>
       : <p className="secret-empty">{t(view.secrets.length ? '검색 결과가 없습니다.' : '등록한 시크릿이 없습니다.')}</p>}
     <SecretAdvanced view={view} hosts={canvas.hosts} busy={busy} change={change} open={advanced} onToggle={setAdvanced} onEdit={type => setEditor({ type })} />
+  </div>;
+}
+
+/** While the attached worker predates per-secret sharing: the notice, and the vault's lock or unlock that it still serves. */
+function SecretWorkerPending({ view, busy, change }: { view: SecretSettingsView; busy: boolean; change: SecretChange }) {
+  const { t } = useI18n(); const { status } = view;
+  return <div className="secret-workspace">
+    <p role="status" className="secret-source-notice">{t('새 실행 워커 적용 대기 중입니다. 진행 중인 작업이 끝나 실행 워커가 바뀌면 시크릿을 관리할 수 있습니다. 그동안은 잠금과 잠금 해제만 할 수 있습니다.')}</p>
+    {status.initialized && (status.locked ? <SecretAccess status={status} busy={busy} change={change} />
+      : <span className="secret-lock-state"><span className="secret-badge">{t('잠금 해제됨')}</span><button type="button" disabled={busy} onClick={() => void change('lock', {})}><LockKeyhole size={14} aria-hidden="true" />{t('잠그기')}</button></span>)}
   </div>;
 }
 
