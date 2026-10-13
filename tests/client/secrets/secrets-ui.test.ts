@@ -211,7 +211,7 @@ test('settings list every secret once with its masked value, sharing summary and
 
 test('a pending import opens the advanced section; a remote secret stays read-only', () => {
   const markup = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { ...view, status: { initialized: true, locked: false, pendingImports: 1, pendingImportIds: ['backup'] }, secrets: [item('remote', { sourceHostId: 'peer-device', sharing: { revision: 1, global: true, folders: [] } })] }, canvas, busy: false, change }));
-  assert.match(markup, /<details class="secret-advanced" open=""/); assert.match(markup, /보관함 가져오기/); assert.match(markup, /보관함 비밀번호 변경/); assert.match(markup, /<strong>빌드 서버<\/strong>/); assert.doesNotMatch(markup, /build-vault/);
+  assert.match(markup, /<details class="secret-advanced" open=""/); assert.match(markup, /보관함 가져오기/); assert.match(markup, />복구 비밀번호<\/h3>/); assert.match(markup, />복구 비밀번호 변경</); assert.match(markup, /<strong>빌드 서버<\/strong>/); assert.doesNotMatch(markup, /build-vault/);
   assert.match(markup, /원본에서 관리/); assert.doesNotMatch(markup, />공유 편집<|>보기<|>수정<|>삭제</, 'another vault’s value is read and changed at its source');
 });
 
