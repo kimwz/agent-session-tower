@@ -98,7 +98,7 @@ export class SecretBroker {
   private subject(context: SecretContext): string { return JSON.stringify([context.hostId, context.taskId, context.runId]); }
   unavailableSources(context: SecretContext): SourceFailure[] { return structuredClone(this.sourceFailures.get(this.subject(context)) ?? []); }
   /**
-   * `reviewer` checks each use of a session the owner did not open (`subject: 'reviewed'`) before any value is resolved.
+   * `reviewer` checks each use of a session the owner did not open (any `subject` but `'owner'`) before any value is resolved.
    * `effects` is the worker's effects gate: such a use checks it after its review, whatever the review said, and again
    * before the consumer starts; `effectsReady` is its synchronous part, checked inside the turn that starts the consumer.
    * A storage hold refuses the use.
@@ -122,11 +122,11 @@ export class SecretBroker {
     catch { return []; } // best-effort: the review only reads names; using the secret is authorized on its own later
   }
   /**
-   * The owner's own sessions are exempt; any other session's use is reviewed (no reviewer here: a failed review, allowed).
-   * A review that could not start (a hold) and a hold after any review both refuse the use.
+   * Only the owner's own sessions are exempt; any other use is reviewed, one whose subject is unset included (no reviewer
+   * here: a failed review, allowed). A review that could not start (a hold) and a hold after any review both refuse the use.
    */
   private async review(context: SecretContext, request: Omit<SecretReviewRequest, 'context' | 'secrets'>): Promise<Verdict> {
-    if (context.subject !== 'reviewed') return { review: 'exempt' };
+    if (context.subject === 'owner') return { review: 'exempt' };
     let review: SecretReview;
     if (!this.options.reviewer) review = { review: 'failed', reason: '시크릿 사용 검토기를 사용할 수 없어 검토 없이 허용했습니다.' };
     else {
@@ -138,7 +138,7 @@ export class SecretBroker {
   }
   /** Reviewed uses only: the worker's effects gate. A hold refuses the use; owners' sessions keep working as before. */
   private async effects(context: SecretContext): Promise<void> {
-    if (context.subject !== 'reviewed' || !this.options.effects) return;
+    if (context.subject === 'owner' || !this.options.effects) return;
     try { await this.options.effects(); }
     catch (error) { throw new SecretUseRefused('unavailable', HELD, { cause: error }); }
   }
@@ -147,7 +147,7 @@ export class SecretBroker {
     return () => {
       this.options.validate?.(context);
       more?.();
-      if (context.subject === 'reviewed' && this.options.effectsReady && !this.options.effectsReady()) throw new SecretUseRefused('unavailable', HELD);
+      if (context.subject !== 'owner' && this.options.effectsReady && !this.options.effectsReady()) throw new SecretUseRefused('unavailable', HELD);
     };
   }
   /** Why a use was refused, as the agent, the session's record and the owner's notice say it. */

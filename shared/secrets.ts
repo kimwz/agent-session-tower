@@ -27,6 +27,7 @@ export interface SecretPeer { device: SecretDevice; routeId: string; direction: 
 export interface SecretTarget { hostId: string; sessionId: string; taskId: string; root: string; projectId?: string }
 /** Who is using a secret: the owner's own session (no review) or any other session (attack-only review before values resolve). */
 export type SecretSubjectMode = 'owner' | 'reviewed';
+/** `subject` unset is reviewed: only `'owner'` is exempt. */
 export interface SecretContext extends SecretTarget { runId: string; subject?: SecretSubjectMode }
 export interface SecretTask {
   id: string; hostId: string; sessionId: string; root: string; status: 'open' | 'closed';

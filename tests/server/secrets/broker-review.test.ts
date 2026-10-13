@@ -25,7 +25,7 @@ class FakeReviewer {
   async review(request: SecretReviewRequest): Promise<SecretReview> { this.asked.push(structuredClone(request)); return this.answer(request); }
 }
 
-/** `unset`: a context from before subjects existed, read as the owner's. */
+/** `unset`: a context that names no subject, reviewed like any session but the owner's. */
 async function fixture(t: test.TestContext, subject: SecretSubjectMode | 'unset' = 'reviewed') {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'tower-broker-review-')));
   t.after(() => rm(base, { recursive: true, force: true }));
@@ -71,13 +71,14 @@ test('a failed review allows the use and records why', async t => {
   assert.deepEqual(f.service.usage({ sessionId: f.context.sessionId }).map(entry => [entry.outcome, entry.review, entry.reason]), [['delivered', 'failed', '검토 모델이 30초 안에 답하지 않아 검토 없이 허용했습니다.']]);
 });
 
-test('the owner’s own sessions are never reviewed', async t => {
-  for (const subject of ['unset', 'owner'] as const) {
+test('only the owner’s own sessions go unreviewed; a context that names no subject is reviewed', async t => {
+  for (const [subject, asked, review] of [['owner', 0, 'exempt'], ['unset', 2, 'allowed']] as const) {
     const f = await fixture(t, subject);
-    assert.equal((await f.broker.run(f.context, f.input(`owner-${subject}`))).exitCode, 0);
+    assert.equal((await f.broker.run(f.context, f.input(`use-${subject}`))).exitCode, 0);
     assert.equal(await f.broker.fingerprint(f.context, f.secret.reference).then(result => result.algorithm), 'HMAC-SHA256');
-    assert.equal(f.reviewer.asked.length, 0, String(subject));
-    assert.deepEqual(new Set(f.service.usage({ sessionId: f.context.sessionId }).map(entry => entry.review)), new Set(['exempt']));
+    assert.equal(f.reviewer.asked.length, asked, subject);
+    assert.ok(f.gate.calls >= asked, `${subject}: the effects gate applies to every reviewed use`);
+    assert.deepEqual(new Set(f.service.usage({ sessionId: f.context.sessionId }).map(entry => entry.review)), new Set([review]));
   }
 });
 
