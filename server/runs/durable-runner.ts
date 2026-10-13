@@ -47,6 +47,12 @@ export function skillsCapability(operation: string, args: unknown[]): 'skills' |
   return operation === 'skillsExport' || operation === 'skillsImportPlan' || operation === 'skillsMutate' && ['adopt', 'guidance', 'import'].includes(String(args[0])) ? 'towerSkills' : 'skills';
 }
 
+/**
+ * What the web admits work with. `brokerOwnerAuthorized` (see http/request-context.ts) is passed on only for a worker of
+ * 1.129–1.132, which requires it for sessions an owner connected to the secret broker (#116); a newer worker ignores it.
+ */
+export type WebAdmission = RunAdmission & { brokerOwnerAuthorized?: boolean };
+
 export class DurableRunManager extends EventEmitter {
   private paths?: Awaited<ReturnType<typeof runnerPaths>>;
   private snapshot?: RunnerSnapshot;
@@ -298,22 +304,22 @@ export class DurableRunManager extends EventEmitter {
     for (const item of input.attachments ?? []) if (typeof item?.data === 'string') total += Buffer.byteLength(item.data, 'base64');
     if (total > MAX_TOTAL_ATTACHMENT_BYTES) throw unavailable();
   }
-  async create(input: NewSessionInput, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
+  async create(input: NewSessionInput, internal: WebAdmission = {}): Promise<{ session: Session; run: Run }> {
     this.requireAttachmentReferences(input);
     this.requireModelRole(input);
     internal.validate?.();
     this.requireOrigins(internal);
     this.requireSubscription(input.cwd);
-    return this.call('create', [input, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]) as Promise<{ session: Session; run: Run }>;
+    return this.call('create', [input, { autoPromptId: internal.autoPromptId, ...(internal.brokerOwnerAuthorized === true ? { brokerOwnerAuthorized: true } : {}), ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]) as Promise<{ session: Session; run: Run }>;
   }
-  async enqueue(id: string, prompt: string, attachments: MessageAttachments = {}, internal: RunAdmission = {}): Promise<Run> {
+  async enqueue(id: string, prompt: string, attachments: MessageAttachments = {}, internal: WebAdmission = {}): Promise<Run> {
     internal.validate?.();
     if (internal.heartbeat && !this.supports('heartbeatAdmission')) throw new TowerError('unavailable', '실행 워커가 heartbeat 안전 검사를 지원할 때까지 조치하지 않습니다.', { disposition: 'not-admitted' });
     this.requireOrigins(internal);
     this.requireSubscription(this.getSession(id)?.cwd);
     await this.requireLegacyChatReferences(id, attachments, internal);
     internal.validate?.();
-    return this.call('enqueue', [id, prompt, attachments, { ...(internal.heartbeat ? { heartbeat: internal.heartbeat } : {}), autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]) as Promise<Run>;
+    return this.call('enqueue', [id, prompt, attachments, { ...(internal.heartbeat ? { heartbeat: internal.heartbeat } : {}), autoPromptId: internal.autoPromptId, ...(internal.brokerOwnerAuthorized === true ? { brokerOwnerAuthorized: true } : {}), ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]) as Promise<Run>;
   }
   /** An older worker would ignore `targetRunId` and insert into whatever turn runs, so it is never sent one. */
   async steer(id: string, options: { targetRunId?: string } = {}): Promise<Run> {
@@ -345,12 +351,12 @@ export class DurableRunManager extends EventEmitter {
       && Number.isSafeInteger(block.at) && typeof block.reason === 'string' && Array.isArray(block.secrets) && block.secrets.every((name: unknown) => typeof name === 'string')).map(block => structuredClone(block));
   }
   /** Tower operations run in the worker; an outdated worker is told apart from a real error. */
-  async api(operation: string, input: unknown, internal?: Pick<RunAdmission, 'origin' | 'requestId' | 'callerCapability'>): Promise<unknown> {
+  async api(operation: string, input: unknown, internal?: Pick<WebAdmission, 'origin' | 'requestId' | 'callerCapability' | 'brokerOwnerAuthorized'>): Promise<unknown> {
     if (operation === 'autoPrompt.submit') this.requireModelRole(input);
     if (!this.supports('triggers')) throw new TowerError('unavailable', 'The execution worker has not updated yet. Triggers become available once it hands over to the new version.');
     if (operation.startsWith('models.') && !this.supports('models')) throw new TowerError('unavailable', 'The execution worker has not updated yet. Model settings become available once it hands over to the new version.', { disposition: 'not-admitted' });
     this.requireOrigins(internal ?? {});
-    if (!internal?.origin?.controllerId) return this.call('api', [operation, input, ...(internal?.callerCapability ? [{ callerCapability: internal.callerCapability }] : [])]);
+    if (!internal?.origin?.controllerId) return this.call('api', [operation, input, { ...(internal?.brokerOwnerAuthorized === true ? { brokerOwnerAuthorized: true } : {}), ...(internal?.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]);
     // An older worker would answer a controlling computer as the owner here, folders kept from sharing included.
     if (!this.supports('remoteTriggers')) throw new TowerError('unavailable', 'The execution worker on this computer has not updated yet, so it cannot take remote requests for this. Nothing was done.', { disposition: 'not-admitted' });
     return this.call('api', [operation, input, { origin: internal.origin, ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]);
@@ -391,7 +397,7 @@ export class DurableRunManager extends EventEmitter {
     return this.call('publicVisit', [action, slug, input]) as Promise<{ state: PublicVisitorState; token?: string }>;
   }
   getAutoPrompt(id: string): AutoPromptJob | undefined { return this.autoPromptList().find(job => job.id === id.toLowerCase()); }
-  async submitAutoPrompt(input: AutoPromptInput, internal: Pick<RunAdmission, 'origin' | 'requestId' | 'callerCapability'> = {}): Promise<AutoPromptJob> {
+  async submitAutoPrompt(input: AutoPromptInput, internal: Pick<WebAdmission, 'origin' | 'requestId' | 'callerCapability' | 'brokerOwnerAuthorized'> = {}): Promise<AutoPromptJob> {
     this.requireAttachmentReferences(input);
     this.requireModelRole(input);
     this.requireOrigins(internal);
@@ -403,7 +409,7 @@ export class DurableRunManager extends EventEmitter {
     if (input.targetSessionId) this.requireSubscription(this.getSession(input.targetSessionId)?.cwd);
     // An older worker routes by itself and does not know to keep other work out of the master's conversation.
     else if (!input.cwd) for (const session of this.snapshot?.sessions ?? []) this.requireSubscription(session.cwd);
-    const admitted = { ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) };
+    const admitted = { ...(internal.brokerOwnerAuthorized === true ? { brokerOwnerAuthorized: true } : {}), ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) };
     return this.call('submitAutoPrompt', [input, ...(Object.keys(admitted).length ? [admitted] : [])]) as Promise<AutoPromptJob>;
   }
   async cancelAutoPrompt(id: string): Promise<AutoPromptJob> { return this.call('cancelAutoPrompt', [id]) as Promise<AutoPromptJob>; }

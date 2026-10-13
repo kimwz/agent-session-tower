@@ -6,6 +6,12 @@ import type { RunOrigin } from '../../shared/types.js';
  * A remote controller's requests carry its origin and a request ID that makes a retry run only once.
  */
 export interface RequestContext {
+  /**
+   * The signed-in owner's page or the verified master sent this. Forwarded only for an execution worker of 1.129–1.132,
+   * which requires it for sessions an owner connected to the secret broker (#116); newer workers ignore it, and nothing
+   * here grants anything by it.
+   */
+  brokerOwnerAuthorized?: boolean;
   heartbeat?: HeartbeatAdmission;
   origin?: RunOrigin;
   requestId?: string;

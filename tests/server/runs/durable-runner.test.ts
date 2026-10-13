@@ -2143,6 +2143,15 @@ test('held typed API permits verified reads and rejects invalid, write and unava
 });
 
 
+test('the owner proof a web passes on for older workers reaches this worker and is ignored', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const client = await f.connect();
+  const run = await client.enqueue(f.session.id, 'Owner follow-up', {}, { brokerOwnerAuthorized: true });
+  assert.equal('brokerOwnerAuthorized' in run, false);
+  assert.equal('brokerOwnerAuthorized' in f.runs.list().find(item => item.id === run.id)!, false, 'nothing keeps or grants by it');
+  await f.runs.cancel(run.id);
+});
+
 test('official reopen finishes the worker closure write before releasing the secret session fence', async t => {
   let f: Awaited<ReturnType<typeof fixture>>;
   const reopened: string[] = [];
