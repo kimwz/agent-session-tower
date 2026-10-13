@@ -574,8 +574,10 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       // Keep their replies small; the regular snapshot poll publishes engine changes.
       if (input.method !== 'slackTool' && (input.instance !== instance || (input.method === 'snapshot' ? input.revision !== revision : !SNAPSHOT_FREE_OPERATIONS.has(input.method)))) reply.snapshot = snapshot();
     } catch (error) {
-      const value = error as { message?: string; disposition?: string; commitDisposition?: 'committed' | 'not-committed' | 'unknown'; identity?: { commandId: string; sha256: string }; proofTransition?: NonNullable<RunnerReply['error']>['proofTransition'] };
-      reply.error = { message: value.message ?? 'Runner operation failed.', statusCode: statusOf(error) ?? 500, ...(value.disposition ? { disposition: value.disposition } : {}), ...(value.identity ? { admission: value.identity } : {}), ...(value.commitDisposition ? { commitDisposition: value.commitDisposition } : {}), ...(value.proofTransition ? { proofTransition: value.proofTransition } : {}) };
+      const value = error as { message?: string; disposition?: string; code?: unknown; commitDisposition?: 'committed' | 'not-committed' | 'unknown'; identity?: { commandId: string; sha256: string }; proofTransition?: NonNullable<RunnerReply['error']>['proofTransition'] };
+      // Only Tower's own named refusals travel; a system error's code (ENOENT) stays here.
+      const code = error instanceof TowerError && typeof value.code === 'string' && /^[a-z][a-z-]{0,63}$/.test(value.code) ? value.code : undefined;
+      reply.error = { message: value.message ?? 'Runner operation failed.', statusCode: statusOf(error) ?? 500, ...(value.disposition ? { disposition: value.disposition } : {}), ...(code ? { code } : {}), ...(value.identity ? { admission: value.identity } : {}), ...(value.commitDisposition ? { commitDisposition: value.commitDisposition } : {}), ...(value.proofTransition ? { proofTransition: value.proofTransition } : {}) };
       reply.snapshot = snapshot();
     } finally { pending--; }
     if (!res.destroyed) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(reply)); }

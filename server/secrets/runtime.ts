@@ -3,7 +3,7 @@ import { realpath, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { Run, Session } from '../../shared/types.js';
-import type { SecretAvailable, SecretContext, SecretSubjectMode, SecretDevice, SecretDisconnected, SecretMetadata, SecretPeer, SecretSessionError, SecretSessionView, SecretSettingsView, SecretTarget, SecretUsage, VaultStatus } from '../../shared/secrets.js';
+import type { SecretAvailable, SecretContext, SecretSubjectMode, SecretDevice, SecretDisconnected, SecretMetadata, SecretPeer, SecretSessionError, SecretSessionView, SecretSettingsView, SecretTarget, SecretTowerPassword, SecretUsage, SecretValue, SecretViewError, VaultStatus } from '../../shared/secrets.js';
 import { SECRET_OPERATIONS } from '../../shared/secrets.js';
 import type { Capability } from '../api/mcp.js';
 import type { SessionOrigin } from '../runs/origin.js';
@@ -45,7 +45,19 @@ export const SECRET_TOOLS = Object.entries(schemas).map(([name, input]) => {
 const SESSION_ERRORS = ['uninitialized', 'locked', 'not-eligible', 'session-closed', 'source-unavailable', 'worker-update-pending'] as const satisfies readonly SecretSessionError[];
 /** Errors that stay until the owner does something; the page stops polling on them. */
 const PERMANENT: ReadonlySet<SecretSessionError> = new Set(['uninitialized', 'not-eligible', 'session-closed']);
-const MUTATIONS = new Set(['create', 'update', 'remove', 'sharing', 'session-connect', 'session-disconnect', 'session-reallow', 'trust', 'untrust']);
+const MUTATIONS = new Set(['create', 'remove', 'sharing', 'session-connect', 'session-disconnect', 'session-reallow', 'trust', 'untrust']);
+/** The web's value-viewing inputs: it verified `password` as the Tower password of the login credentials `credentialId` names. */
+const credentialId = z.string().regex(/^[a-f0-9]{64}$/);
+const vaultPassword = z.string().min(1).max(1024);
+const towerCredential = z.object({ credentialId }).strict();
+const towerWrapInput = z.object({ password: vaultPassword, credentialId }).strict();
+const viewUnlockInput = z.object({ password: vaultPassword, credentialId, recoveryPassword: vaultPassword.optional() }).strict();
+/** `generation`: the lock generation `view-unlock` answered; a value is read or changed only within it. */
+const valueRead = z.object({ secretId: z.string().min(1).max(256), expectedVersion: z.number().int().positive(), generation: z.string().min(1).max(64) }).strict();
+const valueWrite = valueRead.extend({ value: z.string().optional(), content: z.string().optional() }).strict();
+/** A value-viewing refusal the web answers with its own `code`. */
+const viewFail = (code: SecretViewError, kind: ErrorKind, message: string) => Object.assign(new TowerError(kind, message), { code });
+const viewLocked = () => viewFail('view-locked', 'forbidden', '값 보기가 잠겼습니다. Tower 비밀번호를 다시 입력하세요.');
 /** How long a session view waits for a source's answer before listing it as unavailable. */
 const VIEW_REMOTE_MS = 5000;
 /** How long a refused use stays in the worker's report for the owner's notice; the web announces each once. */
@@ -64,7 +76,7 @@ const remoteSubject = z.union([z.object({ error: z.enum(SESSION_ERRORS) }).stric
 export type RemoteSessionSubject = z.output<typeof remoteSubject>;
 /** A committed owner change for a joined computer's session, which its web announces there before reading the view. */
 export interface SecretReceipt { connectedTarget: SecretTarget }
-export type SecretControlResult = SecretSettingsView | SecretSessionView | SecretReceipt | { fields: string[] };
+export type SecretControlResult = SecretSettingsView | SecretSessionView | SecretReceipt | SecretValue | { fields: string[] } | { generation: string } | { towerPassword: SecretTowerPassword } | { wrapped: boolean } | Record<string, never>;
 const closedView = (status: VaultStatus, error: SecretSessionError): SecretSessionView => ({ status, available: [], connectable: [], usage: [], unavailableSources: [], updatePendingSources: [], error, permanent: PERMANENT.has(error) });
 const closureId = (sessionId: string) => createHash('sha256').update('tower-secret-session-close-v1:' + sessionId).digest('hex');
 interface Runs { list(): Run[]; getSession(id: string): Session | undefined; sessionOrigin(id: string): SessionOrigin | undefined }
@@ -445,6 +457,11 @@ export class SecretRuntime {
       return nodeId === undefined ? this.sessionView(sessionId) : this.remoteSessionView(sessionId, ownerInput(remoteSubject, remote, '원격 세션을 확인할 수 없습니다.'));
     }
     if (action === 'preview') return { fields: Object.keys(parseDotenv(typeof input.value === 'string' ? input.value : '')) };
+    if (action === 'tower-status') return { towerPassword: service.vault.hasTower(ownerInput(towerCredential, input).credentialId) ? 'ready' : 'missing' };
+    if (action === 'tower-wrap') { const { password, credentialId } = ownerInput(towerWrapInput, input); return { wrapped: await this.towerWrap(password, credentialId) }; }
+    if (action === 'tower-prune') { const { credentialId } = ownerInput(towerCredential, input); if (service.status().initialized) await service.towerPrune(credentialId); return {}; }
+    if (action === 'view-unlock') return this.viewUnlock(ownerInput(viewUnlockInput, input));
+    if (action === 'value' || action === 'value-update') return this.valueAction(action, input);
     const password = (field: string) => { if (typeof input[field] !== 'string') throw fail('보관함 비밀번호가 필요합니다.'); return input[field] as string; };
     if (action === 'initialize') await this.open(() => service.initialize(password('password')));
     else if (action === 'unlock') await this.open(() => service.unlock(password('password')));
@@ -471,15 +488,60 @@ export class SecretRuntime {
     } else if (action === 'sharing') {
       const { secretId, revision, global, folders, kept } = ownerInput(ownerSharingChange, input);
       await service.setSharing(secretId, revision, { global, folders }, kept);
-    } else if (action === 'update') {
-      const update = ownerInput(z.object({ id: z.string().min(1).max(256), value: z.string().optional(), content: z.string().optional() }), input);
-      await service.update(update);
     } else if (action === 'remove') await service.remove(ownerInput(z.object({ id: z.string().min(1).max(256) }), input).id);
     else if (action === 'trust') {
       const peer = z.object({ device: z.object({ id: z.string().uuid(), name: z.string().max(256), signingKey: z.string().max(4096), encryptionKey: z.string().max(4096), fingerprint: z.string() }), routeId: z.string().min(1).max(256), direction: z.enum(['node','controller']) }).parse(input);
       if (createPublicKey(peer.device.signingKey).asymmetricKeyType !== 'ed25519' || createPublicKey(peer.device.encryptionKey).asymmetricKeyType !== 'x25519' || peer.device.fingerprint !== createHash('sha256').update(peer.device.signingKey + ':' + peer.device.encryptionKey).digest('hex')) throw fail('컴퓨터의 공개 키와 지문을 확인하세요.');
       await service.trustPeer({ ...peer, enabled: true });
     } else if (action === 'untrust') await service.removePeer(z.string().parse(input.id));
+    return this.settingsView();
+  }
+  /** Adds the Tower password wrapper of `credentialId` around the open key; false, never an error, while locked or without a vault. */
+  private async towerWrap(password: string, credentialId: string): Promise<boolean> {
+    const service = this.options.service; if (service.status().locked) return false;
+    try { await service.towerWrap(password, credentialId); return true; }
+    catch (error) { if (service.status().locked) return false; throw error; }
+  }
+  /**
+   * Value viewing with the Tower password the web verified for `credentialId`. A locked vault opens with that password's
+   * wrapper, or once with the recovery (vault) password, which then wraps the key for it; an open one only checks the
+   * wrapper unwraps its key and makes it when it does not (the first use). Only that wrapper is kept.
+   */
+  private async viewUnlock({ password, credentialId, recoveryPassword }: z.output<typeof viewUnlockInput>): Promise<{ generation: string }> {
+    const service = this.options.service;
+    if (!service.status().initialized) throw fail('시크릿 보관함이 아직 없습니다. 보관함을 먼저 만드세요.', 'not-found');
+    if (service.status().locked) {
+      // A wrapper that does not open counts as missing; a failure after it opened is the open's own.
+      if (service.vault.hasTower(credentialId)) {
+        let unwrapped = false;
+        try { await this.open(async () => { await service.towerUnlock(password, credentialId); unwrapped = true; }); }
+        catch (error) { if (unwrapped) throw error; }
+      }
+      if (service.status().locked) {
+        if (recoveryPassword === undefined) throw viewFail('needs-recovery', 'conflict', 'Tower 비밀번호로 연결된 보관함 열쇠가 없습니다. 복구 비밀번호(기존 보관함 비밀번호)를 한 번 입력하세요.');
+        let unlocked = false;
+        try { await this.open(async () => { await service.unlock(recoveryPassword); unlocked = true; }); }
+        catch (error) { if (unlocked) throw error; throw fail('복구 비밀번호(기존 보관함 비밀번호)가 올바르지 않습니다.'); }
+        await service.towerWrap(password, credentialId);
+      }
+    } else {
+      let current = false;
+      if (service.vault.hasTower(credentialId)) { try { await service.towerUnlock(password, credentialId); current = true; } catch { /* Made again below. */ } }
+      if (!current) await service.towerWrap(password, credentialId);
+    }
+    await service.towerPrune(credentialId);
+    return { generation: service.lockGeneration };
+  }
+  /** Reads or replaces one value for the owner, only within the lock generation value viewing was unlocked in. */
+  private async valueAction(action: 'value' | 'value-update', input: Record<string, unknown>): Promise<SecretValue | SecretSettingsView> {
+    const service = this.options.service;
+    const { secretId, expectedVersion, generation, value, content } = ownerInput(action === 'value' ? valueRead : valueWrite, input) as z.output<typeof valueWrite>;
+    const current = () => !this.blocked && !service.status().locked && generation === service.lockGeneration;
+    if (!current()) throw viewLocked();
+    try {
+      if (action === 'value') { const answer = await service.value(secretId, expectedVersion); if (!current()) throw viewLocked(); return answer; }
+      await service.update({ id: secretId, expectedVersion, value, content });
+    } catch (error) { if (!current()) throw viewLocked(); throw error; }
     return this.settingsView();
   }
   peers(): SecretPeer[] { return this.options.service.status().locked ? [] : this.options.service.peers(); }

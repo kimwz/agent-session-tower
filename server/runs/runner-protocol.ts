@@ -11,7 +11,7 @@ export const MAX_RPC_BYTES = 40 * 1024 * 1024;
  * Optional operations this worker build serves. A web process checks the attached worker's list
  * before calling one, because an older worker keeps running until it is idle.
  */
-export const RUNNER_CAPABILITIES = ['heartbeatAdmission', 'sessionHistory', 'origins', 'handoff', 'triggers', 'toolCapabilities', 'remoteOrigins', 'remoteTriggers', 'publicAgents', 'autoPromptTargets', 'steerTargets', 'subscriptionOnly', 'skills', 'towerSkills', 'skillTargets', 'forceUpdate', 'backup', 'models', 'delegation', 'masterWorker', 'secrets', 'attachmentReferences', 'workerClosed', 'retention', 'compaction', 'storage', 'secretSharing', 'secretExclusions'] as const;
+export const RUNNER_CAPABILITIES = ['heartbeatAdmission', 'sessionHistory', 'origins', 'handoff', 'triggers', 'toolCapabilities', 'remoteOrigins', 'remoteTriggers', 'publicAgents', 'autoPromptTargets', 'steerTargets', 'subscriptionOnly', 'skills', 'towerSkills', 'skillTargets', 'forceUpdate', 'backup', 'models', 'delegation', 'masterWorker', 'secrets', 'attachmentReferences', 'workerClosed', 'retention', 'compaction', 'storage', 'secretSharing', 'secretExclusions', 'secretValueView'] as const;
 export type RunnerCapability = typeof RUNNER_CAPABILITIES[number];
 /** One page of a native conversation, read by the worker that already indexes native history. */
 export type SessionHistoryPage = Pick<SessionDetail, 'messages' | 'hasMore' | 'nextBefore' | 'previousUser' | 'skipped'>;
@@ -61,7 +61,8 @@ export interface RunnerReply {
   instance: string;
   snapshot?: RunnerSnapshot;
   result?: unknown;
-  error?: { message: string; statusCode: number; disposition?: string; commitDisposition?: 'committed' | 'not-committed' | 'unknown'; admission?: { commandId: string; sha256: string }; proofTransition?: ProofTransition };
+  /** `code`: a refusal's own name (such as `view-locked`) that the web answers with; only a TowerError's lowercase one. */
+  error?: { message: string; statusCode: number; disposition?: string; code?: string; commitDisposition?: 'committed' | 'not-committed' | 'unknown'; admission?: { commandId: string; sha256: string }; proofTransition?: ProofTransition };
 }
 
 /** Pure calculation for fixture teardown: never recreates a deleted state directory. */
