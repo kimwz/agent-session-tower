@@ -209,9 +209,10 @@ export class SecretBroker {
           try { if (current.metadata.id !== item.value.metadata.id || current.metadata.version !== item.value.metadata.version || !current.bytes.equals(item.value.bytes) || JSON.stringify(current.fields) !== JSON.stringify(item.value.fields)) throw failure('시크릿 권한 또는 값이 변경되었습니다.', 'forbidden'); }
           finally { current.bytes.fill(0); }
         }
-        const dispatched = await this.options.service.dispatch(context, used, () => this.consume(input, args, cwd, env, stdin, timeoutMs, values), () => this.options.validate?.(context));
-        await this.delivered(context, used);
-        result = await dispatched.result;
+        const { result: consumer } = await this.options.service.dispatch(context, used, () => this.consume(input, args, cwd, env, stdin, timeoutMs, values), () => this.options.validate?.(context));
+        // Only a consumer that started was given the values; one that could not start (say, a missing program) used nothing.
+        if (await consumer.started) await this.delivered(context, used);
+        result = await consumer.result;
       } catch { result = genericResult(input.operationId); }
       finally {
         try { if (temporary) await rm(temporary, { recursive: true, force: true }); }
@@ -223,16 +224,22 @@ export class SecretBroker {
     } finally { this.active--; }
   }
 
-  private consume(input: SecretRunInput, args: string[], cwd: string, env: NodeJS.ProcessEnv, stdin: Buffer | undefined, timeoutMs: number, values: Buffer[]): Promise<SecretRunResult> {
-    return new Promise(resolve => {
+  /** The consumer's masked result, and whether its process started at all (`started` settles first). */
+  private consume(input: SecretRunInput, args: string[], cwd: string, env: NodeJS.ProcessEnv, stdin: Buffer | undefined, timeoutMs: number, values: Buffer[]): { started: Promise<boolean>; result: Promise<SecretRunResult> } {
+    let spawned!: (value: boolean) => void;
+    const started = new Promise<boolean>(resolve => { spawned = resolve; });
+    const result = new Promise<SecretRunResult>(resolve => {
       let child: ReturnType<typeof spawn>;
       try { child = spawn(input.command, args, { cwd, env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] }); }
-      catch { resolve({ operationId: input.operationId, exitCode: null, stdout: '', stderr: '프로그램을 시작할 수 없습니다.' }); return; }
+      catch { spawned(false); resolve({ operationId: input.operationId, exitCode: null, stdout: '', stderr: '프로그램을 시작할 수 없습니다.' }); return; }
+      child.once('spawn', () => spawned(true));
       const stdout: Buffer[] = [], stderr: Buffer[] = [];
       let size = 0, timedOut = false, exceeded = false, settled = false;
       let timer: NodeJS.Timeout | undefined;
       const finish = (exitCode: number | null, failed = false) => {
         if (settled) return; settled = true; if (timer) clearTimeout(timer);
+        // Settled before 'spawn' means it never started; after it, this changes nothing.
+        spawned(false);
         // A descendant can retain inherited pipes after the consumer exits. Limits do not wait for its close.
         child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
         try {
@@ -267,6 +274,7 @@ export class SecretBroker {
       child.once('close', code => finish(code));
       child.stdin!.end(stdin);
     });
+    return { started, result };
   }
 
   async compare(context: SecretContext, left: string, right: string): Promise<{ equal: boolean }> {

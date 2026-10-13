@@ -86,6 +86,8 @@ test('each delivered use is kept with its session once per secret and operation,
       [subject, [[scalarId, 'fixture secret', 'fingerprint', 'delivered', 'exempt']]],
     ]);
     assert.doesNotMatch(JSON.stringify(f.usage), new RegExp(`${canary}|REMOTE_USAGE_CANARY`));
+    const missing = await broker.run(f.context, { operationId: 'missing-program', command: join(f.stateDir, 'no-such-program'), env: { TOKEN: scalar } });
+    assert.equal(missing.exitCode, null); assert.equal(f.usage.length, 3, 'a consumer that never started was given nothing');
     f.denied.add(scalar); const before = f.usage.length;
     assert.equal((await broker.run(f.context, command('console.log("no")', { env: { TOKEN: scalar } }))).exitCode, null);
     assert.equal(f.usage.length, before, 'a refused use is not a delivered one');
