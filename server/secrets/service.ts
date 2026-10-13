@@ -54,6 +54,14 @@ export class SecretService {
     await this.vault.initialize(password, data, data.device.id); this.permanent = data; this.journal = emptyJournal(); await this.vault.save(data, this.journal, this.lockedIndex());
   }); }
   async unlock(password: string) { return this.serialize(async () => this.opened(await this.vault.unlock(password) as Permanent)); }
+  /** Opens with the Tower password like `unlock`; an open vault is only checked against it. True when this call opened the vault. */
+  async towerUnlock(password: string, credentialId: string): Promise<boolean> { return this.serialize(async () => {
+    const payload = await this.vault.unlockTower(password, credentialId); if (payload === undefined) return false;
+    await this.opened(payload as Permanent); return true;
+  }); }
+  // Queued with saves: a save spreads the envelope it started from, so a wrapper written meanwhile would be lost.
+  async towerWrap(password: string, credentialId: string) { return this.serialize(() => this.vault.towerWrap(password, credentialId)); }
+  async towerPrune(credentialId: string) { return this.serialize(() => this.vault.towerPrune(credentialId)); }
   /** What the successor worker needs to open this vault without the password; undefined while locked. */
   handoff(): Buffer | undefined {
     const key = this.vault.exportKey(); if (!key) return;
