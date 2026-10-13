@@ -179,7 +179,7 @@ test('temporary values live in the journal with their task, and grants of an old
   const saved = await f.service.create({ name: 'saved', kind: 'scalar', value: 's' }); await f.service.create({ name: 'saved too', kind: 'scalar', value: 's' });
   const towerGroups = (await payloadOf(f.service)).groups.filter(group => group.name === 'Tower');
   assert.deepEqual(towerGroups.map(group => [group.id, group.scope]), [[saved.groupId, 'global']], 'one Tower group per vault, for saved keys only');
-  assert.deepEqual(f.service.overview().groups.find(group => group.id === pasted.groupId), { id: pasted.groupId, name: 'pasted', scope: 'task', taskId: target.taskId });
+  assert.deepEqual(stored(f.service).groups.find(group => group.id === pasted.groupId), { id: pasted.groupId, name: 'pasted', scope: 'task', taskId: target.taskId });
   await f.service.closeTask(target.taskId);
   assert.equal(storedSecret(f.service, pasted.id), false);
   // A journal as 1.130.2 left it: grants, and tasks without connections.

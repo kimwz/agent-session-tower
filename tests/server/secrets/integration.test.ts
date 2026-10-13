@@ -134,7 +134,7 @@ test('after the source revokes the last share, the node lists nothing and still 
   const after = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[]; unavailableSources: unknown[] };
   assert.deepEqual([after.secrets, after.unavailableSources], [[], []], 'the source still answers for the task it already has');
   await f.relay(f.recipient.endSession(f.capB.sessionId));
-  assert.equal(f.a.overview(context).task?.status, 'closed'); assert.deepEqual(f.errors, []);
+  assert.equal(storedTask(f.a, context.taskId)?.status, 'closed'); assert.deepEqual(f.errors, []);
 });
 
 test('recipient task closure or revocation while a sealed response is in flight denies remote consumption', { timeout: 20000 }, async t => {
