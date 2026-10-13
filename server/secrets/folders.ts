@@ -31,19 +31,22 @@ export async function realFolder(path: unknown): Promise<string> {
   return root;
 }
 
+const unique = (folders: SecretFolder[]) => [...new Map(folders.map(folder => [JSON.stringify([folder.hostId, folder.root]), folder])).values()];
+
 /**
  * The page's folders as canonical identities. A folder key (`{ cwd }`) of this computer becomes its real path here; one of
  * a joined computer becomes that computer's real path, asked of it, under the vault ID of the peer trusted for secrets
- * on that link. `{ hostId, root }` passes as given: a folder kept from before, on a computer no longer trusted, which
- * the service accepts only if it is already kept.
+ * on that link. A `{ hostId, root }` the page sends back is not resolved: it is `kept`, which only a folder the key
+ * already keeps may be, and the service checks that.
  */
-export async function canonicalFolders(input: unknown, sources: FolderSources): Promise<SecretFolder[]> {
+export async function canonicalFolders(input: unknown, sources: FolderSources): Promise<{ folders: SecretFolder[]; kept: SecretFolder[] }> {
   if (!Array.isArray(input) || input.length > MAX_FOLDERS) throw invalid('공유할 폴더 목록이 올바르지 않습니다.');
   let device: Promise<string> | undefined; let peers: Promise<SecretPeer[]> | undefined;
-  const folders = await Promise.all(input.map(async (item: unknown): Promise<SecretFolder> => {
+  const kept: SecretFolder[] = [];
+  const folders = await Promise.all(input.map(async (item: unknown): Promise<SecretFolder | undefined> => {
     const value = (item && typeof item === 'object' && !Array.isArray(item) ? item : {}) as Record<string, unknown>;
     const keys = Object.keys(value).sort().join();
-    if (keys === 'hostId,root' && pathLike(value.hostId) && pathLike(value.root)) return { hostId: value.hostId, root: value.root };
+    if (keys === 'hostId,root' && pathLike(value.hostId) && pathLike(value.root)) { kept.push({ hostId: value.hostId, root: value.root }); return undefined; }
     if (keys !== 'cwd' || !pathLike(value.cwd)) throw invalid('공유할 폴더 목록이 올바르지 않습니다.');
     const scoped = SCOPED.exec(value.cwd);
     if (!scoped) return { hostId: await (device ??= sources.deviceId()), root: await realFolder(value.cwd) };
@@ -56,5 +59,5 @@ export async function canonicalFolders(input: unknown, sources: FolderSources): 
     if (!features.includes(SECRET_SHARING_FEATURE)) throw invalid('합류 컴퓨터 업데이트가 필요합니다. 그 컴퓨터의 Tower를 업데이트한 뒤 다시 저장하세요.');
     return { hostId: peer.device.id, root: await sources.ask(node, path) };
   }));
-  return [...new Map(folders.map(folder => [JSON.stringify([folder.hostId, folder.root]), folder])).values()];
+  return { folders: unique(folders.filter(folder => folder !== undefined)), kept: unique(kept) };
 }

@@ -28,7 +28,7 @@ async function folders(t: TestContext) {
 
 test('folders of this computer become real paths of existing folders', async t => {
   const f = await folders(t);
-  assert.deepEqual(await canonicalFolders([{ cwd: join(f.root, 'project-link') }, { cwd: f.project }], f.sources), [{ hostId: DEVICE, root: f.project }], 'a link resolves to its folder, once');
+  assert.deepEqual(await canonicalFolders([{ cwd: join(f.root, 'project-link') }, { cwd: f.project }], f.sources), { folders: [{ hostId: DEVICE, root: f.project }], kept: [] }, 'a link resolves to its folder, once');
   await assert.rejects(canonicalFolders([{ cwd: join(f.root, 'file.txt') }], f.sources), { kind: 'invalid', message: /폴더가 아닙니다/ });
   await assert.rejects(canonicalFolders([{ cwd: join(f.root, 'missing') }], f.sources), { kind: 'invalid', message: /폴더를 찾을 수 없습니다/ });
   await assert.rejects(canonicalFolders([{ cwd: 'relative/project' }], f.sources), { kind: 'invalid', message: /절대 경로/ });
@@ -39,7 +39,7 @@ test('folders of this computer become real paths of existing folders', async t =
 test('the same folder name on different computers stays apart, each under the vault ID trusted on its link', async t => {
   const f = await folders(t);
   const result = await canonicalFolders([{ cwd: f.project }, { cwd: `@${NODE_A}/${f.project}` }, { cwd: `@${NODE_B}/${f.project}` }], f.sources);
-  assert.deepEqual(result, [{ hostId: DEVICE, root: f.project }, { hostId: 'device-of-a', root: f.project }, { hostId: 'device-of-b', root: f.project }]);
+  assert.deepEqual(result.folders, [{ hostId: DEVICE, root: f.project }, { hostId: 'device-of-a', root: f.project }, { hostId: 'device-of-b', root: f.project }]);
   assert.deepEqual(f.asked, [[NODE_A, f.project], [NODE_B, f.project]], 'each joined computer resolves its own path');
   await assert.rejects(canonicalFolders([{ cwd: `@${NODE_A}/relative` }], f.sources), { kind: 'invalid', message: /절대 경로/ });
 });
@@ -52,7 +52,8 @@ test('a joined computer not trusted for secrets, an older one and a disconnected
   assert.deepEqual(f.asked, []);
   await assert.rejects(canonicalFolders([{ cwd: f.project, extra: true }], f.sources), { kind: 'invalid' });
   await assert.rejects(canonicalFolders(Array.from({ length: 101 }, () => ({ cwd: f.project })), f.sources), { kind: 'invalid' });
-  assert.deepEqual(await canonicalFolders([{ hostId: 'device-removed', root: '/kept' }], f.sources), [{ hostId: 'device-removed', root: '/kept' }], 'a kept folder passes for the service to check');
+  assert.deepEqual(await canonicalFolders([{ hostId: 'device-removed', root: '/kept' }, { hostId: DEVICE, root: '/not/resolved' }, { cwd: f.project }], f.sources),
+    { folders: [{ hostId: DEVICE, root: f.project }], kept: [{ hostId: 'device-removed', root: '/kept' }, { hostId: DEVICE, root: '/not/resolved' }] }, 'an identity sent back is not resolved but marked kept, for the service to check');
 });
 
 /** One link request answered by the node-side handler, with a worker that trusts the controller unless told not to. */

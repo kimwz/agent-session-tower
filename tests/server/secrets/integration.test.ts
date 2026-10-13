@@ -280,3 +280,26 @@ test('every secret route refuses the master, local agents and run capabilities b
   }
   assert.deepEqual(calls, []);
 });
+
+test('a folder identity the page sends back is accepted only where that key already keeps it; anything new is resolved first', { timeout: 20000 }, async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-secret-kept-folders-'))); t.after(() => rm(root, { recursive: true, force: true }));
+  const stateDir = join(root, 'state'), project = join(root, 'project'); await mkdir(stateDir); await mkdir(project);
+  const service = await secretService(stateDir, { password: PASSWORD }); const runtime = new SecretRuntime({ stateDir, service, runs: new FixtureRuns() }); t.after(() => runtime.close());
+  const worker = { supports: () => true, secretCall: async (operation: string, args: unknown[] = []) => operation === 'peers' ? runtime.peers() : operation === 'device' ? runtime.device() : runtime.control(String(args[0]), args[1] as Record<string, unknown>, args[2]) };
+  const control = (action: string, input: Record<string, unknown>) => ownerSecretControl(undefined, worker, action, input) as Promise<SecretSettingsView>;
+  const host = service.device().id, gone = randomUUID();
+  // Kept from when that computer was trusted for secrets.
+  await service.trustPeer({ device: { ...service.device(), id: gone }, routeId: 'f'.repeat(32), direction: 'node', enabled: true });
+  const secret = await service.create({ name: 'kept', kind: 'scalar', value: VISIBLE, sharing: { global: false, folders: [{ hostId: gone, root: '/gone/project' }, { hostId: host, root: project }] } });
+  await service.removePeer(gone);
+  const sharing = () => service.settings().secrets.find(item => item.id === secret.id)!.sharing!;
+  for (const folders of [[{ hostId: host, root: join(root, 'missing') }], [{ hostId: host, root: '/' }], [{ hostId: gone, root: '/gone/other' }]]) {
+    await assert.rejects(control('sharing', { secretId: secret.id, revision: 1, global: false, folders }), { kind: 'invalid' }, JSON.stringify(folders));
+    await assert.rejects(control('create', { name: 'raw', kind: 'scalar', value: 'v', sharing: { global: false, folders } }), { kind: 'invalid' });
+  }
+  assert.equal(sharing().revision, 1); assert.equal(service.settings().secrets.length, 1);
+  const saved = await control('sharing', { secretId: secret.id, revision: 1, global: true, folders: [{ hostId: gone, root: '/gone/project' }, { hostId: host, root: project }] });
+  assert.deepEqual(saved.secrets.find(item => item.id === secret.id)?.sharing, { revision: 2, global: true, folders: [{ hostId: gone, root: '/gone/project' }, { hostId: host, root: project }] }, 'folders it keeps come back as identities');
+  await control('sharing', { secretId: secret.id, revision: 2, global: true, folders: [], kept: [{ hostId: host, root: '/' }] });
+  assert.deepEqual(sharing(), { revision: 3, global: true, folders: [] }, 'the page cannot name what counts as kept');
+});

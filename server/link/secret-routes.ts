@@ -118,13 +118,18 @@ export const WORKER_UPDATE_PENDING = 'worker-update-pending';
 /** The attached worker predates per-secret sharing (`secretSharing`): nothing new is sent to it. */
 const workerUpdatePending = () => Object.assign(new TowerError('unavailable', '새 실행 워커 적용 대기: 진행 중인 작업이 끝나 실행 워커가 바뀌면 시크릿을 관리할 수 있습니다.'), { code: WORKER_UPDATE_PENDING });
 
-/** The page's folder keys as canonical folders, in `sharing` and in a created secret's `sharing`. */
+/**
+ * The page's folder keys as canonical folders, in `sharing` and in a created secret's `sharing`. A folder sent back as
+ * an identity goes to the worker as `kept`, for the service to accept only where that key keeps it; a new key keeps none.
+ */
 async function canonicalInput(nodes: RemoteNodes | undefined, worker: Worker, action: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
-  if (action === 'sharing') return { ...input, folders: await canonicalFolders(input.folders, folderSources(nodes, worker)) };
+  if (action === 'sharing') { const { folders, kept } = await canonicalFolders(input.folders, folderSources(nodes, worker)); return { ...input, folders, kept }; }
   if (action !== 'create' || input.sharing === undefined) return input;
   const sharing = input.sharing;
   if (!sharing || typeof sharing !== 'object' || Array.isArray(sharing)) throw fail('공유 범위 입력이 올바르지 않습니다.', 'invalid');
-  return { ...input, sharing: { ...sharing, folders: await canonicalFolders((sharing as Record<string, unknown>).folders, folderSources(nodes, worker)) } };
+  const { folders, kept } = await canonicalFolders((sharing as Record<string, unknown>).folders, folderSources(nodes, worker));
+  if (kept.length) throw fail('새 키의 폴더는 캔버스에서 고르세요.', 'invalid');
+  return { ...input, sharing: { ...sharing, folders } };
 }
 
 /**

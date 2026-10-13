@@ -481,8 +481,8 @@ export class SecretRuntime {
       if (action === 'session-connect') await service.connectSession(target, secretIds); else await service.disconnectSession(target, secretIds);
       return this.changed(target, nodeId !== undefined, action === 'session-connect');
     } else if (action === 'sharing') {
-      const { secretId, revision, global, folders } = ownerInput(ownerSharingChange, input);
-      await service.setSharing(secretId, revision, { global, folders });
+      const { secretId, revision, global, folders, kept } = ownerInput(ownerSharingChange, input);
+      await service.setSharing(secretId, revision, { global, folders }, kept);
     } else if (action === 'update') {
       const update = ownerInput(z.object({ id: z.string().min(1).max(256), value: z.string().optional(), content: z.string().optional() }), input);
       await service.update(update);

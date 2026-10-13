@@ -155,11 +155,13 @@ export class SecretService {
    * The owner's sharing of one saved secret, replacing what its rules allowed. The rules stop naming it, so an older build
    * reads it as unshared, and a rule naming it again can only come from such a build.
    */
-  async setSharing(secretId: string, expectedRevision: number, input: Pick<SecretSharing, 'global' | 'folders'>): Promise<SecretSharing> { return this.mutate(() => {
+  async setSharing(secretId: string, expectedRevision: number, input: Pick<SecretSharing, 'global' | 'folders'>, kept: readonly SecretFolder[] = []): Promise<SecretSharing> { return this.mutate(() => {
     const secret = this.data().secrets.find(secret => secret.metadata.id === secretId);
     if (!secret) throw new TowerError('not-found', '공유를 바꿀 키를 찾을 수 없습니다. 화면을 새로고침하세요.');
     if ((secret.sharing?.revision ?? 0) !== expectedRevision) throw new TowerError('conflict', '다른 곳에서 이 키의 공유가 바뀌었습니다. 화면을 새로고침한 뒤 다시 저장하세요.');
-    secret.sharing = { revision: expectedRevision + 1, ...this.sharing(input, secret.sharing) };
+    // `kept` folders were not resolved again: only ones this key keeps now may come back that way.
+    if (kept.some(folder => !secret.sharing?.folders.some(saved => saved.hostId === folder.hostId && saved.root === folder.root))) throw new TowerError('invalid', '이 키에 저장되지 않은 폴더는 캔버스에서 다시 고르세요.');
+    secret.sharing = { revision: expectedRevision + 1, ...this.sharing({ global: input.global, folders: [...input.folders, ...kept] }, secret.sharing) };
     this.data().rules = withoutSecrets(this.data().rules, id => id === secretId); this.journal.rules = withoutSecrets(this.journal.rules, id => id === secretId);
     return structuredClone(secret.sharing);
   }); }
