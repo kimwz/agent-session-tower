@@ -27,7 +27,9 @@ export interface SecretPeer { device: SecretDevice; routeId: string; direction: 
 export interface SecretTarget { hostId: string; sessionId: string; taskId: string; root: string; projectId?: string }
 export interface SecretBrokerApproval { id: string; hostId: string; sessionId: string; root: string; taskId: string; taskLabel: string; createdAt: number; expiresAt: number }
 export interface SecretBrokerAccess { sessionId: string; root?: string; taskId: string | null; eligible: boolean; requiresApproval: boolean; reason?: string; approval?: SecretBrokerApproval; locked: boolean }
-export interface SecretContext extends SecretTarget { runId: string; brokerApprovalId?: string }
+/** Who is using a secret: the owner's own session (no review) or any other session (attack-only review before values resolve). */
+export type SecretSubjectMode = 'owner' | 'reviewed';
+export interface SecretContext extends SecretTarget { runId: string; brokerApprovalId?: string; subject?: SecretSubjectMode }
 export interface SecretTask {
   id: string; hostId: string; sessionId: string; root: string; status: 'open' | 'closed';
   createdAt: number; closedAt?: number; expiresAt?: number;
@@ -80,4 +82,8 @@ export interface SecretRunInput {
   operationId: string; command: string; args?: string[]; cwd?: string; timeoutMs?: number;
   env?: Record<string, string>; envBundle?: string; stdin?: string; files?: Record<string, string>;
 }
-export interface SecretRunResult { operationId: string; exitCode: number | null; stdout: string; stderr: string; timedOut?: boolean }
+export interface SecretRunResult {
+  operationId: string; exitCode: number | null; stdout: string; stderr: string; timedOut?: boolean;
+  /** Set when the secret-use reviewer refused the request; no value was resolved and no consumer started. */
+  blocked?: { code: 'SECRET_USE_BLOCKED'; reason: string };
+}
