@@ -14,6 +14,7 @@ import { createRemoteRouter } from '../../../server/remote/router.js';
 import { RemoteExclusionStore } from '../../../server/remote/exclusions.js';
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import { ownerSecretControl } from '../../../server/link/secret-routes.js';
+import { CALLER_CAPABILITY_HEADER } from '../../../server/runs/session-mcp.js';
 import { FixtureRuns, editPayload, legacyRecord, legacyRule, secretService, stored, storedTask } from '../../helpers/secrets.js';
 const VISIBLE = 'VISIBLE_INTEGRATION_CANARY_732';
 const HIDDEN = 'HIDDEN_INTEGRATION_CANARY_928';
@@ -254,4 +255,28 @@ test('owner HTTP secret API requires sign-in and page token; generic remote rout
   for (const action of WRITES) assert.equal((await fetch(`${remoteBase}/api/secrets/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) })).status, 404);
   assert.equal(secretCalls, before);
   assert.equal((await storedText(stateDir)).includes(VISIBLE), false); assert.equal((await storedText(stateDir)).includes(PASSWORD), false);
+});
+
+test('every secret route refuses the master, local agents and run capabilities before the worker is asked', { timeout: 20000 }, async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-secret-http-callers-')); t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const auth = await createRemoteAuthFixture(stateDir); const masterSecret = 'c'.repeat(64); const calls: string[] = [];
+  const backend: Backend = { snapshot: () => snapshot, detail: async () => undefined, enqueue: async () => { throw new Error('No native provider may run in this fixture'); }, cancel: async () => {}, subscribe: () => () => {},
+    secrets: async action => { calls.push(action); return {}; } };
+  const monitor = createMonitorServer({ port: 0, clientDir: stateDir, auth: auth.auth, remote: { origins: auth.origins }, backend, master: { callerSecret: masterSecret, handle: async () => false } });
+  t.after(async () => { monitor.dispose(); monitor.server.closeAllConnections(); if (monitor.server.listening) await new Promise<void>(resolve => monitor.server.close(() => resolve())); });
+  await new Promise<void>((resolve, reject) => { monitor.server.once('error', reject); monitor.server.listen(0, '127.0.0.1', resolve); }); const base = `http://127.0.0.1:${(monitor.server.address() as AddressInfo).port}`;
+  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { cookie: auth.cookie } })).json() as { token: string };
+  const owner = { cookie: auth.cookie, 'X-Agent-Monitor-Token': token, 'Content-Type': 'application/json' };
+  const READS = ['settings', 'session?sessionId=codex%3Afixture', 'broker-access?sessionId=codex%3Afixture'];
+  const WRITES = ['sharing', 'create', 'session-connect', 'session-disconnect', 'update', 'remove', 'unlock', 'lock', 'password', 'import', 'trust', 'untrust', 'preview', 'initialize', 'approve-broker', 'revoke-broker'];
+  // On this computer the owner's own page reaches the worker; the same page request naming another caller does not.
+  assert.equal((await fetch(`${base}/api/secrets/settings`, { headers: { cookie: auth.cookie } })).status, 200); assert.deepEqual(calls, ['settings']); calls.length = 0;
+  const callers: Record<string, string>[] = [{ 'x-tower-master': masterSecret }, { 'x-tower-master': 'not-the-master' }, { 'x-tower-agent': 'local' }, { [CALLER_CAPABILITY_HEADER]: 'b'.repeat(64) }];
+  for (const caller of callers) {
+    for (const read of READS) assert.equal((await fetch(`${base}/api/secrets/${read}`, { headers: { cookie: auth.cookie, ...caller } })).status, 403, `${read} with ${Object.keys(caller)[0]}`);
+    // Changes count against the page's request budget; the verified master and local agents have budgets of their own.
+    const writes = caller['x-tower-master'] === masterSecret || caller['x-tower-agent'] ? WRITES : ['sharing', 'create', 'session-connect', 'unlock', 'update'];
+    for (const action of writes) assert.equal((await fetch(`${base}/api/secrets/${action}`, { method: 'POST', headers: { ...owner, ...caller }, body: '{}' })).status, 403, `${action} with ${Object.keys(caller)[0]}`);
+  }
+  assert.deepEqual(calls, []);
 });

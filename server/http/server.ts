@@ -417,7 +417,8 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       const secretRead = secretAction && ['settings', 'session', 'broker-access'].includes(secretAction[1]);
       if (secretAction && ((secretRead && req.method === 'GET') || (!secretRead && req.method === 'POST'))) {
         const brokerAccess = ['broker-access', 'approve-broker', 'revoke-broker'].includes(secretAction[1]);
-        if (masterCall || localAgent || (brokerAccess && (req.headers['x-tower-master'] !== undefined || req.headers['x-tower-agent'] !== undefined || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()] !== undefined))) return json(res, 403, { error: '시크릿 보관함 관리는 소유자의 전용 화면에서만 가능합니다.' });
+        // Only the owner's own page: a request naming the master, a local agent or a run is refused, whether or not it proves it.
+        if (req.headers['x-tower-master'] !== undefined || req.headers['x-tower-agent'] !== undefined || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()] !== undefined) return json(res, 403, { error: '시크릿 보관함 관리는 소유자의 전용 화면에서만 가능합니다.' });
         if (brokerAccess && req.method === 'POST' && !auth?.session(sessionId, identity.ip)) return json(res, 401, { error: '브로커 승인은 로그인한 소유자의 Tower 화면에서만 가능합니다.' });
         // Only an explicitly configured HTTPS origin proves a secure reverse-proxy endpoint.
         // Forwarded protocol headers supplied by a caller cannot permit sensitive input.
