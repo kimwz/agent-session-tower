@@ -201,7 +201,10 @@ function scriptCandidate(input: Pick<SecretRunInput, 'command' | 'args'>): strin
 
 const sameFile = (a: Pick<Stats, 'dev' | 'ino'>, b: Pick<Stats, 'dev' | 'ino'>) => a.dev === b.dev && a.ino === b.ino;
 
-/** A larger script cannot be bound to what was reviewed: a reviewed run of it is refused. */
+/**
+ * A larger script is not read or bound: like a run of no project file, it runs on its review without the change check
+ * (too little evidence is never a reason to refuse). A bound script that grows past it is refused as changed.
+ */
 const SCRIPT_HASH_LIMIT = 16 * 1024 * 1024;
 const TOO_LARGE = 'larger than 16 MiB; not read';
 
@@ -231,14 +234,14 @@ export function scriptExcerpt(input: Pick<SecretRunInput, 'command' | 'args' | '
     file = openSync(real, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
     const opened = fstatSync(file);
     if (!opened.isFile() || !sameFile(opened, checked) || realpathSync(path) !== real || !sameFile(lstatSync(real), opened)) return notRead('changed while it was checked; not read');
-    if (opened.size > SCRIPT_HASH_LIMIT) return notRead(TOO_LARGE);
+    if (opened.size > SCRIPT_HASH_LIMIT) return { path: candidate, omitted: TOO_LARGE };
     const hash = createHash('sha256'); const head: Buffer[] = []; const chunk = Buffer.alloc(64 * 1024);
     let position = 0, kept = 0;
     for (;;) {
       const bytesRead = readSync(file, chunk, 0, chunk.length, position);
       if (!bytesRead) break;
       position += bytesRead;
-      if (position > SCRIPT_HASH_LIMIT) return notRead(TOO_LARGE);
+      if (position > SCRIPT_HASH_LIMIT) return { path: candidate, omitted: TOO_LARGE };
       hash.update(chunk.subarray(0, bytesRead));
       if (kept < SCRIPT_BYTES) { const take = Math.min(SCRIPT_BYTES - kept, bytesRead); head.push(Buffer.from(chunk.subarray(0, take))); kept += take; }
     }
@@ -258,9 +261,9 @@ export async function reviewedScript(input: Pick<SecretRunInput, 'command' | 'ar
   const denied = await deniedPaths(stateDir);
   return () => {
     const now = scriptExcerpt(input, root, denied);
-    if (now?.omitted === TOO_LARGE) return 'too-large';
     const binding = now?.binding ?? null;
-    return binding?.path === reviewed?.path && binding?.sha256 === reviewed?.sha256 ? undefined : 'changed';
+    if (binding?.path === reviewed?.path && binding?.sha256 === reviewed?.sha256) return undefined;
+    return now?.omitted === TOO_LARGE ? 'too-large' : 'changed';
   };
 }
 

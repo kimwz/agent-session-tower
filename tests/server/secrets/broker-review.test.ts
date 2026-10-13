@@ -1,6 +1,6 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { access, appendFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SecretBroker } from '../../../server/secrets/broker.js';
@@ -299,4 +299,27 @@ test('a hold or a script swap while the run waits for its dispatch turn is caugh
   // The owner's sessions do not depend on it.
   const owner = new SecretBroker({ stateDir: f.stateDir, service: f.service, reviewer, effects, effectsReady: () => false });
   assert.equal((await owner.run({ ...f.context, subject: 'owner' }, { operationId: 'owner-queued', command: process.execPath, args: ['deploy.js'], cwd: f.root })).exitCode, 0);
+});
+
+test('a script too large to bind runs on its review; a bound script that grows past the limit is refused', async t => {
+  const f = await fixture(t);
+  const write = (name: string) => `require('node:fs').writeFileSync(${JSON.stringify(f.marker)}, ${JSON.stringify(name)})\n`;
+  // Over 16 MiB: a comment pads it, so it still runs.
+  const padding = `//${'x'.repeat(16 * 1024 * 1024)}\n`;
+  await writeFile(join(f.root, 'bundle.js'), write('bundle') + padding);
+  let change: (() => Promise<void>) | undefined;
+  const reviewer = new SecretUseReviewer({ stateDir: f.stateDir, resolve: async () => ({ provider: 'claude' }), sources: { subject: () => ({}), conversation: async () => [] },
+    model: async () => { const next = change; change = undefined; await next?.(); return { decision: 'allow', reason: '배포', evidence: '' }; } });
+  const broker = new SecretBroker({ stateDir: f.stateDir, service: f.service, reviewer });
+  const run = (operationId: string, script: string) => broker.run(f.context, { operationId, command: process.execPath, args: [script], cwd: f.root, env: { TOKEN: f.secret.reference } });
+  const large = await run('large-1', 'bundle.js');
+  assert.equal(large.exitCode, 0, large.stderr);
+  assert.equal(await readFile(f.marker, 'utf8'), 'bundle');
+  await rm(f.marker);
+  // Hashed when reviewed, then grown past the limit before it runs.
+  await writeFile(join(f.root, 'deploy.js'), write('deploy'));
+  change = () => appendFile(join(f.root, 'deploy.js'), padding);
+  const grown = await run('grown-1', 'deploy.js');
+  assert.match(grown.stderr, /16 MiB보다 커져 검토한 내용과 같은지 확인할 수 없어 실행하지 않았습니다/);
+  assert.equal(await exists(f.marker), false);
 });
