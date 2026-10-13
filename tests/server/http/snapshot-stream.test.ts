@@ -3,9 +3,10 @@ import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import { SseClient } from '../../../server/http/sse-client.js';
 import { SnapshotStream } from '../../../server/http/snapshot-stream.js';
+import { scopedViews } from '../../../server/http/public-snapshot.js';
 import { applySnapshotPatch, type SnapshotPatch } from '../../../shared/snapshot-patch.js';
-import type { Session, Snapshot } from '../../../shared/types.js';
-import type { SessionScope } from '../../../shared/session-scope.js';
+import type { Run, Session, Snapshot } from '../../../shared/types.js';
+import { PROMPT_PREVIEW, type SessionScope } from '../../../shared/session-scope.js';
 
 class Response extends EventEmitter {
   frames: string[] = [];
@@ -211,4 +212,22 @@ test('a scoped page whose socket was blocked receives its newest complete view',
   page.response.emit('drain');
   assert.equal(events(page.response).at(-1)!.event, 'snapshot');
   assert.deepEqual(replay(page.response).sessions, [session('s1', 'second'), session('s2')]);
+});
+
+test('opening a chat sends the whole prompts of its finished turns as a patch; the page held previews before', () => {
+  const prompt = 'q'.repeat(PROMPT_PREVIEW * 3);
+  const turn = (id: string, sessionId: string): Run => ({ id, sessionId, prompt, status: 'completed', createdAt: at, output: '' });
+  const state: Snapshot = { sessions: [session('s1'), session('s2')], runs: [turn('r1', 's1'), turn('r2', 's2'), turn('r3', 'claude:gone')],
+    providers: [], scanning: false, hostname: 'host', version: 'test', updatedAt: at };
+  const stream = new SnapshotStream(() => state, Date.now, undefined, scopedViews);
+  const response = new Response();
+  const client = new SseClient(response, () => stream.detach(client));
+  stream.attach(client, true, '', { closed: false });
+  const prompts = () => Object.fromEntries(replay(response).runs.map(run => [run.id, run.prompt.length]));
+  assert.deepEqual(prompts(), { r1: PROMPT_PREVIEW, r2: PROMPT_PREVIEW, r3: PROMPT_PREVIEW });
+  stream.setScope(client, { closed: false, focus: 's1' });
+  const opened = events(response).at(-1)!;
+  assert.equal(opened.event, 'patch');
+  assert.deepEqual((opened.data as SnapshotPatch).runs?.upsert?.map(run => run.id), ['r1']);
+  assert.deepEqual(prompts(), { r1: prompt.length, r2: PROMPT_PREVIEW, r3: PROMPT_PREVIEW });
 });

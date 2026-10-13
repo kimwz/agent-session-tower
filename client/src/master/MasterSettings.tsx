@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { LoaderCircle, Mic, Play, RefreshCw, Square, Trash2 } from 'lucide-react';
 import { DEFAULT_MASTER_HEARTBEAT, DEFAULT_MASTER_VOICE, MASTER_PLAYBACK_RATES, MASTER_TTS_MODELS, type MasterOverview, type MasterTtsModel, type MasterVoiceSettings } from '../../../shared/master';
 import { builtinRole, resolveRole, type RoleSetting } from '../../../shared/models';
-import type { ProviderHealth, Snapshot } from '../../../shared/types';
 import { RoleRow } from '../models/ModelsPanel';
 import { loadModelSettings, saveModelSettings, useModelSettings } from '../models/model-settings';
 import { api } from '../common/lib';
+import { useProviders } from '../common/providers-context';
 import { post } from './api';
 import { useWords } from './strings';
 import { voiceUsage } from './VoiceBar';
@@ -113,12 +113,11 @@ function HeartbeatModel({ token }: { token: string }) {
   const words = useWords();
   const { settings, error: loadError, problem } = useModelSettings(token);
   const [draft, setDraft] = useState<RoleSetting>();
-  const [providers, setProviders] = useState<ProviderHealth[]>([]);
+  const providers = useProviders();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const current = settings?.roles['master.heartbeat'];
   useEffect(() => setDraft(current && structuredClone(current)), [current]);
-  useEffect(() => { let active = true; void api<Snapshot>('/api/snapshot').then(value => { if (active) setProviders(value.providers); }).catch(reason => { if (active) setError(reason instanceof Error ? reason.message : String(reason)); }); return () => { active = false; }; }, []);
   const save = async () => {
     if (!draft) return;
     setBusy(true); setError('');

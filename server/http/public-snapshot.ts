@@ -1,6 +1,6 @@
 import type { Snapshot } from '../../shared/types.js';
 import { computeConversationRevision } from '../../shared/conversation-revision.js';
-import { sessionSelector, sessionSummary, type SessionScope } from '../../shared/session-scope.js';
+import { pageSelector, sessionSummary, type SessionScope } from '../../shared/session-scope.js';
 
 /** Native history supplies the transcript; broadcasts need only output change markers. */
 export function publicSnapshot(snapshot: Snapshot): Snapshot {
@@ -13,9 +13,9 @@ export function publicSnapshot(snapshot: Snapshot): Snapshot {
   };
 }
 
-/** Views of one public snapshot for pages that hold only some sessions; the shared work is done once. */
+/** Views of one public snapshot for pages that hold only some sessions and their records; the shared work is done once. */
 export function scopedViews(snapshot: Snapshot, now = Date.now()): (scope: SessionScope) => Snapshot {
-  const select = sessionSelector(snapshot, now);
+  const select = pageSelector(snapshot, now);
   let summary: Snapshot['sessionSummary'];
-  return scope => ({ ...snapshot, sessions: select(scope), sessionScope: scope, sessionSummary: summary ??= sessionSummary(snapshot.sessions, snapshot.runs) });
+  return scope => ({ ...snapshot, ...select(scope), sessionScope: scope, sessionSummary: summary ??= sessionSummary(snapshot.sessions, snapshot.runs) });
 }

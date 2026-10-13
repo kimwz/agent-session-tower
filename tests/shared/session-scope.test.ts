@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { AutoPromptJob, Run, Session } from '../../shared/types.js';
-import { scopeFromBody, scopeFromParams, scopeParams, sameScope, sessionSelector, sessionSummary, temporaryFolder } from '../../shared/session-scope.js';
+import { PROMPT_PREVIEW, pageSelector, scopeFromBody, scopeFromParams, scopeParams, sameScope, sessionSummary, temporaryFolder } from '../../shared/session-scope.js';
 
 const NOW = Date.parse('2026-10-01T12:00:00.000Z');
 const hoursAgo = (hours: number) => new Date(NOW - hours * 3_600_000).toISOString();
@@ -11,6 +11,7 @@ function session(id: string, extra: Partial<Session> = {}): Session {
 }
 const run = (sessionId: string, status: Run['status']): Run => ({ id: `run-${sessionId}-${status}`, sessionId, prompt: '', status, createdAt: hoursAgo(0), output: '' });
 const ids = (sessions: Session[]) => sessions.map(item => item.id);
+const sessionSelector = (snapshot: Parameters<typeof pageSelector>[0], now: number) => { const select = pageSelector(snapshot, now); return (scope: Parameters<ReturnType<typeof pageSelector>>[0]) => select(scope).sessions; };
 
 test('a scope is read from the page request and written back the same way; anything else is the whole list', () => {
   const scope = scopeFromParams(new URLSearchParams('scoped=1&days=7&closed=1&focus=claude:a'));
@@ -104,4 +105,66 @@ test('canvas history leaves out temporary folders and finished trigger sessions,
 test('a session with no folder is listed by project, as the canvas groups it, and projects stay apart', () => {
   const summary = sessionSummary([session('a', { cwd: '', project: 'orphan', lastCompletedAt: hoursAgo(500) }), session('b', { cwd: '', project: 'other', closed: true }), session('c', { cwd: '', project: 'orphan' })], []);
   assert.deepEqual(summary.projects, [{ cwd: '', project: 'orphan', open: true }, { cwd: '', project: 'other', open: false }]);
+});
+
+test('a page holds the turns of the sessions it holds, every turn at work, and turns of sessions not known yet', () => {
+  const long = 'x'.repeat(PROMPT_PREVIEW + 50);
+  const sessions = [
+    session('shown'),
+    session('codex:shown-codex', { provider: 'codex', nativeId: 'native-codex' }),
+    session('old', { lastCompletedAt: hoursAgo(100) }),
+    session('busy', { lastCompletedAt: hoursAgo(100) }),
+  ];
+  const turn = (id: string, sessionId: string, status: Run['status']): Run => ({ ...run(sessionId, status), id, prompt: long });
+  const runs = [turn('a', 'shown', 'completed'), turn('b', 'codex:native-codex', 'cancelled'), turn('c', 'old', 'completed'),
+    turn('d', 'busy', 'running'), turn('e', 'busy', 'queued'), turn('f', 'claude:new-one', 'completed'), turn('g', 'shown', 'error')];
+  const select = pageSelector({ sessions, runs }, NOW);
+  const page = select({ days: 1, closed: false });
+  assert.deepEqual(page.runs.map(item => item.id), ['a', 'b', 'd', 'e', 'f', 'g']);
+  const prompt = (id: string) => page.runs.find(item => item.id === id)!.prompt;
+  // Only the opened chat matches whole prompts; a completed or cancelled turn elsewhere carries a preview.
+  assert.equal(prompt('a'), long.slice(0, PROMPT_PREVIEW));
+  assert.equal(prompt('b'), long.slice(0, PROMPT_PREVIEW));
+  assert.equal(prompt('d'), long);
+  assert.equal(prompt('e'), long);
+  // A turn of a session not known yet is kept; it is whole only while its chat is open.
+  assert.equal(prompt('f'), long.slice(0, PROMPT_PREVIEW));
+  assert.equal(select({ days: 1, closed: false, focus: 'claude:new-one' }).runs.find(item => item.id === 'f')!.prompt, long);
+  // A failed turn is shown with its prompt and can be written again, even before its chat's focus arrives.
+  assert.equal(prompt('g'), long);
+  // The complete snapshot's runs are not changed.
+  assert.equal(runs[0].prompt, long);
+});
+
+test('the opened family keeps whole prompts, by any id its session is known by', () => {
+  const long = 'y'.repeat(PROMPT_PREVIEW * 2);
+  const sessions = [session('root', { lastCompletedAt: hoursAgo(100) }), session('child', { isSubagent: true, parentId: 'root' }), session('other')];
+  const runs: Run[] = [{ ...run('root', 'completed'), prompt: long }, { ...run('child', 'cancelled'), prompt: long }, { ...run('other', 'completed'), prompt: long }];
+  const select = pageSelector({ sessions, runs }, NOW);
+  const page = select({ days: 1, closed: false, focus: 'child' });
+  assert.deepEqual(page.runs.map(item => [item.sessionId, item.prompt.length]), [['root', long.length], ['child', long.length], ['other', PROMPT_PREVIEW]]);
+  // A turn may name its session as `provider:nativeId`, and the page may focus it that way.
+  const aliased = pageSelector({ sessions, runs: [{ ...run('claude:root', 'completed'), prompt: long }] }, NOW)({ days: 1, closed: false, focus: 'claude:child' });
+  assert.deepEqual(aliased.runs.map(item => item.prompt.length), [long.length]);
+  // Out of focus, the old root and its turns leave the page.
+  assert.deepEqual(select({ days: 1, closed: false }).runs.map(item => item.sessionId), ['other']);
+});
+
+test('a preview never ends in half a character', () => {
+  const prompt = `${'z'.repeat(PROMPT_PREVIEW - 1)}😀 and more`;
+  const page = pageSelector({ sessions: [session('a')], runs: [{ ...run('a', 'completed'), prompt }] }, NOW)({ days: 1, closed: false });
+  assert.equal(page.runs[0].prompt, 'z'.repeat(PROMPT_PREVIEW - 1));
+});
+
+test('every Auto Prompt job is listed without its routing context, and a settled one with a preview of its prompt', () => {
+  const long = 'p'.repeat(PROMPT_PREVIEW + 1);
+  const jobs = [
+    { id: 'routing', status: 'routing', prompt: long, routingContext: 'context' },
+    { id: 'done', status: 'completed', prompt: long, routingContext: 'context' },
+    { id: 'failed', status: 'error', prompt: 'short' },
+  ] as AutoPromptJob[];
+  const page = pageSelector({ sessions: [], runs: [], autoPrompts: jobs }, NOW)({ closed: false });
+  assert.deepEqual(page.autoPrompts, [{ id: 'routing', status: 'routing', prompt: long }, { id: 'done', status: 'completed', prompt: long.slice(0, PROMPT_PREVIEW) }, { id: 'failed', status: 'error', prompt: 'short' }]);
+  assert.equal(jobs[1].routingContext, 'context');
+  assert.equal('autoPrompts' in pageSelector({ sessions: [], runs: [] }, NOW)({ closed: false }), false);
 });
