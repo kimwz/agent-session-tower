@@ -6,7 +6,9 @@ import { transformSync } from 'esbuild';
 import * as jsxRuntime from 'react/jsx-runtime';
 import type { ReactElement } from 'react';
 import * as secretTypes from '../../../shared/secrets.js';
-import { registrationPayload, isRemoteSecret, localSecretOverview, quickSecretKind, quickSecretPayload, savedSecretMatches } from '../../../client/src/secrets/secrets-client.js';
+import * as secretsClient from '../../../client/src/secrets/secrets-client.js';
+import { ApiError } from '../../../client/src/common/lib.js';
+import type { SecretSessionView, SecretSettingsView } from '../../../shared/secrets.js';
 
 type Element = ReactElement<Record<string, any>>;
 function descendants(element: unknown): Element[] {
@@ -14,250 +16,315 @@ function descendants(element: unknown): Element[] {
   const node = element as Element;
   return [node, ...[node.props.children].flat(Infinity).flatMap(descendants)];
 }
-function componentFixture(component = 'SecretRegistration', file = 'SecretRegistration.tsx', extra: Record<string, unknown> = {}) {
+const text = (element: Element): string => [element.props.children].flat(Infinity).map(child => typeof child === 'string' || typeof child === 'number' ? String(child) : child && typeof child === 'object' && 'props' in child ? text(child as Element) : '').join('');
+
+/** A sibling component stands in as a named function, so tests read the props it is given without rendering it. */
+const stubs = new Map<string, Record<string, unknown>>();
+function stubModule(name: string): Record<string, unknown> {
+  if (!stubs.has(name)) {
+    const cache = new Map<string, unknown>();
+    stubs.set(name, new Proxy({}, { get: (_target, key) => {
+      if (typeof key !== 'string' || key === 'then') return undefined;
+      if (!cache.has(key)) cache.set(key, { [key]: () => null }[key]);
+      return cache.get(key);
+    } }));
+  }
+  return stubs.get(name)!;
+}
+const stub = (name: string, key: string) => stubModule(name)[key] as (props: unknown) => null;
+
+/**
+ * Runs one client file with a hook-slot React: state persists between renders, effects run after a render when their
+ * dependencies changed, and the component's own children are returned as elements, not rendered.
+ */
+function fixture(file: string, component: string, props: Record<string, unknown>, options: { context?: unknown; real?: Record<string, unknown>; globals?: Record<string, unknown> } = {}) {
   let cursor = 0;
-  const slots: unknown[] = [];
+  const slots: any[] = [];
   const cleanups: (() => void)[] = [];
+  const pending: (() => void)[] = [];
   const react = {
     createContext: () => ({}),
-    useState(initial: unknown) { const index = cursor++; if (!(index in slots)) slots[index] = initial; return [slots[index], (value: unknown) => { slots[index] = typeof value === 'function' ? (value as (previous: unknown) => unknown)(slots[index]) : value; }]; },
+    useContext: () => options.context,
+    useState(initial: unknown) {
+      const index = cursor++;
+      if (!(index in slots)) slots[index] = typeof initial === 'function' ? (initial as () => unknown)() : initial;
+      return [slots[index], (value: unknown) => { slots[index] = typeof value === 'function' ? (value as (previous: unknown) => unknown)(slots[index]) : value; }];
+    },
     useRef(initial: unknown) { const index = cursor++; slots[index] ??= { current: initial }; return slots[index]; },
-    useEffect(effect: () => (() => void) | void) { const cleanup = effect(); if (cleanup) cleanups.push(cleanup); },
+    useEffect(effect: () => (() => void) | void, deps?: unknown[]) {
+      const index = cursor++; const previous = slots[index];
+      if (previous && deps && previous.deps.length === deps.length && previous.deps.every((value: unknown, at: number) => Object.is(value, deps[at]))) return;
+      slots[index] = { deps: deps ?? [] };
+      pending.push(() => { previous?.cleanup?.(); const cleanup = effect(); if (cleanup) { slots[index].cleanup = cleanup; cleanups.push(cleanup); } });
+    },
+    useCallback: (callback: unknown) => callback,
+    useMemo: (build: () => unknown) => build(),
+    useId: () => 'fixture',
   };
+  const t = (value: string, values: Record<string, unknown> = {}) => value.replace(/\{(\w+)\}/g, (match, name) => name in values ? String(values[name]) : match);
   const module = { exports: {} as Record<string, (props: unknown) => Element> };
-  const code = transformSync(readFileSync(new URL(`../../../client/src/secrets/${file}`, import.meta.url), 'utf8'), { loader: 'tsx', format: 'cjs', jsx: 'automatic' }).code;
-  runInNewContext(code, { module, exports: module.exports, Uint8Array, btoa, require(name: string) {
+  const code = transformSync(readFileSync(new URL(`../../../client/src/${file.includes('/') ? file : `secrets/${file}`}`, import.meta.url), 'utf8'), { loader: 'tsx', format: 'cjs', jsx: 'automatic' }).code;
+  runInNewContext(code, { module, exports: module.exports, Uint8Array, btoa, AbortController, ...options.globals, require(name: string) {
+    if (name in (options.real ?? {})) return options.real![name];
     if (name === 'react') return react;
     if (name === 'react/jsx-runtime') return jsxRuntime;
-    if (name.endsWith('/shared/secrets')) return secretTypes;
-    if (name === '../i18n/i18n') return { useI18n: () => ({ t: (value: string) => value }) };
-    if (name === '../common/lib') return { copyText: async () => true };
-    if (name === './SecretRegistration') return { SecretOperations: () => null, scopeLabels: { global: '전역', project: '프로젝트', task: '이번 작업' }, operationLabels: { discover: '목록 확인' } };
     if (name === 'react-dom') return { createPortal: (node: unknown) => node };
-    if (name === 'lucide-react') return { KeyRound: () => null, LockKeyhole: () => null, X: () => null, Check: () => null, FileKey: () => null, Search: () => null };
-    if (name === './SecretQuickConnect') return {};
-    if (name === './SecretBrokerApproval') return {};
-    if (name === '../settings/settings-open') return { openSettings() {} };
-    if (name === '../settings/SettingsPane') return { SettingsFrameContext: {}, useSettingsGuard() {} };
-    if (name === './SecretRecovery' || name === './SecretAccess' || name === './SecretManagement') return {};
-    if (name === './secrets-client') return { registrationPayload, isRemoteSecret, localSecretOverview, quickSecretKind, quickSecretPayload, savedSecretMatches };
-    if (name === '../master/api') return { post: async () => ({ fields: [] }) };
+    if (name.endsWith('/shared/secrets')) return secretTypes;
+    if (name === '../i18n/i18n') return { useI18n: () => ({ t }) };
+    if (name === '../common/lib') return { copyText: async () => true, relativeTime: () => 'now' };
+    if (name === './secrets-client') return secretsClient;
+    if (name === 'lucide-react' || name.startsWith('./') || name.startsWith('../')) return stubModule(name);
     throw new Error(`Unexpected fixture import: ${name}`);
   } });
-  const overview = { status: { initialized: true, locked: false }, projects: [], groups: [], secrets: [], rules: [], peers: [], connected: [] };
-  const sent: unknown[] = [];
-  let complete!: (value: boolean) => void;
-  const props = { overview, sessionId: 'session', token: 'token', busy: false, onClose() {}, onConnected() {}, onManage() {}, change: async (_action: string, body: unknown) => { sent.push(body); return new Promise<boolean>(resolve => { complete = resolve; }); }, ...extra };
-  const render = () => { cursor = 0; return module.exports[component](props); };
-  return { render, sent, complete: (value: boolean) => complete(value), cleanup: () => cleanups.forEach(cleanup => cleanup()) };
+  const render = () => { cursor = 0; const root = module.exports[component](props); while (pending.length) pending.shift()!(); return root; };
+  return { render, props, exports: module.exports, cleanup: () => cleanups.forEach(cleanup => cleanup()) };
 }
 
-test('secret registration clears the raw input before the request resolves and stops portal submit propagation', async () => {
-  const fixture = componentFixture();
-  let root = fixture.render();
-  const input = (element: Element, type: string) => descendants(element).find(node => node.type === type)!;
-  input(root, 'textarea').props.onChange({ target: { value: 'transient-canary' } });
-  root = fixture.render();
-  assert.equal(input(root, 'textarea').props.value, 'transient-canary');
-  let prevented = false; let stopped = false;
-  const request = root.props.onSubmit({ preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
-  assert.equal(prevented, true); assert.equal(stopped, true);
-  assert.equal((fixture.sent[0] as { value: string }).value, 'transient-canary');
-  assert.equal(input(fixture.render(), 'textarea').props.value, '');
-  fixture.complete(true); await request; fixture.cleanup();
-});
-
+/** A `change` whose answers the test gives one by one. */
+function changes() {
+  const sent: [string, any][] = [];
+  const answers: ((value: boolean) => void)[] = [];
+  return { sent, change: async (action: string, body: unknown) => { sent.push([action, JSON.parse(JSON.stringify(body))]); return new Promise<boolean>(resolve => { answers.push(resolve); }); }, answer: (value = true) => answers.shift()!(value) };
+}
+const tick = () => new Promise(resolve => setImmediate(resolve));
 const formEvent = { preventDefault() {}, stopPropagation() {} };
-const find = (element: Element, type: string) => descendants(element).find(node => node.type === type)!;
-const readPayload = (fixture: ReturnType<typeof componentFixture>, index = 0) => JSON.parse(JSON.stringify(fixture.sent[index])) as Record<string, any>;
+const find = (root: Element, match: (element: Element) => boolean) => descendants(root).find(match)!;
+const byType = (type: string) => (element: Element) => element.type === type;
+const node = 'c'.repeat(32);
+const device = { id: 'source', name: 'Source', signingKey: 's', encryptionKey: 'e', fingerprint: 'f' };
+const sessionView = (patch: Partial<SecretSessionView> = {}): SecretSessionView => ({
+  status: { initialized: true, locked: false },
+  available: [{ id: 'global_key', name: 'GLOBAL_KEY', groupId: 'tower', kind: 'scalar', version: 1, reference: 'r', basis: ['global'], operations: ['env'] }],
+  connectable: [{ id: 'lonely_key', name: 'LONELY_KEY', groupId: 'tower', kind: 'scalar', version: 1, reference: 'r' }, { id: 'global_key', name: 'GLOBAL_KEY', groupId: 'tower', kind: 'scalar', version: 1, reference: 'r' }],
+  usage: [], unavailableSources: [], ...patch,
+});
+const settingsView: SecretSettingsView = { status: { initialized: true, locked: false }, device, peers: [{ device: { ...device, id: 'peer' }, routeId: node, direction: 'node', enabled: true }],
+  secrets: [{ id: 'folder_key', name: 'FOLDER_KEY', groupId: 'tower', kind: 'scalar', version: 1, reference: 'r', sourceHostId: 'source', sharing: { revision: 5, global: false, folders: [{ hostId: 'source', root: '/work/app' }] } },
+    { id: 'legacy_key', name: 'LEGACY_KEY', groupId: 'g', kind: 'scalar', version: 1, reference: 'r', sourceHostId: 'source', legacy: { global: [], folders: [{ hostId: 'peer', root: '/srv/app' }], limited: false } },
+    { id: 'remote_key', name: 'REMOTE_KEY', groupId: 'g', kind: 'scalar', version: 1, reference: 'r', sourceHostId: 'elsewhere' }] };
 
-test('quick confirmation clears the secret before completion, sends no chat submit and immediately connects task scope', async () => {
-  let connected = false;
-  const fixture = componentFixture('SecretQuickConnect', 'SecretQuickConnect.tsx', { onConnected() { connected = true; } });
-  find(fixture.render(), 'textarea').props.onChange({ target: { value: 'FAKE_QUICK_CANARY' } });
+test('a chat paste clears the value before the request resolves, never submits the chat, and connects it to this session only', async () => {
+  const { sent, change, answer } = changes(); let connected = 0;
+  const paste = fixture('SecretPaste.tsx', 'SecretPaste', { view: sessionView(), sessionId: `@${node}/codex:session`, cwd: `@${node}//srv/app`, busy: false, change, onConnected() { connected++; } });
+  find(paste.render(), byType('textarea')).props.onChange({ target: { value: 'FAKE_PASTE_CANARY' } });
   let prevented = false; let stopped = false;
-  find(fixture.render(), 'form').props.onSubmit({ preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
-  assert.equal(prevented, true); assert.equal(stopped, true); assert.equal(readPayload(fixture).value, 'FAKE_QUICK_CANARY');
-  assert.equal(readPayload(fixture).notifySession, true); assert.equal(readPayload(fixture).scope, 'task'); assert.equal(readPayload(fixture).connect, true);
-  assert.equal(find(fixture.render(), 'textarea').props.value, '');
-  fixture.complete(true); await new Promise(resolve => setImmediate(resolve)); assert.equal(connected, true); fixture.cleanup();
-});
-test('the chat saved picker opts into a notice but unlock alone does not', async () => {
-  const overview = { status: { initialized: true, locked: false }, projects: [], groups: [{ id: 'global', scope: 'global', name: 'Global' }], secrets: [{ id: 'saved', groupId: 'global', name: 'FAKE_SAVED', kind: 'scalar', version: 1 }], rules: [], peers: [], connected: [] };
-  const picker = componentFixture('SecretQuickConnect', 'SecretQuickConnect.tsx', { overview });
-  const button = descendants(picker.render()).find(node => node.props.className === 'secret-saved-key')!;
-  const pending = button.props.onClick();
-  assert.deepEqual(readPayload(picker), { secretIds: ['saved'], notifySession: true });
-  picker.complete(true); await pending; picker.cleanup();
-  const locked = componentFixture('SecretQuickConnect', 'SecretQuickConnect.tsx', { overview: { ...overview, status: { initialized: true, locked: true } } });
-  const password = descendants(locked.render()).find(node => node.type === 'input' && node.props.type === 'password')!;
-  password.props.onChange({ target: { value: 'FAKE_UNLOCK_PASSWORD' } });
-  find(locked.render(), 'form').props.onSubmit(formEvent);
-  assert.deepEqual(readPayload(locked), { password: 'FAKE_UNLOCK_PASSWORD' });
-  locked.complete(true); await new Promise(resolve => setImmediate(resolve)); locked.cleanup();
+  find(paste.render(), byType('form')).props.onSubmit({ preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+  assert.equal(prevented, true); assert.equal(stopped, true);
+  assert.deepEqual(sent, [['create', { name: 'SESSION_SECRET', kind: 'scalar', value: 'FAKE_PASTE_CANARY', connect: 'session', temporary: true, sessionId: 'codex:session', nodeId: node }]]);
+  assert.equal(find(paste.render(), byType('textarea')).props.value, '', 'cleared before the answer');
+  answer(); await tick(); assert.equal(connected, 1); paste.cleanup();
 });
 
-test('closing a pending quick dialog prevents its response from closing a later dialog', async () => {
-  let connected = false;
-  const fixture = componentFixture('SecretQuickConnect', 'SecretQuickConnect.tsx', { onConnected() { connected = true; } });
-  find(fixture.render(), 'textarea').props.onChange({ target: { value: 'FAKE_PENDING' } });
-  find(fixture.render(), 'form').props.onSubmit(formEvent); fixture.cleanup(); fixture.complete(true);
-  await new Promise(resolve => setImmediate(resolve)); assert.equal(connected, false);
+test('saving a paste to the vault sends the chosen sharing instead of a temporary value', async () => {
+  const { sent, change, answer } = changes();
+  const paste = fixture('SecretPaste.tsx', 'SecretPaste', { view: sessionView(), sessionId: 'claude:session', cwd: '/work/app', busy: false, change, onConnected() {} });
+  find(paste.render(), byType('textarea')).props.onChange({ target: { value: 'API=FAKE' } });
+  find(paste.render(), element => element.type === 'input' && element.props.type === 'checkbox').props.onChange({ target: { checked: true } });
+  const radios = descendants(paste.render()).filter(element => element.type === 'input' && element.props.type === 'radio');
+  assert.equal(radios.length, 3, 'not shared, this folder, GLOBAL');
+  radios[1]!.props.onChange();
+  const submit = find(paste.render(), element => element.type === 'button' && element.props.type === 'submit');
+  assert.equal(submit.props.disabled, false); assert.equal(text(submit), '저장하고 이 세션에 연결');
+  find(paste.render(), byType('form')).props.onSubmit(formEvent);
+  assert.deepEqual(sent[0], ['create', { name: 'API', kind: 'env', value: 'API=FAKE', connect: 'session', sharing: { global: false, folders: [{ cwd: '/work/app' }] }, sessionId: 'claude:session' }]);
+  answer(); await tick(); paste.cleanup();
+});
+
+test('a locked vault unlocks inline first, and unlock alone sends only the password', async () => {
+  const locked = sessionView({ status: { initialized: true, locked: true }, error: 'locked' });
+  const only = changes();
+  const unlock = fixture('SecretPaste.tsx', 'SecretPaste', { view: locked, sessionId: 's', busy: false, change: only.change, onConnected() {} });
+  find(unlock.render(), element => element.type === 'input' && element.props.type === 'password').props.onChange({ target: { value: 'FAKE_UNLOCK_PASSWORD' } });
+  find(unlock.render(), byType('form')).props.onSubmit(formEvent);
+  assert.deepEqual(only.sent, [['unlock', { password: 'FAKE_UNLOCK_PASSWORD' }]]);
+  assert.equal(find(unlock.render(), element => element.type === 'input' && element.props.type === 'password').props.value, '');
+  only.answer(); await tick(); assert.equal(only.sent.length, 1); unlock.cleanup();
+  const both = changes();
+  const paste = fixture('SecretPaste.tsx', 'SecretPaste', { view: locked, sessionId: 's', busy: false, change: both.change, onConnected() {} });
+  find(paste.render(), byType('textarea')).props.onChange({ target: { value: 'FAKE_VALUE' } });
+  find(paste.render(), element => element.type === 'input' && element.props.type === 'password').props.onChange({ target: { value: 'FAKE_UNLOCK_PASSWORD' } });
+  find(paste.render(), byType('form')).props.onSubmit(formEvent);
+  assert.deepEqual(both.sent.map(([action]) => action), ['unlock']);
+  both.answer(); await tick();
+  assert.deepEqual(both.sent.map(([action]) => action), ['unlock', 'create']); assert.equal(both.sent[1]![1].value, 'FAKE_VALUE');
+  both.answer(); await tick(); paste.cleanup();
+});
+
+test('a paste that cannot reach this session is not sent, and closing a pending paste never reports it connected later', async () => {
+  const blocked = changes();
+  const closedSession = fixture('SecretPaste.tsx', 'SecretPaste', { view: sessionView({ error: 'session-closed', permanent: true }), sessionId: 's', busy: false, change: blocked.change, onConnected() {} });
+  find(closedSession.render(), byType('textarea')).props.onChange({ target: { value: 'FAKE' } });
+  assert.equal(find(closedSession.render(), element => element.type === 'button' && element.props.type === 'submit').props.disabled, true);
+  find(closedSession.render(), byType('form')).props.onSubmit(formEvent); assert.deepEqual(blocked.sent, []);
+  const { change, answer } = changes(); let connected = false;
+  const paste = fixture('SecretPaste.tsx', 'SecretPaste', { view: sessionView(), sessionId: 's', busy: false, change, onConnected() { connected = true; } });
+  find(paste.render(), byType('textarea')).props.onChange({ target: { value: 'FAKE_PENDING' } });
+  find(paste.render(), byType('form')).props.onSubmit(formEvent); paste.cleanup(); answer();
+  await tick(); assert.equal(connected, false);
+});
+
+test('a secret added in the settings is saved without a session, with the folders picked, and its value cleared at once', async () => {
+  const { sent, change, answer } = changes(); let closed = false;
+  const add = fixture('SecretAddForm.tsx', 'SecretAddForm', { view: settingsView, choices: [], busy: false, change, onClose() { closed = true; } });
+  find(add.render(), element => element.type === 'input' && element.props.maxLength === 128).props.onChange({ target: { value: 'DEPLOY_KEY' } });
+  find(add.render(), byType('textarea')).props.onChange({ target: { value: 'FAKE_ADD_CANARY' } });
+  find(add.render(), element => element.type === stub('./SecretSharingEditor', 'SecretFolderPicker')).props.onKeys(['/work/app', `@${node}//srv/app`]);
+  find(add.render(), byType('form')).props.onSubmit(formEvent);
+  assert.deepEqual(sent, [['create', { name: 'DEPLOY_KEY', kind: 'scalar', value: 'FAKE_ADD_CANARY', sharing: { global: false, folders: [{ cwd: '/work/app' }, { cwd: `@${node}//srv/app` }] } }]]);
+  assert.equal(find(add.render(), byType('textarea')).props.value, '');
+  answer(); await tick(); assert.equal(closed, true); add.cleanup();
+});
+
+test('an added empty file is accepted as its canonical empty base64 and named after the file', async () => {
+  const { sent, change, answer } = changes();
+  const add = fixture('SecretAddForm.tsx', 'SecretAddForm', { view: settingsView, choices: [], busy: false, change, onClose() {} });
+  find(add.render(), element => element.type === 'select').props.onChange({ target: { value: 'file' } });
+  await find(add.render(), element => element.type === 'input' && element.props.type === 'file').props.onChange({ target: { files: [{ name: 'empty.bin', size: 0, arrayBuffer: async () => new ArrayBuffer(0) }] }, currentTarget: { value: '' } });
+  await tick();
+  assert.equal(find(add.render(), element => element.type === 'button' && element.props.type === 'submit').props.disabled, false);
+  find(add.render(), byType('form')).props.onSubmit(formEvent);
+  assert.deepEqual(sent[0], ['create', { name: 'empty.bin', kind: 'file', content: '' }]);
+  answer(); await tick(); add.cleanup();
+});
+
+test('saving sharing sends the stored revision, GLOBAL and the picked folders as canvas keys', async () => {
+  const { sent, change, answer } = changes(); let closed = false;
+  const editor = fixture('SecretSharingEditor.tsx', 'SecretSharingEditor', { view: settingsView, item: settingsView.secrets[0], choices: [], busy: false, change, onClose() { closed = true; } });
+  const picker = () => find(editor.render(), element => element.type === editor.exports.SecretFolderPicker);
+  assert.deepEqual(picker().props.keys, ['/work/app']);
+  find(editor.render(), element => element.type === 'input' && element.props.type === 'checkbox').props.onChange({ target: { checked: true } });
+  picker().props.onKeys(['/work/app', `@${node}//srv/app`]);
+  find(editor.render(), byType('form')).props.onSubmit(formEvent);
+  assert.deepEqual(sent, [['sharing', { secretId: 'folder_key', revision: 5, global: true, folders: [{ cwd: '/work/app' }, { cwd: `@${node}//srv/app` }] }]]);
+  answer(); await tick(); assert.equal(closed, true); editor.cleanup();
+  const legacy = changes();
+  const prefilled = fixture('SecretSharingEditor.tsx', 'SecretSharingEditor', { view: settingsView, item: settingsView.secrets[1], choices: [], busy: false, change: legacy.change, onClose() {} });
+  find(prefilled.render(), byType('form')).props.onSubmit(formEvent);
+  assert.deepEqual(legacy.sent, [['sharing', { secretId: 'legacy_key', revision: 0, global: false, folders: [{ cwd: `@${node}//srv/app` }] }]], 'what the rules shared, exactly as shown');
+  legacy.answer(); await tick(); prefilled.cleanup();
+});
+
+test('the available tab changes the session only through its buttons', async () => {
+  const { sent, change, answer } = changes(); const asked: string[] = []; let pasted = 0;
+  const available = fixture('SecretAvailable.tsx', 'SecretAvailable', { view: sessionView(), busy: false, change, onPaste() { pasted++; }, onSharing(id: string) { asked.push(id); } });
+  find(available.render(), element => element.props['aria-expanded'] === false).props.onClick();
+  assert.deepEqual(sent, [], 'opening the picker connects nothing');
+  find(available.render(), element => element.props['aria-label'] === 'LONELY_KEY 이 세션에 연결').props.onClick();
+  assert.deepEqual(sent, [['session-connect', { secretIds: ['lonely_key'] }]]); answer(); await tick();
+  find(available.render(), element => element.props['aria-label'] === 'GLOBAL_KEY 이 세션에서 끊기').props.onClick();
+  assert.deepEqual(sent[1], ['session-disconnect', { secretIds: ['global_key'] }]); answer(); await tick();
+  find(available.render(), element => element.props['aria-label'] === 'GLOBAL_KEY 공유 설정').props.onClick();
+  find(available.render(), element => element.type === 'button' && text(element) === '새 시크릿 추가').props.onClick();
+  assert.deepEqual(asked, ['global_key']); assert.equal(pasted, 1); assert.equal(sent.length, 2);
+  available.cleanup();
+});
+
+/** The composer's shared state as the chat dialog reads it. */
+function composer(patch: Record<string, unknown> = {}) {
+  const calls: unknown[][] = []; const settings: unknown[] = [];
+  const state = { token: 'token', sessionId: 'claude:session', cwd: '/work/app', view: sessionView(), error: '', busy: false, tab: undefined as string | undefined,
+    change: async (...args: unknown[]) => { calls.push(['change', ...args]); return true; }, reload: () => calls.push(['reload']),
+    show: (tab: string) => calls.push(['show', tab]), close: () => calls.push(['close']), ...patch };
+  const globals = { document: { body: {}, activeElement: null }, window: {} };
+  const real = { '../settings/settings-open': { openSettings: (request: unknown) => { settings.push(JSON.parse(JSON.stringify(request))); return true; } } };
+  return { state, calls, settings, load: (name: string, props: Record<string, unknown> = {}) => fixture('SecretChatDialog.tsx', name, props, { context: state, globals, real }) };
+}
+
+test('the composer button always opens the paste tab, and chips of used secrets open the available tab', () => {
+  const chat = composer();
+  find(chat.load('SecretComposer').render(), element => element.type === 'button').props.onClick();
+  assert.deepEqual(chat.calls, [['show', 'paste']]);
+  assert.equal(chat.load('SecretChips').render(), null, 'no chips before anything is used');
+  const used = composer({ view: sessionView({ usage: [{ at: 2, secretId: 'a', name: 'A_KEY', operation: 'env', outcome: 'delivered', review: 'exempt' }, { at: 1, secretId: 'a', name: 'A_KEY', operation: 'pipe', outcome: 'delivered', review: 'exempt' }] }) });
+  const chips = descendants(used.load('SecretChips').render()).filter(element => element.type === 'button');
+  assert.equal(chips.length, 1); assert.match(text(chips[0]!), /A_KEY/);
+  chips[0]!.props.onClick();
+  assert.deepEqual(used.calls, [['show', 'available']]);
+});
+
+test('switching tabs and closing the dialog never change the session; sharing opens the settings on that secret', () => {
+  const chat = composer({ tab: 'paste' });
+  const portal = find(chat.load('SecretComposer').render(), element => typeof element.type === 'function' && element.type.name === 'SecretChatDialog');
+  const dialog = chat.load('SecretChatDialog', portal.props);
+  let root = dialog.render();
+  const tabs = descendants(root).filter(element => element.props.role === 'tab');
+  assert.deepEqual(tabs.map(tab => tab.props['aria-selected']), [true, false]);
+  assert.ok(find(root, element => element.type === stub('./SecretPaste', 'SecretPaste')), 'the paste tab shows the paste form');
+  tabs[1]!.props.onClick();
+  tabs[1]!.props.onClick();
+  find(root, element => element.props.role === 'tablist').props.onKeyDown({ key: 'ArrowRight', preventDefault() {} });
+  let prevented = false;
+  find(root, byType('dialog')).props.onCancel({ preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.deepEqual(chat.calls, [['show', 'available'], ['show', 'available'], ['show', 'available'], ['close']]);
+  const available = composer({ tab: 'available' });
+  const second = available.load('SecretChatDialog', { state: available.state, tab: 'available' });
+  root = second.render();
+  assert.ok(find(root, element => element.type === stub('./SecretBrokerApproval', 'SecretBrokerApproval')), 'the broker approval stays until PR2');
+  find(root, element => element.type === stub('./SecretAvailable', 'SecretAvailable')).props.onSharing('global_key');
+  assert.deepEqual(available.calls, [['close']]);
+  assert.deepEqual(available.settings, [{ section: 'secrets', secretId: 'global_key' }]);
+  assert.ok(!available.calls.some(([kind]) => kind === 'change'));
+});
+
+test('settings opened for one secret open its sharing editor once, and only for a secret this vault owns', () => {
+  const opened = fixture('SecretSettings.tsx', 'SecretSettingsWorkspace', { view: settingsView, choices: [], busy: false, change: async () => true, focus: 'legacy_key' });
+  opened.render();
+  const editor = opened.render();
+  assert.equal(editor.type, stub('./SecretSharingEditor', 'SecretSharingEditor')); assert.equal(editor.props.item.id, 'legacy_key');
+  editor.props.onClose();
+  assert.notEqual(opened.render().type, stub('./SecretSharingEditor', 'SecretSharingEditor'), 'closing it stays closed');
+  const remote = fixture('SecretSettings.tsx', 'SecretSettingsWorkspace', { view: settingsView, choices: [], busy: false, change: async () => true, focus: 'remote_key' });
+  remote.render();
+  assert.notEqual(remote.render().type, stub('./SecretSharingEditor', 'SecretSharingEditor'));
+});
+
+test('the settings read their view once when shown, and a stale sharing save reloads it and says so', async () => {
+  let reads = 0; const posted: unknown[] = [];
+  const client = { ...secretsClient,
+    readSecretSettings: async () => { reads++; return settingsView; },
+    postSecret: async (action: string, _token: string, body: unknown) => { posted.push([action, body]); throw new ApiError('conflict', 409); } };
+  const panel = fixture('SecretsPanel.tsx', 'SecretsPanel', { token: 'token', folders: [] }, { context: { active: true }, real: { './secrets-client': client } });
+  panel.render(); await tick(); panel.render(); panel.render();
+  assert.equal(reads, 1, 'never polled');
+  const workspace = () => find(panel.render(), element => element.type === stub('./SecretSettings', 'SecretSettingsWorkspace'));
+  assert.equal(await workspace().props.change('sharing', { secretId: 'folder_key', revision: 4, global: true, folders: [] }), false);
+  const root = panel.render(); await tick();
+  assert.equal(reads, 2, 'the conflict reloads what is stored now');
+  assert.match(text(find(root, element => element.props.role === 'status' && element.type === 'p')), /다른 곳에서 바뀌었습니다/);
+  assert.deepEqual(posted, [['sharing', { secretId: 'folder_key', revision: 4, global: true, folders: [] }]]);
+  panel.cleanup();
+});
+
+test('the settings dialog hands every computer’s folders and the asked secret to the secrets section', () => {
+  const secretFolders = [{ key: `@${node}//srv/app`, label: 'app', computer: 'Build server' }];
+  const context = { token: 'token', providers: [], projects: [], secretFolders, computers: [], targets: () => ({ projects: [], sessions: [] }), controlledBy: [], showHidden: false, onShowHiddenChange() {}, onOpenSession() {} };
+  const dialog = fixture('settings/SettingsDialog.tsx', 'SettingsDialog', { place: { section: 'secrets', secretId: 'folder_key' }, sections: ['secrets'], attention: {}, context, onPlace() {}, onChanged() {}, onClose() {} }, { globals: { document: { body: {}, activeElement: null } } });
+  const panel = find(dialog.render(), element => element.type === stub('../secrets/SecretsPanel', 'SecretsPanel'));
+  assert.equal(panel.props.folders, secretFolders); assert.equal(panel.props.focus, 'folder_key'); assert.equal(panel.props.token, 'token');
 });
 
 test('pending import sends only the selected ID and transient source password and clears input immediately', async () => {
-  const fixture = componentFixture('SecretPendingImport', 'SecretRecovery.tsx', { ids: ['backup-a', 'backup-b'] });
-  let root = fixture.render();
-  find(root, 'select').props.onChange({ target: { value: 'backup-b' } });
-  find(root, 'input').props.onChange({ target: { value: 'original-source-password' } });
-  root = fixture.render();
+  const { sent, change, answer } = changes();
+  const fixtureImport = fixture('SecretRecovery.tsx', 'SecretPendingImport', { ids: ['backup-a', 'backup-b'], busy: false, change, onClose() {} });
+  let root = fixtureImport.render();
+  find(root, byType('select')).props.onChange({ target: { value: 'backup-b' } });
+  find(root, byType('input')).props.onChange({ target: { value: 'original-source-password' } });
+  root = fixtureImport.render();
   const pending = root.props.onSubmit(formEvent);
-  assert.deepEqual(readPayload(fixture), { id: 'backup-b', password: 'original-source-password' });
-  assert.equal(find(fixture.render(), 'input').props.value, '');
-  fixture.complete(true); await pending; fixture.cleanup();
+  assert.deepEqual(sent, [['import', { id: 'backup-b', password: 'original-source-password' }]]);
+  assert.equal(find(fixtureImport.render(), byType('input')).props.value, '');
+  answer(); await pending; fixtureImport.cleanup();
 });
 
-test('value rotation submits the existing ID and new value without putting it in metadata or leaving it on screen', async () => {
+test('value replacement submits the existing ID and new value without putting it in metadata or leaving it on screen', async () => {
+  const { sent, change, answer } = changes();
   const secret = { id: 'key', name: 'TOKEN', kind: 'scalar', version: 3, groupId: 'group', reference: 'tower-secret://v/key@3' };
-  const fixture = componentFixture('SecretValueEditor', 'SecretRecovery.tsx', { secret });
-  find(fixture.render(), 'textarea').props.onChange({ target: { value: 'next-value-canary' } });
-  const pending = fixture.render().props.onSubmit(formEvent);
-  assert.deepEqual(readPayload(fixture), { id: 'key', value: 'next-value-canary' });
-  assert.equal(find(fixture.render(), 'textarea').props.value, '');
+  const editor = fixture('SecretRecovery.tsx', 'SecretValueEditor', { secret, busy: false, change, onClose() {} });
+  find(editor.render(), byType('textarea')).props.onChange({ target: { value: 'next-value-canary' } });
+  const pending = editor.render().props.onSubmit(formEvent);
+  assert.deepEqual(sent, [['update', { id: 'key', value: 'next-value-canary' }]]);
+  assert.equal(find(editor.render(), byType('textarea')).props.value, '');
   assert.doesNotMatch(JSON.stringify(secret), /next-value-canary/);
-  fixture.complete(true); await pending; fixture.cleanup();
-});
-
-test('project editing preserves one logical project ID and submits local and remote bindings together', async () => {
-  const project = { id: 'logical-project', name: 'app', bindings: [{ hostId: 'source', root: '/source/app' }, { hostId: 'peer', root: '/peer/app' }] };
-  const fixture = componentFixture('SecretProjectEditor', 'SecretManagement.tsx', { project });
-  const pending = fixture.render().props.onSubmit(formEvent);
-  assert.deepEqual(readPayload(fixture), project);
-  fixture.complete(true); await pending; fixture.cleanup();
-});
-
-test('global rule uses explicit allProjects and preserves discover-only key and field subsets with TTL and expiry', async () => {
-  const overview = { status: { initialized: true, locked: false }, device: { id: 'source', name: 'Source' }, projects: [], peers: [],
-    groups: [{ id: 'group', name: 'bundle', scope: 'global' }], secrets: [{ id: 'bundle', groupId: 'group', name: '.env', kind: 'env', fields: ['TOKEN', 'OTHER'] }], rules: [], connected: [] };
-  const rule = { id: 'rule', groupId: 'group', hostId: 'source', secretIds: ['bundle'], fields: { bundle: ['TOKEN'] }, operations: ['discover'], activation: 'auto', allProjects: true, enabled: true, revision: 3, maxTtlMs: 600000, expiresAt: Date.parse('2028-01-01T00:00:00Z') };
-  const fixture = componentFixture('SecretRuleEditor', 'SecretManagement.tsx', { overview, rule });
-  const pending = fixture.render().props.onSubmit(formEvent);
-  const body = readPayload(fixture);
-  assert.equal(body.allProjects, true); assert.equal(body.projectId, undefined); assert.deepEqual(body.secretIds, ['bundle']); assert.deepEqual(body.fields, { bundle: ['TOKEN'] });
-  assert.deepEqual(body.operations, ['discover']); assert.equal(body.activation, 'auto'); assert.equal(body.maxTtlMs, 600000); assert.equal(body.expiresAt, rule.expiresAt); assert.equal(body.revision, undefined);
-  fixture.complete(true); await pending; fixture.cleanup();
-});
-
-test('registration accepts empty uploaded file bytes and sends their canonical empty base64', async () => {
-  const fixture = componentFixture();
-  let root = fixture.render();
-  const select = descendants(root).find(node => node.type === 'select' && node.props.value === 'scalar')!;
-  select.props.onChange({ target: { value: 'file' } });
-  root = fixture.render();
-  const upload = descendants(root).find(node => node.type === 'input' && node.props.type === 'file')!;
-  await upload.props.onChange({ target: { files: [{ name: 'empty.bin', size: 0, arrayBuffer: async () => new ArrayBuffer(0) }] }, currentTarget: { value: '' } });
-  root = fixture.render();
-  const submit = descendants(root).find(node => node.type === 'button' && node.props.type === 'submit')!;
-  assert.equal(submit.props.disabled, false);
-  const pending = root.props.onSubmit(formEvent);
-  assert.equal(readPayload(fixture).content, ''); assert.equal(readPayload(fixture).name, 'empty.bin');
-  fixture.complete(true); await pending; fixture.cleanup();
-});
-
-test('settings can save a global key without sharing, while automatic access still requires an explicit project choice', async () => {
-  const overview = { status: { initialized: true, locked: false }, projects: [{ id: 'project-a', name: 'A', bindings: [] }], groups: [], secrets: [], rules: [], peers: [], connected: [] };
-  const fixture = componentFixture('SecretRegistration', 'SecretRegistration.tsx', { overview, sessionId: undefined });
-  let root = fixture.render();
-  const name = descendants(root).find(node => node.type === 'input' && node.props.maxLength === 128)!;
-  name.props.onChange({ target: { value: 'GLOBAL_KEY' } });
-  root = fixture.render();
-  const submit = () => descendants(fixture.render()).find(node => node.type === 'button' && node.props.type === 'submit')!;
-  assert.equal(submit().props.disabled, false, 'manual vault storage does not grant any project access');
-  const stored = fixture.render().props.onSubmit(formEvent);
-  assert.equal(readPayload(fixture).allProjects, false); assert.equal(readPayload(fixture).projectId, undefined); assert.equal(readPayload(fixture).activation, 'manual'); assert.equal(readPayload(fixture).connect, false);
-  fixture.complete(true); await stored;
-  const activation = descendants(root).find(node => node.type === 'select' && node.props.value === 'manual')!;
-  activation.props.onChange({ target: { value: 'auto' } });
-  assert.equal(submit().props.disabled, true, 'automatic activation does not opt into all projects');
-  const checkbox = descendants(fixture.render()).find(node => node.type === 'input' && node.props.type === 'checkbox')!;
-  assert.equal(checkbox.props.checked, false);
-  checkbox.props.onChange({ target: { checked: true } });
-  assert.equal(submit().props.disabled, false);
-  const pending = fixture.render().props.onSubmit(formEvent);
-  const body = readPayload(fixture, 1);
-  assert.equal(body.allProjects, true); assert.equal(body.projectId, undefined); assert.equal(body.activation, 'auto');
-  fixture.complete(true); await pending; fixture.cleanup();
-});
-
-test('global session registration defaults to the trusted current session binding without all-project permission', async () => {
-  const fixture = componentFixture();
-  let root = fixture.render();
-  const scope = descendants(root).find(node => node.type === 'select' && node.props.value === 'task')!;
-  scope.props.onChange({ target: { value: 'global' } });
-  root = fixture.render();
-  const all = descendants(root).find(node => node.type === 'input' && node.props.type === 'checkbox')!;
-  assert.equal(all.props.checked, false);
-  const pending = root.props.onSubmit(formEvent);
-  const body = readPayload(fixture);
-  assert.equal(body.scope, 'global'); assert.equal(body.allProjects, false); assert.equal(body.projectId, undefined); assert.equal(body.sessionId, 'session'); assert.equal(body.target, undefined);
-  fixture.complete(true); await pending; fixture.cleanup();
-});
-
-test('editing an existing global rule preserves its exact root fallback and does not widen it', async () => {
-  const overview = { status: { initialized: true, locked: false }, device: { id: 'source', name: 'Source' }, projects: [], peers: [],
-    groups: [{ id: 'group', name: 'key', scope: 'global' }], secrets: [{ id: 'key', groupId: 'group', name: 'TOKEN', kind: 'scalar' }], rules: [], connected: [] };
-  const rule = { id: 'rule', groupId: 'group', hostId: 'source', secretIds: ['key'], operations: ['discover', 'env'], activation: 'manual', root: '/exact/project', enabled: true, revision: 1 };
-  const fixture = componentFixture('SecretRuleEditor', 'SecretManagement.tsx', { overview, rule });
-  const root = fixture.render();
-  const submit = descendants(root).find(node => node.type === 'button' && node.props.type === 'submit')!;
-  assert.equal(submit.props.disabled, false);
-  const pending = root.props.onSubmit(formEvent); const body = readPayload(fixture);
-  assert.equal(body.root, '/exact/project'); assert.equal(body.projectId, undefined); assert.notEqual(body.allProjects, true);
-  fixture.complete(true); await pending; fixture.cleanup();
-});
-
-test('editing a rule whose key or field was removed saves only what still exists, with a whole-millisecond TTL', async () => {
-  const overview = { status: { initialized: true, locked: false }, device: { id: 'source', name: 'Source' }, peers: [], projects: [{ id: 'project', name: 'App', bindings: [] }],
-    groups: [{ id: 'group', name: 'app', scope: 'project', projectId: 'project' }], secrets: [{ id: 'kept', groupId: 'group', name: 'ENV', kind: 'env', fields: ['A'] }], rules: [], connected: [] };
-  const rule = { id: 'rule', groupId: 'group', hostId: 'source', secretIds: ['kept', 'removed'], fields: { kept: ['A', 'GONE'], removed: ['B'] }, operations: ['env'], activation: 'auto', root: '/app', maxTtlMs: 130_000, enabled: true, revision: 3 };
-  const fixture = componentFixture('SecretRuleEditor', 'SecretManagement.tsx', { overview, rule });
-  const root = fixture.render();
-  const pending = root.props.onSubmit(formEvent); const body = readPayload(fixture);
-  assert.deepEqual(body.secretIds, ['kept']); assert.deepEqual(body.fields, { kept: ['A'] });
-  assert.equal(body.projectId, 'project', 'a project group rule names its group project'); assert.equal(body.root, undefined);
-  assert.equal(body.maxTtlMs, 130_000);
-  fixture.complete(true); await pending; fixture.cleanup();
-});
-
-test('a rule whose selected fields were all removed saves unchanged as an explicit empty selection', async () => {
-  const overview = { status: { initialized: true, locked: false }, device: { id: 'source', name: 'Source' }, peers: [], projects: [{ id: 'project', name: 'App', bindings: [] }],
-    groups: [{ id: 'group', name: 'app', scope: 'project', projectId: 'project' }], secrets: [{ id: 'env', groupId: 'group', name: 'ENV', kind: 'env', fields: ['B'] }], rules: [], connected: [] };
-  const rule = { id: 'rule', groupId: 'group', hostId: 'source', projectId: 'project', secretIds: ['env'], fields: { env: ['A'] }, operations: ['env'], activation: 'manual', enabled: true, revision: 2 };
-  const fixture = componentFixture('SecretRuleEditor', 'SecretManagement.tsx', { overview, rule });
-  const root = fixture.render();
-  assert.equal(descendants(root).find(node => node.type === 'button' && node.props.type === 'submit')!.props.disabled, false);
-  const pending = root.props.onSubmit(formEvent); const body = readPayload(fixture);
-  assert.deepEqual(body.fields, { env: [] }, 'never widened to all fields');
-  fixture.complete(true); await pending; fixture.cleanup();
-});
-
-test('remote and mixed key selections disable attach without silently attaching the local subset, while revoke remains available', async () => {
-  const overview = { status: { initialized: true, locked: false }, device: { id: 'local', name: 'Local' }, projects: [], peers: [],
-    groups: [{ id: 'group-local', name: 'Local group', scope: 'global' }, { id: 'group-remote', name: 'Source · remote', scope: 'global' }],
-    secrets: [{ id: 'local-key', groupId: 'group-local', name: 'LOCAL_KEY', kind: 'scalar', version: 1 }, { id: 'remote-key', groupId: 'group-remote', name: 'REMOTE_KEY', sourceHostId: 'source', kind: 'scalar', version: 1 }], rules: [], connected: ['remote-key'] };
-  const fixture = componentFixture('SecretWorkspace', 'SecretsPanel.tsx', { overview });
-  let root = fixture.render();
-  const checkboxes = descendants(root).filter(node => node.type === 'input' && node.props.type === 'checkbox');
-  checkboxes[1].props.onChange({ target: { checked: true } });
-  root = fixture.render();
-  const button = (text: string) => descendants(fixture.render()).find(node => node.type === 'button' && node.props.children === text)!;
-  assert.equal(button('선택한 키 연결').props.disabled, true);
-  await button('선택한 키 연결').props.onClick(); assert.deepEqual(fixture.sent, []);
-  descendants(root).filter(node => node.type === 'input' && node.props.type === 'checkbox')[0].props.onChange({ target: { checked: true } });
-  assert.equal(button('선택한 키 연결').props.disabled, true);
-  await button('선택한 키 연결').props.onClick(); assert.deepEqual(fixture.sent, []);
-  assert.equal(button('선택한 키 권한 회수').props.disabled, false);
-  const pending = button('선택한 키 권한 회수').props.onClick();
-  assert.deepEqual(readPayload(fixture).secretIds, ['remote-key', 'local-key']);
-  fixture.complete(true); await pending; fixture.cleanup();
+  answer(); await pending; editor.cleanup();
 });

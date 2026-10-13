@@ -26,7 +26,7 @@ export function SecretPassword({ busy, change, onClose }: { busy: boolean; chang
   const { t } = useI18n();
   const [currentPassword, setCurrent] = useState(''); const [next, setNext] = useState(''); const [confirmation, setConfirmation] = useState('');
   return <form className="secret-form" onSubmit={async event => { event.preventDefault(); event.stopPropagation(); const body = { currentPassword, newPassword: next }; setCurrent(''); setNext(''); setConfirmation(''); if (await change('password', body)) onClose(); }}>
-    <h3>{t('비밀번호 변경')}</h3>
+    <h3>{t('보관함 비밀번호 변경')}</h3>
     <label>{t('현재 비밀번호')}<input autoFocus type="password" autoComplete="current-password" value={currentPassword} required disabled={busy} onChange={event => setCurrent(event.target.value)} /></label>
     <label>{t('새 비밀번호')}<input type="password" autoComplete="new-password" minLength={MIN_VAULT_PASSWORD} value={next} required disabled={busy} onChange={event => setNext(event.target.value)} /></label>
     <label>{t('비밀번호 확인')}<input type="password" autoComplete="new-password" value={confirmation} required disabled={busy} onChange={event => setConfirmation(event.target.value)} /></label>
