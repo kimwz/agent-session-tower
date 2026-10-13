@@ -18,7 +18,7 @@ jobs:
         with: { persist-credentials: false }
       - id: plan
         run: |
-          node --input-type=module -e "import('./scripts/ci-plan.mjs').then(m=>console.log('matrix='+JSON.stringify({include:m.plan().filter(l=>l.os==='ubuntu-latest')})))" >> "$GITHUB_OUTPUT"
+          node --input-type=module -e "import('./scripts/ci-plan.mjs').then(m=>console.log('matrix='+JSON.stringify({include:m.plan().filter(l=>l.os==='ubuntu-latest').map(({id,os,node,shard})=>({id,os,node,shard}))})))" >> "$GITHUB_OUTPUT"
       - name: Mark owner Mac and combined evidence as pending
         if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
         env:
@@ -28,6 +28,7 @@ jobs:
           gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SOURCE_SHA" -f state=pending -f context='macOS (owner Mac)' -f description='Awaiting exact-tree owner Mac results'
           gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SOURCE_SHA" -f state=pending -f context='validation (all platforms)' -f description='Awaiting complete Mac and Linux results'
   test:
+    name: Linux ${{ matrix.node }} shard ${{ matrix.shard }}
     needs: plan
     strategy:
       fail-fast: false
