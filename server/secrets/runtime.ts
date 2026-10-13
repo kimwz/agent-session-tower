@@ -91,6 +91,8 @@ export class SecretRuntime {
     reviewer?: Pick<SecretUseReviewer, 'review' | 'inFlight'>;
     /** The worker's effects gate; reviewed uses check it after their review and before their consumer starts. */
     effects?: () => Promise<void>;
+    /** Its synchronous part (no hold now), checked inside the turn that starts a reviewed use's consumer. */
+    effectsReady?: () => boolean;
   }) {
     const service = options.service;
     const accepted = new Map<string, SecretContext>();
@@ -117,7 +119,7 @@ export class SecretRuntime {
         return service.resolve(trusted, payload.reference, payload.operation);
       },
     });
-    this.broker = new SecretBroker({ stateDir: options.stateDir, service, remote: this.remote, validate: context => this.validateBrokerContext(context), ...(options.reviewer ? { reviewer: options.reviewer } : {}), ...(options.effects ? { effects: options.effects } : {}) });
+    this.broker = new SecretBroker({ stateDir: options.stateDir, service, remote: this.remote, validate: context => this.validateBrokerContext(context), ...(options.reviewer ? { reviewer: options.reviewer } : {}), ...(options.effects ? { effects: options.effects } : {}), ...(options.effectsReady ? { effectsReady: options.effectsReady } : {}) });
   }
   initialized(): boolean { return this.options.service.status().initialized; }
   /** A review runs inside a broker call; it is counted on its own too, so a handoff waits for it (at most its deadline). */

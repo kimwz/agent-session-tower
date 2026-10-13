@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, realpath, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { renameSync, symlinkSync, truncateSync, unlinkSync } from 'node:fs';
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AutoPromptModelRequest } from '../../../server/auto-prompt/native.js';
-import { reviewVerdict, scriptExcerpt, scrubCredentials, secretReviewInput, SecretUseReviewer, type SecretReviewRequest, type SecretUseReviewerOptions } from '../../../server/secrets/reviewer.js';
+import { reviewedScript, reviewVerdict, scriptExcerpt, scrubCredentials, secretReviewInput, SecretUseReviewer, type SecretReviewRequest, type SecretUseReviewerOptions } from '../../../server/secrets/reviewer.js';
 import type { SecretContext } from '../../../shared/secrets.js';
 import type { ChatMessage } from '../../../shared/types.js';
 
@@ -25,11 +26,12 @@ function request(context: SecretContext, args: string[] = ['deploy.mjs', '--targ
     secrets: [{ reference: 'tower-secret://vault-a/key-1@1', name: 'deploy token', kind: 'scalar' }] };
 }
 function reviewer(stateDir: string, answer: (request: AutoPromptModelRequest) => Promise<unknown>, extra: Partial<SecretUseReviewerOptions> = {}) {
-  const calls: AutoPromptModelRequest[] = [];
+  // `calls`: model calls made; `spawned`: those whose native process would have started (past `beforeSpawn`).
+  const calls: AutoPromptModelRequest[] = [], spawned: AutoPromptModelRequest[] = [];
   const instance = new SecretUseReviewer({ stateDir, resolve: async () => ({ provider: 'claude', model: 'sonnet', effort: 'off' }),
     sources: { subject: () => ({ origin: { kind: 'slack', workflowId: randomUUID() } }), conversation: async () => [message('user', 'Deploy the service with the deploy token.')] },
-    model: async (input, options) => { calls.push(input); await options.beforeSpawn(); return answer(input); }, ...extra });
-  return { instance, calls };
+    model: async (input, options) => { calls.push(input); await options.beforeSpawn(); spawned.push(input); return answer(input); }, ...extra });
+  return { instance, calls, spawned };
 }
 
 const allow = { decision: 'allow', reason: '', evidence: '' };
@@ -161,6 +163,50 @@ test('a storage hold, or an effects gate that does not answer in time, refuses t
   assert.equal(stuck.instance.inFlight(), false);
 });
 
+test('work before any model process holds nothing past the deadline and can no longer start one', async t => {
+  const { stateDir, context } = await folder(t);
+  // A conversation read that never answers.
+  let hang = true;
+  const reading = reviewer(stateDir, async () => allow, { timeoutMs: 80, concurrency: 1,
+    sources: { subject: () => ({}), conversation: () => hang ? new Promise(() => {}) : Promise.resolve([]) } });
+  const first = await reading.instance.review(request(context));
+  assert.deepEqual([first.review, (first as { reason?: string }).reason], ['failed', '검토 모델이 30초 안에 답하지 않아 검토 없이 허용했습니다.']);
+  assert.equal(reading.instance.inFlight(), false, 'nothing is still running for it');
+  hang = false;
+  assert.equal((await reading.instance.review(request(context))).review, 'allowed', 'the next review gets the turn');
+  // A conversation read that answers only after the deadline: no model starts for it then.
+  let answer!: () => void;
+  const slow = reviewer(stateDir, async () => allow, { timeoutMs: 80,
+    sources: { subject: () => ({}), conversation: () => new Promise(resolve => { answer = () => resolve([]); }) } });
+  assert.equal((await slow.instance.review(request(context))).review, 'failed');
+  answer(); await tick(20);
+  assert.deepEqual([slow.calls.length, slow.instance.inFlight()], [0, false]);
+  // A gate before the model process that does not answer in time refuses, keeps no turn, and never lets it start.
+  let release!: () => void, checks = 0;
+  const gated = reviewer(stateDir, async () => allow, { timeoutMs: 80, concurrency: 1, gate: () => ++checks === 2 ? new Promise<void>(resolve => { release = resolve; }) : Promise.resolve() });
+  await assert.rejects(gated.instance.review(request(context)), /실행 환경 확인이 시간 안에 끝나지 않아/);
+  assert.equal(gated.instance.inFlight(), false);
+  release(); await tick(20);
+  assert.deepEqual([gated.calls.length, gated.spawned.length], [1, 0], 'its model process never starts');
+  assert.equal((await gated.instance.review(request(context))).review, 'allowed');
+});
+
+test('the dispatch-time check finds a script changed, relinked or grown past 16 MiB since its review', async t => {
+  const { stateDir, root } = await folder(t);
+  const input = { command: 'node', args: ['deploy.mjs'], cwd: root };
+  await writeFile(join(root, 'deploy.mjs'), 'console.log("a")\n');
+  const reviewed = (await scriptExcerpt(input, root, []))!.binding!;
+  const check = await reviewedScript(input, root, stateDir, reviewed);
+  assert.equal(check(), undefined);
+  await writeFile(join(root, 'deploy.mjs'), 'console.log("b")\n');
+  assert.equal(check(), 'changed');
+  await writeFile(join(root, 'deploy.mjs'), 'console.log("a")\n');
+  assert.equal(check(), undefined);
+  truncateSync(join(root, 'deploy.mjs'), 16 * 1024 * 1024 + 1);
+  assert.equal(check(), 'too-large');
+  assert.equal((await scriptExcerpt(input, root, []))!.binding!.sha256, null, 'a review never hashes more than 16 MiB');
+});
+
 test('a token given as the script path is scrubbed, read failure included', async t => {
   const { stateDir, context } = await folder(t);
   const token = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789';
@@ -245,12 +291,12 @@ test('a script swapped between its check and its opening is never read', async t
   await writeFile(join(root, 'other.mjs'), `console.log(${JSON.stringify(canary)})\n`);
   // Replaced by a link to a credential file: the link is not followed.
   await writeFile(join(root, 'deploy.mjs'), 'console.log("deploy")\n');
-  const linked = await scriptExcerpt({ command: 'node', args: ['deploy.mjs'] }, root, denied, { beforeOpen: async real => { await unlink(real); await symlink(join(root, '.env'), real); } });
+  const linked = await scriptExcerpt({ command: 'node', args: ['deploy.mjs'] }, root, denied, { beforeOpen: real => { unlinkSync(real); symlinkSync(join(root, '.env'), real); } });
   assert.equal(linked?.text, undefined); assert.equal(linked?.binding?.sha256, null);
   // Replaced by another file: the file opened is not the one checked.
   await rm(join(root, 'deploy.mjs'), { force: true });
   await writeFile(join(root, 'deploy.mjs'), 'console.log("deploy")\n');
-  const swapped = await scriptExcerpt({ command: 'node', args: ['deploy.mjs'] }, root, denied, { beforeOpen: async real => { await rename(join(root, 'other.mjs'), real); } });
+  const swapped = await scriptExcerpt({ command: 'node', args: ['deploy.mjs'] }, root, denied, { beforeOpen: real => { renameSync(join(root, 'other.mjs'), real); } });
   assert.deepEqual(swapped, { path: 'deploy.mjs', omitted: 'changed while it was checked; not read', binding: { path: join(root, 'deploy.mjs'), sha256: null } });
   assert.ok(!JSON.stringify([linked, swapped]).includes(canary));
 });

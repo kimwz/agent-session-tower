@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
-import { constants, type Stats } from 'node:fs';
-import { lstat, open, realpath } from 'node:fs/promises';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync, type Stats } from 'node:fs';
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { AutoPromptModelRequest } from '../auto-prompt/native.js';
 import { resolveModel } from '../models/settings.js';
@@ -202,52 +201,67 @@ function scriptCandidate(input: Pick<SecretRunInput, 'command' | 'args'>): strin
 
 const sameFile = (a: Pick<Stats, 'dev' | 'ino'>, b: Pick<Stats, 'dev' | 'ino'>) => a.dev === b.dev && a.ino === b.ino;
 
+/** A larger script cannot be bound to what was reviewed: a reviewed run of it is refused. */
+const SCRIPT_HASH_LIMIT = 16 * 1024 * 1024;
+const TOO_LARGE = 'larger than 16 MiB; not read';
+
 /**
  * The script a run executes, when it lies inside the project: its first 16 KB, and a hash of all of it that binds the
  * run to what was reviewed. Credential files and Tower's state are named but never read; so is a file that is swapped
  * while it is checked (it is opened without following a link and must be the very file checked, still at its path).
- * `hooks` is for tests.
+ * Synchronous, so the broker can check the binding again inside the turn that starts the consumer. `hooks` is for tests.
  */
-export async function scriptExcerpt(input: Pick<SecretRunInput, 'command' | 'args' | 'cwd'>, root: string, denied: readonly string[], hooks: { beforeOpen?(real: string): Promise<void> } = {}): Promise<SecretScriptExcerpt | undefined> {
+export function scriptExcerpt(input: Pick<SecretRunInput, 'command' | 'args' | 'cwd'>, root: string, denied: readonly string[], hooks: { beforeOpen?(real: string): void } = {}): SecretScriptExcerpt | undefined {
   const candidate = scriptCandidate(input);
   if (!candidate) return undefined;
   let identity = resolve(input.cwd ?? root, candidate);
-  let file: Awaited<ReturnType<typeof open>> | undefined;
+  let file: number | undefined;
   try {
-    const top = await realpath(root);
-    const path = resolve(await realpath(input.cwd ?? root), candidate);
-    const real = await realpath(path);
+    const top = realpathSync(root);
+    const path = resolve(realpathSync(input.cwd ?? root), candidate);
+    const real = realpathSync(path);
     identity = real;
     const nested = relative(top, real);
     if (!nested || nested === '..' || nested.startsWith(`..${sep}`) || isAbsolute(nested)) return undefined;
     const notRead = (omitted: string): SecretScriptExcerpt => ({ path: candidate, omitted, binding: { path: real, sha256: null } });
     if (isDenied(path, denied) || isDenied(real, denied)) return notRead('credential file or Tower state; not read');
-    const checked = await lstat(real);
+    const checked = lstatSync(real);
     if (!checked.isFile()) return undefined;
-    await hooks.beforeOpen?.(real);
-    file = await open(real, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
-    const opened = await file.stat();
-    if (!opened.isFile() || !sameFile(opened, checked) || await realpath(path) !== real || !sameFile(await lstat(real), opened)) return notRead('changed while it was checked; not read');
+    hooks.beforeOpen?.(real);
+    file = openSync(real, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    const opened = fstatSync(file);
+    if (!opened.isFile() || !sameFile(opened, checked) || realpathSync(path) !== real || !sameFile(lstatSync(real), opened)) return notRead('changed while it was checked; not read');
+    if (opened.size > SCRIPT_HASH_LIMIT) return notRead(TOO_LARGE);
     const hash = createHash('sha256'); const head: Buffer[] = []; const chunk = Buffer.alloc(64 * 1024);
     let position = 0, kept = 0;
     for (;;) {
-      const { bytesRead } = await file.read(chunk, 0, chunk.length, position);
+      const bytesRead = readSync(file, chunk, 0, chunk.length, position);
       if (!bytesRead) break;
+      position += bytesRead;
+      if (position > SCRIPT_HASH_LIMIT) return notRead(TOO_LARGE);
       hash.update(chunk.subarray(0, bytesRead));
       if (kept < SCRIPT_BYTES) { const take = Math.min(SCRIPT_BYTES - kept, bytesRead); head.push(Buffer.from(chunk.subarray(0, take))); kept += take; }
-      position += bytesRead;
     }
     const binding = { path: real, sha256: hash.digest('hex') };
     const text = new TextDecoder('utf-8').decode(Buffer.concat(head));
     if (text.includes('\0')) return { path: candidate, omitted: 'not text', binding };
     return { path: candidate, text, ...(position > SCRIPT_BYTES ? { truncated: true } : {}), binding };
   } catch { return { path: candidate, omitted: 'could not be read', binding: { path: identity, sha256: null } }; }
-  finally { await file?.close(); }
+  finally { if (file !== undefined) closeSync(file); }
 }
 
-/** The file a run would execute now, as `scriptExcerpt` binds it; compared with the review's right before the run starts. */
-export async function scriptBinding(input: Pick<SecretRunInput, 'command' | 'args' | 'cwd'>, root: string, stateDir: string): Promise<SecretScriptBinding | null> {
-  return (await scriptExcerpt(input, root, await deniedPaths(stateDir)))?.binding ?? null;
+/**
+ * A synchronous check that the file a run executes is still the one its review bound (`reviewed`): undefined when it
+ * is, otherwise why not. Built once (it reads Tower's denied places), then called at each point before the run starts.
+ */
+export async function reviewedScript(input: Pick<SecretRunInput, 'command' | 'args' | 'cwd'>, root: string, stateDir: string, reviewed: SecretScriptBinding | null): Promise<() => 'changed' | 'too-large' | undefined> {
+  const denied = await deniedPaths(stateDir);
+  return () => {
+    const now = scriptExcerpt(input, root, denied);
+    if (now?.omitted === TOO_LARGE) return 'too-large';
+    const binding = now?.binding ?? null;
+    return binding?.path === reviewed?.path && binding?.sha256 === reviewed?.sha256 ? undefined : 'changed';
+  };
 }
 
 /** The model's answer as a review: a block stands only with a reason and evidence found in its input. */
@@ -307,8 +321,8 @@ export interface SecretUseReviewerOptions {
 }
 
 /**
- * Reviews secret uses two at a time. One deadline covers the wait for a turn, the effects gate and the model's answer;
- * a model run stopped at the deadline keeps its turn, and counts as in flight, until its process has ended.
+ * Reviews secret uses two at a time. One deadline covers the wait for a turn, the effects gate, gathering the input and
+ * the model's answer; a model process stopped at the deadline keeps its turn, and counts as in flight, until it has ended.
  */
 export class SecretUseReviewer {
   private active = 0;
@@ -360,16 +374,25 @@ export class SecretUseReviewer {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const expired = new Promise<'expired'>(resolve => { timer = setTimeout(() => { controller.abort(); resolve('expired'); }, Math.max(0, deadline - Date.now())); });
     try {
+      const unanswered = () => new TowerError('unavailable', '실행 환경 확인이 시간 안에 끝나지 않아 시크릿을 사용하지 않았습니다.');
       if (gate) {
         // A hold, or a gate that does not answer in time, refuses the use: never a failed review that allows it.
         const checked = await Promise.race([gate().then(() => ({ open: true as const }), (error: unknown) => ({ error })), expired]);
-        if (checked === 'expired') throw new TowerError('unavailable', '실행 환경 확인이 시간 안에 끝나지 않아 시크릿을 사용하지 않았습니다.');
+        if (checked === 'expired') throw unanswered();
         if ('error' in checked) throw checked.error;
       }
       const refusals = new WeakSet<object>();
+      // `spawned`: the native model process is about to start, so the turn is kept until it has ended. `gating`: the gate
+      // before it is being checked; one that does not answer by the deadline refuses the use.
+      let spawned = false, gating = false;
       const beforeSpawn = async () => {
+        gating = true;
         try { await gate?.(); }
         catch (error) { const refusal = error instanceof Error ? error : new Error(String(error)); refusals.add(refusal); throw refusal; }
+        finally { gating = false; }
+        // Answered at the deadline already: no model process starts for this review any more.
+        if (controller.signal.aborted || Date.now() >= deadline) throw new Error('Review deadline passed.');
+        spawned = true;
       };
       // Undefined until the input is gathered; then the file the run executes, as the model is shown it.
       let script: SecretScriptBinding | null | undefined;
@@ -386,8 +409,12 @@ export class SecretUseReviewer {
       })().then(review => ({ review }), (error: unknown) => ({ error }));
       const late: SecretReview = { review: 'failed', reason: '검토 모델이 30초 안에 답하지 않아 검토 없이 허용했습니다.' };
       const settled = await Promise.race([ending, expired]);
-      // Answered at the deadline while the model run is still being stopped: its turn is kept until that ends.
-      if (settled === 'expired') return { review: bound(late), ending };
+      if (settled === 'expired') {
+        if (gating) throw unanswered();
+        // A model process still being stopped keeps the turn until it has ended; work before any process (reading the
+        // conversation, the gate) holds nothing past the deadline, and can no longer start one.
+        return { review: bound(late), ...(spawned ? { ending } : {}) };
+      }
       if ('review' in settled) return { review: bound(settled.review) };
       if (settled.error instanceof Error && refusals.has(settled.error)) throw settled.error;
       if (Date.now() >= deadline) return { review: bound(late) };

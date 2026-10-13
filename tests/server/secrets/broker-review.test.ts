@@ -274,3 +274,29 @@ test('every use refused in the last hour is reported, not only the latest few', 
   t.after(() => runtime.close());
   assert.deepEqual(runtime.blocks().map(block => block.key.split(':')[1]), Array.from({ length: 25 }, (_, index) => `many-${index}`));
 });
+
+test('a hold or a script swap while the run waits for its dispatch turn is caught inside that turn', async t => {
+  const f = await fixture(t);
+  const write = (name: string) => `require('node:fs').writeFileSync(${JSON.stringify(f.marker)}, ${JSON.stringify(name)})\n`;
+  await writeFile(join(f.root, 'deploy.js'), write('reviewed'));
+  const reviewer = new SecretUseReviewer({ stateDir: f.stateDir, resolve: async () => ({ provider: 'claude' }), sources: { subject: () => ({}), conversation: async () => [] },
+    model: async () => ({ decision: 'allow', reason: '배포', evidence: '' }) });
+  let ready = true, effectsCalls = 0;
+  // The last asynchronous gate before dispatch is where the wait for the dispatch turn begins: the swap lands after it.
+  const effects = async () => { if (++effectsCalls === 2) await writeFile(join(f.root, 'deploy.js'), write('swapped')); };
+  const broker = new SecretBroker({ stateDir: f.stateDir, service: f.service, reviewer, effects, effectsReady: () => ready });
+  const run = (operationId: string) => broker.run(f.context, { operationId, command: process.execPath, args: ['deploy.js'], cwd: f.root, env: { TOKEN: f.secret.reference } });
+  const swapped = await run('queued-swap');
+  assert.match(swapped.stderr, /검토하는 동안 실행할 스크립트가 바뀌어 실행하지 않았습니다/);
+  assert.equal(await exists(f.marker), false);
+  // Storage held by then: the synchronous check inside the dispatch turn refuses.
+  ready = false; effectsCalls = 10;
+  const held = await run('queued-hold');
+  assert.deepEqual([held.exitCode, held.stderr], [null, HELD]);
+  assert.equal(await exists(f.marker), false);
+  await assert.rejects(broker.fingerprint(f.context, f.secret.reference), (error: Error) => error.message === HELD);
+  assert.deepEqual(f.service.usage({ sessionId: f.context.sessionId }), [], 'nothing was delivered');
+  // The owner's sessions do not depend on it.
+  const owner = new SecretBroker({ stateDir: f.stateDir, service: f.service, reviewer, effects, effectsReady: () => false });
+  assert.equal((await owner.run({ ...f.context, subject: 'owner' }, { operationId: 'owner-queued', command: process.execPath, args: ['deploy.js'], cwd: f.root })).exitCode, 0);
+});
