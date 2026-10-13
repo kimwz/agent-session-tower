@@ -138,7 +138,7 @@ test('viewing a joined computer’s session never starts a task there, and asks 
 
 test('nothing new reaches an execution worker that predates per-secret sharing', async () => {
   const old = worker(({ args }) => ({ status: { initialized: true, locked: args[0] === 'lock' }, projects: [], groups: [], secrets: [{ id: 'old' }], rules: [] }), false);
-  for (const action of ['sharing', 'create', 'session-connect', 'session-disconnect', 'session-reallow', 'update', 'remove', 'trust', 'untrust', 'password', 'import', 'initialize', 'preview']) {
+  for (const action of ['sharing', 'create', 'session-connect', 'session-disconnect', 'session-reallow', 'remove', 'trust', 'untrust', 'password', 'import', 'initialize', 'preview', 'view-unlock', 'value', 'value-update', 'tower-status', 'tower-wrap', 'tower-prune']) {
     await assert.rejects(ownerSecretControl(undefined, old, action, { sessionId: 'codex:local', secretIds: ['x'], name: 'x', kind: 'scalar', value: 'v' }), (error: Error & { code?: string; kind?: string }) => error.code === WORKER_UPDATE_PENDING && error.kind === 'unavailable');
   }
   assert.equal(old.calls.length, 0);
@@ -152,6 +152,19 @@ test('nothing new reaches an execution worker that predates per-secret sharing',
   assert.deepEqual(old.calls.slice(2).map(call => call.args), [['overview', {}], ['overview', {}]]);
   const silent = worker(() => { throw new Error('fixture overview failed'); }, false);
   await assert.rejects(ownerSecretControl(undefined, silent, 'settings', {}), (error: Error & { code?: string }) => error.code === WORKER_UPDATE_PENDING);
+});
+
+test('value viewing reaches only a worker that serves it; one that serves sharing without it is not asked', async () => {
+  const calls: Call[] = [];
+  const sharing = { supports: (capability: string) => capability !== 'secretValueView', secretCall: async (operation: string, args: unknown[] = []) => { calls.push({ operation, args }); return { status: { initialized: true, locked: true } }; } };
+  for (const action of ['view-unlock', 'value', 'value-update', 'tower-status', 'tower-wrap', 'tower-prune']) {
+    await assert.rejects(ownerSecretControl(undefined, sharing, action, { password: 'fixture-password-1234', credentialId: 'a'.repeat(64) }), (error: Error & { code?: string }) => error.code === WORKER_UPDATE_PENDING, action);
+  }
+  assert.equal(calls.length, 0);
+  await ownerSecretControl(undefined, sharing, 'lock', {}); assert.deepEqual(calls.map(call => call.args[0]), ['lock']);
+  const current = worker(() => ({ generation: 'fixture-generation' }));
+  assert.deepEqual(await ownerSecretControl(undefined, current, 'view-unlock', { password: 'fixture-password-1234', credentialId: 'a'.repeat(64) }), { generation: 'fixture-generation' });
+  assert.deepEqual(current.calls.map(call => call.args), [['view-unlock', { password: 'fixture-password-1234', credentialId: 'a'.repeat(64) }]]);
 });
 
 test('a relay poll passes on only the features this worker knows, and a joined computer answers a view only with a new worker', async () => {

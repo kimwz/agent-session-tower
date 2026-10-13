@@ -30,6 +30,7 @@ import { APP_VERSION, HEALTH_APPLICATION_ID, REQUEST_TOKEN_HEADER } from '../../
 import { assertWorkspace, listWorkspaceTree, readWorkspaceFile, saveWorkspaceFile, createWorkspaceDirectory, retentionWorkspacePath, openWorkspaceMedia, MAX_WORKSPACE_FILE_BYTES } from '../workspace-files.js';
 import { WorkspaceTerminals, type WorkspaceTerminalBackend } from '../workspace-terminals.js';
 import { sessionKey, type AuthStore } from '../auth/store.js';
+import { VaultPassword, type Viewer } from '../auth/vault-password.js';
 import { ownerIdentity, sessionCookie, setSessionCookie } from './auth.js';
 import type { AuthStatus } from '../../shared/auth.js';
 import type { SlackPublicStatus } from '../../shared/slack.js';
@@ -167,6 +168,8 @@ export interface HttpOptions {
 }
 /** What the page where voice is on sends while it listens and plays (turning voice on counts as an ordinary change). */
 const VOICE_REPORT = /^\/api\/master\/voice\/(presence|token|usage|request|activity|finished|played|progress|off)$/;
+/** Refusals of the secret routes answered with their own `code`, which the page acts on. */
+const SECRET_CODES = new Set(['worker-update-pending', 'needs-recovery', 'view-locked', 'account-required', 'login-required', 'conflict']);
 /** Suggestions follow the owner's typing; they change nothing, so they have their own budget apart from changes. */
 const SUGGESTION_PATH = '/api/auto-prompt-suggestions';
 /** Where a page changes which sessions its event stream holds; it only reads, so it costs none of the change budget. */
@@ -188,6 +191,8 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
 export function createMonitorServer({ attachmentStores, attachmentUploads, port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, storageRollback, storageWebHealth, forceRunnerUpdate, service, notifications, decisions, master, backup, localMcp }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
+  // The Tower password's part in the vault: value viewing of each sign-in, and unlock, lock and credential changes in one turn.
+  const vault = new VaultPassword(auth, backend.secrets && ((action, input) => backend.secrets!(action, input)));
   const unsubscribeAuth = auth?.onRevoke(id => {
     for (const close of streams.get(id) || []) close();
     streams.delete(id);
@@ -414,7 +419,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         const answer = await towerUpdate(body.version as string | undefined);
         return json(res, answer.status, answer.body);
       }
-      const secretAction = path.match(/^\/api\/secrets\/(settings|session|session-connect|session-disconnect|session-reallow|sharing|initialize|unlock|lock|password|create|update|remove|trust|untrust|preview|import)$/);
+      const secretAction = path.match(/^\/api\/secrets\/(settings|session|session-connect|session-disconnect|session-reallow|sharing|initialize|unlock|lock|password|create|remove|trust|untrust|preview|import|view-unlock|value|value-update|view-lock)$/);
       const secretRead = secretAction && ['settings', 'session'].includes(secretAction[1]);
       if (secretAction && ((secretRead && req.method === 'GET') || (!secretRead && req.method === 'POST'))) {
         // Only the owner's own page: a request naming the master, a local agent or a run is refused, whether or not it proves it.
@@ -425,10 +430,20 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         if (!backend.secrets) return json(res, 503, { error: '시크릿 보관함을 사용할 수 없습니다.' });
         const input = req.method === 'GET' ? Object.fromEntries(url.searchParams) : await readJson(req, 3 * 1024 * 1024);
         if (!input || typeof input !== 'object' || Array.isArray(input)) return json(res, 400, { error: '시크릿 입력이 올바르지 않습니다.' });
-        try { return json(res, 200, await backend.secrets(secretAction[1], input)); }
-        catch (error) {
-          // An older execution worker was not asked; the page shows that the new one is pending.
-          if ((error as { code?: unknown }).code === 'worker-update-pending') return json(res, 503, { error: (error as Error).message, code: 'worker-update-pending' });
+        const viewer: Viewer = { token: sessionId, ip: identity.ip, local: identity.local };
+        try {
+          const action = secretAction[1]; let answer: unknown;
+          // Values go only to a sign-in that unlocked value viewing; like every answer here, never cached (`no-store`).
+          if (action === 'value' || action === 'value-update') answer = await vault.value(viewer, action, input);
+          else if (action === 'view-unlock') { viewer.token = await vault.viewUnlock(viewer, input, cookie => setSessionCookie(req, res, cookie, secureOrigin)); answer = await backend.secrets('settings', {}); }
+          else if (action === 'view-lock') { vault.viewLock(viewer); answer = await backend.secrets('settings', {}); }
+          else if (action === 'unlock' || action === 'lock') answer = await vault[action](input);
+          else answer = await backend.secrets(action, input);
+          return json(res, 200, await vault.view(answer, viewer));
+        } catch (error) {
+          // A refusal the page acts on (an older worker, value viewing) carries its code; an older worker was not asked.
+          const code = (error as { code?: unknown }).code;
+          if (typeof code === 'string' && SECRET_CODES.has(code)) return json(res, errorStatus(error), { error: (error as Error).message, code });
           throw error;
         }
       }
@@ -557,10 +572,12 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       if (adminRoute && !auth) return json(res, 503, { error: '계정 관리를 사용할 수 없습니다.' });
       if (req.method === 'GET' && path === '/api/auth/overview') return json(res, 200, auth!.overview());
       if (req.method === 'POST' && path === '/api/auth/credentials') {
+        // The Tower password also opens the vault: a request naming the master, a local agent or a run is refused.
+        if (req.headers['x-tower-master'] !== undefined || req.headers['x-tower-agent'] !== undefined || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()] !== undefined) return json(res, 403, { error: '계정 비밀번호는 소유자의 전용 화면에서만 바꿀 수 있습니다.' });
         const body = await readJson(req, 4096);
         if (typeof body.username !== 'string' || typeof body.password !== 'string' || Object.keys(body).some(key => key !== 'username' && key !== 'password')) return json(res, 400, { error: '계정 요청 형식이 올바르지 않습니다.' });
-        await auth!.setCredentials(body.username, body.password);
-        return json(res, 200, auth!.overview());
+        const outcome = await vault.changeCredentials(body.username, body.password);
+        return json(res, 200, { ...auth!.overview(), vault: outcome });
       }
       if (req.method === 'POST' && path === '/api/auth/unblock') {
         const body = await readJson(req, 4096);
@@ -942,6 +959,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
   const dispose = () => {
     workspaceTerminals.dispose();
     unsubscribeAuth?.();
+    vault.close();
     for (const active of streams.values()) for (const close of active) close();
     streams.clear();
     unsubscribe();

@@ -526,6 +526,7 @@ export class SecretRuntime {
       }
     } else {
       let current = false;
+      // best-effort: a wrapper that does not unwrap the open key is made again below.
       if (service.vault.hasTower(credentialId)) { try { await service.towerUnlock(password, credentialId); current = true; } catch { /* Made again below. */ } }
       if (!current) await service.towerWrap(password, credentialId);
     }

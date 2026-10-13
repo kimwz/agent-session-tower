@@ -80,7 +80,7 @@ Storage diagnostics/recovery
 - POST /api/storage/reconcile {barrierId, scopes:[string], by, evidence} — reconcile named recovery scopes with owner evidence.
 
 Account and Tower (this computer only)
-- GET /api/auth/overview · POST /api/auth/credentials {username, password} · POST /api/auth/unblock {ip}
+- GET /api/auth/overview · POST /api/auth/unblock {ip} (the login password, which also opens the secret vault, is changed only on the owner's own page)
 - POST /api/tower/update {version?} — background-service installs. POST /api/runner/force-update {} — update the execution worker now (running turns wrap up first).
 `.trim();
 
