@@ -29,19 +29,19 @@ if (action === 'prepare') {
     npm_config_cache: join(root, 'npm'), TOWER_AUTO_UPDATE: '0', TSX_DISABLE_CACHE: '1', NODE_DISABLE_COMPILE_CACHE: '1',
     NODE_OPTIONS: '--max-old-space-size=4096', SQLITE_VALIDATION_CI: '1', VALIDATION_ROOT: root,
     TOWER_SQLITE_OLD122_ROOT: join(root, 'old122'), TOWER_SQLITE_OLD124_ROOT: join(root, 'old124'),
-    SQLITE_RETENTION_LARGE: lane.large ? '1' : '0', TZ: 'Asia/Seoul' };
+    SQLITE_RETENTION_LARGE: lane.large ? '1' : '0' };
   const setup = { admitted: Date.now(), env, sha: process.env.GITHUB_SHA, id };
   setup.input = testedInput('.', false);
   const pathNode = spawnSync('node', ['-p', 'process.versions.node'], { env, encoding: 'utf8' });
   assert.equal(pathNode.status, 0); assert.equal(pathNode.stdout.trim(), lane.node, 'child PATH must use the lane Node');
   await run('npm', ['ci', '--no-audit', '--no-fund'], env);
   if (process.platform === 'darwin') createRequire(resolve('package.json'))('node-pty');
-  if (lane.os === 'ubuntu-latest') await run(process.execPath, ['-e', "require('fs').rmSync('node_modules/node-pty',{recursive:true,force:true})"], env);
   if (id !== 'checks') {
     await run(process.execPath, ['scripts/sqlite-old124-capture.mjs', '1.122.0'], env);
     await run(process.execPath, ['scripts/sqlite-old124-capture.mjs', '1.124.0'], env);
   }
   if (lane.sea) await run('npm', ['run', 'build:executable'], env);
+  if (lane.os === 'ubuntu-latest') await run(process.execPath, ['-e', "require('fs').rmSync('node_modules/node-pty',{recursive:true,force:true})"], env);
   setup.built = { lockSHA256: createHash('sha256').update(readFileSync('package-lock.json')).digest('hex'),
     storageBundleSHA256: createHash('sha256').update(readFileSync('dist/server/storage/generated/thread-bundle.json')).digest('hex'),
     nodeSHA256: createHash('sha256').update(readFileSync(process.execPath)).digest('hex'), installCommand: 'npm ci --no-audit --no-fund', installExit: 0 };
@@ -71,8 +71,10 @@ if (action === 'prepare') {
     }
     receipt.exit = 0;
   } finally {
-    if (setup.input) assert.deepEqual(testedInput(), setup.input, 'source changed during local tests');
+    try { if (setup.input) assert.deepEqual(testedInput(), setup.input, 'source changed during local tests'); }
+    catch (error) { receipt.exit = 1; receipt.sourceError = error.message; }
     receipt.finished = Date.now(); writeFileSync(join(jobDir, 'receipt.json'), JSON.stringify(receipt, null, 2));
+    assert.equal(receipt.exit, 0, receipt.sourceError ?? 'test lane failed');
   }
 } else if (action === 'checks') {
   const setup = JSON.parse(readFileSync(meta, 'utf8')), { env } = setup;
@@ -84,7 +86,7 @@ if (action === 'prepare') {
     await run('git', ['fetch', '--no-tags', 'origin', `refs/tags/v${version}:refs/tags/v${version}`], env);
     await run('git', ['diff', '--exit-code', `v${version}`, '--', 'CHANGELOG.md', 'package.json', 'package-lock.json', 'shared/app-identity.ts'], env);
   } else if (tag.status === 2) {
-    await run(process.execPath, ['scripts/release.mjs', 'prepare'], env);
+    await run(process.execPath, ['scripts/release.mjs', 'prepare'], { ...env, TZ: 'Asia/Seoul' });
     await run('git', ['diff', '--exit-code', '--', 'shared/app-identity.ts'], env);
   } else throw new Error('Cannot determine release tag presence');
   const receipt = { id, sha: setup.sha, input: setup.input, admitted: setup.admitted, ready: setup.ready, started: Date.now(), finished: Date.now(), exit: 1 };

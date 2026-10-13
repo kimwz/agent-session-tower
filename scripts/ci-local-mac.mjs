@@ -38,10 +38,13 @@ if (action === 'prepare') {
   const batch = JSON.parse(readFileSync(manifestPath, 'utf8'));
   assert.equal(batch.prepareExit, 0);
   assert.deepEqual(testedInput(), batch.input, 'parent source changed since prepare');
+  const testStarted = Date.now();
   const results = await Promise.allSettled(batch.lanes.map(lane => run(lane.nodePath, ['scripts/ci-run.mjs', 'test', lane.id], lane.cwd,
     { PATH: `${resolve(lane.nodePath, '..')}:${process.env.PATH}`, GITHUB_SHA: batch.input.commit, RUNNER_TEMP: join(record, 'jobs') }, join(record, `${lane.id}-test.log`))));
   for (const result of results) if (result.status === 'rejected') console.error(result.reason.message);
+  assert.ok(results.every(r => r.status === 'fulfilled'), 'a local test process failed');
   const receipts = batch.lanes.map(lane => JSON.parse(readFileSync(join(record, 'jobs', `ci-${lane.id}`, 'receipt.json'), 'utf8')));
+  assert.ok(receipts.every(r => r.started >= testStarted && r.started >= batch.ready), 'stale receipt from an earlier batch');
   const timing = validateReceipts(batch.lanes, receipts, batch.input.commit);
   assert.ok(receipts.every(r => r.input.tree === batch.input.tree));
   assert.deepEqual(testedInput(), batch.input, 'parent source changed during testing');
