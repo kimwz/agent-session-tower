@@ -18,6 +18,7 @@ import { AccountSection } from '../auth/AccountPanel';
 import { GeneralSettings } from './GeneralSettings';
 import { BackupPanel } from '../backup/BackupPanel';
 import { SecretsPanel } from '../secrets/SecretsPanel';
+import type { SecretCanvas } from '../secrets/secrets-client';
 import { ModelsPanel } from '../models/ModelsPanel';
 import { SettingsFrameContext, type SettingsFrame, type SettingsGuard } from './SettingsPane';
 import { markText, sectionMark, type SettingsAttention, type SettingsSection } from './settings-sections';
@@ -29,6 +30,8 @@ export interface SettingsContext {
   providers: ProviderHealth[];
   /** Folders of this computer, with their names. */
   projects: [string, string][];
+  /** Canvas folders and computer names of every computer, for secret sharing. */
+  secretCanvas: SecretCanvas;
   computers: TriggerComputer[];
   targets: TriggerTargets;
   controlledBy: string[];
@@ -37,7 +40,7 @@ export interface SettingsContext {
   onOpenSession: (id: string) => void;
 }
 
-export interface SettingsPlace { section: SettingsSection; cwd?: string; remoteTab?: RemoteTab; list?: boolean }
+export interface SettingsPlace { section: SettingsSection; cwd?: string; remoteTab?: RemoteTab; list?: boolean; secretId?: string }
 
 const ICONS: Record<SettingsSection, LucideIcon> = { general: SlidersHorizontal, models: Cpu, triggers: Zap, skills: Sparkles, permissions: ShieldCheck, decisions: BrainCircuit, remote: Network, notifications: Bell, backup: ArchiveRestore, secrets: KeyRound, account: UserRoundCog };
 const GROUPS: { caption?: string; sections: SettingsSection[] }[] = [
@@ -116,7 +119,7 @@ export function SettingsDialog({ place, sections, attention, context, onPlace, o
       case 'decisions': return <DecisionPanel token={context.token} />;
       case 'remote': return <RemotePanel token={context.token} projects={context.projects} controlledBy={context.controlledBy} initialTab={place.remoteTab} />;
       case 'notifications': return <NotificationPanel token={context.token} />;
-      case 'secrets': return <SecretsPanel token={context.token} computers={context.computers} />;
+      case 'secrets': return <SecretsPanel token={context.token} computers={context.computers} canvas={context.secretCanvas} focus={place.section === 'secrets' ? place.secretId : undefined} />;
       case 'backup': return <BackupPanel token={context.token} />;
       case 'account': return <AccountSection />;
     }

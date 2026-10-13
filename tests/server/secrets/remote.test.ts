@@ -203,6 +203,82 @@ test('opaque relay pumps only approved nodes and concurrent ticks never duplicat
   }
 });
 
+test('a node sends reads only to a source its relay confirmed within 30 s, and the source answers them without a claim', { timeout: 5000 }, async () => {
+  let clock = Date.now(); const operations: string[] = [];
+  const f = fixtures({ handle: (_context, request) => { operations.push(request.operation); return [{ id: 'listed', name: 'listed' }]; } });
+  const node = new RemoteSecretBroker({ device: () => f.b.device, deviceKeys: f.b.keys, peers: () => f.bPeers, begin: () => true, handle: () => undefined, timeoutMs: 1000, now: () => clock });
+  const server = createServer();
+  // The node's link handler: the relay's header becomes the poll's features.
+  server.on('stream', (stream, headers) => {
+    if (headers[':method'] === 'GET') {
+      const header = headers['x-tower-secret-features'];
+      const features = typeof header === 'string' ? header.split(',').filter(item => item === 'available') : [];
+      stream.respond({ ':status': 200 }); stream.end(JSON.stringify({ requests: node.poll('controller-a', features) }));
+    } else {
+      const chunks: Buffer[] = [];
+      stream.on('data', chunk => { chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)); });
+      stream.on('end', () => { node.deliver('controller-a', JSON.parse(Buffer.concat(chunks).toString()).response); stream.respond({ ':status': 200 }); stream.end('{}'); });
+    }
+  });
+  await new Promise<void>(resolve => { server.listen(0, '127.0.0.1', resolve); });
+  const session = connect(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
+  let features: string[] = [];
+  const relay = new SecretRelay({ nodes: { list: () => [{ id: 'node-b', status: 'connected' }], session: () => session }, peers: () => f.aPeers, features: () => features,
+    workerAnswer: (id, request) => f.source.answer(id, request), onError: () => assert.fail('fixture relay failed') });
+  try {
+    await assert.rejects(node.request(f.a.device.id, f.ctx, 'available'), { code: 'SECRET_REMOTE_UNSUPPORTED' }, 'never sent before a confirmation');
+    assert.equal(node.declines(f.a.device.id, 'available'), false, 'a source that never polled is unreachable, not older');
+    await relay.pump(); assert.equal(node.supports(f.a.device.id, 'available'), false, 'an older relay sends no header');
+    assert.equal(node.declines(f.a.device.id, 'available'), true, 'it polled without confirming reads: an older build');
+    features = ['available']; await relay.pump(); assert.equal(node.supports(f.a.device.id, 'available'), true); assert.equal(node.declines(f.a.device.id, 'available'), false);
+    const pending = node.request(f.a.device.id, f.ctx, 'available');
+    await relay.pump();
+    assert.deepEqual(await pending, [{ id: 'listed', name: 'listed' }]);
+    assert.deepEqual(operations, ['available']); assert.equal(f.claims.size, 0, 'a read claims nothing on the source'); assert.deepEqual(f.finished, []);
+    clock += 30_001; assert.equal(node.supports(f.a.device.id, 'available'), false, 'a confirmation older than 30 s no longer counts');
+    await relay.pump(); assert.equal(node.supports(f.a.device.id, 'available'), true);
+    features = []; await relay.pump(); assert.equal(node.supports(f.a.device.id, 'available'), false, 'a relay of an older worker withdraws it');
+    assert.equal(node.declines(f.a.device.id, 'available'), true);
+    clock += 30_001; assert.equal(node.declines(f.a.device.id, 'available'), false, 'a poll older than 30 s says nothing about it any more');
+    features = ['available']; await relay.pump(); node.forget('controller-a'); assert.equal(node.supports(f.a.device.id, 'available'), false, 'the link went away');
+    assert.equal(node.declines(f.a.device.id, 'available'), false, 'nor is it older: it is gone');
+    await relay.pump(); f.bPeers.splice(0, 1, { ...f.bPeers[0]!, device: { ...f.a.device, id: randomUUID() } });
+    assert.equal(node.supports(f.a.device.id, 'available'), false, 'a source no longer trusted on that route');
+  } finally { relay.close(); node.close(); f.target.close(); f.source.close(); session.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+test('a read queued while its source confirmed reads is dropped once the source withdraws them, and never reaches an older worker', { timeout: 5000 }, async () => {
+  const f = fixtures();
+  f.target.poll('controller-a', ['available']);
+  const queued = f.target.request(f.a.device.id, f.ctx, 'available');
+  const resolve = f.target.request(f.a.device.id, f.ctx, 'resolve');
+  // The source's worker was replaced by one without reads before its relay polled again.
+  const polled = f.target.poll('controller-a', []);
+  assert.deepEqual(polled.map(request => request.operation), ['resolve'], 'the read is not handed to that relay');
+  await assert.rejects(queued, { code: 'SECRET_REMOTE_UNSUPPORTED' });
+  assert.equal(f.target.pending(), 1, 'other requests wait as before');
+  f.target.close(); await assert.rejects(resolve);
+  // The relay checks again right before its own worker would answer a read.
+  let workerCalls = 0; const errors: string[] = []; let confirms = 1;
+  const node = fixtures();
+  const server = createServer();
+  server.on('stream', (stream, headers) => {
+    const features = typeof headers['x-tower-secret-features'] === 'string' ? headers['x-tower-secret-features'].split(',') : [];
+    stream.respond({ ':status': 200 }); stream.end(JSON.stringify({ requests: node.target.poll('controller-a', features) }));
+  });
+  await new Promise<void>(resolve => { server.listen(0, '127.0.0.1', resolve); });
+  const session = connect(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
+  const relay = new SecretRelay({ nodes: { list: () => [{ id: 'node-b', status: 'connected' }], session: () => session }, peers: () => node.aPeers,
+    features: () => confirms-- > 0 ? ['available'] : [], workerAnswer: async (id, request) => { workerCalls++; return node.source.answer(id, request); }, onError: (_id, code) => { errors.push(code); } });
+  try {
+    node.target.poll('controller-a', ['available']);
+    const pending = node.target.request(node.a.device.id, node.ctx, 'available'); pending.catch(() => undefined);
+    await relay.pump();
+    assert.equal(workerCalls, 0, 'the worker no longer serves reads, so it is not asked'); assert.deepEqual(errors, ['SECRET_RELAY_UNSUPPORTED']);
+    await relay.pump(); await assert.rejects(pending, { code: 'SECRET_REMOTE_UNSUPPORTED' });
+  } finally { relay.close(); node.target.close(); node.source.close(); session.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
 test('user-selected field names cannot collide with the binary wire marker', async () => {
   const f = fixtures({ handle: () => ({ fields: { $secretBytes: 'plain-field-value' } }) });
   try {

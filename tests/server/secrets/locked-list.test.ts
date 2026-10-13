@@ -4,13 +4,10 @@ import { mkdtemp, mkdir, readFile, rm, realpath, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { SecretService } from '../../../server/secrets/service.js';
 import { SecretRuntime } from '../../../server/secrets/runtime.js';
+import { FixtureRuns, editPayload, legacyRecord, legacyRule, secretService } from '../../helpers/secrets.js';
 import { SECRET_LOCKED_UNINDEXED, SECRET_LOCKED_USE, SECRET_NO_VAULT } from '../../../server/secrets/notices.js';
-import type { SecretContext, SecretMetadata } from '../../../shared/secrets.js';
-import type { Run, Session } from '../../../shared/types.js';
-import type { Capability } from '../../../server/api/mcp.js';
-import type { SessionOrigin } from '../../../server/runs/origin.js';
+import type { SecretContext, SecretMetadata, SecretRule } from '../../../shared/secrets.js';
 import { statusOf } from '../../../shared/errors.js';
 
 const PASSWORD = 'fixture-locked-list-password';
@@ -21,55 +18,56 @@ async function fixture(t: TestContext) {
   const stateDir = join(directory, 'state'), root = join(directory, 'project'), other = join(directory, 'other');
   await Promise.all([stateDir, root, other].map(path => mkdir(path)));
   let now = Date.now(); const clock = { advance: (ms: number) => { now += ms; } };
-  const service = new SecretService({ stateDir, now: () => now }); await service.start(); await service.initialize(PASSWORD);
+  const service = await secretService(stateDir, { password: PASSWORD, now: () => now });
   const host = service.device().id;
-  const project = await service.project({ name: 'fixture', bindings: [{ hostId: host, root }] });
-  const otherProject = await service.project({ name: 'other', bindings: [{ hostId: host, root: other }] });
+  const project = { id: randomUUID(), name: 'fixture', bindings: [{ hostId: host, root }] }, otherProject = { id: randomUUID(), name: 'other', bindings: [{ hostId: host, root: other }] };
+  await editPayload(service, payload => { payload.projects.push(project, otherProject); });
   const startedAt = new Date(now).toISOString();
   const target = await service.bindRun('codex:session-a', root, startedAt);
   const context: SecretContext = { ...target, runId: 'run-a' };
-  return { now: () => now, stateDir, root, service, host, project, otherProject, target, context, startedAt, clock, restart: async () => { const next = new SecretService({ stateDir, now: () => now }); await next.start(); return next; } };
+  return { now: () => now, stateDir, root, other, service, host, project, otherProject, target, context, startedAt, clock, restart: () => secretService(stateDir, { now: () => now }) };
 }
 
-/** Every rule shape that decides discovery or operations, so locked and unlocked evaluation are held to one outcome. */
+/** Every rule shape and sharing basis that decides discovery or operations, so locked and unlocked evaluation are held to one outcome. */
 async function scenario(f: Awaited<ReturnType<typeof fixture>>) {
-  const { service, target, project, otherProject, host } = f;
-  await service.create({ name: 'GLOBAL_AUTO', kind: 'scalar', scope: 'global', value: CANARY, allProjects: true, target, activation: 'auto', operations: ['discover', 'env'] });
-  await service.create({ name: 'PROJECT_MANUAL_UNCONNECTED', kind: 'scalar', scope: 'project', projectId: project.id, value: CANARY, target, activation: 'manual' });
-  await service.create({ name: 'PROJECT_MANUAL_CONNECTED', kind: 'scalar', scope: 'project', projectId: project.id, value: CANARY, target, activation: 'manual', connect: true });
-  await service.create({ name: 'TASK_ONLY', kind: 'scalar', scope: 'task', value: CANARY, target, activation: 'manual', operations: ['discover', 'env'], connect: true });
-  await service.create({ name: 'OTHER_PROJECT', kind: 'scalar', scope: 'project', projectId: otherProject.id, value: CANARY, activation: 'auto' });
-  await service.create({ name: 'EXPIRING', kind: 'scalar', scope: 'project', projectId: project.id, value: CANARY, target, activation: 'auto', expiresAt: f.now() + 60_000 });
-  const dotenv = await service.create({ name: 'DOTENV', kind: 'env', scope: 'project', projectId: project.id, value: `A=${CANARY}\nB=${CANARY}\n`, target, activation: 'auto', operations: ['discover', 'env'] });
-  const rule = service.overview().rules.find(rule => rule.secretIds.includes(dotenv.id))!;
-  await service.setRule({ ...rule, fields: { [dotenv.id]: ['A'] } });
-  // A second rule granting only env makes env ambiguous while discover stays single.
-  const overlap = await service.create({ name: 'OVERLAP', kind: 'scalar', scope: 'project', projectId: project.id, value: CANARY, target, activation: 'auto', operations: ['discover', 'env'] });
-  await service.setRule({ groupId: overlap.groupId, secretIds: [overlap.id], hostId: host, projectId: project.id, activation: 'auto', operations: ['env'], enabled: true });
-  const disabled = await service.create({ name: 'DISABLED', kind: 'scalar', scope: 'project', projectId: project.id, value: CANARY, target, activation: 'auto' });
-  const disabledRule = service.overview().rules.find(rule => rule.secretIds.includes(disabled.id))!;
-  await service.setRule({ ...disabledRule, enabled: false });
-  const revoked = await service.create({ name: 'REVOKED', kind: 'scalar', scope: 'project', projectId: project.id, value: CANARY, target, activation: 'auto' });
-  await service.revoke(target, [revoked.id]);
-  const stale = await service.create({ name: 'STALE_GRANT', kind: 'scalar', scope: 'project', projectId: project.id, value: CANARY, target, activation: 'manual', connect: true });
-  await service.update({ id: stale.id, value: `${CANARY}-v2` });
-  // An automatic grant issued before a value change no longer matches the secret's version.
-  const autoStale = await service.create({ name: 'AUTO_STALE', kind: 'scalar', scope: 'project', projectId: project.id, value: CANARY, target, activation: 'auto' });
-  await service.list(f.context); await service.update({ id: autoStale.id, value: `${CANARY}-v2` });
-  // A grant with a deadline that passes while the vault is locked.
-  const deadline = await service.create({ name: 'DEADLINE', kind: 'scalar', scope: 'project', projectId: project.id, value: CANARY, target, activation: 'manual' });
-  const deadlineRule = service.overview().rules.find(rule => rule.secretIds.includes(deadline.id))!;
-  await service.setRule({ ...deadlineRule, maxTtlMs: 60_000 }); await service.connect(target, [deadline.id]);
+  const { service, target, project, otherProject, host, root, other } = f;
+  // Keys saved by builds before per-secret sharing keep their rules; manual rules now apply automatically.
+  const legacy = (name: string, groupId: string, extra: { kind?: 'env'; value?: string; expiresAt?: number } = {}) => legacyRecord(host, { name, groupId, value: CANARY, ...extra });
+  const keys = { global: legacy('GLOBAL_AUTO', 'legacy-global'), manual: legacy('PROJECT_MANUAL', 'legacy-project'), other: legacy('OTHER_PROJECT', 'legacy-other'), expiring: legacy('EXPIRING', 'legacy-project', { expiresAt: f.now() + 60_000 }),
+    dotenv: legacy('DOTENV', 'legacy-project', { kind: 'env', value: `A=${CANARY}\nB=${CANARY}\n` }), overlap: legacy('OVERLAP', 'legacy-project'), disabled: legacy('DISABLED', 'legacy-project'), deadline: legacy('DEADLINE', 'legacy-project') };
+  const rule = (key: ReturnType<typeof legacy>, extra: Partial<SecretRule>) => legacyRule({ groupId: key.metadata.groupId, secretIds: [key.metadata.id], hostId: host, ...extra });
+  await editPayload(service, payload => {
+    payload.groups.push({ id: 'legacy-global', name: 'Global', scope: 'global' }, { id: 'legacy-project', name: 'Project', scope: 'project', projectId: project.id }, { id: 'legacy-other', name: 'Other', scope: 'project', projectId: otherProject.id });
+    payload.secrets.push(...Object.values(keys));
+    payload.rules.push(rule(keys.global, { allProjects: true, activation: 'auto', operations: ['discover', 'env'] }), rule(keys.manual, { projectId: project.id }), rule(keys.other, { projectId: otherProject.id, activation: 'auto' }),
+      rule(keys.expiring, { projectId: project.id, activation: 'auto' }), rule(keys.dotenv, { projectId: project.id, activation: 'auto', operations: ['discover', 'env'], fields: { [keys.dotenv.metadata.id]: ['A'] } }),
+      // A second rule granting only env makes env ambiguous while discover stays single.
+      rule(keys.overlap, { projectId: project.id, activation: 'auto', operations: ['discover', 'env'] }), rule(keys.overlap, { projectId: project.id, activation: 'auto', operations: ['env'] }),
+      rule(keys.disabled, { projectId: project.id, activation: 'auto', enabled: false }),
+      // A time limit that passes while the vault is locked.
+      rule(keys.deadline, { projectId: project.id, maxTtlMs: 60_000 }));
+  });
+  await service.create({ name: 'SHARED_GLOBAL', kind: 'scalar', value: CANARY, sharing: { global: true, folders: [] } });
+  await service.create({ name: 'SHARED_FOLDER', kind: 'scalar', value: CANARY, sharing: { global: false, folders: [{ hostId: host, root }] } });
+  await service.create({ name: 'OTHER_FOLDER', kind: 'scalar', value: CANARY, sharing: { global: false, folders: [{ hostId: host, root: other }] } });
+  await service.create({ name: 'UNSHARED', kind: 'scalar', value: CANARY });
+  await service.create({ name: 'UNSHARED_CONNECTED', kind: 'scalar', value: CANARY, connect: 'session' }, target);
+  await service.create({ name: 'TEMPORARY', kind: 'env', value: `A=${CANARY}\n`, temporary: true }, target);
+  const revoked = await service.create({ name: 'REVOKED', kind: 'scalar', value: CANARY, sharing: { global: true, folders: [] } });
+  await service.disconnectSession(target, [revoked.id]);
+  // An older build put this shared key back into a rule, so its sharing waits for the owner.
+  const withheld = await service.create({ name: 'WITHHELD', kind: 'scalar', value: CANARY, sharing: { global: true, folders: [] } });
+  await editPayload(service, payload => { payload.rules.push(legacyRule({ groupId: withheld.groupId, secretIds: [withheld.id], hostId: host, allProjects: true, activation: 'auto' })); });
 }
 
 const names = (list: SecretMetadata[]) => list.map(item => item.name).sort();
 /** Tool results travel as JSON, where an undefined field and a missing one are the same. */
 const wire = (value: unknown) => JSON.parse(JSON.stringify(value));
 
-test('locked listing matches unlocked authorization, including operations, fields, grants and expiry', async t => {
+test('locked listing matches unlocked authorization, including operations, fields, sharing, connections and expiry', async t => {
   const f = await fixture(t); await scenario(f);
   const unlocked = await f.service.list(f.context);
-  assert.deepEqual(names(unlocked), ['DEADLINE', 'DOTENV', 'EXPIRING', 'GLOBAL_AUTO', 'OVERLAP', 'PROJECT_MANUAL_CONNECTED', 'TASK_ONLY']);
+  assert.deepEqual(names(unlocked), ['DEADLINE', 'DOTENV', 'EXPIRING', 'GLOBAL_AUTO', 'OVERLAP', 'PROJECT_MANUAL', 'SHARED_FOLDER', 'SHARED_GLOBAL', 'TEMPORARY', 'UNSHARED_CONNECTED']);
   assert.deepEqual(unlocked.find(item => item.name === 'OVERLAP')!.operations, ['discover']);
   assert.deepEqual(unlocked.find(item => item.name === 'DOTENV')!.fields, ['A']);
   await f.service.lock();
@@ -93,7 +91,7 @@ test('a session without a task lists only what a fresh task would, and closed ta
   await f.service.unlock(PASSWORD);
   const bound = await f.service.bindRun('codex:session-b', f.root, new Date(f.now()).toISOString());
   assert.deepEqual(wire(fresh), wire(await f.service.list({ ...bound, runId: 'run-b' })));
-  assert.deepEqual(names(fresh), ['AUTO_STALE', 'DOTENV', 'EXPIRING', 'GLOBAL_AUTO', 'OVERLAP', 'REVOKED'], 'a revocation belongs to the task it was made for');
+  assert.deepEqual(names(fresh), ['DEADLINE', 'DOTENV', 'EXPIRING', 'GLOBAL_AUTO', 'OVERLAP', 'PROJECT_MANUAL', 'REVOKED', 'SHARED_FOLDER', 'SHARED_GLOBAL'], 'connections and revocations belong to the task they were made for');
 
   await f.service.closeTask(f.target.taskId); await f.service.lock();
   assert.throws(() => f.service.lockedList(f.target.sessionId, f.root, f.startedAt, f.target)!.secrets, /Task identity denied/);
@@ -107,31 +105,24 @@ test('the plaintext index holds names but no value or password, and a foreign in
   const index = JSON.parse(text); index.vaultId = randomUUID();
   await writeFile(join(f.stateDir, 'secrets', 'index.json'), JSON.stringify(index));
   assert.equal((await f.restart()).lockedList(f.target.sessionId, f.root, f.startedAt), undefined);
+  // An index of a build before per-secret sharing hides names until the next unlock writes a current one.
+  const older = JSON.parse(text); delete older.state.format; delete older.state.policy.servedHosts;
+  await writeFile(join(f.stateDir, 'secrets', 'index.json'), JSON.stringify(older));
+  const upgraded = await f.restart(); assert.equal(upgraded.lockedList(f.target.sessionId, f.root, f.startedAt), undefined);
+  await upgraded.unlock(PASSWORD); await upgraded.lock(); assert.ok(upgraded.lockedList(f.target.sessionId, f.root, f.startedAt));
 });
 
 test('a failed index write never leaves an older index listing names, in memory or after restart', async t => {
   const f = await fixture(t); await scenario(f);
   const path = join(f.stateDir, 'secrets', 'index.json'); const previous = await readFile(path, 'utf8');
   await rm(path); await mkdir(join(path, 'blocked'), { recursive: true });
-  await f.service.revoke(f.target, f.service.overview().secrets.map(secret => secret.id));
+  await f.service.disconnectSession(f.target, (await f.service.list(f.context)).map(secret => secret.id));
   assert.deepEqual(await f.service.list(f.context), []);
   await f.service.lock();
   assert.equal(f.service.lockedList(f.target.sessionId, f.root, f.startedAt, f.target), undefined);
   await rm(path, { recursive: true }); await writeFile(path, previous);
   assert.equal((await f.restart()).lockedList(f.target.sessionId, f.root, f.startedAt, f.target), undefined, 'an index from an earlier save is not trusted');
 });
-
-class FixtureRuns {
-  readonly sessions = new Map<string, Session>(); readonly running: Run[] = [];
-  add(root: string, sessionId = `codex:${randomUUID()}`): Extract<Capability, { kind: 'secret-run' }> {
-    const runId = randomUUID(); const at = new Date().toISOString();
-    this.sessions.set(sessionId, { id: sessionId, nativeId: sessionId.slice(6), provider: 'codex', title: 'fixture', cwd: root, project: 'fixture', status: 'working', statusReason: '', createdAt: at, updatedAt: at, lastMessage: '', messageCount: 0, isSubagent: false, resumable: true });
-    this.running.push({ id: runId, sessionId, prompt: 'fixture owner task', status: 'running', createdAt: at, startedAt: at, output: '', origin: { kind: 'owner' }, towerTools: 'attached' });
-    return { kind: 'secret-run', runId, sessionId };
-  }
-  list() { return this.running; } getSession(id: string) { return this.sessions.get(id); }
-  sessionOrigin(_id: string): SessionOrigin { return { kind: 'owner', untrustedInput: false }; }
-}
 
 test('locked tools list names and turn any use into an unlock request; ineligible runs are still refused', async t => {
   const f = await fixture(t); await scenario(f);
@@ -171,12 +162,12 @@ test('without an index the locked list says names are unknown, and a vault-less 
   // The first unlock writes the index, so the next lock lists names for the same unbound run.
   await upgraded.unlock(PASSWORD); await upgraded.lock();
   assert.ok(upgraded.lockedList(f.target.sessionId, f.root, f.startedAt), 'unlocking alone writes the index');
-  await upgraded.unlock(PASSWORD); await upgraded.create({ name: 'AFTER_UPGRADE', kind: 'scalar', scope: 'global', value: CANARY, allProjects: true, target: f.target, activation: 'auto' }); await upgraded.lock();
+  await upgraded.unlock(PASSWORD); await upgraded.create({ name: 'AFTER_UPGRADE', kind: 'scalar', value: CANARY, sharing: { global: true, folders: [] } }); await upgraded.lock();
   const listed = await upgradedRuntime.tool(capability, 'secrets_list', {}) as { secrets: SecretMetadata[] };
   assert.deepEqual(names(listed.secrets), ['AFTER_UPGRADE']);
 
   const emptyState = join(f.stateDir, '..', 'empty-state'); await mkdir(emptyState);
-  const empty = new SecretService({ stateDir: emptyState }); await empty.start();
+  const empty = await secretService(emptyState);
   const emptyRuntime = new SecretRuntime({ stateDir: emptyState, service: empty, runs }); t.after(() => emptyRuntime.close());
   assert.deepEqual((await emptyRuntime.tool(capability, 'secrets_list', {}) as { secrets: unknown[] }).secrets, []);
   await assert.rejects(emptyRuntime.tool(capability, 'secrets_run', { operationId: 'no-vault', command: process.execPath, env: { KEY: 'NAME' } }), (error: Error) => statusOf(error) === 404 && error.message === SECRET_NO_VAULT);

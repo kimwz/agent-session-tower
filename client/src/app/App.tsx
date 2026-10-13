@@ -32,6 +32,7 @@ import { NewSessionDialog, type SessionDraft } from '../sessions/NewSessionDialo
 import { IssueDialog } from '../project-groups/IssueDialog';
 import { AutoPromptDialog } from '../auto-prompt/AutoPromptDialog';
 import { canvasVisibleSessions, projectGroupChoices, visiblePinnedProjectGroups } from '../project-groups/project-groups';
+import { secretFolderChoices, type SecretCanvas } from '../secrets/secrets-client';
 import { isAutoPromptShortcut, isNewSessionShortcut, isShowAllShortcut } from '../graph/canvas-shortcuts';
 import { SidebarFilters } from '../sessions/SidebarFilters';
 import { SessionRow } from '../sessions/SessionRow';
@@ -355,6 +356,8 @@ function TowerApp() {
   const workspaceFolders = useMemo(() => [...summary.folders.map(folder => folder.cwd), ...groups.map(group => group.cwd)], [summary.folders, groups]);
   // Triggers and the sharing list belong to each computer; this computer's panel reaches joined computers' triggers too.
   const localProjects = useMemo(() => projects.filter(([key]) => !nodeOf(key)), [projects]);
+  // Secret sharing picks among the folders of every computer and names each computer as the canvas does.
+  const secretCanvas = useMemo((): SecretCanvas => ({ folders: secretFolderChoices(projects, hosts), hosts }), [projects, hosts]);
   const triggerComputers = useMemo(() => hosts.flatMap(host => host.node ? [{ node: host.node, name: host.name, providers: host.providers, ready: Boolean(host.triggers), connected: host.status === 'connected', models: Boolean(host.models) }] : []), [hosts]);
   // What a trigger on another computer can aim at, named as that computer knows it.
   const triggerTargets = useCallback((node: string) => ({
@@ -410,9 +413,9 @@ function TowerApp() {
     refresh();
   }, [refresh, selectSession, snapshots]);
 
-  const settingsContext = useMemo((): SettingsContext => ({ token, triggers: snapshot?.triggers, providers: snapshot?.providers || [], projects: localProjects,
+  const settingsContext = useMemo((): SettingsContext => ({ token, triggers: snapshot?.triggers, providers: snapshot?.providers || [], projects: localProjects, secretCanvas,
     computers: triggerComputers, targets: triggerTargets, controlledBy: snapshot?.controlledBy || [], showHidden, onShowHiddenChange: setShowHidden, onOpenSession: selectSession }),
-  [token, snapshot?.triggers, snapshot?.providers, localProjects, triggerComputers, triggerTargets, snapshot?.controlledBy, showHidden, selectSession]);
+  [token, snapshot?.triggers, snapshot?.providers, localProjects, secretCanvas, triggerComputers, triggerTargets, snapshot?.controlledBy, showHidden, selectSession]);
   const chatHostEntry = activeChatId ? hostOf(hosts, nodeOf(activeChatId)) : undefined;
   const chatHost = chatHostEntry?.node ? { name: chatHostEntry.name, live: chatHostEntry.live, canWork: chatHostEntry.canWork, problem: hostProblem(chatHostEntry), workspace: chatHostEntry.workspace, workspaceNote: workspaceNote(chatHostEntry), ...(chatHostEntry.compaction ? { compaction: true } : {}) }
     : activeChatId && nodeOf(activeChatId) ? { name: t("더 이상 연결되지 않은 컴퓨터"), live: false, canWork: false, workspace: false, problem: t("그 컴퓨터는 더 이상 연결되어 있지 않습니다.") } : undefined;

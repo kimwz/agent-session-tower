@@ -2,12 +2,16 @@ import type { ClientHttp2Session } from 'node:http2';
 import type { SecretPeer } from '../../shared/secrets.js';
 import { linkRequest } from './transport.js';
 import type { RemoteSecretRequest, RemoteSecretResponse } from '../secrets/remote.js';
+import { SECRET_FEATURES_HEADER } from './secret-routes.js';
 
 export interface SecretRelayOptions {
   nodes: { list(): { id: string; status: string }[]; session(id: string): ClientHttp2Session | undefined };
   peers: () => SecretPeer[] | Promise<SecretPeer[]>;
   workerAnswer: (nodeRouteId: string, request: RemoteSecretRequest) => Promise<RemoteSecretResponse>;
-  onError?: (nodeRouteId: string, code: 'SECRET_RELAY_UNAVAILABLE') => void;
+  /** Remote operations the attached worker serves beyond the first protocol (`available`), told to each node on every poll. */
+  features?: () => string[];
+  /** `SECRET_RELAY_UNSUPPORTED`: a node asked for an operation the attached worker no longer serves; it was not passed on. */
+  onError?: (nodeRouteId: string, code: 'SECRET_RELAY_UNAVAILABLE' | 'SECRET_RELAY_UNSUPPORTED') => void;
 }
 /** The controller web process forwards envelopes; it never holds Vault keys or resolved values. */
 export class SecretRelay {
@@ -32,11 +36,14 @@ export class SecretRelay {
     try {
       const session = this.options.nodes.session(id);
       if (!session || this.stopped) return;
-      const answer = await linkRequest(session, 'GET', '/secret-relay', undefined, 5000, { maxBytes: 600 * 1024 });
+      const features = this.options.features?.() ?? [];
+      const answer = await linkRequest(session, 'GET', '/secret-relay', undefined, 5000, { maxBytes: 600 * 1024, ...(features.length ? { headers: { [SECRET_FEATURES_HEADER]: features.join(',') } } : {}) });
       if (answer.status !== 200 || !answer.json || typeof answer.json !== 'object' || !('requests' in answer.json)
         || !Array.isArray(answer.json.requests) || answer.json.requests.length > 8) throw new Error('SECRET_RELAY_UNAVAILABLE');
       for (const request of answer.json.requests) {
         if (this.stopped) return;
+        // The worker may have been replaced since this poll said what it serves; an older one is never handed a read.
+        if ((request as Partial<RemoteSecretRequest> | null)?.operation === 'available' && !(this.options.features?.() ?? []).includes('available')) { this.options.onError?.(id, 'SECRET_RELAY_UNSUPPORTED'); continue; }
         try {
           const response = await this.options.workerAnswer(id, request as RemoteSecretRequest);
           if (this.stopped) return;

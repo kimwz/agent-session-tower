@@ -1,16 +1,21 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { after, before } from 'node:test';
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import type { SecretContext, SecretMetadata, SecretOperation, SecretRunInput } from '../../../shared/secrets.js';
+import type { SecretContext, SecretMetadata, SecretOperation, SecretRunInput, SecretTarget, SecretUsage } from '../../../shared/secrets.js';
 import { SecretBroker, maskSecretOutput } from '../../../server/secrets/broker.js';
 import { parseSecretCli, runSecretsCommand } from '../../../server/secrets/cli.js';
 import { SecretService } from '../../../server/secrets/service.js';
+import { editPayload, legacyRecord, legacyRule, vaultTemplate } from '../../helpers/secrets.js';
 import type { RemoteSecretBroker } from '../../../server/secrets/remote.js';
 
 const canary = 'SYNTHETIC-sensitive-canary-42';
+/** One vault initialized for this file and copied open into each test that uses a real one. */
+const vault = vaultTemplate('fixture-broker-vault-password');
+before(() => vault.ready());
+after(() => vault.dispose());
 async function fixture() {
   const stateDir = await realpath(await mkdtemp(join(tmpdir(), 'tower-broker-fixture-')));
   const root = join(stateDir, 'project'); await mkdir(root);
@@ -23,7 +28,8 @@ async function fixture() {
   const context: SecretContext = { hostId: 'fixture', sessionId: 'session', taskId: randomUUID(), runId: 'run', root };
   const device = { id: 'fixture', name: 'fixture', signingKey: '', encryptionKey: '', fingerprint: '' };
   let peers: unknown[] = [];
-  const service = { checkTask: (ctx: SecretContext, id?: string) => { if (locked || ctx.taskId !== context.taskId || (id && denied.has(`tower-secret://remote/${id}@1`))) throw new Error('Task identity denied'); }, device: () => device, peers: () => peers, status: () => ({ initialized: true, locked }), list: async () => [...resources.values()].map(v => v.metadata), fingerprintKey: () => Buffer.alloc(32, 4),
+  const usage: { target: unknown; entries: SecretUsage[] }[] = [];
+  const service = { recordUsage: async (target: unknown, entries: SecretUsage[]) => { usage.push({ target, entries: structuredClone(entries) }); }, checkTask: (ctx: SecretContext, id?: string) => { if (locked || ctx.taskId !== context.taskId || (id && denied.has(`tower-secret://remote/${id}@1`))) throw new Error('Task identity denied'); }, device: () => device, peers: () => peers, status: () => ({ initialized: true, locked }), list: async () => [...resources.values()].map(v => v.metadata), fingerprintKey: () => Buffer.alloc(32, 4),
     resolve: async (_ctx: SecretContext, ref: string, _op: SecretOperation) => {
       resolves++; onResolve?.(resolves); if (locked || denied.has(ref)) throw new Error('private denial detail');
       const resource = resources.get(ref); if (!resource) throw new Error('missing');
@@ -42,9 +48,55 @@ async function fixture() {
     const metadata: SecretMetadata = { id, name: 'fixture secret', kind, groupId: 'group', version: 1, reference };
     resources.set(reference, { metadata, bytes: Buffer.isBuffer(value) ? value : Buffer.from(value), fields }); return reference;
   };
-  return { stateDir, root, context, service, resources, ledger, add, denied, locked: (value: boolean) => { locked = value; }, onResolve: (fn: (n: number) => void) => { onResolve = fn; }, onFinish: (fn: () => Promise<void>) => { onFinish = fn; }, peers: (value: unknown[]) => { peers = value; }, cleanup: () => rm(stateDir, { recursive: true, force: true }) };
+  return { stateDir, root, context, service, resources, ledger, usage, add, denied, locked: (value: boolean) => { locked = value; }, onResolve: (fn: (n: number) => void) => { onResolve = fn; }, onFinish: (fn: () => Promise<void>) => { onFinish = fn; }, peers: (value: unknown[]) => { peers = value; }, cleanup: () => rm(stateDir, { recursive: true, force: true }) };
 }
 function command(script: string, extra: Partial<SecretRunInput> = {}): SecretRunInput { return { operationId: randomUUID(), command: process.execPath, args: ['-e', script], ...extra }; }
+type AuthorityChange = 'revoke' | 'policy' | 'expiry' | 'rotation' | 'fields';
+/** A local key allowed one way, and the change that withdraws it: disconnection, sharing, value expiry, rotation, or a rule narrowed to one field. */
+async function changingAuthority(service: SecretService, target: SecretTarget, mode: AuthorityChange, operations: SecretOperation[], clock: { now: () => number; advance: (ms: number) => void }) {
+  const value = mode === 'fields' ? `VISIBLE=${canary}\nPRIVATE=PRIVATE_CHANGE_CANARY` : canary;
+  if (mode === 'revoke' || mode === 'rotation') {
+    const local = await service.create({ name: `local-${mode}`, kind: 'scalar', value, temporary: true }, target);
+    return { local, change: async () => { if (mode === 'revoke') await service.disconnectSession(target, [local.id]); else await service.update({ id: local.id, value: 'ROTATED_CHANGE_CANARY' }); } };
+  }
+  if (mode === 'policy') {
+    const local = await service.create({ name: 'local-policy', kind: 'scalar', value, sharing: { global: false, folders: [{ hostId: target.hostId, root: target.root }] } });
+    return { local, change: async () => { await service.setSharing(local.id, 1, { global: false, folders: [] }); } };
+  }
+  // Keys saved before per-secret sharing follow their rules: one expires, the other's rule narrows its fields.
+  const record = legacyRecord(target.hostId, { name: `local-${mode}`, groupId: 'legacy-group', kind: mode === 'fields' ? 'env' : 'scalar', value, ...(mode === 'expiry' ? { expiresAt: clock.now() + 100 } : {}) });
+  const rule = legacyRule({ groupId: 'legacy-group', secretIds: [record.metadata.id], hostId: target.hostId, root: target.root, activation: 'auto', operations });
+  await editPayload(service, payload => { if (!payload.groups.some(group => group.id === 'legacy-group')) payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(record); payload.rules.push(rule); });
+  // Only an older build edits rules now: it narrows this one while the vault stays open to it.
+  const narrow = () => editPayload(service, payload => { payload.rules = payload.rules.map(item => item.id === rule.id ? { ...item, fields: { [record.metadata.id]: ['VISIBLE'] }, revision: item.revision + 1 } : item); });
+  return { local: record.metadata, change: async () => { if (mode === 'expiry') clock.advance(101); else await narrow(); } };
+}
+
+test('each delivered use is kept with its session once per secret and operation, a remote source’s too, never a value', async () => {
+  const f = await fixture(); const scalar = f.add(canary), file = f.add(canary, 'file');
+  const remoteRef = 'tower-secret://remote/remote-key@1';
+  const remote = { request: async () => ({ metadata: { id: 'remote-key', name: 'remote fixture', kind: 'scalar', groupId: 'remote-group', version: 1, reference: remoteRef }, bytes: Buffer.from('REMOTE_USAGE_CANARY') }) } as unknown as RemoteSecretBroker;
+  try {
+    const broker = new SecretBroker({ stateDir: f.stateDir, service: f.service, remote });
+    const input = command('process.stdin.resume();process.stdin.on("end",()=>console.log("ok"))', { env: { TOKEN: scalar, REMOTE: remoteRef }, stdin: scalar, files: { KEY: file } });
+    assert.equal((await broker.run(f.context, input)).exitCode, 0);
+    await broker.compare(f.context, scalar, scalar); await broker.fingerprint(f.context, scalar);
+    const recorded = f.usage.map(({ target, entries }) => [target, entries.map(entry => [entry.secretId, entry.name, entry.operation, entry.outcome, entry.review])]);
+    const [scalarId, fileId] = [scalar, file].map(ref => ref.slice('tower-secret://fixture/'.length, -2));
+    const subject = { hostId: f.context.hostId, sessionId: f.context.sessionId };
+    assert.deepEqual(recorded, [
+      [subject, [[scalarId, 'fixture secret', 'env', 'delivered', 'exempt'], ['remote-key', 'remote fixture', 'env', 'delivered', 'exempt'], [scalarId, 'fixture secret', 'pipe', 'delivered', 'exempt'], [fileId, 'fixture secret', 'file', 'delivered', 'exempt']]],
+      [subject, [[scalarId, 'fixture secret', 'compare', 'delivered', 'exempt']]],
+      [subject, [[scalarId, 'fixture secret', 'fingerprint', 'delivered', 'exempt']]],
+    ]);
+    assert.doesNotMatch(JSON.stringify(f.usage), new RegExp(`${canary}|REMOTE_USAGE_CANARY`));
+    const missing = await broker.run(f.context, { operationId: 'missing-program', command: join(f.stateDir, 'no-such-program'), env: { TOKEN: scalar } });
+    assert.equal(missing.exitCode, null); assert.equal(f.usage.length, 3, 'a consumer that never started was given nothing');
+    f.denied.add(scalar); const before = f.usage.length;
+    assert.equal((await broker.run(f.context, command('console.log("no")', { env: { TOKEN: scalar } }))).exitCode, null);
+    assert.equal(f.usage.length, before, 'a refused use is not a delivered one');
+  } finally { await f.cleanup(); }
+});
 
 test('env/stdin/private file deliver only requested values, remove credentials, redact outputs, and clean private paths', async () => {
   const f = await fixture(); const scalar = f.add(canary), file = f.add(canary, 'file');
@@ -119,7 +171,7 @@ test('revocation and lock during staging prevent spawn and temp files are still 
   for (const reason of ['revoke', 'lock']) {
     const f = await fixture();
     try {
-      const ref = f.add(canary, 'file'); const marker = join(f.root, 'executed');
+    const ref = f.add(canary, 'file'); const marker = join(f.root, 'executed');
       f.onResolve(count => { if (count === 2) { if (reason === 'revoke') f.denied.add(ref); else f.locked(true); } });
       const input = command(`require('fs').writeFileSync(process.argv[1],'executed')`, { files: { KEY: ref } }); input.args!.push(marker);
       const result = await new SecretBroker({ stateDir: f.stateDir, service: f.service }).run(f.context, input);
@@ -194,20 +246,18 @@ test('standalone CLI refuses missing/forged capability and never derives auth fr
 });
 
 test('encrypted domain fixture denies forged task and revoked policy through the actual broker', async () => {
-  const f = await fixture(); const service = new SecretService({ stateDir: f.stateDir });
+  const f = await fixture(); const service = await vault.open(f.stateDir);
   try {
-    await service.start(); await service.initialize('fixture-strong-password-42');
     const target = await service.ensureTask('fixture-session', f.root), context = { ...target, runId: 'owner-run' };
-    const metadata = await service.create({ name: 'fixture-token', kind: 'scalar', scope: 'global', value: canary, target, connect: true, operations: ['env', 'discover', 'compare', 'fingerprint'] });
+    const metadata = await service.create({ name: 'fixture-token', kind: 'scalar', value: canary, connect: 'session' }, target);
     const broker = new SecretBroker({ stateDir: f.stateDir, service });
     await assert.rejects(broker.run({ ...context, taskId: randomUUID() }, command(`console.log('no')`, { env: { TOKEN: metadata.reference } })));
     const used = await broker.run(context, command(`console.log(process.env.TOKEN)`, { env: { TOKEN: metadata.reference } })); assert.equal(used.stdout.trim(), '[REDACTED]');
-    const dotenv = await service.create({ name: 'selected-fields', kind: 'env', scope: 'global', value: `TOKEN=${canary}\nPRIVATE=unselected-canary`, target, activation: 'auto', operations: ['env', 'discover'] });
-    const rule = service.overview(target).rules.find(item => item.secretIds.includes(dotenv.id))!;
-    await service.setRule({ ...rule, fields: { [dotenv.id]: ['TOKEN'] } });
+    const record = legacyRecord(service.device().id, { name: 'selected-fields', groupId: 'legacy-group', kind: 'env', value: `TOKEN=${canary}\nPRIVATE=unselected-canary` }); const dotenv = record.metadata;
+    await editPayload(service, payload => { payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(record); payload.rules.push(legacyRule({ groupId: 'legacy-group', secretIds: [dotenv.id], hostId: target.hostId, root: target.root, activation: 'auto', operations: ['env', 'discover'], fields: { [dotenv.id]: ['TOKEN'] } })); });
     const partial = await broker.run(context, command(`console.log(JSON.stringify({token:process.env.TOKEN,private:process.env.PRIVATE??'ABSENT'}));`, { envBundle: dotenv.reference }));
     assert.deepEqual(JSON.parse(partial.stdout), { token: '[REDACTED]', private: 'ABSENT' });
-    await service.revoke(target, [metadata.id]); const denied = await broker.run(context, command(`console.log('should not run')`, { env: { TOKEN: metadata.reference } })); assert.equal(denied.exitCode, null); assert.equal(denied.stdout, '');
+    await service.disconnectSession(target, [metadata.id]); const denied = await broker.run(context, command(`console.log('should not run')`, { env: { TOKEN: metadata.reference } })); assert.equal(denied.exitCode, null); assert.equal(denied.stdout, '');
     assert.equal((await readFile(join(f.stateDir, 'secrets', 'vault.json'), 'utf8')).includes(canary), false);
     assert.equal((await readFile(join(f.stateDir, 'secrets', 'journal.json'), 'utf8')).includes(canary), false);
     await service.lock(); await assert.rejects(broker.run(context, command(`console.log('no')`, { env: { TOKEN: metadata.reference } })));
@@ -215,26 +265,14 @@ test('encrypted domain fixture denies forged task and revoked policy through the
 });
 
 test('final dispatch denies local changes completed while a later remote reference is reauthorized', { timeout: 20000 }, async () => {
-  const f = await fixture(); let now = Date.now(); const service = new SecretService({ stateDir: f.stateDir, now: () => now });
+  const f = await fixture(); let now = Date.now(); const service = await vault.open(f.stateDir, { now: () => now });
   try {
-    await service.start(); await service.initialize('fixture-dispatch-password-42');
     for (const mode of ['revoke', 'policy', 'expiry', 'rotation', 'fields'] as const) {
       const target = await service.ensureTask(`dispatch-${mode}`, f.root), context = { ...target, runId: `run-${mode}` };
-      const local = await service.create({ name: `local-${mode}`, kind: mode === 'fields' ? 'env' : 'scalar', scope: 'task', target, connect: true,
-        value: mode === 'fields' ? `VISIBLE=${canary}\nPRIVATE=PRIVATE_DISPATCH_CANARY` : canary,
-        operations: ['discover', 'env'], ...(mode === 'expiry' ? { expiresAt: now + 100 } : {}) });
+      const { local, change } = await changingAuthority(service, target, mode, ['discover', 'env'], { now: () => now, advance: ms => { now += ms; } });
       const ref = 'tower-secret://remote/second@1'; let requests = 0;
       const remote = { request: async () => {
-        if (++requests === 2) {
-          if (mode === 'revoke') await service.revoke(target, [local.id]);
-          else if (mode === 'rotation') await service.update({ id: local.id, value: 'ROTATED_DISPATCH_CANARY' });
-          else if (mode === 'expiry') now += 101;
-          else {
-            const rule = service.overview(target).rules.find(item => item.secretIds.includes(local.id))!;
-            await service.setRule({ ...rule, ...(mode === 'fields' ? { fields: { [local.id]: ['VISIBLE'] } } : { operations: ['discover'] }) });
-            if (mode === 'fields') await service.attach(target, [local.id]);
-          }
-        }
+        if (++requests === 2) await change();
         return { metadata: { id: 'second', name: 'fixture', kind: 'scalar', groupId: 'remote-group', version: 1, reference: ref }, bytes: Buffer.from('REMOTE_DISPATCH_CANARY') };
       } } as unknown as RemoteSecretBroker;
       const marker = join(f.root, `spawn-${mode}`);
@@ -249,13 +287,12 @@ test('final dispatch denies local changes completed while a later remote referen
 });
 
 test('final dispatch checks every remote reference recipient exclusion after the last remote await', async () => {
-  const f = await fixture(), service = new SecretService({ stateDir: f.stateDir });
+  const f = await fixture(), service = await vault.open(f.stateDir);
   try {
-    await service.start(); await service.initialize('fixture-recipient-dispatch-password');
     const target = await service.ensureTask('recipient-dispatch', f.root), context = { ...target, runId: 'recipient-run' };
     const first = 'tower-secret://remote/first@1', second = 'tower-secret://remote/second@1'; let secondRequests = 0;
     const remote = { request: async (_host: string, _context: SecretContext, _operation: string, payload: { reference: string }) => {
-      if (payload.reference === second && ++secondRequests === 2) await service.revoke(target, ['first']);
+      if (payload.reference === second && ++secondRequests === 2) await service.disconnectSession(target, ['first']);
       return { metadata: { id: payload.reference === first ? 'first' : 'second', name: 'fixture', kind: 'scalar', groupId: 'remote-group', version: 1, reference: payload.reference }, bytes: Buffer.from('REMOTE_RECIPIENT_CANARY') };
     } } as unknown as RemoteSecretBroker;
     const marker = join(f.root, 'spawn-recipient');
@@ -267,18 +304,17 @@ test('final dispatch checks every remote reference recipient exclusion after the
 });
 
 test('owner revocation commits while a dispatched consumer is still running', async () => {
-  const f = await fixture(), service = new SecretService({ stateDir: f.stateDir });
+  const f = await fixture(), service = await vault.open(f.stateDir);
   let finish!: () => void; const consumer = new Promise<void>(resolve => { finish = resolve; });
   let timer: NodeJS.Timeout | undefined;
   let dispatch: ReturnType<SecretService['dispatch']> | undefined, revoke: Promise<void> | undefined;
   try {
-    await service.start(); await service.initialize('fixture-dispatch-queue-password');
     const target = await service.ensureTask('dispatch-queue', f.root), context = { ...target, runId: 'dispatch-queue-run' };
-    const secret = await service.create({ name: 'queue key', kind: 'scalar', scope: 'task', target, connect: true, value: canary, operations: ['env'] });
+    const secret = await service.create({ name: 'queue key', kind: 'scalar', value: canary, temporary: true }, target);
     const value = await service.resolve(context, secret.reference, 'env');
     let started = false;
     dispatch = service.dispatch(context, [{ ref: secret.reference, operation: 'env', value }], () => { started = true; return consumer; });
-    revoke = service.revoke(target, [secret.id]);
+    revoke = service.disconnectSession(target, [secret.id]);
     const committed = await Promise.race([revoke.then(() => true), new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 1000); })]);
     assert.equal(committed, true, 'consumer runtime cannot hold the policy commit queue'); assert.equal(started, true);
     assert.equal((await dispatch).result, consumer);
@@ -323,24 +359,14 @@ test('compare and domain fingerprint disclose only their derived result', async 
 });
 
 test('comparison denies local authority changes committed while resolving its remote operand', { timeout: 20000 }, async () => {
-  const f = await fixture(); let now = Date.now(); const service = new SecretService({ stateDir: f.stateDir, now: () => now });
+  const f = await fixture(); let now = Date.now(); const service = await vault.open(f.stateDir, { now: () => now });
   try {
-    await service.start(); await service.initialize('fixture-compare-authority-password');
     for (const mode of ['revoke', 'policy', 'expiry', 'rotation', 'fields'] as const) {
       const target = await service.ensureTask(`compare-${mode}`, f.root), context = { ...target, runId: `compare-run-${mode}` };
-      const local = await service.create({ name: `compare-${mode}`, kind: mode === 'fields' ? 'env' : 'scalar', scope: 'task', target, connect: true,
-        value: mode === 'fields' ? `VISIBLE=${canary}\nPRIVATE=PRIVATE_COMPARE_CANARY` : canary,
-        operations: ['compare'], ...(mode === 'expiry' ? { expiresAt: now + 100 } : {}) });
+      const { local, change } = await changingAuthority(service, target, mode, ['compare'], { now: () => now, advance: ms => { now += ms; } });
       const ref = 'tower-secret://remote/right@1';
       const remote = { request: async () => {
-        if (mode === 'revoke') await service.revoke(target, [local.id]);
-        else if (mode === 'rotation') await service.update({ id: local.id, value: 'ROTATED_COMPARE_CANARY' });
-        else if (mode === 'expiry') now += 101;
-        else {
-          const rule = service.overview(target).rules.find(item => item.secretIds.includes(local.id))!;
-          await service.setRule({ ...rule, ...(mode === 'fields' ? { fields: { [local.id]: ['VISIBLE'] } } : { operations: ['discover'] }) });
-          if (mode === 'fields') await service.attach(target, [local.id]);
-        }
+        await change();
         return { metadata: { id: 'right', name: 'fixture', kind: 'scalar', groupId: 'remote-group', version: 1, reference: ref }, bytes: Buffer.from(canary) };
       } } as unknown as RemoteSecretBroker;
       await assert.rejects(new SecretBroker({ stateDir: f.stateDir, service, remote }).compare(context, local.reference, ref), mode);
@@ -349,13 +375,12 @@ test('comparison denies local authority changes committed while resolving its re
 });
 
 test('comparison checks the earlier remote operand recipient exclusion after resolving the later operand', async () => {
-  const f = await fixture(), service = new SecretService({ stateDir: f.stateDir });
+  const f = await fixture(), service = await vault.open(f.stateDir);
   try {
-    await service.start(); await service.initialize('fixture-compare-recipient-password');
     const target = await service.ensureTask('compare-recipient', f.root), context = { ...target, runId: 'compare-recipient-run' };
     const first = 'tower-secret://remote/first@1', second = 'tower-secret://remote/second@1';
     const remote = { request: async (_host: string, _context: SecretContext, _operation: string, payload: { reference: string }) => {
-      if (payload.reference === second) await service.revoke(target, ['first']);
+      if (payload.reference === second) await service.disconnectSession(target, ['first']);
       return { metadata: { id: payload.reference === first ? 'first' : 'second', name: 'fixture', kind: 'scalar', groupId: 'remote-group', version: 1, reference: payload.reference }, bytes: Buffer.from(canary) };
     } } as unknown as RemoteSecretBroker;
     await assert.rejects(new SecretBroker({ stateDir: f.stateDir, service, remote }).compare(context, first, second));

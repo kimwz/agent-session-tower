@@ -458,6 +458,11 @@ export interface Snapshot {
   triggers?: TriggerOverview;
   /** This computer's execution worker compacts conversations (absent while an older one awaits replacement). */
   compaction?: true;
+  /**
+   * This computer's execution worker serves per-secret sharing and the secret settings and session views (absent while
+   * an older one awaits replacement; their routes then answer 503 with `code: 'worker-update-pending'`).
+   */
+  secretSharing?: true;
   /** While the worker runs another build: whether it will hand over by itself. */
   runnerUpdate?: 'automatic' | 'manual';
   /** The owner asked to update now: running turns are wrapping up until `deadline`, then the worker switches. */

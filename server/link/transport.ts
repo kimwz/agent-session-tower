@@ -109,14 +109,15 @@ function plain(socket: TLSSocket): Duplex {
   return duplex;
 }
 
-/** A request over an established link, with a deadline for the answer; the body is read whole. */
-export function linkRequest(session: ClientHttp2Session, method: string, path: string, body?: unknown, timeoutMs = 10_000, options: { maxBytes?: number; signal?: AbortSignal } = {}): Promise<{ status: number; json: unknown }> {
+/** A request over an established link, with a deadline for the answer; the body is read whole. `headers` never replace pseudo-headers. */
+export function linkRequest(session: ClientHttp2Session, method: string, path: string, body?: unknown, timeoutMs = 10_000, options: { maxBytes?: number; signal?: AbortSignal; headers?: Record<string, string> } = {}): Promise<{ status: number; json: unknown }> {
   const maxBytes = options.maxBytes ?? 1_000_000;
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
     if (session.destroyed || session.closed) { reject(new Error('The link is closed.')); return; }
     if (options.signal?.aborted) { reject(new Error('The request was cancelled.')); return; }
-    const stream = session.request({ ':method': method, ':path': path, ...(payload ? { 'content-type': 'application/json', 'content-length': payload.length } : {}) });
+    const extra = Object.fromEntries(Object.entries(options.headers ?? {}).filter(([name]) => !name.startsWith(':')));
+    const stream = session.request({ ...extra, ':method': method, ':path': path, ...(payload ? { 'content-type': 'application/json', 'content-length': payload.length } : {}) });
     let settled = false;
     const fail = (error: Error) => { if (settled) return; settled = true; clearTimeout(timer); reject(error); };
     const timer = setTimeout(() => { fail(new Error('The other computer did not answer in time.')); stream.close(http2.constants.NGHTTP2_CANCEL); }, timeoutMs);

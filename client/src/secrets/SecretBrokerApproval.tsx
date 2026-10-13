@@ -5,18 +5,18 @@ import { api } from '../common/lib';
 import { useI18n } from '../i18n/i18n';
 import { secretSession } from './secrets-client';
 
-export function SecretBrokerApproval({ token, sessionId, onChanged, onBlocked, onManage }: {
-  token: string; sessionId: string; onChanged: () => void; onBlocked: (blocked: boolean) => void; onManage: () => void;
+export function SecretBrokerApproval({ token, sessionId, onChanged, onManage }: {
+  token: string; sessionId: string; onChanged: () => void; onManage: () => void;
 }) {
   const { t } = useI18n();
   const [access, setAccess] = useState<SecretBrokerAccess>();
   const [error, setError] = useState(''); const [loadError, setLoadError] = useState(''); const [busy, setBusy] = useState(false);
   const generation = useRef(0); const mutationVersion = useRef(0); const sending = useRef(false);
-  const callbacks = useRef({ onChanged, onBlocked }); callbacks.current = { onChanged, onBlocked };
+  const callbacks = useRef({ onChanged }); callbacks.current = { onChanged };
   const remote = Boolean(secretSession(sessionId).nodeId);
   useEffect(() => {
     const current = ++generation.current; const controller = new AbortController();
-    setAccess(undefined); setError(''); setLoadError(''); setBusy(false); sending.current = false; callbacks.current.onBlocked(false);
+    setAccess(undefined); setError(''); setLoadError(''); setBusy(false); sending.current = false;
     if (remote || !token) return () => { controller.abort(); generation.current++; };
     const load = async () => {
       if (sending.current) return;
@@ -24,7 +24,7 @@ export function SecretBrokerApproval({ token, sessionId, onChanged, onBlocked, o
       try {
         const next = await api<SecretBrokerAccess>(`/api/secrets/broker-access?sessionId=${encodeURIComponent(sessionId)}`, { signal: controller.signal });
         if (!controller.signal.aborted && generation.current === current && beforeMutation === mutationVersion.current && !sending.current) {
-          setAccess(next); setLoadError(''); callbacks.current.onBlocked(next.requiresApproval && (!next.approval || !next.eligible || next.locked));
+          setAccess(next); setLoadError('');
         }
       } catch {
         if (!controller.signal.aborted && generation.current === current && beforeMutation === mutationVersion.current) setLoadError(t('브로커 연결 승인 상태를 확인하지 못했습니다.'));
@@ -45,7 +45,7 @@ export function SecretBrokerApproval({ token, sessionId, onChanged, onBlocked, o
         body: JSON.stringify({ sessionId, ...fields }),
       });
       if (generation.current !== current) return;
-      setAccess(next); setLoadError(''); callbacks.current.onBlocked(next.requiresApproval && (!next.approval || !next.eligible || next.locked)); callbacks.current.onChanged();
+      setAccess(next); setLoadError(''); callbacks.current.onChanged();
     } catch (failure) {
       if (generation.current === current) setError(failure instanceof Error ? failure.message : t('연결 승인을 완료하지 못했습니다. 현재 상태를 확인하세요.'));
     } finally { if (generation.current === current) { sending.current = false; setBusy(false); } }

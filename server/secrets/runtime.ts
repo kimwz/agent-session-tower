@@ -1,19 +1,20 @@
-import { createHash, createPublicKey } from 'node:crypto';
+import { createHash, createPublicKey, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { realpath, unlink } from 'node:fs/promises';
-import { isAbsolute, normalize, join } from 'node:path';
+import { join } from 'node:path';
 import { z } from 'zod';
 import type { Run, Session } from '../../shared/types.js';
-import type { SecretBrokerAccess, SecretBrokerApproval, SecretContext, SecretCreateInput, SecretDevice, SecretOverview, SecretPeer, SecretTarget } from '../../shared/secrets.js';
+import type { SecretAvailable, SecretBrokerAccess, SecretBrokerApproval, SecretContext, SecretDevice, SecretMetadata, SecretPeer, SecretSessionError, SecretSessionView, SecretSettingsView, SecretTarget, SecretUsage, VaultStatus } from '../../shared/secrets.js';
 import { SECRET_OPERATIONS } from '../../shared/secrets.js';
 import type { Capability } from '../api/mcp.js';
 import type { SessionOrigin } from '../runs/origin.js';
 import { callWorkerTools, serveToolBridge } from '../mcp/stdio.js';
 import { inMasterFolder } from '../runs/subscription.js';
-import { SecretBroker } from './broker.js';
+import { SecretBroker, remoteListing } from './broker.js';
 import { parseSecretCli } from './cli.js';
 import { parseDotenv } from './dotenv.js';
-import { RemoteSecretBroker, type RemoteSecretRequest, type RemoteSecretResponse } from './remote.js';
+import { RemoteSecretBroker, wireMetadata, type RemoteSecretRequest, type RemoteSecretResponse } from './remote.js';
+import { ownerConnection, ownerCreate, ownerInput, ownerSession, ownerSharingChange, secretUsage, VIEW_USAGE } from './owner-input.js';
 import { SecretService } from './service.js';
 import { SECRET_LOCKED_LIST, SECRET_LOCKED_UNINDEXED, SECRET_LOCKED_USE, SECRET_NO_VAULT, SECRET_USE_INSTRUCTIONS } from './notices.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
@@ -30,7 +31,7 @@ const schemas = {
   secrets_cli: z.object({ argv: z.array(z.string().max(32768)).max(512), operationId: z.string().max(100).optional() }).strict(),
 };
 const descriptions: Record<keyof typeof schemas, string> = {
-  secrets_list: `List secret names, references, selected fields and permitted operations for this authenticated project/task, including automatic project connections. Values are never returned. ${SECRET_USE_INSTRUCTIONS}`,
+  secrets_list: `List the secrets this session may use, with references, selected fields and permitted operations: those the owner shares with every folder (GLOBAL) or with this folder, and those connected to this session. Values are never returned. ${SECRET_USE_INSTRUCTIONS}`,
   secrets_run: 'Run a program with permitted secret references as environment variables, stdin or private temporary files. Use {secret-file:NAME} in args for a files mapping. Values never go in args. stdout/stderr are masked before return. Use a unique stable operationId; uncertain requests are not executed again.',
   secrets_compare: 'Compare two permitted secret references inside the broker; returns only equality.',
   secrets_fingerprint: 'Return a domain scoped HMAC fingerprint for a permitted secret reference, without its value.',
@@ -40,6 +41,27 @@ export const SECRET_TOOLS = Object.entries(schemas).map(([name, input]) => {
   const { $schema: _schema, ...inputSchema } = z.toJSONSchema(input, { io: 'input' });
   return { name, description: descriptions[name as keyof typeof schemas], inputSchema };
 });
+const SESSION_ERRORS = ['uninitialized', 'locked', 'not-eligible', 'session-closed', 'source-unavailable', 'worker-update-pending'] as const satisfies readonly SecretSessionError[];
+/** Errors that stay until the owner does something; the page stops polling on them. */
+const PERMANENT: ReadonlySet<SecretSessionError> = new Set(['uninitialized', 'not-eligible', 'session-closed']);
+const BROKER_ACTIONS = new Set(['broker-access', 'approve-broker', 'revoke-broker']);
+const MUTATIONS = new Set(['create', 'update', 'remove', 'sharing', 'session-connect', 'session-disconnect', 'trust', 'untrust']);
+/** How long a session view waits for a source's answer before listing it as unavailable. */
+const VIEW_REMOTE_MS = 5000;
+const taskId = z.string().regex(/^[a-f0-9-]{36}$/);
+/** A joined computer's session as its web verified it: the task an owner change applies to. */
+const remoteTarget = z.object({ hostId: z.string().min(1).max(256), sessionId: z.string().min(1).max(512), root: z.string().min(1).max(8192), taskId, projectId: z.string().optional() });
+const remoteSubject = z.union([z.object({ error: z.enum(SESSION_ERRORS) }).strict(),
+  z.object({ hostId: z.string().min(1).max(256), sessionId: z.string().min(1).max(512), root: z.string().min(1).max(8192), taskId: taskId.optional(), usage: z.array(secretUsage).max(VIEW_USAGE) }).strict()]);
+/**
+ * A joined computer's session as that computer reports it for its controller's owner view: canonical folder, open task
+ * and recent uses, or why it has none. Reading it starts nothing on either computer.
+ */
+export type RemoteSessionSubject = z.output<typeof remoteSubject>;
+/** A committed owner change for a joined computer's session, which its web announces there before reading the view. */
+export interface SecretReceipt { connectedTarget: SecretTarget }
+export type SecretControlResult = SecretSettingsView | SecretSessionView | SecretBrokerAccess | SecretReceipt | { fields: string[] };
+const closedView = (status: VaultStatus, error: SecretSessionError): SecretSessionView => ({ status, available: [], connectable: [], usage: [], unavailableSources: [], updatePendingSources: [], error, permanent: PERMANENT.has(error) });
 const closureId = (sessionId: string) => createHash('sha256').update('tower-secret-session-close-v1:' + sessionId).digest('hex');
 interface Runs { list(): Run[]; getSession(id: string): Session | undefined; sessionOrigin(id: string): SessionOrigin | undefined }
 
@@ -74,6 +96,12 @@ export class SecretRuntime {
       // Remote replay is refused even after completion; retain only its proof, not an unused response cache.
       finish: async (_context, id, digest, _answer) => { const trusted = accepted.get(id); if (!trusted) throw fail('원격 요청 기록을 확인할 수 없습니다.'); try { await service.finishOperation(trusted, id, digest, { answered: true }); } finally { accepted.delete(id); } },
       handle: async (context, request) => {
+        // A read of what this vault allows the peer's session: no task here, no claim, nothing kept.
+        if (request.operation === 'available') {
+          if (this.blocked) throw fail('보관함 잠금 해제를 완료하지 못했습니다.', 'unavailable');
+          if (options.remoteAllowed && !options.remoteAllowed(context)) throw fail('원격 작업을 허용하지 않습니다.', 'forbidden');
+          return service.availableFor(context).map(wireMetadata);
+        }
         const trusted = await normalized(context);
         if (request.operation === 'list') return service.list(trusted);
         if (request.operation === 'close') { await service.closeTask(trusted.taskId); return { closed: true }; }
@@ -321,33 +349,108 @@ export class SecretRuntime {
       if (results.some(result => result.status === 'rejected')) throw fail('로컬 작업은 종료했습니다. 연결할 수 없는 원본 컴퓨터의 정리는 권한 만료 후 완료됩니다.', 'unavailable');
     } else { await service.closeTask(target.taskId); }
   }
-  async overview(target?: SecretTarget): Promise<SecretOverview> {
-    const service = this.options.service;
-    const result = service.overview(target);
+  private async settingsView(): Promise<SecretSettingsView> {
+    const view = this.options.service.settings();
     const ids = await this.options.pendingImports?.() ?? [];
-    result.status = { ...result.status, pendingImports: ids.length, pendingImportIds: ids };
-    if (target && !result.status.locked) {
-      const context = { ...target, runId: 'owner-ui' };
-      const available = target.hostId === service.device().id ? await this.broker.list(context) : await service.list(context);
-      result.connected = available.map(secret => secret.id);
-      result.secrets = result.secrets.map(secret => ({ ...secret, ...available.find(item => item.id === secret.id) }));
-      for (const secret of available) {
-        if (result.secrets.some(item => item.id === secret.id)) continue;
-        result.secrets.push(secret);
-        if (!result.groups.some(group => group.id === secret.groupId)) {
-          const source = result.peers.find(peer => peer.device.id === secret.sourceHostId)?.device.name ?? secret.sourceHostId;
-          result.groups.push({ id: secret.groupId, name: `${source} · ${secret.groupId}`, scope: 'global' });
-        }
-      }
-      if (target.hostId === service.device().id && this.broker.unavailableSources(context).length) result.status.error = 'SECRET_SOURCE_UNAVAILABLE';
-    }
-    return result;
+    return { ...view, status: { ...view.status, pendingImports: ids.length, pendingImportIds: ids } };
   }
-  /** Owner input travels only on the private owner API/RPC, never TowerApi's agent ledger. */
-  async control(action: string, input: Record<string, unknown>, remoteTarget?: SecretTarget, receiptOnly = false): Promise<SecretOverview | SecretBrokerAccess | { fields: string[] } | { connectedTarget: SecretTarget }> {
+  /** Every saved secret the owner may connect to a session, shared or not; no values. */
+  private connectable(): SecretMetadata[] { return this.options.service.settings().secrets.map(({ sharing: _sharing, legacy: _legacy, withheld: _withheld, ...metadata }) => metadata); }
+  private recentUsage(sessionId: string): SecretUsage[] { return this.options.service.usage({ sessionId }).reverse().slice(0, VIEW_USAGE); }
+  /** The owner session a view reads, with its open task in its current folder; reads only, and says why there is none. */
+  private async viewSession(sessionId: string): Promise<{ session: Session & { cwd: string }; task?: SecretTarget } | { error: SecretSessionError }> {
+    const found = this.options.runs.getSession(sessionId);
+    if (!found || found.closed || this.closedSessions.has(found.id) || await this.options.isClosed?.(found.id) || (await this.readClosures()).includes(closureId(found.id))) return { error: 'session-closed' };
+    let session: Session & { cwd: string };
+    try { session = await this.session(found.id, this.brokerApproval(found)?.id); }
+    catch (error) { if (kindOf(error) === 'forbidden' || (error as NodeJS.ErrnoException).code === 'ENOENT') return { error: 'not-eligible' }; throw error; }
+    const open = this.options.service.currentTask(session.id);
+    return { session, ...(open?.root === session.cwd ? { task: open } : {}) };
+  }
+  /**
+   * What a session of this computer may use now: this vault's secrets and those of each source that confirmed it answers
+   * reads; any other source is listed as unavailable. Neither this vault nor a source starts a task for it.
+   */
+  private async sessionView(sessionId: string): Promise<SecretSessionView> {
+    const service = this.options.service; const status = service.status();
+    if (!status.initialized) return closedView(status, 'uninitialized');
+    if (status.locked || this.blocked) return closedView(status, 'locked');
+    try {
+      const subject = await this.viewSession(sessionId);
+      if ('error' in subject) return closedView(status, subject.error);
+      const { session, task } = subject;
+      // Without an open task here, a task ID nobody holds reads what a new task would get, here and at each source.
+      const probe = { sessionId: session.id, root: session.cwd, taskId: task?.taskId ?? randomUUID() };
+      const local = service.available(probe);
+      const remote = await this.remoteAvailable(probe, task);
+      return { status, available: [...local, ...remote.available], connectable: this.connectable(), usage: this.recentUsage(session.id), unavailableSources: remote.unavailable, updatePendingSources: remote.updatePending };
+    } catch (error) { if (service.status().locked) return closedView(service.status(), 'locked'); throw error; }
+  }
+  /**
+   * Each source's secrets for this session, read only from a source whose relay confirmed reads. A source whose relay
+   * polled lately without confirming them runs an older build (`updatePending`); any other one did not answer (`unavailable`).
+   */
+  private async remoteAvailable(probe: { sessionId: string; root: string; taskId: string }, task?: SecretTarget): Promise<{ available: SecretAvailable[]; unavailable: string[]; updatePending: string[] }> {
+    const service = this.options.service; const context: SecretContext = { hostId: service.device().id, ...probe, runId: 'owner-view' };
+    const unavailable: string[] = [], updatePending: string[] = [];
+    const sources = service.peers().filter(peer => peer.enabled && peer.direction === 'controller');
+    const lists = await Promise.all(sources.map(async peer => {
+      if (this.remote.declines(peer.device.id, 'available')) { updatePending.push(peer.device.id); return []; }
+      try {
+        // Only a source whose relay confirmed reads is asked; `list` would start a task there.
+        const listed = remoteListing(await this.remote.request(peer.device.id, context, 'available', {}, { timeoutMs: VIEW_REMOTE_MS }), peer.device.id);
+        // best-effort: a key this session stopped, or a task that ended meanwhile, is simply not listed.
+        return listed.filter(item => { try { if (task) service.checkTask(task, item.id); return true; } catch { return false; } })
+          .map(item => ({ ...item, basis: ['remote' as const], operations: item.operations ?? [] }));
+      } catch { unavailable.push(peer.device.id); return []; }
+    }));
+    return { available: lists.flat(), unavailable, updatePending };
+  }
+  /** The owner view of a joined computer's session, from what that computer reported (`subject`) and this vault. */
+  private remoteSessionView(sessionId: string, subject: RemoteSessionSubject): SecretSessionView {
+    const service = this.options.service; const status = service.status();
+    if (!status.initialized) return closedView(status, 'uninitialized');
+    if (status.locked || this.blocked) return closedView(status, 'locked');
+    if ('error' in subject) return closedView(status, subject.error);
+    if (subject.sessionId !== sessionId) throw fail('원격 세션을 확인할 수 없습니다.', 'unavailable');
+    try {
+      const available = service.availableFor({ hostId: subject.hostId, sessionId, root: subject.root, taskId: subject.taskId ?? randomUUID(), runId: 'owner-view' });
+      return { status, available, connectable: this.connectable(), usage: subject.usage, unavailableSources: [], updatePendingSources: [] };
+    } catch (error) { if (service.status().locked) return closedView(service.status(), 'locked'); throw error; }
+  }
+  /** This computer's session for its controller's owner view (`/secret-session`); reads only. */
+  async sessionSubject(sessionId: string): Promise<RemoteSessionSubject> {
+    const service = this.options.service; const status = service.status();
+    if (!status.initialized) return { error: 'uninitialized' };
+    if (status.locked || this.blocked) return { error: 'locked' };
+    const subject = await this.viewSession(sessionId);
+    if ('error' in subject) return subject;
+    return { hostId: service.device().id, sessionId: subject.session.id, root: subject.session.cwd, ...(subject.task ? { taskId: subject.task.taskId } : {}), usage: this.recentUsage(subject.session.id) };
+  }
+  /** The session an owner change applies to: this computer's, whose task the change may start, or a joined computer's as its web verified it. */
+  private async ownerTarget(input: { sessionId: string; nodeId?: string }, remote: unknown): Promise<SecretTarget> {
+    if (input.nodeId === undefined) {
+      if (remote !== undefined) throw fail('이 컴퓨터의 세션에는 원격 작업을 지정할 수 없습니다.');
+      return this.target(input.sessionId);
+    }
+    const target = ownerInput(remoteTarget, remote, '원격 세션의 시크릿 작업을 확인할 수 없습니다.');
+    if (target.sessionId !== input.sessionId) throw fail('원격 세션의 시크릿 작업을 확인할 수 없습니다.', 'unavailable');
+    return { hostId: target.hostId, sessionId: target.sessionId, root: target.root, taskId: target.taskId };
+  }
+  /** A committed owner change for one session: a joined computer's is answered with its receipt; this computer's session is told of a connection. */
+  private async changed(target: SecretTarget, remote: boolean, notify: boolean): Promise<SecretSessionView | SecretReceipt> {
+    if (remote) return { connectedTarget: { hostId: target.hostId, sessionId: target.sessionId, root: target.root, taskId: target.taskId } };
+    if (notify) this.notifyConnection(target);
+    return this.sessionView(target.sessionId);
+  }
+  /**
+   * Owner input travels only on the private owner API/RPC, never TowerApi's agent ledger. `remote` is what the web
+   * verified for a joined computer's session (`nodeId`): its task for a change, its report for a view.
+   */
+  async control(action: string, input: Record<string, unknown>, remote?: unknown): Promise<SecretControlResult> {
     const service = this.options.service;
-    if (['broker-access', 'approve-broker', 'revoke-broker'].includes(action)) {
-      if (remoteTarget || receiptOnly) throw fail('로컬 프로젝트 세션에서만 브로커를 승인할 수 있습니다.', 'forbidden');
+    if (BROKER_ACTIONS.has(action)) {
+      if (remote !== undefined) throw fail('로컬 프로젝트 세션에서만 브로커를 승인할 수 있습니다.', 'forbidden');
       if (action === 'broker-access') { const parsed = z.object({ sessionId: z.string().min(1).max(512) }).strict().parse(input); return this.brokerAccess(parsed.sessionId); }
       if (service.status().locked) throw fail('시크릿 보관함을 잠금 해제한 뒤 브로커 연결을 승인하세요.', 'locked');
       if (action === 'revoke-broker') { const parsed = z.object({ sessionId: z.string().min(1).max(512), approvalId: z.string().uuid() }).strict().parse(input); await service.revokeBroker(parsed.sessionId, parsed.approvalId); return this.brokerAccess(parsed.sessionId); }
@@ -357,84 +460,51 @@ export class SecretRuntime {
       await service.approveBroker(parsed, () => { const session = this.options.runs.getSession(parsed.sessionId); if (!session || this.candidate(session).cwd !== parsed.root) throw fail('승인할 세션이 변경되었습니다.', 'forbidden'); });
       return this.brokerAccess(parsed.sessionId);
     }
-    const notifySession = z.boolean().optional().parse(input.notifySession);
-    const explicitConnection = notifySession === true && ((action === 'create' && input.connect === true) || action === 'connect' || action === 'attach');
-    if (receiptOnly && (!explicitConnection || !remoteTarget || typeof input.nodeId !== 'string' || typeof input.sessionId !== 'string')) throw fail('원격 채팅 연결의 완료 기록만 요청할 수 있습니다.');
+    if (action === 'settings') return this.settingsView();
+    if (action === 'session') {
+      const { sessionId, nodeId } = ownerInput(ownerSession, input);
+      return nodeId === undefined ? this.sessionView(sessionId) : this.remoteSessionView(sessionId, ownerInput(remoteSubject, remote, '원격 세션을 확인할 수 없습니다.'));
+    }
+    if (action === 'preview') return { fields: Object.keys(parseDotenv(typeof input.value === 'string' ? input.value : '')) };
     const password = (field: string) => { if (typeof input[field] !== 'string') throw fail('보관함 비밀번호가 필요합니다.'); return input[field] as string; };
     if (action === 'initialize') await this.open(() => service.initialize(password('password')));
     else if (action === 'unlock') await this.open(() => service.unlock(password('password')));
     else if (action === 'lock') await service.lock();
     else if (action === 'password') await service.changePassword(password('currentPassword'), password('newPassword'));
     else if (action === 'import') { if (!this.options.importPending || typeof input.id !== 'string') throw fail('가져올 암호화 기록이 필요합니다.'); await this.options.importPending(input.id, password('password')); }
-    if (['create', 'update', 'remove', 'project', 'rule', 'attach', 'connect', 'revoke', 'end-task', 'trust', 'untrust'].includes(action) && service.status().locked) throw fail('시크릿 보관함이 잠겨 있습니다. 잠금을 해제한 뒤 다시 시도하세요.', 'locked');
-    let target: SecretTarget | undefined; let currentProjectId: string | undefined;
-    if (!service.status().locked && typeof input.sessionId === 'string') {
-      const startsTask = ['create', 'attach', 'connect'].includes(action);
-      if (typeof input.nodeId === 'string') target = remoteTarget ? await service.ensureRemoteTask({ ...remoteTarget, runId: 'owner-ui' }) : undefined;
-      else target = startsTask ? await this.target(input.sessionId) : await this.peekTarget(input.sessionId);
-      if (!target && typeof input.nodeId !== 'string') {
-        const session = await this.session(input.sessionId);
-        currentProjectId = service.overview().projects.find(project => project.bindings.some(binding => binding.hostId === service.device().id && binding.root === session.cwd))?.id;
-      }
-    }
-    if (action === 'preview') return { fields: Object.keys(parseDotenv(typeof input.value === 'string' ? input.value : '')) };
-    if (action === 'create') {
-      // Never accept target, hostId, taskId, or projectRoot supplied by the page.
-      const { currentProject, ...create } = z.object({ name: z.string().min(1).max(256), kind: z.enum(['scalar','env','file']), scope: z.enum(['global','project','task']), value: z.string().optional(), content: z.string().optional(), groupId: z.string().optional(), groupName: z.string().max(256).optional(), allProjects: z.boolean().optional(), projectId: z.string().optional(), currentProject: z.boolean().optional(), activation: z.enum(['manual','auto']).optional(), operations: z.array(z.enum(SECRET_OPERATIONS)).max(6).optional(), connect: z.boolean().optional(), expiresAt: z.number().optional() }).parse(input);
-      if (currentProject) {
-        if (!target || create.scope !== 'project') throw fail('저장할 프로젝트 세션이 필요합니다.');
-        const project = target.projectId ? service.overview().projects.find(project => project.id === target!.projectId) : await service.project({ name: target.root.split('/').filter(Boolean).at(-1) || target.root, bindings: [{ hostId: target.hostId, root: target.root }] });
-        create.projectId = project!.id;
-        target = typeof input.nodeId === 'string' ? await service.ensureRemoteTask({ ...target, projectId: project!.id, runId: 'owner-ui' }) : await this.target(input.sessionId as string);
-      }
-      const metadata = await service.create({ ...create, target });
-      if (!target && (create.projectId || create.allProjects === true)) await service.setRule({ groupId: metadata.groupId, secretIds: [metadata.id], hostId: service.device().id, projectId: create.projectId, allProjects: create.allProjects === true && create.scope === 'global', activation: create.activation ?? 'manual', operations: create.operations ?? [...SECRET_OPERATIONS], enabled: true });
+    else if (!MUTATIONS.has(action)) throw fail('알 수 없는 시크릿 작업입니다.', 'not-found');
+    else if (service.status().locked) throw fail('시크릿 보관함이 잠겨 있습니다. 잠금을 해제한 뒤 다시 시도하세요.', 'locked');
+    else if (action === 'create') {
+      // Never a target, host, task or folder of the page's own: the session is verified here or by the web for a joined computer.
+      const { name, kind, value, content, sharing, sessionId, nodeId, connect, temporary } = ownerInput(ownerCreate, input);
+      const secret = { name, kind, value, content, ...(sharing ? { sharing } : {}), ...(connect ? { connect } : {}), ...(temporary ? { temporary } : {}) };
+      if (sessionId === undefined) await service.create(secret);
+      else { const target = await this.ownerTarget({ sessionId, nodeId }, remote); await service.create(secret, target); return this.changed(target, nodeId !== undefined, true); }
+    } else if (action === 'session-connect' || action === 'session-disconnect') {
+      const { sessionId, nodeId, secretIds } = ownerInput(ownerConnection, input);
+      const target = await this.ownerTarget({ sessionId, nodeId }, remote);
+      if (action === 'session-connect') await service.connectSession(target, secretIds); else await service.disconnectSession(target, secretIds);
+      return this.changed(target, nodeId !== undefined, action === 'session-connect');
+    } else if (action === 'sharing') {
+      const { secretId, revision, global, folders, kept } = ownerInput(ownerSharingChange, input);
+      await service.setSharing(secretId, revision, { global, folders }, kept);
     } else if (action === 'update') {
-      const update = z.object({ id: z.string(), value: z.string().optional(), content: z.string().optional() }).parse(input);
+      const update = ownerInput(z.object({ id: z.string().min(1).max(256), value: z.string().optional(), content: z.string().optional() }), input);
       await service.update(update);
-    } else if (action === 'remove') {
-      const id = z.string().parse(input.id); await service.remove(id);
-    }
-    else if (action === 'project') {
-      const project = z.object({ id: z.string().optional(), name: z.string().min(1).max(256), bindings: z.array(z.object({ hostId: z.string(), root: z.string() })).min(1).max(100) }).parse(input);
-      for (const binding of project.bindings) {
-        if (binding.hostId === service.device().id) binding.root = await realpath(binding.root);
-        else if (!service.peers().some(peer => peer.enabled && peer.device.id === binding.hostId)) throw fail('승인한 시크릿 컴퓨터를 선택하세요.');
-        if (!isAbsolute(binding.root) || normalize(binding.root) !== binding.root) throw fail('프로젝트의 절대 경로가 필요합니다.');
-      }
-      await service.project(project);
-    } else if (action === 'rule') {
-      const parsed = z.object({ id: z.string().optional(), groupId: z.string(), secretIds: z.array(z.string()).max(4096), hostId: z.string(), projectId: z.string().optional(), activation: z.enum(['manual','auto']), operations: z.array(z.enum(SECRET_OPERATIONS)).min(1).max(6), fields: z.record(z.string(), z.array(z.string()).max(2048)).optional(), allProjects: z.boolean().optional(), root: z.string().optional(), maxTtlMs: z.number().int().positive().optional(), expiresAt: z.number().optional(), enabled: z.boolean() }).safeParse(input);
-      if (!parsed.success) throw fail(parsed.error.issues.some(issue => issue.path[0] === 'maxTtlMs') ? '작업 내 최대 사용 시간이 올바르지 않습니다.' : '공유 규칙 입력 형식이 올바르지 않습니다.');
-      const rule = parsed.data;
-      if (rule.hostId !== service.device().id && !service.peers().some(peer => peer.enabled && peer.device.id === rule.hostId)) throw fail('승인한 시크릿 컴퓨터를 선택하세요.');
-      // Remote grants have a finite deadline even if the page leaves it blank.
-      if (rule.hostId !== service.device().id) rule.maxTtlMs ??= 8 * 60 * 60_000;
-      await service.setRule(rule);
-    } else if (action === 'attach' || action === 'connect' || action === 'revoke') {
-      if (!target) throw fail('연결할 프로젝트 세션이 필요합니다.');
-      const ids = z.array(z.string()).min(1).max(4096).parse(input.secretIds);
-      if (action === 'attach') await service.attach(target, ids); else if (action === 'connect') await service.connect(target, ids); else await service.revoke(target, ids);
-    } else if (action === 'end-task') { if (!target) throw fail('종료할 작업이 필요합니다.'); await this.endTask(target); target = undefined; }
+    } else if (action === 'remove') await service.remove(ownerInput(z.object({ id: z.string().min(1).max(256) }), input).id);
     else if (action === 'trust') {
       const peer = z.object({ device: z.object({ id: z.string().uuid(), name: z.string().max(256), signingKey: z.string().max(4096), encryptionKey: z.string().max(4096), fingerprint: z.string() }), routeId: z.string().min(1).max(256), direction: z.enum(['node','controller']) }).parse(input);
       if (createPublicKey(peer.device.signingKey).asymmetricKeyType !== 'ed25519' || createPublicKey(peer.device.encryptionKey).asymmetricKeyType !== 'x25519' || peer.device.fingerprint !== createHash('sha256').update(peer.device.signingKey + ':' + peer.device.encryptionKey).digest('hex')) throw fail('컴퓨터의 공개 키와 지문을 확인하세요.');
       await service.trustPeer({ ...peer, enabled: true });
     } else if (action === 'untrust') await service.removePeer(z.string().parse(input.id));
-    else if (!['initialize','unlock','lock','password','import','overview'].includes(action)) throw fail('알 수 없는 시크릿 작업입니다.', 'not-found');
-    // A committed explicit assignment is announced before reading its owner receipt.
-    if (explicitConnection && target) this.notifyConnection(target);
-    if (receiptOnly) {
-      if (!target) throw fail('연결한 원격 작업을 확인할 수 없습니다.', 'unavailable');
-      const { hostId, sessionId, root, taskId, projectId } = target;
-      return { connectedTarget: { hostId, sessionId, root, taskId, ...(projectId ? { projectId } : {}) } };
-    }
-    const overview = await this.overview(target);
-    return { ...overview, currentProjectId: target?.projectId ?? currentProjectId };
+    return this.settingsView();
   }
   peers(): SecretPeer[] { return this.options.service.status().locked ? [] : this.options.service.peers(); }
   device(): SecretDevice { return this.options.service.device(); }
-  poll(routeId: string): RemoteSecretRequest[] { return this.remote.poll(routeId); }
+  /** `features` is what the source's relay says its worker serves; absent from older relays. */
+  poll(routeId: string, features?: unknown): RemoteSecretRequest[] { return this.remote.poll(routeId, features); }
+  /** The source's link went away. */
+  peerOffline(routeId: string): void { this.remote.forget(routeId); }
   answer(routeId: string, request: RemoteSecretRequest): Promise<RemoteSecretResponse> { return this.remote.answer(routeId, request); }
   deliver(routeId: string, response: RemoteSecretResponse): void { this.remote.deliver(routeId, response); }
 }
