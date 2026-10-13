@@ -170,10 +170,17 @@ test('unconfirmed hidden delivery is not resent and holds worker lifetime until 
   assert.equal(f.inputs.length, 1);
 });
 
-test('secret notices exclude automation and turns without the actual secret MCP', async t => {
-  const automation = await fixture(t, { resolveRunTools: secretTools });
-  await automation.running({ kind: 'trigger', triggerId: 'fixture' });
-  automation.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, automation.session.id); await delay(5); assert.equal(automation.inputs.length, 0);
+test('secret notices reach every turn with the secret broker, whoever started it, and no turn without it', async t => {
+  for (const origin of [{ kind: 'agent' }, { kind: 'slack', workflowId: '11111111-1111-4111-8111-111111111111' }, { kind: 'trigger', triggerId: 'fixture' }] as const) {
+    const f = await fixture(t, { resolveRunTools: secretTools });
+    await f.running(origin);
+    f.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, f.session.id);
+    await until(() => f.inputs.length === 1);
+    assert.equal(f.inputs[0].prompt, towerInstructionsBlock(SECRET_CONNECTION_INSTRUCTIONS), origin.kind);
+  }
+  const outsider = await fixture(t, { resolveRunTools: run => run.origin?.triggerId?.startsWith('public:') ? { required: false } : secretTools() });
+  await outsider.running({ kind: 'trigger', triggerId: 'public:agent' });
+  outsider.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, outsider.session.id); await delay(5); assert.equal(outsider.inputs.length, 0, 'a turn the broker was not given');
   const missing = await fixture(t, { resolveRunTools: () => ({ required: false, towerTools: 'attached', instructions: SECRET_USE_INSTRUCTIONS }) });
   await missing.running({ kind: 'owner' }); missing.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, missing.session.id);
   await delay(5); assert.equal(missing.inputs.length, 0);
