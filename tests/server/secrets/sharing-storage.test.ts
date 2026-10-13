@@ -10,6 +10,7 @@ import type { SecretService } from '../../../server/secrets/service.js';
 import { editPayload, legacyRecord, legacyRule, secretService, type StoredPayload, type StoredRecord } from '../../helpers/secrets.js';
 import { writeState, type StateSnapshot } from '../backup/fixtures/state.js';
 import * as oracle from './fixtures/grant-policy-1.130.2.js';
+import { endTask as closeIn1130 } from './fixtures/task-close-1.130.2.js';
 
 const PASSWORD = 'fixture-sharing-storage-password';
 const FIXTURE_PASSWORD = 'fixture vault password 1';
@@ -175,9 +176,10 @@ test('temporary values live in the journal with their task, and grants of an old
   const pasted = await f.service.create({ name: 'pasted', kind: 'scalar', value: 'PASTED_CANARY', temporary: true }, target);
   assert.equal((await f.service.resolve(run, pasted.reference, 'env')).bytes.toString(), 'PASTED_CANARY');
   assert.equal(JSON.stringify(await payloadOf(f.service)).includes(pasted.id), false, 'never in the permanent payload');
+  const saved = await f.service.create({ name: 'saved', kind: 'scalar', value: 's' }); await f.service.create({ name: 'saved too', kind: 'scalar', value: 's' });
   const towerGroups = (await payloadOf(f.service)).groups.filter(group => group.name === 'Tower');
-  assert.equal(towerGroups.length, 1); assert.equal(pasted.groupId, towerGroups[0].id);
-  const saved = await f.service.create({ name: 'saved', kind: 'scalar', value: 's' }); assert.equal(saved.groupId, pasted.groupId, 'one Tower group per vault');
+  assert.deepEqual(towerGroups.map(group => [group.id, group.scope]), [[saved.groupId, 'global']], 'one Tower group per vault, for saved keys only');
+  assert.deepEqual(f.service.overview().groups.find(group => group.id === pasted.groupId), { id: pasted.groupId, name: 'pasted', scope: 'task', taskId: target.taskId });
   await f.service.closeTask(target.taskId);
   assert.equal(f.service.overview().secrets.some(secret => secret.id === pasted.id), false);
   // A journal as 1.130.2 left it: grants, and tasks without connections.
@@ -187,6 +189,18 @@ test('temporary values live in the journal with their task, and grants of an old
   assert.deepEqual(f.service.overview(target).task?.connected, []);
   await f.service.flush();
   assert.equal('grants' in (await f.service.vault.journal() as object), false);
+});
+
+test('a temporary value keeps the task group 1.130.2 gave it, so that build drops it when it closes the task after a rollback', async t => {
+  const f = await fixture(t);
+  const target = await f.service.ensureTask('session', '/p');
+  const pasted = await f.service.create({ name: 'pasted', kind: 'scalar', value: 'PASTED_ROLLBACK_CANARY', temporary: true }, target);
+  // 1.130.2 reads the journal over its own empty one, then closes the task as it did.
+  const older = { grants: [], ...await f.service.vault.journal() as object } as unknown as Parameters<typeof closeIn1130>[0] & { tasks: { id: string; status: 'open' | 'closed'; closedAt?: number }[] };
+  assert.ok(older.secrets.some(secret => secret.metadata.id === pasted.id));
+  closeIn1130(older, older.tasks.find(task => task.id === target.taskId)!, f.now());
+  assert.equal(older.secrets.some(secret => secret.metadata.id === pasted.id), false);
+  assert.equal(JSON.stringify(older).includes('PASTED_ROLLBACK_CANARY'), false);
 });
 
 test('usage is kept per session, value-free, for the latest thousand uses', async t => {

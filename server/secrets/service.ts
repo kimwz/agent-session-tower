@@ -19,7 +19,7 @@ interface StoredSecret {
 interface Legacy { id: string; name: string; value: string; createdAt: string; origin: string }
 interface Permanent {
   device: SecretDevice; keys: { signingPrivateKey: string; encryptionPrivateKey: string }; hmac: string; peers: SecretPeer[]; projects: SecretProject[]; groups: SecretGroup[]; secrets: StoredSecret[]; rules: SecretRule[]; legacy: Legacy[];
-  /** The global group without rules that secrets saved with sharing belong to, so every build finds their group. */
+  /** The global group without rules that saved secrets with sharing belong to, so every build finds their group. */
   towerGroupId?: string;
 }
 interface UsageRecord extends SecretUsage { hostId: string; sessionId: string }
@@ -101,7 +101,7 @@ export class SecretService {
   private allRules() { return [...this.data().rules, ...this.journal.rules]; }
   private secrets() { return [...this.data().secrets, ...this.journal.secrets]; }
   private metadata(secret: StoredSecret): SecretMetadata { return structuredClone(secret.metadata); }
-  /** The task a temporary value lives with: a pasted one's own, or that of the task group an older build kept it in. */
+  /** The task a temporary value lives with: its own mark, or the task group it is kept in (the only mark older builds wrote). */
   private temporaryTask(secret: StoredSecret) { return secret.temporaryTaskId ?? this.journal.groups.find(group => group.id === secret.metadata.groupId)?.taskId; }
   private towerGroup(): string {
     const data = this.data();
@@ -142,7 +142,10 @@ export class SecretService {
     const sharing = input.sharing === undefined || input.temporary ? unshared() : { revision: 1, ...this.sharing(input.sharing) };
     const task = target && (input.temporary || input.connect) ? this.ownerTask(target) : undefined;
     const id = randomUUID(); const fields = input.kind === 'env' ? parseDotenv(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) : undefined;
-    const secret: StoredSecret = { metadata: { id, name: input.name, groupId: this.towerGroup(), kind: input.kind, version: 1, reference: `tower-secret://${this.vault.vaultId}/${id}@1`, fields: fields ? Object.keys(fields) : undefined }, value, encoding: binary ? 'base64' : undefined, fields, sharing, ...(input.temporary ? { temporaryTaskId: task!.id } : {}) };
+    // A temporary value keeps its own task-scope journal group, as 1.130.2 made one, so that build's task close drops it too.
+    const groupId = input.temporary ? randomUUID() : this.towerGroup();
+    if (input.temporary) this.journal.groups.push({ id: groupId, name: input.name, scope: 'task', taskId: task!.id });
+    const secret: StoredSecret = { metadata: { id, name: input.name, groupId, kind: input.kind, version: 1, reference: `tower-secret://${this.vault.vaultId}/${id}@1`, fields: fields ? Object.keys(fields) : undefined }, value, encoding: binary ? 'base64' : undefined, fields, sharing, ...(input.temporary ? { temporaryTaskId: task!.id } : {}) };
     (input.temporary ? this.journal.secrets : this.data().secrets).push(secret);
     if (task) this.join(task, id);
     return this.metadata(secret);
