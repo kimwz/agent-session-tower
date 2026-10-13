@@ -186,6 +186,26 @@ test('secret notices reach every turn with the secret broker, whoever started it
   await delay(5); assert.equal(missing.inputs.length, 0);
 });
 
+test('a turn given the secret broker is told of a connection even once the resolver would no longer give it one', async t => {
+  // A delegated turn's calling turn can leave the run history; asked again, the resolver refuses the unknown caller,
+  // but the credential the running turn holds still works.
+  const callers = new Set<string>();
+  const f = await fixture(t, { resolveRunTools: run => !run.delegation || callers.has(run.delegation.parentRunId) ? secretTools() : { required: false } });
+  const caller = { parentRunId: randomUUID(), rootRunId: randomUUID() }; callers.add(caller.parentRunId);
+  const delegated = await f.manager.enqueue(f.session.id, 'Delegated work', {}, { origin: { kind: 'owner' }, delegation: caller });
+  await until(() => f.controls.length === 1 && f.read(delegated.id).status === 'running');
+  callers.delete(caller.parentRunId);
+  f.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, f.session.id);
+  await until(() => f.inputs.length === 1);
+  assert.equal(f.inputs[0].prompt, towerInstructionsBlock(SECRET_CONNECTION_INSTRUCTIONS));
+  f.controls[0].finish(); await until(() => f.read(delegated.id).status === 'completed');
+  // A later turn composed without the broker is not told.
+  const next = await f.manager.enqueue(f.session.id, 'Later delegated work', {}, { origin: { kind: 'owner' }, delegation: caller });
+  await until(() => f.controls.length === 2 && f.read(next.id).status === 'running');
+  f.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, f.session.id); await delay(5);
+  assert.equal(f.inputs.length, 1);
+});
+
 test('queued same-session instruction is persisted before delivery and follows original completion', async t => {
   const gate = deferred();
   let f: Awaited<ReturnType<typeof fixture>>;

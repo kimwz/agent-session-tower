@@ -354,7 +354,9 @@ export class RunManager extends EventEmitter {
   }
 
   private runTools(run: Run, session: Session): RunTools {
-    return this.options.resolveRunTools?.(run, session) ?? NO_RUN_TOOLS;
+    const tools = this.options.resolveRunTools?.(run, session) ?? NO_RUN_TOOLS;
+    this.toolNotices.composed(run, tools);
+    return tools;
   }
 
   private readonly permissions = new PermissionContinuations({
@@ -369,7 +371,7 @@ export class RunManager extends EventEmitter {
   permissionDecision(request: PermissionRequest, prompt: string, options: DecisionOptions = {}): Promise<Run> { return this.permissions.decide(request, prompt, options); }
 
   private readonly toolNotices = new ToolNotices({
-    runs: () => this.runs.values(), run: id => this.runs.get(id), getSession: id => this.getSession(id), runTools: (run, session) => this.runTools(run, session),
+    runs: () => this.runs.values(), run: id => this.runs.get(id), getSession: id => this.getSession(id),
     stopping: () => this.stopping, updating: () => this.updating,
     admitting: run => this.admissions.has(run.id) || run.steering?.state === 'sending',
     writer: id => this.stdio.get(id) ?? this.owned.get(id)?.claude,
