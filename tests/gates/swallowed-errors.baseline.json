@@ -106,7 +106,6 @@
   "server/runs/update-drain.ts": 3,
   "server/runs/worker.ts": 8,
   "server/secrets/broker.ts": 1,
-  "server/secrets/policy.ts": 2,
   "server/secrets/runtime.ts": 2,
   "server/secrets/service.ts": 1,
   "server/secrets/vault.ts": 1,

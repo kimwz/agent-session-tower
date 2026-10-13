@@ -1,16 +1,22 @@
-import type { SecretGroup, SecretMetadata, SecretOperation, SecretProject, SecretRule, SecretTarget, SecretTask } from '../../shared/secrets.js';
+import type { SecretAvailable, SecretBasis, SecretGroup, SecretOperation, SecretPeer, SecretProject, SecretRule, SecretSharing, SecretTarget, SecretTask } from '../../shared/secrets.js';
 import { SECRET_OPERATIONS } from '../../shared/secrets.js';
+import { legacyRule, namedByRule, projectId, selectedFields, type LegacySecret } from './legacy-policy.js';
 
-export interface PolicySecret { metadata: SecretMetadata; fieldNames?: string[] }
-export interface PolicyGrant { taskId: string; secretId: string; version: number; ruleId: string; revision: number; deadline?: number }
+/** A secret as authorization reads it, without its value. With `sharing` it follows per-secret sharing, without it the rules. */
+export interface PolicySecret extends LegacySecret { sharing?: SecretSharing }
 /** Everything authorization reads, without values or keys; also persisted in plain text so names stay listable while locked. */
-export interface PolicyState { deviceId: string; projects: SecretProject[]; groups: SecretGroup[]; rules: SecretRule[]; secrets: PolicySecret[]; tasks: SecretTask[]; grants: PolicyGrant[] }
-/** How an automatic rule without a grant is treated: issue one, assume the one a fresh issue would create (locked listing), or deny. */
-export type Automatic = ((task: SecretTask, secret: PolicySecret, rule: SecretRule) => PolicyGrant) | 'assume' | undefined;
+export interface PolicyState {
+  deviceId: string;
+  /** The computers GLOBAL covers: this vault's own and its enabled node peers. */
+  servedHosts: string[];
+  projects: SecretProject[]; groups: SecretGroup[]; rules: SecretRule[]; secrets: PolicySecret[]; tasks: SecretTask[];
+}
+/** Why a task may use a secret, and the dotenv fields it may use. */
+export interface Decision { basis: SecretBasis[]; fields?: string[] }
 
-export function projectId(state: Pick<PolicyState, 'projects'>, hostId: string, root: string) { return state.projects.find(project => project.bindings.some(binding => binding.hostId === hostId && binding.root === root))?.id; }
+export function servedHosts(deviceId: string, peers: readonly SecretPeer[]): string[] { return [deviceId, ...peers.filter(peer => peer.enabled && peer.direction === 'node').map(peer => peer.device.id)]; }
 
-export function openTask(state: PolicyState, target: SecretTarget, now: number): SecretTask {
+export function openTask(state: Pick<PolicyState, 'projects' | 'tasks'>, target: SecretTarget, now: number): SecretTask {
   const task = state.tasks.find(task => task.id === target.taskId);
   if (!task || task.status !== 'open' || task.hostId !== target.hostId || task.sessionId !== target.sessionId || task.root !== target.root || (task.expiresAt !== undefined && task.expiresAt <= now) || target.projectId !== projectId(state, task.hostId, task.root)) throw new Error('Task identity denied');
   return task;
@@ -24,41 +30,46 @@ export function sessionTask(state: Pick<PolicyState, 'tasks'>, sessionId: string
   return task;
 }
 
-export function matchingRules(state: PolicyState, task: SecretTask, secret: PolicySecret) {
-  const group = state.groups.find(group => group.id === secret.metadata.groupId);
-  if (!group || (group.scope === 'task' && group.taskId !== task.id) || (group.scope === 'project' && group.projectId !== projectId(state, task.hostId, task.root))) return [];
-  return state.rules.filter(rule => rule.groupId === group.id && rule.secretIds.includes(secret.metadata.id) && rule.hostId === task.hostId && ((rule.projectId !== undefined && rule.projectId === projectId(state, task.hostId, task.root)) || (rule.projectId === undefined && ((group.scope === 'global' && rule.allProjects === true) || (rule.root !== undefined && rule.root === task.root) || (group.scope === 'task' && group.taskId === task.id)))));
-}
-export function activeRules(state: PolicyState, task: SecretTask, secret: PolicySecret, now: number) { return matchingRules(state, task, secret).filter(rule => rule.enabled && (rule.expiresAt === undefined || rule.expiresAt > now)); }
+/** Sharing set aside because a rule names the secret again, which only an older build writes; the owner's next save restores it. */
+export function withheld(state: Pick<PolicyState, 'rules'>, secret: PolicySecret): boolean { return !!secret.sharing && namedByRule(state.rules, secret.metadata.id); }
 
-export function selectedFields(secret: PolicySecret, rule: Pick<SecretRule, 'fields'>): string[] | undefined {
-  const selected = rule.fields?.[secret.metadata.id];
-  if (selected === undefined) return secret.fieldNames ? [...secret.fieldNames] : undefined;
-  if (!secret.fieldNames || !Array.isArray(selected) || new Set(selected).size !== selected.length || selected.some(field => typeof field !== 'string' || !secret.fieldNames!.includes(field))) throw new Error('Invalid field selection');
-  return selected;
-}
-
-export function authorize(state: PolicyState, task: SecretTask, secret: PolicySecret, operation: SecretOperation, now: number, automatic: Automatic): SecretRule {
-  if (task.excluded.includes(secret.metadata.id) || (secret.metadata.expiresAt !== undefined && secret.metadata.expiresAt <= now)) throw new Error('Secret access denied');
-  const rules = activeRules(state, task, secret, now).filter(rule => rule.operations.includes(operation));
-  if (rules.length !== 1) throw new Error('Single matching rule required');
-  const rule = rules[0]; selectedFields(secret, rule);
-  let grant = state.grants.find(grant => grant.taskId === task.id && grant.secretId === secret.metadata.id && grant.ruleId === rule.id);
-  if (!grant && rule.activation === 'auto' && automatic) grant = automatic !== 'assume' ? automatic(task, secret, rule) : { taskId: task.id, secretId: secret.metadata.id, version: secret.metadata.version, ruleId: rule.id, revision: rule.revision };
-  if (!grant || grant.revision !== rule.revision || grant.version !== secret.metadata.version || (grant.deadline !== undefined && grant.deadline <= now)) throw new Error('Grant denied');
-  return rule;
+/** Why this task may use the secret this way, or undefined when nothing allows it. */
+export function decide(state: PolicyState, task: SecretTask, secret: PolicySecret, operation: SecretOperation, now: number): Decision | undefined {
+  const id = secret.metadata.id;
+  if (task.status !== 'open' || (task.expiresAt !== undefined && task.expiresAt <= now) || task.excluded.includes(id) || (secret.metadata.expiresAt !== undefined && secret.metadata.expiresAt <= now)) return;
+  const basis: SecretBasis[] = task.connected.includes(id) ? ['session'] : [];
+  let rule: SecretRule | undefined;
+  if (secret.sharing) {
+    if (!withheld(state, secret)) {
+      if (secret.sharing.global && state.servedHosts.includes(task.hostId)) basis.push('global');
+      if (secret.sharing.folders.some(folder => folder.hostId === task.hostId && folder.root === task.root)) basis.push('folder');
+    }
+  } else if ((rule = legacyRule(state, task, secret, operation, now))) basis.push('legacy');
+  if (!basis.length) return;
+  // A rule's field selection binds only where the rule alone allows the use: bases never combine into a union.
+  return { basis, fields: rule && basis.length === 1 ? selectedFields(secret, rule) : secret.fieldNames && [...secret.fieldNames] };
 }
 
-/** The secrets this task may discover, each with the operations it may use. */
-export function discoverable(state: PolicyState, task: SecretTask, now: number, automatic: Automatic): SecretMetadata[] {
-  const result: SecretMetadata[] = [];
-  for (const secret of state.secrets) {
-    try {
-      const rule = authorize(state, task, secret, 'discover', now, automatic);
-      result.push({ ...structuredClone(secret.metadata), fields: secret.fieldNames ? rule.fields?.[secret.metadata.id] ?? [...secret.fieldNames] : undefined,
-        operations: SECRET_OPERATIONS.filter(operation => { try { authorize(state, task, secret, operation, now, automatic); return true; } catch { return false; } }),
-        activation: rule.activation, sourceHostId: state.deviceId });
-    } catch { /* A list omits resources not authorized for this subject. */ }
-  }
-  return result;
+export function authorize(state: PolicyState, task: SecretTask, secret: PolicySecret, operation: SecretOperation, now: number): Decision {
+  const decision = decide(state, task, secret, operation, now);
+  if (!decision) throw new Error('Secret access denied');
+  return decision;
+}
+
+/** What this task may discover, each with the operations it may use and why. Reads only. */
+export function available(state: PolicyState, task: SecretTask, now: number): SecretAvailable[] {
+  return state.secrets.flatMap(secret => {
+    const decision = decide(state, task, secret, 'discover', now);
+    if (!decision) return [];
+    return [{ ...structuredClone(secret.metadata), fields: decision.fields, basis: decision.basis, sourceHostId: state.deviceId,
+      operations: SECRET_OPERATIONS.filter(operation => decide(state, task, secret, operation, now)) }];
+  });
+}
+
+/** Whether automatic use may enter this folder: some secret is allowed there, or the task already has the owner's connections. */
+export function covered(state: PolicyState, hostId: string, root: string, taskId: string, now: number): boolean {
+  const task = state.tasks.find(task => task.id === taskId);
+  if (task && task.hostId === hostId && task.root === root && task.connected.length) return true;
+  const probe: SecretTask = { id: taskId, hostId, sessionId: '', root, status: 'open', createdAt: task?.createdAt ?? now, excluded: [], connected: [] };
+  return state.secrets.some(secret => decide(state, probe, secret, 'discover', now));
 }

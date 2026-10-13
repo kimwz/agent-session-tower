@@ -6,7 +6,35 @@ import { MAX_SECRET_BYTES, SECRET_OPERATIONS, DEFAULT_SECRET_USE_OPERATIONS } fr
 import { SecretVault } from './vault.js';
 import { decode } from './crypto.js';
 import { parseDotenv } from './dotenv.js';
-import { authorize, discoverable, openTask, projectId, sessionTask, matchingRules, activeRules, selectedFields, type PolicyGrant, type PolicySecret, type PolicyState } from './policy.js';
+import { openTask, sessionTask, servedHosts, type PolicySecret } from './policy.js';
+import { activeRules, matchingRules, projectId, selectedFields } from './legacy-policy.js';
+// Grant-based authorization, kept here only until tasks connect secrets explicitly.
+interface PolicyGrant { taskId: string; secretId: string; version: number; ruleId: string; revision: number; deadline?: number }
+type PolicyState = import('./policy.js').PolicyState & { grants: PolicyGrant[] };
+type Automatic = ((task: SecretTask, secret: PolicySecret, rule: SecretRule) => PolicyGrant) | 'assume' | undefined;
+function authorize(state: PolicyState, task: SecretTask, secret: PolicySecret, operation: SecretOperation, now: number, automatic: Automatic): SecretRule {
+  if (task.excluded.includes(secret.metadata.id) || (secret.metadata.expiresAt !== undefined && secret.metadata.expiresAt <= now)) throw new Error('Secret access denied');
+  const rules = activeRules(state, task, secret, now).filter(rule => rule.operations.includes(operation));
+  if (rules.length !== 1) throw new Error('Single matching rule required');
+  const rule = rules[0]; selectedFields(secret, rule);
+  let grant = state.grants.find(grant => grant.taskId === task.id && grant.secretId === secret.metadata.id && grant.ruleId === rule.id);
+  if (!grant && rule.activation === 'auto' && automatic) grant = automatic !== 'assume' ? automatic(task, secret, rule) : { taskId: task.id, secretId: secret.metadata.id, version: secret.metadata.version, ruleId: rule.id, revision: rule.revision };
+  if (!grant || grant.revision !== rule.revision || grant.version !== secret.metadata.version || (grant.deadline !== undefined && grant.deadline <= now)) throw new Error('Grant denied');
+  return rule;
+}
+function discoverable(state: PolicyState, task: SecretTask, now: number, automatic: Automatic): SecretMetadata[] {
+  const result: SecretMetadata[] = [];
+  for (const secret of state.secrets) {
+    try {
+      const rule = authorize(state, task, secret, 'discover', now, automatic);
+      result.push({ ...structuredClone(secret.metadata), fields: secret.fieldNames ? rule.fields?.[secret.metadata.id] ?? [...secret.fieldNames] : undefined,
+        // best-effort: a list omits operations not authorized for this subject.
+        operations: SECRET_OPERATIONS.filter(operation => { try { authorize(state, task, secret, operation, now, automatic); return true; } catch { return false; } }),
+        activation: rule.activation, sourceHostId: state.deviceId });
+    } catch { /* best-effort: a list omits resources not authorized for this subject. */ }
+  }
+  return result;
+}
 interface StoredSecret { metadata: SecretMetadata; value: string; encoding?: 'base64'; fields?: Record<string, string> }
 type Grant = PolicyGrant;
 interface Legacy { id: string; name: string; value: string; createdAt: string; origin: string }
@@ -75,7 +103,7 @@ export class SecretService {
   private projectId(hostId: string, root: string) { return projectId(this.data(), hostId, root); }
   /** Live view for authorization: grants issued during an evaluation land in the journal it reads. */
   private lockedIndex(): LockedIndex { return { brokerApprovals: structuredClone(this.journal.brokerApprovals), policy: this.policy(), sources: this.data().peers.filter(peer => peer.enabled && peer.direction === 'controller').map(peer => peer.device.id) }; }
-  private policy(): PolicyState { const data = this.data(); return { deviceId: data.device.id, projects: data.projects, groups: this.groups(), rules: this.allRules(), secrets: this.secrets().map(policySecret), tasks: this.journal.tasks, grants: this.journal.grants }; }
+  private policy(): PolicyState { const data = this.data(); return { deviceId: data.device.id, servedHosts: servedHosts(data.device.id, data.peers), projects: data.projects, groups: this.groups(), rules: this.allRules(), secrets: this.secrets().map(policySecret), tasks: this.journal.tasks, grants: this.journal.grants }; }
   private groups() { return [...this.data().groups, ...this.journal.groups]; }
   private allRules() { return [...this.data().rules, ...this.journal.rules]; }
   private secrets() { return [...this.data().secrets, ...this.journal.secrets]; }
