@@ -36,7 +36,7 @@ test('records have explicit empty states', () => {
   assert.match(html, /차단된 IP가 없습니다/);
   assert.match(html, /로그인 시도 기록이 없습니다/);
 });
-test('protected API 401 requests reauthentication but login failure does not', async () => {
+test('protected API 401 requests reauthentication but a refused login or Tower password does not', async () => {
   const originalFetch = globalThis.fetch;
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
   const events: string[] = [];
@@ -47,6 +47,11 @@ test('protected API 401 requests reauthentication but login failure does not', a
     assert.deepEqual(events, [AUTH_REQUIRED_EVENT]);
     await assert.rejects(api('/api/auth/login'));
     assert.equal(events.length, 1);
+    // A wrong Tower password while unlocking value viewing keeps the page signed in.
+    await assert.rejects(api('/api/secrets/view-unlock', { method: 'POST' }));
+    assert.equal(events.length, 1);
+    await assert.rejects(api('/api/secrets/value', { method: 'POST' }));
+    assert.equal(events.length, 2, 'reading a value without a sign-in is a lost sign-in');
   } finally {
     globalThis.fetch = originalFetch;
     if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow); else Reflect.deleteProperty(globalThis, 'window');

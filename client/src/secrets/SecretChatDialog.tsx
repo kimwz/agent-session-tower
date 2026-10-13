@@ -8,9 +8,9 @@ import type { SecretChange } from './SecretAccess';
 import { SecretPaste } from './SecretPaste';
 import { SecretAvailable, SecretSessionState } from './SecretAvailable';
 import { SecretSessionPoller } from './session-poller';
-import { postSecret, readSecretSession, secretFailure, secretLoadFailure, secretSession, sessionBlocked, usedSecrets } from './secrets-client';
+import { failureCode, postSecret, readSecretSession, secretFailure, secretLoadFailure, secretSession, sessionBlocked, usedSecrets } from './secrets-client';
 
-/** Actions on this session's task; their answer is the session view. Vault setup and unlock answer with the settings view. */
+/** Actions on this session's task; their answer is the session view. Vault setup and unlocks answer with the settings view. */
 const SESSION_ACTIONS = new Set(['create', 'session-connect', 'session-disconnect', 'session-reallow']);
 
 /** One session's secret view, read by `SecretSessionPoller`; nothing here connects anything until a button asks. */
@@ -30,7 +30,7 @@ function useSecretSession(token: string, sessionId: string, open: boolean) {
     return () => { current.stop(); window.removeEventListener('focus', focus); if (poller.current === current) poller.current = undefined; };
   }, [token, sessionId]);
   useEffect(() => { poller.current?.setOpen(open); }, [open]);
-  const change: SecretChange = useCallback(async (action, body) => {
+  const change: SecretChange = useCallback(async (action, body, refused) => {
     const current = poller.current;
     if (mutating.current || !current) return false;
     mutating.current = true; setBusy(true); setError(''); current.hold();
@@ -44,7 +44,11 @@ function useSecretSession(token: string, sessionId: string, open: boolean) {
       }
       return poller.current === current;
     } catch (failure) {
-      if (poller.current === current) { setError(secretFailure(failure, latest.current.t)); current.release(); }
+      if (poller.current === current) {
+        const code = failureCode(failure);
+        if (!code || !refused?.(code)) setError(secretFailure(failure, latest.current.t));
+        current.release();
+      }
       return false;
     } finally { if (poller.current === current) { mutating.current = false; setBusy(false); } }
   }, [token, sessionId]);

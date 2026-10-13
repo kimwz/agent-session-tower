@@ -130,24 +130,80 @@ test('saving a paste to the vault sends the chosen sharing instead of a temporar
   answer(); await tick(); paste.cleanup();
 });
 
+const unlockFields = (root: Element) => find(root, element => element.type === stub('./SecretAccess', 'SecretUnlockFields'));
 test('a locked vault unlocks inline first, and unlock alone sends only the password', async () => {
   const locked = sessionView({ status: { initialized: true, locked: true }, error: 'locked' });
   const only = changes();
   const unlock = fixture('SecretPaste.tsx', 'SecretPaste', { view: locked, sessionId: 's', busy: false, change: only.change, onConnected() {} });
-  find(unlock.render(), element => element.type === 'input' && element.props.type === 'password').props.onChange({ target: { value: 'FAKE_UNLOCK_PASSWORD' } });
+  assert.equal(unlockFields(unlock.render()).props.mode, 'vault', 'without Tower-password support the vault password opens it, as before');
+  unlockFields(unlock.render()).props.onPassword('FAKE_UNLOCK_PASSWORD');
   find(unlock.render(), byType('form')).props.onSubmit(formEvent);
   assert.deepEqual(only.sent, [['unlock', { password: 'FAKE_UNLOCK_PASSWORD' }]]);
-  assert.equal(find(unlock.render(), element => element.type === 'input' && element.props.type === 'password').props.value, '');
+  assert.equal(unlockFields(unlock.render()).props.password, '');
   only.answer(); await tick(); assert.equal(only.sent.length, 1); unlock.cleanup();
   const both = changes();
   const paste = fixture('SecretPaste.tsx', 'SecretPaste', { view: locked, sessionId: 's', busy: false, change: both.change, onConnected() {} });
   find(paste.render(), byType('textarea')).props.onChange({ target: { value: 'FAKE_VALUE' } });
-  find(paste.render(), element => element.type === 'input' && element.props.type === 'password').props.onChange({ target: { value: 'FAKE_UNLOCK_PASSWORD' } });
+  unlockFields(paste.render()).props.onPassword('FAKE_UNLOCK_PASSWORD');
   find(paste.render(), byType('form')).props.onSubmit(formEvent);
   assert.deepEqual(both.sent.map(([action]) => action), ['unlock']);
   both.answer(); await tick();
   assert.deepEqual(both.sent.map(([action]) => action), ['unlock', 'create']); assert.equal(both.sent[1]![1].value, 'FAKE_VALUE');
   both.answer(); await tick(); paste.cleanup();
+});
+
+test('the paste tab opens a vault linked to the Tower password with it, and asks for the recovery password with it when the server needs it', async () => {
+  const ready = sessionView({ status: { initialized: true, locked: true, towerPassword: 'ready' }, error: 'locked' });
+  const sent: [string, any][] = [];
+  const change = async (action: string, body: unknown, refused?: (code: string) => boolean) => { sent.push([action, body]); return sent.length === 1 ? (assert.equal(refused?.('needs-recovery'), true), false) : true; };
+  const paste = fixture('SecretPaste.tsx', 'SecretPaste', { view: ready, sessionId: 's', busy: false, change, onConnected() {} });
+  assert.equal(unlockFields(paste.render()).props.mode, 'tower');
+  unlockFields(paste.render()).props.onPassword('FAKE_TOWER_PASSWORD');
+  find(paste.render(), byType('form')).props.onSubmit(formEvent); await tick();
+  assert.deepEqual(sent, [['view-unlock', { password: 'FAKE_TOWER_PASSWORD' }]]);
+  const fields = unlockFields(paste.render()).props;
+  assert.equal(fields.mode, 'both'); assert.equal(fields.password, 'FAKE_TOWER_PASSWORD', 'the Tower password stays; only the recovery password is asked for');
+  fields.onRecoveryPassword('FAKE_RECOVERY_PASSWORD');
+  find(paste.render(), byType('form')).props.onSubmit(formEvent); await tick();
+  assert.deepEqual(sent[1], ['view-unlock', { password: 'FAKE_TOWER_PASSWORD', recoveryPassword: 'FAKE_RECOVERY_PASSWORD' }]);
+  assert.equal(unlockFields(paste.render()).props.recoveryPassword, '');
+  paste.cleanup();
+});
+
+test('settings and the chat open a locked vault per its Tower-password state, with a switch to the recovery password', async () => {
+  const status = (towerPassword?: 'ready' | 'missing') => ({ initialized: true, locked: true, ...(towerPassword ? { towerPassword } : {}) });
+  const open = (towerPassword?: 'ready' | 'missing', change: (...args: any[]) => Promise<boolean> = async () => true) => {
+    const access = fixture('SecretAccess.tsx', 'SecretAccess', { status: status(towerPassword), busy: false, change });
+    const fields = () => find(access.render(), element => element.type === access.exports.SecretUnlockFields).props;
+    const submit = async () => { find(access.render(), byType('form')).props.onSubmit(formEvent); await tick(); };
+    return { access, fields, submit };
+  };
+  const sent: [string, any][] = []; const record = async (action: string, body: unknown) => { sent.push([action, body]); return true; };
+  const ready = open('ready', record);
+  assert.equal(ready.fields().mode, 'tower');
+  ready.fields().onPassword('FAKE_TOWER'); await ready.submit();
+  assert.deepEqual(sent.pop(), ['view-unlock', { password: 'FAKE_TOWER' }]); assert.equal(ready.fields().password, '');
+  ready.fields().onRecovery(true);
+  assert.equal(ready.fields().mode, 'recovery');
+  ready.fields().onPassword('FAKE_RECOVERY'); await ready.submit();
+  assert.deepEqual(sent.pop(), ['unlock', { password: 'FAKE_RECOVERY' }], 'the switch opens the vault alone with the recovery password');
+  ready.fields().onRecovery(false); assert.equal(ready.fields().mode, 'tower');
+  const missing = open('missing', record);
+  assert.equal(missing.fields().mode, 'both');
+  missing.fields().onPassword('FAKE_TOWER'); missing.fields().onRecoveryPassword('FAKE_RECOVERY'); await missing.submit();
+  assert.deepEqual(sent.pop(), ['view-unlock', { password: 'FAKE_TOWER', recoveryPassword: 'FAKE_RECOVERY' }]);
+  const vault = open(undefined, record);
+  assert.equal(vault.fields().mode, 'vault');
+  vault.fields().onPassword('FAKE_VAULT'); await vault.submit();
+  assert.deepEqual(sent.pop(), ['unlock', { password: 'FAKE_VAULT' }]);
+  // A needs-recovery answer switches to both fields with the Tower password kept; other refusals stay the hook's to show.
+  const codes: boolean[] = [];
+  const asking = open('ready', async (action: string, body: unknown, refused?: (code: string) => boolean) => { sent.push([action, body]); codes.push(refused!('login-required'), refused!('needs-recovery')); return false; });
+  asking.fields().onPassword('FAKE_TOWER'); await asking.submit();
+  assert.deepEqual(codes, [false, true]);
+  assert.equal(asking.fields().mode, 'both'); assert.equal(asking.fields().password, 'FAKE_TOWER');
+  asking.fields().onRecoveryPassword('FAKE_RECOVERY'); await asking.submit();
+  assert.deepEqual(sent.slice(-1), [['view-unlock', { password: 'FAKE_TOWER', recoveryPassword: 'FAKE_RECOVERY' }]]);
 });
 
 test('a paste that cannot reach this session is not sent', () => {

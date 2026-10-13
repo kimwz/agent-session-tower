@@ -5,7 +5,7 @@ import { SettingsFrameContext, SettingsPane } from '../settings/SettingsPane';
 import type { SecretChange } from './SecretAccess';
 import type { SecretComputer } from './SecretAdvanced';
 import { SecretSettingsWorkspace } from './SecretSettings';
-import { postSecret, readSecretSettings, secretFailure, secretLoadFailure, sharingConflict, emptyCanvas, type SecretCanvas } from './secrets-client';
+import { failureCode, postSecret, readSecretSettings, secretFailure, secretLoadFailure, sharingConflict, emptyCanvas, type SecretCanvas } from './secrets-client';
 
 /** The settings view, read when the section is shown and replaced by every change's answer; never polled. A read is dropped once a change started after it. */
 function useSecretSettings(token: string, active: boolean) {
@@ -23,7 +23,7 @@ function useSecretSettings(token: string, active: boolean) {
     return () => controller.abort();
   }, [token, active, revision, t]);
   const reload = useCallback(() => { setError(''); setRevision(value => value + 1); }, []);
-  const change: SecretChange = useCallback(async (action, body) => {
+  const change: SecretChange = useCallback(async (action, body, refused) => {
     if (mutating.current || !active || !token) return false;
     const current = generation.current; mutating.current = true; changes.current++; setBusy(true); setError(''); setNotice('');
     try {
@@ -33,6 +33,8 @@ function useSecretSettings(token: string, active: boolean) {
       return true;
     } catch (failure) {
       if (current !== generation.current) return false;
+      const code = failureCode(failure);
+      if (code && refused?.(code)) return false;
       // A stale revision: show what is stored now; the editor starts again from it.
       if (action === 'sharing' && sharingConflict(failure)) { setNotice(t('공유 설정이 다른 곳에서 바뀌었습니다. 지금 저장된 내용을 불러왔으니 확인한 뒤 다시 저장하세요.')); setRevision(value => value + 1); }
       else setError(secretFailure(failure, t));

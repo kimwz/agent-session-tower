@@ -1,6 +1,6 @@
 import type {
   SecretFolder, SecretKind, SecretLegacySummary, SecretMetadata, SecretPeer, SecretSessionError, SecretSessionView, SecretSettingsItem,
-  SecretSettingsView, SecretSharing, SecretUsage,
+  SecretSettingsView, SecretSharing, SecretTowerPassword, SecretUsage,
 } from '../../../shared/secrets';
 import { MAX_SECRET_BYTES } from '../../../shared/secrets';
 import { api, ApiError } from '../common/lib';
@@ -22,10 +22,14 @@ export const postSecret = <T,>(action: string, token: string, body: unknown) => 
 /** The server's 503 for a route the attached execution worker does not support yet. */
 export const workerPending = (failure: unknown) => failure instanceof ApiError && failure.code === 'worker-update-pending';
 export const sharingConflict = (failure: unknown) => failure instanceof ApiError && failure.status === 409;
+/** Why the server refused, when it says (`needs-recovery`, `view-locked` …). */
+export const failureCode = (failure: unknown) => failure instanceof ApiError ? failure.code : undefined;
 export const WORKER_PENDING = '새 실행 워커 적용 대기 중입니다. 진행 중인 작업이 끝나면 다시 시도하세요.';
 /** The server names why it refused (a locked vault, a folder it cannot share); anything else keeps the generic hint. */
 export function secretFailure(failure: unknown, t: (key: string) => string): string {
   if (workerPending(failure)) return t(WORKER_PENDING);
+  // Only the Tower-password check answers this to the page's own request; a lost sign-in has the login screen.
+  if (failureCode(failure) === 'login-required') return t('Tower 비밀번호가 맞지 않습니다.');
   if (failure instanceof ApiError && failure.status === 423) return t('시크릿 보관함이 잠겨 있습니다. 잠금을 해제한 뒤 다시 시도하세요.');
   // A 503 names a joined computer that is not connected now.
   if (failure instanceof ApiError && ((failure.status >= 400 && failure.status < 500 && failure.status !== 401) || failure.status === 503) && failure.message) return t(failure.message);
@@ -63,6 +67,25 @@ export async function readSecretFile(file: Pick<File, 'size' | 'arrayBuffer'>): 
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary);
 }
+
+/**
+ * How a locked vault opens: the Tower (login) password; it with the recovery password once, when the vault is not yet
+ * linked to the current login (`missing`, or the server answered `needs-recovery`); the recovery (old vault) password
+ * alone, when the owner chose it; or, without Tower-password support, the vault password as before.
+ */
+export type UnlockMode = 'tower' | 'both' | 'recovery' | 'vault';
+export function unlockMode(towerPassword: SecretTowerPassword | undefined, choice: { recovery?: boolean; asked?: boolean }): UnlockMode {
+  if (!towerPassword) return 'vault';
+  if (choice.recovery) return 'recovery';
+  return towerPassword === 'missing' || choice.asked ? 'both' : 'tower';
+}
+/** The request that opens the vault in `mode`: the Tower-password paths also turn on value viewing. */
+export function unlockRequest(mode: UnlockMode, password: string, recoveryPassword: string): [action: string, body: Record<string, string>] {
+  if (mode === 'tower') return ['view-unlock', { password }];
+  if (mode === 'both') return ['view-unlock', { password, recoveryPassword }];
+  return ['unlock', { password }];
+}
+export const unlockReady = (mode: UnlockMode, password: string, recoveryPassword: string) => !!password && (mode !== 'both' || !!recoveryPassword);
 
 /** Folders are sent as canvas keys: a local absolute path, or `@<node>/` followed by that computer's absolute path. */
 export interface SharingInput { global: boolean; folders: { cwd: string }[] }

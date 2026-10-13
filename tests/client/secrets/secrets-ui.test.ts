@@ -313,6 +313,28 @@ test('password setup requires confirmation and 12 characters while locked vault 
   assert.match(locked, /잠금 해제/); assert.match(locked, /autoComplete="current-password"/); assert.doesNotMatch(locked, /비밀번호 확인/);
 });
 
+test('a locked vault shows the Tower password, it with the recovery password and why, or the vault password, in settings and the chat', () => {
+  const status = (towerPassword?: 'ready' | 'missing') => ({ initialized: true, locked: true, ...(towerPassword ? { towerPassword } : {}) });
+  const render = (towerPassword?: 'ready' | 'missing') => renderToStaticMarkup(createElement(SecretAccess, { status: status(towerPassword), busy: false, change }));
+  const fields = (markup: string) => markup.match(/type="password"/g)?.length ?? 0;
+  const ready = render('ready');
+  assert.equal(fields(ready), 1); assert.match(ready, /<label>Tower 비밀번호<input type="password"/); assert.match(ready, /Tower에 로그인하는 비밀번호로/);
+  assert.match(ready, /class="secret-unlock-switch"[^>]*>복구 비밀번호로 열기</); assert.doesNotMatch(ready, /기존 보관함 비밀번호/);
+  const missing = render('missing');
+  assert.equal(fields(missing), 2); assert.match(missing, /<label>Tower 비밀번호<input/); assert.match(missing, /<label>복구 비밀번호\(기존 보관함 비밀번호\)<input type="password" autoComplete="off"/);
+  assert.match(missing, /아직 이 Tower 비밀번호와 연결되지 않았습니다/); assert.match(missing, />복구 비밀번호로 열기</);
+  const vault = render();
+  assert.equal(fields(vault), 1); assert.match(vault, /보관함 비밀번호를 입력하세요/); assert.doesNotMatch(vault, /Tower|복구 비밀번호|secret-unlock-switch/, 'without Tower-password support nothing changes');
+  const chat = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ error: 'locked', status: status('missing'), available: [] }), busy: false, change, onPaste: noop, onSharing: noop }));
+  assert.equal(fields(chat), 2); assert.match(chat, /복구 비밀번호로 열기/);
+  const paste = renderToStaticMarkup(createElement(SecretPaste, { view: sessionView({ error: 'locked', status: status('ready') }), sessionId: 's', busy: false, change, onConnected: noop }));
+  assert.match(paste, /<label>Tower 비밀번호<input type="password"/); assert.match(paste, />복구 비밀번호로 열기</);
+  setLanguage('en');
+  const english = render('missing').replace(/<[^>]*>/g, ' ');
+  assert.match(english, /Tower password/); assert.match(english, /Recovery password \(the earlier vault password\)/); assert.match(english, /Open with the recovery password/);
+  assert.doesNotMatch(english, /[가-힣]/);
+});
+
 test('peer public code parsing drops extra properties and rejects malformed codes without reflecting pasted data', () => {
   assert.deepEqual(parseSecretDevice(JSON.stringify({ ...device, password: 'private-canary' })), device);
   assert.throws(() => parseSecretDevice(JSON.stringify({ id: 'source', password: 'private-canary' })), /Invalid public device/);
