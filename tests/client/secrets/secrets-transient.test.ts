@@ -8,6 +8,7 @@ import type { ReactElement } from 'react';
 import * as secretTypes from '../../../shared/secrets.js';
 import * as secretsClient from '../../../client/src/secrets/secrets-client.js';
 import { ApiError } from '../../../client/src/common/lib.js';
+import { english } from '../../../client/src/i18n/messages.js';
 import type { SecretSessionView, SecretSettingsView, SecretValue } from '../../../shared/secrets.js';
 
 type Element = ReactElement<Record<string, any>>;
@@ -554,5 +555,30 @@ test('a file value is saved through a Blob URL that is revoked right after the d
   } finally {
     URL.createObjectURL = original.create; URL.revokeObjectURL = original.revoke;
     if (original.document) Object.defineProperty(globalThis, 'document', original.document); else Reflect.deleteProperty(globalThis, 'document');
+  }
+});
+
+test('saving the account says what became of the secret vault: a locked one needs the recovery password once at its next unlock', async () => {
+  const overview = { configured: true, username: 'owner', attempts: [], blockedIps: [], attemptLimit: 5, historyLimit: 1000 };
+  const outcomes = [['locked', /시크릿 보관함이 잠겨 있어 새 비밀번호를 연결하지 못했습니다\. 다음 잠금 해제 때 복구\(보관함\) 비밀번호를 한 번 입력하세요\./],
+    ['rewrapped', /시크릿 보관함도 새 비밀번호로 열 수 있습니다/], ['unavailable', undefined], [undefined, undefined]] as const;
+  for (const [vault, notice] of outcomes) {
+    const posted: unknown[] = []; let changed = 0;
+    const panel = fixture('auth/AccountPanel.tsx', 'AccountPanel', { token: 'token', async onChanged() { changed++; } }, { context: { active: true }, real: {
+      '../common/lib': { api: async () => overview },
+      './AuthGate': { useAuth: () => null, authPost: async (path: string, _token: string, body: unknown) => { posted.push([path, plain(body)]); return { ...overview, ...(vault ? { vault } : {}) }; } },
+    } });
+    panel.render(); await tick();
+    const form = () => find(panel.render(), element => element.type === 'form' && element.props.className === 'auth-form auth-credentials');
+    const passwords = () => descendants(form()).filter(element => element.type === 'input' && element.props.type === 'password');
+    passwords()[0]!.props.onChange({ target: { value: 'FAKE_NEW_PASSWORD' } }); passwords()[1]!.props.onChange({ target: { value: 'FAKE_NEW_PASSWORD' } });
+    await form().props.onSubmit({ preventDefault() {} });
+    assert.deepEqual(posted, [['/api/auth/credentials', { username: 'owner', password: 'FAKE_NEW_PASSWORD' }]]); assert.equal(changed, 1);
+    const lines = descendants(panel.render()).filter(element => element.type === 'p' && element.props.role === 'status').map(text);
+    assert.match(lines[0]!, /계정을 저장했습니다/, String(vault));
+    if (notice) assert.match(lines[1]!, notice); else assert.equal(lines.length, 1, `${vault}: nothing to say about the vault`);
+    if (vault === 'locked') assert.equal(find(panel.render(), element => element.type === 'p' && element.props.className === 'auth-warning').type, 'p');
+    if (notice) assert.match(english[lines[1]!] ?? '', /secret vault/, 'translated');
+    panel.cleanup();
   }
 });

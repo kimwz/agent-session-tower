@@ -781,6 +781,8 @@ export const english: Record<string, string> = {
   "로그아웃": "Log out",
   "비밀번호가 일치하지 않습니다.": "Passwords do not match.",
   "계정을 저장했습니다. 기존 원격 로그인은 해제됩니다.": "Account saved. Existing remote sessions are signed out.",
+  "시크릿 보관함이 잠겨 있어 새 비밀번호를 연결하지 못했습니다. 다음 잠금 해제 때 복구(보관함) 비밀번호를 한 번 입력하세요.": "The secret vault was locked, so the new password could not be linked to it. At the next unlock, enter the recovery (vault) password once.",
+  "시크릿 보관함도 새 비밀번호로 열 수 있습니다.": "The secret vault now opens with the new password too.",
   "로컬 접속은 로그인 없이 사용할 수 있습니다. 계정 관리는 서버 컴퓨터에서만 가능합니다.": "Local access does not require login. Account management is available only on the server computer.",
   "계정 변경": "Change account",
   "계정 설정": "Set up account",
