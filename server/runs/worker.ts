@@ -1536,12 +1536,12 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
           return { name: trigger.name, instructions: trigger.handler.kind === 'task' ? trigger.handler.instructions : trigger.handler.rules.map(rule => `${rule.name}: ${rule.condition}\n${rule.instructions}`).join('\n\n') };
         },
         authority: cwd => skills.authority(cwd),
-        // The conversation, page by page back to its start; incomplete when that cannot be done.
+        // The conversation, page by page back to its start, each message whole; incomplete when that cannot be done.
         conversation: async sessionId => {
           const session = runs.getSession(sessionId);
           // A child conversation's history leaves out what it inherited from its parent: not all of the owner's words.
           if (!session || session.parentId) return { messages: [], complete: false };
-          return readConversation(before => sessions.detail(runs.nativeSessionId(sessionId), before, 200, { previousUser: false }));
+          return readConversation(before => sessions.detail(runs.nativeSessionId(sessionId), before, 200, { previousUser: false, fullText: true }));
         },
         answers: sessionId => runs.ownerAnswers(sessionId),
         rules: cwd => permissions.overview(cwd).rules,
