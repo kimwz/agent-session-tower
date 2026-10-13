@@ -316,7 +316,7 @@ export class SecretBroker {
     const check = reviewed !== undefined ? await reviewedScript(input, context.root, this.options.stateDir, reviewed) : undefined;
     const sameCode = () => {
       const problem = check?.();
-      if (problem === 'too-large') throw new SecretUseRefused('conflict', '실행할 스크립트가 16 MiB보다 커서 검토한 내용과 같은지 확인할 수 없어 실행하지 않았습니다.');
+      if (problem === 'too-large') throw new SecretUseRefused('conflict', '검토한 뒤 실행할 스크립트가 16 MiB보다 커져 검토한 내용과 같은지 확인할 수 없어 실행하지 않았습니다. 새 operationId로 다시 요청하세요.');
       if (problem) throw new SecretUseRefused('conflict', `검토하는 동안 실행할 스크립트가 바뀌어 실행하지 않았습니다${reviewed ? `(${reviewed.path})` : ''}. 새 operationId로 다시 요청하면 바뀐 내용으로 다시 검토합니다.`);
     };
     sameCode();

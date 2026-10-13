@@ -202,9 +202,16 @@ test('the dispatch-time check finds a script changed, relinked or grown past 16 
   assert.equal(check(), 'changed');
   await writeFile(join(root, 'deploy.mjs'), 'console.log("a")\n');
   assert.equal(check(), undefined);
+  // A bound script that grows past the limit can no longer be shown to be the one reviewed.
   truncateSync(join(root, 'deploy.mjs'), 16 * 1024 * 1024 + 1);
   assert.equal(check(), 'too-large');
-  assert.equal((await scriptExcerpt(input, root, []))!.binding!.sha256, null, 'a review never hashes more than 16 MiB');
+  // One over the limit when reviewed is neither read nor bound, as a run of no project file: it runs on its review.
+  assert.deepEqual(await scriptExcerpt(input, root, []), { path: 'deploy.mjs', omitted: 'larger than 16 MiB; not read' });
+  const unbound = await reviewedScript(input, root, stateDir, null);
+  assert.equal(unbound(), undefined);
+  // Unless a file the limit allows replaces it.
+  await writeFile(join(root, 'deploy.mjs'), 'console.log("small")\n');
+  assert.equal(unbound(), 'changed');
 });
 
 test('a token given as the script path is scrubbed, read failure included', async t => {
