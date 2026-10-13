@@ -6,7 +6,7 @@ export type SecretKind = 'scalar' | 'env' | 'file';
 export const MAX_SECRET_BYTES = 1024 * 1024;
 export const MIN_VAULT_PASSWORD = 12;
 
-/** Rule policy of secrets saved before per-secret sharing (`server/secrets/legacy-policy.ts`); the owner page still edits it. */
+/** Stored rule policy of secrets saved before per-secret sharing; only `server/secrets/legacy-policy.ts` decides with it, until the owner edits that secret's sharing. */
 export type SecretScope = 'global' | 'project' | 'task';
 export type SecretActivation = 'manual' | 'auto';
 export interface SecretProject { id: string; name: string; bindings: { hostId: string; root: string }[] }
@@ -37,13 +37,6 @@ export interface SecretTask {
   connected: string[];
 }
 export interface VaultStatus { initialized: boolean; locked: boolean; pendingImports?: number; pendingImportIds?: string[]; error?: string }
-export interface SecretOverview {
-  status: VaultStatus; device?: SecretDevice; peers: SecretPeer[]; projects: SecretProject[];
-  groups: SecretGroup[]; secrets: SecretMetadata[]; rules: SecretRule[];
-  target?: SecretTarget; task?: SecretTask; connected: string[];
-  /** Owner-only project hint without creating a security task. */
-  currentProjectId?: string;
-}
 
 /** Canonical folder identity: the computer's vault device ID and the folder's real path. */
 export interface SecretFolder { hostId: string; root: string }
@@ -78,14 +71,6 @@ export interface SecretCreateInput {
   connect?: 'session';
   /** Kept with the target session's task, connected to it, and dropped when the task ends. */
   temporary?: boolean;
-}
-/** The owner page's group-and-rule create body, mapped onto SecretCreateInput by the runtime. */
-export interface SecretCreateRequest {
-  name: string; kind: SecretKind; scope: SecretScope; value?: string;
-  /** Canonical base64 of an uploaded file; dotenv uploads also preserve these original bytes. */
-  content?: string;
-  groupId?: string; groupName?: string; projectId?: string; projectRoot?: string;
-  target?: SecretTarget; allProjects?: boolean; activation?: SecretActivation; operations?: SecretOperation[]; connect?: boolean; expiresAt?: number;
 }
 export interface SecretRunInput {
   operationId: string; command: string; args?: string[]; cwd?: string; timeoutMs?: number;
