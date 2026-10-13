@@ -105,18 +105,46 @@ test('one computer reads the same everywhere: the canvas name first, the vault d
   for (const markup of [editor, list]) { assert.match(markup, /원본 맥/); assert.doesNotMatch(markup, /This computer|build-vault/); }
 });
 
-test('the sharing editor starts from stored sharing or the legacy summary and saves folders as canvas keys with the revision', () => {
+test('the sharing editor starts from stored sharing or the legacy summary and saves with the revision', () => {
   const shared = sharingDraft(view, view.secrets[1]!, canvas);
   assert.deepEqual(shared, { global: false, keys: ['/work/app', `@${node}//srv/app`], kept: [], dropped: [] });
-  assert.deepEqual(sharingPayload(view.secrets[1]!, shared), { secretId: 'folder_key', revision: 1, global: false, folders: [{ cwd: '/work/app' }, { cwd: `@${node}//srv/app` }] });
+  assert.deepEqual(sharingPayload(view, view.secrets[1]!, shared), { secretId: 'folder_key', revision: 1, global: false,
+    folders: [{ hostId: device.id, root: '/work/app' }, { hostId: peer.device.id, root: '/srv/app' }] }, 'saved folders go back exactly as received');
   const legacy = sharingDraft(view, view.secrets[3]!, canvas);
   assert.equal(legacy.global, true); assert.deepEqual(legacy.keys, []); assert.deepEqual(legacy.kept, []); assert.deepEqual(legacy.dropped.map(folder => folder.root), ['/old/app']);
-  assert.deepEqual(sharingPayload(view.secrets[3]!, { global: true, keys: [], kept: [] }), { secretId: 'legacy_key', revision: 0, global: true, folders: [] }, 'a legacy secret saves with revision 0');
-  assert.equal(sharingPayload(view.secrets[0]!, { global: false, keys: [], kept: [] }).revision, 3);
+  assert.deepEqual(sharingPayload(view, view.secrets[3]!, { global: true, keys: [], kept: [] }), { secretId: 'legacy_key', revision: 0, global: true, folders: [] }, 'a legacy secret saves with revision 0');
+  assert.equal(sharingPayload(view, view.secrets[0]!, { global: false, keys: [], kept: [] }).revision, 3);
   const away = item('away_key', { sharing: { revision: 7, global: false, folders: [{ hostId: device.id, root: '/work/app' }, { hostId: 'gone-device', root: '/old/app' }] } });
   const draft = sharingDraft(view, away, canvas);
   assert.deepEqual(draft.kept, [{ hostId: 'gone-device', root: '/old/app' }], 'a stored folder of a computer no longer trusted is kept as it was received');
-  assert.deepEqual(sharingPayload(away, draft).folders, [{ cwd: '/work/app' }, { hostId: 'gone-device', root: '/old/app' }]);
+  assert.deepEqual(sharingPayload(view, away, draft).folders, [{ hostId: device.id, root: '/work/app' }, { hostId: 'gone-device', root: '/old/app' }]);
+});
+
+test('a legacy secret sends every folder as a canvas key, since only the current sharing can be kept as it is', () => {
+  const legacy = item('legacy_local', { legacy: { global: [], folders: [{ hostId: device.id, root: '/work/app' }, { hostId: peer.device.id, root: '/srv/app' }], limited: false } });
+  const draft = sharingDraft(view, legacy, canvas);
+  assert.deepEqual(sharingPayload(view, legacy, draft), { secretId: 'legacy_local', revision: 0, global: false, folders: [{ cwd: '/work/app' }, { cwd: `@${node}//srv/app` }] });
+});
+
+test('a saved folder on an offline or unknown computer is sent back as {hostId, root}, so unchecking GLOBAL saves', () => {
+  const wide = item('wide_key', { sharing: { revision: 9, global: true, folders: [{ hostId: peer.device.id, root: '/srv/app' }, { hostId: 'gone-device', root: '/old/app' }] } });
+  const draft = sharingDraft(view, wide, canvas);
+  const body = sharingPayload(view, wide, { ...draft, global: false });
+  assert.deepEqual(body, { secretId: 'wide_key', revision: 9, global: false, folders: [{ hostId: peer.device.id, root: '/srv/app' }, { hostId: 'gone-device', root: '/old/app' }] });
+  assert.ok(body.folders.every(folder => !('cwd' in folder)), 'nothing already saved needs its computer to answer again');
+});
+
+test('a newly picked folder is sent as {cwd} beside the saved ones', () => {
+  const draft = sharingDraft(view, view.secrets[1]!, canvas);
+  const body = sharingPayload(view, view.secrets[1]!, { ...draft, keys: [...draft.keys, '/new/app', `@${node}//srv/other`] });
+  assert.deepEqual(body.folders, [{ hostId: device.id, root: '/work/app' }, { hostId: peer.device.id, root: '/srv/app' }, { cwd: '/new/app' }, { cwd: `@${node}//srv/other` }]);
+});
+
+test('a removed saved folder is not sent', () => {
+  const draft = sharingDraft(view, view.secrets[1]!, canvas);
+  assert.deepEqual(sharingPayload(view, view.secrets[1]!, { ...draft, keys: draft.keys.filter(key => key !== '/work/app') }).folders, [{ hostId: peer.device.id, root: '/srv/app' }]);
+  const away = item('away_key', { sharing: { revision: 2, global: false, folders: [{ hostId: 'gone-device', root: '/old/app' }] } });
+  assert.deepEqual(sharingPayload(view, away, { ...sharingDraft(view, away, canvas), kept: [] }).folders, []);
 });
 
 test('a refused save names its reason: a disconnected joined computer, an outdated worker, or the generic hint', () => {
