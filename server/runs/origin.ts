@@ -54,6 +54,10 @@ export function sessionOriginOf(origin: RunOrigin | undefined, untrustedInput: b
   return { ...rest, untrustedInput };
 }
 
+/** Trigger IDs of public agents' runs: outsiders' requests. The launch gate, permissions and secrets tell them apart by this prefix. */
+export const PUBLIC_TRIGGER_PREFIX = 'public:';
+export function publicAgentTrigger(triggerId: string | undefined): boolean { return triggerId?.startsWith(PUBLIC_TRIGGER_PREFIX) === true; }
+
 /** Work nobody typed into Tower: Slack coordination and delegation, and trigger runs. */
 export function automatedOrigin(origin: RunOrigin | undefined): boolean { return origin?.kind === 'slack' || origin?.kind === 'trigger'; }
 /**
