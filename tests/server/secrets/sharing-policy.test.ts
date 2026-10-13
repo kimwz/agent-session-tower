@@ -89,6 +89,15 @@ test('covered admits automatic use only where something is allowed or the task a
   assert.equal(covered(state([secret('global', {}, shared(true))]), CONTROLLER, '/any', 'fresh', NOW), false);
 });
 
+test('covered admits a folder where a rule allows only a use operation, as 1.130.2 resolved there', () => {
+  const envOnly = secret('env-only', { groupId: 'g' });
+  const policy = state([envOnly], { groups: [{ id: 'g', name: 'G', scope: 'global' }], rules: [{ id: 'r', groupId: 'g', secretIds: ['env-only'], hostId: NODE, root: '/node/env', activation: 'auto', operations: ['env'], enabled: true, revision: 1 }] });
+  assert.deepEqual(available(policy, task({ hostId: NODE, root: '/node/env' }), NOW), [], 'nothing to list');
+  assert.ok(decide(policy, task({ hostId: NODE, root: '/node/env' }), envOnly, 'env', NOW), 'but env is allowed');
+  assert.equal(covered(policy, NODE, '/node/env', 'fresh', NOW), true);
+  assert.equal(covered(policy, NODE, '/node/other', 'fresh', NOW), false);
+});
+
 test('the rule summary shows where rules apply and whether they limit use', () => {
   const projects: SecretProject[] = [{ id: 'p', name: 'P', bindings: [{ hostId: HOST, root: '/work/repo' }, { hostId: NODE, root: '/node/repo' }] }];
   const groups: SecretGroup[] = [{ id: 'g', name: 'G', scope: 'global' }, { id: 'pg', name: 'PG', scope: 'project', projectId: 'p' }];

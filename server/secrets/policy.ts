@@ -66,10 +66,11 @@ export function available(state: PolicyState, task: SecretTask, now: number): Se
   });
 }
 
-/** Whether automatic use may enter this folder: some secret is allowed there, or the task already has the owner's connections. */
+/** Whether automatic use may enter this folder: some secret allows some operation there, or the task already has the owner's connections. */
 export function covered(state: PolicyState, hostId: string, root: string, taskId: string, now: number): boolean {
   const task = state.tasks.find(task => task.id === taskId);
   if (task && task.hostId === hostId && task.root === root && task.connected.length) return true;
   const probe: SecretTask = { id: taskId, hostId, sessionId: '', root, status: 'open', createdAt: task?.createdAt ?? now, excluded: [], connected: [] };
-  return state.secrets.some(secret => decide(state, probe, secret, 'discover', now));
+  // A rule may allow a use without discovery; 1.130.2 resolved such a key in any folder of a registered project.
+  return state.secrets.some(secret => SECRET_OPERATIONS.some(operation => decide(state, probe, secret, operation, now)));
 }
