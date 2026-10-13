@@ -5,7 +5,7 @@ import { useMediaQuery } from '../common/use-media-query';
 import { useI18n } from '../i18n/i18n';
 import { refreshPush } from '../notifications/push';
 import { ControllerJoinNotice } from '../remote/controller-join';
-import { onOpenSettings } from './settings-open';
+import { onOpenSettings, requestPlace } from './settings-open';
 import { entryMark, initialSection, markText, requestAllowed, settingsSections, type SettingsSection } from './settings-sections';
 import { SettingsDialog, type SettingsContext, type SettingsPlace } from './SettingsDialog';
 import { useSettingsAttention } from './use-settings-attention';
@@ -39,7 +39,7 @@ export function SettingsButton({ context, joined }: { context: SettingsContext; 
   openRef.current = open;
   useEffect(() => onOpenSettings(request => {
     if (!requestAllowed({ token, sections, local: Boolean(auth?.status.local) }, request.section)) return false;
-    openRef.current(request.section, 'cwd' in request ? { cwd: request.cwd } : {});
+    openRef.current(request.section, requestPlace(request));
     return true;
   }), [token, sections, auth]);
 

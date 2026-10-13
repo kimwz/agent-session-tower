@@ -5,7 +5,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { setLanguage } from '../../../client/src/i18n/i18n.js';
 import { entryMark, initialSection, noAttention, requestAllowed, sectionMark, settingsSections } from '../../../client/src/settings/settings-sections.js';
-import { onOpenSettings, openSettings, type SettingsRequest } from '../../../client/src/settings/settings-open.js';
+import { onOpenSettings, openSettings, requestPlace, type SettingsRequest } from '../../../client/src/settings/settings-open.js';
 import { openSkills } from '../../../client/src/skills/skills-open.js';
 import { openPermissions } from '../../../client/src/permissions/permissions-open.js';
 import { SettingsFrameContext, SettingsPane } from '../../../client/src/settings/SettingsPane.js';
@@ -57,6 +57,17 @@ test('a folder menu opens skills and permissions in the settings, narrowed to th
   assert.equal(openPermissions('/work/app'), true);
   assert.equal(openSettings(), true);
   assert.deepEqual(asked, [{ section: 'skills', cwd: '/work/app' }, { section: 'permissions', cwd: '/work/app' }, {}]);
+});
+
+test('a chat opens the secrets section on one secret, and a folder request keeps its folder', t => {
+  const asked: SettingsRequest[] = [];
+  t.after(onOpenSettings(request => { asked.push(request); return true; }));
+  assert.equal(openSettings({ section: 'secrets', secretId: 'secret-id' }), true);
+  assert.deepEqual(asked, [{ section: 'secrets', secretId: 'secret-id' }]);
+  assert.deepEqual(requestPlace(asked[0]!), { secretId: 'secret-id' });
+  assert.deepEqual(requestPlace({ section: 'skills', cwd: '/work/app' }), { cwd: '/work/app' });
+  assert.deepEqual(requestPlace({ section: 'skills', cwd: undefined }), { cwd: undefined }, 'an explicit clear of the folder');
+  assert.deepEqual(requestPlace({}), {});
 });
 
 test('nothing reports as opened when no settings button is on the page', () => {

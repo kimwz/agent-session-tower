@@ -29,7 +29,7 @@ import { EffortPicker, ModelPicker, supportedEffort } from './ModelPicker';
 import { useChatAppearance } from './chat-appearance';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { localPart, nodeHeaders, nodeOf, pathFor, scopeDetail, scopedId, settleRequest } from '../remote/scope';
-import { SecretComposer, SecretChips, SecretComposerProvider } from '../secrets/SecretsPanel';
+import { SecretComposer, SecretChips, SecretComposerProvider } from '../secrets/SecretChatDialog';
 import { RemoteContent } from '../remote/remote-content';
 
 const emptyMessages: readonly ChatMessage[] = [];
@@ -286,7 +286,7 @@ export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = 
       </>}
     </div>
     <SecretComposerProvider key={sessionId} token={token} sessionId={sessionId} cwd={current?.cwd}><div className="composer-section">
-      <SecretChips key={sessionId} token={token} sessionId={sessionId} cwd={current?.cwd} />
+      <SecretChips />
       {/* Floats just above the section, whatever it holds (task line, run controls, errors). */}
       {!following && <button className="jump-latest" onClick={scrollToBottom}><ArrowDown size={13} />{t("최신 대화")}</button>}
       {current?.resumable === false && current.parentId && <button className="parent-session-link" onClick={() => onNavigate(current.parentId!)}><GitBranch size={14} /><span>{t("부모 세션에서 이어가기")}</span><ArrowUp size={13} /></button>}
@@ -312,7 +312,7 @@ export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = 
           onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) { event.preventDefault(); void sendPrompt(); } }} />
         <div className="composer-bottom">
           <button className="attach-button" type="button" aria-label={t("파일 첨부")} title={t("파일 첨부 · 최대 {0}개 · 원본 업로드 · 이미지 붙여넣기 가능", { 0: MAX_ATTACHMENTS })} disabled={disabled || sending} onClick={() => fileInput.current?.click()}><Paperclip size={16} aria-hidden="true" /></button>
-          <SecretComposer key={sessionId} token={token} sessionId={sessionId} cwd={current?.cwd} />
+          <SecretComposer />
           <span className="composer-hint">{sending ? <span role="status">{sendingLabel}…</span> : prompt.length > 24000 ? t("{0} / 32,000자", { 0: prompt.length.toLocaleString() }) : composerHint}</span>
           <ModelPicker provider={provider} observedModel={current?.model} value={draft.model} disabled={disabled || sending} onChange={model => {
             const latest = getComposerState(sessionId).draft;
