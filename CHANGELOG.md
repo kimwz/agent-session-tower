@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.130.2] - 2026-10-13
+
+- 실행 중인 작업이 없는데도 실행 워커가 새 버전으로 넘어가지 않던 문제를 고쳤습니다. 권한 검토가 승인한 일회성 실행이 시작 직전 잠깐 저장소 확인에 막히면 '보류'로 남았는데, 이 보류는 저장소 일시 정지가 풀릴 때만 다시 시도됐습니다. 그런 일이 없으면 실행은 끝내 시작되지 않았고, 워커는 이 실행을 진행 중인 작업으로 봐서 자동 업데이트와 '지금 업데이트'가 모두 기다리기만 했습니다(2026-10-13, 두 시간 넘게). 이제 보류된 실행은 10초 뒤 다시 시도하고, 워커 교체를 막지 않습니다. 보류된 실행은 대기 상태로 저장돼 있어 다음 워커가 이어서 시작합니다.
+
 ## [1.130.1] - 2026-10-13
 
 - 권한 자동 검토가 일시적인 OpenAI 오류 때문에 실패하던 문제를 고쳤습니다. Codex는 503 같은 오류가 나면 스스로 다시 시도하면서 `Reconnecting... 2/5` 알림을 보내는데, Tower가 이 알림을 실패로 처리해 "Codex routing failed or returned an unsupported event"로 소유자에게 넘겼습니다. 이제 재시도가 끝날 때까지 기다리고, 실제로 실패하면 Codex가 알려 준 원인(예: `unexpected status 503`)을 사유에 적습니다. Auto Prompt 라우팅 등 Codex로 판단하는 다른 기능도 같습니다.
