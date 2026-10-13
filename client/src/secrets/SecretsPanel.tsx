@@ -19,7 +19,7 @@ function useSecretSettings(token: string, active: boolean) {
     const controller = new AbortController(); const current = generation.current; const started = changes.current;
     readSecretSettings(controller.signal).then(next => {
       if (!controller.signal.aborted && current === generation.current && started === changes.current && !mutating.current) { setView(next); setLoadError(''); }
-    }, failure => { if (!controller.signal.aborted && current === generation.current) setLoadError(secretLoadFailure(failure, t)); });
+    }, failure => { if (!controller.signal.aborted && current === generation.current && started === changes.current) setLoadError(secretLoadFailure(failure, t)); });
     return () => controller.abort();
   }, [token, active, revision, t]);
   const reload = useCallback(() => { setError(''); setRevision(value => value + 1); }, []);

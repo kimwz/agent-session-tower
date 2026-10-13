@@ -281,7 +281,7 @@ test('owner HTTP secret API requires sign-in and page token; generic remote rout
   });
   const post = (action: string, body: unknown, headers: Record<string, string> = { cookie: auth.cookie, 'X-Agent-Monitor-Token': token }) => secureFetch(`/api/secrets/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
   const READS = ['settings', `session?sessionId=${encodeURIComponent('codex:http-session')}`];
-  const WRITES = ['sharing', 'create', 'session-connect', 'session-disconnect', 'initialize'];
+  const WRITES = ['sharing', 'create', 'session-connect', 'session-disconnect', 'session-reallow', 'initialize'];
   // Signed out, without the page token, over plain HTTP from afar, or from an agent or the master: refused before the worker.
   for (const read of READS) assert.equal((await auth.fetch(`${base}/api/secrets/${read}`)).status, 401);
   for (const action of WRITES) assert.equal((await post(action, { password: PASSWORD }, { cookie: auth.cookie })).status, 403);
@@ -307,6 +307,9 @@ test('owner HTTP secret API requires sign-in and page token; generic remote rout
   assert.equal((await post('initialize', { password: PASSWORD })).status, 503); assert.equal(secretCalls, 1);
   sharing = true;
   assert.equal((await post('initialize', { password: PASSWORD })).status, 200);
+  // Allowing a key again reaches the worker, which names an unknown session instead of the route being missing.
+  const callsBefore = secretCalls; const reallow = await post('session-reallow', { sessionId: 'codex:unknown-session', secretIds: ['x'] });
+  assert.notEqual(reallow.status, 404); assert.ok(secretCalls > callsBefore);
   const created = await post('create', { name: 'HTTP key', kind: 'scalar', value: VISIBLE, sharing: { global: false, folders: [{ cwd: link }] } });
   assert.equal(created.status, 200); const settings = await created.json() as SecretSettingsView;
   assert.deepEqual(settings.secrets.map(secret => secret.sharing?.folders), [[{ hostId: service.device().id, root: project }]], 'the folder key becomes the real folder');
@@ -340,7 +343,7 @@ test('every secret route refuses the master, local agents and run capabilities b
   const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { cookie: auth.cookie } })).json() as { token: string };
   const owner = { cookie: auth.cookie, 'X-Agent-Monitor-Token': token, 'Content-Type': 'application/json' };
   const READS = ['settings', 'session?sessionId=codex%3Afixture', 'broker-access?sessionId=codex%3Afixture'];
-  const WRITES = ['sharing', 'create', 'session-connect', 'session-disconnect', 'update', 'remove', 'unlock', 'lock', 'password', 'import', 'trust', 'untrust', 'preview', 'initialize', 'approve-broker', 'revoke-broker'];
+  const WRITES = ['sharing', 'create', 'session-connect', 'session-disconnect', 'session-reallow', 'update', 'remove', 'unlock', 'lock', 'password', 'import', 'trust', 'untrust', 'preview', 'initialize', 'approve-broker', 'revoke-broker'];
   // On this computer the owner's own page reaches the worker; the same page request naming another caller does not.
   assert.equal((await fetch(`${base}/api/secrets/settings`, { headers: { cookie: auth.cookie } })).status, 200); assert.deepEqual(calls, ['settings']); calls.length = 0;
   const callers: Record<string, string>[] = [{ 'x-tower-master': masterSecret }, { 'x-tower-master': 'not-the-master' }, { 'x-tower-agent': 'local' }, { [CALLER_CAPABILITY_HEADER]: 'b'.repeat(64) }];
