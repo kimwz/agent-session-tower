@@ -20,8 +20,8 @@ async function fixture(t: TestContext) {
   let now = Date.now(); const clock = { advance: (ms: number) => { now += ms; } };
   const service = await secretService(stateDir, { password: PASSWORD, now: () => now });
   const host = service.device().id;
-  const project = await service.project({ name: 'fixture', bindings: [{ hostId: host, root }] });
-  const otherProject = await service.project({ name: 'other', bindings: [{ hostId: host, root: other }] });
+  const project = { id: randomUUID(), name: 'fixture', bindings: [{ hostId: host, root }] }, otherProject = { id: randomUUID(), name: 'other', bindings: [{ hostId: host, root: other }] };
+  await editPayload(service, PASSWORD, payload => { payload.projects.push(project, otherProject); });
   const startedAt = new Date(now).toISOString();
   const target = await service.bindRun('codex:session-a', root, startedAt);
   const context: SecretContext = { ...target, runId: 'run-a' };
@@ -116,7 +116,7 @@ test('a failed index write never leaves an older index listing names, in memory 
   const f = await fixture(t); await scenario(f);
   const path = join(f.stateDir, 'secrets', 'index.json'); const previous = await readFile(path, 'utf8');
   await rm(path); await mkdir(join(path, 'blocked'), { recursive: true });
-  await f.service.disconnectSession(f.target, f.service.overview().secrets.map(secret => secret.id));
+  await f.service.disconnectSession(f.target, (await f.service.list(f.context)).map(secret => secret.id));
   assert.deepEqual(await f.service.list(f.context), []);
   await f.service.lock();
   assert.equal(f.service.lockedList(f.target.sessionId, f.root, f.startedAt, f.target), undefined);

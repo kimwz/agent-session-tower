@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SecretService } from '../../../server/secrets/service.js';
-import { editPayload, legacyRecord, legacyRule, secretService } from '../../helpers/secrets.js';
+import { editPayload, legacyRecord, legacyRule, secretService, stored, storedSecret, storedTask } from '../../helpers/secrets.js';
 
 const password = 'owner-connect-fixture-password';
 async function fixture(run: (service: SecretService, setTime: (time: number) => void) => Promise<void>) {
@@ -19,7 +19,7 @@ test('owner can connect a saved key to one session without giving other sessions
   assert.deepEqual(await service.list(context), []);
   await service.connectSession(target, [secret.id]);
   assert.equal((await service.resolve(context, secret.reference, 'env')).bytes.toString(), 'FAKE_OWNER_TOKEN');
-  assert.deepEqual(service.overview().rules, [], 'a connection writes no rule');
+  assert.deepEqual(stored(service).rules, [], 'a connection writes no rule');
   assert.deepEqual(service.settings().secrets[0].sharing, { revision: 1, global: false, folders: [] }, 'nor any sharing');
   const other = { ...await service.ensureTask('not-chosen', '/different'), runId: 'other-run' };
   assert.deepEqual(await service.list(other), []); await assert.rejects(service.resolve(other, secret.reference, 'env'));
@@ -50,8 +50,8 @@ test('an owner connection never edits rules, even disabled or expired ones', asy
   });
   for (const { record } of records) {
     assert.deepEqual(await service.list(context), []);
-    const before = service.overview().rules; await service.connectSession(target, [record.metadata.id]);
-    assert.deepEqual(service.overview().rules, before); assert.ok(service.overview(target).connected.includes(record.metadata.id));
+    const before = stored(service).rules; await service.connectSession(target, [record.metadata.id]);
+    assert.deepEqual(stored(service).rules, before); assert.ok(storedTask(service, target.taskId)?.connected.includes(record.metadata.id));
     await service.disconnectSession(target, [record.metadata.id]);
   }
 }));
@@ -59,13 +59,13 @@ test('owner connection refuses another task’s temporary value and rolls back a
   const chosen = await service.ensureTask('chosen', '/chosen'); const other = await service.ensureTask('other', '/other');
   const saved = await service.create({ name: 'saved', kind: 'scalar', value: 'FAKE_SAVED' });
   const temporary = await service.create({ name: 'private', kind: 'scalar', value: 'FAKE_TASK', temporary: true }, other);
-  assert.deepEqual(service.overview(other).connected, [temporary.id], 'a pasted value is connected to its own session');
-  const before = service.overview(); await assert.rejects(service.connectSession(chosen, [saved.id, temporary.id]), /unavailable/);
-  assert.deepEqual(service.overview().rules, before.rules); assert.deepEqual(service.overview(chosen).connected, []);
+  assert.deepEqual(storedTask(service, other.taskId)?.connected, [temporary.id], 'a pasted value is connected to its own session');
+  const before = stored(service); await assert.rejects(service.connectSession(chosen, [saved.id, temporary.id]), /unavailable/);
+  assert.deepEqual(stored(service).rules, before.rules); assert.deepEqual(storedTask(service, chosen.taskId)?.connected, []);
   await assert.rejects(service.connectSession(chosen, ['missing']), /unavailable/);
   await assert.rejects(service.connectSession({ ...chosen, root: '/forged' }, [saved.id]));
   await service.closeTask(chosen.taskId); await assert.rejects(service.connectSession(chosen, [saved.id]));
-  await service.closeTask(other.taskId); assert.equal(service.overview().secrets.some(secret => secret.id === temporary.id), false, 'it ends with its task');
+  await service.closeTask(other.taskId); assert.equal(storedSecret(service, temporary.id), false, 'it ends with its task');
 }));
 test('the owner’s first connection to a trusted node session starts its bounded task even where nothing is shared', async () => fixture(async service => {
   const hostId = '11111111-1111-4111-8111-111111111111';
@@ -76,11 +76,15 @@ test('the owner’s first connection to a trusted node session starts its bounde
   await assert.rejects(service.ensureRemoteTask({ ...remote, runId: 'remote-run' }), /Remote task denied/, 'automatic use cannot enter an uncovered folder');
   assert.deepEqual((await service.vault.journal() as { tasks: unknown[] }).tasks, []);
   await service.connectSession(remote, [secret.id]);
-  const task = service.overview({ ...remote, projectId: undefined }).task!;
+  const task = storedTask(service, remote.taskId)!;
   assert.deepEqual([task.connected, task.expiresAt! - task.createdAt, task.hostId, task.root], [[secret.id], 8 * 60 * 60_000, hostId, '/remote']);
   const context = await service.ensureRemoteTask({ ...remote, runId: 'remote-run' });
   assert.equal(context.projectId, undefined, 'the node’s own project ID never reaches the source');
   assert.equal((await service.resolve(context, secret.reference, 'env')).bytes.toString(), 'FAKE_REMOTE');
   await assert.rejects(service.ensureRemoteTask({ ...remote, root: '/remote/other', taskId: '33333333-3333-4333-8333-333333333333', runId: 'remote-run' }), /Remote task denied/);
-  assert.deepEqual(service.overview().rules, [], 'no rule is written for a remote connection');
+  assert.deepEqual(stored(service).rules, [], 'no rule is written for a remote connection');
+  // Stopping a key in a node session the owner has not acted on yet starts its task the same way, with the key excluded.
+  const quiet = { ...remote, sessionId: 'remote-quiet', taskId: '44444444-4444-4444-8444-444444444444' };
+  await service.disconnectSession(quiet, [secret.id]);
+  assert.deepEqual([storedTask(service, quiet.taskId)?.excluded, storedTask(service, quiet.taskId)?.connected], [[secret.id], []]);
 }));

@@ -76,7 +76,6 @@ import { SECRET_CONNECTION_INSTRUCTIONS } from '../secrets/notices.js';
 import { SecretStore } from '../triggers/secrets.js';
 import { listPendingSecretImports, importPendingSecret } from '../secrets/imports.js';
 import { openLegacyImport } from '../backup/secrets.js';
-import type { SecretTarget } from '../../shared/secrets.js';
 import type { Capability } from '../api/mcp.js';
 import type { RemoteSecretRequest, RemoteSecretResponse } from '../secrets/remote.js';
 import { installAgentGuidance } from '../agent-guidance/install.js';
@@ -464,17 +463,19 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'secretCall': {
         const secrets = options.secrets; if (!secrets) break;
         const operation = args[0];
-        if (operation === 'control') return secrets.control(String(args[1]), record(args[2]), args[3] as SecretTarget | undefined, args[4] === true);
+        if (operation === 'control') return secrets.control(String(args[1]), record(args[2]), args[3] ?? undefined);
         if (operation === 'peers') return secrets.peers();
         if (operation === 'device') return secrets.device();
-        if (operation === 'poll') return { requests: secrets.poll(String(args[1])) };
+        if (operation === 'poll') return { requests: secrets.poll(String(args[1]), args[2]) };
+        if (operation === 'peer-offline') { secrets.peerOffline(String(args[1])); return { forgotten: true }; }
         if (operation === 'answer') return secrets.answer(String(args[1]), args[2] as RemoteSecretRequest);
         if (operation === 'deliver') { secrets.deliver(String(args[1]), args[2] as RemoteSecretResponse); return { delivered: true }; }
-        if (operation === 'target' || operation === 'connection-notice') {
+        if (operation === 'target' || operation === 'connection-notice' || operation === 'session-subject') {
           const session = options.runs.getSession(String(args[1]));
           if (!session || coordinator(session.id)) throw new TowerError('not-found', 'Not found.');
           await options.exclusions?.reload();
           if (options.exclusions && await options.exclusions.excludesNow(session.cwd)) throw new TowerError('not-found', 'Not found.');
+          if (operation === 'session-subject') return secrets.sessionSubject(session.id);
           if (operation === 'connection-notice') {
             const target = await secrets.peekTarget(session.id);
             if (!target || target.taskId !== args[2]) throw new TowerError('forbidden', 'Secret task no longer matches.');

@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink } from 'node:f
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import type { SecretContext, SecretMetadata, SecretOperation, SecretRunInput, SecretTarget } from '../../../shared/secrets.js';
+import type { SecretContext, SecretMetadata, SecretOperation, SecretRunInput, SecretTarget, SecretUsage } from '../../../shared/secrets.js';
 import { SecretBroker, maskSecretOutput } from '../../../server/secrets/broker.js';
 import { parseSecretCli, runSecretsCommand } from '../../../server/secrets/cli.js';
 import { SecretService } from '../../../server/secrets/service.js';
@@ -24,7 +24,8 @@ async function fixture() {
   const context: SecretContext = { hostId: 'fixture', sessionId: 'session', taskId: randomUUID(), runId: 'run', root };
   const device = { id: 'fixture', name: 'fixture', signingKey: '', encryptionKey: '', fingerprint: '' };
   let peers: unknown[] = [];
-  const service = { checkTask: (ctx: SecretContext, id?: string) => { if (locked || ctx.taskId !== context.taskId || (id && denied.has(`tower-secret://remote/${id}@1`))) throw new Error('Task identity denied'); }, device: () => device, peers: () => peers, status: () => ({ initialized: true, locked }), list: async () => [...resources.values()].map(v => v.metadata), fingerprintKey: () => Buffer.alloc(32, 4),
+  const usage: { target: unknown; entries: SecretUsage[] }[] = [];
+  const service = { recordUsage: async (target: unknown, entries: SecretUsage[]) => { usage.push({ target, entries: structuredClone(entries) }); }, checkTask: (ctx: SecretContext, id?: string) => { if (locked || ctx.taskId !== context.taskId || (id && denied.has(`tower-secret://remote/${id}@1`))) throw new Error('Task identity denied'); }, device: () => device, peers: () => peers, status: () => ({ initialized: true, locked }), list: async () => [...resources.values()].map(v => v.metadata), fingerprintKey: () => Buffer.alloc(32, 4),
     resolve: async (_ctx: SecretContext, ref: string, _op: SecretOperation) => {
       resolves++; onResolve?.(resolves); if (locked || denied.has(ref)) throw new Error('private denial detail');
       const resource = resources.get(ref); if (!resource) throw new Error('missing');
@@ -43,11 +44,11 @@ async function fixture() {
     const metadata: SecretMetadata = { id, name: 'fixture secret', kind, groupId: 'group', version: 1, reference };
     resources.set(reference, { metadata, bytes: Buffer.isBuffer(value) ? value : Buffer.from(value), fields }); return reference;
   };
-  return { stateDir, root, context, service, resources, ledger, add, denied, locked: (value: boolean) => { locked = value; }, onResolve: (fn: (n: number) => void) => { onResolve = fn; }, onFinish: (fn: () => Promise<void>) => { onFinish = fn; }, peers: (value: unknown[]) => { peers = value; }, cleanup: () => rm(stateDir, { recursive: true, force: true }) };
+  return { stateDir, root, context, service, resources, ledger, usage, add, denied, locked: (value: boolean) => { locked = value; }, onResolve: (fn: (n: number) => void) => { onResolve = fn; }, onFinish: (fn: () => Promise<void>) => { onFinish = fn; }, peers: (value: unknown[]) => { peers = value; }, cleanup: () => rm(stateDir, { recursive: true, force: true }) };
 }
 function command(script: string, extra: Partial<SecretRunInput> = {}): SecretRunInput { return { operationId: randomUUID(), command: process.execPath, args: ['-e', script], ...extra }; }
 type AuthorityChange = 'revoke' | 'policy' | 'expiry' | 'rotation' | 'fields';
-/** A local key allowed one way, and the owner change that withdraws it: disconnection, sharing, value expiry, rotation, or a rule narrowed to one field. */
+/** A local key allowed one way, and the change that withdraws it: disconnection, sharing, value expiry, rotation, or a rule narrowed to one field. */
 async function changingAuthority(service: SecretService, password: string, target: SecretTarget, mode: AuthorityChange, operations: SecretOperation[], clock: { now: () => number; advance: (ms: number) => void }) {
   const value = mode === 'fields' ? `VISIBLE=${canary}\nPRIVATE=PRIVATE_CHANGE_CANARY` : canary;
   if (mode === 'revoke' || mode === 'rotation') {
@@ -62,8 +63,34 @@ async function changingAuthority(service: SecretService, password: string, targe
   const record = legacyRecord(target.hostId, { name: `local-${mode}`, groupId: 'legacy-group', kind: mode === 'fields' ? 'env' : 'scalar', value, ...(mode === 'expiry' ? { expiresAt: clock.now() + 100 } : {}) });
   const rule = legacyRule({ groupId: 'legacy-group', secretIds: [record.metadata.id], hostId: target.hostId, root: target.root, activation: 'auto', operations });
   await editPayload(service, password, payload => { if (!payload.groups.some(group => group.id === 'legacy-group')) payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(record); payload.rules.push(rule); });
-  return { local: record.metadata, change: async () => { if (mode === 'expiry') clock.advance(101); else await service.setRule({ ...rule, fields: { [record.metadata.id]: ['VISIBLE'] } }); } };
+  // Only an older build edits rules now: it narrows this one while the vault stays open to it.
+  const narrow = () => editPayload(service, password, payload => { payload.rules = payload.rules.map(item => item.id === rule.id ? { ...item, fields: { [record.metadata.id]: ['VISIBLE'] }, revision: item.revision + 1 } : item); });
+  return { local: record.metadata, change: async () => { if (mode === 'expiry') clock.advance(101); else await narrow(); } };
 }
+
+test('each delivered use is kept with its session once per secret and operation, a remote source’s too, never a value', async () => {
+  const f = await fixture(); const scalar = f.add(canary), file = f.add(canary, 'file');
+  const remoteRef = 'tower-secret://remote/remote-key@1';
+  const remote = { request: async () => ({ metadata: { id: 'remote-key', name: 'remote fixture', kind: 'scalar', groupId: 'remote-group', version: 1, reference: remoteRef }, bytes: Buffer.from('REMOTE_USAGE_CANARY') }) } as unknown as RemoteSecretBroker;
+  try {
+    const broker = new SecretBroker({ stateDir: f.stateDir, service: f.service, remote });
+    const input = command('process.stdin.resume();process.stdin.on("end",()=>console.log("ok"))', { env: { TOKEN: scalar, REMOTE: remoteRef }, stdin: scalar, files: { KEY: file } });
+    assert.equal((await broker.run(f.context, input)).exitCode, 0);
+    await broker.compare(f.context, scalar, scalar); await broker.fingerprint(f.context, scalar);
+    const recorded = f.usage.map(({ target, entries }) => [target, entries.map(entry => [entry.secretId, entry.name, entry.operation, entry.outcome, entry.review])]);
+    const [scalarId, fileId] = [scalar, file].map(ref => ref.slice('tower-secret://fixture/'.length, -2));
+    const subject = { hostId: f.context.hostId, sessionId: f.context.sessionId };
+    assert.deepEqual(recorded, [
+      [subject, [[scalarId, 'fixture secret', 'env', 'delivered', 'exempt'], ['remote-key', 'remote fixture', 'env', 'delivered', 'exempt'], [scalarId, 'fixture secret', 'pipe', 'delivered', 'exempt'], [fileId, 'fixture secret', 'file', 'delivered', 'exempt']]],
+      [subject, [[scalarId, 'fixture secret', 'compare', 'delivered', 'exempt']]],
+      [subject, [[scalarId, 'fixture secret', 'fingerprint', 'delivered', 'exempt']]],
+    ]);
+    assert.doesNotMatch(JSON.stringify(f.usage), new RegExp(`${canary}|REMOTE_USAGE_CANARY`));
+    f.denied.add(scalar); const before = f.usage.length;
+    assert.equal((await broker.run(f.context, command('console.log("no")', { env: { TOKEN: scalar } }))).exitCode, null);
+    assert.equal(f.usage.length, before, 'a refused use is not a delivered one');
+  } finally { await f.cleanup(); }
+});
 
 test('env/stdin/private file deliver only requested values, remove credentials, redact outputs, and clean private paths', async () => {
   const f = await fixture(); const scalar = f.add(canary), file = f.add(canary, 'file');

@@ -1,7 +1,11 @@
 import { createCipheriv, createDecipheriv, createHash, createPrivateKey, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes, randomUUID, sign, verify } from 'node:crypto';
 import type { SecretContext, SecretDevice, SecretMetadata, SecretPeer } from '../../shared/secrets.js';
 
-export type RemoteSecretOperation = 'list' | 'resolve' | 'close';
+/** `available` is a read: it claims nothing on the source and goes only to a source whose relay confirmed it (`poll`). */
+export type RemoteSecretOperation = 'list' | 'resolve' | 'close' | 'available';
+const OPERATIONS: readonly RemoteSecretOperation[] = ['list', 'resolve', 'close', 'available'];
+/** A source's relay confirms its features on every poll; one not confirmed this recently is treated as an older build. */
+const FEATURE_TTL = 30_000;
 /** Listed metadata in the key set every paired build accepts; anything else, such as why a secret is available, stays local. */
 const WIRE_METADATA = ['id', 'name', 'groupId', 'kind', 'version', 'reference', 'fields', 'expiresAt', 'operations', 'sourceHostId'] as const;
 export function wireMetadata(item: SecretMetadata): SecretMetadata {
@@ -87,11 +91,14 @@ function binding(r: Pick<RemoteSecretResponse, 'version' | 'id' | 'nonce' | 'fro
   return Buffer.from(canonical({ purpose: 'tower-secret-response-v1', version: r.version, id: r.id, nonce: r.nonce, from: r.from, to: r.to, expiresAt: r.expiresAt }));
 }
 interface Pending { request: RemoteSecretRequest; peer: SecretPeer; resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
+const refusal = (code: string) => Object.assign(new Error(code), { code });
 
 /** Private keys and values stay in the execution worker; the web relay handles only signed envelopes. */
 export class RemoteSecretBroker {
   private readonly waiting = new Map<string, Pending>();
   private readonly answering = new Set<string>();
+  /** What each source's relay said its worker serves, by controller route, as of its last poll. */
+  private readonly features = new Map<string, { deviceId: string; features: string[]; at: number }>();
   private readonly now: () => number;
   constructor(private readonly options: RemoteSecretBrokerOptions) { this.now = options.now ?? Date.now; }
   private peer(id: string, route?: { id: string; direction: SecretPeer['direction'] }): SecretPeer {
@@ -99,23 +106,39 @@ export class RemoteSecretBroker {
     if (peers.length !== 1) return fail();
     return peers[0]!;
   }
-  request(peerId: string, context: SecretContext, operation: RemoteSecretOperation, payload: unknown = {}): Promise<unknown> {
-    if (this.waiting.size >= MAX_PENDING) return Promise.reject(Object.assign(new Error('SECRET_REMOTE_BUSY'), { code: 'SECRET_REMOTE_BUSY' }));
+  /** Whether this source's relay confirmed `feature` recently, for the peer trusted on that route now. */
+  supports(peerId: string, feature: 'available'): boolean {
+    try {
+      const peer = this.peer(peerId); const known = this.features.get(peer.routeId);
+      return peer.direction === 'controller' && !!known && known.deviceId === peer.device.id && known.features.includes(feature) && this.now() - known.at <= FEATURE_TTL;
+    } catch { return false; } // best-effort: without one trusted peer there is nothing confirmed
+  }
+  /** The source's link went away: what its relay said no longer holds. */
+  forget(controllerRouteId: string): void { this.features.delete(controllerRouteId); }
+  request(peerId: string, context: SecretContext, operation: RemoteSecretOperation, payload: unknown = {}, options: { timeoutMs?: number } = {}): Promise<unknown> {
+    if (this.waiting.size >= MAX_PENDING) return Promise.reject(refusal('SECRET_REMOTE_BUSY'));
+    // An older source refuses an operation it does not know only after its full deadline; never send it one.
+    if (operation === 'available' && !this.supports(peerId, 'available')) return Promise.reject(refusal('SECRET_REMOTE_UNSUPPORTED'));
     try {
       const device = this.options.device(), peer = this.peer(peerId);
-      if (peer.direction !== 'controller' || !contextValid(context) || context.hostId !== device.id || !['list', 'resolve', 'close'].includes(operation)) return fail();
+      if (peer.direction !== 'controller' || !contextValid(context) || context.hostId !== device.id || !OPERATIONS.includes(operation)) return fail();
       const createdAt = this.now();
       const body = { version: 1 as const, id: randomUUID(), nonce: randomUUID(), from: device.id, to: peerId, createdAt,
-        expiresAt: createdAt + Math.min(MAX_TTL, Math.max(1, this.options.timeoutMs ?? MAX_TTL)), context: Object.fromEntries(Object.entries(context).filter(([, value]) => value !== undefined)) as unknown as SecretContext, operation, payload: encode(payload) };
+        expiresAt: createdAt + Math.min(MAX_TTL, Math.max(1, options.timeoutMs ?? this.options.timeoutMs ?? MAX_TTL)), context: Object.fromEntries(Object.entries(context).filter(([, value]) => value !== undefined)) as unknown as SecretContext, operation, payload: encode(payload) };
       wire(body, MAX_REQUEST);
       const request: RemoteSecretRequest = { ...body, signature: sign(null, Buffer.from(canonical(body)), this.options.deviceKeys().signingPrivateKey).toString('base64url') };
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => { this.waiting.delete(request.id); reject(Object.assign(new Error('SECRET_REMOTE_OFFLINE'), { code: 'SECRET_REMOTE_OFFLINE' })); }, request.expiresAt - createdAt);
+        const timer = setTimeout(() => { this.waiting.delete(request.id); reject(refusal('SECRET_REMOTE_OFFLINE')); }, request.expiresAt - createdAt);
         timer.unref(); this.waiting.set(request.id, { request, peer, resolve, reject, timer });
       });
-    } catch { return Promise.reject(Object.assign(new Error('SECRET_REMOTE_DENIED'), { code: 'SECRET_REMOTE_DENIED' })); }
+    } catch { return Promise.reject(refusal('SECRET_REMOTE_DENIED')); }
   }
-  poll(controllerRouteId: string): RemoteSecretRequest[] {
+  /** Requests for a source's relay; `features` is what that relay says its worker serves, absent from older relays. */
+  poll(controllerRouteId: string, features?: unknown): RemoteSecretRequest[] {
+    const peer = this.options.peers().find(peer => peer.enabled && peer.direction === 'controller' && peer.routeId === controllerRouteId);
+    const confirmed = Array.isArray(features) ? OPERATIONS.filter(operation => operation === 'available' && features.includes(operation)) : [];
+    if (peer && confirmed.length) this.features.set(controllerRouteId, { deviceId: peer.device.id, features: confirmed, at: this.now() });
+    else this.features.delete(controllerRouteId);
     return [...this.waiting.values()].filter(p => p.request.expiresAt > this.now() && this.options.peers().some(peer => peer.enabled && peer.direction === 'controller' && peer.routeId === controllerRouteId && peer.device.id === p.peer.device.id && peer.device.signingKey === p.peer.device.signingKey && peer.device.encryptionKey === p.peer.device.encryptionKey))
       .slice(0, 8).map(p => structuredClone(p.request));
   }
@@ -128,7 +151,7 @@ export class RemoteSecretBroker {
     const request = input as unknown as RemoteSecretRequest, device = this.options.device();
     const now = this.now();
     if (request.version !== 1 || !uuid.test(request.id) || !uuid.test(request.nonce) || request.to !== device.id || !contextValid(request.context)
-      || request.context.hostId !== request.from || !['list', 'resolve', 'close'].includes(request.operation)
+      || request.context.hostId !== request.from || !OPERATIONS.includes(request.operation)
       || !Number.isSafeInteger(request.createdAt) || !Number.isSafeInteger(request.expiresAt) || request.createdAt > now + 1000 || request.expiresAt <= now
       || request.expiresAt - request.createdAt > MAX_TTL || request.expiresAt <= request.createdAt || request.createdAt < now - MAX_TTL) return fail();
     const peer = this.peer(request.from, { id: nodeRouteId, direction: 'node' });
@@ -137,10 +160,12 @@ export class RemoteSecretBroker {
     const digest = createHash('sha256').update(unsigned(request)).digest('hex');
     if (this.answering.has(request.id) || this.answering.size >= MAX_PENDING) return fail('SECRET_REMOTE_UNCERTAIN');
     this.answering.add(request.id);
+    // A read is answered again within its deadline rather than claimed: it changes nothing here and only its sender can open it.
+    const claimed = request.operation !== 'available';
     let result: unknown;
     try {
-      if (!await this.options.begin(request.context, `remote-id:${request.from}:${request.id}`, digest)
-        || !await this.options.begin(request.context, `remote-nonce:${request.from}:${request.nonce}`, digest)) return fail('SECRET_REMOTE_UNCERTAIN');
+      if (claimed && (!await this.options.begin(request.context, `remote-id:${request.from}:${request.id}`, digest)
+        || !await this.options.begin(request.context, `remote-nonce:${request.from}:${request.nonce}`, digest))) return fail('SECRET_REMOTE_UNCERTAIN');
       try {
         // Re-read trust immediately before the policy owner resolves the operation.
         const current = this.peer(request.from, { id: nodeRouteId, direction: 'node' });
@@ -165,7 +190,7 @@ export class RemoteSecretBroker {
       } finally { key.fill(0); }
       response.signature = sign(null, unsigned(response), keys.signingPrivateKey).toString('base64url');
       wire(response, MAX_WIRE);
-      await this.options.finish?.(request.context, `remote-id:${request.from}:${request.id}`, digest, response);
+      if (claimed) await this.options.finish?.(request.context, `remote-id:${request.from}:${request.id}`, digest, response);
       return response;
     } finally { this.answering.delete(request.id); }
   }
@@ -193,12 +218,12 @@ export class RemoteSecretBroker {
     const resolved = result.ok ? decode(result.value) : undefined;
     this.waiting.delete(response.id); clearTimeout(pending.timer);
     if (result.ok) pending.resolve(resolved);
-    else pending.reject(Object.assign(new Error('SECRET_REMOTE_UNAVAILABLE'), { code: 'SECRET_REMOTE_UNAVAILABLE' }));
+    else pending.reject(refusal('SECRET_REMOTE_UNAVAILABLE'));
   }
   pending(): number { return this.waiting.size; }
   inFlight(): number { return this.answering.size; }
   close(): void {
-    for (const pending of this.waiting.values()) { clearTimeout(pending.timer); pending.reject(Object.assign(new Error('SECRET_REMOTE_OFFLINE'), { code: 'SECRET_REMOTE_OFFLINE' })); }
+    for (const pending of this.waiting.values()) { clearTimeout(pending.timer); pending.reject(refusal('SECRET_REMOTE_OFFLINE')); }
     this.waiting.clear();
   }
 }

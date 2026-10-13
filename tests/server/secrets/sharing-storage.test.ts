@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { SECRET_OPERATIONS, type SecretContext, type SecretMetadata, type SecretUsage } from '../../../shared/secrets.js';
 import { kindOf } from '../../../shared/errors.js';
 import type { SecretService } from '../../../server/secrets/service.js';
-import { editPayload, legacyRecord, legacyRule, secretService, type StoredPayload, type StoredRecord } from '../../helpers/secrets.js';
+import { editPayload, legacyRecord, legacyRule, secretService, stored, storedSecret, storedTask, type StoredPayload, type StoredRecord } from '../../helpers/secrets.js';
 import { writeState, type StateSnapshot } from '../backup/fixtures/state.js';
 import * as oracle from './fixtures/grant-policy-1.130.2.js';
 import { endTask as closeIn1130 } from './fixtures/task-close-1.130.2.js';
@@ -31,7 +31,7 @@ const refusal = (kind: string, message?: RegExp) => (error: Error) => kindOf(err
 
 test('keys saved before sharing keep 1.130.2 decisions, manual rules being the one change', async t => {
   const f = await fixture(t);
-  const project = await f.service.project({ name: 'P', bindings: [{ hostId: f.host, root: '/p' }] });
+  const project = { id: randomUUID(), name: 'P', bindings: [{ hostId: f.host, root: '/p' }] };
   const record = (name: string, groupId: string, kind: 'scalar' | 'env' = 'scalar') => legacyRecord(f.host, { name, groupId, value: kind === 'env' ? 'A=1\nB=2\n' : `value-${name}`, kind });
   const keys = [record('manual-root', 'g'), record('auto-project', 'pg'), record('duplicate', 'g'), record('fields', 'g', 'env'), record('all-projects', 'g'), record('other-root', 'g'), record('boundary', 'pg')];
   const [manual, autoProject, duplicate, fields, allProjects, otherRoot, boundary] = keys;
@@ -40,9 +40,9 @@ test('keys saved before sharing keep 1.130.2 decisions, manual rules being the o
     legacyRule({ groupId: 'g', secretIds: [fields.metadata.id], hostId: f.host, root: '/p', operations: ['discover', 'env', 'file'], fields: { [fields.metadata.id]: ['B'] } }),
     legacyRule({ groupId: 'g', secretIds: [allProjects.metadata.id], hostId: f.host, allProjects: true, activation: 'auto', operations: ['discover', 'env', 'compare'] }),
     legacyRule({ groupId: 'g', secretIds: [otherRoot.metadata.id], hostId: f.host, root: '/other' }), legacyRule({ groupId: 'pg', secretIds: [boundary.metadata.id], hostId: f.host, root: '/other' })];
-  await editPayload(f.service, PASSWORD, payload => { payload.groups.push({ id: 'g', name: 'G', scope: 'global' }, { id: 'pg', name: 'PG', scope: 'project', projectId: project.id }); payload.secrets.push(...keys); payload.rules.push(...rules); });
+  await editPayload(f.service, PASSWORD, payload => { payload.projects.push(project); payload.groups.push({ id: 'g', name: 'G', scope: 'global' }, { id: 'pg', name: 'PG', scope: 'project', projectId: project.id }); payload.secrets.push(...keys); payload.rules.push(...rules); });
   const subject = await context(f.service, 'session', '/p');
-  const task = f.service.overview(subject).task!;
+  const task = storedTask(f.service, subject.taskId)!;
   const before = { deviceId: f.host, projects: [project], groups: [{ id: 'g', name: 'G', scope: 'global' as const }, { id: 'pg', name: 'PG', scope: 'project' as const, projectId: project.id }],
     rules: rules.map(rule => ({ ...rule, activation: 'auto' as const })), secrets: keys.map(key => ({ metadata: key.metadata, fieldNames: key.fields && Object.keys(key.fields) })), tasks: [task], grants: [] as oracle.PolicyGrant[] };
   const expected = oracle.discoverable(before, task, f.now(), 'assume').map(({ activation: _activation, ...item }) => JSON.parse(JSON.stringify(item)));
@@ -70,7 +70,7 @@ test('sharing one key out of a shared rule leaves every other key’s decision, 
   assert.deepEqual(keptBefore?.fields, ['B']);
   assert.deepEqual(await f.service.setSharing(edited.metadata.id, 0, { global: false, folders: [] }), { revision: 1, global: false, folders: [] });
   await f.service.setSharing(alone.metadata.id, 0, { global: false, folders: [{ hostId: f.host, root: '/q' }] });
-  assert.deepEqual(f.service.overview().rules, [{ ...shared, secretIds: [kept.metadata.id], fields: { [kept.metadata.id]: ['B'] } }], 'only the edited keys leave; a rule left empty goes');
+  assert.deepEqual(stored(f.service).rules, [{ ...shared, secretIds: [kept.metadata.id], fields: { [kept.metadata.id]: ['B'] } }], 'only the edited keys leave; a rule left empty goes');
   assert.deepEqual((await f.service.list(subject)).find(item => item.id === kept.metadata.id), keptBefore);
   assert.deepEqual(names(await f.service.list(subject)), ['kept']);
   assert.deepEqual((await f.service.resolve(subject, kept.metadata.reference, 'env')).fields, { B: 'kept' });
@@ -121,7 +121,7 @@ test('an older build’s round trip: it reads, edits rules and saves; the upgrad
   assert.deepEqual(names(await f.service.list(atA)), ['edited'], 'a session connection still opens a withheld key');
   await f.service.setSharing(edited.metadata.id, 1, { global: true, folders: [] });
   assert.equal(f.service.settings().secrets.find(item => item.id === edited.metadata.id)?.withheld, undefined);
-  assert.deepEqual(f.service.overview().rules.map(rule => rule.secretIds), [[legacy.metadata.id]], 'the owner’s save takes the key out of the older build’s rule again');
+  assert.deepEqual(stored(f.service).rules.map(rule => rule.secretIds), [[legacy.metadata.id]], 'the owner’s save takes the key out of the older build’s rule again');
   assert.deepEqual(names(await f.service.list(atB)), ['edited', 'legacy']);
 });
 
@@ -181,12 +181,12 @@ test('temporary values live in the journal with their task, and grants of an old
   assert.deepEqual(towerGroups.map(group => [group.id, group.scope]), [[saved.groupId, 'global']], 'one Tower group per vault, for saved keys only');
   assert.deepEqual(f.service.overview().groups.find(group => group.id === pasted.groupId), { id: pasted.groupId, name: 'pasted', scope: 'task', taskId: target.taskId });
   await f.service.closeTask(target.taskId);
-  assert.equal(f.service.overview().secrets.some(secret => secret.id === pasted.id), false);
+  assert.equal(storedSecret(f.service, pasted.id), false);
   // A journal as 1.130.2 left it: grants, and tasks without connections.
   const journal = await f.service.vault.journal() as Record<string, unknown> & { tasks: Record<string, unknown>[] };
   await f.service.vault.save(await payloadOf(f.service), { ...journal, tasks: journal.tasks.map(({ connected: _connected, ...task }) => task), grants: [{ taskId: target.taskId, secretId: saved.id, version: 1, ruleId: 'r', revision: 1 }] }, f.service.vault.index);
   await f.service.lock(); await f.service.unlock(PASSWORD);
-  assert.deepEqual(f.service.overview(target).task?.connected, []);
+  assert.deepEqual(storedTask(f.service, target.taskId)?.connected, []);
   await f.service.flush();
   assert.equal('grants' in (await f.service.vault.journal() as object), false);
 });
@@ -231,7 +231,7 @@ test('available and availableFor read without creating tasks or ledger entries',
   assert.throws(() => f.service.availableFor({ ...remote, hostId: randomUUID() }), /Remote task denied/);
   assert.throws(() => f.service.availableFor({ ...remote, root: '/node/' }), /Remote task denied/);
   assert.deepEqual(await readFile(join(f.stateDir, 'secrets', 'journal.json')), journal, 'nothing was written');
-  assert.deepEqual(f.service.overview().secrets.length, 3); assert.equal(f.service.currentTask('session'), undefined);
+  assert.deepEqual(f.service.settings().secrets.length, 3); assert.equal(f.service.currentTask('session'), undefined);
   const target = await f.service.ensureTask('session', '/p');
   await f.service.connectSession(target, [unshared.id]); await f.service.disconnectSession(target, [global.id]);
   assert.deepEqual(f.service.available({ sessionId: 'session', root: '/p' }).map(item => [item.name, item.basis]), [['unshared', ['session']]]);
@@ -268,7 +268,7 @@ test('disconnecting stops a key in that session whatever allows it, and connecti
   assert.deepEqual(names(await f.service.list(subject)), ['shared']);
   assert.deepEqual(Object.keys((await f.service.list(subject))[0]).sort(), ['groupId', 'id', 'kind', 'name', 'operations', 'reference', 'sourceHostId', 'version'], 'listed metadata keeps the key set every paired build accepts');
   await f.service.remove(shared.id);
-  assert.deepEqual(f.service.overview(subject).connected, [], 'a removed key leaves every connection');
+  assert.deepEqual(storedTask(f.service, subject.taskId)?.connected, [], 'a removed key leaves every connection');
   await f.service.connectSession(subject, [ruled.metadata.id]); await f.service.closeTask(subject.taskId);
   const next = await context(f.service, 'session', '/p');
   assert.deepEqual(f.service.available(next).map(item => [item.name, item.basis]), [['ruled', ['legacy']]], 'connections and stops end with their task');

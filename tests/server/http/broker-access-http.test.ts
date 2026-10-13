@@ -45,7 +45,8 @@ test('broker approval needs a real owner login and preserves HTTP boundaries on 
 
 test('broker control preserves expected task identity and rejects remote routing', async () => {
   const calls: unknown[] = [];
-  const worker = { secretCall: async (operation: string, args?: unknown[]) => { calls.push([operation, args]); return {}; } };
+  // A worker that predates per-secret sharing still serves the unchanged broker actions.
+  const worker = { supports: () => false, secretCall: async (operation: string, args?: unknown[]) => { calls.push([operation, args]); return {}; } };
   const input = { sessionId: 'codex:fixture', root: '/fixture', taskId: null, taskLabel: 'Deploy', ttlMs: 1000 };
   await ownerSecretControl(undefined, worker, 'approve-broker', input);
   assert.deepEqual(calls, [['control', ['approve-broker', input]]]);

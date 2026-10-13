@@ -3,7 +3,7 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { chmod, lstat, mkdir, mkdtemp, open, realpath, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { isAbsolute, join, relative, resolve as absolute, sep } from 'node:path';
-import { SECRET_OPERATIONS, type SecretContext, type SecretMetadata, type SecretOperation, type SecretRunInput, type SecretRunResult } from '../../shared/secrets.js';
+import { SECRET_OPERATIONS, type SecretContext, type SecretMetadata, type SecretOperation, type SecretRunInput, type SecretRunResult, type SecretUsage } from '../../shared/secrets.js';
 import type { ResolvedSecret, SecretDispatchUse, SecretService } from './service.js';
 import type { RemoteSecretBroker } from './remote.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
@@ -35,6 +35,19 @@ export function validateSecretRunInput(value: unknown): SecretRunInput {
   if ((value.env !== undefined && !bindings(value.env, 128)) || (value.files !== undefined && !bindings(value.files, 32)) || (value.envBundle !== undefined && !reference(value.envBundle)) || (value.stdin !== undefined && !reference(value.stdin))) throw failure('시크릿 연결이 올바르지 않습니다.');
   if (Buffer.byteLength(JSON.stringify(value)) > MAX_INPUT_BYTES) throw failure('시크릿 실행 요청이 너무 큽니다.');
   return structuredClone(value) as unknown as SecretRunInput;
+}
+/** A source's listing in the key set every paired build sends, each item a reference of that source; throws otherwise. */
+export function remoteListing(result: unknown, sourceHostId: string): SecretMetadata[] {
+  if (!Array.isArray(result) || result.length > 4096 || result.some(item => !plain(item)
+    || Object.keys(item).some(key => !['id', 'name', 'groupId', 'kind', 'version', 'reference', 'fields', 'expiresAt', 'operations', 'activation', 'sourceHostId'].includes(key))
+    || !reference(item.reference) || !item.reference.startsWith(`tower-secret://${sourceHostId}/`)
+    || !text(item.id, 1024) || !text(item.name, 256) || !text(item.groupId, 1024) || !['scalar', 'env', 'file'].includes(String(item.kind))
+    || !Number.isSafeInteger(item.version) || Number(item.version) < 1
+    || (item.fields !== undefined && (!Array.isArray(item.fields) || item.fields.length > 4096 || item.fields.some(field => typeof field !== 'string' || !ENV_NAME.test(field))))
+    || (item.operations !== undefined && (!Array.isArray(item.operations) || item.operations.some(operation => !SECRET_OPERATIONS.includes(operation))))
+    || (item.expiresAt !== undefined && !Number.isSafeInteger(item.expiresAt))
+    || (item.activation !== undefined && !['auto', 'manual'].includes(String(item.activation))))) throw failure('원격 목록이 올바르지 않습니다.', 'upstream');
+  return (result as SecretMetadata[]).map(item => ({ ...item, sourceHostId }));
 }
 async function privateConsumerDirectory(stateDir: string): Promise<string> {
   const root = absolute(stateDir);
@@ -73,6 +86,16 @@ export class SecretBroker {
   unavailableSources(context: SecretContext): SourceFailure[] { return structuredClone(this.sourceFailures.get(this.subject(context)) ?? []); }
   constructor(private readonly options: { stateDir: string; service: SecretService; remote?: RemoteSecretBroker; validate?: (context: SecretContext) => void }) {}
   inFlight(): boolean { return this.active > 0; }
+  /**
+   * Each secret and operation just handed to a consumer, kept with the session that used it; a remote source's secret is
+   * kept here, where it was used. Values never reach the record, and failing to keep it does not undo the use.
+   */
+  private async delivered(context: SecretContext, uses: readonly SecretDispatchUse[]): Promise<void> {
+    const at = Date.now(); const entries = new Map<string, SecretUsage>();
+    for (const use of uses) entries.set(JSON.stringify([use.value.metadata.id, use.operation]), { at, secretId: use.value.metadata.id, name: use.value.metadata.name, operation: use.operation, outcome: 'delivered', review: 'exempt' });
+    try { await this.options.service.recordUsage({ hostId: context.hostId, sessionId: context.sessionId }, [...entries.values()]); }
+    catch { console.warn('Tower could not record a secret use; the use itself went ahead.'); }
+  }
 
   async list(context: SecretContext): Promise<SecretMetadata[]> {
     this.options.validate?.(context);
@@ -86,16 +109,7 @@ export class SecretBroker {
         this.options.service.checkTask(context);
         const result = await this.options.remote.request(peer.device.id, this.remoteContext(context), 'list', {});
         this.options.service.checkTask(context);
-        if (!Array.isArray(result) || result.length > 4096 || result.some(item => !plain(item)
-          || Object.keys(item).some(key => !['id', 'name', 'groupId', 'kind', 'version', 'reference', 'fields', 'expiresAt', 'operations', 'activation', 'sourceHostId'].includes(key))
-          || !reference(item.reference) || !item.reference.startsWith(`tower-secret://${peer.device.id}/`)
-          || !text(item.id, 1024) || !text(item.name, 256) || !text(item.groupId, 1024) || !['scalar', 'env', 'file'].includes(String(item.kind))
-          || !Number.isSafeInteger(item.version) || Number(item.version) < 1
-          || (item.fields !== undefined && (!Array.isArray(item.fields) || item.fields.length > 4096 || item.fields.some(field => typeof field !== 'string' || !ENV_NAME.test(field))))
-          || (item.operations !== undefined && (!Array.isArray(item.operations) || item.operations.some(operation => !SECRET_OPERATIONS.includes(operation))))
-          || (item.expiresAt !== undefined && !Number.isSafeInteger(item.expiresAt))
-          || (item.activation !== undefined && !['auto', 'manual'].includes(String(item.activation))))) throw failure('원격 목록이 올바르지 않습니다.', 'upstream');
-        return result.filter(item => { try { this.options.service.checkTask(context, item.id); return true; } catch { return false; } }).map(item => ({ ...item, sourceHostId: peer.device.id })) as SecretMetadata[];
+        return remoteListing(result, peer.device.id).filter(item => { try { this.options.service.checkTask(context, item.id); return true; } catch { return false; } });
       } catch { failures.push({ sourceHostId: peer.device.id, code: 'SECRET_SOURCE_UNAVAILABLE' }); return []; }
     }));
     this.options.service.checkTask(context);
@@ -196,6 +210,7 @@ export class SecretBroker {
           finally { current.bytes.fill(0); }
         }
         const dispatched = await this.options.service.dispatch(context, used, () => this.consume(input, args, cwd, env, stdin, timeoutMs, values), () => this.options.validate?.(context));
+        await this.delivered(context, used);
         result = await dispatched.result;
       } catch { result = genericResult(input.operationId); }
       finally {
@@ -260,8 +275,10 @@ export class SecretBroker {
     try {
       const a = await this.resolve(context, left, 'compare'); values.push(a.bytes);
       const b = await this.resolve(context, right, 'compare'); values.push(b.bytes);
-      return (await this.options.service.dispatch(context, [{ ref: left, operation: 'compare', value: a }, { ref: right, operation: 'compare', value: b }],
-        () => ({ equal: a.bytes.length === b.bytes.length && timingSafeEqual(a.bytes, b.bytes) }), () => this.options.validate?.(context))).result;
+      const uses: SecretDispatchUse[] = [{ ref: left, operation: 'compare', value: a }, { ref: right, operation: 'compare', value: b }];
+      const { result } = await this.options.service.dispatch(context, uses, () => ({ equal: a.bytes.length === b.bytes.length && timingSafeEqual(a.bytes, b.bytes) }), () => this.options.validate?.(context));
+      await this.delivered(context, uses);
+      return result;
     } finally { for (const value of values) value.fill(0); this.active--; }
   }
 
@@ -271,13 +288,16 @@ export class SecretBroker {
     try {
       const value = await this.resolve(context, reference, 'fingerprint');
       try {
-        return (await this.options.service.dispatch(context, [{ ref: reference, operation: 'fingerprint', value }], () => {
+        const uses: SecretDispatchUse[] = [{ ref: reference, operation: 'fingerprint', value }];
+        const { result } = await this.options.service.dispatch(context, uses, () => {
           const key = this.options.service.fingerprintKey();
           try {
             const fingerprint = createHmac('sha256', key).update(JSON.stringify(['tower-secret-fingerprint-v1', this.options.service.device().id, domain, value.metadata.id])).update(value.bytes).digest('hex');
             return { algorithm: 'HMAC-SHA256' as const, fingerprint };
           } finally { key.fill(0); }
-        }, () => this.options.validate?.(context))).result;
+        }, () => this.options.validate?.(context));
+        await this.delivered(context, uses);
+        return result;
       } finally { value.bytes.fill(0); }
     } finally { this.active--; }
   }
