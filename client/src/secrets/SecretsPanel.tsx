@@ -16,7 +16,7 @@ function useSecretSettings(token: string, active: boolean) {
   useEffect(() => { generation.current++; setView(undefined); setError(''); setLoadError(''); setNotice(''); setBusy(false); mutating.current = false; }, [token]);
   useEffect(() => {
     if (!active || !token) return;
-    const controller = new AbortController(); const current = generation.current; const started = changes.current;
+    const controller = new AbortController(); const current = generation.current; const started = mutating.current ? -1 : changes.current;
     readSecretSettings(controller.signal).then(next => {
       if (!controller.signal.aborted && current === generation.current && started === changes.current && !mutating.current) { setView(next); setLoadError(''); }
     }, failure => { if (!controller.signal.aborted && current === generation.current && started === changes.current) setLoadError(secretLoadFailure(failure, t)); });

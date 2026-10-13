@@ -302,12 +302,14 @@ test('secret controls have English translations while key names remain exact', (
   const settings = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view, canvas, busy: false, change }));
   assert.match(settings, /Edit sharing/); assert.match(settings, /Replace value/); assert.match(settings, /Not shared/); assert.match(settings, /Earlier rules/); assert.match(settings, /Add secret/); assert.match(settings, /FOLDER_KEY/);
   const available = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ error: 'worker-update-pending' }), busy: false, change, onPaste: noop, onSharing: noop }));
-  assert.match(available, /Waiting for the new execution worker/); assert.match(available, /Connect a saved secret/); assert.match(available, /This session/);
+  assert.match(available, /Waiting for the new execution worker/); assert.doesNotMatch(available, /Connect a saved secret/, 'nothing can change until the handoff');
+  const usable = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView(), busy: false, change, onPaste: noop, onSharing: noop }));
+  assert.match(usable, /Connect a saved secret/); assert.match(usable, /This session/);
   const visible = (markup: string) => markup.replace(/<[^>]*>/g, ' ');
   const pending = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { status: { initialized: true, locked: false }, peers: [], secrets: [], workerUpdatePending: true }, canvas, busy: false, change }));
   const stopped = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ disconnected: [{ id: 'x', name: 'X_KEY', groupId: 'g', kind: 'scalar', version: 1, reference: reference('x'), remote: true }] }), busy: false, change, onPaste: noop, onSharing: noop }));
   assert.match(pending, /only lock and unlock/); assert.match(stopped, /Allow again/);
-  for (const markup of [settings, available, pending, stopped]) assert.doesNotMatch(visible(markup).replace(/원본 맥|빌드 서버|상위 Tower/g, ''), /[가-힣]/, 'every control is translated; computer names stay as they are');
+  for (const markup of [settings, available, usable, pending, stopped]) assert.doesNotMatch(visible(markup).replace(/원본 맥|빌드 서버|상위 Tower/g, ''), /[가-힣]/, 'every control is translated; computer names stay as they are');
 });
 
 test('pending encrypted vault restores remain waiting and direct the owner to Secrets settings', async () => {
