@@ -1,4 +1,4 @@
-import type { RunOrigin } from '../../shared/types.js';
+import type { RunDelegation, RunOrigin } from '../../shared/types.js';
 import { UUID } from './saved-state.js';
 
 /** The provenance Tower keeps for a session it created. External content never leaves it. */
@@ -65,6 +65,11 @@ export function automatedOrigin(origin: RunOrigin | undefined): boolean { return
  * tools. It always runs in the provider's automatic approval mode. Work with no recorded origin is not assumed to be it.
  */
 export function ownerOrigin(origin: RunOrigin | undefined): boolean { return origin?.kind === 'owner' || origin?.kind === 'agent'; }
+
+/** The same calling turn started both, or neither was started by one (`Run.delegation`). */
+export function sameDelegation(a: RunDelegation | undefined, b: RunDelegation | undefined): boolean {
+  return a?.parentRunId === b?.parentRunId && a?.rootRunId === b?.rootRunId;
+}
 
 /** Runs without a recorded origin compare as unknown. */
 export function sameOrigin(a: RunOrigin | undefined, b: RunOrigin | undefined): boolean {

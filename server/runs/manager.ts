@@ -24,7 +24,7 @@ import { findExecutable, PROVIDERS } from '../providers/discovery.js';
 import { UUID, type CreatedSession } from './saved-state.js';
 import { checkClaudeSubscription, markMaster, subscriptionOnly } from './subscription.js';
 import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
-import { automatedOrigin, sameOrigin, type SessionOrigin } from './origin.js';
+import { automatedOrigin, sameDelegation, sameOrigin, type SessionOrigin } from './origin.js';
 import type { Wakeup } from './wakeup.js';
 import { TOWER_NOTICE } from '../../shared/task-notification.js';
 import { creationReviewer } from './approval-policy.js';
@@ -737,9 +737,10 @@ export class RunManager extends EventEmitter {
     if (run.instructions?.required) return { blocked: 'instructions' };
     if (run.model && run.model !== (target.model ?? this.getSession(run.sessionId)?.model)) return { blocked: 'model' };
     if (run.effort && run.effort !== target.effort) return { blocked: 'effort' };
-    // An inserted instruction runs with the active turn's tools and approvals. Tools follow origin and
-    // session alone, so the same origin in the same session is exactly the same authority.
-    if (!sameOrigin(run.origin, target.origin)) return { blocked: 'origin' };
+    // An inserted instruction runs with the active turn's tools, approvals and secret credential. They follow origin,
+    // the calling turn (secrets/access.ts reviews delegated work) and session, so only the same origin from the same
+    // calling turn in the same session carries exactly the same authority.
+    if (!sameOrigin(run.origin, target.origin) || !sameDelegation(run.delegation, target.delegation)) return { blocked: 'origin' };
     const adapter = this.stdio.get(target.id) ?? this.bridged.get(target.id) ?? this.owned.get(target.id)?.claude;
     return adapter?.canSteer?.() && adapter.steer ? { target, adapter } : { blocked: 'starting' };
   }

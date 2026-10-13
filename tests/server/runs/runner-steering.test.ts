@@ -75,6 +75,42 @@ async function fixture(t: TestContext, options: { external?: boolean; onSteer?: 
 const secretTools = () => ({ required: true, towerTools: 'attached' as const, instructions: SECRET_USE_INSTRUCTIONS,
   servers: { tower_secrets: { command: '/fixture/secret-tool', args: [] } } });
 
+test('an instruction from another turn’s calling credential is never inserted into a turn it did not start', async t => {
+  const f = await fixture(t, { resolveRunTools: secretTools });
+  const caller = { parentRunId: randomUUID(), rootRunId: randomUUID() };
+  const owner = await f.running({ kind: 'owner' });
+  // Admitted as the owner's, but its secret use is reviewed: it must not ride the owner turn's credential.
+  const delegated = await f.manager.enqueue(f.session.id, 'Delegated instruction', {}, { origin: { kind: 'owner' }, delegation: caller });
+  await delay(5);
+  assert.equal(f.read(delegated.id).canSteer, false);
+  assert.equal(f.read(delegated.id).steerBlocked, 'origin');
+  await assert.rejects(f.manager.steer(delegated.id, { targetRunId: owner.id }));
+  assert.equal(f.inputs.length, 0);
+  const typed = await f.manager.enqueue(f.session.id, 'Owner instruction', {}, { origin: { kind: 'owner' } });
+  await until(() => Boolean(f.read(typed.id).canSteer));
+  await f.manager.steer(typed.id, { targetRunId: owner.id });
+  assert.deepEqual(f.inputs.map(input => input.prompt), ['Owner instruction'], 'the owner’s own message still joins the owner’s turn');
+  f.controls[0].finish(); await until(() => f.read(owner.id).status === 'completed');
+  await until(() => f.controls.length === 2 && f.read(delegated.id).status === 'running');
+  assert.deepEqual(f.read(delegated.id).delegation, caller, 'it runs as its own turn');
+});
+
+test('an instruction from the same calling turn joins the delegated turn it started', async t => {
+  const f = await fixture(t, { resolveRunTools: secretTools });
+  const caller = { parentRunId: randomUUID(), rootRunId: randomUUID() };
+  const first = await f.manager.enqueue(f.session.id, 'Delegated work', {}, { origin: { kind: 'owner' }, delegation: caller });
+  await until(() => f.controls.length === 1 && f.read(first.id).status === 'running');
+  const other = await f.manager.enqueue(f.session.id, 'Another caller', {}, { origin: { kind: 'owner' }, delegation: { ...caller, parentRunId: randomUUID() } });
+  const same = await f.manager.enqueue(f.session.id, 'Same caller follow-up', {}, { origin: { kind: 'owner' }, delegation: { ...caller } });
+  await until(() => Boolean(f.read(same.id).canSteer));
+  assert.equal(f.read(other.id).steerBlocked, 'origin', 'another calling turn, even under the same root');
+  await f.manager.steer(same.id, { targetRunId: first.id });
+  assert.deepEqual(f.inputs.map(input => input.prompt), ['Same caller follow-up']);
+  const typed = await f.manager.enqueue(f.session.id, 'Owner instruction', {}, { origin: { kind: 'owner' } });
+  await delay(5);
+  assert.equal(f.read(typed.id).steerBlocked, 'origin', 'the owner’s own message does not join delegated work either');
+});
+
 test('private tool changes reach only the active owner turn, with no new run or visible history', async t => {
   const f = await fixture(t, { resolveRunTools: secretTools });
   f.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, f.session.id);
@@ -386,6 +422,21 @@ test('permission approval persists one protected next turn and a turn-only notic
   f.controls[1].finish(); await until(() => f.read(resume.id).status === 'completed');
   assert.equal((await f.manager.permissionDecision(request, 'Late retry')).id, resume.id);
   assert.equal(f.controls.length, 2);
+});
+
+test('Tower’s own notices reach a delegated turn: a permission decision and an update’s wrap-up request carry its delegation', async t => {
+  const f = await fixture(t);
+  const caller = { parentRunId: randomUUID(), rootRunId: randomUUID() };
+  const parent = await f.manager.enqueue(f.session.id, 'Delegated work', {}, { origin: { kind: 'owner' }, delegation: caller });
+  await until(() => f.controls.length === 1 && f.read(parent.id).status === 'running');
+  const resume = await f.manager.permissionDecision(permissionRequest(f, parent.id), 'Approved for the next provider turn.');
+  assert.equal(f.inputs.length, 1); assert.match(f.inputs[0].prompt, /next provider turn/);
+  assert.deepEqual(f.manager.list().find(run => run.permissionNotice)?.delegation, caller);
+  assert.deepEqual(f.read(resume.id).delegation, caller);
+  f.manager.beginUpdateDrain(Date.now() + 60000, () => false); f.manager.driveUpdateDrain();
+  await until(() => f.inputs.length === 2);
+  assert.match(f.inputs[1].prompt, /about to restart to apply an update/);
+  f.manager.endUpdateDrain(); f.controls[0].finish(); await until(() => f.read(parent.id).status === 'completed');
 });
 
 test('approvals of steering aliases merge into one next turn with separate durable receipts', async t => {
