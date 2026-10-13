@@ -57,7 +57,7 @@ async function fixture(t: TestContext, options: { vault?: 'open' | 'locked' | 'n
   const signIn = async (value: string) => { const { sessionId } = await store.login(IP, USER, value); assert.ok(sessionId); return { token: sessionId, ip: IP, local: false } satisfies Viewer; };
   /** The next change fails at `at` (`before tower-wrap#1`, `after commit#1`, …), or nowhere. */
   const failing = (at?: string) => { failAt = at; seen.clear(); };
-  return { directory, authDir, stateDir, store, service, runtime, vault, actions, signIn, failing };
+  return { directory, authDir, stateDir, store, service, runtime, vault, actions, signIn, failing, restartWeb: () => { const web = new VaultPassword(auth, secrets); t.after(() => web.close()); return web; } };
 }
 
 test('a credentials change wraps the vault key for the new password before auth.json names it: wherever it stops, the current password keeps a wrapper', { timeout: 180_000 }, async t => {
@@ -115,7 +115,7 @@ test('a credentials change and a value-view unlock never interleave: an old pass
   assert.deepEqual([f.service.vault.hasTower(next), f.service.vault.hasTower(f.store.currentCredentialId()!)], [false, true]);
 });
 
-test('value viewing belongs to one sign-in: idle expiry, sign-out, lock, a credentials change and an ended generation each end it', { timeout: 120_000 }, async t => {
+test('value viewing belongs to one sign-in: idle expiry, a web restart, sign-out, lock, a credentials change and an ended generation each end it', { timeout: 120_000 }, async t => {
   let now = 0; const grants = new ViewGrants(() => now);
   grants.set('a', 'g1'); now += VIEW_IDLE_MS - 1; assert.equal(grants.has('a'), true);
   now += 1; assert.equal(grants.has('a'), false, 'a view that only reads the settings does not keep it alive');
@@ -132,6 +132,7 @@ test('value viewing belongs to one sign-in: idle expiry, sign-out, lock, a crede
   const token = await f.vault.viewUnlock(owner, { password: password(0) }, () => { throw new Error('a signed-in page signs in no further'); });
   assert.equal(token, owner.token);
   assert.equal((await read(owner)).value, 'FIXTURE_VALUE');
+  await assert.rejects(f.restartWeb().value(owner, 'value', { secretId: secret.id, expectedVersion: 1 }), refused('forbidden', 'view-locked'), 'a restarted web remembers no grant');
   await assert.rejects(read(other), refused('forbidden', 'view-locked'), 'another browser has its own');
   await assert.rejects(read({ token: '', ip: '127.0.0.1', local: true }), refused('unauthorized', 'login-required'), 'loopback alone reads no value');
   await assert.rejects(f.vault.value(owner, 'value', { secretId: secret.id, expectedVersion: 1, generation: 'page-chosen' }), refused('invalid'));
