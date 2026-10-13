@@ -47,6 +47,6 @@ export function SecretsPanel({ token, computers = [], canvas = emptyCanvas, focu
   return <SettingsPane title={t('시크릿')} description={t('등록한 시크릿과 각 시크릿의 공유 범위를 관리합니다.')} scope="secrets-pane">
     {state.error && <p role="alert" className="secret-error">{state.error}<button type="button" onClick={state.reload}>{t('다시 시도')}</button></p>}
     {state.notice && <p role="status" className="secret-notice-line">{state.notice}</p>}
-    {frame.active && (state.view ? <SecretSettingsWorkspace key={state.view.status.locked ? 'locked' : 'open'} view={state.view} canvas={canvas} computers={computers} busy={state.busy} change={state.change} focus={focus} /> : <p role="status">{t('불러오는 중…')}</p>)}
+    {frame.active && (state.view ? <SecretSettingsWorkspace key={state.view.status.locked ? 'locked' : 'open'} view={state.view} canvas={canvas} computers={computers} busy={state.busy} change={state.change} focus={focus} reload={state.reload} /> : <p role="status">{t('불러오는 중…')}</p>)}
   </SettingsPane>;
 }

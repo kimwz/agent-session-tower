@@ -405,11 +405,11 @@ export class SecretRuntime {
       try {
         // Only a source whose relay confirmed reads is asked; `list` would start a task there.
         const listed = remoteListing(await this.remote.request(peer.device.id, context, 'available', {}, { timeoutMs: VIEW_REMOTE_MS }), peer.device.id);
-        // A key this session stopped is offered to re-allow; one of a task that ended meanwhile is simply not listed (best-effort).
-        return listed.filter(item => {
-          if (excluded.includes(item.id)) { disconnected.push({ ...wireMetadata(item), remote: true }); return false; }
-          try { if (task) service.checkTask(task); return true; } catch { return false; }
-        })
+        // best-effort: a task that ended meanwhile simply lists nothing.
+        try { if (task) service.checkTask(task); } catch { return []; }
+        // A key this session stopped is offered to re-allow instead.
+        disconnected.push(...listed.filter(item => excluded.includes(item.id)).map(item => ({ ...wireMetadata(item), remote: true })));
+        return listed.filter(item => !excluded.includes(item.id))
           .map(item => ({ ...item, basis: ['remote' as const], operations: item.operations ?? [] }));
       } catch { unavailable.push(peer.device.id); return []; }
     }));

@@ -163,6 +163,8 @@ test('a source that confirmed reads but does not answer is listed as unavailable
   const f = await pair(t);
   await f.a.create({ name: 'silent source key', kind: 'scalar', value: VISIBLE, sharing: f.toB });
   f.confirm();
+  // The request's own timer does not keep the process alive; this does, until the read times out.
+  const alive = setInterval(() => {}, 1000); t.after(() => clearInterval(alive));
   // Nobody relays the read: it times out.
   const view = await f.recipient.control('session', { sessionId: f.capB.sessionId }) as SecretSessionView;
   assert.deepEqual([view.available, view.unavailableSources, view.updatePendingSources, view.error], [[], [f.a.device().id], [], undefined]);

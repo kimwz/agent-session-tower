@@ -13,8 +13,10 @@ import { isRemoteSecret, kindLabels, secretMatches, sharingSummary, type SecretC
 type Editor = { type: 'add' | AdvancedEditor } | { type: 'sharing' | 'value'; id: string };
 
 /** Settings › Secrets: one list of the saved secrets with their sharing, and the vault's rarer controls folded below. */
-export function SecretSettingsWorkspace({ view, canvas, computers = [], busy, change, focus }: {
+export function SecretSettingsWorkspace({ view, canvas, computers = [], busy, change, focus, reload }: {
   view: SecretSettingsView; canvas: SecretCanvas; computers?: SecretComputer[]; busy: boolean; change: SecretChange;
+  /** Reads the view again, offered while the worker handoff is pending. */
+  reload?: () => void;
   /** A secret to open the sharing editor of, asked from a chat. */
   focus?: string;
 }) {
@@ -29,7 +31,7 @@ export function SecretSettingsWorkspace({ view, canvas, computers = [], busy, ch
   }, [focus, unlocked, view]);
   const closeEditor = () => setEditor(undefined);
   useSettingsGuard({ escape: () => { if (editor) { closeEditor(); return true; } if (remove) { setRemove(undefined); return true; } return false; } });
-  if (view.workerUpdatePending) return <SecretWorkerPending view={view} busy={busy} change={change} />;
+  if (view.workerUpdatePending) return <SecretWorkerPending view={view} busy={busy} change={change} reload={reload} />;
   if (!unlocked) return <SecretAccess status={view.status} busy={busy} change={change} />;
   const item = editor && 'id' in editor ? view.secrets.find(secret => secret.id === editor.id) : undefined;
   if (editor?.type === 'add') return <SecretAddForm view={view} canvas={canvas} busy={busy} change={change} onClose={closeEditor} />;
@@ -58,10 +60,10 @@ export function SecretSettingsWorkspace({ view, canvas, computers = [], busy, ch
 }
 
 /** While the attached worker predates per-secret sharing: the notice, and the vault's lock or unlock that it still serves. */
-function SecretWorkerPending({ view, busy, change }: { view: SecretSettingsView; busy: boolean; change: SecretChange }) {
+function SecretWorkerPending({ view, busy, change, reload }: { view: SecretSettingsView; busy: boolean; change: SecretChange; reload?: () => void }) {
   const { t } = useI18n(); const { status } = view;
   return <div className="secret-workspace">
-    <p role="status" className="secret-source-notice">{t('새 실행 워커 적용 대기 중입니다. 진행 중인 작업이 끝나 실행 워커가 바뀌면 시크릿을 관리할 수 있습니다. 그동안은 잠금과 잠금 해제만 할 수 있습니다.')}</p>
+    <p role="status" className="secret-source-notice">{t('새 실행 워커 적용 대기 중입니다. 진행 중인 작업이 끝나 실행 워커가 바뀌면 시크릿을 관리할 수 있습니다. 그동안은 잠금과 잠금 해제만 할 수 있습니다.')}{reload && <button type="button" disabled={busy} onClick={reload}>{t('다시 시도')}</button>}</p>
     {status.initialized && (status.locked ? <SecretAccess status={status} busy={busy} change={change} />
       : <span className="secret-lock-state"><span className="secret-badge">{t('잠금 해제됨')}</span><button type="button" disabled={busy} onClick={() => void change('lock', {})}><LockKeyhole size={14} aria-hidden="true" />{t('잠그기')}</button></span>)}
   </div>;

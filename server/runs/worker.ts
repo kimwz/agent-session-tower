@@ -481,7 +481,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
             if (!target || target.taskId !== args[2]) throw new TowerError('forbidden', 'Secret task no longer matches.');
             // The controller connected these keys: this session's own stop on them ends with that explicit choice.
             const secretIds = Array.isArray(args[3]) ? args[3].filter((id): id is string => typeof id === 'string') : [];
-            if (secretIds.length) await secrets.reallowFromController(target, secretIds);
+            try { if (secretIds.length) await secrets.reallowFromController(target, secretIds); }
+            catch { console.warn('Tower could not lift this session\'s stop on the keys its controller connected; the controller\'s view still offers them.'); }
             secrets.notifyConnection(target);
             return { notified: true };
           }

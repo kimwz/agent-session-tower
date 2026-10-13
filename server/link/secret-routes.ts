@@ -105,8 +105,8 @@ async function remoteSessionSubject(nodes: RemoteNodes | undefined, worker: Work
   const node = nodes.list().find(item => item.id === input.nodeId && item.status === 'connected'); const link = nodes.session(input.nodeId);
   if (!node || !link) return { error: 'source-unavailable' };
   if (!node.features.includes(SECRET_SHARING_FEATURE)) return { error: 'worker-update-pending' };
-  // best-effort: a computer that does not answer is shown as unavailable, and the page asks again.
   const exclusions = worker.supports('secretExclusions') ? '&exclusions=1' : '';
+  // best-effort: a computer that does not answer is shown as unavailable, and the page asks again.
   const response = await linkRequest(link, 'GET', `/secret-session?sessionId=${encodeURIComponent(input.sessionId)}${exclusions}`, undefined, 8000, { maxBytes: 1024 * 1024 }).catch(() => undefined);
   const subject = response?.json as { hostId?: unknown; error?: unknown } | undefined;
   if (response?.status === 404) return { error: 'session-closed' };
