@@ -337,8 +337,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       const localAgent = !masterCall && identity.local && req.headers['x-tower-agent'] === 'local';
       const callerContext = (): RequestContext | undefined => {
         const capability = req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()];
-        const ownerProof = masterCall || (!req.headers['x-tower-agent'] && !req.headers['x-tower-master'] && capability === undefined && Boolean(auth?.session(sessionId, identity.ip)));
-        if (capability === undefined) return ownerProof ? { brokerOwnerAuthorized: true } : undefined;
+        if (capability === undefined) return undefined;
         if (!identity.local || typeof capability !== 'string' || !/^[a-f\d]{64}$/.test(capability)) {
           throw new TowerError('forbidden', 'A calling turn must use its local reporting credential.');
         }
@@ -413,13 +412,11 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         const answer = await towerUpdate(body.version as string | undefined);
         return json(res, answer.status, answer.body);
       }
-      const secretAction = path.match(/^\/api\/secrets\/(settings|session|session-connect|session-disconnect|session-reallow|sharing|broker-access|approve-broker|revoke-broker|initialize|unlock|lock|password|create|update|remove|trust|untrust|preview|import)$/);
-      const secretRead = secretAction && ['settings', 'session', 'broker-access'].includes(secretAction[1]);
+      const secretAction = path.match(/^\/api\/secrets\/(settings|session|session-connect|session-disconnect|session-reallow|sharing|initialize|unlock|lock|password|create|update|remove|trust|untrust|preview|import)$/);
+      const secretRead = secretAction && ['settings', 'session'].includes(secretAction[1]);
       if (secretAction && ((secretRead && req.method === 'GET') || (!secretRead && req.method === 'POST'))) {
-        const brokerAccess = ['broker-access', 'approve-broker', 'revoke-broker'].includes(secretAction[1]);
         // Only the owner's own page: a request naming the master, a local agent or a run is refused, whether or not it proves it.
         if (req.headers['x-tower-master'] !== undefined || req.headers['x-tower-agent'] !== undefined || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()] !== undefined) return json(res, 403, { error: '시크릿 보관함 관리는 소유자의 전용 화면에서만 가능합니다.' });
-        if (brokerAccess && req.method === 'POST' && !auth?.session(sessionId, identity.ip)) return json(res, 401, { error: '브로커 승인은 로그인한 소유자의 Tower 화면에서만 가능합니다.' });
         // Only an explicitly configured HTTPS origin proves a secure reverse-proxy endpoint.
         // Forwarded protocol headers supplied by a caller cannot permit sensitive input.
         if (!identity.local && !secureOrigin && !('encrypted' in req.socket && req.socket.encrypted)) return json(res, 403, { error: '원격 시크릿 관리는 인증된 HTTPS 접속에서만 가능합니다.' });

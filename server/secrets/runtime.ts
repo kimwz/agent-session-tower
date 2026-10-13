@@ -1,15 +1,13 @@
 import { createHash, createPublicKey, randomUUID } from 'node:crypto';
-import { realpathSync } from 'node:fs';
 import { realpath, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { Run, Session } from '../../shared/types.js';
-import type { SecretAvailable, SecretBrokerAccess, SecretBrokerApproval, SecretContext, SecretSubjectMode, SecretDevice, SecretDisconnected, SecretMetadata, SecretPeer, SecretSessionError, SecretSessionView, SecretSettingsView, SecretTarget, SecretUsage, VaultStatus } from '../../shared/secrets.js';
+import type { SecretAvailable, SecretContext, SecretSubjectMode, SecretDevice, SecretDisconnected, SecretMetadata, SecretPeer, SecretSessionError, SecretSessionView, SecretSettingsView, SecretTarget, SecretUsage, VaultStatus } from '../../shared/secrets.js';
 import { SECRET_OPERATIONS } from '../../shared/secrets.js';
 import type { Capability } from '../api/mcp.js';
 import type { SessionOrigin } from '../runs/origin.js';
 import { callWorkerTools, serveToolBridge } from '../mcp/stdio.js';
-import { inMasterFolder } from '../runs/subscription.js';
 import { secretSubject, type SecretStage, type SecretSubject } from './access.js';
 import { SecretBroker, remoteListing } from './broker.js';
 import { parseSecretCli } from './cli.js';
@@ -47,7 +45,6 @@ export const SECRET_TOOLS = Object.entries(schemas).map(([name, input]) => {
 const SESSION_ERRORS = ['uninitialized', 'locked', 'not-eligible', 'session-closed', 'source-unavailable', 'worker-update-pending'] as const satisfies readonly SecretSessionError[];
 /** Errors that stay until the owner does something; the page stops polling on them. */
 const PERMANENT: ReadonlySet<SecretSessionError> = new Set(['uninitialized', 'not-eligible', 'session-closed']);
-const BROKER_ACTIONS = new Set(['broker-access', 'approve-broker', 'revoke-broker']);
 const MUTATIONS = new Set(['create', 'update', 'remove', 'sharing', 'session-connect', 'session-disconnect', 'session-reallow', 'trust', 'untrust']);
 /** How long a session view waits for a source's answer before listing it as unavailable. */
 const VIEW_REMOTE_MS = 5000;
@@ -67,7 +64,7 @@ const remoteSubject = z.union([z.object({ error: z.enum(SESSION_ERRORS) }).stric
 export type RemoteSessionSubject = z.output<typeof remoteSubject>;
 /** A committed owner change for a joined computer's session, which its web announces there before reading the view. */
 export interface SecretReceipt { connectedTarget: SecretTarget }
-export type SecretControlResult = SecretSettingsView | SecretSessionView | SecretBrokerAccess | SecretReceipt | { fields: string[] };
+export type SecretControlResult = SecretSettingsView | SecretSessionView | SecretReceipt | { fields: string[] };
 const closedView = (status: VaultStatus, error: SecretSessionError): SecretSessionView => ({ status, available: [], connectable: [], usage: [], unavailableSources: [], updatePendingSources: [], error, permanent: PERMANENT.has(error) });
 const closureId = (sessionId: string) => createHash('sha256').update('tower-secret-session-close-v1:' + sessionId).digest('hex');
 interface Runs { list(): Run[]; getSession(id: string): Session | undefined; sessionOrigin(id: string): SessionOrigin | undefined }
@@ -161,30 +158,6 @@ export class SecretRuntime {
       lookup: id => { const found = runs.getSession(id); return found && { session: found, provenance: runs.sessionOrigin(id) }; },
       findRun: id => (known ??= new Map(runs.list().map(item => [item.id, item]))).get(id) });
   }
-  private candidate(session: Session): Session & { cwd: string } {
-    const provenance = this.options.runs.sessionOrigin(session.id);
-    if (session.closed || session.node || session.master || session.creationPending || session.isSubagent || session.launchedByAgent || session.parentId || session.launchedBy || provenance?.untrustedInput !== false || provenance?.controllerId || provenance?.kind !== 'agent' || this.closedSessions.has(session.id)) throw fail('외부 입력이나 상속 없는 로컬 agent 생성 주 세션만 승인할 수 있습니다.', 'forbidden');
-    const cwd = realpathSync(session.cwd);
-    if (inMasterFolder(this.options.stateDir, session.cwd) || inMasterFolder(this.options.stateDir, cwd)) throw fail('마스터 폴더의 세션은 프로젝트 브로커 승인을 받을 수 없습니다.', 'forbidden');
-    return { ...session, cwd };
-  }
-  /** Admission protection survives locks/root changes; it confers no secret or tool authority. */
-  brokerAdmissionRequired(session: Session | undefined): boolean {
-    if (!session) return false;
-    const known = this.options.service.brokerAdmissionRequired(session.id);
-    if (known === true || (!this.blocked && known !== undefined)) return known;
-    // An old/unavailable index or an unfinished unlock cannot establish absence of protection.
-    const provenance = this.options.runs.sessionOrigin(session.id);
-    return this.options.service.status().initialized && !session.node && !session.master && !session.isSubagent && !session.launchedByAgent && !session.parentId && !session.launchedBy && provenance?.kind === 'agent' && provenance.untrustedInput === false && !provenance.controllerId;
-  }
-  brokerApproval(session: Session | undefined): SecretBrokerApproval | undefined {
-    if (!session || this.blocked || this.options.service.status().locked) return;
-    try { const current = this.options.runs.getSession(session.id); if (!current) return; const candidate = this.candidate(current); return this.options.service.brokerApproval(candidate.id, candidate.cwd); }
-    catch (error) {
-      if (!(error instanceof TowerError)) console.warn('Tower denied broker access because the session identity could not be verified.');
-      return;
-    }
-  }
   /** A live session of this computer that may use secrets at `stage`, in its canonical folder; `run` is the turn asking, if any. */
   private async session(id: string, run: Run | undefined, stage: SecretStage): Promise<Session & { cwd: string; subject: SecretSubjectMode }> {
     const session = this.options.runs.getSession(id);
@@ -200,17 +173,6 @@ export class SecretRuntime {
     const run = this.options.runs.list().find(item => item.id === context.runId);
     const session = run && this.options.runs.getSession(run.sessionId);
     if (!run || !session || run.sessionId !== context.sessionId || run.status !== 'running' || this.subject(session, run, 'use').mode === 'none') throw fail('이 시크릿 도구는 발급받은 실행 중에만 사용할 수 있습니다.', 'forbidden');
-  }
-  async brokerAccess(sessionId: string): Promise<SecretBrokerAccess> {
-    const locked = this.options.service.status().locked;
-    const result: SecretBrokerAccess = { sessionId, taskId: null, eligible: false, requiresApproval: this.options.runs.sessionOrigin(sessionId)?.kind === 'agent', locked };
-    const session = this.options.runs.getSession(sessionId);
-    if (!session) return { ...result, reason: '세션을 찾을 수 없습니다.' };
-    try {
-      if (await this.options.isClosed?.(sessionId) || (await this.readClosures()).includes(closureId(sessionId))) throw fail('종료한 세션은 승인할 수 없습니다.', 'forbidden');
-      const candidate = this.candidate(session);
-      return { ...result, root: candidate.cwd, eligible: true, ...(!locked ? { taskId: this.options.service.currentTask(sessionId, candidate.cwd)?.taskId ?? null, approval: this.brokerApproval(candidate) } : {}) };
-    } catch (error) { return { ...result, reason: error instanceof TowerError ? error.message : '프로젝트 경로를 확인할 수 없습니다.' }; }
   }
   async target(sessionId: string): Promise<SecretTarget> { const session = await this.session(sessionId, undefined, 'issue'); return this.options.service.ensureTask(session.id, session.cwd); }
   async peekTarget(sessionId: string): Promise<SecretTarget | undefined> { const session = await this.session(sessionId, undefined, 'issue'); return this.options.service.currentTask(session.id, session.cwd); }
@@ -474,17 +436,6 @@ export class SecretRuntime {
    */
   async control(action: string, input: Record<string, unknown>, remote?: unknown): Promise<SecretControlResult> {
     const service = this.options.service;
-    if (BROKER_ACTIONS.has(action)) {
-      if (remote !== undefined) throw fail('로컬 프로젝트 세션에서만 브로커를 승인할 수 있습니다.', 'forbidden');
-      if (action === 'broker-access') { const parsed = z.object({ sessionId: z.string().min(1).max(512) }).strict().parse(input); return this.brokerAccess(parsed.sessionId); }
-      if (service.status().locked) throw fail('시크릿 보관함을 잠금 해제한 뒤 브로커 연결을 승인하세요.', 'locked');
-      if (action === 'revoke-broker') { const parsed = z.object({ sessionId: z.string().min(1).max(512), approvalId: z.string().uuid() }).strict().parse(input); await service.revokeBroker(parsed.sessionId, parsed.approvalId); return this.brokerAccess(parsed.sessionId); }
-      const parsed = z.object({ sessionId: z.string().min(1).max(512), root: z.string().min(1).max(4096), taskId: z.string().uuid().nullable(), taskLabel: z.string().trim().min(1).max(256), ttlMs: z.number().int().positive().max(8 * 60 * 60_000) }).strict().parse(input);
-      const access = await this.brokerAccess(parsed.sessionId);
-      if (!access.eligible || access.root !== parsed.root || access.taskId !== parsed.taskId) throw fail('승인할 세션의 프로젝트 또는 작업이 변경되었습니다.', 'conflict');
-      await service.approveBroker(parsed, () => { const session = this.options.runs.getSession(parsed.sessionId); if (!session || this.candidate(session).cwd !== parsed.root) throw fail('승인할 세션이 변경되었습니다.', 'forbidden'); });
-      return this.brokerAccess(parsed.sessionId);
-    }
     if (action === 'settings') return this.settingsView();
     if (action === 'session') {
       const { sessionId, nodeId } = ownerInput(ownerSession, input);

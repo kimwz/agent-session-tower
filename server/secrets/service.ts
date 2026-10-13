@@ -1,6 +1,6 @@
 import { randomUUID, randomBytes, generateKeyPairSync, createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
-import type { SecretAvailable, SecretBrokerApproval, SecretContext, SecretCreateInput, SecretDevice, SecretDisconnected, SecretFolder, SecretGroup, SecretMetadata, SecretOperation, SecretPeer, SecretProject, SecretRule, SecretSettingsView, SecretSharing, SecretTarget, SecretTask, SecretUsage, VaultStatus } from '../../shared/secrets.js';
+import type { SecretAvailable, SecretContext, SecretCreateInput, SecretDevice, SecretDisconnected, SecretFolder, SecretGroup, SecretMetadata, SecretOperation, SecretPeer, SecretProject, SecretRule, SecretSettingsView, SecretSharing, SecretTarget, SecretTask, SecretUsage, VaultStatus } from '../../shared/secrets.js';
 import { TowerError } from '../../shared/errors.js';
 import { MAX_SECRET_BYTES, SECRET_OPERATIONS } from '../../shared/secrets.js';
 import { SecretVault } from './vault.js';
@@ -26,16 +26,16 @@ interface Permanent {
 interface UsageRecord extends SecretUsage { hostId: string; sessionId: string; operationId?: string }
 /** One blocked operation of a session, for the owner's notice: what was refused and why, without values. */
 export interface SecretBlock { operationId: string; sessionId: string; at: number; reason: string; secrets: string[] }
-interface Journal { brokerApprovals: SecretBrokerApproval[]; groups: SecretGroup[]; rules: SecretRule[]; tasks: SecretTask[]; secrets: StoredSecret[]; usage: UsageRecord[]; operations: Record<string, { taskId: string; runId: string; fingerprint: string; state: 'pending' | 'done'; remote: boolean; claimedAt?: number; result?: unknown }> }
+interface Journal { groups: SecretGroup[]; rules: SecretRule[]; tasks: SecretTask[]; secrets: StoredSecret[]; usage: UsageRecord[]; operations: Record<string, { taskId: string; runId: string; fingerprint: string; state: 'pending' | 'done'; remote: boolean; claimedAt?: number; result?: unknown }> }
 export interface ResolvedSecret { metadata: SecretMetadata; bytes: Buffer; fields?: Record<string, string> }
 export interface SecretDispatchUse { ref: string; operation: SecretOperation; value: ResolvedSecret }
 /** Written in plain text at every unlocked save: the policy to list names by while locked, and the sources it cannot reach then. */
-interface LockedIndex { format: 2; policy: PolicyState; sources: string[]; brokerApprovals: SecretBrokerApproval[] }
+interface LockedIndex { format: 2; policy: PolicyState; sources: string[] }
 const USAGE_LIMIT = 1000;
 const REMOTE_TASK_MS = 8 * 60 * 60_000;
 const unshared = (): SecretSharing => ({ revision: 1, global: false, folders: [] });
 const policySecret = (secret: StoredSecret): PolicySecret => ({ metadata: secret.metadata, fieldNames: secret.fields ? Object.keys(secret.fields) : undefined, sharing: secret.sharing });
-const emptyJournal = (): Journal => ({ brokerApprovals: [], groups: [], rules: [], tasks: [], secrets: [], usage: [], operations: Object.create(null) });
+const emptyJournal = (): Journal => ({ groups: [], rules: [], tasks: [], secrets: [], usage: [], operations: Object.create(null) });
 const canonicalRoot = (root: unknown): root is string => typeof root === 'string' && isAbsolute(root) && normalize(root) === root && (root === '/' || !root.endsWith('/'));
 export class SecretService {
   readonly vault: SecretVault; private permanent?: Permanent; private journal = emptyJournal(); private queue: Promise<unknown> = Promise.resolve(); private readonly now: () => number;
@@ -72,8 +72,8 @@ export class SecretService {
   private async opened(data: Permanent) {
     try {
       this.permanent = data;
-      // Grant records of older builds go at the next save; their tasks have no owner connections.
-      const { grants: _grants, ...stored } = (await this.vault.journal() as (Journal & { grants?: unknown }) | undefined) ?? {};
+      // Grants and broker approvals of older builds go at the next save; their tasks have no owner connections.
+      const { grants: _grants, brokerApprovals: _approvals, ...stored } = (await this.vault.journal() as (Journal & { grants?: unknown; brokerApprovals?: unknown }) | undefined) ?? {};
       this.journal = { ...emptyJournal(), ...stored }; this.data();
       for (const task of this.journal.tasks) task.connected ??= [];
     } catch (error) { this.vault.lock(); this.permanent = undefined; throw error; }
@@ -90,7 +90,7 @@ export class SecretService {
   async trustPeer(peer: SecretPeer) { return this.mutate(() => { if (!peer.device.id || peer.device.id === this.device().id || !peer.device.signingKey || !peer.device.encryptionKey) throw new Error('Invalid peer'); const existing = this.data().peers.find(item => item.device.id === peer.device.id); if (existing && (existing.device.signingKey !== peer.device.signingKey || existing.device.encryptionKey !== peer.device.encryptionKey)) throw new Error('Peer key changed'); this.data().peers = [...this.data().peers.filter(item => item.device.id !== peer.device.id), structuredClone(peer)]; }); }
   async removePeer(deviceId: string) { return this.mutate(() => { this.data().peers = this.data().peers.filter(peer => peer.device.id !== deviceId); }); }
   private projectId(hostId: string, root: string) { return projectId(this.data(), hostId, root); }
-  private lockedIndex(): LockedIndex { return { format: 2, brokerApprovals: structuredClone(this.journal.brokerApprovals), policy: this.policy(), sources: this.data().peers.filter(peer => peer.enabled && peer.direction === 'controller').map(peer => peer.device.id) }; }
+  private lockedIndex(): LockedIndex { return { format: 2, policy: this.policy(), sources: this.data().peers.filter(peer => peer.enabled && peer.direction === 'controller').map(peer => peer.device.id) }; }
   private policy(): PolicyState { const data = this.data(); return { deviceId: data.device.id, servedHosts: servedHosts(data.device.id, data.peers), projects: data.projects, groups: this.groups(), rules: this.allRules(), secrets: this.secrets().map(policySecret), tasks: this.journal.tasks }; }
   private groups() { return [...this.data().groups, ...this.journal.groups]; }
   private allRules() { return [...this.data().rules, ...this.journal.rules]; }
@@ -182,74 +182,6 @@ export class SecretService {
     const task = [...this.journal.tasks].reverse().find(task => task.sessionId === sessionId && task.hostId === hostId && (root === undefined || task.root === root) && task.status === 'open' && (task.expiresAt === undefined || task.expiresAt > this.now()));
     return task ? { hostId, sessionId, root: task.root, taskId: task.id, projectId: this.projectId(hostId, task.root) } : undefined;
   }
-  /** Refusal metadata only: a locked index can protect admission, never authorize broker use. */
-  brokerAdmissionRequired(sessionId: string): boolean | undefined {
-    if (!this.status().initialized) return false;
-    let hostId: string, tasks: SecretTask[], approvals: SecretBrokerApproval[];
-    if (!this.status().locked) { hostId = this.device().id; tasks = this.journal.tasks; approvals = this.journal.brokerApprovals; }
-    else {
-      const index = this.vault.index as Partial<LockedIndex> | undefined;
-      const id = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9-]{36}$/.test(value);
-      const name = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 512;
-      const root = (value: unknown): value is string => typeof value === 'string' && isAbsolute(value) && normalize(value) === value;
-      const time = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-      if (!index || !index.policy || !id(index.policy.deviceId) || index.policy.deviceId !== this.vault.vaultId || !Array.isArray(index.policy.tasks) || index.policy.tasks.length > 10000 || !Array.isArray(index.brokerApprovals) || index.brokerApprovals.length > 10000) return;
-      if (index.policy.tasks.some(task => !task || !id(task.id) || !id(task.hostId) || !name(task.sessionId) || !root(task.root) || !['open', 'closed'].includes(task.status) || !time(task.createdAt) || (task.expiresAt !== undefined && !time(task.expiresAt)))) return;
-      if (index.brokerApprovals.some(approval => !approval || !id(approval.id) || !id(approval.hostId) || !name(approval.sessionId) || !root(approval.root) || !id(approval.taskId) || !name(approval.taskLabel) || !time(approval.createdAt) || !time(approval.expiresAt) || approval.expiresAt <= approval.createdAt || approval.expiresAt - approval.createdAt > 8 * 60 * 60_000)) return;
-      hostId = index.policy.deviceId; tasks = index.policy.tasks; approvals = index.brokerApprovals;
-    }
-    const protectedSession = approvals.some(approval => approval.hostId === hostId && approval.sessionId === sessionId && approval.expiresAt > this.now() && tasks.some(task => task.id === approval.taskId && task.hostId === hostId && task.sessionId === sessionId && task.root === approval.root && task.status === 'open' && (task.expiresAt === undefined || task.expiresAt > this.now())));
-    // The plaintext index has freshness, not integrity: a positive only strengthens refusal.
-    // Absence while locked can never prove that untrusted input is safe for this conversation.
-    return protectedSession ? true : this.status().locked ? undefined : false;
-  }
-  /** Connection approval is independent of every secret policy and stays in the encrypted journal. */
-  brokerApproval(sessionId: string, root: string): SecretBrokerApproval | undefined {
-    if (this.status().locked) return;
-    const target = this.currentTask(sessionId, root);
-    const approval = this.journal.brokerApprovals.find(item => item.sessionId === sessionId && item.root === root && item.hostId === this.device().id && item.taskId === target?.taskId && item.expiresAt > this.now());
-    return approval ? structuredClone(approval) : undefined;
-  }
-  async approveBroker(input: { sessionId: string; root: string; taskId: string | null; taskLabel: string; ttlMs: number }, validate: () => void): Promise<SecretBrokerApproval> {
-    return this.mutate(() => {
-      validate();
-      if (!input.sessionId || !isAbsolute(input.root) || normalize(input.root) !== input.root || !input.taskLabel.trim() || input.taskLabel.length > 256 || !Number.isSafeInteger(input.ttlMs) || input.ttlMs <= 0 || input.ttlMs > 8 * 60 * 60_000) throw new TowerError('invalid', '브로커 승인 입력이 올바르지 않습니다.');
-      // A session has one open security task across all roots; a project move requires closing it first.
-      let bound: SecretTask | undefined;
-      try { bound = sessionTask(this.journal, input.sessionId, this.device().id, input.root); }
-      catch (error) { throw new TowerError('conflict', '현재 시크릿 작업을 종료한 뒤 다른 프로젝트를 승인하세요.', { cause: error }); }
-      if (bound?.expiresAt !== undefined && bound.expiresAt <= this.now()) throw new TowerError('conflict', '만료된 시크릿 작업을 종료한 뒤 새 작업을 승인하세요.');
-      const current = this.currentTask(input.sessionId, input.root);
-      if ((current?.taskId ?? null) !== input.taskId) throw new TowerError('conflict', '시크릿 작업이 변경되었습니다. 화면을 새로고침하세요.');
-      const existing = this.brokerApproval(input.sessionId, input.root);
-      if (existing) {
-        if (existing.taskLabel !== input.taskLabel.trim()) throw new TowerError('conflict', '기존 브로커 승인을 먼저 철회하세요.');
-        return existing;
-      }
-      let taskId = current?.taskId;
-      if (!taskId) {
-        if (this.journal.tasks.length >= 10000) throw new Error('Task count limit');
-        const task: SecretTask = { id: randomUUID(), hostId: this.device().id, sessionId: input.sessionId, root: input.root, status: 'open', createdAt: this.now(), excluded: [], connected: [] };
-        this.journal.tasks.push(task); taskId = task.id;
-      }
-      const approval: SecretBrokerApproval = { id: randomUUID(), hostId: this.device().id, sessionId: input.sessionId, root: input.root, taskId, taskLabel: input.taskLabel.trim(), createdAt: this.now(), expiresAt: this.now() + input.ttlMs };
-      this.journal.brokerApprovals = this.journal.brokerApprovals.filter(item => item.sessionId !== input.sessionId);
-      this.journal.brokerApprovals.push(approval);
-      return structuredClone(approval);
-    });
-  }
-  async revokeBroker(sessionId: string, approvalId: string): Promise<void> {
-    return this.mutate(() => {
-      const approval = this.journal.brokerApprovals.find(item => item.sessionId === sessionId && item.id === approvalId);
-      if (!approval) throw new TowerError('not-found', '철회할 브로커 승인을 찾을 수 없습니다.');
-      this.journal.brokerApprovals = this.journal.brokerApprovals.filter(item => item.id !== approvalId);
-    });
-  }
-  checkBrokerApproval(target: SecretTarget & { brokerApprovalId?: string }): void {
-    if (!target.brokerApprovalId) return;
-    const approval = this.brokerApproval(target.sessionId, target.root);
-    if (!approval || approval.id !== target.brokerApprovalId || approval.taskId !== target.taskId || approval.hostId !== target.hostId) throw new TowerError('forbidden', '이 작업의 브로커 승인이 만료되거나 철회되었습니다.');
-  }
   async bindRun(sessionId: string, root: string, startedAt: string): Promise<SecretTarget> {
     const started = Date.parse(startedAt); if (!Number.isFinite(started)) throw new Error('Invalid run start');
     return this.ensureTask(sessionId, root, undefined, started);
@@ -272,7 +204,7 @@ export class SecretService {
   }
   /** The open task of a target the owner acted on; a remote session's first one starts here, in the same commit as the owner's change. */
   private ownerTask(target: SecretTarget): SecretTask { return this.task(target.hostId === this.device().id ? target : this.remoteTask(target, true)); }
-  private task(target: SecretTarget): SecretTask { this.checkBrokerApproval(target); return openTask(this.policy(), target, this.now()); }
+  private task(target: SecretTarget): SecretTask { return openTask(this.policy(), target, this.now()); }
   private join(task: SecretTask, id: string) { task.excluded = task.excluded.filter(excluded => excluded !== id); if (!task.connected.includes(id)) task.connected.push(id); }
   /** Recipient-side task closure and exclusions also apply to remotely owned secrets. */
   checkTask(target: SecretTarget, secretId?: string): void {
@@ -335,8 +267,8 @@ export class SecretService {
       if (remote ? operation.claimedAt !== undefined && operation.claimedAt + 60_000 < this.now() : !liveRuns.has(operation.runId)) delete this.journal.operations[id];
     }
   }); }
-  private authorize(context: SecretContext, secret: StoredSecret, operation: SecretOperation): Decision { this.checkBrokerApproval(context); const state = this.policy(); const task = openTask(state, context, this.now()); if (!context.runId) throw new Error('Secret access denied'); return authorize(state, task, policySecret(secret), operation, this.now()); }
-  async list(context: SecretContext): Promise<SecretMetadata[]> { return this.serialize(async () => { this.data(); this.checkBrokerApproval(context); const state = this.policy(); const task = openTask(state, context, this.now()); return context.runId ? available(state, task, this.now()).map(wireMetadata) : []; }); }
+  private authorize(context: SecretContext, secret: StoredSecret, operation: SecretOperation): Decision { const state = this.policy(); const task = openTask(state, context, this.now()); if (!context.runId) throw new Error('Secret access denied'); return authorize(state, task, policySecret(secret), operation, this.now()); }
+  async list(context: SecretContext): Promise<SecretMetadata[]> { return this.serialize(async () => { this.data(); const state = this.policy(); const task = openTask(state, context, this.now()); return context.runId ? available(state, task, this.now()).map(wireMetadata) : []; }); }
   /** What a session may discover now, without starting or changing a task: its open task's view, or a fresh task's. */
   available(subject: { hostId?: string; sessionId: string; root: string; taskId?: string }): SecretAvailable[] {
     const state = this.policy(); const hostId = subject.hostId ?? state.deviceId; const now = this.now();

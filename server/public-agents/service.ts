@@ -21,8 +21,6 @@ import {
 } from './prompts.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
-// Kept with run origins, which secrets and permissions read without loading this service.
-export { PUBLIC_TRIGGER_PREFIX };
 /** The intake agent's context budget in tokens; its conversation is compacted at half of it. */
 export const CONTEXT_TOKENS = 100_000;
 const COMPACT_AT_PERCENT = 50;

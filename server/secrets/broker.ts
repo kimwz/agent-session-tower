@@ -95,7 +95,6 @@ export function maskSecretOutput(text: string, values: readonly Buffer[]): strin
 export class SecretBroker {
   private active = 0;
   private readonly sourceFailures = new Map<string, SourceFailure[]>();
-  private remoteContext(context: SecretContext): SecretContext { const { brokerApprovalId: _localApproval, ...target } = context; return target; }
   private subject(context: SecretContext): string { return JSON.stringify([context.hostId, context.taskId, context.runId]); }
   unavailableSources(context: SecretContext): SourceFailure[] { return structuredClone(this.sourceFailures.get(this.subject(context)) ?? []); }
   /**
@@ -187,7 +186,7 @@ export class SecretBroker {
       try {
         if (!this.options.remote) throw failure('원격 원본에 연결할 수 없습니다.', 'unavailable');
         this.options.service.checkTask(context);
-        const result = await this.options.remote.request(peer.device.id, this.remoteContext(context), 'list', {});
+        const result = await this.options.remote.request(peer.device.id, context, 'list', {});
         this.options.service.checkTask(context);
         return remoteListing(result, peer.device.id).filter(item => { try { this.options.service.checkTask(context, item.id); return true; } catch { return false; } });
       } catch { failures.push({ sourceHostId: peer.device.id, code: 'SECRET_SOURCE_UNAVAILABLE' }); return []; }
@@ -209,7 +208,7 @@ export class SecretBroker {
     }
     this.options.service.checkTask(context, match[2]);
     if (!this.options.remote) throw failure('시크릿 원본 컴퓨터에 연결할 수 없습니다.', 'unavailable');
-    const answer = await this.options.remote.request(match[1], this.remoteContext(context), 'resolve', { reference, operation }) as Resolved;
+    const answer = await this.options.remote.request(match[1], context, 'resolve', { reference, operation }) as Resolved;
     try {
       this.options.service.checkTask(context, match[2]);
       if (!plain(answer) || !Buffer.isBuffer(answer.bytes) || answer.bytes.length > MAX_INPUT_BYTES || !plain(answer.metadata)

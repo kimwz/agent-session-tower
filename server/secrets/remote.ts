@@ -55,7 +55,7 @@ function bytes(value: unknown, size?: number): Buffer {
   return decoded;
 }
 function wire(value: unknown, limit: number): void { if (Buffer.byteLength(canonical(value)) > limit) fail('SECRET_REMOTE_TOO_LARGE'); }
-/** What a request says about its task on the wire; local facts (who is asking, approvals) never leave this computer. */
+/** What a request says about its task on the wire; local facts (who is asking) never leave this computer. */
 const WIRE_CONTEXT = ['hostId', 'sessionId', 'taskId', 'root', 'projectId', 'runId'] as const;
 const wireContext = (context: SecretContext) => Object.fromEntries(WIRE_CONTEXT.filter(key => context[key] !== undefined).map(key => [key, context[key]])) as unknown as SecretContext;
 function contextValid(value: unknown): value is SecretContext {

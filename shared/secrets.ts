@@ -25,11 +25,9 @@ export interface SecretMetadata {
 export interface SecretDevice { id: string; name: string; signingKey: string; encryptionKey: string; fingerprint: string }
 export interface SecretPeer { device: SecretDevice; routeId: string; direction: 'node' | 'controller'; enabled: boolean }
 export interface SecretTarget { hostId: string; sessionId: string; taskId: string; root: string; projectId?: string }
-export interface SecretBrokerApproval { id: string; hostId: string; sessionId: string; root: string; taskId: string; taskLabel: string; createdAt: number; expiresAt: number }
-export interface SecretBrokerAccess { sessionId: string; root?: string; taskId: string | null; eligible: boolean; requiresApproval: boolean; reason?: string; approval?: SecretBrokerApproval; locked: boolean }
 /** Who is using a secret: the owner's own session (no review) or any other session (attack-only review before values resolve). */
 export type SecretSubjectMode = 'owner' | 'reviewed';
-export interface SecretContext extends SecretTarget { runId: string; brokerApprovalId?: string; subject?: SecretSubjectMode }
+export interface SecretContext extends SecretTarget { runId: string; subject?: SecretSubjectMode }
 export interface SecretTask {
   id: string; hostId: string; sessionId: string; root: string; status: 'open' | 'closed';
   createdAt: number; closedAt?: number; expiresAt?: number;

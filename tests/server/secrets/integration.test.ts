@@ -344,8 +344,8 @@ test('every secret route refuses the master, local agents and run capabilities b
   await new Promise<void>((resolve, reject) => { monitor.server.once('error', reject); monitor.server.listen(0, '127.0.0.1', resolve); }); const base = `http://127.0.0.1:${(monitor.server.address() as AddressInfo).port}`;
   const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { cookie: auth.cookie } })).json() as { token: string };
   const owner = { cookie: auth.cookie, 'X-Agent-Monitor-Token': token, 'Content-Type': 'application/json' };
-  const READS = ['settings', 'session?sessionId=codex%3Afixture', 'broker-access?sessionId=codex%3Afixture'];
-  const WRITES = ['sharing', 'create', 'session-connect', 'session-disconnect', 'session-reallow', 'update', 'remove', 'unlock', 'lock', 'password', 'import', 'trust', 'untrust', 'preview', 'initialize', 'approve-broker', 'revoke-broker'];
+  const READS = ['settings', 'session?sessionId=codex%3Afixture'];
+  const WRITES = ['sharing', 'create', 'session-connect', 'session-disconnect', 'session-reallow', 'update', 'remove', 'unlock', 'lock', 'password', 'import', 'trust', 'untrust', 'preview', 'initialize'];
   // On this computer the owner's own page reaches the worker; the same page request naming another caller does not.
   assert.equal((await fetch(`${base}/api/secrets/settings`, { headers: { cookie: auth.cookie } })).status, 200); assert.deepEqual(calls, ['settings']); calls.length = 0;
   const callers: Record<string, string>[] = [{ 'x-tower-master': masterSecret }, { 'x-tower-master': 'not-the-master' }, { 'x-tower-agent': 'local' }, { [CALLER_CAPABILITY_HEADER]: 'b'.repeat(64) }];
@@ -355,6 +355,9 @@ test('every secret route refuses the master, local agents and run capabilities b
     const writes = caller['x-tower-master'] === masterSecret || caller['x-tower-agent'] ? WRITES : ['sharing', 'create', 'session-connect', 'unlock', 'update'];
     for (const action of writes) assert.equal((await fetch(`${base}/api/secrets/${action}`, { method: 'POST', headers: { ...owner, ...caller }, body: '{}' })).status, 403, `${action} with ${Object.keys(caller)[0]}`);
   }
+  // The broker approval routes of 1.129–1.132 are gone, for the owner's page too.
+  assert.equal((await fetch(`${base}/api/secrets/broker-access?sessionId=codex%3Afixture`, { headers: { cookie: auth.cookie } })).status, 404);
+  for (const action of ['approve-broker', 'revoke-broker']) assert.equal((await fetch(`${base}/api/secrets/${action}`, { method: 'POST', headers: owner, body: '{}' })).status, 404, action);
   assert.deepEqual(calls, []);
 });
 

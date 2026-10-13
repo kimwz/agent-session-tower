@@ -59,11 +59,6 @@ Backup (the owner and their local agents; never the master)
 - GET /api/backup · POST /api/backup/settings {remote:{endpoint, bucket, prefix, region?, accessKeyId, secretAccessKey?}, passphrase?, intervalHours, keep, ...} · POST /api/backup/(run|test|remote) {}
 - POST /api/backup/export {passphrase} · POST /api/backup/remote/download {key} — the encrypted file. POST /api/backup/restore/check {file, passphrase} → {id} · POST /api/backup/restore/(apply|cancel) {id}
 
-Scoped secret broker connection (owner pages only; master, local agents and run-capability callers are refused)
-- GET /api/secrets/broker-access?sessionId= — read-only eligibility and approval metadata for one local agent-created session: canonical project root, current security taskId (nullable), approval and expiry; reads create no task or grant and disclose no secret values.
-- POST /api/secrets/approve-broker {sessionId, root, taskId:uuid|null, taskLabel, ttlMs} — approve only this session's exact canonical root, host and security task, for at most eight hours. Requires a real logged-in owner session cookie; loopback automatic authentication or the page token alone is insufficient. Provenance stays unchanged; the next local owner turn receives secret broker tools only, with no general Tower authority. This connection approval grants no secret access: each secret's policy and project/task connection remain separate.
-- POST /api/secrets/revoke-broker {sessionId, approvalId:uuid} — revoke the exact connection approval, requiring the same real logged-in owner session cookie. Existing bound broker capabilities stop working; a later approval does not revive them. Joined computers, external-input and inherited sessions are not eligible for this local procedure.
-
 Session retention (owner pages only; master, local agents and run-capability callers are refused)
 - GET /api/retention — policy status, migration grace, provider safety gates, protected/deferred counts, journal entries and child choices. This read does not run a sweep or change files.
 - POST /api/retention/check {} — observe current records under the worker's policy. Blocked providers keep original files, listings and scan load; checking does not automatically create backups.

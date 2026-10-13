@@ -75,22 +75,6 @@ async function fixture(t: TestContext, options: { external?: boolean; onSteer?: 
 const secretTools = () => ({ required: true, towerTools: 'attached' as const, instructions: SECRET_USE_INSTRUCTIONS,
   servers: { tower_secrets: { command: '/fixture/secret-tool', args: [] } } });
 
-for (const towerTools of ['broker-only', 'attached'] as const) test(`ordinary owner-origin instructions cannot enter an authenticated ${towerTools} turn`, async t => {
-  const f = await fixture(t, { resolveRunTools: () => ({ required: true, towerTools }) });
-  const first = await f.manager.enqueue(f.session.id, 'Approved fixture work', {}, { origin: { kind: 'owner' }, brokerOwnerAuthorized: true });
-  await until(() => f.controls.length === 1 && f.read(first.id).status === 'running');
-  const unproved = await f.manager.enqueue(f.session.id, 'Ordinary local request', {}, { origin: { kind: 'owner' } });
-  assert.equal(f.read(unproved.id).canSteer, false);
-  await assert.rejects(f.manager.steer(unproved.id, { targetRunId: first.id }));
-  assert.equal(f.inputs.length, 0);
-  const approved = await f.manager.enqueue(f.session.id, 'Verified parent continuation', {}, { origin: { kind: 'owner' }, brokerOwnerAuthorized: true });
-  await until(() => Boolean(f.read(approved.id).canSteer));
-  await f.manager.steer(approved.id, { targetRunId: first.id });
-  assert.equal(f.inputs.length, 1);
-  assert.equal(f.read(approved.id).brokerOwnerAuthorized, true);
-  assert.equal(f.read(first.id).brokerOwnerAuthorized, true);
-});
-
 test('private tool changes reach only the active owner turn, with no new run or visible history', async t => {
   const f = await fixture(t, { resolveRunTools: secretTools });
   f.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, f.session.id);
@@ -621,54 +605,4 @@ test('a permission continuation whose native history cannot be read completely i
   assert.equal(f.read(resume.id).output, 'Scheduled continuation not started: The latest native user instruction could not be verified.');
   f.controls[0].finish(); await until(() => f.read(parent.id).status === 'completed');
   assert.equal(f.controls.length, 1);
-});
-
-
-for (const brokerOwnerAuthorized of [undefined, true]) test(`queued instruction rechecks broker protection before native launch (proof ${brokerOwnerAuthorized})`, async t => {
-  const f = await fixture(t, { external: true });
-  let protectedSession = false;
-  f.manager.setBrokerAdmissionValidator((_id, admission) => { if (protectedSession && admission.brokerOwnerAuthorized !== true) throw new Error('Broker owner proof required at delivery'); });
-  const queued = await f.manager.enqueue(f.session.id, 'Queued before connection approval', {}, { origin: { kind: 'owner' }, ...(brokerOwnerAuthorized ? { brokerOwnerAuthorized } : {}) });
-  assert.equal(f.controls.length, 0);
-  protectedSession = true; f.session.status = 'completed';
-  await f.manager.markReady();
-  if (brokerOwnerAuthorized) {
-    await until(() => f.controls.length === 1 && f.read(queued.id).status === 'running');
-    assert.equal(f.read(queued.id).brokerOwnerAuthorized, true);
-  } else {
-    await until(() => f.read(queued.id).status === 'error');
-    assert.equal(f.nativeStarts(), 0, 'pre-approval unproved history never reaches native start');
-    assert.equal(f.read(queued.id).startedAt, undefined);
-  }
-});
-
-test('queued steering rechecks newly protected session after its durable flush before provider delivery', async t => {
-  const f = await fixture(t);
-  let protectedSession = false;
-  f.manager.setBrokerAdmissionValidator((_id, admission) => { if (protectedSession && admission.brokerOwnerAuthorized !== true) throw new Error('Broker owner proof required at delivery'); });
-  const pair = await f.pair();
-  const internal = f.manager as unknown as { flush(): Promise<void> };
-  const original = internal.flush.bind(f.manager);
-  let flushCount = 0;
-  internal.flush = async () => { await original(); if (++flushCount === 2) protectedSession = true; };
-  await assert.rejects(f.manager.steer(pair.second.id, { targetRunId: pair.first.id }), /Broker owner proof/);
-  assert.equal(f.inputs.length, 0);
-  assert.equal(f.read(pair.second.id).status, 'queued');
-  assert.equal(f.read(pair.second.id).steerBlocked, 'origin');
-});
-
-
-test('a pre-approval internal permission continuation cannot launch with missing broker proof', async t => {
-  const f = await fixture(t);
-  let protectedSession = false;
-  f.manager.setBrokerAdmissionValidator((_id, admission) => { if (protectedSession && admission.brokerOwnerAuthorized !== true) throw new Error('Broker owner proof required at delivery'); });
-  const parent = await f.running({ kind: 'owner' });
-  const resume = await f.manager.permissionDecision(permissionRequest(f, parent.id), 'Approved before broker connection.');
-  assert.equal(resume.brokerOwnerAuthorized, undefined);
-  const baselineInputs = f.inputs.length;
-  protectedSession = true;
-  f.controls[0].finish();
-  await until(() => f.read(resume.id).status === 'error');
-  assert.equal(f.nativeStarts(), 1, 'only the original pre-approval parent started');
-  assert.equal(f.inputs.length, baselineInputs, 'no further native insert after protection began');
 });

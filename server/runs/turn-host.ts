@@ -56,7 +56,6 @@ export interface TurnHost {
   /** The launch gate's look and a permission continuation's check, taken again (may supersede the run). */
   prepareLaunch(run: Run): Promise<void>;
   refusedAtLaunch(run: Run, session: Session): boolean;
-  validateBrokerRun(run: Run): void;
   /** The conversation is free for its next run; idempotent. */
   release(sessionId: string): void;
   /** The only way a turn reports its end (see TurnExit). */

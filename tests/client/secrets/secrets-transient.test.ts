@@ -286,7 +286,6 @@ test('switching tabs and closing the dialog never change the session; sharing op
   const available = composer({ tab: 'available' });
   const second = available.load('SecretChatDialog', { state: available.state, tab: 'available' });
   root = second.render();
-  assert.ok(find(root, element => element.type === stub('./SecretBrokerApproval', 'SecretBrokerApproval')), 'the broker approval stays until PR2');
   find(root, element => element.type === stub('./SecretAvailable', 'SecretAvailable')).props.onSharing('global_key');
   assert.deepEqual(available.calls, [['close']]);
   assert.deepEqual(available.settings, [{ section: 'secrets', secretId: 'global_key' }]);

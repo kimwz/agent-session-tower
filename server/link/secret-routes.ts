@@ -114,7 +114,6 @@ async function remoteSessionSubject(nodes: RemoteNodes | undefined, worker: Work
   return subject.error !== undefined || subject.hostId === peer.device.id ? subject : { error: 'source-unavailable' };
 }
 
-const BROKER_ACTIONS = ['broker-access', 'approve-broker', 'revoke-broker'];
 /** Owner changes of one session; for a joined computer's session they start its task there and are viewed from it. */
 const SESSION_CHANGES = ['create', 'session-connect', 'session-disconnect'];
 export const WORKER_UPDATE_PENDING = 'worker-update-pending';
@@ -140,10 +139,6 @@ async function canonicalInput(nodes: RemoteNodes | undefined, worker: Worker, ac
  * is verified over its link here; a connection made there is announced to it with a fixed notice before the view is read.
  */
 export async function ownerSecretControl(nodes: RemoteNodes | undefined, worker: Worker, action: string, input: Record<string, unknown>): Promise<unknown> {
-  if (BROKER_ACTIONS.includes(action)) {
-    if (input.nodeId !== undefined) throw fail('브로커 승인은 이 컴퓨터의 세션만 지원합니다.', 'invalid');
-    return worker.secretCall('control', [action, input]);
-  }
   if (!worker.supports('secretSharing')) {
     // Locking and unlocking stay possible during a handoff, so the settings and the session read the vault's status from
     // the older worker's `overview` (which every build before 1.131 serves) to offer them; nothing else is sent to it.

@@ -483,11 +483,3 @@ test('a secret credential is checked by the secrets runtime on every request, wh
   other.towerTools = 'not-owner-session';
   await assert.rejects(handleMcpRequest(context, f.token(other), { method: 'tools/list' }), /Tower tools work only/);
 });
-
-test('MCP admission rechecks captured broker owner proof after preparing an Auto Prompt', async t => {
-  let run!: Run;
-  const f = await fixture(t, async internal => { run.brokerOwnerAuthorized = false; internal.validate?.(); });
-  run = f.ownerTurn('codex:mine'); run.brokerOwnerAuthorized = true;
-  await assert.rejects(handleMcpRequest(f.context, f.token(run), { method: 'tools/call', name: 'autoPrompt_submit', arguments: { requestId: randomUUID(), provider: 'codex', prompt: 'Exact task' } }), /lost its Tower authority/);
-  assert.equal(f.submitted.length, 0);
-});

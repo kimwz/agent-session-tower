@@ -63,7 +63,7 @@ test('who is asking stays on this computer: only the task’s identity crosses t
   let seen: SecretContext | undefined;
   const f = fixtures({ handle: ctx => { seen = ctx; return []; } });
   try {
-    const pending = f.target.request(f.a.device.id, { ...f.ctx, subject: 'reviewed', brokerApprovalId: randomUUID() }, 'list');
+    const pending = f.target.request(f.a.device.id, { ...f.ctx, subject: 'reviewed' }, 'list');
     const [request] = f.target.poll('controller-a'); assert.ok(request);
     assert.deepEqual(request.context, f.ctx);
     f.target.deliver('controller-a', await f.source.answer('node-b', request));

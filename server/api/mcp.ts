@@ -12,7 +12,7 @@ import { TowerError } from '../../shared/errors.js';
 export type Capability = { kind: 'owner-run'; runId: string; sessionId: string } | { kind: 'slack-workflow'; workflowId: string } | { kind: 'github-workflow'; workflowId: string }
   /** Reports who started work through the local HTTP API; grants no API or owner approval rights. */
   | { kind: 'caller-run'; runId: string; sessionId: string }
-  | { kind: 'secret-run'; runId: string; sessionId: string; approvalId?: string }
+  | { kind: 'secret-run'; runId: string; sessionId: string }
   /** The standing key of the session lookup tools every agent here gets (see session-tools.ts). */
   | { kind: 'session-reader' };
 const MAX_CAPABILITIES = 2000;
@@ -143,16 +143,15 @@ export async function handleMcpRequest(context: McpContext, token: string, body:
   // Admission may prepare files asynchronously. Recheck the credential at its commit point, without
   // keeping this transient gate on an already admitted durable job.
   const controllerId = run.origin.controllerId;
-  const brokerOwnerAuthorized = run.brokerOwnerAuthorized === true && !controllerId;
   const validate = () => {
     const current = context.run(capability.runId);
     if (context.capabilities.resolve(token) !== capability || !current || current.sessionId !== capability.sessionId
       || current.status !== 'running' || current.origin?.kind !== 'owner' || current.towerTools !== 'attached'
-      || current.origin.controllerId !== controllerId || (brokerOwnerAuthorized && current.brokerOwnerAuthorized !== true)) {
+      || current.origin.controllerId !== controllerId) {
       throw new TowerError('forbidden', 'The calling turn lost its Tower authority before admission. Nothing was submitted.', { disposition: 'not-admitted' });
     }
   };
   // A turn started from a controlling computer keeps to what that computer may see and change.
   return context.api.call(operation, input, { kind: 'agent', via: 'mcp', sessionId: capability.sessionId, runId: run.id, ...(run.origin.controllerId ? { controllerId: run.origin.controllerId } : {}) },
-    typeof requestKey === 'string' ? requestKey : undefined, { delegation: delegationOf(run), ...(brokerOwnerAuthorized ? { brokerOwnerAuthorized: true } : {}), validate });
+    typeof requestKey === 'string' ? requestKey : undefined, { delegation: delegationOf(run), validate });
 }
