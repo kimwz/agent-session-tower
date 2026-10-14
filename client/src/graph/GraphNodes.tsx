@@ -7,9 +7,9 @@ import type { NodeStatus } from '../../../shared/link';
 import { localPart } from '../remote/scope';
 import { useSessionTasksPeek } from '../sessions/SessionTasksPeek';
 import { SessionContextIcon } from '../sessions/SessionContextIcon';
-import { TowerVersionsBadge, type TowerVersions } from './TowerVersions';
+import { TowerVersionsBadge, type ShellFolder, type TowerVersions } from './TowerVersions';
 import { outcomeLabels } from '../sessions/SessionOutcomeBadge';
-import { cleanPreview, providerLabels, relativeTime, sessionActivityAt, sessionState, sessionTitle } from '../common/lib';
+import { api, cleanPreview, providerLabels, relativeTime, sessionActivityAt, sessionState, sessionTitle } from '../common/lib';
 import { ProjectGroupHeader, type ProjectGroupHeaderData } from '../project-groups/ProjectGroupHeader';
 import { ProviderUsage } from '../providers/ProviderUsage';
 import { SystemRings } from './SystemRings';
@@ -63,13 +63,15 @@ export const ProjectGroupNode = memo(function ProjectGroupNode({ data }: NodePro
   useI18n();
   return <div className={`manual-project-lane ${data.hidden ? 'is-hidden' : ''}${data.stale ? ' is-stale' : ''}`}><div className="project-drag-handle"><Handle type="target" position={Position.Top} /><ProjectGroupHeader data={data} /></div><button type="button" className="auto-prompt-trigger nodrag nopan" aria-label={t("{0} 폴더에서 Auto Prompt 열기", { 0: data.name })} title="Auto Prompt" disabled={data.disabled || !localPart(data.path).startsWith('/')} onClick={() => data.onAutoPrompt(data.path)}><Sparkles size={32} aria-hidden="true" /></button>{!data.count && <p className="project-group-empty">{t("표시된 세션이 없습니다")}<span>{t("폴더 설정 메뉴에서 새 세션을 시작하세요")}</span></p>}</div>;
 });
+/** Where this computer's shells are open, for the versions panel. */
+const localShellFolders = () => api<{ folders: ShellFolder[] | null }>('/api/workspace/terminals/folders').then(answer => answer.folders);
 export const HostNode = memo(function HostNode({ data }: NodeProps<Node<HostData>>) {
   useI18n();
   const link = data.link;
   const offline = link && !(link.status === 'connected' && link.live);
   return <div className={`host-with-usage${link ? ' is-remote' : ''}${offline ? ' is-stale' : ''}`}><div className="host-node has-auto-prompt"><span className="host-icon"><Monitor size={20} /></span><div className="host-copy"><strong title={data.name}>{data.name || t("이 Mac")}</strong>
     {link && <span className={`host-link ${link.status}${link.live ? ' live' : ''}${link.updating ? ' updating' : ''}`}><i /><span role="status">{linkLabel(link)}</span>{link.live && data.versions && <> · <TowerVersionsBadge versions={data.versions} /></>}</span>}
-    {!link && data.versions && <span className="host-link local"><i />{t("이 컴퓨터")} · <TowerVersionsBadge versions={data.versions} /></span>}
+    {!link && data.versions && <span className="host-link local"><i />{t("이 컴퓨터")} · <TowerVersionsBadge versions={data.versions} shellFolders={localShellFolders} /></span>}
     {data.system && !offline && <SystemRings status={data.system} />}
     <span><i className={data.active && !offline ? 'live-pip' : ''} /><span>{offline ? link?.known === false ? t("아직 상태를 받지 못했습니다") : t("마지막으로 본 상태입니다") : data.active ? t("{0}개 에이전트 작업 중", { 0: data.active }) : t("다음 작업을 기다리는 중")}</span></span></div><button type="button" className="auto-prompt-trigger nodrag nopan" aria-label={link ? t("{0}에서 Auto Prompt 열기", { 0: data.name }) : t("이 기기에서 Auto Prompt 열기")} title="Auto Prompt" disabled={data.disabled} onClick={() => data.onAutoPrompt()}><Sparkles size={32} aria-hidden="true" /></button></div><ProviderUsage providers={data.providers} /><Handle type="source" position={Position.Bottom} /></div>;
 });

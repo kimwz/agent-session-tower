@@ -38,6 +38,7 @@ import { SidebarFilters } from '../sessions/SidebarFilters';
 import { SessionRow } from '../sessions/SessionRow';
 import { reconcileApprovalDecisions } from '../chat/chat-approvals';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
+import { releaseWhileHidden } from '../common/hidden-release';
 import { connectSnapshotStream, NodeSnapshotStore, SnapshotStore, type SnapshotConnection } from './snapshot-stream';
 import { sameScope, scopeParams } from '../../../shared/session-scope';
 import { archivedPending, pageScope } from './page-scope';
@@ -172,12 +173,14 @@ function TowerApp() {
     const events = ['pageshow', 'online', 'focus'] as const;
     document.addEventListener('visibilitychange', wake);
     for (const name of events) window.addEventListener(name, wake);
+    // A tab left in the background lets its stream go, so the Tower page in use keeps connections to work with.
+    const release = releaseWhileHidden(() => disconnect.sleep(), () => disconnect.wake());
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
     const onPop = () => { setSelectedId(readSelection()); setSelectedSlackId(undefined); setTriggerEventId(null); };
     window.addEventListener('popstate', onPop);
     return () => {
       connectionRef.current = undefined;
-      disconnect(); window.clearInterval(timer); window.removeEventListener('popstate', onPop);
+      release(); disconnect(); window.clearInterval(timer); window.removeEventListener('popstate', onPop);
       document.removeEventListener('visibilitychange', wake);
       for (const name of events) window.removeEventListener(name, wake);
     };

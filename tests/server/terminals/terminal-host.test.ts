@@ -123,6 +123,28 @@ test('the terminal host leaves once no shell is open and no page has called for 
   await until(() => f.idle() === 1);
 });
 
+test('asking a terminal host its version or its shells never keeps it from leaving', async t => {
+  const f = await fixture(t, { idleMs: 300 });
+  const { id } = await f.client.create('/fixture', 80, 24);
+  await f.client.close(id);
+  // A page and its controllers look every few seconds; that is not using a shell.
+  const looking = setInterval(() => { void f.client.hostVersion().catch(() => {}); void f.client.list().catch(() => {}); }, 50);
+  t.after(() => clearInterval(looking));
+  await until(() => f.idle() === 1);
+});
+
+test('a terminal host says its revision, and one with this revision needs no restart for an update', async t => {
+  const { TERMINAL_HOST_REVISION } = await import('../../../server/terminals/host.js');
+  const f = await fixture(t);
+  assert.equal(f.client.hostCurrent(), undefined, 'not known before it answered');
+  await f.client.displayVersion();
+  assert.equal(f.client.hostCurrent(), true);
+  assert.ok(Number.isInteger(TERMINAL_HOST_REVISION) && TERMINAL_HOST_REVISION >= 1);
+  // A host from before revisions answered without one: it is older than every revision.
+  (f.client as unknown as { seen: { token: string; version: string } }).seen = { token: 'x', version: '1.0.0' };
+  assert.equal(f.client.hostCurrent(), false);
+});
+
 test('the worker credential cannot reach shells and the terminal credential cannot reach the worker', async t => {
   const f = await fixture(t);
   const { RunManager } = await import('../runs/sql-fixture.js');

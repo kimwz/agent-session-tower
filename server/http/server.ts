@@ -3,7 +3,9 @@ import type { WorkerStorageStatus } from '../../shared/storage.js';
 import { MASTER_HEARTBEAT_HEADER, type HeartbeatAdmission } from '../../shared/master.js';
 import type { AttachmentStore } from '../stores/attachments.js';
 import type { AttachmentUploads } from '../stores/attachment-uploads.js';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer, STATUS_CODES, type IncomingMessage, type ServerResponse } from 'node:http';
+import type { Duplex } from 'node:stream';
+import { WebSocketServer } from 'ws';
 import { chatImageReference, isChatImageLink, readChatImage, sendChatImage, sendChatImageReopen, withChatImages } from './chat-images.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readWebAsset } from './web-assets.js';
@@ -29,6 +31,7 @@ import { SnapshotStream, type FrameFormat } from './snapshot-stream.js';
 import { APP_VERSION, HEALTH_APPLICATION_ID, REQUEST_TOKEN_HEADER } from '../../shared/app-identity.js';
 import { assertWorkspace, listWorkspaceTree, readWorkspaceFile, saveWorkspaceFile, createWorkspaceDirectory, retentionWorkspacePath, openWorkspaceMedia, MAX_WORKSPACE_FILE_BYTES } from '../workspace-files.js';
 import { WorkspaceTerminals, type WorkspaceTerminalBackend } from '../workspace-terminals.js';
+import { localRelay, nodeRelay, serveTerminalSocket, MAX_SOCKET_MESSAGE, SOCKET_REFUSED, type TerminalRelay } from './terminal-socket.js';
 import { sessionKey, type AuthStore } from '../auth/store.js';
 import { VaultPassword, type Viewer } from '../auth/vault-password.js';
 import { ownerIdentity, sessionCookie, setSessionCookie } from './auth.js';
@@ -198,7 +201,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
     streams.delete(id);
   });
   // Streams are filed under the sign-in's key, which is what revocation reports.
-  const trackStream = (sessionId: string, res: ServerResponse, close: () => void) => {
+  const trackStream = (sessionId: string, res: { once(event: 'close', listener: () => void): unknown }, close: () => void) => {
     if (!sessionId) return;
     const id = sessionKey(sessionId);
     const active = streams.get(id) || new Set<() => void>();
@@ -252,13 +255,8 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
   nodes?.on('change', nodeChanged);
   nodes?.on('removed', nodeRemoved);
 
-  const server = createServer(async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' wss://api.elevenlabs.io; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+  /** The hosts and origins this server answers: loopback on its port, and the public origins it was given. */
+  const allowed = () => {
     const address = server.address();
     const effectivePort = address && typeof address === 'object' ? address.port : port;
     const hosts = new Set([`localhost:${effectivePort}`, `127.0.0.1:${effectivePort}`, `[::1]:${effectivePort}`]);
@@ -275,6 +273,18 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         }
       } catch { /* Ignore malformed configured origins. */ }
     }
+    return { hosts, origins };
+  };
+  const tokenValid = (value: string) => /^[a-f0-9]{64}$/.test(value) && timingSafeEqual(Buffer.from(value), Buffer.from(token));
+  const server = createServer(async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' wss://api.elevenlabs.io; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+    const address = server.address();
+    const { hosts, origins } = allowed();
     if (!req.headers.host || !hosts.has(req.headers.host)) return json(res, 403, { error: '허용되지 않은 호스트입니다.' });
     // Opening the page itself from elsewhere is allowed: a login in front of Tower (such as Cloudflare Access) redirects
     // back from its own site, and links arrive from chat apps. That load carries no Tower session (SameSite=Strict),
@@ -673,6 +683,15 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       if (req.method === 'POST' && path === '/api/workspace/directory') {
         return json(res, 200, await createWorkspaceDirectory(await readJson(req), backend.snapshot()));
       }
+      if (req.method === 'GET' && path === '/api/workspace/terminals/folders') {
+        // Where this computer's open shells are, so the owner can find the ones keeping the terminal host from moving
+        // to a new version. Null when the host is too old to say.
+        const shells = await workspaceTerminals.list?.();
+        if (!shells) return json(res, 200, { folders: shells === undefined && workspaceTerminals.list ? null : [] });
+        const counts = new Map<string, number>();
+        for (const shell of shells) if (!shell.exited) counts.set(shell.cwd, (counts.get(shell.cwd) ?? 0) + 1);
+        return json(res, 200, { folders: [...counts].map(([cwd, count]) => ({ cwd, count })).sort((a, b) => a.cwd.localeCompare(b.cwd)) });
+      }
       if (req.method === 'GET' && path === '/api/workspace/terminals') {
         // Shells in this folder, whoever opened them, so any window can join one.
         const cwd = await assertWorkspace(url.searchParams.get('cwd'), backend.snapshot());
@@ -953,11 +972,41 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       else res.end();
     }
   });
+  // A terminal tab's output, keys and sizes travel on one WebSocket, which takes none of the six connections a browser
+  // allows one address (see terminal-socket.ts). It passes the same checks as the page's other requests.
+  const sockets = new WebSocketServer({ noServer: true, maxPayload: MAX_SOCKET_MESSAGE, perMessageDeflate: false });
+  server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    const refuse = (status: number) => { socket.end(`HTTP/1.1 ${status} ${STATUS_CODES[status] ?? ''}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); };
+    void (async () => {
+      const { hosts, origins } = allowed();
+      // A browser always names the page's origin on a WebSocket; one from any other page is refused.
+      if (!req.headers.host || !hosts.has(req.headers.host) || !req.headers.origin || !origins.has(req.headers.origin) || req.headers['sec-fetch-site'] === 'cross-site') return refuse(403);
+      const url = new URL(req.url || '/', `http://${req.headers.host}`);
+      const match = url.pathname.match(/^\/api\/(?:nodes\/([a-f0-9]{32})\/)?workspace\/terminals\/([0-9a-f-]{36})\/socket$/);
+      if (!match || req.method !== 'GET') return refuse(404);
+      const identity = await ownerIdentity(req);
+      const sessionId = sessionCookie(req);
+      if (!identity.local && !auth?.session(sessionId, identity.ip)) return refuse(401);
+      let relay: TerminalRelay;
+      if (match[1]) {
+        if (!nodes?.known(match[1])) return refuse(404);
+        const node = match[1];
+        relay = nodeRelay(() => nodes.session(node));
+      } else relay = localRelay(workspaceTerminals);
+      sockets.handleUpgrade(req, socket, head, ws => {
+        // A signed-out page loses its terminals too, like its other streams.
+        if (!identity.local) trackStream(sessionId, ws, () => ws.close(SOCKET_REFUSED, 'Signed out'));
+        serveTerminalSocket(ws, match[2], relay, tokenValid);
+      });
+    })().catch(() => { if (!socket.destroyed) refuse(500); });
+  });
   // A large attachment for another computer can arrive slowly when the link to it is slow.
   server.requestTimeout = 60_000;
   server.headersTimeout = 10_000;
   server.on('clientError', (_err, socket) => socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'));
   const dispose = () => {
+    for (const client of sockets.clients) client.terminate();
+    sockets.close();
     workspaceTerminals.dispose();
     unsubscribeAuth?.();
     vault.close();

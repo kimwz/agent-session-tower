@@ -7,7 +7,9 @@ import { useI18n } from '../i18n/i18n';
  * the terminal and master hosts. Each keeps its own code until it restarts, so after an update they can differ.
  * `null` means the process is not running; a missing entry means the computer did not say.
  */
-export interface TowerVersions { web: string; worker?: string; terminalHost?: string | null; master?: string | null }
+export interface TowerVersions { web: string; worker?: string; terminalHost?: string | null; terminalHostCurrent?: boolean; master?: string | null }
+/** A folder with shells open in this computer's terminal host. */
+export interface ShellFolder { cwd: string; count: number }
 
 type Row = { key: keyof TowerVersions; name: string; hint: string; moves?: string; value?: string | null };
 
@@ -24,13 +26,16 @@ export function newerVersion(a: string | undefined, b: string | undefined): bool
 /** Whether a running process still waits to move to the web server's version. */
 const waits = (web: string, value: string | null | undefined) => value === 'legacy' || (typeof value === 'string' && newerVersion(web, value));
 
-/** Whether any running process is on an older version than the web server. */
+/** Whether the terminal host must restart to catch up: not when it already runs what this version needs of it. */
+const hostWaits = (versions: TowerVersions) => !versions.terminalHostCurrent && waits(versions.web, versions.terminalHost);
+
+/** Whether any running process is on an older version than the web server and has to move to it. */
 export function versionsBehind(versions: TowerVersions): boolean {
-  return [versions.worker, versions.terminalHost, versions.master].some(value => waits(versions.web, value));
+  return [versions.worker, versions.master].some(value => waits(versions.web, value)) || hostWaits(versions);
 }
 
 /** The web server's version; hover, focus or tap shows every process's version and which ones wait to move. */
-export function TowerVersionsBadge({ versions }: { versions: TowerVersions }) {
+export function TowerVersionsBadge({ versions, shellFolders }: { versions: TowerVersions; shellFolders?: () => Promise<ShellFolder[] | null> }) {
   const { t } = useI18n();
   const id = useId();
   const [open, setOpen] = useState(false);
@@ -66,16 +71,28 @@ export function TowerVersionsBadge({ versions }: { versions: TowerVersions }) {
     window.addEventListener('scroll', close, true);
     return () => { document.removeEventListener('pointerdown', closeOutside); window.removeEventListener('wheel', close); window.removeEventListener('resize', close); window.removeEventListener('scroll', close, true); };
   }, [open]);
+  // Which folders still have shells open, looked up when the panel shows the terminal host waiting for them.
+  const [folders, setFolders] = useState<ShellFolder[] | null>();
+  const hostWaiting = hostWaits(versions);
+  useEffect(() => {
+    if (!open || !hostWaiting || !shellFolders) { setFolders(undefined); return; }
+    let current = true;
+    shellFolders().then(value => { if (current) setFolders(value); }, () => { if (current) setFolders(null); });
+    return () => { current = false; };
+  }, [open, hostWaiting, shellFolders]);
+  const openShells = folders?.length ? ` ${t('아직 열린 터미널: {0}', { 0: folders.map(folder => `${folder.cwd} (${folder.count})`).join(', ') })}` : '';
   const all: Row[] = [
     { key: 'web', name: t('화면 서버'), hint: t('이 페이지와 API를 보냅니다.'), value: versions.web },
     { key: 'worker', name: t('실행 워커'), hint: t('에이전트 작업과 트리거를 실행합니다.'), moves: t('실행 중인 작업이 없을 때 v{0}(으)로 바뀝니다.', { 0: versions.web }), value: versions.worker },
-    { key: 'terminalHost', name: t('터미널 호스트'), hint: t('열어 둔 터미널을 유지합니다.'), moves: t('열린 터미널을 모두 닫으면 v{0}(으)로 바뀝니다.', { 0: versions.web }), value: versions.terminalHost },
+    { key: 'terminalHost', name: t('터미널 호스트'),
+      hint: versions.terminalHostCurrent && waits(versions.web, versions.terminalHost) ? t('이 버전에 필요한 기능을 갖추고 있어 다시 시작하지 않아도 됩니다.') : t('열어 둔 터미널을 유지합니다.'),
+      moves: t('이 컴퓨터의 열린 터미널을 모두 닫으면 v{0}(으)로 바뀝니다.', { 0: versions.web }) + openShells, value: versions.terminalHost },
     { key: 'master', name: t('마스터 호스트'), hint: t('마스터 에이전트 대화를 맡습니다.'), moves: t('다시 시작할 때 v{0}(으)로 바뀝니다.', { 0: versions.web }), value: versions.master },
   ];
   const rows = all.filter(row => row.value !== undefined);
   const behind = versionsBehind(versions);
   const shown = (row: Row) => row.value === null ? t('실행 중 아님') : row.value === 'legacy' ? t('이전 버전') : `v${row.value}`;
-  const waiting = (row: Row) => row.key !== 'web' && waits(versions.web, row.value);
+  const waiting = (row: Row) => row.key === 'terminalHost' ? hostWaiting : row.key !== 'web' && waits(versions.web, row.value);
   return <span ref={container} className="tower-versions nodrag nopan" onMouseEnter={hold} onMouseLeave={release} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget) && !hovered.current) setOpen(false); }}>
     <button type="button" className={`tower-versions-trigger${behind ? ' behind' : ''}`} aria-describedby={open ? id : undefined}
       aria-label={t('Tower 버전: {0}', { 0: rows.map(row => `${row.name} ${shown(row)}`).join(', ') })}
