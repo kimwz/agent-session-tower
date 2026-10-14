@@ -66,7 +66,7 @@ import { loadLinkIdentity } from './link/identity.js';
 import { ControllerLinks } from './link/controller.js';
 import { NodeLinks } from './link/node.js';
 import { FollowedHostStore } from './link/follow.js';
-import { ManagedSettingsReceiver, ManagedSettingsSync } from './link/managed-settings.js';
+import { ManagedSettingsReceiver, ManagedSettingsSync, announcingHost } from './link/managed-settings.js';
 import { remoteUrlOf } from './repositories/remote-url.js';
 import { cloneAction, workspaceAction } from './repositories/clone.js';
 import { GhLogin, providerLogin } from './link/readiness.js';
@@ -574,7 +574,6 @@ async function main() {
   // applies from that one, and, as a controller, what it keeps on the computers that follow it.
   const followedHost = new FollowedHostStore(stateDir);
   await followedHost.start();
-  followedHostId = () => followedHost.hostId();
   const folderRemotes = new Map<string, { at: number; url?: string }>();
   const managedFolders = async (): Promise<ManagedFolder[]> => {
     const cwds = [...new Set([...groups.list().map(group => group.cwd), ...runs.sessionList().map(session => session.cwd)].filter((cwd): cwd is string => Boolean(cwd)))].slice(0, 300);
@@ -591,6 +590,8 @@ async function main() {
   const ghLogin = new GhLogin();
   const managedReceiver = new ManagedSettingsReceiver({ stateDir, follow: followedHost, folders: managedFolders });
   await managedReceiver.start();
+  // The work the followed host sent here is announced there while it keeps syncing, from here otherwise (an older host).
+  followedHostId = () => announcingHost(followedHost.hostId(), managedReceiver.applied(), Date.now());
   let managedSync: ManagedSettingsSync | undefined;
   const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname, published: releasePublished, managed: id => managedSync?.status(id), secrets: id => followingSecrets?.status(id) });
   if (controllerLinks) { managedSync = new ManagedSettingsSync({ controller: controllerLinks }); managedSync.on('change', () => changed()); }
@@ -726,7 +727,8 @@ async function main() {
   const { server, dispose, token: pageToken } = createMonitorServer({ attachmentStores, attachmentUploads, port, clientDir, backend, nodes: remoteNodes, onNodeMessage: insertRemote, master: { callerSecret: masterCallerSecret, handle: masterRoutes(master, { turnEnd: new VoiceTurnEnd({ engine: () => decisions.engine('voiceTurnEnd'),
       known: async session => await master.call('voiceKnown', { session }) === true, record: entry => decisions.record(entry) }) }) },
     auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges,
-      sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })), managed: managedSync } : { error: linkError },
+      sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })), managed: managedSync,
+      afterClone: async id => { await followingSecrets?.shareFolders(id, managedSync?.folders(id) ?? []); } } : { error: linkError },
     workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups, localMcp,
     decisions: {
       overview: () => decisions.overview(),

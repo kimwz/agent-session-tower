@@ -202,3 +202,12 @@ test('a URL with broken escapes is no repository rather than an error', async ()
   const { normalizeRemoteUrl } = await import('../../../server/repositories/remote-url.js');
   assert.equal(normalizeRemoteUrl('https://git.example.com/team/percent%.git'), undefined);
 });
+
+test('the followed Tower is left the pushes for the work it sent only while it keeps syncing', async () => {
+  const { announcingHost } = await import('../../../server/link/managed-settings.js');
+  const host = 'a'.repeat(32), now = Date.parse('2026-10-15T00:30:00Z');
+  assert.equal(announcingHost(host, { revision: 'r', appliedAt: '2026-10-15T00:25:00Z' }, now), host);
+  assert.equal(announcingHost(host, { revision: 'r', appliedAt: '2026-10-15T00:05:00Z' }, now), undefined, 'an older or silent host: announced here');
+  assert.equal(announcingHost(host, undefined, now), undefined, 'never synced: announced here');
+  assert.equal(announcingHost(undefined, { revision: 'r', appliedAt: '2026-10-15T00:25:00Z' }, now), undefined);
+});

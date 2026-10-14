@@ -19,6 +19,8 @@ export interface LinkRoutes {
   sessionNames?: () => Map<string, string>;
   /** What this Tower keeps on the computers that follow it, and asks of them. */
   managed?: ManagedSettingsSync;
+  /** Work a new clone on a following computer waits for before it is answered (its project's secrets). */
+  afterClone?: (nodeId: string) => Promise<void>;
 }
 
 /** A clone runs on the other computer until git gives up (10 minutes); its answer may take a little longer to come back. */
@@ -80,7 +82,12 @@ export async function handleLinkRoute(req: IncomingMessage, res: ServerResponse,
     const answer = await links.managed.request(action[1], action[2], body, action[2] === 'clone' ? CLONE_MS : 30_000);
     await links.managed.refreshFolders(action[1]);
     // A new clone takes the skills of its repository before the owner starts work in it.
-    if (action[2] === 'clone') await links.managed.resend(action[1]);
+    if (action[2] === 'clone') {
+      await links.managed.resend(action[1]);
+      // best-effort: secrets shared with this repository's folder here reach the clone before work starts there; one
+      // that does not is shared on the next folder report, and a use before that is told why and offered for sharing.
+      await links.afterClone?.(action[1]).catch(error => console.warn(`A clone's folder was not shared its project secrets: ${error instanceof Error ? error.message : String(error)}`));
+    }
     json(res, 200, answer); return true;
   }
   const node = path.match(/^\/api\/link\/nodes\/([a-f0-9]{32})(\/remove|\/update|\/follow)?$/);

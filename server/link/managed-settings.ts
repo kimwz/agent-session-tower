@@ -26,6 +26,17 @@ export type ManagedApplier = (value: unknown, context: { hostId: string }) => Pr
 /** Something the followed Tower asks this computer to do (`POST /api/managed/<name>`); it resolves to the answer. */
 export type ManagedAction = (body: Record<string, unknown>, context: { hostId: string }) => Promise<unknown>;
 
+/** How long after its last sync the followed Tower still counts as announcing the work it sent here (it syncs every 10 minutes). */
+const ANNOUNCES_MS = 20 * 60_000;
+
+/**
+ * The followed Tower, while it keeps sending its settings: only then does it announce the work it sent here, so this
+ * computer leaves those pushes to it. An older or silent host gets none, and this computer announces that work itself.
+ */
+export function announcingHost(hostId: string | undefined, applied: ManagedApplied | undefined, now: number): string | undefined {
+  return hostId && applied && now - Date.parse(applied.appliedAt) < ANNOUNCES_MS ? hostId : undefined;
+}
+
 /** JSON with object keys in order: the same settings always give the same text, and so the same revision. */
 export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(item => canonicalJson(item === undefined ? null : item)).join(',')}]`;

@@ -94,7 +94,7 @@ test('settings can be sent again unchanged on demand, after any send under way',
   assert.equal(applied.length, count + 1);
 });
 
-test('a clone asked from the page answers only after the computer\'s folders and settings were sent again', async () => {
+test('a clone asked from the page answers only after the computer\'s folders, settings and project secrets were sent again', async () => {
   const steps: string[] = [];
   const managed = {
     request: async (id: string, name: string, body: Record<string, unknown>) => { steps.push(`request:${name}:${body.url}`); return { cwd: '/home/me/Workspace/app', remoteUrl: 'github.com/kimwz/app' }; },
@@ -104,11 +104,11 @@ test('a clone asked from the page answers only after the computer\'s folders and
   const answered: Array<{ status: number; body: unknown }> = [];
   const post = (path: string, body: unknown) => {
     const req = Object.assign(Readable.from([Buffer.from(JSON.stringify(body))]), { method: 'POST' }) as unknown as IncomingMessage;
-    return handleLinkRoute(req, {} as ServerResponse, path, { managed } as unknown as LinkRoutes, (_res, status, answer) => { steps.push('answer'); answered.push({ status, body: answer }); });
+    return handleLinkRoute(req, {} as ServerResponse, path, { managed, afterClone: async () => { steps.push('secrets'); } } as unknown as LinkRoutes, (_res, status, answer) => { steps.push('answer'); answered.push({ status, body: answer }); });
   };
   const id = 'b'.repeat(32);
   assert.equal(await post(`/api/link/nodes/${id}/clone`, { url: 'https://github.com/kimwz/app' }), true);
-  assert.deepEqual(steps, ['request:clone:https://github.com/kimwz/app', 'folders', 'resend', 'answer']);
+  assert.deepEqual(steps, ['request:clone:https://github.com/kimwz/app', 'folders', 'resend', 'secrets', 'answer']);
   assert.deepEqual(answered, [{ status: 200, body: { cwd: '/home/me/Workspace/app', remoteUrl: 'github.com/kimwz/app' } }]);
   steps.length = 0;
   await post(`/api/link/nodes/${id}/workspace`, {});
