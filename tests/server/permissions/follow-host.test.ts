@@ -411,3 +411,26 @@ test('following that changes at any wait before the approval is written: the for
   node.atEffect(undefined);
   assert.ok(!node.service.overview().rules.some(rule => rule.value === 'gh pr merge'), 'no rule was made');
 });
+
+test('an allow the host withdrew leaves the rules file for every project even when no host rule is left, after a restart too', async t => {
+  const { host, node } = await hostAndNode(t);
+  const rulesFolder = join(node.codexHome, 'rules');
+  const codexFile = join(rulesFolder, 'tower.rules');
+  await node.service.applyManaged(await host.service.exportManaged(), HOST);
+  assert.match(await readFile(codexFile, 'utf8'), /"gh", "pr", "view"/);
+  await host.service.remove(host.service.overview().rules.find(rule => rule.value === 'gh pr view')!.id);
+  const withdrawn = await host.service.exportManaged();
+  assert.deepEqual(withdrawn.rules, [], 'no host rule is left');
+  await chmod(rulesFolder, 0o500);
+  t.after(() => chmod(rulesFolder, 0o700).catch(() => {}));
+  await assert.rejects(node.service.applyManaged(withdrawn, HOST), /Codex 규칙 파일에 쓰지 못했습니다/);
+  node.service.close();
+  const restarted = await node.restart();
+  await assert.rejects(restarted.applyManaged(withdrawn, HOST), /Codex 규칙 파일에 쓰지 못했습니다/, 'still reported after a restart while the allow is on disk');
+  assert.match(await readFile(codexFile, 'utf8'), /"gh", "pr", "view"/);
+  await chmod(rulesFolder, 0o700);
+  await restarted.applyManaged(withdrawn, HOST);
+  const text = await readFile(codexFile, 'utf8');
+  assert.doesNotMatch(text, /"gh", "pr", "view"/, 'the withdrawn allow is gone');
+  assert.match(text, /"make", "lint"/, 'this computer’s own rule stays');
+});

@@ -572,6 +572,8 @@ export class PermissionService {
     catch { return false; }
     batch.putRequest({ ...request, status: 'approved', decidedAt: at, decidedBy: 'auto', ruleId: made.id,
       review: { status: 'done', verdict: 'approve', reason: `호스트에서 같은 저장소에 허용한 규칙(${precedent.at.slice(0, 10)})`, at } });
+    // Accepted: following could still change during the SQL write after this last check; the web switches it and this
+    // worker writes, with no lock between them, so that is the owner switching within the same milliseconds.
     if (!await this.commitRows(batch, false, stillFollowed)) return false;
     await this.apply();
     return true;
@@ -605,10 +607,13 @@ export class PermissionService {
       if (current.enabled !== received.autoReview.enabled || current.resume !== received.autoReview.resume) await this.writeAutoReview(received.autoReview);
       // Codex's rules files are brought in line with what is on disk each time (only a file whose text differs is
       // written), so a write that failed before, in this worker or an earlier one, is made now. A file the host's rules
-      // decide (the one for every project, and project files whose reviewer rules yield to them, now or before) that
-      // cannot be written is this section's failure, and the host sends it again.
+      // decide that cannot be written is this section's failure, and the host sends it again: the one for every project
+      // always (an allow the host withdrew must leave it even once no host rule is left to point at it), and project
+      // files whose reviewer rules yield to the host's, now or before. Only a project file regaining a reviewer rule
+      // after a restart is not checked here: that leaves Codex asking more, never allowing more, and the panel shows it.
       await this.apply();
-      const failed = [...new Set([...this.hostFiles(before), ...this.hostFiles(this.host)])].filter(path => this.errors.has(path));
+      const global = this.options.globalCodex === false ? [] : [codexRulesPath('global', undefined, this.options.env)];
+      const failed = [...new Set([...global, ...this.hostFiles(before), ...this.hostFiles(this.host)])].filter(path => this.errors.has(path));
       if (failed.length) throw failure(`호스트의 권한 규칙을 Codex 규칙 파일에 쓰지 못했습니다: ${failed.map(path => `${path}: ${this.errors.get(path)}`).join('; ')}`, 'unavailable');
     });
   }
