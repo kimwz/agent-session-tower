@@ -591,10 +591,11 @@ async function main() {
   managedReceiver.register('permissions', async (value, context) => { await runs.managedCall('permissions', 'apply', value, context); });
   // Skills live in the worker's stores; model roles are one file every process reads; fast judgments are this web's.
   managedSync?.register('skills', () => runs.managedCall('skills', 'export'));
-  managedReceiver.register('skills', async (value, context) => { await runs.managedCall('skills', 'apply', value, context); });
+  // The worker links them into this computer's folders of the same repositories, as this web knows the folders now.
+  managedReceiver.register('skills', async (value, context) => { await runs.managedCall('skills', 'apply', { section: value, folders: await managedFolders() }, context); });
   managedSync?.register('models', () => exportManagedModelSettings(stateDir));
   managedReceiver.register('models', async value => { if (await applyManagedModelSettings(stateDir, value)) changed(); });
-  managedSync?.register('decisions', async () => decisions.backupValue());
+  managedSync?.register('decisions', async () => decisions.exportManaged());
   managedReceiver.register('decisions', async value => { if (await decisions.applyManaged(value)) { outcomes.changed(); changed(); } });
   // The followed Tower clones a repository into a new folder here, or opens a terminal in the Workspace folder (to sign
   // in to Claude, Codex or gh); either becomes a project folder, shown on its canvas like any other.

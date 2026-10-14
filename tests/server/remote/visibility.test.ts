@@ -114,3 +114,13 @@ test('a controlling Tower sees the computer status numbers', () => {
   assert.deepEqual(remoteSnapshot({ ...base(), system }, scope(), 'controller-a1b2c3d4e5f6').system, system);
   assert.equal(remoteSnapshot(base(), scope(), 'controller-a1b2c3d4e5f6').system, undefined);
 });
+
+test('a trigger\'s ids reach only the controller whose trigger started the run, which announces it starting', () => {
+  const host = 'a'.repeat(32), other = 'c'.repeat(32);
+  const snapshot = { ...base(), runs: [run('r-host', 'codex:open', { status: 'running', origin: { kind: 'trigger', triggerId: 't-host', eventId: 'e-1', controllerId: host } }),
+    run('r-local', 'codex:open', { origin: { kind: 'trigger', triggerId: 't-local', eventId: 'e-2' } })] };
+  const forHost = remoteSnapshot(snapshot, scope(), host).runs;
+  assert.deepEqual(forHost.map(item => item.origin), [{ kind: 'trigger', controllerId: host, triggerId: 't-host', eventId: 'e-1' }, { kind: 'trigger' }]);
+  assert.deepEqual(remoteSnapshot(snapshot, scope(), other).runs.map(item => item.origin), [{ kind: 'trigger', controllerId: host }, { kind: 'trigger' }]);
+  assert.deepEqual(remoteSnapshot(snapshot, scope()).runs.map(item => item.origin), [{ kind: 'trigger', controllerId: host }, { kind: 'trigger' }]);
+});

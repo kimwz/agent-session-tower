@@ -79,6 +79,8 @@ export async function handleLinkRoute(req: IncomingMessage, res: ServerResponse,
     if (action[2] === 'clone' ? !only('url') || typeof body.url !== 'string' : !only()) { json(res, 400, { error: action[2] === 'clone' ? '저장소 주소를 입력하세요.' : '요청 본문은 비워 두세요.' }); return true; }
     const answer = await links.managed.request(action[1], action[2], body, action[2] === 'clone' ? CLONE_MS : 30_000);
     await links.managed.refreshFolders(action[1]);
+    // A new clone takes the skills of its repository before the owner starts work in it.
+    if (action[2] === 'clone') await links.managed.resend(action[1]);
     json(res, 200, answer); return true;
   }
   const node = path.match(/^\/api\/link\/nodes\/([a-f0-9]{32})(\/remove|\/update|\/follow)?$/);
