@@ -14,7 +14,7 @@ import { parseSecretCli } from './cli.js';
 import { parseDotenv } from './dotenv.js';
 import { RemoteSecretBroker, wireMetadata, type RemoteSecretRequest, type RemoteSecretResponse } from './remote.js';
 import { ownerConnection, ownerCreate, ownerInput, ownerSession, ownerSharingChange, secretUsage, VIEW_USAGE } from './owner-input.js';
-import { SecretService } from './service.js';
+import { SecretService, viewLocked } from './service.js';
 import type { SecretUseReviewer } from './reviewer.js';
 import type { SecretBlockNotice } from '../runs/runner-protocol.js';
 import { SECRET_LOCKED_LIST, SECRET_LOCKED_UNINDEXED, SECRET_LOCKED_USE, SECRET_NO_VAULT, SECRET_USE_INSTRUCTIONS } from './notices.js';
@@ -57,7 +57,6 @@ const valueRead = z.object({ secretId: z.string().min(1).max(256), expectedVersi
 const valueWrite = valueRead.extend({ value: z.string().optional(), content: z.string().optional() }).strict();
 /** A value-viewing refusal the web answers with its own `code`. */
 const viewFail = (code: SecretViewError, kind: ErrorKind, message: string) => Object.assign(new TowerError(kind, message), { code });
-const viewLocked = () => viewFail('view-locked', 'forbidden', '값 보기가 잠겼습니다. Tower 비밀번호를 다시 입력하세요.');
 /** How long a session view waits for a source's answer before listing it as unavailable. */
 const VIEW_REMOTE_MS = 5000;
 /** How long a refused use stays in the worker's report for the owner's notice; the web announces each once. */
@@ -543,12 +542,10 @@ export class SecretRuntime {
   private async valueAction(action: 'value' | 'value-update', input: Record<string, unknown>): Promise<SecretValue | SecretSettingsView> {
     const service = this.options.service;
     const { secretId, expectedVersion, generation, value, content } = ownerInput(action === 'value' ? valueRead : valueWrite, input) as z.output<typeof valueWrite>;
-    const current = () => !this.blocked && !service.status().locked && generation === service.lockGeneration;
-    if (!current()) throw viewLocked();
-    try {
-      if (action === 'value') { const answer = await service.value(secretId, expectedVersion); if (!current()) throw viewLocked(); return answer; }
-      await service.update({ id: secretId, expectedVersion, value, content });
-    } catch (error) { if (!current()) throw viewLocked(); throw error; }
+    if (this.blocked || service.status().locked || generation !== service.lockGeneration) throw viewLocked();
+    // The service checks the generation again in its own turn of the queue, behind any lock or open queued first.
+    if (action === 'value') return service.value(secretId, expectedVersion, generation);
+    await service.update({ id: secretId, expectedVersion, value, content, generation });
     return this.settingsView();
   }
   peers(): SecretPeer[] { return this.options.service.status().locked ? [] : this.options.service.peers(); }
