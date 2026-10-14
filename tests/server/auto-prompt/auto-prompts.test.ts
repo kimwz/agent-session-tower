@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { AutoPromptManager } from '../../../server/auto-prompt/manager.js';
+import { validEntry } from '../../../server/auto-prompt/storage-codec.js';
 import type { AutoPromptModelRequest } from '../../../server/auto-prompt/native.js';
 import type { RunAdmission } from '../../../server/runs/manager.js';
 import type { AttachmentInput, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, Session, Snapshot } from '../../../shared/types.js';
@@ -99,6 +100,28 @@ test('explicit directory routes a busy continuation and preserves the original i
   assert.equal(f.managed[0].autoPromptId, accepted.id);
   assert.match(f.calls[0].prompt, /Fixed the save operation/);
   assert.match(f.calls[0].systemPrompt, /untrusted data/);
+});
+
+test("the master's request is kept on its job and passed on with the routed turn, without changing the request it matches", async t => {
+  const f = await fixture(t);
+  const input = request(f.cwd);
+  const accepted = await f.manager.submit(input, { origin: { kind: 'owner' }, sender: 'master' });
+  assert.equal(accepted.sender, 'master');
+  assert.equal((await f.finished(accepted.id)).status, 'completed');
+  assert.equal(f.dispatches[0].internal?.sender, 'master');
+  assert.deepEqual(f.dispatches[0].internal?.origin, { kind: 'owner' });
+  // Display only: a retry of the same request matches whoever sent it.
+  assert.equal((await f.manager.submit(input, { origin: { kind: 'owner' } })).id, accepted.id);
+  const owner = await f.manager.submit(request(f.cwd), { origin: { kind: 'owner' } });
+  await f.finished(owner.id);
+  assert.equal(owner.sender, undefined); assert.equal(f.dispatches[1].internal?.sender, undefined);
+});
+
+test('saved Auto Prompt jobs may carry only the master mark', () => {
+  const entry = (sender?: unknown) => ({ fingerprint: 'a'.repeat(64), staged: [], job: { id: randomUUID(), provider: 'codex', prompt: 'Work', routerModel: 'router',
+    createdAt: '2026-10-14T00:00:00.000Z', updatedAt: '2026-10-14T00:00:00.000Z', status: 'completed', origin: { kind: 'owner' }, ...(sender === undefined ? {} : { sender }) } });
+  assert.equal(validEntry(entry()), true); assert.equal(validEntry(entry('master')), true);
+  assert.equal(validEntry(entry('owner')), false); assert.equal(validEntry(entry(true)), false);
 });
 
 test('the chosen execution model and effort reach the routed session, and a changed effort is a different request', async t => {

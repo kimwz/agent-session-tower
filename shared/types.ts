@@ -197,6 +197,11 @@ export interface RunOrigin {
    */
   controllerId?: string;
 }
+/**
+ * Who wrote a request the owner's authority sent, when it was not the owner on a page: `master` is the master agent.
+ * Set only by the entry point that authenticated the caller, and for display only: nothing is granted or refused by it.
+ */
+export type RunSender = 'master';
 /** Authenticated caller links for reporting, independent of the authority in RunOrigin. */
 export interface RunDelegation {
   parentRunId: string; rootRunId: string;
@@ -213,6 +218,7 @@ export interface Run {
   node?: string;
   origin?: RunOrigin;
   delegation?: RunDelegation;
+  sender?: RunSender;
   /** Authenticated internal heartbeat admission, never selectable in a public message body. */
   heartbeat?: import('./master.js').HeartbeatAdmission;
   /** Original admitted heartbeat run; retained only through managed continuations. */
@@ -383,6 +389,7 @@ export interface AutoPromptJob {
   node?: string;
   origin?: RunOrigin;
   delegation?: RunDelegation;
+  sender?: RunSender;
   /** For remote work: the remote-sharing exclusion revision its candidates were filtered with. */
   exclusionRevision?: number;
   unattended?: boolean;

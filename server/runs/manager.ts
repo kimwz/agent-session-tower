@@ -105,6 +105,8 @@ export interface RunAdmission {
   origin?: RunOrigin;
   /** Validated reporting links; never supplied by a public request body. */
   delegation?: Run['delegation'];
+  /** Display only (see RunSender); saved on the run. */
+  sender?: Run['sender'];
   /** Transient credential forwarded to the worker, never saved on a run. */
   callerCapability?: string;
   /** The prompt carries Slack, GitHub or HTTP content. Only a session Tower creates for it may receive it. */
@@ -572,7 +574,7 @@ export class RunManager extends EventEmitter {
       } catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
       const createdAt = new Date().toISOString();
       const origin = internal.origin ?? { kind: 'unknown' as const };
-      const run: Run = { id: randomUUID(), sessionId: id, origin, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}), ...(effort ? { effort } : {}),
+      const run: Run = { id: randomUUID(), sessionId: id, origin, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), ...(this.fromMaster(internal, input.cwd) ? { sender: 'master' as const } : {}), prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}), ...(effort ? { effort } : {}),
         ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
         ...(approvalsReviewer ? { codexApprovalsReviewer: approvalsReviewer } : {}),
         ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
@@ -691,7 +693,7 @@ export class RunManager extends EventEmitter {
         // Recorded before the run exists: once external content is queued, the session stays marked.
         this.registry.markUntrusted(sessionId);
       }
-      const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), ...(internal.heartbeat ? { heartbeat: structuredClone(internal.heartbeat) } : {}), prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
+      const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), ...(this.fromMaster(internal, session.cwd) ? { sender: 'master' as const } : {}), ...(internal.heartbeat ? { heartbeat: structuredClone(internal.heartbeat) } : {}), prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
         ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
         ...(model ? { model } : {}), ...(effort ? { effort } : {}),
         ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),
@@ -1108,6 +1110,8 @@ export class RunManager extends EventEmitter {
 
   /** The master's session talks only through a subscription sign-in (see subscription.ts). */
   private masterSession(session: Session): boolean { return subscriptionOnly(this.options.stateDir ?? defaultStateDir(), session.cwd); }
+  /** The master's mark is for its requests in other conversations; what reaches its own conversation is the owner's or Tower's. */
+  private fromMaster(internal: RunAdmission, cwd: string): boolean { return internal.sender === 'master' && !subscriptionOnly(this.options.stateDir ?? defaultStateDir(), cwd); }
 
   private async launchCodex(run: Run, session: Session, creating: boolean): Promise<void> {
     const prepared = await prepareCodexTurn(this.turnHost, run, session, creating);

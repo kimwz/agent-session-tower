@@ -190,3 +190,32 @@ test('a joined computer’s attached files are matched by the ids that computer 
   assert.equal(projection.matches.get('native')?.text, request.prompt);
   assert.deepEqual(projection.matches.get('native')?.attachments?.map(attachment => attachment.id), [`@${node}/text-id`, `@${node}/image-id`]);
 });
+
+test("the master's requests say they come from the master agent and keep their line breaks; the owner's and older ones stay 나", () => {
+  const prompt = '편집기 저장 오류를 고쳐 주세요.\n세션 codex:a의 작업을 이어 갑니다.\n\n- 테스트를 추가합니다\n  단위 테스트부터\n- 배포까지 진행합니다  \n확인까지\n\n`a\nb` 코드는 그대로';
+  const messages = [row('master', prompt, 10_000), row('owner', '확인해 주세요', 30_000), row('older', '다시 확인', 50_000)];
+  const runs = [run('from-master', { prompt, sender: 'master' }), run('from-owner', { createdAt: at(29_000), startedAt: at(30_000), finishedAt: at(40_000), origin: { kind: 'owner' } }),
+    run('older', { prompt: '다시 확인', createdAt: at(49_000), startedAt: at(50_000), finishedAt: at(60_000), origin: { kind: 'agent' } })];
+  const { matches } = matchChatRuns(messages, runs, 'session');
+  assert.equal(matches.get('master')?.sender, 'master');
+  assert.equal(matches.get('owner')?.sender, undefined); assert.equal(matches.get('older')?.sender, undefined);
+  const html = renderToStaticMarkup(createElement(ChatTranscript, { messages, runMatches: matches }));
+  const [master, owner, older] = html.split('<article').slice(1);
+  assert.match(master, /class="chat-message user from-master/); assert.match(master, /마스터 에이전트/); assert.doesNotMatch(master, /<span>나<\/span>/);
+  // Single line breaks show as written, in paragraphs and list items; an explicit break stays one break; code is untouched.
+  assert.match(master, /편집기 저장 오류를 고쳐 주세요\.<br\/>\n?세션/);
+  assert.match(master, /<li>테스트를 추가합니다<br\/>\n?단위 테스트부터<\/li>/);
+  assert.match(master, /<li>배포까지 진행합니다<br\/>\n?확인까지<\/li>/); assert.equal(master.match(/<br\/>/g)?.length, 3);
+  assert.match(master, /<code>a b<\/code>/);
+  for (const plain of [owner, older]) { assert.doesNotMatch(plain, /from-master|마스터 에이전트/); assert.match(plain, /<span>나<\/span>/); }
+});
+
+test('a master instruction a running turn took minutes later still says it comes from the master agent', () => {
+  const late = row('late', '추가 지시입니다', 200_000);
+  const steered = run('steered', { prompt: '추가 지시입니다', sender: 'master', createdAt: at(9000), startedAt: at(10_000), finishedAt: undefined, status: 'running',
+    steering: { targetRunId: 'target', state: 'delivered', requestedAt: at(10_000), deliveredAt: at(199_500) } });
+  assert.equal(matchChatRuns([late], [steered], 'session').matches.get('late')?.sender, 'master');
+  // The owner's matching is unchanged.
+  const { sender: _sender, ...owner } = steered;
+  assert.equal(matchChatRuns([late], [owner], 'session').matches.get('late'), undefined);
+});

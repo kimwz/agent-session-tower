@@ -17,3 +17,10 @@ test('the master may register issues without confirming, with the same request t
   assert.match(guide, /You may register issues whenever the owner asks, without confirming/);
   assert.ok(guide.includes(issueRequest('<the issue as the owner described it>')));
 });
+
+test('the master writes what it hands to a session for the owner to read', () => {
+  const guide = masterGuide();
+  assert.match(guide, /shows as from the master agent/);
+  assert.match(guide, /short paragraphs or "-" lists separated by blank lines/);
+  assert.match(guide, /Never one run-on line/);
+});

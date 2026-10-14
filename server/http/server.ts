@@ -354,11 +354,11 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         const capability = req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()];
         // The signed-in owner's page or the verified master; never a local agent, a calling turn or loopback alone.
         const ownerProof = masterCall || (!req.headers['x-tower-agent'] && !req.headers['x-tower-master'] && capability === undefined && Boolean(auth?.session(sessionId, identity.ip)));
-        if (capability === undefined) return ownerProof ? { brokerOwnerAuthorized: true } : undefined;
+        if (capability === undefined) return ownerProof ? { brokerOwnerAuthorized: true, ...(masterCall ? { sender: 'master' as const } : {}) } : undefined;
         if (!identity.local || typeof capability !== 'string' || !/^[a-f\d]{64}$/.test(capability)) {
           throw new TowerError('forbidden', 'A calling turn must use its local reporting credential.');
         }
-        return { callerCapability: capability };
+        return { callerCapability: capability, ...(masterCall ? { sender: 'master' as const } : {}) };
       };
       if (req.method === 'POST') {
         const header = req.headers[REQUEST_TOKEN_HEADER.toLowerCase()];

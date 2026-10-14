@@ -92,6 +92,15 @@ test('new-session model is persisted and passed as a native override', async t =
   assert.equal(f.manager.list().length, count);
 });
 
+test("a conversation the master creates keeps its mark on the first turn, and nothing else changes", async t => {
+  const f = await fixture(t);
+  const fromMaster = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Create' }, { origin: { kind: 'owner' }, sender: 'master' });
+  assert.equal(fromMaster.run.sender, 'master'); assert.deepEqual(fromMaster.run.origin, { kind: 'owner' });
+  assert.equal((await finished(f.manager, fromMaster.run.id)).sender, 'master');
+  const own = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Create' }, { origin: { kind: 'owner' } });
+  assert.equal(own.run.sender, undefined);
+});
+
 test("Tower's own Codex turns hand approvals to the automatic reviewer, new or resumed, whatever a page asks", async t => {
   const f = await fixture(t);
   const threadParams = async () => JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8')).threadParams;

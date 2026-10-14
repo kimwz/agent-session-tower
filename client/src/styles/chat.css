@@ -254,6 +254,18 @@
 .chat-message.user .message-meta>span {
   color:#a7bddd
 }
+/* What the master agent wrote: its own card. */
+.chat-message.user.from-master>.message-content {
+  background:#1d2540;
+  border-color:#3d3f6e;
+  border-left:3px solid #8b84d8
+}
+.chat-message.user.from-master .message-meta>span {
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  color:#aaa4ee
+}
 .chat-message.assistant .message-meta:before {
   content:'';
   display:inline-block;
