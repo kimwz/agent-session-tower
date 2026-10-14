@@ -80,7 +80,8 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
     return this.starting ??= this.startHost().finally(() => { this.starting = undefined; });
   }
   private async startHost(): Promise<void> {
-    try { await this.call('ping'); return; }
+    // Says a shell is about to be opened, so a host about to leave for being idle stays for it.
+    try { await this.call('ping', ['opening']); return; }
     catch (error) { if (statusOf(error) !== 503) throw error; }
     const entry = this.options.hostEntry ?? fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? '../index.ts' : '../index.js', import.meta.url));
     const stateDir = (await this.hostPaths()).stateDir;
@@ -92,7 +93,7 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
     const deadline = Date.now() + (this.options.startupTimeoutMs ?? 30_000);
     for (;;) {
       if (spawnError) throw spawnError;
-      try { await this.call('ping'); return; }
+      try { await this.call('ping', ['opening']); return; }
       catch (error) {
         if (statusOf(error) !== 503 || Date.now() >= deadline) throw error;
         await new Promise(resolve => setTimeout(resolve, 100));

@@ -278,8 +278,9 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
           ready: () => {
             if (disposed || closed) return;
             ready = true; failedOpens = 0; socketFailures = 0;
-            // A new shell has no history on its first connection; every reconnect replays some.
-            if (history) replayUntil = Date.now() + 500;
+            // A new shell has no history on its first connection; every reconnect replays some (an event stream that
+            // reconnected by itself too).
+            if (!created) replayUntil = Date.now() + 500;
             history = false; created = false;
             connection?.resize(terminal.cols, terminal.rows);
             setError(''); flush(); if (visible.current) terminal.focus();
@@ -297,7 +298,9 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
             if (disposed || closed) return;
             ready = false;
             setError(t('터미널 연결이 끊겼습니다. 다시 연결하는 중입니다.'));
-            if (!stream && !opened && ++socketFailures >= 2) stream = true;
+            // Two sockets that never reached the server: use the event stream, and try a socket again once it drops.
+            if (stream) { stream = false; socketFailures = 0; }
+            else if (!opened && ++socketFailures >= 2) stream = true;
             if (++failedOpens >= 3) setError(node ? t('터미널에 다시 연결하지 못했습니다. 이 터미널을 보는 창이 너무 많거나 그 컴퓨터에 닿지 않습니다. 계속 다시 시도합니다.')
               : t('터미널에 다시 연결하지 못했습니다. 이 터미널을 보는 창이 너무 많을 수 있습니다. 계속 다시 시도합니다.'));
             reconnect = setTimeout(retry, failedOpens <= 1 ? 500 : Math.min(3000 * failedOpens, 30_000));

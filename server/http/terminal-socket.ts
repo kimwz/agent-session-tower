@@ -89,6 +89,7 @@ export function localRelay(backend: WorkspaceTerminalBackend): TerminalRelay {
 }
 
 const OFFLINE = '그 컴퓨터에 지금 연결되어 있지 않습니다. 다시 연결되면 다시 시도하세요.';
+const QUIET_MS = 60_000;
 
 /** The shells of a joined computer, through the routes it already offers its controllers over the link. */
 export function nodeRelay(session: () => ClientHttp2Session | undefined): TerminalRelay {
@@ -105,10 +106,14 @@ export function nodeRelay(session: () => ClientHttp2Session | undefined): Termin
     events: (id, body, cursor) => new Promise((resolve, reject) => {
       const stream = live().request({ ':method': 'GET', ':path': `/api/workspace/terminals/${encodeURIComponent(id)}/events`, accept: 'text/event-stream', ...(cursor ? { 'last-event-id': cursor } : {}) });
       let answered = false;
-      const stop = () => { if (!stream.destroyed) stream.close(http2.constants.NGHTTP2_CANCEL); };
+      // The stream carries a heartbeat every 15 seconds; one silent for longer than this is gone.
+      let quiet: ReturnType<typeof setTimeout> | undefined;
+      const touch = () => { clearTimeout(quiet); quiet = setTimeout(() => { stop(); body.destroy(); }, QUIET_MS); };
+      const stop = () => { clearTimeout(quiet); if (!stream.destroyed) stream.close(http2.constants.NGHTTP2_CANCEL); };
       body.once('close', stop);
+      touch();
       stream.on('error', error => { if (!answered) { answered = true; reject(Object.assign(new TowerError('unavailable', OFFLINE), { cause: error })); } else body.destroy(); });
-      stream.on('close', () => { if (!answered) { answered = true; reject(new TowerError('unavailable', OFFLINE)); } else body.end(); });
+      stream.on('close', () => { clearTimeout(quiet); if (!answered) { answered = true; reject(new TowerError('unavailable', OFFLINE)); } else body.end(); });
       stream.on('response', headers => {
         const status = Number(headers[':status']);
         answered = true;
@@ -123,7 +128,7 @@ export function nodeRelay(session: () => ClientHttp2Session | undefined): Termin
           return;
         }
         stream.setEncoding('utf8');
-        stream.on('data', (chunk: string) => { if (!body.destroyed) body.write(chunk); });
+        stream.on('data', (chunk: string) => { touch(); if (!body.destroyed) body.write(chunk); });
         resolve();
       });
     }),
@@ -183,7 +188,11 @@ export function serveTerminalSocket(ws: WebSocket, id: string, relay: TerminalRe
     },
     final(callback) { if (!closed) ws.close(1000, 'Stream ended'); callback(); },
   });
+  // However the shell's stream ends (the terminal host or the link to a joined computer gone, a reader too slow),
+  // the socket ends with it, so the page reconnects rather than wait on a socket that hears nothing.
+  let attached = false;
   body.on('error', () => { if (!closed) ws.close(1011, 'Stream failed'); });
+  body.on('close', () => { if (attached && !closed) ws.close(1011, 'Stream ended'); });
   const finish = () => {
     if (closed) return;
     closed = true;
@@ -198,7 +207,11 @@ export function serveTerminalSocket(ws: WebSocket, id: string, relay: TerminalRe
       if (message?.type !== 'hello' || !tokenValid(message.token)) { ws.close(SOCKET_REFUSED, 'Refused'); return; }
       greeted = true;
       clearTimeout(hello);
-      relay.events(id, body, message.cursor).then(() => send({ type: 'ready' }), error => {
+      relay.events(id, body, message.cursor).then(() => {
+        attached = true;
+        if (body.destroyed) { if (!closed) ws.close(1011, 'Stream ended'); return; }
+        send({ type: 'ready' });
+      }, error => {
         const { status, message: text } = failure(error);
         send({ type: 'error', status, message: text });
         ws.close([404, 409, 410].includes(status) ? SOCKET_GONE : 1011, 'Not attached');

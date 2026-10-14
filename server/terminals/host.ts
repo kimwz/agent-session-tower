@@ -95,7 +95,8 @@ export async function startTerminalHost(options: TerminalHostOptions) {
       }
       const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { protocol?: number; method?: string; args?: unknown[] };
       if (input.protocol !== RUNNER_PROTOCOL || typeof input.method !== 'string' || !Array.isArray(input.args)) throw new TowerError('conflict', 'Incompatible terminal request.');
-      use = input.method !== 'ping' && input.method !== 'list';
+      // Except the ping that comes before opening a shell: the host must not leave between it and the shell.
+      use = (input.method !== 'ping' && input.method !== 'list') || (input.method === 'ping' && input.args[0] === 'opening');
       if (use) lastRequest = Date.now();
       reply.result = await dispatch(input.method, input.args) ?? null;
     } catch (error) {

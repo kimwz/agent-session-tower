@@ -31,7 +31,7 @@ import { SnapshotStream, type FrameFormat } from './snapshot-stream.js';
 import { APP_VERSION, HEALTH_APPLICATION_ID, REQUEST_TOKEN_HEADER } from '../../shared/app-identity.js';
 import { assertWorkspace, listWorkspaceTree, readWorkspaceFile, saveWorkspaceFile, createWorkspaceDirectory, retentionWorkspacePath, openWorkspaceMedia, MAX_WORKSPACE_FILE_BYTES } from '../workspace-files.js';
 import { WorkspaceTerminals, type WorkspaceTerminalBackend } from '../workspace-terminals.js';
-import { localRelay, nodeRelay, serveTerminalSocket, MAX_SOCKET_MESSAGE, SOCKET_REFUSED, type TerminalRelay } from './terminal-socket.js';
+import { localRelay, nodeRelay, serveTerminalSocket, MAX_SOCKET_MESSAGE, type TerminalRelay } from './terminal-socket.js';
 import { sessionKey, type AuthStore } from '../auth/store.js';
 import { VaultPassword, type Viewer } from '../auth/vault-password.js';
 import { ownerIdentity, sessionCookie, setSessionCookie } from './auth.js';
@@ -976,6 +976,9 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
   // allows one address (see terminal-socket.ts). It passes the same checks as the page's other requests.
   const sockets = new WebSocketServer({ noServer: true, maxPayload: MAX_SOCKET_MESSAGE, perMessageDeflate: false });
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    // Node stops watching the socket's errors once it hands it here; a client resetting it before the upgrade is
+    // accepted must not take the server down.
+    socket.on('error', () => socket.destroy());
     const refuse = (status: number) => { socket.end(`HTTP/1.1 ${status} ${STATUS_CODES[status] ?? ''}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); };
     void (async () => {
       const { hosts, origins } = allowed();
@@ -995,7 +998,8 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       } else relay = localRelay(workspaceTerminals);
       sockets.handleUpgrade(req, socket, head, ws => {
         // A signed-out page loses its terminals too, like its other streams.
-        if (!identity.local) trackStream(sessionId, ws, () => ws.close(SOCKET_REFUSED, 'Signed out'));
+        // Cut off at once: a closing handshake would still deliver keys until the page answered it.
+        if (!identity.local) trackStream(sessionId, ws, () => ws.terminate());
         serveTerminalSocket(ws, match[2], relay, tokenValid);
       });
     })().catch(() => { if (!socket.destroyed) refuse(500); });

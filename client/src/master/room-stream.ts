@@ -42,8 +42,10 @@ export function followRoom(onState: (state: RoomState) => void, onDirective: (di
     else return;
     publish();
   };
+  let checking = false;
   const connect = () => {
     if (stopped || asleep) return;
+    source?.close();
     source = new EventSource(`/api/master/events?${new URLSearchParams({ epoch, after: String(seq) })}`);
     source.onopen = () => voiceListener?.connected(true);
     source.onmessage = message => { try { apply(JSON.parse(message.data) as MasterStreamEvent); } catch { /* ignore */ } };
@@ -55,6 +57,7 @@ export function followRoom(onState: (state: RoomState) => void, onDirective: (di
   const schedule = () => { if (!stopped && !asleep) { clearTimeout(retry); retry = setTimeout(() => void checkpoint(), 2000); } };
   const checkpoint = async () => {
     if (stopped) return;
+    checking = true;
     try {
       const state = await api<MasterCheckpoint>('/api/master/state');
       overview = state.overview; epoch = state.epoch; seq = state.seq;
@@ -64,12 +67,13 @@ export function followRoom(onState: (state: RoomState) => void, onDirective: (di
     } catch (error) {
       publish(error instanceof Error ? error.message : String(error));
       schedule();
-    }
+    } finally { checking = false; }
   };
   void checkpoint();
   return {
     stop: () => { stopped = true; clearTimeout(retry); source?.close(); },
     sleep: () => { if (stopped || asleep) return; asleep = true; clearTimeout(retry); source?.close(); source = undefined; voiceListener?.connected(false); },
-    wake: () => { if (stopped || !asleep) return; asleep = false; if (epoch) connect(); else void checkpoint(); },
+    // A checkpoint still under way connects by itself when it is done.
+    wake: () => { if (stopped || !asleep) return; asleep = false; if (checking) return; if (epoch) connect(); else void checkpoint(); },
   };
 }

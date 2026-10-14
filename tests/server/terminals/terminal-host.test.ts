@@ -133,6 +133,16 @@ test('asking a terminal host its version or its shells never keeps it from leavi
   await until(() => f.idle() === 1);
 });
 
+test('the ping before opening a shell keeps an idle host for it', async t => {
+  const f = await fixture(t, { idleMs: 400 });
+  const call = (f.client as unknown as { call: (method: string, args?: unknown[]) => Promise<unknown> }).call.bind(f.client);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  await call('ping', ['opening']);
+  await new Promise(resolve => setTimeout(resolve, 250));
+  assert.equal(f.idle(), 0, 'not idle for long enough since the opening ping');
+  await until(() => f.idle() === 1);
+});
+
 test('a terminal host says its revision, and one with this revision needs no restart for an update', async t => {
   const { TERMINAL_HOST_REVISION } = await import('../../../server/terminals/host.js');
   const f = await fixture(t);

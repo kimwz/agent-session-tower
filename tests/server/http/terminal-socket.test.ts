@@ -8,7 +8,8 @@ import { Writable } from 'node:stream';
 import { WebSocket } from 'ws';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { WorkspaceTerminals, type WorkspacePty } from '../../../server/workspace-terminals.js';
-import { nodeRelay, SseReader } from '../../../server/http/terminal-socket.js';
+import { nodeRelay, serveTerminalSocket, SseReader, type TerminalRelay } from '../../../server/http/terminal-socket.js';
+import { WebSocketServer } from 'ws';
 import { openTerminalSocket, type TerminalConnectionHandlers } from '../../../client/src/workspace/terminal-connection.js';
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import { until } from '../../helpers/until.ts';
@@ -49,7 +50,7 @@ async function fixture(t: test.TestContext, remote = false) {
   const { id } = await created.json() as { id: string };
   const url = (shell = id) => `ws://127.0.0.1:${port}/api/workspace/terminals/${shell}/socket`;
   const headers = { Host: host, Origin: `http://${host}`, ...(remote ? { Cookie: cookie, 'X-Forwarded-For': '192.0.2.1' } : {}) };
-  return { pty, token, id, url, headers, base, fetch, cookie };
+  return { pty, token, id, url, headers, base, fetch, cookie, auth: authFixture?.auth };
 }
 
 /** Opens a socket the way a page does, recording what it hears. */
@@ -128,6 +129,32 @@ test('a terminal socket passes the checks every page request does', async t => {
   right.connection.input('ok');
   await until(() => f.pty.written.join('') === 'ok');
   right.connection.close();
+});
+
+test('signing out cuts a remote page\'s terminal socket off at once', async t => {
+  const f = await fixture(t, true);
+  const { heard, connection } = connect(f.url(), f.headers, f.token);
+  await until(() => heard.ready === 1);
+  await f.auth!.setCredentials('monitor', 'replacement-fixture-password');
+  await until(() => heard.lost.length === 1);
+  connection.input('after sign-out');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.deepEqual(f.pty.written, []);
+});
+
+test('a socket ends when the shell\'s stream ends without an error, so the page reconnects', async t => {
+  let attached: Writable | undefined;
+  const relay: TerminalRelay = { events: async (_id, body) => { attached = body; }, input: async () => {}, resize: async () => {} };
+  const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  t.after(() => new Promise<void>(resolve => { for (const client of wss.clients) client.terminate(); wss.close(() => resolve()); }));
+  await new Promise(resolve => wss.once('listening', resolve));
+  wss.on('connection', ws => serveTerminalSocket(ws, 'fixture', relay, token => token === 'a'.repeat(64)));
+  const { heard } = connect(`ws://127.0.0.1:${(wss.address() as { port: number }).port}/`, {}, 'a'.repeat(64));
+  await until(() => heard.ready === 1);
+  // The terminal host went away, or a reader was too slow: the stream is destroyed, not ended.
+  attached!.destroy();
+  await until(() => heard.lost.length === 1);
+  assert.deepEqual(heard.lost, [true]);
 });
 
 test('a joined computer\'s shell is reached over its link with the routes it already offers', async t => {
