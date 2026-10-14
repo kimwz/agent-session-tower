@@ -102,6 +102,16 @@ export class ManagedSettingsSync extends EventEmitter {
     return run;
   }
 
+  /**
+   * Sends the settings again now, even unchanged, once any send under way ended: something on that computer changed
+   * what they mean there (a folder cloned for a repository a skill applies to). Resolves when it answered.
+   */
+  async resend(id: string): Promise<void> {
+    for (let current = this.running.get(id); current; current = this.running.get(id)) await current;
+    this.sentAt.delete(id);
+    await this.schedule(id);
+  }
+
   /** The settings this Tower has now, as one payload. A section whose export fails is left out this time. */
   async payload(): Promise<ManagedPayload> {
     const sections: ManagedPayload['sections'] = {};

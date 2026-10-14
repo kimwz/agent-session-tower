@@ -9,13 +9,16 @@ import { FollowedHostStore } from '../../../server/link/follow.js';
 import { ManagedSettingsReceiver, ManagedSettingsSync } from '../../../server/link/managed-settings.js';
 import { loadLinkIdentity } from '../../../server/link/identity.js';
 import { linkRequest } from '../../../server/link/transport.js';
+import { handleLinkRoute, type LinkRoutes } from '../../../server/link/routes.js';
+import { Readable } from 'node:stream';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { cloneAction } from '../../../server/repositories/clone.js';
 import type { GitRunner } from '../../../server/repositories/git.js';
 import { localRemotes } from '../../helpers/git-remotes.js';
 import { until } from '../../helpers/until.ts';
 
 /** A Tower with both link ends and the managed-settings ends, the clone action registered as server/index.ts does. */
-async function computer(t: TestContext, name: string, clone?: { workspace: string; git: GitRunner; registered: string[] }) {
+async function computer(t: TestContext, name: string, clone?: { workspace: string; git: GitRunner; registered: string[] }, applied?: unknown[]) {
   const stateDir = await mkdtemp(join(tmpdir(), `tower-managed-actions-${name}-`));
   const identity = await loadLinkIdentity(stateDir);
   const follow = new FollowedHostStore(stateDir);
@@ -23,6 +26,7 @@ async function computer(t: TestContext, name: string, clone?: { workspace: strin
   const receiver = new ManagedSettingsReceiver({ stateDir, follow, folders: async () => clone?.registered.map(cwd => ({ cwd })) ?? [] });
   await receiver.start();
   if (clone) receiver.action('clone', cloneAction({ register: async cwd => { clone.registered.push(cwd); }, workspace: clone.workspace, git: clone.git }));
+  if (applied) receiver.register('skills', async value => { applied.push(value); });
   let sync: ManagedSettingsSync | undefined;
   const controller = new ControllerLinks({ stateDir, identity, version: '1.137.0', hostname: () => name, managed: id => sync?.status(id) });
   sync = new ManagedSettingsSync({ controller });
@@ -74,4 +78,39 @@ test('the followed host clones a repository on the computer over the link; any o
   await host.controller.setFollowHost(joined.id, false);
   await assert.rejects(host.sync.request(joined.id, 'clone', { url: 'https://github.com/kimwz/app' }, 60_000), /이 Tower의 설정을 따를 때만/);
   assert.equal(registered.length, 1);
+});
+
+test('settings can be sent again unchanged on demand, after any send under way', async t => {
+  const applied: unknown[] = [];
+  const host = await computer(t, 'host-a');
+  const node = await computer(t, 'node-b', undefined, applied);
+  host.sync.register('skills', async () => ({ skills: [] }));
+  const joined = await host.join(node);
+  await until(() => host.sync.status(joined.id)?.applied ? true : undefined, 10_000);
+  const count = applied.length;
+  await host.sync.schedule(joined.id);
+  assert.equal(applied.length, count, 'unchanged settings are not sent again by themselves');
+  await host.sync.resend(joined.id);
+  assert.equal(applied.length, count + 1);
+});
+
+test('a clone asked from the page answers only after the computer\'s folders and settings were sent again', async () => {
+  const steps: string[] = [];
+  const managed = {
+    request: async (id: string, name: string, body: Record<string, unknown>) => { steps.push(`request:${name}:${body.url}`); return { cwd: '/home/me/Workspace/app', remoteUrl: 'github.com/kimwz/app' }; },
+    refreshFolders: async () => { steps.push('folders'); return []; },
+    resend: async () => { steps.push('resend'); },
+  };
+  const answered: Array<{ status: number; body: unknown }> = [];
+  const post = (path: string, body: unknown) => {
+    const req = Object.assign(Readable.from([Buffer.from(JSON.stringify(body))]), { method: 'POST' }) as unknown as IncomingMessage;
+    return handleLinkRoute(req, {} as ServerResponse, path, { managed } as unknown as LinkRoutes, (_res, status, answer) => { steps.push('answer'); answered.push({ status, body: answer }); });
+  };
+  const id = 'b'.repeat(32);
+  assert.equal(await post(`/api/link/nodes/${id}/clone`, { url: 'https://github.com/kimwz/app' }), true);
+  assert.deepEqual(steps, ['request:clone:https://github.com/kimwz/app', 'folders', 'resend', 'answer']);
+  assert.deepEqual(answered, [{ status: 200, body: { cwd: '/home/me/Workspace/app', remoteUrl: 'github.com/kimwz/app' } }]);
+  steps.length = 0;
+  await post(`/api/link/nodes/${id}/workspace`, {});
+  assert.deepEqual(steps, ['request:workspace:undefined', 'folders', 'answer'], 'only a clone changes what the settings mean there');
 });
