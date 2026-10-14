@@ -667,7 +667,6 @@ async function main() {
       return snapshot ? [{ id: node.id, name: node.label || node.name, snapshot }] : [];
     }) } : undefined;
     remoteNodes.on('change', () => notifications.changed());
-    const nodes = remoteNodes;
     followingSecrets = new FollowingSecrets({ controller: controllerLinks, worker: runs, link: nodeSecretLink(nodes), canonical: (node, path) => folderSources(nodes, runs).ask(node, path), folders: id => managedSync?.folders(id) ?? [] });
     followingSecrets.on('change', changed);
     // Folders of a following computer, reported on connect, after a clone and every few minutes.

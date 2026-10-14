@@ -6,7 +6,7 @@ import { api, relativeTime } from '../common/lib';
 import { translateMessage, useI18n } from '../i18n/i18n';
 import { SettingsFrameContext } from '../settings/SettingsPane';
 import { useOpenWorkspace } from '../workspace/WorkspaceOverlay';
-import { followState, loginStates, needsSignIn, syncView, type LoginTool } from './node-readiness';
+import { followState, loginStates, needsSignIn, secretState, syncView, type LoginTool } from './node-readiness';
 import { scopedId } from './scope';
 
 const post = <T,>(token: string, path: string, body: unknown) => api<T>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body: JSON.stringify(body) });
@@ -22,6 +22,7 @@ export function NodeReadiness({ token, node, busy, run }: { token: string; node:
   const follow = followState(node);
   const sync = syncView(node);
   const logins = loginStates(node);
+  const secrets = secretState(node);
   const setFollow = (value: boolean) => void run(() => post(token, `/api/link/nodes/${node.id}/follow`, { follow: value }));
   const notes: Record<typeof follow, string> = {
     off: t('이 Tower의 스킬·지침·모델·권한 규칙·빠른 판단 설정을 그 컴퓨터에 적용하지 않습니다.'),
@@ -44,6 +45,14 @@ export function NodeReadiness({ token, node, busy, run }: { token: string; node:
           {sync.sections.length > 0 && <ul>{sync.sections.map(([section, message]) => <li key={section}><strong>{sections[section] ?? section}</strong>: {translateMessage(message)}</li>)}</ul>}</>}
     </div>}
     {logins && <ul className="remote-logins" aria-label={t('로그인 상태')}>{logins.map(([tool, state]) => <li key={tool} className={state}><span>{tools[tool]}</span><small>{states[state]}</small></li>)}</ul>}
+    {secrets && <p className={`remote-secrets ${secrets.state}`} role="status"><strong>{t('시크릿')}</strong> · {{
+      connected: t('연결됨 · 사용 가능 {0}개', { 0: String(secrets.available ?? 0) }),
+      'trust-pending': t('신뢰 준비 중입니다. 두 컴퓨터의 보관함이 열리면 저절로 연결됩니다.'),
+      'host-locked': t('이 Tower의 보관함이 잠겨 있어 그 컴퓨터가 시크릿을 쓸 수 없습니다.'),
+      'needs-open': t('그 컴퓨터의 보관함을 한 번 열어 주세요(그 컴퓨터의 Tower › 설정 › 시크릿). 그 뒤로는 저절로 열립니다.'),
+      offline: t('연결 끊김'),
+      untrusted: t('이 컴퓨터의 시크릿 신뢰를 해제했습니다. 설정 › 시크릿에서 다시 신뢰할 수 있습니다.'),
+    }[secrets.state]}</p>}
     {needsSignIn(node) && <SignInTerminal token={token} node={node} name={name} />}
     {follow === 'following' && node.status === 'connected' && <CloneForm token={token} node={node} />}
   </div>;

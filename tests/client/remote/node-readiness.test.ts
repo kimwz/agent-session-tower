@@ -62,3 +62,12 @@ test('on a computer that follows a host, its panels name that host', () => {
   assert.match(renderToStaticMarkup(createElement(FollowedHostNote, { host: 'Main Mac' })), /호스트 설정을 따르는 중: Main Mac/);
   assert.match(renderToStaticMarkup(createElement(FollowedHostNote, { host: 'Main Mac', skills: true })), /그 Tower에서 온 스킬과 지침/);
 });
+
+test('the card says how this Tower\'s secrets reach a computer that follows it', () => {
+  setLanguage('ko');
+  const checkedAt = new Date().toISOString();
+  assert.match(card(node({ secrets: { state: 'connected', available: 3, checkedAt } })), /시크릿.*연결됨 · 사용 가능 3개/);
+  assert.match(card(node({ secrets: { state: 'needs-open', checkedAt } })), /보관함을 한 번 열어 주세요/);
+  assert.match(card(node({ secrets: { state: 'host-locked', checkedAt } })), /이 Tower의 보관함이 잠겨/);
+  assert.doesNotMatch(card(node({ followHost: false, following: false, secrets: { state: 'connected', available: 3, checkedAt } })), /사용 가능 3개/, 'nothing about secrets while it does not follow');
+});

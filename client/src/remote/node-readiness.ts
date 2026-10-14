@@ -44,6 +44,11 @@ export function loginStates(node: NodeSummary): Array<[LoginTool, LoginState]> |
   return logins && LOGINS.map(tool => [tool, logins[tool]]);
 }
 
+/** How this Tower's secrets reach a computer that follows it, for its card; none while it does not follow or predates it. */
+export function secretState(node: NodeSummary): NonNullable<NodeSummary['secrets']> | undefined {
+  return followState(node) === 'following' ? node.secrets : undefined;
+}
+
 /** A terminal there can help: a sign-in is missing, and it follows this Tower (which may open its Workspace folder). */
 export function needsSignIn(node: NodeSummary): boolean {
   return node.status === 'connected' && followState(node) === 'following' && Boolean(loginStates(node)?.some(([, state]) => state === 'missing'));
