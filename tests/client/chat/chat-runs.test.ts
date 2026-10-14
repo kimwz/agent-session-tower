@@ -171,6 +171,16 @@ test('matched running requests show only status and stop; pending actions disabl
   assert.match(renderToStaticMarkup(createElement(RunControl, { ...props, disabled: true })), /disabled=""/);
 });
 
+test('a message held back from delegated work says it runs as its own turn; an older worker’s unknown tool reason shows no note', () => {
+  const props = { onCancel() {}, onRetry() {}, cancelling: false };
+  const queued = renderToStaticMarkup(createElement(RunControl, { ...props, run: run('held', { status: 'queued', canSteer: false, steerBlocked: 'delegation' }) }));
+  assert.match(queued, /다른 턴이 맡긴 작업이라 끼워넣지 않습니다. 작업이 끝나면 따로 실행합니다/);
+  const owner = (towerTools: string) => renderToStaticMarkup(createElement(RunControl, { ...props, run: run('tools', { status: 'running', origin: { kind: 'owner' }, towerTools: towerTools as Run['towerTools'] }) }));
+  assert.match(owner('not-owner-session'), /자동화가 만든 대화라 Tower 도구를 연결하지 않았습니다/);
+  // 1.129–1.132 workers marked turns that had only their secret tools; they did have them.
+  assert.doesNotMatch(owner('broker-only'), /run-control-note/);
+});
+
 test('a joined computer’s attached files are matched by the ids that computer wrote into the conversation', () => {
   const request = run('attachments', { attachments: [file, image] });
   const message = row('native', wrapped(request));
