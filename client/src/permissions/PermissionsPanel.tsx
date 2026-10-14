@@ -8,7 +8,7 @@ import { locale, translateMessage, useI18n } from '../i18n/i18n';
 import { towerOperation } from '../triggers/trigger-helpers';
 import type { TriggerComputer, TriggerTargets } from '../triggers/TriggerPanel';
 import { localPart, nodeOf, scopedId } from '../remote/scope';
-import { FollowedHostNote, useFollowedHost } from '../remote/followed-host';
+import { FollowedHostNote, useFollowedHostState } from '../remote/followed-host';
 
 /** A permission operation on this computer, or through its link on a joined computer that follows this Tower. */
 export const permissionOperation = <T,>(token: string, name: string, input: unknown = {}, node?: string) => towerOperation<T>(token, `permissions.${name}`, input, node);
@@ -45,7 +45,8 @@ export function PermissionsPanel({ token, cwd: place, projects: ownProjects, com
   const reachable = !target || Boolean(computer);
   const cwd = place && (nodeOf(place) ?? '') === node ? localPart(place) : undefined;
   const projects = target ? targets?.(target).projects.map(([key]) => key) ?? [] : ownProjects;
-  const host = useFollowedHost();
+  const followed = useFollowedHostState();
+  const host = followed.host;
   const [overview, setOverview] = useState<PermissionOverview | null>(null);
   const [tab, setTab] = useState<Tab>('rules');
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -154,7 +155,7 @@ export function PermissionsPanel({ token, cwd: place, projects: ownProjects, com
             {request.decidedBy === 'auto' && request.review?.reason && <p className="permission-review-reason"><Bot size={13} />{request.review.reason}{request.review.suggestion ? ` → ${request.review.suggestion}` : ''}</p>}
             {request.run && <RunResult run={request.run} />}</li>)}</ul></details>}
       </section>}
-      {tab === 'rules' && <RuleList overview={overview} cwd={cwd} busy={busy} onNew={() => setDraft(newRule())} onEdit={rule => setDraft(ruleDraft(rule))}
+      {tab === 'rules' && <RuleList overview={overview} cwd={cwd} busy={busy} hostRulesOwn={!target && followed.known && !host} onNew={() => setDraft(newRule())} onEdit={rule => setDraft(ruleDraft(rule))}
         onDelete={rule => { if (window.confirm(t('{0} 규칙을 삭제할까요? 다음 턴부터 적용되지 않습니다.', { 0: rule.value }))) void act('delete', { id: rule.id }, t('규칙을 삭제했습니다.')); }} />}
     </>}
     </>}
@@ -246,7 +247,8 @@ function RequestCard({ request, busy, onApprove, onEdit, onDeny, onOpenSession }
   </article>;
 }
 
-export function RuleList({ overview, cwd, busy, onNew, onEdit, onDelete }: { overview: PermissionOverview; cwd?: string; busy: boolean; onNew: () => void; onEdit: (rule: PermissionRule) => void; onDelete: (rule: PermissionRule) => void }) {
+/** `hostRulesOwn`: this computer follows no Tower now, so the rules a host left here are its owner's to delete. */
+export function RuleList({ overview, cwd, busy, hostRulesOwn = false, onNew, onEdit, onDelete }: { overview: PermissionOverview; cwd?: string; busy: boolean; hostRulesOwn?: boolean; onNew: () => void; onEdit: (rule: PermissionRule) => void; onDelete: (rule: PermissionRule) => void }) {
   const { t } = useI18n();
   const projects = [...new Set(overview.rules.filter(rule => rule.scope === 'project').map(rule => rule.cwd!))].sort();
   if (cwd && !projects.includes(cwd)) projects.unshift(cwd);
@@ -265,10 +267,10 @@ export function RuleList({ overview, cwd, busy, onNew, onEdit, onDelete }: { ove
         <div className="skill-row-main"><code className="permission-value">{rule.value}</code>
           <span className="skill-badges"><Providers providers={rule.providers} />{rule.kind === 'claude' && <span className="skill-badge">{t('Claude 규칙')}</span>}{rule.host ? <span className="skill-badge">{t('호스트 설정')}</span> : rule.source === 'request' ? <span className="skill-badge pinned">{t('요청으로 허용')}</span> : null}{rule.source === 'auto' && <span className="skill-badge pinned">{t('자동 검토로 허용')}</span>}</span>
           {rule.note && <p>{rule.note}</p>}
-          {rule.host && <p className="auth-hint">{t('이 컴퓨터가 따르는 Tower의 규칙입니다. 그 Tower에서 바꾸거나 지웁니다.')}</p>}
+          {rule.host && !hostRulesOwn && <p className="auth-hint">{t('이 컴퓨터가 따르는 Tower의 규칙입니다. 그 Tower에서 바꾸거나 지웁니다.')}</p>}
           <NativePreview rule={rule} guarded={rule.source === 'auto'} /></div>
-        {!rule.host && <div className="skill-row-actions">
-          <button className="icon-button" title={t('편집')} aria-label={t('{0} 편집', { 0: rule.value })} disabled={busy} onClick={() => onEdit(rule)}><Pencil size={15} /></button>
+        {(!rule.host || hostRulesOwn) && <div className="skill-row-actions">
+          {!rule.host && <button className="icon-button" title={t('편집')} aria-label={t('{0} 편집', { 0: rule.value })} disabled={busy} onClick={() => onEdit(rule)}><Pencil size={15} /></button>}
           <button className="icon-button" title={t('삭제')} aria-label={t('{0} 삭제', { 0: rule.value })} disabled={busy} onClick={() => onDelete(rule)}><Trash2 size={15} /></button>
         </div>}
       </li>)}</ul> : <p className="auth-empty">{key === 'global' ? t('모든 프로젝트에 쓰는 규칙이 아직 없습니다.') : t('이 프로젝트에만 쓰는 규칙이 아직 없습니다.')}</p>}

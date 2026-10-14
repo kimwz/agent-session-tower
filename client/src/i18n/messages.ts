@@ -526,6 +526,7 @@ export const english: Record<string, string> = {
   "{0}에 지금 연결되어 있지 않거나 이 Tower의 설정을 따르지 않습니다. 다시 연결되고 \"호스트 설정 따르기\"가 켜지면 여기서 그 컴퓨터의 권한을 관리할 수 있습니다.": "{0} is not connected now, or does not follow this Tower's settings. Once it is connected with \"Follow host settings\" on, its permissions are managed here.",
   "호스트 설정": "Host setting",
   "이 컴퓨터가 따르는 Tower의 규칙입니다. 그 Tower에서 바꾸거나 지웁니다.": "A rule of the Tower this computer follows. Change or delete it there.",
+  "이 컴퓨터가 따르는 Tower의 규칙입니다. 그 Tower에서 바꾸거나 지우세요.": "This is a rule of the Tower this computer follows. Change or delete it there.",
   "권한 요청은 Tower에서 시작한 대화에서만 보낼 수 있습니다.": "Permission requests can be sent only from conversations started in Tower.",
   "기다리는 권한 요청이 너무 많습니다. 소유자가 Tower에서 먼저 정리해야 합니다.": "Too many permission requests are waiting. The owner must decide some in Tower first.",
   "규칙을 찾지 못했습니다.": "Rule not found.",

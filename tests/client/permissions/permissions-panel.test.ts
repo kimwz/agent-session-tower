@@ -49,4 +49,9 @@ test('the followed host’s rules for every project show as its own, without edi
   assert.match(markup, /그 Tower에서 바꾸거나 지웁니다/);
   assert.match(markup, /aria-label="make lint 삭제"/);
   assert.doesNotMatch(markup, /aria-label="gh pr view (삭제|편집)"/);
+  // Following no Tower any more, the rules one left stay in force and may be deleted here; they are still marked.
+  const left = renderToStaticMarkup(createElement(RuleList, { overview, busy: false, hostRulesOwn: true, onNew() {}, onEdit() {}, onDelete() {} }));
+  assert.match(left, /호스트 설정/);
+  assert.match(left, /aria-label="gh pr view 삭제"/);
+  assert.doesNotMatch(left, /aria-label="gh pr view 편집"|그 Tower에서 바꾸거나 지웁니다/);
 });

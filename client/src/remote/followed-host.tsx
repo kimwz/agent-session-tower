@@ -9,16 +9,19 @@ export function followedHostName(overview: Pick<LinkOverview, 'controllers'> | u
 }
 
 /** Which Tower this computer follows, read once when a settings panel opens. */
-export function useFollowedHost(): string | undefined {
-  const [host, setHost] = useState<string>();
+export function useFollowedHost(): string | undefined { return useFollowedHostState().host; }
+
+/** The same, and whether it is known yet: until then nothing may be offered that only an unfollowed computer allows. */
+export function useFollowedHostState(): { known: boolean; host?: string } {
+  const [state, setState] = useState<{ known: boolean; host?: string }>({ known: false });
   useEffect(() => {
     let current = true;
-    void api<LinkOverview>('/api/link').then(overview => { if (current) setHost(followedHostName(overview)); },
+    void api<LinkOverview>('/api/link').then(overview => { if (current) setState({ known: true, host: followedHostName(overview) }); },
       // best-effort: a Tower whose links are unavailable follows nobody, and the note stays hidden.
-      () => { if (current) setHost(undefined); });
+      () => { if (current) setState({ known: true }); });
     return () => { current = false; };
   }, []);
-  return host;
+  return state;
 }
 
 /**

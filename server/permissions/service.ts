@@ -844,8 +844,22 @@ export class PermissionService {
     });
   }
 
+  /**
+   * Deletes a rule. One the followed host keeps here is changed only there while this computer follows it; once it
+   * follows that host no more, the rules it left stay in force (as all its settings do) and are this owner's to delete.
+   */
   remove(id: string): Promise<PermissionOverview> {
     return this.serial(async () => {
+      const host = this.host;
+      if (host?.rules.some(rule => rule.id === id)) {
+        if (await this.options.followedHost?.() === host.hostId) throw failure('이 컴퓨터가 따르는 Tower의 규칙입니다. 그 Tower에서 바꾸거나 지우세요.', 'forbidden');
+        await this.requireEffects();
+        const next = { ...host, rules: host.rules.filter(rule => rule.id !== id) };
+        await this.hostFile.save(host, next);
+        this.host = next;
+        await this.apply();
+        return this.overview();
+      }
       if (!this.state.rules.some(rule => rule.id === id)) throw failure('규칙을 찾지 못했습니다.', 'not-found');
       {
         const batch = new PermissionBatch(this.state);

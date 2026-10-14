@@ -269,7 +269,7 @@ test('the host’s rules for every project apply here for Claude and Codex besid
   assert.match(await readFile(codexFile, 'utf8'), /prefix_rule\(pattern=\["gh", "pr", "view"\], decision="allow"\)/);
   const hostRule = node.service.overview().rules.find(rule => rule.value === 'gh pr view')!;
   assert.equal(hostRule.host, true, 'marked as the host’s');
-  await assert.rejects(node.service.remove(hostRule.id), /찾지 못했습니다/, 'changed only on the host');
+  await assert.rejects(node.service.remove(hostRule.id), /그 Tower에서 바꾸거나 지우세요/, 'changed only on the host while it is followed');
   assert.equal((await node.service.request({ kind: 'command', value: 'gh pr view', scope: 'project', reason: 'x' }, agent((node.sessions.set('claude:a', { cwd: node.paths.shop!, provider: 'claude' }), 'claude:a')))).request.status, 'exists');
 
   // The same settings again: nothing is written.
@@ -433,4 +433,25 @@ test('an allow the host withdrew leaves the rules file for every project even wh
   const text = await readFile(codexFile, 'utf8');
   assert.doesNotMatch(text, /"gh", "pr", "view"/, 'the withdrawn allow is gone');
   assert.match(text, /"make", "lint"/, 'this computer’s own rule stays');
+});
+
+test('once this computer follows the host no more, the rules it left stay in force and are this owner’s to delete', async t => {
+  const { host, node } = await hostAndNode(t);
+  const codexFile = join(node.codexHome, 'rules', 'tower.rules');
+  await node.service.applyManaged(await host.service.exportManaged(), HOST);
+  const left = node.service.overview().rules.find(rule => rule.host && rule.value === 'gh pr view')!;
+  node.follow(OTHER);
+  assert.match(node.service.claudeSettings(node.paths.shop!)!, /gh pr view/, 'last values remain after following stops');
+  await node.service.remove(left.id);
+  assert.ok(!node.service.overview().rules.some(rule => rule.id === left.id));
+  assert.doesNotMatch(node.service.claudeSettings(node.paths.shop!)!, /gh pr view/);
+  const codex = await readFile(codexFile, 'utf8');
+  assert.doesNotMatch(codex, /"gh", "pr", "view"/);
+  assert.match(codex, /"make", "lint"/, 'this computer’s own rule stays');
+  node.service.close();
+  assert.ok(!(await node.restart()).overview().rules.some(rule => rule.id === left.id), 'gone after a restart too');
+  node.follow(HOST);
+  const again = await node.restart();
+  await again.applyManaged(await host.service.exportManaged(), HOST);
+  await assert.rejects(again.remove(again.overview().rules.find(rule => rule.host)!.id), /그 Tower에서 바꾸거나 지우세요/, 'following it again, its rules are its own once more');
 });
