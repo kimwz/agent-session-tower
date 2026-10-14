@@ -514,18 +514,18 @@ export class SecretRuntime {
   private async viewUnlock({ password, credentialId, recoveryPassword }: z.output<typeof viewUnlockInput>): Promise<{ generation: string }> {
     const service = this.options.service;
     if (!service.status().initialized) throw fail('시크릿 보관함이 아직 없습니다. 보관함을 먼저 만드세요.', 'not-found');
+    // False when `unlock` itself fails; a failure after it opened (migration, closures) is the open's own and is thrown.
+    const tryOpen = async (unlock: () => Promise<unknown>): Promise<boolean> => {
+      let opened = false;
+      try { await this.open(async () => { await unlock(); opened = true; }); return true; }
+      catch (error) { if (opened) throw error; return false; }
+    };
     if (service.status().locked) {
-      // A wrapper that does not open counts as missing; a failure after it opened is the open's own.
-      if (service.vault.hasTower(credentialId)) {
-        let unwrapped = false;
-        try { await this.open(async () => { await service.towerUnlock(password, credentialId); unwrapped = true; }); }
-        catch (error) { if (unwrapped) throw error; }
-      }
+      // A wrapper that does not open counts as missing.
+      if (service.vault.hasTower(credentialId)) await tryOpen(() => service.towerUnlock(password, credentialId));
       if (service.status().locked) {
         if (recoveryPassword === undefined) throw viewFail('needs-recovery', 'conflict', 'Tower 비밀번호로 연결된 보관함 열쇠가 없습니다. 복구 비밀번호(기존 보관함 비밀번호)를 한 번 입력하세요.');
-        let unlocked = false;
-        try { await this.open(async () => { await service.unlock(recoveryPassword); unlocked = true; }); }
-        catch (error) { if (unlocked) throw error; throw fail('복구 비밀번호(기존 보관함 비밀번호)가 올바르지 않습니다.'); }
+        if (!await tryOpen(() => service.unlock(recoveryPassword))) throw fail('복구 비밀번호(기존 보관함 비밀번호)가 올바르지 않습니다.');
         await service.towerPrune(credentialId); await service.towerWrap(password, credentialId);
       }
     } else {
