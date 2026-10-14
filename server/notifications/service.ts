@@ -133,6 +133,8 @@ export function withFollowing(context: NotificationContext): NotificationContext
   return {
     ...context,
     runs: () => [...context.runs(), ...computers().flatMap(computer => computer.snapshot.runs.map(run => ({ ...run, id: scoped(computer.id, run.id), sessionId: scoped(computer.id, run.sessionId),
+      // A trigger this Tower set up there is named by that computer's ids, so its events never meet this one's.
+      ...(run.origin?.triggerId ? { origin: { ...run.origin, triggerId: scoped(computer.id, run.origin.triggerId), ...(run.origin.eventId ? { eventId: scoped(computer.id, run.origin.eventId) } : {}) } } : {}),
       ...(run.scheduled ? { scheduled: { ...run.scheduled, afterRunId: scoped(computer.id, run.scheduled.afterRunId) } } : {}),
       ...(run.steering ? { steering: { ...run.steering, targetRunId: scoped(computer.id, run.steering.targetRunId) } } : {}) })))],
     session: id => {

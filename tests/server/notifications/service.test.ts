@@ -235,3 +235,22 @@ test('a computer that follows a host leaves the host\'s work to it and still ann
   await settle();
   assert.equal(sent.length, 2);
 });
+
+test('a trigger this Tower set up on a following computer is announced starting here, once, and not there', async t => {
+  const now = () => new Date().toISOString();
+  let nodeRuns: Run[] = [];
+  const host = await pushes(t, { runs: () => [], session: () => undefined, project: () => '', trigger: () => undefined,
+    following: () => ({ self: HOST, computers: [{ id: NODE, name: 'office-tower-1', snapshot: mirrored(nodeRuns) }] }) });
+  // As the node mirrors it to the host that set the trigger up: its ids included (remoteRun).
+  const started = run('t-run', { sessionId: 'n1', origin: { kind: 'trigger', triggerId: 'nightly', eventId: 'e1', controllerId: HOST }, status: 'running', startedAt: now() });
+  nodeRuns = [started];
+  await host.settle();
+  await host.settle();
+  assert.equal(host.sent.length, 1);
+  const view = withFollowing({ runs: () => [], session: () => undefined, project: () => '', trigger: () => undefined,
+    following: () => ({ self: HOST, computers: [{ id: NODE, name: 'office-tower-1', snapshot: mirrored(nodeRuns) }] }) });
+  assert.deepEqual(pendingEvents(view.runs(), 0, new Set()).map(event => event.key), [`trigger:@${NODE}/nightly:@${NODE}/e1`], 'named by that computer\'s ids');
+  const node = await pushes(t, { runs: () => [started], session: () => session, project: () => 'app', trigger: () => 'Nightly', followedHost: () => HOST });
+  await node.settle();
+  assert.equal(node.sent.length, 0);
+});
