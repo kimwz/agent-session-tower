@@ -477,7 +477,15 @@ export class SecretRuntime {
     const view = this.options.service.settings();
     const ids = await this.options.pendingImports?.() ?? [];
     const keyed = ids.length ? await keyedPendingImports(this.options.stateDir) : [];
-    return { ...view, status: { ...view.status, pendingImports: ids.length, pendingImportIds: ids, ...(keyed.length ? { pendingImportsKeyed: keyed } : {}) } };
+    return { ...view, status: { ...await this.pageStatus(), pendingImports: ids.length, pendingImportIds: ids, ...(keyed.length ? { pendingImportsKeyed: keyed } : {}) } };
+  }
+  /** The vault's status as the page reads it: while locked, whether this computer's machine key opens it (`machineKey`). */
+  private async pageStatus(): Promise<VaultStatus> {
+    const status = this.options.service.status();
+    if (!status.initialized || !status.locked) return status;
+    let key: Buffer | undefined;
+    try { key = await readMachineKey(this.options.stateDir); } catch { return status; } // best-effort: a damaged key file leaves the password to open it
+    try { return key && this.options.service.vault.hasMachine(key) ? { ...status, machineKey: true } : status; } finally { key?.fill(0); }
   }
   /** Every saved secret the owner may connect to a session, shared or not; no values. */
   private connectable(): SecretMetadata[] { return this.options.service.settings().secrets.map(({ sharing: _sharing, legacy: _legacy, withheld: _withheld, ...metadata }) => metadata); }
@@ -502,7 +510,7 @@ export class SecretRuntime {
    * a source starts a task for it.
    */
   private async sessionView(sessionId: string): Promise<SecretSessionView> {
-    const service = this.options.service; const status = service.status();
+    const service = this.options.service; const status = await this.pageStatus();
     if (!status.initialized) return closedView(status, 'uninitialized');
     if (status.locked || this.blocked) return closedView(status, 'locked');
     try {
@@ -542,8 +550,8 @@ export class SecretRuntime {
     return { available: lists.flat(), unavailable, updatePending, disconnected };
   }
   /** The owner view of a joined computer's session, from what that computer reported (`subject`) and this vault. */
-  private remoteSessionView(sessionId: string, subject: RemoteSessionSubject): SecretSessionView {
-    const service = this.options.service; const status = service.status();
+  private async remoteSessionView(sessionId: string, subject: RemoteSessionSubject): Promise<SecretSessionView> {
+    const service = this.options.service; const status = await this.pageStatus();
     if (!status.initialized) return closedView(status, 'uninitialized');
     if (status.locked || this.blocked) return closedView(status, 'locked');
     if ('error' in subject) return closedView(status, subject.error);

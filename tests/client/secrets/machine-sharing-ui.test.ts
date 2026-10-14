@@ -7,6 +7,9 @@ import { machineChoices, sharingDraft, sharingPayload, sharingSummary, type Secr
 import { SecretSharingChips, SecretSharingEditor } from '../../../client/src/secrets/SecretSharingEditor.js';
 import { SecretAddForm } from '../../../client/src/secrets/SecretAddForm.js';
 import { clearShare, openShareRequest, pendingShare, shareRequestOf } from '../../../client/src/secrets/share-request.js';
+import { unlockMode, unlockReady, unlockRequest } from '../../../client/src/secrets/secrets-client.js';
+import { SecretAccess } from '../../../client/src/secrets/SecretAccess.js';
+import { SecretPaste } from '../../../client/src/secrets/SecretPaste.js';
 import { getLanguage, setLanguage } from '../../../client/src/i18n/i18n.js';
 
 const original = getLanguage();
@@ -49,4 +52,18 @@ test('a share push opens that secret with a one-tap share to the computer that a
   assert.match(asked, /office-tower-1 작업이 이 시크릿을 쓰려 합니다/); assert.match(asked, />이 머신에 공유</);
   const already = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: item({ sharing: { revision: 1, allMachines: false, machines: ['office-vault'], folders: [] } }), canvas, busy: false, change, onClose() {} }));
   assert.doesNotMatch(already, /이 머신에 공유/, 'nothing to ask once shared');
+});
+
+test('a vault this computer’s machine key opens is opened with one press: no Tower or recovery password asked', () => {
+  assert.equal(unlockMode('missing', {}, true), 'machine', 'not the Tower and recovery passwords together');
+  assert.equal(unlockMode(undefined, { recovery: true }, true), 'machine');
+  assert.equal(unlockMode('missing', {}), 'both', 'any other vault as before');
+  assert.deepEqual(unlockRequest('machine', '', ''), ['unlock', {}]);
+  assert.equal(unlockReady('machine', '', ''), true);
+  const status = { initialized: true, locked: true, machineKey: true as const, towerPassword: 'missing' as const };
+  const access = renderToStaticMarkup(createElement(SecretAccess, { status, busy: false, change }));
+  assert.doesNotMatch(access, /type="password"/); assert.match(access, /머신 키로 엽니다/);
+  assert.match(access, /<button type="submit">잠금 해제<\/button>/, 'ready to press');
+  const paste = renderToStaticMarkup(createElement(SecretPaste, { view: { status, available: [], connectable: [], usage: [], unavailableSources: [], updatePendingSources: [], error: 'locked' }, sessionId: 's', busy: false, change, onConnected() {} }));
+  assert.doesNotMatch(paste, /type="password"/); assert.match(paste, /머신 키로 엽니다/);
 });

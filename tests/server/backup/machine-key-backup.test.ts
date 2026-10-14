@@ -102,7 +102,10 @@ test('the owner opens a vault its machine key opens without a password, also aft
   const runtime = new SecretRuntime({ stateDir, service, runs: new FixtureRuns(), followed: async () => follow.host });
   t.after(() => runtime.close());
   assert.equal(await runtime.machineVault(), 'open');
+  assert.equal((await runtime.control('settings', {}) as SecretSettingsView).status.machineKey, undefined, 'only said while locked');
   await runtime.control('lock', {});
+  assert.equal((await runtime.control('settings', {}) as SecretSettingsView).status.machineKey, true, 'the page offers a plain open');
+  assert.equal((await runtime.control('session', { sessionId: 'unknown' }) as { status: { machineKey?: true } }).status.machineKey, true, 'in a chat too');
   assert.equal(await runtime.machineVault(), 'needs-open', 'an owner lock is kept by the automatic open');
   await runtime.control('unlock', { password: 'whatever the owner typed' });
   assert.equal(service.status().locked, false, 'the owner’s unlock opens it with the machine key');
@@ -111,4 +114,13 @@ test('the owner opens a vault its machine key opens without a password, also aft
   await runtime.control('unlock', {});
   assert.equal(service.status().locked, false, 'following or not');
   follow.host = HOST; assert.equal(await runtime.machineVault(), 'open', 'and the owner lock ended with it');
+});
+
+test('a password vault without a machine wrapper is not offered a plain open', async t => {
+  const stateDir = await state(t, 'password');
+  const service = await secretService(stateDir, { password: TARGET_PASSWORD });
+  const runtime = new SecretRuntime({ stateDir, service, runs: new FixtureRuns() }); t.after(() => runtime.close());
+  await runtime.control('lock', {});
+  assert.equal((await runtime.control('settings', {}) as SecretSettingsView).status.machineKey, undefined);
+  await assert.rejects(runtime.control('unlock', {}), { kind: 'invalid' }, 'its password is still needed');
 });

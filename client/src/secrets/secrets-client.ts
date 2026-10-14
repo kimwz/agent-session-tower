@@ -79,23 +79,26 @@ export async function readSecretFile(file: Pick<File, 'size' | 'arrayBuffer'>): 
 }
 
 /**
- * How a locked vault opens: the Tower (login) password; it with the recovery password once, when the vault is not yet
- * linked to the current login (`missing`, or the server answered `needs-recovery`); the recovery (old vault) password
- * alone, when the owner chose it; or, without Tower-password support, the vault password as before.
+ * How a locked vault opens: with this computer's machine key and no password (`machine`, a vault made while it followed a
+ * host); the Tower (login) password; it with the recovery password once, when the vault is not yet linked to the current
+ * login (`missing`, or the server answered `needs-recovery`); the recovery (old vault) password alone, when the owner
+ * chose it; or, without Tower-password support, the vault password as before.
  */
-export type UnlockMode = 'tower' | 'both' | 'recovery' | 'vault';
-export function unlockMode(towerPassword: SecretTowerPassword | undefined, choice: { recovery?: boolean; asked?: boolean }): UnlockMode {
+export type UnlockMode = 'machine' | 'tower' | 'both' | 'recovery' | 'vault';
+export function unlockMode(towerPassword: SecretTowerPassword | undefined, choice: { recovery?: boolean; asked?: boolean }, machineKey?: boolean): UnlockMode {
+  if (machineKey) return 'machine';
   if (!towerPassword) return 'vault';
   if (choice.recovery) return 'recovery';
   return towerPassword === 'missing' || choice.asked ? 'both' : 'tower';
 }
 /** The request that opens the vault in `mode`: the Tower-password paths also turn on value viewing. */
 export function unlockRequest(mode: UnlockMode, password: string, recoveryPassword: string): [action: string, body: Record<string, string>] {
+  if (mode === 'machine') return ['unlock', {}];
   if (mode === 'tower') return ['view-unlock', { password }];
   if (mode === 'both') return ['view-unlock', { password, recoveryPassword }];
   return ['unlock', { password }];
 }
-export const unlockReady = (mode: UnlockMode, password: string, recoveryPassword: string) => !!password && (mode !== 'both' || !!recoveryPassword);
+export const unlockReady = (mode: UnlockMode, password: string, recoveryPassword: string) => mode === 'machine' || (!!password && (mode !== 'both' || !!recoveryPassword));
 
 /** A file is previewed as text only when it is valid UTF-8 of at most this size. */
 export const FILE_PREVIEW_BYTES = 64 * 1024;

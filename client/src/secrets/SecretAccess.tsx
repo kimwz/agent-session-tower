@@ -18,6 +18,7 @@ export function SecretUnlockFields({ mode, password, recoveryPassword, disabled,
   onPassword: (value: string) => void; onRecoveryPassword: (value: string) => void; onRecovery: (recovery: boolean) => void;
 }) {
   const { t } = useI18n();
+  if (mode === 'machine') return <p className="secret-hint">{t('이 컴퓨터의 머신 키로 엽니다. 비밀번호는 필요 없습니다.')}</p>;
   const label = mode === 'vault' ? '비밀번호' : mode === 'recovery' ? '복구 비밀번호(기존 보관함 비밀번호)' : 'Tower 비밀번호';
   return <>
     <label>{t(label)}<input type="password" autoComplete={mode === 'recovery' ? 'off' : 'current-password'} autoFocus={autoFocus} value={password} required disabled={disabled} onChange={event => onPassword(event.target.value)} /></label>
@@ -36,7 +37,7 @@ export function SecretAccess({ status, busy, change }: { status: VaultStatus; bu
   const [confirmation, setConfirmation] = useState('');
   // The owner's switch to the recovery password alone, and the server asking for it with the Tower password.
   const [recovery, setRecovery] = useState(false); const [asked, setAsked] = useState(false);
-  const setup = !status.initialized; const mode = unlockMode(status.towerPassword, { recovery, asked });
+  const setup = !status.initialized; const mode = unlockMode(status.towerPassword, { recovery, asked }, status.machineKey);
   const submit = async (event: FormEvent) => {
     event.preventDefault(); event.stopPropagation();
     const input = password; const second = recoveryPassword;
@@ -52,7 +53,7 @@ export function SecretAccess({ status, busy, change }: { status: VaultStatus; bu
   };
   const choose = (next: boolean) => { setPassword(''); setRecoveryPassword(''); setRecovery(next); };
   const ready = setup ? password.length >= MIN_VAULT_PASSWORD && password === confirmation : unlockReady(mode, password, recoveryPassword);
-  const description = setup ? '비밀번호로 암호화하여 이 컴퓨터에 보관합니다.' : mode === 'vault' ? '보관함 비밀번호를 입력하세요.'
+  const description = setup ? '비밀번호로 암호화하여 이 컴퓨터에 보관합니다.' : mode === 'machine' ? '이 컴퓨터가 호스트를 따르는 동안 만든 보관함입니다.' : mode === 'vault' ? '보관함 비밀번호를 입력하세요.'
     : mode === 'recovery' ? '복구 비밀번호로 보관함을 엽니다. 값을 보려면 Tower 비밀번호가 따로 필요합니다.' : 'Tower에 로그인하는 비밀번호로 보관함을 엽니다.';
   return <form className="secret-form" onSubmit={event => void submit(event)}>
     <h3>{t(setup ? '시크릿 보관함 만들기' : '시크릿 보관함 잠금 해제')}</h3>

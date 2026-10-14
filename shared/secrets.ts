@@ -41,6 +41,8 @@ export interface VaultStatus {
   initialized: boolean; locked: boolean; pendingImports?: number; pendingImportIds?: string[]; error?: string;
   /** Pending vault imports that carry their machine key: they import without the source vault's password. */
   pendingImportsKeyed?: string[];
+  /** While locked: this computer's machine key opens the vault (made while it followed a host), so the page opens it without a password. */
+  machineKey?: true;
   /**
    * Set by the web while the vault is locked and the account and worker support it: `ready` when the Tower (login)
    * password opens it, `missing` when the vault (recovery) password is needed once with it. Absent: the vault password opens it.

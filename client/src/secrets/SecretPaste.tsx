@@ -23,7 +23,7 @@ export function SecretPaste({ view, sessionId, cwd, busy, change, onConnected }:
   const generation = useRef(0); const sending = useRef(false);
   useEffect(() => () => { generation.current++; }, []);
   const setup = !!view && !view.status.initialized; const needsAccess = !!view && (setup || view.status.locked);
-  const mode = unlockMode(view?.status.towerPassword, { recovery, asked });
+  const mode = unlockMode(view?.status.towerPassword, { recovery, asked }, view?.status.machineKey);
   const blocked = sessionBlocked(view?.error);
   const disabled = busy || submitting || reading;
   const kind = quickSecretKind(raw, format);
@@ -70,7 +70,7 @@ export function SecretPaste({ view, sessionId, cwd, busy, change, onConnected }:
       <label className="secret-check"><input type="radio" name="secret-destination" checked={destination === 'global'} disabled={disabled} onChange={() => setDestination('global')} />{t('모든 내 머신')}</label>
       <p>{t('저장한 시크릿은 다른 세션에서 ‘기존 시크릿 연결’로 다시 쓸 수 있습니다. 공유 범위는 설정에서 바꿀 수 있습니다.')}</p>
     </fieldset>}
-    {needsAccess && <div className="secret-inline-access"><strong>{t(setup ? '처음 한 번, 보관함 비밀번호를 정하세요' : '보관함 잠금 해제')}</strong><p>{t(setup ? '이 세션의 값도 비밀번호로 암호화합니다. 12자 이상 입력하세요.' : '비밀번호를 입력하면 붙여넣은 값과 저장한 시크릿을 사용할 수 있습니다.')}</p>
+    {needsAccess && <div className="secret-inline-access"><strong>{t(setup ? '처음 한 번, 보관함 비밀번호를 정하세요' : '보관함 잠금 해제')}</strong><p>{t(setup ? '이 세션의 값도 비밀번호로 암호화합니다. 12자 이상 입력하세요.' : mode === 'machine' ? '보관함을 열면 붙여넣은 값과 저장한 시크릿을 사용할 수 있습니다.' : '비밀번호를 입력하면 붙여넣은 값과 저장한 시크릿을 사용할 수 있습니다.')}</p>
       {setup ? <>
         <label>{t('비밀번호')}<input type="password" autoComplete="new-password" value={password} required minLength={MIN_VAULT_PASSWORD} disabled={disabled} onChange={event => setPassword(event.target.value)} /></label>
         <label>{t('비밀번호 확인')}<input type="password" autoComplete="new-password" required value={confirmation} disabled={disabled} onChange={event => setConfirmation(event.target.value)} /></label>
