@@ -361,7 +361,7 @@ function TowerApp() {
   const localProjects = useMemo(() => projects.filter(([key]) => !nodeOf(key)), [projects]);
   // Secret sharing picks among the folders of every computer and names each computer as the canvas does.
   const secretCanvas = useMemo((): SecretCanvas => ({ folders: secretFolderChoices(projects, hosts), hosts }), [projects, hosts]);
-  const triggerComputers = useMemo(() => hosts.flatMap(host => host.node ? [{ node: host.node, name: host.name, providers: host.providers, ready: Boolean(host.triggers), connected: host.status === 'connected', models: Boolean(host.models) }] : []), [hosts]);
+  const triggerComputers = useMemo(() => hosts.flatMap(host => host.node ? [{ node: host.node, name: host.name, providers: host.providers, ready: Boolean(host.triggers), connected: host.status === 'connected', models: Boolean(host.models), permissions: Boolean(host.following) }] : []), [hosts]);
   // What a trigger on another computer can aim at, named as that computer knows it.
   const triggerTargets = useCallback((node: string) => ({
     projects: projects.filter(([key]) => nodeOf(key) === node).map(([key, title]): [string, string] => [localPart(key), title]),

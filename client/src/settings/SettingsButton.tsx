@@ -19,7 +19,7 @@ export function SettingsButton({ context, joined }: { context: SettingsContext; 
   const auth = useAuth();
   const phone = useMediaQuery('(max-width: 680px)');
   const { token } = context;
-  const { attention, refresh, join, acknowledgeTriggers } = useSettingsAttention(token, context.triggers, joined);
+  const { attention, refresh, join, acknowledgeTriggers } = useSettingsAttention(token, context.triggers, joined, context.computers);
   const [place, setPlace] = useState<SettingsPlace | null>(null);
   const last = useRef<SettingsSection | undefined>(undefined);
   const sections = useMemo(() => settingsSections(Boolean(auth)), [auth]);

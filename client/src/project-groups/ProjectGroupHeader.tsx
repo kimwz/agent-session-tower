@@ -41,6 +41,8 @@ export type ProjectGroupHeaderData = {
   workspaceNote?: string;
   /** The joined computer the folder is on. */
   machine?: string;
+  /** That computer follows this Tower's settings, so its permissions are managed from here. */
+  permissions?: boolean;
 };
 
 function GroupTitleDialog({ data, onClose }: { data: ProjectGroupHeaderData; onClose: () => void }) {
@@ -111,7 +113,7 @@ export function ProjectGroupMenu({ data, onEditTitle, onDone }: { data: ProjectG
     <button type="button" disabled={workspaceUnavailable} onClick={act(() => openWorkspace?.(data.path, 'terminal', data.machine))}><Terminal size={15} />{t("브라우저 터미널 열기")}</button>
     {workspaceNote && <p className="project-group-menu-note">{workspaceNote}</p>}
     {!data.machine && <button type="button" disabled={!actionable || !data.token} onClick={act(() => openSkills(data.path))}><Sparkles size={15} />{t("이 폴더의 스킬")}{proposed && <span className="skills-dot" role="img" title={t("이 폴더에 추천 스킬이 있습니다")} aria-label={t("추천 있음")} />}</button>}
-    {!data.machine && <button type="button" disabled={!actionable || !data.token} onClick={act(() => openPermissions(data.path))}><ShieldCheck size={15} />{t("이 폴더의 권한")}</button>}
+    {(!data.machine || data.permissions) && <button type="button" disabled={!actionable || !data.token} onClick={act(() => openPermissions(data.path))}><ShieldCheck size={15} />{t("이 폴더의 권한")}</button>}
     <button type="button" disabled={disabled} onClick={act(onEditTitle)}><Pencil size={14} />{t("그룹 제목 편집")}</button>
     <button type="button" aria-pressed={data.hidden} disabled={viewDisabled} onClick={act(() => { void data.onUpdate({ cwd: data.path, hidden: !data.hidden }); })}>{data.hidden ? <EyeOff size={15} /> : <Eye size={15} />}{data.hidden ? t("폴더 숨김 해제") : t("폴더와 세션을 캔버스에서 숨기기")}</button>
     <div className="project-group-columns" role="group" aria-label={t("한 줄에 놓을 세션 수")}><span>{t("한 줄에 놓을 세션 수")}</span><div>

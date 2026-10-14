@@ -115,7 +115,8 @@ export function SettingsDialog({ place, sections, attention, context, onPlace, o
       case 'triggers': return <TriggerPanel token={context.token} overview={context.triggers} providers={context.providers} projects={context.projects}
         computers={context.computers} targets={context.targets} onOpenSlack={() => setSlack(true)} onOpenPublic={() => setPublicAgents(true)} onSeen={onTriggersSeen} />;
       case 'skills': return <SkillsPanel token={context.token} cwd={cwd} projects={context.projects.map(([key]) => key)} onClearFolder={clearFolder} onChanged={onChanged} onOpenSession={openSession} />;
-      case 'permissions': return <PermissionsPanel token={context.token} cwd={cwd} projects={context.projects.map(([key]) => key)} pending={attention.permissions} onClearFolder={clearFolder} onChanged={onChanged} onOpenSession={openSession} />;
+      case 'permissions': return <PermissionsPanel token={context.token} cwd={cwd} projects={context.projects.map(([key]) => key)} computers={context.computers} targets={context.targets}
+        pending={attention.permissions} waitingOn={attention.permissionsOn} onClearFolder={clearFolder} onChanged={onChanged} onOpenSession={openSession} />;
       case 'decisions': return <DecisionPanel token={context.token} />;
       case 'remote': return <RemotePanel token={context.token} projects={context.projects} controlledBy={context.controlledBy} initialTab={place.remoteTab} />;
       case 'notifications': return <NotificationPanel token={context.token} />;

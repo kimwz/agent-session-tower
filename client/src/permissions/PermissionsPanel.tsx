@@ -4,10 +4,14 @@ import { SettingsFrameContext, SettingsPane, useSettingsGuard } from '../setting
 import { Bot, Check, LoaderCircle, Pencil, Plus, Trash2, TriangleAlert } from 'lucide-react';
 import type { PermissionAutoReview, PermissionOverview, PermissionProvider, PermissionRequest, PermissionRule, PermissionRuleInput } from '../../../shared/permissions';
 import { waitingForOwner as waiting, claudeRule, codexRule, dangerousContinuations, ruleIsBroad, ruleProblem } from '../../../shared/permissions';
-import { authPost } from '../auth/AuthGate';
 import { locale, translateMessage, useI18n } from '../i18n/i18n';
+import { towerOperation } from '../triggers/trigger-helpers';
+import type { TriggerComputer, TriggerTargets } from '../triggers/TriggerPanel';
+import { localPart, nodeOf, scopedId } from '../remote/scope';
+import { FollowedHostNote, useFollowedHost } from '../remote/followed-host';
 
-export const permissionOperation = <T,>(token: string, name: string, input: unknown = {}) => authPost<{ result: T }>(`/api/v1/permissions.${name}`, token, input).then(response => response.result);
+/** A permission operation on this computer, or through its link on a joined computer that follows this Tower. */
+export const permissionOperation = <T,>(token: string, name: string, input: unknown = {}, node?: string) => towerOperation<T>(token, `permissions.${name}`, input, node);
 const folderName = (path: string) => path.split('/').filter(Boolean).at(-1) || path;
 const date = (value: string) => { const time = new Date(value); return Number.isNaN(time.getTime()) ? '' : time.toLocaleString(locale(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }); };
 
@@ -17,10 +21,31 @@ export const ruleDraft = (rule: PermissionRuleInput & { id?: string }): Draft =>
   ...(rule.cwd ? { cwd: rule.cwd } : {}), ...(rule.note ? { note: rule.note } : {}) });
 type Tab = 'requests' | 'rules';
 
-/** Allow rules for Claude Code and Codex in one list, everywhere or for one folder, and the requests agents sent. */
-export function PermissionsPanel({ token, cwd, projects, pending: waitingCount, onClearFolder, onChanged, onOpenSession }: { token: string; cwd?: string; projects: string[]; pending: number; onClearFolder: () => void; onChanged: () => void; onOpenSession: (id: string) => void }) {
+/**
+ * Allow rules for Claude Code and Codex in one list, everywhere or for one folder, and the requests agents sent: this
+ * computer's, or those of a joined computer that follows this Tower ("호스트 설정 따르기"), chosen like the models'
+ * and triggers' computer. A folder of a joined computer (`@node/path`) opens that computer's.
+ */
+export function PermissionsPanel({ token, cwd: place, projects: ownProjects, computers = [], targets, pending: waitingCount, waitingOn = {}, onClearFolder, onChanged, onOpenSession }: { token: string; cwd?: string; projects: string[];
+  computers?: TriggerComputer[]; targets?: TriggerTargets; pending: number;
+  /** Requests waiting on each joined computer that follows this Tower. */
+  waitingOn?: Readonly<Record<string, number>>;
+  onClearFolder: () => void; onChanged: () => void; onOpenSession: (id: string) => void }) {
   const { t } = useI18n();
   const { active } = useContext(SettingsFrameContext);
+  const following = computers.filter(item => item.permissions);
+  // A folder of a joined computer opens that computer; the owner may choose another, which lets the folder go.
+  // Opened without a folder, it shows where requests wait: this computer first.
+  const [node, setNode] = useState(() => nodeOf(place) ?? (waitingCount > Object.values(waitingOn).reduce((sum, count) => sum + count, 0) ? ''
+    : Object.entries(waitingOn).find(([, count]) => count > 0)?.[0] ?? ''));
+  useEffect(() => { if (place) setNode(nodeOf(place) ?? ''); }, [place]);
+  const target = node || undefined;
+  const computer = target ? following.find(item => item.node === target) : undefined;
+  /** This computer, or the chosen one while it is connected and follows this Tower. */
+  const reachable = !target || Boolean(computer);
+  const cwd = place && (nodeOf(place) ?? '') === node ? localPart(place) : undefined;
+  const projects = target ? targets?.(target).projects.map(([key]) => key) ?? [] : ownProjects;
+  const host = useFollowedHost();
   const [overview, setOverview] = useState<PermissionOverview | null>(null);
   const [tab, setTab] = useState<Tab>('rules');
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -32,21 +57,35 @@ export function PermissionsPanel({ token, cwd, projects, pending: waitingCount, 
     targets: all.targets.filter(target => target.scope === 'global' || target.cwd === cwd), pending: all.requests.filter(request => request.cwd === cwd && waiting(request)).length } : all, [cwd]);
   // The requests tab is chosen once, on opening; later reloads leave the owner where they are.
   const opened = useRef(false);
+  // An answer for a computer no longer shown is dropped.
+  const shownNode = useRef(node);
+  shownNode.current = node;
+  const load = useCallback((first = false) => {
+    const asked = node;
+    return permissionOperation<PermissionOverview>(token, 'overview', cwd ? { cwd } : {}, asked || undefined).then(value => {
+      if (shownNode.current !== asked) return;
+      if (first && !opened.current && value.pending) setTab('requests');
+      if (first) opened.current = true;
+      setOverview(value);
+    });
+  }, [token, cwd, node]);
+  useEffect(() => { setOverview(null); setDraft(null); setError(''); setNotice(''); opened.current = false; }, [node]);
   // Asked again when shown again and when the page sees the number of waiting requests change.
   useEffect(() => {
-    if (!active) return;
-    void permissionOperation<PermissionOverview>(token, 'overview', cwd ? { cwd } : {}).then(value => { if (!opened.current && value.pending) setTab('requests'); opened.current = true; setOverview(value); }).catch(error => setError(error instanceof Error ? error.message : String(error)));
-  }, [token, cwd, active, waitingCount]);
+    if (!active || !reachable) return;
+    void load(true).catch(error => setError(error instanceof Error ? error.message : String(error)));
+  }, [load, active, reachable, waitingCount, waitingOn[node]]);
   // While the reviewer works on a request, the panel follows it: the waiting count does not change until it is done.
   // So does a command Tower runs, until it is done.
   const reviewing = Boolean(overview?.requests.some(request => (request.status === 'pending' && (request.review?.status === 'queued' || request.review?.status === 'running'))
     || (request.run && (request.run.status === 'waiting' || request.run.status === 'running'))));
   // Otherwise it looks now and then, for runs and automatic decisions that do not change the waiting count.
   useEffect(() => {
-    if (!active) return;
-    const timer = setInterval(() => { void permissionOperation<PermissionOverview>(token, 'overview', cwd ? { cwd } : {}).then(setOverview).catch(() => {}); }, reviewing ? 4000 : 15000);
+    if (!active || !reachable) return;
+    // best-effort: a look in between that fails changes nothing shown; the next one, or the owner's next step, says why.
+    const timer = setInterval(() => { void load().catch(() => {}); }, reviewing ? 4000 : 15000);
     return () => clearInterval(timer);
-  }, [token, cwd, active, reviewing]);
+  }, [load, active, reachable, reviewing]);
   useSettingsGuard({
     escape: () => { if (!draft) return false; setDraft(null); return true; },
     leave: () => !draft || window.confirm(t('저장하지 않은 변경 사항을 버릴까요?')),
@@ -55,8 +94,9 @@ export function PermissionsPanel({ token, cwd, projects, pending: waitingCount, 
     if (busy) return false;
     setBusy(true); setError(''); setNotice('');
     try {
-      const next = await permissionOperation<PermissionOverview>(token, name, input);
-      setOverview(shown(next));
+      const next = await permissionOperation<PermissionOverview>(token, name, input, target);
+      // A change another computer had already made answers only that it was done: it is read again.
+      if (Array.isArray(next?.rules)) setOverview(shown(next)); else await load();
       onChanged();
       if (next.resumed && 'error' in next.resumed) setError(t('결정은 저장했지만 대화에 알리지 못했습니다: {0}', { 0: translateMessage(next.resumed.error) }));
       else if (done) setNotice(`${next.resumed ? `${done} ${t("요청한 대화에 알렸습니다.")}` : done}${next.replaced?.length ? ` ${t('겹치던 자동 허용 규칙 {0}을(를) 지웠습니다.', { 0: next.replaced.join(', ') })}` : ''}`);
@@ -68,6 +108,13 @@ export function PermissionsPanel({ token, cwd, projects, pending: waitingCount, 
   const pending = overview?.requests.filter(request => request.status === 'pending') ?? [];
   const decided = overview?.requests.filter(request => request.status !== 'pending') ?? [];
   const newRule = (): Draft => ({ kind: 'command', value: '', providers: ['claude', 'codex'], scope: cwd ? 'project' : 'global', ...(cwd ? { cwd } : {}) });
+  const choose = (next: string) => {
+    if (next === node || (draft && !window.confirm(t('저장하지 않은 변경 사항을 버릴까요?')))) return;
+    if (place && (nodeOf(place) ?? '') !== next) onClearFolder();
+    setNode(next);
+  };
+  const name = computer?.name ?? t('연결된 컴퓨터');
+  const openSession = (id: string) => onOpenSession(target ? scopedId(target, id) : id);
   async function save(next: Draft) {
     const rule: PermissionRuleInput = { kind: next.kind, value: next.value, providers: next.providers, scope: next.scope, ...(next.scope === 'project' && next.cwd ? { cwd: next.cwd } : {}), ...(next.note?.trim() ? { note: next.note.trim() } : {}) };
     const ok = next.deciding ? await act('decide', { id: next.deciding, approve: true, rule, resume }, t('요청을 수정해 허용했습니다.'))
@@ -75,8 +122,14 @@ export function PermissionsPanel({ token, cwd, projects, pending: waitingCount, 
     if (ok) { setDraft(null); if (next.deciding && pending.length <= 1) setTab('rules'); }
   }
   return <SettingsPane title={t('권한')} scope="auth-panel skills-scope" chip={cwd ? <FolderChip cwd={cwd} onClear={onClearFolder} /> : undefined}
-    description={t('Claude Code와 Codex가 묻지 않고 할 수 있는 일')}
+    description={target ? t('{0}에서 Claude Code와 Codex가 묻지 않고 할 수 있는 일', { 0: name }) : t('Claude Code와 Codex가 묻지 않고 할 수 있는 일')}
+    actions={(following.length > 0 || target) && <label className="trigger-computer">{t('컴퓨터')}<select value={node} onChange={event => choose(event.target.value)}>
+      <option value="">{t('이 컴퓨터')}</option>
+      {target && !computer && <option value={target}>{t('{0} (연결 끊김)', { 0: name })}</option>}
+      {following.map(item => <option key={item.node} value={item.node}>{waitingOn[item.node] ? t('{0} · 요청 {1}', { 0: item.name, 1: waitingOn[item.node]! }) : item.name}</option>)}</select></label>}
     tabs={draft || !overview ? undefined : [{ id: 'requests' as Tab, label: t('요청'), count: pending.filter(waiting).length, urgent: true }, { id: 'rules' as Tab, label: t('규칙 {0}', { 0: overview.rules.length }) }]} tab={tab} onTab={setTab}>
+    {!reachable ? <p className="slack-empty">{t('{0}에 지금 연결되어 있지 않거나 이 Tower의 설정을 따르지 않습니다. 다시 연결되고 "호스트 설정 따르기"가 켜지면 여기서 그 컴퓨터의 권한을 관리할 수 있습니다.', { 0: name })}</p> : <>
+    {!target && <FollowedHostNote host={host} />}
     <p className="auth-hint">{cwd ? t('이 프로젝트에서 Claude Code와 Codex가 묻지 않고 할 수 있는 일입니다. 이 프로젝트의 규칙과 모든 프로젝트에 쓰이는 규칙이 함께 보입니다.')
       : t('Claude Code와 Codex가 묻거나 막지 않고 할 수 있는 일을 한곳에서 관리합니다. 에이전트가 막힌 작업에 필요한 권한을 요청하면 여기서 허용합니다.')}</p>
     {error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}
@@ -89,7 +142,7 @@ export function PermissionsPanel({ token, cwd, projects, pending: waitingCount, 
         {overview.autoReview && <AutoReviewSettings settings={overview.autoReview} busy={busy} onSave={settings => void act('saveAutoReview', { settings }, settings.enabled ? t('자동 검토 설정을 저장했습니다.') : t('자동 검토를 껐습니다.'))} />}
         {pending.length > 0 && <label className="skill-pinned permission-resume"><input type="checkbox" checked={resume} disabled={busy} onChange={event => setResume(event.target.checked)} />{t('결정을 요청한 대화에 보내 이어서 진행')}
           <small>{t('허용하거나 거절하면 그 대화에 내 메시지로 결과를 보냅니다. 에이전트가 일하는 중이면 그 턴이 끝난 뒤에 보냅니다. 허용한 규칙은 다음 턴부터 적용됩니다.')}</small></label>}
-        {pending.length ? pending.map(request => <RequestCard key={request.id} request={request} busy={busy} onOpenSession={onOpenSession}
+        {pending.length ? pending.map(request => <RequestCard key={request.id} request={request} busy={busy} onOpenSession={openSession}
           onApprove={() => void act('decide', { id: request.id, approve: true, resume }, request.rule.kind === 'run' ? t('명령을 한 번 실행합니다.') : t('{0} 규칙을 허용했습니다.', { 0: request.rule.value }))}
           // A rule for one conversation is edited as one for its project: the editor offers no conversation.
           onEdit={() => setDraft({ ...ruleDraft(request.rule), ...(request.rule.scope === 'conversation' ? { scope: 'project', cwd: request.rule.cwd ?? request.cwd } : {}), deciding: request.id })}
@@ -103,6 +156,7 @@ export function PermissionsPanel({ token, cwd, projects, pending: waitingCount, 
       </section>}
       {tab === 'rules' && <RuleList overview={overview} cwd={cwd} busy={busy} onNew={() => setDraft(newRule())} onEdit={rule => setDraft(ruleDraft(rule))}
         onDelete={rule => { if (window.confirm(t('{0} 규칙을 삭제할까요? 다음 턴부터 적용되지 않습니다.', { 0: rule.value }))) void act('delete', { id: rule.id }, t('규칙을 삭제했습니다.')); }} />}
+    </>}
     </>}
   </SettingsPane>;
 }
@@ -192,7 +246,7 @@ function RequestCard({ request, busy, onApprove, onEdit, onDeny, onOpenSession }
   </article>;
 }
 
-function RuleList({ overview, cwd, busy, onNew, onEdit, onDelete }: { overview: PermissionOverview; cwd?: string; busy: boolean; onNew: () => void; onEdit: (rule: PermissionRule) => void; onDelete: (rule: PermissionRule) => void }) {
+export function RuleList({ overview, cwd, busy, onNew, onEdit, onDelete }: { overview: PermissionOverview; cwd?: string; busy: boolean; onNew: () => void; onEdit: (rule: PermissionRule) => void; onDelete: (rule: PermissionRule) => void }) {
   const { t } = useI18n();
   const projects = [...new Set(overview.rules.filter(rule => rule.scope === 'project').map(rule => rule.cwd!))].sort();
   if (cwd && !projects.includes(cwd)) projects.unshift(cwd);
@@ -209,13 +263,14 @@ function RuleList({ overview, cwd, busy, onNew, onEdit, onDelete }: { overview: 
     {groups.map(([key, label, rules]) => <div key={key} className="skills-group"><h3 title={key === 'global' ? undefined : key}>{label} <span className="auth-count">{rules.length}</span></h3>
       {rules.length ? <ul>{rules.map(rule => <li key={rule.id} className="skill-row">
         <div className="skill-row-main"><code className="permission-value">{rule.value}</code>
-          <span className="skill-badges"><Providers providers={rule.providers} />{rule.kind === 'claude' && <span className="skill-badge">{t('Claude 규칙')}</span>}{rule.source === 'request' && <span className="skill-badge pinned">{t('요청으로 허용')}</span>}{rule.source === 'auto' && <span className="skill-badge pinned">{t('자동 검토로 허용')}</span>}</span>
+          <span className="skill-badges"><Providers providers={rule.providers} />{rule.kind === 'claude' && <span className="skill-badge">{t('Claude 규칙')}</span>}{rule.host ? <span className="skill-badge">{t('호스트 설정')}</span> : rule.source === 'request' ? <span className="skill-badge pinned">{t('요청으로 허용')}</span> : null}{rule.source === 'auto' && <span className="skill-badge pinned">{t('자동 검토로 허용')}</span>}</span>
           {rule.note && <p>{rule.note}</p>}
+          {rule.host && <p className="auth-hint">{t('이 컴퓨터가 따르는 Tower의 규칙입니다. 그 Tower에서 바꾸거나 지웁니다.')}</p>}
           <NativePreview rule={rule} guarded={rule.source === 'auto'} /></div>
-        <div className="skill-row-actions">
+        {!rule.host && <div className="skill-row-actions">
           <button className="icon-button" title={t('편집')} aria-label={t('{0} 편집', { 0: rule.value })} disabled={busy} onClick={() => onEdit(rule)}><Pencil size={15} /></button>
           <button className="icon-button" title={t('삭제')} aria-label={t('{0} 삭제', { 0: rule.value })} disabled={busy} onClick={() => onDelete(rule)}><Trash2 size={15} /></button>
-        </div>
+        </div>}
       </li>)}</ul> : <p className="auth-empty">{key === 'global' ? t('모든 프로젝트에 쓰는 규칙이 아직 없습니다.') : t('이 프로젝트에만 쓰는 규칙이 아직 없습니다.')}</p>}
     </div>)}
     {temporary.length > 0 && <div className="skills-group"><h3>{t('대화 한정')} <span className="auth-count">{temporary.length}</span></h3>

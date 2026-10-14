@@ -18,7 +18,9 @@ interface Context { token: string; providers: ProviderHealth[]; projects: [strin
 /** A joined computer; `ready` when its triggers can be managed from here now (connected, with a Tower that can). */
 export interface TriggerComputer { node: string; name: string; providers: ProviderHealth[]; ready: boolean; connected: boolean;
   /** Its model settings can be read and changed from here. */
-  models?: boolean }
+  models?: boolean;
+  /** It follows this Tower's settings: its permission rules and requests are managed from here. */
+  permissions?: boolean }
 /** Folders and conversations a trigger on that computer can aim at, named as that computer knows them. */
 export type TriggerTargets = (node: string) => { projects: [string, string][]; sessions: Session[] };
 /** What the triggers tab shows: the list, the kind picker for a new trigger, or the editor. */
