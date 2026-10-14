@@ -728,7 +728,8 @@ async function main() {
       known: async session => await master.call('voiceKnown', { session }) === true, record: entry => decisions.record(entry) }) }) },
     auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges,
       sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })), managed: managedSync,
-      afterClone: async id => { await followingSecrets?.shareFolders(id, managedSync?.folders(id) ?? []); } } : { error: linkError },
+      // The trust is made first when it is still pending (right after joining), so the folder can be shared at once.
+      afterClone: async id => { await followingSecrets?.align(id); await followingSecrets?.shareFolders(id, managedSync?.folders(id) ?? []); } } : { error: linkError },
     workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups, localMcp,
     decisions: {
       overview: () => decisions.overview(),

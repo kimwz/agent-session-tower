@@ -134,6 +134,7 @@ A joined computer can follow its controlling Tower ("호스트 설정 따르기"
 Accepted edges:
 - A follow switch that happens while a precedent approval's SQL write, a queued secret trust write or a waiting settings apply is under way can still let that one land. The web switches and the worker writes, with no shared lock; the result equals the state right before the switch.
 - There is no push while the link is down.
+- A host web rolled back to before 1.137 right after a sync gets no push from its following computers for up to 20 minutes: they leave those pushes to a host that synced within that time.
 
 ### Browser workspace
 
