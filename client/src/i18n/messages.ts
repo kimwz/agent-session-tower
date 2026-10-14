@@ -2638,4 +2638,6 @@ export const english: Record<string, string> = {
   "저장소를 받는 데 10분이 넘게 걸려 멈췄습니다. 다시 시도하세요.": "Cloning took more than 10 minutes and was stopped. Try again.",
   "그 컴퓨터가 연결되어 있고 이 Tower의 설정을 따를 때만 할 수 있습니다.": "This works only while that computer is connected and follows this Tower's settings.",
   "저장소 주소를 입력하세요.": "Enter a repository address.",
+  "저장소 서버에 연결하지 못했습니다. 이 컴퓨터의 네트워크를 확인한 뒤 다시 시도하세요.": "The repository server could not be reached. Check this computer's network and try again.",
+  "저장소를 받지 못했습니다. 주소와 이 컴퓨터의 네트워크를 확인한 뒤 다시 시도하세요.": "The repository could not be cloned. Check the address and this computer's network, then try again.",
 };
