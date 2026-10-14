@@ -266,7 +266,7 @@
   gap:5px;
   color:#aaa4ee
 }
-.chat-message.user.from-master .markdown p,.chat-message.user.from-master .markdown li {
+.chat-message.user.from-master .markdown p {
   white-space:pre-line
 }
 .chat-message.assistant .message-meta:before {

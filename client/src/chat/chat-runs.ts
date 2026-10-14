@@ -52,13 +52,21 @@ function matchesAttachmentPrompt(text: string, run: Run): boolean {
   return images.length > 0 && before === leadingImages + instruction && after === '';
 }
 
+/**
+ * When the request's native row appears. A master instruction inserted into a running Claude turn appears when Claude takes
+ * it at its next step, minutes later perhaps, which `deliveredAt` records; it would otherwise lose its master label.
+ */
+function requestStart(run: Run): string {
+  return run.sender === 'master' && run.steering?.deliveredAt ? run.steering.deliveredAt : run.startedAt || run.createdAt;
+}
+
 /** Associate native user rows without adding, removing or reordering any message. */
 export function matchChatRuns(messages: readonly ChatMessage[], runs: readonly Run[], sessionId: string) {
   const matches = new Map<string, ChatRunMatch>();
   const matchedRunIds = new Set<string>();
   const users = messages.filter(message => message.role === 'user').map(message => ({ message, timestamp: Date.parse(message.timestamp), text: normalize(message.text) }));
   const candidates = runs.filter(run => run.sessionId === sessionId && run.status !== 'queued')
-    .map(run => ({ run, start: Date.parse(run.startedAt || run.createdAt), content: requestContent(run) }))
+    .map(run => ({ run, start: Date.parse(requestStart(run)), content: requestContent(run) }))
     .filter(candidate => Number.isFinite(candidate.start))
     .sort((first, second) => first.start - second.start || Date.parse(first.run.createdAt) - Date.parse(second.run.createdAt));
 

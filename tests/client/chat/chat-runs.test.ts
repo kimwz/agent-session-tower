@@ -206,3 +206,13 @@ test("the master's requests say they come from the master agent and keep their l
   assert.match(master, /편집기 저장 오류를 고쳐 주세요\.\n세션/); assert.match(master, /<li>테스트를 추가합니다<\/li>/);
   for (const plain of [owner, older]) { assert.doesNotMatch(plain, /from-master|마스터 에이전트/); assert.match(plain, /<span>나<\/span>/); }
 });
+
+test('a master instruction a running turn took minutes later still says it comes from the master agent', () => {
+  const late = row('late', '추가 지시입니다', 200_000);
+  const steered = run('steered', { prompt: '추가 지시입니다', sender: 'master', createdAt: at(9000), startedAt: at(10_000), finishedAt: undefined, status: 'running',
+    steering: { targetRunId: 'target', state: 'delivered', requestedAt: at(10_000), deliveredAt: at(199_500) } });
+  assert.equal(matchChatRuns([late], [steered], 'session').matches.get('late')?.sender, 'master');
+  // The owner's matching is unchanged.
+  const { sender: _sender, ...owner } = steered;
+  assert.equal(matchChatRuns([late], [owner], 'session').matches.get('late'), undefined);
+});
