@@ -683,14 +683,14 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       if (req.method === 'POST' && path === '/api/workspace/directory') {
         return json(res, 200, await createWorkspaceDirectory(await readJson(req), backend.snapshot()));
       }
-      if (req.method === 'GET' && path === '/api/workspace/terminals/folders') {
-        // Where this computer's open shells are, so the owner can find the ones keeping the terminal host from moving
-        // to a new version. Null when the host is too old to say.
+      if (req.method === 'GET' && path === '/api/workspace/terminals/all') {
+        // Every shell open on this computer, in any folder: the limit counts them all, so the owner must be able to
+        // find and end each one, including those of a folder no longer on the canvas. Null when the host is too old to say.
         const shells = await workspaceTerminals.list?.();
-        if (!shells) return json(res, 200, { folders: shells === undefined && workspaceTerminals.list ? null : [] });
-        const counts = new Map<string, number>();
-        for (const shell of shells) if (!shell.exited) counts.set(shell.cwd, (counts.get(shell.cwd) ?? 0) + 1);
-        return json(res, 200, { folders: [...counts].map(([cwd, count]) => ({ cwd, count })).sort((a, b) => a.cwd.localeCompare(b.cwd)) });
+        if (shells === undefined) return json(res, 200, { terminals: workspaceTerminals.list ? null : [] });
+        const names = new Map(links && !('error' in links) ? links.node.list().map(item => [item.id, item.name]) : []);
+        return json(res, 200, { terminals: shells.filter(shell => !shell.exited).sort((a, b) => a.cwd.localeCompare(b.cwd) || a.openedAt.localeCompare(b.openedAt))
+          .map(shell => ({ id: shell.id, cwd: shell.cwd, openedAt: shell.openedAt, origin: shell.opener === 'local' ? 'self' : 'controller', ...(names.has(shell.opener) ? { openedBy: names.get(shell.opener) } : {}) })) });
       }
       if (req.method === 'GET' && path === '/api/workspace/terminals') {
         // Shells in this folder, whoever opened them, so any window can join one.

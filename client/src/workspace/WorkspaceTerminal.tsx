@@ -10,6 +10,8 @@ import { localPart, nodeHeaders, nodeOf, nodePath, requestId, workspacePath } fr
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 
+/** The terminal host's refusal when the computer has as many shells as it allows (other 429s are request budgets). */
+const TERMINAL_LIMIT = /^열려 있는 터미널이 너무 많습니다/;
 /** `fresh`: start a new shell if the tab's shell is gone; otherwise only reach the one it has again. */
 interface TerminalControls { close(): Promise<void>; restart(fresh: boolean): void }
 /**
@@ -17,6 +19,8 @@ interface TerminalControls { close(): Promise<void>; restart(fresh: boolean): vo
  * (`computer`), or a controlling computer (`controller`, named when known).
  */
 interface SharedShell { id: string; openedAt: string; origin: 'self' | 'computer' | 'controller'; openedBy?: string }
+/** A shell in another folder of the same computer: it counts against the computer's limit like any other. */
+interface OtherShell extends SharedShell { cwd: string }
 /** `lost`: the tab could not reach its shell, which may still be running. */
 interface TerminalState { starting: boolean; exited: boolean; lost?: boolean }
 
@@ -44,6 +48,7 @@ export function WorkspaceTerminal({ cwd, machine, token, maximized, onToggleMaxi
   };
   // Shells in this folder that no tab here shows, whoever opened them.
   const [shared, setShared] = useState<SharedShell[] | null>(null);
+  const [others, setOthers] = useState<{ shells: OtherShell[]; hidden: number }>({ shells: [], hidden: 0 });
   const [ending, setEnding] = useState('');
   const sharedId = useId();
   const sharedToggle = useRef<HTMLButtonElement>(null);
@@ -52,6 +57,11 @@ export function WorkspaceTerminal({ cwd, machine, token, maximized, onToggleMaxi
     try {
       const { terminals } = await api<{ terminals: SharedShell[] }>(workspacePath(cwd, '/api/workspace/terminals'));
       const shown = new Set(tabs.map(tab => savedWorkspaceTerminal(terminalSlot(cwd, tab))).filter(Boolean));
+      // The rest of the computer's shells: the limit counts them all, wherever they were opened. A computer too old to
+      // list them shows only this folder's.
+      const all = await api<{ terminals: OtherShell[] | null; hidden?: number }>(nodePath(node, '/api/workspace/terminals/all')).catch(() => ({ terminals: null, hidden: 0 }));
+      const here = new Set(terminals.map(shell => shell.id));
+      setOthers({ shells: (all.terminals ?? []).filter(shell => !here.has(shell.id) && !shown.has(shell.id)), hidden: all.hidden ?? 0 });
       setShared(terminals.filter(shell => !shown.has(shell.id))); setEnding('');
     } catch (value) { setError(value instanceof Error ? value.message : String(value)); }
   };
@@ -68,6 +78,7 @@ export function WorkspaceTerminal({ cwd, machine, token, maximized, onToggleMaxi
     try { await api(nodePath(node, `/api/workspace/terminals/${encodeURIComponent(shell.id)}/close`), { method: 'POST', headers: nodeHeaders(node, { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }), body: '{}' }); }
     catch (value) { if (!(value instanceof ApiError) || ![404, 409].includes(value.status)) { setError(value instanceof Error ? value.message : String(value)); return; } }
     setEnding(''); setShared(list => list?.filter(item => item.id !== shell.id) ?? null);
+    setOthers(current => ({ ...current, shells: current.shells.filter(item => item.id !== shell.id) }));
     // The row that had focus is gone; focus moves on to the next one, or back to the list's button.
     window.setTimeout(() => (sharedMenu.current?.querySelector<HTMLButtonElement>('.workspace-terminal-shared-menu button:not(:disabled)') ?? sharedToggle.current)?.focus());
   };
@@ -132,7 +143,19 @@ export function WorkspaceTerminal({ cwd, machine, token, maximized, onToggleMaxi
             : <><button disabled={full} title={full ? t('터미널 탭은 최대 {0}개까지 열 수 있습니다.', { 0: MAX_TERMINAL_TABS }) : undefined} onClick={() => add(shell.id)}>{t('들어가기')}</button>
               <button aria-label={t('이 터미널 끝내기: {0}', { 0: who })} title={t('이 터미널을 끝냅니다')} onClick={() => setEnding(shell.id)}><X size={12} /></button></>}
         </li>;
-      })}</ul> : <p>{t('다른 곳에서 연 터미널이 없습니다.')}</p>}</div>}
+      })}</ul> : <p>{t('다른 곳에서 연 터미널이 없습니다.')}</p>}
+        {(others.shells.length > 0 || others.hidden > 0) && <>
+          <strong className="workspace-terminal-shared-heading">{t('이 컴퓨터의 다른 폴더')}</strong>
+          {others.shells.length > 0 && <ul>{others.shells.map(shell => {
+            const who = opener(shell);
+            return <li key={shell.id}><span><strong title={shell.cwd}>{shell.cwd}</strong><small title={absoluteTime(shell.openedAt)}>{who} · {relativeTime(shell.openedAt)}</small></span>
+              {ending === shell.id
+                ? <><button className="danger" onClick={() => { void end(shell); }}>{t('모두에게서 끝내기')}</button><button onClick={() => setEnding('')}>{t('취소')}</button></>
+                : <button aria-label={t('이 터미널 끝내기: {0}', { 0: shell.cwd })} title={t('이 터미널을 끝냅니다')} onClick={() => setEnding(shell.id)}><X size={12} /></button>}
+            </li>;
+          })}</ul>}
+          {others.hidden > 0 && <p>{t('공유하지 않는 폴더에도 터미널 {0}개가 열려 있습니다. 그 컴퓨터에서 끝낼 수 있습니다.', { 0: others.hidden })}</p>}
+        </>}</div>}
     </div>
     <span>{machine ? t('명령은 {0}에서 실행됩니다', { 0: machine }) : t('명령은 Tower 서버에서 실행됩니다')}</span>
     {current?.exited && <button onClick={() => controls.current.get(active)?.restart(!current.lost)}>{current.lost ? t('다시 연결') : t('새 터미널')}</button>}
@@ -140,12 +163,12 @@ export function WorkspaceTerminal({ cwd, machine, token, maximized, onToggleMaxi
   </div>
   {error && <p role="alert" className="workspace-error">{translateMessage(error)}</p>}
   {tabs.map(tab => <TerminalPane key={tab.key} ref={value => { if (value) controls.current.set(tab.key, value); else controls.current.delete(tab.key); }} cwd={cwd} tab={tab} token={token} active={tab.key === active}
-    onState={state => setStates(previous => ({ ...previous, [tab.key]: state }))} onOwned={() => own(tab.key)} />)}
+    onState={state => setStates(previous => ({ ...previous, [tab.key]: state }))} onOwned={() => own(tab.key)} onTooMany={() => { if (!shared) void showShared(); }} />)}
   {!tabs.length && <div className="workspace-terminal-empty"><p>{t('열린 터미널이 없습니다.')}</p><button onClick={() => add()}><Plus size={14} />{t('새 터미널')}</button></div>}
   </section>;
 }
 
-function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd: string; tab: TerminalTab; token: string; active: boolean; onState: (state: TerminalState) => void; onOwned: () => void; ref: Ref<TerminalControls> }) {
+function TerminalPane({ cwd, tab, token, active, onState, onOwned, onTooMany, ref }: { cwd: string; tab: TerminalTab; token: string; active: boolean; onState: (state: TerminalState) => void; onOwned: () => void; onTooMany: () => void; ref: Ref<TerminalControls> }) {
   const host = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<{ terminal: Terminal; fit: FitAddon }>(undefined);
   const closeSession = useRef<() => Promise<void>>(async () => {});
@@ -153,6 +176,8 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
   report.current = onState;
   const owned = useRef(onOwned);
   owned.current = onOwned;
+  const tooMany = useRef(onTooMany);
+  tooMany.current = onTooMany;
   // A tab that joined a shell opened elsewhere starts one only when asked to after that shell is gone.
   const joined = useRef(Boolean(tab.joined));
   const fresh = useRef(false);
@@ -317,6 +342,8 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
       // Without an answer that the shell is gone, it may still be running: the tab offers to reach it again. A refusal
       // from a computer that is there (an old terminal host, a shell that did not start) is not a lost connection.
       const { status, disposition, code } = value as { status?: number; disposition?: string; code?: string };
+      // The computer has as many shells as it allows: show where they are, so the owner can end the ones left over.
+      if (status === 429 && !disposed && value instanceof Error && TERMINAL_LIMIT.test(value.message)) tooMany.current();
       const away = status === undefined || code === 'node-offline' || disposition === 'uncertain' || status === 504 || (status === 503 && !node);
       if (!disposed) { setStarting(false); setExited(true); setLost(away); }
     });

@@ -110,6 +110,15 @@ test('a terminal tab streams output and sends keys and sizes over one WebSocket'
   assert.equal(closed.heard.ready, 0);
 });
 
+test('the page can list every shell of this computer, in any folder', async t => {
+  const f = await fixture(t);
+  const answer = await f.fetch(`${f.base}/api/workspace/terminals/all`);
+  assert.equal(answer.status, 200);
+  const { terminals } = await answer.json() as { terminals: Array<{ id: string; cwd: string; origin: string }> };
+  assert.deepEqual(terminals.map(item => [item.id, item.origin]), [[f.id, 'self']]);
+  assert.ok(terminals[0].cwd.length > 0);
+});
+
 test('a terminal socket passes the checks every page request does', async t => {
   const f = await fixture(t, true);
   assert.equal(await upgradeStatus(f.url(), f.headers), 101);
