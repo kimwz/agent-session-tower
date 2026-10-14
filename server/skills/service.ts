@@ -17,6 +17,8 @@ import { SkillError, SkillFiles, type SkillHomes } from './files.js';
 import { SkillStateStore, type SkillTargetRecord } from './state.js';
 import { ClosedSessionStore } from '../stores/closed-sessions.js';
 import type { SkillBackup } from './backup.js';
+import { ManagedSkillList, parseManagedSkills, sameFiles, untouchedDefault, type ManagedSkill, type ManagedSkills } from './managed.js';
+import { remoteUrlOf } from '../repositories/remote-url.js';
 
 export interface SkillServiceOptions {
   stateDir: string;
@@ -634,6 +636,116 @@ export class SkillService {
     });
     this.options.onChange?.();
     return { restored, skipped };
+  }
+
+  /**
+   * This Tower's own skills and guidance for a computer that follows it ("호스트 설정 따르기"): every Tower skill with
+   * its pin, and the projects it applies to as repository addresses. A project folder that is no clone of a repository
+   * has nothing to name there, so it is left out.
+   */
+  async exportManaged(): Promise<ManagedSkills> {
+    await this.ready();
+    return this.exclusive(async () => {
+      const bundle = await this.exportBundle({ dirs: (await this.files.managed()).map(skill => skill.dir) });
+      const repositories = new Map<string, Promise<string | undefined>>();
+      const repository = (cwd: string) => { if (!repositories.has(cwd)) repositories.set(cwd, remoteUrlOf(cwd)); return repositories.get(cwd)!; };
+      const skills: ManagedSkill[] = [];
+      for (const item of bundle.skills) {
+        // A computer keeps one Tower skill per name; of two here (an older project skill), the first goes.
+        if (skills.some(skill => skill.name === item.name)) continue;
+        const targets = item.targets ? { all: item.targets.all, projects: item.targets.projects.map(place => place.cwd) }
+          : item.scope === 'global' ? { all: true, projects: [] } : { all: false, projects: [item.project!.cwd] };
+        const found = targets.all ? [] : await Promise.all(targets.projects.map(repository));
+        skills.push({ name: item.name, pinned: item.pinned, files: item.files, targets: { all: targets.all, repositories: [...new Set(found.filter((url): url is string => Boolean(url)))].sort() } });
+      }
+      return { skills: skills.sort((a, b) => a.name.localeCompare(b.name)), guidance: await this.ownerGuidance('지침 파일을 읽지 못해 호스트 설정으로 보내지 않았습니다') };
+    });
+  }
+
+  /**
+   * Makes this computer's Tower skills and guidance those of the Tower it follows: each of its skills is made or
+   * replaced, pinned or not, and linked into this computer's folders of the same repositories; the ones it no longer
+   * has are removed, the guidance replaced, empty included. Skills of this computer's own are never changed: one of
+   * the same name stays, and is reported. Nothing is written where nothing changed.
+   */
+  async applyManaged(value: unknown): Promise<void> {
+    await this.ready();
+    const incoming = parseManagedSkills(value);
+    const failures: string[] = [];
+    let changed = false;
+    await this.exclusive(async () => {
+      const list = new ManagedSkillList(this.options.stateDir);
+      const before = await list.read();
+      let saved = [...before].sort();
+      const save = async (dirs: string[]) => {
+        const next = [...new Set(dirs)].sort();
+        if (JSON.stringify(next) === JSON.stringify(saved)) return;
+        await list.write(next);
+        saved = next;
+      };
+      const stored = await this.files.managed();
+      const folders = await this.foldersByRepository(incoming.skills.some(skill => skill.targets.repositories.length > 0));
+      const kept: string[] = [];
+      for (const item of incoming.skills) {
+        try {
+          const dir = await this.files.installDir({ name: item.name, scope: 'global' });
+          // best-effort: a folder that cannot be read is written again, as a missing one would be.
+          const present = Boolean(await stat(dir).catch(() => undefined));
+          const ours = before.includes(dir) || !present || await sameFiles(dir, item.files) || this.state.get().seeded.includes(item.name) && await untouchedDefault(dir, item.name);
+          if (!ours) throw new SkillError('이 컴퓨터에 같은 이름의 Tower 스킬이 있어 호스트의 스킬로 바꾸지 않았습니다.', 'conflict');
+          if (stored.some(skill => basename(skill.dir) === item.name && skill.dir !== dir)) throw new SkillError('이 컴퓨터의 프로젝트에 같은 이름의 Tower 스킬이 있어 호스트의 스킬을 적용하지 않았습니다.', 'conflict');
+          kept.push(dir);
+          // Counted as the followed Tower's before it is written, so a crash never leaves it looking like this computer's own.
+          await save([...saved, dir]);
+          const targets: SkillTargets = item.targets.all ? { all: true, projects: [] }
+            : { all: false, projects: [...new Set(item.targets.repositories.flatMap(url => folders.get(url) ?? []))].slice(0, MAX_SKILL_TARGETS) };
+          const record = this.record(dir);
+          if (!present || !await sameFiles(dir, item.files)) {
+            // A new skill's record comes before its folder, so a crash never leaves it applying everywhere.
+            if (!record) await this.writeRecord({ dir, all: targets.all, projects: targets.projects, linked: targets.projects, globalLinked: targets.all });
+            try { await this.files.install({ name: item.name, description: '', scope: 'global', pinned: item.pinned, files: item.files }, undefined, true, false); }
+            catch (error) {
+              // best-effort: the record stays unless the folder is certainly not there; the error is reported below.
+              if (!record && !await stat(dir).catch(() => undefined)) await this.state.update(state => { state.targets = state.targets.filter(entry => entry.dir !== dir); });
+              throw error;
+            }
+            changed = true;
+          }
+          const same = (a: string[], b: string[]) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+          if (!record || record.all !== targets.all || !same(record.projects, targets.projects)) { await this.apply(dir, targets); changed = true; }
+          // Links taken away here come back; the record already says where it applies.
+          else await this.files.reconcile(dir, targets, { projects: record.linked, global: record.globalLinked });
+          if ((await this.pinned()).has(dir) !== item.pinned) { await this.pin(await this.files.lookup(dir), item.pinned); changed = true; }
+        } catch (error) { failures.push(`${item.name}: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+      const left: string[] = [];
+      for (const dir of before) {
+        if (kept.includes(dir)) continue;
+        // best-effort: one already gone here (no longer a skill) is simply no longer counted.
+        const skill = await this.files.lookup(dir).catch(() => undefined);
+        if (!skill?.managed) continue;
+        try { await this.delete(skill, undefined); changed = true; }
+        catch (error) { left.push(dir); failures.push(`${skill.name}: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+      await save([...kept, ...left]);
+      if (guidanceContent(incoming.guidance) !== (await this.guidance()).owner) { await this.guidanceChange(async () => incoming.guidance); changed = true; }
+    });
+    if (changed) this.options.onChange?.();
+    if (failures.length) throw new SkillError(failures.join(' / '), 'conflict');
+  }
+
+  /** This computer's project folders by the repository they are clones of; read only when a skill names one. */
+  private async foldersByRepository(needed: boolean): Promise<Map<string, string[]>> {
+    const folders = new Map<string, string[]>();
+    if (!needed) return folders;
+    const known = [...new Set([...this.options.projects?.() ?? [], ...this.options.sessions().filter(session => !session.node).map(session => session.cwd)])].slice(0, 300);
+    for (const cwd of known) {
+      // best-effort: a folder that cannot be read is no folder to link into.
+      if (!(await stat(cwd).catch(() => undefined))?.isDirectory()) continue;
+      const url = await remoteUrlOf(cwd);
+      if (url) folders.set(url, [...folders.get(url) ?? [], cwd]);
+    }
+    return folders;
   }
 
   /** What importing a backup would do here, item by item, before anything is written. */

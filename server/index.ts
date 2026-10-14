@@ -70,6 +70,7 @@ import { remoteUrlOf } from './repositories/remote-url.js';
 import type { ManagedFolder } from '../shared/managed.js';
 import { runLinkCommand } from './link/cli.js';
 import { runModelsCommand } from './models/cli.js';
+import { applyManagedModelSettings, exportManagedModelSettings } from './models/settings.js';
 import { RemoteNodes } from './link/nodes.js';
 import { linkRequest } from './link/transport.js';
 import { RemoteAudit } from './remote/audit.js';
@@ -577,6 +578,13 @@ async function main() {
   const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname, published: releasePublished, managed: id => managedSync?.status(id) });
   if (controllerLinks) { managedSync = new ManagedSettingsSync({ controller: controllerLinks }); managedSync.on('change', () => changed()); }
   // Sections register their export (managedSync) and apply (managedReceiver) here, beside their owning modules.
+  // Skills live in the worker's stores; model roles are one file every process reads; fast judgments are this web's.
+  managedSync?.register('skills', () => runs.managedCall('skills', 'export'));
+  managedReceiver.register('skills', async (value, context) => { await runs.managedCall('skills', 'apply', value, context); });
+  managedSync?.register('models', () => exportManagedModelSettings(stateDir));
+  managedReceiver.register('models', async value => { if (await applyManagedModelSettings(stateDir, value)) changed(); });
+  managedSync?.register('decisions', async () => decisions.backupValue());
+  managedReceiver.register('decisions', async value => { if (await decisions.applyManaged(value)) { outcomes.changed(); changed(); } });
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname, follow: followedHost,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
     // and updating do not.

@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { initialModelSettings } from '../../../shared/models.js';
-import { readModelSettings, readModelSettingsState, resolveModel, saveModelSettings } from '../../../server/models/settings.js';
+import { applyManagedModelSettings, exportManagedModelSettings, readModelSettings, readModelSettingsState, resolveModel, saveModelSettings } from '../../../server/models/settings.js';
 import { captureErrors, failOpen } from '../../helpers/quarantine.js';
 import { modelRoleNotes } from '../../../server/models/notes.js';
 import { runModelsCommand } from '../../../server/models/cli.js';
@@ -257,4 +257,29 @@ test('a save between reading a corrupt file and copying it keeps both', { timeou
   assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), saved);
   assert.equal(await readFile(join(directory, `models.json.unreadable-${sha16('{ not json')}`), 'utf8'), '{ not json');
   assert.equal((await readModelSettingsState(directory)).problem, undefined);
+});
+
+test('a following computer takes the host\'s model roles as they are, writing only when they differ', async t => {
+  const host = await stateDir(t), node = await stateDir(t);
+  const chosen = initialModelSettings();
+  chosen.roles['sessions.summarizer'] = { provider: 'codex', claude: {}, codex: { model: 'gpt-5.6-terra' } };
+  await saveModelSettings(host, chosen);
+  await readModelSettings(node);
+  const sent = JSON.parse(JSON.stringify(await exportManagedModelSettings(host)));
+  assert.equal(await applyManagedModelSettings(node, sent), true);
+  assert.deepEqual(await readModelSettings(node), await readModelSettings(host));
+  const written = (await stat(join(node, 'models.json'))).mtimeMs;
+  assert.equal(await applyManagedModelSettings(node, sent), false);
+  assert.equal((await stat(join(node, 'models.json'))).mtimeMs, written, 'unchanged settings are not written again');
+  // Invalid settings are refused as a whole; the node keeps its own.
+  await assert.rejects(applyManagedModelSettings(node, { roles: { 'sessions.summarizer': { provider: 'nobody' } } }));
+  assert.deepEqual(await readModelSettings(node), await readModelSettings(host));
+});
+
+test('a host whose model file cannot be read sends nothing rather than its defaults', async t => {
+  const host = await stateDir(t);
+  await writeFile(join(host, 'models.json'), 'not json', { mode: 0o600 });
+  const logged = captureErrors(t, join(host, 'models.json'));
+  await assert.rejects(exportManagedModelSettings(host), /models\.json/);
+  assert.ok(logged.length > 0);
 });

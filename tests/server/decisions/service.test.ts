@@ -175,3 +175,21 @@ test('recent judgments are listed newest first, rounded, and only the latest one
   assert.deepEqual(recent[0].probabilities, { done: 0.12, progress: 0.01 });
   assert.equal(recent[0].ms, 202);
 });
+
+test('a following computer takes the host\'s fast-judgment settings and key, writing only on a change and never quoting the key', async t => {
+  const host = new DecisionService(await directory(t)), node = new DecisionService(await directory(t));
+  await host.start(); await node.start();
+  await host.update({ apiKey: 'host-secret-key-123', features: { attentionNotifications: false } });
+  const sent = JSON.parse(JSON.stringify(host.backupValue()));
+  assert.equal(await node.applyManaged(sent), true);
+  assert.deepEqual(node.backupValue(), host.backupValue());
+  assert.equal(node.overview().keyHint, '…-123');
+  assert.equal(await node.applyManaged(sent), false, 'the same settings again change nothing');
+  const bad = { ...sent, apiKey: 'bad key with spaces' };
+  await assert.rejects(node.applyManaged(bad), (error: Error) => !error.message.includes('bad key') && /호스트의 빠른 판단 설정/.test(error.message));
+  await assert.rejects(node.applyManaged({ ...sent, features: { unknown: true } }), (error: Error) => !error.message.includes('host-secret-key-123'));
+  assert.deepEqual(node.backupValue(), host.backupValue(), 'a refused payload keeps what was there');
+  await host.update({ apiKey: null });
+  assert.equal(await node.applyManaged(JSON.parse(JSON.stringify(host.backupValue()))), true);
+  assert.equal(node.overview().configured, false, 'a key the host forgot is forgotten here too');
+});
