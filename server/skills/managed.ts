@@ -1,10 +1,8 @@
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import type { SkillBundleFile } from '../../shared/skills.js';
 import { MAX_SKILL_TARGETS, SKILL_BUNDLE_FORMAT } from '../../shared/skills.js';
 import { TowerError } from '../../shared/errors.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
-import { DEFAULT_SKILLS } from './defaults.js';
-import { formatSkillFile } from './skill-file.js';
 import { bundleFiles, parseBundle } from './store.js';
 
 /**
@@ -41,9 +39,26 @@ export function parseManagedSkills(value: unknown): ManagedSkills {
 }
 
 /**
+ * What this computer's web hands its worker to apply: the section the followed Tower sent, and this computer's project
+ * folders with the repositories they are clones of, as the web knows them right now (a folder cloned a moment ago
+ * included), by repository.
+ */
+export function parseManagedApply(value: unknown): { section: ManagedSkills; folders: Map<string, string[]> } {
+  const input = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  if (!Array.isArray(input.folders)) throw bad('이 컴퓨터의 폴더 목록이 없습니다.');
+  const folders = new Map<string, string[]>();
+  for (const item of input.folders.slice(0, 2000)) {
+    const folder = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+    if (typeof folder.cwd !== 'string' || !isAbsolute(folder.cwd) || !repositoryName(folder.remoteUrl)) continue;
+    folders.set(folder.remoteUrl as string, [...folders.get(folder.remoteUrl as string) ?? [], folder.cwd]);
+  }
+  return { section: parseManagedSkills(input.section), folders };
+}
+
+/**
  * The stored skills that came from the followed Tower, by folder, in `<state>/skills-managed.json`: only these are
  * ever replaced or removed by it. A file that cannot be read counts as none, so a skill is never taken from this
- * computer's owner by mistake (one with the same content is recognised again).
+ * computer's owner by mistake; the followed Tower's skills then stay and are reported until the owner sorts them out.
  */
 export class ManagedSkillList {
   private readonly path: string;
@@ -71,11 +86,3 @@ export async function sameFiles(dir: string, files: SkillBundleFile[]): Promise<
   return Boolean(current) && key(current!) === key(files);
 }
 
-/** A default skill exactly as Tower made it here, never edited: the followed Tower's copy of it may take its place. */
-export async function untouchedDefault(dir: string, name: string): Promise<boolean> {
-  const skill = DEFAULT_SKILLS.find(item => item.name === name);
-  if (!skill) return false;
-  // As SkillFiles writes a new skill.
-  const text = formatSkillFile({ name: skill.name, description: skill.description.trim().replace(/\s*\n\s*/g, ' '), body: skill.body });
-  return sameFiles(dir, [{ path: 'SKILL.md', mode: 0o644, base64: Buffer.from(text).toString('base64') }]);
-}

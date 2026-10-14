@@ -1,4 +1,4 @@
-import { mkdir, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type { ChatMessage, Run, Session } from '../../shared/types.js';
@@ -17,7 +17,7 @@ import { SkillError, SkillFiles, type SkillHomes } from './files.js';
 import { SkillStateStore, type SkillTargetRecord } from './state.js';
 import { ClosedSessionStore } from '../stores/closed-sessions.js';
 import type { SkillBackup } from './backup.js';
-import { ManagedSkillList, parseManagedSkills, sameFiles, untouchedDefault, type ManagedSkill, type ManagedSkills } from './managed.js';
+import { ManagedSkillList, parseManagedApply, sameFiles, type ManagedSkill, type ManagedSkills } from './managed.js';
 import { remoteUrlOf } from '../repositories/remote-url.js';
 
 export interface SkillServiceOptions {
@@ -665,12 +665,13 @@ export class SkillService {
   /**
    * Makes this computer's Tower skills and guidance those of the Tower it follows: each of its skills is made or
    * replaced, pinned or not, and linked into this computer's folders of the same repositories; the ones it no longer
-   * has are removed, the guidance replaced, empty included. Skills of this computer's own are never changed: one of
-   * the same name stays, and is reported. Nothing is written where nothing changed.
+   * has are removed, the guidance replaced, empty included. Only skills made this way are ever replaced or removed:
+   * a skill of this computer's own with the same name stays as it is, whatever it holds, and is reported. Nothing is
+   * written where nothing changed. `input` is the section with this computer's project folders (`parseManagedApply`).
    */
-  async applyManaged(value: unknown): Promise<void> {
+  async applyManaged(input: unknown): Promise<void> {
     await this.ready();
-    const incoming = parseManagedSkills(value);
+    const { section: incoming, folders } = parseManagedApply(input);
     const failures: string[] = [];
     let changed = false;
     await this.exclusive(async () => {
@@ -684,15 +685,13 @@ export class SkillService {
         saved = next;
       };
       const stored = await this.files.managed();
-      const folders = await this.foldersByRepository(incoming.skills.some(skill => skill.targets.repositories.length > 0));
       const kept: string[] = [];
       for (const item of incoming.skills) {
         try {
           const dir = await this.files.installDir({ name: item.name, scope: 'global' });
-          // best-effort: a folder that cannot be read is written again, as a missing one would be.
-          const present = Boolean(await stat(dir).catch(() => undefined));
-          const ours = before.includes(dir) || !present || await sameFiles(dir, item.files) || this.state.get().seeded.includes(item.name) && await untouchedDefault(dir, item.name);
-          if (!ours) throw new SkillError('이 컴퓨터에 같은 이름의 Tower 스킬이 있어 호스트의 스킬로 바꾸지 않았습니다.', 'conflict');
+          const present = Boolean(await lstat(dir).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }));
+          // A folder there that this sync did not make is this computer's own, even with the same content.
+          if (present && !before.includes(dir)) throw new SkillError('이 컴퓨터에 같은 이름의 Tower 스킬이 있어 호스트의 스킬을 적용하지 않았습니다. 이 컴퓨터의 스킬은 그대로 둡니다.', 'conflict');
           if (stored.some(skill => basename(skill.dir) === item.name && skill.dir !== dir)) throw new SkillError('이 컴퓨터의 프로젝트에 같은 이름의 Tower 스킬이 있어 호스트의 스킬을 적용하지 않았습니다.', 'conflict');
           kept.push(dir);
           // Counted as the followed Tower's before it is written, so a crash never leaves it looking like this computer's own.
@@ -734,19 +733,6 @@ export class SkillService {
     if (failures.length) throw new SkillError(failures.join(' / '), 'conflict');
   }
 
-  /** This computer's project folders by the repository they are clones of; read only when a skill names one. */
-  private async foldersByRepository(needed: boolean): Promise<Map<string, string[]>> {
-    const folders = new Map<string, string[]>();
-    if (!needed) return folders;
-    const known = [...new Set([...this.options.projects?.() ?? [], ...this.options.sessions().filter(session => !session.node).map(session => session.cwd)])].slice(0, 300);
-    for (const cwd of known) {
-      // best-effort: a folder that cannot be read is no folder to link into.
-      if (!(await stat(cwd).catch(() => undefined))?.isDirectory()) continue;
-      const url = await remoteUrlOf(cwd);
-      if (url) folders.set(url, [...folders.get(url) ?? [], cwd]);
-    }
-    return folders;
-  }
 
   /** What importing a backup would do here, item by item, before anything is written. */
   async importPlan(input: unknown): Promise<SkillImportPlan> {

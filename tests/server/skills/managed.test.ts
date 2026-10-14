@@ -5,7 +5,8 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SkillService } from '../../../server/skills/service.js';
-import { parseManagedSkills, type ManagedSkills } from '../../../server/skills/managed.js';
+import { parseManagedApply, parseManagedSkills, type ManagedSkills } from '../../../server/skills/managed.js';
+import type { ManagedFolder } from '../../../shared/managed.js';
 import type { Session } from '../../../shared/types.js';
 import { ISSUE_SKILL } from '../../../shared/issues.js';
 
@@ -33,8 +34,8 @@ async function clone(path: string, remote: string) {
   execFileSync('git', ['-C', path, 'remote', 'add', 'origin', remote]);
 }
 const exists = (path: string) => lstat(path).then(() => true, () => false);
-/** As the web relays it: through JSON. */
-const relay = (value: ManagedSkills) => JSON.parse(JSON.stringify(value)) as unknown;
+/** As the node's web hands it to its worker: through JSON, with the node's folders and their repositories. */
+const relay = (value: ManagedSkills, folders: ManagedFolder[] = []) => JSON.parse(JSON.stringify({ section: value, folders })) as unknown;
 /** Every file under a folder with its modification time, links by where they lead. */
 async function tree(dir: string): Promise<Record<string, string>> {
   const result: Record<string, string> = {};
@@ -55,8 +56,8 @@ test('a following computer mirrors the host\'s Tower skills: made, changed, pinn
   await clone(hostApp, 'git@github.com:kimwz/app.git');
   await mkdir(hostLocal, { recursive: true });
   const nodeApp = join(node.home, 'Workspace', 'app'), nodeOther = join(node.home, 'Workspace', 'other');
-  await clone(nodeApp, 'https://github.com/kimwz/app');
-  await clone(nodeOther, 'https://github.com/kimwz/other');
+  await mkdir(nodeApp, { recursive: true }); await mkdir(nodeOther, { recursive: true });
+  const nodeFolders = [{ cwd: nodeApp, remoteUrl: 'github.com/kimwz/app' }, { cwd: nodeOther, remoteUrl: 'github.com/kimwz/other' }];
   const from = await service(host, [hostApp, hostLocal]);
   const to = await service(node, [nodeApp, nodeOther]);
   await from.mutate('save', { scope: 'global', name: 'review', description: 'Review code.', body: 'Steps', pinned: true });
@@ -69,7 +70,7 @@ test('a following computer mirrors the host\'s Tower skills: made, changed, pinn
     ['deploy', false, { all: false, repositories: ['github.com/kimwz/app'] }],
     ['review', true, { all: true, repositories: [] }],
   ], 'a project without a repository is left out');
-  await to.applyManaged(relay(sent));
+  await to.applyManaged(relay(sent, nodeFolders));
   let stored = new Map((await to.overview()).stored!.map(skill => [skill.name, skill]));
   assert.equal(stored.get('review')!.pinned, true);
   assert.deepEqual(stored.get('review')!.targets, { all: true, projects: [] });
@@ -81,7 +82,7 @@ test('a following computer mirrors the host\'s Tower skills: made, changed, pinn
 
   // Applying the same again changes nothing on disk.
   const before = { ...await tree(node.state), ...await tree(node.homes.agentsHome), ...await tree(join(nodeApp, '.agents')) };
-  await to.applyManaged(relay(await from.exportManaged()));
+  await to.applyManaged(relay(await from.exportManaged(), nodeFolders));
   assert.deepEqual({ ...await tree(node.state), ...await tree(node.homes.agentsHome), ...await tree(join(nodeApp, '.agents')) }, before);
 
   // The host edits, unpins, retargets and empties its guidance: all of it reaches the node.
@@ -91,7 +92,7 @@ test('a following computer mirrors the host\'s Tower skills: made, changed, pinn
   await from.mutate('assign', { dir: review.dir, targets: { all: false, projects: [hostApp] } });
   guidance = (await from.overview()).guidance!;
   await from.mutate('guidance', { owner: '', revision: guidance.revision });
-  await to.applyManaged(relay(await from.exportManaged()));
+  await to.applyManaged(relay(await from.exportManaged(), nodeFolders));
   stored = new Map((await to.overview()).stored!.map(skill => [skill.name, skill]));
   assert.equal(stored.get('review')!.pinned, false);
   assert.match(await readFile(join(stored.get('review')!.dir, 'SKILL.md'), 'utf8'), /Changed steps/);
@@ -126,7 +127,7 @@ test('a skill the host deleted goes from the node; the node\'s own skills never 
   assert.ok(stored.has('clash'), 'never the host\'s, so never removed by it');
 });
 
-test('a skill identical to one the node already has, and an untouched default, are taken over without a conflict', async t => {
+test('a node skill of the same name stays the node\'s even with the same content, a default included: never replaced or removed by the host', async t => {
   const host = await computer(t, 'host'), node = await computer(t, 'node');
   const from = await service(host, [], true);
   const to = await service(node, [], true);
@@ -134,13 +135,15 @@ test('a skill identical to one the node already has, and an untouched default, a
   await from.mutate('save', { dir: issue.dir, revision: issue.revision, scope: 'global', name: ISSUE_SKILL, description: issue.description, body: 'The owner\'s own way.' });
   await from.mutate('save', { scope: 'global', name: 'same', description: 'Same.', body: 'Same steps' });
   await to.mutate('save', { scope: 'global', name: 'same', description: 'Same.', body: 'Same steps' });
-  await to.applyManaged(relay(await from.exportManaged()));
+  const defaultBefore = await readFile(join((await to.overview()).stored!.find(skill => skill.name === ISSUE_SKILL)!.dir, 'SKILL.md'), 'utf8');
+  await assert.rejects(to.applyManaged(relay(await from.exportManaged())), (error: Error) => error.message.includes(`${ISSUE_SKILL}: 이 컴퓨터에 같은 이름의`) && error.message.includes('same: 이 컴퓨터에 같은 이름의'));
   const mirrored = (await to.overview()).stored!.find(skill => skill.name === ISSUE_SKILL)!;
-  assert.match(await readFile(join(mirrored.dir, 'SKILL.md'), 'utf8'), /The owner's own way/, 'the host\'s edited default replaces the node\'s untouched one');
+  assert.equal(await readFile(join(mirrored.dir, 'SKILL.md'), 'utf8'), defaultBefore, 'the node\'s own default is not replaced');
+  assert.equal(await exists(join(node.state, 'skills-managed.json')), false, 'neither is counted as the host\'s');
   const same = (await from.overview()).stored!.find(skill => skill.name === 'same')!;
   await from.mutate('delete', { dir: same.dir });
-  await to.applyManaged(relay(await from.exportManaged()));
-  assert.equal((await to.overview()).stored!.some(skill => skill.name === 'same'), false, 'taken over, so the host removes it');
+  await to.applyManaged(relay(await from.exportManaged())).catch(() => {});
+  assert.equal((await to.overview()).stored!.some(skill => skill.name === 'same'), true, 'the host deleting its own never removes the node\'s');
 });
 
 test('what the host sends is checked before use: names, file paths and repository addresses', () => {
@@ -149,6 +152,9 @@ test('what the host sends is checked before use: names, file paths and repositor
   assert.throws(() => parseManagedSkills({ skills: [{ name: 'x', pinned: false, files: [{ ...file, path: '../SKILL.md' }], targets: { all: true, repositories: [] } }], guidance: '' }));
   assert.throws(() => parseManagedSkills({ skills: [{ name: 'x', pinned: false, files: [file], targets: { all: false, repositories: ['/etc'] } }], guidance: '' }));
   assert.throws(() => parseManagedSkills({ skills: [], guidance: 1 }));
+  assert.throws(() => parseManagedApply({ section: { skills: [], guidance: '' } }), /폴더 목록/);
+  assert.deepEqual([...parseManagedApply({ section: { skills: [], guidance: '' }, folders: [{ cwd: '/w/app', remoteUrl: 'github.com/kimwz/app' }, { cwd: 'relative', remoteUrl: 'github.com/kimwz/app' }, { cwd: '/w/x' }] }).folders],
+    [['github.com/kimwz/app', ['/w/app']]]);
   assert.deepEqual(parseManagedSkills({ skills: [{ name: 'x', pinned: true, files: [file], targets: { all: false, repositories: ['github.com/kimwz/app'] } }], guidance: 'g' }).skills[0]!.targets,
     { all: false, repositories: ['github.com/kimwz/app'] });
 });
@@ -164,8 +170,8 @@ test('the list of skills from the host is owner-only and written only when it ch
   const first = (await stat(path)).mtimeMs;
   await to.applyManaged(relay(await from.exportManaged()));
   assert.equal((await stat(path)).mtimeMs, first);
-  // A list that cannot be read counts no skill as the host's: an identical one is recognised again, nothing is lost.
+  // A list that cannot be read counts no skill as the host's: the skill stays, and is reported rather than replaced.
   await writeFile(path, 'not json', { mode: 0o600 });
-  await to.applyManaged(relay(await from.exportManaged()));
-  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')).dirs.length, 1);
+  await assert.rejects(to.applyManaged(relay(await from.exportManaged())), /one: 이 컴퓨터에 같은 이름의/);
+  assert.ok((await to.overview()).stored!.some(skill => skill.name === 'one'));
 });

@@ -589,7 +589,8 @@ async function main() {
   // Sections register their export (managedSync) and apply (managedReceiver) here, beside their owning modules.
   // Skills live in the worker's stores; model roles are one file every process reads; fast judgments are this web's.
   managedSync?.register('skills', () => runs.managedCall('skills', 'export'));
-  managedReceiver.register('skills', async (value, context) => { await runs.managedCall('skills', 'apply', value, context); });
+  // The worker links them into this computer's folders of the same repositories, as this web knows the folders now.
+  managedReceiver.register('skills', async (value, context) => { await runs.managedCall('skills', 'apply', { section: value, folders: await managedFolders() }, context); });
   managedSync?.register('models', () => exportManagedModelSettings(stateDir));
   managedReceiver.register('models', async value => { if (await applyManagedModelSettings(stateDir, value)) changed(); });
   managedSync?.register('decisions', async () => decisions.backupValue());
