@@ -34,6 +34,17 @@ function machineWrapper(machine: unknown): MachineWrapper | undefined {
   const value = machine as Partial<MachineWrapper> | undefined;
   return value && typeof value === 'object' && typeof value.keyId === 'string' && /^[a-f0-9]{64}$/.test(value.keyId) && isCiphertext(value.wrappedKey) ? value as MachineWrapper : undefined;
 }
+/** A vault file to import, checked for its format. */
+function importEnvelope(bytes: Buffer): Envelope {
+  if (bytes.length > MAX_FILE) throw new Error('Import size limit');
+  const envelope = JSON.parse(bytes.toString()) as Envelope;
+  if (envelope.format !== 1 || !/^[a-f0-9-]{36}$/.test(envelope.vaultId) || JSON.stringify(envelope.kdf) !== JSON.stringify(KDF)) throw new Error('Unsupported import format');
+  return envelope;
+}
+/** Whether a vault file has a machine wrapper made with this key, without opening it. */
+export function importOpensWith(bytes: Buffer, machineKey: Buffer): boolean {
+  try { return machineWrapper(importEnvelope(bytes).machine)?.keyId === machineKeyId(machineKey); } catch { return false; } // best-effort: a file that is not a vault opens with nothing
+}
 /** Names a machine key without revealing it. */
 export const machineKeyId = (key: Buffer) => createHash('sha256').update('tower-machine-key:1:').update(key).digest('hex');
 export class SecretVault {
@@ -159,11 +170,17 @@ export class SecretVault {
     try { const envelope = { ...this.envelope, salt, wrappedKey: encrypt(wrapper, this.key, this.aad('key')) }; await this.write('vault.json', Buffer.from(JSON.stringify(envelope))); this.envelope = envelope; } finally { wrapper.fill(0); }
   }
   async decryptImport(bytes: Buffer, password: string): Promise<unknown> {
-    if (bytes.length > MAX_FILE) throw new Error('Import size limit');
-    const envelope = JSON.parse(bytes.toString()) as Envelope;
-    if (envelope.format !== 1 || !/^[a-f0-9-]{36}$/.test(envelope.vaultId) || JSON.stringify(envelope.kdf) !== JSON.stringify(KDF)) throw new Error('Unsupported import format');
+    const envelope = importEnvelope(bytes);
     const wrapper = await passwordKey(password, envelope.salt); let key: Buffer | undefined;
     try { key = decrypt(wrapper, envelope.wrappedKey, `tower-secrets:1:${envelope.vaultId}:key`); return JSON.parse(decrypt(key, envelope.payload, `tower-secrets:1:${envelope.vaultId}:permanent`).toString()); } finally { wrapper.fill(0); key?.fill(0); }
+  }
+  /** Another computer's vault file opened with its machine key (a backup carries it for a vault that key opens). */
+  decryptImportWithMachineKey(bytes: Buffer, machineKey: Buffer): unknown {
+    const envelope = importEnvelope(bytes); const wrapper = machineWrapper(envelope.machine); const keyId = machineKeyId(machineKey);
+    if (!wrapper || wrapper.keyId !== keyId || machineKey.length !== 32) throw new Error('Cannot unlock vault');
+    let key: Buffer | undefined;
+    try { key = decrypt(machineKey, wrapper.wrappedKey, `tower-secrets:1:${envelope.vaultId}:machine-key:${keyId}`); return JSON.parse(decrypt(key, envelope.payload, `tower-secrets:1:${envelope.vaultId}:permanent`).toString()); }
+    catch { throw new Error('Cannot unlock vault'); } finally { key?.fill(0); }
   }
   private validatePassword(password: string) { if (typeof password !== 'string' || password.length < MIN_VAULT_PASSWORD || Buffer.byteLength(password) > 1024) throw new Error('Password must contain at least 12 characters'); }
 }

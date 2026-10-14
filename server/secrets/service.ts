@@ -505,8 +505,9 @@ export class SecretService {
   async legacyCreate(input: { name: string; value: string; origin: string }, now = this.now()) { const record = { ...input, id: randomUUID(), createdAt: new Date(now).toISOString() }; await this.importLegacy([record]); return record; }
   async legacyRemove(id: string) { return this.mutate(() => { this.data().legacy = this.data().legacy.filter(record => record.id !== id); }); }
   /** Copies another vault's saved values and groups, never its identity, trust, rules, sharing or connections: everything arrives unshared. */
-  async importEncryptedVault(content: Buffer, password: string): Promise<void> {
-    const source = await this.vault.decryptImport(content, password) as Permanent;
+  async importEncryptedVault(content: Buffer, opener: string | { machineKey: Buffer }): Promise<void> {
+    // A vault that carried its machine key (a backup of a computer that followed a host) opens with it, no password.
+    const source = (typeof opener === 'string' ? await this.vault.decryptImport(content, opener) : this.vault.decryptImportWithMachineKey(content, opener.machineKey)) as Permanent;
     await this.mutate(() => {
       if (!Array.isArray(source.secrets) || !Array.isArray(source.groups) || !Array.isArray(source.legacy)) throw new Error('Invalid import payload');
       const importedGroups = source.groups.filter(group => group.scope !== 'task');

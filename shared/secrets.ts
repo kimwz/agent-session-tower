@@ -39,6 +39,8 @@ export interface SecretTask {
 }
 export interface VaultStatus {
   initialized: boolean; locked: boolean; pendingImports?: number; pendingImportIds?: string[]; error?: string;
+  /** Pending vault imports that carry their machine key: they import without the source vault's password. */
+  pendingImportsKeyed?: string[];
   /**
    * Set by the web while the vault is locked and the account and worker support it: `ready` when the Tower (login)
    * password opens it, `missing` when the vault (recovery) password is needed once with it. Absent: the vault password opens it.

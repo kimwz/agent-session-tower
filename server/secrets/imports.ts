@@ -12,12 +12,15 @@ import type { TriggerBackup } from '../triggers/backup.js';
 import { validStoredSecret } from '../triggers/secrets.js';
 import { decode } from './crypto.js';
 import type { SecretService } from './service.js';
-import { SecretVault } from './vault.js';
+import { importOpensWith, SecretVault } from './vault.js';
+import { readMachineKey } from './machine-key.js';
 
 const PREFIX = 'pending-import-';
 const validId = (id: string) => /^[a-f0-9-]{36}$/.test(id);
 const root = (stateDir: string) => join(stateDir, 'secrets');
-export interface PendingSecretImport { version: 1; kind: 'vault' | 'legacy'; content: string; restoreId?: string }
+/** `machineKey`: the key that opens a `vault` import without its password (base64url), when the backup carried it. */
+export interface PendingSecretImport { version: 1; kind: 'vault' | 'legacy'; content: string; restoreId?: string; machineKey?: string }
+const MACHINE_KEY_TEXT = /^[A-Za-z0-9_-]{43}$/;
 async function directory(stateDir: string, create = false) {
   if (create) await mkdir(root(stateDir), { recursive: true, mode: 0o700 });
   try { if (!(await lstat(root(stateDir))).isDirectory()) throw new Error('Invalid secret import directory'); return true; }
@@ -29,10 +32,31 @@ export async function encryptedVaultOf(stateDir: string): Promise<string | undef
   if (!vault.initialized) return undefined;
   return (await vault.read('vault.json'))!.toString('base64');
 }
-export async function stageVaultImport(stateDir: string, content: string, restoreId?: string): Promise<string> {
+/**
+ * This computer's machine key as text, when its vault opens with it (a computer that follows a host): a backup carries
+ * it, encrypted with the backup, so that vault restores on another computer, where nobody knows its password.
+ */
+export async function machineKeyOf(stateDir: string): Promise<string | undefined> {
+  const vault = new SecretVault(stateDir); await vault.start();
+  if (!vault.initialized) return undefined;
+  const key = await readMachineKey(stateDir);
+  try { return key && vault.hasMachine(key) ? key.toString('base64url') : undefined; } finally { key?.fill(0); }
+}
+/** A backup's vault, waiting for the owner; with the machine key it carried when that key opens it. */
+export async function stageVaultImport(stateDir: string, content: string, restoreId?: string, machineKey?: string): Promise<string> {
   const bytes = decode(content); if (bytes.length > 16 * 1024 * 1024) throw new Error('Vault import size limit');
   const envelope = JSON.parse(bytes.toString()); if (envelope?.format !== 1 || typeof envelope.vaultId !== 'string' || !envelope.wrappedKey || !envelope.payload) throw new Error('Invalid encrypted vault');
-  return stagePendingImport(stateDir, { version: 1, kind: 'vault', content, restoreId });
+  const key = machineKey !== undefined && MACHINE_KEY_TEXT.test(machineKey) && importOpensWith(bytes, Buffer.from(machineKey, 'base64url')) ? machineKey : undefined;
+  return stagePendingImport(stateDir, { version: 1, kind: 'vault', content, restoreId, ...(key ? { machineKey: key } : {}) });
+}
+/** Pending imports that open without a password (they carry their machine key). */
+export async function keyedPendingImports(stateDir: string): Promise<string[]> {
+  const keyed: string[] = [];
+  for (const id of await listPendingSecretImports(stateDir)) {
+    const pending = await readPrivateJson(join(root(stateDir), `${PREFIX}${id}.json`), 45 * 1024 * 1024) as PendingSecretImport;
+    if (pending.kind === 'vault' && typeof pending.machineKey === 'string' && MACHINE_KEY_TEXT.test(pending.machineKey)) keyed.push(id);
+  }
+  return keyed;
 }
 export async function stagePendingImport(stateDir: string, pending: PendingSecretImport): Promise<string> {
   await directory(stateDir, true);
@@ -47,14 +71,23 @@ export async function listPendingSecretImports(stateDir: string): Promise<string
   if (!await directory(stateDir)) return [];
   return (await readdir(root(stateDir))).filter(name => /^pending-import-[a-f0-9-]{36}\.json$/.test(name)).map(name => name.slice(PREFIX.length, -5)).sort();
 }
-/** Source password belongs only to this owner request; the pending file stays encrypted until commit succeeds. */
+/**
+ * Source password belongs only to this owner request; the pending file stays encrypted until commit succeeds. A vault
+ * import that carries its machine key opens with it, and the password is not asked for.
+ */
 export async function importPendingSecret(stateDir: string, id: string, password: string, target: SecretService, options: { openLegacy: (content: string, password: string) => Promise<unknown>; restoreTriggers?: (backup: TriggerBackup) => Promise<void> }): Promise<void> {
   if (!validId(id)) throw new Error('Invalid secret import ID');
   if (!target.status().initialized || target.status().locked) throw new Error('Unlock the target Vault before importing secrets');
   await directory(stateDir);
   const path = join(root(stateDir), `${PREFIX}${id}.json`); const pending = await readPrivateJson(path, 45 * 1024 * 1024) as PendingSecretImport;
   if (pending.version !== 1 || typeof pending.content !== 'string') throw new Error('Invalid pending import');
-  if (pending.kind === 'vault') await target.importEncryptedVault(decode(pending.content), password);
+  if (pending.kind === 'vault' && typeof pending.machineKey === 'string' && MACHINE_KEY_TEXT.test(pending.machineKey)) {
+    const machineKey = Buffer.from(pending.machineKey, 'base64url');
+    try { await target.importEncryptedVault(decode(pending.content), { machineKey }); } finally { machineKey.fill(0); }
+  } else if (pending.kind === 'vault') {
+    if (!password) throw new Error('The source Vault password is required');
+    await target.importEncryptedVault(decode(pending.content), password);
+  }
   else if (pending.kind === 'legacy') {
     const value = await options.openLegacy(pending.content, password) as { version?: unknown; records?: unknown; triggers?: TriggerBackup };
     if (value?.version !== 1 || !Array.isArray(value.records) || !value.records.every(validStoredSecret)) throw new Error('Invalid pending legacy records');

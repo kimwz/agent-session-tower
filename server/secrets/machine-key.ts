@@ -7,7 +7,8 @@ import { readPrivateBytes } from '../stores/private-json.js';
  * The machine key of a computer that follows a host ("호스트 설정 따르기"): 32 random bytes in `<state>/secrets/machine-key`
  * (0600), which open that computer's vault without a password (`SecretVault.machineWrap`). A vault made for it uses the
  * key's base64url text as its vault (recovery) password too, so a build without machine keys still opens it with that
- * text. The key never leaves this file and the worker's memory: no log, argv or environment.
+ * text. Besides this file and the worker's memory the key goes only into this computer's passphrase-encrypted backups
+ * (`machineKeyOf`), so that vault restores elsewhere: never into logs, argv or environments.
  */
 const FILE = 'machine-key';
 

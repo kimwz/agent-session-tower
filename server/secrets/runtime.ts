@@ -14,6 +14,7 @@ import { parseSecretCli } from './cli.js';
 import { parseDotenv } from './dotenv.js';
 import { RemoteSecretBroker, wireMetadata, type RemoteSecretOperation, type RemoteSecretRequest, type RemoteSecretResponse } from './remote.js';
 import { ensureMachineKey, readMachineKey } from './machine-key.js';
+import { keyedPendingImports } from './imports.js';
 import { ownerConnection, ownerCreate, ownerInput, ownerSession, ownerSharingChange, secretUsage, VIEW_USAGE } from './owner-input.js';
 import { SecretService, viewLocked } from './service.js';
 import type { SecretUseReviewer } from './reviewer.js';
@@ -475,7 +476,8 @@ export class SecretRuntime {
   private async settingsView(): Promise<SecretSettingsView> {
     const view = this.options.service.settings();
     const ids = await this.options.pendingImports?.() ?? [];
-    return { ...view, status: { ...view.status, pendingImports: ids.length, pendingImportIds: ids } };
+    const keyed = ids.length ? await keyedPendingImports(this.options.stateDir) : [];
+    return { ...view, status: { ...view.status, pendingImports: ids.length, pendingImportIds: ids, ...(keyed.length ? { pendingImportsKeyed: keyed } : {}) } };
   }
   /** Every saved secret the owner may connect to a session, shared or not; no values. */
   private connectable(): SecretMetadata[] { return this.options.service.settings().secrets.map(({ sharing: _sharing, legacy: _legacy, withheld: _withheld, ...metadata }) => metadata); }
@@ -601,10 +603,11 @@ export class SecretRuntime {
     if (action === 'value' || action === 'value-update') return this.valueAction(action, input);
     const password = (field: string) => { if (typeof input[field] !== 'string') throw fail('보관함 비밀번호가 필요합니다.'); return input[field] as string; };
     if (action === 'initialize') await this.open(() => service.initialize(password('password')));
-    else if (action === 'unlock') await this.open(() => service.unlock(password('password')));
+    else if (action === 'unlock') { if (!await this.openWithMachineKey()) await this.open(() => service.unlock(password('password'))); }
     else if (action === 'lock') { await service.lock(); this.ownerLocked = true; }
     else if (action === 'password') await service.changePassword(password('currentPassword'), password('newPassword'));
-    else if (action === 'import') { if (!this.options.importPending || typeof input.id !== 'string') throw fail('가져올 암호화 기록이 필요합니다.'); await this.options.importPending(input.id, password('password')); }
+    // A vault import that carries its machine key needs no password (`pendingImportsKeyed`).
+    else if (action === 'import') { if (!this.options.importPending || typeof input.id !== 'string') throw fail('가져올 암호화 기록이 필요합니다.'); await this.options.importPending(input.id, typeof input.password === 'string' ? input.password : ''); }
     else if (!MUTATIONS.has(action)) throw fail('알 수 없는 시크릿 작업입니다.', 'not-found');
     else if (service.status().locked) throw fail('시크릿 보관함이 잠겨 있습니다. 잠금을 해제한 뒤 다시 시도하세요.', 'locked');
     else if (action === 'create') {
@@ -632,6 +635,23 @@ export class SecretRuntime {
     } else if (action === 'untrust') await service.removePeer(z.string().parse(input.id));
     return this.settingsView();
   }
+  /**
+   * The owner asked to open the vault: one this computer's machine key opens (made while it followed a host) opens with
+   * it, following or not, and an owner lock ends. False when it does not open that way.
+   */
+  private async openWithMachineKey(): Promise<boolean> {
+    const service = this.options.service;
+    if (!service.status().initialized || !service.status().locked || this.blocked) return false;
+    let key: Buffer | undefined;
+    try { key = await readMachineKey(this.options.stateDir); } catch { return false; } // best-effort: a damaged key file leaves the password to open it
+    if (!key) return false;
+    try {
+      if (!service.vault.hasMachine(key)) return false;
+      let opened = false;
+      try { await this.open(async () => { await service.machineUnlock(key!, service.lockGeneration); opened = true; }); return true; }
+      catch (error) { if (opened) throw error; return false; }
+    } finally { key.fill(0); }
+  }
   /** Adds the Tower password wrapper of `credentialId` around the open key; false, never an error, while locked or without a vault. */
   private async towerWrap(password: string, credentialId: string): Promise<boolean> {
     const service = this.options.service; if (service.status().locked) return false;
@@ -652,6 +672,8 @@ export class SecretRuntime {
       try { await this.open(async () => { await unlock(); opened = true; }); return true; }
       catch (error) { if (opened) throw error; return false; }
     };
+    // A vault this computer's machine key opens needs no recovery password; it is then wrapped for the Tower password below.
+    await this.openWithMachineKey();
     if (service.status().locked) {
       // A wrapper that does not open counts as missing.
       if (service.vault.hasTower(credentialId)) await tryOpen(() => service.towerUnlock(password, credentialId));

@@ -2660,4 +2660,5 @@ export const english: Record<string, string> = {
   "{0} 작업이 이 시크릿을 쓰려 합니다.": "Work on {0} wants to use this secret.",
   "이 머신에 공유": "Share with this machine",
   "시크릿 신뢰를 승인한 컴퓨터만 공유할 수 있습니다.": "Only computers approved for secrets can be shared with.",
+  "이 보관함은 함께 백업된 머신 키로 열어 이 보관함에 가져옵니다. 비밀번호는 필요 없습니다.": "This vault opens with the machine key backed up with it and is imported into this vault. No password is needed.",
 };

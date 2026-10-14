@@ -40,6 +40,8 @@ export interface WorkerRestore {
   done?: { parts: BackupPart[]; errors: string[] };
   files: Partial<Record<WorkerFile, unknown>>;
   encryptedVault?: string;
+  /** The machine key that opens `encryptedVault` (base64url), from a computer that followed a host; never logged. */
+  machineKey?: string;
   triggers?: TriggerBackup;
   skills?: SkillBackup;
 }
@@ -169,13 +171,15 @@ export function parsePayload(value: unknown): BackupPayload {
   for (const name of Object.keys(WORKER_FILES) as WorkerFile[]) if (value.worker.files[name] !== undefined) files[name] = value.worker.files[name];
   const encryptedVault = value.worker.encryptedVault;
   if (encryptedVault !== undefined && (typeof encryptedVault !== 'string' || encryptedVault.length > 24 * 1024 * 1024 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encryptedVault) || Buffer.from(encryptedVault, 'base64').toString('base64') !== encryptedVault)) throw new Error('백업의 암호화 Vault가 올바르지 않습니다.');
+  const machineKey = value.worker.machineKey;
+  if (machineKey !== undefined && (!encryptedVault || typeof machineKey !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(machineKey))) throw new Error('백업의 보관함 머신 키가 올바르지 않습니다.');
   const triggers = value.worker.triggers, skills = value.worker.skills;
   if (triggers !== undefined && !(record(triggers) && Array.isArray(triggers.triggers) && Array.isArray(triggers.trustedFolders) && record(triggers.secretGrants) && record(triggers.fired) && record(triggers.github))) throw new Error('백업의 트리거가 올바르지 않습니다.');
   if (skills !== undefined && !(record(skills) && record(skills.bundle) && Array.isArray(skills.bundle.skills) && typeof skills.guidance === 'string' && record(skills.settings))) throw new Error('백업의 스킬이 올바르지 않습니다.');
   const master = value.master;
   if (master !== undefined && !(record(master) && (master.settings === undefined || record(master.settings)) && (master.voiceKey === undefined || typeof master.voiceKey === 'string'))) throw new Error('백업의 마스터 설정이 올바르지 않습니다.');
   const web = value.web;
-  return { version: 1, ...(typeof value.machine === 'string' ? { machine: value.machine } : {}), worker: { files, ...(encryptedVault ? { encryptedVault } : {}), ...(triggers ? { triggers: triggers as unknown as TriggerBackup } : {}), ...(skills ? { skills: skills as unknown as SkillBackup } : {}) },
+  return { version: 1, ...(typeof value.machine === 'string' ? { machine: value.machine } : {}), worker: { files, ...(encryptedVault ? { encryptedVault } : {}), ...(machineKey ? { machineKey } : {}), ...(triggers ? { triggers: triggers as unknown as TriggerBackup } : {}), ...(skills ? { skills: skills as unknown as SkillBackup } : {}) },
     web: { ...(web.projectGroups !== undefined ? { projectGroups: web.projectGroups } : {}), ...(web.remoteExclusions !== undefined ? { remoteExclusions: web.remoteExclusions } : {}),
       ...(web.decisions !== undefined ? { decisions: web.decisions } : {}), ...(web.backup !== undefined ? { backup: web.backup } : {}) },
     ...(master ? { master: master as BackupPayload['master'] } : {}) };

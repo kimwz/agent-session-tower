@@ -184,10 +184,12 @@ function machineView(answer: unknown): unknown {
  */
 export async function ownerSecretControl(nodes: RemoteNodes | undefined, worker: Worker, action: string, input: Record<string, unknown>): Promise<unknown> {
   if (!worker.supports('secretSharing') || worker.supports('secretMachines')) return secretControl(nodes, worker, action, input);
-  const older = action === 'sharing' ? olderSharing(input) : action === 'create' && input.sharing && typeof input.sharing === 'object' ? { ...input, sharing: olderSharing(input.sharing as Record<string, unknown>) } : input;
-  return machineView(await secretControl(nodes, worker, action, older));
+  // Checked and validated in the page's form; only what goes to the worker is turned into its older form.
+  const older = (value: Record<string, unknown>) => action === 'sharing' ? olderSharing(value) : action === 'create' && value.sharing && typeof value.sharing === 'object' ? { ...value, sharing: olderSharing(value.sharing as Record<string, unknown>) } : value;
+  older(input); // Sharing with single computers is refused before anything is asked of a joined computer.
+  return machineView(await secretControl(nodes, worker, action, input, older));
 }
-async function secretControl(nodes: RemoteNodes | undefined, worker: Worker, action: string, input: Record<string, unknown>): Promise<unknown> {
+async function secretControl(nodes: RemoteNodes | undefined, worker: Worker, action: string, input: Record<string, unknown>, toWorker: (value: Record<string, unknown>) => Record<string, unknown> = value => value): Promise<unknown> {
   if (VALUE_VIEW_ACTIONS.includes(action) && !worker.supports('secretValueView')) throw workerUpdatePending();
   if (!worker.supports('secretSharing')) {
     // Locking and unlocking stay possible during a handoff, so the settings and the session read the vault's status from
@@ -209,11 +211,11 @@ async function secretControl(nodes: RemoteNodes | undefined, worker: Worker, act
     return worker.secretCall('control', ['session', session, ...(remote ? [await remoteSessionSubject(nodes, worker, session)] : [])]);
   }
   const safe = await canonicalInput(nodes, worker, action, page);
-  if (!remote || !SESSION_CHANGES.includes(action)) return worker.secretCall('control', [action, safe]);
+  if (!remote || !SESSION_CHANGES.includes(action)) return worker.secretCall('control', [action, toWorker(safe)]);
   // Validated before the joined computer starts a task for it.
   const { sessionId, nodeId } = ownerInput(action === 'create' ? ownerCreate : ownerConnection, safe) as { sessionId: string; nodeId: string };
   const target = await ownerRemoteTarget(nodes, worker, safe);
-  const connected = (await worker.secretCall('control', [action, safe, target]) as Partial<SecretReceipt>).connectedTarget;
+  const connected = (await worker.secretCall('control', [action, toWorker(safe), target]) as Partial<SecretReceipt>).connectedTarget;
   if (!connected || connected.hostId !== target.hostId || connected.sessionId !== target.sessionId || connected.taskId !== target.taskId) throw fail('연결한 원격 작업의 완료 기록을 확인할 수 없습니다.', 'unavailable');
   if (action !== 'session-disconnect') {
     // An uncertain insert is never sent a second time, and cannot undo the committed connection. A computer that reports
