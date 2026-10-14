@@ -7,6 +7,7 @@ import { MAX_SKILL_DESCRIPTION, proposalReady, SKILL_NAME, targetsCover, targets
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { api } from '../common/lib';
 import { locale, translate as t, translateMessage, useI18n } from '../i18n/i18n';
+import { FollowedHostNote, useFollowedHost } from '../remote/followed-host';
 
 const post = <T = SkillOverview>(path: string, token: string, body: unknown) => api<T>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify(body) });
 const query = (cwd?: string, extra: Record<string, string> = {}) => { const params = new URLSearchParams({ ...(cwd ? { cwd } : {}), ...extra }).toString(); return params ? `?${params}` : ''; };
@@ -83,10 +84,12 @@ export function SkillsPanel({ token, cwd, projects, onClearFolder, onChanged, on
     escape: () => { if (draft) { setDraft(null); return true; } if (secondary[view]) { setView('mine'); return true; } return false; },
     leave: () => !draft || window.confirm(t('저장하지 않은 변경 사항을 버릴까요?')),
   });
+  const followed = useFollowedHost();
   const tabs = draft || !overview || secondary[view] ? undefined : [{ id: 'mine' as View, label: <>{t('내 스킬')}<span className="skills-segment-count">{overview.stored?.length ?? 0}</span></> },
     { id: 'proposals' as View, label: t('추천'), count: ready.length }];
   return <SettingsPane title={t('스킬')} scope="auth-panel skills-scope" chip={cwd ? <FolderChip cwd={cwd} onClear={onClearFolder} /> : undefined}
     description={t('자주 하는 작업 방식을 에이전트가 같은 순서로 따르게 합니다')} actions={!draft && overview && <MoreMenu view={view} onChoose={setView} />} tabs={tabs} tab={view} onTab={setView}>
+    <FollowedHostNote host={followed} skills />
     {error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}
     {notice && <p className="notification-notice" role="status">{notice}</p>}
     {draft ? <SkillEditor draft={draft} cwd={cwd} projects={projects} busy={busy} onCancel={() => setDraft(null)}
