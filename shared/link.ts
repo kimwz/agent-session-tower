@@ -1,4 +1,4 @@
-import type { ManagedSyncStatus } from './managed.js';
+import type { ManagedApplied, ManagedSyncStatus } from './managed.js';
 /** What this browser sees about remote links. Only this computer's own browser receives it. */
 export interface LinkAddress { url: string; kind: 'custom' | 'tailscale' | 'local-name' | 'lan' }
 export interface HubStatus { enabled: boolean; port: number; listening: boolean; error?: string; addresses: LinkAddress[] }
@@ -48,6 +48,8 @@ export interface AutoUpdateStatus {
   };
   tools: { claude?: ToolUpdate; codex?: ToolUpdate };
 }
+/** Whether a CLI new work needs is signed in on a joined computer; `missing` also when it is not installed there. */
+export type LoginState = 'ok' | 'missing' | 'unknown';
 /** What a joined computer reports about itself: structured facts only, never paths or log text. */
 export interface NodeReport {
   versions: { web: string; worker?: string; terminalHost?: string };
@@ -56,6 +58,10 @@ export interface NodeReport {
   update?: UpdateStatus;
   diskFree?: number;
   autoUpdate?: AutoUpdateStatus;
+  /** Whether Claude Code, Codex and gh are signed in there, for new work; never an account or token. */
+  logins?: { claude: LoginState; codex: LoginState; gh: LoginState };
+  /** The settings of the Tower it follows that it applied last ("호스트 설정 따르기"). */
+  managed?: ManagedApplied;
 }
 /** A computer this one controls. */
 export interface UpdateChainStatus { target: string; prerequisite?: string; attempts: Record<string, number>; state: 'done' | 'wait' | 'request' | 'blocked'; code?: string; reason?: string; version?: string }

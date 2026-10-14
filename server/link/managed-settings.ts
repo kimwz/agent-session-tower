@@ -5,6 +5,7 @@ import type { ClientHttp2Session, Http2ServerRequest, Http2ServerResponse } from
 import { join } from 'node:path';
 import { readJson } from '../http/requests.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { TowerError, fromStatus, statusOf } from '../../shared/errors.js';
 import { MANAGED_SECTIONS, type ManagedApplied, type ManagedFolder, type ManagedPayload, type ManagedSection, type ManagedSyncStatus } from '../../shared/managed.js';
 import type { NodeSummary } from '../../shared/link.js';
 import type { FollowedHostStore } from './follow.js';
@@ -22,6 +23,8 @@ const RECONCILE_MS = 10 * 60_000;
 export type ManagedExporter = () => Promise<unknown>;
 /** Applies a section received from the followed Tower. A failure keeps what was there before. */
 export type ManagedApplier = (value: unknown, context: { hostId: string }) => Promise<void>;
+/** Something the followed Tower asks this computer to do (`POST /api/managed/<name>`); it resolves to the answer. */
+export type ManagedAction = (body: Record<string, unknown>, context: { hostId: string }) => Promise<unknown>;
 
 /** JSON with object keys in order: the same settings always give the same text, and so the same revision. */
 export function canonicalJson(value: unknown): string {
@@ -139,6 +142,15 @@ export class ManagedSettingsSync extends EventEmitter {
   /** The project folders a following computer has, with their repositories; the last list known while it is away. */
   folders(id: string): ManagedFolder[] { return this.folderLists.get(id) ?? []; }
 
+  /** Asks a computer that follows this Tower for one of its actions (`ManagedSettingsReceiver.action`); its answer, or why not. */
+  async request(id: string, name: string, body: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+    const session = this.targets().some(node => node.id === id) ? this.options.controller.session(id) : undefined;
+    if (!session) throw new TowerError('conflict', '그 컴퓨터가 연결되어 있고 이 Tower의 설정을 따를 때만 할 수 있습니다.');
+    const answer = await linkRequest(session, 'POST', `/api/managed/${name}`, body, timeoutMs);
+    if (answer.status !== 200) throw fromStatus(answer.status, (answer.json as { error?: unknown } | undefined)?.error as string || `그 컴퓨터가 요청을 받지 않았습니다 (${answer.status}).`);
+    return answer.json;
+  }
+
   async refreshFolders(id: string): Promise<ManagedFolder[]> {
     const session = this.targets().some(node => node.id === id) ? this.options.controller.session(id) : undefined;
     if (!session) return this.folders(id);
@@ -152,7 +164,8 @@ export class ManagedSettingsSync extends EventEmitter {
   }
 }
 
-function parseApplied(value: unknown): ManagedApplied | undefined {
+/** What a computer says it applied, checked: only known sections and short reasons get through. */
+export function parseApplied(value: unknown): ManagedApplied | undefined {
   const applied = value as Partial<ManagedApplied> | undefined;
   if (!applied || typeof applied.revision !== 'string' || typeof applied.appliedAt !== 'string') return undefined;
   const errors = applied.errors && typeof applied.errors === 'object'
@@ -187,6 +200,10 @@ export class ManagedSettingsReceiver {
 
   register(section: ManagedSection, applier: ManagedApplier): void { this.appliers.set(section, applier); }
 
+  private readonly actions = new Map<string, ManagedAction>();
+  /** An action only the followed Tower may ask for, like every managed route. */
+  action(name: string, action: ManagedAction): void { this.actions.set(name, action); }
+
   async start(): Promise<void> {
     // best-effort: no record yet (or an unreadable one) only means nothing is reported until the next apply.
     const saved = await readPrivateJson(this.path, 64 * 1024).catch(() => undefined);
@@ -213,6 +230,12 @@ export class ManagedSettingsReceiver {
       return true;
     }
     if (req.method === 'GET' && path === '/api/managed/folders') { json(200, { folders: await this.options.folders() }); return true; }
+    const action = req.method === 'POST' ? this.actions.get(path.slice('/api/managed/'.length)) : undefined;
+    if (action) {
+      try { json(200, await action(await readJson(req, 64 * 1024), { hostId: principal.controllerId })); }
+      catch (error) { json(statusOf(error) ?? 500, { error: error instanceof Error ? error.message : String(error) }); }
+      return true;
+    }
     json(404, { error: 'Not found.' });
     return true;
   }

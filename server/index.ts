@@ -9,7 +9,7 @@ import { AttachmentUploads } from './stores/attachment-uploads.js';
 import './sessions/launch-env.js';
 import { hostname, homedir } from 'node:os';
 import { stat, truncate } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -67,6 +67,8 @@ import { NodeLinks } from './link/node.js';
 import { FollowedHostStore } from './link/follow.js';
 import { ManagedSettingsReceiver, ManagedSettingsSync } from './link/managed-settings.js';
 import { remoteUrlOf } from './repositories/remote-url.js';
+import { cloneAction, workspaceFolder } from './repositories/clone.js';
+import { GhLogin, providerLogin } from './link/readiness.js';
 import type { ManagedFolder } from '../shared/managed.js';
 import { runLinkCommand } from './link/cli.js';
 import { runModelsCommand } from './models/cli.js';
@@ -578,6 +580,7 @@ async function main() {
     }
     return folders;
   };
+  const ghLogin = new GhLogin();
   const managedReceiver = new ManagedSettingsReceiver({ stateDir, follow: followedHost, folders: managedFolders });
   await managedReceiver.start();
   let managedSync: ManagedSettingsSync | undefined;
@@ -591,6 +594,11 @@ async function main() {
   managedReceiver.register('models', async value => { if (await applyManagedModelSettings(stateDir, value)) changed(); });
   managedSync?.register('decisions', async () => decisions.backupValue());
   managedReceiver.register('decisions', async value => { if (await decisions.applyManaged(value)) { outcomes.changed(); changed(); } });
+  // The followed Tower clones a repository into a new folder here, or opens a terminal in the Workspace folder (to sign
+  // in to Claude, Codex or gh); either becomes a project folder, shown on its canvas like any other.
+  const projectFolder = async (cwd: string) => { if (!groups.list().some(group => group.cwd === cwd)) { await groups.set({ cwd, title: basename(cwd) }); changed(); } };
+  managedReceiver.action('clone', cloneAction({ register: projectFolder }));
+  managedReceiver.action('workspace', async () => { const cwd = await workspaceFolder(); await projectFolder(cwd); return { cwd }; });
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname, follow: followedHost,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
     // and updating do not.
@@ -603,12 +611,15 @@ async function main() {
     update: {
       request: version => updates.request(version),
       report: async () => {
-        const [update, free, running] = await Promise.all([updates.status(), diskFree(stateDir), workspaceTerminals.hostVersion().catch(() => undefined)]);
+        const [update, free, running, gh] = await Promise.all([updates.status(), diskFree(stateDir), workspaceTerminals.hostVersion().catch(() => undefined), ghLogin.state()]);
         // A host that runs what this version needs is not reported as one waiting to move.
         const terminalHost = running && !workspaceTerminals.hostCurrent() ? running : undefined;
         const worker = runs.runnerVersion();
         return { versions: { web: APP_VERSION, ...(worker ? { worker } : {}), ...(terminalHost ? { terminalHost } : {}) }, service: updates.managed,
-          ...(update ? { update } : {}), ...(free !== undefined ? { diskFree: free } : {}), autoUpdate: autoUpdate() };
+          ...(update ? { update } : {}), ...(free !== undefined ? { diskFree: free } : {}), autoUpdate: autoUpdate(),
+          // Whether new work can start here, and how far the followed Tower's settings reached.
+          logins: { claude: providerLogin(capabilities.list().find(item => item.provider === 'claude')), codex: providerLogin(capabilities.list().find(item => item.provider === 'codex')), gh },
+          ...(managedReceiver.applied() ? { managed: managedReceiver.applied() } : {}) };
       },
     } });
   secretRouteKnown = (direction, id) => direction === 'node' ? Boolean(controllerLinks?.list().some(node => node.id === id)) : direction === 'controller' && Boolean(nodeLinks?.list().some(controller => controller.id === id && controller.state === 'paired'));
@@ -697,7 +708,7 @@ async function main() {
   const { server, dispose, token: pageToken } = createMonitorServer({ attachmentStores, attachmentUploads, port, clientDir, backend, nodes: remoteNodes, onNodeMessage: insertRemote, master: { callerSecret: masterCallerSecret, handle: masterRoutes(master, { turnEnd: new VoiceTurnEnd({ engine: () => decisions.engine('voiceTurnEnd'),
       known: async session => await master.call('voiceKnown', { session }) === true, record: entry => decisions.record(entry) }) }) },
     auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges,
-      sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })) } : { error: linkError },
+      sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })), managed: managedSync } : { error: linkError },
     workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups, localMcp,
     decisions: {
       overview: () => decisions.overview(),

@@ -5,6 +5,7 @@ import type { ControllerLinks } from './controller.js';
 import type { NodeLinks } from './node.js';
 import type { LinkIdentity } from './identity.js';
 import type { RemoteAudit } from '../remote/audit.js';
+import type { ManagedSettingsSync } from './managed-settings.js';
 
 export interface LinkRoutes {
   identity: LinkIdentity;
@@ -16,7 +17,12 @@ export interface LinkRoutes {
   changes?: RemoteAudit;
   /** Conversations' titles here now, by id. */
   sessionNames?: () => Map<string, string>;
+  /** What this Tower keeps on the computers that follow it, and asks of them. */
+  managed?: ManagedSettingsSync;
 }
+
+/** A clone runs on the other computer until git gives up (10 minutes); its answer may take a little longer to come back. */
+const CLONE_MS = 11 * 60_000;
 
 /**
  * This Tower's own pages manage its links: the computers it controls, the ones that control it, and the
@@ -64,6 +70,16 @@ export async function handleLinkRoute(req: IncomingMessage, res: ServerResponse,
     if (!only('code') || typeof body.code !== 'string') { json(res, 400, { error: '연결 코드를 붙여 넣으세요.' }); return true; }
     await links.node.join(body.code);
     json(res, 200, overview()); return true;
+  }
+  // A computer that follows this Tower clones a repository into a new folder, or makes its Workspace folder a project
+  // (for a terminal there), when asked from here.
+  const action = path.match(/^\/api\/link\/nodes\/([a-f0-9]{32})\/(clone|workspace)$/);
+  if (action) {
+    if (!links.managed) { json(res, 503, { error: '이 Tower는 다른 컴퓨터에 설정을 보낼 수 없습니다.' }); return true; }
+    if (action[2] === 'clone' ? !only('url') || typeof body.url !== 'string' : !only()) { json(res, 400, { error: action[2] === 'clone' ? '저장소 주소를 입력하세요.' : '요청 본문은 비워 두세요.' }); return true; }
+    const answer = await links.managed.request(action[1], action[2], body, action[2] === 'clone' ? CLONE_MS : 30_000);
+    await links.managed.refreshFolders(action[1]);
+    json(res, 200, answer); return true;
   }
   const node = path.match(/^\/api\/link\/nodes\/([a-f0-9]{32})(\/remove|\/update|\/follow)?$/);
   if (node?.[2] === '/follow') {
