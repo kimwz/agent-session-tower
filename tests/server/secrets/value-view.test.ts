@@ -116,6 +116,21 @@ test('value and value-update answer only in the unlocked generation, at the show
   await assert.rejects(read(scalar.id, 2, f.service.lockGeneration), refusal('forbidden', 'view-locked'));
 });
 
+test('a lock and open queued before a value action end its generation, though the runtime’s own check ran before them', async t => {
+  const f = await fixture(t);
+  const scalar = await f.service.create({ name: 'scalar', kind: 'scalar', value: 'SCALAR_VALUE' });
+  const generation = f.service.lockGeneration, carry = f.service.handoff()!;
+  // Queued, not awaited: the runtime still sees the open vault in the old generation when it is asked.
+  const reopened = Promise.all([f.service.lock(), f.service.adopt(carry)]);
+  const read = f.control('value', { secretId: scalar.id, expectedVersion: 1, generation });
+  const write = f.control('value-update', { secretId: scalar.id, expectedVersion: 1, generation, value: 'LATE_EDIT' });
+  await reopened;
+  await assert.rejects(read, refusal('forbidden', 'view-locked'));
+  await assert.rejects(write, refusal('forbidden', 'view-locked'));
+  assert.equal(f.service.status().locked, false);
+  assert.deepEqual(await f.control('value', { secretId: scalar.id, expectedVersion: 1, generation: f.service.lockGeneration }), { id: scalar.id, version: 1, kind: 'scalar', value: 'SCALAR_VALUE' }, 'nothing was changed');
+});
+
 test('tower-wrap answers false while locked or without a vault; tower-prune works locked; tower-status reads the envelope', { timeout: 60_000 }, async t => {
   const empty = await fixture(t, false);
   assert.deepEqual(await empty.control('tower-wrap', { password: TOWER, credentialId: idA }), { wrapped: false });

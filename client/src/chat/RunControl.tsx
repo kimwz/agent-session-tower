@@ -23,7 +23,7 @@ export const RunControl = memo(function RunControl({ run, onCancel, onRetry, can
       </div>
     </div>
     {run.status === 'queued' && !run.canSteer && !run.steering && run.steerBlocked && <p className="run-control-note">{steerBlockedNote(run.steerBlocked)}</p>}
-    {active && run.origin?.kind === 'owner' && run.towerTools && run.towerTools !== 'attached' && <p className="run-control-note">{towerToolsNote(run.towerTools)}</p>}
+    {active && run.origin?.kind === 'owner' && run.towerTools && run.towerTools !== 'attached' && towerToolsNote(run.towerTools) && <p className="run-control-note">{towerToolsNote(run.towerTools)}</p>}
     {run.status === 'error' && run.error && <p className="run-control-error">{translateMessage(run.error)}</p>}
     {approvals.map(approval => <RunApprovalCard key={approval.id} runId={run.id} approval={approval} token={token} disabled={disabled || cancelling || !onSnapshotRefresh} onSnapshotRefresh={onSnapshotRefresh || (() => {})} />)}
   </div>;
@@ -35,13 +35,18 @@ export function steerBlockedNote(reason: NonNullable<Run['steerBlocked']>): stri
     : reason === 'model' ? t('선택한 모델이 진행 중인 작업과 달라 끼워넣을 수 없습니다. 작업이 끝나면 이 모델로 실행합니다.')
     : reason === 'effort' ? t('선택한 추론 수준이 진행 중인 작업과 달라 끼워넣을 수 없습니다. 작업이 끝나면 이 수준으로 실행합니다.')
     : reason === 'origin' ? t('진행 중인 작업은 트리거·Slack·다른 컴퓨터처럼 이 메시지와 다른 곳에서 시작해 끼워넣을 수 없습니다. 작업이 끝나면 실행합니다.')
+    : reason === 'delegation' ? t('진행 중인 작업이나 이 메시지가 다른 턴이 맡긴 작업이라 끼워넣지 않습니다. 작업이 끝나면 따로 실행합니다.')
     : t('진행 중인 작업이 지금은 메시지를 받을 수 없습니다. 받을 수 있게 되면 끼워넣기 버튼이 나타나고, 그 전에 작업이 끝나면 다음 턴으로 실행합니다.');
 }
 
-/** Why an owner turn has no Tower tools. Agents can manage triggers only in turns that have them. */
-export function towerToolsNote(reason: NonNullable<Run['towerTools']>): string {
+/**
+ * Why an owner turn has no Tower tools. Agents can manage triggers only in turns that have them. Nothing for a reason
+ * this page does not know, such as an older worker's `broker-only` (a turn that did have its secret tools).
+ */
+export function towerToolsNote(reason: NonNullable<Run['towerTools']>): string | undefined {
   return reason === 'desktop-app' ? t('이 턴은 열려 있는 Codex 앱에서 실행되어 Tower 도구가 없습니다.')
     : reason === 'external-input' ? t('외부 내용이 들어온 대화라 Tower 도구를 연결하지 않았습니다.')
     : reason === 'remote' ? t('다른 컴퓨터에서 보낸 턴이라 이 코디네이터 대화의 도구를 연결하지 않았습니다.')
-    : t('자동화가 만든 대화라 Tower 도구를 연결하지 않았습니다.');
+    : reason === 'not-owner-session' ? t('자동화가 만든 대화라 Tower 도구를 연결하지 않았습니다.')
+    : undefined;
 }

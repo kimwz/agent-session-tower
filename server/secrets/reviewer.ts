@@ -9,7 +9,6 @@ import { TOWER_INSTRUCTIONS } from '../sessions/parser.js';
 import type { ResolvedModel } from '../../shared/models.js';
 import type { SecretContext, SecretOperation, SecretRunInput } from '../../shared/secrets.js';
 import type { ChatMessage, RunOrigin } from '../../shared/types.js';
-import { TowerError } from '../../shared/errors.js';
 
 /**
  * The secret-use reviewer: before a session the owner did not open gets a secret value, an independent model looks for
@@ -42,13 +41,13 @@ const INLINE = new Set(['-c', '-e', '--eval', '-p', '--print', '-m', '-r', '--re
 export interface SecretScriptBinding { path: string; sha256: string | null }
 
 /**
- * `script` is set once the review gathered its input: the broker compares it with the file right before the run starts,
- * so code changed during the review never runs on that review.
+ * An allowed review's `script` is the file it read: the broker compares it with the file right before the run starts, so
+ * code changed during the review never runs on it. A failed review binds nothing; it would have allowed any code.
  */
 export type SecretReview =
   | { review: 'allowed'; script?: SecretScriptBinding | null }
   | { review: 'blocked'; reason: string; evidence: string }
-  | { review: 'failed'; reason: string; script?: SecretScriptBinding | null };
+  | { review: 'failed'; reason: string };
 
 /** One use a request asks for: how the value is handed over, and which secret. */
 export interface SecretReviewUse { binding: string; reference: string; operation: SecretOperation }
@@ -316,7 +315,10 @@ export interface SecretUseReviewerOptions {
   model(request: AutoPromptModelRequest, options: { timeoutMs: number; beforeSpawn(): Promise<void> }): Promise<unknown>;
   /** The `secrets.reviewer` role by default. */
   resolve?(): Promise<ResolvedModel>;
-  /** Throws while the worker may take no effects (a storage hold): that refuses the use, it is never a failed review. */
+  /**
+   * Throws while the worker may take no effects (a storage hold). Checked right before a model process starts: a hold
+   * starts none and the review fails; the broker's own check of the same gate then refuses the use.
+   */
   gate?(): Promise<void>;
   timeoutMs?: number;
   concurrency?: number;
@@ -324,7 +326,7 @@ export interface SecretUseReviewerOptions {
 }
 
 /**
- * Reviews secret uses two at a time. One deadline covers the wait for a turn, the effects gate, gathering the input and
+ * Reviews secret uses two at a time. One deadline covers the wait for a turn, gathering the input, the effects gate and
  * the model's answer; a model process stopped at the deadline keeps its turn, and counts as in flight, until it has ended.
  */
 export class SecretUseReviewer {
@@ -370,59 +372,40 @@ export class SecretUseReviewer {
   /** Hands the turn to the next waiting review, if any. */
   private leave(): void { const next = this.waiting.shift(); if (next) next(); else this.active--; }
 
-  /** The review, and `ending`: settles once the model run (if one started) has ended. Throws when the gate refuses. */
+  /** The review, and `ending`: settles once the model run (if one started) has ended. */
   private async decide(request: SecretReviewRequest, deadline: number): Promise<{ review: SecretReview; ending?: Promise<unknown> }> {
-    const { gate } = this.options;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const expired = new Promise<'expired'>(resolve => { timer = setTimeout(() => { controller.abort(); resolve('expired'); }, Math.max(0, deadline - Date.now())); });
     try {
-      const unanswered = () => new TowerError('unavailable', '실행 환경 확인이 시간 안에 끝나지 않아 시크릿을 사용하지 않았습니다.');
-      if (gate) {
-        // A hold, or a gate that does not answer in time, refuses the use: never a failed review that allows it.
-        const checked = await Promise.race([gate().then(() => ({ open: true as const }), (error: unknown) => ({ error })), expired]);
-        if (checked === 'expired') throw unanswered();
-        if ('error' in checked) throw checked.error;
-      }
-      const refusals = new WeakSet<object>();
-      // `spawned`: the native model process is about to start, so the turn is kept until it has ended. `gating`: the gate
-      // before it is being checked; one that does not answer by the deadline refuses the use.
-      let spawned = false, gating = false;
+      // `spawned`: the native model process is about to start, so the turn is kept until it has ended.
+      let spawned = false;
       const beforeSpawn = async () => {
-        gating = true;
-        try { await gate?.(); }
-        catch (error) { const refusal = error instanceof Error ? error : new Error(String(error)); refusals.add(refusal); throw refusal; }
-        finally { gating = false; }
+        await this.options.gate?.();
         // Answered at the deadline already: no model process starts for this review any more.
         if (controller.signal.aborted || Date.now() >= deadline) throw new Error('Review deadline passed.');
         spawned = true;
       };
-      // Undefined until the input is gathered; then the file the run executes, as the model is shown it.
-      let script: SecretScriptBinding | null | undefined;
-      const bound = (review: SecretReview): SecretReview => review.review === 'blocked' || script === undefined ? review : { ...review, script };
       const ending = (async () => {
         const [model, facts] = await Promise.all([this.options.resolve?.() ?? resolveModel(this.options.stateDir, 'secrets.reviewer'), this.facts(request)]);
-        script = facts.script?.binding ?? null;
         const input = secretReviewInput(facts);
         // Past the deadline the review has already been answered; no model starts for it.
         if (controller.signal.aborted || Date.now() >= deadline) throw new Error('Review deadline passed.');
         const answer = await this.options.model({ ...model, systemPrompt: SECRET_REVIEW_SYSTEM, prompt: input.prompt, schema: SECRET_REVIEW_SCHEMA as unknown as Record<string, unknown>, signal: controller.signal },
           { timeoutMs: Math.max(1, deadline - Date.now()), beforeSpawn });
-        return reviewVerdict(answer, input.haystack);
+        // Only an allowed review binds the file the run executes, as the model was shown it.
+        const review = reviewVerdict(answer, input.haystack);
+        return review.review === 'allowed' ? { ...review, script: facts.script?.binding ?? null } : review;
       })().then(review => ({ review }), (error: unknown) => ({ error }));
       const late: SecretReview = { review: 'failed', reason: '검토 모델이 30초 안에 답하지 않아 검토 없이 허용했습니다.' };
       const settled = await Promise.race([ending, expired]);
-      if (settled === 'expired') {
-        if (gating) throw unanswered();
-        // A model process still being stopped keeps the turn until it has ended; work before any process (reading the
-        // conversation, the gate) holds nothing past the deadline, and can no longer start one.
-        return { review: bound(late), ...(spawned ? { ending } : {}) };
-      }
-      if ('review' in settled) return { review: bound(settled.review) };
-      if (settled.error instanceof Error && refusals.has(settled.error)) throw settled.error;
-      if (Date.now() >= deadline) return { review: bound(late) };
+      // A model process still being stopped keeps the turn until it has ended; work before any process (reading the
+      // conversation, the gate) holds nothing past the deadline, and can no longer start one.
+      if (settled === 'expired') return { review: late, ...(spawned ? { ending } : {}) };
+      if ('review' in settled) return { review: settled.review };
+      if (Date.now() >= deadline) return { review: late };
       const message = (settled.error instanceof Error ? settled.error.message : String(settled.error)).replace(/^Auto Prompt: /, '');
-      return { review: bound({ review: 'failed', reason: `검토 모델을 실행하지 못해 검토 없이 허용했습니다: ${clip(message, 200)}` }) };
+      return { review: { review: 'failed', reason: `검토 모델을 실행하지 못해 검토 없이 허용했습니다: ${clip(message, 200)}` } };
     } finally { clearTimeout(timer); }
   }
 

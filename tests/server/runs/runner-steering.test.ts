@@ -83,7 +83,7 @@ test('an instruction from another turn’s calling credential is never inserted 
   const delegated = await f.manager.enqueue(f.session.id, 'Delegated instruction', {}, { origin: { kind: 'owner' }, delegation: caller });
   await delay(5);
   assert.equal(f.read(delegated.id).canSteer, false);
-  assert.equal(f.read(delegated.id).steerBlocked, 'origin');
+  assert.equal(f.read(delegated.id).steerBlocked, 'delegation');
   await assert.rejects(f.manager.steer(delegated.id, { targetRunId: owner.id }));
   assert.equal(f.inputs.length, 0);
   const typed = await f.manager.enqueue(f.session.id, 'Owner instruction', {}, { origin: { kind: 'owner' } });
@@ -103,12 +103,12 @@ test('an instruction from the same calling turn joins the delegated turn it star
   const other = await f.manager.enqueue(f.session.id, 'Another caller', {}, { origin: { kind: 'owner' }, delegation: { ...caller, parentRunId: randomUUID() } });
   const same = await f.manager.enqueue(f.session.id, 'Same caller follow-up', {}, { origin: { kind: 'owner' }, delegation: { ...caller } });
   await until(() => Boolean(f.read(same.id).canSteer));
-  assert.equal(f.read(other.id).steerBlocked, 'origin', 'another calling turn, even under the same root');
+  assert.equal(f.read(other.id).steerBlocked, 'delegation', 'another calling turn, even under the same root');
   await f.manager.steer(same.id, { targetRunId: first.id });
   assert.deepEqual(f.inputs.map(input => input.prompt), ['Same caller follow-up']);
   const typed = await f.manager.enqueue(f.session.id, 'Owner instruction', {}, { origin: { kind: 'owner' } });
   await delay(5);
-  assert.equal(f.read(typed.id).steerBlocked, 'origin', 'the owner’s own message does not join delegated work either');
+  assert.equal(f.read(typed.id).steerBlocked, 'delegation', 'the owner’s own message does not join delegated work either');
 });
 
 test('private tool changes reach only the active owner turn, with no new run or visible history', async t => {

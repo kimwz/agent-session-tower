@@ -742,7 +742,8 @@ export class RunManager extends EventEmitter {
     // An inserted instruction runs with the active turn's tools, approvals and secret credential. They follow origin,
     // the calling turn (secrets/access.ts reviews delegated work) and session, so only the same origin from the same
     // calling turn in the same session carries exactly the same authority.
-    if (!sameOrigin(run.origin, target.origin) || !sameDelegation(run.delegation, target.delegation)) return { blocked: 'origin' };
+    if (!sameOrigin(run.origin, target.origin)) return { blocked: 'origin' };
+    if (!sameDelegation(run.delegation, target.delegation)) return { blocked: 'delegation' };
     const adapter = this.stdio.get(target.id) ?? this.bridged.get(target.id) ?? this.owned.get(target.id)?.claude;
     return adapter?.canSteer?.() && adapter.steer ? { target, adapter } : { blocked: 'starting' };
   }

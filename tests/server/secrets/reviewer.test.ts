@@ -35,8 +35,13 @@ function reviewer(stateDir: string, answer: (request: AutoPromptModelRequest) =>
 }
 
 const allow = { decision: 'allow', reason: '', evidence: '' };
-const tick = (ms = 0) => new Promise(resolve => setTimeout(resolve, ms));
-async function until(condition: () => boolean) { for (let i = 0; i < 400 && !condition(); i++) await tick(5); assert.ok(condition()); }
+/** The deadline tests' clock: timers and Date move only when the test says; promise work and real I/O still run. */
+function clock(t: test.TestContext) { t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() }); return { advance: (ms: number) => t.mock.timers.tick(ms) }; }
+/** Lets pending promise work and file reads finish, without timers. */
+async function settle(condition: () => boolean = () => true) { for (let i = 0; i < 400 && (i < 5 || !condition()); i++) await new Promise(resolve => setImmediate(resolve)); assert.ok(condition()); }
+/** A point a test waits for, or holds something at. */
+function barrier() { let open!: () => void; const reached = new Promise<void>(resolve => { open = resolve; }); return { open, reached }; }
+const LATE = { review: 'failed', reason: '검토 모델이 30초 안에 답하지 않아 검토 없이 허용했습니다.' };
 
 test('an allowed use asks the secrets.reviewer model once, with no tools and no values, and binds the file it runs', async t => {
   const { stateDir, root, context } = await folder(t);
@@ -87,108 +92,110 @@ test('a malformed answer and a model error allow the use as a failed review', as
   for (const answer of [undefined, 'block', [allow], { decision: 'deny', reason: 'x', evidence: 'x' }, { decision: 'block', reason: 'x' }, { decision: ['block'], reason: 'r', evidence: 'deploy.mjs' }, { decision: ['allow'], reason: 'r', evidence: 'deploy.mjs' }]) {
     const { instance } = reviewer(stateDir, async () => answer);
     const review = await instance.review(request(context));
-    assert.deepEqual([review.review, (review as { reason?: string }).reason], ['failed', '검토 모델이 올바른 형식으로 답하지 않아 검토 없이 허용했습니다.'], JSON.stringify(answer));
+    assert.deepEqual(review, { review: 'failed', reason: '검토 모델이 올바른 형식으로 답하지 않아 검토 없이 허용했습니다.' }, 'a failed review binds no script: ' + JSON.stringify(answer));
   }
   const broken = reviewer(stateDir, async () => { throw new Error('Auto Prompt: Claude Code did not complete a structured decision.'); });
-  const review = await broken.instance.review(request(context));
-  assert.deepEqual([review.review, (review as { reason?: string }).reason], ['failed', '검토 모델을 실행하지 못해 검토 없이 허용했습니다: Claude Code did not complete a structured decision.']);
+  assert.deepEqual(await broken.instance.review(request(context)), { review: 'failed', reason: '검토 모델을 실행하지 못해 검토 없이 허용했습니다: Claude Code did not complete a structured decision.' });
 });
 
-test('at the deadline the review answers, but its turn and in-flight count last until the model run has ended', async t => {
+test('at the deadline the review answers, binding nothing, but its turn and in-flight count last until the model run has ended', async t => {
   const { stateDir, context } = await folder(t);
-  const ended: number[] = [], started: number[] = [];
-  // A native run stops some time after it is aborted, as the CLI's process group is signalled and reaped.
-  const slow = reviewer(stateDir, input => { started.push(Date.now()); return new Promise((_, reject) => input.signal.addEventListener('abort', () => setTimeout(() => { ended.push(Date.now()); reject(new Error('cancelled')); }, 150))); },
-    { timeoutMs: 300, concurrency: 1 });
-  const begun = Date.now();
-  const first = await slow.instance.review(request(context));
-  assert.deepEqual([first.review, (first as { reason?: string }).reason], ['failed', '검토 모델이 30초 안에 답하지 않아 검토 없이 허용했습니다.']);
-  assert.ok(Date.now() - begun < 1_000);
-  assert.equal(slow.calls[0]!.signal.aborted, true, 'the model run is stopped at the deadline');
-  assert.equal(ended.length, 0);
+  const time = clock(t);
+  // A native run stops some time after it is aborted, as the CLI's process group is signalled and reaped: `end` is then.
+  const runs: { signal: AbortSignal; end(): void }[] = [];
+  let started = barrier();
+  const slow = reviewer(stateDir, input => new Promise((_, reject) => { runs.push({ signal: input.signal, end: () => reject(new Error('cancelled')) }); started.open(); }), { concurrency: 1 });
+  const first = slow.instance.review(request(context));
+  await started.reached;
+  time.advance(30_000);
+  assert.deepEqual(await first, LATE, 'its input was gathered, yet a failed review binds no script');
+  assert.equal(runs[0]!.signal.aborted, true, 'the model run is stopped at the deadline');
   assert.equal(slow.instance.inFlight(), true, 'still ending: a worker handoff waits for it');
   // The next review waits for the turn the ending run still holds.
+  started = barrier();
   const second = slow.instance.review(request(context));
-  await until(() => ended.length === 1);
-  await until(() => started.length === 2);
-  assert.ok(started[1]! >= ended[0]!, 'no second model run starts before the first has ended');
-  await second;
-  await until(() => ended.length === 2);
-  await tick();
-  assert.equal(slow.instance.inFlight(), false);
+  await settle();
+  assert.equal(runs.length, 1, 'no second model run starts before the first has ended');
+  runs[0]!.end();
+  await started.reached;
+  time.advance(30_000);
+  assert.deepEqual(await second, LATE);
+  runs[1]!.end();
+  await settle(() => !slow.instance.inFlight());
 });
 
 test('two reviews run at a time; the wait counts toward the deadline, and a full queue is not waited on', async t => {
   const { stateDir, context } = await folder(t);
-  const release: (() => void)[] = [];
+  const time = clock(t);
+  const release: (() => void)[] = []; const both = barrier();
   // These model runs ignore the deadline's abort, so the two running reviews keep their turns past the third's deadline.
-  const { instance, calls } = reviewer(stateDir, () => new Promise(resolve => release.push(() => resolve(allow))), { timeoutMs: 200, concurrency: 2, maxWaiting: 1 });
+  const { instance, calls } = reviewer(stateDir, () => new Promise(resolve => { release.push(() => resolve(allow)); if (release.length === 2) both.open(); }), { concurrency: 2, maxWaiting: 1 });
   const running = [instance.review(request(context)), instance.review(request(context))];
   const third = instance.review(request(context));
   // Two run and one waits: a fourth finds the queue full and goes ahead at once as a failed review.
   assert.deepEqual(await instance.review(request(context)), { review: 'failed', reason: '검토 요청이 너무 많이 밀려 검토 없이 허용했습니다.' });
-  await until(() => calls.length === 2);
-  for (const review of await Promise.all(running)) assert.equal(review.review, 'failed', 'answered at their deadline');
+  await both.reached;
+  time.advance(30_000);
+  for (const review of await Promise.all(running)) assert.deepEqual(review, LATE, 'answered at their deadline');
   assert.equal(instance.inFlight(), true);
   assert.deepEqual(await third, { review: 'failed', reason: '검토 차례를 기다리는 동안 시간이 다 되어 검토 없이 허용했습니다.' });
   assert.equal(calls.length, 2, 'a review whose deadline passed in the queue never starts a model');
   for (const done of release) done();
-  await until(() => !instance.inFlight());
+  await settle(() => !instance.inFlight());
   // A turn freed by one review goes to the next one waiting.
-  const queued = reviewer(stateDir, () => new Promise(resolve => setTimeout(() => resolve(allow), 30)), { concurrency: 1 });
+  const queued = reviewer(stateDir, async () => allow, { concurrency: 1 });
   assert.deepEqual((await Promise.all([queued.instance.review(request(context)), queued.instance.review(request(context))])).map(review => review.review), ['allowed', 'allowed']);
   assert.equal(queued.calls.length, 2);
 });
 
-test('a storage hold, or an effects gate that does not answer in time, refuses the use instead of counting as a failed review', async t => {
+test('a storage hold starts no model process and the review fails; a gate that does not answer in time holds nothing', async t => {
   const { stateDir, context } = await folder(t);
   let held = true;
-  const gate = async () => { if (held) throw new Error('storage held'); };
-  const before = reviewer(stateDir, async () => allow, { gate });
-  await assert.rejects(before.instance.review(request(context)), /storage held/);
-  assert.equal(before.calls.length, 0);
-  // Held between the first check and the start of the model process.
-  let checks = 0;
-  const later = reviewer(stateDir, async () => allow, { gate: async () => { if (++checks > 1) throw new Error('storage held at spawn'); } });
-  await assert.rejects(later.instance.review(request(context)), /storage held at spawn/);
+  const before = reviewer(stateDir, async () => allow, { gate: async () => { if (held) throw new Error('storage held'); } });
+  // The broker's own check of the same gate refuses the use (broker-review.test.ts); the review only records why.
+  assert.deepEqual(await before.instance.review(request(context)), { review: 'failed', reason: '검토 모델을 실행하지 못해 검토 없이 허용했습니다: storage held' });
+  assert.deepEqual([before.calls.length, before.spawned.length], [1, 0]);
   held = false;
   assert.equal((await before.instance.review(request(context))).review, 'allowed');
   assert.equal(before.instance.inFlight(), false);
-  // The gate's wait is part of the review's one deadline.
-  const stuck = reviewer(stateDir, async () => allow, { gate: () => new Promise(() => {}), timeoutMs: 80 });
-  const begun = Date.now();
-  await assert.rejects(stuck.instance.review(request(context)), /실행 환경 확인이 시간 안에 끝나지 않아/);
-  assert.ok(Date.now() - begun < 1_000);
-  assert.equal(stuck.calls.length, 0);
-  assert.equal(stuck.instance.inFlight(), false);
+  // The gate's wait is part of the review's one deadline, and a gate answering after it starts nothing.
+  const time = clock(t);
+  const asked = barrier(), answer = barrier();
+  const stuck = reviewer(stateDir, async () => allow, { gate: () => { asked.open(); return answer.reached; }, concurrency: 1 });
+  const pending = stuck.instance.review(request(context));
+  await asked.reached;
+  time.advance(30_000);
+  assert.deepEqual(await pending, LATE);
+  assert.equal(stuck.instance.inFlight(), false, 'it keeps no turn');
+  answer.open(); await settle();
+  assert.deepEqual([stuck.calls.length, stuck.spawned.length], [1, 0], 'its model process never starts');
+  assert.equal((await stuck.instance.review(request(context))).review, 'allowed');
 });
 
 test('work before any model process holds nothing past the deadline and can no longer start one', async t => {
   const { stateDir, context } = await folder(t);
+  const time = clock(t);
   // A conversation read that never answers.
-  let hang = true;
-  const reading = reviewer(stateDir, async () => allow, { timeoutMs: 80, concurrency: 1,
-    sources: { subject: () => ({}), conversation: () => hang ? new Promise(() => {}) : Promise.resolve([]) } });
-  const first = await reading.instance.review(request(context));
-  assert.deepEqual([first.review, (first as { reason?: string }).reason], ['failed', '검토 모델이 30초 안에 답하지 않아 검토 없이 허용했습니다.']);
-  assert.equal(reading.instance.inFlight(), false, 'nothing is still running for it');
+  let hang = true, reading = barrier();
+  const stalled = reviewer(stateDir, async () => allow, { concurrency: 1,
+    sources: { subject: () => ({}), conversation: () => { reading.open(); return hang ? new Promise(() => {}) : Promise.resolve([]); } } });
+  const first = stalled.instance.review(request(context));
+  await reading.reached;
+  time.advance(30_000);
+  assert.deepEqual(await first, LATE, 'failed before its input was gathered: no script key');
+  assert.equal(stalled.instance.inFlight(), false, 'nothing is still running for it');
   hang = false;
-  assert.equal((await reading.instance.review(request(context))).review, 'allowed', 'the next review gets the turn');
+  assert.equal((await stalled.instance.review(request(context))).review, 'allowed', 'the next review gets the turn');
   // A conversation read that answers only after the deadline: no model starts for it then.
-  let answer!: () => void;
-  const slow = reviewer(stateDir, async () => allow, { timeoutMs: 80,
-    sources: { subject: () => ({}), conversation: () => new Promise(resolve => { answer = () => resolve([]); }) } });
-  assert.equal((await slow.instance.review(request(context))).review, 'failed');
-  answer(); await tick(20);
+  let answer!: () => void; reading = barrier();
+  const slow = reviewer(stateDir, async () => allow, {
+    sources: { subject: () => ({}), conversation: () => new Promise(resolve => { answer = () => resolve([]); reading.open(); }) } });
+  const pending = slow.instance.review(request(context));
+  await reading.reached;
+  time.advance(30_000);
+  assert.deepEqual(await pending, LATE);
+  answer(); await settle();
   assert.deepEqual([slow.calls.length, slow.instance.inFlight()], [0, false]);
-  // A gate before the model process that does not answer in time refuses, keeps no turn, and never lets it start.
-  let release!: () => void, checks = 0;
-  const gated = reviewer(stateDir, async () => allow, { timeoutMs: 80, concurrency: 1, gate: () => ++checks === 2 ? new Promise<void>(resolve => { release = resolve; }) : Promise.resolve() });
-  await assert.rejects(gated.instance.review(request(context)), /실행 환경 확인이 시간 안에 끝나지 않아/);
-  assert.equal(gated.instance.inFlight(), false);
-  release(); await tick(20);
-  assert.deepEqual([gated.calls.length, gated.spawned.length], [1, 0], 'its model process never starts');
-  assert.equal((await gated.instance.review(request(context))).review, 'allowed');
 });
 
 test('the dispatch-time check finds a script changed, relinked or grown past 16 MiB since its review', async t => {

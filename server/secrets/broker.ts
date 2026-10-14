@@ -123,7 +123,8 @@ export class SecretBroker {
   }
   /**
    * Only the owner's own sessions are exempt; any other use is reviewed, one whose subject is unset included (no reviewer
-   * here: a failed review, allowed). A review that could not start (a hold) and a hold after any review both refuse the use.
+   * here: a failed review, allowed). A hold refuses the use here, after any review that did not block it, and is
+   * checked again before and inside the dispatch turn; the reviewer only starts no model process during one.
    */
   private async review(context: SecretContext, request: Omit<SecretReviewRequest, 'context' | 'secrets'>): Promise<Verdict> {
     if (context.subject === 'owner') return { review: 'exempt' };
@@ -131,7 +132,7 @@ export class SecretBroker {
     if (!this.options.reviewer) review = { review: 'failed', reason: '시크릿 사용 검토기를 사용할 수 없어 검토 없이 허용했습니다.' };
     else {
       try { review = await this.options.reviewer.review({ ...request, context, secrets: this.described(context) }); }
-      catch (error) { throw new SecretUseRefused('unavailable', HELD, { cause: error }); }
+      catch (error) { review = { review: 'failed', reason: `검토하지 못해 검토 없이 허용했습니다: ${clip(error instanceof Error ? error.message : String(error), 200)}` }; }
     }
     if (review.review !== 'blocked') await this.effects(context);
     return review;
@@ -314,7 +315,7 @@ export class SecretBroker {
     }
     // The code the review read is the code that runs: checked now, and again inside the dispatch turn, since that turn
     // may wait behind other saves. A script changed meanwhile gets a review of its own under a new ID.
-    const reviewed = review.review !== 'exempt' && review.script !== undefined ? review.script : undefined;
+    const reviewed = review.review === 'allowed' && review.script !== undefined ? review.script : undefined;
     const check = reviewed !== undefined ? await reviewedScript(input, context.root, this.options.stateDir, reviewed) : undefined;
     const sameCode = () => {
       const problem = check?.();

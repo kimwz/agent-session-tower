@@ -149,14 +149,20 @@ test('Tower password wrappers requested while a save is paused between its files
     const paused = new Promise<void>(resolve => { reached = resolve; }); const gate = new Promise<void>(resolve => { release = resolve; });
     let held = false;
     vault.write = async (name, bytes) => { if (name === 'vault.json' && !held) { held = true; reached(); await gate; } return write(name, bytes); };
+    // Entry spies: an unserialized wrap or prune would enter the vault at once, before its key derivation could hide it.
+    const entered: string[] = [];
+    const spied = f.service.vault as unknown as Record<'towerWrap' | 'towerPrune', (...args: unknown[]) => Promise<unknown>>;
+    for (const name of ['towerWrap', 'towerPrune'] as const) { const original = spied[name].bind(spied); spied[name] = (...args) => { entered.push(name); return original(...args); }; }
     const saving = f.service.create({ name: 'saved across the barrier', kind: 'scalar', value: 'BARRIER_PAYLOAD' });
     await paused;
     const wrapping = f.service.towerWrap(tower, idA); const pruning = f.service.towerPrune(idA);
-    // Give an unserialized write every chance to run ahead of the paused save.
-    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.deepEqual(entered, [], 'neither entered the vault while the save was paused');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(entered, [], 'nor once the event loop turned');
     assert.deepEqual((await f.envelope()).tower!.wrappers.map(item => item.credentialId), [idB], 'nothing was written while the save was paused');
     release();
     const saved = await saving; await wrapping; await pruning;
+    assert.deepEqual(entered, ['towerWrap', 'towerPrune'], 'each in its turn, after the save');
     assert.deepEqual((await f.envelope()).tower!.wrappers.map(item => item.credentialId), [idA]);
     const restarted = await started(f.directory);
     assert.equal(await restarted.towerUnlock(tower, idA), true);

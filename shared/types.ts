@@ -198,7 +198,14 @@ export interface RunOrigin {
   controllerId?: string;
 }
 /** Authenticated caller links for reporting, independent of the authority in RunOrigin. */
-export interface RunDelegation { parentRunId: string; rootRunId: string }
+export interface RunDelegation {
+  parentRunId: string; rootRunId: string;
+  /**
+   * Found when the turn was admitted: whether a public agent is among the turns that started it (absent: not every one
+   * was known, or an earlier version's record). Secret use judges calling turns that have left history by it.
+   */
+  publicChain?: boolean;
+}
 export interface Run {
   id: string;
   sessionId: string;
@@ -291,10 +298,12 @@ export interface RunReply {
 }
 /**
  * `instructions`: it carries instructions Tower must not drop; `model`/`effort`: it asks for another one than the
- * running turn; `origin`: the running turn was started elsewhere (a trigger, Slack, another computer); `starting`: the running turn
- * cannot take input right now (it is starting or ending, or a Codex turn is taking another insert).
+ * running turn; `origin`: the running turn was started elsewhere (a trigger, Slack, another computer); `delegation`: the
+ * same origin, but it or the running turn is work another turn handed over (`Run.delegation`) and the other is not, or comes
+ * from another calling turn; `starting`: the running turn cannot take input right now (it is starting or ending, or a Codex
+ * turn is taking another insert). Clients of an earlier version read an unknown reason as `starting`.
  */
-export type SteerBlock = 'instructions' | 'model' | 'effort' | 'origin' | 'starting';
+export type SteerBlock = 'instructions' | 'model' | 'effort' | 'origin' | 'delegation' | 'starting';
 export interface RunInstructions { text: string; required?: boolean }
 export interface RunApproval {
   id: string;

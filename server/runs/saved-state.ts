@@ -11,7 +11,8 @@ export const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i
 export function isSavedDelegation(value: unknown): value is RunDelegation {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const item = value as Partial<RunDelegation>;
-  return typeof item.parentRunId === 'string' && UUID.test(item.parentRunId) && typeof item.rootRunId === 'string' && UUID.test(item.rootRunId);
+  return typeof item.parentRunId === 'string' && UUID.test(item.parentRunId) && typeof item.rootRunId === 'string' && UUID.test(item.rootRunId)
+    && (item.publicChain === undefined || typeof item.publicChain === 'boolean');
 }
 
 export interface CreatedSession {

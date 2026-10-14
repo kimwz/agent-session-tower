@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { Run, RunDelegation, RunOrigin, Session } from '../../../shared/types.js';
-import { secretSubject, type KnownSession, type SecretStage, type SecretSubject } from '../../../server/secrets/access.js';
+import { publicChain, secretSubject, type KnownSession, type SecretStage, type SecretSubject } from '../../../server/secrets/access.js';
 import { PUBLIC_TRIGGER_PREFIX, type SessionOrigin } from '../../../server/runs/origin.js';
 import { noticeAdmission } from '../../../server/runs/continuations.js';
+import { isSavedDelegation } from '../../../server/runs/saved-state.js';
 
 const CONTROLLER = 'c'.repeat(32);
 const PUBLIC = `${PUBLIC_TRIGGER_PREFIX}agent-1`;
@@ -138,6 +139,34 @@ test('a calling turn the server no longer knows refuses the broker, but does not
   assert.equal(f.mode('codex:owner', { kind: 'owner' }, { run: { delegation: gone }, stage: 'use' }), 'reviewed');
   f.turn('lost-session-run', 'codex:gone', { kind: 'owner' });
   assert.equal(f.mode('codex:owner', { kind: 'owner' }, { run: { delegation: { parentRunId: 'lost-session-run', rootRunId: 'lost-session-run' } } }), 'none:unknown-caller');
+});
+
+test('a calling turn that left history is judged by what the delegated turn’s admission found; without that fact it is refused', () => {
+  const f = fixture();
+  f.add('codex:owner', {}, { kind: 'owner', untrustedInput: false });
+  f.add('codex:public', { launchedBy: { kind: 'trigger', triggerId: PUBLIC } }, { kind: 'trigger', triggerId: PUBLIC, untrustedInput: true });
+  const known = { lookup: (id: string) => f.known.get(id), findRun: (id: string) => f.runs.get(id) };
+  const owner = f.turn('owner-run', 'codex:owner', { kind: 'owner' });
+  const outsider = f.turn('public-run', 'codex:public', { kind: 'trigger', triggerId: PUBLIC });
+  const clean = publicChain({ parentRunId: owner, rootRunId: owner }, known), dirty = publicChain({ parentRunId: outsider, rootRunId: outsider }, known);
+  assert.deepEqual([clean, dirty], [false, true]);
+  assert.equal(publicChain({ parentRunId: 'gone', rootRunId: owner }, known), undefined, 'not every caller known: no fact');
+  // A middle turn that was itself admitted clean vouches for its own callers once they leave history.
+  const middle = f.turn('middle-run', 'codex:owner', { kind: 'owner' }, { parentRunId: 'gone', rootRunId: 'gone', publicChain: false });
+  assert.equal(publicChain({ parentRunId: middle, rootRunId: 'gone' }, known), false, 'its root, already checked when the middle turn was admitted, is vouched for by it');
+  assert.equal(publicChain({ parentRunId: middle, rootRunId: 'other-gone' }, known), undefined, 'a root it did not check is not');
+  assert.equal(publicChain({ parentRunId: middle, rootRunId: middle }, known), false);
+  f.runs.delete(owner); f.runs.delete(outsider);
+  for (const stage of ['issue', 'discover', 'use'] as const) {
+    assert.equal(f.mode('codex:owner', { kind: 'owner' }, { run: { delegation: { parentRunId: owner, rootRunId: owner, publicChain: false } }, stage }), 'reviewed', stage);
+    assert.equal(f.mode('codex:owner', { kind: 'owner' }, { run: { delegation: { parentRunId: outsider, rootRunId: outsider, publicChain: true } }, stage }), 'none:public-agent', stage);
+  }
+  assert.equal(f.mode('codex:owner', { kind: 'owner' }, { run: { delegation: { parentRunId: owner, rootRunId: owner } } }), 'none:unknown-caller', 'an earlier record keeps today’s rule');
+  // Kept in run and Auto Prompt records: a boolean or nothing.
+  const ids = { parentRunId: '11111111-1111-4111-8111-111111111111', rootRunId: '22222222-2222-4222-8222-222222222222' };
+  assert.deepEqual([ids, { ...ids, publicChain: false }, { ...ids, publicChain: true }, { ...ids, publicChain: 'no' }].map(isSavedDelegation), [true, true, true, false]);
+  f.turn('public-middle', 'codex:owner', { kind: 'owner' }, { parentRunId: outsider, rootRunId: outsider, publicChain: true });
+  assert.equal(f.mode('codex:owner', { kind: 'owner' }, { run: { delegation: { parentRunId: 'public-middle', rootRunId: 'public-middle', publicChain: false } } }), 'none:public-agent', 'a known caller’s own fact still refuses');
 });
 
 test('the master’s conversation follows the same rules as any other', () => {

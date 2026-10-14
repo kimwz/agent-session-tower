@@ -37,6 +37,9 @@ const unshared = (): SecretSharing => ({ revision: 1, global: false, folders: []
 const policySecret = (secret: StoredSecret): PolicySecret => ({ metadata: secret.metadata, fieldNames: secret.fields ? Object.keys(secret.fields) : undefined, sharing: secret.sharing });
 const emptyJournal = (): Journal => ({ groups: [], rules: [], tasks: [], secrets: [], usage: [], operations: Object.create(null) });
 const canonicalRoot = (root: unknown): root is string => typeof root === 'string' && isAbsolute(root) && normalize(root) === root && (root === '/' || !root.endsWith('/'));
+/** Value viewing unlocked in another lock generation: the page asks for the Tower password again. */
+export const viewLocked = () => Object.assign(new TowerError('forbidden', '값 보기가 잠겼습니다. Tower 비밀번호를 다시 입력하세요.'), { code: 'view-locked' as const });
+
 export class SecretService {
   readonly vault: SecretVault; private permanent?: Permanent; private journal = emptyJournal(); private queue: Promise<unknown> = Promise.resolve(); private readonly now: () => number;
   constructor(options: { stateDir: string; now?: () => number }) { this.vault = new SecretVault(options.stateDir); this.now = options.now ?? Date.now; }
@@ -44,8 +47,10 @@ export class SecretService {
   status(): VaultStatus { return { initialized: this.vault.initialized, locked: this.vault.locked }; }
   private data(): Permanent { if (!this.permanent || this.vault.locked) throw new Error('Vault locked'); return this.permanent; }
   private serialize<T>(operation: () => Promise<T>): Promise<T> { const next = this.queue.then(operation); this.queue = next.catch(() => undefined); return next; }
-  private async mutate<T>(operation: () => T | Promise<T>): Promise<T> {
-    return this.serialize(async () => { this.data(); const permanent = structuredClone(this.permanent); const journal = structuredClone(this.journal); let saving = false; try { const result = await operation(); saving = true; await this.vault.save(this.data(), this.journal, this.lockedIndex()); return result; } catch (error) { if (saving) { this.vault.lock(); this.permanent = undefined; this.journal = emptyJournal(); } else { this.permanent = permanent; this.journal = journal; } throw error; } });
+  /** A value-view action runs only in the lock generation it was unlocked in, checked in its turn of the queue: a lock or open queued before it ends it. */
+  private within(generation: string | undefined): void { if (generation !== undefined && generation !== this.vault.lockGeneration) throw viewLocked(); }
+  private async mutate<T>(operation: () => T | Promise<T>, generation?: string): Promise<T> {
+    return this.serialize(async () => { this.within(generation); this.data(); const permanent = structuredClone(this.permanent); const journal = structuredClone(this.journal); let saving = false; try { const result = await operation(); saving = true; await this.vault.save(this.data(), this.journal, this.lockedIndex()); return result; } catch (error) { if (saving) { this.vault.lock(); this.permanent = undefined; this.journal = emptyJournal(); } else { this.permanent = permanent; this.journal = journal; } throw error; } });
   }
   async initialize(password: string) { return this.serialize(async () => {
     const signing = generateKeyPairSync('ed25519'); const encryption = generateKeyPairSync('x25519');
@@ -155,8 +160,8 @@ export class SecretService {
     return this.metadata(secret);
   }); }
   /** One saved or temporary value for the owner's value view, at the version the page shows: text as `value`, a file or an uploaded .env as base64 `content`. */
-  async value(secretId: string, expectedVersion: number): Promise<SecretValue> { return this.serialize(async () => {
-    this.data(); const secret = this.versioned(secretId, expectedVersion);
+  async value(secretId: string, expectedVersion: number, generation?: string): Promise<SecretValue> { return this.serialize(async () => {
+    this.within(generation); this.data(); const secret = this.versioned(secretId, expectedVersion);
     return { id: secret.metadata.id, version: secret.metadata.version, kind: secret.metadata.kind, ...(secret.encoding === 'base64' ? { content: secret.value } : { value: secret.value }) };
   }); }
   private versioned(id: string, expectedVersion: number): StoredSecret {
@@ -166,7 +171,7 @@ export class SecretService {
     return secret;
   }
   /** Replaces a value only at the version the owner saw; the compare and the change are one save. */
-  async update(input: { id: string; expectedVersion: number; value?: string; content?: string }): Promise<SecretMetadata> { return this.mutate(() => {
+  async update(input: { id: string; expectedVersion: number; value?: string; content?: string; generation?: string }): Promise<SecretMetadata> { return this.mutate(() => {
     const secret = this.versioned(input.id, input.expectedVersion);
     const binary = secret.metadata.kind === 'file' || (secret.metadata.kind === 'env' && input.value === undefined);
     const supplied = binary ? input.content : input.value; if (typeof supplied !== 'string') throw new Error('Invalid secret value');
@@ -175,7 +180,7 @@ export class SecretService {
     secret.value = binary ? bytes.toString('base64') : supplied; secret.encoding = binary ? 'base64' : undefined; secret.fields = fields;
     secret.metadata.version++; secret.metadata.fields = fields ? Object.keys(fields) : undefined;
     secret.metadata.reference = `tower-secret://${this.vault.vaultId}/${secret.metadata.id}@${secret.metadata.version}`; return this.metadata(secret);
-  }); }
+  }, input.generation); }
   /**
    * The owner's sharing of one saved secret, replacing what its rules allowed. The rules stop naming it, so an older build
    * reads it as unshared, and a rule naming it again can only come from such a build.

@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.134.1] - 2026-10-14
+
+- 다른 턴이 맡긴 작업이 오래 이어질 때(대기 후 이어 하기 등) 맡긴 쪽 실행 기록이 지워져도 시크릿 도구가 빠지지 않습니다. 처음 판단한 결과를 그 실행에 저장해 두고 이어지는 턴이 물려받습니다. 공개 에이전트에서 온 작업은 계속 막습니다.
+- 시크릿 사용 검토를 단순하게 정리했습니다. 저장소 보류 확인은 한 곳에서 하고, 실행할 스크립트 고정은 검토를 통과한 경우에만 붙입니다. 검토기가 예외로 끝나면 다른 검토 실패와 같이 허용하고 기록합니다.
+- 값 수정이 보관함 잠금과 겹칠 때도 잠기기 전 권한으로 저장되지 않습니다.
+- 로그인이 만료된 상태에서 값을 열면 'Tower 비밀번호가 맞지 않습니다' 대신 로그인이 만료됐다고 안내합니다.
+- 위임받은 지시를 진행 중인 턴에 끼워 넣지 않을 때, 그 이유(다른 턴이 맡긴 작업)를 안내합니다.
+- 시크릿 보관함이 없으면 소유자 턴이 아닌 턴(에이전트·Slack·트리거 등)에 시크릿 도구 서버를 띄우지 않습니다.
+
 ## [1.134.0] - 2026-10-14
 
 - 시크릿 보관함을 **Tower 로그인 비밀번호로 엽니다.** 기존 보관함 비밀번호는 **복구 비밀번호**로 남습니다.

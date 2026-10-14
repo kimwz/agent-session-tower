@@ -2,19 +2,19 @@ import { createHash, createPublicKey, randomUUID } from 'node:crypto';
 import { realpath, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import type { Run, Session } from '../../shared/types.js';
+import type { Run, RunDelegation, Session } from '../../shared/types.js';
 import type { SecretAvailable, SecretContext, SecretSubjectMode, SecretDevice, SecretDisconnected, SecretMetadata, SecretPeer, SecretSessionError, SecretSessionView, SecretSettingsView, SecretTarget, SecretTowerPassword, SecretUsage, SecretValue, SecretViewError, VaultStatus } from '../../shared/secrets.js';
 import { SECRET_OPERATIONS } from '../../shared/secrets.js';
 import type { Capability } from '../api/mcp.js';
 import type { SessionOrigin } from '../runs/origin.js';
 import { callWorkerTools, serveToolBridge } from '../mcp/stdio.js';
-import { secretSubject, type KnownRun, type SecretStage, type SecretSubject } from './access.js';
+import { publicChain, secretSubject, type KnownRun, type SecretStage, type SecretSubject } from './access.js';
 import { SecretBroker, remoteListing } from './broker.js';
 import { parseSecretCli } from './cli.js';
 import { parseDotenv } from './dotenv.js';
 import { RemoteSecretBroker, wireMetadata, type RemoteSecretRequest, type RemoteSecretResponse } from './remote.js';
 import { ownerConnection, ownerCreate, ownerInput, ownerSession, ownerSharingChange, secretUsage, VIEW_USAGE } from './owner-input.js';
-import { SecretService } from './service.js';
+import { SecretService, viewLocked } from './service.js';
 import type { SecretUseReviewer } from './reviewer.js';
 import type { SecretBlockNotice } from '../runs/runner-protocol.js';
 import { SECRET_LOCKED_LIST, SECRET_LOCKED_UNINDEXED, SECRET_LOCKED_USE, SECRET_NO_VAULT, SECRET_USE_INSTRUCTIONS } from './notices.js';
@@ -57,7 +57,6 @@ const valueRead = z.object({ secretId: z.string().min(1).max(256), expectedVersi
 const valueWrite = valueRead.extend({ value: z.string().optional(), content: z.string().optional() }).strict();
 /** A value-viewing refusal the web answers with its own `code`. */
 const viewFail = (code: SecretViewError, kind: ErrorKind, message: string) => Object.assign(new TowerError(kind, message), { code });
-const viewLocked = () => viewFail('view-locked', 'forbidden', '값 보기가 잠겼습니다. Tower 비밀번호를 다시 입력하세요.');
 /** How long a session view waits for a source's answer before listing it as unavailable. */
 const VIEW_REMOTE_MS = 5000;
 /** How long a refused use stays in the worker's report for the owner's notice; the web announces each once. */
@@ -161,15 +160,20 @@ export class SecretRuntime {
     catch { console.warn('Tower could not queue a private secret-connection notice; credentials remain discoverable when needed.'); }
   }
 
+  /** The sessions and turns this computer knows now, for access.ts. */
+  private known() {
+    const runs = this.options.runs;
+    let known: Map<string, Run> | undefined;
+    return { lookup: (id: string) => { const found = runs.getSession(id); return found && { session: found, provenance: runs.sessionOrigin(id) }; },
+      findRun: (id: string) => (known ??= new Map(runs.list().map(item => [item.id, item]))).get(id) };
+  }
   /** Who a session of this computer is for secret use now (see access.ts), with `run` the turn asking, if any. */
   subject(session: Session, run: KnownRun | undefined, stage: SecretStage): SecretSubject {
     if (this.closedSessions.has(session.id)) return { mode: 'none', reason: 'closed' };
-    const runs = this.options.runs;
-    let known: Map<string, Run> | undefined;
-    return secretSubject({ run, session, provenance: runs.sessionOrigin(session.id), stage,
-      lookup: id => { const found = runs.getSession(id); return found && { session: found, provenance: runs.sessionOrigin(id) }; },
-      findRun: id => (known ??= new Map(runs.list().map(item => [item.id, item]))).get(id) });
+    return secretSubject({ run, session, provenance: this.options.runs.sessionOrigin(session.id), stage, ...this.known() });
   }
+  /** What a delegated turn keeps when it is admitted, while its calling turns are still known (access.ts `publicChain`). */
+  publicChain(delegation: RunDelegation): boolean | undefined { return publicChain(delegation, this.known()); }
   /** A live session of this computer that may use secrets at `stage`, in its canonical folder; `run` is the turn asking, if any. */
   private async session(id: string, run: KnownRun | undefined, stage: SecretStage): Promise<Session & { cwd: string; subject: SecretSubjectMode }> {
     const session = this.options.runs.getSession(id);
@@ -510,18 +514,18 @@ export class SecretRuntime {
   private async viewUnlock({ password, credentialId, recoveryPassword }: z.output<typeof viewUnlockInput>): Promise<{ generation: string }> {
     const service = this.options.service;
     if (!service.status().initialized) throw fail('시크릿 보관함이 아직 없습니다. 보관함을 먼저 만드세요.', 'not-found');
+    // False when `unlock` itself fails; a failure after it opened (migration, closures) is the open's own and is thrown.
+    const tryOpen = async (unlock: () => Promise<unknown>): Promise<boolean> => {
+      let opened = false;
+      try { await this.open(async () => { await unlock(); opened = true; }); return true; }
+      catch (error) { if (opened) throw error; return false; }
+    };
     if (service.status().locked) {
-      // A wrapper that does not open counts as missing; a failure after it opened is the open's own.
-      if (service.vault.hasTower(credentialId)) {
-        let unwrapped = false;
-        try { await this.open(async () => { await service.towerUnlock(password, credentialId); unwrapped = true; }); }
-        catch (error) { if (unwrapped) throw error; }
-      }
+      // A wrapper that does not open counts as missing.
+      if (service.vault.hasTower(credentialId)) await tryOpen(() => service.towerUnlock(password, credentialId));
       if (service.status().locked) {
         if (recoveryPassword === undefined) throw viewFail('needs-recovery', 'conflict', 'Tower 비밀번호로 연결된 보관함 열쇠가 없습니다. 복구 비밀번호(기존 보관함 비밀번호)를 한 번 입력하세요.');
-        let unlocked = false;
-        try { await this.open(async () => { await service.unlock(recoveryPassword); unlocked = true; }); }
-        catch (error) { if (unlocked) throw error; throw fail('복구 비밀번호(기존 보관함 비밀번호)가 올바르지 않습니다.'); }
+        if (!await tryOpen(() => service.unlock(recoveryPassword))) throw fail('복구 비밀번호(기존 보관함 비밀번호)가 올바르지 않습니다.');
         await service.towerPrune(credentialId); await service.towerWrap(password, credentialId);
       }
     } else {
@@ -538,12 +542,10 @@ export class SecretRuntime {
   private async valueAction(action: 'value' | 'value-update', input: Record<string, unknown>): Promise<SecretValue | SecretSettingsView> {
     const service = this.options.service;
     const { secretId, expectedVersion, generation, value, content } = ownerInput(action === 'value' ? valueRead : valueWrite, input) as z.output<typeof valueWrite>;
-    const current = () => !this.blocked && !service.status().locked && generation === service.lockGeneration;
-    if (!current()) throw viewLocked();
-    try {
-      if (action === 'value') { const answer = await service.value(secretId, expectedVersion); if (!current()) throw viewLocked(); return answer; }
-      await service.update({ id: secretId, expectedVersion, value, content });
-    } catch (error) { if (!current()) throw viewLocked(); throw error; }
+    if (this.blocked || service.status().locked || generation !== service.lockGeneration) throw viewLocked();
+    // The service checks the generation again in its own turn of the queue, behind any lock or open queued first.
+    if (action === 'value') return service.value(secretId, expectedVersion, generation);
+    await service.update({ id: secretId, expectedVersion, value, content, generation });
     return this.settingsView();
   }
   peers(): SecretPeer[] { return this.options.service.status().locked ? [] : this.options.service.peers(); }
