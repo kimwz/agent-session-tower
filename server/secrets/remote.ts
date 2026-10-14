@@ -148,7 +148,11 @@ export class RemoteSecretBroker {
   declines(peerId: string, feature: 'available'): boolean { const poll = this.recentPoll(peerId); return !!poll && !poll.features.includes('locked') && !poll.features.includes(feature); }
   /** The source's link went away: what its relay said no longer holds. */
   forget(controllerRouteId: string): void { this.polls.delete(controllerRouteId); this.offline.add(controllerRouteId); }
-  /** Why the followed host cannot answer now: its relay said it is locked, or its link is down. */
+  /**
+   * Why the followed host cannot answer now: its relay said it is locked, or its link is down. A locked host hears how
+   * many requests were refused (`lockedRefusals`, read by its next poll) and tells its owner; a host whose link is down
+   * cannot see them, so no push follows that refusal: its agent is told at once and the host's card shows 연결 끊김.
+   */
   private hostDown(peer: SecretPeer): 'SECRET_HOST_LOCKED' | 'SECRET_HOST_OFFLINE' | undefined {
     if (peer.direction !== 'controller' || peer.routeId !== this.options.followed?.()) return;
     if (this.recentPoll(peer.device.id)?.features.includes('locked')) return 'SECRET_HOST_LOCKED';
@@ -165,6 +169,7 @@ export class RemoteSecretBroker {
       const sent = wireContext(context);
       if (peer.direction !== 'controller' || !contextValid(sent) || sent.hostId !== device.id || !OPERATIONS.includes(operation)) return fail();
       const down = this.hostDown(peer);
+      if (down === 'SECRET_HOST_LOCKED') this.lockRefusals.set(peer.routeId, (this.lockRefusals.get(peer.routeId) ?? 0) + 1);
       if (down) return Promise.reject(refusal(down));
       // The followed host that serves `catalog` tells why it refuses, when asked.
       if ((operation === 'list' || operation === 'resolve') && peer.routeId === this.options.followed?.() && this.supports(peerId, 'catalog')) payload = { ...payload as Record<string, unknown>, reasons: true };
@@ -200,10 +205,14 @@ export class RemoteSecretBroker {
     return [...this.waiting.values()].filter(p => p.request.expiresAt > this.now() && this.options.peers().some(peer => peer.enabled && peer.direction === 'controller' && peer.routeId === controllerRouteId && peer.device.id === p.peer.device.id && peer.device.signingKey === p.peer.device.signingKey && peer.device.encryptionKey === p.peer.device.encryptionKey))
       .slice(0, 8).map(p => structuredClone(p.request));
   }
-  async answer(nodeRouteId: string, input: unknown): Promise<RemoteSecretResponse> {
-    try { return await this.answerVerified(nodeRouteId, input); } catch { return fail(); }
+  /**
+   * `following`: the computer on that route follows this host now, as its controller knows at answer time. Only then
+   * are the catalog and refusal reasons answered; any other computer gets today's answers, whatever its request says.
+   */
+  async answer(nodeRouteId: string, input: unknown, following = false): Promise<RemoteSecretResponse> {
+    try { return await this.answerVerified(nodeRouteId, input, following); } catch { return fail(); }
   }
-  private async answerVerified(nodeRouteId: string, input: unknown): Promise<RemoteSecretResponse> {
+  private async answerVerified(nodeRouteId: string, input: unknown, following: boolean): Promise<RemoteSecretResponse> {
     wire(input, MAX_REQUEST);
     if (!record(input) || !exact(input, ['version', 'id', 'nonce', 'from', 'to', 'createdAt', 'expiresAt', 'context', 'operation', 'payload', 'signature'])) return fail();
     const request = input as unknown as RemoteSecretRequest, device = this.options.device();
@@ -223,7 +232,7 @@ export class RemoteSecretBroker {
     let payload: unknown;
     try { payload = decode(request.payload); } catch { payload = undefined; } // best-effort: decoded again below, where a bad payload is refused as before
     // Only a computer that follows this host asks for reasons; any other one gets today's answers.
-    const reasons = (request.operation === 'list' || request.operation === 'resolve') && record(payload) && payload.reasons === true;
+    const reasons = following && (request.operation === 'list' || request.operation === 'resolve') && record(payload) && payload.reasons === true;
     let result: unknown; let reason: typeof REASONS[number] | undefined; let begun = !claimed;
     try {
       try {
@@ -235,6 +244,8 @@ export class RemoteSecretBroker {
         if (!reasons || !(reason = reasonOf(error))) throw error;
       }
       if (reason) result = { ok: false, code: reason };
+      // The catalog is only for a computer that follows this host now; any other one is refused at once, not left waiting.
+      else if (request.operation === 'catalog' && !following) result = { ok: false, code: 'SECRET_REMOTE_UNAVAILABLE' };
       else try {
         // Re-read trust immediately before the policy owner resolves the operation.
         const current = this.peer(request.from, { id: nodeRouteId, direction: 'node' });

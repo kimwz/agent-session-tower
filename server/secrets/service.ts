@@ -37,6 +37,11 @@ export interface SecretDispatchUse { ref: string; operation: SecretOperation; va
 /** Written in plain text at every unlocked save: the policy to list names by while locked, and the sources it cannot reach then. */
 interface LockedIndex { format: 2; policy: PolicyState; sources: string[] }
 const USAGE_LIMIT = 1000;
+/**
+ * At most this many removals and automatic folder additions are remembered. Neither is ever dropped to make room: a
+ * full list stops automatic trust and automatic folders instead, so nothing the owner removed comes back.
+ */
+const MAX_UNTRUSTED = 1000, MAX_AUTO_FOLDERS = 5000;
 const REMOTE_TASK_MS = 8 * 60 * 60_000;
 const unshared = (): StoredSharing => storedSharing({ revision: 1, allMachines: false, machines: [], folders: [] });
 const policySecret = (secret: StoredSecret): PolicySecret => ({ metadata: secret.metadata, fieldNames: secret.fields ? Object.keys(secret.fields) : undefined, sharing: secret.sharing });
@@ -73,8 +78,14 @@ export class SecretService {
     const payload = await this.vault.unlockTower(password, credentialId); if (payload === undefined) return false;
     await this.opened(payload as Permanent); return true;
   }); }
-  /** Opens with this computer's machine key (see machine-key.ts), like `unlock`. */
-  async machineUnlock(key: Buffer) { return this.serialize(async () => this.opened(this.vault.unlockMachine(key) as Permanent)); }
+  /**
+   * Opens with this computer's machine key (see machine-key.ts), like `unlock`, but only in the lock generation it was
+   * decided in: a lock queued before it (the owner's) wins.
+   */
+  async machineUnlock(key: Buffer, generation: string) { return this.serialize(async () => {
+    if (generation !== this.vault.lockGeneration) throw new Error('Vault locked meanwhile');
+    await this.opened(this.vault.unlockMachine(key) as Permanent);
+  }); }
   // Queued with saves: a save spreads the envelope it started from, so a wrapper written meanwhile would be lost.
   async machineWrap(key: Buffer) { return this.serialize(() => this.vault.machineWrap(key)); }
   async towerWrap(password: string, credentialId: string) { return this.serialize(() => this.vault.towerWrap(password, credentialId)); }
@@ -126,21 +137,23 @@ export class SecretService {
   async removePeer(deviceId: string) { return this.mutate(() => {
     const data = this.data(); const removed = data.peers.filter(peer => peer.device.id === deviceId);
     data.peers = data.peers.filter(peer => peer.device.id !== deviceId);
-    if (removed.length) data.untrusted = [...(data.untrusted ?? []).filter(item => !removed.some(peer => sameRoute(item, peer))), ...removed.map(peer => ({ routeId: peer.routeId, direction: peer.direction, at: this.now() }))].slice(-200);
+    if (removed.length) data.untrusted = [...(data.untrusted ?? []).filter(item => !removed.some(peer => sameRoute(item, peer))), ...removed.map(peer => ({ routeId: peer.routeId, direction: peer.direction, at: this.now() }))].slice(0, MAX_UNTRUSTED);
   }); }
   /** Whether the owner removed the trust of this route. */
   untrustedRoute(route: Pick<SecretPeer, 'routeId' | 'direction'>): boolean { return (this.data().untrusted ?? []).some(item => sameRoute(item, route)); }
   /**
    * Trust made by itself over the pinned link between a host and a computer that follows it. The link names the computer,
    * so its vault's device replaces another one trusted on that route (its vault made again); a route the owner removed
-   * stays untrusted, and the same device with other keys is refused as by hand. Saves only when something changes.
+   * stays untrusted, and the same device with other keys is refused as by hand. A full removal list makes no new trust
+   * (a removal it could not hold must not be undone). Saves only when something changes.
    */
   async alignPeer(peer: SecretPeer): Promise<boolean> {
     const current = () => this.data().peers.filter(item => item.device.id === peer.device.id || sameRoute(item, peer));
     const settled = () => { const [found, other] = current(); return !other && !!found?.enabled && sameRoute(found, peer) && (['id', 'signingKey', 'encryptionKey', 'fingerprint'] as const).every(key => found.device[key] === peer.device[key]); };
-    if (this.untrustedRoute(peer)) return false;
+    const refused = () => this.untrustedRoute(peer) || (!settled() && (this.data().untrusted?.length ?? 0) >= MAX_UNTRUSTED);
+    if (refused()) return false;
     if (settled()) return true;
-    return this.mutate(() => { if (this.untrustedRoute(peer)) return false; if (!settled()) this.addPeer({ ...peer, enabled: true }, true); return true; });
+    return this.mutate(() => { if (refused()) return false; if (!settled()) this.addPeer({ ...peer, enabled: true }, true); return true; });
   }
   private projectId(hostId: string, root: string) { return projectId(this.data(), hostId, root); }
   private lockedIndex(): LockedIndex { return { format: 2, policy: this.policy(), sources: this.data().peers.filter(peer => peer.enabled && peer.direction === 'controller').map(peer => peer.device.id) }; }
@@ -373,28 +386,44 @@ export class SecretService {
       const sharing = readSharing(secret.sharing); return (sharing.allMachines && served) || sharing.machines.includes(hostId);
     }).length;
   }
-  /** This computer's folders in saved secrets' sharing, for a clone of the same repository on a computer that follows it. */
-  sharedFolders(): { secretId: string; root: string }[] {
+  /**
+   * This computer's folders in saved secrets' sharing, with the sharing revision they were read at, for a clone of the
+   * same repository on a computer that follows it.
+   */
+  sharedFolders(): { secretId: string; root: string; revision: number }[] {
     const own = this.device().id;
-    return this.data().secrets.flatMap(secret => secret.sharing ? readSharing(secret.sharing).folders.filter(folder => folder.hostId === own).map(folder => ({ secretId: secret.metadata.id, root: folder.root })) : []);
+    return this.data().secrets.flatMap(secret => {
+      if (!secret.sharing) return [];
+      const sharing = readSharing(secret.sharing);
+      return sharing.folders.filter(folder => folder.hostId === own).map(folder => ({ secretId: secret.metadata.id, root: folder.root, revision: sharing.revision }));
+    });
   }
   /**
-   * Adds folders of a computer that follows this host to the sharing of secrets shared with a folder of the same
-   * repository here. Each folder is added once ever: one the owner removes again is not added back. Saves only when
-   * something is added; answers how many were.
+   * Adds folders (`root`) of a computer that follows this host to the sharing of secrets shared with a folder
+   * (`hostRoot`) of the same repository here, only while that sharing is still at the revision it was read at and still
+   * has that folder: an owner's change meanwhile wins. Each folder is added once ever, so one the owner removes is not
+   * added back. Saves only when something changes; answers how many folders were added.
    */
-  async autoShareFolders(hostId: string, additions: readonly { secretId: string; root: string }[]): Promise<number> {
-    const pending = () => additions.filter(item => canonicalRoot(item.root) && !(this.data().autoFolders ?? []).some(done => done.secretId === item.secretId && done.hostId === hostId && done.root === item.root)
-      && this.data().secrets.some(secret => secret.metadata.id === item.secretId && secret.sharing));
+  async autoShareFolders(hostId: string, additions: readonly { secretId: string; root: string; revision: number; hostRoot: string }[]): Promise<number> {
+    const done = (item: { secretId: string; root: string }) => (this.data().autoFolders ?? []).some(record => record.secretId === item.secretId && record.hostId === hostId && record.root === item.root);
+    const current = (item: { secretId: string; revision: number; hostRoot: string }) => {
+      const stored = this.data().secrets.find(secret => secret.metadata.id === item.secretId)?.sharing; const sharing = stored && readSharing(stored);
+      return sharing && sharing.revision === item.revision && sharing.folders.some(folder => folder.hostId === this.device().id && folder.root === item.hostRoot) ? sharing : undefined;
+    };
+    const pending = () => additions.filter(item => canonicalRoot(item.root) && !done(item) && current(item));
     if (!this.data().peers.some(peer => peer.enabled && peer.direction === 'node' && peer.device.id === hostId) || !pending().length) return 0;
     return this.mutate(() => {
       const data = this.data(); let added = 0;
-      for (const item of pending()) {
-        const secret = data.secrets.find(secret => secret.metadata.id === item.secretId)!; const sharing = readSharing(secret.sharing!);
-        data.autoFolders = [...data.autoFolders ?? [], { secretId: item.secretId, hostId, root: item.root }].slice(-2000);
-        // A full list stays as the owner can save it.
-        if (sharing.folders.length >= 100 || sharing.folders.some(folder => folder.hostId === hostId && folder.root === item.root)) continue;
-        secret.sharing = storedSharing({ ...sharing, revision: sharing.revision + 1, folders: [...sharing.folders, { hostId, root: item.root }] }); added++;
+      for (const secretId of new Set(pending().map(item => item.secretId))) {
+        const items = pending().filter(item => item.secretId === secretId); const sharing = current(items[0]!)!;
+        const folders = [...sharing.folders];
+        for (const item of items) {
+          if ((data.autoFolders?.length ?? 0) >= MAX_AUTO_FOLDERS) break;
+          data.autoFolders = [...data.autoFolders ?? [], { secretId, hostId, root: item.root }];
+          // A full list stays as the owner can save it.
+          if (folders.length < 100 && !folders.some(folder => folder.hostId === hostId && folder.root === item.root)) { folders.push({ hostId, root: item.root }); added++; }
+        }
+        if (folders.length !== sharing.folders.length) data.secrets.find(secret => secret.metadata.id === secretId)!.sharing = storedSharing({ ...sharing, revision: sharing.revision + 1, folders });
       }
       return added;
     });

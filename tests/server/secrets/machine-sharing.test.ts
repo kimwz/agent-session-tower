@@ -123,13 +123,47 @@ test('automatic trust keeps a removal by the owner, replaces a vault made again 
 test('a clone’s folder joins the sharing of secrets shared with a folder of the same repository once, and stays out once removed', async t => {
   const f = await fixture(t);
   const secret = await f.service.create({ name: 'repo-token', kind: 'scalar', value: 'v', sharing: { allMachines: false, folders: [{ hostId: f.host, root: '/work/repo' }] } });
-  assert.deepEqual(f.service.sharedFolders(), [{ secretId: secret.id, root: '/work/repo' }]);
-  assert.equal(await f.service.autoShareFolders(f.node.id, [{ secretId: secret.id, root: '/node/repo' }]), 0, 'only for a trusted node');
+  assert.deepEqual(f.service.sharedFolders(), [{ secretId: secret.id, root: '/work/repo', revision: 1 }]);
+  const clone = (patch: Partial<{ secretId: string; root: string; revision: number; hostRoot: string }> = {}) => ({ secretId: secret.id, root: '/node/repo', revision: 1, hostRoot: '/work/repo', ...patch });
+  assert.equal(await f.service.autoShareFolders(f.node.id, [clone()]), 0, 'only for a trusted node');
   await f.trust();
-  assert.equal(await f.service.autoShareFolders(f.node.id, [{ secretId: secret.id, root: '/node/repo' }, { secretId: 'missing', root: '/node/repo' }, { secretId: secret.id, root: 'relative' }]), 1);
-  assert.deepEqual(f.service.settings().secrets[0]!.sharing, { revision: 2, allMachines: false, machines: [], folders: [{ hostId: f.host, root: '/work/repo' }, { hostId: f.node.id, root: '/node/repo' }] });
-  assert.equal(await f.service.autoShareFolders(f.node.id, [{ secretId: secret.id, root: '/node/repo' }]), 0, 'once');
+  assert.equal(await f.service.autoShareFolders(f.node.id, [clone(), clone({ secretId: 'missing' }), clone({ root: 'relative' }), clone({ root: '/node/second' })]), 2);
+  assert.deepEqual(f.service.settings().secrets[0]!.sharing, { revision: 2, allMachines: false, machines: [], folders: [{ hostId: f.host, root: '/work/repo' }, { hostId: f.node.id, root: '/node/repo' }, { hostId: f.node.id, root: '/node/second' }] }, 'one revision for one change');
+  assert.equal(await f.service.autoShareFolders(f.node.id, [clone({ revision: 2 })]), 0, 'once');
   await f.service.setSharing(secret.id, 2, { allMachines: false, folders: [{ hostId: f.host, root: '/work/repo' }] });
-  assert.equal(await f.service.autoShareFolders(f.node.id, [{ secretId: secret.id, root: '/node/repo' }]), 0, 'a folder the owner removed is not added back');
+  assert.equal(await f.service.autoShareFolders(f.node.id, [clone({ revision: 3 })]), 0, 'a folder the owner removed is not added back');
   assert.deepEqual(f.service.settings().secrets[0]!.sharing?.folders, [{ hostId: f.host, root: '/work/repo' }]);
+});
+
+test('a clone’s folder is not added to sharing the owner changed since it was read', async t => {
+  const f = await fixture(t); await f.trust();
+  const secret = await f.service.create({ name: 'repo-token', kind: 'scalar', value: 'v', sharing: { allMachines: false, folders: [{ hostId: f.host, root: '/work/repo' }] } });
+  const [read] = f.service.sharedFolders();
+  // Meanwhile the owner stops sharing the secret at all.
+  await f.service.setSharing(secret.id, 1, { allMachines: false, folders: [] });
+  assert.equal(await f.service.autoShareFolders(f.node.id, [{ ...read!, root: '/node/repo', hostRoot: read!.root }]), 0);
+  assert.deepEqual(f.service.settings().secrets[0]!.sharing, { revision: 2, allMachines: false, machines: [], folders: [] });
+  // Shared again with another folder: a stale read of the first one adds nothing either.
+  await f.service.setSharing(secret.id, 2, { allMachines: false, folders: [{ hostId: f.host, root: '/work/other' }] });
+  assert.equal(await f.service.autoShareFolders(f.node.id, [{ secretId: secret.id, root: '/node/repo', revision: 3, hostRoot: '/work/repo' }]), 0, 'that folder is no longer shared');
+  assert.equal(await f.service.autoShareFolders(f.node.id, [{ secretId: secret.id, root: '/node/other', revision: 3, hostRoot: '/work/other' }]), 1, 'a current read still works');
+});
+
+test('remembered removals and automatic folders are never dropped for room: a full list stops automatic trust and folders', async t => {
+  const f = await fixture(t);
+  const route = { routeId: 'node-link', direction: 'node' as const };
+  await editPayload(f.service, payload => { payload.untrusted = Array.from({ length: 1000 }, (_value, index) => ({ routeId: `removed-${index}`, direction: 'node', at: index })); });
+  assert.equal(f.service.untrustedRoute({ routeId: 'removed-0', direction: 'node' }), true);
+  assert.equal(await f.service.alignPeer({ device: f.node, ...route, enabled: true }), false, 'no new automatic trust once full');
+  await f.service.trustPeer({ device: f.node, ...route, enabled: true });
+  assert.equal(await f.service.alignPeer({ device: f.node, ...route, enabled: true }), true, 'trust the owner made stays as it is');
+  await f.service.removePeer(f.node.id);
+  assert.equal(f.service.untrustedRoute({ routeId: 'removed-0', direction: 'node' }), true, 'the oldest removal is kept');
+  assert.equal(await f.service.alignPeer({ device: f.node, ...route, enabled: true }), false, 'a removal the full list could not hold is not undone');
+
+  const g = await fixture(t); await g.trust();
+  const secret = await g.service.create({ name: 'repo-token', kind: 'scalar', value: 'v', sharing: { allMachines: false, folders: [{ hostId: g.host, root: '/work/repo' }] } });
+  await editPayload(g.service, payload => { payload.autoFolders = Array.from({ length: 5000 }, (_value, index) => ({ secretId: secret.id, hostId: g.node.id, root: `/node/old-${index}` })); });
+  assert.equal(await g.service.autoShareFolders(g.node.id, [{ secretId: secret.id, root: '/node/old-0', revision: 1, hostRoot: '/work/repo' }]), 0, 'the oldest record still keeps its folder out');
+  assert.equal(await g.service.autoShareFolders(g.node.id, [{ secretId: secret.id, root: '/node/new', revision: 1, hostRoot: '/work/repo' }]), 0, 'and nothing new is added once full');
 });

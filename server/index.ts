@@ -773,7 +773,8 @@ async function main() {
   void towerUpdates.start().catch(error => console.error(`Automatic updates are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   if (remoteNodes) {
     secretRelay = new SecretRelay({ nodes: remoteNodes, peers: async () => runs.supports('secrets') ? await runs.secretCall('peers') as SecretPeer[] : [],
-      workerAnswer: (id, request) => runs.secretCall('answer', [id, request]) as Promise<RemoteSecretResponse>,
+      // Whether that computer follows this Tower now decides whether it gets the catalog and refusal reasons.
+      workerAnswer: (id, request) => runs.secretCall('answer', [id, request, { following: controllerLinks?.list().some(node => node.id === id && node.followHost) === true && controllerLinks?.following(id) === true }]) as Promise<RemoteSecretResponse>,
       features: () => [...runs.supports('secretSharing') ? ['available'] : [], ...runs.supports('secretMachines') ? ['catalog'] : []],
       lockedNodes: async () => {
         const followers = controllerLinks?.list().filter(node => node.followHost && node.following && node.status === 'connected' && node.features.includes(SECRET_MACHINES_FEATURE)).map(node => node.id) ?? [];

@@ -46,6 +46,8 @@ export class FollowingSecrets extends EventEmitter {
   private readonly repositories = new Map<string, { at: number; url?: string }>();
   private readonly lockedTold = new Map<string, number>();
   private readonly lockedNotices: SecretShareNotice[] = [];
+  /** Moves on whenever a computer connects, disconnects or its follow changes: an alignment begun before is stale. */
+  private readonly epochs = new Map<string, number>();
   private timer?: ReturnType<typeof setInterval>;
 
   constructor(private readonly options: {
@@ -60,9 +62,9 @@ export class FollowingSecrets extends EventEmitter {
 
   start(): void {
     const controller = this.options.controller;
-    controller.on('connected', id => { void this.align(id); });
-    controller.on('followChanged', id => { void this.align(id); });
-    controller.on('disconnected', id => { if (this.statuses.has(id)) this.set(id, { state: 'offline' }); });
+    controller.on('connected', id => { this.moved(id); void this.align(id); });
+    controller.on('followChanged', id => { this.moved(id); void this.align(id); });
+    controller.on('disconnected', id => { this.moved(id); if (this.statuses.has(id)) this.set(id, { state: 'offline' }); });
     this.timer = setInterval(() => this.alignAll(), this.options.retryMs ?? RETRY_MS);
     this.timer.unref();
   }
@@ -76,6 +78,9 @@ export class FollowingSecrets extends EventEmitter {
   alignAll(): void { for (const node of this.targets()) void this.align(node.id); }
 
   private now(): number { return this.options.now?.() ?? Date.now(); }
+  private moved(id: string): void { this.epochs.set(id, (this.epochs.get(id) ?? 0) + 1); }
+  /** Still the same connection of a computer that follows this Tower, as when `epoch` was read. */
+  private current(id: string, epoch: number): boolean { return this.epochs.get(id) === epoch && this.targets().some(node => node.id === id); }
   private targets(): NodeSummary[] {
     return this.options.controller.list().filter(node => node.followHost && node.status === 'connected' && node.features.includes(SECRET_MACHINES_FEATURE) && this.options.controller.following(node.id));
   }
@@ -97,13 +102,16 @@ export class FollowingSecrets extends EventEmitter {
   }
 
   private async alignNow(id: string): Promise<void> {
-    const worker = this.options.worker;
-    if (!worker.supports('secretMachines') || !this.targets().some(node => node.id === id)) return;
+    const worker = this.options.worker; const epoch = this.epochs.get(id) ?? 0; this.epochs.set(id, epoch);
+    if (!worker.supports('secretMachines') || !this.current(id, epoch)) return;
     const own = alignment(await worker.secretCall('align', [{ routeId: id, direction: 'node' }]));
     if (!own) throw new Error('The worker answered the trust check in a form this build does not read.');
     const offer = own.vault === 'open' && !own.untrusted && own.device ? { device: own.device } : {};
     const answer = await this.options.link(id, '/secret-align', offer);
     const theirs = answer?.status === 200 ? alignment(answer.json) : undefined;
+    // What came back is trusted only for the same connection of a computer that still follows this Tower; a change
+    // meanwhile aligns again from the start (the event that moved the epoch asks for it).
+    if (!this.current(id, epoch)) return;
     let mine = own;
     if (own.vault === 'open' && !own.untrusted && theirs?.device && !theirs.untrusted) mine = alignment(await worker.secretCall('align', [{ routeId: id, direction: 'node', device: theirs.device }])) ?? own;
     const was = this.statuses.get(id)?.state;
@@ -126,20 +134,21 @@ export class FollowingSecrets extends EventEmitter {
     if (!clones.length || !worker.supports('secretMachines') || !this.targets().some(node => node.id === id)) return;
     const peer = (await worker.secretCall('peers') as SecretPeer[]).find(item => item.enabled && item.direction === 'node' && item.routeId === id);
     if (!peer) return;
-    const own = (await worker.secretCall('shared-folders') as { folders: { secretId: string; root: string }[] }).folders;
-    const byRepository = new Map<string, Set<string>>();
-    for (const { secretId, root } of own) {
+    // Each with the sharing revision it was read at: the vault adds nothing to sharing the owner changed meanwhile.
+    const own = (await worker.secretCall('shared-folders') as { folders: { secretId: string; root: string; revision: number }[] }).folders;
+    const byRepository = new Map<string, { secretId: string; revision: number; hostRoot: string }[]>();
+    for (const { secretId, root, revision } of own) {
       const url = await this.repository(root);
-      if (url) byRepository.set(url, (byRepository.get(url) ?? new Set()).add(secretId));
+      if (url) byRepository.set(url, [...byRepository.get(url) ?? [], { secretId, revision, hostRoot: root }]);
     }
-    const additions = new Map<string, { secretId: string; root: string }>();
+    const additions = new Map<string, { secretId: string; root: string; revision: number; hostRoot: string }>();
     for (const clone of clones) {
-      const secrets = byRepository.get(clone.remoteUrl);
-      if (!secrets) continue;
+      const shared = byRepository.get(clone.remoteUrl);
+      if (!shared) continue;
       let root: string;
       try { root = await this.options.canonical(id, clone.cwd); }
       catch { continue; } // best-effort: a folder that computer no longer has, or cannot show now, is tried again with its next list
-      for (const secretId of secrets) additions.set(JSON.stringify([secretId, root]), { secretId, root });
+      for (const item of shared) additions.set(JSON.stringify([item.secretId, root]), { ...item, root });
     }
     if (additions.size) await worker.secretCall('auto-share', [{ hostId: peer.device.id, folders: [...additions.values()] }]);
   }

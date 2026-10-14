@@ -23,7 +23,8 @@ function fixtures(host: Partial<RemoteSecretBrokerOptions> = {}, followed: () =>
   const node = new RemoteSecretBroker({ device: () => b.device, deviceKeys: b.keys, peers: () => bPeers, begin: () => true, handle: () => undefined, timeoutMs: 1000, followed });
   const ctx: SecretContext = { hostId: b.device.id, sessionId: 'session-b', taskId: randomUUID(), runId: 'run-b', root: '/fixture/project' };
   /** One relay round: A's relay polls B with `features` and answers what it got. */
-  const round = async (features: string[]) => { for (const request of node.poll('controller-a', features)) { try { node.deliver('controller-a', await source.answer('node-b', request)); } catch { /* unanswered, as today */ } } };
+  /** `following`: the host's controller sees B following it now. */
+  const round = async (features: string[], following = true) => { for (const request of node.poll('controller-a', features)) { try { node.deliver('controller-a', await source.answer('node-b', request, following)); } catch { /* unanswered, as today */ } } };
   return { a, b, source, node, ctx, refused, round };
 }
 const code = (expected: string) => (error: { code?: string }) => error.code === expected;
@@ -36,7 +37,7 @@ test('the followed host tells why it refuses only to a computer that asked for r
     const asked = f.node.request(f.a.device.id, f.ctx, 'resolve', { reference: 'tower-secret://x/y@1', operation: 'env' });
     const [request] = f.node.poll('controller-a', ['available', 'catalog']);
     assert.deepEqual((request!.payload as { $secretObject: [string, unknown][] }).$secretObject.find(([key]) => key === 'reasons'), ['reasons', true]);
-    f.node.deliver('controller-a', await f.source.answer('node-b', request!));
+    f.node.deliver('controller-a', await f.source.answer('node-b', request!, true));
     await assert.rejects(asked, code('SECRET_NOT_SHARED'));
     assert.deepEqual(f.refused, ['resolve:SECRET_NOT_SHARED']);
     // A host whose relay does not confirm the catalog is asked as before, and leaves the first use unanswered as before.
@@ -44,7 +45,7 @@ test('the followed host tells why it refuses only to a computer that asked for r
     const plain = f.node.request(f.a.device.id, f.ctx, 'resolve', { reference: 'tower-secret://x/y@1', operation: 'env' }); plain.catch(() => undefined);
     const [old] = f.node.poll('controller-a', ['available']);
     assert.equal((old!.payload as { $secretObject: [string, unknown][] }).$secretObject.some(([key]) => key === 'reasons'), false);
-    await assert.rejects(f.source.answer('node-b', old!));
+    await assert.rejects(f.source.answer('node-b', old!, true));
     assert.deepEqual(f.refused, ['resolve:SECRET_NOT_SHARED'], 'no owner notice for a computer that did not ask');
   } finally { f.node.close(); }
 });
@@ -61,6 +62,22 @@ test('a refusal inside the task is told only with reasons; without them it stays
     await notFollowing.round(['catalog']); await generic;
     assert.deepEqual(notFollowing.refused, [], 'a computer that does not follow never asks for reasons');
     notFollowing.node.close();
+  } finally { f.node.close(); }
+});
+
+test('a node the host does not see following asks in vain: no catalog, no reasons, no notice', async () => {
+  let handled = 0;
+  const f = fixtures({ begin: () => { throw notShared('Remote task denied'); }, handle: () => { handled++; return [{ id: 'x' }]; } });
+  try {
+    f.node.poll('controller-a', ['available', 'catalog']);
+    const read = f.node.request(f.a.device.id, f.ctx, 'catalog'); const refused = assert.rejects(read, code('SECRET_REMOTE_UNAVAILABLE'));
+    const [catalog] = f.node.poll('controller-a', ['available', 'catalog']);
+    f.node.deliver('controller-a', await f.source.answer('node-b', catalog!, false));
+    await refused;
+    const asked = f.node.request(f.a.device.id, f.ctx, 'resolve', {}); asked.catch(() => undefined);
+    const [resolve] = f.node.poll('controller-a', ['available', 'catalog']).filter(request => request.operation === 'resolve');
+    await assert.rejects(f.source.answer('node-b', resolve!, false), 'a first use is left unanswered as today');
+    assert.deepEqual(f.refused, []); assert.equal(handled, 0, 'no name read');
   } finally { f.node.close(); }
 });
 
@@ -86,6 +103,7 @@ test('the followed host’s locked vault and lost link refuse at once with their
     await locked;
     assert.equal(f.node.lockedRefusals('controller-a'), 1); assert.equal(f.node.lockedRefusals('controller-a'), 0, 'read once');
     await assert.rejects(f.node.request(f.a.device.id, f.ctx, 'list'), code('SECRET_HOST_LOCKED'), 'while it says so');
+    assert.equal(f.node.lockedRefusals('controller-a'), 1, 'refused at once, and counted for the owner’s notice too');
     assert.equal(f.node.declines(f.a.device.id, 'available'), false, 'a locked host is not an older build');
     f.node.poll('controller-a', ['available', 'catalog']);
     const answered = f.node.request(f.a.device.id, f.ctx, 'list'); await f.round(['available', 'catalog']); assert.deepEqual(await answered, []);

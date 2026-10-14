@@ -12,9 +12,9 @@ const PASSWORD = 'fixture-machine-key-password';
 const HOST = 'c'.repeat(32);
 
 /** A computer's worker as it starts: its vault service and runtime, following `host` or nobody. */
-async function worker(stateDir: string, follow: { host?: string }) {
+async function worker(stateDir: string, follow: { host?: string }, migrate?: () => Promise<void>) {
   const service = new SecretService({ stateDir }); await service.start();
-  const runtime = new SecretRuntime({ stateDir, service, runs: new FixtureRuns(), followed: async () => follow.host });
+  const runtime = new SecretRuntime({ stateDir, service, runs: new FixtureRuns(), followed: async () => follow.host, ...(migrate ? { migrate } : {}) });
   return { service, runtime };
 }
 async function fixture(t: TestContext) {
@@ -103,4 +103,21 @@ test('a machine key that does not open the vault waits for the owner, and a dama
   await assert.rejects(damaged.runtime.machineVault(), /machine key file/);
   assert.equal(await readFile(join(f.stateDir, 'secrets', 'machine-key'), 'utf8'), 'damaged');
   damaged.runtime.close();
+});
+
+test('an owner lock made while an automatic open finishes stays: the open does not undo it, and nothing reopens it', async t => {
+  const f = await fixture(t); const follow = { host: HOST };
+  const made = await worker(f.stateDir, follow); assert.equal(await made.runtime.machineVault(), 'open'); made.runtime.close();
+  let release!: () => void; let entered!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; }); const gate = new Promise<void>(resolve => { release = resolve; });
+  let hold = true;
+  const next = await worker(f.stateDir, follow, async () => { if (hold) { hold = false; entered(); await gate; } });
+  const opening = next.runtime.machineVault();
+  await reached; // Opened with the machine key, still finishing.
+  await next.runtime.control('lock', {});
+  release(); await opening;
+  assert.equal(next.service.status().locked, true);
+  assert.equal(await next.runtime.machineVault(), 'needs-open', 'the owner’s lock is kept');
+  assert.equal(next.service.status().locked, true);
+  next.runtime.close();
 });

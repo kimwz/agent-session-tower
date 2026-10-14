@@ -47,11 +47,11 @@ async function pair(t: TestContext) {
   const following = new FollowingSecrets({ controller: { list: () => [summary], following: () => true, on: () => undefined }, worker,
     link: async (_id, path, body) => { links.push({ path, body }); return { status: 200, json: await node.runtime.align({ routeId: HOST_ROUTE, direction: 'controller', ...body as object }) }; },
     canonical: async (_id, path) => path });
-  /** A's relay polling B, as a host that serves the catalog does, answering until `pending` settles. */
-  async function relay<T>(pending: Promise<T>, features = ['available', 'catalog']): Promise<T> {
+  /** A's relay polling B, as a host that serves the catalog does, answering until `pending` settles; B follows A unless told. */
+  async function relay<T>(pending: Promise<T>, features = ['available', 'catalog'], following = true): Promise<T> {
     let done = false; const observed = pending.then(value => { done = true; return value; }, error => { done = true; throw error; }); observed.catch(() => undefined);
     for (let count = 0; !done && count < 400; count++) {
-      for (const request of node.runtime.poll(HOST_ROUTE, features).requests) node.runtime.deliver(HOST_ROUTE, await source.answer(NODE_ROUTE, request));
+      for (const request of node.runtime.poll(HOST_ROUTE, features).requests) node.runtime.deliver(HOST_ROUTE, await source.answer(NODE_ROUTE, request, following));
       if (!done) await new Promise(resolve => setTimeout(resolve, 5));
     }
     if (!done) throw new Error('Fixture relay did not settle within its bounded poll window');
@@ -159,6 +159,18 @@ test('a host without the catalog, and a computer that does not follow, keep toda
   assert.ok(shared);
 });
 
+test('a computer the host does not see following gets neither the catalog nor reasons, even when it asks', { timeout: 30000 }, async t => {
+  const f = await pair(t); await f.node.runtime.machineVault(); await f.following.align(NODE_ROUTE);
+  await f.a.create({ name: 'SHARED', kind: 'scalar', value: CANARY, sharing: { allMachines: true, folders: [] } });
+  const hidden = await f.a.create({ name: 'HIDDEN', kind: 'scalar', value: CANARY });
+  // B still believes it follows A, and asks; A's controller no longer sees it following.
+  const listed = await f.relay(f.node.runtime.tool(f.capB, 'secrets_list', {}), ['available', 'catalog'], false) as { secrets: SecretMetadata[]; notice?: string };
+  assert.deepEqual(listed.secrets.map(item => item.name), ['SHARED'], 'no names it may not use');
+  const denied = await f.relay(f.node.runtime.tool(f.capB, 'secrets_run', { operationId: 'not-seen', command: process.execPath, args: ['-e', ''], env: { TOKEN: hidden.reference } }), ['available', 'catalog'], false) as SecretRunResult;
+  assert.doesNotMatch(denied.stderr, /SECRET_NOT_SHARED/, 'the generic refusal, as today');
+  assert.deepEqual(f.source.shares(), [], 'and no push');
+});
+
 test('a clone’s folder is added to the secrets of the same repository once, and not again after the owner removes it', { timeout: 30000 }, async t => {
   const f = await pair(t); await f.node.runtime.machineVault();
   const hostFolder = join(f.project, '..', 'host-repo');
@@ -179,4 +191,33 @@ test('a clone’s folder is added to the secrets of the same repository once, an
   await f.a.setSharing(repo.id, 2, { allMachines: false, folders: [{ hostId: f.a.device().id, root: hostFolder }] });
   await following.shareFolders(NODE_ROUTE, folders);
   assert.deepEqual(f.a.settings().secrets[0]!.sharing?.folders, [{ hostId: f.a.device().id, root: hostFolder }], 'the owner’s removal stays');
+});
+
+test('a computer that stops following while the trust is being made is not trusted with what came back', { timeout: 30000 }, async t => {
+  const f = await pair(t); await f.node.runtime.machineVault();
+  let following = true; const listeners = new Map<string, (id: string) => void>();
+  const summary = (): NodeSummary => ({ id: NODE_ROUTE, name: 'n', fingerprint: 'f', status: 'connected', features: [SECRET_MACHINES_FEATURE], pairedAt: '', followHost: following, following });
+  const aligning = new FollowingSecrets({ controller: { list: () => [summary()], following: () => following, on: (event, listener) => { listeners.set(event, listener); } },
+    worker: { supports: () => true, secretCall: async (operation: string, args: unknown[] = []) => { assert.equal(operation, 'align'); return f.source.align(args[0]); } },
+    link: async (_id, _path, body) => {
+      const answer = await f.node.runtime.align({ routeId: HOST_ROUTE, direction: 'controller', ...body as object });
+      // The owner turns following off while the answer is on its way.
+      following = false; listeners.get('followChanged')!(NODE_ROUTE);
+      return { status: 200, json: answer };
+    }, canonical: async (_id, path) => path });
+  aligning.start(); t.after(() => aligning.close());
+  await aligning.align(NODE_ROUTE);
+  assert.deepEqual(f.a.peers(), [], 'the host trusts nothing it got back');
+  assert.notEqual(aligning.status(NODE_ROUTE)?.state, 'connected');
+});
+
+test('a computer that stops following while its vault opens does not trust the host', { timeout: 30000 }, async t => {
+  const f = await pair(t); await f.node.runtime.machineVault();
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-follow-stop-'))); t.after(() => rm(root, { recursive: true, force: true }));
+  // Following when asked and while the vault opens, not any more when the host would be trusted.
+  let asked = 0; const service = new SecretService({ stateDir: root }); await service.start();
+  const runtime = new SecretRuntime({ stateDir: root, service, runs: new FixtureRuns(), followed: async () => ++asked <= 2 ? HOST_ROUTE : undefined });
+  t.after(() => runtime.close());
+  await assert.rejects(runtime.align({ routeId: HOST_ROUTE, direction: 'controller', device: f.a.device() }), { kind: 'forbidden' });
+  assert.deepEqual(service.peers(), []);
 });

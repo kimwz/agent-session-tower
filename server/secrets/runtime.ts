@@ -300,10 +300,11 @@ export class SecretRuntime {
   /** Opens the vault with the previous worker's handoff, completing it as a password unlock would. */
   async adopt(carry: Buffer): Promise<void> { await this.open(() => this.options.service.adopt(carry)); }
   private async open(unlock: () => Promise<void>): Promise<void> {
-    this.blocked = true;
-    try { await unlock(); await this.options.migrate?.(); await this.applyClosures(); this.blocked = false; }
+    this.blocked = true; let opened: string | undefined;
+    try { await unlock(); opened = this.options.service.lockGeneration; await this.options.migrate?.(); await this.applyClosures(); this.blocked = false; }
     catch (error) { await this.options.service.lock(); this.blocked = false; throw error; }
-    this.ownerLocked = false;
+    // An owner lock that came after this open is kept (it moved the generation on).
+    if (opened === this.options.service.lockGeneration) this.ownerLocked = false;
     // However it opened, the vault of a computer that follows a host opens by itself from now on.
     if (await this.following()) await this.wrapMachine().catch(() => console.warn('Tower could not let this computer\'s vault open by itself; it opens with its password until the next try.'));
   }
@@ -336,10 +337,12 @@ export class SecretRuntime {
     }
     if (service.status().locked) {
       if (this.ownerLocked) return 'needs-open';
+      // Decided now: an owner lock from here on is queued before the open and wins.
+      const generation = service.lockGeneration;
       const key = await readMachineKey(this.options.stateDir);
       try {
         if (!key || !service.vault.hasMachine(key)) return 'needs-open';
-        await this.open(() => service.machineUnlock(key));
+        await this.open(() => service.machineUnlock(key, generation));
       } catch { return 'needs-open'; } // best-effort: a machine key that does not open it waits for the owner's one open
       finally { key?.fill(0); }
       return 'open';
@@ -363,6 +366,8 @@ export class SecretRuntime {
     if (status.locked || this.blocked) return { vault: input.direction === 'controller' ? 'needs-open' : 'locked', trusted: false };
     const route = { routeId: input.routeId, direction: input.direction };
     if (service.untrustedRoute(route)) return { vault: 'open', device: service.device(), trusted: false, untrusted: true };
+    // Opening the vault took a while: the host is trusted only while this computer still follows it.
+    if (input.direction === 'controller' && input.device !== undefined && await this.following() !== input.routeId) throw fail('이 컴퓨터는 그 Tower의 설정을 따르지 않습니다.', 'forbidden');
     const trusted = input.device === undefined ? service.peers().some(peer => peer.enabled && peer.routeId === route.routeId && peer.direction === route.direction)
       : await service.alignPeer({ device: peerDevice(input.device), ...route, enabled: true });
     const peer = trusted && input.direction === 'node' ? service.peers().find(item => item.enabled && item.routeId === route.routeId && item.direction === 'node') : undefined;
@@ -389,14 +394,14 @@ export class SecretRuntime {
   /** Share requests of the last hour, for the web's owner notifications; each is announced once. */
   shares(): SecretShareNotice[] { const since = Date.now() - BLOCK_NOTICE_MS; return this.shareNotices.filter(notice => notice.at >= since).map(notice => ({ ...notice })); }
   /** This vault's folders in saved secrets' sharing, for clones of the same repositories on computers that follow it. */
-  sharedFolders(): { deviceId: string; folders: { secretId: string; root: string }[] } {
+  sharedFolders(): { deviceId: string; folders: { secretId: string; root: string; revision: number }[] } {
     if (this.blocked) throw fail('보관함 잠금 해제를 완료하지 못했습니다.', 'unavailable');
     return { deviceId: this.options.service.device().id, folders: this.options.service.sharedFolders() };
   }
   /** Adds those clones' folders (see `SecretService.autoShareFolders`). */
   async autoShare(value: unknown): Promise<{ added: number }> {
     if (this.blocked) throw fail('보관함 잠금 해제를 완료하지 못했습니다.', 'unavailable');
-    const input = ownerInput(z.object({ hostId: z.string().min(1).max(256), folders: z.array(z.object({ secretId: z.string().min(1).max(256), root: z.string().min(1).max(4096) }).strict()).max(2000) }).strict(), value);
+    const input = ownerInput(z.object({ hostId: z.string().min(1).max(256), folders: z.array(z.object({ secretId: z.string().min(1).max(256), root: z.string().min(1).max(4096), revision: z.number().int().min(0), hostRoot: z.string().min(1).max(4096) }).strict()).max(2000) }).strict(), value);
     return { added: await this.options.service.autoShareFolders(input.hostId, input.folders) };
   }
   async endSession(sessionId: string): Promise<void> {
@@ -687,7 +692,8 @@ export class SecretRuntime {
   }
   /** The source's link went away. */
   peerOffline(routeId: string): void { this.remote.forget(routeId); }
-  answer(routeId: string, request: RemoteSecretRequest): Promise<RemoteSecretResponse> { return this.remote.answer(routeId, request); }
+  /** `following`: that computer follows this Tower now, as the web's controller knows it (see `RemoteSecretBroker.answer`). */
+  answer(routeId: string, request: RemoteSecretRequest, following = false): Promise<RemoteSecretResponse> { return this.remote.answer(routeId, request, following); }
   deliver(routeId: string, response: RemoteSecretResponse): void { this.remote.deliver(routeId, response); }
 }
 

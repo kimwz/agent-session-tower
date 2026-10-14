@@ -466,7 +466,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (operation === 'shared-folders') return secrets.sharedFolders();
         if (operation === 'auto-share') return secrets.autoShare(args[1]);
         if (operation === 'peer-offline') { secrets.peerOffline(String(args[1])); return { forgotten: true }; }
-        if (operation === 'answer') return secrets.answer(String(args[1]), args[2] as RemoteSecretRequest);
+        if (operation === 'answer') return secrets.answer(String(args[1]), args[2] as RemoteSecretRequest, record(args[3]).following === true);
         if (operation === 'deliver') { secrets.deliver(String(args[1]), args[2] as RemoteSecretResponse); return { delivered: true }; }
         if (operation === 'target' || operation === 'connection-notice' || operation === 'session-subject') {
           const session = options.runs.getSession(String(args[1]));

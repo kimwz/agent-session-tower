@@ -143,6 +143,7 @@ export interface NodeSecretStatus { state: 'connected' | 'trust-pending' | 'host
 /**
  * A push for the owner from secret use by a computer that follows this host: it asked for a secret not shared with it
  * (`not-shared`, with the secret and that computer's vault ID, so one tap opens its sharing), or found this host's vault
- * locked (`host-locked`). Names only, never values. `nodeId` is the computer's link ID.
+ * locked (`host-locked`). Names only, never values. `nodeId` is the computer's link ID. A lost link has no push: this host
+ * cannot see requests while it is down (the computer's agent is told at once, and its card shows the link down).
  */
 export interface SecretShareNotice { key: string; at: number; kind: 'not-shared' | 'host-locked'; nodeId: string; nodeName?: string; hostId?: string; secretId?: string; secretName?: string }
