@@ -20,8 +20,8 @@ const run = (node, args, cwd, env, log) => new Promise((accept, reject) => {
 const inside = (path, root) => path.startsWith(`${root}/`);
 const release = batch => {
   for (const lane of batch.lanes) {
-    const jobDir = join(record, 'jobs', `ci-${lane.id}`), setupPath = join(jobDir, 'setup.json');
-    const tmp = existsSync(setupPath) ? JSON.parse(readFileSync(setupPath, 'utf8')).env.TMPDIR : undefined;
+    const jobDir = join(record, 'jobs', `ci-${lane.id}`), tmpPath = join(jobDir, 'tmpdir');
+    const tmp = existsSync(tmpPath) ? readFileSync(tmpPath, 'utf8') : undefined;
     for (const name of existsSync(jobDir) ? readdirSync(jobDir).filter(n => n.startsWith('private-')) : []) {
       const reports = join(jobDir, name, 'reports'), kept = join(jobDir, 'reports');
       if (existsSync(reports) && !existsSync(kept)) renameSync(reports, kept);
@@ -39,12 +39,14 @@ const releaseAfter = batch => {
 
 if (action === 'prepare') {
   mkdirSync(record, { recursive: true, mode: 0o700 });
+  assert.ok(!existsSync(manifestPath), `record already used by a batch; choose a new directory: ${record}`);
   const input = testedInput();
   const executionRoot = mkdtempSync('/private/tmp/tower-ci-worktrees-');
   const lanes = plan().filter(l => l.os === 'macos-latest').map(lane => ({ ...lane,
     cwd: join(executionRoot, `worktree-${lane.id}`), nodePath: resolve(toolchains, `node-v${lane.node}-darwin-arm64`, 'bin', 'node') }));
   const batch = { input, executionRoot, admitted: Date.now(), lanes };
-  writeFileSync(manifestPath, JSON.stringify(batch, null, 2));
+  // One batch per record: cleanup owns everything under jobs/, so a reused or shared record is refused.
+  writeFileSync(manifestPath, JSON.stringify(batch, null, 2), { flag: 'wx' });
   try {
     for (const lane of lanes) {
       git(['worktree', 'add', '--detach', lane.cwd, input.commit]);
@@ -60,10 +62,10 @@ if (action === 'prepare') {
   } catch (error) { releaseAfter(batch); throw error; }
 } else if (action === 'test') {
   const batch = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  assert.equal(batch.prepareExit, 0);
-  assert.deepEqual(testedInput(), batch.input, 'parent source changed since prepare');
   const testStarted = Date.now();
   try {
+    assert.equal(batch.prepareExit, 0);
+    assert.deepEqual(testedInput(), batch.input, 'parent source changed since prepare');
     const results = await Promise.allSettled(batch.lanes.map(lane => run(lane.nodePath, ['scripts/ci-run.mjs', 'test', lane.id], lane.cwd,
       { PATH: `${resolve(lane.nodePath, '..')}:/usr/bin:/bin:/usr/sbin:/sbin`, GITHUB_SHA: batch.input.commit, RUNNER_TEMP: join(record, 'jobs') }, join(record, `${lane.id}-test.log`))));
     for (const result of results) if (result.status === 'rejected') console.error(result.reason.message);

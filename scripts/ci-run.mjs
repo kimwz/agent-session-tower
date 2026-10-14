@@ -22,6 +22,7 @@ if (action === 'prepare') {
   mkdirSync(jobDir, { recursive: true, mode: 0o700 });
   const root = realpathSync(mkdtempSync(join(jobDir, 'private-')));
   const tmp = realpathSync(mkdtempSync('/tmp/tci-'));
+  writeFileSync(join(jobDir, 'tmpdir'), tmp); // lets ci-local-mac.mjs remove it even if prepare fails
   for (const name of ['home', 'codex', 'claude', 'config', 'cache', 'state', 'data', 'runtime', 'npm', 'reports', 'fixture-builds']) mkdirSync(join(root, name), { mode: 0o700 });
   const env = { PATH: process.env.PATH, HOME: join(root, 'home'), CODEX_HOME: join(root, 'codex'), CLAUDE_CONFIG_DIR: join(root, 'claude'),
     XDG_CONFIG_HOME: join(root, 'config'), XDG_CACHE_HOME: join(root, 'cache'), XDG_STATE_HOME: join(root, 'state'),
