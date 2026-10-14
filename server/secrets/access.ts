@@ -53,20 +53,22 @@ function callerRefusal(delegation: RunDelegation, strict: boolean, known: Known)
   if (delegation.publicChain) return 'public-agent';
   const kept = delegation.publicChain === false;
   const callers = [{ id: delegation.parentRunId, kept }, { id: delegation.rootRunId, kept }];
-  const seen = new Set<string>();
+  // A caller first met unvouched may be vouched for by a later turn that kept `publicChain: false` (its own root, say).
+  const seen = new Set<string>(), vouched = new Set<string>(), unknown = new Set<string>();
   for (let item = callers.shift(); item; item = callers.shift()) {
+    if (item.kept) vouched.add(item.id);
     if (seen.has(item.id)) continue;
     if (seen.size >= MAX_ANCESTORS) return 'unknown-caller';
     seen.add(item.id);
     const caller = known.findRun(item.id), session = caller && known.lookup(caller.sessionId);
-    if (!caller || !session) { if (strict && !item.kept) return 'unknown-caller'; continue; }
+    if (!caller || !session) { if (!item.kept) unknown.add(item.id); continue; }
     if (publicAgentTrigger(caller.origin?.triggerId) || caller.delegation?.publicChain) return 'public-agent';
     const lineage = publicLineage(session, known.lookup);
     if (lineage) return lineage;
     const next = item.kept || caller.delegation?.publicChain === false;
     if (caller.delegation) callers.push({ id: caller.delegation.parentRunId, kept: next }, { id: caller.delegation.rootRunId, kept: next });
   }
-  return undefined;
+  return strict && [...unknown].some(id => !vouched.has(id)) ? 'unknown-caller' : undefined;
 }
 
 /**

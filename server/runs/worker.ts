@@ -224,7 +224,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   };
   const findRun = (id: string) => options.runs.list().find(run => run.id === id);
   // Kept on each delegated turn when it is admitted, so its later turns keep their secret tools after its callers leave history.
-  const publicChain = options.secrets && ((delegation: RunDelegation) => options.secrets!.publicChain(delegation));
+  // Read at each use: a worker that started on its diagnostic host gets its secrets only when it is activated.
+  const publicChain = (delegation: RunDelegation) => options.secrets?.publicChain(delegation);
   let temporaryFailure: string | undefined;
   const temporaryOverview = () => {
     const overview = options.retention?.temporary?.overview();

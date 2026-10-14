@@ -386,25 +386,23 @@ export class SecretUseReviewer {
         if (controller.signal.aborted || Date.now() >= deadline) throw new Error('Review deadline passed.');
         spawned = true;
       };
-      // Undefined until the input is gathered; then the file the run executes, as the model is shown it.
-      let script: SecretScriptBinding | null | undefined;
-      const bound = (review: SecretReview): SecretReview => review.review === 'allowed' && script !== undefined ? { ...review, script } : review;
       const ending = (async () => {
         const [model, facts] = await Promise.all([this.options.resolve?.() ?? resolveModel(this.options.stateDir, 'secrets.reviewer'), this.facts(request)]);
-        script = facts.script?.binding ?? null;
         const input = secretReviewInput(facts);
         // Past the deadline the review has already been answered; no model starts for it.
         if (controller.signal.aborted || Date.now() >= deadline) throw new Error('Review deadline passed.');
         const answer = await this.options.model({ ...model, systemPrompt: SECRET_REVIEW_SYSTEM, prompt: input.prompt, schema: SECRET_REVIEW_SCHEMA as unknown as Record<string, unknown>, signal: controller.signal },
           { timeoutMs: Math.max(1, deadline - Date.now()), beforeSpawn });
-        return reviewVerdict(answer, input.haystack);
+        // Only an allowed review binds the file the run executes, as the model was shown it.
+        const review = reviewVerdict(answer, input.haystack);
+        return review.review === 'allowed' ? { ...review, script: facts.script?.binding ?? null } : review;
       })().then(review => ({ review }), (error: unknown) => ({ error }));
       const late: SecretReview = { review: 'failed', reason: '검토 모델이 30초 안에 답하지 않아 검토 없이 허용했습니다.' };
       const settled = await Promise.race([ending, expired]);
       // A model process still being stopped keeps the turn until it has ended; work before any process (reading the
       // conversation, the gate) holds nothing past the deadline, and can no longer start one.
       if (settled === 'expired') return { review: late, ...(spawned ? { ending } : {}) };
-      if ('review' in settled) return { review: bound(settled.review) };
+      if ('review' in settled) return { review: settled.review };
       if (Date.now() >= deadline) return { review: late };
       const message = (settled.error instanceof Error ? settled.error.message : String(settled.error)).replace(/^Auto Prompt: /, '');
       return { review: { review: 'failed', reason: `검토 모델을 실행하지 못해 검토 없이 허용했습니다: ${clip(message, 200)}` } };

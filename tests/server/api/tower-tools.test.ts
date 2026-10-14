@@ -114,6 +114,16 @@ test('work an agent hands to Auto Prompt runs as the agent’s, never as the own
   await assert.rejects(f.api.call('triggers.updateSettings', { settings: { maxTriggers: 5, maxConcurrentRuns: 1, maxEventsPerHour: 5 } }, { kind: 'agent', via: 'mcp', sessionId: 'codex:mine' }), { kind: 'forbidden' });
 });
 
+test('an Auto Prompt request an agent hands on keeps the caller chain’s judgement for its later turns', async t => {
+  const f = await fixture(t);
+  const run = f.ownerTurn('codex:mine');
+  const seen: unknown[] = [];
+  const context = { ...f.context, publicChain: (delegation: unknown) => { seen.push(delegation); return false; } };
+  await handleMcpRequest(context, f.token(run), { method: 'tools/call', name: 'autoPrompt_submit', arguments: { requestId: randomUUID(), provider: 'codex', prompt: 'Fix the flaky test' } });
+  const { delegation } = (f.submitted[0] as { internal: { delegation?: unknown } }).internal;
+  assert.deepEqual([delegation, seen], [{ parentRunId: run.id, rootRunId: run.id, publicChain: false }, [{ parentRunId: run.id, rootRunId: run.id }]]);
+});
+
 test('a Slack conversation credential opens only that conversation’s Slack tools', async t => {
   const f = await fixture(t);
   const calls: unknown[] = [];

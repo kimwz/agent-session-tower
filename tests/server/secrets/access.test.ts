@@ -153,7 +153,8 @@ test('a calling turn that left history is judged by what the delegated turn’s 
   assert.equal(publicChain({ parentRunId: 'gone', rootRunId: owner }, known), undefined, 'not every caller known: no fact');
   // A middle turn that was itself admitted clean vouches for its own callers once they leave history.
   const middle = f.turn('middle-run', 'codex:owner', { kind: 'owner' }, { parentRunId: 'gone', rootRunId: 'gone', publicChain: false });
-  assert.equal(publicChain({ parentRunId: middle, rootRunId: 'gone' }, known), undefined, 'its root is not vouched for by the middle turn alone');
+  assert.equal(publicChain({ parentRunId: middle, rootRunId: 'gone' }, known), false, 'its root, already checked when the middle turn was admitted, is vouched for by it');
+  assert.equal(publicChain({ parentRunId: middle, rootRunId: 'other-gone' }, known), undefined, 'a root it did not check is not');
   assert.equal(publicChain({ parentRunId: middle, rootRunId: middle }, known), false);
   f.runs.delete(owner); f.runs.delete(outsider);
   for (const stage of ['issue', 'discover', 'use'] as const) {

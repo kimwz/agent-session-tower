@@ -127,14 +127,14 @@ test('at the deadline the review answers, binding nothing, but its turn and in-f
 test('two reviews run at a time; the wait counts toward the deadline, and a full queue is not waited on', async t => {
   const { stateDir, context } = await folder(t);
   const time = clock(t);
-  const release: (() => void)[] = [];
+  const release: (() => void)[] = []; const both = barrier();
   // These model runs ignore the deadline's abort, so the two running reviews keep their turns past the third's deadline.
-  const { instance, calls } = reviewer(stateDir, () => new Promise(resolve => release.push(() => resolve(allow))), { concurrency: 2, maxWaiting: 1 });
+  const { instance, calls } = reviewer(stateDir, () => new Promise(resolve => { release.push(() => resolve(allow)); if (release.length === 2) both.open(); }), { concurrency: 2, maxWaiting: 1 });
   const running = [instance.review(request(context)), instance.review(request(context))];
   const third = instance.review(request(context));
   // Two run and one waits: a fourth finds the queue full and goes ahead at once as a failed review.
   assert.deepEqual(await instance.review(request(context)), { review: 'failed', reason: '검토 요청이 너무 많이 밀려 검토 없이 허용했습니다.' });
-  await settle(() => calls.length === 2);
+  await both.reached;
   time.advance(30_000);
   for (const review of await Promise.all(running)) assert.deepEqual(review, LATE, 'answered at their deadline');
   assert.equal(instance.inFlight(), true);
