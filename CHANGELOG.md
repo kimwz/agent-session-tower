@@ -4,7 +4,7 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.136.0] - 2026-10-14
+## [1.136.0] - 2026-10-15
 
 - 마스터 에이전트가 다른 세션에 보낸 메시지는 채팅에서 "나" 대신 **마스터 에이전트**로 표시되고, 아이콘과 보라색 띠가 있는 카드로 소유자 메시지와 구분됩니다. 이 메시지는 문단과 목록 안의 한 줄 바꿈도 쓴 그대로 보입니다.
   - 마스터가 새 세션을 만들거나, 기존 세션에 메시지를 보내거나, Auto Prompt로 넘긴 작업(마스터 대화의 Tower 도구 포함)에 적용됩니다. 소유자가 마스터에게 직접 쓴 말은 계속 "나"로 보입니다.
