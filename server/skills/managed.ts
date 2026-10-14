@@ -1,9 +1,11 @@
 import { isAbsolute, join } from 'node:path';
 import type { SkillBundleFile } from '../../shared/skills.js';
-import { MAX_SKILL_TARGETS, SKILL_BUNDLE_FORMAT } from '../../shared/skills.js';
+import { MAX_SKILL_TARGETS, SKILL_BUNDLE_FORMAT, SKILL_NAME } from '../../shared/skills.js';
 import { TowerError } from '../../shared/errors.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { bundleFiles, parseBundle } from './store.js';
+import { DEFAULT_SKILLS } from './defaults.js';
+import { formatSkillFile } from './skill-file.js';
 
 /**
  * The Tower skills and owner guidance of the Tower this computer follows ("호스트 설정 따르기"), as that Tower sends
@@ -14,6 +16,11 @@ export interface ManagedSkills {
   skills: ManagedSkill[];
   /** The owner's guidance, empty included. */
   guidance: string;
+  /**
+   * Default skills the followed Tower keeps as Tower seeded them, by name only: every Tower seeds its own, so they are
+   * not sent. A copy taken over from it before goes back to being this computer's own default.
+   */
+  defaults: string[];
 }
 export interface ManagedSkill { name: string; pinned: boolean; files: SkillBundleFile[]; targets: { all: boolean; repositories: string[] } }
 
@@ -35,7 +42,8 @@ export function parseManagedSkills(value: unknown): ManagedSkills {
       || targets.repositories.some(url => !repositoryName(url))) throw bad('호스트 스킬의 적용 저장소가 올바르지 않습니다.');
     return { name: skill.name, pinned: skill.pinned, files: skill.files, targets: { all: targets.all, repositories: targets.all ? [] : [...new Set(targets.repositories as string[])] } };
   });
-  return { skills, guidance: bundle.guidance ?? '' };
+  const defaults = Array.isArray(input.defaults) ? input.defaults.filter((name): name is string => typeof name === 'string' && SKILL_NAME.test(name)).slice(0, MAX_SKILLS) : [];
+  return { skills, guidance: bundle.guidance ?? '', defaults };
 }
 
 /**
@@ -86,3 +94,16 @@ export async function sameFiles(dir: string, files: SkillBundleFile[]): Promise<
   return Boolean(current) && key(current!) === key(files);
 }
 
+/** A default skill's files exactly as Tower writes them when it seeds one (`SkillService.seed`, through SkillFiles). */
+export function defaultFiles(name: string): SkillBundleFile[] | undefined {
+  const skill = DEFAULT_SKILLS.find(item => item.name === name);
+  if (!skill) return undefined;
+  const text = formatSkillFile({ name: skill.name, description: skill.description.trim().replace(/\s*\n\s*/g, ' '), body: skill.body });
+  return [{ path: 'SKILL.md', mode: 0o644, base64: Buffer.from(text).toString('base64') }];
+}
+
+/** Whether a skill folder holds a default skill exactly as Tower seeds it. */
+export async function defaultContent(dir: string, name: string): Promise<boolean> {
+  const files = defaultFiles(name);
+  return Boolean(files) && sameFiles(dir, files!);
+}

@@ -17,7 +17,7 @@ import { SkillError, SkillFiles, type SkillHomes } from './files.js';
 import { SkillStateStore, type SkillTargetRecord } from './state.js';
 import { ClosedSessionStore } from '../stores/closed-sessions.js';
 import type { SkillBackup } from './backup.js';
-import { ManagedSkillList, parseManagedApply, sameFiles, type ManagedSkill, type ManagedSkills } from './managed.js';
+import { defaultContent, defaultFiles, ManagedSkillList, parseManagedApply, sameFiles, type ManagedSkill, type ManagedSkills } from './managed.js';
 import { remoteUrlOf } from '../repositories/remote-url.js';
 
 export interface SkillServiceOptions {
@@ -641,12 +641,18 @@ export class SkillService {
   /**
    * This Tower's own skills and guidance for a computer that follows it ("호스트 설정 따르기"): every Tower skill with
    * its pin, and the projects it applies to as repository addresses. A project folder that is no clone of a repository
-   * has nothing to name there, so it is left out.
+   * has nothing to name there, so it is left out. A default skill as Tower seeded it is the same on every Tower, which
+   * seeds its own: it is not sent.
    */
   async exportManaged(): Promise<ManagedSkills> {
     await this.ready();
     return this.exclusive(async () => {
-      const bundle = await this.exportBundle({ dirs: (await this.files.managed()).map(skill => skill.dir) });
+      const dirs: string[] = [], defaults: string[] = [];
+      for (const skill of await this.files.managed()) {
+        if (await this.untouchedDefault(skill.dir, basename(skill.dir))) defaults.push(basename(skill.dir));
+        else dirs.push(skill.dir);
+      }
+      const bundle = await this.exportBundle({ dirs });
       const repositories = new Map<string, Promise<string | undefined>>();
       const repository = (cwd: string) => { if (!repositories.has(cwd)) repositories.set(cwd, remoteUrlOf(cwd)); return repositories.get(cwd)!; };
       const skills: ManagedSkill[] = [];
@@ -658,7 +664,7 @@ export class SkillService {
         const found = targets.all ? [] : await Promise.all(targets.projects.map(repository));
         skills.push({ name: item.name, pinned: item.pinned, files: item.files, targets: { all: targets.all, repositories: [...new Set(found.filter((url): url is string => Boolean(url)))].sort() } });
       }
-      return { skills: skills.sort((a, b) => a.name.localeCompare(b.name)), guidance: await this.ownerGuidance('지침 파일을 읽지 못해 호스트 설정으로 보내지 않았습니다') };
+      return { skills: skills.sort((a, b) => a.name.localeCompare(b.name)), guidance: await this.ownerGuidance('지침 파일을 읽지 못해 호스트 설정으로 보내지 않았습니다'), defaults: defaults.sort() };
     });
   }
 
@@ -690,8 +696,9 @@ export class SkillService {
         try {
           const dir = await this.files.installDir({ name: item.name, scope: 'global' });
           const present = Boolean(await lstat(dir).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }));
-          // A folder there that this sync did not make is this computer's own, even with the same content.
-          if (present && !before.includes(dir)) throw new SkillError('이 컴퓨터에 같은 이름의 Tower 스킬이 있어 호스트의 스킬을 적용하지 않았습니다. 이 컴퓨터의 스킬은 그대로 둡니다.', 'conflict');
+          // A folder there that this sync did not make is this computer's own, even with the same content; only a default
+          // skill as Tower seeded it here, never touched since, gives way to the followed Tower's changed one.
+          if (present && !before.includes(dir) && !await this.untouchedDefault(dir, item.name)) throw new SkillError('이 컴퓨터에 같은 이름의 Tower 스킬이 있어 호스트의 스킬을 적용하지 않았습니다. 이 컴퓨터의 스킬은 그대로 둡니다.', 'conflict');
           if (stored.some(skill => basename(skill.dir) === item.name && skill.dir !== dir)) throw new SkillError('이 컴퓨터의 프로젝트에 같은 이름의 Tower 스킬이 있어 호스트의 스킬을 적용하지 않았습니다.', 'conflict');
           kept.push(dir);
           // Counted as the followed Tower's before it is written, so a crash never leaves it looking like this computer's own.
@@ -723,7 +730,8 @@ export class SkillService {
         // best-effort: one already gone here (no longer a skill) is simply no longer counted.
         const skill = await this.files.lookup(dir).catch(() => undefined);
         if (!skill?.managed) continue;
-        try { await this.delete(skill, undefined); changed = true; }
+        // A default the followed Tower keeps as seeded again is this computer's own default again; anything else went there.
+        try { await (incoming.defaults.includes(basename(dir)) ? this.reseed(skill) : this.delete(skill, undefined)); changed = true; }
         catch (error) { left.push(dir); failures.push(`${skill.name}: ${error instanceof Error ? error.message : String(error)}`); }
       }
       await save([...kept, ...left]);
@@ -733,6 +741,26 @@ export class SkillService {
     if (failures.length) throw new SkillError(failures.join(' / '), 'conflict');
   }
 
+
+  /**
+   * A default skill Tower seeded here (its seeding record) and nobody has touched since: its text as Tower wrote it,
+   * applying everywhere as it was made, not pinned.
+   */
+  private async untouchedDefault(dir: string, name: string): Promise<boolean> {
+    if (!this.state.get().seeded.includes(name) || dir !== await this.files.towerDir(name)) return false;
+    const record = this.record(dir);
+    if (!record?.all || record.projects.length || (await this.pinned()).has(dir)) return false;
+    return defaultContent(dir, name);
+  }
+
+  /** Puts a default skill back as Tower seeds it: its text, applying everywhere, not pinned. */
+  private async reseed(skill: Skill): Promise<void> {
+    const name = basename(skill.dir), files = defaultFiles(name);
+    if (!files) throw new SkillError('Tower의 기본 스킬이 아닙니다.', 'not-found');
+    if (!await defaultContent(skill.dir, name)) await this.files.install({ name, description: '', scope: 'global', pinned: false, files }, undefined, true, false);
+    await this.apply(skill.dir, { all: true, projects: [] });
+    await this.pin(skill, false);
+  }
 
   /** What importing a backup would do here, item by item, before anything is written. */
   async importPlan(input: unknown): Promise<SkillImportPlan> {

@@ -9,6 +9,7 @@ import { parseManagedApply, parseManagedSkills, type ManagedSkills } from '../..
 import type { ManagedFolder } from '../../../shared/managed.js';
 import type { Session } from '../../../shared/types.js';
 import { ISSUE_SKILL } from '../../../shared/issues.js';
+import { DEFAULT_SKILLS } from '../../../server/skills/defaults.js';
 
 /** One Tower's skill folders and state, in its own temporary home. */
 async function computer(t: test.TestContext, name: string) {
@@ -127,23 +128,56 @@ test('a skill the host deleted goes from the node; the node\'s own skills never 
   assert.ok(stored.has('clash'), 'never the host\'s, so never removed by it');
 });
 
-test('a node skill of the same name stays the node\'s even with the same content, a default included: never replaced or removed by the host', async t => {
+test('a node skill of the same name stays the node\'s even with the same content: never replaced or removed by the host', async t => {
   const host = await computer(t, 'host'), node = await computer(t, 'node');
-  const from = await service(host, [], true);
-  const to = await service(node, [], true);
-  const issue = (await from.overview()).stored!.find(skill => skill.name === ISSUE_SKILL)!;
-  await from.mutate('save', { dir: issue.dir, revision: issue.revision, scope: 'global', name: ISSUE_SKILL, description: issue.description, body: 'The owner\'s own way.' });
+  const from = await service(host, []);
+  const to = await service(node, []);
   await from.mutate('save', { scope: 'global', name: 'same', description: 'Same.', body: 'Same steps' });
   await to.mutate('save', { scope: 'global', name: 'same', description: 'Same.', body: 'Same steps' });
-  const defaultBefore = await readFile(join((await to.overview()).stored!.find(skill => skill.name === ISSUE_SKILL)!.dir, 'SKILL.md'), 'utf8');
-  await assert.rejects(to.applyManaged(relay(await from.exportManaged())), (error: Error) => error.message.includes(`${ISSUE_SKILL}: 이 컴퓨터에 같은 이름의`) && error.message.includes('same: 이 컴퓨터에 같은 이름의'));
-  const mirrored = (await to.overview()).stored!.find(skill => skill.name === ISSUE_SKILL)!;
-  assert.equal(await readFile(join(mirrored.dir, 'SKILL.md'), 'utf8'), defaultBefore, 'the node\'s own default is not replaced');
-  assert.equal(await exists(join(node.state, 'skills-managed.json')), false, 'neither is counted as the host\'s');
+  await assert.rejects(to.applyManaged(relay(await from.exportManaged())), /same: 이 컴퓨터에 같은 이름의/);
+  assert.equal(await exists(join(node.state, 'skills-managed.json')), false, 'not counted as the host\'s');
   const same = (await from.overview()).stored!.find(skill => skill.name === 'same')!;
   await from.mutate('delete', { dir: same.dir });
-  await to.applyManaged(relay(await from.exportManaged())).catch(() => {});
+  await to.applyManaged(relay(await from.exportManaged()));
   assert.equal((await to.overview()).stored!.some(skill => skill.name === 'same'), true, 'the host deleting its own never removes the node\'s');
+});
+
+test('Tower\'s seeded defaults: an untouched one is not sent, a changed one replaces only an untouched node default', async t => {
+  const host = await computer(t, 'host'), node = await computer(t, 'node'), edited = await computer(t, 'edited');
+  const from = await service(host, [], true);
+  const to = await service(node, [], true);
+  const own = await service(edited, [], true);
+  const defaultOf = async (skills: SkillService) => (await skills.overview()).stored!.find(skill => skill.name === ISSUE_SKILL);
+  const original = await readFile(join((await defaultOf(to))!.dir, 'SKILL.md'), 'utf8');
+
+  // (a) The same on every Tower by construction: not sent, and a fresh node has nothing to report.
+  const untouched = await from.exportManaged();
+  assert.equal(untouched.skills.some(skill => skill.name === ISSUE_SKILL), false);
+  assert.deepEqual(untouched.defaults, [ISSUE_SKILL]);
+  await to.applyManaged(relay(untouched));
+
+  // (b) Changed on the host: it replaces the node's untouched default, which the sync then owns.
+  const issue = (await defaultOf(from))!;
+  await from.mutate('save', { dir: issue.dir, revision: issue.revision, scope: 'global', name: ISSUE_SKILL, description: issue.description, body: 'The owner\'s own way.' });
+  await to.applyManaged(relay(await from.exportManaged()));
+  assert.match(await readFile(join((await defaultOf(to))!.dir, 'SKILL.md'), 'utf8'), /The owner's own way/);
+  assert.equal(JSON.parse(await readFile(join(node.state, 'skills-managed.json'), 'utf8')).dirs.length, 1);
+  // A node owner's edit of their default is theirs: kept, and reported.
+  const mine = (await defaultOf(own))!;
+  await own.mutate('save', { dir: mine.dir, revision: mine.revision, scope: 'global', name: ISSUE_SKILL, description: mine.description, body: 'Edited on the node.' });
+  await assert.rejects(own.applyManaged(relay(await from.exportManaged())), new RegExp(`${ISSUE_SKILL}: 이 컴퓨터에 같은 이름의`));
+  assert.match(await readFile(join(mine.dir, 'SKILL.md'), 'utf8'), /Edited on the node/);
+
+  // (c) Back as seeded on the host: the node's copy is its own default again; the host deleting its default then leaves it.
+  const changed = (await defaultOf(from))!;
+  await from.mutate('save', { dir: changed.dir, revision: (await from.detail({ dir: changed.dir })).revision, scope: 'global', name: ISSUE_SKILL, description: changed.description, body: DEFAULT_SKILLS.find(skill => skill.name === ISSUE_SKILL)!.body });
+  assert.deepEqual((await from.exportManaged()).defaults, [ISSUE_SKILL]);
+  await to.applyManaged(relay(await from.exportManaged()));
+  assert.equal(await readFile(join((await defaultOf(to))!.dir, 'SKILL.md'), 'utf8'), original);
+  assert.equal(JSON.parse(await readFile(join(node.state, 'skills-managed.json'), 'utf8')).dirs.length, 0);
+  await from.mutate('delete', { dir: changed.dir });
+  await to.applyManaged(relay(await from.exportManaged()));
+  assert.ok(await defaultOf(to), 'never the host\'s now, so the host deleting its own leaves it');
 });
 
 test('what the host sends is checked before use: names, file paths and repository addresses', () => {
