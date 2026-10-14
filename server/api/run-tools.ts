@@ -50,10 +50,13 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
   };
   /**
    * The secret broker, bound to this run alone: a later turn, even in the same conversation, gets its own credential. A new
-   * conversation's first turn gets it too; its secrets wait for the creation to be confirmed.
+   * conversation's first turn gets it too; its secrets wait for the creation to be confirmed. Without a vault only the
+   * owner's own turns get it, so one the owner creates meanwhile works there; nothing else starts a broker for nothing.
+   * Connection notices follow what was composed (runs/tool-notices.ts).
    */
   const secretTools = (run: Run, session: Session): SessionMcpServers => {
-    if (!options.secrets || options.secrets.subject(session, run, 'issue').mode === 'none') return {};
+    const subject = options.secrets?.subject(session, run, 'issue').mode;
+    if (!subject || subject === 'none' || (subject !== 'owner' && !options.secrets!.initialized())) return {};
     const build = thisBuild();
     return { tower_secrets: { command: build.command, args: [...build.args, '--secrets-mcp', options.stateDir],
       env: { TOWER_SECRET_CAPABILITY: options.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: session.id }), TOWER_SECRET_STATE_DIR: options.stateDir } } };

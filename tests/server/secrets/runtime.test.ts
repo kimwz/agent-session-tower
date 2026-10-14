@@ -362,6 +362,23 @@ test('a secret credential works for its own running turn whenever its session ma
   } finally { await f.cleanup(); }
 });
 
+test('until a vault exists only the owner’s own turns get the secret broker; other turns get it once one does', async () => {
+  const f = await fixture();
+  try {
+    const delegated = sessionRecord(f.alias, { id: 'codex:delegated', nativeId: 'delegated' });
+    f.sessions.set(delegated.id, delegated); f.origins.set(delegated.id, { kind: 'agent', untrustedInput: false });
+    const agentTurn = () => f.addRun(randomUUID(), delegated, { origin: { kind: 'agent' } });
+    const ownerTurn = f.addRun('run-owner-before-vault');
+    const owner = f.resolver(ownerTurn, f.session);
+    assert.ok(owner.servers?.tower_secrets, 'the owner may create a vault during this turn and use it there');
+    assert.equal(owner.required, false, 'nothing to wait for without a vault');
+    const before = f.resolver(agentTurn(), delegated);
+    assert.equal(before.servers?.tower_secrets, undefined, 'no broker process for a reviewed turn without a vault');
+    await f.initialize();
+    assert.ok(f.resolver(agentTurn(), delegated).servers?.tower_secrets);
+  } finally { await f.cleanup(); }
+});
+
 test('a new conversation’s first turn lists its secret tools at once and uses them once the creation is confirmed', async () => {
   const f = await fixture();
   try {
