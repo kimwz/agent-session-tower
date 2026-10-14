@@ -28,7 +28,7 @@ class Pty implements WorkspacePty {
 }
 
 /** A computer sharing one folder, `open`, whose subfolder `open/secret` is excluded, with real files and fake shells. */
-async function fixture(t: TestContext, options: { oldHost?: boolean; onSnapshot?: () => void; attachments?: (id: string) => Promise<VerifiedAttachment> } = {}) {
+async function fixture(t: TestContext, options: { oldHost?: boolean; onSnapshot?: () => void; attachments?: (id: string) => Promise<VerifiedAttachment>; linked?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-remote-workspace-')));
   const open = join(root, 'open'), secret = join(open, 'secret');
   await mkdir(secret, { recursive: true });
@@ -38,7 +38,9 @@ async function fixture(t: TestContext, options: { oldHost?: boolean; onSnapshot?
   const exclusions = new RemoteExclusionStore(join(root, 'state'));
   await exclusions.start();
   await exclusions.add(secret);
-  const session: Session = { id: 'codex:open', nativeId: 'open', provider: 'codex', title: 't', cwd: open, project: 'open', status: 'idle', statusReason: '',
+  // `linked`: Tower lists the shared folder by a path through a symbolic link.
+  if (options.linked) await symlink(open, join(root, 'link'));
+  const session: Session = { id: 'codex:open', nativeId: 'open', provider: 'codex', title: 't', cwd: options.linked ? join(root, 'link') : open, project: 'open', status: 'idle', statusReason: '',
     createdAt: now, updatedAt: now, lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
   const snapshot = (): Snapshot => { options.onSnapshot?.(); return { sessions: [session], runs: [], providers: [], groups: [], scanning: false, hostname: 'machine-b', version: 'test', updatedAt: now }; };
   const ptys: Pty[] = [];
@@ -150,6 +152,13 @@ test('a controller sees every shell of the shared folders, and only a count of t
   assert.equal(all.status, 200);
   assert.deepEqual(all.json.terminals.map((item: { id: string; origin: string }) => [item.id, item.origin]).sort(), [[here.id, 'computer'], [mine.id, 'self']].sort());
   assert.equal(all.json.hidden, 1, 'a shell in an excluded folder counts against the limit but is not shown');
+});
+
+test('shells of a shared folder Tower lists through a link are shown, not counted as hidden', async t => {
+  const f = await fixture(t, { linked: true });
+  await f.shells.create(f.open, 80, 24);
+  const all = await f.call('/api/workspace/terminals/all');
+  assert.deepEqual([all.json.terminals.length, all.json.hidden], [1, 0]);
 });
 
 test('a controller’s view of a shell ends when its folder stops being shared; the shell itself goes on', async t => {

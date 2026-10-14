@@ -10,6 +10,8 @@ import { localPart, nodeHeaders, nodeOf, nodePath, requestId, workspacePath } fr
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 
+/** The terminal host's refusal when the computer has as many shells as it allows (other 429s are request budgets). */
+const TERMINAL_LIMIT = /^열려 있는 터미널이 너무 많습니다/;
 /** `fresh`: start a new shell if the tab's shell is gone; otherwise only reach the one it has again. */
 interface TerminalControls { close(): Promise<void>; restart(fresh: boolean): void }
 /**
@@ -341,7 +343,7 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, onTooMany, re
       // from a computer that is there (an old terminal host, a shell that did not start) is not a lost connection.
       const { status, disposition, code } = value as { status?: number; disposition?: string; code?: string };
       // The computer has as many shells as it allows: show where they are, so the owner can end the ones left over.
-      if (status === 429 && !disposed) tooMany.current();
+      if (status === 429 && !disposed && value instanceof Error && TERMINAL_LIMIT.test(value.message)) tooMany.current();
       const away = status === undefined || code === 'node-offline' || disposition === 'uncertain' || status === 504 || (status === 503 && !node);
       if (!disposed) { setStarting(false); setExited(true); setLost(away); }
     });
