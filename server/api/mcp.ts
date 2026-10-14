@@ -48,18 +48,23 @@ export class CapabilityRegistry {
   resolve(token: string): Capability | undefined { return /^[a-f\d]{64}$/.test(token) ? this.standing.get(token) ?? this.tokens.get(token) : undefined; }
 }
 
-/** An authenticated calling run, with a stable ancestor even after intermediate runs leave history. */
-export function delegationOf(run: Run): RunDelegation {
-  return { parentRunId: run.id, rootRunId: run.delegation?.rootRunId ?? run.origin?.runId ?? run.id };
+/** Judges a new delegation's calling turns while they are known (see secrets/access.ts `publicChain`). */
+export type PublicChain = (delegation: RunDelegation) => boolean | undefined;
+
+/** An authenticated calling run, with a stable ancestor even after intermediate runs leave history, and what its callers are. */
+export function delegationOf(run: Run, chain?: PublicChain): RunDelegation {
+  const delegation = { parentRunId: run.id, rootRunId: run.delegation?.rootRunId ?? run.origin?.runId ?? run.id };
+  const fact = chain?.(delegation);
+  return fact === undefined ? delegation : { ...delegation, publicChain: fact };
 }
 
-export function callerDelegation(registry: CapabilityRegistry, find: (id: string) => Run | undefined, token: string): RunDelegation {
+export function callerDelegation(registry: CapabilityRegistry, find: (id: string) => Run | undefined, token: string, chain?: PublicChain): RunDelegation {
   const capability = registry.resolve(token);
   const run = capability?.kind === 'caller-run' ? find(capability.runId) : undefined;
   if (!run || capability?.kind !== 'caller-run' || run.sessionId !== capability.sessionId || run.status !== 'running' || run.origin?.controllerId) {
     throw new TowerError('forbidden', 'The calling turn is no longer running here, or its reporting credential is invalid. Nothing was submitted.', { disposition: 'not-admitted' });
   }
-  return delegationOf(run);
+  return delegationOf(run, chain);
 }
 
 /** Tool names agents see (`mcp__tower__triggers_create`), with a requestKey on operations that create something. */
@@ -84,6 +89,7 @@ export interface McpContext {
   slackTool?(workflowId: string, name: string, args: Record<string, unknown>): Promise<unknown>;
   githubTool?(workflowId: string, name: string, args: Record<string, unknown>): Promise<unknown>;
   secretTools?: unknown[];
+  publicChain?: PublicChain;
   secretAuthorize?(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<void>;
   secretTool?(capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>): Promise<unknown>;
 }
@@ -153,5 +159,5 @@ export async function handleMcpRequest(context: McpContext, token: string, body:
   };
   // A turn started from a controlling computer keeps to what that computer may see and change.
   return context.api.call(operation, input, { kind: 'agent', via: 'mcp', sessionId: capability.sessionId, runId: run.id, ...(run.origin.controllerId ? { controllerId: run.origin.controllerId } : {}) },
-    typeof requestKey === 'string' ? requestKey : undefined, { delegation: delegationOf(run), validate });
+    typeof requestKey === 'string' ? requestKey : undefined, { delegation: delegationOf(run, context.publicChain), validate });
 }

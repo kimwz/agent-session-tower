@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Run, Session } from '../../../shared/types.js';
 import type { SecretMetadata, SecretRunResult, SecretSessionView, SecretSettingsView } from '../../../shared/secrets.js';
-import { CapabilityRegistry, handleMcpRequest, type McpContext, type Capability } from '../../../server/api/mcp.js';
+import { CapabilityRegistry, delegationOf, handleMcpRequest, type McpContext, type Capability } from '../../../server/api/mcp.js';
 import { runToolResolver } from '../../../server/api/run-tools.js';
 import { PUBLIC_TRIGGER_PREFIX, type SessionOrigin } from '../../../server/runs/origin.js';
 import { SecretRuntime, SECRET_TOOLS } from '../../../server/secrets/runtime.js';
@@ -15,6 +15,7 @@ import { editPayload, legacyRecord, legacyRule, stored, storedSecret, storedTask
 import { secretService } from '../../helpers/secrets.js';
 import { runSecretsCommand } from '../../../server/secrets/cli.js';
 import { SECRET_USE_INSTRUCTIONS } from '../../../server/secrets/notices.js';
+import { inheritedRunFields } from '../../../server/runs/continuations.js';
 
 const password = 'fixture-runtime-password-1234';
 const canary = 'CANARY_RUNTIME_VALUE_DO_NOT_DISCLOSE';
@@ -389,6 +390,32 @@ test('a turn started with another turn’s calling credential is reviewed, and k
     f.runs.delete(caller.id);
     assert.deepEqual((await f.list(token)).secrets.map(item => item.name), ['SHARED'], 'what was checked when it was issued cannot change');
     assert.equal(f.resolver(f.addRun('run-late', f.session, { delegation: { parentRunId: caller.id, rootRunId: caller.id } }), f.session).servers?.tower_secrets, undefined, 'a new turn is not issued one');
+  } finally { await f.cleanup(); }
+});
+
+test('a delegated session’s later turns keep their secret tools after the calling turn leaves history, by what its admission found', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize();
+    const caller = f.addRun('run-caller');
+    // What the worker keeps on the delegated turn when the caller's credential admits it.
+    const delegation = delegationOf(caller, item => f.runtime.publicChain(item));
+    assert.deepEqual(delegation, { parentRunId: caller.id, rootRunId: caller.id, publicChain: false });
+    const delegated = f.addRun('run-delegated', f.session, { delegation, status: 'completed' });
+    f.runs.delete(caller.id);
+    const wakeup = f.addRun('run-wakeup', f.session, inheritedRunFields(delegated));
+    assert.ok(f.resolver(wakeup, f.session).servers?.tower_secrets, 'a wakeup or continuation of the delegated work');
+    assert.equal(f.runtime.subject(f.session, wakeup, 'issue').mode, 'reviewed');
+    const old = f.addRun('run-old', f.session, { delegation: { parentRunId: caller.id, rootRunId: caller.id } });
+    assert.equal(f.resolver(old, f.session).servers?.tower_secrets, undefined, 'an earlier record without the fact');
+    // A public agent's call stays refused once it has left history.
+    const outsider = f.addRun('run-public', f.session, { origin: { kind: 'trigger', triggerId: `${PUBLIC_TRIGGER_PREFIX}agent` } });
+    const fromPublic = f.runtime.publicChain({ parentRunId: outsider.id, rootRunId: outsider.id });
+    assert.equal(fromPublic, true);
+    f.runs.delete(outsider.id);
+    const later = f.addRun('run-public-later', f.session, { delegation: { parentRunId: outsider.id, rootRunId: outsider.id, publicChain: fromPublic } });
+    for (const stage of ['issue', 'discover', 'use'] as const) assert.deepEqual(f.runtime.subject(f.session, later, stage), { mode: 'none', reason: 'public-agent' });
+    assert.equal(f.runtime.publicChain({ parentRunId: 'never-known', rootRunId: 'never-known' }), undefined, 'a caller not known at admission keeps no fact');
   } finally { await f.cleanup(); }
 });
 

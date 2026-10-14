@@ -2,13 +2,13 @@ import { createHash, createPublicKey, randomUUID } from 'node:crypto';
 import { realpath, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import type { Run, Session } from '../../shared/types.js';
+import type { Run, RunDelegation, Session } from '../../shared/types.js';
 import type { SecretAvailable, SecretContext, SecretSubjectMode, SecretDevice, SecretDisconnected, SecretMetadata, SecretPeer, SecretSessionError, SecretSessionView, SecretSettingsView, SecretTarget, SecretTowerPassword, SecretUsage, SecretValue, SecretViewError, VaultStatus } from '../../shared/secrets.js';
 import { SECRET_OPERATIONS } from '../../shared/secrets.js';
 import type { Capability } from '../api/mcp.js';
 import type { SessionOrigin } from '../runs/origin.js';
 import { callWorkerTools, serveToolBridge } from '../mcp/stdio.js';
-import { secretSubject, type KnownRun, type SecretStage, type SecretSubject } from './access.js';
+import { publicChain, secretSubject, type KnownRun, type SecretStage, type SecretSubject } from './access.js';
 import { SecretBroker, remoteListing } from './broker.js';
 import { parseSecretCli } from './cli.js';
 import { parseDotenv } from './dotenv.js';
@@ -161,15 +161,20 @@ export class SecretRuntime {
     catch { console.warn('Tower could not queue a private secret-connection notice; credentials remain discoverable when needed.'); }
   }
 
+  /** The sessions and turns this computer knows now, for access.ts. */
+  private known() {
+    const runs = this.options.runs;
+    let known: Map<string, Run> | undefined;
+    return { lookup: (id: string) => { const found = runs.getSession(id); return found && { session: found, provenance: runs.sessionOrigin(id) }; },
+      findRun: (id: string) => (known ??= new Map(runs.list().map(item => [item.id, item]))).get(id) };
+  }
   /** Who a session of this computer is for secret use now (see access.ts), with `run` the turn asking, if any. */
   subject(session: Session, run: KnownRun | undefined, stage: SecretStage): SecretSubject {
     if (this.closedSessions.has(session.id)) return { mode: 'none', reason: 'closed' };
-    const runs = this.options.runs;
-    let known: Map<string, Run> | undefined;
-    return secretSubject({ run, session, provenance: runs.sessionOrigin(session.id), stage,
-      lookup: id => { const found = runs.getSession(id); return found && { session: found, provenance: runs.sessionOrigin(id) }; },
-      findRun: id => (known ??= new Map(runs.list().map(item => [item.id, item]))).get(id) });
+    return secretSubject({ run, session, provenance: this.options.runs.sessionOrigin(session.id), stage, ...this.known() });
   }
+  /** What a delegated turn keeps when it is admitted, while its calling turns are still known (access.ts `publicChain`). */
+  publicChain(delegation: RunDelegation): boolean | undefined { return publicChain(delegation, this.known()); }
   /** A live session of this computer that may use secrets at `stage`, in its canonical folder; `run` is the turn asking, if any. */
   private async session(id: string, run: KnownRun | undefined, stage: SecretStage): Promise<Session & { cwd: string; subject: SecretSubjectMode }> {
     const session = this.options.runs.getSession(id);

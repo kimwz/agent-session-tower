@@ -198,7 +198,14 @@ export interface RunOrigin {
   controllerId?: string;
 }
 /** Authenticated caller links for reporting, independent of the authority in RunOrigin. */
-export interface RunDelegation { parentRunId: string; rootRunId: string }
+export interface RunDelegation {
+  parentRunId: string; rootRunId: string;
+  /**
+   * Found when the turn was admitted: whether a public agent is among the turns that started it (absent: not every one
+   * was known, or an earlier version's record). Secret use judges calling turns that have left history by it.
+   */
+  publicChain?: boolean;
+}
 export interface Run {
   id: string;
   sessionId: string;

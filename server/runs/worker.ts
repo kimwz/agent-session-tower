@@ -31,7 +31,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { homedir, hostname } from 'node:os';
-import type { AutoPromptInput, NewSessionInput, MessageAttachments, Run, RunApprovalResponse, Session, Snapshot } from '../../shared/types.js';
+import type { AutoPromptInput, NewSessionInput, MessageAttachments, Run, RunApprovalResponse, RunDelegation, Session, Snapshot } from '../../shared/types.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { AutoPromptManager } from '../auto-prompt/manager.js';
 import { SlackService } from '../slack/service.js';
@@ -223,6 +223,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     return options.ledger.once(controllerId, operation, admitted.requestId, content, execute, record, replay);
   };
   const findRun = (id: string) => options.runs.list().find(run => run.id === id);
+  // Kept on each delegated turn when it is admitted, so its later turns keep their secret tools after its callers leave history.
+  const publicChain = options.secrets && ((delegation: RunDelegation) => options.secrets!.publicChain(delegation));
   let temporaryFailure: string | undefined;
   const temporaryOverview = () => {
     const overview = options.retention?.temporary?.overview();
@@ -257,7 +259,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       }
     };
     validate();
-    return { ...admitted, ...(corrective ? { origin: { kind: 'agent' as const } } : {}), delegation: callerDelegation(capabilities, findRun, token), validate };
+    return { ...admitted, ...(corrective ? { origin: { kind: 'agent' as const } } : {}), delegation: callerDelegation(capabilities, findRun, token, publicChain), validate };
   };
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
   const dispatch = async (method: string, args: unknown[]) => {
@@ -515,7 +517,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       return target.call(args[0], args[1], args[2], args[3], { ...previous, validate });
     };
   } });
-  const mcp = { api: mcpApi(), capabilities, secretTools: options.secrets ? SECRET_TOOLS : undefined, secretAuthorize: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>) => options.secrets!.authorizeCapability(capability) : undefined, secretTool: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>) => options.secrets!.tool(capability, name, args) : undefined, slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
+  const mcp = { api: mcpApi(), capabilities, publicChain, secretTools: options.secrets ? SECRET_TOOLS : undefined, secretAuthorize: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>) => options.secrets!.authorizeCapability(capability) : undefined, secretTool: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>) => options.secrets!.tool(capability, name, args) : undefined, slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
     githubTool: options.github ? (workflowId: string, name: string, args: Record<string, unknown>) => options.github!.tool(workflowId, name, args) : undefined,
     heartbeatAllowed: (run: Run) => { const origin = options.runs.sessionOrigin(run.sessionId); return !origin?.untrustedInput && (!origin || origin.kind === 'owner'); },
     run: (runId: string) => options.runs.list().find(run => run.id === runId) };
