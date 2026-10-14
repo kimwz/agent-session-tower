@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.136.0] - 2026-10-14
+
+- 마스터 에이전트가 다른 세션에 보낸 메시지는 채팅에서 "나" 대신 **마스터 에이전트**로 표시되고, 아이콘과 보라색 띠가 있는 카드로 소유자 메시지와 구분됩니다. 이 메시지는 한 줄 바꿈도 쓴 그대로 보입니다.
+  - 마스터가 새 세션을 만들거나, 기존 세션에 메시지를 보내거나, Auto Prompt로 넘긴 작업(마스터 대화의 Tower 도구 포함)에 적용됩니다. 소유자가 마스터에게 직접 쓴 말은 계속 "나"로 보입니다.
+  - 표시 전용입니다. 마스터가 보낸 작업의 권한·승인·끼워 넣기 판단은 그대로입니다.
+  - 이번 버전 이후에 보낸 메시지부터 적용됩니다. 그 전 기록과 연결된 다른 컴퓨터로 보낸 작업은 이전처럼 보입니다.
+- 마스터는 세션에 넘기는 지시를 사람이 읽기 좋게 씁니다: 첫 줄에 목표, 이어서 빈 줄로 나눈 짧은 문단이나 목록.
+
 ## [1.135.0] - 2026-10-14
 
 - 터미널 탭을 두 개 이상 열면 입력이 들어가지 않고 탭이 멈추던 문제를 고쳤습니다. 브라우저는 한 주소에 HTTP 연결을 6개까지만 열고 모든 Tower 페이지가 나눠 쓰는데, 터미널마다 출력 스트림이 하나씩 붙잡고 키 입력도 요청마다 보내서 연결이 모자랐습니다.
