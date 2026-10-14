@@ -8,9 +8,6 @@ permissions:
 jobs:
   plan:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      statuses: write
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
@@ -18,24 +15,17 @@ jobs:
         with: { persist-credentials: false }
       - id: plan
         run: |
-          node --input-type=module -e "import('./scripts/ci-plan.mjs').then(m=>console.log('matrix='+JSON.stringify({include:m.plan().filter(l=>l.os==='ubuntu-latest').map(({id,os,node,shard})=>({id,os,node,shard}))})))" >> "$GITHUB_OUTPUT"
-      - name: Mark owner Mac and combined evidence as pending
-        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SOURCE_SHA" -f state=pending -f context='macOS (owner Mac)' -f description='Awaiting exact-tree owner Mac results'
-          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SOURCE_SHA" -f state=pending -f context='validation (all platforms)' -f description='Awaiting complete Mac and Linux results'
+          node --input-type=module -e "import('./scripts/ci-plan.mjs').then(m=>console.log('matrix='+JSON.stringify({include:m.plan().map(({id,os,node,shard,kind})=>({id,os,node,label:kind==='compat'?'compatibility':'shard '+shard}))})))" >> "$GITHUB_OUTPUT"
   test:
-    name: Linux ${{ matrix.node }} shard ${{ matrix.shard }}
+    # Tower runs on macOS and on Linux; both are checked here, on GitHub's runners.
+    name: ${{ matrix.os == 'macos-latest' && 'macOS' || 'Linux' }} ${{ matrix.node }} ${{ matrix.label }}
     needs: plan
     strategy:
       fail-fast: false
-      max-parallel: 12
+      max-parallel: 17
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 40 || 20 }}
     steps:
       - uses: actions/checkout@v7
         with: { persist-credentials: false }
@@ -75,7 +65,7 @@ jobs:
           path: ${{ runner.temp }}/ci-checks/receipt.json
           if-no-files-found: error
   validation-gate:
-    name: Linux validation gate (Mac requires owner evidence)
+    name: validation gate (all platforms)
     if: always()
     needs: [plan, test, checks]
     runs-on: ubuntu-latest
@@ -84,7 +74,7 @@ jobs:
         with: { persist-credentials: false }
       - uses: actions/download-artifact@v4
         with: { pattern: 'ci-*', path: ci-results }
-      - name: Validate Linux inventory, real results and whole test window
+      - name: Validate macOS and Linux inventory, real results and whole test window
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
         run: node scripts/ci-gate.mjs ci-results

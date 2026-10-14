@@ -17,10 +17,10 @@ const checks = receipts.find(r => r.id === 'checks');
 assert.ok(checks && checks.sha === process.env.GITHUB_SHA && checks.exit === 0 && checks.legacyNode === '22.13.0', 'missing checks or actual legacy verdict');
 const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim();
 assert.ok(receipts.every(r => r.input?.tree === tree && r.input.dirty === false), 'not every lane tested the checked-out tree');
-const linux = receipts.filter(r => r.id !== 'checks');
-const timing = validateReceipts(plan().filter(l => l.os === 'ubuntu-latest'), linux, process.env.GITHUB_SHA);
+const lanes = receipts.filter(r => r.id !== 'checks');
+const timing = validateReceipts(plan(), lanes, process.env.GITHUB_SHA);
 timing.testWindowSeconds = (Math.max(...receipts.map(r => r.finished)) - Math.min(...receipts.map(r => r.started))) / 1000;
-const report = { scope: 'Linux; owner Mac is a separate actual commit status', sha: process.env.GITHUB_SHA, tree, ...timing, testsUnderFiveMinutes: timing.testWindowSeconds <= 300,
+const report = { scope: 'macOS and Linux', sha: process.env.GITHUB_SHA, tree, ...timing, testsUnderFiveMinutes: timing.testWindowSeconds <= 300,
   setupEnvelopeSeconds: (Math.max(...receipts.map(r => r.ready)) - Math.min(...receipts.map(r => r.admitted))) / 1000,
   lanes: receipts.map(({ env, ...r }) => r) };
 writeFileSync('ci-timing.json', JSON.stringify(report, null, 2));

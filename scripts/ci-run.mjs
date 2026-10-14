@@ -75,7 +75,7 @@ if (action === 'prepare') {
     }
     receipt.exit = 0;
   } finally {
-    try { if (setup.input) assert.deepEqual(testedInput(), setup.input, 'source changed during local tests'); }
+    try { if (setup.input) assert.deepEqual(testedInput(), setup.input, 'source changed during tests'); }
     catch (error) { receipt.exit = 1; receipt.sourceError = error.message; }
     receipt.finished = Date.now(); writeFileSync(join(jobDir, 'receipt.json'), JSON.stringify(receipt, null, 2));
     assert.equal(receipt.exit, 0, receipt.sourceError ?? 'test lane failed');
