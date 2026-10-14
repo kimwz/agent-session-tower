@@ -180,7 +180,7 @@ test('a following computer takes the host\'s fast-judgment settings and key, wri
   const host = new DecisionService(await directory(t)), node = new DecisionService(await directory(t));
   await host.start(); await node.start();
   await host.update({ apiKey: 'host-secret-key-123', features: { attentionNotifications: false } });
-  const sent = JSON.parse(JSON.stringify(host.backupValue()));
+  const sent = JSON.parse(JSON.stringify(host.exportManaged()));
   assert.equal(await node.applyManaged(sent), true);
   assert.deepEqual(node.backupValue(), host.backupValue());
   assert.equal(node.overview().keyHint, '…-123');
@@ -192,4 +192,23 @@ test('a following computer takes the host\'s fast-judgment settings and key, wri
   await host.update({ apiKey: null });
   assert.equal(await node.applyManaged(JSON.parse(JSON.stringify(host.backupValue()))), true);
   assert.equal(node.overview().configured, false, 'a key the host forgot is forgotten here too');
+});
+
+test('a host whose fast-judgment file could not be read sends nothing, so a following computer keeps its key; a real deletion is sent', async t => {
+  const dir = await directory(t);
+  await writeFile(join(dir, 'decisions.json'), '{ not json', { mode: 0o600 });
+  const host = new DecisionService(dir);
+  await assert.rejects(host.start());
+  assert.throws(() => host.exportManaged(), (error: Error) => /읽지 못해/.test(error.message));
+  const broken = await directory(t);
+  await writeFile(join(broken, 'decisions.json'), JSON.stringify({ provider: 'jev', apiKey: 'has space in it', features: {} }), { mode: 0o600 });
+  const unusable = new DecisionService(broken);
+  await unusable.start();
+  assert.throws(() => unusable.exportManaged(), /읽지 못해/, 'a key that is there but unusable is no deletion either');
+  // Once the owner saves (here: removes the key on purpose), that is what is sent.
+  await host.update({ apiKey: null });
+  assert.equal(host.exportManaged().apiKey, undefined);
+  const fresh = new DecisionService(await directory(t));
+  await fresh.start();
+  assert.deepEqual(fresh.exportManaged().apiKey, undefined, 'no file at all is simply no key');
 });
