@@ -460,15 +460,7 @@ export class SkillService {
         break;
       }
       case 'delete': {
-        const skill = await this.files.lookup(text(body.dir), cwd);
-        // A Tower skill loses its links in every project it applied to first.
-        const before = skill.managed ? this.record(skill.dir) : undefined;
-        if (before) await this.apply(skill.dir, { all: false, projects: [] }, false);
-        // A skill that could not be removed applies where it did again.
-        try { await this.files.remove(skill.dir, skill.managed ? skill.cwd : cwd); }
-        catch (error) { if (before) await this.apply(skill.dir, { all: before.all, projects: before.projects }, false).catch(() => {}); throw error; }
-        await this.pin(skill, false);
-        if (skill.managed) await this.state.update(state => { state.targets = state.targets.filter(item => item.dir !== skill.dir); });
+        await this.delete(await this.files.lookup(text(body.dir), cwd), cwd);
         break;
       }
       case 'dismiss': {
@@ -495,6 +487,17 @@ export class SkillService {
       }
       default: throw new SkillError('알 수 없는 스킬 작업입니다.', 'not-found');
     }
+  }
+
+  /** Removes a skill: a Tower skill loses its links in every project it applied to first, then its record and pin. */
+  private async delete(skill: Skill, cwd: string | undefined): Promise<void> {
+    const before = skill.managed ? this.record(skill.dir) : undefined;
+    if (before) await this.apply(skill.dir, { all: false, projects: [] }, false);
+    // A skill that could not be removed applies where it did again.
+    try { await this.files.remove(skill.dir, skill.managed ? skill.cwd : cwd); }
+    catch (error) { if (before) await this.apply(skill.dir, { all: before.all, projects: before.projects }, false).catch(() => {}); throw error; }
+    await this.pin(skill, false);
+    if (skill.managed) await this.state.update(state => { state.targets = state.targets.filter(item => item.dir !== skill.dir); });
   }
 
   /**
@@ -531,13 +534,23 @@ export class SkillService {
     return { owner, revision: revisionOf(owner), tower: AGENT_GUIDANCE, installed: Boolean(this.options.installGuidance) };
   }
 
+  /**
+   * The owner's guidance as saved, for copies of it: missing is no guidance, and one that cannot be read fails with
+   * `failure` rather than be passed on as empty (the copy would clear it).
+   */
+  private ownerGuidance(failure: string): Promise<string> {
+    return readFile(this.guidanceFile(), 'utf8').catch(error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
+      throw new SkillError(`${failure}: ${error instanceof Error ? error.message : String(error)}`, 'internal');
+    });
+  }
+
   private guidanceQueue: Promise<unknown> = Promise.resolve();
   /** Reads, checks and writes the owner's guidance one change at a time, then gives it to the agents. */
   /** Resolves with the revision of the text written. */
   private guidanceChange(change: (current: GuidanceOverview) => Promise<string>): Promise<string> {
     const next = this.guidanceQueue.catch(() => {}).then(async () => {
-      const owner = withoutTowerMarkers(await change(await this.guidance()));
-      const content = owner.trim() ? `${owner.trimEnd()}\n` : '';
+      const content = guidanceContent(await change(await this.guidance()));
       await mkdir(dirname(this.guidanceFile()), { recursive: true, mode: 0o700 });
       await writePrivateFile(this.guidanceFile(), content);
       await this.options.installGuidance?.();
@@ -568,11 +581,7 @@ export class SkillService {
     return this.exclusive(async () => {
       const stored = await this.files.managed();
       const bundle = await this.exportBundle({ dirs: stored.map(skill => skill.dir) });
-      // Missing is no guidance; one that cannot be read fails the backup rather than record it as empty (a restore would clear it).
-      const guidance = await readFile(this.guidanceFile(), 'utf8').catch(error => {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
-        throw new SkillError(`지침 파일을 읽지 못해 백업하지 않았습니다: ${error instanceof Error ? error.message : String(error)}`, 'internal');
-      });
+      const guidance = await this.ownerGuidance('지침 파일을 읽지 못해 백업하지 않았습니다');
       return { bundle, guidance, settings: { ...this.state.get().settings } };
     });
   }
@@ -694,4 +703,10 @@ export class SkillService {
       await this.guidanceChange(async current => body.guidance === 'append' && current.owner.trim() ? `${current.owner.trim()}\n\n${guidance}` : guidance);
     }
   }
+}
+
+/** The owner's guidance as it is saved: Tower's own markers taken out, ending with one newline, or empty. */
+function guidanceContent(owner: string): string {
+  const text = withoutTowerMarkers(owner);
+  return text.trim() ? `${text.trimEnd()}\n` : '';
 }
