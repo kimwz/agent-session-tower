@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.135.1] - 2026-10-14
+
+- 터미널의 '열린 터미널' 메뉴가 이 폴더뿐 아니라 이 컴퓨터의 다른 폴더에 열려 있는 터미널도 보여 주고, 거기서 바로 끝낼 수 있습니다. 터미널 개수 제한은 컴퓨터 전체로 세는데 메뉴는 지금 폴더만 보여 줘서, 화면에 터미널이 없는데도 '열려 있는 터미널이 너무 많습니다'가 나오고 남은 터미널을 찾을 수 없었습니다.
+- 그 오류로 터미널을 열지 못하면 이 메뉴가 바로 열립니다.
+- 다른 컴퓨터의 터미널은 그 컴퓨터가 공유하는 폴더의 것만 보여 주고, 나머지는 개수만 알려 줍니다.
+
 ## [1.135.0] - 2026-10-14
 
 - 터미널 탭을 두 개 이상 열면 입력이 들어가지 않고 탭이 멈추던 문제를 고쳤습니다. 브라우저는 한 주소에 HTTP 연결을 6개까지만 열고 모든 Tower 페이지가 나눠 쓰는데, 터미널마다 출력 스트림이 하나씩 붙잡고 키 입력도 요청마다 보내서 연결이 모자랐습니다.
