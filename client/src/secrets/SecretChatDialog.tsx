@@ -46,7 +46,7 @@ function useSecretSession(token: string, sessionId: string, open: boolean) {
     } catch (failure) {
       if (poller.current === current) {
         const code = failureCode(failure);
-        if (!code || !refused?.(code)) setError(secretFailure(failure, latest.current.t));
+        if (!code || !refused?.(code)) setError(secretFailure(failure, latest.current.t, action));
         current.release();
       }
       return false;

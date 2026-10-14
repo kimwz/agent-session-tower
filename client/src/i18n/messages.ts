@@ -62,6 +62,7 @@ export const english: Record<string, string> = {
   "복구 비밀번호로 보관함을 엽니다. 값을 보려면 Tower 비밀번호가 따로 필요합니다.": "Opens the vault with the recovery password. Viewing values still needs the Tower password.",
   "Tower에 로그인하는 비밀번호로 보관함을 엽니다.": "Open the vault with the password you sign in to Tower with.",
   "Tower 비밀번호가 맞지 않습니다.": "The Tower password is incorrect.",
+  "로그인이 만료되었습니다. 다시 로그인하세요.": "Your sign-in has expired. Sign in again.",
   "복구 비밀번호": "Recovery password",
   "복구 비밀번호 변경": "Change recovery password",
   "기존 보관함 비밀번호입니다. Tower 비밀번호로 열 수 없을 때 이 비밀번호로 보관함을 엽니다.": "The earlier vault password. It opens the vault when the Tower password cannot.",

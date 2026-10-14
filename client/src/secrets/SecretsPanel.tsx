@@ -5,7 +5,7 @@ import { SettingsFrameContext, SettingsPane } from '../settings/SettingsPane';
 import type { SecretChange } from './SecretAccess';
 import type { SecretComputer } from './SecretAdvanced';
 import { SecretSettingsWorkspace } from './SecretSettings';
-import { failureCode, postSecret, readSecretSettings, readSecretValue, secretFailure, secretLoadFailure, staleConflict, emptyCanvas, valueStale, viewLost, type SecretCanvas } from './secrets-client';
+import { failureCode, LOGIN_EXPIRED, postSecret, readSecretSettings, readSecretValue, secretFailure, secretLoadFailure, staleConflict, emptyCanvas, valueStale, viewLost, type SecretCanvas } from './secrets-client';
 
 /** Value actions whose refusal because value viewing ended asks for the Tower password again. */
 const VALUE_ACTIONS = new Set(['value', 'value-update', 'view-lock']);
@@ -36,7 +36,8 @@ function useSecretSettings(token: string, active: boolean) {
     }
     if (!VALUE_ACTIONS.has(action) || !viewLost(failure)) return false;
     setView(current => current && { ...current, valueView: false });
-    if (action !== 'view-lock') setNotice(t('값 보기가 잠겼습니다. Tower 비밀번호를 다시 입력하세요.'));
+    if (failureCode(failure) === 'login-required') setNotice(t(LOGIN_EXPIRED));
+    else if (action !== 'view-lock') setNotice(t('값 보기가 잠겼습니다. Tower 비밀번호를 다시 입력하세요.'));
     return true;
   }, [t]);
   const change: SecretChange = useCallback(async (action, body, refused) => {
@@ -53,7 +54,7 @@ function useSecretSettings(token: string, active: boolean) {
       if (code && refused?.(code)) return false;
       // A stale revision: show what is stored now; the editor starts again from it.
       if (action === 'sharing' && staleConflict(failure)) { setNotice(t('공유 설정이 다른 곳에서 바뀌었습니다. 지금 저장된 내용을 불러왔으니 확인한 뒤 다시 저장하세요.')); setRevision(value => value + 1); }
-      else if (!valueRefused(action, failure)) setError(secretFailure(failure, t));
+      else if (!valueRefused(action, failure)) setError(secretFailure(failure, t, action));
       return false;
     } finally { if (current === generation.current) { mutating.current = false; setBusy(false); } }
   }, [active, token, t, valueRefused]);
@@ -65,7 +66,7 @@ function useSecretSettings(token: string, active: boolean) {
       const value = await readSecretValue(token, secretId, expectedVersion);
       return current === generation.current ? value : undefined;
     } catch (failure) {
-      if (current === generation.current && !valueRefused('value', failure)) setError(secretFailure(failure, t));
+      if (current === generation.current && !valueRefused('value', failure)) setError(secretFailure(failure, t, 'value'));
       return undefined;
     }
   }, [active, token, t, valueRefused]);

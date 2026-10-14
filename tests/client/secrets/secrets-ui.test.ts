@@ -346,7 +346,9 @@ test('the unlock request follows the mode: the Tower password turns on value vie
   assert.deepEqual(unlockRequest('both', 'T', 'R'), ['view-unlock', { password: 'T', recoveryPassword: 'R' }]);
   assert.deepEqual(unlockRequest('recovery', 'R', ''), ['unlock', { password: 'R' }]); assert.deepEqual(unlockRequest('vault', 'V', ''), ['unlock', { password: 'V' }]);
   const t = (key: string) => key;
-  assert.equal(secretFailure(new ApiError('Login required', 401, undefined, 'login-required'), t), 'Tower 비밀번호가 맞지 않습니다.');
+  const lost = new ApiError('Login required', 401, undefined, 'login-required');
+  assert.equal(secretFailure(lost, t, 'view-unlock'), 'Tower 비밀번호가 맞지 않습니다.');
+  for (const action of ['value', 'value-update', 'view-lock', 'create', undefined]) assert.equal(secretFailure(lost, t, action), '로그인이 만료되었습니다. 다시 로그인하세요.', `an expired sign-in at ${action}`);
   // A blocked IP answers 403 with the same code: its own words say why the right password is refused.
   assert.equal(secretFailure(new ApiError('이 IP는 로그인 5회 실패로 차단되었습니다. 로컬 계정 관리에서 해제하세요.', 403, undefined, 'login-required'), t), '이 IP는 로그인 5회 실패로 차단되었습니다. 로컬 계정 관리에서 해제하세요.');
   assert.equal(secretFailure(new ApiError('로컬 계정 관리에서 Tower 계정을 먼저 설정하세요.', 409, undefined, 'account-required'), t), '로컬 계정 관리에서 Tower 계정을 먼저 설정하세요.');

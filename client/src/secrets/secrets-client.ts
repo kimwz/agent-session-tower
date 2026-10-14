@@ -33,11 +33,13 @@ export const failureCode = (failure: unknown) => failure instanceof ApiError ? f
 /** Value viewing ended on the server (a lock, idle expiry, a sign-out): the Tower password is asked for again. */
 export const viewLost = (failure: unknown) => failureCode(failure) === 'view-locked' || failureCode(failure) === 'login-required';
 export const WORKER_PENDING = '새 실행 워커 적용 대기 중입니다. 진행 중인 작업이 끝나면 다시 시도하세요.';
-/** The server names why it refused (a locked vault, a folder it cannot share); anything else keeps the generic hint. */
-export function secretFailure(failure: unknown, t: (key: string) => string): string {
+/** A 401 `login-required` from anything but the Tower-password check: the sign-in ended. */
+export const LOGIN_EXPIRED = '로그인이 만료되었습니다. 다시 로그인하세요.';
+/** The server names why it refused (a locked vault, a folder it cannot share); anything else keeps the generic hint. `action` is the request's. */
+export function secretFailure(failure: unknown, t: (key: string) => string, action?: string): string {
   if (workerPending(failure)) return t(WORKER_PENDING);
-  // Only the Tower-password check answers this to the page's own request; a lost sign-in has the login screen.
-  if (failureCode(failure) === 'login-required' && failure instanceof ApiError && failure.status === 401) return t('Tower 비밀번호가 맞지 않습니다.');
+  // `view-unlock` answers it for a wrong Tower password; any other request, for a sign-in that expired.
+  if (failureCode(failure) === 'login-required' && failure instanceof ApiError && failure.status === 401) return t(action === 'view-unlock' ? 'Tower 비밀번호가 맞지 않습니다.' : LOGIN_EXPIRED);
   if (failure instanceof ApiError && failure.status === 423) return t('시크릿 보관함이 잠겨 있습니다. 잠금을 해제한 뒤 다시 시도하세요.');
   // A 503 names a joined computer that is not connected now.
   if (failure instanceof ApiError && ((failure.status >= 400 && failure.status < 500 && failure.status !== 401) || failure.status === 503) && failure.message) return t(failure.message);

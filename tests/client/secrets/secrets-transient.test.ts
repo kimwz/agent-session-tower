@@ -506,6 +506,7 @@ test('a value read or saved against a moved version reloads and says so; a view 
   failure = new ApiError('Login required', 401, undefined, 'login-required');
   assert.equal(await workspace().change('value-update', { secretId: 'folder_key', expectedVersion: 1, value: 'FAKE' }), false);
   assert.equal(workspace().view.valueView, false, 'a value without a sign-in asks for the Tower password, which signs this page in again');
+  panel.render(); assert.match(line('status'), /로그인이 만료되었습니다/, 'said as an expired sign-in, not a locked view');
   failure = new ApiError('Login required', 401, undefined, 'login-required');
   assert.equal(await workspace().change('view-unlock', { password: 'FAKE_WRONG' }), false);
   assert.match(line('alert'), /Tower 비밀번호가 맞지 않습니다/, 'at the unlock it is a wrong password');
