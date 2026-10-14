@@ -10,3 +10,5 @@ export const SECRET_LOCKED_USE = `Tower's secret vault is locked, so this secret
 export const SECRET_LOCKED_UNINDEXED = `Tower's secret vault is locked and its names cannot be listed until the owner unlocks it once. This does not mean no secret exists. Only if the current task needs a credential, ask the owner to unlock the vault, saying what the credential is for.`;
 
 export const SECRET_NO_VAULT = `Tower has no secret vault yet, so no saved secret can be used. If the task needs a credential, ask the owner how to provide it.`;
+
+export const SECRET_NOT_SHARED_LIST = `Entries with status "not-shared" exist on the host this computer follows but are not shared with this computer or folder. Use one only when the task needs it: the request is refused (SECRET_NOT_SHARED) and the owner is asked to share it. Once the owner shares it, retry with a new operationId.`;

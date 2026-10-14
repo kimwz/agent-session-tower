@@ -17,6 +17,7 @@ import { nextChainStep, chainAsked, type ChainProgress } from './storage-update.
 import { failedAgain, parseRetry, retryDue, type RetryRecord } from '../updates/schedule.js';
 import { TowerError } from '../../shared/errors.js';
 import type { ManagedSyncStatus } from '../../shared/managed.js';
+import type { NodeSecretStatus } from '../../shared/secrets.js';
 
 export const DEFAULT_LINK_PORT = 8765;
 const INVITE_MS = 10 * 60_000;
@@ -94,7 +95,9 @@ export class ControllerLinks extends EventEmitter {
   constructor(private readonly options: { stateDir: string; identity: LinkIdentity; version: string; hostname: () => string; now?: () => number; pingMs?: number; refreshMs?: number; updatePollMs?: number;
     published?: (version: string) => Promise<boolean>;
     /** How far this Tower's settings reached a following computer (see managed-settings.ts). */
-    managed?: (id: string) => ManagedSyncStatus | undefined }) {
+    managed?: (id: string) => ManagedSyncStatus | undefined;
+    /** Where a following computer stands with this Tower's secrets (see secret-follow.ts). */
+    secrets?: (id: string) => NodeSecretStatus | undefined }) {
     super();
     this.path = join(linkDirectory(options.stateDir), 'controller.json');
   }
@@ -166,7 +169,8 @@ export class ControllerLinks extends EventEmitter {
         ...(this.reports.has(node.id) ? { report: this.shownReport(node.id, Boolean(live)) } : {}),
         ...(retryOf(node, this.options.version)?.version === this.options.version && node.retry ? { retryAt: node.retry.nextAt } : {}),
         followHost: node.followHost === true, following: live?.hello.follows === true,
-        ...(node.followHost && this.options.managed?.(node.id) ? { managed: this.options.managed(node.id) } : {}) };
+        ...(node.followHost && this.options.managed?.(node.id) ? { managed: this.options.managed(node.id) } : {}),
+        ...(node.followHost && this.options.secrets?.(node.id) ? { secrets: this.options.secrets(node.id) } : {}) };
     });
   }
 

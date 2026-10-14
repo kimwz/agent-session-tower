@@ -67,7 +67,7 @@ export function SecretPaste({ view, sessionId, cwd, busy, change, onConnected }:
     {save && <fieldset className="secret-save-options"><legend>{t('공유 범위')}</legend>
       <label className="secret-check"><input type="radio" name="secret-destination" checked={destination === 'none'} disabled={disabled} onChange={() => setDestination('none')} />{t('공유 안 함')}</label>
       {cwd && <label className="secret-check"><input type="radio" name="secret-destination" checked={destination === 'folder'} disabled={disabled} onChange={() => setDestination('folder')} />{t('이 폴더')}</label>}
-      <label className="secret-check"><input type="radio" name="secret-destination" checked={destination === 'global'} disabled={disabled} onChange={() => setDestination('global')} />GLOBAL</label>
+      <label className="secret-check"><input type="radio" name="secret-destination" checked={destination === 'global'} disabled={disabled} onChange={() => setDestination('global')} />{t('모든 내 머신')}</label>
       <p>{t('저장한 시크릿은 다른 세션에서 ‘기존 시크릿 연결’로 다시 쓸 수 있습니다. 공유 범위는 설정에서 바꿀 수 있습니다.')}</p>
     </fieldset>}
     {needsAccess && <div className="secret-inline-access"><strong>{t(setup ? '처음 한 번, 보관함 비밀번호를 정하세요' : '보관함 잠금 해제')}</strong><p>{t(setup ? '이 세션의 값도 비밀번호로 암호화합니다. 12자 이상 입력하세요.' : '비밀번호를 입력하면 붙여넣은 값과 저장한 시크릿을 사용할 수 있습니다.')}</p>

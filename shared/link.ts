@@ -1,4 +1,5 @@
 import type { ManagedSyncStatus } from './managed.js';
+import type { NodeSecretStatus } from './secrets.js';
 /** What this browser sees about remote links. Only this computer's own browser receives it. */
 export interface LinkAddress { url: string; kind: 'custom' | 'tailscale' | 'local-name' | 'lan' }
 export interface HubStatus { enabled: boolean; port: number; listening: boolean; error?: string; addresses: LinkAddress[] }
@@ -75,6 +76,8 @@ export interface NodeSummary {
   following?: boolean;
   /** How far this Tower's settings reached it, while it follows. */
   managed?: ManagedSyncStatus;
+  /** Where it stands with this Tower's secrets, while it follows. */
+  secrets?: NodeSecretStatus;
 }
 export type ControllerStatus = 'connected' | 'connecting' | 'offline' | 'expired' | 'refused' | 'removed';
 /** A computer that controls this one. */

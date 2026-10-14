@@ -7,7 +7,8 @@ const sessionId = z.string().min(1).max(512);
 const nodeId = z.string().min(1).max(256);
 /** Canonical folders: the web turns the page's `{ cwd }` keys into these before the worker sees them. */
 const folders = z.array(z.object({ hostId: z.string().min(1).max(256), root: z.string().min(1).max(4096) }).strict()).max(100);
-export const ownerSharing = z.object({ global: z.boolean(), folders }).strict();
+/** `machines`: vault device IDs of computers shared with in all their folders. */
+export const ownerSharing = z.object({ allMachines: z.boolean(), machines: z.array(z.string().min(1).max(256)).max(100).optional(), folders }).strict();
 export const ownerSession = z.object({ sessionId, nodeId: nodeId.optional() });
 export const ownerConnection = z.object({ sessionId, nodeId: nodeId.optional(), secretIds: z.array(z.string().min(1).max(256)).min(1).max(4096) });
 /** `kept`: folders the page sent back as identities, accepted only where the key keeps them already. */
@@ -22,7 +23,7 @@ export const ownerCreate = z.object({
   // A joined computer and a value kept only with its session both need that session.
   .refine(input => input.sessionId !== undefined || (input.nodeId === undefined && !input.temporary))
   // A value kept only with its session is never shared; refused before a task starts for it.
-  .refine(input => !(input.temporary && input.sharing && (input.sharing.global || input.sharing.folders.length)));
+  .refine(input => !(input.temporary && input.sharing && (input.sharing.allMachines || input.sharing.machines?.length || input.sharing.folders.length)));
 export const secretUsage = z.object({
   at: z.number().int().nonnegative(), secretId: z.string().min(1).max(256), name: z.string().max(256), operation: z.enum(SECRET_OPERATIONS),
   outcome: z.enum(['delivered', 'blocked']), review: z.enum(['exempt', 'allowed', 'blocked', 'failed']), reason: z.string().max(2000).optional(),

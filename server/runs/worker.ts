@@ -81,6 +81,7 @@ import { listPendingSecretImports, importPendingSecret } from '../secrets/import
 import { openLegacyImport } from '../backup/secrets.js';
 import type { Capability } from '../api/mcp.js';
 import type { RemoteSecretRequest, RemoteSecretResponse } from '../secrets/remote.js';
+import type { SecretShareNotice } from '../../shared/secrets.js';
 import { installAgentGuidance } from '../agent-guidance/install.js';
 import { PermissionService } from '../permissions/service.js';
 import { PermissionReviewer } from '../permissions/reviewer.js';
@@ -160,6 +161,8 @@ export interface RunnerHostOptions {
   handoffCarry?: () => Buffer | undefined;
   /** Secret uses refused lately, reported to the web for the owner's notifications. */
   secretBlocks?: () => SecretBlockNotice[];
+  /** Secret requests of computers that follow this Tower, for the owner's share notifications. */
+  secretShares?: () => SecretShareNotice[];
   onHandedOff?: () => void;
   handoffHoldMs?: number;
   /** The proof a predecessor gave this worker when it started it. */
@@ -213,6 +216,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   const snapshot = (): RunnerSnapshot => {
     const sessions = options.runs.sessionList(options.sessions.list());
     const secretBlocks = options.secretBlocks?.() ?? [];
+    const secretShares = options.secretShares?.() ?? [];
     return { instance, revision: ++revision, runs: options.runs.list(), sessions,
       nativeIds: Object.fromEntries(sessions.map(session => [session.id, options.runs.nativeSessionId(session.id)])),
       settled: [...options.runs.settledRunIds()], autoPrompts: options.autoPrompts?.list() ?? [], version: APP_VERSION,
@@ -223,7 +227,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       ...(options.triggers ? { triggers: options.triggers.overview() } : {}),
       coordinators: [...new Set([...(options.slack?.coordinatorSessionIds() ?? []), ...(options.github?.coordinatorSessionIds() ?? [])])],
       ...(forced ? { updateDrain: options.runs.updateDrainStatus() } : {}),
-      ...(secretBlocks.length ? { secretBlocks } : {}) };
+      ...(secretBlocks.length ? { secretBlocks } : {}),
+      ...(secretShares.length ? { secretShares } : {}) };
   };
   const coordinator = (sessionId: string) => Boolean(options.slack?.coordinatorSessionIds().includes(sessionId) || options.github?.sessionWorkflow(sessionId));
   /** A paired controller's request: refused for coordinator conversations, and run once per request ID. */
@@ -453,7 +458,13 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (operation === 'control') return secrets.control(String(args[1]), record(args[2]), args[3] ?? undefined);
         if (operation === 'peers') return secrets.peers();
         if (operation === 'device') return secrets.device();
-        if (operation === 'poll') return { requests: secrets.poll(String(args[1]), args[2]) };
+        if (operation === 'poll') return secrets.poll(String(args[1]), args[2]);
+        // "호스트 설정 따르기": this computer's vault opening by itself, trust with the host, and clones' folders.
+        if (operation === 'status') return secrets.status();
+        if (operation === 'machine-vault') return { vault: await secrets.machineVault() };
+        if (operation === 'align') return secrets.align(args[1]);
+        if (operation === 'shared-folders') return secrets.sharedFolders();
+        if (operation === 'auto-share') return secrets.autoShare(args[1]);
         if (operation === 'peer-offline') { secrets.peerOffline(String(args[1])); return { forgotten: true }; }
         if (operation === 'answer') return secrets.answer(String(args[1]), args[2] as RemoteSecretRequest);
         if (operation === 'deliver') { secrets.deliver(String(args[1]), args[2] as RemoteSecretResponse); return { delivered: true }; }
@@ -1347,7 +1358,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         // One page from the end: the review reads only the last few messages.
         conversation: async sessionId => (await sessions.detail(runs.nativeSessionId(sessionId), undefined, 40, { previousUser: false }))?.messages ?? [],
       } });
-    const secrets = new SecretRuntime({ stateDir, service: secretService, runs, reviewer: secretReviewer, effects: requireEffects, effectsReady,
+    const secrets = new SecretRuntime({ stateDir, service: secretService, runs, reviewer: secretReviewer, effects: requireEffects, effectsReady, followed: () => followedHost.reload(),
       onConnect: sessionId => runs.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, sessionId),
       isClosed: async id => { const saved = new ClosedSessionStore(stateDir); await saved.start(); return saved.closedIds().has(id); },
       migrate: () => secretStore.migrate(), pendingImports: () => listPendingSecretImports(stateDir),
@@ -1355,6 +1366,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     runs.setRunToolResolver(runToolResolver({ stateDir, runs, slack, github, capabilities, secrets }));
     // The previous worker's open vault: turns restored below find it as the owner left it.
     if (carry) await secrets.adopt(carry).catch(() => { console.error('The vault handed over by the previous worker did not open; it stays locked until unlocked.'); }).finally(() => { carry?.fill(0); carry = undefined; });
+    // A computer that follows a host opens its vault by itself (made first when it has none).
+    await secrets.machineVault().catch(() => { console.error('This computer\'s vault did not open by itself; the owner can open it once.'); });
     const secretExpiry = setInterval(() => { void secrets.sweep().catch(() => { console.error('Secret expiry cleanup failed; the vault remains unavailable until unlocked.'); }); }, 60_000); secretExpiry.unref();
     const visible = await runnerContext({ stateDir, runs, sessions, slack, exclusions });
     autoPrompts.updateContext(visible);
@@ -1752,7 +1765,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       await requireEffects();
       return settings;
     };
-    const hostOptions: RunnerHostOptions = { settingsBackup, stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, compactions, api, secrets, capabilities, ledger, exclusions, managed, releaseStateLock: release, handoffNonce, storage: () => storageStatus, retryStorage: () => retryNormal!(), storageRecovery, storageControl: control, closeStorage, onCloseFailure: () => unavailable(), handoffCarry: () => secrets.handoff(), secretBlocks: () => secrets.blocks(),
+    const hostOptions: RunnerHostOptions = { settingsBackup, stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, compactions, api, secrets, capabilities, ledger, exclusions, managed, releaseStateLock: release, handoffNonce, storage: () => storageStatus, retryStorage: () => retryNormal!(), storageRecovery, storageControl: control, closeStorage, onCloseFailure: () => unavailable(), handoffCarry: () => secrets.handoff(), secretBlocks: () => secrets.blocks(), secretShares: () => secrets.shares(),
       onIdle: async () => { clearInterval(releaseTimer); await retention?.service.quiesce(); await temporary.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); clearInterval(secretExpiry); secrets.close(); stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await tasks.close(); await compactions.close(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
       inFlight: () => secrets.inFlight() || restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || compactions.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       // A forced update waits only for a compaction creating its session; one still reading or summarizing stops with the worker.

@@ -6,7 +6,7 @@ import { relativeTime } from '../common/lib';
 import { SecretAccess, type SecretChange } from './SecretAccess';
 import { kindLabels, secretMatches, usedSecrets } from './secrets-client';
 
-const basisLabels: Record<SecretBasis, string> = { global: 'GLOBAL', folder: '이 폴더', session: '이 세션', legacy: '기존 규칙', remote: '원격 원본' };
+const basisLabels: Record<SecretBasis, string> = { global: '모든 내 머신', machine: '이 머신', folder: '이 폴더', session: '이 세션', legacy: '기존 규칙', remote: '원격 원본' };
 const reviewLabels: Record<SecretUsage['review'], string> = { exempt: '검토 없음', allowed: '검토 통과', failed: '검토 실패(허용됨)', blocked: '차단됨' };
 
 /**

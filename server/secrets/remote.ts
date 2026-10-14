@@ -1,11 +1,29 @@
 import { createCipheriv, createDecipheriv, createHash, createPrivateKey, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes, randomUUID, sign, verify } from 'node:crypto';
 import type { SecretContext, SecretDevice, SecretMetadata, SecretPeer } from '../../shared/secrets.js';
 
-/** `available` is a read: it claims nothing on the source and goes only to a source whose relay confirmed it (`poll`). */
-export type RemoteSecretOperation = 'list' | 'resolve' | 'close' | 'available';
-const OPERATIONS: readonly RemoteSecretOperation[] = ['list', 'resolve', 'close', 'available'];
+/**
+ * `available` and `catalog` are reads: they claim nothing on the source and go only to a source whose relay confirmed
+ * them (`poll`). `catalog` lists every secret of the host a computer follows, shared with it or not (names only).
+ */
+export type RemoteSecretOperation = 'list' | 'resolve' | 'close' | 'available' | 'catalog';
+const OPERATIONS: readonly RemoteSecretOperation[] = ['list', 'resolve', 'close', 'available', 'catalog'];
+const READS: readonly RemoteSecretOperation[] = ['available', 'catalog'];
+/**
+ * What a source's relay says on its poll: the reads its worker serves, and `locked` from the host a computer follows
+ * while that host's vault is locked (it then answers nothing until opened).
+ */
+export type RemoteSecretFeature = 'available' | 'catalog' | 'locked';
+const FEATURES: readonly RemoteSecretFeature[] = ['available', 'catalog', 'locked'];
 /** A source's relay confirms its features on every poll; one not confirmed this recently is treated as an older build. */
 const FEATURE_TTL = 30_000;
+/**
+ * Why a source refused, as it tells a computer whose request asked for reasons (`reasons: true` in a list or resolve
+ * payload, sent only to the followed host once it confirmed `catalog`). Any other refusal stays SECRET_REMOTE_UNAVAILABLE.
+ */
+const REASONS = ['SECRET_NOT_SHARED'] as const;
+/** Refusals of the host a computer follows, told to its agent with what to do (`SecretRefusal`). */
+export const HOST_REFUSALS = { SECRET_NOT_SHARED: 'not-shared', SECRET_HOST_LOCKED: 'host-locked', SECRET_HOST_OFFLINE: 'host-offline' } as const;
+const reasonOf = (error: unknown) => REASONS.find(code => (error as { code?: unknown } | undefined)?.code === code);
 /** Listed metadata in the key set every paired build accepts; anything else, such as why a secret is available, stays local. */
 const WIRE_METADATA = ['id', 'name', 'groupId', 'kind', 'version', 'reference', 'fields', 'expiresAt', 'operations', 'sourceHostId'] as const;
 export function wireMetadata(item: SecretMetadata): SecretMetadata {
@@ -26,6 +44,10 @@ export interface RemoteSecretBrokerOptions {
   /** Atomically persist a first claim before resolving values. Existing claims, including uncertain ones, return false. */
   begin: (context: SecretContext, id: string, digest: string) => boolean | Promise<boolean>;
   finish?: (context: SecretContext, id: string, digest: string, response: RemoteSecretResponse) => void | Promise<void>;
+  /** A refusal told with its reason (`REASONS`), for the owner's notice; called once the response is sealed. */
+  refused?: (context: SecretContext, request: { operation: RemoteSecretOperation; payload: unknown }, code: typeof REASONS[number]) => void;
+  /** The controller route of the host this computer follows; requests to it fail at once while it is locked or offline. */
+  followed?: () => string | undefined;
   now?: () => number; timeoutMs?: number;
 }
 export const REMOTE_SECRET_MAX_RESPONSE_BYTES = 3 * 1024 * 1024;
@@ -101,7 +123,11 @@ export class RemoteSecretBroker {
   private readonly waiting = new Map<string, Pending>();
   private readonly answering = new Set<string>();
   /** Each source's last relay poll, by controller route: when, and what it said its worker serves (nothing from older relays). */
-  private readonly polls = new Map<string, { deviceId: string; features: string[]; at: number }>();
+  private readonly polls = new Map<string, { deviceId: string; features: RemoteSecretFeature[]; at: number }>();
+  /** Controller routes whose link went away, until their relay polls again. */
+  private readonly offline = new Set<string>();
+  /** Requests refused because the followed host said it is locked, by route, until its web reads how many. */
+  private readonly lockRefusals = new Map<string, number>();
   private readonly now: () => number;
   constructor(private readonly options: RemoteSecretBrokerOptions) { this.now = options.now ?? Date.now; }
   private peer(id: string, route?: { id: string; direction: SecretPeer['direction'] }): SecretPeer {
@@ -117,19 +143,31 @@ export class RemoteSecretBroker {
     } catch { return undefined; } // best-effort: without one trusted peer there is no poll to go by
   }
   /** Whether this source's relay confirmed `feature` recently. */
-  supports(peerId: string, feature: 'available'): boolean { return this.recentPoll(peerId)?.features.includes(feature) ?? false; }
+  supports(peerId: string, feature: 'available' | 'catalog'): boolean { return this.recentPoll(peerId)?.features.includes(feature) ?? false; }
   /** Whether this source's relay polled recently without confirming `feature`: it answers, but its build predates it. */
-  declines(peerId: string, feature: 'available'): boolean { const poll = this.recentPoll(peerId); return !!poll && !poll.features.includes(feature); }
+  declines(peerId: string, feature: 'available'): boolean { const poll = this.recentPoll(peerId); return !!poll && !poll.features.includes('locked') && !poll.features.includes(feature); }
   /** The source's link went away: what its relay said no longer holds. */
-  forget(controllerRouteId: string): void { this.polls.delete(controllerRouteId); }
+  forget(controllerRouteId: string): void { this.polls.delete(controllerRouteId); this.offline.add(controllerRouteId); }
+  /** Why the followed host cannot answer now: its relay said it is locked, or its link is down. */
+  private hostDown(peer: SecretPeer): 'SECRET_HOST_LOCKED' | 'SECRET_HOST_OFFLINE' | undefined {
+    if (peer.direction !== 'controller' || peer.routeId !== this.options.followed?.()) return;
+    if (this.recentPoll(peer.device.id)?.features.includes('locked')) return 'SECRET_HOST_LOCKED';
+    if (this.offline.has(peer.routeId)) return 'SECRET_HOST_OFFLINE';
+  }
+  /** Requests refused since the last call because the followed host on this route said it is locked. */
+  lockedRefusals(controllerRouteId: string): number { const count = this.lockRefusals.get(controllerRouteId) ?? 0; this.lockRefusals.delete(controllerRouteId); return count; }
   request(peerId: string, context: SecretContext, operation: RemoteSecretOperation, payload: unknown = {}, options: { timeoutMs?: number } = {}): Promise<unknown> {
     if (this.waiting.size >= MAX_PENDING) return Promise.reject(refusal('SECRET_REMOTE_BUSY'));
     // An older source refuses an operation it does not know only after its full deadline; never send it one.
-    if (operation === 'available' && !this.supports(peerId, 'available')) return Promise.reject(refusal('SECRET_REMOTE_UNSUPPORTED'));
+    if ((operation === 'available' || operation === 'catalog') && !this.supports(peerId, operation)) return Promise.reject(refusal('SECRET_REMOTE_UNSUPPORTED'));
     try {
       const device = this.options.device(), peer = this.peer(peerId);
       const sent = wireContext(context);
       if (peer.direction !== 'controller' || !contextValid(sent) || sent.hostId !== device.id || !OPERATIONS.includes(operation)) return fail();
+      const down = this.hostDown(peer);
+      if (down) return Promise.reject(refusal(down));
+      // The followed host that serves `catalog` tells why it refuses, when asked.
+      if ((operation === 'list' || operation === 'resolve') && peer.routeId === this.options.followed?.() && this.supports(peerId, 'catalog')) payload = { ...payload as Record<string, unknown>, reasons: true };
       const createdAt = this.now();
       const body = { version: 1 as const, id: randomUUID(), nonce: randomUUID(), from: device.id, to: peerId, createdAt,
         expiresAt: createdAt + Math.min(MAX_TTL, Math.max(1, options.timeoutMs ?? this.options.timeoutMs ?? MAX_TTL)), context: sent, operation, payload: encode(payload) };
@@ -144,13 +182,20 @@ export class RemoteSecretBroker {
   /** Requests for a source's relay; `features` is what that relay says its worker serves, absent from older relays. */
   poll(controllerRouteId: string, features?: unknown): RemoteSecretRequest[] {
     const peer = this.options.peers().find(peer => peer.enabled && peer.direction === 'controller' && peer.routeId === controllerRouteId);
-    const confirmed = Array.isArray(features) ? OPERATIONS.filter(operation => operation === 'available' && features.includes(operation)) : [];
+    const confirmed = Array.isArray(features) ? FEATURES.filter(feature => features.includes(feature)) : [];
     if (peer) this.polls.set(controllerRouteId, { deviceId: peer.device.id, features: confirmed, at: this.now() });
     else this.polls.delete(controllerRouteId);
-    // A read queued while this source confirmed reads is refused here once it no longer does, never handed to its relay.
+    this.offline.delete(controllerRouteId);
+    // A read queued while this source confirmed reads is refused here once it no longer does, never handed to its relay;
+    // anything queued for the followed host is refused once it says it is locked.
+    const down = peer && this.hostDown(peer);
     for (const [id, pending] of this.waiting) {
-      if (pending.request.operation !== 'available' || pending.peer.routeId !== controllerRouteId || this.supports(pending.peer.device.id, 'available')) continue;
-      this.waiting.delete(id); clearTimeout(pending.timer); pending.reject(refusal('SECRET_REMOTE_UNSUPPORTED'));
+      if (pending.peer.routeId !== controllerRouteId) continue;
+      const read = READS.includes(pending.request.operation);
+      const code = down ?? (read && !this.supports(pending.peer.device.id, pending.request.operation as 'available' | 'catalog') ? 'SECRET_REMOTE_UNSUPPORTED' : undefined);
+      if (!code) continue;
+      this.waiting.delete(id); clearTimeout(pending.timer); pending.reject(refusal(code));
+      if (code === 'SECRET_HOST_LOCKED') this.lockRefusals.set(controllerRouteId, (this.lockRefusals.get(controllerRouteId) ?? 0) + 1);
     }
     return [...this.waiting.values()].filter(p => p.request.expiresAt > this.now() && this.options.peers().some(peer => peer.enabled && peer.direction === 'controller' && peer.routeId === controllerRouteId && peer.device.id === p.peer.device.id && peer.device.signingKey === p.peer.device.signingKey && peer.device.encryptionKey === p.peer.device.encryptionKey))
       .slice(0, 8).map(p => structuredClone(p.request));
@@ -174,17 +219,27 @@ export class RemoteSecretBroker {
     if (this.answering.has(request.id) || this.answering.size >= MAX_PENDING) return fail('SECRET_REMOTE_UNCERTAIN');
     this.answering.add(request.id);
     // A read is answered again within its deadline rather than claimed: it changes nothing here and only its sender can open it.
-    const claimed = request.operation !== 'available';
-    let result: unknown;
+    const claimed = !READS.includes(request.operation);
+    const payload = decode(request.payload);
+    // Only a computer that follows this host asks for reasons; any other one gets today's answers.
+    const reasons = (request.operation === 'list' || request.operation === 'resolve') && record(payload) && payload.reasons === true;
+    let result: unknown; let reason: typeof REASONS[number] | undefined; let begun = !claimed;
     try {
-      if (claimed && (!await this.options.begin(request.context, `remote-id:${request.from}:${request.id}`, digest)
-        || !await this.options.begin(request.context, `remote-nonce:${request.from}:${request.nonce}`, digest))) return fail('SECRET_REMOTE_UNCERTAIN');
       try {
+        if (claimed && (!await this.options.begin(request.context, `remote-id:${request.from}:${request.id}`, digest)
+          || !await this.options.begin(request.context, `remote-nonce:${request.from}:${request.nonce}`, digest))) return fail('SECRET_REMOTE_UNCERTAIN');
+        begun = true;
+      } catch (error) {
+        // A first use in a folder nothing is shared with is told so, instead of going unanswered.
+        if (!reasons || !(reason = reasonOf(error))) throw error;
+      }
+      if (reason) result = { ok: false, code: reason };
+      else try {
         // Re-read trust immediately before the policy owner resolves the operation.
         const current = this.peer(request.from, { id: nodeRouteId, direction: 'node' });
         if (current.device.signingKey !== peer.device.signingKey || current.device.encryptionKey !== peer.device.encryptionKey || this.now() >= request.expiresAt) return fail();
-        result = { ok: true, value: encode(await this.options.handle(request.context, { operation: request.operation, payload: decode(request.payload), id: request.id })) };
-      } catch { result = { ok: false, code: 'SECRET_REMOTE_UNAVAILABLE' }; }
+        result = { ok: true, value: encode(await this.options.handle(request.context, { operation: request.operation, payload, id: request.id })) };
+      } catch (error) { reason = reasons ? reasonOf(error) : undefined; result = { ok: false, code: reason ?? 'SECRET_REMOTE_UNAVAILABLE' }; }
       const stillTrusted = this.peer(request.from, { id: nodeRouteId, direction: 'node' });
       if (stillTrusted.device.signingKey !== peer.device.signingKey || stillTrusted.device.encryptionKey !== peer.device.encryptionKey || this.now() >= request.expiresAt) return fail();
       const ephemeral = generateKeyPairSync('x25519');
@@ -203,7 +258,9 @@ export class RemoteSecretBroker {
       } finally { key.fill(0); }
       response.signature = sign(null, unsigned(response), keys.signingPrivateKey).toString('base64url');
       wire(response, MAX_WIRE);
-      if (claimed) await this.options.finish?.(request.context, `remote-id:${request.from}:${request.id}`, digest, response);
+      // A refusal before the claim has no claim to finish.
+      if (claimed && begun) await this.options.finish?.(request.context, `remote-id:${request.from}:${request.id}`, digest, response);
+      if (reason) this.options.refused?.(request.context, { operation: request.operation, payload }, reason);
       return response;
     } finally { this.answering.delete(request.id); }
   }
@@ -231,7 +288,7 @@ export class RemoteSecretBroker {
     const resolved = result.ok ? decode(result.value) : undefined;
     this.waiting.delete(response.id); clearTimeout(pending.timer);
     if (result.ok) pending.resolve(resolved);
-    else pending.reject(refusal('SECRET_REMOTE_UNAVAILABLE'));
+    else pending.reject(refusal(REASONS.find(code => code === result.code) ?? 'SECRET_REMOTE_UNAVAILABLE'));
   }
   pending(): number { return this.waiting.size; }
   inFlight(): number { return this.answering.size; }

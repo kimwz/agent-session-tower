@@ -24,6 +24,7 @@ import type { TriggerBackup } from '../triggers/backup.js';
 import type { SkillBackup } from '../skills/backup.js';
 import { TowerError, fromStatus, statusOf, type Disposition } from '../../shared/errors.js';
 import type { ManagedSection } from '../../shared/managed.js';
+import type { SecretShareNotice } from '../../shared/secrets.js';
 import type { StreamSink } from '../streams/sink.js';
 
 interface Options { stateDir: string; workerEntry?: string; startupTimeoutMs?: number; pollMs?: number; version?: string;
@@ -350,6 +351,14 @@ export class DurableRunManager extends EventEmitter {
     if (!Array.isArray(blocks)) return [];
     return blocks.filter((block): block is SecretBlockNotice => !!block && typeof block === 'object' && typeof block.key === 'string' && typeof block.sessionId === 'string'
       && Number.isSafeInteger(block.at) && typeof block.reason === 'string' && Array.isArray(block.secrets) && block.secrets.every((name: unknown) => typeof name === 'string')).map(block => structuredClone(block));
+  }
+  /** Secret requests of computers that follow this Tower, for the owner's share notifications; none from older workers. */
+  secretShares(): SecretShareNotice[] {
+    const notices: unknown = this.snapshot?.secretShares;
+    if (!Array.isArray(notices)) return [];
+    return notices.filter((notice): notice is SecretShareNotice => !!notice && typeof notice === 'object' && typeof notice.key === 'string' && Number.isSafeInteger(notice.at)
+      && (notice.kind === 'not-shared' || notice.kind === 'host-locked') && typeof notice.nodeId === 'string'
+      && ['hostId', 'secretId', 'secretName'].every(key => notice[key] === undefined || typeof notice[key] === 'string')).map(notice => structuredClone(notice));
   }
   /** Tower operations run in the worker; an outdated worker is told apart from a real error. */
   async api(operation: string, input: unknown, internal?: Pick<WebAdmission, 'origin' | 'requestId' | 'callerCapability' | 'brokerOwnerAuthorized' | 'sender'>): Promise<unknown> {

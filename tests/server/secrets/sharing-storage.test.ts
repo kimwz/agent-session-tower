@@ -68,8 +68,8 @@ test('sharing one key out of a shared rule leaves every other key’s decision, 
   const subject = await context(f.service, 'session', '/p');
   const keptBefore = (await f.service.list(subject)).find(item => item.id === kept.metadata.id);
   assert.deepEqual(keptBefore?.fields, ['B']);
-  assert.deepEqual(await f.service.setSharing(edited.metadata.id, 0, { global: false, folders: [] }), { revision: 1, global: false, folders: [] });
-  await f.service.setSharing(alone.metadata.id, 0, { global: false, folders: [{ hostId: f.host, root: '/q' }] });
+  assert.deepEqual(await f.service.setSharing(edited.metadata.id, 0, { allMachines: false, folders: [] }), { revision: 1, allMachines: false, machines: [], folders: [] });
+  await f.service.setSharing(alone.metadata.id, 0, { allMachines: false, folders: [{ hostId: f.host, root: '/q' }] });
   assert.deepEqual(stored(f.service).rules, [{ ...shared, secretIds: [kept.metadata.id], fields: { [kept.metadata.id]: ['B'] } }], 'only the edited keys leave; a rule left empty goes');
   assert.deepEqual((await f.service.list(subject)).find(item => item.id === kept.metadata.id), keptBefore);
   assert.deepEqual(names(await f.service.list(subject)), ['kept']);
@@ -80,21 +80,21 @@ test('sharing one key out of a shared rule leaves every other key’s decision, 
 test('sharing edits are revisioned, validated and limited to computers this vault serves', async t => {
   const f = await fixture(t);
   const secret = await f.service.create({ name: 'key', kind: 'scalar', value: 'v' });
-  assert.deepEqual(f.service.settings().secrets[0].sharing, { revision: 1, global: false, folders: [] }, 'a new key is saved unshared');
-  await assert.rejects(f.service.setSharing(secret.id, 0, { global: true, folders: [] }), refusal('conflict'));
-  await assert.rejects(f.service.setSharing('missing', 1, { global: true, folders: [] }), refusal('not-found'));
+  assert.deepEqual(f.service.settings().secrets[0].sharing, { revision: 1, allMachines: false, machines: [], folders: [] }, 'a new key is saved unshared');
+  await assert.rejects(f.service.setSharing(secret.id, 0, { allMachines: true, folders: [] }), refusal('conflict'));
+  await assert.rejects(f.service.setSharing('missing', 1, { allMachines: true, folders: [] }), refusal('not-found'));
   for (const folder of [{ hostId: NODE, root: '/node' }, { hostId: f.host, root: 'relative' }, { hostId: f.host, root: '/p/' }, { hostId: f.host, root: '/p/../q' }, { hostId: '', root: '/p' }])
-    await assert.rejects(f.service.setSharing(secret.id, 1, { global: false, folders: [folder] }), refusal('invalid'), JSON.stringify(folder));
-  await assert.rejects(f.service.setSharing(secret.id, 1, { global: 'yes', folders: [] } as never), refusal('invalid'));
+    await assert.rejects(f.service.setSharing(secret.id, 1, { allMachines: false, folders: [folder] }), refusal('invalid'), JSON.stringify(folder));
+  await assert.rejects(f.service.setSharing(secret.id, 1, { allMachines: 'yes', folders: [] } as never), refusal('invalid'));
   await f.service.trustPeer({ device: { ...f.service.device(), id: NODE }, routeId: 'node', direction: 'node', enabled: true });
-  const saved = await f.service.setSharing(secret.id, 1, { global: false, folders: [{ hostId: NODE, root: '/node' }, { hostId: f.host, root: '/p' }, { hostId: NODE, root: '/node' }] });
-  assert.deepEqual(saved, { revision: 2, global: false, folders: [{ hostId: NODE, root: '/node' }, { hostId: f.host, root: '/p' }] });
+  const saved = await f.service.setSharing(secret.id, 1, { allMachines: false, folders: [{ hostId: NODE, root: '/node' }, { hostId: f.host, root: '/p' }, { hostId: NODE, root: '/node' }] });
+  assert.deepEqual(saved, { revision: 2, allMachines: false, machines: [], folders: [{ hostId: NODE, root: '/node' }, { hostId: f.host, root: '/p' }] });
   await f.service.removePeer(NODE);
-  assert.deepEqual((await f.service.setSharing(secret.id, 2, { global: true, folders: saved.folders })).folders, saved.folders, 'a kept folder of a computer no longer trusted can stay until the owner removes it');
-  await assert.rejects(f.service.setSharing(secret.id, 3, { global: true, folders: [...saved.folders, { hostId: NODE, root: '/other' }] }), refusal('invalid'));
+  assert.deepEqual((await f.service.setSharing(secret.id, 2, { allMachines: true, folders: saved.folders })).folders, saved.folders, 'a kept folder of a computer no longer trusted can stay until the owner removes it');
+  await assert.rejects(f.service.setSharing(secret.id, 3, { allMachines: true, folders: [...saved.folders, { hostId: NODE, root: '/other' }] }), refusal('invalid'));
   const temporary = await f.service.create({ name: 'pasted', kind: 'scalar', value: 't', temporary: true }, await f.service.ensureTask('session', '/p'));
-  await assert.rejects(f.service.setSharing(temporary.id, 1, { global: true, folders: [] }), refusal('not-found'), 'a session value is never shared');
-  await assert.rejects(f.service.create({ name: 'pasted', kind: 'scalar', value: 't', temporary: true, sharing: { global: true, folders: [] } }, await f.service.ensureTask('session', '/p')), refusal('invalid'));
+  await assert.rejects(f.service.setSharing(temporary.id, 1, { allMachines: true, folders: [] }), refusal('not-found'), 'a session value is never shared');
+  await assert.rejects(f.service.create({ name: 'pasted', kind: 'scalar', value: 't', temporary: true, sharing: { allMachines: true, folders: [] } }, await f.service.ensureTask('session', '/p')), refusal('invalid'));
   await assert.rejects(f.service.create({ name: 'pasted', kind: 'scalar', value: 't', temporary: true }), /Task target required/);
 });
 
@@ -102,13 +102,14 @@ test('an older build’s round trip: it reads, edits rules and saves; the upgrad
   const f = await fixture(t);
   const legacy = legacyRecord(f.host, { name: 'legacy', groupId: 'g', value: 'legacy-value' }), edited = legacyRecord(f.host, { name: 'edited', groupId: 'g', value: 'edited-value' });
   await editPayload(f.service, payload => { payload.groups.push({ id: 'g', name: 'G', scope: 'global' }); payload.secrets.push(legacy, edited); payload.rules.push(legacyRule({ groupId: 'g', secretIds: [legacy.metadata.id, edited.metadata.id], hostId: f.host, root: '/a' })); });
-  await f.service.setSharing(edited.metadata.id, 0, { global: true, folders: [] });
+  await f.service.setSharing(edited.metadata.id, 0, { allMachines: true, folders: [] });
   const atA = await context(f.service, 'session-a', '/a'), atB = await context(f.service, 'session-b', '/b');
   assert.deepEqual(names(await f.service.list(atA)), ['edited', 'legacy']); assert.deepEqual(names(await f.service.list(atB)), ['edited']);
   // The older build keeps keys it does not know, so `sharing` survives; its rule editor sees the edited key in no rule.
   const saved = await payloadOf(f.service);
   assert.deepEqual(saved.rules.map(rule => rule.secretIds), [[legacy.metadata.id]]);
-  assert.deepEqual(saved.secrets.find(item => item.metadata.id === edited.metadata.id)?.sharing, { revision: 1, global: true, folders: [] });
+  // `global` stays beside `allMachines`, so the older build shares it with all machines as this one does.
+  assert.deepEqual(saved.secrets.find(item => item.metadata.id === edited.metadata.id)?.sharing, { revision: 1, allMachines: true, machines: [], folders: [], global: true });
   await editPayload(f.service, payload => {
     payload.rules[0] = { ...payload.rules[0], root: '/b', revision: payload.rules[0].revision + 1 };
     payload.rules.push(legacyRule({ groupId: 'g', secretIds: [edited.metadata.id], hostId: f.host, root: '/a' }));
@@ -116,10 +117,10 @@ test('an older build’s round trip: it reads, edits rules and saves; the upgrad
   assert.deepEqual(names(await f.service.list(atA)), [], 'the moved rule and the withheld key both apply at once');
   assert.deepEqual(names(await f.service.list(atB)), ['legacy']);
   const row = f.service.settings().secrets.find(item => item.id === edited.metadata.id)!;
-  assert.deepEqual([row.withheld, row.sharing?.global], [true, true]);
+  assert.deepEqual([row.withheld, row.sharing?.allMachines], [true, true]);
   await f.service.connectSession(atA, [edited.metadata.id]);
   assert.deepEqual(names(await f.service.list(atA)), ['edited'], 'a session connection still opens a withheld key');
-  await f.service.setSharing(edited.metadata.id, 1, { global: true, folders: [] });
+  await f.service.setSharing(edited.metadata.id, 1, { allMachines: true, folders: [] });
   assert.equal(f.service.settings().secrets.find(item => item.id === edited.metadata.id)?.withheld, undefined);
   assert.deepEqual(stored(f.service).rules.map(rule => rule.secretIds), [[legacy.metadata.id]], 'the owner’s save takes the key out of the older build’s rule again');
   assert.deepEqual(names(await f.service.list(atB)), ['edited', 'legacy']);
@@ -161,7 +162,7 @@ test('backups of 1.105 and of the sharing format import every key unshared, with
     for (const record of imported.secrets) {
       const original = source.secrets.find(item => item.metadata.id === record.metadata.id)!;
       assert.equal(valueOf(record), valueOf(original), `${name}: ${record.metadata.name}`);
-      assert.deepEqual([record.sharing, record.temporaryTaskId, record.metadata.reference], [{ revision: 1, global: false, folders: [] }, undefined, `tower-secret://${f.host}/${record.metadata.id}@${record.metadata.version}`]);
+      assert.deepEqual([record.sharing, record.temporaryTaskId, record.metadata.reference], [{ revision: 1, allMachines: false, machines: [], folders: [], global: false }, undefined, `tower-secret://${f.host}/${record.metadata.id}@${record.metadata.version}`]);
     }
     assert.deepEqual(imported.rules, []); assert.deepEqual(imported.peers, []);
     assert.ok(source.groups.filter(group => group.scope !== 'task').every(group => imported.groups.some(item => item.id === group.id)), `${name}: groups, Tower included`);
@@ -220,8 +221,8 @@ test('usage is kept per session, value-free, for the latest thousand uses', asyn
 test('available and availableFor read without creating tasks or ledger entries', async t => {
   const f = await fixture(t);
   await f.service.trustPeer({ device: { ...f.service.device(), id: NODE }, routeId: 'node', direction: 'node', enabled: true });
-  const global = await f.service.create({ name: 'global', kind: 'scalar', value: 'g', sharing: { global: true, folders: [] } });
-  await f.service.create({ name: 'node-folder', kind: 'scalar', value: 'n', sharing: { global: false, folders: [{ hostId: NODE, root: '/node' }] } });
+  const global = await f.service.create({ name: 'global', kind: 'scalar', value: 'g', sharing: { allMachines: true, folders: [] } });
+  await f.service.create({ name: 'node-folder', kind: 'scalar', value: 'n', sharing: { allMachines: false, folders: [{ hostId: NODE, root: '/node' }] } });
   const unshared = await f.service.create({ name: 'unshared', kind: 'scalar', value: 'u' });
   const journal = await readFile(join(f.stateDir, 'secrets', 'journal.json'));
   const fresh = f.service.available({ sessionId: 'session', root: '/p' });
@@ -242,10 +243,10 @@ test('available and availableFor read without creating tasks or ledger entries',
 test('a node’s existing task is admitted without coverage, only with its own identity from a trusted node', async t => {
   const f = await fixture(t);
   await f.service.trustPeer({ device: { ...f.service.device(), id: NODE }, routeId: 'node', direction: 'node', enabled: true });
-  const secret = await f.service.create({ name: 'shared', kind: 'scalar', value: 's', sharing: { global: false, folders: [{ hostId: NODE, root: '/node' }] } });
+  const secret = await f.service.create({ name: 'shared', kind: 'scalar', value: 's', sharing: { allMachines: false, folders: [{ hostId: NODE, root: '/node' }] } });
   const remote = { hostId: NODE, sessionId: 'node-session', root: '/node', taskId: randomUUID(), runId: 'node-run' };
   const admitted = await f.service.ensureRemoteTask(remote);
-  await f.service.setSharing(secret.id, 1, { global: false, folders: [] });
+  await f.service.setSharing(secret.id, 1, { allMachines: false, folders: [] });
   assert.deepEqual(await f.service.ensureRemoteTask(remote), admitted, 'a close or list for the task it already has still reaches it');
   assert.deepEqual(await f.service.list(admitted), []);
   for (const other of [{ ...remote, sessionId: 'other-session' }, { ...remote, root: '/node/sub' }]) await assert.rejects(f.service.ensureRemoteTask(other), /Task identity denied/);
@@ -257,7 +258,7 @@ test('disconnecting stops a key in that session whatever allows it, and connecti
   const f = await fixture(t);
   const ruled = legacyRecord(f.host, { name: 'ruled', groupId: 'g', value: 'r' });
   await editPayload(f.service, payload => { payload.groups.push({ id: 'g', name: 'G', scope: 'global' }); payload.secrets.push(ruled); payload.rules.push(legacyRule({ groupId: 'g', secretIds: [ruled.metadata.id], hostId: f.host, allProjects: true, activation: 'auto' })); });
-  const shared = await f.service.create({ name: 'shared', kind: 'scalar', value: 's', sharing: { global: true, folders: [{ hostId: f.host, root: '/p' }] } });
+  const shared = await f.service.create({ name: 'shared', kind: 'scalar', value: 's', sharing: { allMachines: true, folders: [{ hostId: f.host, root: '/p' }] } });
   const subject = await context(f.service, 'session', '/p'), other = await context(f.service, 'other', '/p');
   await f.service.connectSession(subject, [ruled.metadata.id, shared.id]);
   assert.deepEqual(f.service.available(subject).map(item => [item.name, item.basis]), [['ruled', ['session', 'legacy']], ['shared', ['session', 'global', 'folder']]]);

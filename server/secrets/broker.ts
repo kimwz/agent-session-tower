@@ -3,13 +3,22 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto
 import { chmod, lstat, mkdir, mkdtemp, open, realpath, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { isAbsolute, join, relative, resolve as absolute, sep } from 'node:path';
-import { SECRET_OPERATIONS, type SecretContext, type SecretMetadata, type SecretOperation, type SecretRunInput, type SecretRunResult, type SecretUsage } from '../../shared/secrets.js';
+import { SECRET_OPERATIONS, type SecretCatalogItem, type SecretContext, type SecretMetadata, type SecretOperation, type SecretRefusal, type SecretRunInput, type SecretRunResult, type SecretUsage } from '../../shared/secrets.js';
 import type { ResolvedSecret, SecretDispatchUse, SecretService } from './service.js';
-import type { RemoteSecretBroker } from './remote.js';
+import { HOST_REFUSALS, type RemoteSecretBroker } from './remote.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
 import { reviewedScript, reviewUses, type SecretReview, type SecretReviewRequest, type SecretReviewUse, type SecretUseReviewer } from './reviewer.js';
 
-type SourceFailure = { sourceHostId: string; code: 'SECRET_SOURCE_UNAVAILABLE' };
+type SourceFailure = { sourceHostId: string; code: 'SECRET_SOURCE_UNAVAILABLE' | 'SECRET_SOURCE_LOCKED' };
+/** A not-shared secret of the followed host as `secrets_list` names it: usable only once the owner shares it. */
+export type NotSharedSecret = Omit<SecretCatalogItem, 'status'> & { sourceHostId: string; status: 'not-shared' };
+/** What the agent is told when the host it relies on refused, and what to do about it. */
+const HOST_REFUSED: Record<SecretRefusal, string> = {
+  'not-shared': '호스트가 이 시크릿을 이 컴퓨터나 이 폴더에 공유하지 않아 사용하지 못했습니다(SECRET_NOT_SHARED). 소유자에게 공유 요청을 알렸습니다. 소유자가 공유한 뒤 새 operationId로 다시 요청하세요. 같은 operationId는 이 결과를 그대로 돌려줍니다.',
+  'host-locked': '호스트의 시크릿 보관함이 잠겨 있어 사용하지 못했습니다(SECRET_HOST_LOCKED). 소유자에게 알렸습니다. 소유자가 보관함을 연 뒤 새 operationId로 다시 요청하세요.',
+  'host-offline': '호스트와의 연결이 끊겨 시크릿을 사용하지 못했습니다(SECRET_HOST_OFFLINE). 연결이 돌아오면 새 operationId로 다시 요청하세요.',
+};
+const hostRefusal = (error: unknown): SecretRefusal | undefined => HOST_REFUSALS[(error as { code?: string } | undefined)?.code as keyof typeof HOST_REFUSALS];
 type Resolved = ResolvedSecret;
 const failure = (message: string, kind: ErrorKind = 'invalid') => new TowerError(kind, message);
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -51,6 +60,13 @@ export function validateSecretRunInput(value: unknown): SecretRunInput {
   return structuredClone(value) as unknown as SecretRunInput;
 }
 /** A source's listing in the key set every paired build sends, each item a reference of that source; throws otherwise. */
+/** The followed host's catalog: names and references of that host only, nothing else; throws otherwise. */
+export function remoteCatalog(result: unknown, sourceHostId: string): SecretCatalogItem[] {
+  if (!Array.isArray(result) || result.length > 4096 || result.some(item => !plain(item) || Object.keys(item).sort().join() !== 'id,kind,name,reference,status'
+    || !text(item.id, 1024) || !text(item.name, 256) || !['scalar', 'env', 'file'].includes(String(item.kind)) || !['available', 'not-shared'].includes(String(item.status))
+    || !reference(item.reference) || !item.reference.startsWith(`tower-secret://${sourceHostId}/${item.id}@`) || item.reference.includes('#'))) throw failure('원격 목록이 올바르지 않습니다.', 'upstream');
+  return result as SecretCatalogItem[];
+}
 export function remoteListing(result: unknown, sourceHostId: string): SecretMetadata[] {
   if (!Array.isArray(result) || result.length > 4096 || result.some(item => !plain(item)
     || Object.keys(item).some(key => !['id', 'name', 'groupId', 'kind', 'version', 'reference', 'fields', 'expiresAt', 'operations', 'activation', 'sourceHostId'].includes(key))
@@ -190,13 +206,32 @@ export class SecretBroker {
         const result = await this.options.remote.request(peer.device.id, context, 'list', {});
         this.options.service.checkTask(context);
         return remoteListing(result, peer.device.id).filter(item => { try { this.options.service.checkTask(context, item.id); return true; } catch { return false; } });
-      } catch { failures.push({ sourceHostId: peer.device.id, code: 'SECRET_SOURCE_UNAVAILABLE' }); return []; }
+      } catch (error) {
+        // The followed host says when it shares nothing with this folder, which is no failure, or that it is locked.
+        const refused = hostRefusal(error);
+        if (refused !== 'not-shared') failures.push({ sourceHostId: peer.device.id, code: refused === 'host-locked' ? 'SECRET_SOURCE_LOCKED' : 'SECRET_SOURCE_UNAVAILABLE' });
+        return [];
+      }
     }));
     this.options.service.checkTask(context);
     if (this.sourceFailures.size >= 256) this.sourceFailures.delete(this.sourceFailures.keys().next().value!);
     this.sourceFailures.set(this.subject(context), failures);
     this.options.validate?.(context);
     return [...local, ...remote.flat()];
+  }
+
+  /**
+   * The followed host's secrets this session may not use, by name and reference (`catalog`), besides those `listed`;
+   * none from a host whose relay did not confirm it serves the catalog, or that does not answer.
+   */
+  async notShared(context: SecretContext, followedRoute: string, listed: readonly SecretMetadata[]): Promise<NotSharedSecret[]> {
+    const peer = this.options.service.peers().find(peer => peer.enabled && peer.direction === 'controller' && peer.routeId === followedRoute);
+    if (!peer || !this.options.remote?.supports(peer.device.id, 'catalog')) return [];
+    let items: SecretCatalogItem[];
+    try { items = remoteCatalog(await this.options.remote.request(peer.device.id, context, 'catalog', {}), peer.device.id); }
+    catch { return []; } // best-effort: the list itself already says when the host cannot be reached
+    const known = new Set(listed.map(item => item.id));
+    return items.filter(item => item.status === 'not-shared' && !known.has(item.id)).map(item => ({ ...item, status: 'not-shared' as const, sourceHostId: peer.device.id }));
   }
 
   private async resolve(context: SecretContext, reference: string, operation: SecretOperation): Promise<Resolved> {
@@ -209,7 +244,10 @@ export class SecretBroker {
     }
     this.options.service.checkTask(context, match[2]);
     if (!this.options.remote) throw failure('시크릿 원본 컴퓨터에 연결할 수 없습니다.', 'unavailable');
-    const answer = await this.options.remote.request(match[1], context, 'resolve', { reference, operation }) as Resolved;
+    const answer = await this.options.remote.request(match[1], context, 'resolve', { reference, operation }).catch(error => {
+      const refused = hostRefusal(error);
+      throw refused ? new SecretUseRefused('forbidden', HOST_REFUSED[refused], { cause: error }) : error;
+    }) as Resolved;
     try {
       this.options.service.checkTask(context, match[2]);
       if (!plain(answer) || !Buffer.isBuffer(answer.bytes) || answer.bytes.length > MAX_INPUT_BYTES || !plain(answer.metadata)

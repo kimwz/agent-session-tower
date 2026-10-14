@@ -12,6 +12,7 @@ import { useSlackMonitor } from '../slack/use-slack-monitor';
 import { slackChatSelection, slackCoordinatorSessionIds } from '../slack/slack-chat-selection';
 import { finishedAutomationSessionIds } from '../../../shared/automation-sessions';
 import { SettingsButton } from '../settings/SettingsButton';
+import { openShareRequest, openShareRequestFromAddress } from '../secrets/share-request';
 import type { SettingsContext } from '../settings/SettingsDialog';
 import { RunnerUpdateBadge, ToolVersion, TowerUpdateBadge } from './AutoUpdate';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
@@ -201,11 +202,13 @@ function TowerApp() {
     const onMessage = (event: MessageEvent) => {
       if (event.data?.type !== 'tower:open' || typeof event.data.url !== 'string') return;
       const url = new URL(event.data.url, window.location.origin);
-      if (url.origin === window.location.origin) selectSession(url.searchParams.get('session'));
+      if (url.origin === window.location.origin && !openShareRequest(url)) selectSession(url.searchParams.get('session'));
     };
     navigator.serviceWorker.addEventListener('message', onMessage);
     return () => navigator.serviceWorker.removeEventListener('message', onMessage);
   }, [selectSession]);
+  // A share push opened in a new window: its secret's sharing opens once the settings can.
+  useEffect(() => { if (token) openShareRequestFromAddress(); }, [token]);
   const closeChat = useCallback(() => selectSession(null), [selectSession]);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
