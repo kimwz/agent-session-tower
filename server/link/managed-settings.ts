@@ -90,6 +90,7 @@ export class ManagedSettingsSync extends EventEmitter {
   schedule(id: string): Promise<void> {
     const current = this.running.get(id);
     if (current) { this.again.add(id); return current; }
+    // best-effort: sync records its own failures in the computer's status; the next minute tries again.
     const run = this.sync(id).catch(() => {}).finally(() => {
       this.running.delete(id);
       if (this.again.delete(id)) void this.schedule(id);
@@ -141,6 +142,7 @@ export class ManagedSettingsSync extends EventEmitter {
   async refreshFolders(id: string): Promise<ManagedFolder[]> {
     const session = this.targets().some(node => node.id === id) ? this.options.controller.session(id) : undefined;
     if (!session) return this.folders(id);
+    // best-effort: the last list known stays until the next refresh.
     const answer = await linkRequest(session, 'GET', '/api/managed/folders', undefined, 30_000).catch(() => undefined);
     const folders = answer?.status === 200 ? parseFolders(answer.json) : undefined;
     if (!folders) return this.folders(id);
@@ -186,6 +188,7 @@ export class ManagedSettingsReceiver {
   register(section: ManagedSection, applier: ManagedApplier): void { this.appliers.set(section, applier); }
 
   async start(): Promise<void> {
+    // best-effort: no record yet (or an unreadable one) only means nothing is reported until the next apply.
     const saved = await readPrivateJson(this.path, 64 * 1024).catch(() => undefined);
     this.last = parseApplied(saved);
   }
@@ -200,6 +203,7 @@ export class ManagedSettingsReceiver {
     const json = (status: number, body: unknown) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
     if (await this.options.follow.reload() !== principal.controllerId) { json(403, { error: '이 컴퓨터는 그 Tower의 설정을 따르지 않습니다.' }); return true; }
     if (req.method === 'PUT' && path === '/api/managed/settings') {
+      // best-effort: an unreadable body is answered as an invalid one below.
       const body = await readJson(req, MAX_MANAGED_BYTES).catch(() => undefined);
       const sections = body?.sections;
       if (!body || typeof body.revision !== 'string' || !sections || typeof sections !== 'object' || Array.isArray(sections)) { json(400, { error: '설정 형식이 올바르지 않습니다.' }); return true; }
@@ -231,9 +235,11 @@ export class ManagedSettingsReceiver {
       const applied: ManagedApplied = { revision: payload.revision, appliedAt: new Date(this.options.now?.() ?? Date.now()).toISOString(), ...(Object.keys(errors).length ? { errors } : {}) };
       this.last = applied;
       await mkdir(join(this.options.stateDir, 'managed'), { recursive: true, mode: 0o700 });
+      // best-effort: the record only reports the last apply; the controller's next sync corrects a missed one.
       await writePrivateJson(this.path, JSON.stringify(applied)).catch(() => {});
       return applied;
     });
+    // best-effort: the caller of this apply gets its failure; the chain only keeps order.
     this.queue = run.catch(() => {});
     return run;
   }

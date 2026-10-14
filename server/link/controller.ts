@@ -224,6 +224,7 @@ export class ControllerLinks extends EventEmitter {
   private async tellFollow(id: string, live: Connected, follow: boolean, onlyUnclaimed = false): Promise<void> {
     if (!live.hello.features.includes('followHost') || live.hello.follows === follow) return;
     if (onlyUnclaimed && follow && live.hello.followsOther) return;
+    // best-effort: an unanswered request is restated on the next connect or refresh.
     const answer = await linkRequest(live.session, 'POST', '/link/follow', { follow }, HELLO_MS).catch(() => undefined);
     const follows = (answer?.json as { follows?: unknown } | undefined)?.follows;
     if (answer?.status !== 200 || typeof follows !== 'boolean' || this.connected.get(id) !== live) return;
@@ -439,6 +440,7 @@ export class ControllerLinks extends EventEmitter {
    */
   private async restateFollow(id: string, live: Connected): Promise<void> {
     const wanted = this.state.nodes.find(item => item.id === id)?.followHost === true;
+    // best-effort: restated again on the next refresh.
     await this.tellFollow(id, live, wanted, true).catch(() => {});
   }
 
