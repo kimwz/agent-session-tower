@@ -220,7 +220,8 @@ export class RemoteSecretBroker {
     this.answering.add(request.id);
     // A read is answered again within its deadline rather than claimed: it changes nothing here and only its sender can open it.
     const claimed = !READS.includes(request.operation);
-    const payload = decode(request.payload);
+    let payload: unknown;
+    try { payload = decode(request.payload); } catch { payload = undefined; } // best-effort: decoded again below, where a bad payload is refused as before
     // Only a computer that follows this host asks for reasons; any other one gets today's answers.
     const reasons = (request.operation === 'list' || request.operation === 'resolve') && record(payload) && payload.reasons === true;
     let result: unknown; let reason: typeof REASONS[number] | undefined; let begun = !claimed;
@@ -238,7 +239,7 @@ export class RemoteSecretBroker {
         // Re-read trust immediately before the policy owner resolves the operation.
         const current = this.peer(request.from, { id: nodeRouteId, direction: 'node' });
         if (current.device.signingKey !== peer.device.signingKey || current.device.encryptionKey !== peer.device.encryptionKey || this.now() >= request.expiresAt) return fail();
-        result = { ok: true, value: encode(await this.options.handle(request.context, { operation: request.operation, payload, id: request.id })) };
+        result = { ok: true, value: encode(await this.options.handle(request.context, { operation: request.operation, payload: decode(request.payload), id: request.id })) };
       } catch (error) { reason = reasons ? reasonOf(error) : undefined; result = { ok: false, code: reason ?? 'SECRET_REMOTE_UNAVAILABLE' }; }
       const stillTrusted = this.peer(request.from, { id: nodeRouteId, direction: 'node' });
       if (stillTrusted.device.signingKey !== peer.device.signingKey || stillTrusted.device.encryptionKey !== peer.device.encryptionKey || this.now() >= request.expiresAt) return fail();

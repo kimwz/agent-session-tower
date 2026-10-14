@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { connect, createServer } from 'node:http2';
 import type { AddressInfo } from 'node:net';
-import { RemoteSecretBroker, type RemoteSecretBrokerOptions, type RemoteSecretRequest } from '../../../server/secrets/remote.js';
+import { RemoteSecretBroker, type RemoteSecretBrokerOptions } from '../../../server/secrets/remote.js';
 import { SecretRelay } from '../../../server/link/secret-relay.js';
 import { notShared } from '../../../server/secrets/policy.js';
 import type { SecretContext, SecretDevice, SecretPeer } from '../../../shared/secrets.js';
