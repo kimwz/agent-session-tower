@@ -111,6 +111,8 @@ export class FollowingSecrets extends EventEmitter {
     const theirs = answer?.status === 200 ? alignment(answer.json) : undefined;
     // What came back is trusted only for the same connection of a computer that still follows this Tower; a change
     // meanwhile aligns again from the start (the event that moved the epoch asks for it).
+    // Known edge: follow turned off while this trust already waits in the worker's save queue still saves it (no lock
+    // spans web and worker); turning follow off removes no trust either, so the result is the state just before it.
     if (!this.current(id, epoch)) return;
     let mine = own;
     if (own.vault === 'open' && !own.untrusted && theirs?.device && !theirs.untrusted) mine = alignment(await worker.secretCall('align', [{ routeId: id, direction: 'node', device: theirs.device }])) ?? own;

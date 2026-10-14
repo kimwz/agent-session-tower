@@ -22,10 +22,18 @@ interface Permanent {
   device: SecretDevice; keys: { signingPrivateKey: string; encryptionPrivateKey: string }; hmac: string; peers: SecretPeer[]; projects: SecretProject[]; groups: SecretGroup[]; secrets: StoredSecret[]; rules: SecretRule[]; legacy: Legacy[];
   /** The global group without rules that saved secrets with sharing belong to, so every build finds their group. */
   towerGroupId?: string;
-  /** Computers whose trust the owner removed: their link route is not trusted again automatically, until trusted by hand. */
+  /**
+   * Computers whose trust the owner removed: their link route is not trusted again automatically, until trusted by hand.
+   * Only the owner's removals add to it, one per route, so it is never cut short.
+   */
   untrusted?: { routeId: string; direction: SecretPeer['direction']; at: number }[];
   /** Folders a clone added to a secret's sharing by itself (`autoShareFolders`), so one the owner removes stays removed. */
   autoFolders?: (SecretFolder & { secretId: string })[];
+  /**
+   * Set once `autoFolders` is full: clones add no folders by themselves any more, whatever happens to the list later.
+   * No automatic path clears it.
+   */
+  autoFoldersStopped?: true;
 }
 /** `operationId`: the blocked operation a record belongs to, for the owner's one notice of it; kept here, never in views. */
 interface UsageRecord extends SecretUsage { hostId: string; sessionId: string; operationId?: string }
@@ -37,11 +45,8 @@ export interface SecretDispatchUse { ref: string; operation: SecretOperation; va
 /** Written in plain text at every unlocked save: the policy to list names by while locked, and the sources it cannot reach then. */
 interface LockedIndex { format: 2; policy: PolicyState; sources: string[] }
 const USAGE_LIMIT = 1000;
-/**
- * At most this many removals and automatic folder additions are remembered. Neither is ever dropped to make room: a
- * full list stops automatic trust and automatic folders instead, so nothing the owner removed comes back.
- */
-const MAX_UNTRUSTED = 1000, MAX_AUTO_FOLDERS = 5000;
+/** At most this many automatic folder additions are remembered; once full, clones add no folders by themselves (`autoFoldersStopped`). */
+const MAX_AUTO_FOLDERS = 5000;
 const REMOTE_TASK_MS = 8 * 60 * 60_000;
 const unshared = (): StoredSharing => storedSharing({ revision: 1, allMachines: false, machines: [], folders: [] });
 const policySecret = (secret: StoredSecret): PolicySecret => ({ metadata: secret.metadata, fieldNames: secret.fields ? Object.keys(secret.fields) : undefined, sharing: secret.sharing });
@@ -137,23 +142,21 @@ export class SecretService {
   async removePeer(deviceId: string) { return this.mutate(() => {
     const data = this.data(); const removed = data.peers.filter(peer => peer.device.id === deviceId);
     data.peers = data.peers.filter(peer => peer.device.id !== deviceId);
-    if (removed.length) data.untrusted = [...(data.untrusted ?? []).filter(item => !removed.some(peer => sameRoute(item, peer))), ...removed.map(peer => ({ routeId: peer.routeId, direction: peer.direction, at: this.now() }))].slice(0, MAX_UNTRUSTED);
+    if (removed.length) data.untrusted = [...(data.untrusted ?? []).filter(item => !removed.some(peer => sameRoute(item, peer))), ...removed.map(peer => ({ routeId: peer.routeId, direction: peer.direction, at: this.now() }))];
   }); }
   /** Whether the owner removed the trust of this route. */
   untrustedRoute(route: Pick<SecretPeer, 'routeId' | 'direction'>): boolean { return (this.data().untrusted ?? []).some(item => sameRoute(item, route)); }
   /**
    * Trust made by itself over the pinned link between a host and a computer that follows it. The link names the computer,
    * so its vault's device replaces another one trusted on that route (its vault made again); a route the owner removed
-   * stays untrusted, and the same device with other keys is refused as by hand. A full removal list makes no new trust
-   * (a removal it could not hold must not be undone). Saves only when something changes.
+   * stays untrusted, and the same device with other keys is refused as by hand. Saves only when something changes.
    */
   async alignPeer(peer: SecretPeer): Promise<boolean> {
     const current = () => this.data().peers.filter(item => item.device.id === peer.device.id || sameRoute(item, peer));
     const settled = () => { const [found, other] = current(); return !other && !!found?.enabled && sameRoute(found, peer) && (['id', 'signingKey', 'encryptionKey', 'fingerprint'] as const).every(key => found.device[key] === peer.device[key]); };
-    const refused = () => this.untrustedRoute(peer) || (!settled() && (this.data().untrusted?.length ?? 0) >= MAX_UNTRUSTED);
-    if (refused()) return false;
+    if (this.untrustedRoute(peer)) return false;
     if (settled()) return true;
-    return this.mutate(() => { if (refused()) return false; if (!settled()) this.addPeer({ ...peer, enabled: true }, true); return true; });
+    return this.mutate(() => { if (this.untrustedRoute(peer)) return false; if (!settled()) this.addPeer({ ...peer, enabled: true }, true); return true; });
   }
   private projectId(hostId: string, root: string) { return projectId(this.data(), hostId, root); }
   private lockedIndex(): LockedIndex { return { format: 2, policy: this.policy(), sources: this.data().peers.filter(peer => peer.enabled && peer.direction === 'controller').map(peer => peer.device.id) }; }
@@ -411,14 +414,14 @@ export class SecretService {
       return sharing && sharing.revision === item.revision && sharing.folders.some(folder => folder.hostId === this.device().id && folder.root === item.hostRoot) ? sharing : undefined;
     };
     const pending = () => additions.filter(item => canonicalRoot(item.root) && !done(item) && current(item));
-    if (!this.data().peers.some(peer => peer.enabled && peer.direction === 'node' && peer.device.id === hostId) || !pending().length) return 0;
+    if (this.data().autoFoldersStopped || !this.data().peers.some(peer => peer.enabled && peer.direction === 'node' && peer.device.id === hostId) || !pending().length) return 0;
     return this.mutate(() => {
       const data = this.data(); let added = 0;
       for (const secretId of new Set(pending().map(item => item.secretId))) {
         const items = pending().filter(item => item.secretId === secretId); const sharing = current(items[0]!)!;
         const folders = [...sharing.folders];
         for (const item of items) {
-          if ((data.autoFolders?.length ?? 0) >= MAX_AUTO_FOLDERS) break;
+          if ((data.autoFolders?.length ?? 0) >= MAX_AUTO_FOLDERS) { data.autoFoldersStopped = true; break; }
           data.autoFolders = [...data.autoFolders ?? [], { secretId, hostId, root: item.root }];
           // A full list stays as the owner can save it.
           if (folders.length < 100 && !folders.some(folder => folder.hostId === hostId && folder.root === item.root)) { folders.push({ hostId, root: item.root }); added++; }
