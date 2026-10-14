@@ -2164,6 +2164,8 @@ export const english: Record<string, string> = {
   "실행 중인 작업이 없을 때 v{0}(으)로 바뀝니다.": "Moves to v{0} when no work is running.",
   "이 컴퓨터의 열린 터미널을 모두 닫으면 v{0}(으)로 바뀝니다.": "Moves to v{0} once every terminal open on this computer is closed.",
   "아직 열린 터미널: {0}": "Still open: {0}",
+  "이 컴퓨터의 다른 폴더": "Other folders on this computer",
+  "공유하지 않는 폴더에도 터미널 {0}개가 열려 있습니다. 그 컴퓨터에서 끝낼 수 있습니다.": "{0} more terminals are open in folders that are not shared. They can be ended on that computer.",
   "이 버전에 필요한 기능을 갖추고 있어 다시 시작하지 않아도 됩니다.": "Already does what this version needs, so it does not have to restart.",
   "다시 시작할 때 v{0}(으)로 바뀝니다.": "Moves to v{0} when it restarts.",
   "실행 중 아님": "Not running",

@@ -336,6 +336,18 @@ export function createRemoteRouter({ attachmentStores, attachmentUploads, backen
       }
     }
     const terminal = path.match(/^\/api\/workspace\/terminals\/([0-9a-f-]{36})\/(events|input|resize|close)$/);
+    if (method === 'GET' && path === '/api/workspace/terminals/all') {
+      // The shells of this computer in folders it shares; `hidden` counts the others, which also count against its limit.
+      const shells = ((await terminals?.list?.()) ?? []).filter(item => !item.exited);
+      const listed = [];
+      for (const item of shells) {
+        if (await exclusions.excludesNow(item.cwd)) continue;
+        try { await listedFolder(item.cwd); } catch { continue; } // best-effort: a folder no longer shared is counted, not shown
+        listed.push(item);
+      }
+      return json(res, 200, { terminals: listed.map(item => ({ id: item.id, cwd: item.cwd, openedAt: item.openedAt,
+        origin: item.opener === principal.controllerId ? 'self' : item.opener === 'local' ? 'computer' : 'controller' })), hidden: shells.length - listed.length });
+    }
     if (method === 'GET' && path === '/api/workspace/terminals') {
       const cwd = await sharedPath(url.searchParams.get('cwd'), '');
       const root = await realpath(cwd).catch(() => cwd);

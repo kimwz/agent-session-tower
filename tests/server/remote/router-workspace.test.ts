@@ -141,6 +141,17 @@ test('shells in a shared folder are shared by every controller; excluded folders
   assert.equal(f.shells.list().some(item => item.id === opened.json.id), false);
 });
 
+test('a controller sees every shell of the shared folders, and only a count of the others', async t => {
+  const f = await fixture(t);
+  const here = await f.shells.create(f.open, 80, 24);
+  const mine = await f.shells.create(f.open, 80, 24, { opener: CONTROLLER });
+  await f.shells.create(f.secret, 80, 24);
+  const all = await f.call('/api/workspace/terminals/all');
+  assert.equal(all.status, 200);
+  assert.deepEqual(all.json.terminals.map((item: { id: string; origin: string }) => [item.id, item.origin]).sort(), [[here.id, 'computer'], [mine.id, 'self']].sort());
+  assert.equal(all.json.hidden, 1, 'a shell in an excluded folder counts against the limit but is not shown');
+});
+
 test('a controller’s view of a shell ends when its folder stops being shared; the shell itself goes on', async t => {
   const f = await fixture(t);
   const { id } = await f.shells.create(f.open, 80, 24);
