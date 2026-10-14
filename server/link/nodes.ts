@@ -29,7 +29,8 @@ export class RemoteNodes extends EventEmitter {
   list(): RemoteNode[] {
     return this.links.list().map(node => ({ id: node.id, name: node.name, ...(node.label ? { label: node.label } : {}), status: node.status,
       ...(node.version ? { version: node.version } : {}), features: node.features, ...(node.lastSeenAt ? { lastSeenAt: node.lastSeenAt } : {}),
-      streaming: node.status === 'connected' && this.mirrors.live(node.id), ...(updateActive(node.report?.update) ? { updating: true } : {}) }));
+      streaming: node.status === 'connected' && this.mirrors.live(node.id), ...(updateActive(node.report?.update) ? { updating: true } : {}),
+      ...(node.status === 'connected' && node.following ? { following: true as const } : {}) }));
   }
 
   /** Computers with a shared state to show. */

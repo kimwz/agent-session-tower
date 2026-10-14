@@ -1519,7 +1519,10 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       onRunFinished: runFinished,
       runOutput: id => runner.output(id),
       forgetRun: id => runner.forget(id),
-      onAutoReviewChange: settings => { if (!settings.enabled) reviewer?.abort(); } });
+      onAutoReviewChange: settings => { if (!settings.enabled) reviewer?.abort(); },
+      followedHost: () => followedHost.reload() });
+    // "호스트 설정 따르기": the host's rules for every project, reviewer setting and precedents (permissions/managed.ts).
+    managed.set('permissions', { export: () => permissions.exportManaged(), apply: (value, context) => permissions.applyManaged(value, context.hostId) });
     await startupGate();
     bindPermissionsBeforeResume = () => permissions.bindAfterStorageRetry();
     registerStorageHold(() => { permissions.pauseForStorage(); }, () => { permissions.resume(); });
@@ -1567,6 +1570,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         rules: cwd => permissions.overview(cwd).rules,
         guards: rule => ruleGuards(rule),
         requests: sessionId => permissions.overview().requests.filter(item => item.sessionId === sessionId).reverse(),
+        hostPrecedents: cwd => permissions.hostPrecedents(cwd),
       },
       // The decision reaches the conversation as the work it already was: the requesting turn's origin and approvals.
       reachable: request => Boolean(request.runId && runs.list().find(item => item.id === request.runId)?.origin),
@@ -1577,6 +1581,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     reviewer.hold();
 
     runs.setClaudeSettings((cwd, sessionId) => permissions.claudeSettings(cwd, sessionId));
+    // Turns the followed host starts here get the notes for every turn as well.
+    runs.setFollowedHost(() => followedHost.reload());
     runs.setTurnNotes(async (_run, session) => {
       const notes = await Promise.all([skills.turnNotes(session), modelRoleNotes(stateDir).catch(() => undefined), browserNote(sessionBrowsers(stateDir, runs, session))]);
       return notes.filter(Boolean).join('\n\n') || undefined;
@@ -1639,7 +1645,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       // Once more as the provider is about to start: a trigger set up remotely never works in a folder kept from sharing.
       return remoteLaunch.refused(run) ? REMOTE_FOLDER_REFUSED : undefined;
     }, run => remoteLaunch.prepareRun(run));
-    const api = new TowerApi({ stateDir, triggers, runs, github, permissions,
+    const api = new TowerApi({ stateDir, triggers, runs, github, permissions, followedHost: () => followedHost.reload(),
       remote: async paths => { await exclusions.reload(); await exclusions.prepare(paths, { fresh: true }); return { matcher: exclusions.matcher(), coordinators: coordinators() }; },
       projects: () => {
         const snapshot = visible.snapshot();

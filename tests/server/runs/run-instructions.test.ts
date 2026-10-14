@@ -15,7 +15,8 @@ const NATIVE = '40000000-0000-4000-8000-000000000001';
 const now = '2026-09-28T00:00:00.000Z';
 
 /** A manager whose providers never start: each launch is recorded, then refused. */
-async function fixture(t: TestContext, notes?: (run: Run, session: Session) => Promise<string | undefined>, saved?: { runs: unknown[] }, turnNotes?: (run: Run, session: Session) => Promise<string | undefined>) {
+async function fixture(t: TestContext, notes?: (run: Run, session: Session) => Promise<string | undefined>, saved?: { runs: unknown[] }, turnNotes?: (run: Run, session: Session) => Promise<string | undefined>,
+  followedHost?: () => Promise<string | undefined>) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-run-instructions-'));
   const stateDir = join(directory, 'state');
   await mkdir(stateDir, { recursive: true });
@@ -30,7 +31,7 @@ async function fixture(t: TestContext, notes?: (run: Run, session: Session) => P
     findExecutable: async provider => `/fixture/${provider}`,
     spawnProcess: ((_command: string, args: string[]) => { claude.push(args); throw new Error('Fixtures never start providers.'); }) as never,
     openCodexStdio: async options => { codex.push(options); throw new Error('Fixtures never start providers.'); },
-    ...(notes ? { firstTurnNotes: notes } : {}), ...(turnNotes ? { turnNotes } : {}) });
+    ...(notes ? { firstTurnNotes: notes } : {}), ...(turnNotes ? { turnNotes } : {}), ...(followedHost ? { followedHost } : {}) });
   await manager.start();
   t.after(async () => { await manager.close(); await db.close(); await rm(directory, { recursive: true, force: true }); });
   const settled = async (id: string) => { for (let i = 0; i < 200 && manager.list().find(run => run.id === id)?.status === 'queued'; i++) await new Promise(resolve => setTimeout(resolve, 10)); };
@@ -89,6 +90,24 @@ test('every turn gets the owner’s pinned skills after the first turn’s notes
   const remote = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Remote task' }, { origin: { kind: 'owner', controllerId: 'c'.repeat(32) } });
   await f.settled(remote.run.id);
   assert.equal(f.codex[2].instructions, undefined);
+});
+
+test('work the followed host starts gets the notes for every turn, never the related conversations; another controller’s gets none', async t => {
+  const host = 'a'.repeat(32);
+  let followed: string | undefined = host;
+  const related: string[] = [];
+  const f = await fixture(t, async run => { related.push(run.prompt); return 'Related: claude:earlier'; }, undefined, async (_run, session) => `Pinned skills for ${session.provider}`, async () => followed);
+  const hosted = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Host task' }, { origin: { kind: 'owner', controllerId: host } });
+  await f.settled(hosted.run.id);
+  assert.equal(f.codex[0].instructions, 'Pinned skills for codex', 'pinned skills and model roles, as for the owner’s own turn here');
+  assert.deepEqual(related, [], 'earlier conversations may lie in folders kept from sharing');
+  const other = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Other task' }, { origin: { kind: 'owner', controllerId: 'b'.repeat(32) } });
+  await f.settled(other.run.id);
+  assert.equal(f.codex[1].instructions, undefined);
+  followed = undefined;
+  const after = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'After unfollowing' }, { origin: { kind: 'owner', controllerId: host } });
+  await f.settled(after.run.id);
+  assert.equal(f.codex[2].instructions, undefined, 'not once this computer stops following it');
 });
 
 test('notes that fail or take too long never hold up or break the turn', async t => {

@@ -1,4 +1,5 @@
 import type { Run, RunInstructions, Session } from '../../shared/types.js';
+import { followedHostOrigin } from './origin.js';
 import { RunError } from './run-records.js';
 
 export const MAX_INSTRUCTIONS = 48_000;
@@ -12,21 +13,26 @@ type Notes = (run: Run, session: Session) => Promise<string | undefined>;
 
 /**
  * Adds `firstTurnNotes` to a new conversation's first turn and `turnNotes` to every turn. Never delays a turn by more
- * than a few seconds, never fails it, and a turn gets them once however often it is launched.
+ * than a few seconds, never fails it, and a turn gets them once however often it is launched. Work a controlling
+ * Tower started gets none, unless this computer follows that Tower: then the notes for every turn, never the earlier
+ * conversations a first turn is pointed at, which may lie in folders kept from sharing (design §3.1).
  */
 export class TurnNotes {
   /** Turns that already received their notes. */
   private readonly noted = new Set<string>();
-  constructor(private readonly sources: () => { firstTurnNotes?: Notes; turnNotes?: Notes }) {}
+  constructor(private readonly sources: () => { firstTurnNotes?: Notes; turnNotes?: Notes; followedHost?: () => Promise<string | undefined> }) {}
 
   async add(run: Run, session: Session, creating: boolean): Promise<void> {
-    if (run.origin?.controllerId || this.noted.has(run.id)) return;
+    if (this.noted.has(run.id)) return;
     if (this.noted.size >= 10_000) this.noted.clear();
     this.noted.add(run.id);
+    const { firstTurnNotes, turnNotes, followedHost } = this.sources();
+    const remote = Boolean(run.origin?.controllerId);
+    // best-effort: a followed host that cannot be read follows nobody, so the turn gets no notes, as before.
+    if (remote && !followedHostOrigin(run.origin, await followedHost?.().catch(() => undefined))) return;
     const ask = (notes: Notes | undefined) => notes ? notes(run, session).catch(() => undefined) : Promise.resolve(undefined);
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const { firstTurnNotes, turnNotes } = this.sources();
-    const all = Promise.all([creating ? ask(firstTurnNotes) : undefined, ask(turnNotes)]);
+    const all = Promise.all([creating && !remote ? ask(firstTurnNotes) : undefined, ask(turnNotes)]);
     const notes = await Promise.race([all, new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), NOTES_MS); })]);
     clearTimeout(timer);
     const text = [run.instructions?.text, ...(notes ?? [])].filter(item => item?.trim()).join('\n\n');

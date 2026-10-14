@@ -98,4 +98,10 @@ export type OperationName = keyof typeof OPERATIONS;
 export const REMOTE_PAGE_OPERATIONS: ReadonlySet<string> = new Set(['runs.list', 'triggers.list', 'triggers.get', 'triggers.events', 'triggers.event', 'triggers.audit', 'triggers.deleted',
   'triggers.preview', 'triggers.previewIssues', 'triggers.settings', 'triggers.create', 'triggers.update', 'triggers.setEnabled', 'triggers.setArchived', 'triggers.delete', 'triggers.restore', 'triggers.revert', 'triggers.run', 'secrets.list',
   'models.settings', 'models.update']);
+/**
+ * Operations a controlling Tower this computer follows ("호스트 설정 따르기") uses as this computer's own owner: its
+ * permission rules and requests, from that Tower's pages and from the turns it starts here. Everything else it does
+ * stays within what this computer shares.
+ */
+export const FOLLOWED_OPERATIONS: ReadonlySet<string> = new Set(Object.keys(OPERATIONS).filter(name => name.startsWith('permissions.')));
 export const isOperationName = (value: unknown): value is OperationName => typeof value === 'string' && Object.hasOwn(OPERATIONS, value);

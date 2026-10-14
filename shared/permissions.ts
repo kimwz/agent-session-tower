@@ -31,6 +31,11 @@ export interface PermissionRule extends PermissionRuleInput {
   requestId?: string;
   createdAt: string;
   updatedAt: string;
+  /**
+   * A rule for every project kept by the controlling Tower this computer follows ("호스트 설정 따르기"): it applies here
+   * like this computer's own, is changed only there, and is replaced with each sync.
+   */
+  host?: true;
 }
 
 /** `withdrawn`: the reviewer asked the agent for a narrower request instead. */

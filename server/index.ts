@@ -553,7 +553,7 @@ async function main() {
   let controllerName = (_id: string): string | undefined => undefined;
   const remoteChanges = new RemoteAudit(stateDir, { name: id => controllerName(id) });
   await remoteChanges.start();
-  const remoteRouter = createRemoteRouter({ attachmentStores, attachmentUploads, backend, exclusions, terminals: workspaceTerminals, audit: remoteChanges });
+  const remoteRouter = createRemoteRouter({ attachmentStores, attachmentUploads, backend, exclusions, terminals: workspaceTerminals, audit: remoteChanges, followedHost: () => followedHost.reload() });
   // "호스트 설정 따르기": which controlling Tower this computer follows (the worker reads the same file), what it
   // applies from that one, and, as a controller, what it keeps on the computers that follow it.
   const followedHost = new FollowedHostStore(stateDir);
@@ -577,6 +577,8 @@ async function main() {
   const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname, published: releasePublished, managed: id => managedSync?.status(id) });
   if (controllerLinks) { managedSync = new ManagedSettingsSync({ controller: controllerLinks }); managedSync.on('change', () => changed()); }
   // Sections register their export (managedSync) and apply (managedReceiver) here, beside their owning modules.
+  managedSync?.register('permissions', () => runs.managedCall('permissions', 'export'));
+  managedReceiver.register('permissions', async (value, context) => { await runs.managedCall('permissions', 'apply', value, context); });
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname, follow: followedHost,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
     // and updating do not.

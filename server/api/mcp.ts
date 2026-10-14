@@ -141,7 +141,8 @@ export async function handleMcpRequest(context: McpContext, token: string, body:
   if (!run || run.sessionId !== capability.sessionId || run.status !== 'running' || run.origin?.kind !== 'owner' || run.towerTools !== 'attached') {
     throw new TowerError('forbidden', 'Tower tools work only during the turn you started from Tower that they were given to.');
   }
-  if (body.method === 'tools/list') return { tools: towerTools() };
+  // A turn started from a controlling computer is shown only the tools it may call here (see operationReach).
+  if (body.method === 'tools/list') return { tools: towerTools(await context.api?.toolOperations({ ...(run.origin.controllerId ? { controllerId: run.origin.controllerId } : {}) })) };
   const operation = typeof body.name === 'string' ? operationOf(body.name) : undefined;
   if (body.method !== 'tools/call' || !operation) throw new TowerError('not-found', 'Unknown Tower tool.');
   if (!context.api) throw new TowerError('unavailable', 'Tower operations are unavailable.');

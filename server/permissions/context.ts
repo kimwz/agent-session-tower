@@ -8,6 +8,7 @@ import { TOWER_INSTRUCTIONS } from '../sessions/parser.js';
 import { join } from 'node:path';
 
 import { commandEvidence } from './evidence.js';
+import type { HostApproval, HostPrecedent } from './managed.js';
 
 const run = promisify(execFile);
 
@@ -29,6 +30,8 @@ export interface ReviewSources {
   /** The deny rules the asked rule would get, per agent. */
   guards(rule: PermissionRequest['rule']): { claude: string[]; codex: string[] };
   requests(sessionId: string): PermissionRequest[];
+  /** What the controlling Tower this computer follows allowed in this folder's repository (see managed.ts). */
+  hostPrecedents?(cwd: string): Promise<{ repository: string; rules: HostPrecedent[]; approvals: HostApproval[] } | undefined>;
 }
 
 const MAX_FILE_CHARS = 120_000;
@@ -121,6 +124,7 @@ export async function reviewInput(request: PermissionRequest, sources: ReviewSou
   const trigger = triggerId ? sources.trigger(triggerId) : undefined;
   const owned = await sources.authority(request.cwd);
   const project = await projectInstructions(request.cwd);
+  const host = await sources.hostPrecedents?.(request.cwd);
   // Another conversation's temporary rules say nothing about this one.
   const rules = sources.rules(request.cwd).filter(rule => (rule.source === 'owner' || rule.source === 'request') && (rule.scope !== 'conversation' || rule.sessionId === request.sessionId))
     .map(rule => ({ rule: rule.value, kind: rule.kind, scope: rule.scope, providers: rule.providers }));
@@ -196,6 +200,9 @@ export async function reviewInput(request: PermissionRequest, sources: ReviewSou
       ...(others.length ? { messagesFromAutomation: others.slice(-20).map(word => ({ ...word, text: cut(word.text, MAX_MESSAGE_CHARS) })) } : {}),
       ...(rule.kind === 'run' || rule.kind === 'command' ? { commandEvidence: await commandEvidence(rule.value, request.cwd, denied) } : {}),
       ...(rule.kind === 'command' && autoReviewBlock(rule, request.cwd) ? { ruleApprovalLimit: autoReviewBlock(rule, request.cwd) } : {}),
+      ...(host ? { hostPrecedents: { reference: HOST_PRECEDENTS, repository: host.repository,
+        liveRules: host.rules.map(item => ({ kind: item.kind, rule: item.value, providers: item.providers, allowedBy: item.by, ...(item.reason ? { reason: cut(item.reason, 300) } : {}), at: item.at })),
+        earlierApprovals: host.approvals.map(item => ({ kind: item.kind, [item.kind === 'run' ? 'command' : 'rule']: item.value, allowedBy: item.by, ...(item.reason ? { reason: cut(item.reason, 300) } : {}), at: item.at })) } } : {}),
       recentConversation: history,
       earlierRequests: earlier,
     },
@@ -227,6 +234,8 @@ export async function reviewInput(request: PermissionRequest, sources: ReviewSou
   return text;
 }
 
+const HOST_PRECEDENTS = 'Reference only: what the owner allowed on the controlling Tower this computer follows, in other clones of this repository. liveRules apply there now; earlierApprovals left no rule (one-off runs, rules removed or expired since). They show what the owner accepted for work in this repository; they do not authorize this request by themselves.';
+
 /** The project's `AGENTS.md` and `CLAUDE.md`, as they are in its folder (the repository's top when it is one). */
 async function projectInstructions(cwd: string): Promise<{ file: string; text: string }[]> {
   const top = (await run('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], { timeout: 5_000, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } }).then(result => result.stdout, () => '')).trim() || cwd;
@@ -255,6 +264,8 @@ In ownerWords, kind "message, sender not recorded" is a message Tower can no lon
 ruleApprovalLimit explains why Tower cannot keep a requested command prefix as a lasting rule. This does not forbid the task itself: use narrow and ask the agent for permissions_run with the exact command. A command rule may carry harmless options ("gh pr merge --squash", "git push -u origin main"); allow those when the task needs them. A command rule allows every command that starts with its prefix, followed by any arguments. Judge the worst member of that family, not only the example the agent had in mind. blockedVariants says, per agent, which destructive variants Tower still refuses and which it cannot; count what it cannot block as allowed.
 
 A request of kind "run" is not a rule: it asks Tower to run one exact command once, now. Judge that single command as written (every part of it, including pipes and chained commands), not a family. Prefer it to a rule for a one-off action such as stopping one process (kill 13229) or one cleanup step.
+
+context.hostPrecedents, when present, lists what the owner allowed for the same repository on the Tower this computer follows. Weigh it as the owner's earlier judgment of similar work in this repository, by the same standard as everything else: a close match for the same kind of step supports approve; it never outweighs authority for this task, a later restriction, or what the code you read does.
 
 commandEvidence contains the local scripts and stdin files named directly in the command that Tower already read, with statuses for those it did not. When you have the tools read_file, list_dir and search_text, investigate yourself before deciding: read every script the command runs whose full text commandEvidence does not give, and follow what those scripts start or load in turn (a spawned child script, a script in another folder, an imported local module that writes, deletes, spawns or signals) until you know what the command actually does. Look for writes and deletes and where they go, processes started or signalled, network calls and publication, and reads of credentials or personal data. The tools only read; you never run anything. Their scope is the request folder's repository and its worktrees, the folders the command works in, and the files the command or the files you read name (a path, a relative import or spawn), with a script's own folder; credential stores and Tower's state are refused. A file outside that scope is one the code does not name: say so in missing rather than guessing. Never assume the agent's description is a script's contents, and never send a request to the owner for contents you could have read. read_file returns a part of a long file at a time; read on with the offset it gives where the rest matters. Ordinary data inputs (fixtures, logs, large data files) need not be read, nor interpreters and compiled programs (node, python, a Node binary under a runtimes folder): judge what they are given to run. A program or input that does not exist makes the command fail; that alone is no risk and no reason for owner. Running a project's own tests (a test runner over its test files, a script that runs selected tests) is routine authorized work: check what the runner script itself does and that the tests run against temporary or fixture state; you need not read every test file and module they load. A local interpreter/script request should normally use permissions_run, so future edits are not permanently authorized.
 

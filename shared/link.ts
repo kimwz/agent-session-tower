@@ -121,4 +121,6 @@ export interface RemoteNode {
   streaming: boolean;
   /** It is moving to this Tower's version and comes back by itself. */
   updating?: boolean;
+  /** Connected and following this Tower's settings ("호스트 설정 따르기"): its permissions are this page's to manage. */
+  following?: true;
 }
