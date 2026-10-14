@@ -59,6 +59,8 @@
 .workspace-terminal-shared-menu strong { overflow:hidden; font-size:12px; font-weight:500; text-overflow:ellipsis; white-space:nowrap; }
 .workspace-terminal-shared-menu small { font-size:10.5px; color:#8199b5; }
 .workspace-terminal-shared-menu p { margin:0; padding:8px 9px; color:#8199b5; font-size:11.5px; }
+.workspace-terminal-shared-menu .workspace-terminal-shared-heading { display:block; margin-top:4px; padding:8px 9px 4px; border-top:1px solid #253a52; color:#8199b5; font-size:11px; }
+.workspace-terminal-shared-menu { max-height:min(420px, 70vh); overflow-y:auto; }
 .workspace-terminal-tab button[role="tab"] svg { margin-right:3px; vertical-align:-1px; }
 .workspace-terminal-panel { display:flex; flex:1; min-height:0; flex-direction:column; }
 .workspace-terminal-panel[hidden] { display:none; }

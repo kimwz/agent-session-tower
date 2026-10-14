@@ -336,6 +336,18 @@ export function createRemoteRouter({ attachmentStores, attachmentUploads, backen
       }
     }
     const terminal = path.match(/^\/api\/workspace\/terminals\/([0-9a-f-]{36})\/(events|input|resize|close)$/);
+    if (method === 'GET' && path === '/api/workspace/terminals/all') {
+      // The shells of this computer in folders it shares; `hidden` counts the others, which also count against its limit.
+      const shells = ((await terminals?.list?.()) ?? []).filter(item => !item.exited);
+      // Shells keep their folder with links resolved; the folders Tower lists are compared the same way.
+      const view = remoteSnapshot(backend.snapshot(), scope());
+      const shared = new Set(await Promise.all([...new Set([...view.sessions.map(item => item.cwd), ...(view.groups ?? []).map(item => item.cwd)])]
+        .filter(cwd => cwd.startsWith('/')).map(cwd => realpath(cwd).catch(() => cwd))));
+      const listed = [];
+      for (const item of shells) if (shared.has(item.cwd) && !await exclusions.excludesNow(item.cwd)) listed.push(item);
+      return json(res, 200, { terminals: listed.map(item => ({ id: item.id, cwd: item.cwd, openedAt: item.openedAt,
+        origin: item.opener === principal.controllerId ? 'self' : item.opener === 'local' ? 'computer' : 'controller' })), hidden: shells.length - listed.length });
+    }
     if (method === 'GET' && path === '/api/workspace/terminals') {
       const cwd = await sharedPath(url.searchParams.get('cwd'), '');
       const root = await realpath(cwd).catch(() => cwd);

@@ -27,7 +27,7 @@ Folders, git, files, terminals
 - POST /api/groups {cwd, title?, pinned?, hidden?} — folder name, pin, hide.
 - POST /api/repositories {cwd, action:"refresh"|"pull"|"push"}
 - GET /api/workspace/tree?cwd=&path= · GET /api/workspace/file?cwd=&path= · GET /api/workspace/media?cwd=&path= (image, video or audio bytes; Range) · POST /api/workspace/file {cwd, path, content, revision|null} · POST /api/workspace/directory {cwd, path}
-- GET /api/workspace/terminals?cwd= · GET /api/workspace/terminals/folders (folders with shells open on this computer, with counts) · POST /api/workspace/terminals {cwd, cols, rows} · POST /api/workspace/terminals/{id}/input {data} · POST /api/workspace/terminals/{id}/resize {cols, rows} · POST /api/workspace/terminals/{id}/close {} (read a terminal's recent output with terminal_read)
+- GET /api/workspace/terminals?cwd= · GET /api/workspace/terminals/all (every shell open on this computer, with its folder) · POST /api/workspace/terminals {cwd, cols, rows} · POST /api/workspace/terminals/{id}/input {data} · POST /api/workspace/terminals/{id}/resize {cols, rows} · POST /api/workspace/terminals/{id}/close {} (read a terminal's recent output with terminal_read)
 
 Skills and guidance
 - GET /api/skills?cwd= — skills (where each applies, pinned), Tower-kept skills, proposals, notes, settings, and guidance {owner, revision}. GET /api/skills/detail?dir=&cwd= — one skill's files. GET /api/skills/summary — ready proposals.
