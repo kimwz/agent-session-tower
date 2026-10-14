@@ -41,7 +41,7 @@ Skills and guidance
 Other computers (joined to this one)
 - Any route above for a joined computer: pass node:"<32-hex id>" (it goes to /api/nodes/{node}/...). Their ids are in GET /api/link (nodes).
 - GET /api/link — this computer's link: hub, nodes, controllers, exclusions. GET /api/link/changes
-- POST /api/link/hub {enabled?, port?} · POST /api/link/invite {} · POST /api/link/join {code} · POST /api/link/nodes/{id} {label} · POST /api/link/nodes/{id}/(update|remove) {} · POST /api/link/controllers/{id}/remove {}
+- POST /api/link/hub {enabled?, port?} · POST /api/link/invite {} · POST /api/link/join {code} · POST /api/link/nodes/{id} {label} · POST /api/link/nodes/{id}/(update|remove) {} · POST /api/link/nodes/{id}/follow {follow} (호스트 설정 따르기) · POST /api/link/nodes/{id}/clone {url} (a repository into a new folder there; it must follow this Tower) · POST /api/link/nodes/{id}/workspace {} (its ~/Workspace as a project folder, to open a terminal and sign in) · POST /api/link/controllers/{id}/remove {}
 - GET /api/remote/exclusions · POST /api/remote/exclusions {add}|{remove}|{reset:true} · POST /api/nodes/{node}/view {cwd, pinned?, hidden?}
 
 Slack, public agents, notifications, fast judgments
