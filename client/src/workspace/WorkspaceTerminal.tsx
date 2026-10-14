@@ -2,7 +2,8 @@ import { useEffect, useId, useImperativeHandle, useRef, useState, type Ref } fro
 import { Terminal } from '@xterm/xterm';
 import { Maximize2, Minimize2, Plus, Users, X } from 'lucide-react';
 import { FitAddon } from '@xterm/addon-fit';
-import { isTerminalReport, terminalInputChunks } from './terminal-input';
+import { isTerminalReport } from './terminal-input';
+import { openTerminalSocket, openTerminalStream, socketUrl, type TerminalConnection, type TerminalConnectionHandlers } from './terminal-connection';
 import { bindWorkspaceTerminal, workspaceTerminalSession, forgetWorkspaceTerminal, MAX_TERMINAL_TABS, nextTerminalTab, readTerminalTabs, saveTerminalTabs, savedWorkspaceTerminal, settleTerminalRequest, terminalRequest, terminalSlot, type TerminalTab } from './terminal-session';
 import { absoluteTime, api, ApiError, relativeTime } from '../common/lib';
 import { localPart, nodeHeaders, nodeOf, nodePath, requestId, workspacePath } from '../remote/scope';
@@ -174,16 +175,25 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
     let disposed = false;
     let id = '';
     let closed = false;
-    let stream: EventSource | undefined;
+    let connection: TerminalConnection | undefined;
+    let ready = false;
     let pending = '';
     let timer: ReturnType<typeof setTimeout> | undefined;
     let reconnect: ReturnType<typeof setTimeout> | undefined;
-    let queue = Promise.resolve();
     // Replayed output can contain queries a program sent long ago. Answering them again
     // would type the replies (such as `1;2c`) into whatever now owns the shell.
     let created = false;
     let replayUntil = 0;
     let replaying = 0;
+    /** Output before a connection is listening is history, unless the shell is new. */
+    let history = false;
+    /** The place in the shell's output this tab has shown up to, to continue from after a reconnect. */
+    let lastId: string | undefined;
+    /** Whether the screen shows any of the shell's output. */
+    let shown = false;
+    /** Proxies in front of Tower may refuse WebSockets; after two that never opened, the tab uses an event stream. */
+    let stream = false;
+    let socketFailures = 0;
     const terminal = new Terminal({ cursorBlink: true, fontSize: 13, fontFamily: 'ui-monospace, monospace', theme: { background: '#0c1420', foreground: '#dce6f3' } });
     const fit = new FitAddon(); terminal.loadAddon(fit); terminal.open(host.current); fit.fit();
     terminalRef.current = { terminal, fit };
@@ -201,20 +211,24 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
       try { return await send(); }
       catch (error) {
         // A 403 rejects before terminal input is delivered. Never retry a lost response.
-        if (!(error instanceof ApiError) || error.status !== 403) throw error;
-        const fresh = await api<{ token: string }>('/api/bootstrap');
-        if (fresh.token === requestToken) throw error;
-        requestToken = fresh.token;
+        if (!(error instanceof ApiError) || error.status !== 403 || !await refreshToken()) throw error;
         return send();
       }
     };
+    /** Whether the server gave a token other than the one this tab used (it restarted since). */
+    const refreshToken = async () => {
+      const fresh = await api<{ token: string }>('/api/bootstrap');
+      if (fresh.token === requestToken) return false;
+      requestToken = fresh.token;
+      return true;
+    };
     const post = (action: string, body: object) => postPath(`/api/workspace/terminals/${encodeURIComponent(id)}/${action}`, body);
     const fail = (value: unknown) => { if (!disposed) setError(value instanceof Error ? value.message : t('터미널 연결에 실패했습니다.')); };
-    const flush = () => { timer = undefined; if (!pending || !id || disposed || closed) return; const data = pending; pending = ''; queue = queue.then(async () => { for (const chunk of terminalInputChunks(data)) { if (disposed || closed) break; await post('input', { data: chunk }); } }).catch(fail); };
+    const flush = () => { timer = undefined; if (!pending || !ready || disposed || closed) return; const data = pending; pending = ''; connection?.input(data); };
     const input = terminal.onData(data => { if (closed || (replaying && isTerminalReport(data))) return; pending += data; if (!timer) timer = setTimeout(flush, 15); });
-    const resize = terminal.onResize(({ cols, rows }) => { if (id) queue = queue.then(async () => { if (!disposed && !closed) await post('resize', { cols, rows }); }).catch(fail); });
+    const resize = terminal.onResize(({ cols, rows }) => { if (ready && !closed) connection?.resize(cols, rows); });
     const observer = new ResizeObserver(() => { if (!disposed && host.current?.clientWidth && host.current.clientHeight) fit.fit(); }); observer.observe(host.current);
-    const finish = () => { forgetWorkspaceTerminal(slot, id); closed = true; terminal.options.disableStdin = true; stream?.close(); setExited(true); };
+    const finish = () => { forgetWorkspaceTerminal(slot, id); closed = true; ready = false; terminal.options.disableStdin = true; connection?.close(); setExited(true); };
     closeSession.current = async () => { if (!id || closed) { if (id) forgetWorkspaceTerminal(slot, id); return; } try { await post('close', {}); }
       catch (error) { if (!(error instanceof ApiError) || ![404, 409].includes(error.status)) throw error; }
       finish(); };
@@ -239,45 +253,65 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
       id = result;
       if (disposed) return;
       setStarting(false);
+      const gone = () => { if (disposed || closed) return; terminal.writeln(`\r\n${t('터미널이 더 이상 없습니다.')}`); finish(); };
       // Before listening again, check the shell is still there: a closed one ends this tab instead of retrying forever.
       const retry = () => {
         if (disposed || closed) return;
         // Whatever the shell printed meanwhile is replayed, so it is not answered as if it were new.
         created = false;
         postPath(`/api/workspace/terminals/${encodeURIComponent(id)}/resize`, { cols: terminal.cols, rows: terminal.rows }).then(() => {
-          // A new stream replays the shell's output from the start; the screen starts over so nothing shows twice.
-          if (!disposed && !closed) { terminal.reset(); listen(); }
+          if (!disposed && !closed) connect();
         }, error => {
           if (disposed || closed) return;
-          if (error instanceof ApiError && [404, 409].includes(error.status)) { terminal.writeln(`\r\n${t('터미널이 더 이상 없습니다.')}`); finish(); }
+          if (error instanceof ApiError && [404, 409].includes(error.status)) gone();
           else reconnect = setTimeout(retry, 5000);
         });
       };
-      const listen = () => {
-        const current = stream = new EventSource(nodePath(node, `/api/workspace/terminals/${encodeURIComponent(id)}/events`));
-        current.addEventListener('output', event => {
-          const data = JSON.parse((event as MessageEvent).data).data;
-          if (Date.now() >= replayUntil) { terminal.write(data); return; }
-          replaying++; terminal.write(data, () => { replaying--; });
-        });
-        current.addEventListener('exit', event => { const result = JSON.parse((event as MessageEvent).data); terminal.writeln(`\r\n${t('터미널 종료 (코드 {0})', { 0: result.exitCode })}`); finish(); });
-        current.onerror = () => {
-          if (disposed || closed) return;
-          setError(t('터미널 연결이 끊겼습니다. 다시 연결하는 중입니다.'));
-          // The browser gives up on an answer that is not a stream (another computer away, for example); try again,
-          // less often, and say so when it keeps failing although the shell is there.
-          if (current.readyState !== EventSource.CLOSED) return;
-          if (++failedOpens >= 3) setError(node ? t('터미널에 다시 연결하지 못했습니다. 이 터미널을 보는 창이 너무 많거나 그 컴퓨터에 닿지 않습니다. 계속 다시 시도합니다.')
-            : t('터미널에 다시 연결하지 못했습니다. 이 터미널을 보는 창이 너무 많을 수 있습니다. 계속 다시 시도합니다.'));
-          reconnect = setTimeout(retry, Math.min(3000 * failedOpens, 30_000));
+      const connect = () => {
+        ready = false;
+        history = !created;
+        // A connection that cannot continue where this tab got to replays the shell's output from the start; the
+        // screen starts over so nothing shows twice.
+        const resumes = !stream && lastId !== undefined;
+        if (!resumes && shown) { terminal.reset(); shown = false; lastId = undefined; }
+        const handlers: TerminalConnectionHandlers = {
+          ready: () => {
+            if (disposed || closed) return;
+            ready = true; failedOpens = 0; socketFailures = 0;
+            // A new shell has no history on its first connection; every reconnect replays some (an event stream that
+            // reconnected by itself too).
+            if (!created) replayUntil = Date.now() + 500;
+            history = false; created = false;
+            connection?.resize(terminal.cols, terminal.rows);
+            setError(''); flush(); if (visible.current) terminal.focus();
+          },
+          output: (data, outputId) => {
+            if (outputId !== undefined) lastId = outputId;
+            shown = true;
+            if (!history && Date.now() >= replayUntil) { terminal.write(data); return; }
+            replaying++; terminal.write(data, () => { replaying--; });
+          },
+          exit: exitCode => { if (disposed || closed) return; terminal.writeln(`\r\n${t('터미널 종료 (코드 {0})', { 0: exitCode })}`); finish(); },
+          gone,
+          interrupted: () => { if (!disposed && !closed) setError(t('터미널 연결이 끊겼습니다. 다시 연결하는 중입니다.')); },
+          lost: opened => {
+            if (disposed || closed) return;
+            ready = false;
+            setError(t('터미널 연결이 끊겼습니다. 다시 연결하는 중입니다.'));
+            // Two sockets that never reached the server: use the event stream, and try a socket again once it drops.
+            if (stream) { stream = false; socketFailures = 0; }
+            else if (!opened && ++socketFailures >= 2) stream = true;
+            if (++failedOpens >= 3) setError(node ? t('터미널에 다시 연결하지 못했습니다. 이 터미널을 보는 창이 너무 많거나 그 컴퓨터에 닿지 않습니다. 계속 다시 시도합니다.')
+              : t('터미널에 다시 연결하지 못했습니다. 이 터미널을 보는 창이 너무 많을 수 있습니다. 계속 다시 시도합니다.'));
+            reconnect = setTimeout(retry, failedOpens <= 1 ? 500 : Math.min(3000 * failedOpens, 30_000));
+          },
+          refused: (_status, message) => fail(new Error(message)),
         };
-        current.onopen = () => {
-          failedOpens = 0;
-          // A new shell has no history on its first connection; every reconnect replays some.
-          if (created) created = false; else replayUntil = Date.now() + 500;
-          void api<{ token: string }>('/api/bootstrap').then(fresh => { requestToken = fresh.token; if (!disposed) { setError(''); flush(); if (visible.current) terminal.focus(); } }).catch(fail); };
+        const path = nodePath(node, `/api/workspace/terminals/${encodeURIComponent(id)}/${stream ? 'events' : 'socket'}`);
+        connection = stream ? openTerminalStream(path, (action, body) => post(action, body), handlers)
+          : openTerminalSocket(socketUrl(path), requestToken, resumes ? lastId : undefined, handlers, { refusedHello: () => { void refreshToken().catch(() => {}); /* best-effort: the next try asks again */ } });
       };
-      listen();
+      connect();
     }).catch(value => {
       closed = true; terminal.options.disableStdin = true; fail(value);
       // Without an answer that the shell is gone, it may still be running: the tab offers to reach it again. A refusal
@@ -286,7 +320,7 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
       const away = status === undefined || code === 'node-offline' || disposition === 'uncertain' || status === 504 || (status === 503 && !node);
       if (!disposed) { setStarting(false); setExited(true); setLost(away); }
     });
-    return () => { disposed = true; clearTimeout(timer); clearTimeout(reconnect); input.dispose(); resize.dispose(); observer.disconnect(); stream?.close(); terminal.dispose(); if (terminalRef.current?.terminal === terminal) terminalRef.current = undefined; };
+    return () => { disposed = true; clearTimeout(timer); clearTimeout(reconnect); input.dispose(); resize.dispose(); observer.disconnect(); connection?.close(); terminal.dispose(); if (terminalRef.current?.terminal === terminal) terminalRef.current = undefined; };
   }, [cwd, slot, token, generation]);
   return <div className="workspace-terminal-panel" role="tabpanel" id={`workspace-terminal-panel-${tab.key}`} aria-labelledby={`workspace-terminal-tab-${tab.key}`} hidden={!active}>
     {error && <p role="alert" className="workspace-error">{translateMessage(error)}</p>}

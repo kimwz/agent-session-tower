@@ -440,7 +440,12 @@ export interface SystemStatus {
   sampledAt: string;
 }
 /** The versions of Tower's own processes besides the web server and the worker. */
-export interface ComponentVersions { terminalHost?: string | null; master?: string | null }
+export interface ComponentVersions {
+  terminalHost?: string | null;
+  /** The terminal host runs what this Tower needs of it, whatever release it came with; it need not restart. */
+  terminalHostCurrent?: boolean;
+  master?: string | null;
+}
 
 export interface Snapshot {
   storage?: import('./storage.js').WorkerStorageStatus;

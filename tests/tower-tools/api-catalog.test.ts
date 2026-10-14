@@ -19,6 +19,8 @@ const NOT_FOR_AGENTS = new Map<string, string>([
   ['/api/sessions/resume-candidates', 'the trigger editor\'s session choices; sessions.list serves agents'],
   ['/api/master/events', 'the master page\'s live stream'],
   ['/api/workspace/terminals/{}/events', 'a terminal\'s live stream; terminal_read reads it'],
+  ['/api/workspace/terminals/{}/socket', 'a terminal tab\'s WebSocket; agents use the input route and terminal_read'],
+  ['/api/?:nodes/{}/workspace/terminals/{}/socket', 'the same WebSocket for a joined computer\'s terminal tab'],
   ['/api/master/presence', 'a page saying it shows the master'],
   ['/api/master/directives/{}', 'a page answering a screen command'],
   ['/api/master/voice/audio/{}', 'audio a page plays'],

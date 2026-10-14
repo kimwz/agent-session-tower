@@ -124,7 +124,7 @@ export function remoteSnapshot(snapshot: Snapshot, scope: RemoteScope, controlle
     scanning: snapshot.scanning, hostname: snapshot.hostname, version: snapshot.version,
     ...(snapshot.runnerVersion ? { runnerVersion: snapshot.runnerVersion } : {}),
     // Versions only, for the controlling Tower's version panel.
-    ...(snapshot.componentVersions ? { componentVersions: { terminalHost: snapshot.componentVersions.terminalHost, master: snapshot.componentVersions.master } } : {}),
+    ...(snapshot.componentVersions ? { componentVersions: { terminalHost: snapshot.componentVersions.terminalHost, ...(snapshot.componentVersions.terminalHostCurrent ? { terminalHostCurrent: true } : {}), master: snapshot.componentVersions.master } } : {}),
     ...(snapshot.runnerUpdate ? { runnerUpdate: snapshot.runnerUpdate } : {}),
     // Numbers only: how busy the computer is, for its rings on the controlling Tower's canvas.
     ...(snapshot.system ? { system: snapshot.system } : {}),

@@ -16,11 +16,20 @@ export async function terminalHostPaths(stateDir: string) {
   return { stateDir: runner.stateDir, socket: join(runner.directory, 'terminals.sock'), token: join(runner.directory, 'terminals-token'), runtime: join(runner.stateDir, 'terminal-runtime') };
 }
 
+/**
+ * What the terminal host does, as a number raised only when its own code changes in a way the web relies on (what it
+ * answers, how shells run, when it exits). A host keeps running across Tower updates while shells are open; one with
+ * this revision is up to date whatever release it came with, so an update does not wait on it.
+ */
+export const TERMINAL_HOST_REVISION = 1;
+
 export interface TerminalHostReply {
   protocol: number;
   stateDir: string;
   instance: string;
   version: string;
+  /** Absent from hosts before revisions were kept: those are older than every revision. */
+  revision?: number;
   result?: unknown;
   error?: { message: string; statusCode: number };
 }
@@ -62,9 +71,9 @@ export async function startTerminalHost(options: TerminalHostOptions) {
     const supplied = Buffer.from(req.headers.authorization ?? '');
     const expected = Buffer.from(`Bearer ${token}`);
     if (closing || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) { res.writeHead(403); res.end(); return; }
-    lastRequest = Date.now();
     const events = req.url?.match(/^\/terminals\/([0-9a-f-]{36})\/events$/);
     if (req.method === 'GET' && events) {
+      lastRequest = Date.now();
       const cursor = req.headers['last-event-id'];
       try {
         if (Array.isArray(cursor)) throw new TowerError('invalid', 'Invalid terminal cursor.');
@@ -74,7 +83,9 @@ export async function startTerminalHost(options: TerminalHostOptions) {
     }
     if (req.method !== 'POST' || req.url !== '/rpc') { res.writeHead(404); res.end(); return; }
     pending++;
-    const reply: TerminalHostReply = { protocol: RUNNER_PROTOCOL, stateDir: paths.stateDir, instance, version: APP_VERSION };
+    // Asking what runs here (a version check, a list) is not using a shell: it never keeps an idle host from exiting.
+    let use = false;
+    const reply: TerminalHostReply = { protocol: RUNNER_PROTOCOL, stateDir: paths.stateDir, instance, version: APP_VERSION, revision: TERMINAL_HOST_REVISION };
     try {
       const chunks: Buffer[] = []; let bytes = 0;
       for await (const chunk of req) {
@@ -84,11 +95,14 @@ export async function startTerminalHost(options: TerminalHostOptions) {
       }
       const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { protocol?: number; method?: string; args?: unknown[] };
       if (input.protocol !== RUNNER_PROTOCOL || typeof input.method !== 'string' || !Array.isArray(input.args)) throw new TowerError('conflict', 'Incompatible terminal request.');
+      // Except the ping that comes before opening a shell: the host must not leave between it and the shell.
+      use = (input.method !== 'ping' && input.method !== 'list') || (input.method === 'ping' && input.args[0] === 'opening');
+      if (use) lastRequest = Date.now();
       reply.result = await dispatch(input.method, input.args) ?? null;
     } catch (error) {
       const value = error as { message?: string };
       reply.error = { message: value.message ?? 'Terminal operation failed.', statusCode: statusOf(error) ?? 500 };
-    } finally { pending--; lastRequest = Date.now(); }
+    } finally { pending--; if (use) lastRequest = Date.now(); }
     if (!res.destroyed) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(reply)); }
   });
   server.requestTimeout = 0;

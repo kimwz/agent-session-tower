@@ -184,6 +184,8 @@ export interface SnapshotConnection {
    * often drops its connection without telling it, so a connection that has been quiet reconnects at once.
    */
   wake(): void;
+  /** The page is hidden: let the stream go until `wake` (see hidden-release.ts). */
+  sleep(): void;
 }
 
 /**
@@ -200,6 +202,7 @@ export function connectSnapshotStream(store: SnapshotStore, handlers: SnapshotSt
   let requested: SessionScope | undefined;
   let rescopeTimer: unknown;
   let closed = false;
+  let asleep = false;
   let lastResync = -Infinity;
   let lastFrame = timers.now();
   let failures = 0;
@@ -272,7 +275,7 @@ export function connectSnapshotStream(store: SnapshotStore, handlers: SnapshotSt
   };
   // A new connection always begins with a complete snapshot.
   const restart = (wait: number) => {
-    if (closed) return;
+    if (closed || asleep) return;
     if (restartTimer !== undefined) timers.clearTimeout(restartTimer);
     source?.close();
     source = undefined;
@@ -313,8 +316,19 @@ export function connectSnapshotStream(store: SnapshotStore, handlers: SnapshotSt
       if (rescopeTimer !== undefined) timers.clearTimeout(rescopeTimer);
       rescopeTimer = timers.setTimeout(() => { rescopeTimer = undefined; sendScope(); }, RESCOPE_MS);
     },
+    sleep: () => {
+      if (closed || asleep) return;
+      asleep = true;
+      if (restartTimer !== undefined) timers.clearTimeout(restartTimer);
+      restartTimer = undefined;
+      source?.close();
+      source = undefined;
+      stream = undefined;
+      store.setConnected(false);
+    },
     wake: () => {
       if (closed) return;
+      if (asleep) { asleep = false; failures = 0; restart(0); return; }
       const quiet = timers.now() - lastFrame > WAKE_STALE_MS;
       if (!source || source.readyState === CLOSED || quiet) { failures = 0; restart(0); }
     },

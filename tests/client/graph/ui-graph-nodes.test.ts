@@ -128,4 +128,6 @@ test('a process counts as behind only when it runs an older release than the web
   assert.equal(versionsBehind({ web: '1.87.0', worker: 'legacy' }), true);
   assert.equal(versionsBehind({ web: '1.87.0', worker: '1.87.0', terminalHost: null, master: '1.87.0' }), false);
   assert.equal(versionsBehind({ web: '1.87.0', worker: '1.88.0' }), false, 'a newer one left by an undone update is not waiting');
+  assert.equal(versionsBehind({ web: '1.87.0', terminalHost: '1.86.0' }), true);
+  assert.equal(versionsBehind({ web: '1.87.0', terminalHost: '1.86.0', terminalHostCurrent: true }), false, 'a terminal host that already does what this version needs is not waiting');
 });

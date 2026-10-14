@@ -562,7 +562,9 @@ async function main() {
     update: {
       request: version => updates.request(version),
       report: async () => {
-        const [update, free, terminalHost] = await Promise.all([updates.status(), diskFree(stateDir), workspaceTerminals.hostVersion().catch(() => undefined)]);
+        const [update, free, running] = await Promise.all([updates.status(), diskFree(stateDir), workspaceTerminals.hostVersion().catch(() => undefined)]);
+        // A host that runs what this version needs is not reported as one waiting to move.
+        const terminalHost = running && !workspaceTerminals.hostCurrent() ? running : undefined;
         const worker = runs.runnerVersion();
         return { versions: { web: APP_VERSION, ...(worker ? { worker } : {}), ...(terminalHost ? { terminalHost } : {}) }, service: updates.managed,
           ...(update ? { update } : {}), ...(free !== undefined ? { diskFree: free } : {}), autoUpdate: autoUpdate() };
@@ -617,7 +619,8 @@ async function main() {
     asking = true;
     try {
       const [terminalHost, masterHost] = await Promise.all([workspaceTerminals.displayVersion().catch(() => undefined), master.hostVersion().catch(() => undefined)]);
-      const next: ComponentVersions = { ...(terminalHost !== undefined ? { terminalHost } : {}), ...(masterHost !== undefined ? { master: masterHost } : {}) };
+      const next: ComponentVersions = { ...(terminalHost !== undefined ? { terminalHost } : {}), ...(terminalHost && workspaceTerminals.hostCurrent() ? { terminalHostCurrent: true } : {}),
+        ...(masterHost !== undefined ? { master: masterHost } : {}) };
       if (JSON.stringify(next) !== JSON.stringify(componentVersions)) { componentVersions = next; changed(); }
     } finally { asking = false; }
   };

@@ -268,6 +268,24 @@ test('coming back to the page reconnects at once only when the connection may ha
   assert.equal(FakeSource.opened.length, 3);
 });
 
+test('a hidden page lets its stream go and opens a new one when shown again', () => {
+  FakeSource.opened = [];
+  const clock = new Clock();
+  const store = new SnapshotStore(() => {}, clock);
+  const connection = connectSnapshotStream(store, { onFrame: () => {}, onOpen: () => {}, onError: () => {}, onUnreadable: () => {} }, url => new FakeSource(url), clock);
+  const first = FakeSource.opened[0];
+  first.emit('snapshot', 1, snapshot('One'));
+  connection.sleep();
+  assert.equal(first.closed, true);
+  // Neither the watchdog nor a retry opens one while it sleeps.
+  clock.advance(STALE_MS * 3);
+  assert.equal(FakeSource.opened.length, 1);
+  connection.wake();
+  clock.advance(0);
+  assert.equal(FakeSource.opened.length, 2, 'shown again: a new stream, which starts with a complete snapshot');
+  connection();
+});
+
 /** A page whose stream holds only some sessions: the scope it needs and the scope changes it sent. */
 function scopedPage(initial: SessionScope) {
   FakeSource.opened = [];

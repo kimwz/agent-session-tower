@@ -7,6 +7,7 @@ import { post } from './api';
 import { dockLayout } from './dock-layout';
 import { OpenChatButton } from './OpenChatButton';
 import { followRoom, type RoomState } from './room-stream';
+import { releaseWhileHidden } from '../common/hidden-release';
 import { runScreenCommand, type MasterControls } from './screen';
 import { useWords } from './strings';
 import { VoiceSession, type VoiceView } from './voice-client';
@@ -88,7 +89,9 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
       });
     }).catch(() => { if (!cancelled) retry = setTimeout(() => probe(Math.min(wait * 2, 30_000)), wait); });
     probe(2000);
-    return () => { cancelled = true; if (retry) clearTimeout(retry); follow.current?.stop(); voiceRef.current?.stop(); };
+    // A hidden tab lets its stream go, unless voice is on there and must still hear what to read aloud.
+    const release = releaseWhileHidden(() => { if (!voiceRef.current) follow.current?.sleep(); }, () => follow.current?.wake());
+    return () => { cancelled = true; release(); if (retry) clearTimeout(retry); follow.current?.stop(); voiceRef.current?.stop(); };
   }, []);
 
   // A tab showing the master's conversation is where its screen commands go.

@@ -20,7 +20,7 @@ export interface VoiceListener {
  * the master session's, shown like any session. When the stream cannot continue where it left off (the host
  * restarted) it starts again from a new checkpoint.
  */
-export function followRoom(onState: (state: RoomState) => void, onDirective: (directive: MasterDirective) => void, voiceListener?: VoiceListener): { stop(): void } {
+export function followRoom(onState: (state: RoomState) => void, onDirective: (directive: MasterDirective) => void, voiceListener?: VoiceListener): { stop(): void; sleep(): void; wake(): void } {
   let overview: MasterOverview | undefined;
   let voice: MasterVoiceStatus | undefined;
   let epoch = '';
@@ -28,6 +28,8 @@ export function followRoom(onState: (state: RoomState) => void, onDirective: (di
   let source: EventSource | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
+  /** A hidden page lets its stream go (see hidden-release.ts) and continues where it left off when shown. */
+  let asleep = false;
 
   const publish = (error?: string) => onState({ ...(overview ? { overview } : {}), ...(voice ? { voice } : {}), ...(error ? { error } : {}) });
   const heard = (status: MasterVoiceStatus | undefined) => { if (!status) return; voice = status; voiceListener?.status(status); };
@@ -40,8 +42,10 @@ export function followRoom(onState: (state: RoomState) => void, onDirective: (di
     else return;
     publish();
   };
+  let checking = false;
   const connect = () => {
-    if (stopped) return;
+    if (stopped || asleep) return;
+    source?.close();
     source = new EventSource(`/api/master/events?${new URLSearchParams({ epoch, after: String(seq) })}`);
     source.onopen = () => voiceListener?.connected(true);
     source.onmessage = message => { try { apply(JSON.parse(message.data) as MasterStreamEvent); } catch { /* ignore */ } };
@@ -49,10 +53,11 @@ export function followRoom(onState: (state: RoomState) => void, onDirective: (di
     // A dropped connection resumes where it left off; the host answers `resync` if it cannot.
     source.onerror = () => { source?.close(); voiceListener?.connected(false); reconnect(); };
   };
-  const reconnect = () => { if (!stopped) { clearTimeout(retry); retry = setTimeout(connect, 2000); } };
-  const schedule = () => { if (!stopped) { clearTimeout(retry); retry = setTimeout(() => void checkpoint(), 2000); } };
+  const reconnect = () => { if (!stopped && !asleep) { clearTimeout(retry); retry = setTimeout(connect, 2000); } };
+  const schedule = () => { if (!stopped && !asleep) { clearTimeout(retry); retry = setTimeout(() => void checkpoint(), 2000); } };
   const checkpoint = async () => {
     if (stopped) return;
+    checking = true;
     try {
       const state = await api<MasterCheckpoint>('/api/master/state');
       overview = state.overview; epoch = state.epoch; seq = state.seq;
@@ -62,8 +67,13 @@ export function followRoom(onState: (state: RoomState) => void, onDirective: (di
     } catch (error) {
       publish(error instanceof Error ? error.message : String(error));
       schedule();
-    }
+    } finally { checking = false; }
   };
   void checkpoint();
-  return { stop: () => { stopped = true; clearTimeout(retry); source?.close(); } };
+  return {
+    stop: () => { stopped = true; clearTimeout(retry); source?.close(); },
+    sleep: () => { if (stopped || asleep) return; asleep = true; clearTimeout(retry); source?.close(); source = undefined; voiceListener?.connected(false); },
+    // A checkpoint still under way connects by itself when it is done.
+    wake: () => { if (stopped || !asleep) return; asleep = false; if (checking) return; if (epoch) connect(); else void checkpoint(); },
+  };
 }

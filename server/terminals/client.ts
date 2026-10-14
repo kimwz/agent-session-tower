@@ -7,7 +7,7 @@ import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
 import { MAX_RPC_BYTES, RUNNER_PROTOCOL } from '../runs/runner-protocol.js';
 import type { TerminalOwner, TerminalSummary, WorkspaceTerminalBackend } from '../workspace-terminals.js';
-import { terminalHostPaths, type TerminalHostReply } from './host.js';
+import { TERMINAL_HOST_REVISION, terminalHostPaths, type TerminalHostReply } from './host.js';
 import { TowerError, fromStatus, statusOf, type ErrorKind } from '../../shared/errors.js';
 import type { StreamSink } from '../streams/sink.js';
 
@@ -80,7 +80,8 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
     return this.starting ??= this.startHost().finally(() => { this.starting = undefined; });
   }
   private async startHost(): Promise<void> {
-    try { await this.call('ping'); return; }
+    // Says a shell is about to be opened, so a host about to leave for being idle stays for it.
+    try { await this.call('ping', ['opening']); return; }
     catch (error) { if (statusOf(error) !== 503) throw error; }
     const entry = this.options.hostEntry ?? fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? '../index.ts' : '../index.js', import.meta.url));
     const stateDir = (await this.hostPaths()).stateDir;
@@ -92,7 +93,7 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
     const deadline = Date.now() + (this.options.startupTimeoutMs ?? 30_000);
     for (;;) {
       if (spawnError) throw spawnError;
-      try { await this.call('ping'); return; }
+      try { await this.call('ping', ['opening']); return; }
       catch (error) {
         if (statusOf(error) !== 503 || Date.now() >= deadline) throw error;
         await new Promise(resolve => setTimeout(resolve, 100));
@@ -115,8 +116,16 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
     } finally { await file.close(); }
   }
 
-  /** The version of the host each credential belongs to, as its replies said. */
-  private seen?: { token: string; version: string };
+  /** The version and revision of the host each credential belongs to, as its replies said. */
+  private seen?: { token: string; version: string; revision?: number };
+
+  /**
+   * Whether the host last asked runs what this web expects of it, whatever release it came with: then it need not
+   * restart for an update. Undefined until a host has answered.
+   */
+  hostCurrent(): boolean | undefined {
+    return this.seen ? (this.seen.revision ?? 0) >= TERMINAL_HOST_REVISION : undefined;
+  }
 
   /**
    * The running host's version for display, without keeping it alive: its credential file says whether one runs, and
@@ -174,7 +183,7 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
       req.end(body);
     });
     // Remembered before anything else is judged, so even a host this web cannot use is asked only once.
-    if (typeof reply.version === 'string') this.seen = { token, version: reply.version };
+    if (typeof reply.version === 'string') this.seen = { token, version: reply.version, ...(Number.isInteger(reply.revision) ? { revision: reply.revision } : {}) };
     if (reply.protocol !== RUNNER_PROTOCOL || reply.stateDir !== paths.stateDir) throw failure('The terminal host is incompatible.', 'unavailable');
     if (reply.error) throw relayed(reply.error.message, reply.error.statusCode);
     return reply;
