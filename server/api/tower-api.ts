@@ -19,7 +19,7 @@ import { remoteJob, remoteJobVisible, type RemoteScope } from '../remote/visibil
 import { eventPaths, handlerPaths, RemoteView, type KeptTriggers } from './remote-view.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
-type CallContext = Pick<RunAdmission, 'delegation' | 'validate'>;
+type CallContext = Pick<RunAdmission, 'delegation' | 'validate' | 'sender'>;
 
 const failure = (message: string, kind: ErrorKind) => new TowerError(kind, message);
 const REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -41,7 +41,7 @@ export interface TowerServices {
   };
   runs?: { list(): Run[] };
   projects?: () => Array<{ cwd: string; title: string; sessions: number; pinned: boolean }>;
-  autoPrompts?: { submit(request: AutoPromptInput, internal: Pick<RunAdmission, 'origin' | 'delegation' | 'validate'>): Promise<AutoPromptJob>; get(id: string): AutoPromptJob | undefined };
+  autoPrompts?: { submit(request: AutoPromptInput, internal: Pick<RunAdmission, 'origin' | 'delegation' | 'validate' | 'sender'>): Promise<AutoPromptJob>; get(id: string): AutoPromptJob | undefined };
   github?: { workflow(sessionId: string): SlackWorkflow | undefined; approveReply(workflowId: string, requestKey: string, text: string): Promise<unknown> };
   permissions?: PermissionService;
   /** What this computer keeps from controlling computers, with these folders' real locations resolved again now. */
@@ -90,7 +90,7 @@ export class TowerApi {
     // The authenticated master also has run-scoped Tower MCP tools, outside its page-tool adapter.
     if (name === 'autoPrompt.submit' && actor.kind === 'agent' && !actor.controllerId && actor.runId && actor.sessionId
       && this.services.sessions?.list().some(session => session.id === actor.sessionId && subscriptionOnly(this.services.stateDir, session.cwd))
-      && input && typeof input === 'object' && !Array.isArray(input)) input = { ...input, modelRole: 'master.worker' };
+      && input && typeof input === 'object' && !Array.isArray(input)) { input = { ...input, modelRole: 'master.worker' }; context = { ...context, sender: 'master' }; }
     const parsed = operation.input.safeParse(input ?? {});
     if (!parsed.success) throw failure(`Invalid request: ${parsed.error.issues.map(issue => `${issue.path.join('.') || 'input'}: ${issue.message}`).join('; ')}`, 'invalid');
     // Changes from agents, and from controlling computers, are made once per request.

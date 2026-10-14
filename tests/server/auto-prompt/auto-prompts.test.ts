@@ -101,6 +101,21 @@ test('explicit directory routes a busy continuation and preserves the original i
   assert.match(f.calls[0].systemPrompt, /untrusted data/);
 });
 
+test("the master's request is kept on its job and passed on with the routed turn, without changing the request it matches", async t => {
+  const f = await fixture(t);
+  const input = request(f.cwd);
+  const accepted = await f.manager.submit(input, { origin: { kind: 'owner' }, sender: 'master' });
+  assert.equal(accepted.sender, 'master');
+  assert.equal((await f.finished(accepted.id)).status, 'completed');
+  assert.equal(f.dispatches[0].internal?.sender, 'master');
+  assert.deepEqual(f.dispatches[0].internal?.origin, { kind: 'owner' });
+  // Display only: a retry of the same request matches whoever sent it.
+  assert.equal((await f.manager.submit(input, { origin: { kind: 'owner' } })).id, accepted.id);
+  const owner = await f.manager.submit(request(f.cwd), { origin: { kind: 'owner' } });
+  await f.finished(owner.id);
+  assert.equal(owner.sender, undefined); assert.equal(f.dispatches[1].internal?.sender, undefined);
+});
+
 test('the chosen execution model and effort reach the routed session, and a changed effort is a different request', async t => {
   const f = await fixture(t);
   const input = request(f.cwd, { model: 'native-model', effort: 'xhigh' });

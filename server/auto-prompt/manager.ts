@@ -184,7 +184,7 @@ export class AutoPromptManager extends EventEmitter {
   get(id: string): AutoPromptJob | undefined { const job = this.entries.get(id.toLowerCase())?.job; return job ? copy(job) : undefined; }
 
   /** `internal` comes from Tower itself (web owner, Slack, triggers); request fields cannot set it. */
-  async submit(input: AutoPromptInput, internal: Pick<RunAdmission, 'origin' | 'untrustedInput' | 'unattended' | 'delegation' | 'validate'> = {}): Promise<AutoPromptJob> {
+  async submit(input: AutoPromptInput, internal: Pick<RunAdmission, 'origin' | 'untrustedInput' | 'unattended' | 'delegation' | 'validate' | 'sender'> = {}): Promise<AutoPromptJob> {
     await this.options.repository!.gate();
     if (!this.started || this.stopping) throw new RunError('Auto Prompt가 요청을 받지 않고 있습니다.', 'unavailable');
     const origin = internal.origin === undefined ? { kind: 'unknown' as const } : parseRunOrigin(internal.origin);
@@ -235,7 +235,7 @@ export class AutoPromptManager extends EventEmitter {
     return promise;
   }
 
-  private async admit(request: AutoPromptInput, fingerprint: string, origin: RunOrigin, untrustedInput: boolean, unattended: boolean, context: Pick<RunAdmission, 'delegation' | 'validate'>): Promise<AutoPromptJob> {
+  private async admit(request: AutoPromptInput, fingerprint: string, origin: RunOrigin, untrustedInput: boolean, unattended: boolean, context: Pick<RunAdmission, 'delegation' | 'validate' | 'sender'>): Promise<AutoPromptJob> {
     const snapshot = await this.snapshotFor(origin);
     // Resolve after deduplication; a settings change never changes a retry's accepted choice. A named existing
     // session supplies its provider when omitted, while the role's model/effort remain new-session-only.
@@ -256,7 +256,7 @@ export class AutoPromptManager extends EventEmitter {
     const prepared = await this.attachments.prepare(input.requestId, { attachments: input.attachments, attachmentIds: input.attachmentIds }, origin.controllerId ?? 'local');
     const now = new Date().toISOString();
     const entry: Entry = { fingerprint, resumable: true, staged: prepared.attachments, job: {
-      id: input.requestId, ...(newSessionModel ? { newSessionModel } : {}), origin, ...(context.delegation ? { delegation: { ...context.delegation } } : {}), ...(origin.controllerId ? { exclusionRevision: this.options.remote!.matcher().revision } : {}), ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}), provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
+      id: input.requestId, ...(newSessionModel ? { newSessionModel } : {}), origin, ...(context.delegation ? { delegation: { ...context.delegation } } : {}), ...(context.sender === 'master' ? { sender: 'master' as const } : {}), ...(origin.controllerId ? { exclusionRevision: this.options.remote!.matcher().revision } : {}), ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}), provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
       // The owner's own turns always use Codex's automatic reviewer; only other work keeps the one it chose.
       ...(input.provider === 'codex' && input.codexApprovalsReviewer && !ownerOrigin(origin) ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}),
       ...(input.sessionMode ? { sessionMode: input.sessionMode } : {}),
@@ -501,7 +501,7 @@ export class AutoPromptManager extends EventEmitter {
     this.update(job, { status: 'dispatching', decision });
     await this.persist(entry); this.emit('change');
     const attachmentIds = entry.staged.map(item => item.id);
-    const internal: RunAdmission = { autoPromptId: job.id, validate, origin: job.origin ?? { kind: 'unknown' }, ...(job.delegation ? { delegation: job.delegation } : {}), ...(job.untrustedInput ? { untrustedInput: true } : {}), ...(job.unattended ? { unattended: true } : {}) };
+    const internal: RunAdmission = { autoPromptId: job.id, validate, origin: job.origin ?? { kind: 'unknown' }, ...(job.delegation ? { delegation: job.delegation } : {}), ...(job.sender === 'master' ? { sender: 'master' as const } : {}), ...(job.untrustedInput ? { untrustedInput: true } : {}), ...(job.unattended ? { unattended: true } : {}) };
     await this.storageGate(entry, signal); active();
     const dispatch = async () => decision.action === 'resume'
       ? await this.options.runs.enqueue(decision.sessionId!, job.prompt, { attachmentIds, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}) }, internal)

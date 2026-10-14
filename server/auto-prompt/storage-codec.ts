@@ -36,6 +36,7 @@ export function validEntry(value: unknown): value is Entry {
     // Jobs saved by 1.129–1.132 may carry `brokerOwnerAuthorized`; it is read and ignored.
     && (job.brokerOwnerAuthorized === undefined || typeof job.brokerOwnerAuthorized === 'boolean')
     && (job.origin === undefined || !!parseRunOrigin(job.origin))
+    && (job.sender === undefined || job.sender === 'master')
     && (job.untrustedInput === undefined || job.untrustedInput === true)
     && typeof job.id === 'string' && UUID.test(job.id) && ['claude', 'codex'].includes(String(job.provider))
     && (job.sessionMode === undefined || job.sessionMode === 'new')

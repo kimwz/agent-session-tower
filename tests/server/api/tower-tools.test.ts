@@ -356,9 +356,10 @@ test('a master run-scoped MCP Auto Prompt gets its role in code without changing
   const run = f.ownerTurn(master.id);
   const input = { requestId: randomUUID(), prompt: 'delegate without model instructions', cwd: f.project };
   await handleMcpRequest(f.context, f.token(run), { method: 'tools/call', name: 'autoPrompt_submit', arguments: input });
-  const saved = f.submitted[0] as { request: { modelRole?: string; provider?: string }; internal: { origin: { kind: string } } };
+  const saved = f.submitted[0] as { request: { modelRole?: string; provider?: string }; internal: { origin: { kind: string }; sender?: string } };
   assert.equal(saved.request.modelRole, 'master.worker'); assert.equal(saved.request.provider, undefined);
   assert.equal(saved.internal.origin.kind, 'agent');
+  assert.equal(saved.internal.sender, 'master', 'its chat shows the master as the sender');
   const regular = f.ownerTurn('codex:ordinary');
   await assert.rejects(handleMcpRequest(f.context, f.token(regular), { method: 'tools/call', name: 'autoPrompt_submit', arguments: { ...input, requestId: randomUUID() } }), /provider/);
 });

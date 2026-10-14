@@ -6,6 +6,8 @@ export interface ChatRunMatch {
   runId: string;
   text: string;
   attachments?: readonly Attachment[];
+  /** Set when the master agent wrote the request; earlier records have no mark and show as before. */
+  sender?: Run['sender'];
 }
 
 const attachmentMarker = '\n\n첨부 파일 (사용자가 이번 메시지에 첨부한 로컬 파일):\n';
@@ -79,7 +81,7 @@ export function matchChatRuns(messages: readonly ChatMessage[], runs: readonly R
       && Number.isFinite(timestamp) && timestamp >= start - clockAllowance && timestamp <= end
       && ((!run.attachments?.length && prompt !== '' && text === prompt) || matchesAttachmentPrompt(text, run)));
     if (!match) continue;
-    matches.set(match.message.id, { runId: run.id, text: run.prompt, ...(run.attachments?.length ? { attachments: run.attachments } : {}) });
+    matches.set(match.message.id, { runId: run.id, text: run.prompt, ...(run.attachments?.length ? { attachments: run.attachments } : {}), ...(run.sender === 'master' ? { sender: 'master' as const } : {}) });
     matchedRunIds.add(run.id);
   }
   return { matches, matchedRunIds };
