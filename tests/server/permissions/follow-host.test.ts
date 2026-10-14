@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -43,12 +43,23 @@ async function tower(t: TestContext, name: string, folders: Record<string, strin
   let lookups = 0;
   /** Runs while a folder's repository is looked up, as a change made meanwhile would. */
   let meanwhile: (() => void) | undefined;
-  const service = new PermissionService({ stateDir, repository: noStorageFixture(stateDir), env: { CODEX_HOME: codexHome }, session: id => sessions.get(id),
+  /** Runs at each wait for storage before an effect, with how many there were since it was set. */
+  let atEffect: ((count: number) => void) | undefined;
+  let effects = 0;
+  const service = new PermissionService({ stateDir, repository: noStorageFixture(stateDir), env: { CODEX_HOME: codexHome }, session: id => sessions.get(id), effectGate: async () => { effects += 1; atEffect?.(effects); },
     followedHost: async () => followed, remoteUrl: async cwd => { lookups += 1; meanwhile?.(); return repositories.get(cwd); }, onReviewQueued: () => { reviews += 1; } });
   await service.start();
   t.after(async () => { service.close(); closePermissionFixture(stateDir); await rm(root, { recursive: true, force: true }); });
   return { root, stateDir, codexHome, paths, sessions, service, follow: (id: string | undefined) => { followed = id; }, followed: () => followed, reviews: () => reviews, lookups: () => lookups,
-    point: (folder: string, url: string | undefined) => { repositories.set(paths[folder]!, url); }, meanwhile: (change: (() => void) | undefined) => { meanwhile = change; } };
+    point: (folder: string, url: string | undefined) => { repositories.set(paths[folder]!, url); }, meanwhile: (change: (() => void) | undefined) => { meanwhile = change; },
+    atEffect: (change: ((count: number) => void) | undefined) => { effects = 0; atEffect = change; },
+    /** The same computer started again: a new service over the same state. */
+    restart: async () => {
+      const again = new PermissionService({ stateDir, repository: noStorageFixture(stateDir), env: { CODEX_HOME: codexHome }, session: id => sessions.get(id), followedHost: async () => followed, remoteUrl: async cwd => repositories.get(cwd) });
+      await again.start();
+      t.after(() => again.close());
+      return again;
+    } };
 }
 
 /** A Tower API over `service`, with the trigger store it needs, for agents' tools and remote pages. */
@@ -349,4 +360,54 @@ test('a rule of the host for every project decides over an overlapping rule the 
   assert.doesNotMatch(codex, /decision="forbidden"/, 'nothing forbids what the owner allows');
   assert.doesNotMatch(node.service.claudeSettings(node.paths.shop!)!, /"deny"/);
   assert.ok(node.service.overview().rules.some(rule => rule.source === 'auto' && rule.value === 'git push'), 'this computer’s own rule is kept');
+});
+
+test('Codex’s rules files are brought in line on disk with every sync, after a restart too, and a project file the host’s rules decide that cannot be written is reported', async t => {
+  const { host, node } = await hostAndNode(t);
+  const codexFile = join(node.codexHome, 'rules', 'tower.rules');
+  await writeFile(codexFile, 'prefix_rule(pattern=["mine"], decision="allow")\n');
+  const sent = await host.service.exportManaged();
+  await assert.rejects(node.service.applyManaged(sent, HOST), /Codex 규칙 파일에 쓰지 못했습니다/);
+  // Started again with the same settings kept: nothing in memory says a write failed, the file on disk does.
+  node.service.close();
+  const restarted = await node.restart();
+  await rm(codexFile);
+  await restarted.applyManaged(sent, HOST);
+  assert.match(await readFile(codexFile, 'utf8'), /"gh", "pr", "view"/);
+
+  // A reviewer rule here that the host's new rule decides over leaves its project file; that file cannot be changed now.
+  await host.service.save({ kind: 'command', value: 'git push', providers: ['claude', 'codex'], scope: 'project', cwd: host.paths.shop! });
+  await restarted.applyManaged(await host.service.exportManaged(), HOST);
+  node.sessions.set('codex:a', { cwd: node.paths.shop!, provider: 'codex' });
+  assert.equal((await restarted.request({ kind: 'command', value: 'git push', scope: 'project', reason: 'Push' }, agent('codex:a'))).request.status, 'approved');
+  const rulesFolder = join(node.paths.shop!, '.codex', 'rules');
+  const projectFile = join(rulesFolder, 'tower.rules');
+  assert.match(await readFile(projectFile, 'utf8'), /decision="forbidden"/);
+  await host.service.save({ kind: 'command', value: 'git push --force-with-lease', providers: ['claude', 'codex'], scope: 'global' });
+  const widened = await host.service.exportManaged();
+  await chmod(rulesFolder, 0o500);
+  t.after(() => chmod(rulesFolder, 0o700).catch(() => {}));
+  await assert.rejects(restarted.applyManaged(widened, HOST), (error: Error) => error.message.includes(projectFile), 'the project file is named');
+  await chmod(rulesFolder, 0o700);
+  await restarted.applyManaged(widened, HOST);
+  await assert.rejects(readFile(projectFile, 'utf8'), { code: 'ENOENT' }, 'the same settings again: now the file is right');
+});
+
+test('following that changes at any wait before the approval is written: the former host is refused and no rule is made; this computer’s own request is reviewed', async t => {
+  const { host, node } = await hostAndNode(t);
+  await node.service.applyManaged(await host.service.exportManaged(), HOST);
+  // Each wait for storage on the way to the write, the last one inside the write itself.
+  for (const at of [1, 2, 3]) {
+    const session = `claude:host-${at}`;
+    node.sessions.set(session, { cwd: node.paths.shop!, provider: 'claude' });
+    node.atEffect(count => { if (count === at) node.follow(OTHER); });
+    await assert.rejects(node.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'Merge' }, { ...agent(session), controllerId: HOST }), { message: NOT_FOLLOWED }, `at wait ${at}`);
+    node.atEffect(undefined);
+    node.follow(HOST);
+  }
+  node.sessions.set('claude:own', { cwd: node.paths.shop!, provider: 'claude' });
+  node.atEffect(count => { if (count === 3) node.follow(OTHER); });
+  assert.equal((await node.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'Merge' }, agent('claude:own'))).request.status, 'pending');
+  node.atEffect(undefined);
+  assert.ok(!node.service.overview().rules.some(rule => rule.value === 'gh pr merge'), 'no rule was made');
 });

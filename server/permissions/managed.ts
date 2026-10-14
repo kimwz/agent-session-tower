@@ -146,8 +146,6 @@ export function keepHostPermissions(hostId: string, received: Pick<HostPermissio
   return { hostId, rules: received.rules.map(rule => ({ ...rule, scope: 'global' as const, host: true as const })), precedents: received.precedents, approvals: received.approvals };
 }
 
-/** Whether two copies hold the same rules for every project, so nothing the agents read changes between them. */
-export const sameHostRules = (a: KeptHostPermissions | undefined, b: KeptHostPermissions) => JSON.stringify(storedRules(a?.rules ?? [])) === JSON.stringify(storedRules(b.rules));
 const storedRules = (rules: readonly PermissionRule[]) => rules.map(rule => ({ id: rule.id, kind: rule.kind, value: rule.value, providers: rule.providers, source: rule.source,
   ...(rule.note ? { note: rule.note } : {}), createdAt: rule.createdAt, updatedAt: rule.updatedAt }));
 
