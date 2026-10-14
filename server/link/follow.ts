@@ -39,6 +39,7 @@ export class FollowedHostStore extends EventEmitter {
     if (hostId !== undefined && !CONTROLLER_ID.test(hostId)) throw new Error('Invalid controller id.');
     const data = JSON.stringify(hostId ? { hostId, changedAt: new Date().toISOString() } : {});
     const write = this.writes.then(async () => { await mkdir(dirname(this.path), { recursive: true, mode: 0o700 }); await writePrivateJson(this.path, data); });
+    // best-effort: the caller of this write gets its failure; the chain only keeps order.
     this.writes = write.catch(() => {});
     await write;
     if (hostId !== this.current) { this.current = hostId; this.emit('change', hostId); }

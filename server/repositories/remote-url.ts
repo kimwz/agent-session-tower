@@ -16,7 +16,7 @@ export function normalizeRemoteUrl(url: string): string | undefined {
       if (parsed.protocol === 'file:') return undefined;
       host = parsed.hostname;
       path = decodeURIComponent(parsed.pathname);
-    } catch { return undefined; }
+    } catch { return undefined; } // best-effort: an address that does not parse names no repository.
   } else if (scp) {
     host = scp[1]!;
     path = scp[2]!;
@@ -28,6 +28,7 @@ export function normalizeRemoteUrl(url: string): string | undefined {
 
 /** The normalized address of a folder's `origin` remote, or undefined when it has none or git cannot tell. */
 export async function remoteUrlOf(cwd: string, git: GitRunner = gitRunner()): Promise<string | undefined> {
+  // best-effort: a folder that is not a repository, or has no origin, has no address.
   const url = await git(cwd, ['config', '--get', 'remote.origin.url'], 5000).catch(() => '');
   return normalizeRemoteUrl(url);
 }

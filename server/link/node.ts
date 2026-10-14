@@ -176,6 +176,7 @@ export class NodeLinks extends EventEmitter {
     const follow = this.options.follow;
     if (!follow) return Promise.resolve();
     const run = this.follows.then(() => step(follow));
+    // best-effort: the caller of this step gets its failure; the chain only keeps order.
     this.follows = run.catch(() => {});
     return run;
   }
