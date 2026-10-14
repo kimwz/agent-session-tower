@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { lstat, mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { cloneAction, cloneRepository } from '../../../server/repositories/clone.js';
+import { cloneAction, cloneRepository, workspaceAction } from '../../../server/repositories/clone.js';
 import { localRemotes } from '../../helpers/git-remotes.js';
 
 test('a repository is cloned into a new Workspace folder, registered, and named by its repository', async t => {
@@ -46,4 +46,13 @@ test('a clone that needs a sign-in says what to do here and leaves no folder beh
   assert.equal(await lstat(join(workspace, 'private')).catch(() => undefined), undefined);
   const slow = async () => { throw new Error('git clone timed out'); };
   await assert.rejects(cloneRepository('git@github.com:kimwz/big.git', { workspace, git: slow }), /10분/);
+});
+
+test('the Workspace folder is made and registered for a terminal there', async t => {
+  const { root } = await localRemotes(t, []);
+  const registered: string[] = [];
+  const action = workspaceAction({ register: async cwd => { registered.push(cwd); }, home: root });
+  assert.deepEqual(await action({}), { cwd: join(root, 'Workspace') });
+  assert.deepEqual(registered, [join(root, 'Workspace')]);
+  await assert.rejects(action({ cwd: '/etc' }), /비워 두세요/);
 });

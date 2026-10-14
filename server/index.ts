@@ -67,7 +67,7 @@ import { NodeLinks } from './link/node.js';
 import { FollowedHostStore } from './link/follow.js';
 import { ManagedSettingsReceiver, ManagedSettingsSync } from './link/managed-settings.js';
 import { remoteUrlOf } from './repositories/remote-url.js';
-import { cloneAction, workspaceFolder } from './repositories/clone.js';
+import { cloneAction, workspaceAction } from './repositories/clone.js';
 import { GhLogin, providerLogin } from './link/readiness.js';
 import type { ManagedFolder } from '../shared/managed.js';
 import { runLinkCommand } from './link/cli.js';
@@ -598,7 +598,7 @@ async function main() {
   // in to Claude, Codex or gh); either becomes a project folder, shown on its canvas like any other.
   const projectFolder = async (cwd: string) => { if (!groups.list().some(group => group.cwd === cwd)) { await groups.set({ cwd, title: basename(cwd) }); changed(); } };
   managedReceiver.action('clone', cloneAction({ register: projectFolder }));
-  managedReceiver.action('workspace', async () => { const cwd = await workspaceFolder(); await projectFolder(cwd); return { cwd }; });
+  managedReceiver.action('workspace', workspaceAction({ register: projectFolder }));
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname, follow: followedHost,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
     // and updating do not.

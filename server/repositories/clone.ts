@@ -89,3 +89,13 @@ export function cloneAction(options: { register(cwd: string): Promise<void>; wor
     return { cwd: folder.cwd, remoteUrl: folder.remoteUrl };
   };
 }
+
+/** The Workspace folder made a project folder (`register`), for a terminal there: `{ cwd }`. */
+export function workspaceAction(options: { register(cwd: string): Promise<void>; home?: string }) {
+  return async (body: Record<string, unknown>): Promise<{ cwd: string }> => {
+    if (Object.keys(body).length) throw new TowerError('invalid', '요청 본문은 비워 두세요.');
+    const cwd = await workspaceFolder(options.home);
+    await options.register(cwd);
+    return { cwd };
+  };
+}
