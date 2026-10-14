@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { AutoPromptManager } from '../../../server/auto-prompt/manager.js';
+import { validEntry } from '../../../server/auto-prompt/storage-codec.js';
 import type { AutoPromptModelRequest } from '../../../server/auto-prompt/native.js';
 import type { RunAdmission } from '../../../server/runs/manager.js';
 import type { AttachmentInput, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, Session, Snapshot } from '../../../shared/types.js';
@@ -114,6 +115,13 @@ test("the master's request is kept on its job and passed on with the routed turn
   const owner = await f.manager.submit(request(f.cwd), { origin: { kind: 'owner' } });
   await f.finished(owner.id);
   assert.equal(owner.sender, undefined); assert.equal(f.dispatches[1].internal?.sender, undefined);
+});
+
+test('saved Auto Prompt jobs may carry only the master mark', () => {
+  const entry = (sender?: unknown) => ({ fingerprint: 'a'.repeat(64), staged: [], job: { id: randomUUID(), provider: 'codex', prompt: 'Work', routerModel: 'router',
+    createdAt: '2026-10-14T00:00:00.000Z', updatedAt: '2026-10-14T00:00:00.000Z', status: 'completed', origin: { kind: 'owner' }, ...(sender === undefined ? {} : { sender }) } });
+  assert.equal(validEntry(entry()), true); assert.equal(validEntry(entry('master')), true);
+  assert.equal(validEntry(entry('owner')), false); assert.equal(validEntry(entry(true)), false);
 });
 
 test('the chosen execution model and effort reach the routed session, and a changed effort is a different request', async t => {
