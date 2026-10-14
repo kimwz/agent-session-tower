@@ -11,11 +11,12 @@ export function normalizeRemoteUrl(url: string): string | undefined {
   let host: string, path: string;
   const scp = /^(?:[^@/\s]+@)?([^:/\s]+):(?!\/)(.+)$/.exec(text);
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) {
-    let parsed: URL;
-    try { parsed = new URL(text); } catch { return undefined; }
-    if (parsed.protocol === 'file:') return undefined;
-    host = parsed.hostname;
-    path = decodeURIComponent(parsed.pathname);
+    try {
+      const parsed = new URL(text);
+      if (parsed.protocol === 'file:') return undefined;
+      host = parsed.hostname;
+      path = decodeURIComponent(parsed.pathname);
+    } catch { return undefined; }
   } else if (scp) {
     host = scp[1]!;
     path = scp[2]!;

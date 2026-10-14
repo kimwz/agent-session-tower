@@ -154,7 +154,7 @@ test('only the followed controller is answered on the managed routes', async t =
   const a = await computer(t, 'host-a');
   const b = await computer(t, 'node-b');
   const joined = await join2(a, b);
-  await until(() => b.follow.hostId() === a.identity.id ? true : undefined, 10_000);
+  await until(() => a.controller.following(joined.id) ? true : undefined, 10_000);
   assert.deepEqual(await a.sync.refreshFolders(joined.id), [{ cwd: '/work/app', remoteUrl: 'github.com/kimwz/app' }]);
   await a.controller.setFollowHost(joined.id, false);
   const answer = await linkRequest(a.controller.session(joined.id)!, 'PUT', '/api/managed/settings', { revision: 'r', sections: {} });
@@ -177,4 +177,28 @@ test('a computer that still follows after the owner turned it off (a missed chan
   // As if the "off" never reached it.
   await b.follow.set(a.identity.id);
   await until(() => b.follow.hostId() === undefined ? true : undefined, 10_000);
+});
+
+test('a payload from a Tower this computer stopped following while it waited is not applied', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-follow-apply-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const follow = new FollowedHostStore(dir);
+  await follow.set('a'.repeat(32));
+  const receiver = new ManagedSettingsReceiver({ stateDir: dir, follow, folders: async () => [] });
+  let release: (() => void) | undefined;
+  const applied: string[] = [];
+  receiver.register('models', async value => { applied.push(String(value)); await new Promise<void>(resolve => { release = resolve; }); });
+  const first = receiver.apply({ revision: '1', sections: { models: 'from-a' } }, 'a'.repeat(32));
+  const second = receiver.apply({ revision: '2', sections: { models: 'from-a-again' } }, 'a'.repeat(32));
+  await until(() => release ? true : undefined, 2000);
+  await follow.set('c'.repeat(32));
+  release!();
+  assert.equal((await first)?.revision, '1');
+  assert.equal(await second, undefined);
+  assert.deepEqual(applied, ['from-a']);
+});
+
+test('a URL with broken escapes is no repository rather than an error', async () => {
+  const { normalizeRemoteUrl } = await import('../../../server/repositories/remote-url.js');
+  assert.equal(normalizeRemoteUrl('https://git.example.com/team/percent%.git'), undefined);
 });

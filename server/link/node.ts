@@ -73,6 +73,8 @@ export class NodeLinks extends EventEmitter {
   private readonly opening = new Set<WebSocket>();
   private readonly failures = new Map<string, { attempts: number; error?: string; refused?: boolean }>();
   private writes: Promise<unknown> = Promise.resolve();
+  /** Following and forgetting a controller happen one after the other, so a removed controller is never left followed. */
+  private follows: Promise<unknown> = Promise.resolve();
   private closed = false;
 
   constructor(private readonly options: NodeLinkOptions) {
@@ -157,8 +159,25 @@ export class NodeLinks extends EventEmitter {
   private record(id: string) { return this.records.find(item => item.id === id); }
 
   /** A controller this computer no longer trusts is no longer followed. */
-  private async unfollow(id: string): Promise<void> {
-    if (this.options.follow?.hostId() === id) { await this.options.follow.set(undefined); this.emit('change'); }
+  private unfollow(id: string): Promise<void> {
+    return this.followStep(async follow => { if (follow.hostId() === id) { await follow.set(undefined); this.emit('change'); } });
+  }
+
+  /** Follows a controller that is still paired here, replacing any other. */
+  private followController(id: string): Promise<void> {
+    return this.followStep(async follow => {
+      if (this.record(id)?.state !== 'paired' || follow.hostId() === id) return;
+      await follow.set(id);
+      this.emit('change');
+    });
+  }
+
+  private followStep(step: (follow: FollowedHostStore) => Promise<void>): Promise<void> {
+    const follow = this.options.follow;
+    if (!follow) return Promise.resolve();
+    const run = this.follows.then(() => step(follow));
+    this.follows = run.catch(() => {});
+    return run;
   }
 
   private schedule(id: string, delay: number): void {
@@ -304,8 +323,7 @@ export class NodeLinks extends EventEmitter {
       if (req.method === 'POST' && req.url === '/link/follow' && this.options.follow) {
         const body = await readJson(req, 1024);
         if (typeof body.follow !== 'boolean' || Object.keys(body).length !== 1) return json(400, { error: 'Invalid request.' });
-        if (body.follow) { if (this.options.follow.hostId() !== id) { await this.options.follow.set(id); this.emit('change'); } }
-        else await this.unfollow(id);
+        if (body.follow) await this.followController(id); else await this.unfollow(id);
         return json(200, { follows: this.options.follow.hostId() === id });
       }
       // Controllers are the owner's own computers: keeping this one up to date is theirs to ask for.

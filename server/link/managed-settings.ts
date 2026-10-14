@@ -203,7 +203,9 @@ export class ManagedSettingsReceiver {
       const body = await readJson(req, MAX_MANAGED_BYTES).catch(() => undefined);
       const sections = body?.sections;
       if (!body || typeof body.revision !== 'string' || !sections || typeof sections !== 'object' || Array.isArray(sections)) { json(400, { error: '설정 형식이 올바르지 않습니다.' }); return true; }
-      json(200, await this.apply({ revision: body.revision, sections: sections as ManagedPayload['sections'] }, principal.controllerId));
+      const applied = await this.apply({ revision: body.revision, sections: sections as ManagedPayload['sections'] }, principal.controllerId);
+      if (!applied) { json(403, { error: '이 컴퓨터는 그 Tower의 설정을 따르지 않습니다.' }); return true; }
+      json(200, applied);
       return true;
     }
     if (req.method === 'GET' && path === '/api/managed/folders') { json(200, { folders: await this.options.folders() }); return true; }
@@ -211,14 +213,18 @@ export class ManagedSettingsReceiver {
     return true;
   }
 
-  /** Applies each section that came, one payload at a time; one that fails keeps its value and is reported. */
-  apply(payload: ManagedPayload, hostId: string): Promise<ManagedApplied> {
+  /**
+   * Applies each section that came, one payload at a time; one that fails keeps its value and is reported. Undefined
+   * when this computer no longer follows that Tower (it switched while the payload waited): the rest is not applied.
+   */
+  apply(payload: ManagedPayload, hostId: string): Promise<ManagedApplied | undefined> {
     const run = this.queue.then(async () => {
       const errors: Partial<Record<ManagedSection, string>> = {};
       for (const section of MANAGED_SECTIONS) {
         if (!(section in payload.sections)) continue;
         const applier = this.appliers.get(section);
         if (!applier) continue;
+        if (await this.options.follow.reload() !== hostId) return undefined;
         try { await applier(payload.sections[section], { hostId }); }
         catch (error) { errors[section] = (error instanceof Error ? error.message : String(error)).slice(0, 500); }
       }
