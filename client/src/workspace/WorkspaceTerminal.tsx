@@ -309,7 +309,7 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
         };
         const path = nodePath(node, `/api/workspace/terminals/${encodeURIComponent(id)}/${stream ? 'events' : 'socket'}`);
         connection = stream ? openTerminalStream(path, (action, body) => post(action, body), handlers)
-          : openTerminalSocket(socketUrl(path), requestToken, resumes ? lastId : undefined, handlers, { refusedHello: () => { void refreshToken().catch(() => {}); } });
+          : openTerminalSocket(socketUrl(path), requestToken, resumes ? lastId : undefined, handlers, { refusedHello: () => { void refreshToken().catch(() => {}); /* best-effort: the next try asks again */ } });
       };
       connect();
     }).catch(value => {

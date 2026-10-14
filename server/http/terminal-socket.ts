@@ -122,7 +122,7 @@ export function nodeRelay(session: () => ClientHttp2Session | undefined): Termin
           stream.on('data', (chunk: Buffer) => { if (chunks.length < 64) chunks.push(chunk); });
           stream.once('end', () => {
             let message = '그 컴퓨터의 터미널에 연결하지 못했습니다.';
-            try { const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { error?: unknown }; if (typeof parsed.error === 'string') message = parsed.error; } catch { /* Not JSON. */ }
+            try { const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { error?: unknown }; if (typeof parsed.error === 'string') message = parsed.error; } catch { /* best-effort: an answer that is not JSON keeps the general message */ }
             reject(fromStatus(status === 401 || status === 403 ? 502 : status, message));
           });
           return;
@@ -146,7 +146,7 @@ function parse(raw: RawData, binary: boolean): Incoming | undefined {
       && keys.every(key => ['type', 'token', 'cursor'].includes(key))) return value as Incoming;
     if (value?.type === 'input' && typeof value.data === 'string' && keys.every(key => ['type', 'data'].includes(key))) return value as Incoming;
     if (value?.type === 'resize' && keys.every(key => ['type', 'cols', 'rows'].includes(key))) return value as Incoming;
-  } catch { /* Refused below. */ }
+  } catch { /* best-effort: an unreadable message is refused by the caller */ }
   return undefined;
 }
 
@@ -170,7 +170,7 @@ export function serveTerminalSocket(ws: WebSocket, id: string, relay: TerminalRe
   const ping = setInterval(() => {
     if (!alive) { ws.terminate(); return; }
     alive = false;
-    try { ws.ping(); } catch { /* Closing. */ }
+    try { ws.ping(); } catch { /* best-effort: a socket that cannot be pinged is closing already */ }
   }, PING_MS);
   ping.unref?.();
   ws.on('pong', () => { alive = true; });

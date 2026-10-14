@@ -50,7 +50,7 @@ export function openTerminalSocket(url: string, token: string, cursor: string | 
   socket.addEventListener('open', () => { opened = true; send({ type: 'hello', token, ...(cursor ? { cursor } : {}) }); });
   socket.addEventListener('message', event => {
     let message: ServerMessage;
-    try { message = JSON.parse(String(event.data)) as ServerMessage; } catch { return; }
+    try { message = JSON.parse(String(event.data)) as ServerMessage; } catch { return; } // best-effort: the server only sends JSON; anything else is ignored
     if (ended) return;
     if (message.type === 'ready') handlers.ready();
     else if (message.type === 'output' && typeof message.data === 'string') handlers.output(message.data, typeof message.id === 'string' ? message.id : undefined);
