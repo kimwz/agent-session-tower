@@ -55,7 +55,7 @@ async function pair(t: TestContext) {
     return observed;
   }
   /** Shared from A to B's project folder: what B's sessions there may use automatically. */
-  const toB = { global: false, folders: [{ hostId: b.device().id, root: projectB }] };
+  const toB = { allMachines: false, folders: [{ hostId: b.device().id, root: projectB }] };
   /** A's relay polled B just now as a build that serves reads, as it does every second. */
   const confirm = () => { assert.deepEqual(recipient.remote.poll('controller-a', ['available']), []); };
   return { root, stateA, stateB, projectA, projectB, a, b, source, recipient, runsB, capB, logical, local, toB, wires, errors, relay, confirm, advance: (ms: number) => { now += ms; } };
@@ -111,7 +111,7 @@ test('recipient session disconnection filters the session view and lists and blo
 test('a key disconnected in a session of the joined computer is offered there to allow again, and the source still decides its use', { timeout: 20000 }, async t => {
   const f = await pair(t);
   const secret = await f.a.create({ name: 'remote key to allow again', kind: 'scalar', value: VISIBLE, sharing: f.toB });
-  const own = await f.b.create({ name: 'B own key', kind: 'scalar', value: VISIBLE, sharing: { global: true, folders: [] } });
+  const own = await f.b.create({ name: 'B own key', kind: 'scalar', value: VISIBLE, sharing: { allMachines: true, folders: [] } });
   await f.recipient.context(f.capB); f.confirm();
   const session = { sessionId: f.capB.sessionId };
   const stopped = await f.relay(f.recipient.control('session-disconnect', { ...session, secretIds: [secret.id, own.id] })) as SecretSessionView;
@@ -125,7 +125,7 @@ test('a key disconnected in a session of the joined computer is offered there to
   assert.deepEqual(listed.secrets.map(item => item.id), [secret.id]);
   // Allowing again lifts only this session's stop: once the source stops sharing, the key is neither listed nor offered.
   await f.relay(f.recipient.control('session-disconnect', { ...session, secretIds: [secret.id] }));
-  await f.a.setSharing(secret.id, 1, { global: false, folders: [] });
+  await f.a.setSharing(secret.id, 1, { allMachines: false, folders: [] });
   f.confirm(); const unshared = await f.relay(f.recipient.control('session', session)) as SecretSessionView;
   assert.deepEqual([unshared.available, unshared.disconnected], [[], []]);
   await assert.rejects(f.recipient.control('session-reallow', { ...session, nodeId: 'node-a', secretIds: [secret.id] }), { kind: 'invalid' });
@@ -135,7 +135,7 @@ test('a key disconnected in a session of the joined computer is offered there to
 test('the source sees what the joined computer’s session stopped, and connecting a key there lifts that stop', { timeout: 20000 }, async t => {
   const f = await pair(t);
   const secret = await f.a.create({ name: 'stopped on B', kind: 'scalar', value: VISIBLE, sharing: f.toB });
-  const own = await f.b.create({ name: 'B local key', kind: 'scalar', value: VISIBLE, sharing: { global: true, folders: [] } });
+  const own = await f.b.create({ name: 'B local key', kind: 'scalar', value: VISIBLE, sharing: { allMachines: true, folders: [] } });
   const context = await f.recipient.context(f.capB); f.confirm();
   await f.relay(f.recipient.control('session-disconnect', { sessionId: f.capB.sessionId, secretIds: [secret.id, own.id] }));
   // A controller that does not ask for exclusions gets the subject an older build knows.
@@ -172,7 +172,7 @@ test('a source that confirmed reads but does not answer is listed as unavailable
 
 test('a joined computer’s session view lists a source’s keys only once its relay confirmed reads, and starts no task on either computer', { timeout: 20000 }, async t => {
   const f = await pair(t);
-  const shared = await f.a.create({ name: 'shared with B', kind: 'scalar', value: VISIBLE, sharing: { global: true, folders: [] } });
+  const shared = await f.a.create({ name: 'shared with B', kind: 'scalar', value: VISIBLE, sharing: { allMachines: true, folders: [] } });
   await f.a.create({ name: 'unshared on A', kind: 'scalar', value: VISIBLE });
   const sourceJournal = await readFile(join(f.stateA, 'secrets', 'journal.json')), recipientJournal = await readFile(join(f.stateB, 'secrets', 'journal.json'));
   const before = f.wires.length;
@@ -201,7 +201,7 @@ test('after the source revokes the last share, the node lists nothing and still 
   const listed = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[] };
   assert.deepEqual(listed.secrets.map(item => item.id), [secret.id]);
   const context = await f.recipient.context(f.capB);
-  await f.a.setSharing(secret.id, 1, { global: false, folders: [] });
+  await f.a.setSharing(secret.id, 1, { allMachines: false, folders: [] });
   const after = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[]; unavailableSources: unknown[] };
   assert.deepEqual([after.secrets, after.unavailableSources], [[], []], 'the source still answers for the task it already has');
   await f.relay(f.recipient.endSession(f.capB.sessionId));
@@ -312,13 +312,13 @@ test('owner HTTP secret API requires sign-in and page token; generic remote rout
   // Allowing a key again reaches the worker, which names an unknown session instead of the route being missing.
   const callsBefore = secretCalls; const reallow = await post('session-reallow', { sessionId: 'codex:unknown-session', secretIds: ['x'] });
   assert.notEqual(reallow.status, 404); assert.ok(secretCalls > callsBefore);
-  const created = await post('create', { name: 'HTTP key', kind: 'scalar', value: VISIBLE, sharing: { global: false, folders: [{ cwd: link }] } });
+  const created = await post('create', { name: 'HTTP key', kind: 'scalar', value: VISIBLE, sharing: { allMachines: false, folders: [{ cwd: link }] } });
   assert.equal(created.status, 200); const settings = await created.json() as SecretSettingsView;
   assert.deepEqual(settings.secrets.map(secret => secret.sharing?.folders), [[{ hostId: service.device().id, root: project }]], 'the folder key becomes the real folder');
   assert.equal(JSON.stringify(settings).includes(VISIBLE), false);
-  const refused = await post('sharing', { secretId: settings.secrets[0]!.id, revision: 1, global: false, folders: [{ cwd: join(root, 'missing') }] });
+  const refused = await post('sharing', { secretId: settings.secrets[0]!.id, revision: 1, allMachines: false, machines: [], folders: [{ cwd: join(root, 'missing') }] });
   assert.equal(refused.status, 400); assert.match((await refused.json() as { error: string }).error, /폴더를 찾을 수 없습니다/);
-  const stale = await post('sharing', { secretId: settings.secrets[0]!.id, revision: 0, global: true, folders: [] }); assert.equal(stale.status, 409);
+  const stale = await post('sharing', { secretId: settings.secrets[0]!.id, revision: 0, allMachines: true, machines: [], folders: [] }); assert.equal(stale.status, 409);
   const shown = await secureFetch('/api/secrets/settings', { headers: { cookie: auth.cookie } }); assert.equal(shown.status, 200); assert.equal((await shown.text()).includes(VISIBLE), false);
   const view = await secureFetch(`/api/secrets/session?sessionId=${encodeURIComponent('codex:http-session')}`, { headers: { cookie: auth.cookie } });
   assert.deepEqual((await view.json() as SecretSessionView).available.map(item => [item.name, item.basis]), [['HTTP key', ['folder']]]);
@@ -372,16 +372,16 @@ test('a folder identity the page sends back is accepted only where that key alre
   const host = service.device().id, gone = randomUUID();
   // Kept from when that computer was trusted for secrets.
   await service.trustPeer({ device: { ...service.device(), id: gone }, routeId: 'f'.repeat(32), direction: 'node', enabled: true });
-  const secret = await service.create({ name: 'kept', kind: 'scalar', value: VISIBLE, sharing: { global: false, folders: [{ hostId: gone, root: '/gone/project' }, { hostId: host, root: project }] } });
+  const secret = await service.create({ name: 'kept', kind: 'scalar', value: VISIBLE, sharing: { allMachines: false, folders: [{ hostId: gone, root: '/gone/project' }, { hostId: host, root: project }] } });
   await service.removePeer(gone);
   const sharing = () => service.settings().secrets.find(item => item.id === secret.id)!.sharing!;
   for (const folders of [[{ hostId: host, root: join(root, 'missing') }], [{ hostId: host, root: '/' }], [{ hostId: gone, root: '/gone/other' }]]) {
-    await assert.rejects(control('sharing', { secretId: secret.id, revision: 1, global: false, folders }), { kind: 'invalid' }, JSON.stringify(folders));
-    await assert.rejects(control('create', { name: 'raw', kind: 'scalar', value: 'v', sharing: { global: false, folders } }), { kind: 'invalid' });
+    await assert.rejects(control('sharing', { secretId: secret.id, revision: 1, allMachines: false, folders }), { kind: 'invalid' }, JSON.stringify(folders));
+    await assert.rejects(control('create', { name: 'raw', kind: 'scalar', value: 'v', sharing: { allMachines: false, folders } }), { kind: 'invalid' });
   }
   assert.equal(sharing().revision, 1); assert.equal(service.settings().secrets.length, 1);
-  const saved = await control('sharing', { secretId: secret.id, revision: 1, global: true, folders: [{ hostId: gone, root: '/gone/project' }, { hostId: host, root: project }] });
-  assert.deepEqual(saved.secrets.find(item => item.id === secret.id)?.sharing, { revision: 2, global: true, folders: [{ hostId: gone, root: '/gone/project' }, { hostId: host, root: project }] }, 'folders it keeps come back as identities');
-  await control('sharing', { secretId: secret.id, revision: 2, global: true, folders: [], kept: [{ hostId: host, root: '/' }] });
-  assert.deepEqual(sharing(), { revision: 3, global: true, folders: [] }, 'the page cannot name what counts as kept');
+  const saved = await control('sharing', { secretId: secret.id, revision: 1, allMachines: true, machines: [], folders: [{ hostId: gone, root: '/gone/project' }, { hostId: host, root: project }] });
+  assert.deepEqual(saved.secrets.find(item => item.id === secret.id)?.sharing, { revision: 2, allMachines: true, machines: [], folders: [{ hostId: gone, root: '/gone/project' }, { hostId: host, root: project }] }, 'folders it keeps come back as identities');
+  await control('sharing', { secretId: secret.id, revision: 2, allMachines: true, machines: [], folders: [], kept: [{ hostId: host, root: '/' }] });
+  assert.deepEqual(sharing(), { revision: 3, allMachines: true, machines: [], folders: [] }, 'the page cannot name what counts as kept');
 });

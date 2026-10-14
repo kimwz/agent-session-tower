@@ -20,7 +20,7 @@ test('owner can connect a saved key to one session without giving other sessions
   await service.connectSession(target, [secret.id]);
   assert.equal((await service.resolve(context, secret.reference, 'env')).bytes.toString(), 'FAKE_OWNER_TOKEN');
   assert.deepEqual(stored(service).rules, [], 'a connection writes no rule');
-  assert.deepEqual(service.settings().secrets[0].sharing, { revision: 1, global: false, folders: [] }, 'nor any sharing');
+  assert.deepEqual(service.settings().secrets[0].sharing, { revision: 1, allMachines: false, machines: [], folders: [] }, 'nor any sharing');
   const other = { ...await service.ensureTask('not-chosen', '/different'), runId: 'other-run' };
   assert.deepEqual(await service.list(other), []); await assert.rejects(service.resolve(other, secret.reference, 'env'));
   await service.disconnectSession(target, [secret.id]); await assert.rejects(service.resolve(context, secret.reference, 'env'));

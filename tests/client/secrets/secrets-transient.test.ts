@@ -100,7 +100,7 @@ const sessionView = (patch: Partial<SecretSessionView> = {}): SecretSessionView 
   usage: [], unavailableSources: [], updatePendingSources: [], ...patch,
 });
 const settingsView: SecretSettingsView = { status: { initialized: true, locked: false }, device, peers: [{ device: { ...device, id: 'peer' }, routeId: node, direction: 'node', enabled: true }],
-  secrets: [{ id: 'folder_key', name: 'FOLDER_KEY', groupId: 'tower', kind: 'scalar', version: 1, reference: 'r', sourceHostId: 'source', sharing: { revision: 5, global: false, folders: [{ hostId: 'source', root: '/work/app' }] } },
+  secrets: [{ id: 'folder_key', name: 'FOLDER_KEY', groupId: 'tower', kind: 'scalar', version: 1, reference: 'r', sourceHostId: 'source', sharing: { revision: 5, allMachines: false, machines: [], folders: [{ hostId: 'source', root: '/work/app' }] } },
     { id: 'legacy_key', name: 'LEGACY_KEY', groupId: 'g', kind: 'scalar', version: 1, reference: 'r', sourceHostId: 'source', legacy: { global: [], folders: [{ hostId: 'peer', root: '/srv/app' }], limited: false } },
     { id: 'remote_key', name: 'REMOTE_KEY', groupId: 'g', kind: 'scalar', version: 1, reference: 'r', sourceHostId: 'elsewhere' }] };
 
@@ -127,7 +127,7 @@ test('saving a paste to the vault sends the chosen sharing instead of a temporar
   const submit = find(paste.render(), element => element.type === 'button' && element.props.type === 'submit');
   assert.equal(submit.props.disabled, false); assert.equal(text(submit), '저장하고 이 세션에 연결');
   find(paste.render(), byType('form')).props.onSubmit(formEvent);
-  assert.deepEqual(sent[0], ['create', { name: 'API', kind: 'env', value: 'API=FAKE', connect: 'session', sharing: { global: false, folders: [{ cwd: '/work/app' }] }, sessionId: 'claude:session' }]);
+  assert.deepEqual(sent[0], ['create', { name: 'API', kind: 'env', value: 'API=FAKE', connect: 'session', sharing: { allMachines: false, folders: [{ cwd: '/work/app' }] }, sessionId: 'claude:session' }]);
   answer(); await tick(); paste.cleanup();
 });
 
@@ -228,9 +228,12 @@ test('a secret added in the settings is saved without a session, with the folder
   const add = fixture('SecretAddForm.tsx', 'SecretAddForm', { view: settingsView, canvas: { folders: [], hosts: [] }, busy: false, change, onClose() { closed = true; } });
   find(add.render(), element => element.type === 'input' && element.props.maxLength === 128).props.onChange({ target: { value: 'DEPLOY_KEY' } });
   find(add.render(), byType('textarea')).props.onChange({ target: { value: 'FAKE_ADD_CANARY' } });
+  assert.equal(find(add.render(), element => element.type === 'input' && element.props.type === 'checkbox').props.checked, true, 'a new secret is for all my machines unless changed');
+  find(add.render(), element => element.type === 'input' && element.props.type === 'checkbox').props.onChange({ target: { checked: false } });
+  find(add.render(), element => element.type === stub('./SecretSharingEditor', 'SecretMachinePicker')).props.onMachines(['peer']);
   find(add.render(), element => element.type === stub('./SecretSharingEditor', 'SecretFolderPicker')).props.onKeys(['/work/app', `@${node}//srv/app`]);
   find(add.render(), byType('form')).props.onSubmit(formEvent);
-  assert.deepEqual(sent, [['create', { name: 'DEPLOY_KEY', kind: 'scalar', value: 'FAKE_ADD_CANARY', sharing: { global: false, folders: [{ cwd: '/work/app' }, { cwd: `@${node}//srv/app` }] } }]]);
+  assert.deepEqual(sent, [['create', { name: 'DEPLOY_KEY', kind: 'scalar', value: 'FAKE_ADD_CANARY', sharing: { allMachines: false, machines: ['peer'], folders: [{ cwd: '/work/app' }, { cwd: `@${node}//srv/app` }] } }]]);
   assert.equal(find(add.render(), byType('textarea')).props.value, '');
   answer(); await tick(); assert.equal(closed, true); add.cleanup();
 });
@@ -243,20 +246,21 @@ test('registration accepts empty uploaded file bytes and sends their canonical e
   await tick();
   assert.equal(find(add.render(), element => element.type === 'button' && element.props.type === 'submit').props.disabled, false);
   find(add.render(), byType('form')).props.onSubmit(formEvent);
-  assert.deepEqual(sent[0], ['create', { name: 'empty.bin', kind: 'file', content: '' }]);
+  assert.deepEqual(sent[0], ['create', { name: 'empty.bin', kind: 'file', content: '', sharing: { allMachines: true, machines: [], folders: [] } }]);
   answer(); await tick(); add.cleanup();
 });
 
-test('saving sharing sends the stored revision, GLOBAL and the picked folders as canvas keys', async () => {
+test('saving sharing sends the stored revision, all machines, the computers and the picked folders as canvas keys', async () => {
   const { sent, change, answer } = changes(); let closed = false;
-  const stored = { ...settingsView.secrets[0]!, sharing: { revision: 5, global: false, folders: [{ hostId: 'source', root: '/work/app' }, { hostId: 'gone', root: '/old' }] } };
+  const stored = { ...settingsView.secrets[0]!, sharing: { revision: 5, allMachines: false, machines: [], folders: [{ hostId: 'source', root: '/work/app' }, { hostId: 'gone', root: '/old' }] } };
   const editor = fixture('SecretSharingEditor.tsx', 'SecretSharingEditor', { view: settingsView, item: stored, canvas: { folders: [], hosts: [] }, busy: false, change, onClose() { closed = true; } });
   const picker = () => find(editor.render(), element => element.type === editor.exports.SecretFolderPicker);
   assert.deepEqual(picker().props.keys, ['/work/app']);
   find(editor.render(), element => element.type === 'input' && element.props.type === 'checkbox').props.onChange({ target: { checked: true } });
   picker().props.onKeys(['/work/app', `@${node}//srv/app`]);
+  find(editor.render(), element => element.type === editor.exports.SecretMachinePicker).props.onMachines(['peer']);
   find(editor.render(), byType('form')).props.onSubmit(formEvent);
-  assert.deepEqual(sent, [['sharing', { secretId: 'folder_key', revision: 5, global: true, folders: [{ hostId: 'source', root: '/work/app' }, { cwd: `@${node}//srv/app` }, { hostId: 'gone', root: '/old' }] }]],
+  assert.deepEqual(sent, [['sharing', { secretId: 'folder_key', revision: 5, allMachines: true, machines: ['peer'], folders: [{ hostId: 'source', root: '/work/app' }, { cwd: `@${node}//srv/app` }, { hostId: 'gone', root: '/old' }] }]],
     'saved folders stay as they were received; only the newly picked one is a canvas key');
   answer(); await tick(); assert.equal(closed, true); editor.cleanup();
   const removing = changes();
@@ -268,7 +272,7 @@ test('saving sharing sends the stored revision, GLOBAL and the picked folders as
   const legacy = changes();
   const prefilled = fixture('SecretSharingEditor.tsx', 'SecretSharingEditor', { view: settingsView, item: settingsView.secrets[1], canvas: { folders: [], hosts: [] }, busy: false, change: legacy.change, onClose() {} });
   find(prefilled.render(), byType('form')).props.onSubmit(formEvent);
-  assert.deepEqual(legacy.sent, [['sharing', { secretId: 'legacy_key', revision: 0, global: false, folders: [{ cwd: `@${node}//srv/app` }] }]], 'what the rules shared, exactly as shown');
+  assert.deepEqual(legacy.sent, [['sharing', { secretId: 'legacy_key', revision: 0, allMachines: false, machines: [], folders: [{ cwd: `@${node}//srv/app` }] }]], 'what the rules shared, exactly as shown');
   legacy.answer(); await tick(); prefilled.cleanup();
 });
 
@@ -370,11 +374,11 @@ test('the settings read their view once when shown, and a stale sharing save rel
   panel.render(); await tick(); panel.render(); panel.render();
   assert.equal(reads, 1, 'never polled');
   const workspace = () => find(panel.render(), element => element.type === stub('./SecretSettings', 'SecretSettingsWorkspace'));
-  assert.equal(await workspace().props.change('sharing', { secretId: 'folder_key', revision: 4, global: true, folders: [] }), false);
+  assert.equal(await workspace().props.change('sharing', { secretId: 'folder_key', revision: 4, allMachines: true, folders: [] }), false);
   const root = panel.render(); await tick();
   assert.equal(reads, 2, 'the conflict reloads what is stored now');
   assert.match(text(find(root, element => element.props.role === 'status' && element.type === 'p')), /다른 곳에서 바뀌었습니다/);
-  assert.deepEqual(posted, [['sharing', { secretId: 'folder_key', revision: 4, global: true, folders: [] }]]);
+  assert.deepEqual(posted, [['sharing', { secretId: 'folder_key', revision: 4, allMachines: true, folders: [] }]]);
   panel.cleanup();
 });
 

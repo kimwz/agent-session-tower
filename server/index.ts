@@ -52,8 +52,9 @@ import { startSessionsMcp } from './api/session-tools.js';
 import { startSecretsMcp } from './secrets/runtime.js';
 import { runSecretsCommand } from './secrets/cli.js';
 import { SecretRelay } from './link/secret-relay.js';
-import { handleSecretLink, ownerSecretControl } from './link/secret-routes.js';
-import { SECRET_EXCLUSIONS_FEATURE, SECRET_SHARING_FEATURE } from './secrets/folders.js';
+import { folderSources, handleSecretLink, nodeSecretLink, ownerSecretControl } from './link/secret-routes.js';
+import { FollowingSecrets } from './link/secret-follow.js';
+import { SECRET_EXCLUSIONS_FEATURE, SECRET_MACHINES_FEATURE, SECRET_SHARING_FEATURE } from './secrets/folders.js';
 import type { SecretPeer } from '../shared/secrets.js';
 import type { RemoteSecretResponse } from './secrets/remote.js';
 import { overlapsRepository } from '../shared/repositories.js';
@@ -371,6 +372,9 @@ async function main() {
   let controllerJoined = (): { name: string; at: string } | undefined => undefined;
   let remoteNodes: RemoteNodes | undefined;
   let secretRouteKnown = (_direction: string, _id: string) => false;
+  // Secrets for the computers that follow this Tower: trust, card state, clones' folders and locked-vault notices.
+  let followingSecrets: FollowingSecrets | undefined;
+  let followerName = (_id: string): string | undefined => undefined;
   // Fast multiple-choice judgments (Jev, or whatever replaces it) for the web's own features; off without an API key.
   const decisions = new DecisionService(stateDir);
   await decisions.start().catch(error => console.error(`Fast judgment settings were not loaded: ${error instanceof Error ? error.message : String(error)}`));
@@ -441,6 +445,7 @@ async function main() {
     secretBlocks: () => runs.secretBlocks(),
     following: () => followingComputers(),
     followedHost: () => followedHostId(),
+    secretShares: () => [...runs.secretShares(), ...followingSecrets?.notices() ?? []].map(notice => ({ ...notice, ...(followerName(notice.nodeId) ? { nodeName: followerName(notice.nodeId) } : {}) })),
     attention: async (input, signal) => {
       const engine = decisions.engine('attentionNotifications');
       if (!engine) return undefined;
@@ -504,7 +509,10 @@ async function main() {
     cancelAutoPrompt: id => runs.cancelAutoPrompt(id),
     secrets: async (action, input) => {
       if (action === 'trust' && (typeof input.direction !== 'string' || typeof input.routeId !== 'string' || !secretRouteKnown(input.direction, input.routeId))) throw new TowerError('invalid', '연결 설정에서 먼저 승인한 컴퓨터를 선택하세요.');
-      return ownerSecretControl(remoteNodes, runs, action, input);
+      const answer = await ownerSecretControl(remoteNodes, runs, action, input);
+      // An opened vault, or trust changed by hand, is a moment to make the trust with following computers again.
+      if (['initialize', 'unlock', 'view-unlock', 'trust', 'untrust'].includes(action)) followingSecrets?.alignAll();
+      return answer;
     },
     slackOverview: () => runs.slackOverview(),
     api: (operation, input, context) => runs.api(operation, input, context && admit(context)),
@@ -584,7 +592,7 @@ async function main() {
   const managedReceiver = new ManagedSettingsReceiver({ stateDir, follow: followedHost, folders: managedFolders });
   await managedReceiver.start();
   let managedSync: ManagedSettingsSync | undefined;
-  const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname, published: releasePublished, managed: id => managedSync?.status(id) });
+  const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname, published: releasePublished, managed: id => managedSync?.status(id), secrets: id => followingSecrets?.status(id) });
   if (controllerLinks) { managedSync = new ManagedSettingsSync({ controller: controllerLinks }); managedSync.on('change', () => changed()); }
   // Sections register their export (managedSync) and apply (managedReceiver) here, beside their owning modules.
   managedSync?.register('permissions', () => runs.managedCall('permissions', 'export'));
@@ -605,10 +613,10 @@ async function main() {
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname, follow: followedHost,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
     // and updating do not.
-    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : []), ...(runs.supports('secrets') ? ['secrets'] : []), ...(runs.supports('secretSharing') ? [SECRET_SHARING_FEATURE] : []), ...(runs.supports('secretExclusions') ? [SECRET_EXCLUSIONS_FEATURE] : []), ...(runs.supports('compaction') ? ['compaction'] : []), 'followHost', ...(runs.supports('managedSettings') ? ['managedSettings'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
+    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : []), ...(runs.supports('secrets') ? ['secrets'] : []), ...(runs.supports('secretSharing') ? [SECRET_SHARING_FEATURE] : []), ...(runs.supports('secretExclusions') ? [SECRET_EXCLUSIONS_FEATURE] : []), ...(runs.supports('compaction') ? ['compaction'] : []), 'followHost', ...(runs.supports('managedSettings') ? ['managedSettings'] : []), ...(runs.supports('secretMachines') ? [SECRET_MACHINES_FEATURE] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
     handle: async (req, res, principal) => {
       if (await managedReceiver.handle(req, res, principal)) return;
-      if (await handleSecretLink(req, res, principal.controllerId, runs, { excluded: path => exclusions.excludesNow(path) })) return;
+      if (await handleSecretLink(req, res, principal.controllerId, runs, { excluded: path => exclusions.excludesNow(path), follows: async id => await followedHost.reload() === id })) return;
       return remoteRouter.handle(req, res, principal);
     },
     update: {
@@ -659,7 +667,15 @@ async function main() {
       return snapshot ? [{ id: node.id, name: node.label || node.name, snapshot }] : [];
     }) } : undefined;
     remoteNodes.on('change', () => notifications.changed());
+    const nodes = remoteNodes;
+    followingSecrets = new FollowingSecrets({ controller: controllerLinks, worker: runs, link: nodeSecretLink(nodes), canonical: (node, path) => folderSources(nodes, runs).ask(node, path), folders: id => managedSync?.folders(id) ?? [] });
+    followingSecrets.on('change', changed);
+    // Folders of a following computer, reported on connect, after a clone and every few minutes.
+    managedSync?.on('folders', (id: string, folders: ManagedFolder[]) => { void followingSecrets?.shareFolders(id, folders).catch(error => console.warn(`Secrets were not shared with a following computer's folders: ${error instanceof Error ? error.message : String(error)}`)); });
+    followerName = id => controllerLinks.list().find(node => node.id === id)?.name;
   }
+  // While following a host, this computer's vault opens by itself; the worker checks again as the switch changes.
+  followedHost.on('change', () => { if (runs.supports('secretMachines')) void runs.secretCall('machine-vault').catch(() => console.warn('This computer\'s vault did not open by itself; the owner can open it once.')); });
   // The master agent runs in its own process; this web only starts it, tells it how to reach this API, and relays.
   let webCredentials: WebCredentials | undefined;
   const localMcp = ownerMcpOverHttp(stateDir, () => webCredentials?.port);
@@ -791,8 +807,16 @@ async function main() {
   void towerUpdates.start().catch(error => console.error(`Automatic updates are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   if (remoteNodes) {
     secretRelay = new SecretRelay({ nodes: remoteNodes, peers: async () => runs.supports('secrets') ? await runs.secretCall('peers') as SecretPeer[] : [],
-      workerAnswer: (id, request) => runs.secretCall('answer', [id, request]) as Promise<RemoteSecretResponse>,
-      features: () => runs.supports('secretSharing') ? ['available'] : [] });
+      // Whether that computer follows this Tower now decides whether it gets the catalog and refusal reasons.
+      workerAnswer: (id, request) => runs.secretCall('answer', [id, request, { following: controllerLinks?.list().some(node => node.id === id && node.followHost) === true && controllerLinks?.following(id) === true }]) as Promise<RemoteSecretResponse>,
+      features: () => [...runs.supports('secretSharing') ? ['available'] : [], ...runs.supports('secretMachines') ? ['catalog'] : []],
+      lockedNodes: async () => {
+        const followers = controllerLinks?.list().filter(node => node.followHost && node.following && node.status === 'connected' && node.features.includes(SECRET_MACHINES_FEATURE)).map(node => node.id) ?? [];
+        if (!followers.length || !runs.supports('secretMachines')) return [];
+        const status = await runs.secretCall('status') as { initialized?: boolean; locked?: boolean };
+        return status.initialized && status.locked ? followers : [];
+      },
+      onLocked: id => followingSecrets?.locked(id) });
     secretRelay.start();
   }
   capabilities.start();
@@ -805,6 +829,8 @@ async function main() {
   // Links come up after the web server, so a joining computer never reaches a half-started Tower.
   await Promise.all([controllerLinks?.start(), nodeLinks?.start()]).catch(error => console.error(`Remote computers are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   managedSync?.start();
+  followingSecrets?.start();
+  followingSecrets?.alignAll();
   const shutdown = async () => {
     if (closing) return;
     closing = true;
@@ -815,6 +841,7 @@ async function main() {
     backups.close();
     remoteNodes?.close();
     managedSync?.close();
+    followingSecrets?.close();
     secretRelay?.close();
     const stoppingLinks = Promise.all([nodeLinks?.close(), controllerLinks?.close()]).then(() => { remoteRouter.dispose(); return nodeViews.flush(); });
     const stoppingCapabilities = capabilities.stop();

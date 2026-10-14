@@ -17,7 +17,7 @@ export function SecretAdvanced({ view, hosts, busy, change, open, onToggle, onEd
     <summary><ChevronDown size={14} aria-hidden="true" />{t('고급')}{!!view.status.pendingImports && <span className="secret-badge">{t('가져오기 대기 중')}</span>}</summary>
     <section className="secret-advanced-section" aria-label={t('연결된 컴퓨터')}>
       <div className="secret-section-head"><h3>{t('연결된 컴퓨터')}</h3><button type="button" disabled={busy} onClick={() => onEdit('trust')}>{t('컴퓨터 승인')}</button></div>
-      <p>{t('승인한 컴퓨터의 폴더를 공유 범위로 고를 수 있고, GLOBAL은 승인한 컴퓨터에도 적용됩니다.')}</p>
+      <p>{t('승인한 컴퓨터와 그 폴더를 공유 범위로 고를 수 있고, 모든 내 머신은 승인한 컴퓨터에도 적용됩니다. 이 Tower를 따르는 컴퓨터는 저절로 승인됩니다.')}</p>
       {view.peers.length ? <ul>{view.peers.map(peer => <li className="secret-row" key={peer.device.id}><span><strong>{peerName(peer, hosts)}</strong><small>{t(peer.direction === 'node' ? '내가 연결한 컴퓨터' : '나를 연결한 컴퓨터')}</small><code>{peer.device.fingerprint}</code></span>
         <button type="button" disabled={busy} onClick={() => void change('untrust', { id: peer.device.id })}>{t('승인 해제')}</button></li>)}</ul>
         : <p className="secret-empty">{t('승인한 컴퓨터가 없습니다.')}</p>}

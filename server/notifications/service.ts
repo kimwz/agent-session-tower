@@ -8,6 +8,7 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { generateVapidKeys, sendPush, type PushResult, type PushTarget, type VapidKeys } from './web-push.js';
 import type { TurnAttention, TurnAttentionInput } from './attention.js';
 import type { SecretBlockNotice } from '../runs/runner-protocol.js';
+import type { SecretShareNotice } from '../../shared/secrets.js';
 
 export type NotificationKind = keyof NotificationEvents;
 export interface NotificationEvent { key: string; kind: NotificationKind; at: number; run: Run; approval?: RunApproval }
@@ -34,6 +35,8 @@ export interface NotificationContext {
   following?(): { self: string; computers: readonly FollowingComputer[] } | undefined;
   /** The Tower this computer follows: the work it sent here is announced there, so not here too. */
   followedHost?(): string | undefined;
+  /** Secret requests of computers that follow this Tower (not shared with them, or this vault locked); each is announced once. */
+  secretShares?(): readonly SecretShareNotice[];
 }
 /** A joined computer that follows this Tower, as its link mirrors it. */
 export interface FollowingComputer { id: string; name: string; snapshot: Snapshot }
@@ -203,6 +206,22 @@ export function secretBlockMessage(block: SecretBlockNotice, context: Notificati
     body: [clip(session?.customTitle || session?.agentName || session?.title || '', 80), clip(block.reason, 160), names].filter(Boolean).join('\n'),
     url: `/?session=${encodeURIComponent(session?.id ?? block.sessionId)}`, tag: block.key };
 }
+/**
+ * A following computer's work asked for a secret not shared with it, or found this vault locked. Opening it shows that
+ * secret's sharing with a one-tap share to that computer (`client/src/secrets/share-request.ts`), or the vault to open.
+ */
+export function secretShareMessage(notice: SecretShareNotice, language: NotificationLanguage): NotificationPayload {
+  // Names as they are: a secret's name is often an environment variable (`GITHUB_TOKEN`), not text to tidy up.
+  const named = (value: string, length: number) => value.length > length ? `${value.slice(0, length - 1)}…` : value;
+  const ko = language === 'ko'; const computer = named(notice.nodeName || (ko ? '원격 컴퓨터' : 'A remote computer'), 60);
+  if (notice.kind === 'host-locked') return { title: ko ? '시크릿 보관함 잠김' : 'Secret vault locked',
+    body: ko ? `${computer} 작업이 시크릿을 쓰려 했지만 이 컴퓨터의 보관함이 잠겨 있습니다. 보관함을 여세요.` : `${computer} needed a secret, but this computer's vault is locked. Open the vault.`,
+    url: '/?secretShare=', tag: notice.key };
+  const name = named(notice.secretName || notice.secretId || '', 80);
+  return { title: ko ? '시크릿 공유 요청' : 'Secret share request',
+    body: ko ? `${computer} 작업이 ${name}을(를) 쓰려 합니다. 눌러서 이 머신에 공유하세요.` : `${computer} wants to use ${name}. Tap to share it with that computer.`,
+    url: `/?${new URLSearchParams({ secretShare: notice.secretId ?? '', machine: notice.hostId ?? '' })}`, tag: notice.key };
+}
 function defaultVariant(event: NotificationEvent): NotificationVariant {
   if (event.kind === 'triggerStarted') return 'started';
   if (event.approval) return event.approval.interaction?.type === 'questions' ? 'question' : 'approval';
@@ -301,6 +320,11 @@ export class NotificationService {
       handled.add(block.key);
       this.track(block.key, block.at, () => this.deliverBlock(block));
     }
+    for (const notice of this.context.secretShares?.() ?? []) {
+      if (notice.at <= this.cutoff || handled.has(notice.key)) continue;
+      handled.add(notice.key);
+      this.track(notice.key, notice.at, () => this.deliverShare(notice));
+    }
     // The mark moves forward even when nothing happened, so a restart does not announce old work again.
     if (this.now() - this.lastSave > 60_000) void this.save().catch(error => console.error(`Notification state was not saved: ${error instanceof Error ? error.message : String(error)}`));
   }
@@ -323,6 +347,12 @@ export class NotificationService {
   private async deliverBlock(block: SecretBlockNotice): Promise<void> {
     const devices = this.saved!.devices.filter(device => device.events.runWaiting);
     await Promise.all(devices.map(device => this.send(device, secretBlockMessage(block, this.context, device.language))));
+  }
+
+  /** A secret request waits on the owner like an approval: devices that want those hear of it. */
+  private async deliverShare(notice: SecretShareNotice): Promise<void> {
+    const devices = this.saved!.devices.filter(device => device.events.runWaiting);
+    await Promise.all(devices.map(device => this.send(device, secretShareMessage(notice, device.language))));
   }
 
   /** Decides whether an event still deserves a push, then sends it to the devices that chose its kind. */

@@ -113,10 +113,10 @@ test('a chat value is value-free, committed and announced before its view, and u
     await f.runtime.control('session-disconnect', { sessionId: f.session.id, secretIds: [id] });
     await f.runtime.control('lock', {});
     await f.runtime.control('unlock', { password });
-    const shared = await f.runtime.control('create', { name: 'FAKE_SHARED', kind: 'scalar', value: 'FAKE_GLOBAL', sharing: { global: true, folders: [] } }) as SecretSettingsView;
+    const shared = await f.runtime.control('create', { name: 'FAKE_SHARED', kind: 'scalar', value: 'FAKE_GLOBAL', sharing: { allMachines: true, folders: [] } }) as SecretSettingsView;
     const sharedId = shared.secrets.find(secret => secret.name === 'FAKE_SHARED')!.id;
     await f.service.update({ id: sharedId, expectedVersion: 1, value: 'FAKE_GLOBAL_UPDATED' });
-    await f.runtime.control('sharing', { secretId: sharedId, revision: 1, global: false, folders: [] });
+    await f.runtime.control('sharing', { secretId: sharedId, revision: 1, allMachines: false, machines: [], folders: [] });
     assert.deepEqual(f.notices, [f.session.id]);
     assert.doesNotMatch(JSON.stringify(f.notices), /CANARY_RUNTIME_VALUE|fixture-runtime-password/);
     (f.runtime as unknown as { sessionView: () => Promise<never> }).sessionView = async () => { throw new Error('fixture view failure'); };
@@ -156,7 +156,7 @@ test('a key shared with a folder stays discoverable there without a task, a conn
   const f = await fixture();
   try {
     await f.initialize();
-    await f.runtime.control('create', { name: 'FAKE_AUTO', kind: 'env', value: 'TOKEN=FAKE_TOKEN\nOTHER=FAKE_OTHER', sharing: { global: false, folders: [{ hostId: f.service.device().id, root: f.projectRoot }] } });
+    await f.runtime.control('create', { name: 'FAKE_AUTO', kind: 'env', value: 'TOKEN=FAKE_TOKEN\nOTHER=FAKE_OTHER', sharing: { allMachines: false, folders: [{ hostId: f.service.device().id, root: f.projectRoot }] } });
     assert.equal(await f.runtime.peekTarget(f.session.id), undefined, 'saving starts no task');
     const view = await f.runtime.control('session', { sessionId: f.session.id }) as SecretSessionView;
     assert.deepEqual(view.available.map(item => [item.name, item.basis, item.fields]), [['FAKE_AUTO', ['folder'], ['TOKEN', 'OTHER']]]);
@@ -175,7 +175,7 @@ test('invalid chat input fails before task creation or secret mutation', async (
     const input = { sessionId: f.session.id, name: 'FAKE_INVALID_MARKER', kind: 'scalar', value: canary, connect: 'session', temporary: true };
     await assert.rejects(f.runtime.control('create', { ...input, connect: true }), { kind: 'invalid' });
     await assert.rejects(f.runtime.control('create', { ...input, connect: undefined }), { kind: 'invalid' });
-    await assert.rejects(f.runtime.control('create', { ...input, sharing: { global: true, folders: [] } }), { kind: 'invalid' }, 'a temporary value is never shared');
+    await assert.rejects(f.runtime.control('create', { ...input, sharing: { allMachines: true, folders: [] } }), { kind: 'invalid' }, 'a temporary value is never shared');
     await assert.rejects(f.runtime.control('create', { ...input, nodeId: 'fixture-node' }), { kind: 'invalid' }, 'a joined computer’s session needs the target its web verified');
     await assert.rejects(f.runtime.control('create', input, { hostId: 'forged', sessionId: f.session.id, root: '/forged', taskId: randomUUID() }), { kind: 'invalid' }, 'a session of this computer takes no target');
     await assert.rejects(f.runtime.control('create', { ...input, sessionId: undefined }), { kind: 'invalid' });
@@ -239,10 +239,10 @@ test('saving a chat value for this folder uses the canonical folder the web reso
     await f.initialize();
     const running = f.addRun('run-bound-before-project-save'); const token = f.tokenFor(running); await f.list(token);
     const folder = { hostId: f.service.device().id, root: f.projectRoot };
-    const input = { sessionId: f.session.id, kind: 'scalar', name: 'QUICK_PROJECT', value: 'FAKE_QUICK_PROJECT', connect: 'session', sharing: { global: false, folders: [folder] },
+    const input = { sessionId: f.session.id, kind: 'scalar', name: 'QUICK_PROJECT', value: 'FAKE_QUICK_PROJECT', connect: 'session', sharing: { allMachines: false, folders: [folder] },
       projectRoot: '/forged', hostId: 'forged-host', taskId: 'forged-task', projectId: 'forged-project', target: { root: '/forged' } };
     const first = await f.runtime.control('create', input) as SecretSessionView;
-    assert.deepEqual(f.service.settings().secrets.map(secret => secret.sharing), [{ revision: 1, global: false, folders: [folder] }]);
+    assert.deepEqual(f.service.settings().secrets.map(secret => secret.sharing), [{ revision: 1, allMachines: false, machines: [], folders: [folder] }]);
     assert.deepEqual(first.available.map(item => [item.name, item.basis]), [['QUICK_PROJECT', ['session', 'folder']]]);
     assert.equal((await f.list(token)).secrets[0].name, 'QUICK_PROJECT');
     const second = await f.runtime.control('create', { ...input, name: 'ANOTHER_PROJECT_KEY' }) as SecretSessionView;
@@ -301,7 +301,7 @@ test('a secret credential works for its own running turn whenever its session ma
   const f = await fixture();
   try {
     await f.initialize();
-    await f.runtime.control('create', { name: 'SHARED', kind: 'scalar', value: canary, sharing: { global: true, folders: [] } });
+    await f.runtime.control('create', { name: 'SHARED', kind: 'scalar', value: canary, sharing: { allMachines: true, folders: [] } });
     const capability = (run: Run): Extract<Capability, { kind: 'secret-run' }> => ({ kind: 'secret-run', runId: run.id, sessionId: run.sessionId });
     const issue = (run: Run) => f.capabilities.issue(capability(run));
     const listed = async (run: Run) => (await f.list(issue(run))).secrets.map(item => item.name);
@@ -383,7 +383,7 @@ test('a new conversation’s first turn lists its secret tools at once and uses 
   const f = await fixture();
   try {
     await f.initialize();
-    await f.runtime.control('create', { name: 'SHARED', kind: 'scalar', value: canary, sharing: { global: true, folders: [] } });
+    await f.runtime.control('create', { name: 'SHARED', kind: 'scalar', value: canary, sharing: { allMachines: true, folders: [] } });
     f.session.creationPending = true;
     const run = f.addRun('run-creating'); const token = f.tokenFor(run);
     assert.deepEqual(await handleMcpRequest(f.context, token, { method: 'tools/list' }), { tools: SECRET_TOOLS }, 'the provider connects before the creation is confirmed');
@@ -398,7 +398,7 @@ test('a turn started with another turn’s calling credential is reviewed, and k
   const f = await fixture();
   try {
     await f.initialize();
-    await f.runtime.control('create', { name: 'SHARED', kind: 'scalar', value: canary, sharing: { global: true, folders: [] } });
+    await f.runtime.control('create', { name: 'SHARED', kind: 'scalar', value: canary, sharing: { allMachines: true, folders: [] } });
     const caller = f.addRun('run-caller');
     const delegated = f.addRun('run-delegated', f.session, { delegation: { parentRunId: caller.id, rootRunId: caller.id } });
     const token = f.tokenFor(delegated);
@@ -440,7 +440,7 @@ test('MCP lists shared keys without values, an owner connection opens an unshare
   const f = await fixture();
   try {
     await f.initialize(); const run = f.addRun('run-list'); const token = f.tokenFor(run);
-    await f.runtime.control('create', { name: 'AUTOMATIC_KEY', kind: 'scalar', value: canary, sharing: { global: true, folders: [] } });
+    await f.runtime.control('create', { name: 'AUTOMATIC_KEY', kind: 'scalar', value: canary, sharing: { allMachines: true, folders: [] } });
     await f.runtime.control('create', { name: 'MANUAL_KEY', kind: 'scalar', value: 'MANUAL_RUNTIME_CANARY' });
     const all = f.service.settings().secrets; const automatic = all.find(key => key.name === 'AUTOMATIC_KEY')!; const manual = all.find(key => key.name === 'MANUAL_KEY')!;
     const tools = await handleMcpRequest(f.context, token, { method: 'tools/list' }) as { tools: { name: string }[] };
@@ -506,7 +506,7 @@ test('session view polling never creates a security task, and after a task ends 
   const f = await fixture();
   try {
     await f.initialize();
-    await f.runtime.control('create', { name: 'AUTOMATIC_KEY', kind: 'scalar', value: canary, sharing: { global: true, folders: [] } });
+    await f.runtime.control('create', { name: 'AUTOMATIC_KEY', kind: 'scalar', value: canary, sharing: { allMachines: true, folders: [] } });
     assert.equal(await f.runtime.peekTarget(f.session.id), undefined);
     const unused = await readFile(join(f.stateDir, 'secrets/journal.json'));
     const beforeUse = await f.runtime.control('session', { sessionId: f.session.id }) as SecretSessionView;
@@ -685,15 +685,15 @@ test('the settings view lists sharing, rule summaries and pending imports withou
     await f.initialize();
     const legacy = legacyRecord(f.service.device().id, { name: 'RULED', groupId: 'legacy-group', value: canary });
     await editPayload(f.service, payload => { payload.groups.push({ id: 'legacy-group', name: 'Global', scope: 'global' }); payload.secrets.push(legacy); payload.rules.push(legacyRule({ groupId: 'legacy-group', secretIds: [legacy.metadata.id], hostId: f.service.device().id, allProjects: true })); });
-    await f.runtime.control('create', { name: 'SHARED', kind: 'scalar', value: canary, sharing: { global: true, folders: [] } });
+    await f.runtime.control('create', { name: 'SHARED', kind: 'scalar', value: canary, sharing: { allMachines: true, folders: [] } });
     const view = await f.runtime.control('settings', {}) as SecretSettingsView;
     assert.deepEqual(view.status, { initialized: true, locked: false, pendingImports: 0, pendingImportIds: [] });
     assert.deepEqual(view.secrets.map(item => [item.name, item.sharing, item.legacy]), [
-      ['RULED', undefined, { global: [{ hostId: f.service.device().id }], folders: [], limited: true }], ['SHARED', { revision: 1, global: true, folders: [] }, undefined]]);
+      ['RULED', undefined, { global: [{ hostId: f.service.device().id }], folders: [], limited: true }], ['SHARED', { revision: 1, allMachines: true, machines: [], folders: [] }, undefined]]);
     assert.doesNotMatch(JSON.stringify(view), new RegExp(canary));
-    const edited = await f.runtime.control('sharing', { secretId: legacy.metadata.id, revision: 0, global: false, folders: [{ hostId: f.service.device().id, root: f.projectRoot }] }) as SecretSettingsView;
-    assert.deepEqual(edited.secrets.find(item => item.id === legacy.metadata.id)?.sharing, { revision: 1, global: false, folders: [{ hostId: f.service.device().id, root: f.projectRoot }] });
-    await assert.rejects(f.runtime.control('sharing', { secretId: legacy.metadata.id, revision: 0, global: true, folders: [] }), { kind: 'conflict' });
+    const edited = await f.runtime.control('sharing', { secretId: legacy.metadata.id, revision: 0, allMachines: false, machines: [], folders: [{ hostId: f.service.device().id, root: f.projectRoot }] }) as SecretSettingsView;
+    assert.deepEqual(edited.secrets.find(item => item.id === legacy.metadata.id)?.sharing, { revision: 1, allMachines: false, machines: [], folders: [{ hostId: f.service.device().id, root: f.projectRoot }] });
+    await assert.rejects(f.runtime.control('sharing', { secretId: legacy.metadata.id, revision: 0, allMachines: true, machines: [], folders: [] }), { kind: 'conflict' });
     await f.runtime.control('lock', {});
     assert.deepEqual(await f.runtime.control('settings', {}), { status: { initialized: true, locked: true, pendingImports: 0, pendingImportIds: [] }, peers: [], secrets: [] });
   } finally { await f.cleanup(); }
@@ -704,7 +704,7 @@ test('a session view says why a session has nothing, and which states stop polli
   try {
     const view = async (sessionId = f.session.id) => { const answer = await f.runtime.control('session', { sessionId }) as SecretSessionView; return [answer.error, answer.permanent, answer.available.length]; };
     assert.deepEqual(await view(), ['uninitialized', true, 0]);
-    await f.initialize(); await f.runtime.control('create', { name: 'SHARED', kind: 'scalar', value: canary, sharing: { global: true, folders: [] } });
+    await f.initialize(); await f.runtime.control('create', { name: 'SHARED', kind: 'scalar', value: canary, sharing: { allMachines: true, folders: [] } });
     assert.deepEqual(await view(), [undefined, undefined, 1]);
     const child = sessionRecord(f.projectRoot, { id: 'codex:child', isSubagent: true, parentId: f.session.id }); f.sessions.set(child.id, child);
     const agent = sessionRecord(f.projectRoot, { id: 'codex:agent' }); f.sessions.set(agent.id, agent); f.origins.set(agent.id, { kind: 'agent', untrustedInput: false });
@@ -784,8 +784,8 @@ test('the owner view of a joined computer’s session reads this vault for what 
     await f.initialize();
     const device = { ...f.service.device(), id: randomUUID() };
     await f.service.trustPeer({ device, routeId: 'fixture-node', direction: 'node', enabled: true });
-    await f.runtime.control('create', { name: 'GLOBAL', kind: 'scalar', value: canary, sharing: { global: true, folders: [] } });
-    await f.runtime.control('create', { name: 'NODE_FOLDER', kind: 'scalar', value: canary, sharing: { global: false, folders: [{ hostId: device.id, root: '/node/project' }] } });
+    await f.runtime.control('create', { name: 'GLOBAL', kind: 'scalar', value: canary, sharing: { allMachines: true, folders: [] } });
+    await f.runtime.control('create', { name: 'NODE_FOLDER', kind: 'scalar', value: canary, sharing: { allMachines: false, folders: [{ hostId: device.id, root: '/node/project' }] } });
     const usage = [{ at: 1, secretId: 'x', name: 'GLOBAL', operation: 'env', outcome: 'delivered', review: 'exempt' }];
     const journal = await readFile(join(f.stateDir, 'secrets/journal.json'));
     const subject = { hostId: device.id, sessionId: 'codex:remote', root: '/node/project', usage };
