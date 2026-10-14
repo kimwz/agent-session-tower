@@ -386,9 +386,8 @@ test('Codex’s rules files are brought in line on disk with every sync, after a
   await host.service.save({ kind: 'command', value: 'git push --force-with-lease', providers: ['claude', 'codex'], scope: 'global' });
   const widened = await host.service.exportManaged();
   await chmod(rulesFolder, 0o500);
-  t.after(() => chmod(rulesFolder, 0o700).catch(() => {}));
-  await assert.rejects(restarted.applyManaged(widened, HOST), (error: Error) => error.message.includes(projectFile), 'the project file is named');
-  await chmod(rulesFolder, 0o700);
+  try { await assert.rejects(restarted.applyManaged(widened, HOST), (error: Error) => error.message.includes(projectFile), 'the project file is named'); }
+  finally { await chmod(rulesFolder, 0o700); }
   await restarted.applyManaged(widened, HOST);
   await assert.rejects(readFile(projectFile, 'utf8'), { code: 'ENOENT' }, 'the same settings again: now the file is right');
 });
@@ -422,13 +421,14 @@ test('an allow the host withdrew leaves the rules file for every project even wh
   const withdrawn = await host.service.exportManaged();
   assert.deepEqual(withdrawn.rules, [], 'no host rule is left');
   await chmod(rulesFolder, 0o500);
-  t.after(() => chmod(rulesFolder, 0o700).catch(() => {}));
-  await assert.rejects(node.service.applyManaged(withdrawn, HOST), /Codex 규칙 파일에 쓰지 못했습니다/);
-  node.service.close();
-  const restarted = await node.restart();
-  await assert.rejects(restarted.applyManaged(withdrawn, HOST), /Codex 규칙 파일에 쓰지 못했습니다/, 'still reported after a restart while the allow is on disk');
-  assert.match(await readFile(codexFile, 'utf8'), /"gh", "pr", "view"/);
-  await chmod(rulesFolder, 0o700);
+  let restarted: PermissionService;
+  try {
+    await assert.rejects(node.service.applyManaged(withdrawn, HOST), /Codex 규칙 파일에 쓰지 못했습니다/);
+    node.service.close();
+    restarted = await node.restart();
+    await assert.rejects(restarted.applyManaged(withdrawn, HOST), /Codex 규칙 파일에 쓰지 못했습니다/, 'still reported after a restart while the allow is on disk');
+    assert.match(await readFile(codexFile, 'utf8'), /"gh", "pr", "view"/);
+  } finally { await chmod(rulesFolder, 0o700); }
   await restarted.applyManaged(withdrawn, HOST);
   const text = await readFile(codexFile, 'utf8');
   assert.doesNotMatch(text, /"gh", "pr", "view"/, 'the withdrawn allow is gone');
