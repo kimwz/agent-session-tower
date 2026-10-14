@@ -12,6 +12,7 @@ import { useSlackMonitor } from '../slack/use-slack-monitor';
 import { slackChatSelection, slackCoordinatorSessionIds } from '../slack/slack-chat-selection';
 import { finishedAutomationSessionIds } from '../../../shared/automation-sessions';
 import { SettingsButton } from '../settings/SettingsButton';
+import { openShareRequest, openShareRequestFromAddress } from '../secrets/share-request';
 import type { SettingsContext } from '../settings/SettingsDialog';
 import { RunnerUpdateBadge, ToolVersion, TowerUpdateBadge } from './AutoUpdate';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
@@ -201,11 +202,13 @@ function TowerApp() {
     const onMessage = (event: MessageEvent) => {
       if (event.data?.type !== 'tower:open' || typeof event.data.url !== 'string') return;
       const url = new URL(event.data.url, window.location.origin);
-      if (url.origin === window.location.origin) selectSession(url.searchParams.get('session'));
+      if (url.origin === window.location.origin && !openShareRequest(url)) selectSession(url.searchParams.get('session'));
     };
     navigator.serviceWorker.addEventListener('message', onMessage);
     return () => navigator.serviceWorker.removeEventListener('message', onMessage);
   }, [selectSession]);
+  // A share push opened in a new window: its secret's sharing opens once the settings can.
+  useEffect(() => { if (token) openShareRequestFromAddress(); }, [token]);
   const closeChat = useCallback(() => selectSession(null), [selectSession]);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -361,7 +364,7 @@ function TowerApp() {
   const localProjects = useMemo(() => projects.filter(([key]) => !nodeOf(key)), [projects]);
   // Secret sharing picks among the folders of every computer and names each computer as the canvas does.
   const secretCanvas = useMemo((): SecretCanvas => ({ folders: secretFolderChoices(projects, hosts), hosts }), [projects, hosts]);
-  const triggerComputers = useMemo(() => hosts.flatMap(host => host.node ? [{ node: host.node, name: host.name, providers: host.providers, ready: Boolean(host.triggers), connected: host.status === 'connected', models: Boolean(host.models) }] : []), [hosts]);
+  const triggerComputers = useMemo(() => hosts.flatMap(host => host.node ? [{ node: host.node, name: host.name, providers: host.providers, ready: Boolean(host.triggers), connected: host.status === 'connected', models: Boolean(host.models), permissions: Boolean(host.following) }] : []), [hosts]);
   // What a trigger on another computer can aim at, named as that computer knows it.
   const triggerTargets = useCallback((node: string) => ({
     projects: projects.filter(([key]) => nodeOf(key) === node).map(([key, title]): [string, string] => [localPart(key), title]),

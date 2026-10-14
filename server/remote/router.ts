@@ -22,9 +22,10 @@ import type { AutoPromptJob, RunOrigin, Session } from '../../shared/types.js';
 import type { RemoteExclusionStore } from './exclusions.js';
 import { remoteJob, remoteJobVisible, remotePage, remoteRepository, remoteRun, remoteSession, remoteSessionIds, remoteSnapshot, type RemoteScope } from './visibility.js';
 import type { RepositoryAction } from '../../shared/repositories.js';
-import { isOperationName, OPERATIONS, REMOTE_PAGE_OPERATIONS } from '../../shared/api/operations.js';
+import { FOLLOWED_OPERATIONS, isOperationName, OPERATIONS, REMOTE_PAGE_OPERATIONS } from '../../shared/api/operations.js';
 import type { RemoteAction, RemoteChange } from '../../shared/link.js';
 import { TowerError } from '../../shared/errors.js';
+import { followedHostOrigin } from '../runs/origin.js';
 import { sendStoredAttachment, sendWorkspaceMedia, sseSink } from '../http/sinks.js';
 
 type Request = IncomingMessage | Http2ServerRequest;
@@ -44,6 +45,8 @@ export interface RemoteRouterOptions {
   mutationsPerMinute?: number;
   /** Records what controllers change here, for this computer's owner. */
   audit?: { record(change: Omit<RemoteChange, 'at' | 'controller' | 'name'>, request?: string): void };
+  /** The controlling Tower this computer follows now ("호스트 설정 따르기"): its pages manage this computer's permissions. */
+  followedHost?: () => Promise<string | undefined>;
 }
 
 const NOT_FOUND = '찾을 수 없습니다.';
@@ -56,7 +59,7 @@ const REQUEST_ID_HEADER = 'x-tower-request-id';
  * answers with remote views that leave out excluded folders and coordinator conversations. Local management
  * (accounts, pairing, the exclusion list) has no route here at all.
  */
-export function createRemoteRouter({ attachmentStores, attachmentUploads, backend, exclusions, terminals, mutationsPerMinute = 60, audit }: RemoteRouterOptions) {
+export function createRemoteRouter({ attachmentStores, attachmentUploads, backend, exclusions, terminals, mutationsPerMinute = 60, audit, followedHost }: RemoteRouterOptions) {
   const streams = new Map<string, { stream: SnapshotStream; clients: Set<SseClient> }>();
   /** Terminal output streams to controllers; they end when the sharing list changes (the shells go on). */
   const downloads = new Map<string, Set<Reply>>();
@@ -384,10 +387,12 @@ export function createRemoteRouter({ attachmentStores, attachmentUploads, backen
       return json(res, 200, { compaction: job });
     }
     if (method !== 'POST') throw notFound();
-    // Tower operations a controlling computer may use; the worker answers with only what this computer shares.
+    // Tower operations a controlling computer may use; the worker answers with only what this computer shares. The
+    // permission operations exist only for the controlling Tower this computer follows (the worker checks it again).
     const operation = path.match(/^\/api\/v1\/([a-z][a-zA-Z]*\.[a-zA-Z]+)$/)?.[1];
     if (operation) {
-      if (!REMOTE_PAGE_OPERATIONS.has(operation) || !backend.api) throw notFound();
+      const followed = FOLLOWED_OPERATIONS.has(operation) && followedHostOrigin(principal, await followedHost?.());
+      if (!(REMOTE_PAGE_OPERATIONS.has(operation) || followed) || !backend.api) throw notFound();
       const write = isOperationName(operation) && OPERATIONS[operation].write;
       if (write) limit(principal);
       const body = await readJson(req, 1_000_000);

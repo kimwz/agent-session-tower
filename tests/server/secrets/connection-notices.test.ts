@@ -182,3 +182,20 @@ test('a relay poll passes on only the features this worker knows, and a joined c
   const older = await ask(`/secret-session?sessionId=${encodeURIComponent(target.sessionId)}`, {}, false);
   assert.equal(older.status, 503); assert.deepEqual(older.calls, []);
 });
+
+test('a remote chat value saved for all my machines is checked as the page sent it, and only the older worker gets GLOBAL', async t => {
+  const link = await node(t);
+  const calls: Call[] = [];
+  const older = { supports: (capability: string) => capability !== 'secretMachines', secretCall: async (operation: string, args: unknown[] = []) => {
+    calls.push({ operation, args });
+    if (operation === 'peers') return [peer('node')];
+    if (args[0] === 'session') return { view: true };
+    return { connectedTarget: target };
+  } };
+  await ownerSecretControl(link.nodes, older, 'create', { nodeId: NODE, sessionId: target.sessionId, name: 'SAVED', kind: 'scalar', value: 'v', connect: 'session', sharing: { allMachines: true, machines: [], folders: [] } });
+  const created = calls.find(call => call.args[0] === 'create')!;
+  assert.deepEqual((created.args[1] as { sharing: unknown }).sharing, { global: true, folders: [] });
+  assert.deepEqual(created.args[2], target);
+  await assert.rejects(ownerSecretControl(link.nodes, older, 'create', { nodeId: NODE, sessionId: target.sessionId, name: 'ONE', kind: 'scalar', value: 'v', connect: 'session', sharing: { allMachines: false, machines: ['node-device'], folders: [] } }), { code: WORKER_UPDATE_PENDING });
+  assert.equal(calls.filter(call => call.args[0] === 'create').length, 1, 'nothing sent for a share the older worker cannot keep');
+});

@@ -141,7 +141,8 @@ export class VaultPassword {
   /** Which password opens the locked vault for the current credentials; absent (the vault password) without an account or with an older worker. */
   private async towerPassword(status: VaultStatus): Promise<SecretTowerPassword | undefined> {
     const credentialId = this.auth?.configured() ? this.auth.currentCredentialId() : undefined;
-    if (!status?.initialized || !status.locked || !credentialId || !this.secrets) return undefined;
+    // A vault this computer's machine key opens needs no password at all (`status.machineKey`).
+    if (!status?.initialized || !status.locked || status.machineKey || !credentialId || !this.secrets) return undefined;
     try {
       const { towerPassword } = await this.secrets('tower-status', { credentialId }) as { towerPassword?: unknown };
       return towerPassword === 'ready' || towerPassword === 'missing' ? towerPassword : undefined;

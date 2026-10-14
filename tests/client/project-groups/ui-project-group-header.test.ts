@@ -111,6 +111,7 @@ test('another computer’s folder shows its own path and offers that computer’
 test('a folder on this computer opens its skills and permissions from its menu; a joined computer\'s folder does not', () => {
   assert.match(menu(), /이 폴더의 스킬.*이 폴더의 권한/s);
   assert.doesNotMatch(menu({ machine: 'node-1' } as Partial<ProjectGroupHeaderData>), /이 폴더의 권한/);
+  assert.match(menu({ machine: 'node-1', permissions: true }), /이 폴더의 권한/, 'a joined computer that follows this Tower has its permissions managed here');
 });
 
 test('a repository folder shows an issue button on its header and in its menu; other folders do not', async () => {

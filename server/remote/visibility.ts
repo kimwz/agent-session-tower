@@ -69,8 +69,14 @@ const JOB_FIELDS = ['id', 'unattended', 'untrustedInput', 'sessionMode', 'model'
   'status', 'stage', 'createdAt', 'updatedAt', 'attachments', 'sessionId', 'runId', 'error'] as const satisfies readonly (keyof AutoPromptJob)[];
 
 export function remoteSession(session: Session): Session { return pick(session, SESSION_FIELDS) as Session; }
-export function remoteRun(run: Run): Run {
-  return { ...pick(run, RUN_FIELDS), ...(run.origin ? { origin: { kind: run.origin.kind, ...(run.origin.controllerId ? { controllerId: run.origin.controllerId } : {}) } } : {}) } as Run;
+/**
+ * A run as a controller sees it. Its trigger and event ids reach only the controller whose trigger started it, which
+ * knows them already: that one announces the trigger starting.
+ */
+export function remoteRun(run: Run, controllerId?: string): Run {
+  const own = Boolean(controllerId) && run.origin?.controllerId === controllerId;
+  return { ...pick(run, RUN_FIELDS), ...(run.origin ? { origin: { kind: run.origin.kind, ...(run.origin.controllerId ? { controllerId: run.origin.controllerId } : {}),
+    ...(own && run.origin.triggerId ? { triggerId: run.origin.triggerId } : {}), ...(own && run.origin.eventId ? { eventId: run.origin.eventId } : {}) } } : {}) } as Run;
 }
 /**
  * A routing explanation can quote other candidates' conversations. It is shown only for this controller's own
@@ -116,7 +122,7 @@ export function remoteSnapshot(snapshot: Snapshot, scope: RemoteScope, controlle
   const sessions = snapshot.sessions.filter(session => ids.has(session.id)).map(remoteSession);
   return {
     sessions,
-    runs: snapshot.runs.filter(run => ids.has(run.sessionId)).map(remoteRun),
+    runs: snapshot.runs.filter(run => ids.has(run.sessionId)).map(run => remoteRun(run, controllerId)),
     providers: snapshot.providers.map(provider => remoteProvider(provider, sessions.filter(session => session.provider === provider.provider && !session.master).length)),
     ...(snapshot.groups ? { groups: snapshot.groups.filter(group => !scope.matcher.excludes(group.cwd)).map(remoteGroup) } : {}),
     ...(snapshot.autoPrompts ? { autoPrompts: snapshot.autoPrompts.filter(job => remoteJobVisible(job, scope, ids, controllerId)).map(job => remoteJob(job, controllerId, scope.matcher.revision)) } : {}),

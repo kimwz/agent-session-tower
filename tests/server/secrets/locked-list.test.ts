@@ -47,16 +47,16 @@ async function scenario(f: Awaited<ReturnType<typeof fixture>>) {
       // A time limit that passes while the vault is locked.
       rule(keys.deadline, { projectId: project.id, maxTtlMs: 60_000 }));
   });
-  await service.create({ name: 'SHARED_GLOBAL', kind: 'scalar', value: CANARY, sharing: { global: true, folders: [] } });
-  await service.create({ name: 'SHARED_FOLDER', kind: 'scalar', value: CANARY, sharing: { global: false, folders: [{ hostId: host, root }] } });
-  await service.create({ name: 'OTHER_FOLDER', kind: 'scalar', value: CANARY, sharing: { global: false, folders: [{ hostId: host, root: other }] } });
+  await service.create({ name: 'SHARED_GLOBAL', kind: 'scalar', value: CANARY, sharing: { allMachines: true, folders: [] } });
+  await service.create({ name: 'SHARED_FOLDER', kind: 'scalar', value: CANARY, sharing: { allMachines: false, folders: [{ hostId: host, root }] } });
+  await service.create({ name: 'OTHER_FOLDER', kind: 'scalar', value: CANARY, sharing: { allMachines: false, folders: [{ hostId: host, root: other }] } });
   await service.create({ name: 'UNSHARED', kind: 'scalar', value: CANARY });
   await service.create({ name: 'UNSHARED_CONNECTED', kind: 'scalar', value: CANARY, connect: 'session' }, target);
   await service.create({ name: 'TEMPORARY', kind: 'env', value: `A=${CANARY}\n`, temporary: true }, target);
-  const revoked = await service.create({ name: 'REVOKED', kind: 'scalar', value: CANARY, sharing: { global: true, folders: [] } });
+  const revoked = await service.create({ name: 'REVOKED', kind: 'scalar', value: CANARY, sharing: { allMachines: true, folders: [] } });
   await service.disconnectSession(target, [revoked.id]);
   // An older build put this shared key back into a rule, so its sharing waits for the owner.
-  const withheld = await service.create({ name: 'WITHHELD', kind: 'scalar', value: CANARY, sharing: { global: true, folders: [] } });
+  const withheld = await service.create({ name: 'WITHHELD', kind: 'scalar', value: CANARY, sharing: { allMachines: true, folders: [] } });
   await editPayload(service, payload => { payload.rules.push(legacyRule({ groupId: withheld.groupId, secretIds: [withheld.id], hostId: host, allProjects: true, activation: 'auto' })); });
 }
 
@@ -114,7 +114,7 @@ test('the plaintext index holds names but no value or password, and a foreign in
 
 test('broker approvals that 1.129–1.132 kept in the journal and the index are read past, and go at the next save', async t => {
   const f = await fixture(t);
-  await f.service.create({ name: 'SHARED_GLOBAL', kind: 'scalar', value: CANARY, sharing: { global: true, folders: [] } });
+  await f.service.create({ name: 'SHARED_GLOBAL', kind: 'scalar', value: CANARY, sharing: { allMachines: true, folders: [] } });
   const approval = { id: randomUUID(), hostId: f.host, sessionId: f.target.sessionId, root: f.root, taskId: f.target.taskId, taskLabel: 'Deploy', createdAt: f.now(), expiresAt: f.now() + 3_600_000 };
   const key = f.service.vault.exportKey()!;
   try {
@@ -183,7 +183,7 @@ test('without an index the locked list says names are unknown, and a vault-less 
   // The first unlock writes the index, so the next lock lists names for the same unbound run.
   await upgraded.unlock(PASSWORD); await upgraded.lock();
   assert.ok(upgraded.lockedList(f.target.sessionId, f.root, f.startedAt), 'unlocking alone writes the index');
-  await upgraded.unlock(PASSWORD); await upgraded.create({ name: 'AFTER_UPGRADE', kind: 'scalar', value: CANARY, sharing: { global: true, folders: [] } }); await upgraded.lock();
+  await upgraded.unlock(PASSWORD); await upgraded.create({ name: 'AFTER_UPGRADE', kind: 'scalar', value: CANARY, sharing: { allMachines: true, folders: [] } }); await upgraded.lock();
   const listed = await upgradedRuntime.tool(capability, 'secrets_list', {}) as { secrets: SecretMetadata[] };
   assert.deepEqual(names(listed.secrets), ['AFTER_UPGRADE']);
 

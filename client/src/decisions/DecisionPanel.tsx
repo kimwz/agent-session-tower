@@ -5,6 +5,7 @@ import type { DecisionFeatures, DecisionOverview, DecisionRecord } from '../../.
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { api } from '../common/lib';
 import { locale, translate as t, translateMessage, useI18n } from '../i18n/i18n';
+import { FollowedHostNote, useFollowedHost } from '../remote/followed-host';
 
 const post = (path: string, token: string, body: unknown) => api<DecisionOverview>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify(body) });
 
@@ -29,8 +30,10 @@ export function DecisionPanel({ token }: { token: string }) {
   }
   const setFeature = (name: keyof DecisionFeatures, value: boolean) => overview && void act(() => post('/api/decisions/settings', token, { features: { ...overview.features, [name]: value } }));
   const label = overview?.label ?? 'Jev';
+  const followed = useFollowedHost();
   return <SettingsPane title={t('빠른 판단')} scope="auth-panel decision-scope" description={t('Auto Prompt 추천과 알림 선별 같은 빠른 판단 기능')}>
     <p className="auth-hint">{t('{0} 같은 빠른 객관식 판단 서비스로 Auto Prompt 추천과 알림 선별을 켭니다. API 키가 없으면 두 기능은 꺼져 있고 Tower는 평소대로 동작합니다.', { 0: label })}</p>
+    <FollowedHostNote host={followed} />
     {error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}
     {notice && <p className="notification-notice" role="status">{notice}</p>}
     {!overview ? !error && <LoaderCircle className="spin" aria-label={t('연결 중')} /> : <>

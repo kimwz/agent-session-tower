@@ -39,6 +39,10 @@ export interface SecretTask {
 }
 export interface VaultStatus {
   initialized: boolean; locked: boolean; pendingImports?: number; pendingImportIds?: string[]; error?: string;
+  /** Pending vault imports that carry their machine key: they import without the source vault's password. */
+  pendingImportsKeyed?: string[];
+  /** While locked: this computer's machine key opens the vault (made while it followed a host), so the page opens it without a password. */
+  machineKey?: true;
   /**
    * Set by the web while the vault is locked and the account and worker support it: `ready` when the Tower (login)
    * password opens it, `missing` when the vault (recovery) password is needed once with it. Absent: the vault password opens it.
@@ -49,11 +53,18 @@ export type SecretTowerPassword = 'ready' | 'missing';
 
 /** Canonical folder identity: the computer's vault device ID and the folder's real path. */
 export interface SecretFolder { hostId: string; root: string }
-/** Automatic use of one secret. GLOBAL covers every folder of every computer this vault serves: this one and its trusted node peers. */
-export interface SecretSharing { revision: number; global: boolean; folders: SecretFolder[] }
+/**
+ * Automatic use of one secret. `allMachines` ("모든 내 머신") covers every folder of every computer this vault serves: this
+ * one and its trusted node peers, those joining later included. `machines` names computers (vault device IDs) with all
+ * their folders; `folders` names single folders.
+ */
+export interface SecretSharing { revision: number; allMachines: boolean; machines: string[]; folders: SecretFolder[] }
+/** A sharing change as the owner asks for it. */
+export type SecretSharingInput = Pick<SecretSharing, 'allMachines' | 'folders'> & { machines?: string[] };
 /** What the rules of a secret not yet edited for sharing allow, for display only; authorization reads the rules. */
 export interface SecretLegacySummary { global: { hostId: string }[]; folders: SecretFolder[]; limited: boolean }
-export type SecretBasis = 'global' | 'folder' | 'session' | 'legacy' | 'remote';
+/** `global`: shared with all machines; `machine`: with this computer as a whole. */
+export type SecretBasis = 'global' | 'machine' | 'folder' | 'session' | 'legacy' | 'remote';
 export interface SecretAvailable extends SecretMetadata { basis: SecretBasis[]; operations: SecretOperation[] }
 export interface SecretUsage {
   at: number; secretId: string; name: string; operation: SecretOperation;
@@ -98,7 +109,7 @@ export interface SecretCreateInput {
   /** Canonical base64 of an uploaded file; dotenv uploads also preserve these original bytes. */
   content?: string;
   /** For saved values; unshared when omitted. */
-  sharing?: Pick<SecretSharing, 'global' | 'folders'>;
+  sharing?: SecretSharingInput;
   /** Connects the value to the target session. */
   connect?: 'session';
   /** Kept with the target session's task, connected to it, and dropped when the task ends. */
@@ -113,3 +124,30 @@ export interface SecretRunResult {
   /** Set when the secret-use reviewer refused the request; no value was resolved and no consumer started. */
   blocked?: { code: 'SECRET_USE_BLOCKED'; reason: string };
 }
+
+/**
+ * A host secret as a computer that follows the host lists it (`catalog`): its name and reference, never a value or field,
+ * and whether that computer's session may use it. `not-shared` ones can still be asked for, which asks the owner to share.
+ */
+export interface SecretCatalogItem { id: string; name: string; kind: SecretKind; reference: string; status: 'available' | 'not-shared' }
+/** Why a host refused a following computer's use, as that computer's agent is told. */
+export type SecretRefusal = 'not-shared' | 'host-locked' | 'host-offline';
+/**
+ * One side of the automatic secret trust between a host and a computer that follows it: its vault, its public device
+ * while open, and whether it trusts the other side now. `untrusted`: the owner removed that trust there, so it is not
+ * made again automatically. `needs-open`: a following computer's vault the owner has to open once for it to open by itself.
+ */
+export interface SecretAlignment { vault: 'missing' | 'locked' | 'needs-open' | 'open'; device?: SecretDevice; trusted: boolean; untrusted?: true; available?: number }
+/**
+ * Secrets for a computer that follows this host, for its card: `connected` with how many secrets it may use on the whole
+ * computer, or what keeps it from them (this host's vault locked, the trust still being made, its vault to open once,
+ * the link down, or trust the owner removed).
+ */
+export interface NodeSecretStatus { state: 'connected' | 'trust-pending' | 'host-locked' | 'needs-open' | 'offline' | 'untrusted'; available?: number; checkedAt: string }
+/**
+ * A push for the owner from secret use by a computer that follows this host: it asked for a secret not shared with it
+ * (`not-shared`, with the secret and that computer's vault ID, so one tap opens its sharing), or found this host's vault
+ * locked (`host-locked`). Names only, never values. `nodeId` is the computer's link ID. A lost link has no push: this host
+ * cannot see requests while it is down (the computer's agent is told at once, and its card shows the link down).
+ */
+export interface SecretShareNotice { key: string; at: number; kind: 'not-shared' | 'host-locked'; nodeId: string; nodeName?: string; hostId?: string; secretId?: string; secretName?: string }

@@ -79,23 +79,26 @@ export async function readSecretFile(file: Pick<File, 'size' | 'arrayBuffer'>): 
 }
 
 /**
- * How a locked vault opens: the Tower (login) password; it with the recovery password once, when the vault is not yet
- * linked to the current login (`missing`, or the server answered `needs-recovery`); the recovery (old vault) password
- * alone, when the owner chose it; or, without Tower-password support, the vault password as before.
+ * How a locked vault opens: with this computer's machine key and no password (`machine`, a vault made while it followed a
+ * host); the Tower (login) password; it with the recovery password once, when the vault is not yet linked to the current
+ * login (`missing`, or the server answered `needs-recovery`); the recovery (old vault) password alone, when the owner
+ * chose it; or, without Tower-password support, the vault password as before.
  */
-export type UnlockMode = 'tower' | 'both' | 'recovery' | 'vault';
-export function unlockMode(towerPassword: SecretTowerPassword | undefined, choice: { recovery?: boolean; asked?: boolean }): UnlockMode {
+export type UnlockMode = 'machine' | 'tower' | 'both' | 'recovery' | 'vault';
+export function unlockMode(towerPassword: SecretTowerPassword | undefined, choice: { recovery?: boolean; asked?: boolean }, machineKey?: boolean): UnlockMode {
+  if (machineKey) return 'machine';
   if (!towerPassword) return 'vault';
   if (choice.recovery) return 'recovery';
   return towerPassword === 'missing' || choice.asked ? 'both' : 'tower';
 }
 /** The request that opens the vault in `mode`: the Tower-password paths also turn on value viewing. */
 export function unlockRequest(mode: UnlockMode, password: string, recoveryPassword: string): [action: string, body: Record<string, string>] {
+  if (mode === 'machine') return ['unlock', {}];
   if (mode === 'tower') return ['view-unlock', { password }];
   if (mode === 'both') return ['view-unlock', { password, recoveryPassword }];
   return ['unlock', { password }];
 }
-export const unlockReady = (mode: UnlockMode, password: string, recoveryPassword: string) => !!password && (mode !== 'both' || !!recoveryPassword);
+export const unlockReady = (mode: UnlockMode, password: string, recoveryPassword: string) => mode === 'machine' || (!!password && (mode !== 'both' || !!recoveryPassword));
 
 /** A file is previewed as text only when it is valid UTF-8 of at most this size. */
 export const FILE_PREVIEW_BYTES = 64 * 1024;
@@ -135,8 +138,11 @@ export function saveSecretFile(name: string, content: string): void {
   setTimeout(() => URL.revokeObjectURL(url), REVOKE_AFTER_MS);
 }
 
-/** Folders are sent as canvas keys: a local absolute path, or `@<node>/` followed by that computer's absolute path. */
-export interface SharingInput { global: boolean; folders: { cwd: string }[] }
+/**
+ * Folders are sent as canvas keys: a local absolute path, or `@<node>/` followed by that computer's absolute path.
+ * Computers (`machines`) by their vault device IDs.
+ */
+export interface SharingInput { allMachines: boolean; machines?: string[]; folders: { cwd: string }[] }
 const secretValue = (kind: SecretKind, raw: string) => kind === 'file' ? { content: raw } : { value: raw };
 
 export type PasteDestination = 'session' | 'none' | 'folder' | 'global';
@@ -146,16 +152,16 @@ export type PasteDestination = 'session' | 'none' | 'folder' | 'global';
  */
 export function pastePayload(input: { raw: string; format: QuickSecretFormat; name: string; fileName?: string; destination: PasteDestination; sessionId: string; cwd?: string }) {
   const kind = quickSecretKind(input.raw, input.format);
-  const sharing: SharingInput | undefined = input.destination === 'global' ? { global: true, folders: [] }
-    : input.destination === 'folder' && input.cwd ? { global: false, folders: [{ cwd: input.cwd }] } : undefined;
+  const sharing: SharingInput | undefined = input.destination === 'global' ? { allMachines: true, folders: [] }
+    : input.destination === 'folder' && input.cwd ? { allMachines: false, folders: [{ cwd: input.cwd }] } : undefined;
   return { name: input.name.trim() || suggestedSecretName(input.raw, kind, input.fileName), kind, ...secretValue(kind, input.raw), connect: 'session' as const,
     ...(input.destination === 'session' ? { temporary: true } : {}), ...(sharing ? { sharing } : {}), ...secretSession(input.sessionId) };
 }
 /** A secret added in the settings: saved with the chosen sharing, unshared when none is chosen. */
-export function addPayload(input: { raw: string; format: QuickSecretFormat; name: string; fileName?: string; global: boolean; keys: string[] }) {
+export function addPayload(input: { raw: string; format: QuickSecretFormat; name: string; fileName?: string; allMachines: boolean; machines: string[]; keys: string[] }) {
   const kind = quickSecretKind(input.raw, input.format);
   return { name: input.name.trim() || suggestedSecretName(input.raw, kind, input.fileName), kind, ...secretValue(kind, input.raw),
-    ...(input.global || input.keys.length ? { sharing: { global: input.global, folders: input.keys.map(cwd => ({ cwd })) } } : {}) };
+    ...(input.allMachines || input.machines.length || input.keys.length ? { sharing: { allMachines: input.allMachines, machines: input.machines, folders: input.keys.map(cwd => ({ cwd })) } } : {}) };
 }
 
 /** A canvas folder the sharing editor offers: its key, the canvas's label for it, and the computer it is on. */
@@ -218,36 +224,48 @@ export function describeKey(view: SecretHosts, key: string, canvas: SecretCanvas
   return { folder: identity ? describeFolder(view, identity, canvas) : { key, label: lastSegment(localPart(key)), root: localPart(key), computer }, listed: false };
 }
 
+/** A computer a secret can be shared with as a whole: this one and the joined ones trusted for secrets, by vault device ID. */
+export interface MachineChoice { hostId: string; name: string }
+export function machineChoices(view: SecretHosts, hosts: readonly SecretCanvasHost[]): MachineChoice[] {
+  const ids = [...view.device ? [view.device.id] : [], ...view.peers.filter(peer => peer.enabled && peer.direction === 'node').map(peer => peer.device.id)];
+  return ids.map(hostId => ({ hostId, name: computerName(view, hostId, hosts) || hostId }));
+}
+
 /** What a settings row shows of a secret's sharing; the server decides what it allows. */
 export interface SharingSummary {
   legacy: boolean;
   /** Its sharing waits for the owner to save it again; nothing is shared automatically until then. */
   withheld: boolean;
-  global: boolean;
+  /** "모든 내 머신": every computer this vault serves, those joining later included. */
+  allMachines: boolean;
   /** For a legacy secret, the computers its rules shared it everywhere on. */
-  globalComputers: string[];
+  allComputers: string[];
+  /** Computers it is shared with as a whole. */
+  machines: MachineChoice[];
   folders: FolderView[];
   /** Its rules also limit operations, fields or time. */
   limited: boolean;
 }
 export function sharingSummary(view: SecretHosts, item: SecretSettingsItem, canvas: SecretCanvas): SharingSummary {
   const legacy: SecretLegacySummary | undefined = item.sharing ? undefined : item.legacy;
-  const sharing: Pick<SecretSharing, 'global' | 'folders'> = item.sharing ?? { global: !!legacy?.global.length, folders: legacy?.folders ?? [] };
-  return { legacy: !!legacy, withheld: !!item.withheld, global: sharing.global, globalComputers: legacy?.global.map(host => computerName(view, host.hostId, canvas.hosts) || host.hostId) ?? [],
+  const sharing: Omit<SecretSharing, 'revision'> = item.sharing ?? { allMachines: !!legacy?.global.length, machines: [], folders: legacy?.folders ?? [] };
+  return { legacy: !!legacy, withheld: !!item.withheld, allMachines: sharing.allMachines, allComputers: legacy?.global.map(host => computerName(view, host.hostId, canvas.hosts) || host.hostId) ?? [],
+    machines: sharing.machines.map(hostId => ({ hostId, name: computerName(view, hostId, canvas.hosts) || hostId })),
     folders: sharing.folders.map(folder => describeFolder(view, folder, canvas)), limited: !!legacy?.limited };
 }
 
 /**
- * The sharing editor's state: GLOBAL, the chosen canvas keys, stored folders of a computer this vault no longer trusts
- * (kept as `{hostId, root}` until removed), and a legacy secret's folders on such a computer, which saving drops.
+ * The sharing editor's state: all machines, the computers chosen as a whole, the chosen canvas keys, stored folders of
+ * a computer this vault no longer trusts (kept as `{hostId, root}` until removed), and a legacy secret's folders on such
+ * a computer, which saving drops.
  */
-export interface SharingDraft { global: boolean; keys: string[]; kept: SecretFolder[]; dropped: FolderView[] }
+export interface SharingDraft { allMachines: boolean; machines: string[]; keys: string[]; kept: SecretFolder[]; dropped: FolderView[] }
 /** Starts from the stored sharing, or for a legacy secret from what its rules share. */
 export function sharingDraft(view: SecretHosts, item: SecretSettingsItem, canvas: SecretCanvas): SharingDraft {
   const summary = sharingSummary(view, item, canvas);
   const stored = item.sharing ? item.sharing.folders : item.legacy?.folders ?? [];
   const unknown = stored.filter(folder => !folderKey(view, folder));
-  return { global: summary.global, keys: [...new Set(summary.folders.flatMap(folder => folder.key ? [folder.key] : []))],
+  return { allMachines: summary.allMachines, machines: summary.machines.map(machine => machine.hostId), keys: [...new Set(summary.folders.flatMap(folder => folder.key ? [folder.key] : []))],
     kept: item.sharing ? unknown.map(({ hostId, root }) => ({ hostId, root })) : [], dropped: item.sharing ? [] : unknown.map(folder => describeFolder(view, folder, canvas)) };
 }
 /**
@@ -256,10 +274,10 @@ export function sharingDraft(view: SecretHosts, item: SecretSettingsItem, canvas
  * again (its computer may be offline, the folder gone); only newly picked folders, and every folder of a legacy
  * secret, are sent as canvas keys to be resolved.
  */
-export function sharingPayload(view: SecretHosts, item: SecretSettingsItem, draft: Pick<SharingDraft, 'global' | 'keys' | 'kept'>) {
+export function sharingPayload(view: SecretHosts, item: SecretSettingsItem, draft: Pick<SharingDraft, 'allMachines' | 'machines' | 'keys' | 'kept'>) {
   const saved = new Map((item.sharing?.folders ?? []).flatMap(folder => { const key = folderKey(view, folder); return key ? [[key, folder] as const] : []; }));
   const pair = ({ hostId, root }: SecretFolder) => ({ hostId, root });
-  return { secretId: item.id, revision: item.sharing?.revision ?? 0, global: draft.global,
+  return { secretId: item.id, revision: item.sharing?.revision ?? 0, allMachines: draft.allMachines, machines: [...new Set(draft.machines)],
     folders: [...draft.keys.map(key => { const folder = saved.get(key); return folder ? pair(folder) : { cwd: key }; }), ...draft.kept.map(pair)] };
 }
 export function folderMatches(folder: FolderView, query: string): boolean {

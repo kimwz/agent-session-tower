@@ -34,6 +34,8 @@ export class DecisionService {
   private recent: DecisionRecord[] = [];
   /** Each change reads, merges and saves before the next starts, so a removed key never comes back. */
   private changes: Promise<unknown> = Promise.resolve();
+  /** The saved file was there but could not be used: the defaults here stand in for it until a change is saved. */
+  private unreadable = false;
 
   constructor(private readonly stateDir: string, private readonly providers: Record<DecisionProviderId, DecisionProvider> = DECISION_PROVIDERS, private readonly fetcher?: typeof fetch, private readonly beforeSend?: () => Promise<void>) {
     this.path = join(stateDir, FILE);
@@ -43,8 +45,11 @@ export class DecisionService {
     await mkdir(this.stateDir, { recursive: true, mode: 0o700 });
     let raw: unknown;
     try { raw = await readPrivateJson(this.path); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { this.unreadable = true; throw error; } }
     const saved = raw as Partial<Saved> | undefined;
+    if (raw === undefined) return;
+    // A key that is there but cannot be used is not the owner's deletion of it.
+    if (!saved || typeof saved !== 'object' || (saved.apiKey !== undefined && !validKey(saved.apiKey))) this.unreadable = true;
     if (!saved || typeof saved !== 'object') return;
     let features: DecisionFeatures;
     try { features = parseFeatures(saved.features, DEFAULT_DECISION_FEATURES); } catch { features = { ...DEFAULT_DECISION_FEATURES }; }
@@ -120,15 +125,37 @@ export class DecisionService {
   /** The saved settings as a backup keeps them, key included. */
   backupValue(): { provider: DecisionProviderId; apiKey?: string; features: DecisionFeatures } { return structuredClone(this.saved); }
 
+  /**
+   * The settings, key included, for a Tower that follows this one ("호스트 설정 따르기"). Refused while the saved file
+   * could not be read: the defaults standing in for it would take that Tower's own key and choices away.
+   */
+  exportManaged(): { provider: DecisionProviderId; apiKey?: string; features: DecisionFeatures } {
+    if (this.unreadable) throw new TowerError('unavailable', '빠른 판단 설정 파일을 읽지 못해 호스트 설정으로 보내지 않았습니다.');
+    return this.backupValue();
+  }
+
   /** Replaces the settings with a backup's, in turn with the owner's changes, so none of them lands after it with older values. */
-  restore(value: unknown): Promise<DecisionOverview> {
+  async restore(value: unknown): Promise<DecisionOverview> {
+    await this.replace(value, '백업의 빠른 판단 설정이 올바르지 않습니다.', true);
+    return this.overview();
+  }
+
+  /**
+   * Takes the settings of the Tower this computer follows ("호스트 설정 따르기"), key included; judgments stay here.
+   * The file is written only when they differ. Resolves whether they did.
+   */
+  applyManaged(value: unknown): Promise<boolean> { return this.replace(value, '호스트의 빠른 판단 설정이 올바르지 않습니다.', false); }
+
+  /** Replaces the settings in turn with the owner's changes. A refusal never quotes what it got: it may hold a key. */
+  private replace(value: unknown, invalid: string, always: boolean): Promise<boolean> {
     const change = this.changes.then(async () => {
       const input = value as Partial<Saved> | undefined;
-      if (!input || typeof input !== 'object' || !provider(input.provider) || (input.apiKey !== undefined && !validKey(input.apiKey))) throw new TowerError('invalid', '백업의 빠른 판단 설정이 올바르지 않습니다.');
+      if (!input || typeof input !== 'object' || !provider(input.provider) || (input.apiKey !== undefined && !validKey(input.apiKey))) throw new TowerError('invalid', invalid);
       const next: Saved = { provider: input.provider, features: parseFeatures(input.features ?? {}, DEFAULT_DECISION_FEATURES), ...(input.apiKey ? { apiKey: input.apiKey } : {}) };
+      if (!always && JSON.stringify(next) === JSON.stringify(this.saved)) return false;
       await this.save(next);
       this.saved = next;
-      return this.overview();
+      return true;
     });
     this.changes = change.catch(() => {});
     return change;
@@ -137,7 +164,7 @@ export class DecisionService {
   async close(): Promise<void> { await this.changes; await this.writes; }
 
   private save(next: Saved): Promise<void> {
-    const write = this.writes.then(() => writePrivateJson(this.path, `${JSON.stringify(next)}\n`));
+    const write = this.writes.then(() => writePrivateJson(this.path, `${JSON.stringify(next)}\n`)).then(() => { this.unreadable = false; });
     this.writes = write.catch(() => {});
     return write;
   }

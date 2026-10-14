@@ -10,6 +10,7 @@ import { displayFingerprint, linkDirectory, linkId, type LinkIdentity } from './
 import { decodeJoinCode } from './join-code.js';
 import { LINK_PROTOCOL, MAX_FRAME_BYTES, REMOVED_CLOSE_CODE, openNodeEnd, pairingProof } from './transport.js';
 import type { ControllerStatus, ControllerSummary, NodeReport } from '../../shared/link.js';
+import type { FollowedHostStore } from './follow.js';
 import { TowerError } from '../../shared/errors.js';
 
 const CLAIM_GRACE_MS = 10 * 60_000;
@@ -43,6 +44,8 @@ export interface NodeLinkOptions {
     request(version: unknown): Promise<{ status: number; body: unknown }>;
     report(): Promise<NodeReport>;
   };
+  /** Which controller this computer follows ("호스트 설정 따르기"); without it no controller can be followed. */
+  follow?: FollowedHostStore;
   now?: () => number;
   pingMs?: number;
 }
@@ -70,6 +73,8 @@ export class NodeLinks extends EventEmitter {
   private readonly opening = new Set<WebSocket>();
   private readonly failures = new Map<string, { attempts: number; error?: string; refused?: boolean }>();
   private writes: Promise<unknown> = Promise.resolve();
+  /** Following and forgetting a controller happen one after the other, so a removed controller is never left followed. */
+  private follows: Promise<unknown> = Promise.resolve();
   private closed = false;
 
   constructor(private readonly options: NodeLinkOptions) {
@@ -100,6 +105,7 @@ export class NodeLinks extends EventEmitter {
       const status: ControllerStatus = record.state === 'expired' ? 'expired' : record.state === 'removed' ? 'removed' : this.live.has(record.id) ? 'connected'
         : failure?.refused ? 'refused' : failure?.attempts ? 'offline' : 'connecting';
       return { id: record.id, name: record.name, fingerprint: displayFingerprint(record.pin), state: record.state, status,
+        ...(this.options.follow?.hostId() === record.id ? { followed: true } : {}),
         ...(record.pairedAt ? { pairedAt: record.pairedAt } : {}), ...(record.lastConnectedAt ? { lastConnectedAt: record.lastConnectedAt } : {}),
         ...(failure?.error ? { error: failure.error } : {}) };
     });
@@ -134,6 +140,7 @@ export class NodeLinks extends EventEmitter {
   async remove(id: string): Promise<void> {
     if (!this.records.some(record => record.id === id)) return;
     await this.save(this.records.filter(record => record.id !== id));
+    await this.unfollow(id);
     this.stop(id, REMOVED_CLOSE_CODE);
     this.failures.delete(id);
     this.emit('change');
@@ -150,6 +157,29 @@ export class NodeLinks extends EventEmitter {
   }
 
   private record(id: string) { return this.records.find(item => item.id === id); }
+
+  /** A controller this computer no longer trusts is no longer followed. */
+  private unfollow(id: string): Promise<void> {
+    return this.followStep(async follow => { if (follow.hostId() === id) { await follow.set(undefined); this.emit('change'); } });
+  }
+
+  /** Follows a controller that is still paired here, replacing any other. */
+  private followController(id: string): Promise<void> {
+    return this.followStep(async follow => {
+      if (this.record(id)?.state !== 'paired' || follow.hostId() === id) return;
+      await follow.set(id);
+      this.emit('change');
+    });
+  }
+
+  private followStep(step: (follow: FollowedHostStore) => Promise<void>): Promise<void> {
+    const follow = this.options.follow;
+    if (!follow) return Promise.resolve();
+    const run = this.follows.then(() => step(follow));
+    // best-effort: the caller of this step gets its failure; the chain only keeps order.
+    this.follows = run.catch(() => {});
+    return run;
+  }
 
   private schedule(id: string, delay: number): void {
     if (this.closed || this.dialing.has(id) || this.connecting.has(id) || this.live.has(id)) return;
@@ -263,7 +293,9 @@ export class NodeLinks extends EventEmitter {
     try {
       if (req.method === 'GET' && req.url === '/link/hello') {
         const claiming = record.state !== 'expired' && record.inviteId && record.secret;
+        const followed = this.options.follow?.hostId();
         return json(200, { protocol: LINK_PROTOCOL, name: this.options.hostname(), version: this.options.version, features: this.options.features(),
+          ...(this.options.follow ? { follows: followed === id, followsOther: Boolean(followed) && followed !== id } : {}),
           ...(claiming ? { pairing: { inviteId: record.inviteId, proof: pairingProof(record.secret!, exporter, { inviteId: record.inviteId!, controllerPin: record.pin, nodePin: this.options.identity.pin }) } } : {}) });
       }
       if (req.method === 'POST' && req.url === '/link/paired') {
@@ -281,11 +313,20 @@ export class NodeLinks extends EventEmitter {
         json(200, { ok: true });
         await this.save(this.records.map(item => item.id === id ? { id: item.id, pin: item.pin, name: item.name, addresses: item.addresses, state: 'removed' as const,
           ...(item.pairedAt ? { pairedAt: item.pairedAt } : {}), ...(item.lastConnectedAt ? { lastConnectedAt: item.lastConnectedAt } : {}) } : item));
+        await this.unfollow(id);
         this.stop(id);
         this.emit('change');
         return;
       }
       if (record.state !== 'paired') return json(404, { error: 'Not found.' });
+      // A controller the owner turns "호스트 설정 따르기" on for becomes the one this computer follows, replacing any
+      // other; turning it off there only stops following that controller.
+      if (req.method === 'POST' && req.url === '/link/follow' && this.options.follow) {
+        const body = await readJson(req, 1024);
+        if (typeof body.follow !== 'boolean' || Object.keys(body).length !== 1) return json(400, { error: 'Invalid request.' });
+        if (body.follow) await this.followController(id); else await this.unfollow(id);
+        return json(200, { follows: this.options.follow.hostId() === id });
+      }
       // Controllers are the owner's own computers: keeping this one up to date is theirs to ask for.
       if (req.method === 'GET' && req.url === '/link/status' && this.options.update) return json(200, await this.options.update.report());
       if (req.method === 'POST' && req.url === '/link/update' && this.options.update) {

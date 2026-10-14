@@ -33,11 +33,11 @@ const item = (id: string, patch: Partial<SecretSettingsItem> = {}): SecretSettin
 const view: SecretSettingsView = {
   status: { initialized: true, locked: false }, device, peers: [peer, controller],
   secrets: [
-    item('global_key', { sharing: { revision: 3, global: true, folders: [] } }),
-    item('folder_key', { kind: 'env', fields: ['DATABASE_URL'], sharing: { revision: 1, global: false, folders: [{ hostId: device.id, root: '/work/app' }, { hostId: peer.device.id, root: '/srv/app' }] } }),
-    item('lonely_key', { sharing: { revision: 1, global: false, folders: [] } }),
+    item('global_key', { sharing: { revision: 3, allMachines: true, machines: [], folders: [] } }),
+    item('folder_key', { kind: 'env', fields: ['DATABASE_URL'], sharing: { revision: 1, allMachines: false, machines: [], folders: [{ hostId: device.id, root: '/work/app' }, { hostId: peer.device.id, root: '/srv/app' }] } }),
+    item('lonely_key', { sharing: { revision: 1, allMachines: false, machines: [], folders: [] } }),
     item('legacy_key', { legacy: { global: [{ hostId: device.id }], folders: [{ hostId: 'gone-device', root: '/old/app' }], limited: true } }),
-    item('withheld_key', { withheld: true, sharing: { revision: 2, global: false, folders: [{ hostId: device.id, root: '/work/app' }] } }),
+    item('withheld_key', { withheld: true, sharing: { revision: 2, allMachines: false, machines: [], folders: [{ hostId: device.id, root: '/work/app' }] } }),
   ],
 };
 const choices: SecretFolderChoice[] = [
@@ -92,14 +92,14 @@ test('a row summary names folders by canvas label, path and computer, and an unk
   assert.deepEqual(folders, [{ key: '/work/app', label: 'app', root: '/work/app', computer: '원본 맥' }, { key: `@${node}//srv/app`, label: 'app', root: '/srv/app', computer: '빌드 서버' }]);
   assert.deepEqual(describeFolder(view, { hostId: 'gone-device', root: '/old/app' }, canvas), { label: 'app', root: '/old/app', computer: 'gone-device' });
   const legacy = sharingSummary(view, view.secrets[3]!, canvas);
-  assert.equal(legacy.legacy, true); assert.equal(legacy.global, true); assert.deepEqual(legacy.globalComputers, ['원본 맥']); assert.equal(legacy.limited, true);
+  assert.equal(legacy.legacy, true); assert.equal(legacy.allMachines, true); assert.deepEqual(legacy.allComputers, ['원본 맥']); assert.equal(legacy.limited, true);
   assert.equal(sharingSummary(view, view.secrets[4]!, canvas).withheld, true);
 });
 
 test('one computer reads the same everywhere: the canvas name first, the vault device name only when the canvas does not know it', () => {
   assert.deepEqual(sharingSummary(view, view.secrets[1]!, canvas).folders.map(folder => folder.computer), ['원본 맥', '빌드 서버']);
   assert.deepEqual(sharingSummary(view, view.secrets[1]!, { folders: [], hosts: [] }).folders.map(folder => folder.computer), ['This computer', 'build-vault']);
-  assert.deepEqual(sharingSummary(view, view.secrets[3]!, canvas).globalComputers, ['원본 맥']);
+  assert.deepEqual(sharingSummary(view, view.secrets[3]!, canvas).allComputers, ['원본 맥']);
   assert.equal(computerName(view, controller.device.id, canvas.hosts), '상위 Tower', 'a controller is not on this canvas');
   assert.equal(computerName(view, 'gone-device', canvas.hosts), undefined);
   const editor = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: view.secrets[1]!, canvas, busy: false, change, onClose: noop }));
@@ -109,14 +109,14 @@ test('one computer reads the same everywhere: the canvas name first, the vault d
 
 test('the sharing editor starts from stored sharing or the legacy summary and saves with the revision', () => {
   const shared = sharingDraft(view, view.secrets[1]!, canvas);
-  assert.deepEqual(shared, { global: false, keys: ['/work/app', `@${node}//srv/app`], kept: [], dropped: [] });
-  assert.deepEqual(sharingPayload(view, view.secrets[1]!, shared), { secretId: 'folder_key', revision: 1, global: false,
+  assert.deepEqual(shared, { allMachines: false, machines: [], keys: ['/work/app', `@${node}//srv/app`], kept: [], dropped: [] });
+  assert.deepEqual(sharingPayload(view, view.secrets[1]!, shared), { secretId: 'folder_key', revision: 1, allMachines: false, machines: [],
     folders: [{ hostId: device.id, root: '/work/app' }, { hostId: peer.device.id, root: '/srv/app' }] }, 'saved folders go back exactly as received');
   const legacy = sharingDraft(view, view.secrets[3]!, canvas);
-  assert.equal(legacy.global, true); assert.deepEqual(legacy.keys, []); assert.deepEqual(legacy.kept, []); assert.deepEqual(legacy.dropped.map(folder => folder.root), ['/old/app']);
-  assert.deepEqual(sharingPayload(view, view.secrets[3]!, { global: true, keys: [], kept: [] }), { secretId: 'legacy_key', revision: 0, global: true, folders: [] }, 'a legacy secret saves with revision 0');
-  assert.equal(sharingPayload(view, view.secrets[0]!, { global: false, keys: [], kept: [] }).revision, 3);
-  const away = item('away_key', { sharing: { revision: 7, global: false, folders: [{ hostId: device.id, root: '/work/app' }, { hostId: 'gone-device', root: '/old/app' }] } });
+  assert.equal(legacy.allMachines, true); assert.deepEqual(legacy.keys, []); assert.deepEqual(legacy.kept, []); assert.deepEqual(legacy.dropped.map(folder => folder.root), ['/old/app']);
+  assert.deepEqual(sharingPayload(view, view.secrets[3]!, { allMachines: true, machines: [], keys: [], kept: [] }), { secretId: 'legacy_key', revision: 0, allMachines: true, machines: [], folders: [] }, 'a legacy secret saves with revision 0');
+  assert.equal(sharingPayload(view, view.secrets[0]!, { allMachines: false, machines: [], keys: [], kept: [] }).revision, 3);
+  const away = item('away_key', { sharing: { revision: 7, allMachines: false, machines: [], folders: [{ hostId: device.id, root: '/work/app' }, { hostId: 'gone-device', root: '/old/app' }] } });
   const draft = sharingDraft(view, away, canvas);
   assert.deepEqual(draft.kept, [{ hostId: 'gone-device', root: '/old/app' }], 'a stored folder of a computer no longer trusted is kept as it was received');
   assert.deepEqual(sharingPayload(view, away, draft).folders, [{ hostId: device.id, root: '/work/app' }, { hostId: 'gone-device', root: '/old/app' }]);
@@ -125,14 +125,14 @@ test('the sharing editor starts from stored sharing or the legacy summary and sa
 test('a legacy secret sends every folder as a canvas key, since only the current sharing can be kept as it is', () => {
   const legacy = item('legacy_local', { legacy: { global: [], folders: [{ hostId: device.id, root: '/work/app' }, { hostId: peer.device.id, root: '/srv/app' }], limited: false } });
   const draft = sharingDraft(view, legacy, canvas);
-  assert.deepEqual(sharingPayload(view, legacy, draft), { secretId: 'legacy_local', revision: 0, global: false, folders: [{ cwd: '/work/app' }, { cwd: `@${node}//srv/app` }] });
+  assert.deepEqual(sharingPayload(view, legacy, draft), { secretId: 'legacy_local', revision: 0, allMachines: false, machines: [], folders: [{ cwd: '/work/app' }, { cwd: `@${node}//srv/app` }] });
 });
 
-test('a saved folder on an offline or unknown computer is sent back as {hostId, root}, so unchecking GLOBAL saves', () => {
-  const wide = item('wide_key', { sharing: { revision: 9, global: true, folders: [{ hostId: peer.device.id, root: '/srv/app' }, { hostId: 'gone-device', root: '/old/app' }] } });
+test('a saved folder on an offline or unknown computer is sent back as {hostId, root}, so unchecking all machines saves', () => {
+  const wide = item('wide_key', { sharing: { revision: 9, allMachines: true, machines: [], folders: [{ hostId: peer.device.id, root: '/srv/app' }, { hostId: 'gone-device', root: '/old/app' }] } });
   const draft = sharingDraft(view, wide, canvas);
-  const body = sharingPayload(view, wide, { ...draft, global: false });
-  assert.deepEqual(body, { secretId: 'wide_key', revision: 9, global: false, folders: [{ hostId: peer.device.id, root: '/srv/app' }, { hostId: 'gone-device', root: '/old/app' }] });
+  const body = sharingPayload(view, wide, { ...draft, allMachines: false });
+  assert.deepEqual(body, { secretId: 'wide_key', revision: 9, allMachines: false, machines: [], folders: [{ hostId: peer.device.id, root: '/srv/app' }, { hostId: 'gone-device', root: '/old/app' }] });
   assert.ok(body.folders.every(folder => !('cwd' in folder)), 'nothing already saved needs its computer to answer again');
 });
 
@@ -145,7 +145,7 @@ test('a newly picked folder is sent as {cwd} beside the saved ones', () => {
 test('a removed saved folder is not sent', () => {
   const draft = sharingDraft(view, view.secrets[1]!, canvas);
   assert.deepEqual(sharingPayload(view, view.secrets[1]!, { ...draft, keys: draft.keys.filter(key => key !== '/work/app') }).folders, [{ hostId: peer.device.id, root: '/srv/app' }]);
-  const away = item('away_key', { sharing: { revision: 2, global: false, folders: [{ hostId: 'gone-device', root: '/old/app' }] } });
+  const away = item('away_key', { sharing: { revision: 2, allMachines: false, machines: [], folders: [{ hostId: 'gone-device', root: '/old/app' }] } });
   assert.deepEqual(sharingPayload(view, away, { ...sharingDraft(view, away, canvas), kept: [] }).folders, []);
 });
 
@@ -163,8 +163,8 @@ test('a chat paste is temporary and connected by default; saving keeps it in the
   const base = { raw, format: 'auto' as const, name: '', sessionId: `@${node}/codex:session`, cwd: `@${node}//srv/app` };
   assert.deepEqual(pastePayload({ ...base, destination: 'session' }), { name: 'TOKEN', kind: 'env', value: raw, connect: 'session', temporary: true, sessionId: 'codex:session', nodeId: node });
   assert.deepEqual(pastePayload({ ...base, destination: 'none' }), { name: 'TOKEN', kind: 'env', value: raw, connect: 'session', sessionId: 'codex:session', nodeId: node });
-  assert.deepEqual(pastePayload({ ...base, destination: 'folder' }).sharing, { global: false, folders: [{ cwd: `@${node}//srv/app` }] });
-  assert.deepEqual(pastePayload({ ...base, destination: 'global' }).sharing, { global: true, folders: [] });
+  assert.deepEqual(pastePayload({ ...base, destination: 'folder' }).sharing, { allMachines: false, folders: [{ cwd: `@${node}//srv/app` }] });
+  assert.deepEqual(pastePayload({ ...base, destination: 'global' }).sharing, { allMachines: true, folders: [] });
   assert.equal('temporary' in pastePayload({ ...base, destination: 'global' }), false);
   const file = pastePayload({ ...base, raw: 'AAECAw==', format: 'file', fileName: 'key.pem', destination: 'session' });
   assert.equal(file.content, 'AAECAw=='); assert.equal(file.value, undefined); assert.equal(file.name, 'key.pem');
@@ -173,10 +173,11 @@ test('a chat paste is temporary and connected by default; saving keeps it in the
 });
 
 test('a secret added in the settings has no session and is unshared unless sharing is chosen', () => {
-  const plain = addPayload({ raw: 'private-value', format: 'auto', name: 'API_KEY', global: false, keys: [] });
+  const plain = addPayload({ raw: 'private-value', format: 'auto', name: 'API_KEY', allMachines: false, machines: [], keys: [] });
   assert.deepEqual(plain, { name: 'API_KEY', kind: 'scalar', value: 'private-value' });
-  const shared = addPayload({ raw: 'private-value', format: 'auto', name: 'API_KEY', global: false, keys: ['/work/app', `@${node}//srv/app`] });
-  assert.deepEqual(shared.sharing, { global: false, folders: [{ cwd: '/work/app' }, { cwd: `@${node}//srv/app` }] });
+  const shared = addPayload({ raw: 'private-value', format: 'auto', name: 'API_KEY', allMachines: false, machines: [peer.device.id], keys: ['/work/app', `@${node}//srv/app`] });
+  assert.deepEqual(shared.sharing, { allMachines: false, machines: [peer.device.id], folders: [{ cwd: '/work/app' }, { cwd: `@${node}//srv/app` }] });
+  assert.deepEqual(addPayload({ raw: 'private-value', format: 'auto', name: 'API_KEY', allMachines: true, machines: [], keys: [] }).sharing, { allMachines: true, machines: [], folders: [] });
   assert.equal('sessionId' in shared, false); assert.equal('connect' in shared, false);
 });
 
@@ -197,8 +198,8 @@ test('the session view is read every 10 s while open and 60 s while closed, and 
 test('settings list every secret once with its masked value, sharing summary and row actions, never a value or reference', () => {
   const markup = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view, canvas, busy: false, change }));
   for (const name of ['GLOBAL_KEY', 'FOLDER_KEY', 'LONELY_KEY', 'LEGACY_KEY', 'WITHHELD_KEY']) assert.equal(markup.split(`<strong>${name}</strong>`).length, 2, name);
-  assert.match(markup, /GLOBAL/); assert.match(markup, /공유 안 함/); assert.match(markup, /빌드 서버/); assert.match(markup, /title="app · \/srv\/app · 빌드 서버"/);
-  assert.match(markup, /기존 규칙/); assert.match(markup, /GLOBAL · 원본 맥/); assert.match(markup, /기존 규칙에 사용 방식·필드·기간 제한이 있습니다/);
+  assert.match(markup, /모든 내 머신/); assert.match(markup, /공유 안 함/); assert.match(markup, /빌드 서버/); assert.match(markup, /title="app · \/srv\/app · 빌드 서버"/);
+  assert.match(markup, /기존 규칙/); assert.match(markup, /모든 내 머신 · 원본 맥/); assert.match(markup, /기존 규칙에 사용 방식·필드·기간 제한이 있습니다/);
   assert.match(markup, /구버전에서 규칙이 바뀌었습니다. 공유를 다시 저장하세요/);
   assert.match(markup, /••••••••/); assert.match(markup, />공유 편집</); assert.match(markup, />삭제</);
   assert.match(markup, /aria-label="GLOBAL_KEY 값 보기"[^>]*>보기</); assert.match(markup, /aria-label="GLOBAL_KEY 값 수정"[^>]*>수정</); assert.doesNotMatch(markup, /값 교체/);
@@ -210,13 +211,13 @@ test('settings list every secret once with its masked value, sharing summary and
 });
 
 test('a pending import opens the advanced section; a remote secret stays read-only', () => {
-  const markup = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { ...view, status: { initialized: true, locked: false, pendingImports: 1, pendingImportIds: ['backup'] }, secrets: [item('remote', { sourceHostId: 'peer-device', sharing: { revision: 1, global: true, folders: [] } })] }, canvas, busy: false, change }));
+  const markup = renderToStaticMarkup(createElement(SecretSettingsWorkspace, { view: { ...view, status: { initialized: true, locked: false, pendingImports: 1, pendingImportIds: ['backup'] }, secrets: [item('remote', { sourceHostId: 'peer-device', sharing: { revision: 1, allMachines: true, machines: [], folders: [] } })] }, canvas, busy: false, change }));
   assert.match(markup, /<details class="secret-advanced" open=""/); assert.match(markup, /보관함 가져오기/); assert.match(markup, />복구 비밀번호<\/h3>/); assert.match(markup, />복구 비밀번호 변경</); assert.match(markup, /<strong>빌드 서버<\/strong>/); assert.doesNotMatch(markup, /build-vault/);
   assert.match(markup, /원본에서 관리/); assert.doesNotMatch(markup, />공유 편집<|>보기<|>수정<|>삭제</, 'another vault’s value is read and changed at its source');
 });
 
 test('the sharing editor offers every computer’s folders with path and computer, keeps chosen folders off the canvas and refuses untrusted computers', () => {
-  const selected = item('picked', { sharing: { revision: 4, global: false, folders: [{ hostId: device.id, root: '/work/app' }, { hostId: device.id, root: '/hidden/folder' }] } });
+  const selected = item('picked', { sharing: { revision: 4, allMachines: false, machines: [], folders: [{ hostId: device.id, root: '/work/app' }, { hostId: device.id, root: '/hidden/folder' }] } });
   const markup = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: selected, canvas, busy: false, change, onClose: noop }));
   assert.match(markup, /폴더 이름, 경로, 컴퓨터 검색/); assert.match(markup, /\/srv\/app/); assert.match(markup, /빌드 서버/);
   assert.match(markup, /folder<\/strong><small>\/hidden\/folder<\/small><small>원본 맥<\/small><small>캔버스에 없음/, 'a chosen folder the canvas no longer lists stays removable');
@@ -226,7 +227,7 @@ test('the sharing editor offers every computer’s folders with path and compute
   const legacy = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: view.secrets[3]!, canvas, busy: false, change, onClose: noop }));
   assert.match(legacy, /기존 규칙/); assert.match(legacy, /type="checkbox" checked=""/); assert.match(legacy, /사용 방식·필드·기간 제한은 저장하면 사라집니다/);
   assert.match(legacy, /승인이 해제된 컴퓨터의 폴더는 저장하면 빠집니다/); assert.match(legacy, /gone-device/);
-  const away = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: item('away', { sharing: { revision: 1, global: false, folders: [{ hostId: 'gone-device', root: '/old/app' }] } }), canvas, busy: false, change, onClose: noop }));
+  const away = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: item('away', { sharing: { revision: 1, allMachines: false, machines: [], folders: [{ hostId: 'gone-device', root: '/old/app' }] } }), canvas, busy: false, change, onClose: noop }));
   assert.match(away, /승인을 해제한 컴퓨터의 폴더입니다/); assert.match(away, /aria-label="app 선택 해제"/); assert.doesNotMatch(away, /저장하면 빠집니다/);
   const withheld = renderToStaticMarkup(createElement(SecretSharingEditor, { view, item: view.secrets[4]!, canvas, busy: false, change, onClose: noop }));
   assert.match(withheld, /구버전에서 규칙이 바뀌었습니다/);
@@ -234,7 +235,7 @@ test('the sharing editor offers every computer’s folders with path and compute
 
 test('the available tab shows each basis, never offers sharing for a remote source, and tells each state apart', () => {
   const markup = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ usage: [{ at: Date.now(), secretId: 'global_key', name: 'GLOBAL_KEY', operation: 'env', outcome: 'delivered', review: 'exempt' }] }), busy: false, change, onPaste: noop, onSharing: noop }));
-  assert.match(markup, />GLOBAL</); assert.match(markup, />이 세션</); assert.match(markup, />원격 원본</);
+  assert.match(markup, />모든 내 머신</); assert.match(markup, />이 세션</); assert.match(markup, />원격 원본</);
   assert.match(markup, /GLOBAL_KEY<\/strong><small>단일 값<\/small>/); assert.doesNotMatch(markup, />scalar</, 'the same kind labels as the settings'); assert.match(markup, /최근 사용 · /); assert.match(markup, /아직 사용하지 않음/);
   assert.match(markup, /aria-label="GLOBAL_KEY 공유 설정"/); assert.doesNotMatch(markup, /REMOTE_KEY 공유 설정/); assert.match(markup, /REMOTE_KEY 이 세션에서 끊기/);
   const temporary = renderToStaticMarkup(createElement(SecretAvailable, { view: sessionView({ connectable: [] }), busy: false, change, onPaste: noop, onSharing: noop }));

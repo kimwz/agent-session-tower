@@ -61,8 +61,8 @@ async function changingAuthority(service: SecretService, target: SecretTarget, m
     return { local, change: async () => { if (mode === 'revoke') await service.disconnectSession(target, [local.id]); else await service.update({ id: local.id, expectedVersion: local.version, value: 'ROTATED_CHANGE_CANARY' }); } };
   }
   if (mode === 'policy') {
-    const local = await service.create({ name: 'local-policy', kind: 'scalar', value, sharing: { global: false, folders: [{ hostId: target.hostId, root: target.root }] } });
-    return { local, change: async () => { await service.setSharing(local.id, 1, { global: false, folders: [] }); } };
+    const local = await service.create({ name: 'local-policy', kind: 'scalar', value, sharing: { allMachines: false, folders: [{ hostId: target.hostId, root: target.root }] } });
+    return { local, change: async () => { await service.setSharing(local.id, 1, { allMachines: false, folders: [] }); } };
   }
   // Keys saved before per-secret sharing follow their rules: one expires, the other's rule narrows its fields.
   const record = legacyRecord(target.hostId, { name: `local-${mode}`, groupId: 'legacy-group', kind: mode === 'fields' ? 'env' : 'scalar', value, ...(mode === 'expiry' ? { expiresAt: clock.now() + 100 } : {}) });

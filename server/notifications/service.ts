@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Run, RunApproval, Session } from '../../shared/types.js';
+import type { Run, RunApproval, Session, Snapshot } from '../../shared/types.js';
 import { DEFAULT_NOTIFICATION_EVENTS, type NotificationDevice, type NotificationEvents, type NotificationLanguage, type NotificationOverview, type NotificationPayload } from '../../shared/notifications.js';
 import { TowerError } from '../../shared/errors.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { generateVapidKeys, sendPush, type PushResult, type PushTarget, type VapidKeys } from './web-push.js';
 import type { TurnAttention, TurnAttentionInput } from './attention.js';
 import type { SecretBlockNotice } from '../runs/runner-protocol.js';
+import type { SecretShareNotice } from '../../shared/secrets.js';
 
 export type NotificationKind = keyof NotificationEvents;
 export interface NotificationEvent { key: string; kind: NotificationKind; at: number; run: Run; approval?: RunApproval }
@@ -27,7 +28,18 @@ export interface NotificationContext {
   attention?(input: TurnAttentionInput, signal: AbortSignal): Promise<TurnAttention | undefined>;
   /** Secret uses the worker's reviewer refused lately; each is announced once, to devices that want to hear what waits on them. */
   secretBlocks?(): readonly SecretBlockNotice[];
+  /**
+   * The joined computers that follow this Tower ("호스트 설정 따르기"), with what they share now, and this Tower's id
+   * there: the work it sent them is announced here, where its devices subscribe.
+   */
+  following?(): { self: string; computers: readonly FollowingComputer[] } | undefined;
+  /** The Tower this computer follows: the work it sent here is announced there, so not here too. */
+  followedHost?(): string | undefined;
+  /** Secret requests of computers that follow this Tower (not shared with them, or this vault locked); each is announced once. */
+  secretShares?(): readonly SecretShareNotice[];
 }
+/** A joined computer that follows this Tower, as its link mirrors it. */
+export interface FollowingComputer { id: string; name: string; snapshot: Snapshot }
 interface Device extends NotificationDevice { endpoint: string; keys: PushTarget['keys'] }
 interface Saved { vapid: VapidKeys; devices: Device[]; delivered?: { since: string; keys: string[] } }
 
@@ -105,6 +117,54 @@ export function turnRequest(run: Run, runs: readonly Run[]): string {
   return [chain[0].prompt, ...inserted].join('\n\n');
 }
 
+const SCOPED = /^@([a-f0-9]{32})\/([\s\S]+)$/;
+const scoped = (computer: string, id: string) => `@${computer}/${id}`;
+
+/**
+ * This Tower's runs and those of the computers that follow it as one view. A computer's runs and sessions take the ids
+ * this Tower's page gives them (`@<computer>/<id>`), so a notification opens them in this page, and its runs never
+ * meet this computer's. Which of them are announced here is `announced`'s to say.
+ */
+export function withFollowing(context: NotificationContext): NotificationContext {
+  if (!context.following) return context;
+  const computers = () => context.following?.()?.computers ?? [];
+  const find = (id: string) => {
+    const match = SCOPED.exec(id);
+    const computer = match && computers().find(item => item.id === match[1]);
+    return computer ? { computer, id: match![2]! } : undefined;
+  };
+  return {
+    ...context,
+    runs: () => [...context.runs(), ...computers().flatMap(computer => computer.snapshot.runs.map(run => ({ ...run, id: scoped(computer.id, run.id), sessionId: scoped(computer.id, run.sessionId),
+      // A trigger this Tower set up there is named by that computer's ids, so its events never meet this one's.
+      ...(run.origin?.triggerId ? { origin: { ...run.origin, triggerId: scoped(computer.id, run.origin.triggerId), ...(run.origin.eventId ? { eventId: scoped(computer.id, run.origin.eventId) } : {}) } } : {}),
+      ...(run.scheduled ? { scheduled: { ...run.scheduled, afterRunId: scoped(computer.id, run.scheduled.afterRunId) } } : {}),
+      ...(run.steering ? { steering: { ...run.steering, targetRunId: scoped(computer.id, run.steering.targetRunId) } } : {}) })))],
+    session: id => {
+      const found = find(id);
+      if (!found) return context.session(id);
+      const session = found.computer.snapshot.sessions.find(item => item.id === found.id);
+      return session && { ...session, id };
+    },
+    project: session => {
+      const found = find(session.id);
+      if (!found) return context.project(session);
+      const project = found.computer.snapshot.groups?.find(group => group.cwd === session.cwd)?.title || session.project;
+      return `${project} (${found.computer.name})`;
+    },
+  };
+}
+
+/**
+ * Whether this Tower announces a run: of a computer that follows it, only the work it sent there; of its own, all but
+ * the work of the Tower it follows, which that Tower announces. So a turn is announced once, wherever it ran.
+ */
+export function announced(run: Run, context: Pick<NotificationContext, 'following' | 'followedHost'>): boolean {
+  if (SCOPED.test(run.id)) return Boolean(run.origin?.controllerId) && run.origin?.controllerId === context.following?.()?.self;
+  const host = context.followedHost?.();
+  return !host || run.origin?.controllerId !== host;
+}
+
 const clip = (value: string, length: number) => {
   const text = value.replace(/<[^>]*>/g, ' ').replace(/[#*`>_\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
   return text.length > length ? `${text.slice(0, length - 1)}…` : text;
@@ -145,6 +205,22 @@ export function secretBlockMessage(block: SecretBlockNotice, context: Notificati
   return { title: project ? `${project} · ${status}` : status,
     body: [clip(session?.customTitle || session?.agentName || session?.title || '', 80), clip(block.reason, 160), names].filter(Boolean).join('\n'),
     url: `/?session=${encodeURIComponent(session?.id ?? block.sessionId)}`, tag: block.key };
+}
+/**
+ * A following computer's work asked for a secret not shared with it, or found this vault locked. Opening it shows that
+ * secret's sharing with a one-tap share to that computer (`client/src/secrets/share-request.ts`), or the vault to open.
+ */
+export function secretShareMessage(notice: SecretShareNotice, language: NotificationLanguage): NotificationPayload {
+  // Names as they are: a secret's name is often an environment variable (`GITHUB_TOKEN`), not text to tidy up.
+  const named = (value: string, length: number) => value.length > length ? `${value.slice(0, length - 1)}…` : value;
+  const ko = language === 'ko'; const computer = named(notice.nodeName || (ko ? '원격 컴퓨터' : 'A remote computer'), 60);
+  if (notice.kind === 'host-locked') return { title: ko ? '시크릿 보관함 잠김' : 'Secret vault locked',
+    body: ko ? `${computer} 작업이 시크릿을 쓰려 했지만 이 컴퓨터의 보관함이 잠겨 있습니다. 보관함을 여세요.` : `${computer} needed a secret, but this computer's vault is locked. Open the vault.`,
+    url: '/?secretShare=', tag: notice.key };
+  const name = named(notice.secretName || notice.secretId || '', 80);
+  return { title: ko ? '시크릿 공유 요청' : 'Secret share request',
+    body: ko ? `${computer} 작업이 ${name}을(를) 쓰려 합니다. 눌러서 이 머신에 공유하세요.` : `${computer} wants to use ${name}. Tap to share it with that computer.`,
+    url: `/?${new URLSearchParams({ secretShare: notice.secretId ?? '', machine: notice.hostId ?? '' })}`, tag: notice.key };
 }
 function defaultVariant(event: NotificationEvent): NotificationVariant {
   if (event.kind === 'triggerStarted') return 'started';
@@ -195,8 +271,11 @@ export class NotificationService {
   /** Past the shutdown grace: anything still going neither sends, records nor saves; the next start takes it up. */
   private stopped = false;
 
-  constructor(private readonly stateDir: string, private readonly context: NotificationContext, private readonly fetcher: typeof fetch = fetch, private readonly now = Date.now) {
+  private readonly context: NotificationContext;
+
+  constructor(private readonly stateDir: string, context: NotificationContext, private readonly fetcher: typeof fetch = fetch, private readonly now = Date.now) {
     this.path = join(stateDir, 'notifications.json');
+    this.context = withFollowing(context);
   }
 
   async start(): Promise<void> {
@@ -231,11 +310,20 @@ export class NotificationService {
     if (this.closed || !this.saved) return;
     const handled = new Set([...this.delivered, ...this.judging.keys()]);
     const events = pendingEvents(this.context.runs(), this.cutoff, handled, this.now());
-    for (const event of events) this.track(event.key, event.at, () => this.handle(event));
+    // Work the followed Tower announces is decided here not to be sent, for good; a followed computer's own work is not this Tower's at all.
+    for (const event of events) {
+      if (announced(event.run, this.context)) this.track(event.key, event.at, () => this.handle(event));
+      else if (!SCOPED.test(event.run.id)) this.track(event.key, event.at, async () => {});
+    }
     for (const block of this.context.secretBlocks?.() ?? []) {
       if (block.at <= this.cutoff || handled.has(block.key)) continue;
       handled.add(block.key);
       this.track(block.key, block.at, () => this.deliverBlock(block));
+    }
+    for (const notice of this.context.secretShares?.() ?? []) {
+      if (notice.at <= this.cutoff || handled.has(notice.key)) continue;
+      handled.add(notice.key);
+      this.track(notice.key, notice.at, () => this.deliverShare(notice));
     }
     // The mark moves forward even when nothing happened, so a restart does not announce old work again.
     if (this.now() - this.lastSave > 60_000) void this.save().catch(error => console.error(`Notification state was not saved: ${error instanceof Error ? error.message : String(error)}`));
@@ -259,6 +347,12 @@ export class NotificationService {
   private async deliverBlock(block: SecretBlockNotice): Promise<void> {
     const devices = this.saved!.devices.filter(device => device.events.runWaiting);
     await Promise.all(devices.map(device => this.send(device, secretBlockMessage(block, this.context, device.language))));
+  }
+
+  /** A secret request waits on the owner like an approval: devices that want those hear of it. */
+  private async deliverShare(notice: SecretShareNotice): Promise<void> {
+    const devices = this.saved!.devices.filter(device => device.events.runWaiting);
+    await Promise.all(devices.map(device => this.send(device, secretShareMessage(notice, device.language))));
   }
 
   /** Decides whether an event still deserves a push, then sends it to the devices that chose its kind. */

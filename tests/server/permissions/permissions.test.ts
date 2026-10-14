@@ -140,7 +140,7 @@ test('a refused one-time run is told to the turn that asked for it, so the worke
 test('requests need a Tower conversation on this computer; the pending list is bounded; state survives a restart', async t => {
   const f = await fixture(t);
   await assert.rejects(f.service.request({ kind: 'command', value: 'ls', scope: 'project', reason: 'x' }, { kind: 'agent', sessionId: 'unknown' }), /Tower에서 시작한 대화/);
-  await assert.rejects(f.service.request({ kind: 'command', value: 'ls', scope: 'project', reason: 'x' }, { ...agent('claude:one'), controllerId: 'c' }), /다른 컴퓨터/);
+  await assert.rejects(f.service.request({ kind: 'command', value: 'ls', scope: 'project', reason: 'x' }, { ...agent('claude:one'), controllerId: 'c' }), /호스트 설정 따르기/);
   for (let index = 0; index < 50; index++) await f.service.request({ kind: 'command', value: `tool${index} run`, scope: 'project', reason: 'x' }, agent('claude:one'));
   await assert.rejects(f.service.request({ kind: 'command', value: 'one more', scope: 'project', reason: 'x' }, agent('claude:one')), /너무 많습니다/);
   f.service.close();
@@ -190,7 +190,7 @@ test('agents reach permissions only through their own keyed requests; owner-only
   assert.deepEqual(listed.requests.map(item => item.status), ['pending']);
   const overview = await api.call('permissions.overview', {}, { kind: 'owner', via: 'ui' }) as PermissionOverview;
   assert.equal(overview.pending, 1);
-  await assert.rejects(api.call('permissions.overview', {}, { kind: 'owner', via: 'remote', controllerId: 'other' }), /on that computer itself/);
+  await assert.rejects(api.call('permissions.overview', {}, { kind: 'owner', via: 'remote', controllerId: 'other' }), /호스트 설정 따르기/, 'a controlling Tower this computer does not follow is told how to reach its permissions');
 });
 
 test('a project folder that is, or links to, the Codex home\'s parent never gets project rules in the file for every project', async t => {

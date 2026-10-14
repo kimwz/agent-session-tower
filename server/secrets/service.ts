@@ -1,18 +1,19 @@
 import { randomUUID, randomBytes, generateKeyPairSync, createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
-import type { SecretAvailable, SecretContext, SecretCreateInput, SecretDevice, SecretDisconnected, SecretFolder, SecretGroup, SecretMetadata, SecretOperation, SecretPeer, SecretProject, SecretRule, SecretSettingsView, SecretSharing, SecretTarget, SecretTask, SecretUsage, SecretValue, VaultStatus } from '../../shared/secrets.js';
+import type { SecretAvailable, SecretCatalogItem, SecretContext, SecretCreateInput, SecretDevice, SecretDisconnected, SecretFolder, SecretGroup, SecretMetadata, SecretOperation, SecretPeer, SecretProject, SecretRule, SecretSettingsView, SecretSharing, SecretSharingInput, SecretTarget, SecretTask, SecretUsage, SecretValue, VaultStatus } from '../../shared/secrets.js';
 import { TowerError } from '../../shared/errors.js';
 import { MAX_SECRET_BYTES, SECRET_OPERATIONS } from '../../shared/secrets.js';
 import { SecretVault } from './vault.js';
 import { decode } from './crypto.js';
 import { parseDotenv } from './dotenv.js';
-import { authorize, available, covered, openTask, servedHosts, sessionTask, withheld, type Decision, type PolicySecret, type PolicyState } from './policy.js';
+import { authorize, available, catalog, covered, notShared, openTask, readSharing, servedHosts, sessionTask, storedSharing, withheld, type Decision, type PolicySecret, type PolicyState, type StoredSharing } from './policy.js';
+import { machinePassword } from './machine-key.js';
 import { legacySummary, projectId, withoutSecrets } from './legacy-policy.js';
 import { wireMetadata } from './remote.js';
 interface StoredSecret {
   metadata: SecretMetadata; value: string; encoding?: 'base64'; fields?: Record<string, string>;
   /** Set when created or edited for sharing; until then the secret follows the rules it was saved with. */
-  sharing?: SecretSharing;
+  sharing?: StoredSharing;
   /** A pasted value that lives in the journal with this task only. */
   temporaryTaskId?: string;
 }
@@ -21,6 +22,18 @@ interface Permanent {
   device: SecretDevice; keys: { signingPrivateKey: string; encryptionPrivateKey: string }; hmac: string; peers: SecretPeer[]; projects: SecretProject[]; groups: SecretGroup[]; secrets: StoredSecret[]; rules: SecretRule[]; legacy: Legacy[];
   /** The global group without rules that saved secrets with sharing belong to, so every build finds their group. */
   towerGroupId?: string;
+  /**
+   * Computers whose trust the owner removed: their link route is not trusted again automatically, until trusted by hand.
+   * Only the owner's removals add to it, one per route, so it is never cut short.
+   */
+  untrusted?: { routeId: string; direction: SecretPeer['direction']; at: number }[];
+  /** Folders a clone added to a secret's sharing by itself (`autoShareFolders`), so one the owner removes stays removed. */
+  autoFolders?: (SecretFolder & { secretId: string })[];
+  /**
+   * Set once `autoFolders` is full: clones add no folders by themselves any more, whatever happens to the list later.
+   * No automatic path clears it.
+   */
+  autoFoldersStopped?: true;
 }
 /** `operationId`: the blocked operation a record belongs to, for the owner's one notice of it; kept here, never in views. */
 interface UsageRecord extends SecretUsage { hostId: string; sessionId: string; operationId?: string }
@@ -32,10 +45,13 @@ export interface SecretDispatchUse { ref: string; operation: SecretOperation; va
 /** Written in plain text at every unlocked save: the policy to list names by while locked, and the sources it cannot reach then. */
 interface LockedIndex { format: 2; policy: PolicyState; sources: string[] }
 const USAGE_LIMIT = 1000;
+/** At most this many automatic folder additions are remembered; once full, clones add no folders by themselves (`autoFoldersStopped`). */
+const MAX_AUTO_FOLDERS = 5000;
 const REMOTE_TASK_MS = 8 * 60 * 60_000;
-const unshared = (): SecretSharing => ({ revision: 1, global: false, folders: [] });
+const unshared = (): StoredSharing => storedSharing({ revision: 1, allMachines: false, machines: [], folders: [] });
 const policySecret = (secret: StoredSecret): PolicySecret => ({ metadata: secret.metadata, fieldNames: secret.fields ? Object.keys(secret.fields) : undefined, sharing: secret.sharing });
 const emptyJournal = (): Journal => ({ groups: [], rules: [], tasks: [], secrets: [], usage: [], operations: Object.create(null) });
+const sameRoute = (a: Pick<SecretPeer, 'routeId' | 'direction'>, b: Pick<SecretPeer, 'routeId' | 'direction'>) => a.routeId === b.routeId && a.direction === b.direction;
 const canonicalRoot = (root: unknown): root is string => typeof root === 'string' && isAbsolute(root) && normalize(root) === root && (root === '/' || !root.endsWith('/'));
 /** Value viewing unlocked in another lock generation: the page asks for the Tower password again. */
 export const viewLocked = () => Object.assign(new TowerError('forbidden', '값 보기가 잠겼습니다. Tower 비밀번호를 다시 입력하세요.'), { code: 'view-locked' as const });
@@ -52,11 +68,14 @@ export class SecretService {
   private async mutate<T>(operation: () => T | Promise<T>, generation?: string): Promise<T> {
     return this.serialize(async () => { this.within(generation); this.data(); const permanent = structuredClone(this.permanent); const journal = structuredClone(this.journal); let saving = false; try { const result = await operation(); saving = true; await this.vault.save(this.data(), this.journal, this.lockedIndex()); return result; } catch (error) { if (saving) { this.vault.lock(); this.permanent = undefined; this.journal = emptyJournal(); } else { this.permanent = permanent; this.journal = journal; } throw error; } });
   }
-  async initialize(password: string) { return this.serialize(async () => {
+  /** A new vault. With `machineKey` (a computer that follows a host) the key's text is its vault password and the key opens it too. */
+  async initialize(password: string, machineKey?: Buffer) { return this.serialize(async () => {
+    if (machineKey) password = machinePassword(machineKey);
     const signing = generateKeyPairSync('ed25519'); const encryption = generateKeyPairSync('x25519');
     const signingKey = signing.publicKey.export({ type: 'spki', format: 'pem' }).toString(); const encryptionKey = encryption.publicKey.export({ type: 'spki', format: 'pem' }).toString();
     const data: Permanent = { device: { id: String(randomUUID()), name: 'This computer', signingKey, encryptionKey, fingerprint: createHash('sha256').update(signingKey + ':' + encryptionKey).digest('hex') }, keys: { signingPrivateKey: signing.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), encryptionPrivateKey: encryption.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() }, hmac: randomBytes(32).toString('base64'), peers: [], projects: [], groups: [], secrets: [], rules: [], legacy: [] };
     await this.vault.initialize(password, data, data.device.id); this.permanent = data; this.journal = emptyJournal(); await this.vault.save(data, this.journal, this.lockedIndex());
+    if (machineKey) await this.vault.machineWrap(machineKey);
   }); }
   async unlock(password: string) { return this.serialize(async () => this.opened(await this.vault.unlock(password) as Permanent)); }
   /** Opens with the Tower password like `unlock`; an open vault is only checked against it. True when this call opened the vault. */
@@ -64,7 +83,16 @@ export class SecretService {
     const payload = await this.vault.unlockTower(password, credentialId); if (payload === undefined) return false;
     await this.opened(payload as Permanent); return true;
   }); }
+  /**
+   * Opens with this computer's machine key (see machine-key.ts), like `unlock`, but only in the lock generation it was
+   * decided in: a lock queued before it (the owner's) wins.
+   */
+  async machineUnlock(key: Buffer, generation: string) { return this.serialize(async () => {
+    if (generation !== this.vault.lockGeneration) throw new Error('Vault locked meanwhile');
+    await this.opened(this.vault.unlockMachine(key) as Permanent);
+  }); }
   // Queued with saves: a save spreads the envelope it started from, so a wrapper written meanwhile would be lost.
+  async machineWrap(key: Buffer) { return this.serialize(() => this.vault.machineWrap(key)); }
   async towerWrap(password: string, credentialId: string) { return this.serialize(() => this.vault.towerWrap(password, credentialId)); }
   async towerPrune(credentialId: string) { return this.serialize(() => this.vault.towerPrune(credentialId)); }
   /** Changes at every lock and open: value viewing unlocked in one generation is over once it changes. */
@@ -102,8 +130,34 @@ export class SecretService {
   deviceKeys() { return { ...this.data().keys }; }
   fingerprintKey() { return Buffer.from(this.data().hmac, 'base64'); }
   peers() { return structuredClone(this.data().peers); }
-  async trustPeer(peer: SecretPeer) { return this.mutate(() => { if (!peer.device.id || peer.device.id === this.device().id || !peer.device.signingKey || !peer.device.encryptionKey) throw new Error('Invalid peer'); const existing = this.data().peers.find(item => item.device.id === peer.device.id); if (existing && (existing.device.signingKey !== peer.device.signingKey || existing.device.encryptionKey !== peer.device.encryptionKey)) throw new Error('Peer key changed'); this.data().peers = [...this.data().peers.filter(item => item.device.id !== peer.device.id), structuredClone(peer)]; }); }
-  async removePeer(deviceId: string) { return this.mutate(() => { this.data().peers = this.data().peers.filter(peer => peer.device.id !== deviceId); }); }
+  /** The owner trusts a computer by hand; a removal recorded for its route ends with it. */
+  async trustPeer(peer: SecretPeer) { return this.mutate(() => { this.addPeer(peer); const data = this.data(); if (data.untrusted) data.untrusted = data.untrusted.filter(item => !sameRoute(item, peer)); }); }
+  private addPeer(peer: SecretPeer, replaceRoute = false) {
+    if (!peer.device.id || peer.device.id === this.device().id || !peer.device.signingKey || !peer.device.encryptionKey) throw new Error('Invalid peer');
+    const existing = this.data().peers.find(item => item.device.id === peer.device.id);
+    if (existing && (existing.device.signingKey !== peer.device.signingKey || existing.device.encryptionKey !== peer.device.encryptionKey)) throw new Error('Peer key changed');
+    this.data().peers = [...this.data().peers.filter(item => item.device.id !== peer.device.id && !(replaceRoute && sameRoute(item, peer))), structuredClone(peer)];
+  }
+  /** The owner removes a computer's trust: its route is not trusted again automatically (`alignPeer`) until trusted by hand. */
+  async removePeer(deviceId: string) { return this.mutate(() => {
+    const data = this.data(); const removed = data.peers.filter(peer => peer.device.id === deviceId);
+    data.peers = data.peers.filter(peer => peer.device.id !== deviceId);
+    if (removed.length) data.untrusted = [...(data.untrusted ?? []).filter(item => !removed.some(peer => sameRoute(item, peer))), ...removed.map(peer => ({ routeId: peer.routeId, direction: peer.direction, at: this.now() }))];
+  }); }
+  /** Whether the owner removed the trust of this route. */
+  untrustedRoute(route: Pick<SecretPeer, 'routeId' | 'direction'>): boolean { return (this.data().untrusted ?? []).some(item => sameRoute(item, route)); }
+  /**
+   * Trust made by itself over the pinned link between a host and a computer that follows it. The link names the computer,
+   * so its vault's device replaces another one trusted on that route (its vault made again); a route the owner removed
+   * stays untrusted, and the same device with other keys is refused as by hand. Saves only when something changes.
+   */
+  async alignPeer(peer: SecretPeer): Promise<boolean> {
+    const current = () => this.data().peers.filter(item => item.device.id === peer.device.id || sameRoute(item, peer));
+    const settled = () => { const [found, other] = current(); return !other && !!found?.enabled && sameRoute(found, peer) && (['id', 'signingKey', 'encryptionKey', 'fingerprint'] as const).every(key => found.device[key] === peer.device[key]); };
+    if (this.untrustedRoute(peer)) return false;
+    if (settled()) return true;
+    return this.mutate(() => { if (this.untrustedRoute(peer)) return false; if (!settled()) this.addPeer({ ...peer, enabled: true }, true); return true; });
+  }
   private projectId(hostId: string, root: string) { return projectId(this.data(), hostId, root); }
   private lockedIndex(): LockedIndex { return { format: 2, policy: this.policy(), sources: this.data().peers.filter(peer => peer.enabled && peer.direction === 'controller').map(peer => peer.device.id) }; }
   private policy(): PolicyState { const data = this.data(); return { deviceId: data.device.id, servedHosts: servedHosts(data.device.id, data.peers), projects: data.projects, groups: this.groups(), rules: this.allRules(), secrets: this.secrets().map(policySecret), tasks: this.journal.tasks }; }
@@ -123,20 +177,26 @@ export class SecretService {
     if (this.vault.locked) return { status: this.status(), peers: [], secrets: [] };
     const state = this.policy();
     return { status: this.status(), device: this.device(), peers: this.peers(), secrets: this.data().secrets.map(secret => ({ ...this.metadata(secret),
-      ...(secret.sharing ? { sharing: structuredClone(secret.sharing), ...(withheld(state, policySecret(secret)) ? { withheld: true } : {}) } : { legacy: legacySummary(state, policySecret(secret), this.now()) }) })) };
+      ...(secret.sharing ? { sharing: readSharing(structuredClone(secret.sharing)), ...(withheld(state, policySecret(secret)) ? { withheld: true } : {}) } : { legacy: legacySummary(state, policySecret(secret), this.now()) }) })) };
   }
-  /** Validated sharing: folders on a computer this vault serves, or ones already kept, as canonical roots without duplicates. */
-  private sharing(input: unknown, current?: SecretSharing): Pick<SecretSharing, 'global' | 'folders'> {
-    const value = input as Partial<SecretSharing> | undefined; const invalid = (message: string) => new TowerError('invalid', message);
-    if (!value || typeof value !== 'object' || typeof value.global !== 'boolean' || !Array.isArray(value.folders) || value.folders.length > 100) throw invalid('공유 범위 입력이 올바르지 않습니다.');
+  /**
+   * Validated sharing: computers and folders on a computer this vault serves, or ones already kept, folders as canonical
+   * roots, each once.
+   */
+  private sharing(input: unknown, stored?: StoredSharing): Omit<SecretSharing, 'revision'> {
+    const value = input as Partial<SecretSharingInput> | undefined; const invalid = (message: string) => new TowerError('invalid', message);
+    const current = stored && readSharing(stored); const machines = value?.machines ?? [];
+    if (!value || typeof value !== 'object' || typeof value.allMachines !== 'boolean' || !Array.isArray(value.folders) || value.folders.length > 100
+      || !Array.isArray(machines) || machines.length > 100 || machines.some(id => typeof id !== 'string' || !id)) throw invalid('공유 범위 입력이 올바르지 않습니다.');
     const served = servedHosts(this.device().id, this.data().peers); const folders = new Map<string, SecretFolder>();
+    if (machines.some(id => !served.includes(id) && !current?.machines.includes(id))) throw invalid('시크릿 신뢰를 승인한 컴퓨터만 공유할 수 있습니다.');
     for (const folder of value.folders as unknown[]) {
       const { hostId, root } = (folder ?? {}) as Partial<SecretFolder>;
       if (typeof hostId !== 'string' || !hostId || !canonicalRoot(root)) throw invalid('공유할 폴더는 컴퓨터와 정규 절대 경로가 필요합니다.');
       if (!served.includes(hostId) && !current?.folders.some(kept => kept.hostId === hostId && kept.root === root)) throw invalid('시크릿 신뢰를 승인한 컴퓨터의 폴더만 공유할 수 있습니다.');
       folders.set(JSON.stringify([hostId, root]), { hostId, root });
     }
-    return { global: value.global, folders: [...folders.values()] };
+    return { allMachines: value.allMachines, machines: [...new Set(machines)], folders: [...folders.values()] };
   }
   async create(input: SecretCreateInput, target?: SecretTarget): Promise<SecretMetadata> { return this.mutate(() => {
     if (this.secrets().length >= 4096) throw new Error('Secret count limit');
@@ -147,8 +207,8 @@ export class SecretService {
     const bytes = binary ? decode(supplied) : Buffer.from(supplied); if (bytes.length > MAX_SECRET_BYTES) throw new Error('Invalid secret value');
     const value = binary ? bytes.toString('base64') : supplied;
     if ((input.temporary || input.connect) && !target) throw new Error('Task target required');
-    if (input.temporary && input.sharing && (input.sharing.global || input.sharing.folders?.length)) throw new TowerError('invalid', '이 세션에만 쓰는 값은 공유할 수 없습니다. 보관함에 저장하세요.');
-    const sharing = input.sharing === undefined || input.temporary ? unshared() : { revision: 1, ...this.sharing(input.sharing) };
+    if (input.temporary && input.sharing && (input.sharing.allMachines || input.sharing.machines?.length || input.sharing.folders?.length)) throw new TowerError('invalid', '이 세션에만 쓰는 값은 공유할 수 없습니다. 보관함에 저장하세요.');
+    const sharing = input.sharing === undefined || input.temporary ? unshared() : storedSharing({ revision: 1, ...this.sharing(input.sharing) });
     const task = target && (input.temporary || input.connect) ? this.ownerTask(target) : undefined;
     const id = randomUUID(); const fields = input.kind === 'env' ? parseDotenv(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) : undefined;
     // A temporary value keeps its own task-scope journal group, as 1.130.2 made one, so that build's task close drops it too.
@@ -185,15 +245,15 @@ export class SecretService {
    * The owner's sharing of one saved secret, replacing what its rules allowed. The rules stop naming it, so an older build
    * reads it as unshared, and a rule naming it again can only come from such a build.
    */
-  async setSharing(secretId: string, expectedRevision: number, input: Pick<SecretSharing, 'global' | 'folders'>, kept: readonly SecretFolder[] = []): Promise<SecretSharing> { return this.mutate(() => {
+  async setSharing(secretId: string, expectedRevision: number, input: SecretSharingInput, kept: readonly SecretFolder[] = []): Promise<SecretSharing> { return this.mutate(() => {
     const secret = this.data().secrets.find(secret => secret.metadata.id === secretId);
     if (!secret) throw new TowerError('not-found', '공유를 바꿀 키를 찾을 수 없습니다. 화면을 새로고침하세요.');
     if ((secret.sharing?.revision ?? 0) !== expectedRevision) throw new TowerError('conflict', '다른 곳에서 이 키의 공유가 바뀌었습니다. 화면을 새로고침한 뒤 다시 저장하세요.');
     // `kept` folders were not resolved again: only ones this key keeps now may come back that way.
     if (kept.some(folder => !secret.sharing?.folders.some(saved => saved.hostId === folder.hostId && saved.root === folder.root))) throw new TowerError('invalid', '이 키에 저장되지 않은 폴더는 캔버스에서 다시 고르세요.');
-    secret.sharing = { revision: expectedRevision + 1, ...this.sharing({ global: input.global, folders: [...input.folders, ...kept] }, secret.sharing) };
+    secret.sharing = storedSharing({ revision: expectedRevision + 1, ...this.sharing({ ...input, folders: [...input.folders, ...kept] }, secret.sharing) });
     this.data().rules = withoutSecrets(this.data().rules, id => id === secretId); this.journal.rules = withoutSecrets(this.journal.rules, id => id === secretId);
-    return structuredClone(secret.sharing);
+    return readSharing(structuredClone(secret.sharing));
   }); }
   async remove(id: string) { return this.mutate(() => {
     this.data().secrets = this.data().secrets.filter(secret => secret.metadata.id !== id); this.journal.secrets = this.journal.secrets.filter(secret => secret.metadata.id !== id);
@@ -223,7 +283,9 @@ export class SecretService {
   async ensureRemoteTask(context: SecretContext, options: { owner?: boolean } = {}): Promise<SecretContext> { return this.mutate(() => ({ ...context, ...this.remoteTask(context, options.owner === true) })); }
   private remoteTask(target: SecretTarget, owner: boolean): SecretTarget {
     const existing = this.journal.tasks.some(task => task.id === target.taskId);
-    if (!this.data().peers.some(peer => peer.enabled && peer.device.id === target.hostId) || !canonicalRoot(target.root) || !/^[a-f0-9-]{36}$/.test(target.taskId) || !target.sessionId || (!owner && !existing && !covered(this.policy(), target.hostId, target.root, target.taskId, this.now()))) throw new Error('Remote task denied');
+    if (!this.data().peers.some(peer => peer.enabled && peer.device.id === target.hostId) || !canonicalRoot(target.root) || !/^[a-f0-9-]{36}$/.test(target.taskId) || !target.sessionId) throw new Error('Remote task denied');
+    // Nothing shared with that folder or computer: the owner can change that by sharing.
+    if (!owner && !existing && !covered(this.policy(), target.hostId, target.root, target.taskId, this.now())) throw notShared('Remote task denied');
     const { hostId, sessionId, root, taskId } = target; const trusted = { hostId, sessionId, root, taskId, projectId: this.projectId(hostId, root) };
     if (existing) { this.task(trusted); return trusted; }
     if (this.journal.tasks.length >= 10000) throw new Error('Task count limit');
@@ -308,6 +370,67 @@ export class SecretService {
     if (!this.data().peers.some(peer => peer.enabled && peer.device.id === context.hostId) || !canonicalRoot(context.root) || !/^[a-f0-9-]{36}$/.test(context.taskId) || !context.sessionId) throw new Error('Remote task denied');
     return this.available(context);
   }
+  /**
+   * Every saved secret of this vault by name and reference, and whether a trusted node's session may use it (`catalog`
+   * read); admits and records nothing, and gives no value or field.
+   */
+  catalogFor(context: SecretContext): SecretCatalogItem[] {
+    if (!this.data().peers.some(peer => peer.enabled && peer.device.id === context.hostId) || !canonicalRoot(context.root) || !/^[a-f0-9-]{36}$/.test(context.taskId) || !context.sessionId) throw new Error('Remote task denied');
+    const state = this.policy(); const now = this.now();
+    const task = state.tasks.find(task => task.id === context.taskId);
+    if (task && (task.hostId !== context.hostId || task.sessionId !== context.sessionId || task.root !== context.root)) throw new Error('Task identity denied');
+    return catalog({ ...state, secrets: this.data().secrets.map(policySecret) }, task ?? { id: context.taskId, hostId: context.hostId, sessionId: context.sessionId, root: context.root, status: 'open', createdAt: now, excluded: [], connected: [] }, now);
+  }
+  /** How many saved secrets a computer may use in all its folders: shared with all machines or with it. */
+  machineShared(hostId: string): number {
+    const served = servedHosts(this.device().id, this.data().peers).includes(hostId); const state = this.policy();
+    return this.data().secrets.filter(secret => {
+      if (!secret.sharing || withheld(state, policySecret(secret)) || (secret.metadata.expiresAt !== undefined && secret.metadata.expiresAt <= this.now())) return false;
+      const sharing = readSharing(secret.sharing); return (sharing.allMachines && served) || sharing.machines.includes(hostId);
+    }).length;
+  }
+  /**
+   * This computer's folders in saved secrets' sharing, with the sharing revision they were read at, for a clone of the
+   * same repository on a computer that follows it.
+   */
+  sharedFolders(): { secretId: string; root: string; revision: number }[] {
+    const own = this.device().id;
+    return this.data().secrets.flatMap(secret => {
+      if (!secret.sharing) return [];
+      const sharing = readSharing(secret.sharing);
+      return sharing.folders.filter(folder => folder.hostId === own).map(folder => ({ secretId: secret.metadata.id, root: folder.root, revision: sharing.revision }));
+    });
+  }
+  /**
+   * Adds folders (`root`) of a computer that follows this host to the sharing of secrets shared with a folder
+   * (`hostRoot`) of the same repository here, only while that sharing is still at the revision it was read at and still
+   * has that folder: an owner's change meanwhile wins. Each folder is added once ever, so one the owner removes is not
+   * added back. Saves only when something changes; answers how many folders were added.
+   */
+  async autoShareFolders(hostId: string, additions: readonly { secretId: string; root: string; revision: number; hostRoot: string }[]): Promise<number> {
+    const done = (item: { secretId: string; root: string }) => (this.data().autoFolders ?? []).some(record => record.secretId === item.secretId && record.hostId === hostId && record.root === item.root);
+    const current = (item: { secretId: string; revision: number; hostRoot: string }) => {
+      const stored = this.data().secrets.find(secret => secret.metadata.id === item.secretId)?.sharing; const sharing = stored && readSharing(stored);
+      return sharing && sharing.revision === item.revision && sharing.folders.some(folder => folder.hostId === this.device().id && folder.root === item.hostRoot) ? sharing : undefined;
+    };
+    const pending = () => additions.filter(item => canonicalRoot(item.root) && !done(item) && current(item));
+    if (this.data().autoFoldersStopped || !this.data().peers.some(peer => peer.enabled && peer.direction === 'node' && peer.device.id === hostId) || !pending().length) return 0;
+    return this.mutate(() => {
+      const data = this.data(); let added = 0;
+      for (const secretId of new Set(pending().map(item => item.secretId))) {
+        const items = pending().filter(item => item.secretId === secretId); const sharing = current(items[0]!)!;
+        const folders = [...sharing.folders];
+        for (const item of items) {
+          if ((data.autoFolders?.length ?? 0) >= MAX_AUTO_FOLDERS) { data.autoFoldersStopped = true; break; }
+          data.autoFolders = [...data.autoFolders ?? [], { secretId, hostId, root: item.root }];
+          // A full list stays as the owner can save it.
+          if (folders.length < 100 && !folders.some(folder => folder.hostId === hostId && folder.root === item.root)) { folders.push({ hostId, root: item.root }); added++; }
+        }
+        if (folders.length !== sharing.folders.length) data.secrets.find(secret => secret.metadata.id === secretId)!.sharing = storedSharing({ ...sharing, revision: sharing.revision + 1, folders });
+      }
+      return added;
+    });
+  }
   /** What a vault locked since its last save lets a run discover, from that save's plaintext index; undefined without a current one. */
   lockedList(sessionId: string, root: string, runStartedAt: string, bound?: SecretTarget): { secrets: SecretMetadata[]; sources: string[] } | undefined {
     const index = this.vault.index as Partial<LockedIndex> | undefined; if (index?.format !== 2 || !index.policy || !index.sources) return;
@@ -382,8 +505,9 @@ export class SecretService {
   async legacyCreate(input: { name: string; value: string; origin: string }, now = this.now()) { const record = { ...input, id: randomUUID(), createdAt: new Date(now).toISOString() }; await this.importLegacy([record]); return record; }
   async legacyRemove(id: string) { return this.mutate(() => { this.data().legacy = this.data().legacy.filter(record => record.id !== id); }); }
   /** Copies another vault's saved values and groups, never its identity, trust, rules, sharing or connections: everything arrives unshared. */
-  async importEncryptedVault(content: Buffer, password: string): Promise<void> {
-    const source = await this.vault.decryptImport(content, password) as Permanent;
+  async importEncryptedVault(content: Buffer, opener: string | { machineKey: Buffer }): Promise<void> {
+    // A vault that carried its machine key (a backup of a computer that followed a host) opens with it, no password.
+    const source = (typeof opener === 'string' ? await this.vault.decryptImport(content, opener) : this.vault.decryptImportWithMachineKey(content, opener.machineKey)) as Permanent;
     await this.mutate(() => {
       if (!Array.isArray(source.secrets) || !Array.isArray(source.groups) || !Array.isArray(source.legacy)) throw new Error('Invalid import payload');
       const importedGroups = source.groups.filter(group => group.scope !== 'task');

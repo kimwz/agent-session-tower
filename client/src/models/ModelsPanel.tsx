@@ -7,6 +7,7 @@ import { effortLabel, modelEfforts } from '../chat/ModelPicker';
 import { SettingsPane, useSettingsGuard } from '../settings/SettingsPane';
 import type { TriggerComputer } from '../triggers/TriggerPanel';
 import { saveModelSettings, useModelSettings } from './model-settings';
+import { FollowedHostNote, useFollowedHost } from '../remote/followed-host';
 
 const GROUPS: { kind: RoleKind; title: string; description: string }[] = [
   { kind: 'auto', title: '자동 판단', description: 'Tower가 스스로 여는 호출입니다. 도구 없이 한 번 판단하고 끝납니다.' },
@@ -29,6 +30,7 @@ export function ModelsPanel({ token, providers: ownProviders, computers }: { tok
   const providers = node ? computer?.providers ?? [] : ownProviders;
   const target = node || undefined;
   const { settings, problem, error: loadError, reload } = useModelSettings(token, target);
+  const followed = useFollowedHost();
   const [draft, setDraft] = useState<ModelSettings>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -54,6 +56,7 @@ export function ModelsPanel({ token, providers: ownProviders, computers }: { tok
       <option value="">{t('이 컴퓨터')}</option>{computers.map(item => <option key={item.node} value={item.node} disabled={!item.models && item.node !== node}>
         {item.models ? item.name : !item.connected ? t('{0} (오프라인)', { 0: item.name }) : t('{0} (Tower 업데이트 필요)', { 0: item.name })}</option>)}</select></label>}>
     <div className="models-body">
+      {!target && <FollowedHostNote host={followed} />}
       {!ready ? <p className="slack-empty">{computer?.connected ? t('{0}의 Tower를 업데이트하면 여기서 모델을 정할 수 있습니다.', { 0: name }) : t('{0}에 지금 연결되어 있지 않습니다.', { 0: name })}</p>
         : !draft ? (loadError ? <p role="alert" className="slack-error">{translateMessage(loadError)} <button type="button" className="secondary-button" onClick={reload}>{t('다시 시도')}</button></p> : <LoaderCircle className="spin" aria-label={t('연결 중')} />)
         : <>

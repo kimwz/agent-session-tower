@@ -186,6 +186,14 @@ test('a change while the vault is locked asks for the recovery password once; wi
   assert.equal((await older.vault.view({ status: { initialized: true, locked: true }, peers: [], secrets: [] }, signedIn) as SecretSettingsView).status.towerPassword, undefined);
 });
 
+test('a vault this computer’s machine key opens is shown as one that opens without a password, and its Tower password is not asked', { timeout: 120_000 }, async t => {
+  const locked = await fixture(t, { vault: 'locked' });
+  const viewer = await locked.signIn(password(0)); locked.actions.length = 0;
+  const shown = await locked.vault.view({ status: { initialized: true, locked: true, machineKey: true }, peers: [], secrets: [] }, viewer) as SecretSettingsView;
+  assert.deepEqual(shown.status, { initialized: true, locked: true, machineKey: true });
+  assert.deepEqual(locked.actions, [], 'no Tower password check is asked of the worker');
+});
+
 test('setting up an account clears wrappers no credentials name, so the new one always fits', { timeout: 120_000 }, async t => {
   const f = await fixture(t, { account: false });
   for (const id of ['a', 'b']) await f.service.towerWrap(password(9), id.repeat(64));

@@ -23,6 +23,8 @@ import { newerVersion } from '../link/service.js';
 import type { TriggerBackup } from '../triggers/backup.js';
 import type { SkillBackup } from '../skills/backup.js';
 import { TowerError, fromStatus, statusOf, type Disposition } from '../../shared/errors.js';
+import type { ManagedSection } from '../../shared/managed.js';
+import type { SecretShareNotice } from '../../shared/secrets.js';
 import type { StreamSink } from '../streams/sink.js';
 
 interface Options { stateDir: string; workerEntry?: string; startupTimeoutMs?: number; pollMs?: number; version?: string;
@@ -350,6 +352,14 @@ export class DurableRunManager extends EventEmitter {
     return blocks.filter((block): block is SecretBlockNotice => !!block && typeof block === 'object' && typeof block.key === 'string' && typeof block.sessionId === 'string'
       && Number.isSafeInteger(block.at) && typeof block.reason === 'string' && Array.isArray(block.secrets) && block.secrets.every((name: unknown) => typeof name === 'string')).map(block => structuredClone(block));
   }
+  /** Secret requests of computers that follow this Tower, for the owner's share notifications; none from older workers. */
+  secretShares(): SecretShareNotice[] {
+    const notices: unknown = this.snapshot?.secretShares;
+    if (!Array.isArray(notices)) return [];
+    return notices.filter((notice): notice is SecretShareNotice => !!notice && typeof notice === 'object' && typeof notice.key === 'string' && Number.isSafeInteger(notice.at)
+      && (notice.kind === 'not-shared' || notice.kind === 'host-locked') && typeof notice.nodeId === 'string'
+      && ['hostId', 'secretId', 'secretName'].every(key => notice[key] === undefined || typeof notice[key] === 'string')).map(notice => structuredClone(notice));
+  }
   /** Tower operations run in the worker; an outdated worker is told apart from a real error. */
   async api(operation: string, input: unknown, internal?: Pick<WebAdmission, 'origin' | 'requestId' | 'callerCapability' | 'brokerOwnerAuthorized' | 'sender'>): Promise<unknown> {
     if (operation === 'autoPrompt.submit') this.requireModelRole(input);
@@ -387,6 +397,11 @@ export class DurableRunManager extends EventEmitter {
   async settingsBackup(): Promise<WorkerSqlSettings> {
     if (!this.supports('backup')) throw new TowerError('unavailable', '실행 워커가 아직 SQL 설정 DTO를 제공하지 못합니다.');
     return this.call('settingsBackup', []) as Promise<WorkerSqlSettings>;
+  }
+  /** A settings section kept in step with the followed Tower: exported here on a controller, applied on a follower. */
+  async managedCall(section: ManagedSection, action: 'export' | 'apply', value?: unknown, context?: { hostId: string }): Promise<unknown> {
+    if (!this.supports('managedSettings')) throw new TowerError('unavailable', '실행 워커가 아직 새 버전으로 바뀌지 않아 호스트 설정을 주고받을 수 없습니다.');
+    return this.call('managed', action === 'export' ? [section, action] : [section, action, value, context]);
   }
   async skillsBackup(): Promise<SkillBackup> {
     if (!this.supports('backup')) throw new TowerError('unavailable', '실행 워커가 아직 새 버전으로 바뀌지 않아 백업을 만들 수 없습니다. 진행 중인 작업이 끝나 워커가 바뀌면 다시 시도하세요.');

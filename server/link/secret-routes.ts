@@ -2,13 +2,14 @@ import type { IncomingMessage } from 'node:http';
 import type { Http2ServerRequest, Http2ServerResponse } from 'node:http2';
 import { isAbsolute } from 'node:path';
 import { readJson, errorStatus } from '../http/requests.js';
-import type { SecretPeer, SecretSessionView, SecretSettingsView, SecretTarget, VaultStatus } from '../../shared/secrets.js';
+import type { SecretPeer, SecretSessionView, SecretSettingsItem, SecretSettingsView, SecretTarget, VaultStatus } from '../../shared/secrets.js';
 import { REMOTE_SECRET_MAX_RESPONSE_BYTES } from '../secrets/remote.js';
 import { canonicalFolders, realFolder, SECRET_EXCLUSIONS_FEATURE, SECRET_SHARING_FEATURE, type FolderSources } from '../secrets/folders.js';
 import { ownerConnection, ownerCreate, ownerInput, ownerSession } from '../secrets/owner-input.js';
 import type { SecretReceipt } from '../secrets/runtime.js';
 import type { RunnerCapability } from '../runs/runner-protocol.js';
 import type { RemoteNodes } from './nodes.js';
+import type { NodeLink } from './secret-follow.js';
 import { linkRequest } from './transport.js';
 import { z } from 'zod';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
@@ -18,21 +19,31 @@ const fail = (message: string, kind: ErrorKind = 'forbidden') => new TowerError(
 /** Sent by a controller's relay on its poll: the remote operations its worker serves (`available`). */
 export const SECRET_FEATURES_HEADER = 'x-tower-secret-features';
 
+/** What a controller's relay may say on its poll (`RemoteSecretFeature`). */
+const RELAY_FEATURES = ['available', 'catalog', 'locked'];
+
 /**
  * Paired TLS callers can relay envelopes, ask for a verified task and canonicalize this computer's folders, never manage
- * the Vault. `excluded` names folders this computer keeps from its controllers.
+ * the Vault. `excluded` names folders this computer keeps from its controllers. `follows` tells whether this computer
+ * follows that controller, which alone may align secret trust with it (`/secret-align`), before any trust exists.
  */
-export async function handleSecretLink(req: Http2ServerRequest, res: Http2ServerResponse, controllerId: string, worker: Worker, options: { excluded?: (path: string) => Promise<boolean> } = {}): Promise<boolean> {
+export async function handleSecretLink(req: Http2ServerRequest, res: Http2ServerResponse, controllerId: string, worker: Worker, options: { excluded?: (path: string) => Promise<boolean>; follows?: (controllerId: string) => Promise<boolean> } = {}): Promise<boolean> {
   const url = new URL(req.url ?? '/', 'https://tower.invalid');
-  if (!['/secret-relay', '/secret-target', '/secret-device', '/secret-connection-notice', '/secret-folder', '/secret-session'].includes(url.pathname)) return false;
+  if (!['/secret-relay', '/secret-target', '/secret-device', '/secret-connection-notice', '/secret-folder', '/secret-session', '/secret-align'].includes(url.pathname)) return false;
   const reply = (status: number, body: unknown) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); };
   try {
+    if (url.pathname === '/secret-align') {
+      if (req.method !== 'POST' || !worker.supports('secretMachines') || !await options.follows?.(controllerId)) throw fail('이 컴퓨터는 그 Tower의 설정을 따르지 않습니다.');
+      const body = await readJson(req as unknown as IncomingMessage, 32 * 1024) as { device?: unknown };
+      reply(200, await worker.secretCall('align', [{ routeId: controllerId, direction: 'controller', ...(body.device !== undefined ? { device: body.device } : {}) }]));
+      return true;
+    }
     const peers = await worker.secretCall('peers') as SecretPeer[];
     if (!peers.some(peer => peer.enabled && peer.direction === 'controller' && peer.routeId === controllerId)) throw fail('이 컴퓨터에 시크릿 공유를 승인하지 않았습니다.');
     if (url.pathname === '/secret-relay' && req.method === 'GET') {
       // What the controller's worker serves, as its relay says; this worker sends reads only to a source confirmed so.
       const header = req.headers[SECRET_FEATURES_HEADER];
-      const features = typeof header === 'string' ? header.split(',').map(item => item.trim()).filter(item => item === 'available') : [];
+      const features = typeof header === 'string' ? header.split(',').map(item => item.trim()).filter(item => RELAY_FEATURES.includes(item)) : [];
       reply(200, await worker.secretCall('poll', [controllerId, features]));
     }
     else if (url.pathname === '/secret-relay' && req.method === 'POST') {
@@ -58,6 +69,16 @@ export async function handleSecretLink(req: Http2ServerRequest, res: Http2Server
     else reply(404, { error: '알 수 없는 시크릿 전달 요청입니다.' });
   } catch (error) { reply(errorStatus(error), { error: '시크릿 전달 요청을 처리할 수 없습니다. 잠금·컴퓨터 승인·연결 상태를 확인하세요.' }); }
   return true;
+}
+
+/** A secret request to a joined computer over its link (secret-follow.ts); undefined while it is not connected. */
+export function nodeSecretLink(nodes: RemoteNodes | undefined): NodeLink {
+  return async (nodeId, path, body) => {
+    const link = nodes?.session(nodeId);
+    if (!link) return undefined;
+    const answer = await linkRequest(link, 'POST', path, body, 8000, { maxBytes: 64 * 1024 });
+    return { status: answer.status, json: answer.json };
+  };
 }
 
 /** Folder canonicalization for the owner's sharing: this worker's vault, and joined computers over their links. */
@@ -137,10 +158,38 @@ async function canonicalInput(nodes: RemoteNodes | undefined, worker: Worker, ac
 }
 
 /**
+ * The page's sharing for a worker before machine sharing (`secretMachines`), which saves "all machines" as GLOBAL and
+ * cannot share with single computers yet.
+ */
+function olderSharing(sharing: Record<string, unknown>): Record<string, unknown> {
+  const { allMachines, machines, ...rest } = sharing;
+  if (Array.isArray(machines) && machines.length) throw workerUpdatePending();
+  return { ...rest, global: allMachines };
+}
+/** Such a worker's settings as the page reads them: its GLOBAL is "all machines". */
+function machineView(answer: unknown): unknown {
+  const view = answer as Partial<SecretSettingsView> | undefined;
+  if (!view || typeof view !== 'object' || !Array.isArray(view.secrets)) return answer;
+  return { ...view, secrets: view.secrets.map((item: SecretSettingsItem) => {
+    const sharing = item.sharing as (SecretSettingsItem['sharing'] & { global?: boolean }) | undefined;
+    if (!sharing || typeof sharing.global !== 'boolean') return item;
+    const { global, ...rest } = sharing;
+    return { ...item, sharing: { ...rest, allMachines: global, machines: [] } };
+  }) };
+}
+
+/**
  * The owner page's secret actions, sent to the worker only when it serves them. A joined computer's session (`nodeId`)
  * is verified over its link here; a connection made there is announced to it with a fixed notice before the view is read.
  */
 export async function ownerSecretControl(nodes: RemoteNodes | undefined, worker: Worker, action: string, input: Record<string, unknown>): Promise<unknown> {
+  if (!worker.supports('secretSharing') || worker.supports('secretMachines')) return secretControl(nodes, worker, action, input);
+  // Checked and validated in the page's form; only what goes to the worker is turned into its older form.
+  const older = (value: Record<string, unknown>) => action === 'sharing' ? olderSharing(value) : action === 'create' && value.sharing && typeof value.sharing === 'object' ? { ...value, sharing: olderSharing(value.sharing as Record<string, unknown>) } : value;
+  older(input); // Sharing with single computers is refused before anything is asked of a joined computer.
+  return machineView(await secretControl(nodes, worker, action, input, older));
+}
+async function secretControl(nodes: RemoteNodes | undefined, worker: Worker, action: string, input: Record<string, unknown>, toWorker: (value: Record<string, unknown>) => Record<string, unknown> = value => value): Promise<unknown> {
   if (VALUE_VIEW_ACTIONS.includes(action) && !worker.supports('secretValueView')) throw workerUpdatePending();
   if (!worker.supports('secretSharing')) {
     // Locking and unlocking stay possible during a handoff, so the settings and the session read the vault's status from
@@ -162,11 +211,11 @@ export async function ownerSecretControl(nodes: RemoteNodes | undefined, worker:
     return worker.secretCall('control', ['session', session, ...(remote ? [await remoteSessionSubject(nodes, worker, session)] : [])]);
   }
   const safe = await canonicalInput(nodes, worker, action, page);
-  if (!remote || !SESSION_CHANGES.includes(action)) return worker.secretCall('control', [action, safe]);
+  if (!remote || !SESSION_CHANGES.includes(action)) return worker.secretCall('control', [action, toWorker(safe)]);
   // Validated before the joined computer starts a task for it.
   const { sessionId, nodeId } = ownerInput(action === 'create' ? ownerCreate : ownerConnection, safe) as { sessionId: string; nodeId: string };
   const target = await ownerRemoteTarget(nodes, worker, safe);
-  const connected = (await worker.secretCall('control', [action, safe, target]) as Partial<SecretReceipt>).connectedTarget;
+  const connected = (await worker.secretCall('control', [action, toWorker(safe), target]) as Partial<SecretReceipt>).connectedTarget;
   if (!connected || connected.hostId !== target.hostId || connected.sessionId !== target.sessionId || connected.taskId !== target.taskId) throw fail('연결한 원격 작업의 완료 기록을 확인할 수 없습니다.', 'unavailable');
   if (action !== 'session-disconnect') {
     // An uncertain insert is never sent a second time, and cannot undo the committed connection. A computer that reports

@@ -77,6 +77,8 @@ interface RunnerOptions {
   firstTurnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
   /** Notes for every turn, such as the owner's pinned skills; asked and limited like `firstTurnNotes`. */
   turnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
+  /** The controlling Tower this computer follows now: its turns get `turnNotes` too (see TurnNotes). */
+  followedHost?: () => Promise<string | undefined>;
   /** What other parts of the worker add to every listed session, such as its task summaries. */
   sessionOverlay?: (session: Session) => Session;
   /** Settings for every Claude Code turn Tower starts: the owner's allow rules for its folder. */
@@ -341,6 +343,7 @@ export class RunManager extends EventEmitter {
 
   setFirstTurnNotes(notes: NonNullable<RunnerOptions['firstTurnNotes']>): void { this.options.firstTurnNotes = notes; }
   setTurnNotes(notes: NonNullable<RunnerOptions['turnNotes']>): void { this.options.turnNotes = notes; }
+  setFollowedHost(followed: NonNullable<RunnerOptions['followedHost']>): void { this.options.followedHost = followed; }
   setSessionOverlay(overlay: NonNullable<RunnerOptions['sessionOverlay']>): void { this.options.sessionOverlay = overlay; }
   /**
    * What the owner answered the agent's questions in a conversation, kept from the moment it is sent: native history

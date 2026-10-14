@@ -10,12 +10,15 @@ import { displayFingerprint, linkDirectory, linkId, type LinkIdentity } from './
 import { joinCommand, encodeJoinCode, type JoinCode } from './join-code.js';
 import { LINK_PATH, LINK_PROTOCOL, MAX_FRAME_BYTES, REMOVED_CLOSE_CODE, linkRequest, openControllerEnd, pairingProof, proofMatches } from './transport.js';
 import { advertisedAddresses } from './addresses.js';
-import type { AutoUpdateStatus, HubStatus, NodeReport, NodeStatus, NodeSummary, ToolUpdate, UpdateStatus } from '../../shared/link.js';
+import type { AutoUpdateStatus, HubStatus, LoginState, NodeReport, NodeStatus, NodeSummary, ToolUpdate, UpdateStatus } from '../../shared/link.js';
 import { newerVersion } from './service.js';
 import { updateActive } from './update.js';
 import { nextChainStep, chainAsked, type ChainProgress } from './storage-update.js';
 import { failedAgain, parseRetry, retryDue, type RetryRecord } from '../updates/schedule.js';
 import { TowerError } from '../../shared/errors.js';
+import type { ManagedSyncStatus } from '../../shared/managed.js';
+import { parseApplied } from './managed-settings.js';
+import type { NodeSecretStatus } from '../../shared/secrets.js';
 
 export const DEFAULT_LINK_PORT = 8765;
 const INVITE_MS = 10 * 60_000;
@@ -53,11 +56,13 @@ interface NodeRecord {
   /** The update the owner asked for last, by when it started: its failure does not move the schedule. */
   manual?: string;
   chain?: ChainProgress;
+  /** The owner wants it to follow this Tower's settings ("호스트 설정 따르기"). On for computers joined since. */
+  followHost?: boolean;
 }
 interface InviteRecord { id: string; secret: string; expiresAt: number; claimedBy?: string }
 interface State { version: 1; settings: HubSettings; nodes: NodeRecord[]; removed: Array<{ pin: string; at: string }>; invites: InviteRecord[] }
 
-interface Hello { protocol: number; name: string; version: string; features: string[]; pairing?: { inviteId: string; proof: string } }
+interface Hello { protocol: number; name: string; version: string; features: string[]; pairing?: { inviteId: string; proof: string }; follows?: boolean; followsOther?: boolean }
 interface Connected { session: ClientHttp2Session; ws: WebSocket; hello: Hello; ping?: ReturnType<typeof setInterval>; refresh?: ReturnType<typeof setInterval>; watch?: ReturnType<typeof setTimeout>; gone?: () => void }
 
 /**
@@ -89,7 +94,11 @@ export class ControllerLinks extends EventEmitter {
    * can, and builds from source otherwise.
    */
   constructor(private readonly options: { stateDir: string; identity: LinkIdentity; version: string; hostname: () => string; now?: () => number; pingMs?: number; refreshMs?: number; updatePollMs?: number;
-    published?: (version: string) => Promise<boolean> }) {
+    published?: (version: string) => Promise<boolean>;
+    /** How far this Tower's settings reached a following computer (see managed-settings.ts). */
+    managed?: (id: string) => ManagedSyncStatus | undefined;
+    /** Where a following computer stands with this Tower's secrets (see secret-follow.ts). */
+    secrets?: (id: string) => NodeSecretStatus | undefined }) {
     super();
     this.path = join(linkDirectory(options.stateDir), 'controller.json');
   }
@@ -159,7 +168,10 @@ export class ControllerLinks extends EventEmitter {
         ...(live?.hello.version ?? node.version ? { version: live?.hello.version ?? node.version } : {}), features: live?.hello.features ?? [],
         pairedAt: node.pairedAt, ...(node.lastSeenAt ? { lastSeenAt: node.lastSeenAt } : {}), ...(node.invite ? { invite: node.invite } : {}),
         ...(this.reports.has(node.id) ? { report: this.shownReport(node.id, Boolean(live)) } : {}),
-        ...(retryOf(node, this.options.version)?.version === this.options.version && node.retry ? { retryAt: node.retry.nextAt } : {}) };
+        ...(retryOf(node, this.options.version)?.version === this.options.version && node.retry ? { retryAt: node.retry.nextAt } : {}),
+        followHost: node.followHost === true, following: live?.hello.follows === true,
+        ...(node.followHost && this.options.managed?.(node.id) ? { managed: this.options.managed(node.id) } : {}),
+        ...(node.followHost && this.options.secrets?.(node.id) ? { secrets: this.options.secrets(node.id) } : {}) };
     });
   }
 
@@ -195,6 +207,39 @@ export class ControllerLinks extends EventEmitter {
     await this.save({ ...this.state, nodes: this.state.nodes.map(node => node.id === id ? { ...node, ...(trimmed ? { label: trimmed } : { label: undefined }) } : node) });
     this.emit('change');
   }
+
+  /**
+   * Turns "호스트 설정 따르기" on or off for a joined computer and tells it now when it is connected. Turned on here,
+   * it follows this Tower even if it followed another one; otherwise it is told again whenever it connects.
+   */
+  async setFollowHost(id: string, follow: boolean): Promise<void> {
+    if (!this.state.nodes.some(node => node.id === id)) throw new TowerError('not-found', '연결된 컴퓨터가 아닙니다.');
+    await this.save({ ...this.state, nodes: this.state.nodes.map(node => node.id === id ? { ...node, followHost: follow } : node) });
+    const live = this.connected.get(id);
+    if (live) await this.tellFollow(id, live, follow);
+    this.emit('change');
+    this.emit('followChanged', id);
+  }
+
+  /**
+   * Tells a connected computer whether to follow this Tower. On its own (at connect and on each refresh) it is asked
+   * only while it follows no other controller, so two controllers never take it from each other; the owner's switch
+   * (`setFollowHost`) asks regardless.
+   */
+  private async tellFollow(id: string, live: Connected, follow: boolean, onlyUnclaimed = false): Promise<void> {
+    if (!live.hello.features.includes('followHost') || live.hello.follows === follow) return;
+    if (onlyUnclaimed && follow && live.hello.followsOther) return;
+    // best-effort: an unanswered request is restated on the next connect or refresh.
+    const answer = await linkRequest(live.session, 'POST', '/link/follow', { follow }, HELLO_MS).catch(() => undefined);
+    const follows = (answer?.json as { follows?: unknown } | undefined)?.follows;
+    if (answer?.status !== 200 || typeof follows !== 'boolean' || this.connected.get(id) !== live) return;
+    live.hello = { ...live.hello, follows, ...(follows ? { followsOther: false } : {}) };
+    this.emit('change');
+    this.emit('followChanged', id);
+  }
+
+  /** Whether a joined computer follows this Tower now, as it last said. */
+  following(id: string): boolean { return this.connected.get(id)?.hello.follows === true; }
 
   /** Forgets a computer. It is told to stop connecting if it is online; if not, it is refused whenever it returns. */
   async remove(id: string): Promise<void> {
@@ -336,7 +381,9 @@ export class ControllerLinks extends EventEmitter {
     if (!open && !resumed) return undefined;
     if (!proofMatches(pairingProof(invite.secret, exporter, { inviteId: invite.id, controllerPin: this.options.identity.pin, nodePin: pin }), pairing.proof)) return undefined;
     const { left: _, ...kept } = known ?? {} as Partial<NodeRecord>;
-    const node: NodeRecord = { ...kept, id: linkId(pin), pin, name: hello.name.slice(0, 100) || 'Computer', pairedAt: known?.pairedAt ?? new Date(now).toISOString(), version: hello.version, invite: invite.id };
+    const node: NodeRecord = { ...kept, id: linkId(pin), pin, name: hello.name.slice(0, 100) || 'Computer', pairedAt: known?.pairedAt ?? new Date(now).toISOString(), version: hello.version, invite: invite.id,
+      // A computer joined from now on follows this Tower's settings until the owner turns it off; one joined before keeps its choice.
+      ...(known ? {} : { followHost: true }) };
     await this.save({ ...this.state,
       invites: this.state.invites.map(item => item.id === invite.id ? { ...item, claimedBy: pin } : item),
       nodes: [...this.state.nodes.filter(item => item.pin !== pin), node],
@@ -375,8 +422,11 @@ export class ControllerLinks extends EventEmitter {
         if (answer.status !== 200 || !hello || this.connected.get(node.id) !== live) return;
         const { pairing: _, ...current } = hello;
         const changed = JSON.stringify([current.name, current.version, current.features, current.protocol]) !== JSON.stringify([live.hello.name, live.hello.version, live.hello.features, live.hello.protocol]);
+        const followChanged = current.follows !== live.hello.follows;
         live.hello = current;
-        if (changed) { void this.touch(node.id, current.version, false); this.emit('change'); }
+        if (changed || followChanged) { void this.touch(node.id, current.version, false); this.emit('change'); }
+        if (followChanged) this.emit('followChanged', node.id);
+        void this.restateFollow(node.id, live);
         void this.follow(node.id, live);
       }).catch(() => {});
     }, this.options.refreshMs ?? HELLO_REFRESH_MS);
@@ -386,6 +436,17 @@ export class ControllerLinks extends EventEmitter {
     this.emit('change');
     this.emit('connected', node.id);
     void this.follow(node.id, live);
+    void this.restateFollow(node.id, live);
+  }
+
+  /**
+   * Brings a connected computer in line with the owner's switch: asked to follow while it follows nobody, and told to
+   * stop when it still follows this Tower after the owner turned it off (a change it may have missed while away).
+   */
+  private async restateFollow(id: string, live: Connected): Promise<void> {
+    const wanted = this.state.nodes.find(item => item.id === id)?.followHost === true;
+    // best-effort: restated again on the next refresh.
+    await this.tellFollow(id, live, wanted, true).catch(() => {});
   }
 
   /**
@@ -569,14 +630,18 @@ function parseReport(value: unknown): NodeReport | undefined {
   const terminalHost = text(report.versions?.terminalHost);
   const update = parseUpdate(report.update);
   const autoUpdate = parseAutoUpdate(report.autoUpdate);
+  const login = (value: unknown): LoginState => value === 'ok' || value === 'missing' ? value : 'unknown';
+  const logins = report.logins && typeof report.logins === 'object' ? { claude: login(report.logins.claude), codex: login(report.logins.codex), gh: login(report.logins.gh) } : undefined;
+  const managed = parseApplied(report.managed);
   return { versions: { web, ...(worker ? { worker } : {}), ...(terminalHost ? { terminalHost } : {}) }, service: report.service, ...(update ? { update } : {}),
     ...(typeof report.diskFree === 'number' && Number.isFinite(report.diskFree) && report.diskFree >= 0 ? { diskFree: report.diskFree } : {}),
-    ...(autoUpdate ? { autoUpdate } : {}) };
+    ...(autoUpdate ? { autoUpdate } : {}), ...(logins ? { logins } : {}), ...(managed ? { managed } : {}) };
 }
 
 function parseHello(value: unknown): Hello | undefined {
   const hello = value as Partial<Hello> | undefined;
   if (!hello || typeof hello !== 'object' || !Number.isInteger(hello.protocol) || typeof hello.name !== 'string' || typeof hello.version !== 'string' || !Array.isArray(hello.features)) return undefined;
   const pairing = hello.pairing && typeof hello.pairing.inviteId === 'string' && typeof hello.pairing.proof === 'string' ? { inviteId: hello.pairing.inviteId, proof: hello.pairing.proof } : undefined;
-  return { protocol: hello.protocol!, name: hello.name.slice(0, 100), version: hello.version.slice(0, 40), features: hello.features.filter((item): item is string => typeof item === 'string').slice(0, 32), ...(pairing ? { pairing } : {}) };
+  return { protocol: hello.protocol!, name: hello.name.slice(0, 100), version: hello.version.slice(0, 40), features: hello.features.filter((item): item is string => typeof item === 'string').slice(0, 32), ...(pairing ? { pairing } : {}),
+    ...(typeof hello.follows === 'boolean' ? { follows: hello.follows } : {}), ...(typeof hello.followsOther === 'boolean' ? { followsOther: hello.followsOther } : {}) };
 }

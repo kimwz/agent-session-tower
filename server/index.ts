@@ -9,7 +9,7 @@ import { AttachmentUploads } from './stores/attachment-uploads.js';
 import './sessions/launch-env.js';
 import { hostname, homedir } from 'node:os';
 import { stat, truncate } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -52,8 +52,9 @@ import { startSessionsMcp } from './api/session-tools.js';
 import { startSecretsMcp } from './secrets/runtime.js';
 import { runSecretsCommand } from './secrets/cli.js';
 import { SecretRelay } from './link/secret-relay.js';
-import { handleSecretLink, ownerSecretControl } from './link/secret-routes.js';
-import { SECRET_EXCLUSIONS_FEATURE, SECRET_SHARING_FEATURE } from './secrets/folders.js';
+import { folderSources, handleSecretLink, nodeSecretLink, ownerSecretControl } from './link/secret-routes.js';
+import { FollowingSecrets } from './link/secret-follow.js';
+import { SECRET_EXCLUSIONS_FEATURE, SECRET_MACHINES_FEATURE, SECRET_SHARING_FEATURE } from './secrets/folders.js';
 import type { SecretPeer } from '../shared/secrets.js';
 import type { RemoteSecretResponse } from './secrets/remote.js';
 import { overlapsRepository } from '../shared/repositories.js';
@@ -64,8 +65,15 @@ import type { Backend } from './http/server.js';
 import { loadLinkIdentity } from './link/identity.js';
 import { ControllerLinks } from './link/controller.js';
 import { NodeLinks } from './link/node.js';
+import { FollowedHostStore } from './link/follow.js';
+import { ManagedSettingsReceiver, ManagedSettingsSync, announcingHost } from './link/managed-settings.js';
+import { remoteUrlOf } from './repositories/remote-url.js';
+import { cloneAction, workspaceAction } from './repositories/clone.js';
+import { GhLogin, providerLogin } from './link/readiness.js';
+import type { ManagedFolder } from '../shared/managed.js';
 import { runLinkCommand } from './link/cli.js';
 import { runModelsCommand } from './models/cli.js';
+import { applyManagedModelSettings, exportManagedModelSettings } from './models/settings.js';
 import { RemoteNodes } from './link/nodes.js';
 import { linkRequest } from './link/transport.js';
 import { RemoteAudit } from './remote/audit.js';
@@ -81,7 +89,7 @@ import type { AutoUpdateStatus } from '../shared/link.js';
 import type { ComponentVersions, Snapshot, ProviderHealth, Run, Session } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { PublicListener } from './public-agents/listener.js';
-import { NotificationService } from './notifications/service.js';
+import { NotificationService, type FollowingComputer } from './notifications/service.js';
 import { judgeTurn } from './notifications/attention.js';
 import { DecisionService } from './decisions/service.js';
 import { SessionOutcomes } from './sessions/outcomes.js';
@@ -358,9 +366,15 @@ async function main() {
     onChange: changed,
   });
   let controlledBy = (): string[] => [];
+  // Pushes for work this Tower sent to computers that follow it come from here; on a computer that follows one, from there.
+  let followingComputers = (): { self: string; computers: FollowingComputer[] } | undefined => undefined;
+  let followedHostId = (): string | undefined => undefined;
   let controllerJoined = (): { name: string; at: string } | undefined => undefined;
   let remoteNodes: RemoteNodes | undefined;
   let secretRouteKnown = (_direction: string, _id: string) => false;
+  // Secrets for the computers that follow this Tower: trust, card state, clones' folders and locked-vault notices.
+  let followingSecrets: FollowingSecrets | undefined;
+  let followerName = (_id: string): string | undefined => undefined;
   // Fast multiple-choice judgments (Jev, or whatever replaces it) for the web's own features; off without an API key.
   const decisions = new DecisionService(stateDir);
   await decisions.start().catch(error => console.error(`Fast judgment settings were not loaded: ${error instanceof Error ? error.message : String(error)}`));
@@ -429,6 +443,9 @@ async function main() {
     project: session => groups.list().find(group => group.cwd === session.cwd)?.title || session.project,
     trigger: id => runs.triggerOverview()?.triggers.find(item => item.id === id)?.name,
     secretBlocks: () => runs.secretBlocks(),
+    following: () => followingComputers(),
+    followedHost: () => followedHostId(),
+    secretShares: () => [...runs.secretShares(), ...followingSecrets?.notices() ?? []].map(notice => ({ ...notice, ...(followerName(notice.nodeId) ? { nodeName: followerName(notice.nodeId) } : {}) })),
     attention: async (input, signal) => {
       const engine = decisions.engine('attentionNotifications');
       if (!engine) return undefined;
@@ -492,7 +509,10 @@ async function main() {
     cancelAutoPrompt: id => runs.cancelAutoPrompt(id),
     secrets: async (action, input) => {
       if (action === 'trust' && (typeof input.direction !== 'string' || typeof input.routeId !== 'string' || !secretRouteKnown(input.direction, input.routeId))) throw new TowerError('invalid', '연결 설정에서 먼저 승인한 컴퓨터를 선택하세요.');
-      return ownerSecretControl(remoteNodes, runs, action, input);
+      const answer = await ownerSecretControl(remoteNodes, runs, action, input);
+      // An opened vault, or trust changed by hand, is a moment to make the trust with following computers again.
+      if (['initialize', 'unlock', 'view-unlock', 'trust', 'untrust'].includes(action)) followingSecrets?.alignAll();
+      return answer;
     },
     slackOverview: () => runs.slackOverview(),
     api: (operation, input, context) => runs.api(operation, input, context && admit(context)),
@@ -549,25 +569,69 @@ async function main() {
   let controllerName = (_id: string): string | undefined => undefined;
   const remoteChanges = new RemoteAudit(stateDir, { name: id => controllerName(id) });
   await remoteChanges.start();
-  const remoteRouter = createRemoteRouter({ attachmentStores, attachmentUploads, backend, exclusions, terminals: workspaceTerminals, audit: remoteChanges });
-  const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname, published: releasePublished });
-  const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
+  const remoteRouter = createRemoteRouter({ attachmentStores, attachmentUploads, backend, exclusions, terminals: workspaceTerminals, audit: remoteChanges, followedHost: () => followedHost.reload() });
+  // "호스트 설정 따르기": which controlling Tower this computer follows (the worker reads the same file), what it
+  // applies from that one, and, as a controller, what it keeps on the computers that follow it.
+  const followedHost = new FollowedHostStore(stateDir);
+  await followedHost.start();
+  const folderRemotes = new Map<string, { at: number; url?: string }>();
+  const managedFolders = async (): Promise<ManagedFolder[]> => {
+    const cwds = [...new Set([...groups.list().map(group => group.cwd), ...runs.sessionList().map(session => session.cwd)].filter((cwd): cwd is string => Boolean(cwd)))].slice(0, 300);
+    const folders: ManagedFolder[] = [];
+    for (const cwd of cwds) {
+      if (await exclusions.excludesNow(cwd)) continue;
+      const known = folderRemotes.get(cwd);
+      const url = known && Date.now() - known.at < 10 * 60_000 ? known.url : await remoteUrlOf(cwd);
+      folderRemotes.set(cwd, { at: known && Date.now() - known.at < 10 * 60_000 ? known.at : Date.now(), ...(url ? { url } : {}) });
+      folders.push({ cwd, ...(url ? { remoteUrl: url } : {}) });
+    }
+    return folders;
+  };
+  const ghLogin = new GhLogin();
+  const managedReceiver = new ManagedSettingsReceiver({ stateDir, follow: followedHost, folders: managedFolders });
+  await managedReceiver.start();
+  // The work the followed host sent here is announced there while it keeps syncing, from here otherwise (an older host).
+  followedHostId = () => announcingHost(followedHost.hostId(), managedReceiver.applied(), Date.now());
+  let managedSync: ManagedSettingsSync | undefined;
+  const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname, published: releasePublished, managed: id => managedSync?.status(id), secrets: id => followingSecrets?.status(id) });
+  if (controllerLinks) { managedSync = new ManagedSettingsSync({ controller: controllerLinks }); managedSync.on('change', () => changed()); }
+  // Sections register their export (managedSync) and apply (managedReceiver) here, beside their owning modules.
+  managedSync?.register('permissions', () => runs.managedCall('permissions', 'export'));
+  managedReceiver.register('permissions', async (value, context) => { await runs.managedCall('permissions', 'apply', value, context); });
+  // Skills live in the worker's stores; model roles are one file every process reads; fast judgments are this web's.
+  managedSync?.register('skills', () => runs.managedCall('skills', 'export'));
+  // The worker links them into this computer's folders of the same repositories, as this web knows the folders now.
+  managedReceiver.register('skills', async (value, context) => { await runs.managedCall('skills', 'apply', { section: value, folders: await managedFolders() }, context); });
+  managedSync?.register('models', () => exportManagedModelSettings(stateDir));
+  managedReceiver.register('models', async value => { if (await applyManagedModelSettings(stateDir, value)) changed(); });
+  managedSync?.register('decisions', async () => decisions.exportManaged());
+  managedReceiver.register('decisions', async value => { if (await decisions.applyManaged(value)) { outcomes.changed(); changed(); } });
+  // The followed Tower clones a repository into a new folder here, or opens a terminal in the Workspace folder (to sign
+  // in to Claude, Codex or gh); either becomes a project folder, shown on its canvas like any other.
+  const projectFolder = async (cwd: string) => { if (!groups.list().some(group => group.cwd === cwd)) { await groups.set({ cwd, title: basename(cwd) }); changed(); } };
+  managedReceiver.action('clone', cloneAction({ register: projectFolder }));
+  managedReceiver.action('workspace', workspaceAction({ register: projectFolder }));
+  const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname, follow: followedHost,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
     // and updating do not.
-    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : []), ...(runs.supports('secrets') ? ['secrets'] : []), ...(runs.supports('secretSharing') ? [SECRET_SHARING_FEATURE] : []), ...(runs.supports('secretExclusions') ? [SECRET_EXCLUSIONS_FEATURE] : []), ...(runs.supports('compaction') ? ['compaction'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
+    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : []), ...(runs.supports('secrets') ? ['secrets'] : []), ...(runs.supports('secretSharing') ? [SECRET_SHARING_FEATURE] : []), ...(runs.supports('secretExclusions') ? [SECRET_EXCLUSIONS_FEATURE] : []), ...(runs.supports('compaction') ? ['compaction'] : []), 'followHost', ...(runs.supports('managedSettings') ? ['managedSettings'] : []), ...(runs.supports('secretMachines') ? [SECRET_MACHINES_FEATURE] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
     handle: async (req, res, principal) => {
-      if (await handleSecretLink(req, res, principal.controllerId, runs, { excluded: path => exclusions.excludesNow(path) })) return;
+      if (await managedReceiver.handle(req, res, principal)) return;
+      if (await handleSecretLink(req, res, principal.controllerId, runs, { excluded: path => exclusions.excludesNow(path), follows: async id => await followedHost.reload() === id })) return;
       return remoteRouter.handle(req, res, principal);
     },
     update: {
       request: version => updates.request(version),
       report: async () => {
-        const [update, free, running] = await Promise.all([updates.status(), diskFree(stateDir), workspaceTerminals.hostVersion().catch(() => undefined)]);
+        const [update, free, running, gh] = await Promise.all([updates.status(), diskFree(stateDir), workspaceTerminals.hostVersion().catch(() => undefined), ghLogin.state()]);
         // A host that runs what this version needs is not reported as one waiting to move.
         const terminalHost = running && !workspaceTerminals.hostCurrent() ? running : undefined;
         const worker = runs.runnerVersion();
         return { versions: { web: APP_VERSION, ...(worker ? { worker } : {}), ...(terminalHost ? { terminalHost } : {}) }, service: updates.managed,
-          ...(update ? { update } : {}), ...(free !== undefined ? { diskFree: free } : {}), autoUpdate: autoUpdate() };
+          ...(update ? { update } : {}), ...(free !== undefined ? { diskFree: free } : {}), autoUpdate: autoUpdate(),
+          // Whether new work can start here, and how far the followed Tower's settings reached.
+          logins: { claude: providerLogin(capabilities.list().find(item => item.provider === 'claude')), codex: providerLogin(capabilities.list().find(item => item.provider === 'codex')), gh },
+          ...(managedReceiver.applied() ? { managed: managedReceiver.applied() } : {}) };
       },
     } });
   secretRouteKnown = (direction, id) => direction === 'node' ? Boolean(controllerLinks?.list().some(node => node.id === id)) : direction === 'controller' && Boolean(nodeLinks?.list().some(controller => controller.id === id && controller.state === 'paired'));
@@ -598,7 +662,20 @@ async function main() {
   if (controllerLinks) {
     remoteNodes = new RemoteNodes(controllerLinks, nodeViews);
     remoteNodes.on('summary', changed);
+    const nodes = remoteNodes, links = controllerLinks, self = identity?.id;
+    followingComputers = () => self ? { self, computers: links.list().filter(node => node.following).flatMap(node => {
+      const snapshot = nodes.snapshot(node.id);
+      return snapshot ? [{ id: node.id, name: node.label || node.name, snapshot }] : [];
+    }) } : undefined;
+    remoteNodes.on('change', () => notifications.changed());
+    followingSecrets = new FollowingSecrets({ controller: controllerLinks, worker: runs, link: nodeSecretLink(nodes), canonical: (node, path) => folderSources(nodes, runs).ask(node, path), folders: id => managedSync?.folders(id) ?? [] });
+    followingSecrets.on('change', changed);
+    // Folders of a following computer, reported on connect, after a clone and every few minutes.
+    managedSync?.on('folders', (id: string, folders: ManagedFolder[]) => { void followingSecrets?.shareFolders(id, folders).catch(error => console.warn(`Secrets were not shared with a following computer's folders: ${error instanceof Error ? error.message : String(error)}`)); });
+    followerName = id => controllerLinks.list().find(node => node.id === id)?.name;
   }
+  // While following a host, this computer's vault opens by itself; the worker checks again as the switch changes.
+  followedHost.on('change', () => { if (runs.supports('secretMachines')) void runs.secretCall('machine-vault').catch(() => console.warn('This computer\'s vault did not open by itself; the owner can open it once.')); });
   // The master agent runs in its own process; this web only starts it, tells it how to reach this API, and relays.
   let webCredentials: WebCredentials | undefined;
   const localMcp = ownerMcpOverHttp(stateDir, () => webCredentials?.port);
@@ -650,7 +727,9 @@ async function main() {
   const { server, dispose, token: pageToken } = createMonitorServer({ attachmentStores, attachmentUploads, port, clientDir, backend, nodes: remoteNodes, onNodeMessage: insertRemote, master: { callerSecret: masterCallerSecret, handle: masterRoutes(master, { turnEnd: new VoiceTurnEnd({ engine: () => decisions.engine('voiceTurnEnd'),
       known: async session => await master.call('voiceKnown', { session }) === true, record: entry => decisions.record(entry) }) }) },
     auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges,
-      sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })) } : { error: linkError },
+      sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })), managed: managedSync,
+      // The trust is made first when it is still pending (right after joining), so the folder can be shared at once.
+      afterClone: async id => { await followingSecrets?.align(id); await followingSecrets?.shareFolders(id, managedSync?.folders(id) ?? []); } } : { error: linkError },
     workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups, localMcp,
     decisions: {
       overview: () => decisions.overview(),
@@ -730,8 +809,16 @@ async function main() {
   void towerUpdates.start().catch(error => console.error(`Automatic updates are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   if (remoteNodes) {
     secretRelay = new SecretRelay({ nodes: remoteNodes, peers: async () => runs.supports('secrets') ? await runs.secretCall('peers') as SecretPeer[] : [],
-      workerAnswer: (id, request) => runs.secretCall('answer', [id, request]) as Promise<RemoteSecretResponse>,
-      features: () => runs.supports('secretSharing') ? ['available'] : [] });
+      // Whether that computer follows this Tower now decides whether it gets the catalog and refusal reasons.
+      workerAnswer: (id, request) => runs.secretCall('answer', [id, request, { following: controllerLinks?.list().some(node => node.id === id && node.followHost) === true && controllerLinks?.following(id) === true }]) as Promise<RemoteSecretResponse>,
+      features: () => [...runs.supports('secretSharing') ? ['available'] : [], ...runs.supports('secretMachines') ? ['catalog'] : []],
+      lockedNodes: async () => {
+        const followers = controllerLinks?.list().filter(node => node.followHost && node.following && node.status === 'connected' && node.features.includes(SECRET_MACHINES_FEATURE)).map(node => node.id) ?? [];
+        if (!followers.length || !runs.supports('secretMachines')) return [];
+        const status = await runs.secretCall('status') as { initialized?: boolean; locked?: boolean };
+        return status.initialized && status.locked ? followers : [];
+      },
+      onLocked: id => followingSecrets?.locked(id) });
     secretRelay.start();
   }
   capabilities.start();
@@ -743,6 +830,9 @@ async function main() {
   if (publicListener.status().listening) console.log(`  Public agent pages: http://127.0.0.1:${publicListener.status().port}${publicListener.status().publicUrl ? ` (${publicListener.status().publicUrl})` : ''}\n`);
   // Links come up after the web server, so a joining computer never reaches a half-started Tower.
   await Promise.all([controllerLinks?.start(), nodeLinks?.start()]).catch(error => console.error(`Remote computers are unavailable: ${error instanceof Error ? error.message : String(error)}`));
+  managedSync?.start();
+  followingSecrets?.start();
+  followingSecrets?.alignAll();
   const shutdown = async () => {
     if (closing) return;
     closing = true;
@@ -752,6 +842,8 @@ async function main() {
     towerUpdates.stop();
     backups.close();
     remoteNodes?.close();
+    managedSync?.close();
+    followingSecrets?.close();
     secretRelay?.close();
     const stoppingLinks = Promise.all([nodeLinks?.close(), controllerLinks?.close()]).then(() => { remoteRouter.dispose(); return nodeViews.flush(); });
     const stoppingCapabilities = capabilities.stop();

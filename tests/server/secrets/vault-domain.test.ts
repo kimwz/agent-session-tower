@@ -56,11 +56,11 @@ test('binary file bytes survive encrypted storage and encrypted import preserves
   try {
     const source = await secretService(sourceDir, { password });
     const target = await source.ensureTask('session', '/fixture'); const context = { ...target, runId: 'run' }; const bytes = Buffer.from([0, 255, 13, 10, 128]);
-    const metadata = await source.create({ name: 'binary', kind: 'file', content: bytes.toString('base64'), sharing: { global: true, folders: [] }, connect: 'session' }, target);
+    const metadata = await source.create({ name: 'binary', kind: 'file', content: bytes.toString('base64'), sharing: { allMachines: true, folders: [] }, connect: 'session' }, target);
     assert.deepEqual((await source.resolve(context, metadata.reference, 'file')).bytes, bytes);
     const recipient = await secretService(targetDir, { password: 'recipient-password-1234' }); const identity = recipient.device();
     await recipient.importEncryptedVault((await source.exportEncryptedVault())!, password); assert.deepEqual(recipient.device(), identity); assert.equal(recipient.settings().secrets.length, 1); assert.equal(stored(recipient).rules.length, 0); assert.equal(recipient.settings().secrets[0].reference.startsWith(`tower-secret://${identity.id}/`), true);
-    assert.deepEqual(recipient.settings().secrets[0].sharing, { revision: 1, global: false, folders: [] }, 'sharing never travels with an import');
+    assert.deepEqual(recipient.settings().secrets[0].sharing, { revision: 1, allMachines: false, machines: [], folders: [] }, 'sharing never travels with an import');
     await recipient.importEncryptedVault((await source.exportEncryptedVault())!, password); assert.equal(recipient.settings().secrets.length, 1);
   } finally { await rm(sourceDir, { recursive: true, force: true }); await rm(targetDir, { recursive: true, force: true }); }
 });
@@ -90,7 +90,7 @@ test('separate discover and manual use rules, task-only backup exclusion, journa
     assert.equal(backup.secrets.some(item => item.metadata.id === ephemeral.id), false); assert.equal(backup.rules.some(rule => rule.secretIds.includes(ephemeral.id)), false);
     assert.equal(JSON.stringify(backup).includes('transient'), false);
     await service.trustPeer({ device: { ...service.device(), id: remoteId }, routeId: 'fixture', direction: 'node', enabled: true });
-    await service.create({ name: 'remote folder key', kind: 'scalar', value: 'remote', sharing: { global: false, folders: [{ hostId: remoteId, root: '/remote' }] } });
+    await service.create({ name: 'remote folder key', kind: 'scalar', value: 'remote', sharing: { allMachines: false, folders: [{ hostId: remoteId, root: '/remote' }] } });
     const remote = await service.ensureRemoteTask({ hostId: remoteId, root: '/remote', sessionId: 'remote-session', taskId: '22222222-2222-4222-8222-222222222222', runId: 'remote-run', projectId: 'untrusted-peer-project' });
     assert.equal(remote.projectId, remoteProject.id); await service.closeTask(remote.taskId); await assert.rejects(service.ensureRemoteTask(remote));
     const originalWrite = service.vault.write.bind(service.vault); service.vault.write = async (name, bytes) => { if (name === 'vault.json') throw new Error('fixture atomic failure'); await originalWrite(name, bytes); };

@@ -23,7 +23,14 @@ export interface SkillState {
   calls: { day: string; count: number };
   /** Default skills Tower made once (or found already there); never made again, even after the owner removed them. */
   seeded: string[];
+  /**
+   * The default skills Tower itself made here, as it made them: the folder (by its inode, so one removed and made again
+   * is another) and a digest of its files then. Only such a skill, still unchanged, may give way to the followed
+   * Tower's changed default ("호스트 설정 따르기").
+   */
+  madeDefaults: MadeDefault[];
 }
+export interface MadeDefault { name: string; dir: string; ino: number; digest: string }
 
 /**
  * Where a Tower skill applies (`all`, `projects`), and every place Tower may have linked it (`linked`, `globalLinked`):
@@ -38,7 +45,7 @@ const MAX_BYTES = 12_000_000;
 const MAX_REFLECTED = 2_000;
 
 export function emptySkillState(now = new Date()): SkillState {
-  return { version: 1, pinned: [], targets: [], settings: { enabled: true, provider: 'claude' }, proposals: [], notes: [], excluded: [], reflected: {}, startedAt: now.toISOString(), calls: { day: '', count: 0 }, seeded: [] };
+  return { version: 1, pinned: [], targets: [], settings: { enabled: true, provider: 'claude' }, proposals: [], notes: [], excluded: [], reflected: {}, startedAt: now.toISOString(), calls: { day: '', count: 0 }, seeded: [], madeDefaults: [] };
 }
 
 export class SkillStateStore {
@@ -142,6 +149,8 @@ function normalize(value: unknown): SkillState {
   if (input.reflected && typeof input.reflected === 'object') state.reflected = Object.fromEntries(Object.entries(input.reflected).filter(([, at]) => typeof at === 'string'));
   if (input.calls && typeof input.calls.day === 'string' && Number.isSafeInteger(input.calls.count)) state.calls = { day: input.calls.day, count: input.calls.count };
   if (Array.isArray(input.seeded)) state.seeded = [...new Set(input.seeded.filter((name): name is string => typeof name === 'string'))];
+  if (Array.isArray(input.madeDefaults)) state.madeDefaults = input.madeDefaults.filter(item => item && typeof item.name === 'string' && typeof item.dir === 'string' && Number.isSafeInteger(item.ino) && typeof item.digest === 'string')
+    .map(item => ({ name: item.name, dir: item.dir, ino: item.ino, digest: item.digest }));
   trim(state);
   return state;
 }

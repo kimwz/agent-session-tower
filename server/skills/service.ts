@@ -1,4 +1,4 @@
-import { mkdir, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type { ChatMessage, Run, Session } from '../../shared/types.js';
@@ -14,9 +14,11 @@ import type { AutoPromptModelRequest } from '../auto-prompt/native.js';
 import { SkillAdvisor } from './advisor.js';
 import { DEFAULT_SKILLS } from './defaults.js';
 import { SkillError, SkillFiles, type SkillHomes } from './files.js';
-import { SkillStateStore, type SkillTargetRecord } from './state.js';
+import { SkillStateStore, type MadeDefault, type SkillTargetRecord } from './state.js';
 import { ClosedSessionStore } from '../stores/closed-sessions.js';
 import type { SkillBackup } from './backup.js';
+import { defaultContent, defaultFiles, filesDigest, ManagedSkillList, parseManagedApply, sameFiles, type ManagedSkill, type ManagedSkills } from './managed.js';
+import { remoteUrlOf } from '../repositories/remote-url.js';
 
 export interface SkillServiceOptions {
   stateDir: string;
@@ -109,7 +111,12 @@ export class SkillService {
           made = false;
         }
       }
-      await this.state.update(state => { if (!state.seeded.includes(skill.name)) state.seeded.push(skill.name); });
+      // Only one Tower made itself is recorded as made, as it was then (see madeDefaults).
+      const record = made ? await this.madeDefault(skill.name) : undefined;
+      await this.state.update(state => {
+        if (!state.seeded.includes(skill.name)) state.seeded.push(skill.name);
+        if (record) state.madeDefaults = [...state.madeDefaults.filter(item => item.name !== skill.name), record];
+      });
       if (made) this.options.onChange?.();
     }
   }
@@ -460,15 +467,7 @@ export class SkillService {
         break;
       }
       case 'delete': {
-        const skill = await this.files.lookup(text(body.dir), cwd);
-        // A Tower skill loses its links in every project it applied to first.
-        const before = skill.managed ? this.record(skill.dir) : undefined;
-        if (before) await this.apply(skill.dir, { all: false, projects: [] }, false);
-        // A skill that could not be removed applies where it did again.
-        try { await this.files.remove(skill.dir, skill.managed ? skill.cwd : cwd); }
-        catch (error) { if (before) await this.apply(skill.dir, { all: before.all, projects: before.projects }, false).catch(() => {}); throw error; }
-        await this.pin(skill, false);
-        if (skill.managed) await this.state.update(state => { state.targets = state.targets.filter(item => item.dir !== skill.dir); });
+        await this.delete(await this.files.lookup(text(body.dir), cwd), cwd);
         break;
       }
       case 'dismiss': {
@@ -495,6 +494,19 @@ export class SkillService {
       }
       default: throw new SkillError('알 수 없는 스킬 작업입니다.', 'not-found');
     }
+  }
+
+  /** Removes a skill: a Tower skill loses its links in every project it applied to first, then its record and pin. */
+  private async delete(skill: Skill, cwd: string | undefined): Promise<void> {
+    // A default made again in its place later is another skill: what Tower made is gone with this one.
+    if (this.state.get().madeDefaults.some(item => item.dir === skill.dir)) await this.state.update(state => { state.madeDefaults = state.madeDefaults.filter(item => item.dir !== skill.dir); });
+    const before = skill.managed ? this.record(skill.dir) : undefined;
+    if (before) await this.apply(skill.dir, { all: false, projects: [] }, false);
+    // A skill that could not be removed applies where it did again.
+    try { await this.files.remove(skill.dir, skill.managed ? skill.cwd : cwd); }
+    catch (error) { if (before) await this.apply(skill.dir, { all: before.all, projects: before.projects }, false).catch(() => {}); throw error; }
+    await this.pin(skill, false);
+    if (skill.managed) await this.state.update(state => { state.targets = state.targets.filter(item => item.dir !== skill.dir); });
   }
 
   /**
@@ -531,13 +543,23 @@ export class SkillService {
     return { owner, revision: revisionOf(owner), tower: AGENT_GUIDANCE, installed: Boolean(this.options.installGuidance) };
   }
 
+  /**
+   * The owner's guidance as saved, for copies of it: missing is no guidance, and one that cannot be read fails with
+   * `failure` rather than be passed on as empty (the copy would clear it).
+   */
+  private ownerGuidance(failure: string): Promise<string> {
+    return readFile(this.guidanceFile(), 'utf8').catch(error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
+      throw new SkillError(`${failure}: ${error instanceof Error ? error.message : String(error)}`, 'internal');
+    });
+  }
+
   private guidanceQueue: Promise<unknown> = Promise.resolve();
   /** Reads, checks and writes the owner's guidance one change at a time, then gives it to the agents. */
   /** Resolves with the revision of the text written. */
   private guidanceChange(change: (current: GuidanceOverview) => Promise<string>): Promise<string> {
     const next = this.guidanceQueue.catch(() => {}).then(async () => {
-      const owner = withoutTowerMarkers(await change(await this.guidance()));
-      const content = owner.trim() ? `${owner.trimEnd()}\n` : '';
+      const content = guidanceContent(await change(await this.guidance()));
       await mkdir(dirname(this.guidanceFile()), { recursive: true, mode: 0o700 });
       await writePrivateFile(this.guidanceFile(), content);
       await this.options.installGuidance?.();
@@ -568,11 +590,7 @@ export class SkillService {
     return this.exclusive(async () => {
       const stored = await this.files.managed();
       const bundle = await this.exportBundle({ dirs: stored.map(skill => skill.dir) });
-      // Missing is no guidance; one that cannot be read fails the backup rather than record it as empty (a restore would clear it).
-      const guidance = await readFile(this.guidanceFile(), 'utf8').catch(error => {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
-        throw new SkillError(`지침 파일을 읽지 못해 백업하지 않았습니다: ${error instanceof Error ? error.message : String(error)}`, 'internal');
-      });
+      const guidance = await this.ownerGuidance('지침 파일을 읽지 못해 백업하지 않았습니다');
       return { bundle, guidance, settings: { ...this.state.get().settings } };
     });
   }
@@ -625,6 +643,153 @@ export class SkillService {
     });
     this.options.onChange?.();
     return { restored, skipped };
+  }
+
+  /**
+   * This Tower's own skills and guidance for a computer that follows it ("호스트 설정 따르기"): every Tower skill with
+   * its pin, and the projects it applies to as repository addresses. A project folder that is no clone of a repository
+   * has nothing to name there, so it is left out. A default skill as Tower seeded it is the same on every Tower, which
+   * seeds its own: it is not sent.
+   */
+  async exportManaged(): Promise<ManagedSkills> {
+    await this.ready();
+    return this.exclusive(async () => {
+      const dirs: string[] = [], defaults: string[] = [];
+      for (const skill of await this.files.managed()) {
+        if (await this.asSeeded(skill.dir, basename(skill.dir))) defaults.push(basename(skill.dir));
+        else dirs.push(skill.dir);
+      }
+      const bundle = await this.exportBundle({ dirs });
+      const repositories = new Map<string, Promise<string | undefined>>();
+      const repository = (cwd: string) => { if (!repositories.has(cwd)) repositories.set(cwd, remoteUrlOf(cwd)); return repositories.get(cwd)!; };
+      const skills: ManagedSkill[] = [];
+      for (const item of bundle.skills) {
+        // A computer keeps one Tower skill per name; of two here (an older project skill), the first goes.
+        if (skills.some(skill => skill.name === item.name)) continue;
+        const targets = item.targets ? { all: item.targets.all, projects: item.targets.projects.map(place => place.cwd) }
+          : item.scope === 'global' ? { all: true, projects: [] } : { all: false, projects: [item.project!.cwd] };
+        const found = targets.all ? [] : await Promise.all(targets.projects.map(repository));
+        skills.push({ name: item.name, pinned: item.pinned, files: item.files, targets: { all: targets.all, repositories: [...new Set(found.filter((url): url is string => Boolean(url)))].sort() } });
+      }
+      return { skills: skills.sort((a, b) => a.name.localeCompare(b.name)), guidance: await this.ownerGuidance('지침 파일을 읽지 못해 호스트 설정으로 보내지 않았습니다'), defaults: defaults.sort() };
+    });
+  }
+
+  /**
+   * Makes this computer's Tower skills and guidance those of the Tower it follows: each of its skills is made or
+   * replaced, pinned or not, and linked into this computer's folders of the same repositories; the ones it no longer
+   * has are removed, the guidance replaced, empty included. Only skills made this way are ever replaced or removed:
+   * a skill of this computer's own with the same name stays as it is, whatever it holds, and is reported. Nothing is
+   * written where nothing changed. `input` is the section with this computer's project folders (`parseManagedApply`).
+   */
+  async applyManaged(input: unknown): Promise<void> {
+    await this.ready();
+    const { section: incoming, folders } = parseManagedApply(input);
+    const failures: string[] = [];
+    let changed = false;
+    await this.exclusive(async () => {
+      const list = new ManagedSkillList(this.options.stateDir);
+      const before = await list.read();
+      let saved = [...before].sort();
+      const save = async (dirs: string[]) => {
+        const next = [...new Set(dirs)].sort();
+        if (JSON.stringify(next) === JSON.stringify(saved)) return;
+        await list.write(next);
+        saved = next;
+      };
+      const stored = await this.files.managed();
+      const kept: string[] = [];
+      for (const item of incoming.skills) {
+        try {
+          const dir = await this.files.installDir({ name: item.name, scope: 'global' });
+          const present = Boolean(await lstat(dir).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }));
+          // A folder there that this sync did not make is this computer's own, even with the same content; only a default
+          // skill as Tower seeded it here, never touched since, gives way to the followed Tower's changed one.
+          if (present && !before.includes(dir) && !await this.untouchedDefault(dir, item.name)) throw new SkillError('이 컴퓨터에 같은 이름의 Tower 스킬이 있어 호스트의 스킬을 적용하지 않았습니다. 이 컴퓨터의 스킬은 그대로 둡니다.', 'conflict');
+          if (stored.some(skill => basename(skill.dir) === item.name && skill.dir !== dir)) throw new SkillError('이 컴퓨터의 프로젝트에 같은 이름의 Tower 스킬이 있어 호스트의 스킬을 적용하지 않았습니다.', 'conflict');
+          kept.push(dir);
+          // Counted as the followed Tower's before it is written, so a crash never leaves it looking like this computer's own.
+          await save([...saved, dir]);
+          const targets: SkillTargets = item.targets.all ? { all: true, projects: [] }
+            : { all: false, projects: [...new Set(item.targets.repositories.flatMap(url => folders.get(url) ?? []))].slice(0, MAX_SKILL_TARGETS) };
+          const record = this.record(dir);
+          if (!present || !await sameFiles(dir, item.files)) {
+            // A new skill's record comes before its folder, so a crash never leaves it applying everywhere.
+            if (!record) await this.writeRecord({ dir, all: targets.all, projects: targets.projects, linked: targets.projects, globalLinked: targets.all });
+            try { await this.files.install({ name: item.name, description: '', scope: 'global', pinned: item.pinned, files: item.files }, undefined, true, false); }
+            catch (error) {
+              // best-effort: the record stays unless the folder is certainly not there; the error is reported below.
+              if (!record && !await stat(dir).catch(() => undefined)) await this.state.update(state => { state.targets = state.targets.filter(entry => entry.dir !== dir); });
+              throw error;
+            }
+            changed = true;
+          }
+          const same = (a: string[], b: string[]) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+          if (!record || record.all !== targets.all || !same(record.projects, targets.projects)) { await this.apply(dir, targets); changed = true; }
+          // Links taken away here come back; the record already says where it applies.
+          else await this.files.reconcile(dir, targets, { projects: record.linked, global: record.globalLinked });
+          if ((await this.pinned()).has(dir) !== item.pinned) { await this.pin(await this.files.lookup(dir), item.pinned); changed = true; }
+        } catch (error) { failures.push(`${item.name}: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+      const left: string[] = [];
+      for (const dir of before) {
+        if (kept.includes(dir)) continue;
+        // best-effort: one already gone here (no longer a skill) is simply no longer counted.
+        const skill = await this.files.lookup(dir).catch(() => undefined);
+        if (!skill?.managed) continue;
+        // A default the followed Tower keeps as seeded again is this computer's own default again; anything else went there.
+        try { await (incoming.defaults.includes(basename(dir)) ? this.reseed(skill) : this.delete(skill, undefined)); changed = true; }
+        catch (error) { left.push(dir); failures.push(`${skill.name}: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+      await save([...kept, ...left]);
+      if (guidanceContent(incoming.guidance) !== (await this.guidance()).owner) { await this.guidanceChange(async () => incoming.guidance); changed = true; }
+    });
+    if (changed) this.options.onChange?.();
+    if (failures.length) throw new SkillError(failures.join(' / '), 'conflict');
+  }
+
+
+  /**
+   * A default skill kept as Tower seeds it: its text as Tower writes it, applying everywhere, not pinned. Every Tower
+   * seeds the same, so the followed Tower does not send one (only its name).
+   */
+  private async asSeeded(dir: string, name: string): Promise<boolean> {
+    if (dir !== await this.files.towerDir(name)) return false;
+    const record = this.record(dir);
+    if (!record?.all || record.projects.length || (await this.pinned()).has(dir)) return false;
+    return defaultContent(dir, name);
+  }
+
+  /**
+   * A default skill Tower itself made here and nobody has touched since: kept as seeded, in the very folder Tower
+   * made (`madeDefaults`), its files unchanged. Content alone never proves it: an owner's skill may read the same.
+   */
+  private async untouchedDefault(dir: string, name: string): Promise<boolean> {
+    const made = this.state.get().madeDefaults.find(item => item.name === name && item.dir === dir);
+    if (!made || !await this.asSeeded(dir, name)) return false;
+    // best-effort: a folder that cannot be read is not proven Tower's.
+    const info = await stat(dir).catch(() => undefined);
+    return info?.ino === made.ino && await filesDigest(dir) === made.digest;
+  }
+
+  /** What Tower made just now for a default skill, to know it later (`untouchedDefault`). */
+  private async madeDefault(name: string): Promise<MadeDefault | undefined> {
+    const dir = await this.files.towerDir(name);
+    // best-effort: a default whose folder cannot be read now is simply not recorded, and never given away.
+    const [info, digest] = await Promise.all([stat(dir).catch(() => undefined), filesDigest(dir)]);
+    return info && digest ? { name, dir, ino: info.ino, digest } : undefined;
+  }
+
+  /** Puts a default skill back as Tower seeds it: its text, applying everywhere, not pinned. */
+  private async reseed(skill: Skill): Promise<void> {
+    const name = basename(skill.dir), files = defaultFiles(name);
+    if (!files) throw new SkillError('Tower의 기본 스킬이 아닙니다.', 'not-found');
+    if (!await defaultContent(skill.dir, name)) await this.files.install({ name, description: '', scope: 'global', pinned: false, files }, undefined, true, false);
+    await this.apply(skill.dir, { all: true, projects: [] });
+    await this.pin(skill, false);
+    // Tower made it again as it seeds it: it may give way again, like the one it seeded.
+    const made = await this.madeDefault(name);
+    if (made) await this.state.update(state => { state.madeDefaults = [...state.madeDefaults.filter(item => item.name !== name), made]; });
   }
 
   /** What importing a backup would do here, item by item, before anything is written. */
@@ -694,4 +859,10 @@ export class SkillService {
       await this.guidanceChange(async current => body.guidance === 'append' && current.owner.trim() ? `${current.owner.trim()}\n\n${guidance}` : guidance);
     }
   }
+}
+
+/** The owner's guidance as it is saved: Tower's own markers taken out, ending with one newline, or empty. */
+function guidanceContent(owner: string): string {
+  const text = withoutTowerMarkers(owner);
+  return text.trim() ? `${text.trimEnd()}\n` : '';
 }

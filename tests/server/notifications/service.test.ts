@@ -4,9 +4,9 @@ import { createECDH, randomBytes } from 'node:crypto';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { deviceId, notificationMessage, NotificationService, pendingEvents, secretBlockMessage, type NotificationContext } from '../../../server/notifications/service.js';
+import { deviceId, notificationMessage, NotificationService, pendingEvents, secretBlockMessage, withFollowing, type NotificationContext } from '../../../server/notifications/service.js';
 import type { SecretBlockNotice } from '../../../server/runs/runner-protocol.js';
-import type { Run, Session } from '../../../shared/types.js';
+import type { Run, Session, Snapshot } from '../../../shared/types.js';
 
 const at = (minutes: number) => new Date(Date.parse('2026-09-26T00:00:00Z') + minutes * 60_000).toISOString();
 const run = (id: string, fields: Partial<Run>): Run => ({ id, sessionId: 's1', prompt: 'Fix the login bug', status: 'running', createdAt: at(0), output: '', ...fields });
@@ -175,4 +175,82 @@ test('a secret use the reviewer refused is announced once, to devices that hear 
   service.check();
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(sent.length, 1);
+});
+
+const HOST = 'a'.repeat(32), NODE = 'b'.repeat(32), OTHER = 'c'.repeat(32);
+const mirrored = (runs: Run[]): Snapshot => ({ sessions: [{ ...session, id: 'n1', cwd: '/home/me/Workspace/app' }], runs, providers: [], groups: [{ cwd: '/home/me/Workspace/app', title: 'App', pinned: false }],
+  repositories: [], autoPrompts: [], hostname: 'office', updatedAt: at(0) } as unknown as Snapshot);
+async function pushes(t: test.TestContext, context: NotificationContext) {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-notifications-follow-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const sent: string[] = [];
+  const service = new NotificationService(dir, context, (async (url: string | URL | Request) => { sent.push(String(url)); return new Response(null, { status: 201 }); }) as typeof fetch);
+  await service.start();
+  await service.subscribe({ subscription: subscription(), label: 'Phone', language: 'ko' });
+  t.after(() => service.close());
+  const settle = async () => { service.check(); await new Promise(resolve => setTimeout(resolve, 30)); service.check(); await new Promise(resolve => setTimeout(resolve, 30)); };
+  return { sent, settle };
+}
+
+test('the host announces the work it sent to a computer that follows it, once, and opens it in its own page', async t => {
+  const now = () => new Date().toISOString();
+  let nodeRuns: Run[] = [];
+  const context: NotificationContext = { runs: () => [], session: () => undefined, project: () => '', trigger: () => undefined,
+    following: () => ({ self: HOST, computers: [{ id: NODE, name: 'office-tower-1', snapshot: mirrored(nodeRuns) }] }) };
+  const { sent, settle } = await pushes(t, context);
+  nodeRuns = [
+    run('sent', { sessionId: 'n1', origin: { kind: 'owner', controllerId: HOST }, status: 'completed', finishedAt: now(), output: 'Done.' }),
+    run('local', { sessionId: 'n1', origin: { kind: 'owner' }, status: 'completed', finishedAt: now() }),
+    run('other', { sessionId: 'n1', origin: { kind: 'owner', controllerId: OTHER }, status: 'completed', finishedAt: now() }),
+  ];
+  await settle();
+  assert.equal(sent.length, 1, 'only the work this Tower sent, and only once');
+  await settle();
+  assert.equal(sent.length, 1);
+  nodeRuns = [...nodeRuns, run('waiting', { sessionId: 'n1', origin: { kind: 'owner', controllerId: HOST }, status: 'running', approvals: [{ id: 'p1', toolName: 'Bash', description: 'gh pr merge' }] as Run['approvals'] })];
+  await settle();
+  assert.equal(sent.length, 2, 'an approval it waits on too');
+
+  const view = withFollowing(context);
+  const [event] = pendingEvents(view.runs(), 0, new Set()).filter(item => item.run.id === `@${NODE}/sent`);
+  const message = notificationMessage(event!, view, 'ko');
+  assert.equal(message.url, `/?session=${encodeURIComponent(`@${NODE}/n1`)}`);
+  assert.equal(message.title, 'App (office-tower-1) · 작업 완료');
+});
+
+test('a computer that follows a host leaves the host\'s work to it and still announces its own', async t => {
+  const now = () => new Date().toISOString();
+  let runs: Run[] = [];
+  let host: string | undefined = HOST;
+  const { sent, settle } = await pushes(t, { runs: () => runs, session: () => session, project: () => 'app', trigger: () => undefined, followedHost: () => host });
+  runs = [run('from-host', { origin: { kind: 'owner', controllerId: HOST }, status: 'completed', finishedAt: now() })];
+  await settle();
+  assert.equal(sent.length, 0);
+  runs = [...runs, run('mine', { origin: { kind: 'owner' }, status: 'completed', finishedAt: now() }),
+    run('from-other', { origin: { kind: 'owner', controllerId: OTHER }, status: 'completed', finishedAt: now() })];
+  await settle();
+  assert.equal(sent.length, 2, 'its own owner\'s and another controller\'s work, as before');
+  // Decided for good: following nobody later does not announce it after all.
+  host = undefined;
+  await settle();
+  assert.equal(sent.length, 2);
+});
+
+test('a trigger this Tower set up on a following computer is announced starting here, once, and not there', async t => {
+  const now = () => new Date().toISOString();
+  let nodeRuns: Run[] = [];
+  const host = await pushes(t, { runs: () => [], session: () => undefined, project: () => '', trigger: () => undefined,
+    following: () => ({ self: HOST, computers: [{ id: NODE, name: 'office-tower-1', snapshot: mirrored(nodeRuns) }] }) });
+  // As the node mirrors it to the host that set the trigger up: its ids included (remoteRun).
+  const started = run('t-run', { sessionId: 'n1', origin: { kind: 'trigger', triggerId: 'nightly', eventId: 'e1', controllerId: HOST }, status: 'running', startedAt: now() });
+  nodeRuns = [started];
+  await host.settle();
+  await host.settle();
+  assert.equal(host.sent.length, 1);
+  const view = withFollowing({ runs: () => [], session: () => undefined, project: () => '', trigger: () => undefined,
+    following: () => ({ self: HOST, computers: [{ id: NODE, name: 'office-tower-1', snapshot: mirrored(nodeRuns) }] }) });
+  assert.deepEqual(pendingEvents(view.runs(), 0, new Set()).map(event => event.key), [`trigger:@${NODE}/nightly:@${NODE}/e1`], 'named by that computer\'s ids');
+  const node = await pushes(t, { runs: () => [started], session: () => session, project: () => 'app', trigger: () => 'Nightly', followedHost: () => HOST });
+  await node.settle();
+  assert.equal(node.sent.length, 0);
 });

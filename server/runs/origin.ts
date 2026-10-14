@@ -66,6 +66,14 @@ export function automatedOrigin(origin: RunOrigin | undefined): boolean { return
  */
 export function ownerOrigin(origin: RunOrigin | undefined): boolean { return origin?.kind === 'owner' || origin?.kind === 'agent'; }
 
+/**
+ * Work the controlling Tower this computer follows started here (its owner's own messages, the agents and triggers it
+ * started). Such work is treated as this computer's owner's own; any other controller's work keeps its limits.
+ */
+export function followedHostOrigin(origin: Pick<RunOrigin, 'controllerId'> | undefined, hostId: string | undefined): boolean {
+  return Boolean(hostId) && origin?.controllerId === hostId;
+}
+
 /** The same calling turn started both, or neither was started by one (`Run.delegation`). */
 export function sameDelegation(a: RunDelegation | undefined, b: RunDelegation | undefined): boolean {
   return a?.parentRunId === b?.parentRunId && a?.rootRunId === b?.rootRunId;

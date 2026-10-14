@@ -1,9 +1,22 @@
-import type { SecretAvailable, SecretBasis, SecretGroup, SecretOperation, SecretPeer, SecretProject, SecretRule, SecretSharing, SecretTarget, SecretTask } from '../../shared/secrets.js';
+import type { SecretAvailable, SecretBasis, SecretCatalogItem, SecretFolder, SecretGroup, SecretOperation, SecretPeer, SecretProject, SecretRule, SecretSharing, SecretTarget, SecretTask } from '../../shared/secrets.js';
 import { SECRET_OPERATIONS } from '../../shared/secrets.js';
 import { legacyRule, namedByRule, projectId, selectedFields, type LegacySecret } from './legacy-policy.js';
 
+/**
+ * Sharing as builds save it. Up to 1.136 it was `{ revision, global, folders }`; since machine sharing it is the whole
+ * `SecretSharing` with `global` kept equal to `allMachines`, so a build rolled back to decides "all machines" the same
+ * and, not knowing `machines`, allows less, never more. Read with `readSharing`.
+ */
+export type StoredSharing = Pick<SecretSharing, 'revision' | 'folders'> & Partial<Pick<SecretSharing, 'allMachines' | 'machines'>> & { global?: boolean };
+/** Stored sharing of any build as this one decides with it: `global` alone is "all machines". */
+export function readSharing(stored: StoredSharing): SecretSharing {
+  const machines = Array.isArray(stored.machines) ? stored.machines.filter((id): id is string => typeof id === 'string') : [];
+  return { revision: stored.revision, allMachines: typeof stored.allMachines === 'boolean' ? stored.allMachines : stored.global === true, machines, folders: stored.folders };
+}
+/** Sharing as this build saves it; see `StoredSharing`. */
+export function storedSharing(sharing: SecretSharing): StoredSharing { return { ...structuredClone(sharing), global: sharing.allMachines }; }
 /** A secret as authorization reads it, without its value. With `sharing` it follows per-secret sharing, without it the rules. */
-export interface PolicySecret extends LegacySecret { sharing?: SecretSharing }
+export interface PolicySecret extends LegacySecret { sharing?: StoredSharing }
 /** Everything authorization reads, without values or keys; also persisted in plain text so names stay listable while locked. */
 export interface PolicyState {
   deviceId: string;
@@ -40,9 +53,11 @@ export function decide(state: PolicyState, task: SecretTask, secret: PolicySecre
   const basis: SecretBasis[] = task.connected.includes(id) ? ['session'] : [];
   let rule: SecretRule | undefined;
   if (secret.sharing) {
+    const sharing = readSharing(secret.sharing);
     if (!withheld(state, secret)) {
-      if (secret.sharing.global && state.servedHosts.includes(task.hostId)) basis.push('global');
-      if (secret.sharing.folders.some(folder => folder.hostId === task.hostId && folder.root === task.root)) basis.push('folder');
+      if (sharing.allMachines && state.servedHosts.includes(task.hostId)) basis.push('global');
+      if (sharing.machines.includes(task.hostId)) basis.push('machine');
+      if (sharing.folders.some((folder: SecretFolder) => folder.hostId === task.hostId && folder.root === task.root)) basis.push('folder');
     }
   } else if ((rule = legacyRule(state, task, secret, operation, now))) basis.push('legacy');
   if (!basis.length) return;
@@ -50,10 +65,14 @@ export function decide(state: PolicyState, task: SecretTask, secret: PolicySecre
   return { basis, fields: rule && basis.length === 1 ? selectedFields(secret, rule) : secret.fieldNames && [...secret.fieldNames] };
 }
 
+/** A refusal because nothing shares the secret with the task's folder or computer, which the owner can change by sharing it. */
+export const notShared = (message = 'Secret access denied') => Object.assign(new Error(message), { code: 'SECRET_NOT_SHARED' as const });
 export function authorize(state: PolicyState, task: SecretTask, secret: PolicySecret, operation: SecretOperation, now: number): Decision {
   const decision = decide(state, task, secret, operation, now);
-  if (!decision) throw new Error('Secret access denied');
-  return decision;
+  if (decision) return decision;
+  // A key this session stopped, or one expired, is not a sharing question.
+  if (task.excluded.includes(secret.metadata.id) || (secret.metadata.expiresAt !== undefined && secret.metadata.expiresAt <= now)) throw new Error('Secret access denied');
+  throw notShared();
 }
 
 /** What this task may discover, each with the operations it may use and why. Reads only. */
@@ -73,4 +92,11 @@ export function covered(state: PolicyState, hostId: string, root: string, taskId
   const probe: SecretTask = { id: taskId, hostId, sessionId: '', root, status: 'open', createdAt: task?.createdAt ?? now, excluded: [], connected: [] };
   // A rule may allow a use without discovery; 1.130.2 resolved such a key in any folder of a registered project.
   return state.secrets.some(secret => SECRET_OPERATIONS.some(operation => decide(state, probe, secret, operation, now)));
+}
+
+/** Every saved secret by name and reference, and whether this task may use it; values and fields stay out. Reads only. */
+export function catalog(state: PolicyState, task: SecretTask, now: number): SecretCatalogItem[] {
+  return state.secrets.filter(secret => secret.metadata.expiresAt === undefined || secret.metadata.expiresAt > now).map(secret => ({
+    id: secret.metadata.id, name: secret.metadata.name, kind: secret.metadata.kind, reference: secret.metadata.reference.split('#')[0]!,
+    status: SECRET_OPERATIONS.some(operation => decide(state, task, secret, operation, now)) ? 'available' as const : 'not-shared' as const }));
 }

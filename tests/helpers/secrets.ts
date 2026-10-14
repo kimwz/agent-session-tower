@@ -4,11 +4,11 @@ import { cp, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SecretService } from '../../server/secrets/service.js';
-import type { PolicyState } from '../../server/secrets/policy.js';
+import type { PolicyState, StoredSharing } from '../../server/secrets/policy.js';
 import { parseDotenv } from '../../server/secrets/dotenv.js';
 import type { Capability } from '../../server/api/mcp.js';
 import type { SessionOrigin } from '../../server/runs/origin.js';
-import { DEFAULT_SECRET_USE_OPERATIONS, type SecretDevice, type SecretGroup, type SecretMetadata, type SecretProject, type SecretRule, type SecretSharing } from '../../shared/secrets.js';
+import { DEFAULT_SECRET_USE_OPERATIONS, type SecretDevice, type SecretGroup, type SecretMetadata, type SecretProject, type SecretRule } from '../../shared/secrets.js';
 import type { Run, Session } from '../../shared/types.js';
 
 /** A started service on stateDir, initialized with password; without one it stays as a restarted worker finds it. */
@@ -66,7 +66,7 @@ export class FixtureRuns {
 }
 
 /** One saved secret in the vault's encrypted permanent payload. */
-export interface StoredRecord { metadata: SecretMetadata; value: string; encoding?: 'base64'; fields?: Record<string, string>; sharing?: SecretSharing; temporaryTaskId?: string }
+export interface StoredRecord { metadata: SecretMetadata; value: string; encoding?: 'base64'; fields?: Record<string, string>; sharing?: StoredSharing; temporaryTaskId?: string }
 /** The encrypted permanent payload as any build reads it; builds keep the keys they do not know. */
 export interface StoredPayload { device: SecretDevice; projects: SecretProject[]; groups: SecretGroup[]; secrets: StoredRecord[]; rules: SecretRule[]; [key: string]: unknown }
 

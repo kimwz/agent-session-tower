@@ -65,6 +65,8 @@ import { relatedSessionNotes } from '../sessions/related.js';
 import { runToolResolver, sessionBrowsers, thisBuild } from '../api/run-tools.js';
 import { browserNote } from '../browser/tools.js';
 import { RemoteExclusionStore } from '../remote/exclusions.js';
+import { FollowedHostStore } from '../link/follow.js';
+import type { ManagedSection } from '../../shared/managed.js';
 import { remoteSessionIds, remoteTriggerLaunch } from '../remote/visibility.js';
 import { RemoteRequestLedger, type RemoteResult } from '../remote/request-ledger.js';
 import { SkillService } from '../skills/service.js';
@@ -79,6 +81,7 @@ import { listPendingSecretImports, importPendingSecret } from '../secrets/import
 import { openLegacyImport } from '../backup/secrets.js';
 import type { Capability } from '../api/mcp.js';
 import type { RemoteSecretRequest, RemoteSecretResponse } from '../secrets/remote.js';
+import type { SecretShareNotice } from '../../shared/secrets.js';
 import { installAgentGuidance } from '../agent-guidance/install.js';
 import { PermissionService } from '../permissions/service.js';
 import { PermissionReviewer } from '../permissions/reviewer.js';
@@ -158,6 +161,8 @@ export interface RunnerHostOptions {
   handoffCarry?: () => Buffer | undefined;
   /** Secret uses refused lately, reported to the web for the owner's notifications. */
   secretBlocks?: () => SecretBlockNotice[];
+  /** Secret requests of computers that follow this Tower, for the owner's share notifications. */
+  secretShares?: () => SecretShareNotice[];
   onHandedOff?: () => void;
   handoffHoldMs?: number;
   /** The proof a predecessor gave this worker when it started it. */
@@ -167,6 +172,17 @@ export interface RunnerHostOptions {
   ledger?: RemoteRequestLedger;
   /** The remote-sharing exclusion list the web process saves; reloaded with every refresh. */
   exclusions?: RemoteExclusionStore;
+  /**
+   * Settings sections kept in step with the followed Tower ("호스트 설정 따르기", see link/managed-settings.ts): each
+   * owning module exports its section on the controlling Tower and applies it on a computer that follows one.
+   */
+  managed?: ReadonlyMap<ManagedSection, WorkerManagedSection>;
+}
+
+/** One settings section the web relays between Towers; it lives in this worker's stores. */
+export interface WorkerManagedSection {
+  export(): Promise<unknown>;
+  apply(value: unknown, context: { hostId: string }): Promise<void>;
 }
 
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -200,6 +216,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   const snapshot = (): RunnerSnapshot => {
     const sessions = options.runs.sessionList(options.sessions.list());
     const secretBlocks = options.secretBlocks?.() ?? [];
+    const secretShares = options.secretShares?.() ?? [];
     return { instance, revision: ++revision, runs: options.runs.list(), sessions,
       nativeIds: Object.fromEntries(sessions.map(session => [session.id, options.runs.nativeSessionId(session.id)])),
       settled: [...options.runs.settledRunIds()], autoPrompts: options.autoPrompts?.list() ?? [], version: APP_VERSION,
@@ -210,7 +227,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       ...(options.triggers ? { triggers: options.triggers.overview() } : {}),
       coordinators: [...new Set([...(options.slack?.coordinatorSessionIds() ?? []), ...(options.github?.coordinatorSessionIds() ?? [])])],
       ...(forced ? { updateDrain: options.runs.updateDrainStatus() } : {}),
-      ...(secretBlocks.length ? { secretBlocks } : {}) };
+      ...(secretBlocks.length ? { secretBlocks } : {}),
+      ...(secretShares.length ? { secretShares } : {}) };
   };
   const coordinator = (sessionId: string) => Boolean(options.slack?.coordinatorSessionIds().includes(sessionId) || options.github?.sessionWorkflow(sessionId));
   /** A paired controller's request: refused for coordinator conversations, and run once per request ID. */
@@ -440,9 +458,15 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (operation === 'control') return secrets.control(String(args[1]), record(args[2]), args[3] ?? undefined);
         if (operation === 'peers') return secrets.peers();
         if (operation === 'device') return secrets.device();
-        if (operation === 'poll') return { requests: secrets.poll(String(args[1]), args[2]) };
+        if (operation === 'poll') return secrets.poll(String(args[1]), args[2]);
+        // "호스트 설정 따르기": this computer's vault opening by itself, trust with the host, and clones' folders.
+        if (operation === 'status') return secrets.status();
+        if (operation === 'machine-vault') return { vault: await secrets.machineVault() };
+        if (operation === 'align') return secrets.align(args[1]);
+        if (operation === 'shared-folders') return secrets.sharedFolders();
+        if (operation === 'auto-share') return secrets.autoShare(args[1]);
         if (operation === 'peer-offline') { secrets.peerOffline(String(args[1])); return { forgotten: true }; }
-        if (operation === 'answer') return secrets.answer(String(args[1]), args[2] as RemoteSecretRequest);
+        if (operation === 'answer') return secrets.answer(String(args[1]), args[2] as RemoteSecretRequest, record(args[3]).following === true);
         if (operation === 'deliver') { secrets.deliver(String(args[1]), args[2] as RemoteSecretResponse); return { delivered: true }; }
         if (operation === 'target' || operation === 'connection-notice' || operation === 'session-subject') {
           const session = options.runs.getSession(String(args[1]));
@@ -494,6 +518,14 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'settingsBackup': if (options.settingsBackup) return options.settingsBackup(); break;
       case 'triggersBackup': if (options.triggers) return options.triggers.backup(); break;
       case 'skillsBackup': if (options.skills) return options.skills.backup(); break;
+      case 'managed': {
+        const section = options.managed?.get(args[0] as ManagedSection);
+        if (!section) throw new TowerError('not-found', 'Unknown managed settings section.');
+        if (args[1] === 'export') return section.export();
+        const hostId = record(args[3]).hostId;
+        if (args[1] === 'apply' && typeof hostId === 'string') { await section.apply(args[2], { hostId }); changed(); return { applied: true }; }
+        throw new TowerError('invalid', 'Invalid managed settings request.');
+      }
       case 'publicAgentsOverview': if (options.publicAgents) return options.publicAgents.overview(); break;
       case 'publicAgentsConversation': if (options.publicAgents) return options.publicAgents.conversation(args[0] as string, args[1] as string); break;
       case 'publicAgentsMutate': if (options.publicAgents) return options.publicAgents.mutate(args[0] as string, args[1] as Record<string, unknown>); break;
@@ -1279,6 +1311,11 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // The web process saves the remote-sharing exclusion list; this copy follows it on every refresh.
     const exclusions = new RemoteExclusionStore(stateDir);
     await exclusions.start();
+    // The web saves which controlling Tower this computer follows; decisions that depend on it read it again first.
+    const followedHost = new FollowedHostStore(stateDir);
+    await followedHost.start();
+    /** Each section's owning module registers its export and apply here (see WorkerManagedSection). */
+    const managed = new Map<ManagedSection, WorkerManagedSection>();
     externalIntentHeld=()=>[externalRemote,externalPrompts,externalWorkflows].some(repository=>Boolean(repository.pending()));
     const externalGate=async()=>{ await requireEffects(); for(const repository of [externalRemote,externalPrompts,externalWorkflows]) await repository.gate(); };
     const ledger = new RemoteRequestLedger(stateDir,Date.now,undefined,externalRemote,externalGate);
@@ -1321,7 +1358,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         // One page from the end: the review reads only the last few messages.
         conversation: async sessionId => (await sessions.detail(runs.nativeSessionId(sessionId), undefined, 40, { previousUser: false }))?.messages ?? [],
       } });
-    const secrets = new SecretRuntime({ stateDir, service: secretService, runs, reviewer: secretReviewer, effects: requireEffects, effectsReady,
+    const secrets = new SecretRuntime({ stateDir, service: secretService, runs, reviewer: secretReviewer, effects: requireEffects, effectsReady, followed: () => followedHost.reload(),
       onConnect: sessionId => runs.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, sessionId),
       isClosed: async id => { const saved = new ClosedSessionStore(stateDir); await saved.start(); return saved.closedIds().has(id); },
       migrate: () => secretStore.migrate(), pendingImports: () => listPendingSecretImports(stateDir),
@@ -1329,6 +1366,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     runs.setRunToolResolver(runToolResolver({ stateDir, runs, slack, github, capabilities, secrets }));
     // The previous worker's open vault: turns restored below find it as the owner left it.
     if (carry) await secrets.adopt(carry).catch(() => { console.error('The vault handed over by the previous worker did not open; it stays locked until unlocked.'); }).finally(() => { carry?.fill(0); carry = undefined; });
+    // A computer that follows a host opens its vault by itself (made first when it has none).
+    await secrets.machineVault().catch(() => { console.error('This computer\'s vault did not open by itself; the owner can open it once.'); });
     const secretExpiry = setInterval(() => { void secrets.sweep().catch(() => { console.error('Secret expiry cleanup failed; the vault remains unavailable until unlocked.'); }); }, 60_000); secretExpiry.unref();
     const visible = await runnerContext({ stateDir, runs, sessions, slack, exclusions });
     autoPrompts.updateContext(visible);
@@ -1361,6 +1400,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     await startupGate();
     registerStorageHold(() => { skills.pause(); }, () => { skills.resume(); }, () => skills.inFlight());
     await skills.start().catch(error => console.error(`Skills did not start: ${error instanceof Error ? error.message : String(error)}`));
+    managed.set('skills', { export: () => skills.exportManaged(), apply: value => skills.applyManaged(value) });
     // What each conversation works on, summarized after its turns.
     const tasks = new SessionTasks({ stateDir, sessions: () => visible.allSessions(),
       history: (session, limit, before) => sessions.detail(runs.nativeSessionId(session.id), before, limit),
@@ -1493,7 +1533,10 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       onRunFinished: runFinished,
       runOutput: id => runner.output(id),
       forgetRun: id => runner.forget(id),
-      onAutoReviewChange: settings => { if (!settings.enabled) reviewer?.abort(); } });
+      onAutoReviewChange: settings => { if (!settings.enabled) reviewer?.abort(); },
+      followedHost: () => followedHost.reload() });
+    // "호스트 설정 따르기": the host's rules for every project, reviewer setting and precedents (permissions/managed.ts).
+    managed.set('permissions', { export: () => permissions.exportManaged(), apply: (value, context) => permissions.applyManaged(value, context.hostId) });
     await startupGate();
     bindPermissionsBeforeResume = () => permissions.bindAfterStorageRetry();
     registerStorageHold(() => { permissions.pauseForStorage(); }, () => { permissions.resume(); });
@@ -1541,6 +1584,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         rules: cwd => permissions.overview(cwd).rules,
         guards: rule => ruleGuards(rule),
         requests: sessionId => permissions.overview().requests.filter(item => item.sessionId === sessionId).reverse(),
+        hostPrecedents: cwd => permissions.hostPrecedents(cwd),
       },
       // The decision reaches the conversation as the work it already was: the requesting turn's origin and approvals.
       reachable: request => Boolean(request.runId && runs.list().find(item => item.id === request.runId)?.origin),
@@ -1551,6 +1595,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     reviewer.hold();
 
     runs.setClaudeSettings((cwd, sessionId) => permissions.claudeSettings(cwd, sessionId));
+    // Turns the followed host starts here get the notes for every turn as well.
+    runs.setFollowedHost(() => followedHost.reload());
     runs.setTurnNotes(async (_run, session) => {
       const notes = await Promise.all([skills.turnNotes(session), modelRoleNotes(stateDir).catch(() => undefined), browserNote(sessionBrowsers(stateDir, runs, session))]);
       return notes.filter(Boolean).join('\n\n') || undefined;
@@ -1613,7 +1659,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       // Once more as the provider is about to start: a trigger set up remotely never works in a folder kept from sharing.
       return remoteLaunch.refused(run) ? REMOTE_FOLDER_REFUSED : undefined;
     }, run => remoteLaunch.prepareRun(run));
-    const api = new TowerApi({ stateDir, triggers, runs, github, permissions,
+    const api = new TowerApi({ stateDir, triggers, runs, github, permissions, followedHost: () => followedHost.reload(),
       remote: async paths => { await exclusions.reload(); await exclusions.prepare(paths, { fresh: true }); return { matcher: exclusions.matcher(), coordinators: coordinators() }; },
       projects: () => {
         const snapshot = visible.snapshot();
@@ -1726,7 +1772,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       await requireEffects();
       return settings;
     };
-    const hostOptions: RunnerHostOptions = { settingsBackup, stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, compactions, api, secrets, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce, storage: () => storageStatus, retryStorage: () => retryNormal!(), storageRecovery, storageControl: control, closeStorage, onCloseFailure: () => unavailable(), handoffCarry: () => secrets.handoff(), secretBlocks: () => secrets.blocks(),
+    const hostOptions: RunnerHostOptions = { settingsBackup, stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, compactions, api, secrets, capabilities, ledger, exclusions, managed, releaseStateLock: release, handoffNonce, storage: () => storageStatus, retryStorage: () => retryNormal!(), storageRecovery, storageControl: control, closeStorage, onCloseFailure: () => unavailable(), handoffCarry: () => secrets.handoff(), secretBlocks: () => secrets.blocks(), secretShares: () => secrets.shares(),
       onIdle: async () => { clearInterval(releaseTimer); await retention?.service.quiesce(); await temporary.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); clearInterval(secretExpiry); secrets.close(); stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await tasks.close(); await compactions.close(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
       inFlight: () => secrets.inFlight() || restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || compactions.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       // A forced update waits only for a compaction creating its session; one still reading or summarizing stops with the worker.

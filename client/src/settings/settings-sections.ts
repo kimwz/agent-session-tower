@@ -4,8 +4,10 @@ export type SettingsSection = typeof SETTINGS_SECTIONS[number];
 
 /** What waits for the owner in the settings: counts to act on, and marks that only ask for a look. */
 export interface SettingsAttention {
-  /** Permission requests agents sent that wait for a decision. */
+  /** Permission requests agents sent that wait for a decision, here and on the joined computers that follow this Tower. */
   permissions: number;
+  /** Of those, the ones waiting on each joined computer that follows this Tower. */
+  permissionsOn?: Readonly<Record<string, number>>;
   /** Skill proposals ready to review. */
   skills: number;
   /** A trigger problem (paused, failing, a failed or unknown run, an unreadable store) not yet seen in this browser. */

@@ -34,7 +34,7 @@ async function fixture(t: test.TestContext, subject: SecretSubjectMode | 'unset'
   const service = await vault.open(stateDir);
   const target = await service.ensureTask('codex:reviewed-session', root);
   const context: SecretContext = { ...target, runId: 'reviewed-run', ...(subject !== 'unset' ? { subject } : {}) };
-  const secret = await service.create({ name: 'deploy token', kind: 'scalar', value: canary, sharing: { global: false, folders: [{ hostId: target.hostId, root }] } });
+  const secret = await service.create({ name: 'deploy token', kind: 'scalar', value: canary, sharing: { allMachines: false, folders: [{ hostId: target.hostId, root }] } });
   let resolves = 0;
   const resolve = service.resolve.bind(service);
   service.resolve = async (...args: Parameters<SecretService['resolve']>) => { resolves++; return resolve(...args); };
@@ -130,7 +130,7 @@ test('an operation still under review is never sent again', async t => {
 
 test('sharing withdrawn during the review stops the use at the check before it runs', async t => {
   const f = await fixture(t);
-  f.reviewer.answer = async () => { await f.service.setSharing(f.secret.id, 1, { global: false, folders: [] }); return { review: 'allowed' }; };
+  f.reviewer.answer = async () => { await f.service.setSharing(f.secret.id, 1, { allMachines: false, folders: [] }); return { review: 'allowed' }; };
   const result = await f.broker.run(f.context, f.input('withdrawn-1'));
   assert.equal(result.exitCode, null); assert.equal(result.blocked, undefined);
   assert.equal(await exists(f.marker), false);

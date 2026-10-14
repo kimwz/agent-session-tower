@@ -1,3 +1,5 @@
+import type { ManagedApplied, ManagedSyncStatus } from './managed.js';
+import type { NodeSecretStatus } from './secrets.js';
 /** What this browser sees about remote links. Only this computer's own browser receives it. */
 export interface LinkAddress { url: string; kind: 'custom' | 'tailscale' | 'local-name' | 'lan' }
 export interface HubStatus { enabled: boolean; port: number; listening: boolean; error?: string; addresses: LinkAddress[] }
@@ -47,6 +49,8 @@ export interface AutoUpdateStatus {
   };
   tools: { claude?: ToolUpdate; codex?: ToolUpdate };
 }
+/** Whether a CLI new work needs is signed in on a joined computer; `missing` also when it is not installed there. */
+export type LoginState = 'ok' | 'missing' | 'unknown';
 /** What a joined computer reports about itself: structured facts only, never paths or log text. */
 export interface NodeReport {
   versions: { web: string; worker?: string; terminalHost?: string };
@@ -55,6 +59,10 @@ export interface NodeReport {
   update?: UpdateStatus;
   diskFree?: number;
   autoUpdate?: AutoUpdateStatus;
+  /** Whether Claude Code, Codex and gh are signed in there, for new work; never an account or token. */
+  logins?: { claude: LoginState; codex: LoginState; gh: LoginState };
+  /** The settings of the Tower it follows that it applied last ("호스트 설정 따르기"). */
+  managed?: ManagedApplied;
 }
 /** A computer this one controls. */
 export interface UpdateChainStatus { target: string; prerequisite?: string; attempts: Record<string, number>; state: 'done' | 'wait' | 'request' | 'blocked'; code?: string; reason?: string; version?: string }
@@ -68,12 +76,22 @@ export interface NodeSummary {
   report?: NodeReport;
   /** When this Tower asks it again for its version, after an update to it failed. */
   retryAt?: string;
+  /** The owner wants it to follow this Tower's settings ("호스트 설정 따르기"). */
+  followHost?: boolean;
+  /** It said it follows this Tower, when it last introduced itself. */
+  following?: boolean;
+  /** How far this Tower's settings reached it, while it follows. */
+  managed?: ManagedSyncStatus;
+  /** Where it stands with this Tower's secrets, while it follows. */
+  secrets?: NodeSecretStatus;
 }
 export type ControllerStatus = 'connected' | 'connecting' | 'offline' | 'expired' | 'refused' | 'removed';
 /** A computer that controls this one. */
 export interface ControllerSummary {
   id: string; name: string; fingerprint: string; state: 'claiming' | 'paired' | 'expired' | 'removed'; status: ControllerStatus;
   pairedAt?: string; lastConnectedAt?: string; error?: string;
+  /** This computer follows that one's settings and treats the work it starts here as the owner's own. */
+  followed?: true;
 }
 export interface LinkOverview {
   identity: { name: string; fingerprint: string; version: string };
@@ -112,4 +130,6 @@ export interface RemoteNode {
   streaming: boolean;
   /** It is moving to this Tower's version and comes back by itself. */
   updating?: boolean;
+  /** Connected and following this Tower's settings ("호스트 설정 따르기"): its permissions are this page's to manage. */
+  following?: true;
 }

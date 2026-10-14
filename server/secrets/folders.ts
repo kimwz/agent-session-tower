@@ -7,6 +7,11 @@ import { TowerError } from '../../shared/errors.js';
 export const SECRET_SHARING_FEATURE = 'secretSharing';
 /** A joined computer that reports its sessions' exclusions and lifts them when its controller connects those keys. */
 export const SECRET_EXCLUSIONS_FEATURE = 'secretExclusions';
+/**
+ * A joined computer whose worker shares by machine and, while it follows a host, opens its vault by itself and aligns
+ * its secret trust with that host (`/secret-align`).
+ */
+export const SECRET_MACHINES_FEATURE = 'secretMachines';
 /** A joined computer's folder as the page keys it: `@<node>/<its own absolute path>`. */
 const SCOPED = /^@([a-f0-9]{32})\/([\s\S]+)$/;
 const MAX_FOLDERS = 100;

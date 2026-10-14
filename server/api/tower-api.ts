@@ -2,12 +2,13 @@ import { permissionProtected } from '../permissions/protection.js';
 import { subscriptionOnly } from '../runs/subscription.js';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { OPERATIONS, REMOTE_PAGE_OPERATIONS, isOperationName, type OperationName } from '../../shared/api/operations.js';
+import { FOLLOWED_OPERATIONS, OPERATIONS, REMOTE_PAGE_OPERATIONS, isOperationName, type OperationName } from '../../shared/api/operations.js';
 import type { TriggerActor, TriggerEvent, TriggerInput } from '../../shared/triggers.js';
 import type { AutoPromptJob, AutoPromptInput, ChatMessage, Run, RunOrigin, Session, SessionDetail } from '../../shared/types.js';
 import type { SlackWorkflow } from '../../shared/slack.js';
 import type { RunAdmission } from '../runs/manager.js';
-import type { PermissionService } from '../permissions/service.js';
+import { NOT_FOLLOWED, type PermissionService } from '../permissions/service.js';
+import { followedHostOrigin } from '../runs/origin.js';
 import type { SessionSearch, SessionSearchResult } from '../sessions/service.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { readModelSettingsState, resolveModel, saveModelSettings } from '../models/settings.js';
@@ -46,6 +47,8 @@ export interface TowerServices {
   permissions?: PermissionService;
   /** What this computer keeps from controlling computers, with these folders' real locations resolved again now. */
   remote?: (paths: string[]) => Promise<RemoteScope>;
+  /** The controlling Tower this computer follows now ("호스트 설정 따르기"), read again on each call. */
+  followedHost?: () => Promise<string | undefined>;
 }
 /** What this computer holds, read at once, so the look taken after judges exactly what an answer shows. */
 interface Held { kept: KeptTriggers; sessions: Session[] }
@@ -55,6 +58,19 @@ interface Held { kept: KeptTriggers; sessions: Session[] }
  * trigger limits, HTTP tests and GitHub replies stay with this computer's own Tower.
  */
 const REMOTE_OPERATIONS: ReadonlySet<string> = new Set([...REMOTE_PAGE_OPERATIONS, 'sessions.list', 'sessions.read', 'sessions.search', 'projects.list', 'runs.list', 'autoPrompt.submit', 'autoPrompt.get', 'models.get']);
+const OPERATION_NAMES = Object.keys(OPERATIONS) as OperationName[];
+
+/**
+ * How a caller reaches an operation here: as this computer's own (`local`), within what this computer shares with the
+ * controlling computer that started it (`shared`), or not at all. The Tower this computer follows reaches the
+ * permission operations as its own owner; everything else it does stays shared (design §3.1). The one rule for
+ * admission, answers and the tools agents are shown.
+ */
+export function operationReach(name: OperationName, actor: Pick<TriggerActor, 'controllerId'>, followedHost: string | undefined): 'local' | 'shared' | undefined {
+  if (!actor.controllerId) return 'local';
+  if (FOLLOWED_OPERATIONS.has(name) && followedHostOrigin(actor, followedHost)) return 'local';
+  return REMOTE_OPERATIONS.has(name) ? 'shared' : undefined;
+}
 interface RequestRecord { at: number; fingerprint: string; status: 'pending' | 'done'; result?: unknown }
 
 /**
@@ -76,16 +92,29 @@ export class TowerApi {
    * first result; a call whose outcome was not recorded is reported as uncertain rather than repeated.
    */
   async call(name: unknown, input: unknown, actor: TriggerActor, requestKey?: string, context?: CallContext): Promise<unknown> {
-    const answer = await this.answer(name, input, actor, requestKey, context);
+    if (!isOperationName(name)) throw failure('Unknown Tower operation.', 'not-found');
+    const reach = operationReach(name, actor, await this.followed(actor));
+    const answer = await this.answer(name, input, actor, reach, requestKey, context);
     // A controlling computer's answer is judged by what this computer shares now, a retry's recorded answer too.
-    return actor.controllerId && isOperationName(name) ? this.shown(name, OPERATIONS[name].input.parse(input ?? {}) as Record<string, any>, answer, actor) : answer;
+    return reach === 'shared' ? this.shown(name, OPERATIONS[name].input.parse(input ?? {}) as Record<string, any>, answer, actor) : answer;
   }
 
-  private async answer(name: unknown, input: unknown, actor: TriggerActor, requestKey?: string, context?: CallContext): Promise<unknown> {
-    if (!isOperationName(name)) throw failure('Unknown Tower operation.', 'not-found');
+  /** The operations an agent's tools offer to a turn started by `actor`'s computer; undefined when it is this one. */
+  async toolOperations(actor: Pick<TriggerActor, 'controllerId'>): Promise<ReadonlySet<string> | undefined> {
+    if (!actor.controllerId) return undefined;
+    const followed = await this.followed(actor);
+    return new Set(OPERATION_NAMES.filter(name => operationReach(name, actor, followed)));
+  }
+
+  /** Which controlling Tower this computer follows, asked only for a controlling computer's call. */
+  private async followed(actor: Pick<TriggerActor, 'controllerId'>): Promise<string | undefined> {
+    return actor.controllerId ? this.services.followedHost?.() : undefined;
+  }
+
+  private async answer(name: OperationName, input: unknown, actor: TriggerActor, reach: 'local' | 'shared' | undefined, requestKey?: string, context?: CallContext): Promise<unknown> {
     const operation = OPERATIONS[name];
     if ('ownerOnly' in operation && operation.ownerOnly && actor.kind !== 'owner') throw failure('Only the owner can do this in Tower.', 'forbidden');
-    if (actor.controllerId && !REMOTE_OPERATIONS.has(name)) throw failure('This is done in Tower on that computer itself.', 'forbidden');
+    if (!reach) throw failure(FOLLOWED_OPERATIONS.has(name) ? NOT_FOLLOWED : 'This is done in Tower on that computer itself.', 'forbidden');
     if (actor.kind === 'agent' && !('agent' in operation && operation.agent)) throw failure('Agents cannot use this Tower operation.', 'forbidden');
     // The authenticated master also has run-scoped Tower MCP tools, outside its page-tool adapter.
     if (name === 'autoPrompt.submit' && actor.kind === 'agent' && !actor.controllerId && actor.runId && actor.sessionId
@@ -94,7 +123,7 @@ export class TowerApi {
     const parsed = operation.input.safeParse(input ?? {});
     if (!parsed.success) throw failure(`Invalid request: ${parsed.error.issues.map(issue => `${issue.path.join('.') || 'input'}: ${issue.message}`).join('; ')}`, 'invalid');
     // Changes from agents, and from controlling computers, are made once per request.
-    if ((actor.kind !== 'agent' && !actor.controllerId) || !operation.write) return this.perform(name, parsed.data as Record<string, any>, actor, context);
+    if ((actor.kind !== 'agent' && !actor.controllerId) || !operation.write) return this.perform(name, parsed.data as Record<string, any>, actor, reach, context);
     // An Auto Prompt request is known by its requestId everywhere; other changes by the calling run's requestKey.
     const keyField = 'keyField' in operation ? operation.keyField : undefined;
     const ownKey = keyField ? (parsed.data as Record<string, string>)[keyField] : requestKey;
@@ -124,7 +153,7 @@ export class TowerApi {
     let result: unknown;
     // Operations fail before changing anything (validation, a refused save), so a failure frees the key, unless
     // the failure says something may already have happened outside Tower (a sent POST): then the key stays taken.
-    try { result = await this.perform(name, parsed.data as Record<string, any>, actor, context); }
+    try { result = await this.perform(name, parsed.data as Record<string, any>, actor, reach, context); }
     catch (error) {
       if (!(error as { uncertain?: boolean }).uncertain && (error as { disposition?: string }).disposition !== 'uncertain') { requests.delete(key); await this.save().catch(() => {}); }
       throw error;
@@ -154,8 +183,8 @@ export class TowerApi {
     return new RemoteView(await remote(paths), sessions, kept);
   }
 
-  private async perform(name: OperationName, value: Record<string, any>, actor: TriggerActor, context?: CallContext): Promise<unknown> {
-    if (!actor.controllerId) return this.performLocal(name, value, actor, undefined, context);
+  private async perform(name: OperationName, value: Record<string, any>, actor: TriggerActor, reach: 'local' | 'shared', context?: CallContext): Promise<unknown> {
+    if (reach === 'local') return this.performLocal(name, value, actor, undefined, context);
     // What a controlling computer reads is gathered when it is answered, after the latest look (see `shown`).
     if (!OPERATIONS[name].write) return undefined;
     if (!name.startsWith('triggers.')) return this.performLocal(name, value, actor, undefined, context);

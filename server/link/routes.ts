@@ -5,6 +5,7 @@ import type { ControllerLinks } from './controller.js';
 import type { NodeLinks } from './node.js';
 import type { LinkIdentity } from './identity.js';
 import type { RemoteAudit } from '../remote/audit.js';
+import type { ManagedSettingsSync } from './managed-settings.js';
 
 export interface LinkRoutes {
   identity: LinkIdentity;
@@ -16,7 +17,14 @@ export interface LinkRoutes {
   changes?: RemoteAudit;
   /** Conversations' titles here now, by id. */
   sessionNames?: () => Map<string, string>;
+  /** What this Tower keeps on the computers that follow it, and asks of them. */
+  managed?: ManagedSettingsSync;
+  /** Work a new clone on a following computer waits for before it is answered (its project's secrets). */
+  afterClone?: (nodeId: string) => Promise<void>;
 }
+
+/** A clone runs on the other computer until git gives up (10 minutes); its answer may take a little longer to come back. */
+const CLONE_MS = 11 * 60_000;
 
 /**
  * This Tower's own pages manage its links: the computers it controls, the ones that control it, and the
@@ -65,7 +73,29 @@ export async function handleLinkRoute(req: IncomingMessage, res: ServerResponse,
     await links.node.join(body.code);
     json(res, 200, overview()); return true;
   }
-  const node = path.match(/^\/api\/link\/nodes\/([a-f0-9]{32})(\/remove|\/update)?$/);
+  // A computer that follows this Tower clones a repository into a new folder, or makes its Workspace folder a project
+  // (for a terminal there), when asked from here.
+  const action = path.match(/^\/api\/link\/nodes\/([a-f0-9]{32})\/(clone|workspace)$/);
+  if (action) {
+    if (!links.managed) { json(res, 503, { error: '이 Tower는 다른 컴퓨터에 설정을 보낼 수 없습니다.' }); return true; }
+    if (action[2] === 'clone' ? !only('url') || typeof body.url !== 'string' : !only()) { json(res, 400, { error: action[2] === 'clone' ? '저장소 주소를 입력하세요.' : '요청 본문은 비워 두세요.' }); return true; }
+    const answer = await links.managed.request(action[1], action[2], body, action[2] === 'clone' ? CLONE_MS : 30_000);
+    await links.managed.refreshFolders(action[1]);
+    // A new clone takes the skills of its repository before the owner starts work in it.
+    if (action[2] === 'clone') {
+      await links.managed.resend(action[1]);
+      // best-effort: secrets shared with this repository's folder here reach the clone before work starts there; one
+      // that does not is shared on the next folder report, and a use before that is told why and offered for sharing.
+      await links.afterClone?.(action[1]).catch(error => console.warn(`A clone's folder was not shared its project secrets: ${error instanceof Error ? error.message : String(error)}`));
+    }
+    json(res, 200, answer); return true;
+  }
+  const node = path.match(/^\/api\/link\/nodes\/([a-f0-9]{32})(\/remove|\/update|\/follow)?$/);
+  if (node?.[2] === '/follow') {
+    if (!only('follow') || typeof body.follow !== 'boolean') { json(res, 400, { error: '호스트 설정 따르기 값이 올바르지 않습니다.' }); return true; }
+    await links.controller.setFollowHost(node[1], body.follow);
+    json(res, 200, overview()); return true;
+  }
   if (node) {
     if (node[2] && !only()) { json(res, 400, { error: '요청 본문은 비워 두세요.' }); return true; }
     if (node[2] === '/remove') await links.controller.remove(node[1]);

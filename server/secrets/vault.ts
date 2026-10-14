@@ -14,7 +14,12 @@ const MAX_TOWER_WRAPPERS = 2;
  * (`salt`/`wrappedKey`) stays the recovery password.
  */
 interface TowerWrapper { credentialId: string; salt: string; wrappedKey: Ciphertext }
-interface Envelope { format: 1; vaultId: string; kdf: typeof KDF; salt: string; wrappedKey: Ciphertext; payload: Ciphertext; tower?: { wrappers: TowerWrapper[] } }
+/**
+ * The vault key wrapped by this computer's machine key (`machine-key.ts`), which opens the vault of a computer that
+ * follows a host without a password. `keyId` names the machine key it was made with; the AAD binds it.
+ */
+interface MachineWrapper { keyId: string; wrappedKey: Ciphertext }
+interface Envelope { format: 1; vaultId: string; kdf: typeof KDF; salt: string; wrappedKey: Ciphertext; payload: Ciphertext; tower?: { wrappers: TowerWrapper[] }; machine?: MachineWrapper }
 const isCredentialId = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const isCiphertext = (value: unknown): value is Ciphertext => !!value && typeof value === 'object' && ['nonce', 'ciphertext', 'tag'].every(name => typeof (value as Record<string, unknown>)[name] === 'string');
 /** The envelope's Tower password wrappers; undefined when the field is malformed. */
@@ -24,6 +29,24 @@ function towerWrappers(tower: unknown): TowerWrapper[] | undefined {
   if (!Array.isArray(wrappers) || wrappers.length > MAX_TOWER_WRAPPERS || new Set(wrappers.map(item => item?.credentialId)).size !== wrappers.length) return undefined;
   return wrappers.every(item => isCredentialId(item?.credentialId) && typeof item.salt === 'string' && isCiphertext(item.wrappedKey)) ? wrappers : undefined;
 }
+/** The machine wrapper; undefined when absent or malformed. */
+function machineWrapper(machine: unknown): MachineWrapper | undefined {
+  const value = machine as Partial<MachineWrapper> | undefined;
+  return value && typeof value === 'object' && typeof value.keyId === 'string' && /^[a-f0-9]{64}$/.test(value.keyId) && isCiphertext(value.wrappedKey) ? value as MachineWrapper : undefined;
+}
+/** A vault file to import, checked for its format. */
+function importEnvelope(bytes: Buffer): Envelope {
+  if (bytes.length > MAX_FILE) throw new Error('Import size limit');
+  const envelope = JSON.parse(bytes.toString()) as Envelope;
+  if (envelope.format !== 1 || !/^[a-f0-9-]{36}$/.test(envelope.vaultId) || JSON.stringify(envelope.kdf) !== JSON.stringify(KDF)) throw new Error('Unsupported import format');
+  return envelope;
+}
+/** Whether a vault file has a machine wrapper made with this key, without opening it. */
+export function importOpensWith(bytes: Buffer, machineKey: Buffer): boolean {
+  try { return machineWrapper(importEnvelope(bytes).machine)?.keyId === machineKeyId(machineKey); } catch { return false; } // best-effort: a file that is not a vault opens with nothing
+}
+/** Names a machine key without revealing it. */
+export const machineKeyId = (key: Buffer) => createHash('sha256').update('tower-machine-key:1:').update(key).digest('hex');
 export class SecretVault {
   readonly directory: string; vaultId = ''; private envelope?: Envelope; private key?: Buffer; private generation = randomUUID();
   /** Plaintext policy index (names, references, rules; no values) of the last unlocked save. */
@@ -102,6 +125,23 @@ export class SecretVault {
     const salt = randomBytes(16).toString('base64'); const derived = await passwordKey(password, salt);
     try { if (!this.key) throw new Error('Vault locked'); await this.writeTower([...others, { credentialId, salt, wrappedKey: encrypt(derived, this.key, this.towerAad(credentialId)) }]); } finally { derived.fill(0); }
   }
+  private machineAad(keyId: string) { return this.aad(`machine-key:${keyId}`); }
+  /** Whether the vault has a machine wrapper made with this machine key. */
+  hasMachine(key: Buffer): boolean { return machineWrapper(this.envelope?.machine)?.keyId === machineKeyId(key); }
+  /** Opens with the machine wrapper of this machine key, returning the payload. */
+  unlockMachine(key: Buffer): unknown {
+    if (!this.envelope) throw new Error('Vault not initialized'); const wrapper = machineWrapper(this.envelope.machine); const keyId = machineKeyId(key);
+    if (!wrapper || wrapper.keyId !== keyId || key.length !== 32) throw new Error('Cannot unlock vault');
+    let opened: Buffer | undefined;
+    try { opened = decrypt(key, wrapper.wrappedKey, this.machineAad(keyId)); return this.open(opened); } catch { opened?.fill(0); throw new Error('Cannot unlock vault'); }
+  }
+  /** Adds, or replaces, the machine wrapper around the open key. */
+  async machineWrap(key: Buffer) {
+    if (!this.key || !this.envelope) throw new Error('Vault locked'); if (key.length !== 32) throw new Error('Invalid machine key');
+    const keyId = machineKeyId(key);
+    const envelope: Envelope = { ...this.envelope, machine: { keyId, wrappedKey: encrypt(key, this.key, this.machineAad(keyId)) } };
+    await this.write('vault.json', Buffer.from(JSON.stringify(envelope))); this.envelope = envelope;
+  }
   /** Removes every Tower password wrapper but the one of `credentialId`; needs no key. */
   async towerPrune(credentialId: string) {
     if (!this.envelope) throw new Error('Vault not initialized');
@@ -130,11 +170,17 @@ export class SecretVault {
     try { const envelope = { ...this.envelope, salt, wrappedKey: encrypt(wrapper, this.key, this.aad('key')) }; await this.write('vault.json', Buffer.from(JSON.stringify(envelope))); this.envelope = envelope; } finally { wrapper.fill(0); }
   }
   async decryptImport(bytes: Buffer, password: string): Promise<unknown> {
-    if (bytes.length > MAX_FILE) throw new Error('Import size limit');
-    const envelope = JSON.parse(bytes.toString()) as Envelope;
-    if (envelope.format !== 1 || !/^[a-f0-9-]{36}$/.test(envelope.vaultId) || JSON.stringify(envelope.kdf) !== JSON.stringify(KDF)) throw new Error('Unsupported import format');
+    const envelope = importEnvelope(bytes);
     const wrapper = await passwordKey(password, envelope.salt); let key: Buffer | undefined;
     try { key = decrypt(wrapper, envelope.wrappedKey, `tower-secrets:1:${envelope.vaultId}:key`); return JSON.parse(decrypt(key, envelope.payload, `tower-secrets:1:${envelope.vaultId}:permanent`).toString()); } finally { wrapper.fill(0); key?.fill(0); }
+  }
+  /** Another computer's vault file opened with its machine key (a backup carries it for a vault that key opens). */
+  decryptImportWithMachineKey(bytes: Buffer, machineKey: Buffer): unknown {
+    const envelope = importEnvelope(bytes); const wrapper = machineWrapper(envelope.machine); const keyId = machineKeyId(machineKey);
+    if (!wrapper || wrapper.keyId !== keyId || machineKey.length !== 32) throw new Error('Cannot unlock vault');
+    let key: Buffer | undefined;
+    try { key = decrypt(machineKey, wrapper.wrappedKey, `tower-secrets:1:${envelope.vaultId}:machine-key:${keyId}`); return JSON.parse(decrypt(key, envelope.payload, `tower-secrets:1:${envelope.vaultId}:permanent`).toString()); }
+    catch { throw new Error('Cannot unlock vault'); } finally { key?.fill(0); }
   }
   private validatePassword(password: string) { if (typeof password !== 'string' || password.length < MIN_VAULT_PASSWORD || Buffer.byteLength(password) > 1024) throw new Error('Password must contain at least 12 characters'); }
 }

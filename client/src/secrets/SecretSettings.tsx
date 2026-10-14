@@ -74,7 +74,7 @@ export function SecretSettingsWorkspace({ view, canvas, computers = [], busy, ch
   // Keyed by revision: after a conflicting save the editor starts again from what is stored now.
   if (editor?.type === 'sharing' && item) return <SecretSharingEditor key={`${item.id}:${item.sharing?.revision ?? 'legacy'}`} view={view} item={item} canvas={canvas} busy={busy} change={change} onClose={closeEditor} />;
   if (editor?.type === 'trust') return <SecretTrustEditor device={view.device} computers={computers} busy={busy} change={change} onClose={closeEditor} />;
-  if (editor?.type === 'import') return <SecretPendingImport ids={view.status.pendingImportIds || []} busy={busy} change={change} onClose={closeEditor} />;
+  if (editor?.type === 'import') return <SecretPendingImport ids={view.status.pendingImportIds || []} keyed={view.status.pendingImportsKeyed} busy={busy} change={change} onClose={closeEditor} />;
   if (editor?.type === 'password') return <SecretPassword busy={busy} change={change} onClose={closeEditor} />;
   const editing = slot?.edit && slot.value && view.valueView ? view.secrets.find(secret => secret.id === slot.id && secret.version === slot.value?.version) : undefined;
   if (editing && slot?.value) return <SecretValueForm key={`${editing.id}:${editing.version}`} secret={editing} value={slot.value} busy={busy} change={change} onClose={values.close} />;
