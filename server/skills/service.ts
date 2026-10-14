@@ -14,10 +14,10 @@ import type { AutoPromptModelRequest } from '../auto-prompt/native.js';
 import { SkillAdvisor } from './advisor.js';
 import { DEFAULT_SKILLS } from './defaults.js';
 import { SkillError, SkillFiles, type SkillHomes } from './files.js';
-import { SkillStateStore, type SkillTargetRecord } from './state.js';
+import { SkillStateStore, type MadeDefault, type SkillTargetRecord } from './state.js';
 import { ClosedSessionStore } from '../stores/closed-sessions.js';
 import type { SkillBackup } from './backup.js';
-import { defaultContent, defaultFiles, ManagedSkillList, parseManagedApply, sameFiles, type ManagedSkill, type ManagedSkills } from './managed.js';
+import { defaultContent, defaultFiles, filesDigest, ManagedSkillList, parseManagedApply, sameFiles, type ManagedSkill, type ManagedSkills } from './managed.js';
 import { remoteUrlOf } from '../repositories/remote-url.js';
 
 export interface SkillServiceOptions {
@@ -111,7 +111,12 @@ export class SkillService {
           made = false;
         }
       }
-      await this.state.update(state => { if (!state.seeded.includes(skill.name)) state.seeded.push(skill.name); });
+      // Only one Tower made itself is recorded as made, as it was then (see madeDefaults).
+      const record = made ? await this.madeDefault(skill.name) : undefined;
+      await this.state.update(state => {
+        if (!state.seeded.includes(skill.name)) state.seeded.push(skill.name);
+        if (record) state.madeDefaults = [...state.madeDefaults.filter(item => item.name !== skill.name), record];
+      });
       if (made) this.options.onChange?.();
     }
   }
@@ -493,6 +498,8 @@ export class SkillService {
 
   /** Removes a skill: a Tower skill loses its links in every project it applied to first, then its record and pin. */
   private async delete(skill: Skill, cwd: string | undefined): Promise<void> {
+    // A default made again in its place later is another skill: what Tower made is gone with this one.
+    if (this.state.get().madeDefaults.some(item => item.dir === skill.dir)) await this.state.update(state => { state.madeDefaults = state.madeDefaults.filter(item => item.dir !== skill.dir); });
     const before = skill.managed ? this.record(skill.dir) : undefined;
     if (before) await this.apply(skill.dir, { all: false, projects: [] }, false);
     // A skill that could not be removed applies where it did again.
@@ -649,7 +656,7 @@ export class SkillService {
     return this.exclusive(async () => {
       const dirs: string[] = [], defaults: string[] = [];
       for (const skill of await this.files.managed()) {
-        if (await this.untouchedDefault(skill.dir, basename(skill.dir))) defaults.push(basename(skill.dir));
+        if (await this.asSeeded(skill.dir, basename(skill.dir))) defaults.push(basename(skill.dir));
         else dirs.push(skill.dir);
       }
       const bundle = await this.exportBundle({ dirs });
@@ -743,14 +750,34 @@ export class SkillService {
 
 
   /**
-   * A default skill Tower seeded here (its seeding record) and nobody has touched since: its text as Tower wrote it,
-   * applying everywhere as it was made, not pinned.
+   * A default skill kept as Tower seeds it: its text as Tower writes it, applying everywhere, not pinned. Every Tower
+   * seeds the same, so the followed Tower does not send one (only its name).
    */
-  private async untouchedDefault(dir: string, name: string): Promise<boolean> {
-    if (!this.state.get().seeded.includes(name) || dir !== await this.files.towerDir(name)) return false;
+  private async asSeeded(dir: string, name: string): Promise<boolean> {
+    if (dir !== await this.files.towerDir(name)) return false;
     const record = this.record(dir);
     if (!record?.all || record.projects.length || (await this.pinned()).has(dir)) return false;
     return defaultContent(dir, name);
+  }
+
+  /**
+   * A default skill Tower itself made here and nobody has touched since: kept as seeded, in the very folder Tower
+   * made (`madeDefaults`), its files unchanged. Content alone never proves it: an owner's skill may read the same.
+   */
+  private async untouchedDefault(dir: string, name: string): Promise<boolean> {
+    const made = this.state.get().madeDefaults.find(item => item.name === name && item.dir === dir);
+    if (!made || !await this.asSeeded(dir, name)) return false;
+    // best-effort: a folder that cannot be read is not proven Tower's.
+    const info = await stat(dir).catch(() => undefined);
+    return info?.ino === made.ino && await filesDigest(dir) === made.digest;
+  }
+
+  /** What Tower made just now for a default skill, to know it later (`untouchedDefault`). */
+  private async madeDefault(name: string): Promise<MadeDefault | undefined> {
+    const dir = await this.files.towerDir(name);
+    // best-effort: a default whose folder cannot be read now is simply not recorded, and never given away.
+    const [info, digest] = await Promise.all([stat(dir).catch(() => undefined), filesDigest(dir)]);
+    return info && digest ? { name, dir, ino: info.ino, digest } : undefined;
   }
 
   /** Puts a default skill back as Tower seeds it: its text, applying everywhere, not pinned. */
@@ -760,6 +787,9 @@ export class SkillService {
     if (!await defaultContent(skill.dir, name)) await this.files.install({ name, description: '', scope: 'global', pinned: false, files }, undefined, true, false);
     await this.apply(skill.dir, { all: true, projects: [] });
     await this.pin(skill, false);
+    // Tower made it again as it seeds it: it may give way again, like the one it seeded.
+    const made = await this.madeDefault(name);
+    if (made) await this.state.update(state => { state.madeDefaults = [...state.madeDefaults.filter(item => item.name !== name), made]; });
   }
 
   /** What importing a backup would do here, item by item, before anything is written. */

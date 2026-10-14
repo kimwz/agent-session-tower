@@ -180,6 +180,33 @@ test('Tower\'s seeded defaults: an untouched one is not sent, a changed one repl
   assert.ok(await defaultOf(to), 'never the host\'s now, so the host deleting its own leaves it');
 });
 
+test('a node skill reading like a default is taken over only when Tower made it there and it is untouched', async t => {
+  const host = await computer(t, 'host'), before = await computer(t, 'before'), remade = await computer(t, 'remade');
+  const from = await service(host, [], true);
+  const issue = (await from.overview()).stored!.find(skill => skill.name === ISSUE_SKILL)!;
+  await from.mutate('save', { dir: issue.dir, revision: issue.revision, scope: 'global', name: ISSUE_SKILL, description: issue.description, body: 'The owner\'s own way.' });
+  const changed = await from.exportManaged();
+  const text = DEFAULT_SKILLS.find(skill => skill.name === ISSUE_SKILL)!;
+
+  // The owner made a skill of that name, reading exactly like the default, before Tower would have seeded it.
+  const owner = await service(before, []);
+  await owner.mutate('save', { scope: 'global', name: ISSUE_SKILL, description: text.description, body: text.body });
+  const seededLater = await service(before, [], true);
+  await assert.rejects(seededLater.applyManaged(relay(changed)), new RegExp(`${ISSUE_SKILL}: 이 컴퓨터에 같은 이름의`));
+  const kept = (await seededLater.overview()).stored!.find(skill => skill.name === ISSUE_SKILL)!;
+  assert.doesNotMatch(await readFile(join(kept.dir, 'SKILL.md'), 'utf8'), /The owner's own way/);
+  await from.mutate('delete', { dir: issue.dir });
+  await seededLater.applyManaged(relay(await from.exportManaged())).catch(() => {});
+  assert.ok((await seededLater.overview()).stored!.some(skill => skill.name === ISSUE_SKILL), 'never the host\'s, so never removed');
+
+  // Tower made it, then the owner removed it and made one reading the same: another skill, the owner's.
+  const node = await service(remade, [], true);
+  const seeded = (await node.overview()).stored!.find(skill => skill.name === ISSUE_SKILL)!;
+  await node.mutate('delete', { dir: seeded.dir });
+  await node.mutate('save', { scope: 'global', name: ISSUE_SKILL, description: text.description, body: text.body });
+  await assert.rejects(node.applyManaged(relay(changed)), new RegExp(`${ISSUE_SKILL}: 이 컴퓨터에 같은 이름의`));
+});
+
 test('what the host sends is checked before use: names, file paths and repository addresses', () => {
   const file = { path: 'SKILL.md', mode: 0o644, base64: Buffer.from('---\nname: x\n---\n').toString('base64') };
   assert.throws(() => parseManagedSkills({ skills: [{ name: '../x', pinned: false, files: [file], targets: { all: true, repositories: [] } }], guidance: '' }));

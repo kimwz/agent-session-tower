@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
 import type { SkillBundleFile } from '../../shared/skills.js';
 import { MAX_SKILL_TARGETS, SKILL_BUNDLE_FORMAT, SKILL_NAME } from '../../shared/skills.js';
@@ -86,12 +87,21 @@ export class ManagedSkillList {
   async write(dirs: string[]): Promise<void> { await writePrivateJson(this.path, `${JSON.stringify({ dirs }, null, 2)}\n`); }
 }
 
-/** Whether a skill folder holds exactly these files: the same paths, contents and executable bits. */
+/** What makes two skill folders the same: their paths, contents and executable bits. */
+const filesKey = (list: SkillBundleFile[]) => JSON.stringify(list.map(file => [file.path, file.base64, file.mode & 0o100]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
+
+/** Whether a skill folder holds exactly these files. */
 export async function sameFiles(dir: string, files: SkillBundleFile[]): Promise<boolean> {
   // best-effort: a folder that cannot be read (or holds a link) is not the same, and is written again.
   const current = await bundleFiles(dir).catch(() => undefined);
-  const key = (list: SkillBundleFile[]) => JSON.stringify(list.map(file => [file.path, file.base64, file.mode & 0o100]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
-  return Boolean(current) && key(current!) === key(files);
+  return Boolean(current) && filesKey(current!) === filesKey(files);
+}
+
+/** A digest of a skill folder's files; undefined when it cannot be read. */
+export async function filesDigest(dir: string): Promise<string | undefined> {
+  // best-effort: a folder that cannot be read has no digest, and so matches none.
+  const current = await bundleFiles(dir).catch(() => undefined);
+  return current && createHash('sha256').update(filesKey(current)).digest('hex');
 }
 
 /** A default skill's files exactly as Tower writes them when it seeds one (`SkillService.seed`, through SkillFiles). */
