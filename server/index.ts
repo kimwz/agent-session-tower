@@ -64,6 +64,10 @@ import type { Backend } from './http/server.js';
 import { loadLinkIdentity } from './link/identity.js';
 import { ControllerLinks } from './link/controller.js';
 import { NodeLinks } from './link/node.js';
+import { FollowedHostStore } from './link/follow.js';
+import { ManagedSettingsReceiver, ManagedSettingsSync } from './link/managed-settings.js';
+import { remoteUrlOf } from './repositories/remote-url.js';
+import type { ManagedFolder } from '../shared/managed.js';
 import { runLinkCommand } from './link/cli.js';
 import { runModelsCommand } from './models/cli.js';
 import { RemoteNodes } from './link/nodes.js';
@@ -550,12 +554,35 @@ async function main() {
   const remoteChanges = new RemoteAudit(stateDir, { name: id => controllerName(id) });
   await remoteChanges.start();
   const remoteRouter = createRemoteRouter({ attachmentStores, attachmentUploads, backend, exclusions, terminals: workspaceTerminals, audit: remoteChanges });
-  const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname, published: releasePublished });
-  const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
+  // "호스트 설정 따르기": which controlling Tower this computer follows (the worker reads the same file), what it
+  // applies from that one, and, as a controller, what it keeps on the computers that follow it.
+  const followedHost = new FollowedHostStore(stateDir);
+  await followedHost.start();
+  const folderRemotes = new Map<string, { at: number; url?: string }>();
+  const managedFolders = async (): Promise<ManagedFolder[]> => {
+    const cwds = [...new Set([...groups.list().map(group => group.cwd), ...runs.sessionList().map(session => session.cwd)].filter((cwd): cwd is string => Boolean(cwd)))].slice(0, 300);
+    const folders: ManagedFolder[] = [];
+    for (const cwd of cwds) {
+      if (await exclusions.excludesNow(cwd)) continue;
+      const known = folderRemotes.get(cwd);
+      const url = known && Date.now() - known.at < 10 * 60_000 ? known.url : await remoteUrlOf(cwd);
+      folderRemotes.set(cwd, { at: known && Date.now() - known.at < 10 * 60_000 ? known.at : Date.now(), ...(url ? { url } : {}) });
+      folders.push({ cwd, ...(url ? { remoteUrl: url } : {}) });
+    }
+    return folders;
+  };
+  const managedReceiver = new ManagedSettingsReceiver({ stateDir, follow: followedHost, folders: managedFolders });
+  await managedReceiver.start();
+  let managedSync: ManagedSettingsSync | undefined;
+  const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname, published: releasePublished, managed: id => managedSync?.status(id) });
+  if (controllerLinks) { managedSync = new ManagedSettingsSync({ controller: controllerLinks }); managedSync.on('change', () => changed()); }
+  // Sections register their export (managedSync) and apply (managedReceiver) here, beside their owning modules.
+  const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname, follow: followedHost,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
     // and updating do not.
-    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : []), ...(runs.supports('secrets') ? ['secrets'] : []), ...(runs.supports('secretSharing') ? [SECRET_SHARING_FEATURE] : []), ...(runs.supports('secretExclusions') ? [SECRET_EXCLUSIONS_FEATURE] : []), ...(runs.supports('compaction') ? ['compaction'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
+    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : []), ...(runs.supports('secrets') ? ['secrets'] : []), ...(runs.supports('secretSharing') ? [SECRET_SHARING_FEATURE] : []), ...(runs.supports('secretExclusions') ? [SECRET_EXCLUSIONS_FEATURE] : []), ...(runs.supports('compaction') ? ['compaction'] : []), 'followHost', ...(runs.supports('managedSettings') ? ['managedSettings'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
     handle: async (req, res, principal) => {
+      if (await managedReceiver.handle(req, res, principal)) return;
       if (await handleSecretLink(req, res, principal.controllerId, runs, { excluded: path => exclusions.excludesNow(path) })) return;
       return remoteRouter.handle(req, res, principal);
     },
@@ -743,6 +770,7 @@ async function main() {
   if (publicListener.status().listening) console.log(`  Public agent pages: http://127.0.0.1:${publicListener.status().port}${publicListener.status().publicUrl ? ` (${publicListener.status().publicUrl})` : ''}\n`);
   // Links come up after the web server, so a joining computer never reaches a half-started Tower.
   await Promise.all([controllerLinks?.start(), nodeLinks?.start()]).catch(error => console.error(`Remote computers are unavailable: ${error instanceof Error ? error.message : String(error)}`));
+  managedSync?.start();
   const shutdown = async () => {
     if (closing) return;
     closing = true;
@@ -752,6 +780,7 @@ async function main() {
     towerUpdates.stop();
     backups.close();
     remoteNodes?.close();
+    managedSync?.close();
     secretRelay?.close();
     const stoppingLinks = Promise.all([nodeLinks?.close(), controllerLinks?.close()]).then(() => { remoteRouter.dispose(); return nodeViews.flush(); });
     const stoppingCapabilities = capabilities.stop();

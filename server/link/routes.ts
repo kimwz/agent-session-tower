@@ -65,7 +65,12 @@ export async function handleLinkRoute(req: IncomingMessage, res: ServerResponse,
     await links.node.join(body.code);
     json(res, 200, overview()); return true;
   }
-  const node = path.match(/^\/api\/link\/nodes\/([a-f0-9]{32})(\/remove|\/update)?$/);
+  const node = path.match(/^\/api\/link\/nodes\/([a-f0-9]{32})(\/remove|\/update|\/follow)?$/);
+  if (node?.[2] === '/follow') {
+    if (!only('follow') || typeof body.follow !== 'boolean') { json(res, 400, { error: '호스트 설정 따르기 값이 올바르지 않습니다.' }); return true; }
+    await links.controller.setFollowHost(node[1], body.follow);
+    json(res, 200, overview()); return true;
+  }
   if (node) {
     if (node[2] && !only()) { json(res, 400, { error: '요청 본문은 비워 두세요.' }); return true; }
     if (node[2] === '/remove') await links.controller.remove(node[1]);

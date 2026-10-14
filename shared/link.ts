@@ -1,3 +1,4 @@
+import type { ManagedSyncStatus } from './managed.js';
 /** What this browser sees about remote links. Only this computer's own browser receives it. */
 export interface LinkAddress { url: string; kind: 'custom' | 'tailscale' | 'local-name' | 'lan' }
 export interface HubStatus { enabled: boolean; port: number; listening: boolean; error?: string; addresses: LinkAddress[] }
@@ -68,12 +69,20 @@ export interface NodeSummary {
   report?: NodeReport;
   /** When this Tower asks it again for its version, after an update to it failed. */
   retryAt?: string;
+  /** The owner wants it to follow this Tower's settings ("호스트 설정 따르기"). */
+  followHost?: boolean;
+  /** It said it follows this Tower, when it last introduced itself. */
+  following?: boolean;
+  /** How far this Tower's settings reached it, while it follows. */
+  managed?: ManagedSyncStatus;
 }
 export type ControllerStatus = 'connected' | 'connecting' | 'offline' | 'expired' | 'refused' | 'removed';
 /** A computer that controls this one. */
 export interface ControllerSummary {
   id: string; name: string; fingerprint: string; state: 'claiming' | 'paired' | 'expired' | 'removed'; status: ControllerStatus;
   pairedAt?: string; lastConnectedAt?: string; error?: string;
+  /** This computer follows that one's settings and treats the work it starts here as the owner's own. */
+  followed?: true;
 }
 export interface LinkOverview {
   identity: { name: string; fingerprint: string; version: string };

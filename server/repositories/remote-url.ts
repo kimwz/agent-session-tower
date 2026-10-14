@@ -1,0 +1,32 @@
+import { gitRunner, type GitRunner } from './git.js';
+
+/**
+ * One name for a repository wherever it is cloned: `host/owner/repo`, the host in lower case, without scheme, user,
+ * port or `.git`. `git@github.com:kimwz/x.git`, `https://github.com/kimwz/x` and `ssh://git@github.com/kimwz/x.git`
+ * are the same. Anything that does not look like a repository address gives undefined.
+ */
+export function normalizeRemoteUrl(url: string): string | undefined {
+  const text = url.trim();
+  if (!text || text.length > 2048) return undefined;
+  let host: string, path: string;
+  const scp = /^(?:[^@/\s]+@)?([^:/\s]+):(?!\/)(.+)$/.exec(text);
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) {
+    let parsed: URL;
+    try { parsed = new URL(text); } catch { return undefined; }
+    if (parsed.protocol === 'file:') return undefined;
+    host = parsed.hostname;
+    path = decodeURIComponent(parsed.pathname);
+  } else if (scp) {
+    host = scp[1]!;
+    path = scp[2]!;
+  } else return undefined;
+  const parts = path.replace(/\.git\/?$/i, '').split('/').filter(Boolean);
+  if (!host || parts.length < 2 || parts.some(part => part === '.' || part === '..')) return undefined;
+  return [host.toLowerCase(), ...parts].join('/');
+}
+
+/** The normalized address of a folder's `origin` remote, or undefined when it has none or git cannot tell. */
+export async function remoteUrlOf(cwd: string, git: GitRunner = gitRunner()): Promise<string | undefined> {
+  const url = await git(cwd, ['config', '--get', 'remote.origin.url'], 5000).catch(() => '');
+  return normalizeRemoteUrl(url);
+}

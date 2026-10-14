@@ -65,6 +65,8 @@ import { relatedSessionNotes } from '../sessions/related.js';
 import { runToolResolver, sessionBrowsers, thisBuild } from '../api/run-tools.js';
 import { browserNote } from '../browser/tools.js';
 import { RemoteExclusionStore } from '../remote/exclusions.js';
+import { FollowedHostStore } from '../link/follow.js';
+import type { ManagedSection } from '../../shared/managed.js';
 import { remoteSessionIds, remoteTriggerLaunch } from '../remote/visibility.js';
 import { RemoteRequestLedger, type RemoteResult } from '../remote/request-ledger.js';
 import { SkillService } from '../skills/service.js';
@@ -167,6 +169,17 @@ export interface RunnerHostOptions {
   ledger?: RemoteRequestLedger;
   /** The remote-sharing exclusion list the web process saves; reloaded with every refresh. */
   exclusions?: RemoteExclusionStore;
+  /**
+   * Settings sections kept in step with the followed Tower ("호스트 설정 따르기", see link/managed-settings.ts): each
+   * owning module exports its section on the controlling Tower and applies it on a computer that follows one.
+   */
+  managed?: ReadonlyMap<ManagedSection, WorkerManagedSection>;
+}
+
+/** One settings section the web relays between Towers; it lives in this worker's stores. */
+export interface WorkerManagedSection {
+  export(): Promise<unknown>;
+  apply(value: unknown, context: { hostId: string }): Promise<void>;
 }
 
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -494,6 +507,14 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'settingsBackup': if (options.settingsBackup) return options.settingsBackup(); break;
       case 'triggersBackup': if (options.triggers) return options.triggers.backup(); break;
       case 'skillsBackup': if (options.skills) return options.skills.backup(); break;
+      case 'managed': {
+        const section = options.managed?.get(args[0] as ManagedSection);
+        if (!section) throw new TowerError('not-found', 'Unknown managed settings section.');
+        if (args[1] === 'export') return section.export();
+        const hostId = record(args[3]).hostId;
+        if (args[1] === 'apply' && typeof hostId === 'string') { await section.apply(args[2], { hostId }); changed(); return { applied: true }; }
+        throw new TowerError('invalid', 'Invalid managed settings request.');
+      }
       case 'publicAgentsOverview': if (options.publicAgents) return options.publicAgents.overview(); break;
       case 'publicAgentsConversation': if (options.publicAgents) return options.publicAgents.conversation(args[0] as string, args[1] as string); break;
       case 'publicAgentsMutate': if (options.publicAgents) return options.publicAgents.mutate(args[0] as string, args[1] as Record<string, unknown>); break;
@@ -1279,6 +1300,11 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // The web process saves the remote-sharing exclusion list; this copy follows it on every refresh.
     const exclusions = new RemoteExclusionStore(stateDir);
     await exclusions.start();
+    // The web saves which controlling Tower this computer follows; decisions that depend on it read it again first.
+    const followedHost = new FollowedHostStore(stateDir);
+    await followedHost.start();
+    /** Each section's owning module registers its export and apply here (see WorkerManagedSection). */
+    const managed = new Map<ManagedSection, WorkerManagedSection>();
     externalIntentHeld=()=>[externalRemote,externalPrompts,externalWorkflows].some(repository=>Boolean(repository.pending()));
     const externalGate=async()=>{ await requireEffects(); for(const repository of [externalRemote,externalPrompts,externalWorkflows]) await repository.gate(); };
     const ledger = new RemoteRequestLedger(stateDir,Date.now,undefined,externalRemote,externalGate);
@@ -1726,7 +1752,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       await requireEffects();
       return settings;
     };
-    const hostOptions: RunnerHostOptions = { settingsBackup, stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, compactions, api, secrets, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce, storage: () => storageStatus, retryStorage: () => retryNormal!(), storageRecovery, storageControl: control, closeStorage, onCloseFailure: () => unavailable(), handoffCarry: () => secrets.handoff(), secretBlocks: () => secrets.blocks(),
+    const hostOptions: RunnerHostOptions = { settingsBackup, stateDir, sessions, runs, closedSessions, retention, retentionUnavailable, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, compactions, api, secrets, capabilities, ledger, exclusions, managed, releaseStateLock: release, handoffNonce, storage: () => storageStatus, retryStorage: () => retryNormal!(), storageRecovery, storageControl: control, closeStorage, onCloseFailure: () => unavailable(), handoffCarry: () => secrets.handoff(), secretBlocks: () => secrets.blocks(),
       onIdle: async () => { clearInterval(releaseTimer); await retention?.service.quiesce(); await temporary.quiesce(); await Promise.all([runs.pauseAttachmentCleanup(), autoPrompts.pauseAttachmentCleanup()]); clearInterval(secretExpiry); secrets.close(); stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await tasks.close(); await compactions.close(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
       inFlight: () => secrets.inFlight() || restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || compactions.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       // A forced update waits only for a compaction creating its session; one still reading or summarizing stops with the worker.

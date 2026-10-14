@@ -23,6 +23,7 @@ import { newerVersion } from '../link/service.js';
 import type { TriggerBackup } from '../triggers/backup.js';
 import type { SkillBackup } from '../skills/backup.js';
 import { TowerError, fromStatus, statusOf, type Disposition } from '../../shared/errors.js';
+import type { ManagedSection } from '../../shared/managed.js';
 import type { StreamSink } from '../streams/sink.js';
 
 interface Options { stateDir: string; workerEntry?: string; startupTimeoutMs?: number; pollMs?: number; version?: string;
@@ -387,6 +388,11 @@ export class DurableRunManager extends EventEmitter {
   async settingsBackup(): Promise<WorkerSqlSettings> {
     if (!this.supports('backup')) throw new TowerError('unavailable', '실행 워커가 아직 SQL 설정 DTO를 제공하지 못합니다.');
     return this.call('settingsBackup', []) as Promise<WorkerSqlSettings>;
+  }
+  /** A settings section kept in step with the followed Tower: exported here on a controller, applied on a follower. */
+  async managedCall(section: ManagedSection, action: 'export' | 'apply', value?: unknown, context?: { hostId: string }): Promise<unknown> {
+    if (!this.supports('managedSettings')) throw new TowerError('unavailable', '실행 워커가 아직 새 버전으로 바뀌지 않아 호스트 설정을 주고받을 수 없습니다.');
+    return this.call('managed', action === 'export' ? [section, action] : [section, action, value, context]);
   }
   async skillsBackup(): Promise<SkillBackup> {
     if (!this.supports('backup')) throw new TowerError('unavailable', '실행 워커가 아직 새 버전으로 바뀌지 않아 백업을 만들 수 없습니다. 진행 중인 작업이 끝나 워커가 바뀌면 다시 시도하세요.');
