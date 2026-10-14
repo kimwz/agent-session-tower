@@ -8,6 +8,7 @@ import { absoluteTime, api, copyText, relativeTime } from '../common/lib';
 import { translateMessage, useI18n } from '../i18n/i18n';
 import { auditActionLabel } from '../triggers/trigger-helpers';
 import { NodeTools } from '../app/AutoUpdate';
+import { NodeReadiness } from './NodeReadiness';
 
 export type RemoteTab = 'nodes' | 'controllers' | 'exclusions';
 const TABS: RemoteTab[] = ['nodes', 'controllers', 'exclusions'];
@@ -164,6 +165,7 @@ function NodeRow({ token, node, version, busy, run }: { token: string; node: Nod
       <small>{status}{node.version ? ` · v${node.version}` : ''}{worker ? ` · ${t('작업 실행기 v{0} (진행 중인 작업이 끝나면 바뀜)', { 0: worker })}` : ''}{terminalHost ? ` · ${t('터미널 호스트 v{0} (열린 터미널이 모두 닫히면 바뀜)', { 0: terminalHost })}` : ''} · {t('지문')} {node.fingerprint}{node.status !== 'connected' && node.lastSeenAt ? ` · ${t('마지막 연결')} ${relativeTime(node.lastSeenAt)}` : ''}{lowDisk ? ` · ${t('디스크 여유 {0}GB', { 0: lowDisk })}` : ''}</small>
       <UpdateLine token={token} node={node} version={version} busy={busy} run={run} />
       <NodeTools autoUpdate={node.report?.autoUpdate} />
+      <NodeReadiness token={token} node={node} busy={busy} run={run} />
     </div>
     {!editing && <button type="button" className="secondary-button" disabled={busy} onClick={() => setEditing(true)}>{t('이름 변경')}</button>}
     <button type="button" className="icon-button" aria-label={t('{0} 연결 해제', { 0: name })} title={t('연결 해제')} disabled={busy}

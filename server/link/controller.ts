@@ -10,13 +10,14 @@ import { displayFingerprint, linkDirectory, linkId, type LinkIdentity } from './
 import { joinCommand, encodeJoinCode, type JoinCode } from './join-code.js';
 import { LINK_PATH, LINK_PROTOCOL, MAX_FRAME_BYTES, REMOVED_CLOSE_CODE, linkRequest, openControllerEnd, pairingProof, proofMatches } from './transport.js';
 import { advertisedAddresses } from './addresses.js';
-import type { AutoUpdateStatus, HubStatus, NodeReport, NodeStatus, NodeSummary, ToolUpdate, UpdateStatus } from '../../shared/link.js';
+import type { AutoUpdateStatus, HubStatus, LoginState, NodeReport, NodeStatus, NodeSummary, ToolUpdate, UpdateStatus } from '../../shared/link.js';
 import { newerVersion } from './service.js';
 import { updateActive } from './update.js';
 import { nextChainStep, chainAsked, type ChainProgress } from './storage-update.js';
 import { failedAgain, parseRetry, retryDue, type RetryRecord } from '../updates/schedule.js';
 import { TowerError } from '../../shared/errors.js';
 import type { ManagedSyncStatus } from '../../shared/managed.js';
+import { parseApplied } from './managed-settings.js';
 
 export const DEFAULT_LINK_PORT = 8765;
 const INVITE_MS = 10 * 60_000;
@@ -625,9 +626,12 @@ function parseReport(value: unknown): NodeReport | undefined {
   const terminalHost = text(report.versions?.terminalHost);
   const update = parseUpdate(report.update);
   const autoUpdate = parseAutoUpdate(report.autoUpdate);
+  const login = (value: unknown): LoginState => value === 'ok' || value === 'missing' ? value : 'unknown';
+  const logins = report.logins && typeof report.logins === 'object' ? { claude: login(report.logins.claude), codex: login(report.logins.codex), gh: login(report.logins.gh) } : undefined;
+  const managed = parseApplied(report.managed);
   return { versions: { web, ...(worker ? { worker } : {}), ...(terminalHost ? { terminalHost } : {}) }, service: report.service, ...(update ? { update } : {}),
     ...(typeof report.diskFree === 'number' && Number.isFinite(report.diskFree) && report.diskFree >= 0 ? { diskFree: report.diskFree } : {}),
-    ...(autoUpdate ? { autoUpdate } : {}) };
+    ...(autoUpdate ? { autoUpdate } : {}), ...(logins ? { logins } : {}), ...(managed ? { managed } : {}) };
 }
 
 function parseHello(value: unknown): Hello | undefined {

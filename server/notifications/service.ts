@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Run, RunApproval, Session } from '../../shared/types.js';
+import type { Run, RunApproval, Session, Snapshot } from '../../shared/types.js';
 import { DEFAULT_NOTIFICATION_EVENTS, type NotificationDevice, type NotificationEvents, type NotificationLanguage, type NotificationOverview, type NotificationPayload } from '../../shared/notifications.js';
 import { TowerError } from '../../shared/errors.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
@@ -27,7 +27,16 @@ export interface NotificationContext {
   attention?(input: TurnAttentionInput, signal: AbortSignal): Promise<TurnAttention | undefined>;
   /** Secret uses the worker's reviewer refused lately; each is announced once, to devices that want to hear what waits on them. */
   secretBlocks?(): readonly SecretBlockNotice[];
+  /**
+   * The joined computers that follow this Tower ("호스트 설정 따르기"), with what they share now, and this Tower's id
+   * there: the work it sent them is announced here, where its devices subscribe.
+   */
+  following?(): { self: string; computers: readonly FollowingComputer[] } | undefined;
+  /** The Tower this computer follows: the work it sent here is announced there, so not here too. */
+  followedHost?(): string | undefined;
 }
+/** A joined computer that follows this Tower, as its link mirrors it. */
+export interface FollowingComputer { id: string; name: string; snapshot: Snapshot }
 interface Device extends NotificationDevice { endpoint: string; keys: PushTarget['keys'] }
 interface Saved { vapid: VapidKeys; devices: Device[]; delivered?: { since: string; keys: string[] } }
 
@@ -103,6 +112,52 @@ export function turnRequest(run: Run, runs: readonly Run[]): string {
   const turns = new Set(chain.map(item => item.id));
   const inserted = runs.filter(item => merged(item) && turns.has(item.steering!.targetRunId)).map(item => item.prompt);
   return [chain[0].prompt, ...inserted].join('\n\n');
+}
+
+const SCOPED = /^@([a-f0-9]{32})\/([\s\S]+)$/;
+const scoped = (computer: string, id: string) => `@${computer}/${id}`;
+
+/**
+ * This Tower's runs and those of the computers that follow it as one view. A computer's runs and sessions take the ids
+ * this Tower's page gives them (`@<computer>/<id>`), so a notification opens them in this page, and its runs never
+ * meet this computer's. Which of them are announced here is `announced`'s to say.
+ */
+export function withFollowing(context: NotificationContext): NotificationContext {
+  if (!context.following) return context;
+  const computers = () => context.following?.()?.computers ?? [];
+  const find = (id: string) => {
+    const match = SCOPED.exec(id);
+    const computer = match && computers().find(item => item.id === match[1]);
+    return computer ? { computer, id: match![2]! } : undefined;
+  };
+  return {
+    ...context,
+    runs: () => [...context.runs(), ...computers().flatMap(computer => computer.snapshot.runs.map(run => ({ ...run, id: scoped(computer.id, run.id), sessionId: scoped(computer.id, run.sessionId),
+      ...(run.scheduled ? { scheduled: { ...run.scheduled, afterRunId: scoped(computer.id, run.scheduled.afterRunId) } } : {}),
+      ...(run.steering ? { steering: { ...run.steering, targetRunId: scoped(computer.id, run.steering.targetRunId) } } : {}) })))],
+    session: id => {
+      const found = find(id);
+      if (!found) return context.session(id);
+      const session = found.computer.snapshot.sessions.find(item => item.id === found.id);
+      return session && { ...session, id };
+    },
+    project: session => {
+      const found = find(session.id);
+      if (!found) return context.project(session);
+      const project = found.computer.snapshot.groups?.find(group => group.cwd === session.cwd)?.title || session.project;
+      return `${project} (${found.computer.name})`;
+    },
+  };
+}
+
+/**
+ * Whether this Tower announces a run: of a computer that follows it, only the work it sent there; of its own, all but
+ * the work of the Tower it follows, which that Tower announces. So a turn is announced once, wherever it ran.
+ */
+export function announced(run: Run, context: Pick<NotificationContext, 'following' | 'followedHost'>): boolean {
+  if (SCOPED.test(run.id)) return Boolean(run.origin?.controllerId) && run.origin?.controllerId === context.following?.()?.self;
+  const host = context.followedHost?.();
+  return !host || run.origin?.controllerId !== host;
 }
 
 const clip = (value: string, length: number) => {
@@ -195,8 +250,11 @@ export class NotificationService {
   /** Past the shutdown grace: anything still going neither sends, records nor saves; the next start takes it up. */
   private stopped = false;
 
-  constructor(private readonly stateDir: string, private readonly context: NotificationContext, private readonly fetcher: typeof fetch = fetch, private readonly now = Date.now) {
+  private readonly context: NotificationContext;
+
+  constructor(private readonly stateDir: string, context: NotificationContext, private readonly fetcher: typeof fetch = fetch, private readonly now = Date.now) {
     this.path = join(stateDir, 'notifications.json');
+    this.context = withFollowing(context);
   }
 
   async start(): Promise<void> {
@@ -231,7 +289,11 @@ export class NotificationService {
     if (this.closed || !this.saved) return;
     const handled = new Set([...this.delivered, ...this.judging.keys()]);
     const events = pendingEvents(this.context.runs(), this.cutoff, handled, this.now());
-    for (const event of events) this.track(event.key, event.at, () => this.handle(event));
+    // Work the followed Tower announces is decided here not to be sent, for good; a followed computer's own work is not this Tower's at all.
+    for (const event of events) {
+      if (announced(event.run, this.context)) this.track(event.key, event.at, () => this.handle(event));
+      else if (!SCOPED.test(event.run.id)) this.track(event.key, event.at, async () => {});
+    }
     for (const block of this.context.secretBlocks?.() ?? []) {
       if (block.at <= this.cutoff || handled.has(block.key)) continue;
       handled.add(block.key);

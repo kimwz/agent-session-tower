@@ -648,3 +648,18 @@ test('what a joined computer reports about keeping itself current reaches the co
       codex: { method: 'npm', state: 'failed', reason: 'command-failed', version: '0.155.1', target: '0.156.1', checkedAt, nextAt: checkedAt },
     } });
 });
+
+test('a joined computer reports whether new work can start there and how far the followed Tower\'s settings reached; nothing else gets through', async t => {
+  const a = await computer(t, 'computer-a', { version: '1.24.0' });
+  const b = await computer(t, 'computer-b', { version: '1.24.0', features: ['work', 'status'], update: {
+    request: async () => ({ status: 409, body: {} }),
+    report: async () => ({ versions: { web: '1.24.0' }, service: true, logins: { claude: 'ok', codex: 'missing', gh: 'token gho_123' },
+      managed: { revision: 'r1', appliedAt: '2026-10-15T00:00:00.000Z', errors: { skills: 'clash: 이 컴퓨터에 같은 이름의 Tower 스킬이 있어', secrets: 'not a section' } } }) as never,
+  } });
+  await a.listen();
+  await b.node.join((await a.controller.invite()).code);
+  await connected(a.controller, 'computer-b');
+  const report = await until(() => a.controller.list()[0]?.report, 5000);
+  assert.deepEqual(report.logins, { claude: 'ok', codex: 'missing', gh: 'unknown' });
+  assert.deepEqual(report.managed, { revision: 'r1', appliedAt: '2026-10-15T00:00:00.000Z', errors: { skills: 'clash: 이 컴퓨터에 같은 이름의 Tower 스킬이 있어' } });
+});

@@ -1387,6 +1387,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     await startupGate();
     registerStorageHold(() => { skills.pause(); }, () => { skills.resume(); }, () => skills.inFlight());
     await skills.start().catch(error => console.error(`Skills did not start: ${error instanceof Error ? error.message : String(error)}`));
+    managed.set('skills', { export: () => skills.exportManaged(), apply: value => skills.applyManaged(value) });
     // What each conversation works on, summarized after its turns.
     const tasks = new SessionTasks({ stateDir, sessions: () => visible.allSessions(),
       history: (session, limit, before) => sessions.detail(runs.nativeSessionId(session.id), before, limit),

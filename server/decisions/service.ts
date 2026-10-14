@@ -121,14 +121,27 @@ export class DecisionService {
   backupValue(): { provider: DecisionProviderId; apiKey?: string; features: DecisionFeatures } { return structuredClone(this.saved); }
 
   /** Replaces the settings with a backup's, in turn with the owner's changes, so none of them lands after it with older values. */
-  restore(value: unknown): Promise<DecisionOverview> {
+  async restore(value: unknown): Promise<DecisionOverview> {
+    await this.replace(value, '백업의 빠른 판단 설정이 올바르지 않습니다.', true);
+    return this.overview();
+  }
+
+  /**
+   * Takes the settings of the Tower this computer follows ("호스트 설정 따르기"), key included; judgments stay here.
+   * The file is written only when they differ. Resolves whether they did.
+   */
+  applyManaged(value: unknown): Promise<boolean> { return this.replace(value, '호스트의 빠른 판단 설정이 올바르지 않습니다.', false); }
+
+  /** Replaces the settings in turn with the owner's changes. A refusal never quotes what it got: it may hold a key. */
+  private replace(value: unknown, invalid: string, always: boolean): Promise<boolean> {
     const change = this.changes.then(async () => {
       const input = value as Partial<Saved> | undefined;
-      if (!input || typeof input !== 'object' || !provider(input.provider) || (input.apiKey !== undefined && !validKey(input.apiKey))) throw new TowerError('invalid', '백업의 빠른 판단 설정이 올바르지 않습니다.');
+      if (!input || typeof input !== 'object' || !provider(input.provider) || (input.apiKey !== undefined && !validKey(input.apiKey))) throw new TowerError('invalid', invalid);
       const next: Saved = { provider: input.provider, features: parseFeatures(input.features ?? {}, DEFAULT_DECISION_FEATURES), ...(input.apiKey ? { apiKey: input.apiKey } : {}) };
+      if (!always && JSON.stringify(next) === JSON.stringify(this.saved)) return false;
       await this.save(next);
       this.saved = next;
-      return this.overview();
+      return true;
     });
     this.changes = change.catch(() => {});
     return change;

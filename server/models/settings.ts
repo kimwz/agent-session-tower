@@ -3,6 +3,7 @@ import { link, open, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { initialModelSettings, parseModelSettings, resolveRole, type ModelProvider, type ModelSettings, type ResolvedModel } from '../../shared/models.js';
 import { readPrivateBytes, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { TowerError } from '../../shared/errors.js';
 
 /**
  * The one place Tower's own Claude/Codex calls get their provider, model and effort: `<state>/models.json`.
@@ -104,6 +105,25 @@ export async function saveModelSettings(stateDir: string, input: unknown): Promi
   const settings = parseModelSettings(input, true, await readModelSettings(stateDir));
   await save(stateDir, settings, false);
   return structuredClone(settings);
+}
+
+/**
+ * The settings as a Tower that follows this one receives them ("호스트 설정 따르기"). Defaults standing in for a file
+ * that could not be read are never sent: they would replace the follower's own.
+ */
+export async function exportManagedModelSettings(stateDir: string): Promise<ModelSettings> {
+  const { settings, problem } = await readModelSettingsState(stateDir);
+  if (problem) throw new TowerError('unavailable', problem);
+  return settings;
+}
+
+/** Takes the followed Tower's settings as they are; the file is written only when they differ from those here. */
+export async function applyManagedModelSettings(stateDir: string, input: unknown): Promise<boolean> {
+  const current = await readModelSettings(stateDir);
+  const settings = parseModelSettings(input, true, current);
+  if (JSON.stringify(settings) === JSON.stringify(current)) return false;
+  await save(stateDir, settings, false);
+  return true;
 }
 
 async function save(stateDir: string, settings: ModelSettings, onlyIfMissing: boolean): Promise<void> {
