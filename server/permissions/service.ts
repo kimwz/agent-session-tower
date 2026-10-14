@@ -12,7 +12,7 @@ import { codexRulesPath, realLocation, syncCodex } from './native.js';
 import type { PermissionsRepository } from './storage-repository.js';
 import { permissionRows, permissionStateBytes, permissionValueBytes, type PermissionRowKind, type PermissionChange } from './storage-codec.js';
 import { mergePermissions, permissionsBackupOf } from './backup.js';
-import { exportHostPermissions, HostPermissionFile, keepHostPermissions, matchingPrecedent, parseHostPermissions, sameHostRules, type HostApproval, type HostPermissions, type HostPrecedent, type KeptHostPermissions } from './managed.js';
+import { exportHostPermissions, HostPermissionFile, keepHostPermissions, matchingPrecedent, parseHostPermissions, type HostApproval, type HostPermissions, type HostPrecedent, type KeptHostPermissions } from './managed.js';
 import { followedHostOrigin } from '../runs/origin.js';
 import { remoteUrlOf } from '../repositories/remote-url.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
@@ -117,8 +117,6 @@ export interface PermissionServiceOptions {
 
 /** Why work a controlling Tower started may not reach this computer's permissions, and how the owner lets it. */
 export const NOT_FOLLOWED = '이 컴퓨터는 이 작업을 시작한 Tower의 설정을 따르지 않아, 거기서 시작한 작업은 이 컴퓨터의 권한을 요청하거나 관리할 수 없습니다. 그 Tower의 설정 › 원격 컴퓨터에서 이 컴퓨터의 "호스트 설정 따르기"를 켜거나, 이 컴퓨터의 Tower 화면에서 작업을 시작하세요.';
-/** Folders' repositories are read again after this long. */
-const REMOTE_URL_MS = 10 * 60_000;
 
 /**
  * The owner's allow rules for Claude Code and Codex in one list, and the requests agents send for rules they need.
@@ -134,7 +132,6 @@ export class PermissionService {
   /** What the followed host keeps here: its rules for every project and its precedents (see managed.ts). */
   private host?: KeptHostPermissions;
   private readonly hostFile: HostPermissionFile;
-  private readonly remoteUrls = new Map<string, { at: number; url?: string }>();
 
   constructor(private readonly options: PermissionServiceOptions) { this.hostFile = new HostPermissionFile(options.stateDir); }
 
@@ -145,7 +142,8 @@ export class PermissionService {
   }
 
   /** This computer's rules and the followed host's rules for every project, which apply here alike. */
-  private effective(): PermissionRule[] { return this.host?.rules.length ? [...this.state.rules, ...this.host.rules] : this.state.rules; }
+  private effective(): PermissionRule[] { return this.withHost(this.host); }
+  private withHost(host: KeptHostPermissions | undefined): PermissionRule[] { return host?.rules.length ? [...this.state.rules, ...host.rules] : this.state.rules; }
 
   /** Parent calls after SQL load, closed-session expiry, and run/continuation gates are wired. */
   async bootstrapEffects(closed: ReadonlySet<string>): Promise<void> {
@@ -475,8 +473,10 @@ export class PermissionService {
       if (same) return { request: { id: same.id, status: same.status }, note: WAIT_NOTE };
       const request: PermissionRequest = { id: randomUUID(), status: 'pending', rule, reason: input.reason.trim(), sessionId: caller.sessionId, ...(caller.runId ? { runId: caller.runId } : {}),
         cwd: session.cwd, provider, createdAt: this.now() };
-      if (await this.approveByPrecedent(request)) return { request: { id: request.id, status: 'approved' as const }, note: PRECEDENT_NOTE };
+      if (await this.approveByPrecedent(request, caller)) return { request: { id: request.id, status: 'approved' as const }, note: PRECEDENT_NOTE };
       if (this.pending() >= MAX_PENDING) throw failure('기다리는 권한 요청이 너무 많습니다. 소유자가 Tower에서 먼저 정리해야 합니다.', 'rate-limited');
+      // Following may have changed while the request was looked at: a host no longer followed is refused here too.
+      await this.admitCaller(caller);
       if (this.autoReview().enabled) {
         const skip = (rule.kind === 'command' ? undefined : autoReviewBlock(rule, session.cwd)) ?? this.options.autoReviewSkip?.(request);
         request.review = skip ? { status: 'skipped', reason: skip, at: this.now() } : { status: 'queued', at: this.now() };
@@ -540,7 +540,7 @@ export class PermissionService {
    * every agent asked) in a clone of the same repository now (design §3.4). The rule made is for this project only,
    * whatever scope was asked. A conversation rule, a one-off run and anything only alike go the usual way.
    */
-  private async approveByPrecedent(request: PermissionRequest): Promise<boolean> {
+  private async approveByPrecedent(request: PermissionRequest, caller: PermissionCaller): Promise<boolean> {
     const host = this.host;
     if (!host?.precedents.length || request.rule.kind === 'run' || request.rule.scope === 'conversation' || this.options.autoReviewSkip?.(request)) return false;
     if (await this.options.followedHost?.() !== host.hostId) return false;
@@ -556,6 +556,14 @@ export class PermissionService {
     // Its deny rules would override an overlapping rule the owner keeps here: the owner, or the reviewer, decides that.
     if (this.ownerRuleOverlaps(given, request)) return false;
     await this.requireRequestEffects(request);
+    // Checked again right before the rows are written: following may have changed while the repository and effects were
+    // looked at. A host no longer followed is refused; this computer's own request then goes the usual way.
+    const stillFollowed = async () => {
+      const followed = await this.options.followedHost?.();
+      if (caller.controllerId && !followedHostOrigin(caller, followed)) throw failure(NOT_FOLLOWED, 'forbidden');
+      return followed === host.hostId && this.host === host;
+    };
+    if (!await stillFollowed()) return false;
     const at = this.now();
     const batch = new PermissionBatch(this.state);
     let made: PermissionRule;
@@ -564,25 +572,25 @@ export class PermissionService {
     catch { return false; }
     batch.putRequest({ ...request, status: 'approved', decidedAt: at, decidedBy: 'auto', ruleId: made.id,
       review: { status: 'done', verdict: 'approve', reason: `호스트에서 같은 저장소에 허용한 규칙(${precedent.at.slice(0, 10)})`, at } });
-    await this.commitRows(batch);
+    // Accepted: following could still change during the SQL write after this last check; the web switches it and this
+    // worker writes, with no lock between them, so that is the owner switching within the same milliseconds.
+    if (!await this.commitRows(batch, false, stillFollowed)) return false;
     await this.apply();
     return true;
   }
 
-  /** A folder's repository, read again after a while: precedents are looked up by it, and a host lists its own by it. */
-  private async remoteUrl(cwd: string): Promise<string | undefined> {
-    const known = this.remoteUrls.get(cwd);
-    if (known && Date.now() - known.at < REMOTE_URL_MS) return known.url;
-    const url = await (this.options.remoteUrl ?? remoteUrlOf)(cwd);
-    if (this.remoteUrls.size >= 2000) this.remoteUrls.clear();
-    this.remoteUrls.set(cwd, { at: Date.now(), ...(url ? { url } : {}) });
-    return url;
-  }
+  /**
+   * A folder's repository as its git configuration names it now: precedents are looked up by it and a host lists its
+   * own by it, so it is never remembered (a folder pointed at another repository must not keep the old one's).
+   */
+  private remoteUrl(cwd: string): Promise<string | undefined> { return (this.options.remoteUrl ?? remoteUrlOf)(cwd); }
 
   /** What this Tower keeps on the computers that follow it (see managed.ts). */
   exportManaged(): Promise<HostPermissions> {
     const { rules, requests } = this.state;
-    return exportHostPermissions({ rules, requests, autoReview: this.autoReview() }, cwd => this.remoteUrl(cwd));
+    // Each folder is read once per export.
+    const read = new Map<string, Promise<string | undefined>>();
+    return exportHostPermissions({ rules, requests, autoReview: this.autoReview() }, cwd => { if (!read.has(cwd)) read.set(cwd, this.remoteUrl(cwd)); return read.get(cwd)!; });
   }
 
   /**
@@ -592,13 +600,30 @@ export class PermissionService {
   async applyManaged(value: unknown, hostId: string): Promise<void> {
     const received = parseHostPermissions(value);
     await this.serial(async () => {
+      const before = this.host;
       const next = keepHostPermissions(hostId, received);
-      const rulesChanged = !sameHostRules(this.host, next);
       if (await this.hostFile.save(this.host, next)) this.host = next;
-      if (rulesChanged) await this.apply();
       const current = this.autoReview();
       if (current.enabled !== received.autoReview.enabled || current.resume !== received.autoReview.resume) await this.writeAutoReview(received.autoReview);
+      // Codex's rules files are brought in line with what is on disk each time (only a file whose text differs is
+      // written), so a write that failed before, in this worker or an earlier one, is made now. A file the host's rules
+      // decide that cannot be written is this section's failure, and the host sends it again: the one for every project
+      // always (an allow the host withdrew must leave it even once no host rule is left to point at it), and project
+      // files whose reviewer rules yield to the host's, now or before. Only a project file regaining a reviewer rule
+      // after a restart is not checked here: that leaves Codex asking more, never allowing more, and the panel shows it.
+      await this.apply();
+      const global = this.options.globalCodex === false ? [] : [codexRulesPath('global', undefined, this.options.env)];
+      const failed = [...new Set([...global, ...this.hostFiles(before), ...this.hostFiles(this.host)])].filter(path => this.errors.has(path));
+      if (failed.length) throw failure(`호스트의 권한 규칙을 Codex 규칙 파일에 쓰지 못했습니다: ${failed.map(path => `${path}: ${this.errors.get(path)}`).join('; ')}`, 'unavailable');
     });
+  }
+
+  /** The Codex rules files whose text `host`'s rules change: the one for every project, and project files they decide. */
+  private hostFiles(host: KeptHostPermissions | undefined): string[] {
+    if (!host?.rules.length) return [];
+    const own = this.desired(this.state.rules), theirs = this.desired(this.withHost(host));
+    const changed = (path: string) => (theirs.get(path)?.lines ?? []).join('\n') !== (own.get(path)?.lines ?? []).join('\n');
+    return [...new Set([...own.keys(), ...theirs.keys()])].filter(changed);
   }
 
   /** What the followed host allowed in this folder's repository, for the reviewer to weigh as reference only. */
@@ -956,12 +981,16 @@ export class PermissionService {
     await this.requireEffects();
   }
 
-  /** Only explicit row operations enter SQL; publish their projection after the commit succeeds. */
-  private async commitRows(batch: PermissionBatch, completionOnly = false): Promise<void> {
+  /**
+   * Only explicit row operations enter SQL; publish their projection after the commit succeeds. `admit`, checked last
+   * before the write, may still hold it back: then nothing is written and false is answered.
+   */
+  private async commitRows(batch: PermissionBatch, completionOnly = false, admit?: () => Promise<boolean>): Promise<boolean> {
     if (!completionOnly) {
       for (const id of trimmedRequests(batch.requests(), this.options.now?.() ?? new Date())) batch.removeRequest(id);
       await this.requireEffects();
     }
+    if (admit && !await admit()) return false;
     if (this.options.repository) {
       const changes: PermissionChange[] = [];
       for (const operation of batch.operations()) {
@@ -973,15 +1002,23 @@ export class PermissionService {
     const removedRuns = batch.removedRequests().filter(request => request.rule.kind === 'run');
     this.state = batch.publish();
     for (const request of removedRuns) void this.requireEffects().then(() => this.options.forgetRun?.(request.id)).catch(() => {});
+    return true;
   }
 
   /** Every Codex rules file Tower writes, with the lines it should hold now. */
-  private desired(): Map<string, { scope: PermissionRule['scope']; cwd?: string; lines: string[] }> {
+  private desired(all: readonly PermissionRule[] = this.effective()): Map<string, { scope: PermissionRule['scope']; cwd?: string; lines: string[] }> {
     const files = new Map<string, { scope: PermissionRule['scope']; cwd?: string; lines: string[] }>();
     // The file for every project is always checked, so rules left there by a record that could not be read are removed.
     if (this.options.globalCodex !== false) files.set(codexRulesPath('global', undefined, this.options.env), { scope: 'global', lines: [] });
-    for (const rule of this.effective()) {
-      if (rule.kind !== 'command' || !rule.providers.includes('codex') || rule.scope === 'conversation') continue;
+    const rules = all.filter(rule => rule.kind === 'command' && rule.providers.includes('codex') && rule.scope !== 'conversation');
+    // Where the owner allows a command overlapping one the reviewer allowed, in places that meet, the owner's rule decides
+    // (as for Claude, see claudeRules): the reviewer's rule and its forbidden variants are left out of the files, not deleted.
+    // The followed host's rules bring this about; an owner's rule saved here replaces such rules instead.
+    const owned = rules.filter(rule => rule.source !== 'auto');
+    const yields = (rule: PermissionRule) => rule.source === 'auto' && owned.some(mine => rulesOverlap(mine.value, rule.value)
+      && (mine.scope === 'global' || rule.scope === 'global' || within(rule.cwd!, mine.cwd!) || within(mine.cwd!, rule.cwd!)));
+    for (const rule of rules) {
+      if (yields(rule)) continue;
       if (rule.scope === 'global' && this.options.globalCodex === false) continue;
       const path = codexRulesPath(rule.scope, rule.cwd, this.options.env);
       const file = files.get(path) ?? { scope: rule.scope, ...(rule.cwd ? { cwd: rule.cwd } : {}), lines: [] };

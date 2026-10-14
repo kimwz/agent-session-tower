@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -40,11 +40,26 @@ async function tower(t: TestContext, name: string, folders: Record<string, strin
   const sessions = new Map<string, { cwd: string; provider: 'claude' | 'codex' }>();
   let followed: string | undefined;
   let reviews = 0;
-  const service = new PermissionService({ stateDir, repository: noStorageFixture(stateDir), env: { CODEX_HOME: codexHome }, session: id => sessions.get(id),
-    followedHost: async () => followed, remoteUrl: async cwd => repositories.get(cwd), onReviewQueued: () => { reviews += 1; } });
+  let lookups = 0;
+  /** Runs while a folder's repository is looked up, as a change made meanwhile would. */
+  let meanwhile: (() => void) | undefined;
+  /** Runs at each wait for storage before an effect, with how many there were since it was set. */
+  let atEffect: ((count: number) => void) | undefined;
+  let effects = 0;
+  const service = new PermissionService({ stateDir, repository: noStorageFixture(stateDir), env: { CODEX_HOME: codexHome }, session: id => sessions.get(id), effectGate: async () => { effects += 1; atEffect?.(effects); },
+    followedHost: async () => followed, remoteUrl: async cwd => { lookups += 1; meanwhile?.(); return repositories.get(cwd); }, onReviewQueued: () => { reviews += 1; } });
   await service.start();
   t.after(async () => { service.close(); closePermissionFixture(stateDir); await rm(root, { recursive: true, force: true }); });
-  return { root, stateDir, codexHome, paths, sessions, service, follow: (id: string | undefined) => { followed = id; }, followed: () => followed, reviews: () => reviews };
+  return { root, stateDir, codexHome, paths, sessions, service, follow: (id: string | undefined) => { followed = id; }, followed: () => followed, reviews: () => reviews, lookups: () => lookups,
+    point: (folder: string, url: string | undefined) => { repositories.set(paths[folder]!, url); }, meanwhile: (change: (() => void) | undefined) => { meanwhile = change; },
+    atEffect: (change: ((count: number) => void) | undefined) => { effects = 0; atEffect = change; },
+    /** The same computer started again: a new service over the same state. */
+    restart: async () => {
+      const again = new PermissionService({ stateDir, repository: noStorageFixture(stateDir), env: { CODEX_HOME: codexHome }, session: id => sessions.get(id), followedHost: async () => followed, remoteUrl: async cwd => repositories.get(cwd) });
+      await again.start();
+      t.after(() => again.close());
+      return again;
+    } };
 }
 
 /** A Tower API over `service`, with the trigger store it needs, for agents' tools and remote pages. */
@@ -282,4 +297,140 @@ test('the host’s rules for every project apply here for Claude and Codex besid
   assert.ok(!JSON.stringify(node.service.exportBackup()).includes('WebFetch(domain:example.com)'));
   await assert.rejects(node.service.applyManaged({ rules: 'nope' }, HOST), /형식이 올바르지 않습니다/, 'a malformed section is refused whole');
   assert.ok(node.service.overview().rules.some(rule => rule.host), 'and what was kept stays');
+});
+
+test('a folder pointed at another repository is judged by the repository it names now, on both sides', async t => {
+  const { host, node } = await hostAndNode(t);
+  await node.service.applyManaged(await host.service.exportManaged(), HOST);
+  for (const id of ['claude:a', 'claude:b']) node.sessions.set(id, { cwd: node.paths.shop!, provider: 'claude' });
+  const ask = (sessionId: string) => node.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'Merge' }, agent(sessionId));
+  // Looked up once for this repository; then the folder's origin moves to another one.
+  assert.ok(await node.service.hostPrecedents(node.paths.shop!));
+  node.point('shop', 'github.com/owner/fork');
+  const before = node.lookups();
+  assert.equal((await ask('claude:a')).request.status, 'pending', 'never allowed by the precedents of the repository it named before');
+  assert.ok(node.lookups() > before, 'read again for the decision');
+  node.point('shop', REPOSITORY);
+  assert.equal((await ask('claude:b')).request.status, 'approved');
+  host.point('shop', 'github.com/owner/renamed');
+  assert.ok((await host.service.exportManaged()).precedents.every(item => item.remoteUrl === 'github.com/owner/renamed'), 'a host lists its precedents by what its folders name now');
+});
+
+test('a change of followed host while a request is looked at: the former host is refused, this computer’s own request is reviewed, nothing is allowed by the former host’s precedents', async t => {
+  const { host, node } = await hostAndNode(t);
+  await node.service.applyManaged(await host.service.exportManaged(), HOST);
+  for (const id of ['claude:a', 'claude:b']) node.sessions.set(id, { cwd: node.paths.shop!, provider: 'claude' });
+  node.meanwhile(() => node.follow(OTHER));
+  await assert.rejects(node.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'Merge' }, { ...agent('claude:a'), controllerId: HOST }), { message: NOT_FOLLOWED });
+  node.follow(HOST);
+  const local = await node.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'Merge' }, agent('claude:b'));
+  assert.equal(local.request.status, 'pending');
+  assert.ok(!node.service.overview().rules.some(rule => rule.value === 'gh pr merge'), 'no rule was made');
+  assert.ok(!node.service.overview().requests.some(request => request.sessionId === 'claude:a'), 'the former host’s request was not recorded');
+});
+
+test('host rules that could not reach Codex fail the section and are written again with the same settings', async t => {
+  const { host, node } = await hostAndNode(t);
+  const codexFile = join(node.codexHome, 'rules', 'tower.rules');
+  // Someone else's file where Tower writes the rules for every project: Tower never replaces it.
+  await writeFile(codexFile, 'prefix_rule(pattern=["mine"], decision="allow")\n');
+  const sent = await host.service.exportManaged();
+  await assert.rejects(node.service.applyManaged(sent, HOST), /Codex 규칙 파일에 쓰지 못했습니다/);
+  assert.match(JSON.parse(node.service.claudeSettings(node.paths.shop!)!).permissions.allow.join(' '), /gh pr view/, 'Claude has them already');
+  await assert.rejects(node.service.applyManaged(sent, HOST), /Codex 규칙 파일에 쓰지 못했습니다/, 'still failing, still reported');
+  await rm(codexFile);
+  await node.service.applyManaged(sent, HOST);
+  assert.match(await readFile(codexFile, 'utf8'), /"gh", "pr", "view"/, 'the same settings are written once the file can be');
+});
+
+test('a rule of the host for every project decides over an overlapping rule the reviewer allowed here, for Codex as for Claude, without deleting it', async t => {
+  const { host, node } = await hostAndNode(t);
+  await host.service.save({ kind: 'command', value: 'git push', providers: ['claude', 'codex'], scope: 'project', cwd: host.paths.shop! });
+  await node.service.applyManaged(await host.service.exportManaged(), HOST);
+  node.sessions.set('codex:a', { cwd: node.paths.shop!, provider: 'codex' });
+  node.sessions.set('claude:a', { cwd: node.paths.shop!, provider: 'claude' });
+  assert.equal((await node.service.request({ kind: 'command', value: 'git push', scope: 'project', reason: 'Push' }, agent('codex:a'))).request.status, 'approved');
+  assert.equal((await node.service.request({ kind: 'command', value: 'git push', scope: 'project', reason: 'Push' }, agent('claude:a'))).request.status, 'approved');
+  const projectFile = join(node.paths.shop!, '.codex', 'rules', 'tower.rules');
+  assert.match(await readFile(projectFile, 'utf8'), /"git", "push", "--force-with-lease"\], decision="forbidden"/, 'the reviewer’s kind of rule comes with its forbidden variants');
+  await host.service.save({ kind: 'command', value: 'git push --force-with-lease', providers: ['claude', 'codex'], scope: 'global' });
+  await node.service.applyManaged(await host.service.exportManaged(), HOST);
+  const codex = [await readFile(join(node.codexHome, 'rules', 'tower.rules'), 'utf8'), await readFile(projectFile, 'utf8').catch(() => '')].join('\n');
+  assert.match(codex, /"git", "push", "--force-with-lease"\], decision="allow"/);
+  assert.doesNotMatch(codex, /decision="forbidden"/, 'nothing forbids what the owner allows');
+  assert.doesNotMatch(node.service.claudeSettings(node.paths.shop!)!, /"deny"/);
+  assert.ok(node.service.overview().rules.some(rule => rule.source === 'auto' && rule.value === 'git push'), 'this computer’s own rule is kept');
+});
+
+test('Codex’s rules files are brought in line on disk with every sync, after a restart too, and a project file the host’s rules decide that cannot be written is reported', async t => {
+  const { host, node } = await hostAndNode(t);
+  const codexFile = join(node.codexHome, 'rules', 'tower.rules');
+  await writeFile(codexFile, 'prefix_rule(pattern=["mine"], decision="allow")\n');
+  const sent = await host.service.exportManaged();
+  await assert.rejects(node.service.applyManaged(sent, HOST), /Codex 규칙 파일에 쓰지 못했습니다/);
+  // Started again with the same settings kept: nothing in memory says a write failed, the file on disk does.
+  node.service.close();
+  const restarted = await node.restart();
+  await rm(codexFile);
+  await restarted.applyManaged(sent, HOST);
+  assert.match(await readFile(codexFile, 'utf8'), /"gh", "pr", "view"/);
+
+  // A reviewer rule here that the host's new rule decides over leaves its project file; that file cannot be changed now.
+  await host.service.save({ kind: 'command', value: 'git push', providers: ['claude', 'codex'], scope: 'project', cwd: host.paths.shop! });
+  await restarted.applyManaged(await host.service.exportManaged(), HOST);
+  node.sessions.set('codex:a', { cwd: node.paths.shop!, provider: 'codex' });
+  assert.equal((await restarted.request({ kind: 'command', value: 'git push', scope: 'project', reason: 'Push' }, agent('codex:a'))).request.status, 'approved');
+  const rulesFolder = join(node.paths.shop!, '.codex', 'rules');
+  const projectFile = join(rulesFolder, 'tower.rules');
+  assert.match(await readFile(projectFile, 'utf8'), /decision="forbidden"/);
+  await host.service.save({ kind: 'command', value: 'git push --force-with-lease', providers: ['claude', 'codex'], scope: 'global' });
+  const widened = await host.service.exportManaged();
+  await chmod(rulesFolder, 0o500);
+  try { await assert.rejects(restarted.applyManaged(widened, HOST), (error: Error) => error.message.includes(projectFile), 'the project file is named'); }
+  finally { await chmod(rulesFolder, 0o700); }
+  await restarted.applyManaged(widened, HOST);
+  await assert.rejects(readFile(projectFile, 'utf8'), { code: 'ENOENT' }, 'the same settings again: now the file is right');
+});
+
+test('following that changes at any wait before the approval is written: the former host is refused and no rule is made; this computer’s own request is reviewed', async t => {
+  const { host, node } = await hostAndNode(t);
+  await node.service.applyManaged(await host.service.exportManaged(), HOST);
+  // Each wait for storage on the way to the write, the last one inside the write itself.
+  for (const at of [1, 2, 3]) {
+    const session = `claude:host-${at}`;
+    node.sessions.set(session, { cwd: node.paths.shop!, provider: 'claude' });
+    node.atEffect(count => { if (count === at) node.follow(OTHER); });
+    await assert.rejects(node.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'Merge' }, { ...agent(session), controllerId: HOST }), { message: NOT_FOLLOWED }, `at wait ${at}`);
+    node.atEffect(undefined);
+    node.follow(HOST);
+  }
+  node.sessions.set('claude:own', { cwd: node.paths.shop!, provider: 'claude' });
+  node.atEffect(count => { if (count === 3) node.follow(OTHER); });
+  assert.equal((await node.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'Merge' }, agent('claude:own'))).request.status, 'pending');
+  node.atEffect(undefined);
+  assert.ok(!node.service.overview().rules.some(rule => rule.value === 'gh pr merge'), 'no rule was made');
+});
+
+test('an allow the host withdrew leaves the rules file for every project even when no host rule is left, after a restart too', async t => {
+  const { host, node } = await hostAndNode(t);
+  const rulesFolder = join(node.codexHome, 'rules');
+  const codexFile = join(rulesFolder, 'tower.rules');
+  await node.service.applyManaged(await host.service.exportManaged(), HOST);
+  assert.match(await readFile(codexFile, 'utf8'), /"gh", "pr", "view"/);
+  await host.service.remove(host.service.overview().rules.find(rule => rule.value === 'gh pr view')!.id);
+  const withdrawn = await host.service.exportManaged();
+  assert.deepEqual(withdrawn.rules, [], 'no host rule is left');
+  await chmod(rulesFolder, 0o500);
+  let restarted: PermissionService;
+  try {
+    await assert.rejects(node.service.applyManaged(withdrawn, HOST), /Codex 규칙 파일에 쓰지 못했습니다/);
+    node.service.close();
+    restarted = await node.restart();
+    await assert.rejects(restarted.applyManaged(withdrawn, HOST), /Codex 규칙 파일에 쓰지 못했습니다/, 'still reported after a restart while the allow is on disk');
+    assert.match(await readFile(codexFile, 'utf8'), /"gh", "pr", "view"/);
+  } finally { await chmod(rulesFolder, 0o700); }
+  await restarted.applyManaged(withdrawn, HOST);
+  const text = await readFile(codexFile, 'utf8');
+  assert.doesNotMatch(text, /"gh", "pr", "view"/, 'the withdrawn allow is gone');
+  assert.match(text, /"make", "lint"/, 'this computer’s own rule stays');
 });
