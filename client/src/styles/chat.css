@@ -254,7 +254,7 @@
 .chat-message.user .message-meta>span {
   color:#a7bddd
 }
-/* What the master agent wrote: its own card, and its line breaks kept as written. */
+/* What the master agent wrote: its own card. */
 .chat-message.user.from-master>.message-content {
   background:#1d2540;
   border-color:#3d3f6e;
@@ -265,9 +265,6 @@
   align-items:center;
   gap:5px;
   color:#aaa4ee
-}
-.chat-message.user.from-master .markdown p {
-  white-space:pre-line
 }
 .chat-message.assistant .message-meta:before {
   content:'';

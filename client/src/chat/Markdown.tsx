@@ -9,6 +9,7 @@ import { copyText } from '../common/lib';
 import { localOnlyAddress, useRemoteContent } from '../remote/remote-content';
 import { hrefPath } from '../workspace/workspace-paths';
 import { PATH_ATTRIBUTE, remarkWorkspacePaths } from './markdown-paths';
+import { remarkLineBreaks } from './markdown-breaks';
 import { useWorkspaceFiles, WorkspacePath } from './WorkspacePath';
 
 function CodeBlock({ children, ...props }: ComponentPropsWithoutRef<'pre'>) {
@@ -32,7 +33,8 @@ function MarkedSpan({ node: _, [PATH_ATTRIBUTE]: path, ...props }: Marked<'span'
 function MarkedCode({ node: _, [PATH_ATTRIBUTE]: path, ...props }: Marked<'code'>) {
   return path ? <WorkspacePath path={path}><code {...props} /></WorkspacePath> : <code {...props} />;
 }
-export const Markdown = memo(function Markdown({ children, images }: { children: string; images?: ChatMessage['images'] }) {
+/** `lineBreaks`: show single line breaks as written (see remarkLineBreaks). */
+export const Markdown = memo(function Markdown({ children, images, lineBreaks }: { children: string; images?: ChatMessage['images']; lineBreaks?: boolean }) {
   useI18n();
-  return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm, remarkWorkspacePaths]} components={{ pre: CodeBlock, a: Link, span: MarkedSpan, code: MarkedCode, img: ({ alt, src }) => { const image = images?.find(image => image.source === src || encodeURI(image.source) === src); return image ? <ChatImage key={image.url} image={image} alt={alt} /> : <span className="attachment-label">{t("[이미지:")}{' '}{alt || t("첨부 파일")}]</span>; } }}>{children}</ReactMarkdown></div>;
+  return <div className="markdown"><ReactMarkdown remarkPlugins={lineBreaks ? [remarkGfm, remarkLineBreaks, remarkWorkspacePaths] : [remarkGfm, remarkWorkspacePaths]} components={{ pre: CodeBlock, a: Link, span: MarkedSpan, code: MarkedCode, img: ({ alt, src }) => { const image = images?.find(image => image.source === src || encodeURI(image.source) === src); return image ? <ChatImage key={image.url} image={image} alt={alt} /> : <span className="attachment-label">{t("[이미지:")}{' '}{alt || t("첨부 파일")}]</span>; } }}>{children}</ReactMarkdown></div>;
 });
