@@ -86,7 +86,7 @@ import type { AutoUpdateStatus } from '../shared/link.js';
 import type { ComponentVersions, Snapshot, ProviderHealth, Run, Session } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { PublicListener } from './public-agents/listener.js';
-import { NotificationService } from './notifications/service.js';
+import { NotificationService, type FollowingComputer } from './notifications/service.js';
 import { judgeTurn } from './notifications/attention.js';
 import { DecisionService } from './decisions/service.js';
 import { SessionOutcomes } from './sessions/outcomes.js';
@@ -363,6 +363,9 @@ async function main() {
     onChange: changed,
   });
   let controlledBy = (): string[] => [];
+  // Pushes for work this Tower sent to computers that follow it come from here; on a computer that follows one, from there.
+  let followingComputers = (): { self: string; computers: FollowingComputer[] } | undefined => undefined;
+  let followedHostId = (): string | undefined => undefined;
   let controllerJoined = (): { name: string; at: string } | undefined => undefined;
   let remoteNodes: RemoteNodes | undefined;
   let secretRouteKnown = (_direction: string, _id: string) => false;
@@ -434,6 +437,8 @@ async function main() {
     project: session => groups.list().find(group => group.cwd === session.cwd)?.title || session.project,
     trigger: id => runs.triggerOverview()?.triggers.find(item => item.id === id)?.name,
     secretBlocks: () => runs.secretBlocks(),
+    following: () => followingComputers(),
+    followedHost: () => followedHostId(),
     attention: async (input, signal) => {
       const engine = decisions.engine('attentionNotifications');
       if (!engine) return undefined;
@@ -559,6 +564,7 @@ async function main() {
   // applies from that one, and, as a controller, what it keeps on the computers that follow it.
   const followedHost = new FollowedHostStore(stateDir);
   await followedHost.start();
+  followedHostId = () => followedHost.hostId();
   const folderRemotes = new Map<string, { at: number; url?: string }>();
   const managedFolders = async (): Promise<ManagedFolder[]> => {
     const cwds = [...new Set([...groups.list().map(group => group.cwd), ...runs.sessionList().map(session => session.cwd)].filter((cwd): cwd is string => Boolean(cwd)))].slice(0, 300);
@@ -633,6 +639,12 @@ async function main() {
   if (controllerLinks) {
     remoteNodes = new RemoteNodes(controllerLinks, nodeViews);
     remoteNodes.on('summary', changed);
+    const nodes = remoteNodes, links = controllerLinks, self = identity?.id;
+    followingComputers = () => self ? { self, computers: links.list().filter(node => node.following).flatMap(node => {
+      const snapshot = nodes.snapshot(node.id);
+      return snapshot ? [{ id: node.id, name: node.label || node.name, snapshot }] : [];
+    }) } : undefined;
+    remoteNodes.on('change', () => notifications.changed());
   }
   // The master agent runs in its own process; this web only starts it, tells it how to reach this API, and relays.
   let webCredentials: WebCredentials | undefined;
