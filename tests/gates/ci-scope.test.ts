@@ -37,38 +37,21 @@ test('documentation and a patch version bump are quick; anything that runs is no
   assert.equal(change({ 'client/App.tsx': "const days = '7'" }).tier, 'related');
   assert.equal(change({ ...release(nextPatch), 'client/App.tsx': 'x' }).tier, 'related');
   assert.equal(change({ 'tests/client/app.test.ts': 'x' }).tier, 'related');
-  assert.equal(change({ 'server/slack/service.ts': 'x', 'shared/types.ts': 'x' }).tier, 'related');
+  assert.equal(change({ 'server/slack/service.ts': 'x' }).tier, 'full', 'server code holds storage, access and lifetime');
+  assert.equal(change({ 'shared/triggers.ts': 'x' }).tier, 'full', 'shared code feeds the server');
 });
 
-test('core areas, build and CI, minor or major versions and unknown paths need the full run', () => {
-  for (const path of ['server/storage/x.ts', 'tests/server/storage/x.test.ts', 'server/secrets/vault.ts', 'server/permissions/rules.ts',
-    'server/runs/worker.ts', 'server/updates/x.ts', 'server/link/storage-web.ts', 'server/terminals/host.ts', 'server/auth/x.ts',
-    'tests/server/runs/run-manager.test.ts', 'server/sessions/retention-storage.ts', 'server/index.ts', 'server/workspace-files.ts',
-    'shared/secrets.ts', 'shared/link.ts', 'scripts/release.mjs', '.github/workflows/ci.yml', 'bin/agent-session-tower.mjs', 'tests/helpers/fixture.ts',
-    'vite.config.ts', 'tsconfig.json', '.npmrc', 'newdir/file.ts', 'server/newarea/x.ts', 'server/api/tower-api.ts',
-    'server/slack/storage-codec.ts', 'server/triggers/secrets.ts', 'server/auto-prompt/storage-schema.ts', 'server/master/host.ts',
-    'server/master/query-process.ts', 'tests/master/live-read.test.ts', 'server/models/worker.ts', 'server/sessions/processes.ts',
-    'server/sessions/launch-marks.ts', 'server/workspace-terminals.ts', 'server/temporary/x.ts', 'tests/mcp/x.test.ts']) {
+test('server and shared code, sensitive browser views, build and CI, minor or major versions and unknown paths need the full run', () => {
+  for (const path of ['server/storage/x.ts', 'tests/server/storage/x.test.ts', 'server/secrets/vault.ts', 'server/runs/worker.ts',
+    'server/slack/service.ts', 'server/slack/owner-consent.ts', 'server/triggers/http.ts', 'server/master/voice-turn-end.ts',
+    'shared/triggers.ts', 'shared/types.ts', 'tests/master/live-read.test.ts', 'tests/server/slack/service.test.ts',
+    'client/src/secrets/SecretsPanel.tsx', 'client/src/auth/AuthGate.tsx', 'client/src/permissions/PermissionsPanel.tsx',
+    'client/src/backup/RetentionPanel.tsx', 'tests/client/secrets.test.ts', 'scripts/release.mjs', '.github/workflows/ci.yml',
+    'bin/agent-session-tower.mjs', 'tests/helpers/fixture.ts', 'tests/gates/ci-scope.test.ts', 'assets/logo.svg', 'vite.config.ts',
+    'tsconfig.json', '.npmrc', 'newdir/file.ts']) {
     assert.equal(pathTier(path).tier, 'full', path);
   }
-  assert.equal(pathTier('server/slack/service.ts').tier, 'related');
-  assert.equal(pathTier('server/master/voice-turn-end.ts').tier, 'related');
-  // A file of an ordinary area that reaches data, secrets or access directly is core, whatever its name.
-  assert.equal(pathTier('server/triggers/rules.ts', ["import type { StorageClient } from '../storage/client.js';"]).tier, 'full');
-  assert.equal(pathTier('server/triggers/rules.ts', [null, "import type { SecretStore } from './secrets.js';"]).tier, 'full');
-  assert.equal(pathTier('server/triggers/rules.ts', ["const db = await import('node:sqlite');"]).tier, 'full');
-  assert.equal(pathTier('server/triggers/rules.ts', ["import { failure } from './errors.js';", null]).tier, 'related');
-  assert.equal(pathTier('server/triggers/store.ts').tier, 'full');
-  assert.equal(pathTier('server/triggers/github-access.ts').tier, 'full');
-  for (const path of ['server/triggers/http.ts', 'server/triggers/github.ts', 'server/slack/client.ts', 'server/slack/socket.ts',
-    'server/notifications/web-push.ts', 'server/master/elevenlabs.ts', 'server/repositories/clone.ts', 'tests/server/triggers/http.test.ts']) {
-    assert.equal(pathTier(path, [real(path)]).tier, 'full', path);
-  }
-  assert.equal(pathTier('tests/client/app.test.ts').tier, 'related', 'a folder named client is not the Slack client');
-  // The browser shows what the server decided; its imports of settings or secrets views are not core.
-  assert.equal(pathTier('client/src/app/App.tsx', ["import { SecretsPanel } from '../secrets/SecretsPanel';"]).tier, 'related');
-  assert.equal(pathTier('client/src/secrets/SecretsPanel.tsx').tier, 'full');
-  assert.equal(pathTier('tests/server/slack-transport.test.ts').tier, 'full', 'outside the named areas');
+  for (const path of ['client/src/app/App.tsx', 'client/src/chat/ChatPanel.tsx', 'tests/client/app.test.ts']) assert.equal(pathTier(path).tier, 'related', path);
   assert.match(change(release(`${major}.${minor + 1}.0`)).reasons.join(), /minor or major/);
   assert.equal(change(release(`${major}.${minor + 1}.0`)).tier, 'full');
   assert.equal(change(release(`${major + 1}.0.0`)).tier, 'full');

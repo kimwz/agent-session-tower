@@ -2,9 +2,9 @@
  * Decides how much CI a change needs, from the files it touches:
  * - quick: documentation and a patch version bump only. CI runs the checks job; the tests are the base commit's,
  *   which must itself have passed `validation gate (all platforms)`.
- * - related: ordinary features. The Node 22 floor runs the whole inventory once on Linux and once on macOS.
- * - full: storage, permissions, secrets, updates, execution lifetime, build and CI, a minor or major version, and
- *   every path outside the named ordinary areas. All lanes run.
+ * - related: browser code. The Node 22 floor runs the whole inventory once on Linux and once on macOS.
+ * - full: server and shared code (storage, permissions, secrets, updates, execution lifetime live there), build and CI,
+ *   any dependency or package change, a minor or major version, and every other path. All lanes run.
  * Usage: node scripts/ci-scope.mjs plan | local
  */
 import { execFileSync } from 'node:child_process';
@@ -19,36 +19,22 @@ export const GATE = 'validation gate (all platforms)';
 const rank = tier => TIERS.indexOf(tier);
 export const atLeast = (tier, floor) => rank(tier) >= rank(floor);
 
-// Only these areas count as ordinary features. Everything else, a new server area included, needs the full run.
-const GENERAL_AREAS = ['agent-guidance', 'auto-prompt', 'browser', 'decisions', 'models', 'notifications', 'repositories', 'sessions',
-  'skills', 'slack', 'streams', 'triggers'];
-const GENERAL = new RegExp(`^(client/|assets/|shared/|tests/(client|shared|gates|release)/|(server|tests/server)/(${GENERAL_AREAS.join('|')})/|(server|tests)/master/(voice|tts|elevenlabs|mp3|first-reply))`);
-// Data, access, secrets, updates and process lifetime inside an ordinary area are core all the same, whether a file is
-// named after them or imports them.
-const SENSITIVE = /(storage|store|state|backup|secret|access|sqlite|retention|migrat|permission|auth|launch|process|lifetime|handoff|worker|^link\.(ts|js)$)/i;
-// Files of ordinary areas that hold credentials or decide where requests may go (egress allow lists, secret origins).
-const CREDENTIALS = /^(http|github|client|socket|mcp-bridge|web-push|elevenlabs|clone|remote-url)(\.test)?\.(ts|js)$/;
-const CORE_MODULE = /(^node:sqlite$|(^|\/)(storage|stores|secrets|permissions|auth|updates|link|backup)(\/|$))/;
-const IMPORTS = /\b(?:from|import)\s*\(?\s*['"]([^'"]+)['"]/g;
-const importsCore = text => [...(text ?? '').matchAll(IMPORTS)].some(([, specifier]) =>
-  CORE_MODULE.test(specifier) || SENSITIVE.test(specifier.split('/').pop()));
+// Browser code is the ordinary feature area: what it shows, the server decides. Server and shared code hold storage, access,
+// secrets, updates and process lifetime too closely interleaved with features for a path rule to separate them, so they
+// need the full run, as does every path not named here.
+const BROWSER = /^(client|tests\/client)\//;
+// Browser views of secrets, sign-in, permissions and backups still run in full.
+const SENSITIVE = /(secret|auth|permission|backup|retention|storage)/i;
 const BUILD = /^(\.github|scripts|bin)\//;
 const DOCS = new Set(['README.md', 'README.ko.md', 'AGENTS.md', 'CLAUDE.md', 'CHANGELOG.md', 'LICENSE', 'assets/brand/README.md']);
 const APP_VERSION = /^export const APP_VERSION = '[^'\n]*';$/m;
 
-/**
- * The tier one path needs, given its text before and after (null when absent); the version metadata files are decided
- * by their content in `classify`.
- */
-export function pathTier(path, texts = []) {
+/** The tier one path needs; the version metadata files are decided by their content in `classify`. */
+export function pathTier(path) {
   if (DOCS.has(path) || path.startsWith('docs/')) return { tier: 'quick' };
   if (BUILD.test(path)) return { tier: 'full', reason: `build or CI: ${path}` };
-  if (!GENERAL.test(path) || path.split('/').slice(1).some(part => SENSITIVE.test(part) || CREDENTIALS.test(part))) {
-    return { tier: 'full', reason: `core or unclassified: ${path}` };
-  }
-  // Access and data are decided by the server; a browser module importing a settings or secrets view is not core.
-  if (!path.startsWith('client/') && texts.some(importsCore)) return { tier: 'full', reason: `imports a core module: ${path}` };
-  return { tier: 'related', reason: `code: ${path}` };
+  if (BROWSER.test(path) && !SENSITIVE.test(path)) return { tier: 'related', reason: `browser code: ${path}` };
+  return { tier: 'full', reason: `server, shared, sensitive or unclassified: ${path}` };
 }
 
 const semver = text => /^(\d+)\.(\d+)\.(\d+)$/.exec(text ?? '')?.slice(1).map(Number);
@@ -85,7 +71,7 @@ export function classify({ changes, content, baseGreen, nextVersion }) {
       if (!versionOnly(path, content(path, 'base'), content(path, 'head'))) raise('full', `more than the version: ${path}`);
       continue;
     }
-    const { tier: needed, reason } = pathTier(path, [content(path, 'base'), content(path, 'head')]);
+    const { tier: needed, reason } = pathTier(path);
     raise(needed, reason);
   }
   const from = parse(content('package.json', 'base'))?.version, to = nextVersion ?? parse(content('package.json', 'head'))?.version;

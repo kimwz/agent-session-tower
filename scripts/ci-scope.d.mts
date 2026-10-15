@@ -6,7 +6,7 @@ export interface CheckRun { id: number; name: string; status: string; conclusion
 export const TIERS: Tier[];
 export const GATE: string;
 export function atLeast(tier: string, floor: string): boolean;
-export function pathTier(path: string, texts?: (string | null)[]): { tier: Tier; reason?: string };
+export function pathTier(path: string): { tier: Tier; reason?: string };
 export function versionOnly(path: string, before: string | null, after: string | null): boolean;
 export function classify(input: { changes: string[]; content: (path: string, side: 'base' | 'head') => string | null; baseGreen?: boolean; nextVersion?: string }): Scope;
 export function gatePassed(checkRuns: CheckRun[]): GateResult;

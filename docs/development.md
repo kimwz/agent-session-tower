@@ -283,8 +283,8 @@ The Linux checks job validates tagged metadata against its immutable tag, or app
 `scripts/ci-scope.mjs` decides how many lanes a change needs from the files it changes against the commit's first parent (the pull request's base tip, or the previous `main` commit for a squash merge):
 
 - **quick**: documentation and a patch version bump (only the version in `package.json`, the lockfile's root and `APP_VERSION`, plus `CHANGELOG.md`). No lanes; the checks job. The base commit must have passed its own gate, otherwise the change runs in full.
-- **related**: code in the ordinary feature areas the script names. The Node 22 floor runs the whole inventory once on Linux and once on macOS.
-- **full**: everything else: storage, permissions, secrets, updates, process lifetime and any file named after them, build, CI and scripts, any dependency or package change, a minor or major version, and every path outside the named areas. All lanes.
+- **related**: browser code (`client/`, `tests/client/`) other than the secrets, sign-in, permissions, backup and retention views. The server decides what it shows. The Node 22 floor runs the whole inventory once on Linux and once on macOS.
+- **full**: everything else: server and shared code (storage, permissions, secrets, updates and process lifetime are interleaved with features there), build, CI and scripts, any dependency or package change, a minor or major version, and every path not named above. All lanes.
 
 On `main`, a squash merge whose tree equals the tree its pull request's gate validated at a related or full tier reuses that result (`execution: reuse`): no lanes run, the checks job and gate still do. A push of more than one commit runs in full. The plan records its decision in the `ci-scope` artifact and the step summary; the gate recomputes the files' tier, rereads the base gate or the reused result, requires exactly the selected lanes, and records its verdict in `ci-timing` even when it fails.
 
