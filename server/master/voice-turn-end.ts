@@ -3,7 +3,7 @@
  * pause (and again as the pause grows or what was written down changes); the web answers with a fast judgment, so a
  * natural pause mid-thought does not send half a request. Without a judgment the page falls back to its own rule.
  */
-import { VOICE_TURN_FINISHED, type DecisionRecord } from '../../shared/decisions.js';
+import { voiceTurnBar, type DecisionRecord } from '../../shared/decisions.js';
 import type { DecisionEngine } from '../decisions/engine.js';
 
 /** A judgment slower than this is of no use to a waiting speaker; the page then uses its own rule. */
@@ -73,7 +73,7 @@ export class VoiceTurnEnd {
       const finished = await judgeTurnEnd(engine, { text, pauseMs }, AbortSignal.timeout(JUDGMENT_MS));
       this.cache.set(key, finished);
       if (this.cache.size > CACHED) this.cache.delete(this.cache.keys().next().value!);
-      record(finished >= VOICE_TURN_FINISHED ? 'finished' : 'listening', { finished }, `${Math.round(pauseMs / 100) / 10}s pause`);
+      record(finished >= voiceTurnBar(pauseMs) ? 'finished' : 'listening', { finished }, `${Math.round(pauseMs / 100) / 10}s pause`);
       return { finished };
     } catch (error) {
       record('failed', {}, error instanceof Error ? error.message : String(error));

@@ -55,8 +55,30 @@ export interface DecisionOverview {
   recent?: DecisionRecord[];
 }
 
-/** A spoken request is sent once the owner is judged finished with at least this probability. */
-export const VOICE_TURN_FINISHED = 0.6;
+/**
+ * A spoken request is sent once the owner is judged finished with at least `finished`, by how long they have been
+ * quiet. The longer the silence, the lower the bar, down to a floor: in Jev's measured answers, speech that stops on
+ * a filler, joining word or stutter stays at or under about 0.3 even at long pauses, while a finished statement that
+ * is not phrased as a request rises from about 0.4 to 0.5. Words still under the floor wait for the owner. The same
+ * words are judged again as the silence reaches each row.
+ */
+export const VOICE_TURN_BARS = [
+  { fromMs: 0, finished: 0.6 },
+  { fromMs: 3_000, finished: 0.5 },
+  { fromMs: 6_000, finished: 0.4 },
+] as const;
+
+/** Which row of `VOICE_TURN_BARS` a silence of `pauseMs` is in. */
+export function voiceTurnStep(pauseMs: number): number {
+  let step = 0;
+  while (step + 1 < VOICE_TURN_BARS.length && pauseMs >= VOICE_TURN_BARS[step + 1].fromMs) step++;
+  return step;
+}
+
+/** The probability of being finished that sends a spoken request after a silence of `pauseMs`. */
+export function voiceTurnBar(pauseMs: number): number {
+  return VOICE_TURN_BARS[voiceTurnStep(pauseMs)].finished;
+}
 
 /** An Auto Prompt draft gets suggestions once it is this long. */
 export const AUTO_PROMPT_SUGGESTION_MIN_CHARS = 30;

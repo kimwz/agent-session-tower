@@ -558,6 +558,301 @@ test('without a judgment (none set up, failed or too slow) the pause and how the
   } finally { page.end(); }
 });
 
+/**
+ * Jev's measured chance that the owner is finished, at a pause of 1, 3 and 6 seconds (tmp eval of 2026-10-15, made-up
+ * sentences): a fake judgment answers by the pause it is asked at.
+ */
+const MEASURED: Array<{ text: string; p: [number, number, number]; goes: 'at once' | 'at 3 s' | 'at 6 s' | 'kept' }> = [
+  { text: '배포해 줘', p: [0.90, 0.88, 0.91], goes: 'at once' },
+  { text: '로, 로그 좀 보, 보여 줘.', p: [0.79, 0.80, 0.83], goes: 'at once' },
+  { text: '그, 뭐야, 어제 만든 PR 있잖아, 그거 머지해 줘.', p: [0.85, 0.83, 0.87], goes: 'at once' },
+  { text: '원격 서버에 SSH로 붙어서 예전 버전 타워를 지우고, 마이그레이션 없이 데이터까지 아예 지운 다음 최신 버전으로 다시 깔아 줘.', p: [0.84, 0.84, 0.86], goes: 'at once' },
+  { text: '이거 저번에 고친 거 같은데 다시 확인해 봐', p: [0.58, 0.60, 0.67], goes: 'at 3 s' },
+  { text: '이거 자동 전송 로직을 조금 고칠 필요가 있을 것 같아.', p: [0.38, 0.45, 0.50], goes: 'at 6 s' },
+  { text: '그, 뭐야', p: [0.21, 0.25, 0.31], goes: 'kept' },
+  { text: '어', p: [0.06, 0.10, 0.10], goes: 'kept' },
+  { text: '로, 로그를', p: [0.06, 0.07, 0.08], goes: 'kept' },
+  { text: '배포하고 나서', p: [0.06, 0.07, 0.08], goes: 'kept' },
+  { text: '마이그레이션은 안 해도 돼 가지고', p: [0.16, 0.16, 0.19], goes: 'kept' },
+  { text: '이 버그 고쳐 줘. 그리고', p: [0.03, 0.04, 0.04], goes: 'kept' },
+];
+const measured = (p: [number, number, number]) => ({ pauseMs }: { pauseMs: number }) => ({ finished: pauseMs >= 6_000 ? p[2] : pauseMs >= 3_000 ? p[1] : p[0] });
+
+/** The owner is quiet; how long the silence was when the utterance was committed (or that it never was). */
+async function silenceUntilCommit(page: Awaited<ReturnType<typeof harness>>, socket: FakeSocket, untilMs: number): Promise<number | undefined> {
+  for (let silent = 0; silent < untilMs; silent += 50) {
+    await page.hearSlowly(0.002, 50);
+    if (commits(socket) > 0) return silent + 50;
+  }
+  return undefined;
+}
+
+test('the longer the silence, the less sure a judgment must be, down to a floor: finished requests go, sooner the surer; speech left mid-thought waits for the owner', async () => {
+  const page = await harness();
+  try {
+    for (const { text, p, goes } of MEASURED) {
+      turnEnd = measured(p);
+      const asked = judged().length;
+      const socket = await startSpeaking(page, text);
+      socket.autoCommit = true;
+      socket.write(text);
+      const at = await silenceUntilCommit(page, socket, 21_000);
+      const pauses = judged().slice(asked).map(body => body.pauseMs);
+      const window = { 'at once': [0, 1_300], 'at 3 s': [3_000, 3_400], 'at 6 s': [6_000, 6_400], kept: [20_000, 21_000] }[goes];
+      assert.ok(at !== undefined && at >= window[0] && at <= window[1], `${text}: committed after ${at} ms of silence, expected ${goes} (judged at ${pauses.join(', ')} ms)`);
+      assert.ok(pauses.length <= 3, `${text}: at most one judgment per row (${pauses.join(', ')})`);
+      await flush();
+      socket.closed();
+      await flush();
+      if (goes === 'kept') {
+        assert.deepEqual([requests().includes(text), page.view().draft], [false, text], `${text}: kept unsent to go on from`);
+        assert.deepEqual(pauses.map(pause => pause >= 6_000 ? 6 : pause >= 3_000 ? 3 : 1), [1, 3, 6], `${text}: asked again as the pause grew, and not past six seconds`);
+        page.voice.discard();
+      } else assert.equal(requests().at(-1), text);
+    }
+    assert.equal(new Set(requests()).size, requests().length, 'each sent once');
+  } finally { page.end(); }
+});
+
+test('speaking again after a long pause starts the bar over: the judgment of the old end, or one still on its way, never sends what follows', async () => {
+  const page = await harness();
+  try {
+    // Judgments depend only on the words and the pause row, as the web's memory of them does.
+    // Judged 0.45 at three seconds: it would go at six. The owner speaks again at five; ElevenLabs has not written it yet.
+    const text = '이거 자동 전송 로직을 조금 고칠 필요가 있을 것 같아.';
+    turnEnd = measured([0.38, 0.45, 0.50]);
+    const socket = await startSpeaking(page, text);
+    await page.hearSlowly(0.002, 5_000);
+    const asked = judged().length;
+    assert.deepEqual([commits(socket), asked], [0, 2]);
+    await page.hearSlowly(0.1, 400);
+    await page.hearSlowly(0.002, 1_500);
+    assert.deepEqual([commits(socket), judged().length], [0, asked], 'not at six seconds of the old pause; the same words are not asked again while the new ones may still be written');
+    await page.hearSlowly(0.002, 1_000);
+    assert.ok(judged().length > asked && judged().slice(asked).every(body => body.pauseMs >= 2_000), 'nothing new written: asked again, as a pause of its own');
+    await page.hearSlowly(0.002, 2_500);
+    assert.equal(commits(socket), 0, 'not before six seconds of the new pause');
+    await page.hearSlowly(0.002, 1_300);
+    assert.equal(commits(socket), 1, 'the same words, still the end after six seconds of the new pause, go');
+    socket.closed();
+    await flush();
+    page.voice.discard();
+
+    // A question at three seconds still on its way when the owner speaks again: its answer is about the old end.
+    let late: () => void = () => {};
+    turnEnd = ({ text: words, pauseMs }) => words.endsWith('음') ? { finished: 0.05 }
+      : pauseMs >= 3_000 ? new Promise(resolve => { late = () => resolve({ finished: 0.62 }); }) : { finished: 0.4 };
+    const next = await startSpeaking(page, '로그 확인해 줘');
+    await page.hearSlowly(0.002, 3_100);
+    assert.ok(judged().some(body => body.pauseMs >= 3_000), 'asked at three seconds');
+    await page.hearSlowly(0.1, 300);
+    late();
+    await page.hearSlowly(0.1, 200);
+    await page.hearSlowly(0.002, 5_000);
+    assert.equal(commits(next), 0, 'the late 0.62 is dropped; the new pause goes by its own judgments');
+    next.message({ message_type: 'partial_transcript', text: '로그 확인해 줘 그리고 음' });
+    await page.hearSlowly(0.002, 8_000);
+    assert.deepEqual([commits(next), requests().length], [0, 1], 'what follows trails off: it waits');
+  } finally { page.end(); }
+});
+
+test('writing that changes in a pause is judged as written: a late correction before the bar holds, one that finishes the words sends them, and nothing goes twice', async () => {
+  const page = await harness();
+  try {
+    // A full stop ElevenLabs wrote early, judged 0.45; just before six seconds it writes on: "… 그리고".
+    turnEnd = ({ text, pauseMs }) => ({ finished: text.endsWith('그리고') ? 0.04 : pauseMs >= 3_000 ? 0.45 : 0.41 });
+    const socket = await startSpeaking(page, '자동 전송이 안 되고.');
+    socket.autoCommit = true;
+    socket.write('자동 전송이 안 되고.');
+    await page.hearSlowly(0.002, 5_700);
+    socket.write('자동 전송이 안 되고. 그리고');
+    await page.hearSlowly(0.002, 10_000);
+    assert.equal(commits(socket), 0, 'the correction is judged, not the words before it');
+    assert.ok(judged().some(body => body.text === '자동 전송이 안 되고. 그리고'));
+    // Written this late, it is new speech: the pause started over with it, and twenty seconds of it keep it unsent.
+    await page.hearSlowly(0.002, 10_500);
+    assert.equal(commits(socket), 1);
+    await flush();
+    socket.closed();
+    await flush();
+    assert.deepEqual([requests(), page.view().draft], [[], '자동 전송이 안 되고. 그리고']);
+    page.voice.discard();
+
+    // The final writing of a part finishes the words mid-pause (the pause goes on): judged again, and sent once.
+    turnEnd = ({ text }) => ({ finished: text.endsWith('줘') ? 0.9 : 0.2 });
+    const next = await startSpeaking(page, '세션 목록 보여');
+    await page.hearSlowly(0.002, 1_800);
+    assert.equal(commits(next), 0);
+    next.message({ message_type: 'committed_transcript', text: '세션 목록 보여 줘' });
+    await page.hearSlowly(0.002, 600);
+    assert.equal(commits(next), 1);
+    next.message({ message_type: 'committed_transcript', text: '' });
+    next.message({ message_type: 'committed_transcript', text: '' });
+    await page.hearSlowly(0.002, 5_000);
+    assert.deepEqual([commits(next), requests()], [1, ['세션 목록 보여 줘']]);
+  } finally { page.end(); }
+});
+
+test('speaking again before the pause is even reached also starts over: the same words are not judged again until what was said can be written', async () => {
+  const page = await harness();
+  try {
+    turnEnd = ({ text }) => ({ finished: text.endsWith('음') ? 0.05 : 0.95 });
+    const socket = await startSpeaking(page, '로그 확인해 줘');
+    await page.hearSlowly(0.002, 900);
+    assert.deepEqual([judged().length, commits(socket)], [1, 0], 'judged on the way to the pause, not reached yet');
+    // Loud again before the pause: still the same speech to the gate, so no new start; ElevenLabs writes it a moment later.
+    await page.hearSlowly(0.1, 300);
+    await page.hearSlowly(0.002, 1_500);
+    assert.deepEqual([commits(socket), judged().length], [0, 1], 'the judgment before the owner went on does not send it, and the same words are not asked again yet');
+    socket.message({ message_type: 'partial_transcript', text: '로그 확인해 줘 그리고 음' });
+    await page.hearSlowly(0.002, 6_000);
+    assert.equal(commits(socket), 0, 'what was written meanwhile trails off: it waits');
+    socket.closed();
+    await flush();
+    page.voice.discard();
+
+    // Heard again, but nothing new is ever written (a breath, say): the same words go once late writing could have come.
+    const next = await startSpeaking(page, '세션 목록 보여 줘');
+    await page.hearSlowly(0.002, 900);
+    await page.hearSlowly(0.1, 300);
+    const at = await silenceUntilCommit(page, next, 4_000);
+    assert.ok(at !== undefined && at >= 2_000 && at <= 2_800, `sent after ${at} ms of silence`);
+  } finally { page.end(); }
+});
+
+test('speaking again while the first question is still unanswered also waits for the words to be written', async () => {
+  const page = await harness();
+  try {
+    // Judged 0.95 whenever asked, but the first answer is slow; the owner goes on before it comes.
+    const slow: Array<() => void> = [];
+    turnEnd = ({ text }) => text.endsWith('음') ? { finished: 0.05 } : slow.length ? { finished: 0.95 } : new Promise(resolve => { slow.push(() => resolve({ finished: 0.95 })); });
+    const socket = await startSpeaking(page, '로그 확인해 줘');
+    await page.hearSlowly(0.002, 900);
+    assert.equal(slow.length, 1, 'asked on the way to the pause, not answered yet');
+    await page.hearSlowly(0.1, 300);
+    await page.hearSlowly(0.002, 1_500);
+    assert.equal(commits(socket), 0, 'the same words are not asked again before what was said could be written');
+    socket.message({ message_type: 'partial_transcript', text: '로그 확인해 줘 그리고 음' });
+    slow[0]();
+    await page.hearSlowly(0.002, 6_000);
+    assert.deepEqual([commits(socket), requests()], [0, []], 'what was written meanwhile trails off: it waits');
+  } finally { page.end(); }
+});
+
+test('answers that come after the owner went on are not kept or counted: a request after many such pauses is still judged', async () => {
+  const page = await harness();
+  try {
+    // Every answer is slow: it comes once the owner has already gone on.
+    const slow: Array<() => void> = [];
+    turnEnd = ({ text }) => text.endsWith('줘') ? { finished: 0.9 } : new Promise(resolve => { slow.push(() => resolve({ finished: 0.1 })); });
+    const socket = await startSpeaking(page, '그,');
+    socket.autoCommit = true;
+    let said = '그,';
+    for (let pause = 0; pause < 22; pause++) {
+      await page.hearSlowly(0.002, 900);
+      await page.hearSlowly(0.1, 150);
+      slow.shift()?.();
+      await page.hearSlowly(0.1, 150);
+      said += ` 말 ${pause}`;
+      socket.write(said);
+    }
+    assert.ok(judged().length > 20, `asked at each pause (${judged().length})`);
+    said += ' 로그 보여 줘';
+    socket.write(said);
+    await page.hearSlowly(0.002, 2_500);
+    await flush();
+    assert.deepEqual(requests(), [said], 'judged and sent, not held as if out of judgments');
+  } finally { page.end(); }
+});
+
+test('a question about words the owner has since gone on from cannot hand the decision to the page: its failure is dropped', async () => {
+  const page = await harness();
+  try {
+    let answer: (value: unknown) => void = () => {};
+    turnEnd = () => new Promise(resolve => { answer = resolve; });
+    const socket = await startSpeaking(page, '이거 배포해 주고');
+    await page.hearSlowly(0.002, 2_200);
+    assert.equal(judged().length, 1);
+    // Quiet speech the gate does not hear: ElevenLabs writes on, and the pause starts over.
+    turnEnd = ({ text }) => ({ finished: text.endsWith('그리고') ? 0.05 : 0.9 });
+    socket.message({ message_type: 'partial_transcript', text: '이거 배포해 주고 그리고' });
+    await page.hearSlowly(0.002, 300);
+    answer({ unavailable: true });
+    await page.hearSlowly(0.002, 9_000);
+    assert.deepEqual([commits(socket), requests()], [0, []], 'the new words trail off: they wait');
+    assert.ok(judged().some(body => body.text === '이거 배포해 주고 그리고'));
+  } finally { page.end(); }
+});
+
+for (const failure of ['unavailable', 'refused', 'too late'] as const) {
+  test(`a judgment asked again that fails (${failure}) leaves the last one standing: words judged unfinished still wait`, async () => {
+    const page = await harness();
+    try {
+      turnEnd = ({ pauseMs }) => pauseMs < 3_000 ? { finished: 0.1 }
+        : failure === 'unavailable' ? { unavailable: true }
+        : failure === 'refused' ? Promise.reject(new Error('offline'))
+        : new Promise(() => {});
+      const socket = await startSpeaking(page, '그리고 음');
+      await page.hearSlowly(0.002, 12_000);
+      assert.equal(commits(socket), 0, 'not sent by the page\'s own rule');
+      assert.ok(judged().length <= 3, `no question after question (${judged().length})`);
+      await page.hearSlowly(0.002, 9_000);
+      assert.equal(commits(socket), 1, 'kept unsent after twenty seconds');
+      await flush();
+      socket.message({ message_type: 'committed_transcript', text: '그리고 음' });
+      socket.closed();
+      await flush();
+      assert.deepEqual([requests(), page.view().draft], [[], '그리고 음']);
+    } finally { page.end(); }
+  });
+}
+
+for (const resume of ['aloud', 'quietly', 'rewritten', 'final wording'] as const) {
+  test(`a failed judgment hands the page only those words as they end: speaking again or writing them differently (${resume}) is judged again`, async () => {
+    const page = await harness();
+    try {
+      let failing = true;
+      turnEnd = ({ text }) => failing ? { unavailable: true } : { finished: text.endsWith('음') ? 0.05 : 0.9 };
+      const socket = await startSpeaking(page, '이거 배포해 주고');
+      await page.hearSlowly(0.002, 900);
+      assert.deepEqual([judged().length, commits(socket)], [1, 0], 'the judgment on the way to the pause failed');
+      failing = false;
+      // Aloud or quietly, the owner says more; or, at the same end, ElevenLabs writes the same speech differently.
+      if (resume === 'aloud') await page.hearSlowly(0.1, 300);
+      else if (resume === 'quietly') await page.hearSlowly(0.002, 1_400);
+      else await page.hearSlowly(0.002, 300);
+      socket.message({ message_type: resume === 'final wording' ? 'committed_transcript' : 'partial_transcript', text: '이거 배포해 주고 그리고 음' });
+      await page.hearSlowly(0.002, 8_000);
+      assert.deepEqual([commits(socket), requests()], [0, []], 'the new words trail off: they wait, not sent by the page\'s rule');
+      assert.ok(judged().some(body => body.text === '이거 배포해 주고 그리고 음'), 'asked again');
+    } finally { page.end(); }
+  });
+}
+
+test('with judgments off, every pause of a long request is the page\'s to decide, however many there are', async () => {
+  const page = await harness();
+  try {
+    turnEnd = () => ({ unavailable: true });
+    const socket = await startSpeaking(page, '그,');
+    socket.autoCommit = true;
+    let said = '그,';
+    for (let pause = 0; pause < 21; pause++) {
+      await page.hearSlowly(0.002, 900);
+      said += ` 말 ${pause}`;
+      await page.hearSlowly(0.1, 300);
+      socket.write(said);
+    }
+    said += ' 그리고 이것도 고쳐 주고';
+    socket.write(said);
+    assert.ok(judged().length >= 20, `asked at each of its pauses (${judged().length})`);
+    await page.hearSlowly(0.002, 2_200);
+    assert.equal(page.view().capturing, true, 'it trails off: the page waits a little longer');
+    await page.hearSlowly(0.002, 800);
+    await flush();
+    assert.deepEqual(requests(), [said], 'and then sends it, as without judgments before');
+  } finally { page.end(); }
+});
+
 test('once the reply starts, talking over it is never written down; afterwards it is a new request, and talking before it plays holds it back', async () => {
   const page = await harness();
   try {
@@ -614,8 +909,10 @@ test('a finished request after many pauses still goes: once judgments run out, t
     assert.equal(judged().length, 20, 'the finished request had the last judgment');
     assert.equal(judged().at(-1)!.text, said, 'judged as a whole, its parts included');
     assert.equal(page.view().capturing, true);
-    await page.hearSlowly(0.002, 2_300);
-    assert.equal(commits(socket), parts + 1, 'sent within seconds, not kept unsent after twenty');
+    await page.hearSlowly(0.002, 4_500);
+    assert.equal(commits(socket), parts, 'under the bar of a pause shorter than six seconds');
+    await page.hearSlowly(0.002, 1_000);
+    assert.equal(commits(socket), parts + 1, 'sent at six seconds by the same judgment, not kept unsent after twenty');
     await flush();
     assert.deepEqual(requests(), [said]);
     assert.ok(judged().length <= 20);

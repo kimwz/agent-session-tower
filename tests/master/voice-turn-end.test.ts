@@ -58,3 +58,11 @@ test('no judgment, and the page decides itself: feature off, another session, no
   assert.deepEqual(await failing.turnEnd.judge({ session: 'live', text: '배포해 줘', pauseMs: 1_000 }), { unavailable: true });
   assert.deepEqual(failing.records.map(record => [record.result, record.detail]), [['failed', 'Jev did not answer in time.']]);
 });
+
+test('a judgment is recorded as finished by the bar of the pause it was asked at', async () => {
+  for (const [pauseMs, result] of [[1_000, 'listening'], [3_000, 'listening'], [6_000, 'finished']] as const) {
+    const h = harness({ finished: 0.45 });
+    await h.turnEnd.judge({ session: 'live', text: '이거 고칠 필요가 있을 것 같아.', pauseMs });
+    assert.equal(h.records[0].result, result, `${pauseMs} ms`);
+  }
+});
