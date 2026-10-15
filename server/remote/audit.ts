@@ -28,6 +28,8 @@ export class RemoteAudit {
    * sent again is recorded once for as long as the request ledger would answer it again.
    */
   private requests = new Map<string, number>();
+  /** The earliest time in `requests`: none has expired while it is inside the window, so most records skip the sweep. */
+  private oldestRequest = Infinity;
   /** The latest computer that started controlling this one; kept apart so newer changes never push it out. */
   private joined?: RemoteChange;
   private unsaved = false;
@@ -60,19 +62,31 @@ export class RemoteAudit {
     this.changes = value.changes.filter(valid).slice(-MAX_CHANGES);
     if (valid(value.joined)) this.joined = value.joined;
     if (Array.isArray(value.requests)) for (const entry of value.requests) if (Array.isArray(entry) && typeof entry[0] === 'string' && typeof entry[1] === 'number') this.requests.set(entry[0], entry[1]);
+    for (const at of this.requests.values()) if (at < this.oldestRequest) this.oldestRequest = at;
   }
 
   /** Records a change a controlling computer made. The same `request` sent again is recorded once. */
   record(change: Omit<RemoteChange, 'at' | 'controller' | 'name'>, request?: string): void {
     const now = (this.options.now ?? Date.now)();
-    for (const [known, at] of this.requests) if (at < now - REMOTE_REQUEST_RETENTION_MS) this.requests.delete(known);
+    if (this.oldestRequest < now - REMOTE_REQUEST_RETENTION_MS) {
+      this.oldestRequest = Infinity;
+      for (const [known, at] of this.requests) {
+        if (at < now - REMOTE_REQUEST_RETENTION_MS) this.requests.delete(known);
+        else if (at < this.oldestRequest) this.oldestRequest = at;
+      }
+    }
     const key = request && `${change.controllerId}\n${request}`;
     if (key && this.requests.has(key)) return;
     // One still inside its window is never forgotten to make room; past the limit a change is recorded without it.
-    if (key && this.requests.size < MAX_REQUESTS) this.requests.set(key, Math.max(now, remoteRequestTime(request) ?? now));
+    if (key && this.requests.size < MAX_REQUESTS) {
+      const at = Math.max(now, remoteRequestTime(request) ?? now);
+      this.requests.set(key, at);
+      if (at < this.oldestRequest) this.oldestRequest = at;
+    }
     const controller = this.options.name?.(change.controllerId);
     const entry: Saved = { at: new Date(now).toISOString(), ...change, ...(controller ? { controller } : {}) };
-    this.changes = [...this.changes, entry].slice(-MAX_CHANGES);
+    this.changes.push(entry);
+    if (this.changes.length > MAX_CHANGES) this.changes.splice(0, this.changes.length - MAX_CHANGES);
     if (change.action === 'joined') this.joined = entry;
     this.save();
   }

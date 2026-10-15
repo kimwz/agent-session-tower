@@ -106,15 +106,10 @@ test('a request is remembered as long as it can be sent again, even after its ch
 test('requests still inside their window are never forgotten to make room', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-remote-audit-'));
   t.after(() => rm(stateDir, { recursive: true, force: true }));
-  const id = (index: number) => `0199a2b3-c4d5-7123-8abc-${index.toString(16).padStart(12, '0')}`;
-  // All but the last two requests the record keeps are already known, all inside their window: recording each of
-  // 20,000 one by one looks through every one before it, which only costs time.
-  await mkdir(join(stateDir, 'link'), { recursive: true, mode: 0o700 });
-  const now = Date.now();
-  await writeFile(join(stateDir, 'link', 'remote-changes.json'), JSON.stringify({ changes: [], requests: Array.from({ length: 19_999 }, (_, index) => [`${A}\n${id(index)}`, now]) }), { mode: 0o600 });
   const audit = new RemoteAudit(stateDir);
   await audit.start();
-  for (let index = 19_999; index < 20_001; index++) audit.record({ controllerId: A, action: 'file', target: '/work/app/a.ts' }, id(index));
+  const id = (index: number) => `0199a2b3-c4d5-7123-8abc-${index.toString(16).padStart(12, '0')}`;
+  for (let index = 0; index < 20_001; index++) audit.record({ controllerId: A, action: 'file', target: '/work/app/a.ts' }, id(index));
   audit.record({ controllerId: A, action: 'title', target: '/work/app' }, id(0));
   assert.notEqual(audit.list()[0].action, 'title', 'the first request is still known');
   await audit.flush();
