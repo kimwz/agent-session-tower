@@ -141,7 +141,7 @@ test('every text in the lookup database is hidden before it is stored, names and
   assert.ok(Buffer.byteLength(JSON.stringify(result.rows)) <= 256 * 1024 + 1000);
 });
 
-test('a lookup process whose host was killed exits by itself', { skip: noLookups, timeout: 120_000 }, async () => {
+test('a lookup process whose host was killed exits by itself', { skip: noLookups, timeout: 120_000 }, async t => {
   // The helper starts the lookup process and waits for its first answer without the query's own deadline: a cold start
   // on a busy machine can take longer than that, and only what the process does once its host is gone is tested here.
   const helper = spawn(process.execPath, ['--import', 'tsx', '-e', `
@@ -151,12 +151,24 @@ test('a lookup process whose host was killed exits by itself', { skip: noLookups
     setInterval(() => {}, 1000);
     const db = new ReadDatabase();
     const child = db.process();
-    const ready = new Promise(resolve => createInterface({ input: child.stdout }).on('line', line => { if (JSON.parse(line).id === 1) resolve(); }));
+    // A lookup process that fails to start ends the helper, so the test fails instead of waiting.
+    const failed = reason => { console.error('lookup process failed: ' + reason); process.exit(1); };
+    child.on('error', error => failed(error.message));
+    child.on('exit', code => failed('exited ' + code));
+    const ready = new Promise(resolve => createInterface({ input: child.stdout }).on('line', line => { if (JSON.parse(line).id === 1) resolve(); }).on('close', () => failed('output closed')));
     child.stdin.write(JSON.stringify({ type: 'rebuild', tables: [], id: 1 }) + String.fromCharCode(10));
     await ready;
     console.log('child ' + child.pid);
   `], { stdio: ['ignore', 'pipe', 'inherit'], cwd: new URL('../..', import.meta.url).pathname });
-  const pid = await new Promise<number>((resolve, reject) => {
+  const helperClosed = new Promise<void>(resolve => helper.once('close', () => resolve()));
+  let pid = 0;
+  // Whatever happens, the helper and its lookup process do not outlive the test.
+  t.after(async () => {
+    if (helper.exitCode === null && helper.signalCode === null) helper.kill('SIGKILL');
+    await helperClosed;
+    if (pid) try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  });
+  pid = await new Promise<number>((resolve, reject) => {
     helper.stdout.on('data', chunk => { const match = /child (\d+)/.exec(String(chunk)); if (match) resolve(Number(match[1])); });
     helper.on('exit', () => reject(new Error('helper exited early')));
   });
