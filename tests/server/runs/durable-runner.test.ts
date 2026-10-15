@@ -769,13 +769,20 @@ test('updating on request stops the running turn at the deadline, hands off, and
   await f.host.close();
   let handoffs = 0;
   let successorStarted = 0;
-  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { await stopFixtureWriter(f.runs); handoffs++; }, startSuccessor: () => { successorStarted++; } });
+  // This newer web asks for a handoff as it starts; the worker's checks wait until the turn runs, or the idle worker
+  // would hand off (and refuse the turn) before it is sent.
+  const driver = new CheckDriver();
+  driver.held = true;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { await stopFixtureWriter(f.runs); handoffs++; }, startSuccessor: () => { successorStarted++; } }, driver);
   t.after(() => host.close());
   const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0' });
   t.after(() => client.close());
   await client.start();
   const run = await client.enqueue(f.session.id, 'Long work');
   await until(() => f.starts() === 1 && client.list().some(item => item.id === run.id && item.status === 'running'));
+  driver.held = false;
+  await driver.checks();
+  assert.equal(handoffs, 0, 'a running turn keeps the worker');
   const answer = await client.forceUpdate(300);
   assert.equal(Date.parse(answer.deadline), clock + 300);
   await until(() => client.updateDrain() !== undefined);

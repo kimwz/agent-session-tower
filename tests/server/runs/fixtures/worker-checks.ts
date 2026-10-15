@@ -13,6 +13,8 @@ const live = new Set<CheckDriver>();
 export class CheckDriver {
   /** Skips the idle check (a test sets it until its own request has reached the worker, as a second-long tick always allowed). */
   idleHeld = false;
+  /** Skips whole rounds: a test holds every check until the state it needs is in place (a turn running, say). */
+  held = false;
   private started = 0;
   private readonly completed: number[] = [];
   /** Handoff attempts not yet settled: one under way ends with a handoff (the successor started) or a resume. */
@@ -30,6 +32,7 @@ export class CheckDriver {
   readonly schedule = (checks: WorkerChecks): (() => void) => {
     live.add(this);
     const timer = setInterval(() => {
+      if (this.held) return;
       const round = ++this.started;
       const handoff = checks.handoff();
       this.attempts.add(handoff);
