@@ -84,18 +84,25 @@ test('a quick change stands on its base: a base without a passed gate needs the 
   assert.equal(change({ 'client/App.tsx': 'x' }, false).tier, 'related', 'related does not lean on its base');
 });
 
-test('only a completed successful newest gate run passes; pending, skipped, failed and absent do not', () => {
-  const run = (id: number, status: string, conclusion: string | null, name = GATE) => ({ id, name, status, conclusion, app: { slug: 'github-actions' } });
-  assert.equal(gatePassed([run(1, 'completed', 'success')]).passed, true);
-  assert.equal(gatePassed([]).passed, false, '[skip ci] starts no workflow, so no gate');
+test('only a completed successful newest CI run and gate pass; pending, rerunning, skipped, failed and absent do not', () => {
+  const check = (id: number, status: string, conclusion: string | null, name = GATE) => ({ id, name, status, conclusion, app: { slug: 'github-actions' } });
+  const ci = (id: number, attempt: number, status: string, conclusion: string | null, number = 1) => ({ id, run_number: number, run_attempt: attempt, status, conclusion });
+  const done = [ci(7, 1, 'completed', 'success')];
+  assert.equal(gatePassed([check(1, 'completed', 'success')], done).passed, true);
+  assert.equal(gatePassed([], []).passed, false, '[skip ci] starts no workflow, so no run and no gate');
+  assert.equal(gatePassed([], done).passed, false, 'a run without a gate');
   for (const [status, conclusion] of [['queued', null], ['in_progress', null], ['completed', 'skipped'], ['completed', 'cancelled'],
     ['completed', 'failure'], ['completed', 'neutral'], ['completed', 'timed_out']] as const) {
-    assert.equal(gatePassed([run(1, status, conclusion)]).passed, false, `${status}/${conclusion}`);
+    assert.equal(gatePassed([check(1, status, conclusion)], done).passed, false, `gate ${status}/${conclusion}`);
+    assert.equal(gatePassed([check(1, 'completed', 'success')], [ci(7, 1, status, conclusion)]).passed, false, `run ${status}/${conclusion}`);
   }
-  assert.equal(gatePassed([run(1, 'completed', 'success'), run(2, 'in_progress', null)]).passed, false, 'a rerun in progress');
-  assert.equal(gatePassed([run(1, 'completed', 'failure'), run(2, 'completed', 'success')]).passed, true, 'a rerun that passed');
-  assert.equal(gatePassed([run(1, 'completed', 'success', 'checks')]).passed, false, 'another job is not the gate');
-  assert.equal(gatePassed([{ ...run(1, 'completed', 'success'), app: { slug: 'other-app' } }]).passed, false);
+  // A rerun keeps the run and its old gate until the new gate job starts; the attempt in progress decides.
+  assert.equal(gatePassed([check(1, 'completed', 'success')], [ci(7, 2, 'in_progress', null)]).passed, false, 'a rerun before its gate exists');
+  assert.equal(gatePassed([check(1, 'completed', 'success')], [ci(7, 1, 'completed', 'success'), ci(9, 1, 'queued', null, 2)]).passed, false, 'a newer run queued');
+  assert.equal(gatePassed([check(1, 'completed', 'success'), check(2, 'in_progress', null)], done).passed, false, 'a newer gate in progress');
+  assert.equal(gatePassed([check(1, 'completed', 'failure'), check(2, 'completed', 'success')], [ci(7, 2, 'completed', 'success')]).passed, true, 'a rerun that passed');
+  assert.equal(gatePassed([check(1, 'completed', 'success', 'checks')], done).passed, false, 'another job is not the gate');
+  assert.equal(gatePassed([{ ...check(1, 'completed', 'success'), app: { slug: 'other-app' } }], done).passed, false);
 });
 
 const sha = 'a'.repeat(40), tree = 't'.repeat(40);

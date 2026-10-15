@@ -85,14 +85,22 @@ export function classify({ changes, content, baseGreen, nextVersion }) {
   return { tier, reasons, files: changes, version: { from, to } };
 }
 
-/** Whether the newest gate check run of a commit completed with success. Pending, skipped, failed or absent is not. */
-export function gatePassed(checkRuns) {
+/**
+ * Whether a commit's CI passed: its newest CI workflow run (a rerun keeps the run and raises its attempt) completed with
+ * success, and so did its newest gate check run. A run still going, a rerun whose gate does not exist yet, skipped, failed,
+ * or none at all is not a pass.
+ */
+export function gatePassed(checkRuns, workflowRuns) {
+  const latest = workflowRuns.reduce((a, b) => (!a || b.run_number > a.run_number || (b.run_number === a.run_number && b.run_attempt > a.run_attempt) ? b : a), undefined);
+  if (!latest) return { passed: false, reason: 'no CI run (workflow skipped or never started)' };
+  if (latest.status !== 'completed') return { passed: false, reason: `CI run ${latest.id} attempt ${latest.run_attempt} ${latest.status}` };
+  if (latest.conclusion !== 'success') return { passed: false, reason: `CI run ${latest.id} ${latest.conclusion}` };
   const gates = checkRuns.filter(run => run.name === GATE && run.app?.slug === 'github-actions');
-  if (!gates.length) return { passed: false, reason: 'no gate run (workflow skipped or never started)' };
-  const latest = gates.reduce((a, b) => (b.id > a.id ? b : a));
-  if (latest.status !== 'completed') return { passed: false, reason: `gate ${latest.status}` };
-  if (latest.conclusion !== 'success') return { passed: false, reason: `gate ${latest.conclusion}` };
-  return { passed: true, reason: 'gate success', id: latest.id };
+  if (!gates.length) return { passed: false, reason: 'no gate run' };
+  const gate = gates.reduce((a, b) => (b.id > a.id ? b : a));
+  if (gate.status !== 'completed') return { passed: false, reason: `gate ${gate.status}` };
+  if (gate.conclusion !== 'success') return { passed: false, reason: `gate ${gate.conclusion}` };
+  return { passed: true, reason: `gate success (CI run ${latest.id} attempt ${latest.run_attempt})`, id: gate.id };
 }
 
 const gitIn = cwd => (...args) => execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 }).trim();
@@ -104,9 +112,11 @@ const gh = args => JSON.parse(execFileSync('gh', ['api', ...args], { encoding: '
 /** The gate verdict of a commit from GitHub. Any API failure counts as not passed. */
 export function commitGate(sha, repo = process.env.GITHUB_REPOSITORY) {
   try {
-    const runs = gh(['--paginate', '--slurp', `repos/${repo}/commits/${sha}/check-runs?per_page=100&check_name=${encodeURIComponent(GATE)}`])
+    const checks = gh(['--paginate', '--slurp', `repos/${repo}/commits/${sha}/check-runs?per_page=100&check_name=${encodeURIComponent(GATE)}`])
       .flatMap(page => page.check_runs);
-    return gatePassed(runs);
+    const runs = gh(['--paginate', '--slurp', `repos/${repo}/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=100`])
+      .flatMap(page => page.workflow_runs);
+    return gatePassed(checks, runs);
   } catch (error) { return { passed: false, reason: `cannot read gate: ${error.message.split('\n')[0]}` }; }
 }
 

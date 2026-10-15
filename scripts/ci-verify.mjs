@@ -1,6 +1,6 @@
 /**
- * Exit 0 only when the newest `validation gate (all platforms)` run of a commit completed with success. A gate still
- * queued or running, skipped, cancelled, failed, or never started (as `[skip ci]` does) fails. Used before merging,
+ * Exit 0 only when the newest CI run of a commit and its `validation gate (all platforms)` completed with success. A run
+ * or rerun still going, skipped, cancelled, failed, or never started (as `[skip ci]` does) fails. Used before merging,
  * before tagging and by the Release workflow before it publishes. Usage: node scripts/ci-verify.mjs <commit>
  */
 import { execFileSync } from 'node:child_process';
