@@ -38,8 +38,8 @@ export async function historyWithSidecars(t: TestContext): Promise<History> {
   return history;
 }
 
-/** A copy of a closed history in a new state directory: the same database, sidecars and snapshot, at new inodes. */
-export async function cloneHistory(t: TestContext, history: History): Promise<History> {
+/** A copy of a closed state directory in a new one, removed after the test: the same files, at new inodes. */
+export async function cloneStateDir(t: TestContext, source: string): Promise<string> {
   const dir = await stateDir(t);
   const copy = async (from: string, to: string): Promise<void> => {
     await Promise.all((await readdir(from, { withFileTypes: true })).map(async entry => {
@@ -48,8 +48,13 @@ export async function cloneHistory(t: TestContext, history: History): Promise<Hi
       await copy(join(from, entry.name), join(to, entry.name));
     }));
   };
-  await copy(history.dir, dir);
-  return { ...history, dir };
+  await copy(source, dir);
+  return dir;
+}
+
+/** A copy of a closed history in a new state directory: the same database, sidecars and snapshot, at new inodes. */
+export async function cloneHistory(t: TestContext, history: History): Promise<History> {
+  return { ...history, dir: await cloneStateDir(t, history.dir) };
 }
 
 /** The history with sidecars, and its barrier recorded: the barrier records all three files. */
