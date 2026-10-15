@@ -33,7 +33,11 @@ const shortFirstReplyDeadline = (t: test.TestContext) => {
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 /** What the fake fast model says first, unless a test says otherwise. */
 const FIRST = '요청을 확인해 볼게요.';
-const FAST: Partial<VoiceTiming> = { firstChunkMs: 1_000, synthMs: 2_000, playMs: 2_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 };
+/**
+ * Short waits for what the tests play out themselves. The waits for the fake ElevenLabs over a real socket stay long: a
+ * busy machine must not turn a slow local answer into "no sound in time" (the tests of those deadlines set their own).
+ */
+const FAST: Partial<VoiceTiming> = { firstChunkMs: 30_000, synthMs: 60_000, playMs: 2_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 };
 
 async function listen(server: Server): Promise<number> {
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -610,9 +614,11 @@ test('an answer prepared for v3 is made with v3 to its end when the model change
   await until(() => h.says().find(item => item.kind === 'answer'));
   await h.settings.update({ voice: { model: 'eleven_v4_turbo' } });
   await playFiniteAnswer(h, session, entry.id, fetchAudio);
+  // Counted before the request: the next answer's first part can be out before its entry is seen.
+  const before = h.says().length;
   await request(h, session, '하나 더');
   const next = await masterEntry(h, /다음 답입니다/);
-  await playFiniteAnswer(h, session, next.id, fetchAudio, h.says().length);
+  await playFiniteAnswer(h, session, next.id, fetchAudio, before);
   const parts = h.labs.speeches.filter(item => item.text.includes('번째 문장'));
   assert.ok(parts.length > 1);
   assert.ok(parts.every(item => item.request === 'speech' && item.body.model_id === 'eleven_v3_conversational' && item.text.startsWith('[')), 'every part as prepared, with its tag');

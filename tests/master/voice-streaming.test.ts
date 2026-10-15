@@ -234,7 +234,7 @@ async function harness(t: test.TestContext, options: { settings?: Record<string,
       return signal.aborted ? { skipped: 'failed' as const, warm: true } : { text: FIRST, warm: true };
     },
   };
-  const voice = new MasterVoice({ dataDir: dir, settings, room, elevenLabs, firstReply, timing: { firstChunkMs: 1_000, synthMs: 2_000, playMs: options.playMs ?? 2_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 },
+  const voice = new MasterVoice({ dataDir: dir, settings, room, elevenLabs, firstReply, timing: { firstChunkMs: 30_000, synthMs: 60_000, playMs: options.playMs ?? 2_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 },
     hooks: { hide: text => text, connectedSince: () => client.connectedSince(), send: input => session.spoken({ text: input.text, key: input.voice.key, voiceSession: input.voice.session ?? '' }),
       streamState: (turn, state) => session.voicedState(turn, state) } });
   session.setVoice(voice);
