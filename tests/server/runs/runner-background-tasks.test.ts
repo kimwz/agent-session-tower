@@ -328,31 +328,54 @@ test("a wakeup is dropped only when Claude's own timer delivered it in the kept-
 });
 
 
+/** The turn's process and Claude control while it runs, as the manager owns them. */
+const ownedTurn = (manager: RunManager, id: string) => (manager as unknown as { owned: Map<string, { child: { stdin: { writableEnded: boolean } }; claude?: { turnIdle: boolean } }> }).owned.get(id);
+
 test('without a test grace a turn waits the production 250 ms for bookends in a later chunk before it ends', async t => {
   assert.equal(CLAUDE_FINISH_RECHECK_MS, 250);
-  // Named but undefined: the run manager falls back to CLAUDE_FINISH_RECHECK_MS, as in production.
+  // Named but undefined: the run manager falls back to CLAUDE_FINISH_RECHECK_MS, as in production. The grace runs on a
+  // fake clock from before the turn starts; the provider process stays real.
   const { manager, entries, cleanup } = await fixture({ first: [says('Done.')] }, { finishRecheckMs: undefined });
   t.after(cleanup);
-  const began = performance.now();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => t.mock.timers.reset());
   const run = await manager.enqueue(SESSION, 'Quick', {}, { origin: { kind: 'owner' } });
+  // The result has been read (the grace starts in the same step).
+  const owned = await until(() => ownedTurn(manager, run.id)?.claude?.turnIdle && ownedTurn(manager, run.id));
+  t.mock.timers.tick(249);
+  assert.equal(owned.child.stdin.writableEnded, false, 'input stays open within the grace');
+  t.mock.timers.tick(1);
+  assert.equal(owned.child.stdin.writableEnded, true, 'input closes once the grace has passed');
+  t.mock.timers.reset();
   const done = await settled(manager, run.id);
   assert.equal(done.status, 'completed');
-  // Only a lower bound: the turn cannot end before its grace has passed, however fast the machine.
-  assert.ok(performance.now() - began >= CLAUDE_FINISH_RECHECK_MS - 5, 'the input closed only after the grace');
   assert.ok((await entries()).some(entry => entry.end));
 });
 
 test('a task start arriving after the result keeps input open', async t => {
-  // A grace far longer than the 40 ms the start comes after the result, so no machine is too slow for it (the
-  // production 250 ms is used in the test above).
+  // The finish grace runs on a fake clock from before the turn starts, so it cannot pass while the late start is on its
+  // way, however slow the machine; the start is sent only once the result has been read.
   const { manager, release, cleanup } = await fixture({ first: [says('Waiting for review.')], later: [
-    { at: 40, frames: [started('late')] },
+    { when: 'start', frames: [started('late')] },
     { when: 'review', frames: [notified('late'), takes('late'), says('Review complete.'), result] },
-  ] }, { finishRecheckMs: 2_000 });
+  ] }, { finishRecheckMs: CLAUDE_FINISH_RECHECK_MS });
   t.after(cleanup);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => t.mock.timers.reset());
   const run = await manager.enqueue(SESSION, 'Review');
+  const owned = await until(() => ownedTurn(manager, run.id)?.claude?.turnIdle && ownedTurn(manager, run.id));
+  await release('start');
   assert.equal((await until(() => find(manager, run.id).backgroundWait)).tasks, 1);
+  // Well past the grace: the started task keeps input open.
+  t.mock.timers.tick(CLAUDE_FINISH_RECHECK_MS * 4);
+  assert.equal(owned.child.stdin.writableEnded, false, 'the late task keeps input open');
   await release('review');
+  // The follow-up's result has been read (its reply is shown and the turn is idle again): only then does the clock move,
+  // so no other wait (the follow-up's or the background limit) can pass meanwhile.
+  await until(() => owned.claude?.turnIdle && find(manager, run.id).output.includes('Review complete'));
+  t.mock.timers.tick(CLAUDE_FINISH_RECHECK_MS);
+  assert.equal(owned.child.stdin.writableEnded, true, 'the turn ends after its grace');
+  t.mock.timers.reset();
   const done = await settled(manager, run.id);
   assert.equal(done.status, 'completed');
   assert.match(done.output, /Review complete/);
