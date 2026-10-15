@@ -18,7 +18,7 @@ format, and saved browser preferences are the compatibility surface.
   - `/api/health`의 `candidateStorage` 항목
 - 1.137.x로 되돌리는 방법이 설치 방식마다 다릅니다(자세한 절차는 docs/development.md).
   - checkout: 이전 태그를 빌드하고 웹을 재시작합니다. 아무 작업도 돌지 않을 때 워커도 재시작합니다.
-  - 서비스: 이전 버전을 설치해도 내려가지 않습니다. 업데이트 검증에 실패했을 때 자동 롤백으로만 돌아갑니다. 그 뒤 1.137.x가 저장소를 보류하면 1.137.x CLI로 `storage verify-update overwritten-done`과 `storage retry`를 실행합니다.
+  - 서비스: 이전 버전을 설치해도 내려가지 않습니다. 업데이트 검증에 실패했을 때 자동 롤백으로만 돌아갑니다. 그 뒤 1.137.x가 저장소를 `done-overwritten`으로 보류하면 1.137.x CLI로 `storage verify-update overwritten-done`과 `storage retry`를 실행합니다. 손으로 되돌려 `later-update-recorded`로 보류되면 `runtime/update.json`을 옮기고 서비스를 다시 시작합니다.
   - 1.138.0 이후 빈 상태에서 새로 만든 저장소는 1.137.x에서 열 수 없습니다.
 - 웹의 저장소 런타임 확인이 시간 초과처럼 일시적인 이유로 실패하면 다음 상태 확인에서 다시 확인합니다. 웹을 재시작할 때까지 503이 이어지지 않습니다.
 - 지원하지 않는 Node.js(22.22.3 미만의 22.x, 24.15.0 미만의 24.x, 22·24·26 이외의 버전)에서는 시작하자마자 지원 버전을 안내하고 멈춥니다.
