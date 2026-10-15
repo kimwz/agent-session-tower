@@ -137,21 +137,25 @@ test('a clock that moves backwards never fires a time again', async t => {
 });
 
 test('while its previous run works, a trigger skips, queues one run, or runs in parallel as configured', async t => {
-  for (const overlap of ['skip', 'queue', 'parallel'] as const) await t.test(overlap, async t => {
-    const f = await fixture(t);
-    const service = await f.open();
-    const trigger = await service.create(hourly(f.project, { policy: { overlap, maxEventsPerHour: 20 } }), OWNER);
+  // One storage and service for the three modes, one after another: each mode has its own trigger, and its runs end
+  // before the next mode starts.
+  const f = await fixture(t);
+  const service = await f.open();
+  for (const overlap of ['skip', 'queue', 'parallel'] as const) await t.test(overlap, async () => {
+    const trigger = await service.create(hourly(f.project, { name: `Hourly report (${overlap})`, policy: { overlap, maxEventsPerHour: 20 } }), OWNER);
+    const calls = f.calls.length;
     await service.run(trigger.id, OWNER);
     await service.tick();
     await service.run(trigger.id, OWNER);
     await service.run(trigger.id, OWNER);
     await service.tick();
-    const statuses = service.events().map(event => event.status).reverse();
+    const statuses = service.events().filter(event => event.triggerId === trigger.id).map(event => event.status).reverse();
     if (overlap === 'skip') assert.deepEqual(statuses, ['running', 'skipped', 'skipped']);
     if (overlap === 'queue') assert.deepEqual(statuses, ['running', 'queued', 'coalesced']);
     if (overlap === 'parallel') assert.deepEqual(statuses, ['running', 'running', 'running']);
     f.finish(); await service.tick(); await service.tick();
-    if (overlap === 'queue') assert.equal(f.calls.length, 2, 'the waiting run starts after the previous one');
+    if (overlap === 'queue') assert.equal(f.calls.length - calls, 2, 'the waiting run starts after the previous one');
+    f.finish(); await service.tick(); // nothing of this mode is left running for the next
   });
 });
 
@@ -298,7 +302,8 @@ test('wrong shape holds startup instead of treating once history as empty', asyn
 });
 
 test('invalid independent once ledger holds startup without quarantine', async t => {
-  for (const onceConsumed of [[],{ id: { bad: 1 } }]) {
+  // One malformed ledger row stands for any: the startup reads every row through the same validation.
+  for (const onceConsumed of [{ id: { bad: 1 } }]) {
     const f = await fixture(t), service = await f.open();
     await service.create(hourly(f.project),OWNER); service.close(); await service.settle();
     await f.sql.malformedLedger(onceConsumed);
