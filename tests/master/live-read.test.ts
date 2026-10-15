@@ -11,6 +11,11 @@ import { tickUntil, until } from '../helpers/until.js';
 
 /** Lookups need SQLite's authorizer, which Node.js 22 lacks; there the master simply does not offer them. */
 const noLookups = !lookupsSupported() && 'this Node.js has no SQLite authorizer';
+/**
+ * The lookup process without the whole server loaded first, so a first query (which has its own 10 s deadline) waits
+ * only for a small module even on a busy machine. The server's own entry is started in the host-killed test below.
+ */
+const QUERY_ENTRY = new URL('./fixtures/query-entry.ts', import.meta.url).pathname;
 
 const session = (id: string, status: Session['status'], extra: Partial<Session> = {}): Session => ({ id, nativeId: id, provider: 'claude', title: `title ${id}`, cwd: `/work/${id}`, project: `project-${id}`,
   status, statusReason: '', createdAt: '2026-09-27T00:00:00Z', updatedAt: '2026-09-27T00:00:00Z', lastMessage: `last ${id}`, messageCount: 3, isSubagent: false, resumable: true, ...extra });
@@ -63,7 +68,7 @@ test('the master follows the page\'s event stream: snapshots, patches and joined
 });
 
 test('the quick-lookup database answers reads only: no writes, PRAGMA, ATTACH, recursion or second statements', { skip: noLookups }, async t => {
-  const db = new ReadDatabase();
+  const db = new ReadDatabase({ entry: QUERY_ENTRY });
   t.after(() => db.close());
   const tables = () => tablesFrom(snapshot([session('a', 'working'), session('b', 'idle', { customTitle: 'key sk-proj-ABCDEFGHIJKLMNOPQRSTUV' })]), new Map([[NODE, snapshot([session('n', 'working')])]]),
     text => text.replace(/sk-[A-Za-z0-9-]+/g, '{{secret}}'));
@@ -81,7 +86,7 @@ test('the quick-lookup database answers reads only: no writes, PRAGMA, ATTACH, r
 });
 
 test('a query is cut at 500 rows, and one that runs too long is stopped without breaking the next', { skip: noLookups }, async t => {
-  const db = new ReadDatabase();
+  const db = new ReadDatabase({ entry: QUERY_ENTRY });
   t.after(() => db.close());
   const many = () => tablesFrom(snapshot(Array.from({ length: 600 }, (_, index) => session(`s${index}`, 'idle'))), new Map(), text => text);
   const capped = await db.query('SELECT id FROM sessions', 'many', many);
@@ -123,7 +128,7 @@ test('a first look waits a moment for joined computers, and says which ones have
 });
 
 test('every text in the lookup database is hidden before it is stored, names and paths included, and sizes count bytes', { skip: noLookups }, async t => {
-  const db = new ReadDatabase();
+  const db = new ReadDatabase({ entry: QUERY_ENTRY });
   t.after(() => db.close());
   const key = 'sk-proj-ABCDEFGHIJKLMNOPQRSTUV';
   const hide = (text: string) => text.replaceAll(key, '{{secret}}');
@@ -136,13 +141,20 @@ test('every text in the lookup database is hidden before it is stored, names and
   assert.ok(Buffer.byteLength(JSON.stringify(result.rows)) <= 256 * 1024 + 1000);
 });
 
-test('a lookup process whose host was killed exits by itself', { skip: noLookups }, async () => {
+test('a lookup process whose host was killed exits by itself', { skip: noLookups, timeout: 120_000 }, async () => {
+  // The helper starts the lookup process and waits for its first answer without the query's own deadline: a cold start
+  // on a busy machine can take longer than that, and only what the process does once its host is gone is tested here.
   const helper = spawn(process.execPath, ['--import', 'tsx', '-e', `
     const { ReadDatabase } = await import(${JSON.stringify(new URL('../../server/tower-tools/read-db.ts', import.meta.url).href)});
-    const db = new ReadDatabase();
-    await db.query('SELECT 1 AS one', 'v', () => []);
-    console.log('child ' + db.child.pid);
+    const { createInterface } = await import('node:readline');
+    // The lookup process and its pipes never keep a host alive (they are unref'd): this helper keeps itself alive.
     setInterval(() => {}, 1000);
+    const db = new ReadDatabase();
+    const child = db.process();
+    const ready = new Promise(resolve => createInterface({ input: child.stdout }).on('line', line => { if (JSON.parse(line).id === 1) resolve(); }));
+    child.stdin.write(JSON.stringify({ type: 'rebuild', tables: [], id: 1 }) + String.fromCharCode(10));
+    await ready;
+    console.log('child ' + child.pid);
   `], { stdio: ['ignore', 'pipe', 'inherit'], cwd: new URL('../..', import.meta.url).pathname });
   const pid = await new Promise<number>((resolve, reject) => {
     helper.stdout.on('data', chunk => { const match = /child (\d+)/.exec(String(chunk)); if (match) resolve(Number(match[1])); });
@@ -151,11 +163,12 @@ test('a lookup process whose host was killed exits by itself', { skip: noLookups
   const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
   assert.equal(alive(), true);
   helper.kill('SIGKILL');
-  await until(() => !alive(), 8000);
+  // It ends as soon as it sees its input close; a busy machine may be slow to run it.
+  await until(() => !alive(), 30_000);
 });
 
 test('a key at the edge of a shortened text is hidden whole first in the lookup database', { skip: noLookups }, async t => {
-  const db = new ReadDatabase();
+  const db = new ReadDatabase({ entry: QUERY_ENTRY });
   t.after(() => db.close());
   const key = 'AKIAABCDEFGHIJKLMNOP';
   const hide = (text: string) => text.replace(/\bAKIA[0-9A-Z]{16}\b/g, '{{secret}}');
@@ -167,7 +180,7 @@ test('a key at the edge of a shortened text is hidden whole first in the lookup 
 });
 
 test('quick lookups see the task each session works on now and every task it worked on', { skip: noLookups }, async t => {
-  const db = new ReadDatabase();
+  const db = new ReadDatabase({ entry: QUERY_ENTRY });
   t.after(() => db.close());
   const tasks = [{ id: 't1', title: 'Voice playback fix', stage: '배포됨', startedAt: '2026-09-27T01:00:00Z', updatedAt: '2026-09-27T02:00:00Z' },
     { id: 't2', title: 'Snapshot compression', stage: 'PR 리뷰중', startedAt: '2026-09-27T03:00:00Z', updatedAt: '2026-09-27T04:00:00Z' }];
