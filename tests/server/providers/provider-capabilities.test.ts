@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import test from 'node:test';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';

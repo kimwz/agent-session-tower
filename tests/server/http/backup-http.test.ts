@@ -7,6 +7,8 @@ import { RemoteExclusionStore } from '../../../server/remote/exclusions.js';
 import { DecisionService } from '../../../server/decisions/service.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
+import '../../helpers/fast-scrypt.js';
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

@@ -1,6 +1,7 @@
 import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
