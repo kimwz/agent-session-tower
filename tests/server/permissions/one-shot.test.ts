@@ -24,7 +24,7 @@ const until = async (check: () => boolean, ms = 10_000) => {
 };
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'], effectGate?: () => Promise<void>, requestAdmission?: () => void, autoReviewSkip?: () => string | undefined, runnerOptions: Partial<RunnerOptions> = {}) {
+async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'], effectGate?: () => Promise<void>, requestAdmission?: () => void, autoReviewSkip?: () => string | undefined, runnerOptions: Partial<RunnerOptions> = {}, timeScale = 1) {
   const root = await mkdtemp(join(tmpdir(), 'tower-one-shot-'));
   const stateDir = join(root, 'state');
   const project = join(root, 'project');
@@ -34,9 +34,10 @@ async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'
   let clock = new Date('2026-09-30T00:00:00.000Z');
   const finished: string[] = [];
   let service!: PermissionService;
-  const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 300, now: () => clock, beforeStart, beforeLaunch: (id, command, cwd, timeout, launch) => service.launchReviewed(id, command, cwd, timeout, launch), ...runnerOptions });
+  const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 300, now: () => clock, beforeStart, beforeLaunch: (id, command, cwd, timeout, launch) => service.launchReviewed(id, command, cwd, timeout / timeScale, launch), ...runnerOptions });
   const make = () => new PermissionService({ stateDir, repository:noStorageFixture(stateDir), effectGate, requestAdmission, autoReviewSkip, env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), now: () => clock,
-    startRun: request => runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600, request.sessionId),
+    // `timeScale` shortens the runner's real time limit; the request keeps its whole seconds.
+    startRun: request => runner.start(request.id, request.rule.value, request.cwd, (request.timeoutSeconds ?? 600) * timeScale, request.sessionId),
     onRunFinished: request => finished.push(request.id), runOutput: id => runner.output(id), forgetRun: id => runner.forget(id) });
   service = make();
   await service.start();
@@ -78,7 +79,7 @@ test('the same command, or the same key, returns the same request instead of run
 });
 
 test('a run past its time limit is stopped with everything it started', async t => {
-  const f = await fixture(t);
+  const f = await fixture(t, undefined, undefined, undefined, undefined, {}, 0.25);
   const asked = await f.service.requestRun({ command: 'sleep 30 & echo $! > child.pid; sleep 30', reason: 'r', timeoutSeconds: 1 }, agent('claude:one'));
   await f.service.decide(asked.request.id!, true);
   const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 15 }, agent('claude:one'));
@@ -214,11 +215,11 @@ test('one conversation’s runs go one after another, and nothing starts while a
   const f = await fixture(t);
   let release!: () => void;
   f.runner.hold(new Promise<void>(resolve => { release = resolve; }));
-  const first = await f.service.requestRun({ command: 'sleep 0.5; perl -MTime::HiRes=time -e "printf q(%.6f), time" > first', reason: 'r' }, agent('claude:one'));
+  const first = await f.service.requestRun({ command: 'sleep 0.2; perl -MTime::HiRes=time -e "printf q(%.6f), time" > first', reason: 'r' }, agent('claude:one'));
   const second = await f.service.requestRun({ command: 'perl -MTime::HiRes=time -e "printf q(%.6f), time" > second', reason: 'r' }, agent('claude:one'));
   await f.service.decide(first.request.id!, true);
   await f.service.decide(second.request.id!, true);
-  await new Promise(resolve => setTimeout(resolve, 300));
+  await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(f.service.overview().requests.find(item => item.id === first.request.id!)!.run!.status, 'waiting', 'held until recovery is done');
   assert.ok(f.runner.inFlight());
   release();
@@ -351,12 +352,14 @@ test('a refused request with a key can be asked again with that key', async t =>
 
 test('a run still going is reported as such without output, and stays to be told', async t => {
   const f = await fixture(t);
-  const asked = await f.service.requestRun({ command: 'sleep 2', reason: 'r' }, agent('claude:one'));
+  // The command ends once the test lets it, after its early result was read.
+  const asked = await f.service.requestRun({ command: 'while [ ! -f go ]; do sleep 0.02; done', reason: 'r' }, agent('claude:one'));
   await f.service.decide(asked.request.id!, true, undefined, true);
   await until(() => f.service.overview().requests[0]!.run!.status === 'running');
   const early = await f.service.runResult({ id: asked.request.id!, waitSeconds: 0 }, agent('claude:one'));
   assert.equal(early.request.run!.status, 'running');
   assert.equal(early.output, undefined);
+  await writeFile(join(f.project, 'go'), '');
   await f.runner.flush();
   assert.deepEqual(f.service.untoldRuns().map(item => item.id), [asked.request.id]);
 });
@@ -545,13 +548,15 @@ test('storage hold keeps a same-conversation slot waiter while the owned command
   service = f.service;
   const db = await storage.openStorage({ stateDir: f.stateDir, bundle: threadBundle('production') });
   await db.prepare({ allowMigration: true }); t.after(() => db.close());
-  const first = await service.requestRun({ command: 'sleep 0.5; echo first', reason: 'fixture' }, agent('claude:one'));
+  // The first command drains once the test lets it, so it is surely still running while the storage is held.
+  const first = await service.requestRun({ command: 'while [ ! -f go ]; do sleep 0.02; done; echo first', reason: 'fixture' }, agent('claude:one'));
   const second = await service.requestRun({ command: 'echo once >> executions', reason: 'fixture' }, agent('claude:one'));
   await service.decide(first.request.id!, true);
   await until(() => service.overview().requests.find(r => r.id === first.request.id)?.run?.status === 'running');
   await service.decide(second.request.id!, true);
   f.runner.holdStorage();
   assert.equal(f.runner.active(), true);
+  await writeFile(join(f.project, 'go'), '');
   await f.runner.flush();
   assert.equal(service.overview().requests.find(r => r.id === second.request.id)!.run!.status, 'waiting');
   assert.equal((await db.gate('core')).open, true);
