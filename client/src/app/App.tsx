@@ -88,7 +88,7 @@ function TowerApp() {
   const [provider, setProvider] = useState<'all' | Provider>('all');
   const [status, setStatus] = useState<StatusFilter>('all');
   const [project, setProject] = useState('all');
-  const [period, setPeriod] = useState('1');
+  const [period, setPeriod] = useState('7');
   const [showHidden, setShowHidden] = useState(false);
   const [query, setQuery] = useState('');
   const [listLimit, setListLimit] = useState(80);
@@ -414,7 +414,7 @@ function TowerApp() {
   const sessionCreated = useCallback((session: Session, run: Run) => {
     // Another computer's new session arrives on its own stream.
     if (!session.node) snapshots.provisional(previous => previous ? { ...previous, sessions: previous.sessions.some(item => item.id === session.id) ? previous.sessions : [...previous.sessions, session], runs: previous.runs.some(item => item.id === run.id) ? previous.runs : [...previous.runs, run] } : previous);
-    setShowClosed(false); setMachine('all'); setProvider('all'); setStatus('all'); setProject('all'); setQuery(''); setPeriod('1');
+    setShowClosed(false); setMachine('all'); setProvider('all'); setStatus('all'); setProject('all'); setQuery(''); setPeriod('7');
     selectSession(session.id);
     refresh();
   }, [refresh, selectSession, snapshots]);
