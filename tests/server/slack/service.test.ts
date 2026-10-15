@@ -394,6 +394,22 @@ test('runtime polling shows its own errors without secrets, clears them on recov
   assert.match(service.overview().error!, /EACCES/);
   assert.equal(service.projection()?.error, service.overview().error);
   assert.doesNotMatch(service.overview().error!, /secret|xoxp|https/);
+  // Each storage refusal has its own wording: a hold says so, an unknown outcome does not, and neither shows the cause's text.
+  const { TowerError } = await import('../../../shared/errors.js');
+  const { StorageCommandError } = await import('../../../server/storage/contract.js');
+  gateFailure = new TowerError('unavailable', 'Permission SQL receipt/effect reconciliation remains held.', { disposition: 'not-admitted' });
+  await poll();
+  assert.match(service.overview().error!, /보류.*permission-reconciliation/);
+  await poll();
+  assert.match(service.projection()!.error!, /보류/, 'even a persistent hold remains visible');
+  gateFailure = new StorageCommandError({ phase: 'command', code: 'not-ready', message: 'secret xoxp-test-1234567890', disposition: 'not-committed', retryable: false });
+  await poll();
+  assert.match(service.overview().error!, /보류.*not-ready\/not-committed/);
+  assert.doesNotMatch(service.overview().error!, /secret|xoxp/);
+  gateFailure = new StorageCommandError({ phase: 'command', code: 'sqlite-error', message: 'private path /secret', disposition: 'unknown', retryable: false });
+  await poll();
+  assert.match(service.overview().error!, /확인하지 못.*sqlite-error\/unknown/);
+  assert.doesNotMatch(service.overview().error!, /보류|secret|private/);
   gateFailure = undefined;
   await poll();
   assert.equal(service.overview().error, undefined, 'the error clears after recovery');
