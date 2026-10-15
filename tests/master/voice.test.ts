@@ -68,7 +68,8 @@ async function fakeElevenLabs() {
       if (state.silent(state.speeches.at(-1)!.text)) { res.end(); return; }
       if (state.lagMs) await sleep(state.lagMs);
       res.write(state.chunks[0]);
-      await sleep(state.gapMs);
+      // A long gap ends early when the client goes away, so no fixture timer outlives its test.
+      await new Promise<void>(resolve => { const timer = setTimeout(resolve, state.gapMs); res.once('close', () => { clearTimeout(timer); resolve(); }); });
       if (state.mode === 'cut') { res.destroy(); return; }
       res.end(state.chunks[1]);
       state.completed.push(speechNumber);
@@ -323,10 +324,11 @@ test('no first reply is said when the model says nothing, it comes too late, it 
   h.firsts.reply = () => ({ skipped: 'model', warm: true });
   assert.deepEqual(await request(h, session, '안녕'), {});
   h.firsts.reply = () => ({ text: FIRST, warm: true });
-  h.firsts.delayMs = 3_000;
+  // The first reply would take 30 s; the request is answered at the (shortened) deadline, far sooner on any machine.
+  h.firsts.delayMs = 30_000;
   const started = Date.now();
   assert.deepEqual(await request(h, session, '배포 상태 봐줘'), {});
-  assert.ok(Date.now() - started < 2_900, 'given up on at its deadline');
+  assert.ok(Date.now() - started < 10_000, 'given up on at its deadline');
   h.firsts.delayMs = 0;
   (h.voice as unknown as { options: { hooks: { hide(text: string): string } } }).options.hooks.hide = text => text.replace('확인', '■');
   assert.deepEqual(await request(h, session, '세션 확인해줘'), {});
@@ -858,13 +860,15 @@ test('finite first response discards audio completed after the answer started', 
 });
 
 test('finite first response retains the original deadline while TTS is incomplete', async t => {
-  const h = await harness(t, { steps: [() => undefined], timing: { synthMs: 4_000 } });
+  // The first reply's sound takes 15 s (within its 20 s synthesis time); the request is answered at the (shortened)
+  // first-response deadline, far sooner on any machine.
+  const h = await harness(t, { steps: [() => undefined], timing: { synthMs: 20_000 } });
   shortFirstReplyDeadline(t);
   const session = on(h);
-  h.labs.gapMs = 3_000;
+  h.labs.gapMs = 15_000;
   const started = Date.now();
   assert.deepEqual(await request(h, session, '느린 첫 음성'), {});
-  assert.ok(Date.now() - started < 2_900, 'the existing 2.5 second first-response deadline also covers synthesis');
+  assert.ok(Date.now() - started < 10_000, 'the existing 2.5 second first-response deadline also covers synthesis');
 });
 
 test('missing preview and live audio are bodiless 404s, and a preview is a finite file with its length', async t => {

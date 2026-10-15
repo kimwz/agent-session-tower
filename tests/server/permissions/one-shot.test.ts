@@ -13,7 +13,7 @@ import { PermissionRunner, processStart } from '../../../server/permissions/runn
 import { noStorageFixture, permissionFixture, closePermissionFixture } from './storage-fixture.js';
 import { PermissionService } from '../../../server/permissions/service.js';
 import { storage, threadBundle } from '../storage/helpers.js';
-import { realDelay, settle } from '../../helpers/settle.ts';
+import { settle, tickUntil } from '../../helpers/until.ts';
 import type { RunnerOptions } from '../../../server/permissions/runner.js';
 import { autoReviewBlock, type PermissionRun } from '../../../shared/permissions.js';
 
@@ -94,8 +94,7 @@ test('a run past its time limit is stopped with everything it started', async t 
   assert.ok(f.runner.isRunning(asked.request.id!) && alive(child), 'not stopped before its limit');
   t.mock.timers.tick(1);
   // The kill grace and output waits run on the same fake clock.
-  const deadline = performance.now() + 10_000;
-  while (f.runner.isRunning(asked.request.id!) && performance.now() < deadline) { t.mock.timers.tick(1_000); await realDelay(1); }
+  await tickUntil(t, () => !f.runner.isRunning(asked.request.id!), 1_000);
   t.mock.timers.reset();
   const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 0 }, agent('claude:one'));
   assert.equal(result.request.run!.timedOut, true);
@@ -331,14 +330,15 @@ test('lines joined by a backslash are checked as one command', () => {
 
 test('a finished command is done even when a child it left holds the output open', async t => {
   const f = await fixture(t);
-  const asked = await f.service.requestRun({ command: 'sleep 20 & echo done', reason: 'r', timeoutSeconds: 10 }, agent('claude:one'));
+  const asked = await f.service.requestRun({ command: 'sleep 20 & echo done', reason: 'r', timeoutSeconds: 30 }, agent('claude:one'));
   const began = Date.now();
   await f.service.decide(asked.request.id!, true);
   const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 15 }, agent('claude:one'));
   assert.equal(result.request.run!.exitCode, 0);
   assert.equal(result.request.run!.timedOut, undefined);
   assert.equal(result.output!.stdout, 'done\n');
-  assert.ok(Date.now() - began < 8_000);
+  // The child holds the output for 20 s; waiting for it would take that long, and 10 s is far below it.
+  assert.ok(Date.now() - began < 10_000);
 });
 
 test('a rule for one conversation allowed late lasts from the decision; it leaves other conversations’ and the project’s rules alone', async t => {

@@ -362,7 +362,8 @@ test('a turn that ends is answered at once, not at the next regular look', async
   h.write(run, 'm1:0', '네, 끝났어요.', true);
   h.finish(run);
   await h.entry(/끝났어요/);
-  assert.ok(Date.now() - started < 2_000, 'well before the next regular look');
+  // The next regular look is a minute away; 10 s is far below it on any machine.
+  assert.ok(Date.now() - started < 10_000, 'well before the next regular look');
 });
 
 test('many replies at once are all read in order, none of their audio pushed out while it waits', async t => {

@@ -298,7 +298,8 @@ test('3. no hold because writing it failed (stale breaker, busy turn) or a relea
     while (!readFileSync(marks, 'utf8').includes('enter')) { if (Date.now() > deadline) throw new Error('the other process never took the turn'); await new Promise(resolve => setTimeout(resolve, 10)); }
     const started = Date.now();
     assertHeld(await outcome(handoffHeld(state)), 'folder', 'none', 'busy turn');
-    assert.ok(Date.now() - started < 1000, 'held without waiting for the turn');
+    // Waiting for the turn would take the whole 30 s wait (WAIT_MS); 10 s is far below it on any machine.
+    assert.ok(Date.now() - started < 10_000, 'held without waiting for the turn');
     assert.ok(!readFileSync(marks, 'utf8').includes('leave'), 'judged while the other process kept the turn');
     other.stdin.write('go on\n');
     assert.equal(await done, 0);

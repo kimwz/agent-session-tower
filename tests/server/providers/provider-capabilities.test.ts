@@ -4,7 +4,7 @@ import test from 'node:test';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { until } from '../../helpers/until.js';
+import { settle, until } from '../../helpers/until.js';
 import { join } from 'node:path';
 import { parseClaudeUsage, parseCodexUsage, parseCodexModels, parseCodexConfig, readClaudeDefaultEffort, claudeStorage, readClaudeCredential, readClaudeUsage, readCodexCapabilities, ProviderCapabilities, parseSavedUsage, maskEmail, parseCodexAccount, readClaudeEmail } from '../../../server/providers/capabilities.js';
 import type { ProviderHealth, ProviderUsage } from '../../../shared/types.js';
@@ -146,32 +146,41 @@ createInterface({input:process.stdin}).on('line', line => {
   assert.deepEqual(requests.map(request => request.method), ['initialize', 'initialized', 'account/rateLimits/read', 'account/read', 'model/list', 'model/list', 'config/read']);
 });
 
-test('aborting an unresponsive Codex reader force-kills its child even when SIGTERM is ignored', { timeout: 15000 }, async t => {
+test('aborting an unresponsive Codex reader force-kills its child a second after SIGTERM when SIGTERM is ignored', { timeout: 60_000 }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'tower-capability-abort-'));
   const executable = join(directory, 'codex');
   const pidFile = join(directory, 'pid');
+  const endFile = join(directory, 'stdin-ended');
   let pid: number | undefined;
   t.after(async () => { if (pid) { try { process.kill(pid, 'SIGKILL'); } catch { /* Already reaped. */ } } await rm(directory, { recursive: true, force: true }); });
+  // The fake CLI ignores SIGTERM, publishes its pid whole (renamed into place), and notes when its input is closed.
   await writeFile(executable, `#!${process.execPath}
 import {renameSync,writeFileSync} from 'node:fs';
-process.on('SIGTERM',()=>{}); process.stdin.resume();
+process.on('SIGTERM',()=>{});
+process.stdin.on('end',()=>writeFileSync(process.env.END_FILE,'')); process.stdin.resume();
 writeFileSync(process.env.PID_FILE+'.pending',String(process.pid)); renameSync(process.env.PID_FILE+'.pending',process.env.PID_FILE);
 setInterval(()=>{},1000);
 `);
   await chmod(executable, 0o700);
-  const controller = new AbortController();
-  const pending = readCodexCapabilities(executable, { ...process.env, PID_FILE: pidFile }, controller.signal);
-  // A busy machine can take seconds to start the fake CLI. The pid is renamed into place whole, so it is there or not.
-  pid = await until(() => (existsSync(pidFile) && Number(readFileSync(pidFile, 'utf8'))) || undefined, 30_000);
-  // The second between SIGTERM and SIGKILL runs on a fake clock.
-  const realTimeout = setTimeout;
+  // The second between SIGTERM and SIGKILL runs on a fake clock from the start; the process stays real.
   t.mock.timers.enable({ apis: ['setTimeout'] });
   t.after(() => t.mock.timers.reset());
+  const controller = new AbortController();
+  const pending = readCodexCapabilities(executable, { ...process.env, PID_FILE: pidFile, END_FILE: endFile }, controller.signal);
   let ended = false;
   void pending.finally(() => { ended = true; });
+  // A busy machine can take seconds to start the fake CLI.
+  pid = await until(() => (existsSync(pidFile) && Number(readFileSync(pidFile, 'utf8'))) || undefined, 30_000);
   controller.abort();
-  // Only the fake second ends the child that ignores SIGTERM; the real time this takes is not measured.
-  for (let tries = 0; !ended && tries < 1000; tries++) { t.mock.timers.tick(1000); await new Promise(resolve => realTimeout(resolve, 5)); }
+  // The reader closes the child's input, sends SIGTERM and sets its one-second kill timer in one step: once the child
+  // has seen its input end, that timer is set.
+  await until(() => existsSync(endFile), 30_000);
+  t.mock.timers.tick(999);
+  await settle(() => true, 20);
+  assert.equal(ended, false, 'not ended before the second has passed');
+  assert.doesNotThrow(() => process.kill(pid!, 0), 'the child ignoring SIGTERM still runs');
+  t.mock.timers.tick(1);
+  await until(() => ended, 30_000);
   t.mock.timers.reset();
   const result = await pending;
   assert.equal(result.usage?.status, 'error'); assert.equal(result.usage?.reason, 'unreachable');

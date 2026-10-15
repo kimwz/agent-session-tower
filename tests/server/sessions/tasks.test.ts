@@ -263,9 +263,8 @@ test('closing ends a summary underway instead of waiting for it, and saves nothi
   tasks.changed();
   await asked;
   assert.equal(tasks.inFlight(), true);
-  const at = Date.now();
+  // The call never answers unless it is aborted: a close that waited it out would never end (the test's own timeout).
   await tasks.close();
-  assert.ok(Date.now() - at < 1_000, 'close does not wait out the call');
   assert.equal(tasks.apply(list[0]).tasks, undefined);
 });
 
