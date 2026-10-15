@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.137.4] - 2026-10-15
+
+- 동작 변경 없음. 버전만 올려 새 CI·릴리스 경로를 점검합니다.
+
 ## [1.137.3] - 2026-10-15
 
 - **개발: 변경 내용만큼만 CI를 돌립니다.** 앱 동작은 바뀌지 않았습니다.
