@@ -20,14 +20,13 @@ const answering = (choice: string, calls: unknown[] = []): DecisionEngine => ({ 
 
 async function setup(t: test.TestContext, patch: Partial<SessionOutcomeDependencies> & { list?: Session[] } = {}) {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-outcomes-'));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
   const records: Array<Omit<DecisionRecord, 'at'>> = [];
   let changes = 0;
   const list = patch.list ?? [session('a')];
   const outcomes = new SessionOutcomes({ stateDir, engine: () => answering('finished'), sessions: () => list,
     history: async () => [message('user', 'Deploy it'), message('tool', '', 'Bash'), message('assistant', 'Deployed 1.2.0.')],
     project: item => item.project, title: item => item.title, record: entry => records.push(entry), onChange: () => changes++, settleMs: 1, ...patch });
-  t.after(() => outcomes.close());
+  t.after(async () => { await outcomes.close(); await rm(stateDir, { recursive: true, force: true }); });
   const settled = async () => { for (let i = 0; i < 50 && !changes; i++) await new Promise(resolve => setTimeout(resolve, 5)); await new Promise(resolve => setTimeout(resolve, 20)); };
   return { stateDir, outcomes, records, list, settled, changes: () => changes };
 }
