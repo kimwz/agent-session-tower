@@ -8,7 +8,7 @@ import { isAbsolute } from 'node:path';
 import type { AutoPromptJob, AutoPromptRequest, Run } from '../../shared/types.js';
 import type { SlackFollowUp, SlackMention, SlackMessage, SlackRule, SlackWorkflow } from '../../shared/slack.js';
 import { WorkflowRepository } from './storage-repository.js';
-import { requireDomainAuthority } from '../storage/initialize.js';
+import { requireDomainAuthority } from '../storage/domain-authority.js';
 import { canonical } from '../remote/storage-rows.js';
 import { validateSlackRules, type WorkflowChannel } from './storage-codec.js';
 export { validateSlackRules } from './storage-codec.js';

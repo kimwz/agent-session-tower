@@ -9,10 +9,8 @@ import test, { before, type TestContext } from 'node:test';
 import { Worker } from 'node:worker_threads';
 import { captureStorageBundle, type StorageBundleCapture } from '../../../server/storage/bundle.js';
 import type { StorageClient } from '../../../server/storage/client.js';
-import {
-  freshManifestSha256, initializeStorageDomains, openWorkerStorage, requireDomainAuthority, STORAGE_DOMAINS, StorageInitializationError, storagePreopenRefusal,
-  type OpenWorkerStorageResult, type StorageDomainScope,
-} from '../../../server/storage/initialize.js';
+import { requireDomainAuthority, STORAGE_DOMAINS, StorageInitializationError, type StorageDomainScope } from '../../../server/storage/domain-authority.js';
+import { freshManifestSha256, initializeStorageDomains, openWorkerStorage, storagePreopenRefusal, type OpenWorkerStorageResult } from '../../../server/storage/initialize.js';
 import { preflightStorage } from '../../../server/storage/preflight.js';
 import { currentStorage } from '../../helpers/current-storage.js';
 
@@ -218,6 +216,30 @@ test('a missing authority beside any domain\'s legacy source or migration eviden
       await rm(path, { recursive: true });
     }
   } finally { await storage.close(); }
+});
+
+test('a store shaped like a 1.137.x install opens unrefused: its legacy JSON, migration history and evidence are left byte for byte', async t => {
+  // A current store with its seven authorities, beside everything a JSON-era install and its migrations left behind.
+  const dir = await currentStore(t);
+  for (const [scope, name, kind] of LEGACY_PATHS) {
+    if (kind === 'file') await writeFile(join(dir, name), JSON.stringify({ legacy: scope }), { mode: 0o600 });
+    else {
+      await mkdir(join(dir, name), { mode: 0o700 });
+      await writeFile(join(dir, name, 'evidence.json'), JSON.stringify({ migrated: scope }), { mode: 0o600 });
+    }
+  }
+  await mkdir(join(dir, 'storage-contracts'), { mode: 0o700 });
+  for (const scope of STORAGE_DOMAINS) await writeFile(join(dir, 'storage-contracts', `${scope}.json`), JSON.stringify({ domain: scope }), { mode: 0o600 });
+  await writeFile(join(dir, 'storage-offline-activation.json'), '{}', { mode: 0o600 });
+  // The database and its sidecars belong to the claim; everything else must stay as it is.
+  const outside = async () => Object.fromEntries(Object.entries(await filesUnder(dir)).filter(([path]) => !path.startsWith(DATABASE)));
+  const [before, files] = [dump(dir), await outside()];
+  assert.ok(files[join('retention', 'evidence.json')] && files[join('storage-migrations', 'evidence.json')] && files[join('storage-contracts', 'runs.json')]);
+  const result = await start(dir);
+  assert.equal(result.refusal, undefined, JSON.stringify(result.refusal));
+  assert.deepEqual(result.domains, present);
+  onlyClaimed(before, dump(dir));
+  assert.deepEqual(await outside(), files, 'no legacy, history or evidence file was changed, moved or rewritten');
 });
 
 for (const [code, scope, damage] of [

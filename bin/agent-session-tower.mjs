@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-const major = Number(process.versions.node.split('.')[0]);
-if (major < 22) {
-  console.error('Agent Session Tower requires Node.js 22.22.3+ (22.x), 24.15.0+ (24.x) or 26.0.0+ (26.x).');
+import { nodeSupported } from './node-support.mjs';
+
+if (!nodeSupported(process.versions.node)) {
+  console.error(`Agent Session Tower requires Node.js 22.22.3+ (22.x), 24.15.0+ (24.x) or 26.0.0+ (26.x); this is ${process.versions.node}.`);
   process.exit(1);
 }
 try {

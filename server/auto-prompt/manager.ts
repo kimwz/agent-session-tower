@@ -9,7 +9,7 @@ import { isAbsolute, join } from 'node:path';
 import type { AutoPromptDecision, AutoPromptJob, AutoPromptInput, AutoPromptRequest, Run, RunOrigin, Session, SessionDetail, Snapshot } from '../../shared/types.js';
 import { AttachmentStore, imagePaths, type StoredAttachment } from '../stores/attachments.js';
 import { AutoPromptRepository } from './storage-repository.js';
-import { requireDomainAuthority } from '../storage/initialize.js';
+import { requireDomainAuthority } from '../storage/domain-authority.js';
 import { canonical, type ExternalChange } from '../remote/storage-rows.js';
 import { validEntry, type Entry } from './storage-codec.js';
 import { RunError, type RunAdmission, type RunManager } from '../runs/manager.js';

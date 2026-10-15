@@ -2,7 +2,9 @@ import { AttachmentStore } from './stores/attachments.js';
 import { AttachmentUploads } from './stores/attachment-uploads.js';
 // First: Tower's processes never carry the identity of an agent turn that started them.
 import './sessions/launch-env.js';
+import { parseRunOptions } from './cli-options.js';
 import { captureStorageBundle, preflightStorage } from './storage/index.js';
+import { webStorageCheck } from './storage/web-preflight.js';
 import { hostname, homedir } from 'node:os';
 import { stat, truncate } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -191,25 +193,10 @@ async function main() {
     await runMasterHost(resolve(args[1]));
     return;
   }
-  if (args.includes('--help') || args.includes('-h')) { console.log(HELP); return; }
-  if (args.includes('--version')) { console.log(APP_VERSION); return; }
-  let port = 8000;
-  let host = '127.0.0.1';
-  let open = true;
-  let stateDir = defaultStateDir();
-  let command = 'run';
-  const publicUrls: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === 'run' || arg === 'doctor') command = arg;
-    else if (arg === '--no-open') open = false;
-    else if (arg === '--port') { if (!args[i + 1]) throw new Error('--port requires a number.'); port = Number(args[++i]); }
-    else if (arg === '--host') { if (!args[i + 1]) throw new Error('--host requires an IPv4 address.'); host = args[++i]; }
-    else if (arg === '--public-url') { if (!args[i + 1]) throw new Error('--public-url requires a URL.'); publicUrls.push(args[++i]); }
-    else if (arg === '--state-dir') { if (!args[i + 1]) throw new Error('--state-dir requires a path.'); stateDir = resolve(args[++i]); }
-    else throw new Error(`Unknown option: ${arg}. Run with --help for usage.`);
-  }
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Port must be between 1 and 65535.');
+  const parsed = parseRunOptions(args, defaultStateDir());
+  if (parsed.kind === 'help') { console.log(HELP); return; }
+  if (parsed.kind === 'version') { console.log(APP_VERSION); return; }
+  const { command, port, host, open, stateDir, publicUrls } = parsed;
   const access = networkAccess(host, port, undefined, publicUrls);
   const providers: ProviderHealth[] = await getProviderHealth();
   if (command === 'doctor') {
@@ -280,13 +267,10 @@ async function main() {
   await updates.recover().catch(error => console.error(`The last update could not be settled: ${error instanceof Error ? error.message : String(error)}`));
   // While an update is tried, the worker stays the previous version's, and one that is needed is started from it.
   const runs = new DurableRunManager({ stateDir, handoffHeld: () => handoffHeld(stateDir), heldWorkerEntry: () => heldWorkerEntry(stateDir) });
-  // This web's own storage runtime, checked once when health is first asked (never the state directory: the worker
-  // alone opens the storage). A build whose runtime cannot run it answers 503 whatever its worker says.
-  let webPreflight: Promise<{ code: string; message: string } | undefined> | undefined;
-  const storageRefusal = () => webPreflight ??= captureStorageBundle().then(bundle => preflightStorage({ bundle })).then(
-    preflight => preflight.supported ? undefined : { code: preflight.refusal?.code ?? 'runtime-unsupported', message: preflight.refusal?.message ?? 'The storage runtime preflight was refused.' },
-    error => ({ code: 'runtime-unsupported', message: error instanceof Error ? error.message : String(error) }),
-  ).then(refusal => { if (refusal) console.error(`This build's storage runtime is unsupported (${refusal.code}): ${refusal.message}`); return refusal; });
+  // This web's own storage runtime, checked when health is asked until it passes or is refused for good. A build whose
+  // runtime cannot run it answers 503 whatever its worker says.
+  const storageRefusal = webStorageCheck(() => captureStorageBundle().then(bundle => preflightStorage({ bundle })),
+    refusal => console.error(`This build's storage runtime is unsupported (${refusal.code}): ${refusal.message}`));
   // Load persisted history before shutdown or an HTTP request can touch the runner.
   try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await exclusions.start(); await runs.start(); } catch (error) { auth.close(); await releaseLock(); throw error; }
   const attachmentStores = { chat: new AttachmentStore(stateDir), auto: new AttachmentStore(join(stateDir, 'auto-prompt-staging')) };

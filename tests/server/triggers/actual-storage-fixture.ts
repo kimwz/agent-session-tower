@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { TestContext } from 'node:test';
 import type { StorageClient } from '../../../server/storage/client.js';
-import { requireDomainAuthority } from '../../../server/storage/initialize.js';
+import { requireDomainAuthority } from '../../../server/storage/domain-authority.js';
 import { TriggersRepository } from '../../../server/triggers/storage-repository.js';
 import { changesOf, rowsOf } from '../../../server/triggers/storage-codec.js';
 import { empty, parseState, serializeState, type EngineState } from '../../../server/triggers/state.js';

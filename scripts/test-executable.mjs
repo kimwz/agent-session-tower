@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdtemp, copyFile, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir, networkInterfaces } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout } from 'node:timers/promises';
+import { promisify } from 'node:util';
 
+const execFileAsync = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const dir = await mkdtemp(join(tmpdir(), 'monitor-executable-check-'));
 let child;
@@ -21,6 +23,16 @@ async function stop() {
 try {
   const binary = join(dir, process.platform === 'win32' ? 'agent-session-tower.exe' : 'agent-session-tower');
   await copyFile(join(root, 'artifacts', binary.split('/').at(-1)), binary);
+  // An update helper from 1.125–1.137.x probes its target with `--storage-contract` (through the package's bin with
+  // its own Node, the way a service installs it) and goes on only on this answer: a numeric non-zero exit within its
+  // 60-second limit, not killed, `Unknown option: --storage-contract` on stderr, and `--version` answering the version.
+  const version = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version;
+  for (const [file, prefix] of [[process.execPath, [join(root, 'bin', 'agent-session-tower.mjs')]], [binary, []]]) {
+    const probe = await execFileAsync(file, [...prefix, '--storage-contract'], { cwd: dir, timeout: 60_000 }).then(() => assert.fail(`${file} accepted --storage-contract`), error => error);
+    assert.ok(typeof probe.code === 'number' && probe.code !== 0 && !probe.killed && probe.signal === null, `${file}: ${probe.message}`);
+    assert.match(String(probe.stderr), /Unknown option: --storage-contract/, file);
+    assert.equal((await execFileAsync(file, [...prefix, '--version'], { cwd: dir, timeout: 60_000 })).stdout.trim(), version, file);
+  }
   await mkdir(join(dir, 'codex'));
   await mkdir(join(dir, 'claude'));
   await mkdir(join(dir, 'codex', 'sessions'));
@@ -297,7 +309,7 @@ try {
   assert.equal((await fetch(`${base}/api/snapshot`, { headers })).status, 401, 'a revoked sign-in stays revoked after a restart');
   const renewedHeaders = await loginRemote();
   assert.equal((await fetch(`${base}/api/snapshot`, { headers: renewedHeaders })).status, 200);
-  console.log(`PASS: copied executable alone, minimal PATH, ${Object.keys(config.assets).length} embedded assets, duplicate launch, persistent private session titles and reset, persistent private project group titles/pins and reset without sessions, durable session close/reopen and creation validation, persistent failure dismissal with unchanged lifecycle and raw history, unchanged native history, shutdown/restart, authenticated public-interface binding and persistent 0600 password hash, local bypass, remote sign-in kept across restart, revoked by logout and still revoked after restart, and a new sign-in.`);
+  console.log(`PASS: copied executable alone, the 1.137.x update helper's --storage-contract answer (bin and executable), minimal PATH, ${Object.keys(config.assets).length} embedded assets, duplicate launch, persistent private session titles and reset, persistent private project group titles/pins and reset without sessions, durable session close/reopen and creation validation, persistent failure dismissal with unchanged lifecycle and raw history, unchanged native history, shutdown/restart, authenticated public-interface binding and persistent 0600 password hash, local bypass, remote sign-in kept across restart, revoked by logout and still revoked after restart, and a new sign-in.`);
 } finally {
   try { await stop(); } finally { await rm(dir, { recursive: true, force: true }); }
 }

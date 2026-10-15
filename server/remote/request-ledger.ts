@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { RemoteRepository } from './storage-repository.js';
-import { requireDomainAuthority } from '../storage/initialize.js';
+import { requireDomainAuthority } from '../storage/domain-authority.js';
 import type { RemoteEntry } from './storage-codec.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
 

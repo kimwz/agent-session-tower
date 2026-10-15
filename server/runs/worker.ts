@@ -896,6 +896,8 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
     }
     // Kept for a retry, which reopens the same client.
     database = opened.database ?? database;
+    // A failed open (a behind store refused at open included) arrives here through unavailable(), which moved the hold
+    // generation on: it answers `aborted`, and its status is already set.
     if (opened.aborted || !current()) return false;
     if (opened.refusal) { refused(opened.refusal); return false; }
     if (await privateFile(join(stateDir, 'storage-permissions-pending.json'))) {

@@ -17,6 +17,7 @@ import type { StorageBundleCapture } from './bundle.js';
 import { openStorage, type StorageClient } from './client.js';
 import { StorageCommandError, type DomainAuthority, type StorageFailure, type StorageLimits, type StorageStatus } from './contract.js';
 import { OCCUPIED_TABLES_COMMAND } from './domain.js';
+import { requireDomainAuthority, stagesOf, STORAGE_DOMAINS, StorageInitializationError, type StorageDomainScope } from './domain-authority.js';
 import type { StoragePreflight } from './preflight.js';
 
 /**
@@ -28,9 +29,6 @@ import type { StoragePreflight } from './preflight.js';
  * exported from storage/index.ts: it reaches the domains through their repositories.
  */
 
-export const STORAGE_DOMAINS = ['runs', 'retention', 'triggers', 'permissions', 'remote', 'auto-prompt', 'automation-workflows'] as const;
-export type StorageDomainScope = typeof STORAGE_DOMAINS[number];
-
 /** Why the worker's storage does not become ready. Data is never changed to get past one. */
 export interface StorageRefusal {
   state: 'unavailable' | 'recovery-required';
@@ -39,16 +37,6 @@ export interface StorageRefusal {
   healthStatus: 200 | 503;
   failure?: StorageFailure;
   scope?: StorageDomainScope;
-}
-
-export class StorageInitializationError extends Error {
-  readonly code: 'authority-missing' | 'legacy-source-present' | 'legacy-exported' | 'stages-held';
-  readonly scope: StorageDomainScope;
-  constructor(code: StorageInitializationError['code'], scope: StorageDomainScope, message: string) {
-    super(message);
-    this.name = 'StorageInitializationError';
-    this.code = code; this.scope = scope;
-  }
 }
 
 /** The sha256 a fresh (empty) domain authority records as its source manifest. */
@@ -67,8 +55,6 @@ const LEGACY_SOURCES: Readonly<Record<StorageDomainScope, readonly string[]>> = 
   'auto-prompt': ['auto-prompts.json', 'auto-prompt-storage-migrations'],
   'automation-workflows': ['slack-automation.json', 'github-automation.json', 'automation-workflows-storage-migrations'],
 };
-/** Domains whose staged (multi-part) writes leave rows a crash can strand; permissions commits in one command. */
-const STAGED: ReadonlySet<StorageDomainScope> = new Set(['runs', 'retention', 'triggers', 'remote', 'auto-prompt', 'automation-workflows']);
 /** What only a storage that existed leaves beside a database: its migration history and the records of its activation. */
 const HISTORY_FILES = ['storage-contracts', 'storage-offline-activation.json'];
 const isMigrationFolder = (name: string) => name === 'storage-migrations' || name.endsWith('-storage-migrations');
@@ -198,7 +184,6 @@ export async function openWorkerStorage(input: OpenWorkerStorageInput): Promise<
 }
 
 interface DomainCheck { scope: StorageDomainScope; authority?: DomainAuthority }
-const stagesOf = async (storage: StorageClient, scope: StorageDomainScope) => STAGED.has(scope) ? (await storage.read<{ stages: number }>(scope, 'bootstrapHistory', {})).stages : 0;
 
 /** What each domain's first authority holds: nothing. */
 function creator(storage: StorageClient, scope: StorageDomainScope, now: () => number): (id: string, verify: () => Promise<void>) => Promise<unknown> {
@@ -257,16 +242,4 @@ export async function initializeStorageDomains(storage: StorageClient, stateDir:
     results.push({ scope, result: 'created' });
   }
   return results;
-}
-
-/** Throws unless the database holds `scope` (authority `database`) with no stranded stages. */
-export async function requireDomainAuthority(storage: StorageClient, scope: StorageDomainScope): Promise<void> {
-  // The authority row itself first: a domain's head() refuses rows without one in its own words.
-  const authority = (await storage.inspect()).authority.find(entry => entry.domain === scope);
-  if (!authority) throw new StorageInitializationError('authority-missing', scope, `${scope} has no storage authority.`);
-  if (authority.authority !== 'database') throw new StorageInitializationError('legacy-exported', scope, `${scope} was exported back to its legacy files; only the owner can recover it.`);
-  const head = await storage.read<{ authority?: DomainAuthority | null }>(scope, 'head', {});
-  if (head.authority?.authority !== 'database' || head.authority.generation !== authority.generation) throw new StorageInitializationError('authority-missing', scope, `${scope} has no storage authority.`);
-  const stages = await stagesOf(storage, scope);
-  if (stages) throw new StorageInitializationError('stages-held', scope, `${scope} holds ${stages} unfinished staged write(s); they need explicit owner recovery.`);
 }
