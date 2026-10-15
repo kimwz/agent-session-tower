@@ -7,3 +7,7 @@ export function gateVerdict(input: {
   receipts: (Partial<Receipt> & { id: string; [key: string]: unknown })[];
   sha: string; tree: string; lanes?: Lane[];
 }): { problems: string[]; timing: { testWindowSeconds?: number; testRunnerSeconds?: number } };
+export function rereadClaims(input: {
+  planned: { tier: string; execution: string } | undefined; path: { base: string; head: string; tree: string };
+  gate?: (sha: string) => GateResult; reuse?: (input: any) => Evidence; repo?: string;
+}): { baseGate?: GateResult; evidence?: Evidence };

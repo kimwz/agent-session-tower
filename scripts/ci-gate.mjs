@@ -34,6 +34,18 @@ export function gateVerdict({ needs, planned, pathTier, baseGate, evidence, rece
   return { problems, timing };
 }
 
+/**
+ * Rereads what a quick tier or a reuse rests on: the base commit's gate, or the pull request's result at the tier the plan
+ * ran, which may be above what the files alone need.
+ */
+export function rereadClaims({ planned, path, gate = commitGate, reuse = reuseEvidence, repo = process.env.GITHUB_REPOSITORY }) {
+  return {
+    baseGate: planned?.tier === 'quick' ? gate(path.base) : undefined,
+    evidence: planned?.execution === 'reuse'
+      ? reuse({ head: path.head, tree: path.tree, needed: planned.tier, repo, api: ghJson, artifact: ghArtifact }) : undefined,
+  };
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const receipts = [];
   const walk = path => { for (const entry of readdirSync(path, { withFileTypes: true })) {
@@ -46,10 +58,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const scopeFile = join(root, 'ci-scope', 'ci-scope.json');
   const planned = existsSync(scopeFile) ? JSON.parse(readFileSync(scopeFile, 'utf8')) : undefined;
   const path = ciScope({ gate: () => ({ passed: true }) });
-  const baseGate = planned?.tier === 'quick' ? commitGate(path.base) : undefined;
-  // Reread the reused result against the tier the plan ran, which may be above what the files alone need.
-  const evidence = planned?.execution === 'reuse'
-    ? reuseEvidence({ head: path.head, tree: path.tree, needed: planned.tier, repo: process.env.GITHUB_REPOSITORY, api: ghJson, artifact: ghArtifact }) : undefined;
+  const { baseGate, evidence } = rereadClaims({ planned, path });
   const sha = process.env.GITHUB_SHA;
   const { problems, timing } = gateVerdict({ needs: JSON.parse(process.env.CI_NEEDS), planned, pathTier: path.tier, baseGate,
     evidence, receipts, sha, tree: path.tree });

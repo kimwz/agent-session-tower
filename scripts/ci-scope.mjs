@@ -26,6 +26,8 @@ const GENERAL = new RegExp(`^(client/|assets/|shared/|tests/(client|shared|gates
 // Data, access, secrets, updates and process lifetime inside an ordinary area are core all the same, whether a file is
 // named after them or imports them.
 const SENSITIVE = /(storage|store|state|backup|secret|access|sqlite|retention|migrat|permission|auth|launch|process|lifetime|handoff|worker|^link\.(ts|js)$)/i;
+// Files of ordinary areas that hold credentials or decide where requests may go (egress allow lists, secret origins).
+const CREDENTIALS = /^(http|github|client|socket|mcp-bridge|web-push|elevenlabs|clone|remote-url)(\.test)?\.(ts|js)$/;
 const CORE_MODULE = /(^node:sqlite$|(^|\/)(storage|stores|secrets|permissions|auth|updates|link|backup)(\/|$))/;
 const IMPORTS = /\b(?:from|import)\s*\(?\s*['"]([^'"]+)['"]/g;
 const importsCore = text => [...(text ?? '').matchAll(IMPORTS)].some(([, specifier]) =>
@@ -41,7 +43,9 @@ const APP_VERSION = /^export const APP_VERSION = '[^'\n]*';$/m;
 export function pathTier(path, texts = []) {
   if (DOCS.has(path) || path.startsWith('docs/')) return { tier: 'quick' };
   if (BUILD.test(path)) return { tier: 'full', reason: `build or CI: ${path}` };
-  if (!GENERAL.test(path) || path.split('/').slice(1).some(part => SENSITIVE.test(part))) return { tier: 'full', reason: `core or unclassified: ${path}` };
+  if (!GENERAL.test(path) || path.split('/').slice(1).some(part => SENSITIVE.test(part) || CREDENTIALS.test(part))) {
+    return { tier: 'full', reason: `core or unclassified: ${path}` };
+  }
   // Access and data are decided by the server; a browser module importing a settings or secrets view is not core.
   if (!path.startsWith('client/') && texts.some(importsCore)) return { tier: 'full', reason: `imports a core module: ${path}` };
   return { tier: 'related', reason: `code: ${path}` };

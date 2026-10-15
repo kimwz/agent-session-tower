@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { classify, ciScope, gatePassed, pathTier, planCi, reuseEvidence, versionOnly, GATE } from '../../scripts/ci-scope.mjs';
-import { gateVerdict } from '../../scripts/ci-gate.mjs';
+import { gateVerdict, rereadClaims } from '../../scripts/ci-gate.mjs';
 import { lanesFor, plan } from '../../scripts/ci-plan.mjs';
 
 const real = (path: string) => readFileSync(path, 'utf8');
@@ -60,6 +60,11 @@ test('core areas, build and CI, minor or major versions and unknown paths need t
   assert.equal(pathTier('server/triggers/rules.ts', ["import { failure } from './errors.js';", null]).tier, 'related');
   assert.equal(pathTier('server/triggers/store.ts').tier, 'full');
   assert.equal(pathTier('server/triggers/github-access.ts').tier, 'full');
+  for (const path of ['server/triggers/http.ts', 'server/triggers/github.ts', 'server/slack/client.ts', 'server/slack/socket.ts',
+    'server/notifications/web-push.ts', 'server/master/elevenlabs.ts', 'server/repositories/clone.ts', 'tests/server/triggers/http.test.ts']) {
+    assert.equal(pathTier(path, [real(path)]).tier, 'full', path);
+  }
+  assert.equal(pathTier('tests/client/app.test.ts').tier, 'related', 'a folder named client is not the Slack client');
   // The browser shows what the server decided; its imports of settings or secrets views are not core.
   assert.equal(pathTier('client/src/app/App.tsx', ["import { SecretsPanel } from '../secrets/SecretsPanel';"]).tier, 'related');
   assert.equal(pathTier('client/src/secrets/SecretsPanel.tsx').tier, 'full');
@@ -165,6 +170,14 @@ test('the gate refuses a tier below what the files need and unconfirmed quick or
   assert.ok(problems({ ...reused, pathTier: 'full', planned: { ...reused.planned, tier: 'related' } }).length, 'a reuse keeps the tier the change needs');
   assert.ok(problems({ ...reused, planned: { ...reused.planned, execution: 'skip' } }).length, 'unknown execution');
   assert.deepEqual(problems({ ...reused, pathTier: 'quick' }), [], 'a quick change raised to full by its base reuses the full result');
+  const asked: unknown[] = [];
+  const path = { base: 'b'.repeat(40), head: sha, tree };
+  const claims = rereadClaims({ planned: { tier: 'full', execution: 'reuse' }, path, repo: 'o/r',
+    gate: () => { throw new Error('a reuse does not read the base gate'); }, reuse: input => { asked.push(input.needed); return { reused: true, reason: 'ok' }; } });
+  assert.deepEqual(asked, ['full'], 'the reused result is checked at the tier the plan ran, not the quick tier of the files');
+  assert.equal(claims.baseGate, undefined);
+  assert.equal(rereadClaims({ planned: { tier: 'quick', execution: 'run' }, path, gate: sha => ({ passed: sha === path.base, reason: 'x' }),
+    reuse: () => { throw new Error('quick does not reuse'); } }).baseGate?.passed, true);
   const related = run('related');
   assert.ok(problems({ ...related, planned: { ...related.planned, lanes: lanesFor('full').map(l => l.id) } }).length, 'lanes differ from the tier');
 });
