@@ -16,9 +16,10 @@ const ID = '20000000-0000-4000-8000-000000000011';
 const SESSION = `claude:${ID}`;
 
 // A background task outlives the turn that started it. The fixture plays Claude: the first message gets `first`
-// and a result, then `later` frames are sent on their own timers; any further message gets `reply` and a result.
+// and a result, then `later` frames are sent on their own timers (`at`) or once the test releases them (`when`, see
+// release()); any further message gets `onMessage` at once, then `reply` and a result.
 const PROVIDER = `
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 const send = event => process.stdout.write(JSON.stringify(event) + '\\n');
 const log = entry => appendFileSync(process.env.LOG, JSON.stringify(entry) + '\\n');
@@ -35,9 +36,14 @@ createInterface({ input: process.stdin }).on('line', line => {
     send({ type: 'system', subtype: 'init', session_id: id, permissionMode: 'auto' });
     for (const frame of script.first) send({ session_id: id, ...frame });
     if (!script.noResult) send({ type: 'result', session_id: id, is_error: false, result: 'first done' });
-    for (const step of script.later ?? []) setTimeout(() => { for (const frame of step.frames ?? []) send({ session_id: id, ...frame }); if (step.exit) { if (step.stderr) process.stderr.write(step.stderr); process.exit(step.code ?? 0); } }, step.at);
+    for (const step of script.later ?? []) {
+      const fire = () => { for (const frame of step.frames ?? []) send({ session_id: id, ...frame }); if (step.exit) { if (step.stderr) process.stderr.write(step.stderr); process.exit(step.code ?? 0); } };
+      if (!step.when) { setTimeout(fire, step.at); continue; }
+      const released = setInterval(() => { if (existsSync(process.env.LOG + '.' + step.when)) { clearInterval(released); fire(); } }, 5);
+    }
     return;
   }
+  for (const frame of script.onMessage ?? []) send({ session_id: id, ...frame });
   if (script.unacknowledgedReply) { send({ type: 'result', session_id: id, is_error: false, result: 'finished without replay' }); return; }
   setTimeout(() => {
     send({ type: 'user', isReplay: true, uuid: message.uuid, session_id: id, parent_tool_use_id: null, message: message.message });
@@ -70,7 +76,9 @@ async function fixture(script: Record<string, unknown>, options: { followUpMs?: 
     spawnProcess: (_file, args, spawnOptions) => spawn(process.execPath, [provider, ...args], spawnOptions) });
   await manager.start();
   const entries = async () => (await readFile(log, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as { user?: string; end?: true });
-  return { manager, entries, cleanup: async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); } };
+  /** Lets the provider send the `later` step whose `when` is `name`. */
+  const release = (name: string) => writeFile(`${log}.${name}`, '');
+  return { manager, entries, release, cleanup: async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); } };
 }
 
 const find = (manager: RunManager, id: string) => manager.list().find(run => run.id === id)!;
@@ -97,14 +105,15 @@ test('an unacknowledged private notice releases completed input after delivery s
 });
 
 test('a turn stays open while its background task runs and ends after Claude takes the result', async t => {
-  const { manager, entries, cleanup } = await fixture({ first: [started('bash-1'), says('I will report when the reviews finish.')],
-    later: [{ at: 300, frames: [notified('bash-1')] }, { at: 350, frames: [takes('bash-1'), says('All seven reviews passed.'), result] }] });
+  const { manager, entries, release, cleanup } = await fixture({ first: [started('bash-1'), says('I will report when the reviews finish.')],
+    later: [{ when: 'notice', frames: [notified('bash-1')] }, { when: 'notice', frames: [takes('bash-1'), says('All seven reviews passed.'), result] }] });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Run the reviews', {}, { origin: { kind: 'owner' } });
   const waiting = await until(() => find(manager, run.id).backgroundWait);
   assert.equal(waiting.tasks, 1);
   assert.equal(find(manager, run.id).status, 'running');
   assert.equal((await entries()).some(entry => entry.end), false, 'input must stay open while the task runs');
+  await release('notice');
   const done = await settled(manager, run.id);
   assert.equal(done.status, 'completed');
   assert.equal(done.backgroundWait, undefined);
@@ -124,10 +133,12 @@ test('tasks that finish and are taken inside the turn end it at its result as be
 });
 
 test('a task that ends in the turn but whose notice comes after the result still keeps the turn open', async t => {
-  const { manager, entries, cleanup } = await fixture({ first: [started('bash-1'), { type: 'system', subtype: 'task_updated', task_id: 'bash-1', patch: { status: 'completed' } }],
-    later: [{ at: 200, frames: [notified('bash-1'), takes('bash-1'), says('Read the output.'), result] }] });
+  const { manager, entries, release, cleanup } = await fixture({ first: [started('bash-1'), { type: 'system', subtype: 'task_updated', task_id: 'bash-1', patch: { status: 'completed' } }],
+    later: [{ when: 'notice', frames: [notified('bash-1'), takes('bash-1'), says('Read the output.'), result] }] });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Run it', {}, { origin: { kind: 'owner' } });
+  await until(() => find(manager, run.id).backgroundWait);
+  await release('notice');
   const done = await settled(manager, run.id);
   assert.equal(done.status, 'completed');
   assert.match(done.output, /Waiting for Claude to take the finished background work[\s\S]*Read the output\./);
@@ -135,11 +146,12 @@ test('a task that ends in the turn but whose notice comes after the result still
 });
 
 test('a foreground task moved to the background is followed from then on', async t => {
-  const { manager, cleanup } = await fixture({ first: [started('bash-1', { is_backgrounded: false }), { type: 'system', subtype: 'task_updated', task_id: 'bash-1', patch: { is_backgrounded: true } }],
-    later: [{ at: 200, frames: [notified('bash-1'), takes('bash-1'), says('Build finished.'), result] }] });
+  const { manager, release, cleanup } = await fixture({ first: [started('bash-1', { is_backgrounded: false }), { type: 'system', subtype: 'task_updated', task_id: 'bash-1', patch: { is_backgrounded: true } }],
+    later: [{ when: 'notice', frames: [notified('bash-1'), takes('bash-1'), says('Build finished.'), result] }] });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Build', {}, { origin: { kind: 'owner' } });
   assert.equal((await until(() => find(manager, run.id).backgroundWait)).tasks, 1);
+  await release('notice');
   assert.match((await settled(manager, run.id)).output, /Build finished\./);
 });
 
@@ -195,8 +207,9 @@ test('a notice the turn under way may have taken ends the turn quietly when Clau
 });
 
 test("Tower's notice holds the turn open until Claude takes it, even if another follow-up finishes first", async t => {
-  const { manager, cleanup } = await fixture({ first: [started('bash-1')], replyDelay: 300, reply: [says('Summarised the reviews.')],
-    later: [{ at: 100, frames: [notified('bash-1')] }, { at: 320, frames: [says('Something else.'), result] }] }, { followUpMs: 150 });
+  // Another follow-up finishes as soon as Tower's notice arrives; Claude takes the notice only after it.
+  const { manager, cleanup } = await fixture({ first: [started('bash-1')], onMessage: [says('Something else.'), result], replyDelay: 100, reply: [says('Summarised the reviews.')],
+    later: [{ at: 20, frames: [notified('bash-1')] }] }, { followUpMs: 50 });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Run the reviews', {}, { origin: { kind: 'owner' } });
   const done = await settled(manager, run.id);
@@ -215,8 +228,8 @@ test('background work still running at the limit closes the turn and is not repo
 });
 
 test("the owner's next message goes straight into a turn that only waits for background work", async t => {
-  const { manager, entries, cleanup } = await fixture({ first: [started('bash-1')], reply: [says('Here is the status so far.')],
-    later: [{ at: 1500, frames: [notified('bash-1'), takes('bash-1'), says('Reviews finished.'), result] }] });
+  const { manager, entries, release, cleanup } = await fixture({ first: [started('bash-1')], reply: [says('Here is the status so far.')],
+    later: [{ when: 'reviews', frames: [notified('bash-1'), takes('bash-1'), says('Reviews finished.'), result] }] });
   t.after(cleanup);
   const first = await manager.enqueue(SESSION, 'Run the reviews', {}, { origin: { kind: 'owner' } });
   await until(() => find(manager, first.id).backgroundWait);
@@ -225,6 +238,7 @@ test("the owner's next message goes straight into a turn that only waits for bac
   await until(() => find(manager, first.id).output.includes('Here is the status so far.'));
   // Still waiting for the task after answering.
   await until(() => find(manager, first.id).backgroundWait);
+  await release('reviews');
   const done = await settled(manager, first.id);
   assert.equal(done.status, 'completed');
   assert.match(done.output, /Reviews finished\./);
@@ -314,13 +328,14 @@ test("a wakeup is dropped only when Claude's own timer delivered it in the kept-
 
 
 test('a task start arriving after the result keeps input open', async t => {
-  const { manager, cleanup } = await fixture({ first: [says('Waiting for review.')], later: [
+  const { manager, release, cleanup } = await fixture({ first: [says('Waiting for review.')], later: [
     { at: 40, frames: [started('late')] },
-    { at: 400, frames: [notified('late'), takes('late'), says('Review complete.'), result] },
+    { when: 'review', frames: [notified('late'), takes('late'), says('Review complete.'), result] },
   ] });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Review');
   assert.equal((await until(() => find(manager, run.id).backgroundWait)).tasks, 1);
+  await release('review');
   const done = await settled(manager, run.id);
   assert.equal(done.status, 'completed');
   assert.match(done.output, /Review complete/);
@@ -329,7 +344,7 @@ test('a task start arriving after the result keeps input open', async t => {
 test('a subagent result cannot close the parent input', async t => {
   const { manager, cleanup } = await fixture({ noResult: true,
     first: [{ ...result, parent_tool_use_id: 'agent-tool' }],
-    later: [{ at: 500, frames: [says('Parent finished.'), result] }] });
+    later: [{ at: 400, frames: [says('Parent finished.'), result] }] });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Delegate');
   const done = await settled(manager, run.id);
