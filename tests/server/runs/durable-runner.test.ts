@@ -37,48 +37,9 @@ import { RetentionStore } from '../../../server/sessions/retention/store.js';
 import { RetentionArchive } from '../../../server/sessions/retention/archive.js';
 import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
 import { worktreeCleanupVisible } from '../../../server/worktrees/janitor.js';
+import { checks, installWorkerChecks, workerChecks } from './fixtures/worker-checks.ts';
 
-/**
- * The worker checks for a handoff, then for idleness, once a second (two setInterval(…, 1000) in server/runs/worker.ts,
- * the handoff timer created first). Here each worker's pair runs every 10 ms, in that same order, and every round is
- * counted, so a test proves that nothing happened after real checks instead of sleeping for them. What a check decides is
- * unchanged: hold, retry and idle deadlines are read from the clock. `idleHeld` skips the idle half until a test's own
- * request has reached the worker, as a second-long tick always allowed.
- */
-const workerChecks = { rounds: 0, idleHeld: false };
-{
-  const realSet = globalThis.setInterval;
-  const realClear = globalThis.clearInterval;
-  type Pair = { idle?: () => void };
-  let last: Pair | undefined;
-  const idles = new Map<unknown, Pair>();
-  globalThis.setInterval = ((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
-    const source = ms === 1000 && /server[\\/]runs[\\/]worker\.ts/.test(new Error().stack ?? '') ? String(callback) : '';
-    if (source.includes('handOff')) {
-      const pair: Pair = last = {};
-      return realSet(() => { workerChecks.rounds++; callback(...args); if (!workerChecks.idleHeld) pair.idle?.(); }, 10);
-    }
-    if (source.includes('onIdle') && last && !last.idle) {
-      const pair = last;
-      pair.idle = () => callback(...args);
-      const handle = { unref: () => handle, ref: () => handle, hasRef: () => false };
-      idles.set(handle, pair);
-      return handle;
-    }
-    return realSet(callback, ms, ...args);
-  }) as unknown as typeof setInterval;
-  globalThis.clearInterval = ((handle: Parameters<typeof clearInterval>[0]) => {
-    const pair = idles.get(handle);
-    if (pair) { pair.idle = undefined; idles.delete(handle); return; }
-    realClear(handle);
-  }) as typeof clearInterval;
-}
-
-/** Waits until the workers have run `count` more rounds of their handoff and idle checks. */
-async function checks(count = 3) {
-  const target = workerChecks.rounds + count;
-  await until(() => workerChecks.rounds >= target);
-}
+installWorkerChecks();
 
 async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector, hostOptions?: (parts: { stateDir: string; sessions: SessionService; runs: RunManager }) => Promise<Partial<RunnerHostOptions>>, fault?: { onUnavailable: (status: ReturnType<import('../../../server/storage/client.js').StorageClient['status']>, runs: RunManager) => void }, beforeExecutable?: () => Promise<void>, holdUntilReady = false) {
   const directory = await realpath(await temporaryFixture('tower-durable-fixture-'));
