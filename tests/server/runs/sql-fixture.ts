@@ -98,7 +98,8 @@ export class RunManager extends ProductionRunManager {
   private fixtureClosed = false;
   constructor(private readonly fixtureOptions: ConstructorParameters<typeof ProductionRunManager>[0] & { fixtureInitial?: RunDocuments; fixtureThreadFault?: boolean; fixtureOnUnavailable?: import('../../../server/storage/client.js').StorageClientOptions['onUnavailable'] }) {
     // Fake Claude processes write their bookends with the result; they need no 250 ms grace for a later stdout chunk.
-    super({ ...fixtureOptions, claudeFinishRecheckMs: fixtureOptions.claudeFinishRecheckMs ?? 1 }); this.bound = Boolean(fixtureOptions.storage);
+    // A fixture that names the option (even as undefined, for the production default) gets exactly what it names.
+    super({ ...fixtureOptions, claudeFinishRecheckMs: 'claudeFinishRecheckMs' in fixtureOptions ? fixtureOptions.claudeFinishRecheckMs : 1 }); this.bound = Boolean(fixtureOptions.storage);
   }
   override useStorage(storage: StorageClient): void { super.useStorage(storage); this.bound = true; }
   fixtureIsClosed(): boolean { return this.fixtureClosed; }
