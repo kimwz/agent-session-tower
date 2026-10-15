@@ -19,6 +19,7 @@ import { CALLER_CAPABILITY_HEADER } from '../../../server/runs/session-mcp.js';
 import { FixtureRuns, editPayload, legacyRecord, legacyRule, secretService, stored, storedTask, vaultTemplate } from '../../helpers/secrets.js';
 import { fastVaultKdf } from '../../helpers/fast-kdf.js';
 import { fastScrypt } from '../../helpers/fast-scrypt.js';
+import { settle } from '../../helpers/settle.js';
 
 fastVaultKdf();
 fastScrypt();
@@ -172,7 +173,7 @@ test('a source that confirmed reads but does not answer is listed as unavailable
   // Nobody relays the read: it times out, on a fake clock once the read is waiting.
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const viewing = f.recipient.control('session', { sessionId: f.capB.sessionId }) as Promise<SecretSessionView>;
-  while (f.recipient.remote.pending() === 0) await new Promise(setImmediate);
+  await settle(() => f.recipient.remote.pending() > 0, 0);
   t.mock.timers.tick(5000);
   const view = await viewing;
   assert.deepEqual([view.available, view.unavailableSources, view.updatePendingSources, view.error], [[], [f.a.device().id], [], undefined]);
