@@ -17,6 +17,7 @@ import type { FirstReply } from '../../server/master/first-reply.js';
 import type { MasterEntry, MasterSpeak, MasterStreamEvent } from '../../shared/master.js';
 import type { ChatMessage, Run, Snapshot } from '../../shared/types.js';
 import { until } from '../helpers/until.js';
+import '../helpers/skip-fsync.js';
 import { audioSink } from '../../server/http/sinks.js';
 
 const TOKEN = 'a'.repeat(64);
@@ -24,6 +25,11 @@ const SECRET = 'b'.repeat(64);
 const VOICE_KEY = 'el-test-0123456789abcdef';
 const TAB = randomUUID();
 const digestOf = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32);
+/** The first response's 2.5 s deadline, a tenth as long in the tests that run into it, so they do not wait seconds. */
+const shortFirstReplyDeadline = (t: test.TestContext) => {
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, 'timeout', (ms: number) => timeout(ms === 2_500 ? 250 : ms));
+};
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 /** What the fake fast model says first, unless a test says otherwise. */
 const FIRST = '요청을 확인해 볼게요.';
@@ -312,6 +318,7 @@ test('short replies recorded by an earlier version are removed when the voice st
 
 test('no first reply is said when the model says nothing, it comes too late, it names a card, or voice moved; the request goes all the same', async t => {
   const h = await harness(t, { steps: ['하나', '둘', '셋', '넷'] });
+  shortFirstReplyDeadline(t);
   const session = on(h);
   h.firsts.reply = () => ({ skipped: 'model', warm: true });
   assert.deepEqual(await request(h, session, '안녕'), {});
@@ -463,7 +470,7 @@ test('finite audio has exact length; partial synthesis stays unpublished and a p
   const h = await harness(t, { steps: ['답 하나.', '답 둘.', '답 셋.'], timing: { waitMs: 10_000 } });
   const { fetchAudio, port: audioPort } = await audioServer(t, h.voice);
   const session = on(h);
-  h.labs.gapMs = 200;
+  h.labs.gapMs = 50;
   await request(h, session, '하나');
   const first = await until(() => h.says().find(item => item.kind === 'answer'));
   const id = first.audio.split('/').at(-1)!;
@@ -487,7 +494,7 @@ test('finite audio has exact length; partial synthesis stays unpublished and a p
   const third = await until(() => h.says().filter(item => item.kind === 'answer')[1]);
   const thirdId = third.audio.split('/').at(-1)!;
   await new Promise<void>(resolve => {
-    const req = httpRequest({ host: '127.0.0.1', port: (audioPort), path: `/${thirdId}` }, res => { res.pause(); setTimeout(() => { req.destroy(); resolve(); }, 300); });
+    const req = httpRequest({ host: '127.0.0.1', port: (audioPort), path: `/${thirdId}` }, res => { res.pause(); setTimeout(() => { req.destroy(); resolve(); }, 100); });
     req.end();
   });
   await until(() => h.voice.listeners(thirdId) === 0, 3_000);
@@ -624,7 +631,9 @@ test('a long answer skipped partway stops being made: the parts not yet asked fo
   h.voice.voicePlayed({ session, id: reading.id, result: 'stopped' });
   await until(() => h.speakOf(entry.id)?.state === 'unspoken');
   const made = readings(h).length;
-  await sleep(600);
+  // Once every speech asked for has been answered, anything that went on would be asked for at once.
+  await until(() => h.labs.completed.length === h.labs.speeches.length);
+  await sleep(50);
   assert.equal(readings(h).length, made, 'nothing more is asked for');
   const all = voicedParts(speakable(answer), 'eleven_v4_turbo', 'answer');
   assert.ok(made < all.length);
@@ -645,7 +654,9 @@ test('an answer whose sound does not start in time is not made further', async t
   await request(h, session, '길게 알려줘');
   const entry = await masterEntry(h, /30번째/);
   await until(() => h.speakOf(entry.id)?.state === 'unspoken');
-  await sleep(800);
+  // The late first part comes back in the end; anything that went on after it would be asked for at once.
+  await until(() => h.labs.completed.length === h.labs.speeches.length);
+  await sleep(50);
   assert.equal(readings(h).length, 1, 'only the first part was asked for');
   assert.equal(h.says().filter(item => item.kind === 'answer').length, 0);
 });
@@ -848,6 +859,7 @@ test('finite first response discards audio completed after the answer started', 
 
 test('finite first response retains the original deadline while TTS is incomplete', async t => {
   const h = await harness(t, { steps: [() => undefined], timing: { synthMs: 4_000 } });
+  shortFirstReplyDeadline(t);
   const session = on(h);
   h.labs.gapMs = 3_000;
   const started = Date.now();

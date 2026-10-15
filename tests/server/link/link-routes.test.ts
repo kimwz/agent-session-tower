@@ -12,6 +12,8 @@ import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import type { LinkInvite, LinkOverview } from '../../../shared/link.js';
 import type { Snapshot } from '../../../shared/types.js';
 import { RemoteAudit } from '../../../server/remote/audit.js';
+import '../../helpers/skip-fsync.js';
+import '../../helpers/fast-scrypt.js';
 
 /** One Tower's web server with real link state in a temporary folder, and no providers. */
 async function tower(t: TestContext, name: string, audit?: (stateDir: string) => Promise<{ changes: RemoteAudit; sessionNames: () => Map<string, string> }>) {

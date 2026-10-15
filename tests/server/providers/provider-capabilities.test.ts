@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import test from 'node:test';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -163,7 +164,15 @@ setInterval(()=>{},1000);
     try { pid = Number(await readFile(pidFile, 'utf8')); } catch { await new Promise(resolve => setTimeout(resolve, 10)); }
   }
   assert.ok(pid);
+  // The second between SIGTERM and SIGKILL runs on a fake clock.
+  const realTimeout = setTimeout;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => t.mock.timers.reset());
+  let ended = false;
+  void pending.finally(() => { ended = true; });
   const at = Date.now(); controller.abort();
+  for (let tries = 0; !ended && tries < 1000; tries++) { t.mock.timers.tick(1000); await new Promise(resolve => realTimeout(resolve, 5)); }
+  t.mock.timers.reset();
   const result = await pending;
   assert.equal(result.usage?.status, 'error'); assert.equal(result.usage?.reason, 'unreachable');
   assert.ok(Date.now() - at < 3500);

@@ -1,5 +1,6 @@
 import { apiTriggerStorageFixture } from './trigger-storage-fixture.js';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';

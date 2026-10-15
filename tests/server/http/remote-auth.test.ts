@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
+import '../../helpers/fast-scrypt.js';
 import { request, type IncomingHttpHeaders, type IncomingMessage } from 'node:http';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';

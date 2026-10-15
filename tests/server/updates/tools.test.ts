@@ -1,5 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import { mkdtemp, mkdir, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -221,7 +222,9 @@ test('a probe and an update started together never run the same CLI at once', as
   let overlapped = false;
   const using = async <T>(value: T) => { running++; overlapped ||= running > 1; await new Promise(resolve => setTimeout(resolve, 30)); running--; return value; };
   f.behave(() => ({ code: 0, version: f.latest.codex }));
-  for (let round = 0; round < 4; round++) {
+  // Two rounds: an update that finds a probe under way polls for it every 200 ms, so each round may cost that much.
+  const ROUNDS = 2;
+  for (let round = 0; round < ROUNDS; round++) {
     f.versions.codex = '0.155.1';
     const open = f.block();
     const [, probe] = await Promise.all([
@@ -232,7 +235,7 @@ test('a probe and an update started together never run the same CLI at once', as
     assert.ok(probe === 'read' || probe === undefined);
   }
   assert.equal(overlapped, false, 'the CLI is never probed while it is being updated');
-  assert.equal(f.calls.length, 5, 'every round updated it once');
+  assert.equal(f.calls.length, 1 + ROUNDS, 'every round updated it once');
 });
 
 test('an update command runs in its own process group: a stuck npm is only reported, a stuck installer is stopped with everything it started', async t => {

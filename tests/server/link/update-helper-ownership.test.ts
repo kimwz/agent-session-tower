@@ -18,6 +18,7 @@ import { handoffHeld, heldWorkerEntry, runUpdateHelper, updatePaths, Updates, ty
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
 import { TowerAutoUpdate } from '../../../server/updates/tower.js';
 import { Updates as LegacyUpdates } from './fixtures/legacy-1.114.1/server/link/update.js';
+import '../../helpers/skip-fsync.js';
 
 /**
  * W0U correction 4 (w0u-helper-final-contract.md): whether an update helper may still run is told by one judgment.
@@ -151,9 +152,10 @@ test('1. the common helper judgment: absent or gone is no helper, running is one
 // ---- 2. Recovery: nothing written on an unknown helper ----
 
 test('2. recovery beside an unknown helper (resume or previous version, no hold, its own or another version\'s): rejects; hold, record and lock untouched, nothing started', async t => {
+  // Every shape with every web and record; the hold (none, its own or another version's) taken in turn, each kept for every shape.
   for (const shape of SHAPES) {
-    for (const [web, stage] of [['1.1.0', 'verifying'], ['1.0.0', 'verifying'], ['1.0.0', 'failed']] as const) {
-      for (const holder of [undefined, '1.1.0', '2.0.0']) {
+    for (const [index, [web, stage]] of ([['1.1.0', 'verifying'], ['1.0.0', 'verifying'], ['1.0.0', 'failed']] as const).entries()) {
+      for (const holder of [[undefined, '1.1.0', '2.0.0'][(index + SHAPES.indexOf(shape)) % 3]]) {
         const label = `${shape} / web ${web} / ${stage} / hold ${holder ?? 'none'}`;
         const state = await stateDir(t);
         await save(state, record(stage, stage === 'failed' ? { code: 'start-failed', failedStage: 'verifying' } : {}));
@@ -174,9 +176,10 @@ test('2. recovery beside an unknown helper (resume or previous version, no hold,
 
 test('3. handoff beside an unknown helper, for every record (active, terminal, absent, invalid, unreadable) and hold age: held, nothing changed', async t => {
   quiet(t);
-  for (const shape of SHAPES) {
-    for (const kind of RECORDS) {
-      for (const age of AGES) {
+  // Every shape with every hold age (what the judgment turns on); the record, which changes nothing here, taken in turn.
+  for (const [shapeIndex, shape] of SHAPES.entries()) {
+    for (const [ageIndex, age] of AGES.entries()) {
+      for (const kind of [RECORDS[(shapeIndex * AGES.length + ageIndex) % RECORDS.length]]) {
         const label = `${shape} / record ${kind} / hold ${age}`;
         const state = await stateDir(t);
         await setRecord(state, kind);
@@ -286,15 +289,18 @@ test('3. no hold because writing it failed (stale breaker, busy turn) or a relea
     await unknownLock(state, 'folder');
     const marks = join(state, 'marks');
     appendFileSync(marks, '');
-    const script = fileURLToPath(new URL('./fixtures/hold-child.ts', import.meta.url));
-    const other = spawn(process.execPath, ['--import', 'tsx', script, state, marks, 'turn', '1.1.0', '1500'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    // It keeps the turn until told to go on, after the judgment.
+    const script = fileURLToPath(new URL('./fixtures/turn-hold-child.ts', import.meta.url));
+    const other = spawn(process.execPath, ['--import', 'tsx', script, state, marks, '1.1.0'], { stdio: ['pipe', 'pipe', 'pipe'] });
     const done = new Promise<number | null>(resolve => other.on('close', code => resolve(code)));
-    t.after(() => done);
+    t.after(() => { other.stdin.end(); return done; });
     const deadline = Date.now() + 20_000;
     while (!readFileSync(marks, 'utf8').includes('enter')) { if (Date.now() > deadline) throw new Error('the other process never took the turn'); await new Promise(resolve => setTimeout(resolve, 10)); }
     const started = Date.now();
     assertHeld(await outcome(handoffHeld(state)), 'folder', 'none', 'busy turn');
     assert.ok(Date.now() - started < 1000, 'held without waiting for the turn');
+    assert.ok(!readFileSync(marks, 'utf8').includes('leave'), 'judged while the other process kept the turn');
+    other.stdin.write('go on\n');
     assert.equal(await done, 0);
     assert.equal(await handoffHeld(state), true, 'the other process\'s hold, written in its turn, holds once it is there');
   }

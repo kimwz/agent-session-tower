@@ -2,6 +2,7 @@ import { apiTriggerStorageFixture } from './trigger-storage-fixture.js';
 import { importFixtureRuns } from '../runs/sql-fixture.js';
 import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -321,12 +322,15 @@ test('only existing owner authority gets local tools; reporting env never grants
 
 
 test('MCP rechecks parent authority after async preparation and before new job admission', async t => {
+  // One Tower for every change, each on a turn of its own.
+  let preparing: ((internal: { validate?: () => void }) => Promise<void>) | undefined;
+  const f = await fixture(t, internal => preparing!(internal));
   for (const change of ['completed', 'cancelled', 'session', 'origin', 'tools', 'controller', 'credential'] as const) {
-    await t.test(change, async t => {
+    await t.test(change, async () => {
       let entered!: () => void, release!: () => void;
       const ready = new Promise<void>(resolve => { entered = resolve; });
       const gate = new Promise<void>(resolve => { release = resolve; });
-      const f = await fixture(t, async internal => { entered(); await gate; internal.validate?.(); });
+      preparing = async internal => { entered(); await gate; internal.validate?.(); };
       const run = f.ownerTurn('codex:parent');
       const token = f.token(run);
       const pending = handleMcpRequest(f.context, token, { method: 'tools/call', name: 'autoPrompt_submit', arguments: { requestId: randomUUID(), provider: 'codex', prompt: 'follow up' } });

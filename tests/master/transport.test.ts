@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import '../helpers/fast-scrypt.js';
 import { createServer, type Server } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -119,7 +120,18 @@ test('a change the server says it did not admit is sent once more; one cut off m
   const port = await listen(web);
   const client = new TowerClient();
   client.setCredentials({ port, token: 'a'.repeat(64), callerSecret: 'b'.repeat(64) });
-  const busy = await client.call('POST', '/api/busy', {}, { write: true });
+  // The 3 s pause before sending again runs on a fake clock.
+  const realTimeout = setTimeout;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let answered = false;
+  const busyCall = client.call('POST', '/api/busy', {}, { write: true }).finally(() => { answered = true; });
+  for (let tries = 0; !answered; tries++) {
+    if (tries > 1000) throw new Error('no answer');
+    t.mock.timers.tick(3000);
+    await new Promise(resolve => realTimeout(resolve, 5));
+  }
+  t.mock.timers.reset();
+  const busy = await busyCall;
   assert.equal(busy.state, 'not-admitted');
   assert.equal(calls, 2, 'one retry after the server said it ran nothing');
   calls = 0;

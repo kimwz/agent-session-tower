@@ -1,5 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -96,13 +97,13 @@ test('a computer joined now follows its controller; the owner turns it off and o
 
 test('a second controller does not take a computer by itself; the owner\'s switch there does', async t => {
   const a = await computer(t, 'host-a');
-  const c = await computer(t, 'host-c', { refreshMs: 200 });
+  const c = await computer(t, 'host-c', { refreshMs: 50 });
   const b = await computer(t, 'node-b');
   await join2(a, b);
   await until(() => b.follow.hostId() === a.identity.id ? true : undefined, 10_000);
   const fromC = await join2(c, b);
-  // C wants it too (joined now), but B already follows A: C's refresh never asks.
-  await new Promise(resolve => setTimeout(resolve, 800));
+  // C wants it too (joined now), but B already follows A: C's refresh never asks (four refreshes go by).
+  await new Promise(resolve => setTimeout(resolve, 200));
   assert.equal(b.follow.hostId(), a.identity.id);
   assert.equal(c.controller.list().find(node => node.id === fromC.id)?.following, false);
   await c.controller.setFollowHost(fromC.id, true);

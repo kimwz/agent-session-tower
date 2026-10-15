@@ -1,5 +1,6 @@
 import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -87,7 +88,8 @@ test('a new shell starts the terminal host when none answers and waits while it 
   // No host at first: one is started and waited for; it comes up a while later and the shell is made.
   const create = pend(client(5_000).create('/fixture', 80, 24));
   await until(() => spawned.length === 2);
-  await new Promise(resolve => setTimeout(resolve, 350));
+  // Longer than the client's 100 ms between looks, so it has looked and found nothing at least once.
+  await new Promise(resolve => setTimeout(resolve, 150));
   await writeFile(paths.token, 'a'.repeat(64), { mode: 0o600 });
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(paths.socket, resolve); });
   assert.deepEqual(await create, { id: 'shell' });

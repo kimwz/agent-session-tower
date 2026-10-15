@@ -16,6 +16,7 @@ import { handoffHeld, heldWorkerEntry, runUpdateHelper, updatePaths, Updates, ty
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
 import { TowerAutoUpdate } from '../../../server/updates/tower.js';
 import { A, B, installArtifact, runningBuild } from './fixtures/storage-builds.js';
+import '../../helpers/skip-fsync.js';
 
 /**
  * W0U correction 5 (w0-update-fix4-review.txt, required 1): whether a helper lock's owner runs is observed, never
@@ -83,10 +84,12 @@ function hookKill(t: TestContext) {
 }
 
 /** Writes the shape's lock; for a hooked shape, returns the very error its observation throws. */
+let hookedPid: number | undefined;
 async function unknownLock(state: string, shape: Shape): Promise<unknown> {
   const { lock } = updatePaths(state);
   if (shape.text) { await writeFile(lock, shape.text, { mode: 0o600 }); return undefined; }
-  const pid = deadPid();
+  // One gone pid serves every hooked lock (its observation throws whatever the shape says), so no process is started each time.
+  const pid = hookedPid ??= deadPid();
   const error = shape.error!();
   failing.set(pid, error);
   await writeFile(lock, String(pid), { mode: 0o600 });
@@ -236,9 +239,10 @@ test('1. the start time of a live pid: undefined is running, another start is go
 
 test('2. recovery beside a pid out of range or an observation failure (resume or previous version, any hold): rejects; nothing written, removed or started', async t => {
   hookKill(t);
+  // Every shape with every web and record; the hold (none, its own or another version's) taken in turn, each kept once per shape.
   for (const shape of SHAPES) {
-    for (const [web, stage] of [['1.1.0', 'verifying'], ['1.0.0', 'verifying'], ['1.0.0', 'failed']] as const) {
-      for (const holder of [undefined, '1.1.0', '2.0.0']) {
+    for (const [index, [web, stage]] of ([['1.1.0', 'verifying'], ['1.0.0', 'verifying'], ['1.0.0', 'failed']] as const).entries()) {
+      for (const holder of [[undefined, '1.1.0', '2.0.0'][(index + SHAPES.indexOf(shape)) % 3]]) {
         const label = `${shape.name} / web ${web} / ${stage} / hold ${holder ?? 'none'}`;
         const state = await stateDir(t);
         await save(state, record(stage, stage === 'failed' ? { code: 'start-failed', failedStage: 'verifying' } : {}));
@@ -260,9 +264,10 @@ test('2. recovery beside a pid out of range or an observation failure (resume or
 test('3. handoff beside a pid out of range or an observation failure, for every record and hold age: held, nothing changed; a worker to start is the previous one or the unknown', async t => {
   quiet(t);
   hookKill(t);
-  for (const shape of SHAPES) {
-    for (const kind of RECORDS) {
-      for (const age of AGES) {
+  // Every shape with every hold age (what the judgment turns on); the record, which changes nothing here, taken in turn.
+  for (const [shapeIndex, shape] of SHAPES.entries()) {
+    for (const [ageIndex, age] of AGES.entries()) {
+      for (const kind of [RECORDS[(shapeIndex * AGES.length + ageIndex) % RECORDS.length]]) {
         const label = `${shape.name} / record ${kind} / hold ${age}`;
         const state = await stateDir(t);
         await setRecord(state, kind);

@@ -1,5 +1,7 @@
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
+import '../../helpers/fast-scrypt.js';
 import { mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
@@ -59,10 +60,14 @@ test('before work starts, a branch that is only behind is fast-forwarded and the
 });
 
 test('nothing moves when the branch has its own commits, uncommitted edits, or an agent at work', async t => {
+  // One remote with a clone for each case, all one commit behind.
+  const { dir, remote, other, work: first } = await repositories(t);
+  const works = { diverged: first, changes: join(dir, 'work-changes'), busy: join(dir, 'work-busy') };
+  for (const clone of [works.changes, works.busy]) execFileSync('git', ['clone', '-q', remote, clone], { env });
+  await commit(other, 'b.txt', 'remote');
+  git(other, 'push', '-q');
   for (const setup of ['diverged', 'changes', 'busy'] as const) {
-    const { work, other } = await repositories(t);
-    await commit(other, 'b.txt', 'remote');
-    git(other, 'push', '-q');
+    const work = works[setup];
     if (setup === 'diverged') await commit(work, 'local.txt', 'local');
     if (setup === 'changes') await writeFile(join(work, 'a.txt'), 'edited');
     const before = git(work, 'rev-parse', 'HEAD');
