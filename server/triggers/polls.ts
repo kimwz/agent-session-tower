@@ -43,7 +43,7 @@ export class TriggerPolls {
   }
   /** Fires inside a commit; a capacity warning it answers is noted in that same commit. */
   private fire(state: EngineState, trigger: Trigger, dedupKey: string, at: number, kind: TriggerEvent['kind'], by?: TriggerActor, overlap?: TriggerPolicy['overlap']): TriggerEvent | undefined {
-    const { event, capacity } = fire(state, trigger, dedupKey, at, kind, this.now, by, overlap);
+    const { event, capacity } = fire(state, trigger, dedupKey, at, kind, this.now, by, overlap, this.store.firedPerTrigger);
     if (capacity) this.store.noteCapacity(capacity);
     return event;
   }
@@ -116,7 +116,7 @@ export class TriggerPolls {
     if (!trigger.enabled) throw failure('Turn the trigger on before running it.', 'conflict');
     // A run that limits would skip is refused before anything is sent. Tried on a copy, so nothing is recorded.
     // The probe's capacity warning is dropped: it records nothing.
-    const probe = fire(structuredClone(this.store.state), trigger, `manual:${randomUUID()}`, this.now(), 'manual', this.now, actor).event;
+    const probe = fire(structuredClone(this.store.state), trigger, `manual:${randomUUID()}`, this.now(), 'manual', this.now, actor, undefined, this.store.firedPerTrigger).event;
     if (!probe || probe.status === 'skipped') throw failure(`Nothing was sent: ${probe?.reason ?? 'this trigger cannot record more runs right now.'}`, 'conflict');
     const unlock = this.lock(id);
     if (!unlock) throw failure('This trigger is sending its request right now. Try again in a moment.', 'conflict');

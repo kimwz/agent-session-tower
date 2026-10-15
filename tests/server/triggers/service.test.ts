@@ -52,7 +52,7 @@ async function fixture(t: TestContext) {
     session: id => sessions.get(id),
   };
   const services: TriggerService[] = [];
-  const open = async (limits?: { acceptBytes?: number; maxBytes?: number }) => {
+  const open = async (limits?: { acceptBytes?: number; maxBytes?: number; firedPerTrigger?: number }) => {
     const service = new TriggerService({ stateDir: directory, storage: sql.client, executor, now: () => clock.now, tickMs: 60_000, ...(limits ? { limits } : {}) });
     await sql.bootstrap(() => clock.now).catch(async error => {
       // A failed first import has no authority: the real owner load below must reject and hold it.
@@ -446,12 +446,13 @@ test('a trigger at its record limit adds nothing more and says so', async t => {
   const trigger = await service.create(hourly(f.project), OWNER);
   service.close();
   const state = JSON.parse(await f.sql.text());
-  for (let index = 0; index < 20_000; index++) state.fired[`${trigger.id} old:${index}`] = new Date(start - 1000).toISOString();
+  // A small limit stands in for the production 20,000 (the same check; tests/server/triggers/limits.test.ts keeps the default).
+  for (let index = 0; index < 20; index++) state.fired[`${trigger.id} old:${index}`] = new Date(start - 1000).toISOString();
   await f.sql.replace(state);
-  service = await f.open();
+  service = await f.open({ firedPerTrigger: 20 });
   await assert.rejects(service.run(trigger.id, OWNER), { kind: 'conflict' });
-  assert.match(service.overview().storageError ?? '', /20000 runs recorded/);
-  assert.equal(Object.keys(JSON.parse(await f.sql.text()).fired).length, 20_000);
+  assert.match(service.overview().storageError ?? '', /20 runs recorded/);
+  assert.equal(Object.keys(JSON.parse(await f.sql.text()).fired).length, 20);
 });
 
 test('with history full, a trigger can still be turned off or deleted, and a schedule moves on with a warning', async t => {

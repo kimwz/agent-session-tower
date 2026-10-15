@@ -122,7 +122,7 @@ export class TriggerStore {
   private stateBytes = 0;
   private capacityError?: string;
 
-  constructor(private readonly options: { stateDir: string; storage?: StorageClient; now: () => number; limits: () => { acceptBytes?: number; maxBytes?: number } | undefined; changed: () => void }) {
+  constructor(private readonly options: { stateDir: string; storage?: StorageClient; now: () => number; limits: () => { acceptBytes?: number; maxBytes?: number; firedPerTrigger?: number } | undefined; changed: () => void }) {
     if (options.storage) this.repository = new TriggersRepository(options.storage);
   }
 
@@ -143,6 +143,8 @@ export class TriggerStore {
 
   private get acceptBytes() { return this.options.limits()?.acceptBytes ?? ACCEPT_STATE_BYTES; }
   private get maxBytes() { return this.options.limits()?.maxBytes ?? MAX_STATE_BYTES; }
+  /** Runs one trigger may have recorded; undefined is the production limit (MAX_FIRED_PER_TRIGGER). */
+  get firedPerTrigger(): number | undefined { return this.options.limits()?.firedPerTrigger; }
 
   /** The state as last saved. Read only; changes go through `commit`. */
   get state(): EngineState { return this.current; }

@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { carriesOutsideContent, type Trigger, type TriggerActor, type TriggerEvent, type TriggerPolicy } from '../../shared/triggers.js';
 import { consumeOnce } from './once.js';
+import { MAX_FIRED_PER_TRIGGER } from './limits.js';
 import { writeRows, recordIndexedReplacement, UNFINISHED, type EngineState } from './state.js';
 
-const MAX_FIRED_PER_TRIGGER = 20_000;
 const MAX_WAITING_PER_TRIGGER = 5;
 
 /** Deterministic, so a retried claim for the same slot is recognized by the run registry. */
@@ -16,9 +16,9 @@ export function triggerRequestId(triggerId: string, dedupKey: string): string {
  * Records one firing on the state being committed. Overlap and hourly limits decide whether it waits, joins or is
  * skipped; a once reservation is consumed in the same change. `by` is who asked for a run now: one asked for from a
  * controlling computer counts as started there. Answers the event, or, when the trigger cannot record more runs, the
- * capacity warning its caller notes in the same commit.
+ * capacity warning its caller notes in the same commit. `maxFired` is replaceable in tests only (TriggerService limits).
  */
-export function fire(state: EngineState, trigger: Trigger, dedupKey: string, at: number, kind: TriggerEvent['kind'], now: () => number, by?: TriggerActor, overlapOverride?: TriggerPolicy['overlap']): { event?: TriggerEvent; capacity?: string } {
+export function fire(state: EngineState, trigger: Trigger, dedupKey: string, at: number, kind: TriggerEvent['kind'], now: () => number, by?: TriggerActor, overlapOverride?: TriggerPolicy['overlap'], maxFired = MAX_FIRED_PER_TRIGGER): { event?: TriggerEvent; capacity?: string } {
   const key = `${trigger.id} ${dedupKey}`;
   if (trigger.source.schedule.type === 'once' && state.onceConsumed[trigger.id]) return {};
   if (state.fired[key]) {
@@ -28,8 +28,8 @@ export function fire(state: EngineState, trigger: Trigger, dedupKey: string, at:
   const time = now();
   const iso = new Date(time).toISOString();
   // Checked before anything is stored: a trigger at its record limit adds nothing more.
-  if (Object.keys(state.fired).filter(item => item.startsWith(`${trigger.id} `)).length >= MAX_FIRED_PER_TRIGGER) {
-    return { capacity: `"${trigger.name}" has ${MAX_FIRED_PER_TRIGGER} runs recorded in the last 30 days; new runs are not accepted until older ones expire.` };
+  if (Object.keys(state.fired).filter(item => item.startsWith(`${trigger.id} `)).length >= maxFired) {
+    return { capacity: `"${trigger.name}" has ${maxFired} runs recorded in the last 30 days; new runs are not accepted until older ones expire.` };
   }
   writeRows(state,'fired',key);
   state.fired[key] = iso;
