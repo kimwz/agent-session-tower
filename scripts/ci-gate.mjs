@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { lanesFor, plan, validateReceipts } from './ci-plan.mjs';
-import { TIERS, atLeast, ciScope, commitGate, planCi } from './ci-scope.mjs';
+import { TIERS, atLeast, ciScope, commitGate, ghArtifact, ghJson, reuseEvidence } from './ci-scope.mjs';
 
 /**
  * The gate's decision, from the jobs' results, the plan's record and the lane receipts. `pathTier` is what the change
@@ -47,7 +47,9 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const planned = existsSync(scopeFile) ? JSON.parse(readFileSync(scopeFile, 'utf8')) : undefined;
   const path = ciScope({ gate: () => ({ passed: true }) });
   const baseGate = planned?.tier === 'quick' ? commitGate(path.base) : undefined;
-  const evidence = planned?.execution === 'reuse' ? planCi({ scope: path }).evidence : undefined;
+  // Reread the reused result against the tier the plan ran, which may be above what the files alone need.
+  const evidence = planned?.execution === 'reuse'
+    ? reuseEvidence({ head: path.head, tree: path.tree, needed: planned.tier, repo: process.env.GITHUB_REPOSITORY, api: ghJson, artifact: ghArtifact }) : undefined;
   const sha = process.env.GITHUB_SHA;
   const { problems, timing } = gateVerdict({ needs: JSON.parse(process.env.CI_NEEDS), planned, pathTier: path.tier, baseGate,
     evidence, receipts, sha, tree: path.tree });

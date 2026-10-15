@@ -23,18 +23,28 @@ export const atLeast = (tier, floor) => rank(tier) >= rank(floor);
 const GENERAL_AREAS = ['agent-guidance', 'auto-prompt', 'browser', 'decisions', 'models', 'notifications', 'repositories', 'sessions',
   'skills', 'slack', 'streams', 'triggers'];
 const GENERAL = new RegExp(`^(client/|assets/|shared/|tests/(client|shared|gates|release)/|(server|tests/server)/(${GENERAL_AREAS.join('|')})/|(server|tests)/master/(voice|tts|elevenlabs|mp3|first-reply))`);
-// Data, access, secrets, updates and process lifetime inside an ordinary area are core all the same.
-const SENSITIVE = /(storage|backup|restore|secret|sqlite|retention|migrat|permission|auth|launch|process|lifetime|handoff|worker|^link\.ts$)/i;
+// Data, access, secrets, updates and process lifetime inside an ordinary area are core all the same, whether a file is
+// named after them or imports them.
+const SENSITIVE = /(storage|store|state|backup|secret|access|sqlite|retention|migrat|permission|auth|launch|process|lifetime|handoff|worker|^link\.(ts|js)$)/i;
+const CORE_MODULE = /(^node:sqlite$|(^|\/)(storage|stores|secrets|permissions|auth|updates|link|backup)(\/|$))/;
+const IMPORTS = /\b(?:from|import)\s*\(?\s*['"]([^'"]+)['"]/g;
+const importsCore = text => [...(text ?? '').matchAll(IMPORTS)].some(([, specifier]) =>
+  CORE_MODULE.test(specifier) || SENSITIVE.test(specifier.split('/').pop()));
 const BUILD = /^(\.github|scripts|bin)\//;
 const DOCS = new Set(['README.md', 'README.ko.md', 'AGENTS.md', 'CLAUDE.md', 'CHANGELOG.md', 'LICENSE', 'assets/brand/README.md']);
 const APP_VERSION = /^export const APP_VERSION = '[^'\n]*';$/m;
 
-/** The tier one path needs on its own; the version metadata files are decided by their content in `classify`. */
-export function pathTier(path) {
+/**
+ * The tier one path needs, given its text before and after (null when absent); the version metadata files are decided
+ * by their content in `classify`.
+ */
+export function pathTier(path, texts = []) {
   if (DOCS.has(path) || path.startsWith('docs/')) return { tier: 'quick' };
   if (BUILD.test(path)) return { tier: 'full', reason: `build or CI: ${path}` };
-  if (GENERAL.test(path) && !path.split('/').slice(1).some(part => SENSITIVE.test(part))) return { tier: 'related', reason: `code: ${path}` };
-  return { tier: 'full', reason: `core or unclassified: ${path}` };
+  if (!GENERAL.test(path) || path.split('/').slice(1).some(part => SENSITIVE.test(part))) return { tier: 'full', reason: `core or unclassified: ${path}` };
+  // Access and data are decided by the server; a browser module importing a settings or secrets view is not core.
+  if (!path.startsWith('client/') && texts.some(importsCore)) return { tier: 'full', reason: `imports a core module: ${path}` };
+  return { tier: 'related', reason: `code: ${path}` };
 }
 
 const semver = text => /^(\d+)\.(\d+)\.(\d+)$/.exec(text ?? '')?.slice(1).map(Number);
@@ -62,7 +72,7 @@ export function versionOnly(path, before, after) {
  * `changes` lists every changed path (a rename as its old and new path); `content(path, side)` reads a file at 'base' or
  * 'head', or returns null when it is absent there. `baseGreen` says whether the base commit passed the gate.
  */
-export function classify({ changes, content, baseGreen }) {
+export function classify({ changes, content, baseGreen, nextVersion }) {
   let tier = 'quick';
   const reasons = [];
   const raise = (to, reason) => { if (rank(to) > rank(tier)) tier = to; if (reason && !reasons.includes(reason)) reasons.push(reason); };
@@ -71,10 +81,10 @@ export function classify({ changes, content, baseGreen }) {
       if (!versionOnly(path, content(path, 'base'), content(path, 'head'))) raise('full', `more than the version: ${path}`);
       continue;
     }
-    const { tier: needed, reason } = pathTier(path);
+    const { tier: needed, reason } = pathTier(path, [content(path, 'base'), content(path, 'head')]);
     raise(needed, reason);
   }
-  const from = parse(content('package.json', 'base'))?.version, to = parse(content('package.json', 'head'))?.version;
+  const from = parse(content('package.json', 'base'))?.version, to = nextVersion ?? parse(content('package.json', 'head'))?.version;
   if (from !== to) {
     const [a, b] = [semver(from), semver(to)];
     if (!a || !b) raise('full', `unreadable version: ${from} → ${to}`);
@@ -149,8 +159,8 @@ export function reuseEvidence({ head, tree, needed, repo, api, artifact }) {
   } catch (error) { return { reused: false, reason: `cannot read pull request result: ${error.message.split('\n')[0]}` }; }
 }
 
-const ghJson = path => gh([path]);
-const ghArtifact = id => {
+export const ghJson = path => gh([path]);
+export const ghArtifact = id => {
   const zip = join(mkdtempSync(join(tmpdir(), 'ci-record-')), 'record.zip');
   writeFileSync(zip, execFileSync('gh', ['api', `repos/${process.env.GITHUB_REPOSITORY}/actions/artifacts/${id}/zip`], { maxBuffer: 64 * 1024 * 1024 }));
   return JSON.parse(execFileSync('unzip', ['-p', zip, 'ci-timing.json'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }));
@@ -172,7 +182,8 @@ export function localScope() {
     if (side === 'base') return gitShow(base, path);
     try { return readFileSync(path, 'utf8'); } catch { return null; }
   };
-  return classify({ changes, content, baseGreen: true });
+  // `npm version` runs this before it writes the new version, so take the version it is about to write.
+  return classify({ changes, content, baseGreen: true, nextVersion: process.env.npm_new_version || undefined });
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {

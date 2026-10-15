@@ -53,6 +53,16 @@ test('core areas, build and CI, minor or major versions and unknown paths need t
   }
   assert.equal(pathTier('server/slack/service.ts').tier, 'related');
   assert.equal(pathTier('server/master/voice-turn-end.ts').tier, 'related');
+  // A file of an ordinary area that reaches data, secrets or access directly is core, whatever its name.
+  assert.equal(pathTier('server/triggers/rules.ts', ["import type { StorageClient } from '../storage/client.js';"]).tier, 'full');
+  assert.equal(pathTier('server/triggers/rules.ts', [null, "import type { SecretStore } from './secrets.js';"]).tier, 'full');
+  assert.equal(pathTier('server/triggers/rules.ts', ["const db = await import('node:sqlite');"]).tier, 'full');
+  assert.equal(pathTier('server/triggers/rules.ts', ["import { failure } from './errors.js';", null]).tier, 'related');
+  assert.equal(pathTier('server/triggers/store.ts').tier, 'full');
+  assert.equal(pathTier('server/triggers/github-access.ts').tier, 'full');
+  // The browser shows what the server decided; its imports of settings or secrets views are not core.
+  assert.equal(pathTier('client/src/app/App.tsx', ["import { SecretsPanel } from '../secrets/SecretsPanel';"]).tier, 'related');
+  assert.equal(pathTier('client/src/secrets/SecretsPanel.tsx').tier, 'full');
   assert.equal(pathTier('tests/server/slack-transport.test.ts').tier, 'full', 'outside the named areas');
   assert.match(change(release(`${major}.${minor + 1}.0`)).reasons.join(), /minor or major/);
   assert.equal(change(release(`${major}.${minor + 1}.0`)).tier, 'full');
@@ -60,6 +70,10 @@ test('core areas, build and CI, minor or major versions and unknown paths need t
   assert.equal(change(release(`${major}.${minor}.${patch}`)).tier, 'quick', 'unchanged version');
   assert.equal(change({ 'package.json': bumpJson(pkg, `${major}.${minor}.${Math.max(patch - 1, 0)}`) }).tier, patch ? 'full' : 'quick');
   assert.equal(change({ 'package.json': bumpJson(pkg, 'next') }).tier, 'full');
+  // `npm version` checks before it writes the version it was asked for.
+  const docs = { changes: ['docs/usage.md'], baseGreen: true, content: (path: string) => path === 'package.json' ? pkg : 'x' };
+  assert.equal(classify({ ...docs, nextVersion: nextPatch }).tier, 'quick');
+  assert.equal(classify({ ...docs, nextVersion: `${major}.${minor + 1}.0` }).tier, 'full');
 });
 
 test('version metadata counts as metadata only when nothing but the version changed', () => {
@@ -150,6 +164,7 @@ test('the gate refuses a tier below what the files need and unconfirmed quick or
   const reused = run('reused');
   assert.ok(problems({ ...reused, pathTier: 'full', planned: { ...reused.planned, tier: 'related' } }).length, 'a reuse keeps the tier the change needs');
   assert.ok(problems({ ...reused, planned: { ...reused.planned, execution: 'skip' } }).length, 'unknown execution');
+  assert.deepEqual(problems({ ...reused, pathTier: 'quick' }), [], 'a quick change raised to full by its base reuses the full result');
   const related = run('related');
   assert.ok(problems({ ...related, planned: { ...related.planned, lanes: lanesFor('full').map(l => l.id) } }).length, 'lanes differ from the tier');
 });
