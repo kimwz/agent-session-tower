@@ -2,7 +2,7 @@
  * Decides how much CI a change needs, from the files it touches:
  * - quick: documentation and a patch version bump only. CI runs the checks job; the tests are the base commit's,
  *   which must itself have passed `validation gate (all platforms)`.
- * - related: browser code. The Node 22 floor runs the whole inventory once on Linux and once on macOS.
+ * - related: browser code. The Node 22 floor runs the whole inventory on Linux.
  * - full: server and shared code (storage, permissions, secrets, updates, execution lifetime live there), build and CI,
  *   any dependency or package change, a minor or major version, and every other path. All lanes run.
  * Usage: node scripts/ci-scope.mjs plan | local
