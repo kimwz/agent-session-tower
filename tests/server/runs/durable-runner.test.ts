@@ -39,8 +39,20 @@ import { createNativeRetentionAdapter } from '../../../server/sessions/retention
 import { worktreeCleanupVisible } from '../../../server/worktrees/janitor.js';
 import { CheckDriver, checks } from './fixtures/worker-checks.ts';
 
+/** Workers started here, by state folder: a fixture ends them all before its folders go, whatever order a test's own cleanups run in. */
+const startedHosts = new Map<string, Set<() => Promise<void>>>();
 /** Every worker here runs its once-a-second handoff and idle checks every few milliseconds, each round counted. */
-const startRunnerHost = (options: RunnerHostOptions) => startWorker({ scheduleChecks: new CheckDriver().schedule, ...options });
+const startRunnerHost = async (options: RunnerHostOptions) => {
+  const driver = new CheckDriver();
+  const host = await startWorker({ scheduleChecks: driver.schedule, ...options });
+  const hosts = startedHosts.get(options.stateDir) ?? new Set();
+  startedHosts.set(options.stateDir, hosts);
+  // A close already under way (a handoff) is not awaited by host.close(); its checks stop once its endpoint keeper has.
+  hosts.add(async () => { await host.close(); if (!options.scheduleChecks) await until(() => !driver.running(), 20_000); });
+  return host;
+};
+/** Ends every worker started for `stateDir`. */
+const closeStarted = async (stateDir: string) => { for (const close of startedHosts.get(stateDir) ?? []) await close(); startedHosts.delete(stateDir); };
 
 async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector, hostOptions?: (parts: { stateDir: string; sessions: SessionService; runs: RunManager }) => Promise<Partial<RunnerHostOptions>>, fault?: { onUnavailable: (status: ReturnType<import('../../../server/storage/client.js').StorageClient['status']>, runs: RunManager) => void }, beforeExecutable?: () => Promise<void>, holdUntilReady = false) {
   const directory = await realpath(await temporaryFixture('tower-durable-fixture-'));
@@ -95,7 +107,7 @@ async function fixture(workerClosed = false, withRetention = false, retentionUna
   const close = async () => {
     await retention?.service.quiesce();
     await Promise.all(clients.map(client => client.close()));
-    await host.close(); sessions.stop(); await runs.close();
+    await host.close(); await closeStarted(stateDir); sessions.stop(); await runs.close();
   };
   const remove = async () => {
     await removeTemporaryFixture(directory);

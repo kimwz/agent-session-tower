@@ -18,6 +18,9 @@ export class CheckDriver {
 
   constructor(private readonly periodMs = 10, private readonly onRound?: () => void) {}
 
+  /** Whether the worker is running its checks: from its start until its close has stopped its endpoint keeper. */
+  running(): boolean { return live.has(this); }
+
   /** Pass as `scheduleChecks`. */
   readonly schedule = (checks: WorkerChecks): (() => void) => {
     live.add(this);
