@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.137.1] - 2026-10-15
+
+- 세션 목록의 기본 조회 기간이 **최근 7일**입니다. 페이지를 새로 열거나 새 세션을 시작했을 때 지금까지는 최근 24시간만 보였습니다.
+
 ## [1.137.0] - 2026-10-15
 
 - **호스트 설정 따르기.** 합류한 컴퓨터가 이 Tower의 설정을 그대로 따릅니다. 새로 합류하는 컴퓨터는 기본으로 켜지고, 이미 합류한 컴퓨터는 **원격 컴퓨터**의 그 컴퓨터 카드에서 켭니다. 새 컴퓨터를 붙여 저장소를 clone하고 새 작업을 시작할 때 백지에서 시작하지 않아도 됩니다.
