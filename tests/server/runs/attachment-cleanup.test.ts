@@ -19,6 +19,10 @@ import { RunManager, fixtureDocuments, importFixtureRuns } from './sql-fixture.j
 import { AutoPromptManager } from '../../../server/auto-prompt/manager.js';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
 import type { Session, Snapshot } from '../../../shared/types.js';
+import { installWorkerChecks } from './fixtures/worker-checks.ts';
+
+// The worker's once-a-second handoff check runs every few milliseconds, so a requested handoff starts at once.
+installWorkerChecks();
 
 function gate<T = void>() { let resolve!: (value: T) => void; let reject!: (error: Error) => void; const promise = new Promise<T>((ok, fail) => { resolve = ok; reject = fail; }); return { promise, resolve, reject }; }
 interface CleanupInternals { attachments: AttachmentStore; cleanupAttachments(): Promise<void>; attachmentCleanupTimer?: ReturnType<typeof setInterval> }

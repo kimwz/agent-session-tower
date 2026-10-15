@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { openCodexBridgeRun, type CodexBridgeOptions } from '../../../server/runs/codex-bridge.js';
 import { until } from '../../helpers/until.ts';
+import { settle } from './fixtures/settle.ts';
 
 type Request = { id: number; method: string; params: any };
 type QueueItem = { id: string; clientUserMessageId: string; input: unknown[] };
@@ -249,10 +250,12 @@ test('busy start races wait without steering or resending the queued prompt', as
   });
   const { bridge, started, finished } = await open(fake);
   t.after(() => bridge.close());
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   await bridge.start();
   assert.deepEqual(started, []);
   fake.notice('thread/status/changed', { threadId: 'thread', status: { type: 'idle' } });
-  await until(() => started.length === 1);
+  t.mock.timers.tick(1000);
+  await settle(() => started.length === 1);
   fake.complete(fake.turns[0], 'Done'); await bridge.done;
   assert.equal(fake.requests.filter(request => request.method === 'thread/queue/add').length, 1);
   assert.equal(fake.requests.filter(request => request.method === 'thread/queue/start').length, 2);
@@ -415,9 +418,11 @@ test('a start response without the clientId waits for persisted ownership eviden
   });
   const { bridge, started, finished } = await open(fake);
   t.after(() => bridge.close());
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   await bridge.start();
   assert.deepEqual(started, []);
-  await until(() => started.length === 1);
+  t.mock.timers.tick(1000);
+  await settle(() => started.length === 1);
   assert.deepEqual(started, ['turn-monitor-run']);
   fake.complete(fake.turns[0], 'Verified from persisted client ID'); await bridge.done;
   assert.deepEqual(finished, [{ status: 'completed' }]);
@@ -536,17 +541,24 @@ test('closing during cancellation reports unknown completion instead of confirmi
   assert.equal(fake.turns[0].status, 'inProgress');
 });
 
-test('an acknowledged interrupt times out without marking a still-running turn cancelled', { timeout: 16_000 }, async t => {
+test('an acknowledged interrupt times out without marking a still-running turn cancelled', async t => {
+  let acknowledged = false;
   const fake = await fixture(t, (request, fake) => {
     if (request.method !== 'turn/interrupt') return;
-    fake.reply(request, {}); return true;
+    fake.reply(request, {}); acknowledged = true; return true;
   });
   const { bridge, finished } = await open(fake);
   await bridge.start();
-  const startedAt = Date.now();
-  await assert.rejects(bridge.cancel(), /12초 안에 Codex 작업 종료를 확인하지 못했습니다/);
+  // The bridge's own deadlines run on a fake clock; the socket stays real.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const cancelled = assert.rejects(bridge.cancel(), /12초 안에 Codex 작업 종료를 확인하지 못했습니다/);
+  await settle(() => acknowledged);
+  t.mock.timers.tick(11_999);
+  await settle();
+  assert.equal(finished.length, 0, 'not given up before the deadline');
+  t.mock.timers.tick(1);
+  await cancelled;
   await bridge.done;
-  assert.ok(Date.now() - startedAt < 15_000);
   assert.equal(finished.length, 1);
   assert.equal(finished[0].status, 'error');
   assert.equal(fake.turns[0].status, 'inProgress');
@@ -568,9 +580,15 @@ for (const mode of ['ok', 'rejected', 'mismatch', 'lost', 'timeout']) {
     await assert.rejects(run.bridge.steer!({ id: 'queued', prompt: 'later' }), { disposition: 'rejected' });
     await run.bridge.start();
     assert.equal(run.bridge.canSteer!(), true);
+    // The 15 s answer deadline runs on a fake clock; the socket stays real.
+    if (mode === 'timeout') t.mock.timers.enable({ apis: ['setTimeout'] });
     const result = run.bridge.steer!({ id: 'queued', prompt: 'New instruction', imagePaths: ['/tmp/image path.png'] });
     assert.equal(run.bridge.canSteer!(), false);
     await assert.rejects(run.bridge.steer!({ id: 'duplicate', prompt: 'later' }), { disposition: 'rejected' });
+    if (mode === 'timeout') {
+      await settle(() => fake.requests.some(request => request.method === 'turn/steer'));
+      t.mock.timers.tick(15_000);
+    }
     if (mode === 'ok') await result;
     else await assert.rejects(result, { disposition: mode === 'rejected' ? 'rejected' : 'uncertain' });
     assert.deepEqual(fake.requests.find(request => request.method === 'turn/steer')?.params, {

@@ -13,6 +13,7 @@ import { SessionTasks } from '../../../../server/sessions/tasks.js';
 import { SkillService } from '../../../../server/skills/service.js';
 import { TriggerService } from '../../../../server/triggers/service.js';
 import type { Session } from '../../../../shared/types.js';
+import { installWorkerChecks } from './worker-checks.ts';
 
 const stateDir = process.argv.at(-1)!;
 const provider = process.env.FIXTURE_PROVIDER as 'claude' | 'codex';
@@ -24,6 +25,8 @@ const publish = async (name: string, value: string) => {
   await writeFile(pendingPath, value);
   await rename(pendingPath, path);
 };
+// The worker's once-a-second checks run every 20 ms here; each round adds a byte to `checks-<pid>` for the test to count.
+if (process.argv.includes('--runner-worker')) installWorkerChecks(20, () => appendFileSync(join(root, `checks-${process.pid}`), '.'));
 const nativeId = '10000000-0000-4000-8000-000000000001';
 const session: Session = { id: `${provider}:${nativeId}`, nativeId, provider, title: 'Detached fixture', cwd: root,
   project: 'fixture', status: 'idle', statusReason: 'Ready', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
