@@ -214,7 +214,8 @@ test('a web that starts while a master session exists starts the master host its
   const marker = join(stateDir, 'started');
   // Stands in for the host: it only notes that it was started, and how.
   const entry = join(stateDir, 'fake-host.mjs');
-  await writeFile(entry, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, process.argv.slice(2).join(' '));`);
+  // Written whole, then renamed into place: the marker never exists without its arguments.
+  await writeFile(entry, `import { renameSync, writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker + '.pending')}, process.argv.slice(2).join(' ')); renameSync(${JSON.stringify(marker + '.pending')}, ${JSON.stringify(marker)});`);
   const start = () => { const web = new MasterClient({ stateDir, credentials: () => undefined, hostEntry: entry, startupTimeoutMs: 300 }); web.start(); return web; };
 
   const quiet = start();
@@ -225,7 +226,8 @@ test('a web that starts while a master session exists starts the master host its
   await writePrivateJson(join(paths.data, 'settings.json'), JSON.stringify({ session: { sessionId: 'claude:master', provider: 'claude', startedAt: new Date().toISOString() } }));
   const web = start();
   t.after(() => web.dispose());
-  await until(() => existsSync(marker));
+  // A process start on a busy machine can take seconds.
+  await until(() => existsSync(marker), 30_000);
   assert.match(await readFile(marker, 'utf8'), /--master-host/);
 });
 
