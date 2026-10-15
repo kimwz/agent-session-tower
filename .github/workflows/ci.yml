@@ -5,21 +5,37 @@ on:
   pull_request:
 permissions:
   contents: read
+  # The plan and the gate read earlier gate results and the merged pull request's record.
+  checks: read
+  actions: read
+  pull-requests: read
 jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      lanes: ${{ steps.plan.outputs.lanes }}
     steps:
       - uses: actions/checkout@v7
-        with: { persist-credentials: false }
+        with: { persist-credentials: false, fetch-depth: 2 }
       - id: plan
-        run: |
-          node --input-type=module -e "import('./scripts/ci-plan.mjs').then(m=>console.log('matrix='+JSON.stringify({include:m.plan().map(({id,os,node,shard,kind})=>({id,os,node,label:kind==='compat'?'compatibility':'shard '+shard}))})))" >> "$GITHUB_OUTPUT"
+        name: Classify the change (quick, related, full or reused) and pick its lanes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_PUSH_BEFORE: ${{ github.event.before }}
+        run: node scripts/ci-scope.mjs plan
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-scope
+          path: ci-scope.json
+          if-no-files-found: error
+          # A rerun of failed jobs replaces their earlier result instead of failing on the name.
+          overwrite: true
   test:
     # Tower runs on macOS and on Linux; both are checked here, on GitHub's runners.
     name: ${{ matrix.os == 'macos-latest' && 'macOS' || 'Linux' }} ${{ matrix.node }} ${{ matrix.label }}
     needs: plan
+    if: needs.plan.outputs.lanes != '0'
     strategy:
       fail-fast: false
       max-parallel: 17
@@ -44,6 +60,7 @@ jobs:
             ${{ runner.temp }}/ci-${{ matrix.id }}/receipt.json
             ${{ runner.temp }}/ci-${{ matrix.id }}/private-*/reports/
           if-no-files-found: error
+          overwrite: true
   checks:
     runs-on: ubuntu-latest
     steps:
@@ -64,6 +81,7 @@ jobs:
           name: ci-checks
           path: ${{ runner.temp }}/ci-checks/receipt.json
           if-no-files-found: error
+          overwrite: true
   validation-gate:
     name: validation gate (all platforms)
     if: always()
@@ -71,12 +89,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with: { persist-credentials: false }
+        with: { persist-credentials: false, fetch-depth: 2 }
       - uses: actions/download-artifact@v4
         with: { pattern: 'ci-*', path: ci-results }
-      - name: Validate macOS and Linux inventory, real results and whole test window
+      - name: Recheck the tier and validate every selected lane's real result
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
+          GH_TOKEN: ${{ github.token }}
+          CI_PUSH_BEFORE: ${{ github.event.before }}
         run: node scripts/ci-gate.mjs ci-results
       - if: always()
         uses: actions/upload-artifact@v4
@@ -84,3 +104,4 @@ jobs:
           name: ci-timing
           path: ci-timing.json
           if-no-files-found: error
+          overwrite: true

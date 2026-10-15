@@ -12,6 +12,7 @@ on:
         type: string
 permissions:
   contents: write
+  checks: read
 jobs:
   release:
     runs-on: macos-latest
@@ -72,13 +73,18 @@ jobs:
           name: release-revalidation-evidence
           path: ${{ runner.temp }}/release-revalidation.json
           if-no-files-found: error
+      # A tag is published only when CI passed on that very commit (same tree, lockfile and tests), so the release does
+      # not run the suite again. A gate that is missing, pending or failed stops it before anything is published.
+      - name: Require CI to have passed on the tagged commit
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci-verify.mjs "$(git rev-parse 'HEAD^{commit}')"
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
       - run: npm ci
-      # The version was checked before it was tagged. Its built package is published first, since joined computers wait
-      # for it to update; the checks run again after.
       - if: github.event_name == 'push'
         run: npm run build
       - if: github.event_name == 'push'
@@ -89,7 +95,9 @@ jobs:
         run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md --verify-tag "agent-session-tower-${GITHUB_REF_NAME#v}.tgz"
         env:
           GH_TOKEN: ${{ github.token }}
+      # Revalidating an existing release runs the whole check again.
       - name: Capture the pinned genuine old worker inputs
+        if: github.event_name == 'workflow_dispatch'
         shell: bash
         env:
           VALIDATION_ROOT: ${{ runner.temp }}/sqlite-general-old-fixtures
@@ -118,6 +126,7 @@ jobs:
           node scripts/sqlite-old124-capture.mjs 1.124.0
           CAPTURE
       - name: Run npm run check
+        if: github.event_name == 'workflow_dispatch'
         shell: bash
         env:
           VALIDATION_ROOT: ${{ runner.temp }}/sqlite-general-old-fixtures

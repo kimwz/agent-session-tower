@@ -99,7 +99,9 @@ if (action === 'prepare') {
     await run('git', ['diff', '--exit-code', '--', 'shared/app-identity.ts'], env);
   } else throw new Error('Cannot determine release tag presence');
   const receipt = { id, sha: setup.sha, input: setup.input, admitted: setup.admitted, ready: setup.ready, started, finished: Date.now(), exit: 1 };
-  await run(process.execPath, ['--import', 'tsx', '--test', 'tests/shared/app-identity.test.ts'], env);
+  // The quick suite (gates, release scripts, app identity) is all the testing a quick change gets of its own.
+  await run('npm', ['run', 'test:quick'], env);
+  receipt.quick = true;
   receipt.finished = Date.now(); writeFileSync(join(jobDir, 'receipt.json'), JSON.stringify(receipt));
 } else if (action === 'legacy') {
   const setup = JSON.parse(readFileSync(meta, 'utf8')), env = { ...setup.env, PATH: process.env.PATH };

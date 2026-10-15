@@ -45,8 +45,9 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.tests.json --noEmit",
     "test": "node --import tsx --test --test-concurrency=2 \"tests/**/*.test.ts\"",
     "test:executable": "node scripts/test-executable.mjs",
+    "test:quick": "node --import tsx --test --test-concurrency=4 \"tests/gates/*.test.ts\" \"tests/release/*.test.ts\" tests/shared/app-identity.test.ts",
     "check": "npm run typecheck && npm test && npm run build",
-    "preversion": "npm run check",
+    "preversion": "node scripts/ci-scope.mjs local",
     "version": "node scripts/release.mjs prepare && node --import tsx --test tests/shared/app-identity.test.ts && git add shared/app-identity.ts",
     "postversion": "npm run build",
     "prepare": "npm run build"

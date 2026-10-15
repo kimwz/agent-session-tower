@@ -70,6 +70,14 @@ export function plan(root = '.') {
   return lanes;
 }
 
+/** The lanes a tier runs (see scripts/ci-scope.mjs). `related` keeps the Node 22 floor's full inventory on Linux and macOS. */
+export function lanesFor(tier, lanes = plan()) {
+  if (tier === 'full') return lanes;
+  if (tier === 'related') return lanes.filter(lane => lane.kind === 'full' && lane.major === '22');
+  if (tier === 'quick') return [];
+  throw new Error(`unknown CI tier: ${tier}`);
+}
+
 export function validateReceipts(lanes, receipts, sha) {
   assert.equal(receipts.length, lanes.length, 'missing/extra lane receipt');
   assert.equal(new Set(receipts.map(r => r.id)).size, receipts.length, 'duplicate receipt');
