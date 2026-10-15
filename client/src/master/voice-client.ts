@@ -735,6 +735,8 @@ export class VoiceSession {
         if (utterance.asking !== asking) return;
         if (typeof answer?.finished !== 'number' || !Number.isFinite(answer.finished)) { this.unanswered(utterance, asking); return; }
         utterance.asking = undefined;
+        // About words or an end that are no longer the last: neither kept nor counted.
+        if (!this.holds(utterance, asking, this.said(utterance.heard))) return;
         utterance.judgments++;
         utterance.verdict = { text, end: asking.end, pauseMs, finished: answer.finished };
       }, () => this.unanswered(utterance, asking))

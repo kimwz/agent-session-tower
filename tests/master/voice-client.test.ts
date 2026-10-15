@@ -739,6 +739,32 @@ test('speaking again while the first question is still unanswered also waits for
   } finally { page.end(); }
 });
 
+test('answers that come after the owner went on are not kept or counted: a request after many such pauses is still judged', async () => {
+  const page = await harness();
+  try {
+    // Every answer is slow: it comes once the owner has already gone on.
+    const slow: Array<() => void> = [];
+    turnEnd = ({ text }) => text.endsWith('줘') ? { finished: 0.9 } : new Promise(resolve => { slow.push(() => resolve({ finished: 0.1 })); });
+    const socket = await startSpeaking(page, '그,');
+    socket.autoCommit = true;
+    let said = '그,';
+    for (let pause = 0; pause < 22; pause++) {
+      await page.hearSlowly(0.002, 900);
+      await page.hearSlowly(0.1, 150);
+      slow.shift()?.();
+      await page.hearSlowly(0.1, 150);
+      said += ` 말 ${pause}`;
+      socket.write(said);
+    }
+    assert.ok(judged().length > 20, `asked at each pause (${judged().length})`);
+    said += ' 로그 보여 줘';
+    socket.write(said);
+    await page.hearSlowly(0.002, 2_500);
+    await flush();
+    assert.deepEqual(requests(), [said], 'judged and sent, not held as if out of judgments');
+  } finally { page.end(); }
+});
+
 test('a question about words the owner has since gone on from cannot hand the decision to the page: its failure is dropped', async () => {
   const page = await harness();
   try {
