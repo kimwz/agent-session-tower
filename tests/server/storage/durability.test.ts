@@ -3,7 +3,7 @@ import { lstat, readdir, readFile, realpath, rename, rm } from 'node:fs/promises
 import { dirname, join, relative } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import type { RecoveryBarrier } from '../../../server/storage/recovery.js';
-import { historyAfterSnapshot, historyWithSidecars, recordedWithSidecars, sha, type History } from './fixtures/history.js';
+import { cloneHistory, historyAfterSnapshot, historyWithSidecars, recordedWithSidecars, sha, unsyncedStorageFs, type History } from './fixtures/history.js';
 import { DATABASE, databasePath, filesUnder, openFixture, rejectsWith, stateDir, storage } from './helpers.js';
 
 const { activateRecoveryBarrier, adoptSnapshot, readRecoveryBarrier, reconcileRecovery, recordRecoveryBarrier, recordStorageIdentity, recoveryHold, storageFs, storageLayout } = storage;
@@ -88,14 +88,18 @@ class OrderModel {
   describe(index: number): string { return `cut ${index} (after ${JSON.stringify(this.log[index - 1])})`; }
 }
 
+/** The model judges what a power cut keeps by the syncs it records, never by the disk: it can run without real fsyncs. */
+const unsynced: Partial<Record<Op, (...args: string[]) => Promise<void>>> = unsyncedStorageFs;
+
 /**
  * Records every storageFs operation in `model`, and lets `fail` throw instead of (or after) one. Installed once per
- * test: a retry changes what `fail` answers, never the instrument, so the same model sees every attempt.
+ * test: a retry changes what `fail` answers, never the instrument, so the same model sees every attempt. With
+ * `realSyncs` off, the operations run `unsynced`.
  */
-function instrument(t: TestContext, model: OrderModel | undefined, fail?: (index: number, op: Op, path: string) => 'before' | 'after' | undefined) {
+function instrument(t: TestContext, model: OrderModel | undefined, fail?: (index: number, op: Op, path: string) => 'before' | 'after' | undefined, realSyncs = true) {
   let index = 0;
   for (const op of OPS) {
-    const original = storageFs[op] as (...args: string[]) => Promise<void>;
+    const original = (realSyncs ? undefined : unsynced[op]) ?? storageFs[op] as (...args: string[]) => Promise<void>;
     t.mock.method(storageFs, op, async (...args: string[]) => {
       const at = ++index;
       const path = op === 'rename' || op === 'copyFile' ? args[1] : args[0];
@@ -203,31 +207,40 @@ test('ordering model control: the same activation without the parent sync of a n
 });
 
 test('ordering model: an adoption stopped before any one step (or after the last) is retried under the same model, and the retry proves every link the failed attempt left', async t => {
+  // Every attempt starts from a copy of one history (made once: each takes a storage thread and a crashed process).
+  const template = await historyWithSidecars(t);
   // How many operations a whole adoption (record, then activate) makes.
-  const probe = await historyWithSidecars(t);
-  const count = instrument(t, undefined);
+  const probe = await cloneHistory(t, template);
+  const count = instrument(t, undefined, undefined, false);
   await adopt(probe);
   const steps = count();
   t.mock.restoreAll();
   assert.ok(steps >= 20, `an adoption makes ${steps} operations`);
 
+  // The syncs are recorded but not made (see `unsynced`).
+  let openChecked = false;
   for (let step = 1; step <= steps; step++) {
     for (const when of ['before', 'after'] as const) {
       if (when === 'after' && step !== steps) continue; // after step n is before step n + 1
-      const history = await historyWithSidecars(t);
+      const history = await cloneHistory(t, template);
       const dir = await realpath(history.dir);
       const inodes = await originals(dir);
       const model = new OrderModel(dir);
       await model.start();
       let failing = true;
-      instrument(t, model, at => failing && at === step ? when : undefined);
+      instrument(t, model, at => failing && at === step ? when : undefined, false);
       await assert.rejects(adopt(history), `${when} step ${step}`);
       const read = await readRecoveryBarrier(dir);
       if (read.state === 'present' && read.barrier.state === 'recorded') {
-        // While unfinished, the storage does not open.
-        const blocked = await openFixture(t, dir);
-        assert.equal(blocked.status().failure?.code, 'recovery-in-progress', `${when} step ${step}`);
-        await blocked.close();
+        // While unfinished, the storage does not open: the open refuses on this barrier state alone (recoveryHold), so
+        // one real open stands for every step that left it.
+        assert.equal(storage.recoveryHold(read, 'core', history.context).held, true, `${when} step ${step}`);
+        if (!openChecked) {
+          openChecked = true;
+          const blocked = await openFixture(t, dir);
+          assert.equal(blocked.status().failure?.code, 'recovery-in-progress', `${when} step ${step}`);
+          await blocked.close();
+        }
       }
       // The same failure condition lifted; the instrument and the model stay.
       failing = false;
@@ -238,6 +251,7 @@ test('ordering model: an adoption stopped before any one step (or after the last
       t.mock.restoreAll();
     }
   }
+  assert.ok(openChecked, 'some step left a recorded barrier');
 });
 
 /** Fails every sync once `from` has answered true for an operation, until `lift()`. */

@@ -41,8 +41,8 @@ test('server-provided read revisions retain stored markers when run output is om
 });
 
 test('read marks are bounded: a mark written again becomes the newest, and the oldest written go first', () => {
-  let state = {};
-  for (let index = 0; index < READ_STATE_LIMIT; index++) state = acknowledgeSession(state, `claude:s${index}`, 'r1');
+  // A full set of marks written in order s0..sN (built at once: writing them one by one copies the set each time).
+  let state: Record<string, string> = Object.fromEntries(Array.from({ length: READ_STATE_LIMIT }, (_, index) => [`claude:s${index}`, 'r1']));
   state = acknowledgeSession(state, 'claude:s0', 'r2');
   state = acknowledgeSession(state, 'claude:new', 'r1');
   const ids = Object.keys(state);

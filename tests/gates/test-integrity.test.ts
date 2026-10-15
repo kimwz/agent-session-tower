@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -55,29 +55,30 @@ test('a renamed file keeps its tests; a title edited in the same rename is liste
 });
 
 test('a new unconditional skip fails, in each of its forms', async t => {
-  for (const skipped of ["test.skip('a', () => {});", "test('a', { skip: true }, () => {});", "test('a', { todo: 'later' }, () => {});",
-    "test('a', t => {\n  t.skip();\n});", "test('a', t => {\n  return t.skip('later');\n});", "it.todo('a', () => {});"]) {
-    const cwd = await repository(t, { 'tests/a.test.ts': file("test('a', () => {});") }, { 'tests/a.test.ts': file(skipped) });
-    const result = checkTestIntegrity(cwd);
-    assert.equal(result.exitCode, 1, skipped);
-    assert.deepEqual(result.unconditionalSkips, ['tests/a.test.ts::a'], skipped);
-    assert.match(result.report, /New unconditional skips \(fails\)/);
-  }
+  // One repository holds every form in a file of its own (each repository costs a dozen git processes).
+  const forms = ["test.skip('a', () => {});", "test('a', { skip: true }, () => {});", "test('a', { todo: 'later' }, () => {});",
+    "test('a', t => {\n  t.skip();\n});", "test('a', t => {\n  return t.skip('later');\n});", "it.todo('a', () => {});"];
+  const path = (index: number) => `tests/form${index}.test.ts`;
+  const cwd = await repository(t, { ...Object.fromEntries(forms.map((_, index) => [path(index), file("test('a', () => {});")])),
+    'tests/already.test.ts': file("test.skip('a', () => {});") },
+  { ...Object.fromEntries(forms.map((skipped, index) => [path(index), file(skipped)])), 'tests/already.test.ts': file("test.skip('a', () => {});", "test('b', () => {});") });
+  const result = checkTestIntegrity(cwd);
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(result.unconditionalSkips, forms.map((_, index) => `${path(index)}::a`), 'each form, and not a skip that was already there');
+  assert.match(result.report, /New unconditional skips \(fails\)/);
   const already = await repository(t, { 'tests/a.test.ts': file("test.skip('a', () => {});") }, { 'tests/a.test.ts': file("test.skip('a', () => {});", "test('b', () => {});") });
   assert.equal(checkTestIntegrity(already).exitCode, 0, 'a skip that was already there');
 });
 
 test('a skip decided at run time is listed and does not fail', async t => {
-  for (const skipped of ["test('a', { skip: noLookups }, () => {});", "test('a', t => {\n  if (process.getuid?.() === 0) return t.skip('root');\n});"]) {
-    const cwd = await repository(t, { 'tests/a.test.ts': file("test('a', () => {});") }, { 'tests/a.test.ts': file(skipped) });
-    const result = checkTestIntegrity(cwd);
-    assert.equal(result.exitCode, 0, skipped);
-    assert.deepEqual(result.conditionalSkips, ['tests/a.test.ts::a'], skipped);
-    assert.deepEqual(result.unconditionalSkips, []);
-  }
-  const off = await repository(t, { 'tests/a.test.ts': file("test('a', () => {});") }, { 'tests/a.test.ts': file("test('a', { skip: false, only: true }, () => {});") });
-  assert.deepEqual(checkTestIntegrity(off).conditionalSkips, []);
-  assert.deepEqual(checkTestIntegrity(off).only, ['tests/a.test.ts::a']);
+  const cwd = await repository(t, { 'tests/a.test.ts': file("test('a', () => {});"), 'tests/b.test.ts': file("test('a', () => {});"), 'tests/off.test.ts': file("test('a', () => {});") },
+    { 'tests/a.test.ts': file("test('a', { skip: noLookups }, () => {});"), 'tests/b.test.ts': file("test('a', t => {\n  if (process.getuid?.() === 0) return t.skip('root');\n});"),
+      'tests/off.test.ts': file("test('a', { skip: false, only: true }, () => {});") });
+  const result = checkTestIntegrity(cwd);
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.conditionalSkips, ['tests/a.test.ts::a', 'tests/b.test.ts::a'], 'skip: false is no skip');
+  assert.deepEqual(result.unconditionalSkips, []);
+  assert.deepEqual(result.only, ['tests/off.test.ts::a']);
 });
 
 test('pattern.test(…) inside a test is not a subtest', async t => {
@@ -126,15 +127,22 @@ test('a deleted test file lists its tests and every assertion as removed', async
 
 test('without --base, HEAD must be a merge commit; the CLI exits 2 otherwise and compares with the first parent when it is', async t => {
   const cwd = await repository(t, { 'tests/a.test.ts': file("test('a', () => {});") }, { 'tests/a.test.ts': file("test.skip('a', () => {});") });
-  const run = (...args: string[]) => spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), script, ...args], { cwd, env: { ...env, GITHUB_STEP_SUMMARY: '' }, encoding: 'utf8' });
-  const merged = run();
+  // A second checkout of the branch, so the CLI runs on the merge commit and on a single-parent HEAD at once.
+  const single = join(cwd, '.single');
+  execFileSync('git', ['worktree', 'add', '-q', single, 'change'], { cwd, env });
+  const run = (dir: string, ...args: string[]) => new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), script, ...args], { cwd: dir, env: { ...env, GITHUB_STEP_SUMMARY: '' } });
+    let stdout = '', stderr = '';
+    child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+    child.on('error', reject).on('close', status => resolve({ status, stdout, stderr }));
+  });
+  const [merged, alone, explicit, missing] = await Promise.all([run(cwd), run(single), run(single, '--base', 'main^1'), run(single, '--base')]);
   assert.equal(merged.status, 1, merged.stderr);
   assert.match(merged.stdout, /tests\/a\.test\.ts::a/);
-  execFileSync('git', ['checkout', '-q', 'change'], { cwd, env });
-  const single = run();
-  assert.equal(single.status, 2);
-  assert.match(single.stderr, /--base/);
-  assert.equal(checkTestIntegrity(cwd).exitCode, 2);
-  assert.equal(run('--base', 'main^1').status, 1, 'an explicit base uses the merge base');
-  assert.equal(run('--base').status, 2);
+  assert.equal(alone.status, 2);
+  assert.match(alone.stderr, /--base/);
+  assert.equal(checkTestIntegrity(single).exitCode, 2);
+  assert.equal(explicit.status, 1, 'an explicit base uses the merge base');
+  assert.equal(missing.status, 2);
 });

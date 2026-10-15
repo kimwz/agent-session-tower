@@ -6,6 +6,18 @@ import { join } from 'node:path';
 import { AuthStore, canonicalIp, isLoopbackAddress, sessionKey } from '../../../server/auth/store.js';
 import { statusOf } from '../../../shared/errors.js';
 import { blockRename } from '../../helpers/private-writes.js';
+import crypto from 'node:crypto';
+import { syncBuiltinESMExports } from 'node:module';
+
+/**
+ * The store's scrypt cost (N=2^17) takes ~0.2 s per hash; these tests hash dozens of times. Outside the test that checks
+ * hashing itself, each hash runs at a low cost: the store still derives, saves and compares keys the same way.
+ */
+const realScrypt = crypto.scrypt;
+let fastHashes = true;
+(crypto as { scrypt: unknown }).scrypt = (password: crypto.BinaryLike, salt: crypto.BinaryLike, length: number, options: crypto.ScryptOptions, done: (error: Error | null, key: Buffer) => void) =>
+  realScrypt(password, salt, length, fastHashes ? { ...options, N: 1024 } : options, done);
+syncBuiltinESMExports();
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'tower-auth-'));
@@ -22,6 +34,7 @@ test('normalizes mapped addresses and only trusts actual loopback', () => {
 });
 test('credentials are hashed and private; sessions bind IP and revoke on change', async () => {
   const f = await fixture();
+  fastHashes = false;
   try {
     assert.equal((await f.store.login('192.0.2.1', 'admin', 'bad')).status, 'unconfigured');
     await f.store.setCredentials(' admin ', 'password-test-123');
@@ -36,7 +49,7 @@ test('credentials are hashed and private; sessions bind IP and revoke on change'
     await f.store.setCredentials('admin', 'new-password-test');
     assert.deepEqual(revoked, [sessionKey(result.sessionId)]);
     assert.equal(f.store.session(result.sessionId, '192.0.2.1'), false);
-  } finally { await f.cleanup(); }
+  } finally { fastHashes = true; await f.cleanup(); }
 });
 test('five cumulative failures permanently block across restarts and successful logins; manual unblock resets', async () => {
   const f = await fixture();

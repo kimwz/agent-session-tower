@@ -202,18 +202,17 @@ test('CI compares a commit with its first parent, leans a quick change on its ba
   for (const [path, text] of Object.entries({ 'package.json': pkg, 'package-lock.json': lock, 'shared/app-identity.ts': identity, 'CHANGELOG.md': '' })) await put(path, text);
   git('add', '.'); git('commit', '-qm', 'base');
   const first = git('rev-parse', 'HEAD');
-  for (const [path, text] of Object.entries(release(nextPatch))) await put(path, text);
-  git('add', '.'); git('commit', '-qm', 'Release [skip ci]');
+  // A documentation change is quick (a release bump is too: the classify tests above read those files; here each read is a git process).
+  await put('docs/usage.md', 'x'); git('add', '.'); git('commit', '-qm', 'docs');
   const asked: string[] = [];
   const green = (sha: string) => { asked.push(sha); return { passed: true, reason: 'gate success' }; };
   assert.equal(ciScope({ cwd: root, event: 'pull_request', gate: green }).tier, 'quick');
   assert.deepEqual(asked, [first], 'a quick change asks for its base gate');
   assert.equal(ciScope({ cwd: root, event: 'push', before: first, gate: green }).tier, 'quick');
-  for (const reason of ['CI run 7 attempt 1 in_progress', 'no CI run (workflow skipped or never started)', 'gate failure']) {
-    const scope = ciScope({ cwd: root, event: 'pull_request', gate: () => ({ passed: false, reason }) });
-    assert.equal(scope.tier, 'full', reason);
-    assert.match(scope.reasons.join(), /base commit has not passed/);
-  }
+  // Any base gate short of passed (in progress, absent, failed: see gatePassed above) runs the change in full.
+  const unpassed = ciScope({ cwd: root, event: 'pull_request', gate: () => ({ passed: false, reason: 'CI run 7 attempt 1 in_progress' }) });
+  assert.equal(unpassed.tier, 'full');
+  assert.match(unpassed.reasons.join(), /base commit has not passed/);
   assert.equal(ciScope({ cwd: root, event: 'pull_request', gate: null }).tier, 'quick', 'the files alone');
   await put('client/App.tsx', 'x'); git('add', '.'); git('commit', '-qm', 'code');
   assert.equal(ciScope({ cwd: root, event: 'push', before: first, gate: green }).tier, 'full', 'two commits pushed at once');

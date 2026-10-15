@@ -83,16 +83,18 @@ test('a Codex review started from a Claude turn joins that session even when no 
 
 test('a new non-interactive run is looked at once as soon as it appears, not on the next process interval', async t => {
   const f = await fixture(t);
+  // The service's clock moves on a second at a time instead of the test sleeping.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   await writeFile(join(f.claudeDir, `${CLAUDE}.jsonl`), claude(CLAUDE, 'cli'));
   await f.service.refresh();
   const initial = f.inspections();
-  await new Promise(resolve => setTimeout(resolve, 1100));
+  t.mock.timers.tick(1100);
   await writeFile(join(f.codexDir, `rollout-${REVIEW}.jsonl`), codex(REVIEW, 'exec'));
   f.setLaunchers({ [`codex:${REVIEW}`]: [`claude:${CLAUDE}`] });
   await f.service.refresh();
   assert.equal(f.inspections(), initial + 1, 'the process interval (8 s) had not elapsed');
   assert.equal(f.service.get(`codex:${REVIEW}`)?.parentId, `claude:${CLAUDE}`);
-  await new Promise(resolve => setTimeout(resolve, 1100));
+  t.mock.timers.tick(1100);
   await f.service.refresh();
   assert.equal(f.inspections(), initial + 1, 'each run is looked at once');
 });

@@ -11,6 +11,7 @@ import {
   artifactOf, bundleBody, crashWith, DATABASE, databasePath, filesUnder, fixtureManifest, fsPromises, openFixture, rehashedArtifact, replaceCall, stateDir, statedSource, storage,
   threadBundle, threadRequests, type FaultThread,
 } from './helpers.js';
+import { cloneStateDir } from './fixtures/history.js';
 
 const { openStorage, storageBundleFromArtifact, readStorageBundleArtifact } = storage;
 
@@ -206,28 +207,43 @@ test('every existing database is judged on a private copy before SQLite opens th
 });
 
 test('a refused open reports whether the live files were preserved by comparing them, whatever failed: thread exit, deadline or a change during the check', async t => {
+  const requests = threadRequests(t);
   for (const [shape, crashed] of shapes) {
+    // Each case opens its own copy of one existing storage of this shape.
+    const template = await existingShaped(t, crashed);
     // The thread ends during the check, the live files untouched: preserved, as compared.
-    let dir = await existingShaped(t, crashed);
+    let dir = await cloneStateDir(t, template);
     let before = await filesUnder(dir);
     await refused(t, { stateDir: dir, ...fault('exit-on-check') }, { phase: 'thread-exit', code: 'thread-exited', sourcePreserved: true });
     assert.deepEqual(await filesUnder(dir), before, shape);
     // The thread ends when asked to open the live files, before SQLite opens them: preserved, as compared.
-    dir = await existingShaped(t, crashed);
+    dir = await cloneStateDir(t, template);
     before = await filesUnder(dir);
     await refused(t, { stateDir: dir, ...fault('exit-on-open') }, { phase: 'thread-exit', code: 'thread-exited', sourcePreserved: true });
     assert.deepEqual(await filesUnder(dir), before, shape);
-    // The check misses its deadline: the thread is ended, the live files compared.
-    dir = await existingShaped(t, crashed);
+    // The check misses its deadline: the thread is ended, the live files compared. The deadline passes on a fake clock
+    // once the check was sent; the thread's end is waited for in real time.
+    dir = await cloneStateDir(t, template);
     before = await filesUnder(dir);
-    await refused(t, { stateDir: dir, ...fault('stall-on-check'), limits: { handshakeDeadlineMs: 1000 } }, { phase: 'deadline', code: 'deadline-exceeded', sourcePreserved: true });
+    const checks = requests.filter(request => request.op === 'check').length;
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const refusing = refused(t, { stateDir: dir, ...fault('stall-on-check'), limits: { handshakeDeadlineMs: 1000 } }, { phase: 'deadline', code: 'deadline-exceeded', sourcePreserved: true });
+      const since = performance.now();
+      while (requests.filter(request => request.op === 'check').length === checks) {
+        assert.ok(performance.now() - since < 10_000, 'the check was sent');
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      t.mock.timers.tick(1000);
+      await refusing;
+    } finally { t.mock.timers.reset(); }
     assert.deepEqual(await filesUnder(dir), before, shape);
     // Another process writes to the live database while the copy is checked: source-changed, never reported preserved.
-    dir = await existingShaped(t, crashed);
+    dir = await cloneStateDir(t, template);
     let status = await refused(t, { stateDir: dir, ...fault('change-on-check') }, { phase: 'open', code: 'source-changed', retryable: true, sourcePreserved: false });
     assert.match(status.failure!.message, /changed while it was checked/);
     // The same, and then the thread ends: the comparison, not the default, decides.
-    dir = await existingShaped(t, crashed);
+    dir = await cloneStateDir(t, template);
     status = await refused(t, { stateDir: dir, ...fault('change-exit-on-check') }, { phase: 'thread-exit', code: 'thread-exited', sourcePreserved: false });
   }
 });
@@ -304,7 +320,19 @@ test('a refusal whose own cleanup fails keeps its cause: a comparison that canno
   const unanswered = await unnamedShaped(t, true);
   const requests = threadRequests(t, op => op === 'close');
   replaceCall(t, storage.storageFs, 'syncDirectory', (original, path) => { if (path === unanswered.recoveryDir) throw eio(); return original(path); });
-  const status = await refused(t, { stateDir: unanswered.dir, bundle: threadBundle('fixture'), limits: { commandDeadlineMs: 1000 } }, { phase: 'paths', code: 'io-error', sourcePreserved: false });
+  // The close's deadline passes on a fake clock once the close was sent; the thread's end is waited for in real time.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let status: StorageStatus;
+  try {
+    const refusing = refused(t, { stateDir: unanswered.dir, bundle: threadBundle('fixture'), limits: { commandDeadlineMs: 1000 } }, { phase: 'paths', code: 'io-error', sourcePreserved: false });
+    const since = performance.now();
+    while (!requests.some(request => request.op === 'close')) {
+      assert.ok(performance.now() - since < 10_000, 'the close was sent');
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    t.mock.timers.tick(1000);
+    status = await refusing;
+  } finally { t.mock.timers.reset(); }
   assert.match(status.failure!.message, /injected EIO/);
   assert.deepEqual(requests.map(request => request.op), ['check', 'open', 'close']);
 });
@@ -365,8 +393,10 @@ test('symlinks, foreign modes, hard links and stray journals are refused as foun
     ['stray rollback journal', async dir => writeFile(`${databasePath(dir)}-journal`, 'hot', { mode: 0o600 }), 'unexpected-journal'],
     ['state directory group-writable', async dir => chmod(dir, 0o770), 'state-dir-invalid'],
   ];
+  // Each case damages its own copy of one existing storage.
+  const template = await existingStorage(t);
   for (const [name, damage, code] of cases) {
-    const dir = await existingStorage(t);
+    const dir = await cloneStateDir(t, template);
     await damage(dir);
     const before = await filesUnder(dir);
     await refused(t, options(dir), { phase: 'paths', code, retryable: false });
