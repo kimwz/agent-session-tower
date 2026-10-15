@@ -10,6 +10,9 @@ import { SECRET_MACHINES_FEATURE } from '../../../server/secrets/folders.js';
 import type { SecretMetadata, SecretRunResult } from '../../../shared/secrets.js';
 import type { NodeSummary } from '../../../shared/link.js';
 import { FixtureRuns, vaultTemplate } from '../../helpers/secrets.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const CANARY = 'FOLLOW_HOST_SECRET_CANARY_517';
 const HOST_ROUTE = 'a'.repeat(32), NODE_ROUTE = 'b'.repeat(32);
@@ -61,7 +64,7 @@ async function pair(t: TestContext) {
   return { a, source, get node() { return node; }, restart: async () => { node.runtime.close(); node = await nodeWorker(stateB, runsB, follow); return node; }, capB, follow, following, links, relay, run, project };
 }
 
-test('a clean computer that joins and follows: vault made by itself, trust aligned, an "all my machines" secret works, also after a restart', { timeout: 30000 }, async t => {
+test('a clean computer that joins and follows: vault made by itself, trust aligned, an "all my machines" secret works, also after a restart', async t => {
   const f = await pair(t);
   const all = await f.a.create({ name: 'ALL_MACHINES', kind: 'scalar', value: CANARY, sharing: { allMachines: true, folders: [] } });
   assert.equal(await f.node.runtime.machineVault(), 'open', 'its worker made the vault at start');
@@ -81,7 +84,7 @@ test('a clean computer that joins and follows: vault made by itself, trust align
   assert.equal(again.exitCode, 0); assert.match(again.stdout, /token-present/);
 });
 
-test('trust made while the host was locked completes once it opens; a computer the owner untrusted is not trusted again', { timeout: 30000 }, async t => {
+test('trust made while the host was locked completes once it opens; a computer the owner untrusted is not trusted again', async t => {
   const f = await pair(t); await f.node.runtime.machineVault();
   const carry = f.a.handoff()!; await f.a.lock();
   await f.following.align(NODE_ROUTE);
@@ -106,7 +109,7 @@ test('trust made while the host was locked completes once it opens; a computer t
   assert.equal(f.following.status(NODE_ROUTE)?.state, 'untrusted'); assert.deepEqual(f.node.service.peers(), []);
 });
 
-test('a computer that does not follow the host answers no trust request, and its vault never opens by itself', { timeout: 20000 }, async t => {
+test('a computer that does not follow the host answers no trust request, and its vault never opens by itself', async t => {
   const f = await pair(t); f.follow.host = undefined;
   assert.equal(await f.node.runtime.machineVault(), 'off');
   assert.equal(f.node.service.status().initialized, false);
@@ -115,7 +118,7 @@ test('a computer that does not follow the host answers no trust request, and its
   await assert.rejects(f.node.runtime.align({ routeId: HOST_ROUTE, direction: 'controller' }), { kind: 'forbidden' }, 'nor one from another controller');
 });
 
-test('unshared host secrets are listed by name, refused with the reason, pushed once, and work after sharing with a new operation ID', { timeout: 40000 }, async t => {
+test('unshared host secrets are listed by name, refused with the reason, pushed once, and work after sharing with a new operation ID', async t => {
   const f = await pair(t); await f.node.runtime.machineVault(); await f.following.align(NODE_ROUTE);
   const token = await f.a.create({ name: 'GITHUB_TOKEN', kind: 'scalar', value: CANARY });
   const listed = await f.relay(f.node.runtime.tool(f.capB, 'secrets_list', {})) as { secrets: (SecretMetadata & { status?: string })[]; unavailableSources: unknown[]; notice?: string };
@@ -143,7 +146,7 @@ test('unshared host secrets are listed by name, refused with the reason, pushed 
   assert.deepEqual(await f.run('use-1', token.reference), refused, 'the same operation ID keeps its recorded result');
 });
 
-test('a host without the catalog, and a computer that does not follow, keep today’s lists and answers', { timeout: 30000 }, async t => {
+test('a host without the catalog, and a computer that does not follow, keep today’s lists and answers', async t => {
   const f = await pair(t); await f.node.runtime.machineVault(); await f.following.align(NODE_ROUTE);
   const shared = await f.a.create({ name: 'SHARED', kind: 'scalar', value: CANARY, sharing: { allMachines: true, folders: [] } });
   const hidden = await f.a.create({ name: 'HIDDEN', kind: 'scalar', value: CANARY });
@@ -159,7 +162,7 @@ test('a host without the catalog, and a computer that does not follow, keep toda
   assert.ok(shared);
 });
 
-test('a computer the host does not see following gets neither the catalog nor reasons, even when it asks', { timeout: 30000 }, async t => {
+test('a computer the host does not see following gets neither the catalog nor reasons, even when it asks', async t => {
   const f = await pair(t); await f.node.runtime.machineVault(); await f.following.align(NODE_ROUTE);
   await f.a.create({ name: 'SHARED', kind: 'scalar', value: CANARY, sharing: { allMachines: true, folders: [] } });
   const hidden = await f.a.create({ name: 'HIDDEN', kind: 'scalar', value: CANARY });
@@ -171,7 +174,7 @@ test('a computer the host does not see following gets neither the catalog nor re
   assert.deepEqual(f.source.shares(), [], 'and no push');
 });
 
-test('a clone’s folder is added to the secrets of the same repository once, and not again after the owner removes it', { timeout: 30000 }, async t => {
+test('a clone’s folder is added to the secrets of the same repository once, and not again after the owner removes it', async t => {
   const f = await pair(t); await f.node.runtime.machineVault();
   const hostFolder = join(f.project, '..', 'host-repo');
   const repo = await f.a.create({ name: 'REPO_TOKEN', kind: 'scalar', value: CANARY, sharing: { allMachines: false, folders: [{ hostId: f.a.device().id, root: hostFolder }] } });
@@ -193,7 +196,7 @@ test('a clone’s folder is added to the secrets of the same repository once, an
   assert.deepEqual(f.a.settings().secrets[0]!.sharing?.folders, [{ hostId: f.a.device().id, root: hostFolder }], 'the owner’s removal stays');
 });
 
-test('a computer that stops following while the trust is being made is not trusted with what came back', { timeout: 30000 }, async t => {
+test('a computer that stops following while the trust is being made is not trusted with what came back', async t => {
   const f = await pair(t); await f.node.runtime.machineVault();
   let following = true; const listeners = new Map<string, (id: string) => void>();
   const summary = (): NodeSummary => ({ id: NODE_ROUTE, name: 'n', fingerprint: 'f', status: 'connected', features: [SECRET_MACHINES_FEATURE], pairedAt: '', followHost: following, following });
@@ -211,7 +214,7 @@ test('a computer that stops following while the trust is being made is not trust
   assert.notEqual(aligning.status(NODE_ROUTE)?.state, 'connected');
 });
 
-test('a computer that stops following while its vault opens does not trust the host', { timeout: 30000 }, async t => {
+test('a computer that stops following while its vault opens does not trust the host', async t => {
   const f = await pair(t); await f.node.runtime.machineVault();
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-follow-stop-'))); t.after(() => rm(root, { recursive: true, force: true }));
   // Following when asked and while the vault opens, not any more when the host would be trusted.

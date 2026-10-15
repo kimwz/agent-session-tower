@@ -10,6 +10,9 @@ import { parseDotenv } from '../../../server/secrets/dotenv.js';
 import { SecretVault } from '../../../server/secrets/vault.js';
 import { collectEncryptedVault, listPendingSecretImports, stageVaultImport } from '../../../server/backup/secrets.js';
 import { blockRename } from '../../helpers/private-writes.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 const password = 'fixture-password-1234';
 test('dotenv preserves literals, empty values and multiline; duplicate assignments fail', () => {
   assert.deepEqual({ ...parseDotenv('\uFEFFA=\r\nB="one\\ntwo"\r\nC=\'${literal}\'\nD="multi\nline"\n') }, { A: '', B: 'one\ntwo', C: '${literal}', D: 'multi\nline' });

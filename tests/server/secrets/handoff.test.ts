@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { SecretRuntime } from '../../../server/secrets/runtime.js';
 import { FixtureRuns, secretService, storedTask } from '../../helpers/secrets.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const PASSWORD = 'fixture-handoff-password';
 const CANARY = 'HANDOFF_VALUE_CANARY_8172';

@@ -6,6 +6,9 @@ import test, { type TestContext } from 'node:test';
 import { SecretStore } from '../../../server/triggers/secrets.js';
 import { SecretService } from '../../../server/secrets/service.js';
 import { asideNames, blockQuarantine, captureErrors } from '../../helpers/quarantine.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 async function stateDir(t: TestContext): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'tower-trigger-secrets-'));

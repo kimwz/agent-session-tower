@@ -16,6 +16,9 @@ import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import { ownerSecretControl } from '../../../server/link/secret-routes.js';
 import { CALLER_CAPABILITY_HEADER } from '../../../server/runs/session-mcp.js';
 import { FixtureRuns, editPayload, legacyRecord, legacyRule, secretService, stored, storedTask, vaultTemplate } from '../../helpers/secrets.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 const VISIBLE = 'VISIBLE_INTEGRATION_CANARY_732';
 const HIDDEN = 'HIDDEN_INTEGRATION_CANARY_928';
 const PASSWORD = 'fixture-integration-vault-password';
@@ -60,7 +63,7 @@ async function pair(t: TestContext) {
   const confirm = () => { assert.deepEqual(recipient.remote.poll('controller-a', ['available']), []); };
   return { root, stateA, stateB, projectA, projectB, a, b, source, recipient, runsB, capB, logical, local, toB, wires, errors, relay, confirm, advance: (ms: number) => { now += ms; } };
 }
-test('two encrypted runtimes relay source-authoritative selected fields, owner connections and signed task closure', { timeout: 20000 }, async t => {
+test('two encrypted runtimes relay source-authoritative selected fields, owner connections and signed task closure', async t => {
   const f = await pair(t);
   // A key saved before per-secret sharing, in a logical project's group, follows A's rules for B.
   const record = legacyRecord(f.a.device().id, { name: 'source env bundle', groupId: 'logical-group', kind: 'env', value: `VISIBLE=${VISIBLE}\nHIDDEN=${HIDDEN}` }); const bundle = record.metadata;
@@ -81,13 +84,13 @@ test('two encrypted runtimes relay source-authoritative selected fields, owner c
   assert.deepEqual(f.errors, []); assert.equal(JSON.stringify(f.wires).includes(VISIBLE), false); assert.equal(JSON.stringify(f.wires).includes(HIDDEN), false); assert.equal(stored(f.b).secrets.length, 0); assert.equal(f.runsB.list()[0].output, '');
   const disk = await storedText(f.stateA) + await storedText(f.stateB); assert.equal(disk.includes(VISIBLE), false); assert.equal(disk.includes(HIDDEN), false); assert.equal(disk.includes(PASSWORD), false);
 });
-test('source lock, offline relay and task expiry fail closed while owner run remains active', { timeout: 15000 }, async t => {
+test('source lock, offline relay and task expiry fail closed while owner run remains active', async t => {
   const f = await pair(t); await f.a.create({ name: 'remote scalar', kind: 'scalar', value: VISIBLE, sharing: f.toB });
   await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})); const fixedTask = (await f.recipient.context(f.capB)).taskId; const carry = f.a.handoff()!; await f.a.lock(); const locked = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(locked.secrets, []); assert.equal(locked.unavailableSources.length, 1);
   await f.a.adopt(carry); const offline = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {}), true) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(offline.secrets, []); assert.equal(offline.unavailableSources.length, 1);
   f.advance(8 * 60 * 60_000 + 1); const expired = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(expired.secrets, []); assert.equal(expired.unavailableSources.length, 1); assert.equal(f.runsB.list()[0].status, 'running'); assert.equal(stored(f.b).secrets.length, 0); assert.equal((await f.recipient.context(f.capB)).taskId, fixedTask);
 });
-test('recipient session disconnection filters the session view and lists and blocks use without changing the source sharing', { timeout: 20000 }, async t => {
+test('recipient session disconnection filters the session view and lists and blocks use without changing the source sharing', async t => {
   const f = await pair(t);
   const secret = await f.a.create({ name: 'B can revoke this remote key', kind: 'scalar', value: VISIBLE, sharing: f.toB });
   const context = await f.recipient.context(f.capB); f.confirm();
@@ -108,7 +111,7 @@ test('recipient session disconnection filters the session view and lists and blo
   assert.equal(f.runsB.list()[0].status, 'running'); assert.equal(stored(f.b).secrets.length, 0); assert.deepEqual(f.errors, []);
 });
 
-test('a key disconnected in a session of the joined computer is offered there to allow again, and the source still decides its use', { timeout: 20000 }, async t => {
+test('a key disconnected in a session of the joined computer is offered there to allow again, and the source still decides its use', async t => {
   const f = await pair(t);
   const secret = await f.a.create({ name: 'remote key to allow again', kind: 'scalar', value: VISIBLE, sharing: f.toB });
   const own = await f.b.create({ name: 'B own key', kind: 'scalar', value: VISIBLE, sharing: { allMachines: true, folders: [] } });
@@ -132,7 +135,7 @@ test('a key disconnected in a session of the joined computer is offered there to
   assert.equal(JSON.stringify([stopped, allowed]).includes(VISIBLE), false); assert.deepEqual(f.errors, []);
 });
 
-test('the source sees what the joined computer’s session stopped, and connecting a key there lifts that stop', { timeout: 20000 }, async t => {
+test('the source sees what the joined computer’s session stopped, and connecting a key there lifts that stop', async t => {
   const f = await pair(t);
   const secret = await f.a.create({ name: 'stopped on B', kind: 'scalar', value: VISIBLE, sharing: f.toB });
   const own = await f.b.create({ name: 'B local key', kind: 'scalar', value: VISIBLE, sharing: { allMachines: true, folders: [] } });
@@ -159,18 +162,20 @@ test('the source sees what the joined computer’s session stopped, and connecti
   assert.ok(used); assert.deepEqual(f.errors, []);
 });
 
-test('a source that confirmed reads but does not answer is listed as unavailable, not as waiting for its update', { timeout: 20000 }, async t => {
+test('a source that confirmed reads but does not answer is listed as unavailable, not as waiting for its update', async t => {
   const f = await pair(t);
   await f.a.create({ name: 'silent source key', kind: 'scalar', value: VISIBLE, sharing: f.toB });
   f.confirm();
-  // The request's own timer does not keep the process alive; this does, until the read times out.
-  const alive = setInterval(() => {}, 1000); t.after(() => clearInterval(alive));
-  // Nobody relays the read: it times out.
-  const view = await f.recipient.control('session', { sessionId: f.capB.sessionId }) as SecretSessionView;
+  // Nobody relays the read: it times out, on a fake clock once the read is waiting.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const viewing = f.recipient.control('session', { sessionId: f.capB.sessionId }) as Promise<SecretSessionView>;
+  while (f.recipient.remote.pending() === 0) await new Promise(setImmediate);
+  t.mock.timers.tick(5000);
+  const view = await viewing;
   assert.deepEqual([view.available, view.unavailableSources, view.updatePendingSources, view.error], [[], [f.a.device().id], [], undefined]);
 });
 
-test('a joined computer’s session view lists a source’s keys only once its relay confirmed reads, and starts no task on either computer', { timeout: 20000 }, async t => {
+test('a joined computer’s session view lists a source’s keys only once its relay confirmed reads, and starts no task on either computer', async t => {
   const f = await pair(t);
   const shared = await f.a.create({ name: 'shared with B', kind: 'scalar', value: VISIBLE, sharing: { allMachines: true, folders: [] } });
   await f.a.create({ name: 'unshared on A', kind: 'scalar', value: VISIBLE });
@@ -195,7 +200,7 @@ test('a joined computer’s session view lists a source’s keys only once its r
   assert.equal(JSON.stringify(view).includes(VISIBLE), false); assert.ok(shared); assert.deepEqual(f.errors, []);
 });
 
-test('after the source revokes the last share, the node lists nothing and still closes its source task', { timeout: 20000 }, async t => {
+test('after the source revokes the last share, the node lists nothing and still closes its source task', async t => {
   const f = await pair(t);
   const secret = await f.a.create({ name: 'revoked share', kind: 'scalar', value: VISIBLE, sharing: f.toB });
   const listed = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[] };
@@ -208,7 +213,7 @@ test('after the source revokes the last share, the node lists nothing and still 
   assert.equal(storedTask(f.a, context.taskId)?.status, 'closed'); assert.deepEqual(f.errors, []);
 });
 
-test('recipient task closure or revocation while a sealed response is in flight denies remote consumption', { timeout: 20000 }, async t => {
+test('recipient task closure or revocation while a sealed response is in flight denies remote consumption', async t => {
   const f = await pair(t);
   const secret = await f.a.create({ name: 'inflight remote key', kind: 'scalar', value: VISIBLE, sharing: f.toB });
   for (const mode of ['revoke', 'close'] as const) {
@@ -225,7 +230,7 @@ test('recipient task closure or revocation while a sealed response is in flight 
   }
 });
 
-test('two encrypted vaults deliver an exact 1MiB remote file through a bounded sealed envelope', { timeout: 30000 }, async t => {
+test('two encrypted vaults deliver an exact 1MiB remote file through a bounded sealed envelope', async t => {
   const f = await pair(t), payload = Buffer.alloc(MAX_SECRET_BYTES, 0xa5);
   const secret = await f.a.create({ name: 'maximum fixture file', kind: 'file', content: payload.toString('base64'), sharing: f.toB });
   await assert.rejects(f.a.create({ name: 'oversized fixture file', kind: 'file', content: Buffer.alloc(MAX_SECRET_BYTES + 1).toString('base64'), sharing: f.toB }));
@@ -249,7 +254,7 @@ test('two encrypted vaults deliver an exact 1MiB remote file through a bounded s
 });
 
 const snapshot: Snapshot = { sessions: [], runs: [], providers: [], scanning: false, hostname: 'fixture', version: 'fixture', updatedAt: '' };
-test('owner HTTP secret API requires sign-in and page token; generic remote router exposes no secret management', { timeout: 20000 }, async t => {
+test('owner HTTP secret API requires sign-in and page token; generic remote router exposes no secret management', async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-secret-http-integration-'))); t.after(() => rm(root, { recursive: true, force: true }));
   const stateDir = join(root, 'state'), project = join(root, 'project'), link = join(root, 'project-link'); await mkdir(stateDir); await mkdir(project); await symlink(project, link);
   const service = await secretService(stateDir); const runs = new FixtureRuns(); runs.session('codex:http-session', link);
@@ -334,7 +339,7 @@ test('owner HTTP secret API requires sign-in and page token; generic remote rout
   assert.equal((await storedText(stateDir)).includes(VISIBLE), false); assert.equal((await storedText(stateDir)).includes(PASSWORD), false);
 });
 
-test('every secret route refuses the master, local agents and run capabilities before the worker is asked', { timeout: 20000 }, async t => {
+test('every secret route refuses the master, local agents and run capabilities before the worker is asked', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-secret-http-callers-')); t.after(() => rm(stateDir, { recursive: true, force: true }));
   const auth = await createRemoteAuthFixture(stateDir); const masterSecret = 'c'.repeat(64); const calls: string[] = [];
   const backend: Backend = { snapshot: () => snapshot, detail: async () => undefined, enqueue: async () => { throw new Error('No native provider may run in this fixture'); }, cancel: async () => {}, subscribe: () => () => {},
@@ -363,7 +368,7 @@ test('every secret route refuses the master, local agents and run capabilities b
   assert.deepEqual(calls, []);
 });
 
-test('a folder identity the page sends back is accepted only where that key already keeps it; anything new is resolved first', { timeout: 20000 }, async t => {
+test('a folder identity the page sends back is accepted only where that key already keeps it; anything new is resolved first', async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-secret-kept-folders-'))); t.after(() => rm(root, { recursive: true, force: true }));
   const stateDir = join(root, 'state'), project = join(root, 'project'); await mkdir(stateDir); await mkdir(project);
   const service = await secretService(stateDir, { password: PASSWORD }); const runtime = new SecretRuntime({ stateDir, service, runs: new FixtureRuns() }); t.after(() => runtime.close());

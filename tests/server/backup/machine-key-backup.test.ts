@@ -13,6 +13,9 @@ import { collectEncryptedVault, importPendingSecret, listPendingSecretImports } 
 import { decryptBackup, encryptBackup } from '../../../server/backup/crypto.js';
 import type { SecretSettingsView } from '../../../shared/secrets.js';
 import { FixtureRuns, secretService } from '../../helpers/secrets.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const BACKUP_PASSWORD = 'fixture-backup-password';
 const TARGET_PASSWORD = 'fixture-target-vault-password';

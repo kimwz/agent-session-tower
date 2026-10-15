@@ -12,6 +12,9 @@ import { DurableRunManager } from '../../../server/runs/durable-runner.js';
 import { kindOf } from '../../../shared/errors.js';
 import type { SecretContext, SecretRunInput, SecretSubjectMode } from '../../../shared/secrets.js';
 import { FixtureRuns, vaultTemplate } from '../../helpers/secrets.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const canary = 'SYNTHETIC-review-broker-canary-31';
 const vault = vaultTemplate('fixture-review-broker-password');

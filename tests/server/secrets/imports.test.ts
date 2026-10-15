@@ -7,6 +7,9 @@ import { deferredSecretParts, importPendingSecret, listPendingSecretImports, sta
 import { SecretService } from '../../../server/secrets/service.js';
 import { secretService } from '../../helpers/secrets.js';
 import type { TriggerBackup } from '../../../server/triggers/backup.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const triggers: TriggerBackup = { triggers: [], settings: {}, trustedFolders: [], secretGrants: {}, fired: {}, github: {} };
 
