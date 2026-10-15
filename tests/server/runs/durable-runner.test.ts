@@ -39,20 +39,43 @@ import { createNativeRetentionAdapter } from '../../../server/sessions/retention
 import { worktreeCleanupVisible } from '../../../server/worktrees/janitor.js';
 import { CheckDriver, checks } from './fixtures/worker-checks.ts';
 
-/** Workers started here, by state folder: a fixture ends them all before its folders go, whatever order a test's own cleanups run in. */
+/**
+ * Workers started here, by state folder, each with what proves it fully gone: a fixture ends them all before its folders
+ * go, whatever order a test's own cleanups run in.
+ */
 const startedHosts = new Map<string, Set<() => Promise<void>>>();
-/** Every worker here runs its once-a-second handoff and idle checks every few milliseconds, each round counted. */
-const startRunnerHost = async (options: RunnerHostOptions) => {
-  const driver = new CheckDriver();
-  const host = await startWorker({ scheduleChecks: driver.schedule, ...options });
+/**
+ * Every worker here runs its once-a-second handoff and idle checks every few milliseconds through `driver`, each round
+ * counted. Its state lock is taken here and handed to the worker as production startup does (`releaseStateLock`), so the
+ * fixture sees when the worker has let it go: the last step of a close, after its endpoint is removed.
+ */
+const startRunnerHost = (options: RunnerHostOptions, driver = new CheckDriver()) => {
+  let released = false;
+  const starting = (async () => {
+    const release = options.releaseStateLock ?? await acquireStateLock((await runnerPaths(options.stateDir)).runtime, 0);
+    try {
+      return await startWorker({ scheduleChecks: driver.schedule, ...options, releaseStateLock: async () => { await release(); released = true; } });
+    } catch (error) { if (!options.releaseStateLock && !released) await release(); throw error; }
+  })();
   const hosts = startedHosts.get(options.stateDir) ?? new Set();
   startedHosts.set(options.stateDir, hosts);
-  // A close already under way (a handoff) is not awaited by host.close(); its checks stop once its endpoint keeper has.
-  hosts.add(async () => { await host.close(); if (!options.scheduleChecks) await until(() => !driver.running(), 20_000); });
-  return host;
+  hosts.add(async () => {
+    const host = await starting.catch(() => undefined);
+    if (!host) return;
+    // A close already under way (a handoff) is not awaited by host.close(): its lock release is, and the handoff attempt
+    // itself (which starts the successor after the close) settles before this worker counts as gone.
+    await host.close();
+    await until(() => released, 30_000);
+    await driver.settled();
+  });
+  return starting;
 };
-/** Ends every worker started for `stateDir`. */
-const closeStarted = async (stateDir: string) => { for (const close of startedHosts.get(stateDir) ?? []) await close(); startedHosts.delete(stateDir); };
+/** Ends every worker started for `stateDir`, including successors a handoff starts meanwhile. */
+const closeStarted = async (stateDir: string) => {
+  const done = new Set<() => Promise<void>>();
+  for (let next; (next = [...startedHosts.get(stateDir) ?? []].find(close => !done.has(close)));) { done.add(next); await next(); }
+  startedHosts.delete(stateDir);
+};
 
 async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector, hostOptions?: (parts: { stateDir: string; sessions: SessionService; runs: RunManager }) => Promise<Partial<RunnerHostOptions>>, fault?: { onUnavailable: (status: ReturnType<import('../../../server/storage/client.js').StorageClient['status']>, runs: RunManager) => void }, beforeExecutable?: () => Promise<void>, holdUntilReady = false) {
   const directory = await realpath(await temporaryFixture('tower-durable-fixture-'));
@@ -739,6 +762,9 @@ test('an outdated worker hands off only when nothing is running, and the web fol
 });
 
 test('updating on request stops the running turn at the deadline, hands off, and leaves its continuation queued', async t => {
+  // The wrap-up deadline is read from a clock that moves only when the test moves it.
+  let clock = Date.now();
+  t.mock.method(Date, 'now', () => clock);
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();
   let handoffs = 0;
@@ -751,10 +777,14 @@ test('updating on request stops the running turn at the deadline, hands off, and
   const run = await client.enqueue(f.session.id, 'Long work');
   await until(() => f.starts() === 1 && client.list().some(item => item.id === run.id && item.status === 'running'));
   const answer = await client.forceUpdate(300);
-  assert.ok(Date.parse(answer.deadline) > Date.now() - 1000);
+  assert.equal(Date.parse(answer.deadline), clock + 300);
   await until(() => client.updateDrain() !== undefined);
   const queued = await client.enqueue(f.session.id, 'Sent while updating');
-  await until(() => f.cancels() === 1 && successorStarted === 1, 5000);
+  assert.equal(queued.status, 'queued');
+  await checks();
+  assert.deepEqual([f.cancels(), successorStarted], [0, 0], 'the running turn wraps up until the deadline');
+  clock += 300;
+  await until(() => f.cancels() === 1 && successorStarted === 1, 20_000);
   assert.equal(handoffs, 1);
   // Flush the actual SQL owner before inspecting its committed projection.
   await until(() => f.runs.list().find(item => item.id === run.id)?.error !== undefined);
@@ -1114,9 +1144,9 @@ async function idleWorker(f: Awaited<ReturnType<typeof fixture>>, options: Parti
   // With idleMs 0 the first idle check would end the worker before the test's request reaches it.
   const driver = new CheckDriver();
   driver.idleHeld = true;
-  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, idleMs: 0, scheduleChecks: driver.schedule,
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, idleMs: 0,
     releaseStateLock: async () => { recordAtRelease.push(existsSync(join(f.paths.runtime, 'handoff.json'))); await lock(); events.push('release'); },
-    onIdle: async () => { events.push('onIdle'); }, ...options });
+    onIdle: async () => { events.push('onIdle'); }, ...options }, driver);
   // A newer web asks for the handoff and goes away (a web replaced during an update), so nothing keeps the worker busy.
   const ask = async () => { const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0' }); await client.start(); await client.close(); driver.idleHeld = false; };
   /**

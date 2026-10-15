@@ -15,11 +15,16 @@ export class CheckDriver {
   idleHeld = false;
   private started = 0;
   private readonly completed: number[] = [];
+  /** Handoff attempts not yet settled: one under way ends with a handoff (the successor started) or a resume. */
+  private readonly attempts = new Set<Promise<void>>();
 
   constructor(private readonly periodMs = 10, private readonly onRound?: () => void) {}
 
   /** Whether the worker is running its checks: from its start until its close has stopped its endpoint keeper. */
   running(): boolean { return live.has(this); }
+
+  /** Settles once every handoff attempt started so far has (after the worker stopped its checks, no new one starts). */
+  async settled(): Promise<void> { while (this.attempts.size) await Promise.all(this.attempts); }
 
   /** Pass as `scheduleChecks`. */
   readonly schedule = (checks: WorkerChecks): (() => void) => {
@@ -27,8 +32,9 @@ export class CheckDriver {
     const timer = setInterval(() => {
       const round = ++this.started;
       const handoff = checks.handoff();
+      this.attempts.add(handoff);
       if (!this.idleHeld) checks.idle();
-      void handoff.then(() => { this.completed.push(round); this.onRound?.(); });
+      void handoff.then(() => { this.attempts.delete(handoff); this.completed.push(round); this.onRound?.(); });
     }, this.periodMs);
     return () => { clearInterval(timer); live.delete(this); };
   };
