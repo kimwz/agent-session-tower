@@ -530,15 +530,16 @@ test('conditional owner authorization survives restart and sends exact text only
   assert.equal(restarted.list()[0].ownerConditionalReply?.status, 'sent');
 });
 test('conditional reply requires owner permission and never sends failed uncertain cancelled or mismatched tasks', async t => {
-  for (const outcome of ['failed', 'uncertain', 'error', 'cancelled', 'mismatch', 'no-owner']) {
+  // Independent fixtures, checked side by side.
+  await Promise.all(['failed', 'uncertain', 'error', 'cancelled', 'mismatch', 'no-owner'].map(async outcome => {
     const f = await conditionalFixture(t);
     if (outcome !== 'no-owner') chatText(await f.manager.ownerChat('owner-chat', conditionalCommand));
     f.run.status = outcome === 'error' || outcome === 'cancelled' ? outcome : 'completed';
     if (outcome === 'mismatch') f.run.autoPromptId = 'other';
     const work = f.manager.tool(f.id, 'tower_task_complete', { requestId: f.task.requestId, runId: f.run.id, outcome: outcome === 'failed' || outcome === 'uncertain' ? outcome : 'succeeded', evidence: 'Checked task result.' });
     if (outcome === 'no-owner') await assert.rejects(work, /No owner authorization/); else await work;
-    assert.equal(f.counts().sends, 0);
-  }
+    assert.equal(f.counts().sends, 0, outcome);
+  }));
 });
 test('owner cancellation is serialized before completion and uncertain delivery never retries after restart', async t => {
   const f = await conditionalFixture(t); chatText(await f.manager.ownerChat('owner-chat', conditionalCommand)); f.run.status = 'completed';
@@ -618,14 +619,15 @@ test('composed owner consent during work survives restart and sends once without
 });
 
 test('polite immediate and edited-wording chat permissions allow an agent composed send without proposals', async t => {
-  for (const message of ['슬랙에 보내주시겠어요?', '슬랙에 보내줄래요?', '슬랙에 보내도 됩니다', '이 문구로 슬랙에 보내주세요', '수정한 내용으로 답변 보내주세요']) {
+  // Independent fixtures, checked side by side.
+  await Promise.all(['슬랙에 보내주시겠어요?', '슬랙에 보내줄래요?', '슬랙에 보내도 됩니다', '이 문구로 슬랙에 보내주세요', '수정한 내용으로 답변 보내주세요'].map(async message => {
     const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
     await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
     assert.match(chatText(await f.manager.ownerChat('owner-chat', message)), /authorization saved/);
     await f.manager.tool(id, 'slack_send', { text: '수정 내용을 반영했습니다.', requestKey: 'report' });
     await f.manager.tool(id, 'slack_send', { text: '수정 내용을 반영했습니다.', requestKey: 'report' });
-    assert.equal(f.counts().sends, 1);
-  }
+    assert.equal(f.counts().sends, 1, message);
+  }));
 });
 
 test('Slack replies need no owner authorization: one post per requestKey, marked as an agent reply', async t => {

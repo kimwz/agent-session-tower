@@ -17,6 +17,7 @@ import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { MAX_ATTACHMENT_BYTES } from '../../../shared/attachments.js';
 import { buildCreateArgs, buildResumeArgs } from '../../../server/runs/claude-args.js';
 import { findExecutable } from '../../../server/providers/discovery.js';
+import { nativeContextObservation } from '../../../server/sessions/context.js';
 import type { Run, Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
 
@@ -32,11 +33,11 @@ function makeSession(cwd: string, overrides: Partial<Session> = {}): Session {
 }
 
 
-async function fixture(options: { inheritedCaller?: string; permissionMode?: string; mode?: string; provider?: 'codex' | 'claude'; busy?: boolean; maxConcurrent?: number; refreshError?: boolean; path?: string; shebang?: boolean; openCodexBridge?: OpenCodexBridge; resolveRunTools?: ConstructorParameters<typeof RunManager>[0]['resolveRunTools']; contextFrames?: unknown[] } = {}) {
+async function fixture(options: { inheritedCaller?: string; permissionMode?: string; mode?: string; provider?: 'codex' | 'claude'; busy?: boolean; refreshError?: boolean; path?: string; shebang?: boolean; openCodexBridge?: OpenCodexBridge; resolveRunTools?: ConstructorParameters<typeof RunManager>[0]['resolveRunTools']; contextFrames?: unknown[] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'agent-monitor-runner-'));
   const script = join(directory, 'provider.mjs');
   await writeFile(script, `#!/usr/bin/env node
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { startCodexFixture } from ${JSON.stringify(new URL('./fixtures/provider-stdio.mjs', import.meta.url).href)};
@@ -56,15 +57,20 @@ function processPrompt() {
   const provider = args.includes('--resume') ? 'claude' : 'codex';
   const send = event => process.stdout.write(JSON.stringify(event) + '\\n');
   writeFileSync(process.env.RECEIVED_PATH, JSON.stringify({prompt,args,cwd:process.cwd(),nested:process.env.CLAUDECODE}));
-  const mode = process.env.FIXTURE_MODE;
+  // One conversation's own fixture behaviour (see claudeConversation), over the fixture-wide settings.
+  let control = {}; try { control = JSON.parse(readFileSync(process.env.RECEIVED_PATH + '.' + id + '.json', 'utf8')); } catch {}
+  const mode = control.mode ?? process.env.FIXTURE_MODE;
+  const permissionMode = control.permissionMode ?? process.env.FIXTURE_PERMISSION_MODE;
+  const frames = control.frames ?? (process.env.FIXTURE_CONTEXT_FRAMES ? JSON.parse(process.env.FIXTURE_CONTEXT_FRAMES) : undefined);
   if (mode === 'invalid-event') { process.stdout.write('null\\n'); return; }
   if (mode === 'orphan') { spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:['ignore',process.stdout,process.stderr]}); process.exit(0); }
   if (mode === 'empty') { process.exit(0); return; }
   if (mode === 'fail') { process.stderr.write('authentication expired'); process.exit(2); return; }
-  if (mode === 'hold') { setTimeout(() => send({type:'item.completed',item:{type:'agent_message',text:'too late'}}), 20000); return; }
+  // Open stdin keeps the turn running until Tower ends it.
+  if (mode === 'hold') return;
   if (provider === 'claude') {
-    send({type:'system',subtype:'init',session_id: mode === 'mismatch' ? '${ID2}' : id, ...(process.env.FIXTURE_PERMISSION_MODE ? {permissionMode: process.env.FIXTURE_PERMISSION_MODE === 'none' ? undefined : process.env.FIXTURE_PERMISSION_MODE} : {permissionMode: process.argv.includes('--permission-mode') ? process.argv[process.argv.indexOf('--permission-mode') + 1] : 'default'})});
-    if (process.env.FIXTURE_CONTEXT_FRAMES) { for (const frame of JSON.parse(process.env.FIXTURE_CONTEXT_FRAMES)) send(frame); return; }
+    send({type:'system',subtype:'init',session_id: mode === 'mismatch' ? '${ID2}' : id, ...(permissionMode ? {permissionMode: permissionMode === 'none' ? undefined : permissionMode} : {permissionMode: process.argv.includes('--permission-mode') ? process.argv[process.argv.indexOf('--permission-mode') + 1] : 'default'})});
+    if (frames) { for (const frame of frames) send(frame); return; }
     send({type:'stream_event',event:{type:'message_start'}});
     send({type:'stream_event',event:{type:'content_block_delta',delta:{type:'text_delta',text:'Hello '}}});
     send({type:'stream_event',event:{type:'content_block_delta',delta:{type:'text_delta',text:'Claude'}}});
@@ -83,7 +89,7 @@ function processPrompt() {
   const stateDir = join(directory, 'state');
   const manager = new RunManager({
     getSession: (id) => sessions.get(id), refreshSessions: async () => { refreshes++; if(options.refreshError) throw new Error('activity unavailable'); }, stateDir,
-    pollMs: 25, maxConcurrent: options.maxConcurrent, findExecutable: async (provider) => `/fixture/${provider}`,
+    pollMs: 25, findExecutable: async (provider) => `/fixture/${provider}`,
     openCodexBridge: options.openCodexBridge, resolveRunTools: options.resolveRunTools,
     env: { ...(options.inheritedCaller ? { TOWER_CALLER_CAPABILITY: options.inheritedCaller } : {}), FIXTURE_MODE: options.mode ?? '', RECEIVED_PATH: join(directory, 'received.json'), CLAUDECODE: '1', ...(options.permissionMode ? { FIXTURE_PERMISSION_MODE: options.permissionMode } : {}), ...(options.path !== undefined ? { PATH: options.path } : {}),
       ...(options.contextFrames ? { FIXTURE_CONTEXT_FRAMES: JSON.stringify(options.contextFrames) } : {}) },
@@ -96,6 +102,20 @@ function processPrompt() {
   return { manager, sessions, session, launches, children, directory, stateDir, refreshes: () => refreshes,
     cleanup: async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); } };
 }
+
+/**
+ * Another Claude conversation in the same fixture, with its own provider behaviour: several cases then run side by side
+ * on one manager instead of one fixture each. `ID` in the frames becomes this conversation's own ID.
+ */
+async function claudeConversation(f: Awaited<ReturnType<typeof fixture>>, n: number, control: { mode?: string; permissionMode?: string; frames?: unknown[] } = {}): Promise<Session> {
+  const nativeId = `10000000-0000-4000-8000-1${String(n).padStart(11, '0')}`;
+  const session = makeSession(f.directory, { id: `claude:${nativeId}`, nativeId, provider: 'claude' });
+  f.sessions.set(session.id, session);
+  await writeFile(join(f.directory, `received.json.${nativeId}.json`), JSON.stringify(control).replaceAll(ID, nativeId));
+  return session;
+}
+/** The launch of one conversation's turn, when several run at once. */
+const launchOf = (f: Awaited<ReturnType<typeof fixture>>, session: Session) => f.launches.find(launch => launch.args.includes(session.nativeId))!;
 
 /** Waits until an asynchronous check holds (`until` takes only synchronous ones). */
 async function eventually(check: () => Promise<boolean>, timeout = 5000): Promise<void> {
@@ -312,12 +332,15 @@ test('Claude does not persist subagent, unconfirmed, compacted, mismatched-model
     { frames: [contextAssistant, { ...contextResult, modelUsage: { 'claude-opus-5': { contextWindow: '200000' } } }] },
     { frames: [contextAssistant, { ...contextResult, parent_tool_use_id: 'child-tool' }, { type: 'result', is_error: false, result: 'Parent done' }] },
   ];
-  for (const entry of cases) {
-    const f = await fixture({ provider: 'claude', mode: entry.mode, contextFrames: entry.frames }); t.after(f.cleanup);
-    const accepted = await f.manager.enqueue(f.session.id, 'Synthetic context observation');
-    const result = await finished(f.manager, accepted.id);
-    assert.equal(result.contextUsage, undefined);
-  }
+  const f = await fixture({ provider: 'claude' }); t.after(f.cleanup);
+  // The last conversation gets the frames unaltered and keeps its context, so each case is refused for its own difference.
+  await Promise.all([...cases, { frames: [contextAssistant, contextResult] }].map(async (entry, n) => {
+    const session = await claudeConversation(f, n, entry);
+    const result = await finished(f.manager, (await f.manager.enqueue(session.id, 'Synthetic context observation')).id);
+    if (n === cases.length) { assert.equal(result.contextUsage?.contextWindow, 200_000); return; }
+    assert.equal(result.contextUsage, undefined, JSON.stringify(entry));
+    assert.equal(f.manager.getSession(session.id)?.contextUsage, undefined, JSON.stringify(entry));
+  }));
 });
 
 test('invalid persisted context metadata is discarded without losing the saved run', async t => {
@@ -326,15 +349,17 @@ test('invalid persisted context metadata is discarded without losing the saved r
   await finished(f.manager, accepted.id); await f.manager.close();
   const saved = (await fixtureDocuments(f.manager)).runs;
   const original = saved[0].contextUsage;
-  for (const patch of [{ capacitySource: 'model-default' }, { model: '--invalid' }, { usedTokens: -1 }, { contextWindow: 0 }, { usedPercent: 25 }, { updatedAt: 'invalid' }]) {
-    saved[0].contextUsage = { ...original, ...patch } as Run['contextUsage']; await fixtureReplaceRuns(f.manager, saved);
-    const restored = new RunManager({ getSession: id => f.sessions.get(id), refreshSessions: async () => {}, stateDir: f.stateDir });
-    try {
-      await restored.start();
-      assert.equal(restored.list().length, 1);
-      assert.equal(restored.list()[0].contextUsage, undefined);
-    } finally { await restored.close(); }
-  }
+  const patches = [{ capacitySource: 'model-default' }, { model: '--invalid' }, { usedTokens: -1 }, { contextWindow: 0 }, { usedPercent: 25 }, { updatedAt: 'invalid' }];
+  // The check a restart applies to each saved run; one restart below proves it is applied there.
+  assert.deepEqual(nativeContextObservation(original), original);
+  for (const patch of patches) assert.equal(nativeContextObservation({ ...original, ...patch }), undefined, JSON.stringify(patch));
+  saved[0].contextUsage = { ...original, ...patches[0] } as Run['contextUsage']; await fixtureReplaceRuns(f.manager, saved);
+  const restored = new RunManager({ getSession: id => f.sessions.get(id), refreshSessions: async () => {}, stateDir: f.stateDir });
+  try {
+    await restored.start();
+    assert.equal(restored.list().length, 1);
+    assert.equal(restored.list()[0].contextUsage, undefined);
+  } finally { await restored.close(); }
 });
 
 for (const decision of ['allow', 'deny'] as const) test(`owned Codex exposes a live approval and sends exactly the selected ${decision}`, async t => {
@@ -675,23 +700,6 @@ test('Auto Prompt tasks in independent sessions start despite two active tasks, 
   } finally { await f.cleanup(); }
 });
 
-test('serializes a conversation while allowing independent sessions up to concurrency limit', async () => {
-  const f = await fixture({mode:'slow', maxConcurrent:2});
-  try {
-    const secondSession = makeSession(f.directory, {id:`codex:${ID2}`,nativeId:ID2});
-    f.sessions.set(secondSession.id, secondSession);
-    const one = await f.manager.enqueue(f.session.id, 'one');
-    const two = await f.manager.enqueue(f.session.id, 'two');
-    const three = await f.manager.enqueue(secondSession.id, 'three');
-    await until(() => f.launches.length === 2 ? true : undefined);
-    assert.equal(f.manager.list().find((run) => run.id === two.id)?.status, 'queued');
-    assert.equal(f.manager.list().filter((run) => run.status === 'running').length, 2);
-    await Promise.all([one,two,three].map((run) => finished(f.manager, run.id)));
-    assert.equal(f.launches.length, 3);
-    assert.ok(f.manager.list().every((run) => run.status === 'completed'));
-  } finally { await f.cleanup(); }
-});
-
 for (const mode of ['fail', 'stream-error', 'mismatch', 'empty', 'invalid-event']) test(`provider ${mode} is an error, never false success`, async () => {
   const f = await fixture({mode});
   try {
@@ -911,14 +919,18 @@ test('Claude receives only the session-bound MCP configuration as a single argum
 });
 
 test('Claude gets the owner\'s Chrome only when it is the turn\'s strong browser, and is told not to use it otherwise', async t => {
-  for (const claudeChrome of [true, false, undefined]) {
-    const f = await fixture({ provider: 'claude', resolveRunTools: () => ({ required: false, ...(claudeChrome === undefined ? {} : { claudeChrome }) }) });
-    t.after(f.cleanup);
-    const run = await f.manager.enqueue(f.session.id, 'Look at the dashboard');
+  const settings = [true, false, undefined];
+  const chrome = new Map<string, boolean | undefined>();
+  const f = await fixture({ provider: 'claude', resolveRunTools: (_run, session) => { const claudeChrome = chrome.get(session.id); return { required: false, ...(claudeChrome === undefined ? {} : { claudeChrome }) }; } });
+  t.after(f.cleanup);
+  await Promise.all(settings.map(async (claudeChrome, n) => {
+    const session = await claudeConversation(f, n);
+    chrome.set(session.id, claudeChrome);
+    const run = await f.manager.enqueue(session.id, 'Look at the dashboard');
     assert.equal((await finished(f.manager, run.id)).status, 'completed');
-    const args = f.launches[0].args;
+    const args = launchOf(f, session).args;
     assert.deepEqual([args.includes('--chrome'), args.includes('--no-chrome')], claudeChrome ? [true, false] : [false, true], String(claudeChrome));
-  }
+  }));
 });
 
 test('optional tools still let a turn go to the open Codex app, and a lost acknowledgement is never replayed', async t => {
@@ -940,38 +952,35 @@ test('optional tools still let a turn go to the open Codex app, and a lost ackno
 });
 
 test('an unattended Claude run continues only in automatic mode or a mode that asks the owner', async t => {
-  for (const [mode, expected] of [['auto', 'completed'], ['default', 'completed'], ['bypassPermissions', 'error'], ['acceptEdits', 'error'], ['none', 'error']] as const) await t.test(mode, async () => {
-    const f = await fixture({ provider: 'claude', permissionMode: mode });
-    try {
-      const run = await f.manager.enqueue(f.session.id, 'Scheduled check', {}, { origin: { kind: 'trigger', triggerId: 'daily' }, unattended: true });
-      const result = await finished(f.manager, run.id);
-      assert.equal(result.status, expected);
-      const args = f.launches[0].args;
-      assert.equal(args[args.indexOf('--permission-mode') + 1], 'auto');
-      if (mode === 'default') assert.match(result.output, /wait for you in Tower/);
-      if (expected === 'error') assert.match(result.error ?? '', /unexpected permission mode/);
-    } finally { await f.cleanup(); }
-  });
+  const f = await fixture({ provider: 'claude' }); t.after(f.cleanup);
+  await Promise.all(([['auto', 'completed'], ['default', 'completed'], ['bypassPermissions', 'error'], ['acceptEdits', 'error'], ['none', 'error']] as const).map(async ([mode, expected], n) => {
+    const session = await claudeConversation(f, n, { permissionMode: mode });
+    const run = await f.manager.enqueue(session.id, 'Scheduled check', {}, { origin: { kind: 'trigger', triggerId: 'daily' }, unattended: true });
+    const result = await finished(f.manager, run.id);
+    assert.equal(result.status, expected, mode);
+    const args = launchOf(f, session).args;
+    assert.equal(args[args.indexOf('--permission-mode') + 1], 'auto', mode);
+    if (mode === 'default') assert.match(result.output, /wait for you in Tower/);
+    if (expected === 'error') assert.match(result.error ?? '', /unexpected permission mode/, mode);
+  }));
 });
 
 test("the owner's Claude turns always start in automatic mode, and say so when Claude falls back", async t => {
-  const replies: string[] = [];
-  for (const [mode, note] of [
+  const f = await fixture({ provider: 'claude' }); t.after(f.cleanup);
+  const replies = await Promise.all(([
     ['auto', undefined],
     ['default', /^\[Tower\] Claude did not start in automatic permission mode \(default\)\. Approval requests will wait for you in Tower\.\n/],
     ['acceptEdits', /^\[Tower\] Claude did not start in automatic permission mode \(acceptEdits\)\.\n/],
-  ] as const) await t.test(mode, async () => {
-    const f = await fixture({ provider: 'claude', permissionMode: mode });
-    try {
-      const run = await f.manager.enqueue(f.session.id, 'Owner work', {}, { origin: { kind: 'owner' } });
-      const result = await finished(f.manager, run.id);
-      assert.equal(result.status, 'completed');
-      const args = f.launches[0].args;
-      assert.equal(args[args.indexOf('--permission-mode') + 1], 'auto');
-      if (note) assert.match(result.output, note); else assert.doesNotMatch(result.output, /\[Tower\]/);
-      replies.push(note ? result.output.replace(note, '') : result.output);
-    } finally { await f.cleanup(); }
-  });
+  ] as const).map(async ([mode, note], n) => {
+    const session = await claudeConversation(f, n, { permissionMode: mode });
+    const run = await f.manager.enqueue(session.id, 'Owner work', {}, { origin: { kind: 'owner' } });
+    const result = await finished(f.manager, run.id);
+    assert.equal(result.status, 'completed', mode);
+    const args = launchOf(f, session).args;
+    assert.equal(args[args.indexOf('--permission-mode') + 1], 'auto', mode);
+    if (note) assert.match(result.output, note); else assert.doesNotMatch(result.output, /\[Tower\]/);
+    return note ? result.output.replace(note, '') : result.output;
+  }));
   // The note comes before Claude's own reply and never replaces it.
   assert.ok(replies[0]);
   assert.deepEqual(replies, [replies[0], replies[0], replies[0]]);
@@ -991,11 +1000,14 @@ test('work the owner starts through an agent or from a controller runs Claude au
   t.after(f.cleanup);
   const origins = [{ kind: 'agent', runId: '40000000-0000-4000-8000-000000000001' }, { kind: 'owner', controllerId: 'a'.repeat(32) },
     { kind: 'slack', workflowId: '40000000-0000-4000-8000-000000000002' }, undefined] as const;
-  for (const origin of origins) {
-    const run = await f.manager.enqueue(f.session.id, `From ${origin?.kind ?? 'nowhere'}`, {}, origin ? { origin } : {});
+  const modes = await Promise.all(origins.map(async (origin, n) => {
+    const session = await claudeConversation(f, n);
+    const run = await f.manager.enqueue(session.id, `From ${origin?.kind ?? 'nowhere'}`, {}, origin ? { origin } : {});
     assert.equal((await finished(f.manager, run.id)).status, 'completed');
-  }
-  assert.deepEqual(f.launches.map(launch => launch.args.includes('--permission-mode') ? launch.args[launch.args.indexOf('--permission-mode') + 1] : 'own'), ['auto', 'auto', 'own', 'own']);
+    const args = launchOf(f, session).args;
+    return args.includes('--permission-mode') ? args[args.indexOf('--permission-mode') + 1] : 'own';
+  }));
+  assert.deepEqual(modes, ['auto', 'auto', 'own', 'own']);
 });
 
 test("the owner's turn in a Slack conversation still requires Codex's automatic reviewer", async t => {
@@ -1088,27 +1100,27 @@ test('a turn forwarded to the open Codex app is marked as having no Tower tools'
 
 
 test('fake CLI launches inherit only the resolver-issued caller credential, and remove stale credentials without a resolver', async t => {
-  for (const provider of ['codex', 'claude'] as const) {
-    await t.test(provider, async t => {
-      const capabilities = new CapabilityRegistry();
-      let resolve!: ReturnType<typeof runToolResolver>;
-      const f = await fixture({ provider, inheritedCaller: 'stale-caller', resolveRunTools: (run, session) => resolve(run, session) });
-      t.after(f.cleanup);
-      resolve = runToolResolver({ stateDir: f.stateDir, runs: { sessionOrigin: () => undefined }, capabilities });
-      const run = await f.manager.enqueue(f.session.id, 'fake launch with caller identity', {}, { origin: { kind: 'owner' } });
-      assert.equal((await finished(f.manager, run.id)).status, 'completed');
-      const observed = JSON.parse(await readFile(join(f.directory, 'received.json.env'), 'utf8'));
-      assert.notEqual(observed.caller, 'stale-caller');
-      assert.deepEqual(capabilities.resolve(observed.caller), { kind: 'caller-run', runId: run.id, sessionId: run.sessionId });
-      assert.equal(f.launches.length, 1);
-      assert.equal(f.launches[0].args.join(' ').includes(observed.caller), false, 'the reporting credential never goes through argv');
-      const untracked = await fixture({ provider, inheritedCaller: 'stale-caller' });
-      t.after(untracked.cleanup);
-      const plain = await untracked.manager.enqueue(untracked.session.id, 'fake launch without caller identity');
-      assert.equal((await finished(untracked.manager, plain.id)).status, 'completed');
-      assert.deepEqual(JSON.parse(await readFile(join(untracked.directory, 'received.json.env'), 'utf8')), {}, 'a child cannot reuse its launcher’s stale reporting credential');
-    });
-  }
+  // Each provider, with and without a resolver, on its own manager; all four run at once.
+  await Promise.all((['codex', 'claude'] as const).flatMap(provider => [async () => {
+    const capabilities = new CapabilityRegistry();
+    let resolve!: ReturnType<typeof runToolResolver>;
+    const f = await fixture({ provider, inheritedCaller: 'stale-caller', resolveRunTools: (run, session) => resolve(run, session) });
+    t.after(f.cleanup);
+    resolve = runToolResolver({ stateDir: f.stateDir, runs: { sessionOrigin: () => undefined }, capabilities });
+    const run = await f.manager.enqueue(f.session.id, 'fake launch with caller identity', {}, { origin: { kind: 'owner' } });
+    assert.equal((await finished(f.manager, run.id)).status, 'completed', provider);
+    const observed = JSON.parse(await readFile(join(f.directory, 'received.json.env'), 'utf8'));
+    assert.notEqual(observed.caller, 'stale-caller', provider);
+    assert.deepEqual(capabilities.resolve(observed.caller), { kind: 'caller-run', runId: run.id, sessionId: run.sessionId }, provider);
+    assert.equal(f.launches.length, 1, provider);
+    assert.equal(f.launches[0].args.join(' ').includes(observed.caller), false, 'the reporting credential never goes through argv');
+  }, async () => {
+    const untracked = await fixture({ provider, inheritedCaller: 'stale-caller' });
+    t.after(untracked.cleanup);
+    const plain = await untracked.manager.enqueue(untracked.session.id, 'fake launch without caller identity');
+    assert.equal((await finished(untracked.manager, plain.id)).status, 'completed', provider);
+    assert.deepEqual(JSON.parse(await readFile(join(untracked.directory, 'received.json.env'), 'utf8')), {}, `${provider}: a child cannot reuse its launcher’s stale reporting credential`);
+  }]).map(check => check()));
 });
 
 test('optional desktop forwarding attaches neither caller environment nor CLI tool configuration', async t => {
