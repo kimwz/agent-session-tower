@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { openCodexBridgeRun, type CodexBridgeOptions } from '../../../server/runs/codex-bridge.js';
 import { until } from '../../helpers/until.ts';
-import { settle } from './fixtures/settle.ts';
+import { settle } from '../../helpers/settle.ts';
 
 type Request = { id: number; method: string; params: any };
 type QueueItem = { id: string; clientUserMessageId: string; input: unknown[] };
@@ -49,8 +49,12 @@ class Fake {
   queue: QueueItem[] = [];
   turns: FakeTurn[] = [];
   constructor(readonly codexHome: string, readonly hook?: (request: Request, fake: Fake) => boolean | void) {}
-  reply(request: Request, result: unknown) { this.socket.send(JSON.stringify({ id: request.id, result })); }
-  error(request: Request, text: string) { this.socket.send(JSON.stringify({ id: request.id, error: { code: -32600, message: text } })); }
+  /** Ids of the requests this fake has answered. */
+  answered = new Set<number>();
+  reply(request: Request, result: unknown) { this.answered.add(request.id); this.socket.send(JSON.stringify({ id: request.id, result })); }
+  error(request: Request, text: string) { this.answered.add(request.id); this.socket.send(JSON.stringify({ id: request.id, error: { code: -32600, message: text } })); }
+  /** Requests still waiting for an answer, apart from those of `except`. */
+  unanswered(...except: string[]) { return this.requests.filter(request => request.method && request.method !== 'initialized' && !except.includes(request.method) && !this.answered.has(request.id)); }
   notice(method: string, params: object) { this.socket.send(JSON.stringify({ method, params })); }
   createTurn(queueId: string, announce = true) {
     const index = this.queue.findIndex(item => item.id === queueId);
@@ -548,9 +552,9 @@ test('an acknowledged interrupt times out without marking a still-running turn c
     fake.reply(request, {}); acknowledged = true; return true;
   });
   const { bridge, finished } = await open(fake);
-  await bridge.start();
-  // The bridge's own deadlines run on a fake clock; the socket stays real.
+  // The bridge's own deadlines and polls run on a fake clock from its start; the socket stays real.
   t.mock.timers.enable({ apis: ['setTimeout'] });
+  await bridge.start();
   const cancelled = assert.rejects(bridge.cancel(), /12초 안에 Codex 작업 종료를 확인하지 못했습니다/);
   await settle(() => acknowledged);
   t.mock.timers.tick(11_999);
@@ -578,15 +582,17 @@ for (const mode of ['ok', 'rejected', 'mismatch', 'lost', 'timeout']) {
     t.after(() => run.bridge.close());
     assert.equal(run.bridge.canSteer!(), false);
     await assert.rejects(run.bridge.steer!({ id: 'queued', prompt: 'later' }), { disposition: 'rejected' });
+    // The 15 s answer deadline and the bridge's polls run on a fake clock from its start; the socket stays real.
+    if (mode === 'timeout') t.mock.timers.enable({ apis: ['setTimeout'] });
     await run.bridge.start();
     assert.equal(run.bridge.canSteer!(), true);
-    // The 15 s answer deadline runs on a fake clock; the socket stays real.
-    if (mode === 'timeout') t.mock.timers.enable({ apis: ['setTimeout'] });
     const result = run.bridge.steer!({ id: 'queued', prompt: 'New instruction', imagePaths: ['/tmp/image path.png'] });
     assert.equal(run.bridge.canSteer!(), false);
     await assert.rejects(run.bridge.steer!({ id: 'duplicate', prompt: 'later' }), { disposition: 'rejected' });
     if (mode === 'timeout') {
       await settle(() => fake.requests.some(request => request.method === 'turn/steer'));
+      // Only the steer is left unanswered (start() awaited every other answer), so only its deadline can pass.
+      assert.deepEqual(fake.unanswered('turn/steer'), []);
       t.mock.timers.tick(15_000);
     }
     if (mode === 'ok') await result;

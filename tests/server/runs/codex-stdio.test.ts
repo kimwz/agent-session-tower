@@ -11,7 +11,7 @@ import type { Run, Session } from '../../../shared/types.js';
 import type { RunApproval } from '../../../shared/types.js';
 import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioResult } from '../../../server/runs/codex-stdio.js';
 import { until } from '../../helpers/until.ts';
-import { settle } from './fixtures/settle.ts';
+import { settle } from '../../helpers/settle.ts';
 import { SECRET_CONNECTION_INSTRUCTIONS, SECRET_USE_INSTRUCTIONS } from '../../../server/secrets/notices.js';
 import { parseMessages, towerInstructionsBlock } from '../../../server/sessions/parser.js';
 

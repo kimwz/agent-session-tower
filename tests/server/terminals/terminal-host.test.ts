@@ -122,6 +122,14 @@ const fakeIdleClock = (t: TestContext) => {
   /** Moves the clock on by `ms`, then lets the host's check and what it starts run. */
   return async (ms: number) => { t.mock.timers.tick(ms); for (let turn = 0; turn < 5; turn++) await new Promise(resolve => setImmediate(resolve)); };
 };
+/**
+ * Moves the fake clock on `step` at a time until `done`: a check that found a request still under way is followed by
+ * the next one, however long the real requests take. The real deadline only bounds a broken test.
+ */
+const passUntil = async (pass: (ms: number) => Promise<void>, done: () => boolean, step = 1000) => {
+  for (const deadline = performance.now() + 10_000; !done() && performance.now() < deadline;) { await pass(step); await new Promise(resolve => setTimeout(resolve, 2)); }
+  assert.ok(done(), `not reached: ${done}`);
+};
 
 test('the terminal host leaves once no shell is open and no page has called for a while', async t => {
   const pass = fakeIdleClock(t);
@@ -130,8 +138,7 @@ test('the terminal host leaves once no shell is open and no page has called for 
   await pass(1200);
   assert.equal(f.idle(), 0, 'an open shell keeps its host');
   await f.client.close(id);
-  await pass(1000);
-  await until(() => f.idle() === 1);
+  await passUntil(pass, () => f.idle() === 1);
 });
 
 test('asking a terminal host its version or its shells never keeps it from leaving', async t => {
@@ -142,8 +149,7 @@ test('asking a terminal host its version or its shells never keeps it from leavi
   // A page and its controllers look every few seconds; that is not using a shell.
   const looking = setInterval(() => { void f.client.hostVersion().catch(() => {}); void f.client.list().catch(() => {}); }, 50);
   t.after(() => clearInterval(looking));
-  for (let step = 0; step < 30 && f.idle() === 0; step++) { await pass(50); await new Promise(resolve => setTimeout(resolve, 2)); }
-  await until(() => f.idle() === 1);
+  await passUntil(pass, () => f.idle() === 1, 50);
 });
 
 test('the ping before opening a shell keeps an idle host for it', async t => {
@@ -155,8 +161,7 @@ test('the ping before opening a shell keeps an idle host for it', async t => {
   // The check a second after the start comes 300 ms after the ping: too soon.
   await pass(300);
   assert.equal(f.idle(), 0, 'not idle for long enough since the opening ping');
-  await pass(1000);
-  await until(() => f.idle() === 1);
+  await passUntil(pass, () => f.idle() === 1);
 });
 
 test('a terminal host says its revision, and one with this revision needs no restart for an update', async t => {

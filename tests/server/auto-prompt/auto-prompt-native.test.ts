@@ -1,4 +1,5 @@
 import { runInNewContext } from 'node:vm';
+import { realDelay } from '../../helpers/settle.ts';
 import { openFixture, stateDir as storageStateDir } from '../storage/helpers.js';
 import { TowerError } from '../../../shared/errors.js';
 import test, { type TestContext } from 'node:test';
@@ -380,7 +381,8 @@ test('routing waits for an update of its CLI before it even looks the CLI up, th
   for (let step = 0; step < 200; step++) { t.mock.timers.tick(250); await turn(); }
   assert.equal(lookups, 0, 'nothing of the CLI is touched while it is being replaced');
   await rm(join(flags, 'codex.update'));
-  for (let step = 0; lookups === 0 && step < 100_000; step++) { t.mock.timers.tick(250); await turn(); }
+  // Each look reads the flag file for real: the clock moves on until one has seen it gone.
+  for (const deadline = performance.now() + 10_000; lookups === 0 && performance.now() < deadline;) { t.mock.timers.tick(250); await realDelay(1); }
   assert.deepEqual(await routing, DECISION);
   assert.equal(lookups, 1);
 });

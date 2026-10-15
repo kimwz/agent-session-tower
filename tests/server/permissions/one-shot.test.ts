@@ -4,7 +4,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
 import { TowerError } from '../../../shared/errors.js';
 import { spawn } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +13,7 @@ import { PermissionRunner, processStart } from '../../../server/permissions/runn
 import { noStorageFixture, permissionFixture, closePermissionFixture } from './storage-fixture.js';
 import { PermissionService } from '../../../server/permissions/service.js';
 import { storage, threadBundle } from '../storage/helpers.js';
+import { realDelay, settle } from '../../helpers/settle.ts';
 import type { RunnerOptions } from '../../../server/permissions/runner.js';
 import { autoReviewBlock, type PermissionRun } from '../../../shared/permissions.js';
 
@@ -24,7 +25,7 @@ const until = async (check: () => boolean, ms = 10_000) => {
 };
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'], effectGate?: () => Promise<void>, requestAdmission?: () => void, autoReviewSkip?: () => string | undefined, runnerOptions: Partial<RunnerOptions> = {}, timeScale = 1) {
+async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'], effectGate?: () => Promise<void>, requestAdmission?: () => void, autoReviewSkip?: () => string | undefined, runnerOptions: Partial<RunnerOptions> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'tower-one-shot-'));
   const stateDir = join(root, 'state');
   const project = join(root, 'project');
@@ -34,10 +35,9 @@ async function fixture(t: TestContext, beforeStart?: RunnerOptions['beforeStart'
   let clock = new Date('2026-09-30T00:00:00.000Z');
   const finished: string[] = [];
   let service!: PermissionService;
-  const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 300, now: () => clock, beforeStart, beforeLaunch: (id, command, cwd, timeout, launch) => service.launchReviewed(id, command, cwd, timeout / timeScale, launch), ...runnerOptions });
+  const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 300, now: () => clock, beforeStart, beforeLaunch: (id, command, cwd, timeout, launch) => service.launchReviewed(id, command, cwd, timeout, launch), ...runnerOptions });
   const make = () => new PermissionService({ stateDir, repository:noStorageFixture(stateDir), effectGate, requestAdmission, autoReviewSkip, env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), now: () => clock,
-    // `timeScale` shortens the runner's real time limit; the request keeps its whole seconds.
-    startRun: request => runner.start(request.id, request.rule.value, request.cwd, (request.timeoutSeconds ?? 600) * timeScale, request.sessionId),
+    startRun: request => runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600, request.sessionId),
     onRunFinished: request => finished.push(request.id), runOutput: id => runner.output(id), forgetRun: id => runner.forget(id) });
   service = make();
   await service.start();
@@ -79,12 +79,26 @@ test('the same command, or the same key, returns the same request instead of run
 });
 
 test('a run past its time limit is stopped with everything it started', async t => {
-  const f = await fixture(t, undefined, undefined, undefined, undefined, {}, 0.25);
+  const f = await fixture(t);
+  // The time limit runs on a fake clock that moves only once the command has started its child; the processes stay real.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => t.mock.timers.reset());
   const asked = await f.service.requestRun({ command: 'sleep 30 & echo $! > child.pid; sleep 30', reason: 'r', timeoutSeconds: 1 }, agent('claude:one'));
   await f.service.decide(asked.request.id!, true);
-  const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 15 }, agent('claude:one'));
+  const pidFile = join(f.project, 'child.pid');
+  await settle(() => { try { return /^\d+\n$/.test(readFileSync(pidFile, 'utf8')); } catch { return false; } }, 0);
+  const child = Number(readFileSync(pidFile, 'utf8').trim());
+  assert.ok(alive(child));
+  t.mock.timers.tick(999);
+  await settle(() => true, 20);
+  assert.ok(f.runner.isRunning(asked.request.id!), 'not stopped before its limit');
+  t.mock.timers.tick(1);
+  // The kill grace and output waits run on the same fake clock.
+  const deadline = performance.now() + 10_000;
+  while (f.runner.isRunning(asked.request.id!) && performance.now() < deadline) { t.mock.timers.tick(1_000); await realDelay(1); }
+  t.mock.timers.reset();
+  const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 0 }, agent('claude:one'));
   assert.equal(result.request.run!.timedOut, true);
-  const child = Number((await readFile(join(f.project, 'child.pid'), 'utf8')).trim());
   await until(() => !alive(child), 3_000);
 });
 
