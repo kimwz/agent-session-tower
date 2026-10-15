@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.137.3] - 2026-10-15
+
+- **개발: 변경 내용만큼만 CI를 돌립니다.** 앱 동작은 바뀌지 않았습니다.
+  - 문서와 패치 버전만 바꾸면 검사 job 하나만 돕니다. 기반 커밋이 검사를 통과한 경우에 한합니다.
+  - 브라우저 화면 코드는 Node 22 Linux에서만 돕니다.
+  - 서버·공유 코드, 빌드·의존성 변경, 마이너·메이저 버전, 분류하지 않은 경로는 지금처럼 전체를 돕니다.
+  - main은 pull request가 검증한 것과 같은 트리면 그 결과를 다시 씁니다.
+  - 릴리스는 CI를 통과한 커밋만 게시하고, 게시 뒤 전체 검사를 다시 돌리지 않습니다.
+  - `npm version`도 같은 기준으로 로컬 검사를 고릅니다.
+
 ## [1.137.2] - 2026-10-15
 
 - **음성으로 말을 마치고 기다리면 요청이 전송됩니다.** 지금까지는 말이 끝났을 확률이 0.6 이상이어야만 보냈고, 같은 말은 3초 침묵까지만 다시 판단했습니다. 그래서 "~할 필요가 있을 것 같아."처럼 요청 형태가 아닌 완결 문장이나 긴 요청은 0.4~0.5에 머물러 20초 뒤 보내지 않은 채 남았습니다.

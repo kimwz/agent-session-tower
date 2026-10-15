@@ -14,6 +14,7 @@ export const offlineFile: string;
 export function inventory(root?: string): string[];
 export function shards(files: string[], costs: Record<string, number>, count: number, concurrency?: number, tails?: Record<string, number>): string[][];
 export function plan(root?: string): Lane[];
+export function lanesFor(tier: string, lanes?: Lane[]): Lane[];
 export function validateReceipts(lanes: Lane[], receipts: Receipt[], sha: string): { testWindowSeconds: number; testRunnerSeconds: number };
 
 export function projectedSeconds(files: string[], costs: Record<string, number>, concurrency: number, tails?: Record<string, number>): number;
