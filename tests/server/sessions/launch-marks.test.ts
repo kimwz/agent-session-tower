@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
@@ -11,16 +11,33 @@ import type { ProcessSnapshot } from '../../../server/sessions/processes.js';
 const LAUNCHER = '10000000-0000-4000-8000-000000000001';
 const CHILD = '20000000-0000-4000-8000-000000000002';
 
+/**
+ * The shims and fake programs are installed once for the file: macOS checks every new executable file on its first run
+ * (~0.2 s each), so a fresh install per test costs more than the test. Each test still has its own marks folder.
+ */
+let installed: Promise<{ dir: string; real: string }> | undefined;
+const installedRoot = mkdtemp(join(tmpdir(), 'tower-shims-installed-')).then(realpath);
+after(async () => rm(await installedRoot, { recursive: true, force: true }));
+function install() {
+  return installed ??= (async () => {
+    const root = await installedRoot;
+    const real = join(root, 'real');
+    await mkdir(real, { recursive: true });
+    for (const name of ['claude', 'codex']) {
+      await writeFile(join(real, name), `#!/bin/sh\necho "$$ $*"\necho "PATH=$PATH" >&2\nexit 3\n`);
+      await chmod(join(real, name), 0o755);
+    }
+    return { dir: await installLaunchShims(join(root, 'state')), real };
+  })();
+}
+
 async function shims(t: test.TestContext) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-shims-')));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const state = join(root, 'state'), real = join(root, 'real');
-  await mkdir(real, { recursive: true });
-  for (const name of ['claude', 'codex']) {
-    await writeFile(join(real, name), `#!/bin/sh\necho "$$ $*"\necho "PATH=$PATH" >&2\nexit 3\n`);
-    await chmod(join(real, name), 0o755);
-  }
-  const dir = await installLaunchShims(state);
+  const state = join(root, 'state');
+  const { dir, real } = await install();
+  await mkdir(launchMarksDir(state), { recursive: true, mode: 0o700 });
+  await chmod(launchMarksDir(state), 0o700);
   const run = (name: string, args: string[], env: Record<string, string>, path = `${dir}:${real}:/usr/bin:/bin`) =>
     spawnSync(join(dir, name), args, { env: { PATH: path, TOWER_LAUNCH_MARKS: launchMarksDir(state), ...env }, encoding: 'utf8' });
   const marks = async () => Promise.all((await readdir(launchMarksDir(state))).filter(name => name.endsWith('.json'))
@@ -164,8 +181,11 @@ test('Tower’s own processes start without the identity of the turn that restar
 test('a helper’s own helper finds the real program too', async t => {
   const f = await shims(t);
   // The real claude runs claude again, as a helper that starts a helper does.
-  await writeFile(join(f.real, 'claude'), `#!${process.execPath}\nconst { spawnSync } = require('node:child_process');\nif (process.argv.includes('inner')) { console.log('inner ran'); process.exit(0); }\nconst r = spawnSync('claude', ['-p', 'inner'], { encoding: 'utf8' });\nprocess.stdout.write(r.stdout); process.exit(r.status ?? 9);\n`);
-  const result = f.run('claude', ['-p', 'outer'], { CLAUDE_CODE_SESSION_ID: LAUNCHER });
+  const real = join(f.root, 'real');
+  await mkdir(real);
+  await writeFile(join(real, 'claude'), `#!${process.execPath}\nconst { spawnSync } = require('node:child_process');\nif (process.argv.includes('inner')) { console.log('inner ran'); process.exit(0); }\nconst r = spawnSync('claude', ['-p', 'inner'], { encoding: 'utf8' });\nprocess.stdout.write(r.stdout); process.exit(r.status ?? 9);\n`);
+  await chmod(join(real, 'claude'), 0o755);
+  const result = f.run('claude', ['-p', 'outer'], { CLAUDE_CODE_SESSION_ID: LAUNCHER }, `${f.dir}:${real}:/usr/bin:/bin`);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /inner ran/);
   assert.equal((await f.marks()).length, 2, 'both runs are marked');
@@ -177,8 +197,11 @@ test('a program started through a small shell script (a version manager) still f
   await mkdir(join(f.root, 'versions'));
   await writeFile(binary, `#!${process.execPath}\nconst { spawnSync } = require('node:child_process');\nif (process.argv.includes('inner')) { console.log('inner ran'); process.exit(0); }\nconst r = spawnSync('/bin/sh', ['-c', 'claude -p inner'], { encoding: 'utf8' });\nprocess.stdout.write(r.stdout); process.stderr.write(r.stderr); process.exit(r.status ?? 9);\n`);
   await chmod(binary, 0o755);
-  await writeFile(join(f.real, 'claude'), `#!/bin/sh\nexec ${binary} "$@"\n`);
-  const result = f.run('claude', ['-p', 'outer'], { CLAUDE_CODE_SESSION_ID: LAUNCHER });
+  const real = join(f.root, 'real');
+  await mkdir(real);
+  await writeFile(join(real, 'claude'), `#!/bin/sh\nexec ${binary} "$@"\n`);
+  await chmod(join(real, 'claude'), 0o755);
+  const result = f.run('claude', ['-p', 'outer'], { CLAUDE_CODE_SESSION_ID: LAUNCHER }, `${f.dir}:${real}:/usr/bin:/bin`);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /inner ran/);
 });
