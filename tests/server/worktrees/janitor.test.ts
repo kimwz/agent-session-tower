@@ -407,14 +407,20 @@ test('once closed and flushed, a pass that was stuck writes nothing', async t =>
   const { dir, state, add, transcript, session } = await setup(t);
   const target = join(dir, 'work.wt-sealed');
   const world = { sessions: [session('s', await transcript('s', add(`git worktree add --detach ${target} HEAD`, ['--detach', target, 'HEAD'])))], closed: new Set(['claude:s']) };
-  let release!: () => void;
+  let release!: () => void, reached!: () => void;
   const stuck = new Promise<void>(resolve => { release = resolve; });
-  const cleaner = janitor(state, world, { cwds: async () => { await stuck; return []; } });
+  const listing = new Promise<void>(resolve => { reached = resolve; });
+  const cleaner = janitor(state, world, { cwds: async () => { reached(); await stuck; return []; } });
   await cleaner.start();
   const pass = cleaner.pass();
-  await new Promise(resolve => setTimeout(resolve, 300));
+  await listing;
   cleaner.close();
-  await cleaner.flush();
+  // The flush gives the stuck pass five seconds, on a fake clock.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const flushing = cleaner.flush();
+  t.mock.timers.tick(5_000);
+  await flushing;
+  t.mock.timers.reset();
   release();
   await pass;
   assert.equal(existsSync(join(state, 'worktree-cleanup.json')), false);
