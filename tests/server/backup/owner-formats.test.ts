@@ -25,6 +25,9 @@ import { initialModelSettings } from '../../../shared/models.js';
 import type { TriggerActor, TriggerInput } from '../../../shared/triggers.js';
 import type { Run } from '../../../shared/types.js';
 import { payloadOf } from './fixtures/payload-of.ts';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const collectTriggers = async (stateDir: string) => (await workerSettingsFixture(stateDir)).triggersBackup();
 const collectWorkerFiles = async (stateDir: string) => collectOwnedWorkerFiles(stateDir, (await workerSettingsFixture(stateDir)).collect);

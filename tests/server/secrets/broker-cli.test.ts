@@ -10,6 +10,9 @@ import { parseSecretCli, runSecretsCommand } from '../../../server/secrets/cli.j
 import { SecretService } from '../../../server/secrets/service.js';
 import { editPayload, legacyRecord, legacyRule, vaultTemplate } from '../../helpers/secrets.js';
 import type { RemoteSecretBroker } from '../../../server/secrets/remote.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const canary = 'SYNTHETIC-sensitive-canary-42';
 /** One vault initialized for this file and copied open into each test that uses a real one. */
@@ -265,7 +268,7 @@ test('encrypted domain fixture denies forged task and revoked policy through the
   } finally { await service.lock(); await f.cleanup(); }
 });
 
-test('final dispatch denies local changes completed while a later remote reference is reauthorized', { timeout: 20000 }, async () => {
+test('final dispatch denies local changes completed while a later remote reference is reauthorized', async () => {
   const f = await fixture(); let now = Date.now(); const service = await vault.open(f.stateDir, { now: () => now });
   try {
     for (const mode of ['revoke', 'policy', 'expiry', 'rotation', 'fields'] as const) {
@@ -359,7 +362,7 @@ test('compare and domain fingerprint disclose only their derived result', async 
   } finally { await f.cleanup(); }
 });
 
-test('comparison denies local authority changes committed while resolving its remote operand', { timeout: 20000 }, async () => {
+test('comparison denies local authority changes committed while resolving its remote operand', async () => {
   const f = await fixture(); let now = Date.now(); const service = await vault.open(f.stateDir, { now: () => now });
   try {
     for (const mode of ['revoke', 'policy', 'expiry', 'rotation', 'fields'] as const) {

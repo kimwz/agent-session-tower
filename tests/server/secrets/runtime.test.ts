@@ -16,6 +16,9 @@ import { secretService } from '../../helpers/secrets.js';
 import { runSecretsCommand } from '../../../server/secrets/cli.js';
 import { SECRET_USE_INSTRUCTIONS } from '../../../server/secrets/notices.js';
 import { inheritedRunFields } from '../../../server/runs/continuations.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const password = 'fixture-runtime-password-1234';
 const canary = 'CANARY_RUNTIME_VALUE_DO_NOT_DISCLOSE';

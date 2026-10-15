@@ -7,6 +7,9 @@ import { SecretRuntime } from '../../../server/secrets/runtime.js';
 import { SecretService } from '../../../server/secrets/service.js';
 import { machinePassword, readMachineKey } from '../../../server/secrets/machine-key.js';
 import { FixtureRuns } from '../../helpers/secrets.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const PASSWORD = 'fixture-machine-key-password';
 const HOST = 'c'.repeat(32);

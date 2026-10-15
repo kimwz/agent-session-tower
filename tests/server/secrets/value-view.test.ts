@@ -7,6 +7,9 @@ import { SecretRuntime } from '../../../server/secrets/runtime.js';
 import type { SecretService } from '../../../server/secrets/service.js';
 import type { SecretSettingsView, SecretValue } from '../../../shared/secrets.js';
 import { FixtureRuns, secretService, vaultTemplate } from '../../helpers/secrets.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 /** The worker's value-viewing actions on fixture vaults: the web verified each Tower password before asking. */
 const RECOVERY = 'fixture-value-view-recovery';
@@ -31,7 +34,7 @@ async function fixture(t: TestContext, open = true) {
   return { directory, service, runtime, control, wrappers, reopen, migrations: () => migrations };
 }
 
-test('view-unlock: an open vault gets, checks or remakes the current wrapper; a locked one opens with it or once with the recovery password', { timeout: 120_000 }, async t => {
+test('view-unlock: an open vault gets, checks or remakes the current wrapper; a locked one opens with it or once with the recovery password', async t => {
   const f = await fixture(t);
   // Open without a wrapper (a vault made before this release): the first use wraps the key for these credentials.
   const first = await f.control('view-unlock', { password: TOWER, credentialId: idA }) as { generation: string };
@@ -67,7 +70,7 @@ test('view-unlock: an open vault gets, checks or remakes the current wrapper; a 
   await f.control('view-unlock', { password: TOWER, credentialId: idB }); assert.equal(f.migrations(), 3, 'the next unlock needs no recovery');
 });
 
-test('two wrappers of other credentials (a backup taken mid-change, a reset login) leave room for the current one', { timeout: 120_000 }, async t => {
+test('two wrappers of other credentials (a backup taken mid-change, a reset login) leave room for the current one', async t => {
   const f = await fixture(t); const idC = 'c'.repeat(64);
   const others = async () => { await f.service.towerPrune(idA); await f.service.towerWrap(OTHER, idA); await f.service.towerWrap(OTHER, idB); };
   await others();
@@ -78,7 +81,7 @@ test('two wrappers of other credentials (a backup taken mid-change, a reset logi
   assert.deepEqual((await f.wrappers()).map(item => item.credentialId), [idC], 'locked: the recovery password opens it and the same room is made');
 });
 
-test('value and value-update answer only in the unlocked generation, at the shown version, in one serial change', { timeout: 60_000 }, async t => {
+test('value and value-update answer only in the unlocked generation, at the shown version, in one serial change', async t => {
   const f = await fixture(t);
   const scalar = await f.service.create({ name: 'scalar', kind: 'scalar', value: 'SCALAR_VALUE' });
   const file = await f.service.create({ name: 'file', kind: 'file', content: Buffer.from('FILE_BYTES').toString('base64') });
@@ -131,7 +134,7 @@ test('a lock and open queued before a value action end its generation, though th
   assert.deepEqual(await f.control('value', { secretId: scalar.id, expectedVersion: 1, generation: f.service.lockGeneration }), { id: scalar.id, version: 1, kind: 'scalar', value: 'SCALAR_VALUE' }, 'nothing was changed');
 });
 
-test('tower-wrap answers false while locked or without a vault; tower-prune works locked; tower-status reads the envelope', { timeout: 60_000 }, async t => {
+test('tower-wrap answers false while locked or without a vault; tower-prune works locked; tower-status reads the envelope', async t => {
   const empty = await fixture(t, false);
   assert.deepEqual(await empty.control('tower-wrap', { password: TOWER, credentialId: idA }), { wrapped: false });
   assert.deepEqual(await empty.control('tower-prune', { credentialId: idA }), {});

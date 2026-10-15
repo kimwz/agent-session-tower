@@ -8,6 +8,9 @@ import { SECRET_OPERATIONS, type SecretPeer, type SecretTask } from '../../../sh
 import { catalog, decide, readSharing, servedHosts, storedSharing, type PolicySecret, type PolicyState } from '../../../server/secrets/policy.js';
 import { kindOf } from '../../../shared/errors.js';
 import { editPayload, stored, vaultTemplate, type StoredPayload } from '../../helpers/secrets.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const NOW = 1_000_000;
 const HOST = '11111111-1111-4111-8111-111111111111', NODE = '22222222-2222-4222-8222-222222222222', OTHER = '33333333-3333-4333-8333-333333333333';

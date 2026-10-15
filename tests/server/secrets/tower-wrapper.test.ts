@@ -9,6 +9,9 @@ import { SecretVault } from '../../../server/secrets/vault.js';
 import { encrypt, passwordKey } from '../../../server/secrets/crypto.js';
 import { stageVaultImport } from '../../../server/secrets/imports.js';
 import { SecretVault1130 } from './fixtures/vault-995f869.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const recovery = 'fixture-password-1234';
 const tower = 'tower-password-1234';

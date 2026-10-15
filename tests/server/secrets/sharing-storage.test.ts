@@ -11,6 +11,9 @@ import { editPayload, legacyRecord, legacyRule, secretService, stored, storedSec
 import { writeState, type StateSnapshot } from '../backup/fixtures/state.js';
 import * as oracle from './fixtures/grant-policy-1.130.2.js';
 import { endTask as closeIn1130 } from './fixtures/task-close-1.130.2.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const PASSWORD = 'fixture-sharing-storage-password';
 const FIXTURE_PASSWORD = 'fixture vault password 1';
