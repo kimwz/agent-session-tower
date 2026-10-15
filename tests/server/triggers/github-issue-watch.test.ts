@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { until } from '../../helpers/until.js';
 import test, { type TestContext } from 'node:test';
 import { checkGitHub, GitHubError, keyOf, passed, type GitHubFetch } from '../../../server/triggers/github.js';
 import { upgradeState } from '../../../server/triggers/state.js';
@@ -88,8 +89,8 @@ async function fixture(t: TestContext, github: ReturnType<typeof fakeGitHub>, re
   await sql.bootstrap(() => clock.now);
   await service.start();
   // A tick a manual run started may still be saving; the folder is removed only once nothing is in flight.
-  t.after(async () => { service.close(); for (let wait = 0; service.inFlight() && wait < 400; wait++) await new Promise(resolve => setTimeout(resolve, 5)); await service.settle(); await sql.client.close(); await rm(directory, { recursive: true, force: true }); });
-  const step = async () => { await service.tick(); for (let wait = 0; service.inFlight() && wait < 300; wait++) await new Promise(resolve => setTimeout(resolve, 5)); await service.tick(); };
+  t.after(async () => { service.close(); await until(() => !service.inFlight()); await service.settle(); await sql.client.close(); await rm(directory, { recursive: true, force: true }); });
+  const step = async () => { await service.tick(); await until(() => !service.inFlight()); await service.tick(); };
   const finish = (index: number, output = 'Done.', status: Run['status'] = 'completed') => Object.assign(runs[index], { status, output });
   const continueAfter = (index: number): Run => {
     const run: Run = { ...structuredClone(runs[index]), id: randomUUID(), status: 'queued', output: '', scheduled: { at: '', afterRunId: runs[index].id } };

@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { until } from '../../helpers/until.js';
 import { test, type TestContext } from 'node:test';
 import { SlackAutomationManager, type CoordinatorChannel, type SlackAutomationOptions } from '../../../server/slack/automation.js';
 import type { SlackMention, SlackRule } from '../../../shared/slack.js';
@@ -1119,7 +1120,7 @@ test('Tower puts its working reaction on a new request at once and takes it off 
   await f.manager.ingest({ ...mention, id: 'event-0', ts: '0.1', threadTs: '0.0' });
   const stuck = f.manager.tick();
   await f.manager.ingest(mention);
-  for (let wait = 0; calls.length < 2 && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  await until(() => calls.length >= 2);
   assert.deepEqual(calls, ['add:loading:0.1', 'add:loading:1.1'], 'both requests are marked while the first thread fetch hangs');
   release(); await stuck; await f.manager.tick();
   assert.deepEqual(calls.slice(2), [], 'nothing comes off while the coordinator works');
@@ -1222,7 +1223,7 @@ test('a reaction call underway keeps the worker from handing off, and the handof
   f.options.workingReaction = () => 'loading';
   f.options.startConversation = () => new Promise(() => {});
   await f.manager.ingest(mention);
-  for (let wait = 0; !calls.length && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  await until(() => calls.length > 0);
   assert.equal(f.manager.inFlight(), true);
   f.manager.hold();
   let flushed = false;
@@ -1261,11 +1262,11 @@ test('clearing waits for a reaction pass and no sweep puts a mark back meanwhile
   f.options.workingReaction = () => 'loading';
   f.options.startConversation = () => new Promise(() => {});
   const admitted = f.manager.ingest(mention);
-  for (let wait = 0; !calls.length && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  await until(() => calls.length > 0);
   const clearing = f.manager.clearMarks();
   void f.manager.tick();
   answers.shift()!(); await admitted;
-  for (let wait = 0; calls.length < 2 && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  await until(() => calls.length >= 2);
   assert.equal(f.manager.inFlight(), true);
   void f.manager.tick();
   answers.shift()!(); await clearing;
@@ -1281,12 +1282,12 @@ test('nothing is marked while clearing, and nothing goes back on before the acco
   f.options.workingReaction = () => 'loading';
   f.options.startConversation = async () => ({ sessionId: 'account-change-session', runId: 'account-change-run' });
   const admitted = f.manager.ingest(mention);
-  for (let wait = 0; !calls.length && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  await until(() => calls.length > 0);
   answers.shift()!(); await admitted;
   let changed = false, release!: () => void;
   const change = new Promise<void>(resolve => { release = resolve; });
   const clearing = f.manager.clearMarks(async () => { await change; changed = true; });
-  for (let wait = 0; calls.length < 2 && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  await until(() => calls.length >= 2);
   // A second request arrives while the first mark is coming off.
   const second = f.manager.ingest({ ...mention, id: 'event-2', ts: '2.1', threadTs: '2.0' });
   answers.shift()!(); await second;
