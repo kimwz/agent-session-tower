@@ -302,10 +302,9 @@ test('a changed gh login is checked again before anything is read, and GitHub ra
   // A used-up rate limit on the account check holds every check, manual ones too, until it resets.
   data.login = 'me';
   const reset = Math.floor((clock.now + 3_600_000) / 1000);
-  const limitedDirectory = join(directory, 'limited'); await mkdir(limitedDirectory, { mode: 0o700 });
-  const limitedSQL = await actualStorage(t, limitedDirectory);
-  await limitedSQL.bootstrap(() => clock.now);
-  const limited = new TriggerService({ stateDir: limitedDirectory, storage: limitedSQL.client, executor: { runs: () => [], session: () => undefined, getAutoPrompt: () => undefined } as unknown as TriggerExecutor,
+  // Another service on the same storage, its account check rate-limited; the first one is closed.
+  service.close(); for (let wait = 0; service.inFlight() && wait < 400; wait++) await new Promise(resolve => setTimeout(resolve, 5)); await service.settle();
+  const limited = new TriggerService({ stateDir: directory, storage: sql.client, executor: { runs: () => [], session: () => undefined, getAutoPrompt: () => undefined } as unknown as TriggerExecutor,
     now: () => clock.now, tickMs: 60_000, ghToken: async () => 'gho_limited', githubTransport: () => async () => ({ status: 403, body: {}, remaining: 0, reset }) });
   await limited.start();
   t.after(async () => { limited.close(); await limited.settle(); });
