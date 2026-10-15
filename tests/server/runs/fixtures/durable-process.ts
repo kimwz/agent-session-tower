@@ -24,6 +24,21 @@ const publish = async (name: string, value: string) => {
   await writeFile(pendingPath, value);
   await rename(pendingPath, path);
 };
+/**
+ * The worker checks for a handoff and for idleness once a second (setInterval(…, 1000) in server/runs/worker.ts). In
+ * this fixture's workers those checks run every 20 ms, in the same order, and each round adds a byte to
+ * `checks-<pid>`, so a test proves that nothing happened after real checks instead of sleeping for them. What a check
+ * decides is unchanged: its deadlines are read from the clock.
+ */
+if (process.argv.includes('--runner-worker')) {
+  const realSet = globalThis.setInterval;
+  const checks = join(root, `checks-${process.pid}`);
+  globalThis.setInterval = ((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    if (ms !== 1000 || !/server[\\/]runs[\\/]worker\.ts/.test(new Error().stack ?? '')) return realSet(callback, ms, ...args);
+    const counted = String(callback).includes('handOff');
+    return realSet(() => { if (counted) appendFileSync(checks, '.'); callback(...args); }, 20);
+  }) as unknown as typeof setInterval;
+}
 const nativeId = '10000000-0000-4000-8000-000000000001';
 const session: Session = { id: `${provider}:${nativeId}`, nativeId, provider, title: 'Detached fixture', cwd: root,
   project: 'fixture', status: 'idle', statusReason: 'Ready', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
