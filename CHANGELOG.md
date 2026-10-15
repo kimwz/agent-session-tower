@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.138.1] - 2026-10-15
+
+- 동작 변경 없음. 버전만 올려 릴리스 경로 소요 시간을 다시 잽니다.
+
 ## [1.138.0] - 2026-10-15
 
 - **SQLite 전환용 마이그레이션 기능을 없앴습니다.** 저장소는 지금 형식으로만 엽니다.
