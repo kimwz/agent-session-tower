@@ -144,9 +144,10 @@ test('trust revoked after request and locked source deny without cancelling prov
 test('offline timeout only clears broker pending requests', async () => {
   const f = fixtures();
   const target = new RemoteSecretBroker({ device: () => f.b.device, deviceKeys: f.b.keys, peers: () => f.bPeers, begin: () => true, handle: () => undefined, timeoutMs: 10 });
-  const keepAlive = setTimeout(() => {}, 100);
+  // The request's own timer is unref'd: this keeps the process alive until the request has timed out.
+  const keepAlive = setInterval(() => {}, 1000);
   try { await assert.rejects(target.request(f.a.device.id, f.ctx, 'list'), /SECRET_REMOTE_OFFLINE/); assert.equal(target.pending(), 0); }
-  finally { clearTimeout(keepAlive); target.close(); }
+  finally { clearInterval(keepAlive); target.close(); }
 });
 
 test('copied public identity cannot decrypt a sealed response without the independent encryption private key', async () => {

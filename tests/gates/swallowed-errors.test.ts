@@ -66,12 +66,8 @@ function exemptLines(file: ts.SourceFile): Set<number> {
 /** Every counted site of one file, by the line of its `.catch`/`.then` or `catch` keyword. */
 export function swallowedErrors(path: string, text: string): Site[] {
   const file = parse(path, text);
-  const exempt = exemptLines(file);
   const sites: Site[] = [];
-  const at = (node: ts.Node, pattern: Pattern) => {
-    const line = file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1;
-    if (!exempt.has(line) && !exempt.has(line - 1)) sites.push({ line, pattern });
-  };
+  const at = (node: ts.Node, pattern: Pattern) => { sites.push({ line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1, pattern }); };
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
       const method = node.expression.name, [first, second] = node.arguments;
@@ -89,7 +85,10 @@ export function swallowedErrors(path: string, text: string): Site[] {
     ts.forEachChild(node, visit);
   };
   visit(file);
-  return sites;
+  if (!sites.length) return sites;
+  // Comments are read (a walk of every token) only in files that have a candidate site.
+  const exempt = exemptLines(file);
+  return sites.filter(({ line }) => !exempt.has(line) && !exempt.has(line - 1));
 }
 
 const sorted = (counts: Record<string, number>) => `${JSON.stringify(Object.fromEntries(Object.entries(counts).filter(([, count]) => count > 0).sort(([a], [b]) => a < b ? -1 : 1)), null, 2)}\n`;

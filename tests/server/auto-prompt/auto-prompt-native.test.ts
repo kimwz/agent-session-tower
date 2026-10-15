@@ -1,4 +1,5 @@
 import { runInNewContext } from 'node:vm';
+import { tickUntil } from '../../helpers/until.ts';
 import { openFixture, stateDir as storageStateDir } from '../storage/helpers.js';
 import { TowerError } from '../../../shared/errors.js';
 import test, { type TestContext } from 'node:test';
@@ -371,10 +372,17 @@ test('routing waits for an update of its CLI before it even looks the CLI up, th
   await writeFile(join(flags, 'codex.update'), String(process.pid));
   let lookups = 0;
   const find = f.dependencies.findExecutable!;
-  const routing = runAutoPromptModel(f.request, { ...f.dependencies, findExecutable: async (...args) => { lookups++; return find(...args); } });
-  await delay(1500);
+  // The router looks again every second while the update is under way: a fake clock stands in for those pauses, and the
+  // real one is back once it looks the CLI up (the routing itself keeps its real timers).
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => t.mock.timers.reset());
+  const routing = runAutoPromptModel(f.request, { ...f.dependencies, findExecutable: async (...args) => { lookups++; t.mock.timers.reset(); return find(...args); } });
+  const turn = () => new Promise(resolve => setImmediate(resolve));
+  for (let step = 0; step < 200; step++) { t.mock.timers.tick(250); await turn(); }
   assert.equal(lookups, 0, 'nothing of the CLI is touched while it is being replaced');
   await rm(join(flags, 'codex.update'));
+  // Each look reads the flag file for real: the clock moves on until one has seen it gone.
+  await tickUntil(t, () => lookups > 0, 250);
   assert.deepEqual(await routing, DECISION);
   assert.equal(lookups, 1);
 });

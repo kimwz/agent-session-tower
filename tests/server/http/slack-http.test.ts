@@ -1,11 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import type { SlackPublicStatus } from '../../../shared/slack.js';
+
+fastScrypt();
 
 const status: SlackPublicStatus = { connected: false, enabled: false, status: 'disconnected', rules: [], events: [] };
 test('Slack settings and credentials require existing authentication, origin, CSRF and JSON protections', async t => {

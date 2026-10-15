@@ -1,6 +1,8 @@
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +12,8 @@ import { createMonitorServer } from '../../../server/http/server.js';
 import type { Session } from '../../../shared/types.js';
 import { computeConversationRevision } from '../../../shared/conversation-revision.js';
 import { statusOf } from '../../../shared/errors.js';
+
+fastScrypt();
 
 const native: Session = {
   id: 'codex:example', nativeId: 'example', provider: 'codex', title: 'First conversation', cwd: '/tmp/project', project: 'project',

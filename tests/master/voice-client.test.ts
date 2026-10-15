@@ -580,9 +580,12 @@ const measured = (p: [number, number, number]) => ({ pauseMs }: { pauseMs: numbe
 
 /** The owner is quiet; how long the silence was when the utterance was committed (or that it never was). */
 async function silenceUntilCommit(page: Awaited<ReturnType<typeof harness>>, socket: FakeSocket, untilMs: number): Promise<number | undefined> {
-  for (let silent = 0; silent < untilMs; silent += 50) {
-    await page.hearSlowly(0.002, 50);
-    if (commits(socket) > 0) return silent + 50;
+  // Judgments are asked up to six seconds into the pause: until a while after, the page answers every 50 ms; past
+  // that only the commit is waited for, in half-second steps (the clock still moves frame by frame).
+  for (let silent = 0, step = 50; silent < untilMs; silent += step) {
+    step = silent < 7_000 ? 50 : 500;
+    await (step === 50 ? page.hearSlowly(0.002, step) : page.hear(0.002, step));
+    if (commits(socket) > 0) return silent + step;
   }
   return undefined;
 }

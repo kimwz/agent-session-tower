@@ -110,7 +110,7 @@ test('owner verify-update HTTP reaches the actual diagnostic worker RPC and its 
       const req = request({ socketPath: paths.socket, method: 'POST', path: '/rpc', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' } }, res => {
         let text = ''; res.on('data', chunk => { text += String(chunk); }); res.on('end', () => { try { resolve(JSON.parse(text)); } catch (error) { reject(error); } }); res.on('error', reject);
       });
-      req.on('error', reject); req.setTimeout(2000, () => req.destroy(new Error('Fixture RPC timeout'))); req.end(JSON.stringify({ protocol: RUNNER_PROTOCOL, method, args }));
+      req.on('error', reject); req.setTimeout(30_000, () => req.destroy(new Error('Fixture RPC timeout'))); req.end(JSON.stringify({ protocol: RUNNER_PROTOCOL, method, args }));
     });
   };
   const deadline = Date.now() + 60000;

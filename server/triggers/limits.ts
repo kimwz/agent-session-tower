@@ -7,3 +7,5 @@ export const MAX_TOMBSTONES = 20;
 export const MAX_RETAINED_TRIGGERS = 200;
 export const MAX_ONCE_RESERVATIONS = 2000;
 export const MAX_AUDIT = 1000;
+/** Runs one trigger may have recorded (in the last 30 days); past it, new runs are not accepted. */
+export const MAX_FIRED_PER_TRIGGER = 20_000;

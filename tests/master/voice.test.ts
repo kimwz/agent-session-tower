@@ -17,6 +17,7 @@ import type { FirstReply } from '../../server/master/first-reply.js';
 import type { MasterEntry, MasterSpeak, MasterStreamEvent } from '../../shared/master.js';
 import type { ChatMessage, Run, Snapshot } from '../../shared/types.js';
 import { until } from '../helpers/until.js';
+import '../helpers/skip-fsync.js';
 import { audioSink } from '../../server/http/sinks.js';
 
 const TOKEN = 'a'.repeat(64);
@@ -24,10 +25,19 @@ const SECRET = 'b'.repeat(64);
 const VOICE_KEY = 'el-test-0123456789abcdef';
 const TAB = randomUUID();
 const digestOf = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32);
+/** The first response's 2.5 s deadline, a tenth as long in the tests that run into it, so they do not wait seconds. */
+const shortFirstReplyDeadline = (t: test.TestContext) => {
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, 'timeout', (ms: number) => timeout(ms === 2_500 ? 250 : ms));
+};
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 /** What the fake fast model says first, unless a test says otherwise. */
 const FIRST = '요청을 확인해 볼게요.';
-const FAST: Partial<VoiceTiming> = { firstChunkMs: 1_000, synthMs: 2_000, playMs: 2_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 };
+/**
+ * Short waits for what the tests play out themselves. The waits for the fake ElevenLabs over a real socket stay long: a
+ * busy machine must not turn a slow local answer into "no sound in time" (the tests of those deadlines set their own).
+ */
+const FAST: Partial<VoiceTiming> = { firstChunkMs: 30_000, synthMs: 60_000, playMs: 2_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 };
 
 async function listen(server: Server): Promise<number> {
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -62,7 +72,8 @@ async function fakeElevenLabs() {
       if (state.silent(state.speeches.at(-1)!.text)) { res.end(); return; }
       if (state.lagMs) await sleep(state.lagMs);
       res.write(state.chunks[0]);
-      await sleep(state.gapMs);
+      // A long gap ends early when the client goes away, so no fixture timer outlives its test.
+      await new Promise<void>(resolve => { const timer = setTimeout(resolve, state.gapMs); res.once('close', () => { clearTimeout(timer); resolve(); }); });
       if (state.mode === 'cut') { res.destroy(); return; }
       res.end(state.chunks[1]);
       state.completed.push(speechNumber);
@@ -312,14 +323,16 @@ test('short replies recorded by an earlier version are removed when the voice st
 
 test('no first reply is said when the model says nothing, it comes too late, it names a card, or voice moved; the request goes all the same', async t => {
   const h = await harness(t, { steps: ['하나', '둘', '셋', '넷'] });
+  shortFirstReplyDeadline(t);
   const session = on(h);
   h.firsts.reply = () => ({ skipped: 'model', warm: true });
   assert.deepEqual(await request(h, session, '안녕'), {});
   h.firsts.reply = () => ({ text: FIRST, warm: true });
-  h.firsts.delayMs = 3_000;
+  // The first reply would take 30 s; the request is answered at the (shortened) deadline, far sooner on any machine.
+  h.firsts.delayMs = 30_000;
   const started = Date.now();
   assert.deepEqual(await request(h, session, '배포 상태 봐줘'), {});
-  assert.ok(Date.now() - started < 2_900, 'given up on at its deadline');
+  assert.ok(Date.now() - started < 10_000, 'given up on at its deadline');
   h.firsts.delayMs = 0;
   (h.voice as unknown as { options: { hooks: { hide(text: string): string } } }).options.hooks.hide = text => text.replace('확인', '■');
   assert.deepEqual(await request(h, session, '세션 확인해줘'), {});
@@ -463,7 +476,7 @@ test('finite audio has exact length; partial synthesis stays unpublished and a p
   const h = await harness(t, { steps: ['답 하나.', '답 둘.', '답 셋.'], timing: { waitMs: 10_000 } });
   const { fetchAudio, port: audioPort } = await audioServer(t, h.voice);
   const session = on(h);
-  h.labs.gapMs = 200;
+  h.labs.gapMs = 50;
   await request(h, session, '하나');
   const first = await until(() => h.says().find(item => item.kind === 'answer'));
   const id = first.audio.split('/').at(-1)!;
@@ -487,7 +500,7 @@ test('finite audio has exact length; partial synthesis stays unpublished and a p
   const third = await until(() => h.says().filter(item => item.kind === 'answer')[1]);
   const thirdId = third.audio.split('/').at(-1)!;
   await new Promise<void>(resolve => {
-    const req = httpRequest({ host: '127.0.0.1', port: (audioPort), path: `/${thirdId}` }, res => { res.pause(); setTimeout(() => { req.destroy(); resolve(); }, 300); });
+    const req = httpRequest({ host: '127.0.0.1', port: (audioPort), path: `/${thirdId}` }, res => { res.pause(); setTimeout(() => { req.destroy(); resolve(); }, 100); });
     req.end();
   });
   await until(() => h.voice.listeners(thirdId) === 0, 3_000);
@@ -601,9 +614,11 @@ test('an answer prepared for v3 is made with v3 to its end when the model change
   await until(() => h.says().find(item => item.kind === 'answer'));
   await h.settings.update({ voice: { model: 'eleven_v4_turbo' } });
   await playFiniteAnswer(h, session, entry.id, fetchAudio);
+  // Counted before the request: the next answer's first part can be out before its entry is seen.
+  const before = h.says().length;
   await request(h, session, '하나 더');
   const next = await masterEntry(h, /다음 답입니다/);
-  await playFiniteAnswer(h, session, next.id, fetchAudio, h.says().length);
+  await playFiniteAnswer(h, session, next.id, fetchAudio, before);
   const parts = h.labs.speeches.filter(item => item.text.includes('번째 문장'));
   assert.ok(parts.length > 1);
   assert.ok(parts.every(item => item.request === 'speech' && item.body.model_id === 'eleven_v3_conversational' && item.text.startsWith('[')), 'every part as prepared, with its tag');
@@ -624,7 +639,9 @@ test('a long answer skipped partway stops being made: the parts not yet asked fo
   h.voice.voicePlayed({ session, id: reading.id, result: 'stopped' });
   await until(() => h.speakOf(entry.id)?.state === 'unspoken');
   const made = readings(h).length;
-  await sleep(600);
+  // Once every speech asked for has been answered, anything that went on would be asked for at once.
+  await until(() => h.labs.completed.length === h.labs.speeches.length);
+  await sleep(50);
   assert.equal(readings(h).length, made, 'nothing more is asked for');
   const all = voicedParts(speakable(answer), 'eleven_v4_turbo', 'answer');
   assert.ok(made < all.length);
@@ -645,7 +662,9 @@ test('an answer whose sound does not start in time is not made further', async t
   await request(h, session, '길게 알려줘');
   const entry = await masterEntry(h, /30번째/);
   await until(() => h.speakOf(entry.id)?.state === 'unspoken');
-  await sleep(800);
+  // The late first part comes back in the end; anything that went on after it would be asked for at once.
+  await until(() => h.labs.completed.length === h.labs.speeches.length);
+  await sleep(50);
   assert.equal(readings(h).length, 1, 'only the first part was asked for');
   assert.equal(h.says().filter(item => item.kind === 'answer').length, 0);
 });
@@ -847,12 +866,15 @@ test('finite first response discards audio completed after the answer started', 
 });
 
 test('finite first response retains the original deadline while TTS is incomplete', async t => {
-  const h = await harness(t, { steps: [() => undefined], timing: { synthMs: 4_000 } });
+  // The first reply's sound takes 15 s (within its 20 s synthesis time); the request is answered at the (shortened)
+  // first-response deadline, far sooner on any machine.
+  const h = await harness(t, { steps: [() => undefined], timing: { synthMs: 20_000 } });
+  shortFirstReplyDeadline(t);
   const session = on(h);
-  h.labs.gapMs = 3_000;
+  h.labs.gapMs = 15_000;
   const started = Date.now();
   assert.deepEqual(await request(h, session, '느린 첫 음성'), {});
-  assert.ok(Date.now() - started < 2_900, 'the existing 2.5 second first-response deadline also covers synthesis');
+  assert.ok(Date.now() - started < 10_000, 'the existing 2.5 second first-response deadline also covers synthesis');
 });
 
 test('missing preview and live audio are bodiless 404s, and a preview is a finite file with its length', async t => {

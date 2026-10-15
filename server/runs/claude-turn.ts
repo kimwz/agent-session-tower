@@ -23,6 +23,8 @@ import { WakeupTracker } from './wakeup.js';
 
 const BACKGROUND_FOLLOW_UP_MS = 60_000;
 const BACKGROUND_WAIT_MAX_MS = 2 * 60 * 60 * 1000;
+/** Task bookends can follow a result, even in the next stdout chunk: an answered turn closes its input this much later. */
+export const CLAUDE_FINISH_RECHECK_MS = 250;
 /** What Tower tells Claude when a finished background task did not start a follow-up turn by itself. */
 function backgroundNotice(finished: readonly FinishedTask[]): string {
   const lines = finished.map(task => `- ${task.status}${task.summary ? `: ${task.summary}` : ''}${task.outputFile ? ` (output: ${task.outputFile})` : ''}`);
@@ -134,6 +136,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
   const tasks = new BackgroundTaskTracker();
   const followUpMs = host.options.backgroundFollowUpMs ?? BACKGROUND_FOLLOW_UP_MS;
   const waitMaxMs = host.options.backgroundWaitMaxMs ?? BACKGROUND_WAIT_MAX_MS;
+  const finishRecheckMs = host.options.claudeFinishRecheckMs ?? CLAUDE_FINISH_RECHECK_MS;
   let turnActive = true;
   /** Tower handed Claude the notice itself and Claude has not yet replayed it. */
   let noticeId: string | undefined;
@@ -228,7 +231,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
           if (!idle() || owned.claude?.hasPendingSteers()) return;
           if (tasks.outstanding || noticeId) { owned.finishInput?.(); return; }
           endWait(); closeInput();
-        }, 250);
+        }, finishRecheckMs);
         return;
       }
       clearFinishTimer();

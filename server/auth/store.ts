@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual, type BinaryLike, type ScryptOptions } from 'node:crypto';
 import { mkdir, chmod } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
@@ -38,9 +38,19 @@ export function isLoopbackHostname(hostname: string): boolean {
 }
 /** Sign-ins are kept and revoked by this digest; the token itself exists only in the browser's cookie. */
 export function sessionKey(token: string): string { return createHash('sha256').update(token).digest('hex'); }
+/** The node:crypto scrypt call, in the one shape derive uses. */
+export type Scrypt = (password: BinaryLike, salt: BinaryLike, keylen: number, options: ScryptOptions, callback: (error: Error | null, key: Buffer) => void) => void;
+/** The scrypt call behind derive; only tests/helpers/fast-scrypt.ts replaces it (a gate test keeps it so). */
+let scryptCall: Scrypt = scrypt;
 function derive(password: string, salt: string): Promise<Buffer> {
-  return new Promise((resolve, reject) => scrypt(password, Buffer.from(salt, 'hex'), 64, KDF, (error, key) => error ? reject(error) : resolve(key)));
+  return new Promise((resolve, reject) => scryptCall(password, Buffer.from(salt, 'hex'), 64, KDF, (error, key) => error ? reject(error) : resolve(key)));
 }
+/** Test-only: swaps the scrypt call so tests skip the production-strength hash; returns the restore. */
+export function replaceAuthScryptForTests(fn: Scrypt): () => void {
+  const previous = scryptCall; scryptCall = fn; return () => { scryptCall = previous; };
+}
+/** Test-only: whether the scrypt call is node:crypto's. */
+export const usesRealAuthScrypt = () => scryptCall === scrypt;
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }
 function validUsername(value: unknown): value is string { return typeof value === 'string' && value.trim() === value && value.length > 0 && value.length <= 64; }
 function validIp(value: unknown): value is string { try { return typeof value === 'string' && canonicalIp(value) === value; } catch { return false; } }

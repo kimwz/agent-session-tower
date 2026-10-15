@@ -11,6 +11,11 @@ import { SecretService } from '../../../server/secrets/service.js';
 import { VIEW_IDLE_MS, ViewGrants } from '../../../server/secrets/view-grants.js';
 import type { SecretSettingsView, SecretValue } from '../../../shared/secrets.js';
 import { FixtureRuns, secretService, vaultTemplate } from '../../helpers/secrets.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
+
+fastVaultKdf();
+fastScrypt();
 
 /** The web's coordinator on fixture state: a real AuthStore and a real secret runtime behind the owner control, with injectable failures. */
 const USER = 'monitor';
@@ -60,7 +65,7 @@ async function fixture(t: TestContext, options: { vault?: 'open' | 'locked' | 'n
   return { directory, authDir, stateDir, store, service, runtime, vault, actions, signIn, failing, restartWeb: () => { const web = new VaultPassword(auth, secrets); t.after(() => web.close()); return web; } };
 }
 
-test('a credentials change wraps the vault key for the new password before auth.json names it: wherever it stops, the current password keeps a wrapper', { timeout: 180_000 }, async t => {
+test('a credentials change wraps the vault key for the new password before auth.json names it: wherever it stops, the current password keeps a wrapper', async t => {
   const f = await fixture(t);
   const warn = t.mock.method(console, 'warn', () => undefined);
   let n = 0; let current = 0;
@@ -96,7 +101,7 @@ test('a credentials change wraps the vault key for the new password before auth.
   assert.equal(await service.towerUnlock(password(current), store.currentCredentialId()!), true);
 });
 
-test('a credentials change and a value-view unlock never interleave: an old password never wraps the new credentials', { timeout: 120_000 }, async t => {
+test('a credentials change and a value-view unlock never interleave: an old password never wraps the new credentials', async t => {
   const f = await fixture(t);
   // The change first: it signs everyone out, so the unlock that waited is refused before the worker sees its password.
   const viewer = await f.signIn(password(0));
@@ -115,7 +120,7 @@ test('a credentials change and a value-view unlock never interleave: an old pass
   assert.deepEqual([f.service.vault.hasTower(next), f.service.vault.hasTower(f.store.currentCredentialId()!)], [false, true]);
 });
 
-test('value viewing belongs to one sign-in: idle expiry, a web restart, sign-out, lock, a credentials change and an ended generation each end it', { timeout: 120_000 }, async t => {
+test('value viewing belongs to one sign-in: idle expiry, a web restart, sign-out, lock, a credentials change and an ended generation each end it', async t => {
   let now = 0; const grants = new ViewGrants(() => now);
   grants.set('a', 'g1'); now += VIEW_IDLE_MS - 1; assert.equal(grants.has('a'), true);
   now += 1; assert.equal(grants.has('a'), false, 'a view that only reads the settings does not keep it alive');
@@ -160,7 +165,7 @@ test('value viewing belongs to one sign-in: idle expiry, a web restart, sign-out
   assert.equal(f.vault.grants.has(sessionKey(third.token)), false);
 });
 
-test('a change while the vault is locked asks for the recovery password once; without a vault or with an older worker the vault is untouched', { timeout: 120_000 }, async t => {
+test('a change while the vault is locked asks for the recovery password once; without a vault or with an older worker the vault is untouched', async t => {
   const locked = await fixture(t, { vault: 'locked' });
   const old = locked.store.currentCredentialId()!;
   assert.equal(await locked.vault.changeCredentials(USER, password(1)), 'locked');
@@ -186,7 +191,7 @@ test('a change while the vault is locked asks for the recovery password once; wi
   assert.equal((await older.vault.view({ status: { initialized: true, locked: true }, peers: [], secrets: [] }, signedIn) as SecretSettingsView).status.towerPassword, undefined);
 });
 
-test('a vault this computer’s machine key opens is shown as one that opens without a password, and its Tower password is not asked', { timeout: 120_000 }, async t => {
+test('a vault this computer’s machine key opens is shown as one that opens without a password, and its Tower password is not asked', async t => {
   const locked = await fixture(t, { vault: 'locked' });
   const viewer = await locked.signIn(password(0)); locked.actions.length = 0;
   const shown = await locked.vault.view({ status: { initialized: true, locked: true, machineKey: true }, peers: [], secrets: [] }, viewer) as SecretSettingsView;
@@ -194,7 +199,7 @@ test('a vault this computer’s machine key opens is shown as one that opens wit
   assert.deepEqual(locked.actions, [], 'no Tower password check is asked of the worker');
 });
 
-test('setting up an account clears wrappers no credentials name, so the new one always fits', { timeout: 120_000 }, async t => {
+test('setting up an account clears wrappers no credentials name, so the new one always fits', async t => {
   const f = await fixture(t, { account: false });
   for (const id of ['a', 'b']) await f.service.towerWrap(password(9), id.repeat(64));
   assert.equal(await f.vault.changeCredentials(USER, password(1)), 'rewrapped');

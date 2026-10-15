@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { until } from '../../helpers/until.js';
 import test from 'node:test';
 import { ClaudeControl } from '../../../server/runs/claude-control.js';
 import type { RunApproval } from '../../../shared/types.js';
@@ -96,7 +97,8 @@ test('a lost approval response is not retried or silently reported as sent', asy
 
 test('an unresponsive initialization times out before the first user message', async t => {
   const f = fixture(10); t.after(() => f.control.close());
-  await new Promise(resolve => setTimeout(resolve, 30));
+  // Waits on a real (ref'd) timer for the initialization's own unref'd one.
+  await until(() => f.errors.length > 0);
   assert.equal(f.errors.length, 1); assert.equal(f.written.length, 1);
 });
 
@@ -153,7 +155,8 @@ test('steering timeout after the turn ended remains uncertain without cancelling
   const f = fixture(5000, 10); t.after(() => f.control.close()); f.initialize();
   const rejection = assert.rejects(f.control.steer({ ...f.input, uuid: 'steer-1' }), { disposition: 'uncertain' });
   f.control.setTurnIdle(true);
-  await new Promise(resolve => setTimeout(resolve, 30)); await rejection;
+  // The steer's timer is unref'd: the test's own (real, ref'd) wait keeps the process alive until it has fired.
+  await until(() => !f.control.hasPendingSteers()); await rejection;
   assert.equal(f.control.hasPendingSteers(), false);
   assert.equal(f.control.canSteer(), true); assert.deepEqual(f.errors, []);
   f.ask(); assert.equal(f.approvals.length, 1);

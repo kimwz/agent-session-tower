@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { until } from '../../helpers/until.js';
 import test, { type TestContext } from 'node:test';
 import { checkGitHub, GitHubError, keyOf, passed, type GitHubFetch } from '../../../server/triggers/github.js';
 import { upgradeState } from '../../../server/triggers/state.js';
@@ -88,8 +89,8 @@ async function fixture(t: TestContext, github: ReturnType<typeof fakeGitHub>, re
   await sql.bootstrap(() => clock.now);
   await service.start();
   // A tick a manual run started may still be saving; the folder is removed only once nothing is in flight.
-  t.after(async () => { service.close(); for (let wait = 0; service.inFlight() && wait < 400; wait++) await new Promise(resolve => setTimeout(resolve, 5)); await service.settle(); await sql.client.close(); await rm(directory, { recursive: true, force: true }); });
-  const step = async () => { await service.tick(); for (let wait = 0; service.inFlight() && wait < 300; wait++) await new Promise(resolve => setTimeout(resolve, 5)); await service.tick(); };
+  t.after(async () => { service.close(); await until(() => !service.inFlight()); await service.settle(); await sql.client.close(); await rm(directory, { recursive: true, force: true }); });
+  const step = async () => { await service.tick(); await until(() => !service.inFlight()); await service.tick(); };
   const finish = (index: number, output = 'Done.', status: Run['status'] = 'completed') => Object.assign(runs[index], { status, output });
   const continueAfter = (index: number): Run => {
     const run: Run = { ...structuredClone(runs[index]), id: randomUUID(), status: 'queued', output: '', scheduled: { at: '', afterRunId: runs[index].id } };
@@ -444,14 +445,28 @@ test('a close that keeps failing is recorded after five tries, five minutes apar
 });
 
 test('HTTP 404 is recorded at once; 403, 429 and 5xx are tried again', async t => {
-  for (const [status, recorded] of [[404, true], [403, false], [429, false], [500, false]] as const) {
-    const { f, tries } = await closing(t, () => status);
-    await f.service.create(queue(f.project, { assign: false }), OWNER);
-    f.clock.now += 300_000; await f.step();
-    f.finish(0);
-    f.clock.now += 1000; await f.step();
-    assert.equal(tries(), 1, String(status));
-    assert.equal(f.service.events()[0].issueActions?.closeError, recorded ? `Closing the issue failed: GitHub answered HTTP ${status}.` : undefined, String(status));
+  // One watch works on four issues at once; GitHub answers each one's close with its own status.
+  const cases = [[404, true], [403, false], [429, false], [500, false]] as const;
+  const repos = { 'octo/app': cases.map((_, index) => ({ number: index + 1 })) as Issue[] };
+  const github = fakeGitHub(repos);
+  const tries = new Map<number, number>();
+  const answer: GitHubFetch = async (path, etag, send) => {
+    if (send?.method !== 'PATCH') return github.fetch(path, etag, send);
+    const number = Number(/\/issues\/(\d+)/.exec(path)?.[1]);
+    tries.set(number, (tries.get(number) ?? 0) + 1);
+    return { status: cases[number - 1]![0], body: {} };
+  };
+  const f = await fixture(t, { ...github, fetch: answer });
+  await f.service.updateSettings({ maxConcurrentRuns: cases.length }, OWNER);
+  await f.service.create(queue(f.project, { assign: false, concurrency: cases.length }), OWNER);
+  f.clock.now += 300_000; await f.step();
+  assert.deepEqual(numbers(f.service), [1, 2, 3, 4]);
+  cases.forEach((_, index) => f.finish(index));
+  f.clock.now += 1000; await f.step();
+  for (const [index, [status, recorded]] of cases.entries()) {
+    assert.equal(tries.get(index + 1), 1, String(status));
+    const event = f.service.events().find(item => numberOf(item) === index + 1)!;
+    assert.equal(event.issueActions?.closeError, recorded ? `Closing the issue failed: GitHub answered HTTP ${status}.` : undefined, String(status));
   }
 });
 

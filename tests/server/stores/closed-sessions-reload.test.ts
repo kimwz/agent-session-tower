@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import { mkdtemp, open, readFile, rename, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -46,8 +47,9 @@ test('a reload paused after reading cannot roll back a completed close; flush sh
       assert.equal(store.apply(session).closed, true);
     });
     flush = store.flush().then(() => { flushed = true; });
-    // Same actual-file ordering and bounded wait as the confirmed baseline repro.
-    await Promise.race([save, new Promise<void>(resolve => { timer = setTimeout(resolve, 3000); })]);
+    // Same actual-file ordering as the confirmed baseline repro. A set not queued behind the reload would finish its
+    // write (no disk flush in this file) within a few milliseconds; 150 ms is the bound.
+    await Promise.race([save, new Promise<void>(resolve => { timer = setTimeout(resolve, 150); })]);
     assert.equal(setCompleted, false, 'set must wait for the older reload in the owner queue');
     assert.equal(flushed, false, 'flush must wait for both queued operations');
     release();

@@ -1,12 +1,16 @@
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { MAX_WORKSPACE_FILE_BYTES } from '../../../server/workspace-files.js';
 import type { Snapshot } from '../../../shared/types.js';
+
+fastScrypt();
 
 test('remote editor authenticates file APIs and accepts escaped JSON for files near the text limit', async t => {
   const cwd = await mkdtemp(join(tmpdir(), 'tower-editor-http-'));

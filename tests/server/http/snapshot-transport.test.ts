@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { conversationRevision } from '../../../client/src/sessions/session-read-state.js';
 import type { Session, Run, Snapshot } from '../../../shared/types.js';

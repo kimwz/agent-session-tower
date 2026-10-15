@@ -1,6 +1,7 @@
 import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -124,7 +125,7 @@ test("the worker runs a controller's compaction once per request ID, and never o
   assert.equal(again?.id, first?.id);
   await assert.rejects(f.client.compaction('start', f.session.id, {}, { origin: remote }), /요청 ID/);
   // The conversation went on and another request compacted it since: a late copy of the first request is not run again.
-  for (let tries = 0; (await f.client.compaction('get', f.session.id))?.state !== 'failed'; tries++) { assert.ok(tries < 200, 'the first compaction ends'); await new Promise(resolve => setTimeout(resolve, 10)); }
+  await until(async () => (await f.client.compaction('get', f.session.id))?.state === 'failed');
   f.session.messageCount = 3; f.session.lastMessage = 'more';
   const second = await f.client.compaction('start', f.session.id, {}, { origin: remote, requestId: v7('000000000005') });
   assert.notEqual(second?.id, first?.id);

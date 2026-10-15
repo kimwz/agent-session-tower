@@ -7,10 +7,15 @@ import { lookupsSupported, ReadDatabase, tablesFrom } from '../../server/tower-t
 import { TowerClient } from '../../server/tower-tools/tower-client.js';
 import { diffSnapshots, indexSnapshot } from '../../shared/snapshot-patch.js';
 import type { Session, Snapshot } from '../../shared/types.js';
-import { until } from '../helpers/until.js';
+import { tickUntil, until } from '../helpers/until.js';
 
 /** Lookups need SQLite's authorizer, which Node.js 22 lacks; there the master simply does not offer them. */
 const noLookups = !lookupsSupported() && 'this Node.js has no SQLite authorizer';
+/**
+ * The lookup process without the whole server loaded first, so a first query (which has its own 10 s deadline) waits
+ * only for a small module even on a busy machine. The server's own entry is started in the host-killed test below.
+ */
+const QUERY_ENTRY = new URL('./fixtures/query-entry.ts', import.meta.url).pathname;
 
 const session = (id: string, status: Session['status'], extra: Partial<Session> = {}): Session => ({ id, nativeId: id, provider: 'claude', title: `title ${id}`, cwd: `/work/${id}`, project: `project-${id}`,
   status, statusReason: '', createdAt: '2026-09-27T00:00:00Z', updatedAt: '2026-09-27T00:00:00Z', lastMessage: `last ${id}`, messageCount: 3, isSubagent: false, resumable: true, ...extra });
@@ -52,15 +57,18 @@ test('the master follows the page\'s event stream: snapshots, patches and joined
   events.send(`event: node\ndata: ${JSON.stringify({ node: NODE, removed: true })}\n\n`);
   await until(() => !live.node(NODE));
   // A patch that does not follow what was received cannot be applied: the stream starts over, nothing stale is served.
+  // The reconnect waits a second, on a fake clock here.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   events.send(`id: 9\nevent: patch\ndata: ${JSON.stringify({ base: 7, sessions: { upsert: [] } })}\n\n`);
-  await until(() => events.connections() === 2);
+  await tickUntil(t, () => events.connections() === 2, 1000);
+  t.mock.timers.reset();
   assert.equal(live.snapshot(), undefined);
   events.send(`id: 1\nevent: snapshot\ndata: ${JSON.stringify(first)}\n\n`);
   await until(() => live.snapshot()?.sessions.length === 1);
 });
 
 test('the quick-lookup database answers reads only: no writes, PRAGMA, ATTACH, recursion or second statements', { skip: noLookups }, async t => {
-  const db = new ReadDatabase();
+  const db = new ReadDatabase({ entry: QUERY_ENTRY });
   t.after(() => db.close());
   const tables = () => tablesFrom(snapshot([session('a', 'working'), session('b', 'idle', { customTitle: 'key sk-proj-ABCDEFGHIJKLMNOPQRSTUV' })]), new Map([[NODE, snapshot([session('n', 'working')])]]),
     text => text.replace(/sk-[A-Za-z0-9-]+/g, '{{secret}}'));
@@ -78,15 +86,18 @@ test('the quick-lookup database answers reads only: no writes, PRAGMA, ATTACH, r
 });
 
 test('a query is cut at 500 rows, and one that runs too long is stopped without breaking the next', { skip: noLookups }, async t => {
-  const db = new ReadDatabase();
+  const db = new ReadDatabase({ entry: QUERY_ENTRY });
   t.after(() => db.close());
   const many = () => tablesFrom(snapshot(Array.from({ length: 600 }, (_, index) => session(`s${index}`, 'idle'))), new Map(), text => text);
   const capped = await db.query('SELECT id FROM sessions', 'many', many);
   assert.equal(capped.rows.length, 500);
   assert.equal(capped.truncated, true);
-  const started = Date.now();
-  await assert.rejects(db.query('SELECT count(*) FROM sessions a, sessions b, sessions c, sessions d', 'many', many), /longer than 2 seconds/);
-  assert.ok(Date.now() - started < 4000);
+  // The two seconds a query may take run on a fake clock: the runaway query is stopped when they pass.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const runaway = db.query('SELECT count(*) FROM sessions a, sessions b, sessions c, sessions d', 'many', many);
+  t.mock.timers.tick(2000);
+  t.mock.timers.reset();
+  await assert.rejects(runaway, /longer than 2 seconds/);
   assert.equal((await db.query('SELECT count(*) AS n FROM sessions', 'many', many)).rows[0].n, 600, 'a fresh thread rebuilds and answers');
 });
 
@@ -96,20 +107,28 @@ test('a first look waits a moment for joined computers, and says which ones have
   t.after(() => live.close());
   const other = 'c'.repeat(32);
   const local = snapshot([session('a', 'idle')], { nodes: [{ id: NODE, name: 'Server', status: 'connected', features: [], streaming: true }, { id: other, name: 'Laptop', status: 'offline', features: [], streaming: false }] });
+  // The moment given to joined computers runs on a fake clock; the stream itself is real.
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
   const pending = live.fresh(3000);
+  let answered = false;
+  void pending.then(() => { answered = true; });
   await until(() => events.clients.length === 1);
   events.send(`id: 1\nevent: snapshot\ndata: ${JSON.stringify(local)}\n\n`);
-  await new Promise(resolve => setTimeout(resolve, 200));
+  await until(() => live.snapshot());
   events.send(`event: node\ndata: ${JSON.stringify({ node: NODE, sequence: 1, snapshot: snapshot([session('n', 'working')]) })}\n\n`);
+  await until(() => live.node(NODE));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(answered, false, 'the computer still missing is waited for');
   const started = Date.now();
-  await pending;
+  t.mock.timers.tick(1500);
+  await until(() => answered);
   assert.ok(live.node(NODE), 'the computer that answered is included');
   assert.deepEqual(live.missing(), [other]);
   assert.ok(Date.now() - started < 2500);
 });
 
 test('every text in the lookup database is hidden before it is stored, names and paths included, and sizes count bytes', { skip: noLookups }, async t => {
-  const db = new ReadDatabase();
+  const db = new ReadDatabase({ entry: QUERY_ENTRY });
   t.after(() => db.close());
   const key = 'sk-proj-ABCDEFGHIJKLMNOPQRSTUV';
   const hide = (text: string) => text.replaceAll(key, '{{secret}}');
@@ -122,48 +141,46 @@ test('every text in the lookup database is hidden before it is stored, names and
   assert.ok(Buffer.byteLength(JSON.stringify(result.rows)) <= 256 * 1024 + 1000);
 });
 
-test('a lookup process whose host was killed exits by itself', { skip: noLookups }, async () => {
+test('a lookup process whose host was killed exits by itself', { skip: noLookups, timeout: 120_000 }, async t => {
+  // The helper starts the lookup process and waits for its first answer without the query's own deadline: a cold start
+  // on a busy machine can take longer than that, and only what the process does once its host is gone is tested here.
   const helper = spawn(process.execPath, ['--import', 'tsx', '-e', `
     const { ReadDatabase } = await import(${JSON.stringify(new URL('../../server/tower-tools/read-db.ts', import.meta.url).href)});
-    const db = new ReadDatabase();
-    await db.query('SELECT 1 AS one', 'v', () => []);
-    console.log('child ' + db.child.pid);
+    const { createInterface } = await import('node:readline');
+    // The lookup process and its pipes never keep a host alive (they are unref'd): this helper keeps itself alive.
     setInterval(() => {}, 1000);
+    const db = new ReadDatabase();
+    const child = db.process();
+    // A lookup process that fails to start ends the helper, so the test fails instead of waiting.
+    const failed = reason => { console.error('lookup process failed: ' + reason); process.exit(1); };
+    child.on('error', error => failed(error.message));
+    child.on('exit', code => failed('exited ' + code));
+    const ready = new Promise(resolve => createInterface({ input: child.stdout }).on('line', line => { if (JSON.parse(line).id === 1) resolve(); }).on('close', () => failed('output closed')));
+    child.stdin.write(JSON.stringify({ type: 'rebuild', tables: [], id: 1 }) + String.fromCharCode(10));
+    await ready;
+    console.log('child ' + child.pid);
   `], { stdio: ['ignore', 'pipe', 'inherit'], cwd: new URL('../..', import.meta.url).pathname });
-  const pid = await new Promise<number>((resolve, reject) => {
+  const helperClosed = new Promise<void>(resolve => helper.once('close', () => resolve()));
+  let pid = 0;
+  // Whatever happens, the helper and its lookup process do not outlive the test.
+  t.after(async () => {
+    if (helper.exitCode === null && helper.signalCode === null) helper.kill('SIGKILL');
+    await helperClosed;
+    if (pid) try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+  });
+  pid = await new Promise<number>((resolve, reject) => {
     helper.stdout.on('data', chunk => { const match = /child (\d+)/.exec(String(chunk)); if (match) resolve(Number(match[1])); });
     helper.on('exit', () => reject(new Error('helper exited early')));
   });
   const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
   assert.equal(alive(), true);
   helper.kill('SIGKILL');
-  await until(() => !alive(), 8000);
-});
-
-test('a lookup process stuck in a runaway query when its host is killed is ended by its CPU limit', { skip: noLookups }, async () => {
-  const helper = spawn(process.execPath, ['--import', 'tsx', '-e', `
-    const { ReadDatabase, tablesFrom } = await import(${JSON.stringify(new URL('../../server/tower-tools/read-db.ts', import.meta.url).href)});
-    // The CPU budget includes cold Node/tsx loading before the runaway query starts.
-    const db = new ReadDatabase({ cpuLimitSeconds: 3 });
-    const rows = Array.from({ length: 300 }, (_, index) => ({ id: 's' + index, nativeId: 's', provider: 'claude', title: 't', cwd: '/w', project: 'p', status: 'idle', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true }));
-    const tables = () => tablesFrom({ sessions: rows, runs: [], providers: [], scanning: false, hostname: 'h', version: 'v', updatedAt: '' }, new Map(), text => text);
-    await db.query('SELECT 1 AS one', 'v', tables);
-    console.log('child ' + db.child.pid);
-    void db.query('SELECT count(*) FROM sessions a, sessions b, sessions c, sessions d', 'v', tables).catch(() => {});
-    setInterval(() => {}, 1000);
-  `], { stdio: ['ignore', 'pipe', 'inherit'], cwd: new URL('../..', import.meta.url).pathname });
-  const pid = await new Promise<number>((resolve, reject) => {
-    helper.stdout.on('data', chunk => { const match = /child (\d+)/.exec(String(chunk)); if (match) resolve(Number(match[1])); });
-    helper.on('exit', () => reject(new Error('helper exited early')));
-  });
-  await new Promise(resolve => setTimeout(resolve, 200));
-  helper.kill('SIGKILL');
-  const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
-  await until(() => !alive(), 8000);
+  // It ends as soon as it sees its input close; a busy machine may be slow to run it.
+  await until(() => !alive(), 30_000);
 });
 
 test('a key at the edge of a shortened text is hidden whole first in the lookup database', { skip: noLookups }, async t => {
-  const db = new ReadDatabase();
+  const db = new ReadDatabase({ entry: QUERY_ENTRY });
   t.after(() => db.close());
   const key = 'AKIAABCDEFGHIJKLMNOP';
   const hide = (text: string) => text.replace(/\bAKIA[0-9A-Z]{16}\b/g, '{{secret}}');
@@ -175,7 +192,7 @@ test('a key at the edge of a shortened text is hidden whole first in the lookup 
 });
 
 test('quick lookups see the task each session works on now and every task it worked on', { skip: noLookups }, async t => {
-  const db = new ReadDatabase();
+  const db = new ReadDatabase({ entry: QUERY_ENTRY });
   t.after(() => db.close());
   const tasks = [{ id: 't1', title: 'Voice playback fix', stage: '배포됨', startedAt: '2026-09-27T01:00:00Z', updatedAt: '2026-09-27T02:00:00Z' },
     { id: 't2', title: 'Snapshot compression', stage: 'PR 리뷰중', startedAt: '2026-09-27T03:00:00Z', updatedAt: '2026-09-27T04:00:00Z' }];

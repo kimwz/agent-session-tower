@@ -14,7 +14,7 @@ import { MasterSettingsStore } from '../../server/master/settings.js';
 import { TowerClient } from '../../server/tower-tools/tower-client.js';
 import { frameAt, id3Size, MasterVoice } from '../../server/master/voice.js';
 import { withoutTag } from '../../server/master/mp3.js';
-import { FIRST_CHUNK, TextFollower } from '../../server/master/voice-stream.js';
+import { CHUNK_PAUSE_MS, FIRST_CHUNK, TextFollower } from '../../server/master/voice-stream.js';
 import { streamTone, VOICE_REST, VOICE_TONES, voicedChunk, voicedChunkPairs, voicedParts, voicedPartPairs } from '../../server/master/voice-text.js';
 
 /** What the fake fast model says first. */
@@ -27,6 +27,7 @@ import { SayOrder } from '../../shared/master/voice-order.js';
 import type { MasterEntry, MasterSay, MasterStreamEvent } from '../../shared/master.js';
 import type { Run, RunReply, Snapshot } from '../../shared/types.js';
 import { until } from '../helpers/until.js';
+import '../helpers/skip-fsync.js';
 import { audioSink } from '../../server/http/sinks.js';
 
 const TOKEN = 'a'.repeat(64);
@@ -233,7 +234,7 @@ async function harness(t: test.TestContext, options: { settings?: Record<string,
       return signal.aborted ? { skipped: 'failed' as const, warm: true } : { text: FIRST, warm: true };
     },
   };
-  const voice = new MasterVoice({ dataDir: dir, settings, room, elevenLabs, firstReply, timing: { firstChunkMs: 1_000, synthMs: 2_000, playMs: options.playMs ?? 2_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 },
+  const voice = new MasterVoice({ dataDir: dir, settings, room, elevenLabs, firstReply, timing: { firstChunkMs: 30_000, synthMs: 60_000, playMs: options.playMs ?? 2_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 },
     hooks: { hide: text => text, connectedSince: () => client.connectedSince(), send: input => session.spoken({ text: input.text, key: input.voice.key, voiceSession: input.voice.session ?? '' }),
       streamState: (turn, state) => session.voicedState(turn, state) } });
   session.setVoice(voice);
@@ -361,11 +362,14 @@ test('a turn that ends is answered at once, not at the next regular look', async
   h.write(run, 'm1:0', '네, 끝났어요.', true);
   h.finish(run);
   await h.entry(/끝났어요/);
-  assert.ok(Date.now() - started < 2_000, 'well before the next regular look');
+  // The next regular look is a minute away; 10 s is far below it on any machine.
+  assert.ok(Date.now() - started < 10_000, 'well before the next regular look');
 });
 
 test('many replies at once are all read in order, none of their audio pushed out while it waits', async t => {
-  const h = await harness(t, { page: { delayMs: 5 } });
+  const h = await harness(t, { page: { delayMs: 1 } });
+  // More than the 40 live audios kept; each made and played at once, so the 45 take no longer than they must.
+  h.labs.gapMs = 0;
   h.on();
   const { run } = await h.ask('많이 말해 줘');
   for (let index = 0; index < 45; index++) run.replies!.push({ id: `m${index}:0`, text: `${index}번째 짧은 말이에요.`, done: true });
@@ -539,7 +543,13 @@ test('words that keep coming after the first ones went to speech are read too, f
   await sleep(50);
   // Well after the turn's record was kept, more words come, in new objects each time.
   for (let index = 0; index < 3; index++) { await sleep(20); h.write(run, 'm1:0', `${index + 2}번째 문장을 이어서 말씀드려요, 조금 더 길게 써 볼게요. `); }
+  // Short words wait for the pause after the last chunk; the clock is moved past it instead of waiting it out.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  t.after(() => t.mock.timers.reset());
+  t.mock.timers.setTime(Date.now() + CHUNK_PAUSE_MS);
+  h.emit();
   await until(() => h.spoken().length >= 2 || undefined);
+  t.mock.timers.reset();
   h.write(run, 'm1:0', '끝.', true);
   await until(() => h.spoken().join(' ').endsWith('끝.') || undefined);
   assert.equal(h.spoken().join(' '), '첫 문장을 먼저 말씀드릴게요. 2번째 문장을 이어서 말씀드려요, 조금 더 길게 써 볼게요. 3번째 문장을 이어서 말씀드려요, 조금 더 길게 써 볼게요. 4번째 문장을 이어서 말씀드려요, 조금 더 길게 써 볼게요. 끝.');

@@ -1,7 +1,7 @@
 import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createServer, request } from 'node:http';
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -139,7 +139,10 @@ test('locked state does not stop a handoff and is never written over; the turn e
   web = new DurableRunManager({ stateDir, workerEntry: entry, pollMs: 10, version: '99.0.0' });
   clients.push(web);
   await web.start();
-  await new Promise(resolve => setTimeout(resolve, 1500));
+  // The request has reached the worker (start() waits for it); the worker then checks it a few more times.
+  const checked = () => existsSync(join(root, `checks-${first.pid}`)) ? statSync(join(root, `checks-${first.pid}`)).size : 0;
+  const target = checked() + 3;
+  await until(() => checked() >= target);
   assert.deepEqual(lines(join(root, 'handed-off.jsonl')), [], 'a running turn keeps the old worker');
   assert.equal(alive(first.pid!), true);
   await unchanged();

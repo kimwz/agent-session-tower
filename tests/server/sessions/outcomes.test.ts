@@ -7,6 +7,7 @@ import type { DecisionEngine } from '../../../server/decisions/engine.js';
 import { judgeable, lastTurn, outcomeMark, SessionOutcomes, type SessionOutcomeDependencies } from '../../../server/sessions/outcomes.js';
 import type { ChatMessage, Session } from '../../../shared/types.js';
 import type { DecisionRecord } from '../../../shared/decisions.js';
+import { until } from '../../helpers/until.js';
 
 const NOW = Date.now();
 const session = (id: string, patch: Partial<Session> = {}): Session => ({ id, nativeId: `n-${id}`, provider: 'claude', title: `Title ${id}`, cwd: '/work/app', project: 'app',
@@ -20,15 +21,15 @@ const answering = (choice: string, calls: unknown[] = []): DecisionEngine => ({ 
 
 async function setup(t: test.TestContext, patch: Partial<SessionOutcomeDependencies> & { list?: Session[] } = {}) {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-outcomes-'));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
   const records: Array<Omit<DecisionRecord, 'at'>> = [];
   let changes = 0;
   const list = patch.list ?? [session('a')];
   const outcomes = new SessionOutcomes({ stateDir, engine: () => answering('finished'), sessions: () => list,
     history: async () => [message('user', 'Deploy it'), message('tool', '', 'Bash'), message('assistant', 'Deployed 1.2.0.')],
     project: item => item.project, title: item => item.title, record: entry => records.push(entry), onChange: () => changes++, settleMs: 1, ...patch });
-  t.after(() => outcomes.close());
-  const settled = async () => { for (let i = 0; i < 50 && !changes; i++) await new Promise(resolve => setTimeout(resolve, 5)); await new Promise(resolve => setTimeout(resolve, 20)); };
+  t.after(async () => { await outcomes.close(); await rm(stateDir, { recursive: true, force: true }); });
+  /** Waits until a pass has judged every listed conversation (each judged one shows its outcome). */
+  const settled = () => until(() => list.every(item => outcomes.apply(item).outcome !== undefined));
   return { stateDir, outcomes, records, list, settled, changes: () => changes };
 }
 
@@ -83,9 +84,12 @@ test('a failed judgment is recorded, shows nothing and is not retried at once', 
   const failing: DecisionEngine = { provider: 'jev', label: 'Jev', decide: async () => { calls++; throw new Error('unavailable'); } };
   const { outcomes, records, list } = await setup(t, { engine: () => failing });
   await outcomes.start();
-  for (let i = 0; i < 50 && !records.length; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  await until(() => records.length > 0);
+  // Another pass runs to its end: it finds the failed turn too recent to ask again.
+  const internals = outcomes as unknown as { timer?: unknown; running?: unknown };
+  await until(() => !internals.timer && !internals.running);
   outcomes.changed();
-  await new Promise(resolve => setTimeout(resolve, 30));
+  await until(() => !internals.timer && !internals.running);
   assert.equal(calls, 1);
   assert.equal(records[0].result, 'failed');
   assert.equal(outcomes.apply(list[0]).outcome, undefined);

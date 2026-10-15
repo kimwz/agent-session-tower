@@ -1,5 +1,7 @@
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +11,8 @@ import { blockRename, temporaryFiles } from '../../helpers/private-writes.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import type { CreateSessionRequest, Run, Session, Snapshot } from '../../../shared/types.js';
 import { statusOf } from '../../../shared/errors.js';
+
+fastScrypt();
 
 const session: Session = { id: 'claude:fixture', nativeId: 'fixture', provider: 'claude', title: 'Native task', cwd: '/tmp', project: 'tmp', status: 'working',
   statusReason: 'Active in original application', createdAt: '2026-09-15T00:00:00Z', updatedAt: '2026-09-15T00:00:00Z', lastMessage: 'hello',

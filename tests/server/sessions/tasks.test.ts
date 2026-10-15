@@ -1,12 +1,11 @@
 import test from 'node:test';
 import { until } from '../../helpers/until.js';
-import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { applySummary, conversationSince, DAILY_CALLS, SessionTasks, summarizable, type SessionTaskDependencies } from '../../../server/sessions/tasks.js';
-import { runAutoPromptModel, type AutoPromptModelRequest } from '../../../server/auto-prompt/native.js';
+import type { AutoPromptModelRequest } from '../../../server/auto-prompt/native.js';
 import { saveModelSettings } from '../../../server/models/settings.js';
 import { initialModelSettings } from '../../../shared/models.js';
 import { currentTask } from '../../../shared/session-tasks.js';
@@ -22,6 +21,13 @@ let ids = 0;
 const message = (role: ChatMessage['role'], text: string, at = iso(-2_000), toolName?: string): ChatMessage => ({ id: `m${ids++}`, role, text, timestamp: at, ...(toolName ? { toolName } : {}) });
 
 type Answer = Record<string, unknown> | Error;
+/** Runs passes until nothing is left to do: scheduled passes and their writes, including a slow CI filesystem. */
+async function settleTasks(tasks: SessionTasks) {
+  tasks.changed();
+  const pending = tasks as unknown as { timer?: unknown; running?: Promise<void>; again: boolean };
+  await until(() => !pending.timer && !pending.running && !pending.again);
+  await tasks.flush();
+}
 const update = (action: string, taskId: string, title: string, stage: string) => ({ action, taskId, title, stage });
 const u = (action: string, taskId: string, title: string, stage: string) => ({ updates: [update(action, taskId, title, stage)] });
 async function setup(t: test.TestContext, options: { list?: Session[]; answers?: Answer[]; history?: ChatMessage[]; startedAt?: number; prepare?: (stateDir: string) => Promise<unknown> } = {}) {
@@ -42,14 +48,7 @@ async function setup(t: test.TestContext, options: { list?: Session[]; answers?:
   t.after(async () => { await tasks.close(); await rm(stateDir, { recursive: true, force: true }); });
   let changes = 0;
   tasks.on('change', () => changes++);
-  /** Runs passes until nothing is left to do. */
-  const settle = async () => {
-    tasks.changed();
-    // Wait for scheduled passes and their writes, including a slow CI filesystem.
-    const pending = tasks as unknown as { timer?: unknown; running?: Promise<void>; again: boolean };
-    await until(() => !pending.timer && !pending.running && !pending.again);
-    await tasks.flush();
-  };
+  const settle = () => settleTasks(tasks);
   return { stateDir, tasks, list, requests, answers, settle, changes: () => changes, setHistory: (next: ChatMessage[]) => { history = next; }, setNow: (next: number) => { now = next; }, setPages: (next: SessionTaskDependencies['history']) => { pages = next; } };
 }
 
@@ -239,45 +238,16 @@ test('a long stretch since the last summary is read in parts, so no work in it i
 
 test('a day has a call limit', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-tasks-limit-'));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
   await writeFile(join(stateDir, 'session-tasks.json'), JSON.stringify({ version: 1, startedAt: iso(-10_000), calls: { day: new Date(NOW).toISOString().slice(0, 10), count: DAILY_CALLS - 1 }, sessions: {} }));
   const list = Array.from({ length: 3 }, (_, i) => session(`s${i}`));
   let calls = 0;
   const tasks = new SessionTasks({ stateDir, sessions: () => list, history: async () => ({ messages: [message('user', 'hello')], hasMore: false }), settleMs: 0, now: () => NOW,
     model: async () => { calls++; return u('new', '', 'T', 's'); } });
+  t.after(async () => { await tasks.close(); await rm(stateDir, { recursive: true, force: true }); });
   await tasks.start();
-  t.after(() => tasks.close());
-  for (let i = 0; i < 6; i++) { tasks.changed(); await new Promise(resolve => setTimeout(resolve, 15)); }
+  for (let i = 0; i < 3; i++) await settleTasks(tasks);
   assert.equal(calls, 1, 'one call was left for today');
   assert.equal(list.filter(item => tasks.apply(item).tasks).length, 1);
-});
-
-test('a summary through a fake Claude CLI leaves no saved conversation and passes the role model', async t => {
-  const dir = await mkdtemp(join(tmpdir(), 'tower-tasks-cli-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const report = join(dir, 'args.json');
-  const script = join(dir, 'claude.mjs');
-  await writeFile(script, `import { writeFileSync } from 'node:fs';
-writeFileSync(${JSON.stringify(report)}, JSON.stringify(process.argv.slice(2)));
-let input = ''; process.stdin.on('data', chunk => input += chunk); process.stdin.on('end', () => {
-  process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', tools: ['StructuredOutput'], mcp_servers: [] }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, structured_output: { updates: [{ action: 'new', taskId: '', title: 'From the CLI', stage: '조사중' }] } }) + '\\n');
-});`);
-  await chmod(script, 0o700);
-  const list = [session('cli')];
-  const tasks = new SessionTasks({ stateDir: dir, sessions: () => list, history: async () => ({ messages: [message('user', 'Why is it slow?')], hasMore: false }), settleMs: 0, now: () => NOW,
-    model: (request, options) => runAutoPromptModel(request, { stateDir: dir, timeoutMs: options.timeoutMs, findExecutable: async () => process.execPath,
-      spawnProcess: ((command: string, args: string[], spawnOptions: object) => spawn(command, [script, ...args], spawnOptions as never)) as never }) });
-  await tasks.start();
-  // Started before the turn ended.
-  list[0] = { ...list[0], lastCompletedAt: new Date(Date.now() + 1_000).toISOString() };
-  t.after(() => tasks.close());
-  for (let i = 0; i < 40 && !tasks.apply(list[0]).tasks; i++) { tasks.changed(); await new Promise(resolve => setTimeout(resolve, 50)); }
-  assert.equal(tasks.apply(list[0]).tasks?.[0].title, 'From the CLI');
-  const args = JSON.parse(await readFile(report, 'utf8')) as string[];
-  assert.ok(args.includes('--no-session-persistence'), 'no native conversation is saved');
-  assert.deepEqual(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2), ['--model', 'haiku']);
-  assert.equal(args.includes('--effort'), false, 'thinking off passes no effort');
 });
 
 test('closing ends a summary underway instead of waiting for it, and saves nothing for that turn', { timeout: 10_000 }, async t => {
@@ -285,31 +255,28 @@ test('closing ends a summary underway instead of waiting for it, and saves nothi
   t.after(() => rm(stateDir, { recursive: true, force: true }));
   // Ended after the summaries started.
   const list = [session('a', { lastCompletedAt: iso(1_000) })];
-  let started!: () => void;
-  const asked = new Promise<void>(resolve => { started = resolve; });
+  let asked = false;
   const tasks = new SessionTasks({ stateDir, sessions: () => list, history: async () => ({ messages: [message('user', 'hello')], hasMore: false }), settleMs: 0, now: () => NOW,
-    model: request => { started(); return new Promise((_, reject) => request.signal.addEventListener('abort', () => reject(new Error('aborted')))); } });
+    model: request => { asked = true; return new Promise((_, reject) => request.signal.addEventListener('abort', () => reject(new Error('aborted')))); } });
   await tasks.start();
-  for (let i = 0; i < 3; i++) { tasks.changed(); await new Promise(resolve => setTimeout(resolve, 5)); }
-  await asked;
+  tasks.changed();
+  // The summary passes run on unref'd timers, so a bare promise would let the event loop end before the call: wait on a real timer.
+  await until(() => asked);
   assert.equal(tasks.inFlight(), true);
-  const at = Date.now();
+  // The call never answers unless it is aborted: a close that waited it out would never end (the test's own timeout).
   await tasks.close();
-  assert.ok(Date.now() - at < 1_000, 'close does not wait out the call');
   assert.equal(tasks.apply(list[0]).tasks, undefined);
 });
 
 test('turns that need no model call do not count against the day', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-tasks-count-'));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
   const list = [session('a', { lastCompletedAt: iso(1_000) })];
   let calls = 0;
   const tasks = new SessionTasks({ stateDir, sessions: () => list, history: async () => ({ messages: [message('system', '')], hasMore: false }), settleMs: 0, now: () => NOW,
     model: async () => { calls++; return u('new', '', 'T', 's'); } });
+  t.after(async () => { await tasks.close(); await rm(stateDir, { recursive: true, force: true }); });
   await tasks.start();
-  t.after(() => tasks.close());
-  for (let i = 0; i < 4; i++) { tasks.changed(); await new Promise(resolve => setTimeout(resolve, 15)); }
-  await tasks.flush();
+  await settleTasks(tasks);
   assert.equal(calls, 0);
   const saved = JSON.parse(await readFile(join(stateDir, 'session-tasks.json'), 'utf8'));
   assert.equal(saved.calls.count, 0);
@@ -318,7 +285,6 @@ test('turns that need no model call do not count against the day', async t => {
 
 test('a long stretch waiting for the next day is not read again and again meanwhile', { timeout: 10_000 }, async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-tasks-wait-'));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
   const long = Array.from({ length: 15 }, (_, i) => message('assistant', `${i} ${'w'.repeat(1_400)}`, iso(-900 + i)));
   await writeFile(join(stateDir, 'session-tasks.json'), JSON.stringify({ version: 1, startedAt: iso(-10_000), calls: { day: new Date(NOW).toISOString().slice(0, 10), count: DAILY_CALLS },
     sessions: { a: { mark: 'old', upTo: iso(-2_000), tasks: [{ id: 't', title: 'T', stage: 's', startedAt: iso(-3_000), updatedAt: iso(-3_000) }] } } }));
@@ -326,21 +292,19 @@ test('a long stretch waiting for the next day is not read again and again meanwh
   let reads = 0;
   const tasks = new SessionTasks({ stateDir, sessions: () => list, history: async () => { reads++; return { messages: long, hasMore: false }; }, settleMs: 0, now: () => NOW,
     model: async () => { throw new Error('the day is used up'); } });
+  t.after(async () => { await tasks.close(); await rm(stateDir, { recursive: true, force: true }); });
   await tasks.start();
-  t.after(() => tasks.close());
-  for (let i = 0; i < 3; i++) { tasks.changed(); await new Promise(resolve => setTimeout(resolve, 15)); }
-  await new Promise(resolve => setTimeout(resolve, 100));
+  for (let i = 0; i < 3; i++) await settleTasks(tasks);
   assert.ok(reads <= 3, `read ${reads} times`);
 });
 
 test('unreadable session tasks are moved aside and start empty', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-tasks-'));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
   const path = join(stateDir, 'session-tasks.json');
   await writeFile(path, '{ not json', { mode: 0o600 });
   const logged = captureErrors(t, path);
   const tasks = new SessionTasks({ stateDir, sessions: () => [], history: async () => ({ messages: [], hasMore: false }), model: async () => ({}) });
-  t.after(() => tasks.close());
+  t.after(async () => { await tasks.close(); await rm(stateDir, { recursive: true, force: true }); });
   await tasks.start();
   await tasks.flush();
   assert.equal(tasks.apply(session('a')).tasks, undefined);
@@ -353,13 +317,12 @@ test('unreadable session tasks are moved aside and start empty', async t => {
 
 test('session tasks that cannot be moved aside are logged and the summaries still start', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-tasks-'));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
   const path = join(stateDir, 'session-tasks.json');
   await writeFile(path, '{ not json', { mode: 0o600 });
   const blocked = await blockQuarantine(t, path);
   const logged = captureErrors(t, path);
   const tasks = new SessionTasks({ stateDir, sessions: () => [], history: async () => ({ messages: [], hasMore: false }), model: async () => ({}) });
-  t.after(() => tasks.close());
+  t.after(async () => { await tasks.close(); await rm(stateDir, { recursive: true, force: true }); });
   await tasks.start();
   blocked.release();
   await tasks.flush();

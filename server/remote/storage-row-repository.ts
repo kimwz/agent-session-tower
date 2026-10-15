@@ -4,6 +4,15 @@ import { StorageCommandError } from '../storage/contract.js';
 import type { ExternalHead } from './storage-row-commands.js';
 import { canonical, hash, EXTERNAL_INTENT_BYTES, EXTERNAL_CHUNK_BYTES, type ExternalCodec, type ExternalRow, type ExternalChange } from './storage-rows.js';
 export interface ExternalPending { commandId: string; command: string; payloadSha256: string; intent: string; intentSha256: string; requestSha256: string; finalSent: boolean; error: unknown }
+/** The final head check of loadRows: a write committed while the rows were read. */
+class ExternalFenceMoved extends Error {}
+/** First attempt included. */
+export const FENCE_ATTEMPTS = 3;
+/** The storage thread's refusal of a fenced read whose revision/generation is no longer current (storage-row-commands.ts current()). */
+const FENCE_REFUSAL = 'External authority/revision/generation changed.';
+/** Structural, not instanceof: a storage client loaded from another bundle (an older build) has its own error class. */
+const fenceMoved = (error: unknown): boolean => error instanceof ExternalFenceMoved
+  || error instanceof Error && error.name === 'StorageCommandError' && (error as { code?: unknown }).code === 'domain-failed' && error.message === FENCE_REFUSAL;
 /** One domain owner; uncertain writes fence later mutations, including after SDK reopen. */
 export class ExternalRowRepository {
   private uncertain?: ExternalPending;
@@ -17,7 +26,9 @@ export class ExternalRowRepository {
   }
   async head(): Promise<ExternalHead> { await this.gate();const h=await this.storage.read<ExternalHead>(this.codec.scope,'head',{});
     if(h.authority&&h.authority.authority!=='database') throw new Error('Legacy-exported authority requires explicit owner recovery.');return h; }
-  async loadRows(): Promise<ExternalRow[]> {
+  /** Fenced reads run outside the write queue: a write committing between head() and the read moves the fence, so the whole read restarts. */
+  async loadRows(): Promise<ExternalRow[]> { return this.fenced(() => this.loadRowsOnce()); }
+  private async loadRowsOnce(): Promise<ExternalRow[]> {
     const h=await this.head();if(!h.authority||h.revision===null) throw new Error(`${this.codec.scope} has no imported SQL authority.`);
     const fence={revision:h.revision,generation:h.authority.generation},rows:ExternalRow[]=[];let total=0;
     for(const collection of this.collections) {
@@ -35,7 +46,7 @@ export class ExternalRowRepository {
         after=page[page.length-1].ordinal+1;
       }
     }
-    const last=await this.head();if(last.revision!==h.revision||last.authority?.generation!==h.authority.generation) throw new Error('External rows changed during export.');
+    const last=await this.head();if(last.revision!==h.revision||last.authority?.generation!==h.authority.generation) throw new ExternalFenceMoved('External rows changed during export.');
     this.codec.validateCollection(rows);return rows;
   }
   update(changes: readonly ExternalChange[], id=`external-${randomUUID()}`): Promise<void> {
@@ -81,7 +92,13 @@ export class ExternalRowRepository {
       if (!direct) this.failure=error; throw error;
     }
   }
-  async unfinished(channel:string):Promise<boolean> {const h=await this.head();if(!h.authority) throw new Error('No SQL authority for unfinished view.');return this.storage.read<boolean>(this.codec.scope,'unfinished',{channel,revision:h.revision,generation:h.authority.generation});}
+  unfinished(channel:string):Promise<boolean> {return this.fenced(async () => {const h=await this.head();if(!h.authority) throw new Error('No SQL authority for unfinished view.');return this.storage.read<boolean>(this.codec.scope,'unfinished',{channel,revision:h.revision,generation:h.authority.generation});});}
+  /** Up to FENCE_ATTEMPTS tries of one read-only call; only a moved fence restarts it, and the last failure propagates. Never wrap writes. */
+  protected async fenced<T>(read: () => Promise<T>): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try { return await read(); } catch (error) { if (attempt >= FENCE_ATTEMPTS || !fenceMoved(error)) throw error; }
+    }
+  }
   /** Read-only resolution; neither stages nor external effects are replayed. */
   async resolveUnknown():Promise<'committed'|'not-committed'|'unknown'> {
     const p=this.uncertain;if(!p) return 'not-committed';

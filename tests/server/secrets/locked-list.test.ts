@@ -9,6 +9,9 @@ import { FixtureRuns, editPayload, legacyRecord, legacyRule, secretService } fro
 import { SECRET_LOCKED_UNINDEXED, SECRET_LOCKED_USE, SECRET_NO_VAULT } from '../../../server/secrets/notices.js';
 import type { SecretContext, SecretMetadata, SecretRule } from '../../../shared/secrets.js';
 import { statusOf } from '../../../shared/errors.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const PASSWORD = 'fixture-locked-list-password';
 const CANARY = 'LOCKED_LIST_VALUE_CANARY_5531';

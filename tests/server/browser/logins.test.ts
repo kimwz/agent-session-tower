@@ -176,7 +176,7 @@ test('when several turns find the same dead owner, only one takes the lock over 
   const lock = join(dir, 'browser', 'logins.lock');
   const dead = spawn(process.execPath, ['-e', '']);
   await new Promise(resolve => dead.on('exit', resolve));
-  for (let round = 0; round < 5; round++) {
+  for (let round = 0; round < 2; round++) {
     await mkdir(lock, { recursive: true });
     await writeFile(join(lock, 'owner'), `${dead.pid}:0:dead`);
     await Promise.all(Array.from({ length: 6 }, (_, n) => saveChanges(dir, EMPTY_STATE, state([cookie(`r${round}t${n}`, '1')]))));

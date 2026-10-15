@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SecretService } from '../../../server/secrets/service.js';
 import { editPayload, legacyRecord, legacyRule, secretService, stored, storedSecret, storedTask } from '../../helpers/secrets.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const password = 'owner-connect-fixture-password';
 async function fixture(run: (service: SecretService, setTime: (time: number) => void) => Promise<void>) {

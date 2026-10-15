@@ -1,11 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, rm, mkdir, symlink, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import { createMonitorServer, type Backend } from '../../../server/http/server.js';
 import type { Snapshot } from '../../../shared/types.js';
+
+fastScrypt();
 
 async function fixture(t: test.TestContext, retention?: Backend['retention']) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-retention-http-'));

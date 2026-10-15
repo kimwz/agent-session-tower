@@ -15,6 +15,11 @@ import type { SecretSessionView, SecretSettingsView, SecretValue } from '../../.
 import type { Snapshot } from '../../../shared/types.js';
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import { FixtureRuns, vaultTemplate } from '../../helpers/secrets.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
+
+fastVaultKdf();
+fastScrypt();
 
 /** The value routes over HTTP, from a remote HTTPS page and a loopback page, in front of a real secret runtime on a fixture vault. */
 const RECOVERY = 'fixture-value-http-recovery';
@@ -68,7 +73,7 @@ async function fixture(t: TestContext, account: 'configured' | 'unconfigured' | 
 }
 const code = (answer: Answer) => [answer.status, answer.body.code];
 
-test('a signed-in browser reads and edits values only after unlocking value viewing with the Tower password; nothing is cached', { timeout: 120_000 }, async t => {
+test('a signed-in browser reads and edits values only after unlocking value viewing with the Tower password; nothing is cached', async t => {
   const f = await fixture(t);
   const secret = await f.service.create({ name: 'HTTP value', kind: 'scalar', value: CANARY });
   const settings = await f.remote('/api/secrets/settings');
@@ -117,7 +122,7 @@ test('a signed-in browser reads and edits values only after unlocking value view
   const stored = await files(f.root); assert.equal(stored.includes(TOWER), false); assert.equal(stored.includes(CANARY), false);
 });
 
-test('a loopback page signs in to unlock value viewing; an older worker and a vault without a wrapper are answered with their codes', { timeout: 120_000 }, async t => {
+test('a loopback page signs in to unlock value viewing; an older worker and a vault without a wrapper are answered with their codes', async t => {
   const f = await fixture(t);
   const secret = await f.service.create({ name: 'local value', kind: 'scalar', value: CANARY });
   assert.equal((await f.call('/api/secrets/settings')).body.valueView, false);
@@ -150,7 +155,7 @@ test('a loopback page signs in to unlock value viewing; an older worker and a va
   assert.equal(((await f.call('/api/secrets/unlock', { body: { password: RECOVERY }, cookie })).body as unknown as SecretSettingsView).status.locked, false);
 });
 
-test('value viewing needs a Tower login account; the old update route is gone', { timeout: 60_000 }, async t => {
+test('value viewing needs a Tower login account; the old update route is gone', async t => {
   for (const account of ['unconfigured', 'none'] as const) {
     const f = await fixture(t, account);
     const answer = await f.call('/api/secrets/view-unlock', { body: { password: TOWER } });
@@ -161,7 +166,7 @@ test('value viewing needs a Tower login account; the old update route is gone', 
   }
 });
 
-test('only the owner\'s own local page changes the login; the answer says what happened to the vault', { timeout: 60_000 }, async t => {
+test('only the owner\'s own local page changes the login; the answer says what happened to the vault', async t => {
   const f = await fixture(t);
   await f.runtime.control('tower-wrap', { password: TOWER, credentialId: f.auth!.currentCredentialId() });
   const before = f.auth!.currentCredentialId()!; const body = { username: 'monitor', password: 'fixture-changed-password' };

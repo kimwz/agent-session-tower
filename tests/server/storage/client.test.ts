@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import type { StorageStatus } from '../../../server/storage/contract.js';
-import { databasePath, filesUnder, fixtureBundle, openFixture, rejectsWith, sleep, stateDir, storage, threadBundle } from './helpers.js';
+import { databasePath, filesUnder, fixtureBundle, openFixture, rejectsWith, stateDir, storage, threadBundle } from './helpers.js';
 
 const { openStorage } = storage;
 
@@ -145,15 +145,25 @@ test('a missed deadline fails the storage: the running write is unknown, waiting
   const statuses: StorageStatus[] = [];
   const client = await openFixture(t, dir, { limits: { commandDeadlineMs: 1000 }, onUnavailable: status => statuses.push(status) });
   await client.prepare({ allowMigration: true });
+  // The thread spins past the deadline; the deadline, and the minute after it, pass on a fake clock.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => t.mock.timers.reset());
+  const turn = () => new Promise(resolve => setImmediate(resolve));
   const slow = client.write('fixture', 'spinWrite', { key: 'slow', ms: 1600 }, 'slow-1');
   const queued = client.write('fixture', 'put', { key: 'after', value: '1' }, 'after-1');
+  let answered = false;
+  void slow.then(() => { answered = true; }, () => { answered = true; });
+  void queued.catch(() => {}); // answered below, once the deadline has passed
+  while (!answered) { t.mock.timers.tick(1000); await turn(); }
   await rejectsWith(slow, { code: 'deadline-exceeded', phase: 'deadline', disposition: 'unknown', retryable: true, commandId: 'slow-1' });
   await rejectsWith(queued, { code: 'deadline-exceeded', disposition: 'not-committed' });
   assert.equal(client.status().state, 'unavailable');
   assert.equal(statuses.length, 1);
   assert.equal(statuses[0].failure?.phase, 'deadline');
-  await sleep(800);
+  t.mock.timers.tick(60_000);
+  await turn();
   assert.equal(client.status().state, 'unavailable', 'nothing reopens it on its own');
+  t.mock.timers.reset();
   await rejectsWith(client.inspect(), { code: 'deadline-exceeded', disposition: 'not-committed' });
 
   // The explicit retry, then the receipt settles what the deadline left unknown: here terminating the thread stopped

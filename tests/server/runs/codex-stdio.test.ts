@@ -10,7 +10,7 @@ import { runToolResolver } from '../../../server/api/run-tools.js';
 import type { Run, Session } from '../../../shared/types.js';
 import type { RunApproval } from '../../../shared/types.js';
 import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioResult } from '../../../server/runs/codex-stdio.js';
-import { until } from '../../helpers/until.ts';
+import { settle, until } from '../../helpers/until.ts';
 import { SECRET_CONNECTION_INSTRUCTIONS, SECRET_USE_INSTRUCTIONS } from '../../../server/secrets/notices.js';
 import { parseMessages, towerInstructionsBlock } from '../../../server/sessions/parser.js';
 
@@ -355,7 +355,12 @@ test('owned processes that ignore termination or leave stdout descendants are re
   for (const mode of ['ignore-stop', 'orphan']) await t.test(mode, async t => {
     const f = await fixture(t, mode);
     await f.run.start();
-    if (mode === 'ignore-stop') f.run.close();
+    if (mode === 'ignore-stop') {
+      // The 2 s grace before SIGKILL runs on a fake clock.
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      f.run.close();
+      t.mock.timers.tick(2000);
+    }
     await f.run.done;
     assert.equal(f.finished[0].status, 'error');
     assert.ok(f.child().exitCode !== null || f.child().signalCode !== null);
@@ -383,9 +388,15 @@ for (const mode of ['steer-ok', 'steer-rejected', 'steer-mismatch', 'steer-lost'
     await assert.rejects(f.run.steer!({ id: 'queued', prompt: 'later' }), { disposition: 'rejected' });
     await f.run.start();
     assert.equal(f.run.canSteer!(), true);
+    // The 15 s answer deadline runs on a fake clock; the provider process stays real.
+    if (mode === 'steer-timeout') t.mock.timers.enable({ apis: ['setTimeout'] });
     const result = f.run.steer!({ id: 'queued', prompt: 'New instruction', imagePaths: ['/tmp/image path.png'] });
     assert.equal(f.run.canSteer!(), false);
     await assert.rejects(f.run.steer!({ id: 'duplicate', prompt: 'later' }), { disposition: 'rejected' });
+    if (mode === 'steer-timeout') {
+      await settle(() => f.sent.some(frame => frame.method === 'turn/steer'));
+      t.mock.timers.tick(15_000);
+    }
     if (mode === 'steer-ok') await result;
     else await assert.rejects(result, { disposition: mode === 'steer-rejected' ? 'rejected' : 'uncertain' });
     assert.deepEqual(f.sent.find(frame => frame.method === 'turn/steer')?.params, {

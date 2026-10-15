@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import { AuthStore, canonicalIp, isLoopbackAddress, sessionKey } from '../../../server/auth/store.js';
 import { statusOf } from '../../../shared/errors.js';
 import { blockRename } from '../../helpers/private-writes.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
+
+fastScrypt();
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'tower-auth-'));
@@ -27,6 +30,8 @@ test('credentials are hashed and private; sessions bind IP and revoke on change'
     await f.store.setCredentials(' admin ', 'password-test-123');
     const raw = await readFile(join(f.dir, 'auth.json'), 'utf8');
     assert.ok(!raw.includes('password-test-123'));
+    const saved = JSON.parse(raw);
+    assert.deepEqual([saved.algorithm, saved.N, saved.r, saved.p, saved.salt.length, saved.hash.length], ['scrypt', 131072, 8, 1, 64, 128]);
     assert.equal((await stat(join(f.dir, 'auth.json'))).mode & 0o777, 0o600);
     const result = await f.store.login('192.0.2.1', 'admin', 'password-test-123');
     assert.equal(result.status, 'success'); assert.ok(result.sessionId);

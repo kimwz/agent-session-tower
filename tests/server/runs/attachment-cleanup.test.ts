@@ -19,6 +19,7 @@ import { RunManager, fixtureDocuments, importFixtureRuns } from './sql-fixture.j
 import { AutoPromptManager } from '../../../server/auto-prompt/manager.js';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
 import type { Session, Snapshot } from '../../../shared/types.js';
+import { CheckDriver } from './fixtures/worker-checks.ts';
 
 function gate<T = void>() { let resolve!: (value: T) => void; let reject!: (error: Error) => void; const promise = new Promise<T>((ok, fail) => { resolve = ok; reject = fail; }); return { promise, resolve, reject }; }
 interface CleanupInternals { attachments: AttachmentStore; cleanupAttachments(): Promise<void>; attachmentCleanupTimer?: ReturnType<typeof setInterval> }
@@ -160,7 +161,8 @@ async function host(f: Awaited<ReturnType<typeof fixture>>, extra: Partial<Param
   const paths = await runnerPaths(f.directory);
   // The custom release fixture replaces acquireStateLock, including its runtime-directory setup.
   await mkdir(paths.runtime, { recursive: true, mode: 0o700 });
-  const result = await startRunnerHost({ stateDir: f.directory, runs: f.runs, sessions, ...extra });
+  // The worker's once-a-second handoff check runs every few milliseconds, so a requested handoff starts at once.
+  const result = await startRunnerHost({ stateDir: f.directory, runs: f.runs, sessions, scheduleChecks: new CheckDriver().schedule, ...extra });
   return result;
 }
 async function requestHandoff(directory: string, method = 'requestHandoff') {

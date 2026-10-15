@@ -4,7 +4,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { createHash } from 'node:crypto';
 import { TowerError } from '../../../shared/errors.js';
 import { spawn } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +13,7 @@ import { PermissionRunner, processStart } from '../../../server/permissions/runn
 import { noStorageFixture, permissionFixture, closePermissionFixture } from './storage-fixture.js';
 import { PermissionService } from '../../../server/permissions/service.js';
 import { storage, threadBundle } from '../storage/helpers.js';
+import { settle, tickUntil } from '../../helpers/until.ts';
 import type { RunnerOptions } from '../../../server/permissions/runner.js';
 import { autoReviewBlock, type PermissionRun } from '../../../shared/permissions.js';
 
@@ -79,12 +80,25 @@ test('the same command, or the same key, returns the same request instead of run
 
 test('a run past its time limit is stopped with everything it started', async t => {
   const f = await fixture(t);
+  // The time limit runs on a fake clock that moves only once the command has started its child; the processes stay real.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => t.mock.timers.reset());
   const asked = await f.service.requestRun({ command: 'sleep 30 & echo $! > child.pid; sleep 30', reason: 'r', timeoutSeconds: 1 }, agent('claude:one'));
   await f.service.decide(asked.request.id!, true);
-  const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 15 }, agent('claude:one'));
+  const pidFile = join(f.project, 'child.pid');
+  await settle(() => { try { return /^\d+\n$/.test(readFileSync(pidFile, 'utf8')); } catch { return false; } }, 0);
+  const child = Number(readFileSync(pidFile, 'utf8').trim());
+  assert.ok(alive(child));
+  t.mock.timers.tick(999);
+  await settle(() => true, 20);
+  assert.ok(f.runner.isRunning(asked.request.id!) && alive(child), 'not stopped before its limit');
+  t.mock.timers.tick(1);
+  // The kill grace and output waits run on the same fake clock.
+  await tickUntil(t, () => !f.runner.isRunning(asked.request.id!), 1_000);
+  t.mock.timers.reset();
+  const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 0 }, agent('claude:one'));
   assert.equal(result.request.run!.timedOut, true);
-  const child = Number((await readFile(join(f.project, 'child.pid'), 'utf8')).trim());
-  await until(() => !alive(child), 3_000);
+  await until(() => !alive(child), 10_000);
 });
 
 test('what a finished command leaves running in its group is stopped too', async t => {
@@ -214,11 +228,11 @@ test('one conversation’s runs go one after another, and nothing starts while a
   const f = await fixture(t);
   let release!: () => void;
   f.runner.hold(new Promise<void>(resolve => { release = resolve; }));
-  const first = await f.service.requestRun({ command: 'sleep 0.5; perl -MTime::HiRes=time -e "printf q(%.6f), time" > first', reason: 'r' }, agent('claude:one'));
+  const first = await f.service.requestRun({ command: 'sleep 0.2; perl -MTime::HiRes=time -e "printf q(%.6f), time" > first', reason: 'r' }, agent('claude:one'));
   const second = await f.service.requestRun({ command: 'perl -MTime::HiRes=time -e "printf q(%.6f), time" > second', reason: 'r' }, agent('claude:one'));
   await f.service.decide(first.request.id!, true);
   await f.service.decide(second.request.id!, true);
-  await new Promise(resolve => setTimeout(resolve, 300));
+  await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(f.service.overview().requests.find(item => item.id === first.request.id!)!.run!.status, 'waiting', 'held until recovery is done');
   assert.ok(f.runner.inFlight());
   release();
@@ -316,14 +330,15 @@ test('lines joined by a backslash are checked as one command', () => {
 
 test('a finished command is done even when a child it left holds the output open', async t => {
   const f = await fixture(t);
-  const asked = await f.service.requestRun({ command: 'sleep 20 & echo done', reason: 'r', timeoutSeconds: 10 }, agent('claude:one'));
+  const asked = await f.service.requestRun({ command: 'sleep 20 & echo done', reason: 'r', timeoutSeconds: 30 }, agent('claude:one'));
   const began = Date.now();
   await f.service.decide(asked.request.id!, true);
   const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 15 }, agent('claude:one'));
   assert.equal(result.request.run!.exitCode, 0);
   assert.equal(result.request.run!.timedOut, undefined);
   assert.equal(result.output!.stdout, 'done\n');
-  assert.ok(Date.now() - began < 8_000);
+  // The child holds the output for 20 s; waiting for it would take that long, and 10 s is far below it.
+  assert.ok(Date.now() - began < 10_000);
 });
 
 test('a rule for one conversation allowed late lasts from the decision; it leaves other conversations’ and the project’s rules alone', async t => {
@@ -351,12 +366,14 @@ test('a refused request with a key can be asked again with that key', async t =>
 
 test('a run still going is reported as such without output, and stays to be told', async t => {
   const f = await fixture(t);
-  const asked = await f.service.requestRun({ command: 'sleep 2', reason: 'r' }, agent('claude:one'));
+  // The command ends once the test lets it, after its early result was read.
+  const asked = await f.service.requestRun({ command: 'while [ ! -f go ]; do sleep 0.02; done', reason: 'r' }, agent('claude:one'));
   await f.service.decide(asked.request.id!, true, undefined, true);
   await until(() => f.service.overview().requests[0]!.run!.status === 'running');
   const early = await f.service.runResult({ id: asked.request.id!, waitSeconds: 0 }, agent('claude:one'));
   assert.equal(early.request.run!.status, 'running');
   assert.equal(early.output, undefined);
+  await writeFile(join(f.project, 'go'), '');
   await f.runner.flush();
   assert.deepEqual(f.service.untoldRuns().map(item => item.id), [asked.request.id]);
 });
@@ -545,13 +562,15 @@ test('storage hold keeps a same-conversation slot waiter while the owned command
   service = f.service;
   const db = await storage.openStorage({ stateDir: f.stateDir, bundle: threadBundle('production') });
   await db.prepare({ allowMigration: true }); t.after(() => db.close());
-  const first = await service.requestRun({ command: 'sleep 0.5; echo first', reason: 'fixture' }, agent('claude:one'));
+  // The first command drains once the test lets it, so it is surely still running while the storage is held.
+  const first = await service.requestRun({ command: 'while [ ! -f go ]; do sleep 0.02; done; echo first', reason: 'fixture' }, agent('claude:one'));
   const second = await service.requestRun({ command: 'echo once >> executions', reason: 'fixture' }, agent('claude:one'));
   await service.decide(first.request.id!, true);
   await until(() => service.overview().requests.find(r => r.id === first.request.id)?.run?.status === 'running');
   await service.decide(second.request.id!, true);
   f.runner.holdStorage();
   assert.equal(f.runner.active(), true);
+  await writeFile(join(f.project, 'go'), '');
   await f.runner.flush();
   assert.equal(service.overview().requests.find(r => r.id === second.request.id)!.run!.status, 'waiting');
   assert.equal((await db.gate('core')).open, true);

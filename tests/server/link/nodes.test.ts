@@ -1,5 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import { get, type IncomingMessage } from 'node:http';
 import { mkdir, mkdtemp, realpath, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -95,12 +96,19 @@ async function tower(t: TestContext) {
   return { stateDir, identity, controller, nodes, base, post, sentToNodes, setLocal: (next: Snapshot) => { local = next; } };
 }
 
-/** The page's event stream, as frames. */
+/**
+ * How long a page frame or a link change may take: only real work stands in the way (sockets, TLS, the servers of two
+ * Towers in one process), and a busy runner has taken over five seconds for it.
+ */
+const WAIT = 30_000;
+
+/** The page's event stream, as frames. A stream that fails or is refused fails the test at once instead of staying silent. */
 function events(t: TestContext, url: string) {
   const frames: Array<{ event: string; data: any }> = [];
   let response: IncomingMessage | undefined;
   const request = get(url, res => {
     response = res;
+    assert.equal(res.statusCode, 200, `the page's event stream was refused: ${res.statusCode}`);
     let buffer = '';
     res.setEncoding('utf8');
     res.on('data', chunk => {
@@ -114,8 +122,9 @@ function events(t: TestContext, url: string) {
       }
     });
   });
-  request.on('error', () => {});
-  t.after(() => { request.destroy(); response?.destroy(); });
+  let closing = false;
+  request.on('error', error => { if (!closing) throw error; });
+  t.after(() => { closing = true; request.destroy(); response?.destroy(); });
   return frames;
 }
 
@@ -131,18 +140,18 @@ test('a joined computer’s shared sessions reach this Tower’s page on the sam
   const a = await tower(t);
   const b = await joined(t, a, 'computer-b');
   const frames = events(t, `${a.base}/api/events?patch=1&nodes=1`);
-  const first = await until(() => frames.find(frame => frame.event === 'node'), 5000);
+  const first = await until(() => frames.find(frame => frame.event === 'node'), WAIT);
   assert.equal(first.data.node, b.id);
   assert.deepEqual(first.data.snapshot.sessions.map((item: Session) => item.id), ['codex:shared'], 'excluded folders never leave the joined computer');
   const own = frames.find(frame => frame.event === 'snapshot');
   assert.deepEqual(own?.data.nodes.map((item: { name: string; status: string; streaming: boolean }) => [item.name, item.status, item.streaming]), [['computer-b', 'connected', true]]);
   b.sessions[0] = { ...b.sessions[0], title: 'Renamed over there' };
   b.changed();
-  const patch = await until(() => frames.find(frame => frame.event === 'node' && frame.data.patch), 5000);
+  const patch = await until(() => frames.find(frame => frame.event === 'node' && frame.data.patch), WAIT);
   assert.deepEqual(patch.data.patch.sessions.upsert.map((item: Session) => item.title), ['Renamed over there']);
   // A page that does not ask for joined computers sees only this Tower, as before.
   const plain = events(t, `${a.base}/api/events?patch=1`);
-  await until(() => plain.find(frame => frame.event === 'snapshot'), 5000);
+  await until(() => plain.find(frame => frame.event === 'snapshot'), WAIT);
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(plain.some(frame => frame.event === 'node'), false);
 });
@@ -162,7 +171,7 @@ test('requests for a joined computer pass through its link with only the headers
   assert.deepEqual(b.calls.at(-1)?.args.slice(0, 2), ['codex:shared', 'continue']);
   assert.deepEqual((b.calls.at(-1)?.args[2] as RequestContext).origin, { kind: 'owner', controllerId: a.identity.id });
   // The message as that computer accepted it is handed on here, to be judged for inserting into its running turn.
-  await until(() => a.sentToNodes.length > 0, 5000);
+  await until(() => a.sentToNodes.length > 0, WAIT);
   assert.deepEqual(a.sentToNodes.map(({ node, run }) => [node, run.id, run.sessionId]), [[b.id, 'run-new', 'codex:shared']]);
   await fetch(`${a.base}/api/nodes/${b.id}/sessions/codex:shared`);
   assert.equal(a.sentToNodes.length, 1, 'only a sent message is handed on');
@@ -171,7 +180,7 @@ test('requests for a joined computer pass through its link with only the headers
   assert.equal((await refused.json() as { code: string }).code, 'node-refused');
   assert.equal((await fetch(`${a.base}/api/nodes/0123456789abcdef0123456789abcdef/sessions/codex:shared`)).status, 404);
   await b.stop();
-  await until(() => a.controller.list().find(item => item.id === b.id && item.status === 'offline'), 5000);
+  await until(() => a.controller.list().find(item => item.id === b.id && item.status === 'offline'), WAIT);
   const offline = await fetch(`${a.base}/api/nodes/${b.id}/sessions/codex:shared`);
   assert.equal(offline.status, 503);
   assert.equal((await offline.json() as { code: string }).code, 'node-offline');
@@ -181,9 +190,9 @@ test('pins and hidden folders for another computer are kept by this Tower, never
   const a = await tower(t);
   const b = await joined(t, a, 'computer-b');
   const frames = events(t, `${a.base}/api/events?patch=1&nodes=1`);
-  await until(() => frames.find(frame => frame.event === 'node'), 5000);
+  await until(() => frames.find(frame => frame.event === 'node'), WAIT);
   assert.equal((await a.post(`/api/nodes/${b.id}/view`, { cwd: b.open, hidden: true })).status, 200);
-  const hidden = await until(() => frames.find(frame => frame.event === 'node' && frame.data.patch?.fields?.groups), 5000);
+  const hidden = await until(() => frames.find(frame => frame.event === 'node' && frame.data.patch?.fields?.groups), WAIT);
   assert.deepEqual(hidden.data.patch.fields.groups, [{ cwd: b.open, title: '', pinned: false, hidden: true }]);
   assert.equal(b.calls.some(call => call.method === 'setGroup'), false);
   assert.match(await readFile(join(a.stateDir, 'link', 'views.json'), 'utf8'), /"hidden":true/);
@@ -197,12 +206,12 @@ test('a joined computer that goes away stays shown as last seen, and leaves the 
   const a = await tower(t);
   const b = await joined(t, a, 'computer-b');
   const frames = events(t, `${a.base}/api/events?patch=1&nodes=1`);
-  await until(() => frames.find(frame => frame.event === 'node'), 5000);
+  await until(() => frames.find(frame => frame.event === 'node'), WAIT);
   await b.stop();
-  await until(() => frames.find(frame => frame.event === 'patch' && frame.data.fields?.nodes?.[0]?.streaming === false), 5000);
+  await until(() => frames.find(frame => frame.event === 'patch' && frame.data.fields?.nodes?.[0]?.streaming === false), WAIT);
   assert.deepEqual(a.nodes.snapshot(b.id)?.sessions.map(item => item.id), ['codex:shared'], 'its last state stays in memory');
   await a.controller.remove(b.id);
-  const removed = await until(() => frames.find(frame => frame.event === 'node' && frame.data.removed), 5000);
+  const removed = await until(() => frames.find(frame => frame.event === 'node' && frame.data.removed), WAIT);
   assert.equal(removed.data.node, b.id);
   assert.equal(a.nodes.snapshot(b.id), undefined);
 });
@@ -215,7 +224,7 @@ test('two joined computers with the same folder and session ids stay apart in st
   const b = await joined(t, a, 'computer-b', folder);
   const c = await joined(t, a, 'computer-c', folder);
   const frames = events(t, `${a.base}/api/events?patch=1&nodes=1`);
-  await until(() => frames.filter(frame => frame.event === 'node').length >= 2 || undefined, 5000);
+  await until(() => frames.filter(frame => frame.event === 'node').length >= 2 || undefined, WAIT);
   const streams = frames.filter(frame => frame.event === 'node');
   assert.deepEqual(streams.map(frame => frame.data.node).sort(), [b.id, c.id].sort());
   for (const frame of streams) assert.deepEqual(frame.data.snapshot.sessions.map((item: Session) => [item.id, item.cwd]), [['codex:shared', folder]]);
@@ -225,7 +234,7 @@ test('two joined computers with the same folder and session ids stay apart in st
   assert.deepEqual(b.calls, []);
   // Hiding the folder on one computer leaves the same folder on the other as it was.
   assert.equal((await a.post(`/api/nodes/${b.id}/view`, { cwd: folder, hidden: true })).status, 200);
-  await until(() => a.nodes.snapshot(b.id)?.groups?.some(group => group.hidden), 5000);
+  await until(() => a.nodes.snapshot(b.id)?.groups?.some(group => group.hidden), WAIT);
   assert.equal(a.nodes.snapshot(c.id)?.groups?.some(group => group.hidden), false);
 });
 
@@ -251,12 +260,12 @@ test('a request whose answer is lost after it left says it may have run, so the 
   const a = await tower(t);
   const b = await joined(t, a, 'computer-b');
   const pending = fetch(`${a.base}/api/nodes/${b.id}/hang`);
-  await until(() => b.seen.find(item => item.url === '/api/hang'), 5000);
+  await until(() => b.seen.find(item => item.url === '/api/hang'), WAIT);
   await b.stop();
   const lost = await pending;
   assert.equal(lost.status, 502);
   assert.equal((await lost.json() as { disposition: string }).disposition, 'uncertain');
-  await until(() => a.controller.list().find(item => item.id === b.id && item.status === 'offline'), 5000);
+  await until(() => a.controller.list().find(item => item.id === b.id && item.status === 'offline'), WAIT);
   const offline = await fetch(`${a.base}/api/nodes/${b.id}/sessions/codex:shared`);
   assert.equal((await offline.json() as { disposition: string }).disposition, 'not-admitted', 'nothing left for an offline computer');
 });

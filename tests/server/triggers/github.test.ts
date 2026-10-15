@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { until } from '../../helpers/until.js';
 import test, { type TestContext } from 'node:test';
 import { checkGitHub, GitHubError, keyOf, passed, type GitHubCursor, type GitHubFetch, type GitHubIssue, type GitHubResponse } from '../../../server/triggers/github.js';
 import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
@@ -202,8 +203,8 @@ async function fixture(t: TestContext, github: ReturnType<typeof fakeGitHub>) {
   await sql.bootstrap(() => clock.now);
   await service.start();
   // A tick a manual run started may still be saving; the folder is removed only once nothing is in flight.
-  t.after(async () => { service.close(); for (let wait = 0; service.inFlight() && wait < 400; wait++) await new Promise(resolve => setTimeout(resolve, 5)); await service.settle(); await sql.client.close(); await rm(directory, { recursive: true, force: true }); });
-  const step = async () => { await service.tick(); for (let wait = 0; service.inFlight() && wait < 300; wait++) await new Promise(resolve => setTimeout(resolve, 5)); await service.tick(); };
+  t.after(async () => { service.close(); await until(() => !service.inFlight()); await service.settle(); await sql.client.close(); await rm(directory, { recursive: true, force: true }); });
+  const step = async () => { await service.tick(); await until(() => !service.inFlight()); await service.tick(); };
   return { directory, sql, project, clock, calls, service, step };
 }
 
@@ -290,7 +291,7 @@ test('a changed gh login is checked again before anything is read, and GitHub ra
   await sql.bootstrap(() => clock.now);
   await service.start();
   // A tick a manual run started may still be saving; the folder is removed only once nothing is in flight.
-  t.after(async () => { service.close(); for (let wait = 0; service.inFlight() && wait < 400; wait++) await new Promise(resolve => setTimeout(resolve, 5)); await service.settle(); await sql.client.close(); await rm(directory, { recursive: true, force: true }); });
+  t.after(async () => { service.close(); await until(() => !service.inFlight()); await service.settle(); await sql.client.close(); await rm(directory, { recursive: true, force: true }); });
   const trigger = await service.create(watcher(project), OWNER);
   await assert.rejects(service.run(trigger.id, OWNER), /noted the issues already open/);
   // The gh login changes to another account: the next check notices before reading issues.
@@ -302,10 +303,9 @@ test('a changed gh login is checked again before anything is read, and GitHub ra
   // A used-up rate limit on the account check holds every check, manual ones too, until it resets.
   data.login = 'me';
   const reset = Math.floor((clock.now + 3_600_000) / 1000);
-  const limitedDirectory = join(directory, 'limited'); await mkdir(limitedDirectory, { mode: 0o700 });
-  const limitedSQL = await actualStorage(t, limitedDirectory);
-  await limitedSQL.bootstrap(() => clock.now);
-  const limited = new TriggerService({ stateDir: limitedDirectory, storage: limitedSQL.client, executor: { runs: () => [], session: () => undefined, getAutoPrompt: () => undefined } as unknown as TriggerExecutor,
+  // Another service on the same storage, its account check rate-limited; the first one is closed.
+  service.close(); await until(() => !service.inFlight()); await service.settle();
+  const limited = new TriggerService({ stateDir: directory, storage: sql.client, executor: { runs: () => [], session: () => undefined, getAutoPrompt: () => undefined } as unknown as TriggerExecutor,
     now: () => clock.now, tickMs: 60_000, ghToken: async () => 'gho_limited', githubTransport: () => async () => ({ status: 403, body: {}, remaining: 0, reset }) });
   await limited.start();
   t.after(async () => { limited.close(); await limited.settle(); });

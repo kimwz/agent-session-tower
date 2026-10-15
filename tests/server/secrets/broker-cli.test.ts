@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test, { after, before } from 'node:test';
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { until } from '../../helpers/until.js';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { SecretContext, SecretMetadata, SecretOperation, SecretRunInput, SecretTarget, SecretUsage } from '../../../shared/secrets.js';
@@ -10,6 +12,9 @@ import { parseSecretCli, runSecretsCommand } from '../../../server/secrets/cli.j
 import { SecretService } from '../../../server/secrets/service.js';
 import { editPayload, legacyRecord, legacyRule, vaultTemplate } from '../../helpers/secrets.js';
 import type { RemoteSecretBroker } from '../../../server/secrets/remote.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const canary = 'SYNTHETIC-sensitive-canary-42';
 /** One vault initialized for this file and copied open into each test that uses a real one. */
@@ -265,7 +270,7 @@ test('encrypted domain fixture denies forged task and revoked policy through the
   } finally { await service.lock(); await f.cleanup(); }
 });
 
-test('final dispatch denies local changes completed while a later remote reference is reauthorized', { timeout: 20000 }, async () => {
+test('final dispatch denies local changes completed while a later remote reference is reauthorized', async () => {
   const f = await fixture(); let now = Date.now(); const service = await vault.open(f.stateDir, { now: () => now });
   try {
     for (const mode of ['revoke', 'policy', 'expiry', 'rotation', 'fields'] as const) {
@@ -359,7 +364,7 @@ test('compare and domain fingerprint disclose only their derived result', async 
   } finally { await f.cleanup(); }
 });
 
-test('comparison denies local authority changes committed while resolving its remote operand', { timeout: 20000 }, async () => {
+test('comparison denies local authority changes committed while resolving its remote operand', async () => {
   const f = await fixture(); let now = Date.now(); const service = await vault.open(f.stateDir, { now: () => now });
   try {
     for (const mode of ['revoke', 'policy', 'expiry', 'rotation', 'fields'] as const) {
@@ -415,21 +420,29 @@ async function cleanupFixtureOrphans(file: string): Promise<number[]> {
   return ids;
 }
 
-test('timeout settles without waiting for nested fixture descendants that inherited output pipes', { timeout: 5000 }, async () => {
+test('timeout settles without waiting for nested fixture descendants that inherited output pipes', { timeout: 60_000 }, async t => {
   const f = await fixture(), pids = join(f.root, 'fixture-orphan-pids');
-  const leaf = `setTimeout(()=>{},2000);`;
-  const middle = `const fs=require('fs'),cp=require('child_process');const leaf=cp.spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:['ignore',1,2]});fs.appendFileSync(${JSON.stringify(pids)},leaf.pid+'\\n');setTimeout(()=>{},2000);`;
-  const parent = `const fs=require('fs'),cp=require('child_process');const middle=cp.spawn(process.execPath,['-e',${JSON.stringify(middle)}],{stdio:['ignore',1,2]});fs.appendFileSync(${JSON.stringify(pids)},middle.pid+'\\n');setTimeout(()=>{},2000);`;
+  // Every process holds the inherited pipes for 30 s: a broker that waited for them could not answer within 10 s.
+  const leaf = `setTimeout(()=>{},30000);`;
+  const middle = `const fs=require('fs'),cp=require('child_process');const leaf=cp.spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:['ignore',1,2]});fs.appendFileSync(${JSON.stringify(pids)},leaf.pid+'\\n');setTimeout(()=>{},30000);`;
+  const parent = `const fs=require('fs'),cp=require('child_process');const middle=cp.spawn(process.execPath,['-e',${JSON.stringify(middle)}],{stdio:['ignore',1,2]});fs.appendFileSync(${JSON.stringify(pids)},middle.pid+'\\n');setTimeout(()=>{},30000);`;
   const broker = new SecretBroker({ stateDir: f.stateDir, service: f.service });
+  const started = () => { try { return readFileSync(pids, 'utf8').trim().split('\n').length === 2; } catch { return false; } };
   try {
-    const started = performance.now();
-    const result = await broker.run(f.context, command(parent, { timeoutMs: 300 }));
-    assert.ok(performance.now() - started < 1200, 'consumer timeout must not await inherited descendant pipes');
-    assert.equal(result.timedOut, true); assert.equal(result.stdout, ''); assert.equal(result.exitCode, null); assert.match(result.stderr, /출력은 폐기/); assert.equal(broker.inFlight(), false);
+    // The time limit runs on a fake clock and passes only once both descendants have started; the processes stay real.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let result: Awaited<ReturnType<SecretBroker['run']>> | undefined;
+    const running = broker.run(f.context, command(parent, { timeoutMs: 300 })).then(value => { result = value; });
+    await until(started, 30_000);
+    t.mock.timers.tick(300);
+    t.mock.timers.reset();
+    await until(() => result, 10_000);
+    await running;
+    assert.equal(result!.timedOut, true); assert.equal(result!.stdout, ''); assert.equal(result!.exitCode, null); assert.match(result!.stderr, /출력은 폐기/); assert.equal(broker.inFlight(), false);
     const ids = (await readFile(pids, 'utf8')).trim().split('\n').map(Number); assert.equal(ids.length, 2);
     for (const id of ids) assert.doesNotThrow(() => process.kill(id, 0), 'the broker does not terminate fixture descendants');
     assert.equal(f.ledger.get([...f.ledger.keys()][0]!)?.state, 'done');
-  } finally { await cleanupFixtureOrphans(pids); await f.cleanup(); }
+  } finally { t.mock.timers.reset(); await cleanupFixtureOrphans(pids); await f.cleanup(); }
 });
 
 test('timeout discards incomplete canary prefixes from both streams and finishes private-file cleanup', async () => {
@@ -437,22 +450,28 @@ test('timeout discards incomplete canary prefixes from both streams and finishes
   try {
     const ref = f.add(canary), file = f.add(canary, 'file');
     const broker = new SecretBroker({ stateDir: f.stateDir, service: f.service });
-    const result = await broker.run(f.context, command(`process.stdout.write(process.env.TOKEN.slice(0,12));process.stderr.write(process.env.TOKEN.slice(0,12));setTimeout(()=>{},2000);`, { env: { TOKEN: ref }, files: { KEY: file }, timeoutMs: 150 }));
+    const result = await broker.run(f.context, command(`process.stdout.write(process.env.TOKEN.slice(0,12));process.stderr.write(process.env.TOKEN.slice(0,12));setTimeout(()=>{},30000);`, { env: { TOKEN: ref }, files: { KEY: file }, timeoutMs: 150 }));
     assert.equal(result.timedOut, true); assert.equal(result.stdout, ''); assert.equal(result.stderr.includes(canary.slice(0,12)), false); assert.match(result.stderr, /출력은 폐기/);
     assert.deepEqual(await readdir(join(f.stateDir, 'secrets', 'consumers')), []); assert.equal(broker.inFlight(), false);
     assert.equal(JSON.stringify([...f.ledger.values()]).includes(canary.slice(0,12)), false);
   } finally { await f.cleanup(); }
 });
 
-test('output limit settles immediately despite an inherited fixture output pipe', { timeout: 5000 }, async () => {
+test('output limit settles immediately despite an inherited fixture output pipe', { timeout: 60_000 }, async t => {
   const f = await fixture(), pids = join(f.root, 'fixture-limit-orphan-pids');
-  const descendant = `setTimeout(()=>{},2000);`;
-  const parent = `const fs=require('fs'),cp=require('child_process');const child=cp.spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore',1,2]});fs.appendFileSync(${JSON.stringify(pids)},child.pid+'\\n');process.stdout.write('x'.repeat(700000));setTimeout(()=>{},2000);`;
+  // Both processes hold the inherited pipe for 30 s: a broker that waited for it could not answer within 10 s.
+  const descendant = `setTimeout(()=>{},30000);`;
+  const parent = `const fs=require('fs'),cp=require('child_process');const child=cp.spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore',1,2]});fs.appendFileSync(${JSON.stringify(pids)},child.pid+'\\n');process.stdout.write('x'.repeat(700000));setTimeout(()=>{},30000);`;
   const broker = new SecretBroker({ stateDir: f.stateDir, service: f.service });
   try {
-    const started = performance.now(), result = await broker.run(f.context, command(parent, { timeoutMs: 3000 }));
-    assert.ok(performance.now() - started < 1200, 'output limit must not await inherited descendant pipes');
-    assert.equal(result.stdout, ''); assert.match(result.stderr, /출력 크기 제한/); assert.equal(result.timedOut, undefined); assert.equal(broker.inFlight(), false);
+    // The time limit is faked and never passes: only the output limit can end this run, however slowly the output comes.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let result: Awaited<ReturnType<SecretBroker['run']>> | undefined;
+    const running = broker.run(f.context, command(parent, { timeoutMs: 3000 })).then(value => { result = value; });
+    await until(() => result, 10_000);
+    await running;
+    t.mock.timers.reset();
+    assert.equal(result!.stdout, ''); assert.match(result!.stderr, /출력 크기 제한/); assert.equal(result!.timedOut, undefined); assert.equal(broker.inFlight(), false);
     const ids = (await readFile(pids, 'utf8')).trim().split('\n').map(Number); assert.equal(ids.length, 1); assert.doesNotThrow(() => process.kill(ids[0]!, 0));
-  } finally { await cleanupFixtureOrphans(pids); await f.cleanup(); }
+  } finally { t.mock.timers.reset(); await cleanupFixtureOrphans(pids); await f.cleanup(); }
 });

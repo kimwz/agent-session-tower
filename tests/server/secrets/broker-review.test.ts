@@ -1,5 +1,6 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import { access, appendFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { symlinkSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,6 +13,9 @@ import { DurableRunManager } from '../../../server/runs/durable-runner.js';
 import { kindOf } from '../../../shared/errors.js';
 import type { SecretContext, SecretRunInput, SecretSubjectMode } from '../../../shared/secrets.js';
 import { FixtureRuns, vaultTemplate } from '../../helpers/secrets.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const canary = 'SYNTHETIC-review-broker-canary-31';
 const vault = vaultTemplate('fixture-review-broker-password');

@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,6 +23,8 @@ import { notAdmitted, RunError } from '../../../server/runs/run-records.js';
 import { SteeringError } from '../../../server/runs/steering.js';
 import { SkillError } from '../../../server/skills/files.js';
 import { assertWorkspace, readWorkspaceFile } from '../../../server/workspace-files.js';
+
+fastScrypt();
 
 /**
  * What the HTTP edge answers for an error: its status, message and delivery disposition. These expectations hold

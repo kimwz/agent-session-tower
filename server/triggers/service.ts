@@ -55,7 +55,8 @@ export class TriggerService extends EventEmitter {
     secretStore?: SecretStore;
     /** Public agents appear among triggers; their settings and history stay in their own files. */
     publicAgents?: () => SlackProjection[];
-    limits?: { acceptBytes?: number; maxBytes?: number; requestsPerMinute?: number };
+    /** Test-only overrides of the state size, request rate and per-trigger run record limits. */
+    limits?: { acceptBytes?: number; maxBytes?: number; requestsPerMinute?: number; firedPerTrigger?: number };
     /** Ports this Tower listens on; HTTP triggers may never call them. */
     ownPorts?: () => Promise<number[]>;
     /**

@@ -1,12 +1,16 @@
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { byteRange } from '../../../server/http/sinks.js';
 import type { Snapshot } from '../../../shared/types.js';
+
+fastScrypt();
 
 test('a player’s byte range is read as one inclusive span, the whole file, or one past the end', () => {
   assert.equal(byteRange(undefined, 10), undefined);
@@ -107,7 +111,8 @@ test('a player leaving mid-file, or a sign-out while the file opens, ends the an
   assert.equal(started.status, 200);
   await started.body!.getReader().read();
   leaving.abort();
-  await new Promise(resolve => setTimeout(resolve, 300));
+  // A failure from the answer cut off would surface within moments.
+  await new Promise(resolve => setTimeout(resolve, 100));
   assert.deepEqual(unhandled, [], 'a player that leaves is not a server failure');
 
   signOutOnRead = true;
@@ -117,7 +122,7 @@ test('a player leaving mid-file, or a sign-out while the file opens, ends the an
     for (;;) { const next = await reader.read(); if (next.done) break; received += next.value.length; }
   }).catch(() => {});
   assert.equal(received, 0, `a sign-out while the file opened still sent ${received} bytes`);
-  await new Promise(resolve => setTimeout(resolve, 300));
+  await new Promise(resolve => setTimeout(resolve, 100));
   assert.deepEqual(unhandled, []);
   assert.equal((await fetch(url, { headers: { cookie } })).status, 401, 'the sign-out took effect');
 });

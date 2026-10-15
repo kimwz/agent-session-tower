@@ -8,6 +8,9 @@ import { kindOf } from '../../../shared/errors.js';
 import type { SecretRule } from '../../../shared/secrets.js';
 import { editPayload, legacyRecord, legacyRule, secretService, stored } from '../../helpers/secrets.js';
 import { SecretRuntime } from '../../../server/secrets/runtime.js';
+import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+
+fastVaultKdf();
 
 const password = 'fixture-rule-edit-password-1234';
 

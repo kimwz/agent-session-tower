@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { until } from '../../helpers/until.js';
 import { test, type TestContext } from 'node:test';
 import { SlackAutomationManager, type CoordinatorChannel, type SlackAutomationOptions } from '../../../server/slack/automation.js';
 import type { SlackMention, SlackRule } from '../../../shared/slack.js';
@@ -530,15 +531,16 @@ test('conditional owner authorization survives restart and sends exact text only
   assert.equal(restarted.list()[0].ownerConditionalReply?.status, 'sent');
 });
 test('conditional reply requires owner permission and never sends failed uncertain cancelled or mismatched tasks', async t => {
-  for (const outcome of ['failed', 'uncertain', 'error', 'cancelled', 'mismatch', 'no-owner']) {
+  // Independent fixtures, checked side by side.
+  await Promise.all(['failed', 'uncertain', 'error', 'cancelled', 'mismatch', 'no-owner'].map(async outcome => {
     const f = await conditionalFixture(t);
     if (outcome !== 'no-owner') chatText(await f.manager.ownerChat('owner-chat', conditionalCommand));
     f.run.status = outcome === 'error' || outcome === 'cancelled' ? outcome : 'completed';
     if (outcome === 'mismatch') f.run.autoPromptId = 'other';
     const work = f.manager.tool(f.id, 'tower_task_complete', { requestId: f.task.requestId, runId: f.run.id, outcome: outcome === 'failed' || outcome === 'uncertain' ? outcome : 'succeeded', evidence: 'Checked task result.' });
     if (outcome === 'no-owner') await assert.rejects(work, /No owner authorization/); else await work;
-    assert.equal(f.counts().sends, 0);
-  }
+    assert.equal(f.counts().sends, 0, outcome);
+  }));
 });
 test('owner cancellation is serialized before completion and uncertain delivery never retries after restart', async t => {
   const f = await conditionalFixture(t); chatText(await f.manager.ownerChat('owner-chat', conditionalCommand)); f.run.status = 'completed';
@@ -618,14 +620,15 @@ test('composed owner consent during work survives restart and sends once without
 });
 
 test('polite immediate and edited-wording chat permissions allow an agent composed send without proposals', async t => {
-  for (const message of ['슬랙에 보내주시겠어요?', '슬랙에 보내줄래요?', '슬랙에 보내도 됩니다', '이 문구로 슬랙에 보내주세요', '수정한 내용으로 답변 보내주세요']) {
+  // Independent fixtures, checked side by side.
+  await Promise.all(['슬랙에 보내주시겠어요?', '슬랙에 보내줄래요?', '슬랙에 보내도 됩니다', '이 문구로 슬랙에 보내주세요', '수정한 내용으로 답변 보내주세요'].map(async message => {
     const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
     await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
     assert.match(chatText(await f.manager.ownerChat('owner-chat', message)), /authorization saved/);
     await f.manager.tool(id, 'slack_send', { text: '수정 내용을 반영했습니다.', requestKey: 'report' });
     await f.manager.tool(id, 'slack_send', { text: '수정 내용을 반영했습니다.', requestKey: 'report' });
-    assert.equal(f.counts().sends, 1);
-  }
+    assert.equal(f.counts().sends, 1, message);
+  }));
 });
 
 test('Slack replies need no owner authorization: one post per requestKey, marked as an agent reply', async t => {
@@ -1117,7 +1120,7 @@ test('Tower puts its working reaction on a new request at once and takes it off 
   await f.manager.ingest({ ...mention, id: 'event-0', ts: '0.1', threadTs: '0.0' });
   const stuck = f.manager.tick();
   await f.manager.ingest(mention);
-  for (let wait = 0; calls.length < 2 && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  await until(() => calls.length >= 2);
   assert.deepEqual(calls, ['add:loading:0.1', 'add:loading:1.1'], 'both requests are marked while the first thread fetch hangs');
   release(); await stuck; await f.manager.tick();
   assert.deepEqual(calls.slice(2), [], 'nothing comes off while the coordinator works');
@@ -1220,7 +1223,7 @@ test('a reaction call underway keeps the worker from handing off, and the handof
   f.options.workingReaction = () => 'loading';
   f.options.startConversation = () => new Promise(() => {});
   await f.manager.ingest(mention);
-  for (let wait = 0; !calls.length && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  await until(() => calls.length > 0);
   assert.equal(f.manager.inFlight(), true);
   f.manager.hold();
   let flushed = false;
@@ -1259,11 +1262,11 @@ test('clearing waits for a reaction pass and no sweep puts a mark back meanwhile
   f.options.workingReaction = () => 'loading';
   f.options.startConversation = () => new Promise(() => {});
   const admitted = f.manager.ingest(mention);
-  for (let wait = 0; !calls.length && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  await until(() => calls.length > 0);
   const clearing = f.manager.clearMarks();
   void f.manager.tick();
   answers.shift()!(); await admitted;
-  for (let wait = 0; calls.length < 2 && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  await until(() => calls.length >= 2);
   assert.equal(f.manager.inFlight(), true);
   void f.manager.tick();
   answers.shift()!(); await clearing;
@@ -1279,12 +1282,12 @@ test('nothing is marked while clearing, and nothing goes back on before the acco
   f.options.workingReaction = () => 'loading';
   f.options.startConversation = async () => ({ sessionId: 'account-change-session', runId: 'account-change-run' });
   const admitted = f.manager.ingest(mention);
-  for (let wait = 0; !calls.length && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  await until(() => calls.length > 0);
   answers.shift()!(); await admitted;
   let changed = false, release!: () => void;
   const change = new Promise<void>(resolve => { release = resolve; });
   const clearing = f.manager.clearMarks(async () => { await change; changed = true; });
-  for (let wait = 0; calls.length < 2 && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  await until(() => calls.length >= 2);
   // A second request arrives while the first mark is coming off.
   const second = f.manager.ingest({ ...mention, id: 'event-2', ts: '2.1', threadTs: '2.0' });
   answers.shift()!(); await second;

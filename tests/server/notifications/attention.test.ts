@@ -104,7 +104,15 @@ async function service(t: test.TestContext, runs: () => Run[], attention?: Notif
   const notifications = new NotificationService(dir, context, fetcher, now);
   return { dir, sent, notifications };
 }
-const settle = () => new Promise(resolve => setTimeout(resolve, 30));
+// Real time, also while a test fakes the service's own timers.
+const realSetTimeout = globalThis.setTimeout;
+const settle = (ms = 30) => new Promise(resolve => realSetTimeout(resolve, ms));
+/** Closes with a judgment still pending: the service's two-second grace for it passes on a fake clock. */
+async function closeWithGrace(t: test.TestContext, notifications: NotificationService) {
+  const closing = notifications.close();
+  t.mock.timers.tick(2_000);
+  await closing;
+}
 
 test('a step followed by another turn is not pushed, and a failure always is', async t => {
   const turn = run('turn', {}), failed = run('failed', { sessionId: 's2', status: 'error', error: 'boom' });
@@ -153,9 +161,12 @@ test('a message the owner sends while a turn is being judged means they have see
 test('a turn still being judged when the web stops is taken up again after a restart', async t => {
   const turn = run('turn', {});
   const { dir, sent, notifications } = await service(t, () => [turn], () => new Promise<TurnAttention>(() => {}));
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => t.mock.timers.reset());
   await notifications.start();
   await settle();
-  await notifications.close();
+  await closeWithGrace(t, notifications);
+  t.mock.timers.reset();
   assert.equal(sent.length, 0);
   const saved = JSON.parse(await readFile(join(dir, 'notifications.json'), 'utf8'));
   assert.ok(!saved.delivered.keys.includes('done:turn'));
@@ -213,12 +224,14 @@ test('after shutdown a judgment that finishes late neither pushes nor overwrites
   const turn = run('turn', {});
   let release!: () => void;
   const { dir, sent, notifications } = await service(t, () => [turn], () => new Promise<TurnAttention>(resolve => { release = () => resolve({ outcome: 'done', quiet: false, probabilities: { done: 1, needsOwner: 0, blocked: 0, progress: 0 } }); }));
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => t.mock.timers.reset());
   await notifications.start();
   await settle();
-  await notifications.close();
+  await closeWithGrace(t, notifications);
   const before = await readFile(join(dir, 'notifications.json'), 'utf8');
   release();
-  await new Promise(resolve => setTimeout(resolve, 100));
+  await settle(100);
   assert.equal(sent.length, 0);
   assert.equal(await readFile(join(dir, 'notifications.json'), 'utf8'), before);
 });

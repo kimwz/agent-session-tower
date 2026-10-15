@@ -1,5 +1,6 @@
 import { temporaryFixture, removeTemporaryFixture } from '../../helpers/temporary.js';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer, request } from 'node:http';
@@ -114,33 +115,53 @@ test('shells an older worker still owns stay reachable until they are closed', a
   assert.deepEqual(calls.at(-1), `input:${old}`, 'without a running host every known shell is the old worker’s');
 });
 
+/** The host's once-a-second idle check and its clock, faked from before it starts; I/O stays real. */
+const fakeIdleClock = (t: TestContext) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() });
+  t.after(() => t.mock.timers.reset());
+  /** Moves the clock on by `ms`, then lets the host's check and what it starts run. */
+  return async (ms: number) => { t.mock.timers.tick(ms); for (let turn = 0; turn < 5; turn++) await new Promise(resolve => setImmediate(resolve)); };
+};
+/**
+ * Moves the fake clock on `step` at a time until `done`: a check that found a request still under way is followed by
+ * the next one, however long the real requests take. The real deadline only bounds a broken test.
+ */
+const passUntil = async (pass: (ms: number) => Promise<void>, done: () => boolean, step = 1000) => {
+  for (const deadline = performance.now() + 10_000; !done() && performance.now() < deadline;) { await pass(step); await new Promise(resolve => setTimeout(resolve, 2)); }
+  assert.ok(done(), `not reached: ${done}`);
+};
+
 test('the terminal host leaves once no shell is open and no page has called for a while', async t => {
+  const pass = fakeIdleClock(t);
   const f = await fixture(t, { idleMs: 0 });
   const { id } = await f.client.create('/fixture', 80, 24);
-  await new Promise(resolve => setTimeout(resolve, 1200));
+  await pass(1200);
   assert.equal(f.idle(), 0, 'an open shell keeps its host');
   await f.client.close(id);
-  await until(() => f.idle() === 1);
+  await passUntil(pass, () => f.idle() === 1);
 });
 
 test('asking a terminal host its version or its shells never keeps it from leaving', async t => {
+  const pass = fakeIdleClock(t);
   const f = await fixture(t, { idleMs: 300 });
   const { id } = await f.client.create('/fixture', 80, 24);
   await f.client.close(id);
   // A page and its controllers look every few seconds; that is not using a shell.
   const looking = setInterval(() => { void f.client.hostVersion().catch(() => {}); void f.client.list().catch(() => {}); }, 50);
   t.after(() => clearInterval(looking));
-  await until(() => f.idle() === 1);
+  await passUntil(pass, () => f.idle() === 1, 50);
 });
 
 test('the ping before opening a shell keeps an idle host for it', async t => {
+  const pass = fakeIdleClock(t);
   const f = await fixture(t, { idleMs: 400 });
   const call = (f.client as unknown as { call: (method: string, args?: unknown[]) => Promise<unknown> }).call.bind(f.client);
-  await new Promise(resolve => setTimeout(resolve, 300));
+  await pass(700);
   await call('ping', ['opening']);
-  await new Promise(resolve => setTimeout(resolve, 250));
+  // The check a second after the start comes 300 ms after the ping: too soon.
+  await pass(300);
   assert.equal(f.idle(), 0, 'not idle for long enough since the opening ping');
-  await until(() => f.idle() === 1);
+  await passUntil(pass, () => f.idle() === 1);
 });
 
 test('a terminal host says its revision, and one with this revision needs no restart for an update', async t => {

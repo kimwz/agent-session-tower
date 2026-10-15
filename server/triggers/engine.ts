@@ -39,7 +39,7 @@ export class TriggerEngine {
 
   /** Fires inside a commit; a capacity warning it answers is noted in that same commit. */
   private fire(state: EngineState, trigger: Trigger, dedupKey: string, at: number, kind: TriggerEvent['kind'], by?: TriggerActor, overlap?: TriggerPolicy['overlap']): TriggerEvent | undefined {
-    const { event, capacity } = fire(state, trigger, dedupKey, at, kind, this.now, by, overlap);
+    const { event, capacity } = fire(state, trigger, dedupKey, at, kind, this.now, by, overlap, this.store.firedPerTrigger);
     if (capacity) this.store.noteCapacity(capacity);
     return event;
   }

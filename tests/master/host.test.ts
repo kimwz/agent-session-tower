@@ -13,6 +13,7 @@ import { masterPaths } from '../../server/master/paths.js';
 import { writePrivateJson } from '../../server/stores/private-json.js';
 import type { MasterCheckpoint, MasterOverview } from '../../shared/master.js';
 import { until } from '../helpers/until.js';
+import '../helpers/skip-fsync.js';
 
 test('master overview preserves inspector and corrective audit corruption diagnostics across actual RPC', async t => {
   const stateDir = await temporaryFixture('tower-master-heartbeat-corrupt-rpc-');
@@ -124,13 +125,17 @@ test('a master session keeps the host alive past its idle time, yet another buil
   const paths = await masterPaths(stateDir);
   await mkdir(paths.data, { recursive: true, mode: 0o700 });
   await writePrivateJson(join(paths.data, 'settings.json'), JSON.stringify({ session: { sessionId: 'claude:master', provider: 'claude', startedAt: new Date().toISOString() } }));
+  // The host's once-a-second idle check runs on a fake clock.
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() });
   const host = await startMasterHost({ stateDir, idleMs: 50 });
   cleanup.push(() => host.close());
   const client = new MasterClient({ stateDir, credentials: () => undefined });
   cleanup.push(() => client.dispose());
   assert.equal((await client.call('overview') as MasterOverview).session?.id, 'claude:master');
   // Past its idle time it stays, to report the work the master handed out.
-  await new Promise(resolve => setTimeout(resolve, 1500));
+  for (let second = 0; second < 2; second++) t.mock.timers.tick(1000);
+  t.mock.timers.reset();
+  for (let turn = 0; turn < 10; turn++) await new Promise(resolve => setImmediate(resolve));
   assert.notEqual(await client.hostVersion(), null);
   // What it follows is on disk, so it steps aside for another build all the same.
   assert.equal(await client.call('shutdown'), true);
@@ -209,7 +214,8 @@ test('a web that starts while a master session exists starts the master host its
   const marker = join(stateDir, 'started');
   // Stands in for the host: it only notes that it was started, and how.
   const entry = join(stateDir, 'fake-host.mjs');
-  await writeFile(entry, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, process.argv.slice(2).join(' '));`);
+  // Written whole, then renamed into place: the marker never exists without its arguments.
+  await writeFile(entry, `import { renameSync, writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker + '.pending')}, process.argv.slice(2).join(' ')); renameSync(${JSON.stringify(marker + '.pending')}, ${JSON.stringify(marker)});`);
   const start = () => { const web = new MasterClient({ stateDir, credentials: () => undefined, hostEntry: entry, startupTimeoutMs: 300 }); web.start(); return web; };
 
   const quiet = start();
@@ -220,7 +226,8 @@ test('a web that starts while a master session exists starts the master host its
   await writePrivateJson(join(paths.data, 'settings.json'), JSON.stringify({ session: { sessionId: 'claude:master', provider: 'claude', startedAt: new Date().toISOString() } }));
   const web = start();
   t.after(() => web.dispose());
-  await until(() => existsSync(marker));
+  // A process start on a busy machine can take seconds.
+  await until(() => existsSync(marker), 30_000);
   assert.match(await readFile(marker, 'utf8'), /--master-host/);
 });
 

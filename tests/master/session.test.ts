@@ -11,7 +11,9 @@ import { MasterSession } from '../../server/master/session.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
 import { TowerClient } from '../../server/tower-tools/tower-client.js';
 import type { AutoPromptJob, ChatMessage, Run, SessionOutcome, Snapshot } from '../../shared/types.js';
+import '../helpers/skip-fsync.js';
 import { asideNames, blockQuarantine, captureErrors, failOpen } from '../helpers/quarantine.js';
+import { tickUntil } from '../helpers/until.js';
 
 const MASTER = 'claude:master';
 
@@ -202,6 +204,8 @@ test('an Auto Prompt that fails before any run is reported as such, and a report
   await h.session.follow();
   assert.equal(h.reports().length, 0);
   h.setMessageStatus(202);
+  // Past the (1 ms, doubling) wait before the report is tried again.
+  await new Promise(resolve => setTimeout(resolve, 5));
   await h.session.follow();
   assert.equal(h.reports().length, 1);
   assert.match(String(h.reports()[0].body.prompt), /"deploy it" — error/);
@@ -276,8 +280,14 @@ test('a report Tower could not take just then (a web or worker changing over) wa
   h.runs.push(run);
   h.finish(run, 'Done.');
   h.setMessageStatus(503);
-  // Keep one genuine HTTP handoff/retry. Repeated held-report policy is independent of transport delay.
-  await h.session.follow();
+  // Keep one genuine HTTP handoff/retry (its 3 s pause before sending again runs on a fake clock). Repeated
+  // held-report policy is independent of transport delay.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let followed = false;
+  const first = h.session.follow().then(() => { followed = true; });
+  await tickUntil(t, () => followed, 3000);
+  await first;
+  t.mock.timers.reset();
   t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   const call = h.tower.call.bind(h.tower);
   let held = true, refused = 0;
