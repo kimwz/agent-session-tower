@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { constants, copyFile, cp, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -109,8 +109,14 @@ test('a checkout trusts only the thread its own first capture bundles from its c
 test('a checkout whose own thread entry changes after its capture reopens with the capture, and trusts no thread bundled from the change (an isolated copy of the checkout)', async t => {
   // A copy of what a checkout capture bundles (compileStorage's sources, and the tsconfig.json esbuild compiles them
   // with), run by tsx from its own folder.
-  const checkout = await mkdtemp(join(tmpdir(), 'tower-storage-checkout-'));
-  t.after(() => rm(checkout, { recursive: true, force: true }));
+  // The root dependency sits where this checkout resolves it, relative to the copy as to this checkout: a worktree
+  // whose node_modules links to another folder bundles it from there, and the bundle names that path.
+  const dependency = relative(await realpath(root), await realpath(join(root, 'node_modules/zod')));
+  const ups = dependency.split(sep).findIndex(part => part !== '..');
+  const folder = await mkdtemp(join(tmpdir(), 'tower-storage-checkout-'));
+  t.after(() => rm(folder, { recursive: true, force: true }));
+  const checkout = join(folder, ...Array.from({ length: ups }, (_, index) => `up${index}`));
+  assert.ok(relative(folder, join(checkout, dependency)).split(sep)[0] !== 'up0', 'the dependency lies beside the copy');
   await copyTree(join(root, 'server/storage'), join(checkout, 'server/storage'));
   for (const name of ['storage-schema.ts', 'storage-codec.ts', 'storage-commands.ts']) {
     await cp(join(root, 'server/sessions/retention', name), join(checkout, 'server/sessions/retention', name));
@@ -121,7 +127,8 @@ test('a checkout whose own thread entry changes after its capture reopens with t
   await writeFile(join(checkout, 'package.json'), '{"type":"module"}');
   await mkdir(join(checkout, 'node_modules'));
   // Bundle the root dependency's actual bytes at the same checkout-relative path; loader/build tools stay shared.
-  await copyTree(await realpath(join(root, 'node_modules/zod')), join(checkout, 'node_modules/zod'));
+  await copyTree(await realpath(join(root, 'node_modules/zod')), join(checkout, dependency));
+  if (dependency !== join('node_modules', 'zod')) await symlink(join(checkout, dependency), join(checkout, 'node_modules/zod'));
   for (const name of ['tsx', 'esbuild']) await symlink(join(root, 'node_modules', name), join(checkout, 'node_modules', name));
   const state = await stateDir(t);
   const fresh = await stateDir(t);
