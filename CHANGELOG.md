@@ -4,6 +4,23 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.138.0] - 2026-10-15
+
+- **SQLite 전환용 마이그레이션 기능을 없앴습니다.** 저장소는 지금 형식으로만 엽니다.
+  - 마이그레이션이 필요한 옛 저장소는 파일을 열기 전에 거절하고, 아무것도 바꾸지 않습니다.
+  - 빈 상태 폴더에서는 저장소를 새로 만듭니다.
+  - 이미 쓰던 저장소, 옛 JSON 파일, 마이그레이션 기록 폴더는 그대로 두고 읽지도 지우지도 않습니다.
+- 다음이 없어졌습니다.
+  - 오프라인 활성화, 저장소 계약 확인, 버전 고정, 저장소 롤백
+  - `--storage-contract`, `--offline-owner` 옵션
+  - `storage offline`, `verify-update`, `rollback` CLI 명령
+  - `/api/storage/verify-update`, `/api/storage/rollback/*` 경로
+  - `/api/health`의 `candidateStorage` 항목
+- 버전을 되돌릴 때 저장소 롤백 절차가 없습니다. 이전 버전을 그대로 설치하면 됩니다(같은 저장소 형식).
+- 연결된 컴퓨터가 1.125.0보다 낮으면 업데이트를 자동으로 요청하지 않고, 직접 요청해도 거절합니다(storage-too-old). 그 컴퓨터의 저장소를 마이그레이션 없이 열 수 없기 때문입니다.
+- 개발: CI는 옛 빌드 캡처, Node 22.13 로더 검사, 오프라인 실행 파일 증명을 더 이상 돌리지 않습니다. 각 lane이 1초 이상 걸린 테스트를 보고합니다(보고만 하고 실패시키지 않음).
+- 개발: 마이그레이션 테스트가 빠지면서 전체 테스트 시간이 크게 줄었습니다. 이 맥에서 동시 8로 돌린 전체 테스트는 세 번 모두 실패 없이 끝났습니다.
+
 ## [1.137.5] - 2026-10-15
 
 - **Slack과 GitHub 자동화가 동시에 저장할 때 Slack 자동화가 보류되지 않습니다.** 한쪽이 저장하는 순간 다른 쪽의 저장 전 확인 읽기가 "External authority/revision/generation changed"로 실패해, Slack 자동화가 보류 상태에 빠질 수 있었습니다. 연결 해제, 규칙 복원, 백업 내보내기도 같은 순간에 영어 오류로 실패할 수 있었습니다. 이제 그 읽기만 최대 3번 다시 시도합니다. 저장 자체는 다시 실행하지 않습니다.
