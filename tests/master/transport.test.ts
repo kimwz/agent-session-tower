@@ -10,6 +10,7 @@ import { createMonitorServer } from '../../server/http/server.js';
 import { masterRoutes } from '../../server/master/routes.js';
 import type { MasterClient } from '../../server/master/client.js';
 import { createRemoteAuthFixture } from '../helpers/auth.js';
+import { tickUntil } from '../helpers/until.js';
 import type { Snapshot } from '../../shared/types.js';
 
 fastScrypt();
@@ -123,15 +124,10 @@ test('a change the server says it did not admit is sent once more; one cut off m
   const client = new TowerClient();
   client.setCredentials({ port, token: 'a'.repeat(64), callerSecret: 'b'.repeat(64) });
   // The 3 s pause before sending again runs on a fake clock.
-  const realTimeout = setTimeout;
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let answered = false;
   const busyCall = client.call('POST', '/api/busy', {}, { write: true }).finally(() => { answered = true; });
-  for (let tries = 0; !answered; tries++) {
-    if (tries > 1000) throw new Error('no answer');
-    t.mock.timers.tick(3000);
-    await new Promise(resolve => realTimeout(resolve, 5));
-  }
+  await tickUntil(t, () => answered, 3000);
   t.mock.timers.reset();
   const busy = await busyCall;
   assert.equal(busy.state, 'not-admitted');

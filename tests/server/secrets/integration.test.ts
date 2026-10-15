@@ -19,7 +19,7 @@ import { CALLER_CAPABILITY_HEADER } from '../../../server/runs/session-mcp.js';
 import { FixtureRuns, editPayload, legacyRecord, legacyRule, secretService, stored, storedTask, vaultTemplate } from '../../helpers/secrets.js';
 import { fastVaultKdf } from '../../helpers/fast-kdf.js';
 import { fastScrypt } from '../../helpers/fast-scrypt.js';
-import { settle } from '../../helpers/settle.js';
+import { settle } from '../../helpers/until.js';
 
 fastVaultKdf();
 fastScrypt();

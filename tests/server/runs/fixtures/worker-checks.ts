@@ -36,6 +36,8 @@ export class CheckDriver {
       if (!this.idleHeld) checks.idle();
       void handoff.then(() => { this.attempts.delete(handoff); this.completed.push(round); this.onRound?.(); });
     }, this.periodMs);
+    // As the production timers: the checks never keep a process alive by themselves.
+    timer.unref();
     return () => { clearInterval(timer); live.delete(this); };
   };
 

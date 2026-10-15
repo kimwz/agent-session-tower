@@ -405,15 +405,11 @@ test('a computer whose link breaks mid-request is dropped cleanly on both sides 
   a.controller.on('disconnected', disconnected);
   t.after(() => a.controller.off('disconnected', disconnected));
   // The joined computer's second before dialling again runs on a fake clock.
-  const realTimeout = setTimeout;
   t.mock.timers.enable({ apis: ['setTimeout'] });
   t.after(() => t.mock.timers.reset());
   session.destroy(new Error('network went away'));
   assert.ok(await pending instanceof Error, 'the request in flight fails instead of hanging');
-  for (let tries = 0; !disconnectedId || b.node.list()[0]?.status !== 'offline'; tries++) {
-    if (tries > 1000) throw new Error('not dropped on both sides');
-    await new Promise(resolve => realTimeout(resolve, 5));
-  }
+  await until(() => disconnectedId && b.node.list()[0]?.status === 'offline');
   assert.equal(offlineAtDisconnect, true, 'actual disconnected event observes this computer offline');
   // Dropped, its next try is due in a second and a fifth at most.
   t.mock.timers.tick(1200);
@@ -430,12 +426,10 @@ test('a computer removed while it was away joins again with a new code', async t
   await until(() => b.node.list().find(item => item.state === 'paired'), 5000);
   // The controller stops listening, then listens elsewhere: the joined computer keeps trying the old port. The
   // pauses between its tries run on a fake clock.
-  const realTimeout = setTimeout;
-  const settle = async (done: () => unknown) => { for (let tries = 0; !done(); tries++) { if (tries > 1000) throw new Error('timed out'); await new Promise(resolve => realTimeout(resolve, 5)); } };
   t.mock.timers.enable({ apis: ['setTimeout'] });
   t.after(() => t.mock.timers.reset());
   await a.controller.setHub({ enabled: false });
-  await settle(() => b.node.list().find(item => item.status !== 'connected'));
+  await until(() => b.node.list().find(item => item.status !== 'connected'));
   await a.controller.remove(joined.id);
   await a.controller.setHub({ enabled: true, port: 0 });
   const again = decodeJoinCode((await a.controller.invite()).code);
@@ -445,7 +439,7 @@ test('a computer removed while it was away joins again with a new code', async t
   // Once its current try is over and the next is waiting, that wait passes at once.
   const dialer = b.node as unknown as { dialing: Map<string, unknown>; connecting: Set<string> };
   const controllerId = b.node.list()[0]!.id;
-  await settle(() => dialer.dialing.has(controllerId) && !dialer.connecting.has(controllerId));
+  await until(() => dialer.dialing.has(controllerId) && !dialer.connecting.has(controllerId));
   t.mock.timers.tick(36_000);
   t.mock.timers.reset();
   const rejoined = await connected(a.controller, 'computer-b');

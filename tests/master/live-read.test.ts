@@ -7,7 +7,7 @@ import { lookupsSupported, ReadDatabase, tablesFrom } from '../../server/tower-t
 import { TowerClient } from '../../server/tower-tools/tower-client.js';
 import { diffSnapshots, indexSnapshot } from '../../shared/snapshot-patch.js';
 import type { Session, Snapshot } from '../../shared/types.js';
-import { until } from '../helpers/until.js';
+import { tickUntil, until } from '../helpers/until.js';
 
 /** Lookups need SQLite's authorizer, which Node.js 22 lacks; there the master simply does not offer them. */
 const noLookups = !lookupsSupported() && 'this Node.js has no SQLite authorizer';
@@ -53,14 +53,9 @@ test('the master follows the page\'s event stream: snapshots, patches and joined
   await until(() => !live.node(NODE));
   // A patch that does not follow what was received cannot be applied: the stream starts over, nothing stale is served.
   // The reconnect waits a second, on a fake clock here.
-  const realTimeout = setTimeout;
   t.mock.timers.enable({ apis: ['setTimeout'] });
   events.send(`id: 9\nevent: patch\ndata: ${JSON.stringify({ base: 7, sessions: { upsert: [] } })}\n\n`);
-  for (let tries = 0; events.connections() !== 2; tries++) {
-    if (tries > 1000) throw new Error('did not reconnect');
-    t.mock.timers.tick(1000);
-    await new Promise(resolve => realTimeout(resolve, 5));
-  }
+  await tickUntil(t, () => events.connections() === 2, 1000);
   t.mock.timers.reset();
   assert.equal(live.snapshot(), undefined);
   events.send(`id: 1\nevent: snapshot\ndata: ${JSON.stringify(first)}\n\n`);
@@ -108,22 +103,20 @@ test('a first look waits a moment for joined computers, and says which ones have
   const other = 'c'.repeat(32);
   const local = snapshot([session('a', 'idle')], { nodes: [{ id: NODE, name: 'Server', status: 'connected', features: [], streaming: true }, { id: other, name: 'Laptop', status: 'offline', features: [], streaming: false }] });
   // The moment given to joined computers runs on a fake clock; the stream itself is real.
-  const realTimeout = setTimeout;
-  const settle = async (done: () => unknown) => { for (let tries = 0; !done(); tries++) { if (tries > 1000) throw new Error('timed out'); await new Promise(resolve => realTimeout(resolve, 5)); } };
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
   const pending = live.fresh(3000);
   let answered = false;
   void pending.then(() => { answered = true; });
-  await settle(() => events.clients.length === 1);
+  await until(() => events.clients.length === 1);
   events.send(`id: 1\nevent: snapshot\ndata: ${JSON.stringify(local)}\n\n`);
-  await settle(() => live.snapshot());
+  await until(() => live.snapshot());
   events.send(`event: node\ndata: ${JSON.stringify({ node: NODE, sequence: 1, snapshot: snapshot([session('n', 'working')]) })}\n\n`);
-  await settle(() => live.node(NODE));
+  await until(() => live.node(NODE));
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(answered, false, 'the computer still missing is waited for');
   const started = Date.now();
   t.mock.timers.tick(1500);
-  await settle(() => answered);
+  await until(() => answered);
   assert.ok(live.node(NODE), 'the computer that answered is included');
   assert.deepEqual(live.missing(), [other]);
   assert.ok(Date.now() - started < 2500);

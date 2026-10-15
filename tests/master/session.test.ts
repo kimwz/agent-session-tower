@@ -13,6 +13,7 @@ import { TowerClient } from '../../server/tower-tools/tower-client.js';
 import type { AutoPromptJob, ChatMessage, Run, SessionOutcome, Snapshot } from '../../shared/types.js';
 import '../helpers/skip-fsync.js';
 import { asideNames, blockQuarantine, captureErrors, failOpen } from '../helpers/quarantine.js';
+import { tickUntil } from '../helpers/until.js';
 
 const MASTER = 'claude:master';
 
@@ -281,15 +282,10 @@ test('a report Tower could not take just then (a web or worker changing over) wa
   h.setMessageStatus(503);
   // Keep one genuine HTTP handoff/retry (its 3 s pause before sending again runs on a fake clock). Repeated
   // held-report policy is independent of transport delay.
-  const realTimeout = setTimeout;
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let followed = false;
   const first = h.session.follow().then(() => { followed = true; });
-  for (let tries = 0; !followed; tries++) {
-    if (tries > 1000) throw new Error('the first follow did not end');
-    t.mock.timers.tick(3000);
-    await new Promise(resolve => realTimeout(resolve, 5));
-  }
+  await tickUntil(t, () => followed, 3000);
   await first;
   t.mock.timers.reset();
   t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
