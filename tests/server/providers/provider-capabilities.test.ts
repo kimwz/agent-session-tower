@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import '../../helpers/skip-fsync.js';
 import test from 'node:test';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { until } from '../../helpers/until.js';
 import { join } from 'node:path';
 import { parseClaudeUsage, parseCodexUsage, parseCodexModels, parseCodexConfig, readClaudeDefaultEffort, claudeStorage, readClaudeCredential, readClaudeUsage, readCodexCapabilities, ProviderCapabilities, parseSavedUsage, maskEmail, parseCodexAccount, readClaudeEmail } from '../../../server/providers/capabilities.js';
 import type { ProviderHealth, ProviderUsage } from '../../../shared/types.js';
@@ -151,19 +153,16 @@ test('aborting an unresponsive Codex reader force-kills its child even when SIGT
   let pid: number | undefined;
   t.after(async () => { if (pid) { try { process.kill(pid, 'SIGKILL'); } catch { /* Already reaped. */ } } await rm(directory, { recursive: true, force: true }); });
   await writeFile(executable, `#!${process.execPath}
-import {writeFileSync} from 'node:fs';
+import {renameSync,writeFileSync} from 'node:fs';
 process.on('SIGTERM',()=>{}); process.stdin.resume();
-writeFileSync(process.env.PID_FILE,String(process.pid));
+writeFileSync(process.env.PID_FILE+'.pending',String(process.pid)); renameSync(process.env.PID_FILE+'.pending',process.env.PID_FILE);
 setInterval(()=>{},1000);
 `);
   await chmod(executable, 0o700);
   const controller = new AbortController();
   const pending = readCodexCapabilities(executable, { ...process.env, PID_FILE: pidFile }, controller.signal);
-  // A busy machine can take seconds to start the fake CLI; only the abort itself is timed.
-  for (let attempt = 0; attempt < 800 && !pid; attempt++) {
-    try { pid = Number(await readFile(pidFile, 'utf8')); } catch { await new Promise(resolve => setTimeout(resolve, 10)); }
-  }
-  assert.ok(pid);
+  // A busy machine can take seconds to start the fake CLI. The pid is renamed into place whole, so it is there or not.
+  pid = await until(() => (existsSync(pidFile) && Number(readFileSync(pidFile, 'utf8'))) || undefined, 30_000);
   // The second between SIGTERM and SIGKILL runs on a fake clock.
   const realTimeout = setTimeout;
   t.mock.timers.enable({ apis: ['setTimeout'] });
