@@ -7,7 +7,7 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 import type { StorageBuildContext } from '../../../server/storage/bundle.js';
 import type { KnownStorageEvidence, RecoveryBarrier } from '../../../server/storage/recovery.js';
-import { historyAfterSnapshot, recordedWithSidecars, sha, type History } from './fixtures/history.js';
+import { cloneHistory, historyAfterSnapshot, recordedWithSidecars, sha, withoutFsync, type History } from './fixtures/history.js';
 import { artifactOf, contextOf, DATABASE, databasePath, filesUnder, fixtureManifest, fixtureParentFile, openFixture, stateDir, storage } from './helpers.js';
 
 const {
@@ -294,8 +294,9 @@ test('a snapshot of another storage is refused', async t => {
 });
 
 /** The snapshot adopted with `known` as the evidence of the live database it replaced. */
-async function adoptedWith(t: Parameters<typeof historyAfterSnapshot>[0], change: (known: KnownStorageEvidence) => KnownStorageEvidence): Promise<History & { barrier: RecoveryBarrier }> {
-  const history = await historyAfterSnapshot(t);
+async function adoptedWith(t: Parameters<typeof historyAfterSnapshot>[0], change: (known: KnownStorageEvidence) => KnownStorageEvidence, template?: History): Promise<History & { barrier: RecoveryBarrier }> {
+  // A copy of `template` when given: one history serves every case of a test.
+  const history = template ? await cloneHistory(t, template) : await historyAfterSnapshot(t);
   const barrier = await adoptSnapshot(history.dir, { snapshotId: history.snapshotId, reason: 'evidence', context: history.context, known: change(history.known) });
   return { ...history, barrier };
 }
@@ -308,8 +309,11 @@ test('a barrier whose evidence names a scope or schema version beyond this build
     ['a higher domain schema', known => ({ ...known, schema: [...known.schema, { scope: 'fixture', version: 2 }] }), 'fixture schema 2'],
     ['an unknown domain\'s authority', known => ({ ...known, authority: [...known.authority, { domain: 'later', authority: 'database', generation: 1 }] }), 'later'],
   ];
+  const template = await historyAfterSnapshot(t);
+  // What the holds decide, not what a disk keeps (durability.test.ts proves the syncs).
+  withoutFsync(t);
   for (const [name, change, named] of cases) {
-    const { dir, context, barrier } = await adoptedWith(t, change);
+    const { dir, context, barrier } = await adoptedWith(t, change, template);
     // As a build that understood the evidence would have left it: core reconciled.
     await writeFile(barrierFile(dir), JSON.stringify({ ...barrier, reconciled: [release('core')] }));
     const read = await readRecoveryBarrier(dir);
@@ -322,13 +326,16 @@ test('a barrier whose evidence names a scope or schema version beyond this build
     }
     const summary = recoverySummary(read, context);
     assert.ok(summary.state === 'held' && !summary.reconciled.length && /reconciliations do not apply/.test(summary.reason), `${name}: ${JSON.stringify(summary)}`);
-    // The storage still opens and prepares, for diagnosis; its gate stays closed.
-    const client = await openFixture(t, dir);
-    await client.prepare({ allowMigration: false });
-    const gate = await client.gate('core');
-    assert.equal(gate.open, false, `${name}: core stays held though reconciled`);
-    assert.ok(gate.reasons.some(reason => reason.includes(named)));
-    await client.close();
+    // The storage still opens and prepares, for diagnosis; its gate stays closed. The gate answers recoveryHold, checked
+    // above for every case, so one case opens a real storage.
+    if (name === cases[0]![0]) {
+      const client = await openFixture(t, dir);
+      await client.prepare({ allowMigration: false });
+      const gate = await client.gate('core');
+      assert.equal(gate.open, false, `${name}: core stays held though reconciled`);
+      assert.ok(gate.reasons.some(reason => reason.includes(named)));
+      await client.close();
+    }
     const before = await readFile(barrierFile(dir), 'utf8');
     await assert.rejects(reconcileRecovery(dir, { barrierId: barrier.id, scopes: ['core'], by: 'owner', evidence: 'x', context }), { code: 'unknown-scope' }, name);
     assert.equal(await readFile(barrierFile(dir), 'utf8'), before, `${name}: nothing written`);

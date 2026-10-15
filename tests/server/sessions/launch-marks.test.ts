@@ -16,7 +16,7 @@ const CHILD = '20000000-0000-4000-8000-000000000002';
  * (~0.2 s each), so a fresh install per test costs more than the test. Each test still has its own marks folder.
  */
 let installed: Promise<{ dir: string; real: string }> | undefined;
-const installedRoot = mkdtemp(join(tmpdir(), 'tower-shims-installed-')).then(realpath);
+const installedRoot = mkdtemp(join(tmpdir(), 'tower-shims-installed-')).then(dir => realpath(dir));
 after(async () => rm(await installedRoot, { recursive: true, force: true }));
 function install() {
   return installed ??= (async () => {

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { chmod, constants, copyFile, lstat, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, readdir, readFile, realpath, rename, rm } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import type { RecoveryBarrier } from '../../../server/storage/recovery.js';
-import { cloneHistory, historyAfterSnapshot, historyWithSidecars, recordedWithSidecars, sha, type History } from './fixtures/history.js';
+import { cloneHistory, historyAfterSnapshot, historyWithSidecars, recordedWithSidecars, sha, unsyncedStorageFs, type History } from './fixtures/history.js';
 import { DATABASE, databasePath, filesUnder, openFixture, rejectsWith, stateDir, storage } from './helpers.js';
 
 const { activateRecoveryBarrier, adoptSnapshot, readRecoveryBarrier, reconcileRecovery, recordRecoveryBarrier, recordStorageIdentity, recoveryHold, storageFs, storageLayout } = storage;
@@ -88,16 +88,8 @@ class OrderModel {
   describe(index: number): string { return `cut ${index} (after ${JSON.stringify(this.log[index - 1])})`; }
 }
 
-/**
- * storageFs without its fsyncs: the same files, links and modes. For the model, which judges what a power cut keeps by
- * the syncs it records, never by the disk; real fsyncs only make each adoption slow (and slower still on a busy disk).
- */
-const unsynced: Partial<Record<Op, (...args: string[]) => Promise<void>>> = {
-  createFile: (path, data) => writeFile(path, data, { flag: 'wx', mode: 0o600 }),
-  copyFile: async (from, to) => { await copyFile(from, to, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE); await chmod(to, 0o600); },
-  syncFile: async () => {},
-  syncDirectory: async () => {},
-};
+/** The model judges what a power cut keeps by the syncs it records, never by the disk: it can run without real fsyncs. */
+const unsynced: Partial<Record<Op, (...args: string[]) => Promise<void>>> = unsyncedStorageFs;
 
 /**
  * Records every storageFs operation in `model`, and lets `fail` throw instead of (or after) one. Installed once per
