@@ -14,6 +14,7 @@ import { loadLinkIdentity, type LinkIdentity } from '../../../server/link/identi
 import { decodeJoinCode, encodeJoinCode } from '../../../server/link/join-code.js';
 import { linkRequest, openControllerEnd, openNodeEnd, pairingProof } from '../../../server/link/transport.js';
 import { until } from '../../helpers/until.ts';
+import '../../helpers/skip-fsync.js';
 
 async function computer(t: TestContext, name: string, options: { pingMs?: number; refreshMs?: number; updatePollMs?: number; now?: () => number; version?: string; features?: string[]; update?: NodeLinkOptions['update'] } = {}) {
   const stateDir = await mkdtemp(join(tmpdir(), `tower-link-${name}-`));
@@ -49,6 +50,10 @@ async function computer(t: TestContext, name: string, options: { pingMs?: number
 // A code lists every address this computer has, a .local name among them; where that name does not resolve, trying it
 // can take seconds.
 const connected = (controller: ControllerLinks, name: string) => until(() => controller.list().find(node => node.name === name && node.status === 'connected'), 20_000);
+/** A code that names only `port` on loopback: a try that fails ends at once instead of going on to names that do not resolve. */
+const loopbackOnly = (code: string, port: number) => encodeJoinCode({ ...decodeJoinCode(code), addresses: [`ws://127.0.0.1:${port}/tower-link`] });
+/** The joining computer's first try is over and was turned away (refused, or dropped after connecting), so the controller has decided. */
+const triedOnce = (node: NodeLinks) => until(() => ['offline', 'refused'].includes(node.list()[0]?.status ?? '') || undefined, 5000);
 
 test('a computer joins with a code; each side then knows the other and requests reach the joined computer', async t => {
   const a = await computer(t, 'computer-a');
@@ -96,13 +101,16 @@ test('a computer removed while it is being told it joined is told to stop instea
 test('a controller asks a joined computer on an older version to move to its own, follows it, and asks again on the schedule or when told', async t => {
   const asked: unknown[] = [];
   let update: UpdateStatus | undefined;
+  // Nothing is asked for while the controller reads three more reports (it reads one each refresh).
+  let reports = 0;
+  const readAgain = async () => { const from = reports; await until(() => reports >= from + 3, 5000); };
   let clock = Date.now();
   const at = new Date(clock).toISOString();
   const a = await computer(t, 'computer-a', { version: '1.25.0', refreshMs: 50, updatePollMs: 20, now: () => clock });
   const b = await computer(t, 'computer-b', { version: '1.24.0', features: ['work', 'status', 'update'], update: {
     // Each request starts an update of its own, told apart by when it started.
     request: async version => { asked.push(version); const started = new Date(clock + asked.length * 1000).toISOString(); update = { version: String(version), previous: '1.24.0', stage: 'installing', startedAt: started, updatedAt: started }; return { status: 202, body: { update } }; },
-    report: async () => ({ versions: { web: '1.24.0', worker: '1.23.0' }, service: true, ...(update ? { update } : {}), diskFree: 5e9 }),
+    report: async () => { reports++; return { versions: { web: '1.24.0', worker: '1.23.0' }, service: true, ...(update ? { update } : {}), diskFree: 5e9 }; },
   } });
   await a.listen();
   await b.node.join((await a.controller.invite()).code);
@@ -113,17 +121,17 @@ test('a controller asks a joined computer on an older version to move to its own
   update = { ...update!, stage: 'failed', code: 'start-failed', failedStage: 'verifying', updatedAt: at };
   await until(() => a.controller.list()[0]?.retryAt, 5000);
   assert.equal(a.controller.list()[0].retryAt, new Date(clock + 60 * 60_000).toISOString(), 'the first retry is an hour after the failure');
-  await new Promise(resolve => setTimeout(resolve, 300));
+  await readAgain();
   assert.deepEqual(asked, ['1.25.0'], 'a failed update is not asked for again before its time');
   update = { ...update, version: '1.26.0', code: 'check-failed', startedAt: new Date(clock + 1).toISOString() };
   await until(() => a.controller.list()[0]?.report?.update?.version === '1.26.0', 5000);
-  await new Promise(resolve => setTimeout(resolve, 300));
+  await readAgain();
   assert.deepEqual(asked, ['1.25.0'], 'another controller’s failure does not make this one forget its own');
   await a.controller.update(joined.id);
   assert.deepEqual(asked, ['1.25.0', '1.25.0'], 'the owner asks again at once');
   update = { ...update!, stage: 'failed', code: 'start-failed', failedStage: 'verifying' };
   await until(() => a.controller.list()[0]?.report?.update?.stage === 'failed' && a.controller.list()[0].report?.update?.version === '1.25.0', 5000);
-  await new Promise(resolve => setTimeout(resolve, 300));
+  await readAgain();
   assert.equal(a.controller.list()[0].retryAt, new Date(clock + 60 * 60_000).toISOString(), 'the owner’s own attempt failing leaves the schedule as it was: only attempts made by the schedule count');
   assert.deepEqual(asked, ['1.25.0', '1.25.0'], 'and nothing is asked for by itself before its time');
   clock += 60 * 60_000 + 10;
@@ -153,23 +161,26 @@ test('a computer away in the middle of an update shows it as updating, until not
 test('an update that keeps being cut short is asked for again on the schedule, never in a loop', async t => {
   const asked: unknown[] = [];
   let update: UpdateStatus | undefined;
+  // Nothing is asked for while the controller reads three more reports (it reads one each refresh).
+  let reports = 0;
+  const readAgain = async () => { const from = reports; await until(() => reports >= from + 3, 5000); };
   let clock = Date.now();
   const a = await computer(t, 'computer-a', { version: '1.25.0', refreshMs: 30, updatePollMs: 20, now: () => clock });
   const b = await computer(t, 'computer-b', { version: '1.24.0', features: ['work', 'status', 'update'], update: {
     // Its helper never starts: each request is reported as cut short right away.
     request: async version => { asked.push(version); const at = new Date(clock + asked.length).toISOString(); update = { version: String(version), previous: '1.24.0', stage: 'failed', code: 'interrupted', failedStage: 'installing', startedAt: at, updatedAt: at }; return { status: 202, body: { update } }; },
-    report: async () => ({ versions: { web: '1.24.0' }, service: true, ...(update ? { update } : {}) }),
+    report: async () => { reports++; return { versions: { web: '1.24.0' }, service: true, ...(update ? { update } : {}) }; },
   } });
   await a.listen();
   await b.node.join((await a.controller.invite()).code);
   await until(() => a.controller.list()[0]?.retryAt, 5000);
-  await new Promise(resolve => setTimeout(resolve, 300));
+  await readAgain();
   assert.equal(asked.length, 1);
   clock += 61 * 60_000;
   await until(() => asked.length === 2, 5000);
   await until(() => a.controller.list()[0]?.retryAt && Date.parse(a.controller.list()[0].retryAt!) > clock + 60 * 60_000, 5000);
   clock += 61 * 60_000;
-  await new Promise(resolve => setTimeout(resolve, 300));
+  await readAgain();
   assert.equal(asked.length, 2, 'the second retry waits two hours');
   clock += 60 * 60_000;
   await until(() => asked.length === 3, 5000);
@@ -195,12 +206,12 @@ test('a code works once: a second computer using it is not accepted', async t =>
   const a = await computer(t, 'computer-a');
   const b = await computer(t, 'computer-b');
   const c = await computer(t, 'computer-c');
-  await a.listen();
+  const port = await a.listen();
   const invite = await a.controller.invite();
   await b.node.join(invite.code);
   await connected(a.controller, 'computer-b');
-  await c.node.join(invite.code);
-  await new Promise(resolve => setTimeout(resolve, 500));
+  await c.node.join(loopbackOnly(invite.code, port));
+  await triedOnce(c.node);
   assert.deepEqual(a.controller.list().map(node => node.name), ['computer-b']);
   assert.equal(c.node.list()[0].status === 'connected', false);
 });
@@ -222,10 +233,11 @@ test('an expired code, a code from this computer, and text that is not a code ar
 test('a joining computer refuses to connect when another computer answers in place of the one the code names', async t => {
   const a = await computer(t, 'computer-a');
   const b = await computer(t, 'computer-b');
-  await a.listen();
+  const port = await a.listen();
   const invite = decodeJoinCode((await a.controller.invite()).code);
-  await b.node.join(encodeJoinCode({ ...invite, pin: randomBytes(32).toString('base64url') }));
-  // Every address in the code is tried (see `connected`).
+  // Only the loopback address: every address in a code is tried, and names that do not resolve here take seconds
+  // (trying the next address is its own test below).
+  await b.node.join(encodeJoinCode({ ...invite, addresses: [`ws://127.0.0.1:${port}/tower-link`], pin: randomBytes(32).toString('base64url') }));
   const refused = await until(() => b.node.list().find(item => item.status === 'refused'), 20_000);
   assert.match(refused.error ?? '', /다른 컴퓨터가 응답/);
   assert.deepEqual(a.controller.list(), []);
@@ -234,10 +246,10 @@ test('a joining computer refuses to connect when another computer answers in pla
 test('without the code’s secret a computer cannot join, even with the right controller and invitation', async t => {
   const a = await computer(t, 'computer-a');
   const b = await computer(t, 'computer-b');
-  await a.listen();
+  const port = await a.listen();
   const invite = decodeJoinCode((await a.controller.invite()).code);
-  await b.node.join(encodeJoinCode({ ...invite, secret: randomBytes(32).toString('base64url') }));
-  await new Promise(resolve => setTimeout(resolve, 600));
+  await b.node.join(encodeJoinCode({ ...invite, addresses: [`ws://127.0.0.1:${port}/tower-link`], secret: randomBytes(32).toString('base64url') }));
+  await triedOnce(b.node);
   assert.deepEqual(a.controller.list(), []);
   assert.equal(b.served.length, 0);
 });
@@ -392,10 +404,20 @@ test('a computer whose link breaks mid-request is dropped cleanly on both sides 
   };
   a.controller.on('disconnected', disconnected);
   t.after(() => a.controller.off('disconnected', disconnected));
+  // The joined computer's second before dialling again runs on a fake clock.
+  const realTimeout = setTimeout;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => t.mock.timers.reset());
   session.destroy(new Error('network went away'));
   assert.ok(await pending instanceof Error, 'the request in flight fails instead of hanging');
-  await until(() => disconnectedId, 5000);
+  for (let tries = 0; !disconnectedId || b.node.list()[0]?.status !== 'offline'; tries++) {
+    if (tries > 1000) throw new Error('not dropped on both sides');
+    await new Promise(resolve => realTimeout(resolve, 5));
+  }
   assert.equal(offlineAtDisconnect, true, 'actual disconnected event observes this computer offline');
+  // Dropped, its next try is due in a second and a fifth at most.
+  t.mock.timers.tick(1200);
+  t.mock.timers.reset();
   await connected(a.controller, 'computer-b');
 });
 
@@ -406,14 +428,26 @@ test('a computer removed while it was away joins again with a new code', async t
   await b.node.join((await a.controller.invite()).code);
   const joined = await connected(a.controller, 'computer-b');
   await until(() => b.node.list().find(item => item.state === 'paired'), 5000);
-  // The controller stops listening, then listens elsewhere: the joined computer keeps trying the old port.
+  // The controller stops listening, then listens elsewhere: the joined computer keeps trying the old port. The
+  // pauses between its tries run on a fake clock.
+  const realTimeout = setTimeout;
+  const settle = async (done: () => unknown) => { for (let tries = 0; !done(); tries++) { if (tries > 1000) throw new Error('timed out'); await new Promise(resolve => realTimeout(resolve, 5)); } };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => t.mock.timers.reset());
   await a.controller.setHub({ enabled: false });
-  await until(() => b.node.list().find(item => item.status !== 'connected'), 5000);
+  await settle(() => b.node.list().find(item => item.status !== 'connected'));
   await a.controller.remove(joined.id);
   await a.controller.setHub({ enabled: true, port: 0 });
-  const again = await a.controller.invite();
-  await b.node.join(again.code);
+  const again = decodeJoinCode((await a.controller.invite()).code);
+  // Only the old loopback address (see the refused join above): names that do not resolve here take seconds.
+  await b.node.join(encodeJoinCode({ ...again, addresses: [`ws://127.0.0.1:${port}/tower-link`] }));
   await a.controller.setHub({ port });
+  // Once its current try is over and the next is waiting, that wait passes at once.
+  const dialer = b.node as unknown as { dialing: Map<string, unknown>; connecting: Set<string> };
+  const controllerId = b.node.list()[0]!.id;
+  await settle(() => dialer.dialing.has(controllerId) && !dialer.connecting.has(controllerId));
+  t.mock.timers.tick(36_000);
+  t.mock.timers.reset();
   const rejoined = await connected(a.controller, 'computer-b');
   assert.equal(rejoined.id, joined.id);
   await until(() => b.node.list().find(item => item.state === 'paired' && item.status === 'connected'), 5000);
@@ -438,7 +472,7 @@ test('a code used to join again cannot be used by another computer afterwards', 
   const a = await computer(t, 'computer-a');
   const b = await computer(t, 'computer-b');
   const c = await computer(t, 'computer-c');
-  await a.listen();
+  const port = await a.listen();
   await b.node.join((await a.controller.invite()).code);
   await connected(a.controller, 'computer-b');
   await until(() => b.node.list().find(item => item.state === 'paired'), 5000);
@@ -448,8 +482,8 @@ test('a code used to join again cannot be used by another computer afterwards', 
   const again = await a.controller.invite();
   await b.node.join(again.code);
   await connected(a.controller, 'computer-b');
-  await c.node.join(again.code);
-  await new Promise(resolve => setTimeout(resolve, 500));
+  await c.node.join(loopbackOnly(again.code, port));
+  await triedOnce(c.node);
   assert.deepEqual(a.controller.list().map(node => node.name), ['computer-b']);
 });
 
