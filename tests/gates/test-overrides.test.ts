@@ -18,16 +18,17 @@ const OVERRIDES: Record<string, string[]> = {
 
 const naming = (files: Map<string, string>, name: string) => [...files].filter(([path, text]) => mentions(path, text, name) > 0).map(([path]) => path).sort();
 
-test('the check below finds an override set in any kind of script, by name or by string property name', () => {
+test('the check below finds an override set in any kind of script, by name or by string property name, computed keys included', () => {
   const fixtures = new Map([
     ['server/runs/fixture-set.mjs', "export const options = { 'claudeFinishRecheckMs': 1 };\n"],
     ['scripts/deep/fixture-index.cjs', "module.exports = options => { options['firedPerTrigger'] = 1; };\n"],
     ['client/src/fixture-name.tsx', 'export const host = { scheduleChecks: () => () => {} };\n'],
+    ['server/fixture-computed.ts', "export const host = { ['scheduleChecks']: () => () => {} };\nexport class Limits { ['firedPerTrigger'] = 1; }\n"],
     ['shared/fixture-text.ts', "// scheduleChecks\nexport const words = 'claudeFinishRecheckMs';\n"],
   ]);
   assert.deepEqual(naming(fixtures, 'claudeFinishRecheckMs'), ['server/runs/fixture-set.mjs'], 'a string property name counts; plain text does not');
-  assert.deepEqual(naming(fixtures, 'firedPerTrigger'), ['scripts/deep/fixture-index.cjs']);
-  assert.deepEqual(naming(fixtures, 'scheduleChecks'), ['client/src/fixture-name.tsx']);
+  assert.deepEqual(naming(fixtures, 'firedPerTrigger'), ['scripts/deep/fixture-index.cjs', 'server/fixture-computed.ts'], 'a computed string key counts too');
+  assert.deepEqual(naming(fixtures, 'scheduleChecks'), ['client/src/fixture-name.tsx', 'server/fixture-computed.ts']);
 });
 
 test('test-only delays and limits are named only where they are defined and read, never set by other server code', async () => {

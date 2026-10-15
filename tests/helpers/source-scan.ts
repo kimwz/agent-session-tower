@@ -75,9 +75,10 @@ export function mentions(path: string, text: string, name: string): number {
   return count;
 }
 
-/** A string in the place of a property name: a key, `x['name']`, `{ 'name': y } = …` or `T['name']`. */
+/** A string in the place of a property name: a key, `{ ['name']: … }`, `x['name']`, `{ 'name': y } = …` or `T['name']`. */
 function propertyName(node: ts.StringLiteralLike): boolean {
   const parent = node.parent;
+  if (ts.isComputedPropertyName(parent)) return true;
   if (ts.isElementAccessExpression(parent)) return parent.argumentExpression === node;
   if (ts.isBindingElement(parent)) return parent.propertyName === node;
   if (ts.isPropertyAssignment(parent) || ts.isPropertySignature(parent) || ts.isPropertyDeclaration(parent) || ts.isMethodDeclaration(parent)

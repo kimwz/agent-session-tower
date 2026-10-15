@@ -58,6 +58,7 @@ const FIXTURES = new Map([
   ['scripts/fixture-build.mjs', "import { fastKdf } from '../tests/helpers/fast-kdf.js';\nimport '../tests/helpers/skip-fsync.js';\n"],
   ['scripts/fixture-old.cjs', "const fast = require('../tests/helpers/fast-scrypt.js');\nrequire('../tests/helpers/skip-fsync');\n"],
   ['server/fixture-hook.js', "export const hooks = { 'replaceArgon2ForTests': () => {} };\n"],
+  ['server/fixture-computed.cjs', "module.exports = { ['replaceArgon2ForTests']: () => {} };\n"],
   ['server/deep/fixture-access.mts', "import * as crypto from '../secrets/crypto.js';\ncrypto['replaceAuthScryptForTests']?.();\n"],
   ['shared/fixture-type.tsx', "export type Hook = typeof import('../server/backup/crypto.js')['replaceBackupScryptForTests'];\nawait import('../tests/helpers/fast-kdf.js');\n"],
   ['tests/server/storage/durability.test.ts', "import '../../helpers/skip-fsync.js';\n"],
@@ -65,7 +66,7 @@ const FIXTURES = new Map([
 ]);
 
 test('the checks below refuse every kind of script that names a hook or imports a fast helper, at any depth', () => {
-  assert.deepEqual(naming(FIXTURES, 'replaceArgon2ForTests'), ['server/fixture-hook.js']);
+  assert.deepEqual(naming(FIXTURES, 'replaceArgon2ForTests'), ['server/fixture-computed.cjs', 'server/fixture-hook.js']);
   assert.deepEqual(naming(FIXTURES, 'replaceAuthScryptForTests'), ['server/deep/fixture-access.mts']);
   assert.deepEqual(naming(FIXTURES, 'replaceBackupScryptForTests'), ['shared/fixture-type.tsx']);
   assert.deepEqual(importing(FIXTURES, 'tests/helpers/fast-kdf'), ['scripts/fixture-build.mjs', 'shared/fixture-type.tsx']);
