@@ -21,8 +21,8 @@ const bumpJson = (text: string, to: string, lockfile = false) => {
 };
 const bumpIdentity = (to: string) => identity.replace(/APP_VERSION = '[^']*'/, `APP_VERSION = '${to}'`);
 /** A change where `head` overrides files of the real tree; a null removes the file. */
-const change = (head: Record<string, string | null>, baseGreen = true) => classify({
-  changes: Object.keys(head), baseGreen,
+const change = (head: Record<string, string | null>) => classify({
+  changes: Object.keys(head),
   content: (path, side) => side === 'head' && path in head ? head[path] : path === 'package.json' ? pkg : path === 'package-lock.json' ? lock
     : path === 'shared/app-identity.ts' ? identity : side === 'base' || !(path in head) ? 'base text' : head[path],
 });
@@ -59,7 +59,7 @@ test('server and shared code, sensitive browser views, build and CI, minor or ma
   assert.equal(change({ 'package.json': bumpJson(pkg, `${major}.${minor}.${Math.max(patch - 1, 0)}`) }).tier, patch ? 'full' : 'quick');
   assert.equal(change({ 'package.json': bumpJson(pkg, 'next') }).tier, 'full');
   // `npm version` checks before it writes the version it was asked for.
-  const docs = { changes: ['docs/usage.md'], baseGreen: true, content: (path: string) => path === 'package.json' ? pkg : 'x' };
+  const docs = { changes: ['docs/usage.md'], content: (path: string) => path === 'package.json' ? pkg : 'x' };
   assert.equal(classify({ ...docs, nextVersion: nextPatch }).tier, 'quick');
   assert.equal(classify({ ...docs, nextVersion: `${major}.${minor + 1}.0` }).tier, 'full');
 });
@@ -76,12 +76,6 @@ test('version metadata counts as metadata only when nothing but the version chan
   assert.equal(change({ 'package.json': null }).tier, 'full', 'a removed package.json');
   assert.equal(versionOnly('package.json', pkg, bumpJson(pkg, nextPatch)), true);
   assert.equal(versionOnly('package.json', pkg, '{'), false);
-});
-
-test('a quick change stands on its base: a base without a passed gate needs the full run', () => {
-  assert.equal(change({ 'docs/usage.md': 'x' }, false).tier, 'full');
-  assert.match(change({ 'docs/usage.md': 'x' }, false).reasons.join(), /base commit has not passed/);
-  assert.equal(change({ 'client/App.tsx': 'x' }, false).tier, 'related', 'related does not lean on its base');
 });
 
 test('only a completed successful newest CI run and gate pass; pending, rerunning, skipped, failed and absent do not', () => {
@@ -123,7 +117,7 @@ const problems = (input: ReturnType<typeof run>) => gateVerdict(input as any).pr
 test('the gate passes each tier with exactly its lanes', () => {
   for (const tier of ['full', 'related', 'quick', 'reused']) assert.deepEqual(problems(run(tier)), [], tier);
   assert.equal(lanesFor('full').length, 17);
-  assert.deepEqual(lanesFor('related').map(l => l.id), ['linux-22-0', 'linux-22-1', 'linux-22-2', 'linux-22-3', 'mac-22-0', 'mac-22-1', 'mac-22-2']);
+  assert.deepEqual(lanesFor('related').map(l => l.id), ['linux-22-0', 'linux-22-1', 'linux-22-2', 'linux-22-3']);
   assert.deepEqual(lanesFor('quick'), []);
   assert.throws(() => lanesFor('none'));
 });
@@ -198,23 +192,54 @@ test('main reuses a pull request result only for the same tree at a tier that co
   assert.equal(planCi({ scope: { ...scope, tier: 'quick' }, repo: 'o/r', ...api({ verdict: 'pass', tree, tier: 'full' }) }).execution, 'run', 'quick runs its own checks');
 });
 
-test('CI compares a commit with its first parent and treats a push of several commits as full', async t => {
+test('CI compares a commit with its first parent, leans a quick change on its base and runs a multi-commit push in full', async t => {
   const root = await mkdtemp(join(tmpdir(), 'tower-ci-scope-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const git = (...args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false',
     '-c', 'user.name=fixture', '-c', 'user.email=fixture@invalid', ...args], { cwd: root, encoding: 'utf8' }).trim();
   const put = async (path: string, text: string) => { await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), text); };
-  git('init', '-q');
+  git('init', '-q', '-b', 'main');
   for (const [path, text] of Object.entries({ 'package.json': pkg, 'package-lock.json': lock, 'shared/app-identity.ts': identity, 'CHANGELOG.md': '' })) await put(path, text);
   git('add', '.'); git('commit', '-qm', 'base');
   const first = git('rev-parse', 'HEAD');
   for (const [path, text] of Object.entries(release(nextPatch))) await put(path, text);
   git('add', '.'); git('commit', '-qm', 'Release [skip ci]');
-  const green = () => ({ passed: true, reason: 'gate success' });
+  const asked: string[] = [];
+  const green = (sha: string) => { asked.push(sha); return { passed: true, reason: 'gate success' }; };
   assert.equal(ciScope({ cwd: root, event: 'pull_request', gate: green }).tier, 'quick');
+  assert.deepEqual(asked, [first], 'a quick change asks for its base gate');
   assert.equal(ciScope({ cwd: root, event: 'push', before: first, gate: green }).tier, 'quick');
-  assert.equal(ciScope({ cwd: root, event: 'pull_request', gate: () => ({ passed: false, reason: 'gate in_progress' }) }).tier, 'full');
+  for (const reason of ['CI run 7 attempt 1 in_progress', 'no CI run (workflow skipped or never started)', 'gate failure']) {
+    const scope = ciScope({ cwd: root, event: 'pull_request', gate: () => ({ passed: false, reason }) });
+    assert.equal(scope.tier, 'full', reason);
+    assert.match(scope.reasons.join(), /base commit has not passed/);
+  }
+  assert.equal(ciScope({ cwd: root, event: 'pull_request', gate: null }).tier, 'quick', 'the files alone');
   await put('client/App.tsx', 'x'); git('add', '.'); git('commit', '-qm', 'code');
   assert.equal(ciScope({ cwd: root, event: 'push', before: first, gate: green }).tier, 'full', 'two commits pushed at once');
-  assert.equal(ciScope({ cwd: root, event: 'pull_request', gate: green }).tier, 'related');
+  assert.equal(ciScope({ cwd: root, event: 'pull_request', gate: () => { throw new Error('related does not lean on its base'); } }).tier, 'related');
+  // A pull request's merge ref: the first parent is the base tip, the second the branch that changed server code.
+  git('checkout', '-q', '-b', 'branch', first);
+  await put('server/slack/service.ts', 'x'); git('add', '.'); git('commit', '-qm', 'server');
+  git('checkout', '-q', 'main');
+  git('merge', '-q', '--no-ff', '-m', 'merge ref', 'branch');
+  assert.equal(ciScope({ cwd: root, event: 'pull_request', gate: green }).tier, 'full', 'compared with the base tip, the merge brings server code');
+  git('checkout', '-q', 'branch');
+  git('merge', '-q', '--no-ff', '-m', 'merge main into branch', 'main');
+  assert.equal(ciScope({ cwd: root, event: 'pull_request', gate: green }).files.includes('client/App.tsx'), true, 'first parent only');
+});
+
+test('the workflows wire the gate: it always runs on every job, lanes are skipped only when none, and Release verifies before publishing', () => {
+  const ci = real('.github/workflows/ci.yml'), release = real('.github/workflows/release.yml');
+  const gate = ci.slice(ci.indexOf('  validation-gate:'));
+  assert.match(gate, /if: always\(\)/);
+  assert.match(gate, /needs: \[plan, test, checks\]/);
+  assert.match(ci, /  test:[\s\S]*?if: needs\.plan\.outputs\.lanes != '0'[\s\S]*?strategy:/);
+  assert.equal((ci.match(/overwrite: true/g) ?? []).length, (ci.match(/actions\/upload-artifact/g) ?? []).length, 'every result can be replaced by a rerun');
+  const verify = release.indexOf('scripts/ci-verify.mjs'), publish = release.indexOf('gh release create');
+  assert.ok(verify > 0 && verify < publish, 'Release checks CI before it publishes');
+  assert.match(release.slice(verify - 200, verify), /if: github\.event_name == 'push'/);
+  for (const step of ['Capture the pinned genuine old worker inputs', 'Run npm run check']) {
+    assert.match(release.slice(release.indexOf(`name: ${step}`)), new RegExp(`^name: ${step}\\n\\s+if: github\\.event_name == 'workflow_dispatch'`), step);
+  }
 });

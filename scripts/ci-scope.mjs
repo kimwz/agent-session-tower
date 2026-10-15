@@ -60,9 +60,9 @@ export function versionOnly(path, before, after) {
 
 /**
  * `changes` lists every changed path (a rename as its old and new path); `content(path, side)` reads a file at 'base' or
- * 'head', or returns null when it is absent there. `baseGreen` says whether the base commit passed the gate.
+ * 'head', or returns null when it is absent there. `nextVersion` overrides the head's version.
  */
-export function classify({ changes, content, baseGreen, nextVersion }) {
+export function classify({ changes, content, nextVersion }) {
   let tier = 'quick';
   const reasons = [];
   const raise = (to, reason) => { if (rank(to) > rank(tier)) tier = to; if (reason && !reasons.includes(reason)) reasons.push(reason); };
@@ -81,7 +81,6 @@ export function classify({ changes, content, baseGreen, nextVersion }) {
     else if (a[0] !== b[0] || a[1] !== b[1]) raise('full', `minor or major version: ${from} → ${to}`);
     else if (b[2] <= a[2]) raise('full', `version not raised: ${from} → ${to}`);
   }
-  if (tier === 'quick' && baseGreen !== true) raise('full', 'base commit has not passed the gate');
   return { tier, reasons, files: changes, version: { from, to } };
 }
 
@@ -122,17 +121,17 @@ export function commitGate(sha, repo = process.env.GITHUB_REPOSITORY) {
 
 /**
  * The change a CI run validates: the checked-out commit against its first parent (a pull request's merge ref or a squash
- * merge). `gate` reads the base commit's gate, only for a quick change; pass `() => ({ passed: true })` for paths alone.
+ * merge). A quick change stands on its base, so `gate(base)` must pass or it runs in full; pass `gate: null` for the files'
+ * tier alone.
  */
 export function ciScope({ event = process.env.GITHUB_EVENT_NAME, before = process.env.CI_PUSH_BEFORE, gate = commitGate, cwd = '.' } = {}) {
   const git = gitIn(cwd), show = gitShowIn(cwd);
   const head = git('rev-parse', 'HEAD'), base = git('rev-parse', 'HEAD^1');
   const changes = git('diff', '--no-renames', '--name-only', '-z', base, head).split('\0').filter(Boolean);
-  const content = (path, side) => show(side === 'base' ? base : head, path);
-  const pathOnly = classify({ changes, content, baseGreen: true });
-  const baseGate = pathOnly.tier === 'quick' ? gate(base) : undefined;
-  const scope = classify({ changes, content, baseGreen: baseGate ? baseGate.passed : true });
+  const scope = classify({ changes, content: (path, side) => show(side === 'base' ? base : head, path) });
   if (event === 'push' && before !== base) { scope.tier = 'full'; scope.reasons.push(`push of more than one commit (${before} → ${head})`); }
+  const baseGate = scope.tier === 'quick' && gate ? gate(base) : undefined;
+  if (baseGate && !baseGate.passed) { scope.tier = 'full'; scope.reasons.push(`base commit has not passed the gate: ${baseGate.reason}`); }
   return { ...scope, event, base, head, tree: git('rev-parse', 'HEAD^{tree}'), baseGate };
 }
 
@@ -183,7 +182,7 @@ export function localScope() {
     try { return readFileSync(path, 'utf8'); } catch { return null; }
   };
   // `npm version` runs this before it writes the new version, so take the version it is about to write.
-  return classify({ changes, content, baseGreen: true, nextVersion: process.env.npm_new_version || undefined });
+  return classify({ changes, content, nextVersion: process.env.npm_new_version || undefined });
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {

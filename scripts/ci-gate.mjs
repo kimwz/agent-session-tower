@@ -57,14 +57,14 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   walk(root);
   const scopeFile = join(root, 'ci-scope', 'ci-scope.json');
   const planned = existsSync(scopeFile) ? JSON.parse(readFileSync(scopeFile, 'utf8')) : undefined;
-  const path = ciScope({ gate: () => ({ passed: true }) });
+  const path = ciScope({ gate: null });
   const { baseGate, evidence } = rereadClaims({ planned, path });
   const sha = process.env.GITHUB_SHA;
   const { problems, timing } = gateVerdict({ needs: JSON.parse(process.env.CI_NEEDS), planned, pathTier: path.tier, baseGate,
     evidence, receipts, sha, tree: path.tree });
   const window = receipts.length ? (Math.max(...receipts.map(r => r.finished)) - Math.min(...receipts.map(r => r.started))) / 1000 : undefined;
   const report = { verdict: problems.length ? 'fail' : 'pass', problems, tier: planned?.tier, execution: planned?.execution, pathTier: path.tier, reasons: path.reasons,
-    lanes: planned?.lanes, baseGate, evidence, scope: 'macOS and Linux', sha, tree: path.tree, ...timing, testWindowSeconds: window,
+    lanes: planned?.lanes, baseGate, evidence, sha, tree: path.tree, testRunnerSeconds: timing.testRunnerSeconds, testWindowSeconds: window,
     setupEnvelopeSeconds: receipts.length ? (Math.max(...receipts.map(r => r.ready)) - Math.min(...receipts.map(r => r.admitted))) / 1000 : undefined,
     receipts: receipts.map(({ env, ...receipt }) => receipt) };
   writeFileSync('ci-timing.json', JSON.stringify(report, null, 2));

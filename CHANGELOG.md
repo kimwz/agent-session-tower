@@ -8,7 +8,7 @@ format, and saved browser preferences are the compatibility surface.
 
 - **개발: 변경 내용만큼만 CI를 돌립니다.** 앱 동작은 바뀌지 않았습니다.
   - 문서와 패치 버전만 바꾸면 검사 job 하나만 돕니다. 기반 커밋이 검사를 통과한 경우에 한합니다.
-  - 브라우저 화면 코드는 Node 22에서 Linux와 macOS로 한 번씩 돕니다.
+  - 브라우저 화면 코드는 Node 22 Linux에서만 돕니다.
   - 서버·공유 코드, 빌드·의존성 변경, 마이너·메이저 버전, 분류하지 않은 경로는 지금처럼 전체를 돕니다.
   - main은 pull request가 검증한 것과 같은 트리면 그 결과를 다시 씁니다.
   - 릴리스는 CI를 통과한 커밋만 게시하고, 게시 뒤 전체 검사를 다시 돌리지 않습니다.
