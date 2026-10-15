@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { openCodexBridgeRun, type CodexBridgeOptions } from '../../../server/runs/codex-bridge.js';
 import { until } from '../../helpers/until.ts';
+import { settle } from './fixtures/settle.ts';
 
 type Request = { id: number; method: string; params: any };
 type QueueItem = { id: string; clientUserMessageId: string; input: unknown[] };
@@ -97,13 +98,6 @@ class Fake {
       assert.ok(turn); this.reply(request, {}); this.complete(turn, '', 'interrupted');
     } else assert.fail(`Unexpected method ${request.method}`);
   }
-}
-
-/** Lets real socket I/O run while setTimeout is mocked: polls on setImmediate, never on a timer. */
-async function settle(read: () => boolean = () => true, rounds = 20): Promise<void> {
-  for (let i = 0; i < 10_000 && !read(); i++) await new Promise(resolve => setImmediate(resolve));
-  assert.ok(read());
-  for (let i = 0; i < rounds; i++) await new Promise(resolve => setImmediate(resolve));
 }
 
 async function open(fake: Fake, runId = 'monitor-run', imagePaths?: string[], model?: string, effort?: string, extra: Partial<CodexBridgeOptions> = {}) {
