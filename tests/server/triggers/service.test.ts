@@ -889,15 +889,19 @@ test('restoring an older backup preserves an explicit local archive and converge
 
 
 test('manual execution races a due tick as one reservation in both invocation orders', async t => {
-  for (const manualFirst of [true, false]) {
-    const f = await fixture(t); const service = await f.open();
-    const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
-    f.clock.now = Date.parse('2026-09-24T01:00:01Z');
+  // One service: each order races its own reservation, due an hour after the one before.
+  const f = await fixture(t); const service = await f.open();
+  for (const [index, manualFirst] of [true, false].entries()) {
+    const at = Date.parse('2026-09-24T01:00:00Z') + index * HOUR;
+    const trigger = await service.create(hourly(f.project, { name: `Reservation ${index}`, source: { kind: 'schedule', schedule: { type: 'once', at: new Date(at).toISOString() }, catchUp: 'latest' } }), OWNER);
+    f.clock.now = at + 1000;
+    const calls = f.calls.length;
     await Promise.allSettled(manualFirst ? [service.run(trigger.id, OWNER), service.tick()] : [service.tick(), service.run(trigger.id, OWNER)]);
     await service.tick();
-    assert.equal(service.events({ triggerId: trigger.id }).length, 1);
-    assert.equal(f.calls.length, 1);
+    assert.equal(service.events({ triggerId: trigger.id }).length, 1, String(manualFirst));
+    assert.equal(f.calls.length - calls, 1, String(manualFirst));
     assert.ok(service.get(trigger.id).trigger.consumed);
+    f.finish(); await service.tick();
   }
 });
 
