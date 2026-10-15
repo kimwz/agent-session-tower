@@ -255,13 +255,13 @@ test('closing ends a summary underway instead of waiting for it, and saves nothi
   t.after(() => rm(stateDir, { recursive: true, force: true }));
   // Ended after the summaries started.
   const list = [session('a', { lastCompletedAt: iso(1_000) })];
-  let started!: () => void;
-  const asked = new Promise<void>(resolve => { started = resolve; });
+  let asked = false;
   const tasks = new SessionTasks({ stateDir, sessions: () => list, history: async () => ({ messages: [message('user', 'hello')], hasMore: false }), settleMs: 0, now: () => NOW,
-    model: request => { started(); return new Promise((_, reject) => request.signal.addEventListener('abort', () => reject(new Error('aborted')))); } });
+    model: request => { asked = true; return new Promise((_, reject) => request.signal.addEventListener('abort', () => reject(new Error('aborted')))); } });
   await tasks.start();
   tasks.changed();
-  await asked;
+  // The summary passes run on unref'd timers, so a bare promise would let the event loop end before the call: wait on a real timer.
+  await until(() => asked);
   assert.equal(tasks.inFlight(), true);
   // The call never answers unless it is aborted: a close that waited it out would never end (the test's own timeout).
   await tasks.close();
