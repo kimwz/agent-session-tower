@@ -38,6 +38,48 @@ import { RetentionArchive } from '../../../server/sessions/retention/archive.js'
 import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
 import { worktreeCleanupVisible } from '../../../server/worktrees/janitor.js';
 
+/**
+ * The worker checks for a handoff, then for idleness, once a second (two setInterval(…, 1000) in server/runs/worker.ts,
+ * the handoff timer created first). Here each worker's pair runs every 10 ms, in that same order, and every round is
+ * counted, so a test proves that nothing happened after real checks instead of sleeping for them. What a check decides is
+ * unchanged: hold, retry and idle deadlines are read from the clock. `idleHeld` skips the idle half until a test's own
+ * request has reached the worker, as a second-long tick always allowed.
+ */
+const workerChecks = { rounds: 0, idleHeld: false };
+{
+  const realSet = globalThis.setInterval;
+  const realClear = globalThis.clearInterval;
+  type Pair = { idle?: () => void };
+  let last: Pair | undefined;
+  const idles = new Map<unknown, Pair>();
+  globalThis.setInterval = ((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    const source = ms === 1000 && /server[\\/]runs[\\/]worker\.ts/.test(new Error().stack ?? '') ? String(callback) : '';
+    if (source.includes('handOff')) {
+      const pair: Pair = last = {};
+      return realSet(() => { workerChecks.rounds++; callback(...args); if (!workerChecks.idleHeld) pair.idle?.(); }, 10);
+    }
+    if (source.includes('onIdle') && last && !last.idle) {
+      const pair = last;
+      pair.idle = () => callback(...args);
+      const handle = { unref: () => handle, ref: () => handle, hasRef: () => false };
+      idles.set(handle, pair);
+      return handle;
+    }
+    return realSet(callback, ms, ...args);
+  }) as unknown as typeof setInterval;
+  globalThis.clearInterval = ((handle: Parameters<typeof clearInterval>[0]) => {
+    const pair = idles.get(handle);
+    if (pair) { pair.idle = undefined; idles.delete(handle); return; }
+    realClear(handle);
+  }) as typeof clearInterval;
+}
+
+/** Waits until the workers have run `count` more rounds of their handoff and idle checks. */
+async function checks(count = 3) {
+  const target = workerChecks.rounds + count;
+  await until(() => workerChecks.rounds >= target);
+}
+
 async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector, hostOptions?: (parts: { stateDir: string; sessions: SessionService; runs: RunManager }) => Promise<Partial<RunnerHostOptions>>, fault?: { onUnavailable: (status: ReturnType<import('../../../server/storage/client.js').StorageClient['status']>, runs: RunManager) => void }, beforeExecutable?: () => Promise<void>, holdUntilReady = false) {
   const directory = await realpath(await temporaryFixture('tower-durable-fixture-'));
   const stateDir = join(directory, 'state');
@@ -708,7 +750,7 @@ test('an outdated worker hands off only when nothing is running, and the web fol
   const run = await client.enqueue(f.session.id, 'Keep working through the deploy');
   await until(() => f.starts() === 1);
   assert.equal(await client.requestHandoff(true), true);
-  await new Promise(resolve => setTimeout(resolve, 1500));
+  await checks();
   assert.equal(handoffs, 0, 'a running turn keeps the old worker in service');
   assert.equal(existsSync(join(f.stateDir, 'runner-runtime', 'handoff.json')), false);
   f.finish();
@@ -776,11 +818,14 @@ test('while an update of this computer is being tried, the new web does not take
   let handedOff = false;
   const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => {}, onHandedOff: () => { handedOff = true; } });
   let held = true;
-  const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: async () => held });
+  let holdChecks = 0;
+  const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: async () => { holdChecks++; return held; } });
   // Closed here, before the fixture's own cleanup removes the folder they write to.
   try {
     await client.start();
-    await new Promise(resolve => setTimeout(resolve, 300));
+    // The web looked at the hold several times, and the worker at its requests, without a handoff.
+    await until(() => holdChecks >= 3);
+    await checks();
     assert.equal(handoffs, 0, 'going back to the previous version must still find the previous worker');
     held = false;
     await until(() => handedOff);
@@ -806,11 +851,12 @@ test('a hold that cannot be checked keeps the worker until the check works again
   // Quiesce runs before the handoff record is written; only onHandedOff says the worker has stopped writing here.
   const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => {}, onHandedOff: () => { handedOff = true; } });
   let unreadable = true;
-  const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: async () => { if (unreadable) throw new Error('ELOOP: too many symbolic links'); return false; } });
+  let holdChecks = 0;
+  const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: async () => { holdChecks++; if (unreadable) throw new Error('ELOOP: too many symbolic links'); return false; } });
   try {
     await client.start();
-    // The worker looks at a handoff request once a second.
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    await until(() => holdChecks >= 3);
+    await checks();
     assert.equal(handoffs, 0, 'whether an update is still tried cannot be told, so the previous worker stays');
     unreadable = false;
     await until(() => handedOff);
@@ -833,18 +879,21 @@ test('with a live helper and a hold unreadable past 15 minutes, automatic handof
   await mkdir(runtimePaths(f.stateDir).root, { recursive: true });
   await symlink(hold, hold);
   await writeFile(lock, String(process.pid));
-  const web = () => new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: () => handoffHeld(f.stateDir, Date.now() + 16 * 60_000) });
+  let holdChecks = 0;
+  const web = () => new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: () => { holdChecks++; return handoffHeld(f.stateDir, Date.now() + 16 * 60_000); } });
+  /** The web looked at the hold several more times, and the worker at its requests, without a handoff. */
+  const looked = async () => { const target = holdChecks + 3; await until(() => holdChecks >= target); await checks(); };
   let client = web();
   try {
     await client.start();
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    await looked();
     assert.equal(handoffs, 0);
     await assert.rejects(client.restartWorker(), { kind: 'conflict', message: /could not check/ });
     await assert.rejects(client.forceUpdate(), { kind: 'conflict', message: /could not check/ });
     await client.close();
     client = web();
     await client.start();
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    await looked();
     assert.equal(handoffs, 0, 'a new web attached meanwhile does not take the worker either');
     assert.equal(successors, 0);
     assert.equal(f.cancels(), 0, 'the running turn is untouched');
@@ -866,7 +915,7 @@ test('a worker newer than this web, left by an update that was undone, is not ha
   try {
     await client.start();
     assert.equal(await client.requestHandoff(), false);
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await checks();
     assert.equal(handoffs, 0);
   } finally { await client.close(); await host.close(); }
 });
@@ -1025,7 +1074,7 @@ test('a handoff asked only so a new worker reads settings again (a restore) neve
   await client.enqueue(f.session.id, 'Long turn');
   await until(() => f.starts() === 1);
   assert.equal(await client.restartWorker(), true);
-  await new Promise(resolve => setTimeout(resolve, 1500));
+  await checks();
   assert.equal(holds, 0);
   assert.equal(f.runs.list()[0].status, 'running');
   f.finish();
@@ -1034,6 +1083,10 @@ test('a handoff asked only so a new worker reads settings again (a restore) neve
 });
 
 test('an ordinary handoff asked after a patient one waits its own long hold from when it is asked', async t => {
+  // The hold is read from the clock; the clock is moved on instead of waiting it out.
+  let skew = 0;
+  const now = Date.now.bind(Date);
+  t.mock.method(Date, 'now', () => now() + skew);
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();
   let holds = 0;
@@ -1044,10 +1097,12 @@ test('an ordinary handoff asked after a patient one waits its own long hold from
   await client.enqueue(f.session.id, 'Long turn');
   await until(() => f.starts() === 1);
   await client.restartWorker();
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  skew += 2000;
+  await checks();
   await client.requestHandoff(true);
-  await new Promise(resolve => setTimeout(resolve, 700));
+  await checks();
   assert.equal(holds, 0, 'not held at once for the time the patient request waited');
+  skew += 1500;
   await until(() => holds === 1);
   f.finish();
 });
@@ -1063,7 +1118,7 @@ test('a turn that is still closing its provider keeps the old worker, whatever i
   t.after(() => host.close());
   const client = await f.connect();
   await client.requestHandoff(true);
-  await new Promise(resolve => setTimeout(resolve, 1500));
+  await checks();
   assert.equal(started, 0);
   closing = false;
   await until(() => started === 1);
@@ -1079,11 +1134,13 @@ async function idleWorker(f: Awaited<ReturnType<typeof fixture>>, options: Parti
   /** Per release, whether the handoff record was already on disk. */
   const recordAtRelease: boolean[] = [];
   const lock = await acquireStateLock(f.paths.runtime, 0);
+  // With idleMs 0 the first idle check would end the worker before the test's request reaches it.
+  workerChecks.idleHeld = true;
   const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, idleMs: 0,
     releaseStateLock: async () => { recordAtRelease.push(existsSync(join(f.paths.runtime, 'handoff.json'))); await lock(); events.push('release'); },
     onIdle: async () => { events.push('onIdle'); }, ...options });
   // A newer web asks for the handoff and goes away (a web replaced during an update), so nothing keeps the worker busy.
-  const ask = async () => { const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0' }); await client.start(); await client.close(); };
+  const ask = async () => { const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0' }); await client.start(); await client.close(); workerChecks.idleHeld = false; };
   /**
    * Ends this worker before the fixture folder goes, whatever point a test stopped at: test gates opened, every handoff
    * attempt that paused finished or resumed (an earlier attempt's resume does not end a later one), then the worker
@@ -1091,6 +1148,7 @@ async function idleWorker(f: Awaited<ReturnType<typeof fixture>>, options: Parti
    * not wait for a close already under way, so the release is awaited.
    */
   const settle = async (...gates: Array<() => void>) => {
+    workerChecks.idleHeld = false;
     for (const open of gates) open();
     // Each handoff attempt that paused ends with either a handoff or a resume; wait until every one has ended.
     const count = (name: string) => events.filter(event => event === name).length;
@@ -1118,8 +1176,8 @@ test('an idle tick never closes a worker whose handoff is pausing: the state sta
   try {
     await w.ask();
     await until(() => w.events.includes('quiesce'));
-    // Two idle ticks pass while the handoff is pausing.
-    await new Promise(resolve => setTimeout(resolve, 2200));
+    // Idle ticks pass while the handoff is pausing.
+    await checks();
     assert.deepEqual(w.events, ['quiesce'], 'no idle shutdown and no lock release while the handoff owns shutdown');
     await assert.rejects(acquireStateLock(f.paths.runtime, 0).then(release => { other = release; }), MonitorAlreadyRunning);
     open();
@@ -1168,7 +1226,7 @@ test('an idle shutdown that started first is never joined by a handoff', { timeo
     await until(() => w.events.includes('onIdle'));
     closingProvider = false;
     // Handoff ticks come while the idle shutdown is still under way.
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    await checks();
     open();
     await until(() => w.events.includes('release'));
     assert.deepEqual(w.events, ['onIdle', 'idle done', 'release']);
@@ -1231,7 +1289,7 @@ test('cleanup during a second handoff attempt waits for that attempt, not for th
     settling = w.settle(openFirst);
     await until(() => w.events.includes('quiesced'));
     // The second attempt is still under way: cleanup must not close the worker and release its lock meanwhile.
-    await until(() => w.events.includes('release'), 500).then(() => {}, () => {});
+    await checks();
     assert.deepEqual(w.events, ['quiesce', 'resume', 'quiesce', 'quiesced'], 'nothing is closed or released while the current attempt has not finished');
     openSecond();
     await settling;
@@ -1275,6 +1333,10 @@ test('a pause that fails halfway is undone and the worker stays in service', asy
 });
 
 test('the web keeps trying to start a worker until one answers after a silent successor', async t => {
+  // The web waits a second before its next try; the clock is moved on instead of waiting it out.
+  let skew = 0;
+  const now = Date.now.bind(Date);
+  t.mock.method(Date, 'now', () => now() + skew);
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();
   let replacement: Awaited<ReturnType<typeof startRunnerHost>> | undefined;
@@ -1286,7 +1348,11 @@ test('the web keeps trying to start a worker until one answers after a silent su
   t.after(() => client.close());
   await client.start();
   await client.requestHandoff(true);
-  await until(() => replacement && (client as unknown as { snapshot?: { instance: string } }).snapshot?.instance === replacement.instance, 15_000);
+  const recovery = () => (client as unknown as { recovery?: { nextAt: number } }).recovery;
+  await until(() => attempts === 1 && (recovery()?.nextAt ?? 0) > now() + skew);
+  assert.equal(attempts, 1, 'no second try before the pause');
+  skew += 1000;
+  await until(() => replacement && (client as unknown as { snapshot?: { instance: string } }).snapshot?.instance === replacement.instance);
   assert.equal(attempts, 2, 'the first failed start was retried after a pause');
 });
 
@@ -1458,19 +1524,6 @@ test('the receiving worker resolves master.worker for direct creation before Run
   assert.deepEqual(received[1], { provider: 'codex', cwd: f.directory, prompt: 'ordinary' });
 });
 
-/** Failures a test injects into a trigger handoff fixture, and where it sees the fixture's parts even if building it fails. */
-interface HandoffInjection {
-  /** Each submission takes this much longer after its barrier opens. */
-  submitDelayMs?: number;
-  /** Runs after the first engine started and before its host starts (a test may hold the state lock here). */
-  beforeHost?: (f: Awaited<ReturnType<typeof fixture>>) => Promise<void>;
-  /** Starts the successor's engine in place of `engine.start()`; a rejection fails that start with the engine created. */
-  startSuccessorEngine?: (engine: TriggerService) => Promise<void>;
-  /** Runs after the successor's engine started and before its host starts; a rejection fails the successor's start. */
-  beforeSuccessorHost?: () => Promise<void>;
-  seen?: { f?: Awaited<ReturnType<typeof fixture>>; cleanup?: (options?: CleanupOptions) => Promise<void>; engines?: () => TriggerService[] };
-}
-
 /** `waitMs` bounds each wait; `keep` leaves the folder for the test to inspect (a later cleanup removes it). */
 interface CleanupOptions { waitMs?: number; keep?: boolean }
 
@@ -1499,18 +1552,17 @@ function started<T>(name: string): Started<T> {
 /**
  * A trigger engine on the fixture's runs, handed over the way the production worker does it (hold, wait for nothing in
  * flight, pause and flush, close; the successor starts its own engine on the same state). `enqueues` counts submissions;
- * `hold()` holds submissions until the returned release; `delaySuccessor()` holds the successor's start the same way.
+ * `hold()` holds submissions until the returned release.
  * Each host takes the state lock itself and releases it when it closes.
  *
  * The folder is removed only once everything this fixture started is confirmed to have ended (see `cleanup`). Cleanup is
  * registered as the test's after hook as soon as the fixture exists, so a failure while building it is cleaned up too.
  */
-async function triggerHandoff(t: test.TestContext, inject: HandoffInjection = {}) {
+async function triggerHandoff(t: test.TestContext) {
   const f = await fixture();
   const events: string[] = [];
   let enqueues = 0;
   let gate: Promise<void> | undefined;
-  let successorGate: Promise<void> | undefined;
   /** Every barrier a test set; cleanup opens them all, whatever point the test stopped at. */
   const barriers: Array<() => void> = [];
   const barrier = () => {
@@ -1588,7 +1640,7 @@ async function triggerHandoff(t: test.TestContext, inject: HandoffInjection = {}
       try { await work(); } catch (error) { errors.push(Object.assign(new Error(`${name}: ${error instanceof Error ? error.message : String(error)}`), { cause: error })); }
     };
     for (const open of barriers) open();
-    gate = undefined; successorGate = undefined;
+    gate = undefined;
     await attempt('engine work', () => engineWork(ms));
     await attempt('first host', () => closeHost(firstHost, ms));
     for (const record of hostRecords.slice(1)) await attempt(record.name, () => closeHost(record, ms));
@@ -1615,12 +1667,11 @@ async function triggerHandoff(t: test.TestContext, inject: HandoffInjection = {}
     if (!options.keep) await f.remove();
   })().finally(() => { running = undefined; });
   t.after(() => cleanup());
-  if (inject.seen) Object.assign(inject.seen, { f, cleanup, engines });
 
   const executor: TriggerExecutor = {
     submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
     create: async () => { throw new Error('unused'); },
-    enqueue: async (sessionId, prompt, request, internal) => { enqueues++; await gate; if (inject.submitDelayMs) await new Promise(resolve => setTimeout(resolve, inject.submitDelayMs)); return f.runs.enqueue(sessionId, prompt, request, internal); },
+    enqueue: async (sessionId, prompt, request, internal) => { enqueues++; await gate; return f.runs.enqueue(sessionId, prompt, request, internal); },
     runs: () => f.runs.list(), session: id => f.runs.getSession(id),
   };
   await importFixtureTriggers(f.runs.sqlFixture());
@@ -1631,7 +1682,6 @@ async function triggerHandoff(t: test.TestContext, inject: HandoffInjection = {}
     first = firstEngine.value = engine();
     // A failure while building is thrown to the test, which counts as its report.
     try { await first.start(); firstEngine.settle(); } catch (error) { firstEngine.settle({ error, reported: true }); throw error; }
-    try { await inject.beforeHost?.(f); } catch (error) { firstHost.settle({ error, reported: true }); throw error; }
     const engineA = first;
     try {
       firstHost.value = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, triggers: engineA,
@@ -1646,12 +1696,10 @@ async function triggerHandoff(t: test.TestContext, inject: HandoffInjection = {}
           engineRecords.push(nextEngine); hostRecords.push(nextHost);
           const next = b = nextEngine.value = engine();
           void (async () => {
-            await successorGate;
-            try { await (inject.startSuccessorEngine ?? (item => item.start()))(next); nextEngine.settle(); }
+            try { await next.start(); nextEngine.settle(); }
             // Its host is then never started: settled without a value.
             catch (error) { nextEngine.settle({ error, reported: false }); nextHost.settle(); return; }
             try {
-              await inject.beforeSuccessorHost?.();
               successor = nextHost.value = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, triggers: next, handoffNonce: nonce });
               events.push('successorStarted');
               nextHost.settle();
@@ -1668,176 +1716,8 @@ async function triggerHandoff(t: test.TestContext, inject: HandoffInjection = {}
     handler: { kind: 'task', instructions: 'Continue the work', provider: 'codex', approvals: 'auto', target: { node: 'local', mode: 'session', sessionId: f.session.id } },
     policy: { overlap: 'skip', maxEventsPerHour: 20 } }, { kind: 'owner', via: 'ui' });
   return { f, a: first, b: () => b, successor: () => successor, events, trigger, enqueues: () => enqueues, cleanup, engines,
-    hold: () => { const { held, open } = barrier(); gate = held; return () => { open(); gate = undefined; }; },
-    delaySuccessor: () => { const { held, open } = barrier(); successorGate = held; return open; } };
+    hold: () => { const { held, open } = barrier(); gate = held; return () => { open(); gate = undefined; }; } };
 }
-
-/** After cleanup: the state lock is free, no engine has work in flight, and nothing changes the engine file later. */
-async function nothingLeft(h: Awaited<ReturnType<typeof triggerHandoff>>) {
-  const f = h.f;
-  const release = await acquireStateLock(f.paths.runtime, 0);
-  await release();
-  assert.deepEqual(h.engines().map(item => item.inFlight()), h.engines().map(() => false));
-  const before = await fixtureTriggerText(f.runs);
-  const enqueues = h.enqueues();
-  await new Promise(resolve => setTimeout(resolve, 300));
-  assert.equal(await fixtureTriggerText(f.runs), before, 'nothing writes the engine state after cleanup');
-  assert.equal(h.enqueues(), enqueues, 'nothing is submitted after cleanup');
-}
-
-test('cleanup during a trigger handoff whose claim is still held opens it, ends both workers and frees the state lock', { timeout: 20_000 }, async t => {
-  const h = await triggerHandoff(t);
-  h.hold();
-  const fired = await h.a.run(h.trigger.id, { kind: 'owner', via: 'ui' });
-  await until(() => h.enqueues() === 1 && h.a.event(fired.id).status === 'claimed');
-  const client = await h.f.connect();
-  assert.equal(await client.requestHandoff(true), true);
-  // The test stops here, the claim still held.
-  await h.cleanup({ keep: true });
-  assert.equal(h.a.event(fired.id).status, 'running', 'the held submission finished before the workers closed');
-  await nothingLeft(h);
-  assert.equal(h.enqueues(), 1);
-});
-
-test('cleanup during a trigger handoff whose successor is still starting waits for it, then frees the state lock', { timeout: 20_000 }, async t => {
-  const h = await triggerHandoff(t);
-  h.delaySuccessor();
-  const client = await h.f.connect();
-  assert.equal(await client.requestHandoff(true), true);
-  await until(() => h.events.includes('onHandedOff'));
-  assert.equal(h.successor(), undefined, 'the successor is still starting');
-  // The test stops here, the successor not yet started.
-  await h.cleanup({ keep: true });
-  assert.ok(h.events.includes('successorStarted'), 'cleanup let the successor start and then closed it');
-  await nothingLeft(h);
-});
-
-test('cleanup during a slow trigger tick waits for the tick itself to end', { timeout: 20_000 }, async t => {
-  const h = await triggerHandoff(t, { submitDelayMs: 2500 });
-  const fired = await h.a.run(h.trigger.id, { kind: 'owner', via: 'ui' });
-  await until(() => h.enqueues() === 1);
-  assert.ok(tickUnderWay(h.a), 'a tick is under way, submitting');
-  await h.cleanup({ keep: true });
-  assert.equal(tickUnderWay(h.a), undefined, 'the tick ended before cleanup did');
-  assert.equal(h.a.event(fired.id).status, 'running', 'its submission was recorded');
-  await nothingLeft(h);
-});
-
-test('a cleanup that cannot confirm the end of a tick in time fails, keeps the folder, and can be run again', { timeout: 20_000 }, async t => {
-  const h = await triggerHandoff(t, { submitDelayMs: 1500 });
-  await h.a.run(h.trigger.id, { kind: 'owner', via: 'ui' });
-  await until(() => h.enqueues() === 1);
-  await assert.rejects(h.cleanup({ waitMs: 200 }), (error: unknown) => error instanceof AggregateError && error.errors.some(item => /engine work did not end within 200ms/.test(String(item))));
-  assert.ok(existsSync(h.f.directory), 'the fixture folder is kept while work may still run in it');
-  await h.cleanup({ keep: true });
-  assert.equal(tickUnderWay(h.a), undefined);
-  await nothingLeft(h);
-  await h.cleanup();
-  assert.ok(!existsSync(h.f.directory), 'removed once everything is confirmed to have ended');
-});
-
-test('cleanup after a successor that failed to start reports it, still ends everything, and removes the folder when run again', { timeout: 20_000 }, async t => {
-  const h = await triggerHandoff(t, { beforeSuccessorHost: async () => { throw new Error('successor host failed to start'); } });
-  const client = await h.f.connect();
-  assert.equal(await client.requestHandoff(true), true);
-  await until(() => h.events.includes('onHandedOff') && h.b());
-  await assert.rejects(h.cleanup({ keep: true }), (error: unknown) => error instanceof AggregateError && error.errors.some(item => /successor host failed to start/.test(String(item))));
-  assert.ok(existsSync(h.f.directory), 'kept after a failure');
-  assert.deepEqual(h.engines().map(tickUnderWay), [undefined, undefined]);
-  await nothingLeft(h);
-  await h.cleanup();
-  assert.ok(!existsSync(h.f.directory), 'the failure was reported once; with everything ended the folder goes');
-});
-
-test('a trigger handoff fixture whose first host cannot start still ends the engine it started', { timeout: 20_000 }, async t => {
-  const seen: NonNullable<HandoffInjection['seen']> = {};
-  let held: (() => Promise<void>) | undefined;
-  await assert.rejects(triggerHandoff(t, { seen, beforeHost: async f => { held = await acquireStateLock(f.paths.runtime, 0); } }), MonitorAlreadyRunning);
-  await held!();
-  assert.ok(seen.cleanup && seen.engines, 'the cleanup was registered before the host started');
-  await seen.cleanup({ keep: true });
-  const [a] = seen.engines();
-  assert.equal((a as unknown as { engine: { timer?: unknown } }).engine.timer, undefined, "the engine's timer is stopped");
-  assert.equal(a.inFlight(), false);
-  await (await acquireStateLock(seen.f!.paths.runtime, 0))();
-});
-
-test('a successor host that starts after its start timed out is still closed by a later cleanup', { timeout: 20_000 }, async t => {
-  const h = await triggerHandoff(t, { beforeSuccessorHost: () => new Promise(resolve => setTimeout(resolve, 600)) });
-  const client = await h.f.connect();
-  assert.equal(await client.requestHandoff(true), true);
-  await until(() => h.events.includes('onHandedOff') && h.b());
-  try {
-    await assert.rejects(h.cleanup({ keep: true, waitMs: 200 }), (error: unknown) => error instanceof AggregateError && error.errors.some(item => /successor host start did not end within 200ms/.test(String(item))));
-    // The late host now holds the state lock; a later cleanup must close it.
-    await until(() => h.successor());
-    await h.cleanup({ keep: true });
-    await nothingLeft(h);
-    await h.cleanup();
-    assert.ok(!existsSync(h.f.directory));
-  } finally {
-    // Repro safety net only: never leave the late host (and its lock) behind whatever the cleanup did.
-    await h.successor()?.close();
-  }
-});
-
-test('a tick that rejects while cleanup waits for it is reported, and the folder is kept until a later cleanup', { timeout: 20_000 }, async t => {
-  const h = await triggerHandoff(t);
-  // Stands in for a tick of the first engine that fails while cleanup watches it; like the engine's own tick, it
-  // clears itself when it settles (engine.ts: this.ticking ??= this.step().finally(() => { this.ticking = undefined; })).
-  const engine = (h.a as unknown as { engine: { ticking?: Promise<void> } }).engine;
-  const failing = new Promise<void>((_, reject) => setTimeout(() => reject(new Error('tick failed')), 300)).finally(() => { engine.ticking = undefined; });
-  failing.catch(() => {});
-  engine.ticking = failing;
-  await assert.rejects(h.cleanup({ keep: true }), (error: unknown) => error instanceof AggregateError && error.errors.some(item => /tick failed/.test(String(item))));
-  assert.ok(existsSync(h.f.directory), 'kept after a tick failed');
-  await h.cleanup();
-  assert.ok(!existsSync(h.f.directory));
-});
-
-test('a tick that rejects after cleanup gave up waiting for it is reported by the next cleanup', { timeout: 20_000 }, async t => {
-  const h = await triggerHandoff(t);
-  const engine = (h.a as unknown as { engine: { ticking?: Promise<void> } }).engine;
-  const failing = new Promise<void>((_, reject) => setTimeout(() => reject(new Error('late tick failed')), 500)).finally(() => { engine.ticking = undefined; });
-  failing.catch(() => {});
-  engine.ticking = failing;
-  await assert.rejects(h.cleanup({ keep: true, waitMs: 100 }), (error: unknown) => error instanceof AggregateError
-    && error.errors.some(item => /engine work did not end within 100ms/.test(String(item))) && !error.errors.some(item => /late tick failed/.test(String(item))));
-  await until(() => !tickUnderWay(h.a));
-  // The tick is gone from the engine, but the cleanup that saw it keeps its outcome.
-  await assert.rejects(h.cleanup({ keep: true }), (error: unknown) => error instanceof AggregateError && error.errors.some(item => /a tick failed: Error: late tick failed/.test(String(item))));
-  assert.ok(existsSync(h.f.directory), 'kept by the cleanup that reported it');
-  await h.cleanup();
-  assert.ok(!existsSync(h.f.directory), 'reported once; the next cleanup removes the folder');
-});
-
-test('a successor engine whose start fails is reported once and still closed', { timeout: 20_000 }, async t => {
-  const h = await triggerHandoff(t, { startSuccessorEngine: async engine => { await engine.start(); throw new Error('successor engine start failed'); } });
-  const client = await h.f.connect();
-  assert.equal(await client.requestHandoff(true), true);
-  await until(() => h.events.includes('onHandedOff') && h.b());
-  const b = h.b()!;
-  await until(() => (b as unknown as { engine: { timer?: unknown } }).engine.timer !== undefined);
-  await assert.rejects(h.cleanup({ keep: true }), (error: unknown) => error instanceof AggregateError
-    && error.errors.filter(item => /successor engine start failed/.test(String(item))).length === 1);
-  assert.equal((b as unknown as { engine: { timer?: unknown } }).engine.timer, undefined, 'the engine it created is closed');
-  assert.equal(h.successor(), undefined, 'its host never started');
-  await nothingLeft(h);
-  await h.cleanup();
-  assert.ok(!existsSync(h.f.directory));
-});
-
-test('a cleanup while the first host is still starting waits for it, and a later cleanup closes it', { timeout: 20_000 }, async t => {
-  const seen: NonNullable<HandoffInjection['seen']> = {};
-  let open!: () => void;
-  const starting = triggerHandoff(t, { seen, beforeHost: () => new Promise<void>(resolve => { open = resolve; }) });
-  await until(() => seen.cleanup && open);
-  await assert.rejects(seen.cleanup!({ keep: true, waitMs: 200 }), (error: unknown) => error instanceof AggregateError && error.errors.some(item => /first host start did not end within 200ms/.test(String(item))));
-  open();
-  const h = await starting;
-  await h.cleanup({ keep: true });
-  await nothingLeft(h);
-});
 
 test('a trigger run in flight survives a worker handoff and is not submitted again', { timeout: 20_000 }, async t => {
   const h = await triggerHandoff(t);
@@ -1847,7 +1727,7 @@ test('a trigger run in flight survives a worker handoff and is not submitted aga
   const runId = h.a.event(fired.id).dispatch?.runId;
   const client = await f.connect();
   assert.equal(await client.requestHandoff(true), true);
-  await new Promise(resolve => setTimeout(resolve, 1500));
+  await checks();
   assert.deepEqual(h.events, [], 'a running turn keeps the old worker and its engine in service');
   f.finish();
   await until(() => h.events.includes('onHandedOff') && h.successor());
@@ -1868,7 +1748,7 @@ test('a handoff asked for while a trigger run is being claimed waits until the c
   await until(() => h.enqueues() === 1 && h.a.event(fired.id).status === 'claimed');
   const client = await f.connect();
   assert.equal(await client.requestHandoff(true), true);
-  await new Promise(resolve => setTimeout(resolve, 1500));
+  await checks();
   assert.deepEqual(h.events, [], 'the claim keeps the old worker in service');
   release();
   await until(() => h.a.event(fired.id).status === 'running' && f.starts() === 1);
@@ -2004,7 +1884,7 @@ test('storage-held queued work and paused workflow references hand off patiently
     closeStorage: async () => { await stopFixtureWriter(f.runs); const result = await database.close(); assert.ok(['closed', 'already-closed'].includes(result.ack)); order.push('db-close-ack'); },
     startSuccessor: () => { order.push('successor'); handed = true; } });
   assert.equal(await client.requestHandoff(true, { patient: true }), true);
-  await new Promise(resolve => setTimeout(resolve, 1200));
+  await checks();
   assert.equal(handed, false); assert.equal(f.cancels(), 0);
   f.finish();
   await until(() => handed, 5000);
@@ -2112,7 +1992,7 @@ test('storage patient handoff keeps legacy PTY RPC pending until owner closes it
   await client.requestHandoff(true, { patient: true });
   await client.terminals.input(old.id, 'legacy still attached');
   assert.deepEqual(legacyPty.writes, ['legacy still attached']);
-  await new Promise(resolve => setTimeout(resolve, 1200));
+  await checks();
   assert.equal(handed, false); assert.equal(legacyPty.killed, 0); assert.equal(independentPty.killed, 0);
   terminal.dispose(); // A web disconnect does not close the independent host's shell.
   const reconnected = new TerminalHostClient({ stateDir: f.stateDir, hostEntry: '/fixture/must-not-spawn.mjs' }); shells.push(reconnected);
