@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { externalStorageFixture, backupWorkflow } from '../remote/external-storage-fixture.js';
+import { externalStorageFixture, backupWorkflow, writeWorkflowFixture } from '../remote/external-storage-fixture.js';
 import { collectAutomationSettings, restoreAutomationSettings } from '../../../server/slack/backup.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -30,9 +30,11 @@ test('SQL workflow owner backs up and restores rules without exposing local work
   const directory = await mkdtemp(join(tmpdir(), 'tower-slack-backup-'));
   const workflow = backupWorkflow('local');
   const source = JSON.stringify({ rules: [RULE], workflows: [workflow], secret: 'fixture-source-secret' });
-  await writeFile(join(directory, 'slack-automation.json'), source, { mode: 0o600 });
   const f = await externalStorageFixture(t, directory);
   t.after(async () => { await f.storage.close(); await rm(directory, { recursive: true, force: true }); });
+  await writeWorkflowFixture(f.workflows, source, 'slack');
+  // A stale JSON-era file stays as it is: the SQL owner neither reads nor writes it.
+  await writeFile(join(directory, 'slack-automation.json'), source, { mode: 0o600 });
   assert.deepEqual(await collectAutomationSettings(f.workflows, 'slack'), { rules: [RULE] });
   const local = f.workflows.source(await f.workflows.loadRows(), 'slack').workflows;
   await restoreAutomationSettings(f.workflows, 'slack', { rules: [] });

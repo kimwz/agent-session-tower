@@ -25,10 +25,11 @@ import { evaluateRuntime } from './runtime.js';
  * an empty database in place of a missing one, and never says a write it lost track of was not committed.
  * `reopen()` is the explicit retry, with the same captured bundle; it does not claim the storage again, `prepare()` does.
  *
- * The worker starts it in this order, all under its runtime lock (the single writer of the state directory) and
- * before takeWorkerRestore: captureStorageBundle once → preflightStorage (the runtime only) → its update evidence →
- * openStorage → status() → prepare({ allowMigration }) with a new command ID → gate('core') → takeWorkerRestore only
- * when the gate is open. A reopen is reopen() → prepare({ allowMigration: false }) → gate. Only gate() says durable
+ * The worker starts it in this order (openWorkerStorage, initialize.ts), all under its runtime lock (the single writer
+ * of the state directory) and before takeWorkerRestore: captureStorageBundle once → preflightStorage → the read-only
+ * pre-open refusals → openStorage({ refuseBehind: true }) → prepare({ allowMigration }) with a new command ID, allowed
+ * only for an empty file → gate('core') → the domain authorities → takeWorkerRestore only when the gate is open. A
+ * reopen is reopen() → prepare({ allowMigration: false }) → gate. Only gate() says durable
  * work may go ahead: a prepare's answer, replayed or not, does not; a held gate keeps the worker in its diagnostic mode.
  * The lock is what keeps a second Tower writer away between the check of the files and the open; a program other than
  * Tower that writes the database is not held back by it.
@@ -40,6 +41,11 @@ export interface StorageClientOptions {
   limits?: Partial<StorageLimits>;
   /** Called on every change to `unavailable`, a failed first open included, so the worker can hold durable intake. */
   onUnavailable?: (status: StorageStatus) => void;
+  /**
+   * Refuse a storage whose schema is behind this build (`migration-required`) on its private check copy, before the
+   * live files are opened: they stay exactly as found. Without it a behind storage opens and waits for prepare.
+   */
+  refuseBehind?: boolean;
 }
 export interface StorageGate { open: boolean; reasons: string[] }
 /** `closed`: the thread answered the close after every earlier command and exited (`exitCode`, 0 when it ended on its own). */
@@ -442,6 +448,10 @@ export class StorageClient {
     let checked: SchemaState | undefined;
     if (!created) {
       try { checked = await this.#checkCopy(layout, before, expected); } catch (error) { return this.#refuse(this.#openFailure(error), layout, before); }
+      if (checked.kind === 'behind' && this.#options.refuseBehind) {
+        const pending = checked.pending.map(({ scope, version }) => `${scope} v${version}`).join(', ');
+        return this.#refuse(failureOf('schema', 'migration-required', `The storage needs schema changes this build does not make to an existing storage (${pending}); it is left as it is.`, false), layout, before);
+      }
     }
     let opened: OpenResult;
     try {

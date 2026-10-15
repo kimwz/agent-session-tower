@@ -761,6 +761,34 @@ test('an outdated worker hands off only when nothing is running, and the web fol
   assert.equal(after.origin?.kind, 'owner');
 });
 
+test('a worker started without a test schedule hands off once, on its own once-a-second check', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  // Only intervals created from here on are fake: the worker's two check timers among them, the fixture's own stay real.
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let handoffs = 0, successors = 0;
+  let successor: Awaited<ReturnType<typeof startRunnerHost>> | undefined;
+  // No `scheduleChecks`: the worker falls back to production's `everySecond`, as every real worker does.
+  const first = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, scheduleChecks: undefined,
+    quiesce: async () => { handoffs++; },
+    startSuccessor: (_command, nonce) => {
+      successors++;
+      void startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, handoffNonce: nonce }).then(host => { successor = host; });
+    } });
+  // A long poll: the client's own fake interval never fires within the ticks below.
+  const client = await f.connect(60_000);
+  assert.equal(await client.requestHandoff(true), true);
+  t.mock.timers.tick(999);
+  // A check that ran would have entered quiesce synchronously, before its first await.
+  assert.deepEqual([handoffs, successors], [0, 0], 'no check before the first second');
+  t.mock.timers.tick(1);
+  await until(() => successor);
+  assert.deepEqual([handoffs, successors], [1, 1], 'the first check hands off');
+  assert.notEqual(successor!.instance, first.instance);
+  t.mock.timers.tick(3000);
+  assert.deepEqual([handoffs, successors], [1, 1], 'the closed worker stopped its checks');
+});
+
 test('updating on request stops the running turn at the deadline, hands off, and leaves its continuation queued', async t => {
   // The wrap-up deadline is read from a clock that moves only when the test moves it.
   let clock = Date.now();

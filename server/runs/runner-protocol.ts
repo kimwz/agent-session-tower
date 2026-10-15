@@ -53,11 +53,6 @@ export interface UpdateDrainStatus { startedAt: string; deadline: string; runnin
 export const FORCE_UPDATE_DEADLINE_MS = 10 * 60 * 1000;
 /** How long after the deadline a forced update may still wait to hand off before new turns start here again. */
 export const FORCE_UPDATE_GIVE_UP_MS = 10 * 60 * 1000;
-export interface ProofTransition {
-  reason: 'draining' | 'socket' | 'adopted';
-  fence: { id: string; attempt: number };
-}
-
 export interface RunnerReply {
   protocol: number;
   stateDir: string;
@@ -65,7 +60,7 @@ export interface RunnerReply {
   snapshot?: RunnerSnapshot;
   result?: unknown;
   /** `code`: a refusal's own name (such as `view-locked`) that the web answers with; only a TowerError's lowercase one. */
-  error?: { message: string; statusCode: number; disposition?: string; code?: string; commitDisposition?: 'committed' | 'not-committed' | 'unknown'; admission?: { commandId: string; sha256: string }; proofTransition?: ProofTransition };
+  error?: { message: string; statusCode: number; disposition?: string; code?: string; commitDisposition?: 'committed' | 'not-committed' | 'unknown'; admission?: { commandId: string; sha256: string } };
 }
 
 /** Pure calculation for fixture teardown: never recreates a deleted state directory. */

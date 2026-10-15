@@ -1,26 +1,21 @@
 import { applyWorkerFiles, collectWorkerFiles } from '../../../server/backup/payload.js';
 import { takeWorkerRestore, writePendingWorker } from '../../../server/backup/restore-files.js';
 import { restoreAutomationSettings } from '../../../server/slack/backup.js';
-import { bootstrapFreshPermissions } from '../../../server/permissions/storage-transfer.js';
 import { PermissionsRepository } from '../../../server/permissions/storage-repository.js';
-import { importWorkflows } from '../../../server/slack/storage-transfer.js';
 import assert from 'node:assert/strict';
 import test, { type TestContext } from 'node:test';
-import { mkdtemp, mkdir, readFile, rm, writeFile, readdir, realpath } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, readdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { externalStorageFixture } from './external-storage-fixture.js';
-import { RemoteRequestLedger, remoteRequestTime, requestFingerprint, REMOTE_REQUEST_RETENTION_MS, type RemoteResult } from '../../../server/remote/request-ledger.js';
-import { RemoteRepository } from '../../../server/remote/storage-repository.js';
-import { importRemote, bootstrapExternal } from '../../../server/remote/storage-transfer.js';
-import { importAutoPrompts } from '../../../server/auto-prompt/storage-transfer.js';
+import { externalStorageFixture, writeWorkflowFixture } from './external-storage-fixture.js';
+import { freshManifestSha256 } from '../../../server/storage/initialize.js';
+import { remoteRows } from '../../../server/remote/storage-codec.js';
+import { RemoteRequestLedger, requestFingerprint, REMOTE_REQUEST_RETENTION_MS, type RemoteResult } from '../../../server/remote/request-ledger.js';
 import { AutoPromptManager } from '../../../server/auto-prompt/manager.js';
 import { SlackAutomationManager, slackRequestId } from '../../../server/slack/automation.js';
 import { collectAutomationSettings, guardSlackConnectionRestore } from '../../../server/slack/backup.js';
 import { canonical } from '../../../server/remote/storage-rows.js';
-import { workflowRows } from '../../../server/slack/storage-codec.js';
 import type { SlackMention, SlackWorkflow } from '../../../shared/slack.js';
-import type { Entry } from '../../../server/auto-prompt/storage-codec.js';
 import type { Snapshot } from '../../../shared/types.js';
 async function folder(t:TestContext) {const dir=await realpath(await mkdtemp(join(tmpdir(),'tower-external-rows-')));t.after(()=>rm(dir,{recursive:true,force:true}));return dir;}
 const now=Date.parse('2026-10-10T00:00:00Z');
@@ -29,23 +24,6 @@ const record=(r:{runId:string}):RemoteResult=>({kind:'run',runId:r.runId});
 const replay=(r:RemoteResult)=>r.kind==='run'?{runId:r.runId}:undefined;
 const mention:SlackMention={id:'event',teamId:'T1',channel:'C1',user:'U1',ts:'1',threadTs:'1',text:'fixture'};
 function workflow():SlackWorkflow {return {id:slackRequestId(mention),mention,rules:[],mode:'conversation',status:'reply-uncertain',createdAt:'2026-10-10T00:00:00Z',updatedAt:'2026-10-10T00:00:00Z',replies:[{requestKey:'fixed-send',text:'one reply',status:'sending'}]};}
-const entry=():Entry=>({fingerprint:'a'.repeat(64),staged:[],job:{id:'10000000-0000-4000-8000-000000000001',provider:'codex',prompt:'fixture',routerModel:'fixture',status:'dispatching',createdAt:'2026-10-10T00:00:00Z',updatedAt:'2026-10-10T00:00:00Z'},selection:{decision:{action:'create',cwd:'/fixture',reason:'fixture'},relation:'new'}});
-
-test('actual row authority wins over changed/missing source; raw remote legacy fields/issue fallback remain lossless',async t=>{
- const dir=await folder(t),id=uuid(now),legacy={key:`owner\nenqueue\n${id}`,fingerprint:requestFingerprint({}),at:now,result:{kind:'run',runId:'retained'},extra:{lost:true}};
- await writeFile(join(dir,'remote-requests.json'),JSON.stringify([legacy]),{mode:0o600});
- const f=await externalStorageFixture(t,dir);
- assert.equal((await f.remote.load())[0].entry.issued,remoteRequestTime(id));
- assert.deepEqual((await f.remote.loadRows()).map(r=>JSON.parse(r.json)),[{...legacy,issued:now}]);
- assert.deepEqual(JSON.parse(await readFile(join(dir,'remote-storage-migrations','fixture-remote','remote-requests.json'),'utf8')),[legacy]);
- assert.equal((await f.storage.receipt('fixture-remote-commit')).found,true);
- await writeFile(join(dir,'remote-requests.json'),'{broken');await rm(join(dir,'auto-prompts.json'),{force:true});
- await bootstrapExternal(f.remote,dir);assert.equal((await f.remote.load())[0].entry.result?.kind,'run');
- const ledger=new RemoteRequestLedger(dir,()=>now,20_000,f.remote,f.effectGate);await ledger.start();let executions=0;
- assert.deepEqual(await ledger.once('owner','enqueue',id,{},async()=>{executions++;return {runId:'duplicate'};},record,replay),{runId:'retained'});assert.equal(executions,0);
- await assert.rejects(ledger.once('owner','enqueue',id,{changed:true},async()=>({runId:'bad'}),record,replay),/다른 내용/);
- await assert.rejects(importRemote({repository:f.remote,stateDir:dir,evidenceParent:join(dir,'remote-storage-migrations'),commandId:'reimport',checkActivation:f.checkActivation}),/reimport/);
-});
 
 test('actual remote scoped concurrency, pruning and future clock keep dedup capacity; only definite rejection permits deletion',async t=>{
  const dir=await folder(t),f=await externalStorageFixture(t,dir);let clock=now,calls=0;const ledger=new RemoteRequestLedger(dir,()=>clock,2,f.remote,f.effectGate);await ledger.start();
@@ -74,35 +52,14 @@ test('actual unknown remote admission never executes after commit-response loss,
  assert.equal((await successor.storage.receipt('lost-intent-commit')).found,true);
 });
 
-test('raw source change and pre-commit crash keep seal/stage hold instead of empty fallback',async t=>{
- const dir=await folder(t);await writeFile(join(dir,'remote-requests.json'),'[]',{mode:0o600});const f=await externalStorageFixture(t,dir,false);let checks=0;
- await assert.rejects(importRemote({repository:f.remote,stateDir:dir,evidenceParent:join(dir,'remote-storage-migrations'),commandId:'changed',checkActivation:async()=>{await f.checkActivation();if(++checks===1) return;await writeFile(join(dir,'remote-requests.json'),'[null]',{mode:0o600});}}),/source changed|uncertain|불확실/);
- // The injected activation change happens after the first comparison; a second source comparison is required.
- assert.equal((await f.storage.read<{authority:unknown}>('remote','head',{})).authority,null);
- await assert.rejects(bootstrapExternal(new RemoteRepository(f.storage),dir),/seal|stages/);
- assert.ok((await readdir(join(dir,'remote-storage-migrations'))).includes('changed'));
-});
-
-test('actual AP import/load retains every checkpoint and separates held model/provider/attachment effects',async t=>{
- const dir=await folder(t),e=entry();e.job.cwd='/fixture';const f=await externalStorageFixture(t,dir,false);
- await writeFile(join(dir,'auto-prompts.json'),JSON.stringify([e]),{mode:0o600});
- await importAutoPrompts({repository:f.autoPrompt,stateDir:dir,evidenceParent:join(dir,'auto-prompt-storage-migrations'),commandId:'ap-raw',checkActivation:f.checkActivation});
- assert.deepEqual((await f.autoPrompt.load())[0].entry,e);let effects=0;
- const snapshot={sessions:[],runs:[],providers:[],scanning:false,updatedAt:'',hostname:'fixture',version:'test'} as Snapshot;
- const manager=new AutoPromptManager({stateDir:dir,repository:f.autoPrompt,effectGate:async()=>{throw new Error('historical held');},snapshot:()=>snapshot,detail:async()=>undefined,refresh:async()=>{},model:async()=>{effects++;return {};},runs:{list:()=>[],create:async()=>{effects++;throw new Error('must not run');},enqueue:async()=>{effects++;throw new Error('must not run');}}});
- await manager.load();assert.equal(manager.get(e.job.id)?.status,'dispatching');assert.equal(effects,0);await assert.rejects(manager.startRuntimeEffects(),/held/);assert.equal(effects,0);
- await writeFile(join(dir,'auto-prompts.json'),'[]');assert.deepEqual((await f.autoPrompt.load())[0].entry,e);
- const next={...e,job:{...e.job,status:'uncertain' as const,error:'unknown dispatch'}};await f.autoPrompt.update([{...f.autoPrompt.row(next,0),previous:canonical(e)}],'ap-uncertain');
- assert.equal((await f.storage.receipt('ap-uncertain-commit')).found,true);
-});
-
 test('actual Slack/GitHub channel PK, owner settings DTO, retained run/notification and SQL uncertain account guard',async t=>{
  const dir=await folder(t),w=workflow();w.ownerConditionalReply={requestId:'fixed-task',requestKey:'permission',text:'approved',authorizedAt:'2026-10-10T00:00:00Z',status:'pending'};w.delegatedTasks=[{requestKey:'task',requestId:'fixed-task',prompt:'fixture',provider:'codex',delegatedRunId:'retained-run',notificationClaimed:true,notificationError:'uncertain notification'}];
- await writeFile(join(dir,'slack-automation.json'),JSON.stringify({rules:[],workflows:[w],lost:{preserve:true}}),{mode:0o600});
- await writeFile(join(dir,'github-automation.json'),JSON.stringify({rules:[],workflows:[w],wrapper:'github'}),{mode:0o600});
- const f=await externalStorageFixture(t,dir),rows=await f.workflows.loadRows();assert.equal(rows.filter(r=>r.id===w.id).length,2);
+ const f=await externalStorageFixture(t,dir);
+ await writeWorkflowFixture(f.workflows,JSON.stringify({rules:[],workflows:[w],lost:{preserve:true}}),'slack');
+ await writeWorkflowFixture(f.workflows,JSON.stringify({rules:[],workflows:[w],wrapper:'github'}),'github');
+ const rows=await f.workflows.loadRows();assert.equal(rows.filter(r=>r.id===w.id).length,2);
  assert.deepEqual(f.workflows.source(rows,'slack').lost,{preserve:true});assert.equal(f.workflows.source(rows,'github').wrapper,'github');
- await rm(join(dir,'slack-automation.json'));assert.deepEqual(await collectAutomationSettings(f.workflows,'slack'),{rules:[]});
+ assert.deepEqual(await collectAutomationSettings(f.workflows,'slack'),{rules:[]});
  await assert.rejects(guardSlackConnectionRestore(f.workflows,{account:{teamId:'T1',userId:'U1'}},{account:{teamId:'T1',userId:'U2'}}),/Unfinished/);
  await assert.rejects(f.workflows.assertAccountTeam('slack','T2'),/another Slack account/);
  let effects=0;const manager=new SlackAutomationManager({stateDir:dir,repository:f.workflows,effectGate:async()=>{throw new Error('historical held');},fetchThread:async()=>{effects++;return [];},match:async()=>{effects++;return {};},submitAutoPrompt:async()=>{effects++;throw new Error('no');},getAutoPrompt:()=>undefined,getRun:()=>undefined,composeReply:async()=>{effects++;return {};},sendReply:async()=>{effects++;return {ts:'duplicate'};}});
@@ -126,25 +83,9 @@ test('actual SDK historical barrier holds every external owner command and model
  await assert.rejects(f.workflows.replaceRules('github',[]));assert.equal(effects,0);
 });
 
-test('malformed AP raw source is preserved without authority, receipt or external calls',async t=>{
- const dir=await folder(t),f=await externalStorageFixture(t,dir,false),source='[{"job":null}]';
- await writeFile(join(dir,'auto-prompts.json'),source,{mode:0o600});
- await assert.rejects(importAutoPrompts({repository:f.autoPrompt,stateDir:dir,evidenceParent:join(dir,'auto-prompt-storage-migrations'),commandId:'malformed-ap',checkActivation:f.checkActivation}));
- assert.equal(await readFile(join(dir,'auto-prompts.json'),'utf8'),source);assert.equal((await f.autoPrompt.head()).authority,null);assert.equal((await f.storage.receipt('malformed-ap-commit')).found,false);
-});
-
-test('actual pre-commit thread exit leaves a staged hold and never retries the request on startup',async t=>{
- const dir=await folder(t),f=await externalStorageFixture(t,dir);await f.storage.close();
- const lost=await externalStorageFixture(t,dir,false,'before'),ledger=new RemoteRequestLedger(dir,()=>now,20_000,lost.remote,lost.effectGate);await ledger.start();let effects=0;
- await assert.rejects(ledger.once('owner','enqueue',uuid(now),{},async()=>{effects++;return {runId:'never'};},record,replay));assert.equal(effects,0);
- await lost.storage.reopen();await lost.storage.prepare({allowMigration:false});assert.equal(await lost.remote.resolveUnknown(),'not-committed');
- await assert.rejects(bootstrapExternal(new RemoteRepository(lost.storage),dir),/stages/);
- assert.equal((await lost.storage.receipt(lost.remote.pending()!.commandId)).found,false);
-});
-
 test('actual bounded pages/chunks retain source order and immutable receipt payload identity',async t=>{
  const dir=await folder(t),source=Array.from({length:65},(_,i)=>({key:`owner\nenqueue\n${uuid(now+i,i.toString(16).padStart(12,'0'))}`,fingerprint:requestFingerprint({}),at:now+i,issued:now+i,padding:'한'.repeat(2_000)}));
- await writeFile(join(dir,'remote-requests.json'),JSON.stringify(source),{mode:0o600});const f=await externalStorageFixture(t,dir);
+ const f=await externalStorageFixture(t,dir,false);await f.remote.importPrepared(remoteRows(source),'a'.repeat(64),'bounded-seed',f.checkActivation);
  const loaded=await f.remote.loadRows();assert.equal(loaded.length,65);assert.deepEqual(loaded.map(row=>JSON.parse(row.json)),source);assert.deepEqual(loaded.map(row=>row.ordinal),Array.from({length:65},(_,i)=>i));
  const previous=loaded[0],next={...previous,json:canonical({...source[0],result:{kind:'run',runId:'fixed-result'}})};
  await f.remote.update([{...next,previous:previous.json}],'fixed-result');const head=await f.remote.head();
@@ -152,40 +93,25 @@ test('actual bounded pages/chunks retain source order and immutable receipt payl
  await assert.rejects(f.remote.update([{...next,json:canonical({...source[0],result:{kind:'run',runId:'changed'}}),previous:previous.json}],'fixed-result'),/conflicts/);
 });
 
-
-test('normal fresh bootstrap establishes the four additional authorities and receipts in the same SDK; prior seal is held', async t => {
- const dir = await folder(t), f = await externalStorageFixture(t, dir, false);
- const permissions = new PermissionsRepository(f.storage, dir);
- await bootstrapFreshPermissions(permissions, dir, f.checkActivation);
- assert.deepEqual((await permissions.load()).rules, []);
- for (const [repository, importer] of [[f.remote, importRemote], [f.autoPrompt, importAutoPrompts], [f.workflows, importWorkflows]] as const) {
-  await importer({ repository, stateDir: dir, evidenceParent: join(dir, `${repository.codec.scope}-storage-migrations`), commandId: `fresh-${repository.codec.scope}`, checkActivation: f.checkActivation, fresh: true });
-  assert.equal((await repository.head()).authority?.authority, 'database');
-  assert.equal((await f.storage.receipt(`fresh-${repository.codec.scope}-commit`)).found, true);
+test('initialization creates the permissions and three external authorities empty, in the same SDK, with no migration evidence', async t => {
+ const dir = await folder(t), f = await externalStorageFixture(t, dir);
+ assert.deepEqual((await new PermissionsRepository(f.storage, dir).load()).rules, []);
+ const authorities = (await f.storage.inspect()).authority;
+ for (const scope of ['permissions', 'remote', 'auto-prompt', 'automation-workflows'] as const) {
+  const authority = authorities.find(entry => entry.domain === scope);
+  assert.equal(authority?.authority, 'database', scope); assert.equal(authority.generation, 1);
+  assert.equal(authority.manifestSha256, freshManifestSha256(scope));
  }
- await assert.rejects(readFile(join(dir, 'storage-offline-activation.json')), { code: 'ENOENT' });
- const heldDir = await folder(t), held = await externalStorageFixture(t, heldDir, false);
- await mkdir(join(heldDir, 'remote-storage-migrations', 'prior-seal'), { recursive: true, mode: 0o700 });
- await assert.rejects(importRemote({ repository: held.remote, stateDir: heldDir, evidenceParent: join(heldDir, 'remote-storage-migrations'), commandId: 'fresh-held', checkActivation: held.checkActivation, fresh: true }), /seal/);
- assert.equal((await held.remote.head()).authority, null);
-});
-
-test('actual uncertain Auto Prompt import refuses completion and preserves the exact pending outcome', async t => {
- const dir = await folder(t), f = await externalStorageFixture(t, dir, false);
- const original = { ...entry(), outcome: { state: 'pending', marker: 'preserve' }, job: { ...entry().job, cwd: '/fixture', status: 'uncertain' as const } };
- await writeFile(join(dir, 'auto-prompts.json'), JSON.stringify([original]), { mode: 0o600 });
- await importAutoPrompts({ repository: f.autoPrompt, stateDir: dir, evidenceParent: join(dir, 'auto-prompt-storage-migrations'), commandId: 'uncertain-import', checkActivation: f.checkActivation });
- const head = await f.autoPrompt.head();
- await assert.rejects(f.storage.read('auto-prompt', 'offlineCompletion', { commandId: 'uncertain-import-commit', inputSha256: head.authority!.manifestSha256 }), /incomplete/);
- assert.deepEqual((await f.autoPrompt.load())[0].entry, original);
- assert.deepEqual(JSON.parse(await readFile(join(dir, 'auto-prompts.json'), 'utf8')), [original]);
+ assert.deepEqual(await f.remote.loadRows(), []); assert.deepEqual(await f.autoPrompt.loadRows(), []);
+ assert.deepEqual((await f.workflows.loadRows()).map(row => [row.channel, row.kind]).sort(), [['github', 'settings'], ['slack', 'settings']]);
+ assert.deepEqual((await readdir(dir)).filter(name => name.endsWith('storage-migrations') || name.startsWith('storage-offline')), []);
 });
 
 test('public worker files consume SQL rules, commit restores, preserve local workflow metadata and guard credentials from SQL', async t => {
  const dir = await folder(t);
  const original = { rules: [], workflows: [workflow()], extensions: { keep: true } };
- await writeFile(join(dir, 'slack-automation.json'), JSON.stringify(original), { mode: 0o600 });
  const f = await externalStorageFixture(t, dir);
+ await writeWorkflowFixture(f.workflows, JSON.stringify(original), 'slack');
  // This stale source would previously bypass the unfinished SQL account check.
  await writeFile(join(dir, 'slack-automation.json'), '{"rules":[],"workflows":[]}', { mode: 0o600 });
  const connection = { enabled: false, appToken: 'fixture-app', userToken: 'fixture-user', account: { teamId: 'T1', userId: 'U1' } };

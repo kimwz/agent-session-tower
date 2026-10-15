@@ -3,17 +3,17 @@ import { PassThrough, Writable } from 'node:stream';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, chmod, lstat, readdir } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
-import { retentionBuild } from '../storage/fixtures/retention-build.js';
-import { recordPreparationEvidence } from '../../../server/link/storage-update.js';
+import { openStorage } from '../../../server/storage/client.js';
+import { captureStorageBundle } from '../../../server/storage/bundle.js';
+import { currentStorage } from '../../helpers/current-storage.js';
+import { faultBuild, type FaultBuild } from '../../helpers/fault-storage.js';
 import { RunsRepository } from '../../../server/runs/storage-repository.js';
 import { RunHistory } from '../../../server/runs/run-history.js';
 import { RunManager } from '../../../server/runs/manager.js';
-import { canonical, documentsHash, parseRunDocuments, rowsOf, RUN_SOURCE_BYTES, type RunDocuments } from '../../../server/runs/storage-codec.js';
-import { bootstrapRuns, importRuns, exportRuns, restoreRunsStorage, workerLegacyFiles } from '../../../server/runs/storage-transfer.js';
+import { parseRunDocuments, RUN_SOURCE_BYTES, type RunDocuments } from '../../../server/runs/storage-codec.js';
 import { RemoteRepository } from '../../../server/remote/storage-repository.js';
 import { RemoteRequestLedger } from '../../../server/remote/request-ledger.js';
 import type { Run, Session } from '../../../shared/types.js';
@@ -30,107 +30,23 @@ function documents(cwd: string): RunDocuments {
   const session: Session = { id: sessionId, nativeId: '', provider: 'codex', title: 'Fixture', cwd, project: 'fixture', status: 'idle', statusReason: '', createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-01T00:00:00Z', lastMessage: '', messageCount: 0, isSubagent: false, resumable: false, creationPending: true };
   return { runs: [{ id,sessionId,prompt: 'fixture',status: 'queued',createdAt: session.createdAt,output: '', needsInstructions: true, keepQueued: true, retain: true, extra: { raw: ['preserved'] } } as unknown as Run], created: [{ session,runId: id,confirmed: false,origin: { kind: 'owner', untrustedInput: false } }], instructions: { [id]: { text: 'Required fixture instructions', required: true } } };
 }
-async function sources(stateDir: string, data: RunDocuments) {
-  for (const [key,name] of [['runs','runs.json'],['created','created-sessions.json'],['instructions','run-instructions.json']] as const) await writeFile(join(stateDir,name),JSON.stringify(data[key]),{ mode: 0o600 });
-  const evidenceParent = join(stateDir,'runs-storage-migrations'); await mkdir(evidenceParent,{ mode: 0o700 }); return evidenceParent;
-}
+/**
+ * A current-build storage (currentStorage) without domain authorities, so each test imports the runs it starts from.
+ * `open()` opens it again with the product build; `open(fault)` with a fault build of this test's own, whose one-shot
+ * fault markers (`<fault>-consumed`) are in `faults().directory`.
+ */
 async function prepared(t: TestContext) {
-  const stateDir = await folder(t), a = await retentionBuild('1.122.0',await folder(t)), b = await retentionBuild('1.123.0',await folder(t));
-  const ac = await a.storage.openStorage({ stateDir,bundle: a.bundle() });
-  const prepare = await ac.prepare({ allowMigration: true });
-  const preflight = await a.storage.preflightStorage({ stateDir,bundle: a.bundle() });
-  await recordPreparationEvidence(stateDir,{ context: ac.context!,preflight,prepared: prepare,gate: await ac.gate('core') });
-  await ac.close();
-  const open = async (build: typeof a, fault = 'normal') => {
-    const client = await build.storage.openStorage({ stateDir,bundle: build.bundle(fault) });
+  const stateDir = await folder(t);
+  await (await currentStorage(stateDir,{ initialize: false })).close();
+  let build: Promise<FaultBuild> | undefined;
+  const faults = () => build ??= faultBuild(t);
+  const open = async (fault = 'normal') => {
+    const captured = fault === 'normal' ? undefined : await faults();
+    const client = captured ? await captured.storage.openStorage({ stateDir,bundle: captured.bundle(fault) }) : await openStorage({ stateDir,bundle: await captureStorageBundle() });
     t.after(() => client.close()); await client.prepare({ allowMigration: false }); return client;
   };
-  return { stateDir,a,b,open };
+  return { stateDir,open,faults };
 }
-
-test('actual runs A refuses first import; B authority survives absent/stale JSON; A reader/writer/export/restore', async t => {
-  const f = await prepared(t), data = documents(f.stateDir), evidenceParent = await sources(f.stateDir,data);
-  const ac = await f.open(f.a), ar = new RunsRepository(ac);
-  await assert.rejects(ar.importPrepared(data,'a'.repeat(64),'a-refusal'),/no cutover/);
-  const aUpdate = { stateDir: f.stateDir,managed: false,build: { version: f.a.version,manifest: f.a.manifest,preflight: await f.a.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.a.bundle() }) } };
-  await assert.rejects(importRuns({ storage: ac,repository: ar,stateDir: f.stateDir,evidenceParent,commandId: 'a-import',update: aUpdate }),/no cutover/);
-  assert.equal((await ac.receipt('a-refusal-begin')).found,false);
-  await ac.close();
-  const bc = await f.open(f.b), br = new RunsRepository(bc);
-  const update = { stateDir: f.stateDir,managed: false,build: { version: f.b.version,manifest: f.b.manifest,preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.b.bundle() }) } };
-  await bootstrapRuns(br, f.stateDir, async () => update)();
-  const evidenceNames = await readdir(evidenceParent);
-  const evidence = { directory: join(evidenceParent, evidenceNames[0]) };
-  assert.equal(evidenceNames.length, 1);
-  assert.deepEqual((await br.exportCurrent()).documents,data);
-  assert.equal((await bc.receipt(`${evidenceNames[0]}-commit`)).found,true);
-  const manifest = JSON.parse(await readFile(join(evidence.directory,'manifest.json'),'utf8'));
-  assert.equal(manifest.canonicalSha256,documentsHash(data));
-  for (const [kind, name] of [['runs', 'runs.json'], ['created', 'created-sessions.json'], ['instructions', 'run-instructions.json']] as const) {
-    const sealed = await readFile(join(evidence.directory, name));
-    assert.deepEqual(sealed, await readFile(join(f.stateDir, name)));
-    assert.equal((await lstat(join(evidence.directory, name))).mode & 0o777, 0o600);
-    assert.equal(manifest.files[name].bytes, sealed.length);
-    assert.deepEqual(JSON.parse(sealed.toString('utf8')), data[kind]);
-  }
-  await bc.close();
-  await rm(join(f.stateDir,'runs.json')); await writeFile(join(f.stateDir,'run-instructions.json'),'{bad');
-  const current = await f.open(f.a), repository = new RunsRepository(current), history = new RunHistory(f.stateDir,current);
-  assert.deepEqual(await history.readCreated(),data.created);
-  await bootstrapRuns(repository, f.stateDir, async () => { throw new Error('SQL authority must not probe JSON/update evidence'); })();
-  const restored = await history.restore(); assert.equal(restored[0].status,'queued'); assert.equal(restored[0].instructions?.text,data.instructions[data.runs[0].id].text);
-  const run = data.runs[0], required = { text: 'Only instructions changed',required: true };
-  await repository.markers(run,{ needsInstructions: true,keepQueued: true },required,data.instructions[run.id],'instructions-only');
-  assert.equal((await repository.exportCurrent()).documents.instructions[run.id].text,required.text);
-  await repository.markers(run,{ needsInstructions: true,keepQueued: true },required,data.instructions[run.id],'instructions-only');
-  await assert.rejects(repository.markers(run,{ needsInstructions: true,keepQueued: true },{ text: 'different',required: true },data.instructions[run.id],'instructions-only'),/conflicts/);
-  const compatible = new RunHistory(f.stateDir,current);
-  await compatible.readCreated();
-  const ready = await compatible.restore(), live = new Map(ready.map(value => [value.id,value]));
-  live.get(run.id)!.instructions = { text: 'Compatibility instructions only',required: true };
-  compatible.carried.delete(run.id);
-  compatible.saveRows({ runs: [...live.values()], deleted: [], created: data.created, deletedCreated: [], retained: new Set() });
-  await compatible.flush();
-  const compatibleData = (await repository.exportCurrent()).documents;
-  assert.equal(compatibleData.instructions[run.id].text,'Compatibility instructions only');
-  assert.equal((compatibleData.runs[0] as unknown as { keepQueued?: boolean }).keepQueued,undefined);
-  const saved = await exportRuns(repository,evidenceParent,'current-export');
-  await repository.output(compatibleData.runs[0],'new output','output-change');
-  await restoreRunsStorage(repository,saved.directory,'restore-current');
-  const originalExport = await readFile(join(saved.directory, 'runs.json'));
-  await writeFile(join(saved.directory, 'runs.json'), '[]');
-  await assert.rejects(restoreRunsStorage(repository,saved.directory,'restore-damaged'), /hash mismatch/);
-  await writeFile(join(saved.directory, 'runs.json'), originalExport);
-  assert.equal((await repository.exportCurrent()).documents.runs[0].output,'');
-  await restoreRunsStorage(repository,saved.directory,'restore-current');
-  await assert.rejects(repository.restore({ ...data,runs: [] },'restore-current'),/conflicts/);
-  const remove = rowsOf((await repository.exportCurrent()).documents);
-  await repository.deleteRows(remove,'delete-dependencies');
-  assert.deepEqual((await repository.exportCurrent()).documents,{ runs: [],created: [],instructions: {} });
-  await repository.admit({ run: data.runs[0],created: data.created[0],instructions: data.instructions[run.id] },'single-admission');
-  assert.deepEqual((await repository.exportCurrent()).documents,data);
-  await repository.admit({ run: data.runs[0],created: data.created[0],instructions: data.instructions[run.id] },'single-admission');
-  await assert.rejects(repository.admit({ run: { ...data.runs[0],prompt: 'different' },created: data.created[0],instructions: data.instructions[run.id] },'single-admission'),/conflicts/);
-  const receipt = await current.write('runs','commit',{ intent: 'delete-dependencies' },'delete-dependencies-commit');
-  assert.equal(receipt.replayed,true);
-  await assert.rejects(current.write('runs','commit',{ intent: 'other' },'delete-dependencies-commit'),/different|conflict|payload/i);
-});
-
-test('actual malformed/missing state and unknown authority marker never become empty JSON fallback', async t => {
-  for (const damage of ['missing','unknown','orphan','malformed','marker-only'] as const) {
-    const f = await prepared(t), client = await f.open(f.b), repo = new RunsRepository(client), data = documents(f.stateDir);
-    await repo.importPrepared(data,'a'.repeat(64),`import-${damage}`); await client.close();
-    const db = new DatabaseSync(join(f.stateDir,'state.sqlite'));
-    if (damage === 'missing') db.exec('DELETE FROM runs_state');
-    if (damage === 'unknown') db.exec("UPDATE domain_imports SET reader_contract = 99 WHERE domain = 'runs'");
-    if (damage === 'malformed') db.exec("UPDATE runs_rows SET json = '{bad' WHERE kind = 'run'");
-    if (damage === 'marker-only') db.exec('DELETE FROM runs_state; DELETE FROM runs_rows');
-    if (damage === 'orphan') db.exec("DELETE FROM domain_imports WHERE domain = 'runs'");
-    db.close();
-    const reopened = await f.open(f.a);
-    await assert.rejects(new RunHistory(f.stateDir,reopened).readCreated());
-  }
-});
 
 test('raw runs validation retains unknown fields/markers and rejects malformed, missing and unknown markers', () => {
   const data = documents('/fixture'), raw = { runs: Buffer.from(JSON.stringify(data.runs)),created: Buffer.from(JSON.stringify(data.created)),instructions: Buffer.from(JSON.stringify(data.instructions)) };
@@ -143,9 +59,9 @@ test('raw runs validation retains unknown fields/markers and rejects malformed, 
 
 for (const fault of ['before','after-native-hold','runs-refuse-compensation-loss']) test(`actual ${fault} response loss holds manager attachments/placeholder/remote ledger and provider until receipt resolution`, async t => {
   const stateDir = await folder(t);
-  const captured = await retentionBuild('1.125.0',await folder(t),true,true,true);
-  const initial = await captured.storage.openStorage({ stateDir,bundle: captured.bundle() });
-  t.after(() => initial.close()); await initial.prepare({ allowMigration: true });
+  const captured = await faultBuild(t);
+  const initial = await currentStorage(stateDir,{ initialize: false });
+  t.after(() => initial.close());
   const repo = new RunsRepository(initial);
   await new RemoteRepository(initial).importPrepared([],'b'.repeat(64),'remote-empty-import',async () => {});
   const f = { stateDir };
@@ -196,11 +112,11 @@ for (const fault of ['before','after-native-hold','runs-refuse-compensation-loss
 });
 
 for (const fault of ['before','after-native-hold']) test(`actual permission continuation ${fault} stays held across reopen and never reinserts absent reservations`, async t => {
-  const f = await prepared(t), initial = await f.open(f.b), data = documents(f.stateDir);
+  const f = await prepared(t), initial = await f.open(), data = documents(f.stateDir);
   const parent: Run = { id: data.runs[0].id,sessionId: data.runs[0].sessionId,prompt: 'Parent',output: '',createdAt: data.runs[0].createdAt,status: 'completed',finishedAt: data.runs[0].createdAt };
   await new RunsRepository(initial).importPrepared({ runs: [parent],created: [],instructions: {} },'a'.repeat(64),'permission-parent');
   await initial.close();
-  const client = await f.open(f.a,fault);
+  const client = await f.open(fault);
   let starts = 0;
   const manager = new RunManager({ stateDir: f.stateDir,storage: client,holdUntilReady: true,getSession: () => ({ ...data.created[0].session,creationPending: false }),refreshSessions: async () => {},
     findExecutable: async () => '/fixture/codex',spawnProcess: () => { starts++; throw new Error('Fixture forbids native launch'); } });
@@ -225,9 +141,9 @@ for (const fault of ['before','after-native-hold']) test(`actual permission cont
 });
 
 for (const wrapUp of [false,true]) test(`actual ${wrapUp ? 'update wrap-up global flush' : 'repeated steer'} loss preserves target-only delivery after target end and drain give-up`, async t => {
-  const f = await prepared(t), initial = await f.open(f.b);
+  const f = await prepared(t), initial = await f.open();
   await new RunsRepository(initial).importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'steer-empty'); await initial.close();
-  const client = await f.open(f.a,wrapUp ? 'after-native-hold' : 'after-steer-hold'), session = { ...documents(f.stateDir).created[0].session,nativeId: '10000000-0000-4000-8000-000000000002',resumable: true,creationPending: false,status: 'completed' as const };
+  const client = await f.open(wrapUp ? 'after-native-hold' : 'after-steer-hold'), session = { ...documents(f.stateDir).created[0].session,nativeId: '10000000-0000-4000-8000-000000000002',resumable: true,creationPending: false,status: 'completed' as const };
   let inserts = 0, starts = 0, finish!: () => void, endTarget!: () => void, output!: (text: string) => void;
   const done = new Promise<void>(resolve => { finish = resolve; });
   const manager = new RunManager({ stateDir: f.stateDir,storage: client,getSession: () => session,refreshSessions: async () => {},findExecutable: async () => '/fixture/codex',
@@ -288,9 +204,9 @@ for (const wrapUp of [false,true]) test(`actual ${wrapUp ? 'update wrap-up globa
 });
 
 test('actual SQLite output reply loss preserves a running ordinary turn after a late explicit target steer', async t => {
-  const f = await prepared(t), initial = await f.open(f.b);
+  const f = await prepared(t), initial = await f.open();
   await new RunsRepository(initial).importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'running-steer-empty'); await initial.close();
-  const client = await f.open(f.a,'after-native-hold');
+  const client = await f.open('after-native-hold');
   const session = { ...documents(f.stateDir).created[0].session,nativeId: '10000000-0000-4000-8000-000000000002',resumable: true,creationPending: false,status: 'completed' as const };
   const turns: { output: (text: string) => void; end: () => void }[] = [];
   let inserts = 0;
@@ -349,76 +265,12 @@ test('actual SQLite output reply loss preserves a running ordinary turn after a 
   await manager.close();
 });
 
-test('exact legacy source probes classify every domain independently', async t => {
-  const stateDir = await folder(t);
-  assert.equal(await workerLegacyFiles(stateDir,'runs'),'absent');
-  await writeFile(join(stateDir,'created-sessions.json'),'[]');
-  assert.equal(await workerLegacyFiles(stateDir,'runs'),'present');
-  assert.equal(await workerLegacyFiles(stateDir,'retention'),'absent');
-  assert.equal(await workerLegacyFiles(stateDir,'future'),'present');
-});
-
-test('actual 64MiB source allowance uses SDK chunks; a stale dependency fails the entire receipt TX', async t => {
-  const f = await prepared(t), client = await f.open(f.b), repository = new RunsRepository(client), data = documents(f.stateDir);
-  const base = Buffer.byteLength(JSON.stringify(data.runs));
-  data.runs[0].output = 'x'.repeat(RUN_SOURCE_BYTES - base);
-  assert.equal(Buffer.byteLength(JSON.stringify(data.runs)),RUN_SOURCE_BYTES);
-  const raw = { runs: Buffer.from(JSON.stringify(data.runs)),created: Buffer.from(JSON.stringify(data.created)),instructions: Buffer.from(JSON.stringify(data.instructions)) };
-  parseRunDocuments(raw);
-  await repository.importPrepared(data,'a'.repeat(64),'large-source');
-  assert.equal((await repository.exportCurrent()).documents.runs[0].output.length,data.runs[0].output.length);
-  const before = await repository.exportCurrent(), run = before.rows.find(row => row.kind === 'run')!, instruction = before.rows.find(row => row.kind === 'instruction')!;
-  await assert.rejects(repository.update([{ ...run,previous: run.json,remove: true },{ ...instruction,previous: '{}',remove: true }],'delete','atomic-refusal'),/changed/);
-  assert.equal((await client.receipt('atomic-refusal-commit')).found,false);
-  assert.equal((await repository.exportCurrent()).sha256,before.sha256,'failed later dependency leaves the earlier deletion uncommitted');
-});
-
-test('actual old schema refuses runs preparation rather than treating authority as legacy JSON', async t => {
-  const f = await prepared(t), old = await retentionBuild('1.121.0',await folder(t));
-  const client = await old.storage.openStorage({ stateDir: f.stateDir,bundle: old.bundle() });
-  try {
-    assert.equal(client.status().state,'unavailable'); assert.equal(client.status().failure?.code,'unknown-schema');
-    await assert.rejects(client.prepare({ allowMigration: false }));
-  } finally { await client.close(); }
-});
-
-test('actual B raw importer refuses missing dependency without creating empty authority or evidence', async t => {
-  const f = await prepared(t), data = documents(f.stateDir), evidenceParent = await sources(f.stateDir,data), client = await f.open(f.b), repository = new RunsRepository(client);
-  await rm(join(f.stateDir,'run-instructions.json'));
-  const update = { stateDir: f.stateDir,managed: false,build: { version: f.b.version,manifest: f.b.manifest,preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.b.bundle() }) } };
-  await assert.rejects(importRuns({ storage: client,repository,stateDir: f.stateDir,evidenceParent,commandId: 'missing-source',update }),/ENOENT/);
-  assert.equal((await repository.head()).authority,null);
-  assert.equal((await client.receipt('missing-source-commit')).found,false);
-});
-
-
-test('sealed B import before commit holds A JSON restoration on the same actual database', async t => {
-  const f = await prepared(t), data = documents(f.stateDir), evidenceParent = await sources(f.stateDir,data);
-  const names = ['runs.json','created-sessions.json','run-instructions.json'];
-  const before = await Promise.all(names.map(name => readFile(join(f.stateDir,name))));
-  const bc = await f.open(f.b,'before');
-  const update = { stateDir: f.stateDir,managed: false,build: { version: f.b.version,manifest: f.b.manifest,preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir,bundle: f.b.bundle('before') }) } };
-  await assert.rejects(importRuns({ storage: bc,repository: new RunsRepository(bc),stateDir: f.stateDir,evidenceParent,commandId: 'sealed-before-commit',update }));
-  await bc.close();
-  const ac = await f.open(f.a), repository = new RunsRepository(ac);
-  assert.equal(await repository.databaseAuthority(),false);
-  const history = new RunHistory(f.stateDir,ac);
-  await assert.rejects(history.readCreated(),/evidence exists without authority/);
-  await assert.rejects(history.restore(),/evidence exists without authority/);
-  let native = 0;
-  const manager = new RunManager({ stateDir: f.stateDir,storage: ac,getSession: () => undefined,refreshSessions: async () => {},
-    spawnProcess: () => { native++; throw new Error('No native fixture process'); } });
-  await assert.rejects(manager.start(),/evidence exists without authority/);
-  assert.equal(manager.list().length,0); assert.equal(native,0);
-  assert.deepEqual(await Promise.all(names.map(name => readFile(join(f.stateDir,name)))),before);
-});
-
 for (const outcome of ['saved','unknown','known-failure'] as const) test(`actual Q receipt cannot authorize R identity before its current save: ${outcome}`, async t => {
-  const f = await prepared(t), initial = await f.open(f.b), data = documents(f.stateDir);
+  const f = await prepared(t), initial = await f.open(), data = documents(f.stateDir);
   const rId = data.runs[0].id, qId = '10000000-0000-4000-8000-000000000003';
   const nativeId = '10000000-0000-4000-8000-000000000099';
   await new RunsRepository(initial).importPrepared(data,'a'.repeat(64),'ordered-identity-seed'); await initial.close();
-  const client = await f.open(f.a,'after-native-hold'), write = client.write.bind(client);
+  const client = await f.open('after-native-hold'), write = client.write.bind(client);
   let identify!: () => Promise<void>, finish!: () => void, submissions = 0, cancelled = false;
   const done = new Promise<void>(resolve => { finish = resolve; });
   const manager = new RunManager({ stateDir: f.stateDir,storage: client,holdUntilReady: true,getSession: () => undefined,refreshSessions: async () => {},
@@ -457,7 +309,7 @@ for (const outcome of ['saved','unknown','known-failure'] as const) test(`actual
   assert.equal(submissions,0,'R stays unsent throughout the explicit Q retention gate');
   if (outcome === 'unknown') {
     // Re-arm the existing one-shot response-loss marker for the current identity write.
-    await rm(join(f.a.directory,'after-native-hold-consumed'));
+    await rm(join((await f.faults()).directory,'after-native-hold-consumed'));
   }
   let staged = false, conflicted = false, savedIdentity!: () => void, releaseSave!: () => void;
   const saving = new Promise<void>(resolve => { savedIdentity = resolve; }), saveGate = new Promise<void>(resolve => { releaseSave = resolve; });
@@ -505,9 +357,9 @@ for (const outcome of ['saved','unknown','known-failure'] as const) test(`actual
 for (const provider of ['codex','claude'] as const) for (const outcome of ['receipt','owner-stop','known-failure'] as const) {
   test(`actual identity persistence preserves ${provider} lifetime; outcome=${outcome}`, async t => {
     const ownerStop = outcome === 'owner-stop', knownFailure = outcome === 'known-failure';
-    const f = await prepared(t), initial = await f.open(f.b);
+    const f = await prepared(t), initial = await f.open();
     await new RunsRepository(initial).importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'identity-empty'); await initial.close();
-    const client = await f.open(f.a,knownFailure ? 'normal' : 'after-native-hold');
+    const client = await f.open(knownFailure ? 'normal' : 'after-native-hold');
     const originalWrite = client.write.bind(client);
     let identityStaged = false, conflicted = false;
     if (knownFailure) client.write = async <T>(...args: Parameters<typeof client.write>) => {
@@ -598,9 +450,9 @@ for (const provider of ['codex','claude'] as const) for (const outcome of ['rece
 }
 
 test('actual target termination before handover and compensation loss never launches the unsent request', async t => {
-  const f = await prepared(t), initial = await f.open(f.b);
+  const f = await prepared(t), initial = await f.open();
   await new RunsRepository(initial).importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'compensation-empty'); await initial.close();
-  const client = await f.open(f.a,'after-unsent-compensation');
+  const client = await f.open('after-unsent-compensation');
   const session = { ...documents(f.stateDir).created[0].session,nativeId: '10000000-0000-4000-8000-000000000002',creationPending: false,resumable: true,status: 'completed' as const };
   let starts = 0, inserts = 0, finish!: () => void, end!: () => void;
   const done = new Promise<void>(resolve => { finish = resolve; });
@@ -637,52 +489,8 @@ test('actual target termination before handover and compensation loss never laun
   await manager.close();
 });
 
-
-test('B bootstrap initializes only absent history and holds missing dependencies, prior seals and stages', async t => {
-  for (const kind of ['fresh', 'missing', 'unsafe', 'sealed', 'stage'] as const) {
-    const f = await prepared(t), client = await f.open(f.b), repository = new RunsRepository(client);
-    const update = { stateDir: f.stateDir, managed: false, legacyFiles: (domain: string) => workerLegacyFiles(f.stateDir, domain), build: { version: f.b.version, manifest: f.b.manifest, preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir, bundle: f.b.bundle() }) } };
-    if (kind === 'unsafe') { await sources(f.stateDir, documents(f.stateDir)); await chmod(join(f.stateDir, 'created-sessions.json'), 0o644); }
-    if (kind === 'missing') await writeFile(join(f.stateDir, 'runs.json'), '[]', { mode: 0o600 });
-    if (kind === 'sealed') { const parent = join(f.stateDir, 'runs-storage-migrations'); await mkdir(parent, { mode: 0o700 }); await mkdir(join(parent, 'prior'), { mode: 0o700 }); }
-    if (kind === 'stage') await client.write('runs', 'begin', { intent: 'prior', bytes: 1, sha256: 'a'.repeat(64), chunks: 1 }, 'prior-begin');
-    const bootstrap = bootstrapRuns(repository, f.stateDir, async () => update);
-    if (kind === 'fresh') {
-      await bootstrap(); await bootstrap();
-      assert.deepEqual((await repository.exportCurrent()).documents, { runs: [], created: [], instructions: {} });
-      assert.equal((await readdir(join(f.stateDir, 'runs-storage-migrations'))).length, 1);
-    } else {
-      await assert.rejects(bootstrap()); await assert.rejects(bootstrap());
-      assert.equal(await repository.databaseAuthority(), false);
-    }
-  }
-});
-
-for (const fault of ['before', 'after'] as const) test(`B bootstrap ${fault} loss never replays an uncertain import`, async t => {
-  const f = await prepared(t), data = documents(f.stateDir), evidenceParent = await sources(f.stateDir, data);
-  const client = await f.open(f.b, fault), repository = new RunsRepository(client);
-  const update = { stateDir: f.stateDir, managed: false, build: { version: f.b.version, manifest: f.b.manifest, preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir, bundle: f.b.bundle(fault) }) } };
-  const bootstrap = bootstrapRuns(repository, f.stateDir, async () => update);
-  await assert.rejects(bootstrap());
-  const identity = repository.lastIntent!; assert.ok(identity);
-  await client.reopen(); await client.prepare({ allowMigration: false });
-  await assert.rejects(bootstrap());
-  assert.deepEqual(repository.lastIntent, identity);
-  assert.equal((await readdir(evidenceParent)).length, 1);
-  assert.equal(await repository.resolvePending(), fault === 'after' ? 'committed' : 'not-committed');
-  if (fault === 'after') { await bootstrap(); assert.deepEqual((await repository.exportCurrent()).documents, data); }
-  else await assert.rejects(bootstrap());
-  await client.close();
-  const successor = await f.open(f.b), nextRepository = new RunsRepository(successor);
-  const nextUpdate = { ...update, build: { ...update.build, preflight: await f.b.storage.preflightStorage({ stateDir: f.stateDir, bundle: f.b.bundle() }) } };
-  const next = bootstrapRuns(nextRepository, f.stateDir, async () => nextUpdate);
-  if (fault === 'before') await assert.rejects(next(), /evidence exists without authority/);
-  else { await next(); assert.deepEqual((await nextRepository.exportCurrent()).documents, data); }
-  assert.equal((await readdir(evidenceParent)).length, 1);
-});
-
 test('R6 runtime reads refuse absent SQL authority even when no JSON or migration evidence exists', async t => {
-  const f = await prepared(t), client = await f.open(f.b);
+  const f = await prepared(t), client = await f.open();
   const history = new RunHistory(f.stateDir, client);
   await assert.rejects(history.readCreated(), /SQL authority is missing/);
   await assert.rejects(history.restore(), /SQL authority is missing/);
@@ -694,7 +502,7 @@ test('R6 runtime reads refuse absent SQL authority even when no JSON or migratio
 });
 
 test('R6 operation snapshots only touched rows, preserves queued A→B→A ordering and commits dependency deletion together', async t => {
-  const f = await prepared(t), client = await f.open(f.b), repository = new RunsRepository(client);
+  const f = await prepared(t), client = await f.open(), repository = new RunsRepository(client);
   const data = documents(f.stateDir), touchedId = data.runs[0].id;
   const untouched: Run = { id: '10000000-0000-4000-8000-000000000088', sessionId: data.runs[0].sessionId,
     status: 'completed', prompt: 'Untouched historical output', output: 'x'.repeat(3_000_000), createdAt: data.runs[0].createdAt };
@@ -734,7 +542,7 @@ test('R6 operation snapshots only touched rows, preserves queued A→B→A order
 });
 
 test('R6 manager uses explicit mutation IDs without reading output from unrelated historical runs', async t => {
-  const f = await prepared(t), client = await f.open(f.b), repository = new RunsRepository(client);
+  const f = await prepared(t), client = await f.open(), repository = new RunsRepository(client);
   const data = documents(f.stateDir);
   const first: Run = { ...data.runs[0], status: 'completed', output: 'First' };
   for (const marker of ['needsInstructions', 'keepQueued', 'retain']) delete (first as unknown as Record<string, unknown>)[marker];
@@ -755,9 +563,9 @@ test('R6 manager uses explicit mutation IDs without reading output from unrelate
 });
 
 for (const fault of ['before', 'after'] as const) test(`R6 history ${fault} reply loss holds queued row operations until the same receipt resolves`, async t => {
-  const f = await prepared(t), seed = await f.open(f.b), data = documents(f.stateDir);
+  const f = await prepared(t), seed = await f.open(), data = documents(f.stateDir);
   await new RunsRepository(seed).importPrepared(data, 'a'.repeat(64), 'r6-loss-seed'); await seed.close();
-  const client = await f.open(f.b, fault), history = new RunHistory(f.stateDir, client);
+  const client = await f.open(fault), history = new RunHistory(f.stateDir, client);
   await history.readCreated(); const run = (await history.restore())[0];
   const calls: string[] = [], write = client.write.bind(client);
   client.write = async <T>(...args: Parameters<typeof client.write>) => { calls.push(args[1]); return write<T>(...args); };
@@ -779,7 +587,7 @@ for (const fault of ['before', 'after'] as const) test(`R6 history ${fault} repl
 });
 
 test('R6 startup prunes orphan instruction rows through the same SQL owner while retaining carried instructions', async t => {
-  const f = await prepared(t), client = await f.open(f.b), repository = new RunsRepository(client), data = documents(f.stateDir);
+  const f = await prepared(t), client = await f.open(), repository = new RunsRepository(client), data = documents(f.stateDir);
   const orphan = '10000000-0000-4000-8000-000000000090';
   data.instructions[orphan] = { text: 'No remaining run owns these instructions', required: true };
   await repository.importPrepared(data, 'a'.repeat(64), 'r6-orphan-instruction-seed');

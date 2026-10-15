@@ -106,47 +106,48 @@ test('a controller asks a joined computer on an older version to move to its own
   const readAgain = async () => { const from = reports; await until(() => reports >= from + 3, 5000); };
   let clock = Date.now();
   const at = new Date(clock).toISOString();
-  const a = await computer(t, 'computer-a', { version: '1.25.0', refreshMs: 50, updatePollMs: 20, now: () => clock });
-  const b = await computer(t, 'computer-b', { version: '1.24.0', features: ['work', 'status', 'update'], update: {
+  const a = await computer(t, 'computer-a', { version: '1.140.0', refreshMs: 50, updatePollMs: 20, now: () => clock });
+  const b = await computer(t, 'computer-b', { version: '1.139.0', features: ['work', 'status', 'update'], update: {
     // Each request starts an update of its own, told apart by when it started.
-    request: async version => { asked.push(version); const started = new Date(clock + asked.length * 1000).toISOString(); update = { version: String(version), previous: '1.24.0', stage: 'installing', startedAt: started, updatedAt: started }; return { status: 202, body: { update } }; },
-    report: async () => { reports++; return { versions: { web: '1.24.0', worker: '1.23.0' }, service: true, ...(update ? { update } : {}), diskFree: 5e9 }; },
+    request: async version => { asked.push(version); const started = new Date(clock + asked.length * 1000).toISOString(); update = { version: String(version), previous: '1.139.0', stage: 'installing', startedAt: started, updatedAt: started }; return { status: 202, body: { update } }; },
+    report: async () => { reports++; return { versions: { web: '1.139.0', worker: '1.138.0' }, service: true, ...(update ? { update } : {}), diskFree: 5e9 }; },
   } });
   await a.listen();
   await b.node.join((await a.controller.invite()).code);
   const joined = await connected(a.controller, 'computer-b');
   await until(() => a.controller.list()[0]?.report?.update?.stage === 'installing', 5000);
-  assert.deepEqual(asked, ['1.25.0']);
-  assert.deepEqual(a.controller.list()[0].report?.versions, { web: '1.24.0', worker: '1.23.0' });
+  await readAgain();
+  assert.deepEqual(asked, ['1.140.0'], 'asked once for the controller\'s own version, not again while it installs');
+  assert.deepEqual(a.controller.list()[0].report?.versions, { web: '1.139.0', worker: '1.138.0' });
   update = { ...update!, stage: 'failed', code: 'start-failed', failedStage: 'verifying', updatedAt: at };
   await until(() => a.controller.list()[0]?.retryAt, 5000);
   assert.equal(a.controller.list()[0].retryAt, new Date(clock + 60 * 60_000).toISOString(), 'the first retry is an hour after the failure');
   await readAgain();
-  assert.deepEqual(asked, ['1.25.0'], 'a failed update is not asked for again before its time');
-  update = { ...update, version: '1.26.0', code: 'check-failed', startedAt: new Date(clock + 1).toISOString() };
-  await until(() => a.controller.list()[0]?.report?.update?.version === '1.26.0', 5000);
+  assert.deepEqual(asked, ['1.140.0'], 'a failed update is not asked for again before its time');
+  update = { ...update, version: '1.141.0', code: 'check-failed', startedAt: new Date(clock + 1).toISOString() };
+  await until(() => a.controller.list()[0]?.report?.update?.version === '1.141.0', 5000);
   await readAgain();
-  assert.deepEqual(asked, ['1.25.0'], 'another controller’s failure does not make this one forget its own');
+  assert.deepEqual(asked, ['1.140.0'], 'another controller’s failure does not make this one forget its own');
   await a.controller.update(joined.id);
-  assert.deepEqual(asked, ['1.25.0', '1.25.0'], 'the owner asks again at once');
+  assert.deepEqual(asked, ['1.140.0', '1.140.0'], 'the owner asks again at once');
   update = { ...update!, stage: 'failed', code: 'start-failed', failedStage: 'verifying' };
-  await until(() => a.controller.list()[0]?.report?.update?.stage === 'failed' && a.controller.list()[0].report?.update?.version === '1.25.0', 5000);
+  await until(() => a.controller.list()[0]?.report?.update?.stage === 'failed' && a.controller.list()[0].report?.update?.version === '1.140.0', 5000);
   await readAgain();
   assert.equal(a.controller.list()[0].retryAt, new Date(clock + 60 * 60_000).toISOString(), 'the owner’s own attempt failing leaves the schedule as it was: only attempts made by the schedule count');
-  assert.deepEqual(asked, ['1.25.0', '1.25.0'], 'and nothing is asked for by itself before its time');
+  assert.deepEqual(asked, ['1.140.0', '1.140.0'], 'and nothing is asked for by itself before its time');
   clock += 60 * 60_000 + 10;
   await until(() => asked.length === 3, 5000);
-  assert.deepEqual(asked, ['1.25.0', '1.25.0', '1.25.0'], 'asked again by itself once the retry is due, as if the owner had not tried');
+  assert.deepEqual(asked, ['1.140.0', '1.140.0', '1.140.0'], 'asked again by itself once the retry is due, as if the owner had not tried');
 });
 
 test('a computer away in the middle of an update shows it as updating, until nothing has been heard for a long time', async t => {
   let clock = Date.now();
   const at = new Date(clock).toISOString();
-  const update: UpdateStatus = { version: '1.25.0', previous: '1.24.0', stage: 'switching', startedAt: at, updatedAt: at };
-  const a = await computer(t, 'computer-a', { version: '1.25.0', now: () => clock });
-  const b = await computer(t, 'computer-b', { version: '1.24.0', features: ['work', 'status', 'update'], update: {
+  const update: UpdateStatus = { version: '1.140.0', previous: '1.139.0', stage: 'switching', startedAt: at, updatedAt: at };
+  const a = await computer(t, 'computer-a', { version: '1.140.0', now: () => clock });
+  const b = await computer(t, 'computer-b', { version: '1.139.0', features: ['work', 'status', 'update'], update: {
     request: async () => ({ status: 202, body: { update } }),
-    report: async () => ({ versions: { web: '1.24.0' }, service: true, update }),
+    report: async () => ({ versions: { web: '1.139.0' }, service: true, update }),
   } });
   await a.listen();
   await b.node.join((await a.controller.invite()).code);
@@ -165,11 +166,11 @@ test('an update that keeps being cut short is asked for again on the schedule, n
   let reports = 0;
   const readAgain = async () => { const from = reports; await until(() => reports >= from + 3, 5000); };
   let clock = Date.now();
-  const a = await computer(t, 'computer-a', { version: '1.25.0', refreshMs: 30, updatePollMs: 20, now: () => clock });
-  const b = await computer(t, 'computer-b', { version: '1.24.0', features: ['work', 'status', 'update'], update: {
+  const a = await computer(t, 'computer-a', { version: '1.140.0', refreshMs: 30, updatePollMs: 20, now: () => clock });
+  const b = await computer(t, 'computer-b', { version: '1.139.0', features: ['work', 'status', 'update'], update: {
     // Its helper never starts: each request is reported as cut short right away.
-    request: async version => { asked.push(version); const at = new Date(clock + asked.length).toISOString(); update = { version: String(version), previous: '1.24.0', stage: 'failed', code: 'interrupted', failedStage: 'installing', startedAt: at, updatedAt: at }; return { status: 202, body: { update } }; },
-    report: async () => { reports++; return { versions: { web: '1.24.0' }, service: true, ...(update ? { update } : {}) }; },
+    request: async version => { asked.push(version); const at = new Date(clock + asked.length).toISOString(); update = { version: String(version), previous: '1.139.0', stage: 'failed', code: 'interrupted', failedStage: 'installing', startedAt: at, updatedAt: at }; return { status: 202, body: { update } }; },
+    report: async () => { reports++; return { versions: { web: '1.139.0' }, service: true, ...(update ? { update } : {}) }; },
   } });
   await a.listen();
   await b.node.join((await a.controller.invite()).code);
@@ -188,18 +189,37 @@ test('an update that keeps being cut short is asked for again on the schedule, n
 
 test('a joined computer that cannot update itself is never asked to', async t => {
   let asked = 0;
-  const a = await computer(t, 'computer-a', { version: '1.25.0', refreshMs: 50 });
-  const b = await computer(t, 'computer-b', { version: '1.24.0', features: ['work', 'status'], update: {
+  let reports = 0;
+  const a = await computer(t, 'computer-a', { version: '1.140.0', refreshMs: 50 });
+  const b = await computer(t, 'computer-b', { version: '1.139.0', features: ['work', 'status'], update: {
     request: async () => { asked++; return { status: 409, body: { code: 'not-service' } }; },
-    report: async () => ({ versions: { web: '1.24.0' }, service: false }),
+    report: async () => { reports++; return { versions: { web: '1.139.0' }, service: false }; },
   } });
   await a.listen();
   await b.node.join((await a.controller.invite()).code);
   const joined = await connected(a.controller, 'computer-b');
-  await until(() => a.controller.list()[0]?.report, 5000);
-  await new Promise(resolve => setTimeout(resolve, 200));
+  // Three reports read: each would have been followed by a request.
+  await until(() => reports >= 3, 5000);
   assert.equal(asked, 0);
   await assert.rejects(a.controller.update(joined.id), { kind: 'conflict' });
+});
+
+test('a joined computer older than the storage this build takes over (below 1.125.0) is never asked to update, and the owner is told why', async t => {
+  let asked = 0;
+  let reports = 0;
+  const a = await computer(t, 'computer-a', { version: '1.140.0', refreshMs: 50 });
+  const b = await computer(t, 'computer-b', { version: '1.124.9', features: ['work', 'status', 'update'], update: {
+    request: async () => { asked++; return { status: 202, body: {} }; },
+    report: async () => { reports++; return { versions: { web: '1.124.9' }, service: true }; },
+  } });
+  await a.listen();
+  await b.node.join((await a.controller.invite()).code);
+  const joined = await connected(a.controller, 'computer-b');
+  // Three reports read: each would have been followed by a request, behind as it is and due from the start.
+  await until(() => reports >= 3, 5000);
+  assert.equal(asked, 0, 'it would install this build and then refuse its storage: its turns would stop');
+  await assert.rejects(a.controller.update(joined.id), (error: Error & { kind?: string }) => error.kind === 'conflict' && error.message.includes('storage-too-old'));
+  assert.equal(asked, 0, 'the owner\'s own request is refused too, before anything is sent');
 });
 
 test('a code works once: a second computer using it is not accepted', async t => {

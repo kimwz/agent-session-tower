@@ -11,6 +11,7 @@ export interface UpdateStatus {
   version: string; previous: string; stage: UpdateStage; startedAt: string; updatedAt: string;
   /** Why it failed, and the stage it failed in. */
   code?: UpdateFailure; failedStage?: UpdateStage;
+  /** Written by 1.137-or-older helpers when the target's storage contract stopped the update; still shown. */
   storage?: { code: 'prerequisite-required' | 'previous-incompatible' | 'contract-unverifiable' | 'target-runtime-unsupported'; prepare?: string; domains?: string[] };
   hold?: { code: string; reason: string; at: string };
 }
@@ -65,9 +66,7 @@ export interface NodeReport {
   managed?: ManagedApplied;
 }
 /** A computer this one controls. */
-export interface UpdateChainStatus { target: string; prerequisite?: string; attempts: Record<string, number>; state: 'done' | 'wait' | 'request' | 'blocked'; code?: string; reason?: string; version?: string }
 export interface NodeSummary {
-  updateChain?: UpdateChainStatus;
   id: string; name: string; label?: string; fingerprint: string; status: NodeStatus;
   version?: string; features: string[]; pairedAt: string; lastSeenAt?: string;
   /** The code it last joined with. */

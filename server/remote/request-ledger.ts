@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { RemoteRepository } from './storage-repository.js';
-import { bootstrapExternal } from './storage-transfer.js';
+import { requireDomainAuthority } from '../storage/domain-authority.js';
 import type { RemoteEntry } from './storage-codec.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
@@ -55,7 +55,7 @@ export class RemoteRequestLedger {
 
   async start(): Promise<void> {
     if (!this.repository) throw new Error('RemoteRequestLedger requires its worker SQL repository.');
-    await bootstrapExternal(this.repository, this.stateDir);
+    await requireDomainAuthority(this.repository.storage, 'remote');
     for (const { entry, ordinal } of await this.repository.load()) {
       this.entries.set(entry.key, entry); this.ordinals.set(entry.key, ordinal);
       this.nextOrdinal = Math.max(this.nextOrdinal, ordinal + 1);

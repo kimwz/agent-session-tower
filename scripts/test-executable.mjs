@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
-import { spawn, execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { promisify } from 'node:util';
+import { execFile, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdtemp, copyFile, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir, networkInterfaces } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout } from 'node:timers/promises';
+import { promisify } from 'node:util';
 
+const execFileAsync = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const dir = await mkdtemp(join(tmpdir(), 'monitor-executable-check-'));
 let child;
@@ -23,6 +23,16 @@ async function stop() {
 try {
   const binary = join(dir, process.platform === 'win32' ? 'agent-session-tower.exe' : 'agent-session-tower');
   await copyFile(join(root, 'artifacts', binary.split('/').at(-1)), binary);
+  // An update helper from 1.125–1.137.x probes its target with `--storage-contract` (through the package's bin with
+  // its own Node, the way a service installs it) and goes on only on this answer: a numeric non-zero exit within its
+  // 60-second limit, not killed, `Unknown option: --storage-contract` on stderr, and `--version` answering the version.
+  const version = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version;
+  for (const [file, prefix] of [[process.execPath, [join(root, 'bin', 'agent-session-tower.mjs')]], [binary, []]]) {
+    const probe = await execFileAsync(file, [...prefix, '--storage-contract'], { cwd: dir, timeout: 60_000 }).then(() => assert.fail(`${file} accepted --storage-contract`), error => error);
+    assert.ok(typeof probe.code === 'number' && probe.code !== 0 && !probe.killed && probe.signal === null, `${file}: ${probe.message}`);
+    assert.match(String(probe.stderr), /Unknown option: --storage-contract/, file);
+    assert.equal((await execFileAsync(file, [...prefix, '--version'], { cwd: dir, timeout: 60_000 })).stdout.trim(), version, file);
+  }
   await mkdir(join(dir, 'codex'));
   await mkdir(join(dir, 'claude'));
   await mkdir(join(dir, 'codex', 'sessions'));
@@ -42,74 +52,38 @@ try {
   };
   const stateDir = join(dir, 'state');
   await mkdir(stateDir, { mode: 0o700 });
-  await writeFile(join(stateDir, 'runs.json'), JSON.stringify([failedRun]), { mode: 0o600 });
-  await writeFile(join(stateDir, 'created-sessions.json'), '[]', { mode: 0o600 });
-  await writeFile(join(stateDir, 'run-instructions.json'), '{}', { mode: 0o600 });
-  // A prepared existing installation has complete retention sources as well as run history.
-  await mkdir(join(stateDir, 'retention'), { mode: 0o700 });
-  await writeFile(join(stateDir, 'retention', 'journal.json'), JSON.stringify({ version: 1, migratedAt: Date.parse(timestamp), entries: [], policies: [] }), { mode: 0o600 });
-  await writeFile(join(stateDir, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
-  // The official prior SDK creates the database; only the copied SEA's offline owner
-  // may back it up and complete all seven authorities before the web smoke begins.
-  const { tsImport } = await import('tsx/esm/api');
-  const { protectedOld124 } = await tsImport('../tests/server/storage/fixtures/retention-build.ts', import.meta.url);
-  const a = await protectedOld124();
-  const preparation = await a.storage.openStorage({ stateDir, bundle: a.bundle() });
-  let storageId;
+  const dist = path => import(pathToFileURL(join(root, 'dist/server', path)).href);
+  const storage = await dist('storage/index.js');
+  const { initializeStorageDomains } = await dist('storage/initialize.js');
+  const { RunsRepository } = await dist('runs/storage-repository.js');
+  const bundle = await storage.captureStorageBundle();
+  const context = storage.storageBuildContext(bundle);
+  assert.equal(context.ok, true, 'actual compiled SDK must be trusted');
+  const artifact = JSON.parse(await readFile(join(root, 'dist/server/storage/generated/thread-bundle.json'), 'utf8'));
+  assert.equal(artifact.sourceHash, context.identity.sourceHash);
+  // The compiled storage seeds an existing installation the way the worker leaves one: every domain authority, then one
+  // failed run in the run history. It is closed before the executable starts, so only the executable writes afterwards.
+  const seed = await storage.openStorage({ stateDir, bundle });
   try {
-    await preparation.prepare({ allowMigration: true });
-    const schema = (await preparation.inspect()).schema;
-    assert.notEqual(schema.kind, 'empty');
-    storageId = schema.storageId;
-  } finally { await preparation.close(); }
+    assert.equal(seed.status().state, 'ready', JSON.stringify(seed.status()));
+    await seed.prepare({ allowMigration: true });
+    const domains = await initializeStorageDomains(seed, stateDir);
+    assert.deepEqual(domains.map(domain => domain.result), domains.map(() => 'created'));
+    await new RunsRepository(seed).restore({ runs: [failedRun], created: [], instructions: {} }, 'standalone-run-seed');
+  } finally { await seed.close(); }
+  /** The run history as stored, through a read-only connection beside the executable's worker (never a second writer). */
+  function storedRuns() {
+    const database = new (process.getBuiltinModule('node:sqlite').DatabaseSync)(join(stateDir, 'state.sqlite'), { readOnly: true });
+    try { return database.prepare("SELECT json FROM runs_rows WHERE kind = 'run' ORDER BY ordinal").all().map(row => JSON.parse(row.json)); }
+    finally { database.close(); }
+  }
   const portProbe = createServer();
   await new Promise(resolve => portProbe.listen(0, '127.0.0.1', resolve));
   const port = portProbe.address().port;
   await new Promise(resolve => portProbe.close(resolve));
   const base = `http://127.0.0.1:${port}`;
-  const args = ['--no-open', '--port', String(port), '--state-dir', join(dir, 'state')];
+  const args = ['--no-open', '--port', String(port), '--state-dir', stateDir];
   const env = { ...process.env, HOME: dir, SHELL: '/bin/sh', PATH: '/usr/bin:/bin', CODEX_HOME: join(dir, 'codex'), CLAUDE_CONFIG_DIR: join(dir, 'claude') };
-  const storage = await import(pathToFileURL(join(root, 'dist/server/storage/index.js')).href);
-  const { empty, serializeState } = await import(pathToFileURL(join(root, 'dist/server/triggers/state.js')).href);
-  await writeFile(join(stateDir, 'trigger-engine.json'), serializeState(empty()), { mode: 0o600 });
-  await writeFile(join(stateDir, 'permissions.json'), JSON.stringify({ version: 1, rules: [], requests: [], codex: [] }), { mode: 0o600 });
-  const context = storage.storageBuildContext(await storage.captureStorageBundle());
-  assert.equal(context.ok, true, 'actual compiled SDK must be trusted');
-  const artifact = JSON.parse(await readFile(join(root, 'dist/server/storage/generated/thread-bundle.json'), 'utf8'));
-  assert.equal(artifact.sourceHash, context.identity.sourceHash);
-  const command = async commandArgs => {
-    const { stdout } = await promisify(execFile)(binary, commandArgs, { cwd: dir, env, timeout: 120_000, killSignal: 'SIGTERM', maxBuffer: 16 * 1024 * 1024 });
-    return JSON.parse(stdout);
-  };
-  const seaContract = await command(['--storage-contract']);
-  assert.equal(seaContract.supported, true);
-  assert.deepEqual(seaContract.identity, context.identity, 'copied SEA and compiled SDK have the same actual source identity');
-  assert.deepEqual(seaContract.manifest, context.manifest);
-  const hash = async path => createHash('sha256').update(await readFile(path)).digest('hex');
-  const oldEntry = join(a.packageRoot, 'bin/agent-session-tower.mjs');
-  const oldContract = join(a.directory, 'storage-contract.json');
-  const scopes = ['retention', 'runs', 'triggers', 'permissions', 'remote', 'auto-prompt', 'automation-workflows'];
-  assert.deepEqual(context.manifest.domains.map(domain => domain.scope).sort(), [...scopes].sort());
-  const activation = {
-    format: 'tower-offline-activation', version: 1, activationId: 'standalone-all-domains', stateDir, storageId,
-    build: context.identity, manifest: context.manifest,
-    oldArtifact: { identity: a.contract.identity, entry: { path: oldEntry, sha256: await hash(oldEntry) },
-      contract: { path: oldContract, sha256: await hash(oldContract) } },
-    targets: [context.manifest.core.scope, ...scopes], domains: [], phase: 'pending',
-  };
-  const ownerInput = join(dir, 'offline-owner.json');
-  await writeFile(ownerInput, JSON.stringify({ format: 'tower-offline-owner', activation, backupRoot: join(dir, 'consistent-backup') }), { mode: 0o600 });
-  const activated = await command(['storage', 'offline', 'activate', '--state-dir', stateDir, '--input', ownerInput]);
-  assert.deepEqual(activated, { activationId: activation.activationId, state: 'complete',
-    completedStoreScopes: context.manifest.domains.map(domain => domain.scope), effectsStarted: false });
-  const completed = JSON.parse(await readFile(join(stateDir, 'storage-offline-activation.json'), 'utf8'));
-  const completionInput = join(dir, 'offline-completion.json');
-  await writeFile(completionInput, JSON.stringify(completed), { mode: 0o600 });
-  const checked = await command(['storage', 'offline', 'check', '--state-dir', stateDir, '--input', completionInput]);
-  assert.equal(checked.state, 'complete');
-  assert.equal(checked.activationId, activation.activationId);
-  assert.deepEqual(checked.identity, context.identity);
-  assert.equal(checked.effectsStarted, false);
   function start() {
     child = spawn(binary, args, { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'] });
     completion = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', code => resolve(code)); });
@@ -156,8 +130,21 @@ try {
     assert.equal(response.status, 200);
     return (await response.json()).group;
   }
+  /** The executable's worker storage as its health reports it, once that worker has opened it. */
+  async function workerStorage() {
+    let last;
+    for (let attempt = 0; attempt < 150; attempt++) {
+      if (child.exitCode !== null) throw new Error(output);
+      last = (await (await fetch(`${base}/api/health`)).json()).storage;
+      if (last?.state === 'ready') return last;
+      await setTimeout(100);
+    }
+    throw new Error(`Executable storage did not become ready: ${JSON.stringify(last)}; ${output}`);
+  }
   start();
   await ready();
+  // The copied executable's own worker runs the storage this checkout compiled, not merely a compatible one.
+  assert.deepEqual((await workerStorage()).identity, context.identity, 'the executable worker\'s storage identity is the compiled SDK\'s');
   const config = JSON.parse(await readFile(join(root, 'dist/executable/sea-config.json'), 'utf8'));
   for (const [key, path] of Object.entries(config.assets)) {
     if (!key.startsWith('web/')) continue;
@@ -242,7 +229,7 @@ try {
   await setGroup({ cwd: emptyGroupCwd, pinned: false }, secondToken);
   assert.deepEqual((await (await fetch(`${base}/api/snapshot`)).json()).groups, []);
   assert.deepEqual((await (await fetch(`${base}/api/snapshot`)).json()).runs, [], 'dismissal survives executable restart');
-  assert.deepEqual(JSON.parse(await readFile(join(dir, 'state', 'runs.json'), 'utf8')), [failedRun], 'dismissal keeps raw execution history intact');
+  assert.deepEqual(storedRuns(), [failedRun], 'dismissal keeps raw execution history intact');
   assert.equal((await discovered()).customTitle, '실행파일 제목 저장 확인');
   assert.equal((await discovered()).closed, true, 'closed session stays closed after executable restart');
   const reopenResponse = await fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}/reopen`, {
@@ -322,7 +309,7 @@ try {
   assert.equal((await fetch(`${base}/api/snapshot`, { headers })).status, 401, 'a revoked sign-in stays revoked after a restart');
   const renewedHeaders = await loginRemote();
   assert.equal((await fetch(`${base}/api/snapshot`, { headers: renewedHeaders })).status, 200);
-  console.log(`PASS: copied executable alone, minimal PATH, ${Object.keys(config.assets).length} embedded assets, duplicate launch, persistent private session titles and reset, persistent private project group titles/pins and reset without sessions, durable session close/reopen and creation validation, persistent failure dismissal with unchanged lifecycle and raw history, unchanged native history, shutdown/restart, authenticated public-interface binding and persistent 0600 password hash, local bypass, remote sign-in kept across restart, revoked by logout and still revoked after restart, and a new sign-in.`);
+  console.log(`PASS: copied executable alone, the 1.137.x update helper's --storage-contract answer (bin and executable), minimal PATH, ${Object.keys(config.assets).length} embedded assets, duplicate launch, persistent private session titles and reset, persistent private project group titles/pins and reset without sessions, durable session close/reopen and creation validation, persistent failure dismissal with unchanged lifecycle and raw history, unchanged native history, shutdown/restart, authenticated public-interface binding and persistent 0600 password hash, local bypass, remote sign-in kept across restart, revoked by logout and still revoked after restart, and a new sign-in.`);
 } finally {
   try { await stop(); } finally { await rm(dir, { recursive: true, force: true }); }
 }

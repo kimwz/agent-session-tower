@@ -7,9 +7,9 @@ import { observeProcess } from './process-owner.js';
 import { processStart } from '../instance/process-start.js';
 
 /**
- * One turn, for the whole computer, at changing what the background service starts: the `current` pointer, the owner's
- * pin and a rollback's records. The web (an owner's rollback, a pin release), the update helper (its switch) and the
- * CLI (install and join, through useVersion) are separate processes, so the turn is an exclusive file beside `current`.
+ * One turn, for the whole computer, at changing what the background service starts: the `current` pointer and the
+ * handoff hold. The web, the update helper (its switch) and the CLI (install and join, through useVersion) are
+ * separate processes, so the turn is an exclusive file beside `current`.
  * Only short file steps run inside it; nothing waits on a worker or the network there.
  *
  * The lock is published whole (written to a private file, then linked into place), so it is never seen empty. It names
@@ -28,8 +28,6 @@ const OWNER_FORMAT = 'tower-transition-owner';
 
 export const transitionLockPath = (stateDir: string) => join(stateDir, 'runtime', 'storage-transition.lock');
 export const transitionBreakerPath = (stateDir: string) => `${transitionLockPath(stateDir)}.break`;
-/** The owner's pin (see storage-update.ts): the version the service keeps while it is there. */
-export const storagePinPath = (stateDir: string) => join(stateDir, 'runtime', 'storage-pin.json');
 
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT';
 const messageOf = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -47,41 +45,6 @@ export async function readExact(path: string, maxBytes: number): Promise<Buffer 
     if (info.size > maxBytes) throw Object.assign(new Error(`${path} is too large.`), { code: 'EFBIG' });
     return await file.readFile();
   } finally { await file.close(); }
-}
-
-/** Keeps the service on one version: no update, scheduler, controller or install moves it, and pruning keeps its artifact. */
-export interface StoragePin {
-  format: 'tower-storage-pin';
-  version: 1;
-  pinned: string;
-  sourceHash: string;
-  manifestDigest: string;
-  /** sha256 of the artifact's entry point when it was validated. */
-  entrySha256: string;
-  /** The rollback that wrote it; only that rollback's record releases it. */
-  rollbackId: string;
-  by: string;
-  reason: string;
-  at: string;
-}
-export type PinRead = { state: 'absent' } | { state: 'present'; pin: StoragePin } | { state: 'invalid'; reason: string } | { state: 'unreadable'; reason: string };
-
-const RELEASE = /^\d+\.\d+\.\d+$/;
-const SHA256 = /^[0-9a-f]{64}$/;
-const isText = (value: unknown, maximum: number) => typeof value === 'string' && !!value.trim() && value.length <= maximum;
-
-export async function readStoragePin(stateDir: string): Promise<PinRead> {
-  let bytes: Buffer | undefined;
-  try { bytes = await readExact(storagePinPath(stateDir), 64 * 1024); } catch (error) { return { state: 'unreadable', reason: messageOf(error) }; }
-  if (!bytes) return { state: 'absent' };
-  let value: Record<string, unknown>;
-  try { value = JSON.parse(bytes.toString('utf8')); } catch { return { state: 'invalid', reason: 'The version pin is not JSON.' }; }
-  if (!value || typeof value !== 'object' || Array.isArray(value) || value.format !== 'tower-storage-pin' || value.version !== 1 || typeof value.pinned !== 'string' || !RELEASE.test(value.pinned)
-    || !SHA256.test(String(value.sourceHash)) || !SHA256.test(String(value.manifestDigest)) || !SHA256.test(String(value.entrySha256))
-    || !isText(value.rollbackId, 64) || !isText(value.by, 200) || typeof value.reason !== 'string' || value.reason.length > 2000 || typeof value.at !== 'string' || Number.isNaN(Date.parse(value.at))) {
-    return { state: 'invalid', reason: 'The version pin has an unknown format.' };
-  }
-  return { state: 'present', pin: value as unknown as StoragePin };
 }
 
 // ---- Who owns a file: a process told by its pid and start time. ----

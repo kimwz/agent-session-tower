@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import { isSavedRun } from '../../../server/runs/saved-state.js';
 import { BackgroundTaskTracker } from '../../../server/runs/background-tasks.js';
 import { CLAUDE_FINISH_RECHECK_MS } from '../../../server/runs/claude-turn.js';
@@ -18,11 +18,14 @@ const SESSION = `claude:${ID}`;
 
 // A background task outlives the turn that started it. The fixture plays Claude: the first message gets `first`
 // and a result, then `later` frames are sent on their own timers (`at`) or once the test releases them (`when`, see
-// release()); any further message gets `onMessage` at once, then `reply` and a result.
+// release()); any further message gets `onMessage` at once, then `reply` and a result. Each group of frames goes out
+// in one write, so Tower never waits between frames Claude sends together. Released steps go out in the order they are
+// listed, one per check: steps released together keep their order (a notice before the turn that takes it).
 const PROVIDER = `
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 const send = event => process.stdout.write(JSON.stringify(event) + '\\n');
+const sendAll = frames => { if (frames.length) process.stdout.write(frames.map(frame => JSON.stringify({ session_id: id, ...frame }) + '\\n').join('')); };
 const log = entry => appendFileSync(process.env.LOG, JSON.stringify(entry) + '\\n');
 const id = process.argv.slice(2).find(value => /^20000000-/.test(value));
 let script = JSON.parse(process.env.SCRIPT);
@@ -35,22 +38,19 @@ createInterface({ input: process.stdin }).on('line', line => {
   log({ user: message.message.content[0].text });
   if (turns++ === 0) {
     send({ type: 'system', subtype: 'init', session_id: id, permissionMode: 'auto' });
-    for (const frame of script.first) send({ session_id: id, ...frame });
-    if (!script.noResult) send({ type: 'result', session_id: id, is_error: false, result: 'first done' });
-    for (const step of script.later ?? []) {
-      const fire = () => { for (const frame of step.frames ?? []) send({ session_id: id, ...frame }); if (step.exit) { if (step.stderr) process.stderr.write(step.stderr); process.exit(step.code ?? 0); } };
-      if (!step.when) { setTimeout(fire, step.at); continue; }
-      const released = setInterval(() => { if (existsSync(process.env.LOG + '.' + step.when)) { clearInterval(released); fire(); } }, 5);
+    sendAll([...script.first, ...(script.noResult ? [] : [{ type: 'result', is_error: false, result: 'first done' }])]);
+    const fire = step => { sendAll(step.frames ?? []); if (step.exit) { if (step.stderr) process.stderr.write(step.stderr); process.exit(step.code ?? 0); } };
+    const released = [];
+    for (const step of script.later ?? []) if (step.when) released.push(step); else setTimeout(() => fire(step), step.at);
+    if (released.length) {
+      const check = setInterval(() => { if (!existsSync(process.env.LOG + '.' + released[0].when)) return; fire(released.shift()); if (!released.length) clearInterval(check); }, 5);
     }
     return;
   }
-  for (const frame of script.onMessage ?? []) send({ session_id: id, ...frame });
-  if (script.unacknowledgedReply) { send({ type: 'result', session_id: id, is_error: false, result: 'finished without replay' }); return; }
-  setTimeout(() => {
-    send({ type: 'user', isReplay: true, uuid: message.uuid, session_id: id, parent_tool_use_id: null, message: message.message });
-    for (const frame of script.reply ?? []) send({ session_id: id, ...frame });
-    send({ type: 'result', session_id: id, is_error: false, result: 'reply done' });
-  }, script.replyDelay ?? 0);
+  if (script.unacknowledgedReply) { sendAll([...(script.onMessage ?? []), { type: 'result', is_error: false, result: 'finished without replay' }]); return; }
+  sendAll(script.onMessage ?? []);
+  setTimeout(() => sendAll([{ type: 'user', isReplay: true, uuid: message.uuid, parent_tool_use_id: null, message: message.message },
+    ...(script.reply ?? []), { type: 'result', is_error: false, result: 'reply done' }]), script.replyDelay ?? 0);
 }).on('close', () => { log({ end: true }); process.exit(0); });
 `;
 
@@ -84,6 +84,27 @@ async function fixture(script: Record<string, unknown>, options: { followUpMs?: 
 
 const find = (manager: RunManager, id: string) => manager.list().find(run => run.id === id)!;
 const settled = (manager: RunManager, id: string) => until(() => { const run = find(manager, id); return run && !['queued', 'running'].includes(run.status) ? run : undefined; }, 10_000);
+/** The turn's process and Claude control while it runs, as the manager owns them. */
+const ownedTurn = (manager: RunManager, id: string) => (manager as unknown as { owned: Map<string, { child: { stdin: { writableEnded: boolean } }; claude?: { turnIdle: boolean } }> }).owned.get(id);
+/**
+ * Puts the turn's waits (the finish grace, Tower's follow-up notice, the background limit) on a fake clock from before
+ * the turn starts: none can pass while the provider's frames are on their way, however slow the machine. The provider
+ * process and the test's own waits (until) stay on the real clock.
+ */
+const fakeClock = (t: TestContext) => { t.mock.timers.enable({ apis: ['setTimeout'] }); t.after(() => t.mock.timers.reset()); };
+/**
+ * Once the turn has read the result that follows `text` (the reply is shown and the turn is idle again), checks that
+ * Tower sent Claude no other message than `prompt`, then moves the fake clock past the finish grace: input closes.
+ */
+async function endsAtGrace(t: TestContext, manager: RunManager, id: string, text: string, prompt: string, entries: () => Promise<{ user?: string }[]>) {
+  const owned = await until(() => ownedTurn(manager, id));
+  await until(() => owned.claude?.turnIdle && find(manager, id).output.includes(text));
+  assert.deepEqual((await entries()).flatMap(entry => entry.user ?? []), [prompt], 'Tower sent Claude nothing more');
+  assert.equal(owned.child.stdin.writableEnded, false, 'input stays open within the grace');
+  t.mock.timers.tick(CLAUDE_FINISH_RECHECK_MS);
+  assert.equal(owned.child.stdin.writableEnded, true, 'input closes once the grace has passed');
+  t.mock.timers.reset();
+}
 
 test('an unacknowledged private notice releases completed input after delivery settles', async t => {
   const f = await fixture({ first: [says('Working.')], noResult: true, unacknowledgedReply: true }, {
@@ -106,15 +127,19 @@ test('an unacknowledged private notice releases completed input after delivery s
 });
 
 test('a turn stays open while its background task runs and ends after Claude takes the result', async t => {
+  // The notice and Claude's turn for it come as two writes, in that order.
   const { manager, entries, release, cleanup } = await fixture({ first: [started('bash-1'), says('I will report when the reviews finish.')],
-    later: [{ when: 'notice', frames: [notified('bash-1')] }, { when: 'notice', frames: [takes('bash-1'), says('All seven reviews passed.'), result] }] });
+    later: [{ when: 'notice', frames: [notified('bash-1')] }, { when: 'notice', frames: [takes('bash-1'), says('All seven reviews passed.'), result] }] },
+  { finishRecheckMs: CLAUDE_FINISH_RECHECK_MS });
   t.after(cleanup);
+  fakeClock(t);
   const run = await manager.enqueue(SESSION, 'Run the reviews', {}, { origin: { kind: 'owner' } });
   const waiting = await until(() => find(manager, run.id).backgroundWait);
   assert.equal(waiting.tasks, 1);
   assert.equal(find(manager, run.id).status, 'running');
   assert.equal((await entries()).some(entry => entry.end), false, 'input must stay open while the task runs');
   await release('notice');
+  await endsAtGrace(t, manager, run.id, 'All seven reviews passed.', 'Run the reviews', entries);
   const done = await settled(manager, run.id);
   assert.equal(done.status, 'completed');
   assert.equal(done.backgroundWait, undefined);
@@ -135,11 +160,14 @@ test('tasks that finish and are taken inside the turn end it at its result as be
 
 test('a task that ends in the turn but whose notice comes after the result still keeps the turn open', async t => {
   const { manager, entries, release, cleanup } = await fixture({ first: [started('bash-1'), { type: 'system', subtype: 'task_updated', task_id: 'bash-1', patch: { status: 'completed' } }],
-    later: [{ when: 'notice', frames: [notified('bash-1'), takes('bash-1'), says('Read the output.'), result] }] });
+    later: [{ when: 'notice', frames: [notified('bash-1'), takes('bash-1'), says('Read the output.'), result] }] }, { finishRecheckMs: CLAUDE_FINISH_RECHECK_MS });
   t.after(cleanup);
+  // Tower's follow-up wait starts at the first result, while the test still has to release the notice.
+  fakeClock(t);
   const run = await manager.enqueue(SESSION, 'Run it', {}, { origin: { kind: 'owner' } });
   await until(() => find(manager, run.id).backgroundWait);
   await release('notice');
+  await endsAtGrace(t, manager, run.id, 'Read the output.', 'Run it', entries);
   const done = await settled(manager, run.id);
   assert.equal(done.status, 'completed');
   assert.match(done.output, /Waiting for Claude to take the finished background work[\s\S]*Read the output\./);
@@ -327,9 +355,6 @@ test("a wakeup is dropped only when Claude's own timer delivered it in the kept-
   assert.equal(loop.pending, undefined);
 });
 
-
-/** The turn's process and Claude control while it runs, as the manager owns them. */
-const ownedTurn = (manager: RunManager, id: string) => (manager as unknown as { owned: Map<string, { child: { stdin: { writableEnded: boolean } }; claude?: { turnIdle: boolean } }> }).owned.get(id);
 
 test('without a test grace a turn waits the production 250 ms for bookends in a later chunk before it ends', async t => {
   assert.equal(CLAUDE_FINISH_RECHECK_MS, 250);

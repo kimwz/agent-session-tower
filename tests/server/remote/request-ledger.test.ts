@@ -4,10 +4,11 @@ import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import '../../helpers/skip-fsync.js';
 import { until } from '../../helpers/until.ts';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RunError } from '../../../server/runs/manager.js';
+import { remoteRows } from '../../../server/remote/storage-codec.js';
 import { RemoteRequestLedger, REMOTE_REQUEST_RETENTION_MS, remoteRequestTime, requestFingerprint, type RemoteResult } from '../../../server/remote/request-ledger.js';
 
 const CONTROLLER = 'controllera1b2c3d4e5f6';
@@ -20,7 +21,11 @@ async function fixture(t: TestContext, now = () => Date.now()) {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-ledger-'));
   t.after(() => rm(stateDir, { recursive: true, force: true }));
   let storage: Awaited<ReturnType<typeof externalStorageFixture>> | undefined;
-  const open = async () => { storage ??= await externalStorageFixture(t, stateDir); const ledger = new RemoteRequestLedger(stateDir, now, 20_000, storage.remote, storage.effectGate); await ledger.start(); return ledger; };
+  /** `saved`: records an earlier worker left in the remote authority, which then starts with them. */
+  const open = async (saved?: unknown[]) => {
+    if (saved && !storage) { storage = await externalStorageFixture(t, stateDir, false); await storage.remote.importPrepared(remoteRows(saved), 'a'.repeat(64), 'saved-requests', storage.checkActivation); }
+    storage ??= await externalStorageFixture(t, stateDir);
+    const ledger = new RemoteRequestLedger(stateDir, now, 20_000, storage.remote, storage.effectGate); await ledger.start(); return ledger; };
   return { stateDir, open };
 }
 const record = (value: { runId: string }): RemoteResult => ({ kind: 'run', runId: value.runId });
@@ -106,8 +111,7 @@ test('an outcome lost to a crash is reported as uncertain instead of running the
   const f = await fixture(t);
   const id = requestId(Date.now());
   // The entry is written before the work starts; a crash in between leaves it without a result.
-  await writeFile(join(f.stateDir, 'remote-requests.json'), JSON.stringify([{ key: `${CONTROLLER}\nenqueue\n${id}`, fingerprint: requestFingerprint({ prompt: 'x' }), at: Date.now() }]), { mode: 0o600 });
-  const ledger = await f.open();
+  const ledger = await f.open([{ key: `${CONTROLLER}\nenqueue\n${id}`, fingerprint: requestFingerprint({ prompt: 'x' }), at: Date.now() }]);
   let runs = 0;
   await assert.rejects(ledger.once(CONTROLLER, 'enqueue', id, { prompt: 'x' }, async () => { runs++; return { runId: 'second' }; }, record, () => undefined),
     (error: Error & { disposition?: string }) => error.disposition === 'uncertain' && /확실하지 않습니다/.test(error.message));
@@ -149,9 +153,9 @@ test('records saved before the issue time was kept still use the time inside the
   let now = Date.parse('2026-09-24T00:00:00.000Z');
   const f = await fixture(t, () => now);
   const id = requestId(now + 12 * 60 * 60 * 1000);
-  await writeFile(join(f.stateDir, 'remote-requests.json'), JSON.stringify([{ key: `${CONTROLLER}\nenqueue\n${id}`, fingerprint: requestFingerprint({}), at: now, result: { kind: 'run', runId: 'run-1' } }]), { mode: 0o600 });
+  const saved = [{ key: `${CONTROLLER}\nenqueue\n${id}`, fingerprint: requestFingerprint({}), at: now, result: { kind: 'run', runId: 'run-1' } }];
   now += REMOTE_REQUEST_RETENTION_MS + 60_000;
-  const ledger = await f.open();
+  const ledger = await f.open(saved);
   let runs = 0;
   assert.deepEqual(await ledger.once(CONTROLLER, 'enqueue', id, {}, async () => ({ runId: `new-${++runs}` }), record, result => result.kind === 'run' ? { runId: result.runId } : undefined), { runId: 'run-1' });
   assert.equal(runs, 0);

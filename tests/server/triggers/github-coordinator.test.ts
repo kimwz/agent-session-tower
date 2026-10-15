@@ -13,7 +13,7 @@ import { CapabilityRegistry, handleMcpRequest } from '../../../server/api/mcp.js
 import { runToolResolver } from '../../../server/api/run-tools.js';
 import { RunManager } from '../../../server/runs/manager.js';
 import { RunsRepository } from '../../../server/runs/storage-repository.js';
-import { retentionBuild } from '../storage/fixtures/retention-build.js';
+import { faultBuild } from '../../helpers/fault-storage.js';
 import type { RunAdmission } from '../../../server/runs/manager.js';
 const AGENT: TriggerActor = { kind: 'agent', via: 'mcp', sessionId: 'codex:agent', runId: randomUUID() };
 import type { AutoPromptJob, AutoPromptRequest, CreateSessionRequest, Run, Session } from '../../../shared/types.js';
@@ -311,8 +311,7 @@ test('a trigger that allows comment reviews only posts no verdict, and says so b
 
 test('actual admission loss reaches coordinator trigger event once without a new workflow or retry', async t => {
   const stateDir = await realpath(await mkdtemp(join(tmpdir(),'tower-github-sql-receipt-')));
-  const buildDir = await realpath(await mkdtemp(join(tmpdir(),'tower-github-sql-build-')));
-  const b = await retentionBuild('1.123.0',buildDir);
+  const b = await faultBuild(t);
   const client = await b.storage.openStorage({ stateDir,bundle: b.bundle('after-native-hold') });
   await client.prepare({ allowMigration: true });
   await new RunsRepository(client).importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'github-empty');
@@ -339,5 +338,5 @@ test('actual admission loss reaches coordinator trigger event once without a new
   await manager.resolveAdmission(pending.commandId);
   manager.holdStorage();
   await manager.close(); await client.close();
-  await rm(stateDir,{ recursive: true,force: true }); await rm(buildDir,{ recursive: true,force: true });
+  await rm(stateDir,{ recursive: true,force: true });
 });

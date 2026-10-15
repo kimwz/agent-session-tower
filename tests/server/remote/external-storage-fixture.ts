@@ -9,39 +9,48 @@ import { permissionsBackupOf, mergePermissions } from '../../../server/permissio
 import type { PermissionState } from '../../../server/permissions/service.js';
 import { collectAutomationSettings, restoreAutomationSettings, guardSlackConnectionRestore } from '../../../server/slack/backup.js';
 import type { WorkerSqlFile, WorkerSqlSettings, WorkerSettingsOwner } from '../../../server/backup/payload.js';
-import { after, type TestContext } from 'node:test';
-import { mkdtemp, mkdir, rm, realpath } from 'node:fs/promises';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
-import { retentionBuild } from '../storage/fixtures/retention-build.js';
+import type { TestContext } from 'node:test';
+import { mkdir, realpath } from 'node:fs/promises';
 import { RemoteRepository } from '../../../server/remote/storage-repository.js';
 import { AutoPromptRepository } from '../../../server/auto-prompt/storage-repository.js';
 import { WorkflowRepository } from '../../../server/slack/storage-repository.js';
-import { importRemote } from '../../../server/remote/storage-transfer.js';
-import { importAutoPrompts } from '../../../server/auto-prompt/storage-transfer.js';
-import { importWorkflows } from '../../../server/slack/storage-transfer.js';
-/** Existing actual SDK/artifact fixture, extended with the three owner registries. No second harness. */
-let build: ReturnType<typeof retentionBuild> | undefined;
-let buildDirectory: string | undefined;
-after(async()=> { if(buildDirectory) await rm(buildDirectory,{recursive:true,force:true}); });
-async function artifact() {
- if(!build) build=(async()=> {buildDirectory=await realpath(await mkdtemp(join(tmpdir(),'tower-external-artifact-')));return retentionBuild('1.125.0',buildDirectory,true,true,true);})();return build;
+import * as productStorage from '../../../server/storage/index.js';
+import type { StorageClient } from '../../../server/storage/client.js';
+import { currentStorage } from '../../helpers/current-storage.js';
+import { faultBuild } from '../../helpers/fault-storage.js';
+
+/** The build a fixture storage runs: the product's storage module and captured bundle, or a fault build. */
+export interface FixtureCapture { storage: typeof productStorage; bundle(): productStorage.CapturedStorageBundle; manifest: productStorage.StorageBuildManifest; version: string }
+async function productCapture(): Promise<FixtureCapture> {
+ const bundle = await productStorage.captureStorageBundle();
+ if (!bundle.ok) throw new Error(bundle.failure.message);
+ const context = productStorage.storageBuildContext(bundle);
+ if (!context.ok) throw new Error(context.failure.message);
+ return { storage: productStorage, bundle: () => bundle, manifest: context.manifest, version: context.identity.appVersion };
 }
-export async function externalStorageFixture(t:TestContext | undefined,stateDir:string,importDomains=true,fault='normal',registerClose=true) {
+
+/**
+ * The current build's storage with the three external owner registries. `initialize` (default) creates every missing
+ * domain authority (currentStorage); false leaves a new storage with none. A `fault` other than 'normal' opens the
+ * storage (made by the product build first when `initialize`) with that fault build of the current domains (faultBuild).
+ */
+export async function externalStorageFixture(t:TestContext | undefined,stateDir:string,initialize=true,fault='normal',registerClose=true) {
  if(registerClose && !t) throw new Error('Fixture close owner is required.');
  await mkdir(stateDir,{recursive:true,mode:0o700}); stateDir = await realpath(stateDir);
- const captured=await artifact(),storage=await captured.storage.openStorage({stateDir,bundle:captured.bundle(fault)});
+ let storage: StorageClient, captured: FixtureCapture;
+ if(fault==='normal') { captured=await productCapture(); storage=await currentStorage(stateDir,{initialize}); }
+ else {
+  if(initialize) await (await currentStorage(stateDir)).close();
+  const build=await faultBuild(t);captured=build;
+  storage=await build.storage.openStorage({stateDir,bundle:build.bundle(fault)});
+  try { await storage.prepare({allowMigration:true}); } catch(error) { await storage.close(); throw error; }
+ }
  if(registerClose) t!.after(()=>storage.close());
- await storage.prepare({allowMigration:true});
  const remote=new RemoteRepository(storage),autoPrompt=new AutoPromptRepository(storage),workflows=new WorkflowRepository(storage);
  const checkActivation=async()=> {
-  // The fixture invokes domain import directly; it is not a replacement for C's product offline owner checker.
-  if(storage.context?.manifest.digest!==captured.manifest.digest||storage.context.identity.appVersion!=='1.125.0') throw new Error('External fixture identity mismatch.');
+  if(storage.context?.manifest.digest!==captured.manifest.digest) throw new Error('External fixture identity mismatch.');
   for(const scope of ['core','remote','auto-prompt','automation-workflows']) if(!(await storage.gate(scope)).open) throw new Error('Fixture actual SDK gate closed.');
  };
- if(importDomains) for(const [repository,importer] of [[remote,importRemote],[autoPrompt,importAutoPrompts],[workflows,importWorkflows]] as const) {
-  if(!(await repository.head()).authority) await importer({repository,stateDir,evidenceParent:join(stateDir,`${repository.codec.scope}-storage-migrations`),commandId:`fixture-${repository.codec.scope}`,checkActivation});
- }
  return {storage,remote,autoPrompt,workflows,captured,checkActivation,effectGate:checkActivation};
 }
 

@@ -13,10 +13,8 @@ const steps: UpdateHelperSteps = {
   free: async () => Number.MAX_SAFE_INTEGER,
   install: async () => {
     line({ event: 'install-paused', pid: process.pid });
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('the fixture was not released in time')), 60_000);
-      process.stdin.once('data', () => { clearTimeout(timer); resolve(); });
-    });
+    // Released by the parent's line, or by the end of its input (a parent that went away): never by a clock.
+    await new Promise<void>(resolve => { process.stdin.once('data', () => resolve()); process.stdin.once('end', () => resolve()); });
     process.stdin.destroy();
     throw new Error('controlled fixture completion; nothing was installed');
   },

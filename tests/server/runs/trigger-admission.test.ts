@@ -16,8 +16,8 @@ import { RunManager } from './sql-fixture.js';
 import { TriggersRepository } from '../../../server/triggers/storage-repository.js';
 import { TriggerDispatch } from '../../../server/triggers/dispatch.js';
 import { TriggerStore } from '../../../server/triggers/store.js';
-import { retentionBuild } from '../storage/fixtures/retention-build.js';
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { currentStorage } from '../../helpers/current-storage.js';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Session } from '../../../shared/types.js';
@@ -161,10 +161,8 @@ test('unknown receipt with a different payload hash stays unresolved and cannot 
 for (const response of ['known','lost'] as const) test(`actual dispatch local trigger provider gate, readback and completion tracking: ${response} commit response`, async t => {
   const directory = await realpath(await mkdtemp(join(tmpdir(),'tower-r4-admission-')));
   t.after(() => rm(directory,{ recursive: true,force: true }));
-  const build = await retentionBuild('1.125.0',join(directory,'build'));
-  await mkdir(join(directory,'state'),{ mode: 0o700 });
-  const client = await build.storage.openStorage({ stateDir: join(directory,'state'),bundle: build.bundle() });
-  t.after(() => client.close()); await client.prepare({ allowMigration: true });
+  const client = await currentStorage(join(directory,'state'),{ initialize: false });
+  t.after(() => client.close());
   await new RunsRepository(client).importPrepared({ runs: [],created: [],instructions: {} },'a'.repeat(64),'runs-import');
   const state = empty(), requestId = '40000000-0000-4000-8000-000000000001';
   const session: Session = { id: 'codex:10000000-0000-4000-8000-000000000002',nativeId: '10000000-0000-4000-8000-000000000002',provider: 'codex',title: 'fixture',cwd: directory,project: 'fixture',status: 'completed',statusReason: '',createdAt: '2026-10-01T00:00:00Z',updatedAt: '2026-10-01T00:00:00Z',lastMessage: '',messageCount: 0,isSubagent: false,resumable: true };

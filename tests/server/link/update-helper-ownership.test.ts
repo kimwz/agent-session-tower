@@ -18,6 +18,7 @@ import { handoffHeld, heldWorkerEntry, runUpdateHelper, updatePaths, Updates, ty
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
 import { TowerAutoUpdate } from '../../../server/updates/tower.js';
 import { Updates as LegacyUpdates } from './fixtures/legacy-1.114.1/server/link/update.js';
+import { ownChild, ownDirectory } from '../../helpers/child-processes.js';
 import '../../helpers/skip-fsync.js';
 
 /**
@@ -30,7 +31,7 @@ import '../../helpers/skip-fsync.js';
 
 async function stateDir(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-helper-owner-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  ownDirectory(t, directory);
   await mkdir(versionDirectory(directory, '1.0.0'), { recursive: true });
   await pointCurrent(directory, '1.0.0');
   return directory;
@@ -204,12 +205,13 @@ async function liveLegacyHelper(t: TestContext, state: string) {
   const exited = new Promise<number | null>(resolve => child.on('close', code => resolve(code)));
   let released = false;
   const release = () => { if (!released && child.exitCode === null) { released = true; child.stdin.write('release\n'); } };
-  t.after(async () => { release(); await exited; });
-  const deadline = Date.now() + 20_000;
-  while (!out.includes('install-paused')) {
-    if (child.exitCode !== null || Date.now() > deadline) throw new Error(`the helper did not reach its install: ${out}`);
-    await new Promise(resolve => setTimeout(resolve, 20));
-  }
+  ownChild(t, child, exited, release);
+  // Barrier: its real lock is published and it waits in its install (or it ended without getting there).
+  const paused = await new Promise<boolean>(resolve => {
+    child.stdout.on('data', () => { if (out.includes('install-paused')) resolve(true); });
+    void exited.then(() => resolve(out.includes('install-paused')));
+  });
+  if (!paused) throw new Error(`the helper did not reach its install: ${out}`);
   return { child, release, exited, output: () => out };
 }
 
@@ -292,14 +294,17 @@ test('3. no hold because writing it failed (stale breaker, busy turn) or a relea
     // It keeps the turn until told to go on, after the judgment.
     const script = fileURLToPath(new URL('./fixtures/turn-hold-child.ts', import.meta.url));
     const other = spawn(process.execPath, ['--import', 'tsx', script, state, marks, '1.1.0'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let said = '';
     const done = new Promise<number | null>(resolve => other.on('close', code => resolve(code)));
-    t.after(() => { other.stdin.end(); return done; });
-    const deadline = Date.now() + 20_000;
-    while (!readFileSync(marks, 'utf8').includes('enter')) { if (Date.now() > deadline) throw new Error('the other process never took the turn'); await new Promise(resolve => setTimeout(resolve, 10)); }
-    const started = Date.now();
+    ownChild(t, other, done, () => other.stdin.end());
+    // Barrier: the other process is inside the turn (or it ended without getting there).
+    const entered = await new Promise<boolean>(resolve => {
+      other.stdout.on('data', chunk => { said += String(chunk); if (said.includes('entered')) resolve(true); });
+      void done.then(() => resolve(said.includes('entered')));
+    });
+    assert.ok(entered, 'the other process took the turn');
+    // It leaves only once told to, below: a judgment that waited for the turn would never come back held.
     assertHeld(await outcome(handoffHeld(state)), 'folder', 'none', 'busy turn');
-    // Waiting for the turn would take the whole 30 s wait (WAIT_MS); 10 s is far below it on any machine.
-    assert.ok(Date.now() - started < 10_000, 'held without waiting for the turn');
     assert.ok(!readFileSync(marks, 'utf8').includes('leave'), 'judged while the other process kept the turn');
     other.stdin.write('go on\n');
     assert.equal(await done, 0);
@@ -397,9 +402,6 @@ test('5. a request beside an unknown helper: refused before anything is saved or
         await save(state, record('failed', { code: 'check-failed', failedStage: 'checking', storage: { code: 'contract-unverifiable' }, hold: { code: 'hold-owned-elsewhere', reason: 'kept', at } }));
         await hold.writeHold(state, '1.1.0');
       }, '1.1.0', 409, 'helper-lock-unknown'],
-      ['the target needs its preparation release (an early answer)', async state => {
-        await save(state, record('failed', { code: 'check-failed', failedStage: 'checking', storage: { code: 'prerequisite-required', prepare: '1.0.5' } }));
-      }, '1.1.0', 409, 'prerequisite-required'],
       ['an update whose helper never answered, the same target', async state => { await save(state, record('verifying')); }, '1.1.0', 202, undefined],
       ['an update whose helper never answered, another target', async state => { await save(state, record('verifying')); }, '1.2.0', 409, 'busy'],
       ['a record this build does not understand', async state => { await save(state, '{'); }, '1.1.0', 409, 'busy'],

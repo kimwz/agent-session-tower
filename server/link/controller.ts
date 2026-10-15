@@ -13,7 +13,6 @@ import { advertisedAddresses } from './addresses.js';
 import type { AutoUpdateStatus, HubStatus, LoginState, NodeReport, NodeStatus, NodeSummary, ToolUpdate, UpdateStatus } from '../../shared/link.js';
 import { newerVersion } from './service.js';
 import { updateActive } from './update.js';
-import { nextChainStep, chainAsked, type ChainProgress } from './storage-update.js';
 import { failedAgain, parseRetry, retryDue, type RetryRecord } from '../updates/schedule.js';
 import { TowerError } from '../../shared/errors.js';
 import type { ManagedSyncStatus } from '../../shared/managed.js';
@@ -55,7 +54,6 @@ interface NodeRecord {
   counted?: string;
   /** The update the owner asked for last, by when it started: its failure does not move the schedule. */
   manual?: string;
-  chain?: ChainProgress;
   /** The owner wants it to follow this Tower's settings ("호스트 설정 따르기"). On for computers joined since. */
   followHost?: boolean;
 }
@@ -162,9 +160,7 @@ export class ControllerLinks extends EventEmitter {
     return this.state.nodes.map(node => {
       const live = this.connected.get(node.id);
       const status: NodeStatus = live ? (live.hello.protocol === LINK_PROTOCOL ? 'connected' : 'update-required') : node.left ? 'removed-by-node' : 'offline';
-      const progress = node.chain;
-      const step = progress && validChain(progress) ? nextChainStep({ running: this.reports.get(node.id)?.versions.web ?? live?.hello.version ?? node.version ?? '', update: this.reports.get(node.id)?.update, progress }) : undefined;
-      return { ...(progress && step ? { updateChain: { ...progress, state: step.action, ...('code' in step ? { code: step.code } : {}), ...('reason' in step ? { reason: step.reason } : {}), ...('version' in step ? { version: step.version } : {}) } } : {}), id: node.id, name: live?.hello.name ?? node.name, ...(node.label ? { label: node.label } : {}), fingerprint: displayFingerprint(node.pin), status,
+      return { id: node.id, name: live?.hello.name ?? node.name, ...(node.label ? { label: node.label } : {}), fingerprint: displayFingerprint(node.pin), status,
         ...(live?.hello.version ?? node.version ? { version: live?.hello.version ?? node.version } : {}), features: live?.hello.features ?? [],
         pairedAt: node.pairedAt, ...(node.lastSeenAt ? { lastSeenAt: node.lastSeenAt } : {}), ...(node.invite ? { invite: node.invite } : {}),
         ...(this.reports.has(node.id) ? { report: this.shownReport(node.id, Boolean(live)) } : {}),
@@ -189,6 +185,7 @@ export class ControllerLinks extends EventEmitter {
     if (!live.hello.features.includes('update')) throw new TowerError('conflict', '그 컴퓨터는 Tower를 백그라운드 서비스로 실행하지 않아 여기서 업데이트할 수 없습니다.');
     const { code, update } = await this.askUpdate(id, live);
     if (code === 'busy') throw new TowerError('conflict', '그 컴퓨터가 다른 버전으로 업데이트하는 중입니다. 끝난 뒤 다시 시도하세요.');
+    if (code === 'storage-too-old') throw new TowerError('conflict', `그 컴퓨터의 Tower는 ${STORAGE_FLOOR}보다 오래되어 이 버전으로 옮길 수 없습니다(storage-too-old). 그 컴퓨터에서 직접 다시 설치하세요.`);
     if (code) throw new TowerError('upstream', '그 컴퓨터가 업데이트 요청을 받지 않았습니다.');
     // The owner tries at once, whatever the schedule says, and a failure of that try leaves the schedule as it is.
     if (update && updateActive(update)) await this.retries(id, node => node.manual === update.startedAt ? undefined : { manual: update.startedAt });
@@ -473,10 +470,7 @@ export class ControllerLinks extends EventEmitter {
     if (!behind) await this.retries(id, node => node.retry || node.failedUpdates ? { retry: undefined, failedUpdates: undefined } : undefined);
     const node = this.state.nodes.find(item => item.id === id);
     const due = retryDue(node && retryOf(node, this.options.version), this.options.version, this.now());
-    const progress = node?.chain?.target === this.options.version && validChain(node.chain) ? node.chain : { target: this.options.version, attempts: {} };
-    const step = nextChainStep({ running: report.versions.web, update, progress });
-    const preparing = step.action === 'request' && (step.version !== this.options.version || !!progress.prerequisite && update?.version === progress.prerequisite && update.stage === 'done');
-    if (live.hello.features.includes('update') && behind && !updateActive(update) && (due || preparing)) await this.askUpdate(id, live);
+    if (live.hello.features.includes('update') && behind && !storageTooOld(report.versions.web) && !updateActive(update) && due) await this.askUpdate(id, live);
     this.watch(id, live);
   }
 
@@ -492,30 +486,22 @@ export class ControllerLinks extends EventEmitter {
     if (this.connected.get(id) === live && updateActive(this.reports.get(id)?.update)) live.watch = setTimeout(() => { void this.follow(id, live); }, this.options.updatePollMs ?? UPDATE_POLL_MS);
   }
 
-  /** Asks for this Tower's version; resolves to the refusal's code, if it was refused, and the update under way. */
+  /**
+   * Asks for this Tower's version; resolves to the refusal's code, if it was refused, and the update under way. One
+   * request per computer at a time: asked again meanwhile, the one under way answers. A computer whose storage is
+   * older than this build takes over (storageTooOld) is never asked.
+   */
   private askUpdate(id: string, live: Connected): Promise<{ code?: string; update?: UpdateStatus }> {
     const existing = this.updateRequests.get(id);
     if (existing) return existing;
-    const asked = this.askChainUpdate(id, live);
+    const asked = this.sendUpdate(id, live);
     this.updateRequests.set(id, asked);
-    void asked.finally(() => { if (this.updateRequests.get(id) === asked) this.updateRequests.delete(id); }).catch(error => console.error('Controller preparation request failed:', error));
+    void asked.finally(() => { if (this.updateRequests.get(id) === asked) this.updateRequests.delete(id); }).catch(error => console.error('Controller update request failed:', error));
     return asked;
   }
-  private async askChainUpdate(id: string, live: Connected): Promise<{ code?: string; update?: UpdateStatus }> {
-    const node = this.state.nodes.find(item => item.id === id);
-    const knownReport = this.reports.get(id);
-    const progress = node?.chain?.target === this.options.version ? node.chain : { target: this.options.version, attempts: {} };
-    if (node?.chain && (node.chain.target !== this.options.version || !validChain(node.chain))) {
-      if (node.chain.target === this.options.version) return { code: 'invalid-chain' };
-    }
-    if (knownReport?.update?.hold) return { code: knownReport.update.hold.code };
-    if (knownReport?.update?.storage && ['contract-unverifiable', 'target-runtime-unsupported'].includes(knownReport.update.storage.code)) return { code: knownReport.update.storage.code };
-    const step = nextChainStep({ running: knownReport?.versions.web ?? live.hello.version, update: knownReport?.update, progress });
-    if (step.action !== 'request') return { ...(step.action === 'blocked' ? { code: step.code } : {}), ...(knownReport?.update ? { update: knownReport.update } : {}) };
-    // Persist the bounded attempt before sending: a lost reply must not trigger unlimited resends after restart.
-    if (!node) return { code: 'unknown-node' };
-    await this.save({ ...this.state, nodes: this.state.nodes.map(item => item.id === id ? { ...item, chain: chainAsked(progress, step.version, knownReport?.update) } : item) });
-    const answer = await linkRequest(live.session, 'POST', '/link/update', { version: step.version }, HELLO_MS).catch(() => undefined);
+  private async sendUpdate(id: string, live: Connected): Promise<{ code?: string; update?: UpdateStatus }> {
+    if (storageTooOld(this.reports.get(id)?.versions.web ?? live.hello.version)) return { code: 'storage-too-old' };
+    const answer = await linkRequest(live.session, 'POST', '/link/update', { version: this.options.version }, HELLO_MS).catch(() => undefined);
     const body = answer?.json as { update?: unknown; code?: unknown } | undefined;
     const update = parseUpdate(body?.update);
     const known = this.reports.get(id);
@@ -573,12 +559,13 @@ function retryOf(node: NodeRecord, version: string): RetryRecord | undefined {
 
 const FAILURES = new Set(['low-disk', 'install-failed', 'check-failed', 'switch-failed', 'start-failed', 'link-failed', 'rollback-failed', 'interrupted']);
 const RELEASE = /^\d+\.\d+\.\d+$/;
-function validChain(value: ChainProgress): boolean {
-  return !!value && typeof value.target === 'string' && RELEASE.test(value.target)
-    && (value.prerequisite === undefined || typeof value.prerequisite === 'string' && RELEASE.test(value.prerequisite))
-    && !!value.attempts && typeof value.attempts === 'object' && !Array.isArray(value.attempts)
-    && Object.entries(value.attempts).every(([version, count]) => RELEASE.test(version) && Number.isSafeInteger(count) && count >= 0);
-}
+/**
+ * The oldest web version whose storage this build takes over as it is. An older computer would install this build and
+ * then refuse to start its storage (migration-required): its turns would stop. It is never asked to update from here;
+ * the owner reinstalls it on that computer.
+ */
+export const STORAGE_FLOOR = '1.125.0';
+const storageTooOld = (web: string | undefined) => !!web && newerVersion(STORAGE_FLOOR, web);
 const text = (value: unknown, pattern = /^[\w.:-]{1,40}$/) => typeof value === 'string' && pattern.test(value) ? value : undefined;
 
 /** Only the facts a report is made of get through; nothing a joined computer sends is shown as it came. */

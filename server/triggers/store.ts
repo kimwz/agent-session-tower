@@ -1,7 +1,5 @@
-import type { StorageUpdateInput } from '../link/storage-update.js';
 import type { StorageClient } from '../storage/client.js';
 import { TriggersRepository } from './storage-repository.js';
-import { bootstrapTriggers } from './storage-transfer.js';
 import { canonical, logicalBytes, triggerHash, rowCost, projectedJson, ROW_KINDS, type TriggerChange, type TriggerRow, type TriggerRowKind } from './storage-codec.js';
 import { consumedSnapshot, isolateConsumed, normalizeOnce } from './once.js';
 import { failure } from './errors.js';
@@ -84,7 +82,6 @@ export function mutationProjection(current: EngineState, mutation: TriggerMutati
 export class TriggerStore {
   private repository?: TriggersRepository;
   private database = false;
-  private bootstrap?: Promise<void>;
   private rows: TriggerRow[] = [];
   private rowLedger: EngineState['onceConsumed'] = {};
   private startupOperations?: RowOperations;
@@ -126,13 +123,6 @@ export class TriggerStore {
     if (options.storage) this.repository = new TriggersRepository(options.storage);
   }
 
-  /** The worker parks its existing startup continuation here, before load/recovery or secret/native effects. */
-  bootstrapStorage(update: () => Promise<StorageUpdateInput>): Promise<void> {
-    if (!this.repository) return Promise.reject(new Error('Triggers storage is unavailable.'));
-    return this.bootstrap ??= bootstrapTriggers(this.repository,this.options.stateDir,{ update,now: this.options.now })
-      .then(() => undefined).finally(() => { this.bootstrap = undefined; });
-  }
-
   /** Reopen/prepare the common SDK first. Resolution never retries the staged command. */
   async resolveStorage(): Promise<'committed' | 'not-committed'> {
     if (!this.repository?.pending()) throw new Error('No uncertain trigger write to resolve.');
@@ -166,7 +156,7 @@ export class TriggerStore {
   async load(prepare: (loaded: EngineState) => void): Promise<void> {
     let loaded: EngineState;
     try {
-      if (!this.repository || !await bootstrapTriggers(this.repository,this.options.stateDir)) throw new Error('Triggers SQL authority is unavailable.');
+      if (!this.repository || !await this.repository.databaseAuthority()) throw new Error('Triggers SQL authority is unavailable.');
       this.database = true;
       const current = await this.repository.exportCurrent(); loaded = current.documents; this.rows = current.rows; this.revision = current.head.revision!;
       this.rowLedger = consumedSnapshot(loaded);
