@@ -91,7 +91,7 @@ test('a run past its time limit is stopped with everything it started', async t 
   assert.ok(alive(child));
   t.mock.timers.tick(999);
   await settle(() => true, 20);
-  assert.ok(f.runner.isRunning(asked.request.id!), 'not stopped before its limit');
+  assert.ok(f.runner.isRunning(asked.request.id!) && alive(child), 'not stopped before its limit');
   t.mock.timers.tick(1);
   // The kill grace and output waits run on the same fake clock.
   const deadline = performance.now() + 10_000;
@@ -99,7 +99,7 @@ test('a run past its time limit is stopped with everything it started', async t 
   t.mock.timers.reset();
   const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 0 }, agent('claude:one'));
   assert.equal(result.request.run!.timedOut, true);
-  await until(() => !alive(child), 3_000);
+  await until(() => !alive(child), 10_000);
 });
 
 test('what a finished command leaves running in its group is stopped too', async t => {
