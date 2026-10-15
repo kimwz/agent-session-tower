@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.137.5] - 2026-10-15
+
+- **Slack과 GitHub 자동화가 동시에 저장할 때 Slack 자동화가 보류되지 않습니다.** 한쪽이 저장하는 순간 다른 쪽의 저장 전 확인 읽기가 "External authority/revision/generation changed"로 실패해, Slack 자동화가 보류 상태에 빠질 수 있었습니다. 연결 해제, 규칙 복원, 백업 내보내기도 같은 순간에 영어 오류로 실패할 수 있었습니다. 이제 그 읽기만 최대 3번 다시 시도합니다. 저장 자체는 다시 실행하지 않습니다.
+- 원격 요청 감사 기록이 요청마다 기억한 요청 전체를 훑지 않습니다. 만료된 요청이 생길 때만 정리합니다.
+- 개발: 테스트가 빨라졌습니다.
+  - 테스트는 비밀번호 해시를 운영 강도로 계산하지 않습니다. 운영 파라미터와 저장 파일 검사는 그대로이고, 고정 테스트가 그 값을 확인합니다.
+  - 실제 시간을 기다리던 테스트는 상태 대기나 가짜 시계로 바꿨습니다. 같은 동작을 중복으로 확인하던 테스트와 드문 순열 일부는 줄였습니다.
+  - 1초 이상 걸리던 테스트가 408개에서 202개로 줄었습니다. 남은 것 대부분은 다음 단계에서 정리할 저장소 마이그레이션 테스트입니다.
+
 ## [1.137.4] - 2026-10-15
 
 - 동작 변경 없음. 버전만 올려 새 CI·릴리스 경로를 점검합니다.

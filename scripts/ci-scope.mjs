@@ -199,7 +199,9 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   } else if (action === 'local') {
     let scope;
     try { scope = localScope(); } catch (error) { scope = { tier: 'full', reasons: [`cannot classify: ${error.message.split('\n')[0]}`] }; }
-    console.error(`Local check: ${scope.tier}${scope.reasons.length ? ` (${scope.reasons.join('; ')})` : ''}`);
+    const shown = scope.reasons.slice(0, 3).join('; ');
+    const more = scope.reasons.length > 3 ? `; and ${scope.reasons.length - 3} more` : '';
+    console.error(`Local check: ${scope.tier}${scope.reasons.length ? ` (${shown}${more})` : ''}`);
     const steps = scope.tier === 'quick' ? [['run', 'typecheck'], ['run', 'test:quick'], ['run', 'build']] : [['run', 'check']];
     for (const args of steps) execFileSync('npm', args, { stdio: 'inherit' });
   } else throw new Error('usage: ci-scope.mjs plan | local');
