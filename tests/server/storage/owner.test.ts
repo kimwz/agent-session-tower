@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import type { StorageClient } from '../../../server/storage/client.js';
 import type { StorageStatus } from '../../../server/storage/contract.js';
-import { historyAfterSnapshot } from './fixtures/history.js';
+import { cloneHistory, historyAfterSnapshot, type History } from './fixtures/history.js';
 import { databasePath, fsPromises, holdCall, openFixture, rejectsWith, stateDir, storage } from './helpers.js';
 
 const { adoptSnapshot, reconcileRecovery, storageFs, storageLayout } = storage;
@@ -16,9 +16,19 @@ const { adoptSnapshot, reconcileRecovery, storageFs, storageLayout } = storage;
  */
 
 type Disruption = 'none' | 'exit' | 'deadline' | 'close';
-async function disrupt(client: StorageClient, how: Disruption): Promise<void> {
+async function disrupt(t: TestContext, client: StorageClient, how: Disruption): Promise<void> {
   if (how === 'exit') await rejectsWith(client.write('fixture', 'exitNow', { key: 'gone', code: 4 }, 'exit-1'), { code: 'thread-exited', disposition: 'unknown' });
-  if (how === 'deadline') await rejectsWith(client.read('fixture', 'spin', { ms: 3000 }), { code: 'deadline-exceeded' });
+  if (how === 'deadline') {
+    // The thread spins past the command deadline; the deadline itself passes on a fake clock.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      let answered = false;
+      const reading = client.read('fixture', 'spin', { ms: 3000 });
+      void reading.then(() => { answered = true; }, () => { answered = true; });
+      while (!answered) { t.mock.timers.tick(1000); await new Promise(resolve => setImmediate(resolve)); }
+      await rejectsWith(reading, { code: 'deadline-exceeded' });
+    } finally { t.mock.timers.reset(); }
+  }
   if (how === 'close') assert.equal((await client.close()).ack, 'closed');
 }
 const expectedReason = { exit: /unavailable.*exited/, deadline: /unavailable.*did not answer/, close: /closed/ } as const;
@@ -32,7 +42,7 @@ test('a gate waiting on its barrier read answers for the open it started on: a t
     const read = holdCall(t, fsPromises, 'lstat', path => path === recoveryDir);
     const gate = client.gate('core');
     await read.reached;
-    await disrupt(client, how);
+    await disrupt(t, client, how);
     read.release();
     const answer = await gate;
     if (how === 'none') assert.deepEqual(answer, { open: true, reasons: [] }, 'nothing happened meanwhile: the gate opens');
@@ -44,8 +54,9 @@ test('a gate waiting on its barrier read answers for the open it started on: a t
 });
 
 /** A storage on an adopted snapshot whose barrier releases `fixture`, reconciled after the open (so a gate proves it again), prepared. */
-async function releasing(t: TestContext) {
-  const history = await historyAfterSnapshot(t);
+async function releasing(t: TestContext, template?: History) {
+  // A copy of `template` when given: one history serves every case of a test.
+  const history = template ? await cloneHistory(t, template) : await historyAfterSnapshot(t);
   const barrier = await adoptSnapshot(history.dir, { snapshotId: history.snapshotId, reason: 'gate', context: history.context, known: history.known });
   // The database as adopted, before this worker claims it: put back, the next claim gets the same owner number.
   const unclaimed = await readFile(databasePath(history.dir));
@@ -58,13 +69,14 @@ async function releasing(t: TestContext) {
 }
 
 test('a gate waiting on the proof of a barrier that releases its scope answers for the open it started on: a thread exit meanwhile keeps it closed', async t => {
+  const template = await historyAfterSnapshot(t);
   for (const how of ['none', 'exit'] as const) {
-    const live = await releasing(t);
+    const live = await releasing(t, template);
     const proof = holdCall(t, storageFs, 'syncFile', path => path === live.barrierFile);
     const gate = live.client.gate('fixture');
     // The proof really runs: the barrier changed since the open proved it.
     await proof.reached;
-    await disrupt(live.client, how);
+    await disrupt(t, live.client, how);
     proof.release();
     const answer = await gate;
     if (how === 'none') assert.deepEqual(answer, { open: true, reasons: [] });
@@ -76,8 +88,9 @@ test('a gate waiting on the proof of a barrier that releases its scope answers f
 });
 
 test('a gate started before a close, reopen and new claim (with the same owner number) stays closed and does not publish its barrier read', async t => {
+  const template = await historyAfterSnapshot(t);
   for (const wait of ['read', 'proof'] as const) {
-    const live = await releasing(t);
+    const live = await releasing(t, template);
     const held = wait === 'read' ? holdCall(t, fsPromises, 'lstat', path => path === live.recoveryDir) : holdCall(t, storageFs, 'syncFile', path => path === live.barrierFile);
     const gate = live.client.gate('fixture');
     await held.reached;
