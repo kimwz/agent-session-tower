@@ -91,7 +91,8 @@ interface Spare { token: Promise<Token | undefined>; at: number }
  * It is committed in parts: `commits` asked for (the last one `final`), `segments` what ElevenLabs wrote for each part
  * back so far, `partial` its latest writing of the part still open, `uncommitted` the audio since the last commit.
  * `heard` is all of it as one text. `quietSince` (audio clock, ms) is set while the owner pauses; each pause is judged
- * (`asking`, then `verdict`) until they seem finished, and `ownRule` means judgments failed and the page decides.
+ * (`asking`, then `verdict`) until they seem finished. `ownRule` is the end at which a judgment failed: the page decides
+ * until the owner speaks again, and then asks again.
  * A judgment is about the words as they end (`end`, see `endOf`); `pauseMs` is the longest pause it stands for (a
  * question asked again that failed leaves it standing). `resumes` counts pauses restarted by quiet writing.
  */
@@ -99,7 +100,7 @@ interface Judgment { text: string; end: string; pauseMs: number }
 interface Utterance {
   token?: Token; socket?: WebSocket; bytes: number; sent: number; queue: Array<{ message: string; bytes: number }>; open: boolean; closed: boolean; done: Promise<string>; settle(text: string | Error): void;
   commits: number; final?: boolean; segments: string[]; partial: string; uncommitted: number;
-  heard: string; quietSince?: number; resumedQuietly?: boolean; resumes: number; judgments: number; asking?: Judgment & { at: number }; verdict?: Judgment & { finished: number }; ownRule?: boolean;
+  heard: string; quietSince?: number; resumedQuietly?: boolean; resumes: number; judgments: number; asking?: Judgment & { at: number }; verdict?: Judgment & { finished: number }; ownRule?: string;
 }
 /**
  * A say being played. A notice's moment to object starts at `armedAt`; with listening on, `heard` counts the
@@ -645,7 +646,7 @@ export class VoiceSession {
     this.dropStale(utterance, text);
     if (utterance.asking && Date.now() - utterance.asking.at >= JUDGE_WAIT_MS) this.unanswered(utterance, utterance.asking);
     const verdict = this.judgment(utterance, text);
-    if (utterance.ownRule || !text) {
+    if (this.pageDecides(utterance) || !text) {
       if (silent >= this.gate.silenceMs + endHoldMs(text)) void this.commit();
       return;
     }
@@ -667,7 +668,7 @@ export class VoiceSession {
   private prejudge(utterance: Utterance): void {
     const text = this.said(utterance.heard);
     this.dropStale(utterance, text);
-    if (!text || utterance.ownRule || this.judgment(utterance, text) || utterance.asking || utterance.judgments >= JUDGMENTS) return;
+    if (!text || this.pageDecides(utterance) || this.judgment(utterance, text) || utterance.asking || utterance.judgments >= JUDGMENTS) return;
     this.judge(utterance, text, this.gate.silenceMs);
   }
 
@@ -677,6 +678,11 @@ export class VoiceSession {
    */
   private endOf(utterance: Utterance): string {
     return `${this.gate.lastVoiceAt}:${utterance.resumes}`;
+  }
+
+  /** Whether judgments failed for what was said as it ends now, so the page's own rule decides. */
+  private pageDecides(utterance: Utterance): boolean {
+    return utterance.ownRule === this.endOf(utterance);
   }
 
   /** The judgment of `text` as it ends now; one of other words, or of an earlier end (the owner spoke since), is none. */
@@ -700,7 +706,7 @@ export class VoiceSession {
     if (asking.text !== this.said(utterance.heard) || asking.end !== this.endOf(utterance)) return;
     const verdict = this.judgment(utterance, asking.text);
     if (verdict) utterance.verdict = { ...verdict, pauseMs: Math.max(verdict.pauseMs, asking.pauseMs) };
-    else utterance.ownRule = true;
+    else utterance.ownRule = asking.end;
   }
 
   /** Asks whether the owner is finished with `text` after a pause of `pauseMs`; one question at a time. */
@@ -1022,7 +1028,7 @@ export class VoiceSession {
 
   private show(change: Partial<VoiceView>): void {
     const utterance = this.utterance;
-    const verdict = utterance && utterance.quietSince !== undefined && !utterance.ownRule ? this.judgment(utterance, this.said(utterance.heard)) : undefined;
+    const verdict = utterance && utterance.quietSince !== undefined && !this.pageDecides(utterance) ? this.judgment(utterance, this.said(utterance.heard)) : undefined;
     const silent = utterance?.quietSince !== undefined && this.context ? this.context.currentTime * 1000 - utterance.quietSince : 0;
     const waiting = Boolean(verdict && verdict.finished < voiceTurnBar(silent));
     if (utterance || this.current || !this.armed) this.hearing = false;

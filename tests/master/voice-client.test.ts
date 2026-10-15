@@ -750,6 +750,26 @@ for (const failure of ['unavailable', 'refused', 'too late'] as const) {
   });
 }
 
+for (const resume of ['aloud', 'quietly'] as const) {
+  test(`a failed judgment hands the page only that end: speaking again (${resume}) is judged again`, async () => {
+    const page = await harness();
+    try {
+      let failing = true;
+      turnEnd = ({ text }) => failing ? { unavailable: true } : { finished: text.endsWith('음') ? 0.05 : 0.9 };
+      const socket = await startSpeaking(page, '이거 배포해 주고');
+      await page.hearSlowly(0.002, 900);
+      assert.deepEqual([judged().length, commits(socket)], [1, 0], 'the judgment on the way to the pause failed');
+      failing = false;
+      if (resume === 'aloud') await page.hearSlowly(0.1, 300);
+      else await page.hearSlowly(0.002, 1_400);
+      socket.message({ message_type: 'partial_transcript', text: '이거 배포해 주고 그리고 음' });
+      await page.hearSlowly(0.002, 8_000);
+      assert.deepEqual([commits(socket), requests()], [0, []], 'the new words trail off: they wait, not sent by the page\'s rule');
+      assert.ok(judged().some(body => body.text === '이거 배포해 주고 그리고 음'), 'asked again');
+    } finally { page.end(); }
+  });
+}
+
 test('once the reply starts, talking over it is never written down; afterwards it is a new request, and talking before it plays holds it back', async () => {
   const page = await harness();
   try {
