@@ -13,7 +13,7 @@ import { SessionTasks } from '../../../../server/sessions/tasks.js';
 import { SkillService } from '../../../../server/skills/service.js';
 import { TriggerService } from '../../../../server/triggers/service.js';
 import type { Session } from '../../../../shared/types.js';
-import { installWorkerChecks } from './worker-checks.ts';
+import { CheckDriver } from './worker-checks.ts';
 
 const stateDir = process.argv.at(-1)!;
 const provider = process.env.FIXTURE_PROVIDER as 'claude' | 'codex';
@@ -25,8 +25,8 @@ const publish = async (name: string, value: string) => {
   await writeFile(pendingPath, value);
   await rename(pendingPath, path);
 };
-// The worker's once-a-second checks run every 20 ms here; each round adds a byte to `checks-<pid>` for the test to count.
-if (process.argv.includes('--runner-worker')) installWorkerChecks(20, () => appendFileSync(join(root, `checks-${process.pid}`), '.'));
+// The worker's once-a-second checks run every 20 ms here; each completed round adds a byte to `checks-<pid>` for the test to count.
+const scheduleChecks = new CheckDriver(20, () => appendFileSync(join(root, `checks-${process.pid}`), '.')).schedule;
 const nativeId = '10000000-0000-4000-8000-000000000001';
 const session: Session = { id: `${provider}:${nativeId}`, nativeId, provider, title: 'Detached fixture', cwd: root,
   project: 'fixture', status: 'idle', statusReason: 'Ready', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -91,7 +91,7 @@ async function lockedStateWorker() {
     sessions: () => [], runs: () => runs.list(), history: async () => [], model: async () => ({}), advise: false });
   await skills.start();
   const busy = () => triggers.inFlight() || skills.inFlight() || tasks.inFlight();
-  const host = await startRunnerHost({ stateDir, sessions, runs, triggers, skills, sessionTasks: tasks, handoffNonce, inFlight: busy, transient: busy,
+  const host = await startRunnerHost({ stateDir, sessions, runs, triggers, skills, sessionTasks: tasks, handoffNonce, inFlight: busy, transient: busy, scheduleChecks,
     quiesce: async () => {
       triggers.pause(); skills.pause(); tasks.pause();
       await Promise.all([tasks.flush(), triggers.flush(), skills.flush(), runs.flushState()]);
@@ -113,7 +113,7 @@ if (process.argv.includes('--runner-worker') && process.env.FIXTURE_LOCKED_STATE
   await lockedStateWorker();
 } else if (process.argv.includes('--runner-worker')) {
   const { sessions, runs } = await fixtureRuns();
-  const host = await startRunnerHost({ stateDir, sessions, runs });
+  const host = await startRunnerHost({ stateDir, sessions, runs, scheduleChecks });
   process.once('SIGTERM', () => { void host.close().then(() => runs.close()).then(() => process.exit(0)); });
   await publish('worker-pid', String(process.pid));
 } else {

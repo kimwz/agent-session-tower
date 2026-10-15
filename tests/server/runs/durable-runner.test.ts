@@ -15,7 +15,7 @@ import { DurableRunManager } from '../../../server/runs/durable-runner.js';
 import { TowerError } from '../../../shared/errors.js';
 import { RunManager, fixtureDocuments, importFixtureRetention, importFixtureTriggers, fixtureTriggerText, stopFixtureWriter, fixtureCommandError } from './sql-fixture.js';
 import { SessionService } from '../../../server/sessions/service.js';
-import { startRunnerHost, type RunnerHostOptions } from '../../../server/runs/worker.js';
+import { startRunnerHost as startWorker, type RunnerHostOptions } from '../../../server/runs/worker.js';
 import type { SlackService } from '../../../server/slack/service.js';
 import { RUNNER_PROTOCOL, runnerPaths } from '../../../server/runs/runner-protocol.js';
 import type { CodexBridgeOptions } from '../../../server/runs/codex-bridge.js';
@@ -37,9 +37,10 @@ import { RetentionStore } from '../../../server/sessions/retention/store.js';
 import { RetentionArchive } from '../../../server/sessions/retention/archive.js';
 import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
 import { worktreeCleanupVisible } from '../../../server/worktrees/janitor.js';
-import { checks, installWorkerChecks, workerChecks } from './fixtures/worker-checks.ts';
+import { CheckDriver, checks } from './fixtures/worker-checks.ts';
 
-installWorkerChecks();
+/** Every worker here runs its once-a-second handoff and idle checks every few milliseconds, each round counted. */
+const startRunnerHost = (options: RunnerHostOptions) => startWorker({ scheduleChecks: new CheckDriver().schedule, ...options });
 
 async function fixture(workerClosed = false, withRetention = false, retentionUnavailable?: string, temporary?: import('../../../server/temporary/directories.js').TemporaryCollector, hostOptions?: (parts: { stateDir: string; sessions: SessionService; runs: RunManager }) => Promise<Partial<RunnerHostOptions>>, fault?: { onUnavailable: (status: ReturnType<import('../../../server/storage/client.js').StorageClient['status']>, runs: RunManager) => void }, beforeExecutable?: () => Promise<void>, holdUntilReady = false) {
   const directory = await realpath(await temporaryFixture('tower-durable-fixture-'));
@@ -1044,10 +1045,9 @@ test('a handoff asked only so a new worker reads settings again (a restore) neve
 });
 
 test('an ordinary handoff asked after a patient one waits its own long hold from when it is asked', async t => {
-  // The hold is read from the clock; the clock is moved on instead of waiting it out.
-  let skew = 0;
-  const now = Date.now.bind(Date);
-  t.mock.method(Date, 'now', () => now() + skew);
+  // The hold is read from the clock, which moves only when the test moves it.
+  let clock = Date.now();
+  t.mock.method(Date, 'now', () => clock);
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();
   let holds = 0;
@@ -1058,12 +1058,16 @@ test('an ordinary handoff asked after a patient one waits its own long hold from
   await client.enqueue(f.session.id, 'Long turn');
   await until(() => f.starts() === 1);
   await client.restartWorker();
-  skew += 2000;
+  clock += 2000;
   await checks();
+  assert.equal(holds, 0, 'a patient request never holds');
   await client.requestHandoff(true);
   await checks();
   assert.equal(holds, 0, 'not held at once for the time the patient request waited');
-  skew += 1500;
+  clock += 1499;
+  await checks();
+  assert.equal(holds, 0, 'not held before its own hold has passed');
+  clock += 1;
   await until(() => holds === 1);
   f.finish();
 });
@@ -1096,12 +1100,13 @@ async function idleWorker(f: Awaited<ReturnType<typeof fixture>>, options: Parti
   const recordAtRelease: boolean[] = [];
   const lock = await acquireStateLock(f.paths.runtime, 0);
   // With idleMs 0 the first idle check would end the worker before the test's request reaches it.
-  workerChecks.idleHeld = true;
-  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, idleMs: 0,
+  const driver = new CheckDriver();
+  driver.idleHeld = true;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, idleMs: 0, scheduleChecks: driver.schedule,
     releaseStateLock: async () => { recordAtRelease.push(existsSync(join(f.paths.runtime, 'handoff.json'))); await lock(); events.push('release'); },
     onIdle: async () => { events.push('onIdle'); }, ...options });
   // A newer web asks for the handoff and goes away (a web replaced during an update), so nothing keeps the worker busy.
-  const ask = async () => { const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0' }); await client.start(); await client.close(); workerChecks.idleHeld = false; };
+  const ask = async () => { const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0' }); await client.start(); await client.close(); driver.idleHeld = false; };
   /**
    * Ends this worker before the fixture folder goes, whatever point a test stopped at: test gates opened, every handoff
    * attempt that paused finished or resumed (an earlier attempt's resume does not end a later one), then the worker
@@ -1109,7 +1114,7 @@ async function idleWorker(f: Awaited<ReturnType<typeof fixture>>, options: Parti
    * not wait for a close already under way, so the release is awaited.
    */
   const settle = async (...gates: Array<() => void>) => {
-    workerChecks.idleHeld = false;
+    driver.idleHeld = false;
     for (const open of gates) open();
     // Each handoff attempt that paused ends with either a handoff or a resume; wait until every one has ended.
     const count = (name: string) => events.filter(event => event === name).length;
@@ -1294,10 +1299,10 @@ test('a pause that fails halfway is undone and the worker stays in service', asy
 });
 
 test('the web keeps trying to start a worker until one answers after a silent successor', async t => {
-  // The web waits a second before its next try; the clock is moved on instead of waiting it out.
-  let skew = 0;
-  const now = Date.now.bind(Date);
-  t.mock.method(Date, 'now', () => now() + skew);
+  // The web's waits (for the successor, for a started worker, before its next try) are read from a clock that moves
+  // only when the test moves it; the worker starts and the polls stay real.
+  let clock = Date.now();
+  t.mock.method(Date, 'now', () => clock);
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();
   let replacement: Awaited<ReturnType<typeof startRunnerHost>> | undefined;
@@ -1309,11 +1314,18 @@ test('the web keeps trying to start a worker until one answers after a silent su
   t.after(() => client.close());
   await client.start();
   await client.requestHandoff(true);
-  const recovery = () => (client as unknown as { recovery?: { nextAt: number } }).recovery;
-  await until(() => attempts === 1 && (recovery()?.nextAt ?? 0) > now() + skew);
+  const internals = client as unknown as { unreachableSince?: number; recovery?: { nextAt: number }; snapshot?: { instance: string } };
+  // The old worker handed off to a successor that never answers.
+  await until(() => internals.unreachableSince !== undefined);
+  assert.equal(attempts, 0, 'the successor is given its time first');
+  clock += 100;
+  await until(() => attempts === 1);
+  // The started worker never answers either: its start fails once its own wait has passed.
+  clock += 200;
+  await until(() => (internals.recovery?.nextAt ?? 0) > clock);
   assert.equal(attempts, 1, 'no second try before the pause');
-  skew += 1000;
-  await until(() => replacement && (client as unknown as { snapshot?: { instance: string } }).snapshot?.instance === replacement.instance);
+  clock += 1000;
+  await until(() => replacement && internals.snapshot?.instance === replacement.instance);
   assert.equal(attempts, 2, 'the first failed start was retried after a pause');
 });
 
@@ -1694,7 +1706,7 @@ test('a trigger run in flight survives a worker handoff and is not submitted aga
   await until(() => h.events.includes('onHandedOff') && h.successor());
   assert.equal((h.a as unknown as { engine: { timer?: unknown } }).engine.timer, undefined, "the old engine's timer is stopped");
   const b = h.b()!;
-  for (let i = 0; i < 200 && b.event(fired.id).status !== 'completed'; i++) { await b.tick(); await new Promise(resolve => setTimeout(resolve, 10)); }
+  for (const deadline = performance.now() + 10_000; b.event(fired.id).status !== 'completed' && performance.now() < deadline;) { await b.tick(); await new Promise(resolve => setTimeout(resolve, 10)); }
   assert.equal(b.event(fired.id).status, 'completed');
   assert.equal(b.event(fired.id).dispatch?.runId, runId, 'the successor follows the same run');
   assert.equal(h.enqueues(), 1, 'submitted exactly once');
@@ -1716,7 +1728,7 @@ test('a handoff asked for while a trigger run is being claimed waits until the c
   f.finish();
   await until(() => h.events.includes('onHandedOff') && h.successor());
   const b = h.b()!;
-  for (let i = 0; i < 200 && b.event(fired.id).status !== 'completed'; i++) { await b.tick(); await new Promise(resolve => setTimeout(resolve, 10)); }
+  for (const deadline = performance.now() + 10_000; b.event(fired.id).status !== 'completed' && performance.now() < deadline;) { await b.tick(); await new Promise(resolve => setTimeout(resolve, 10)); }
   assert.equal(b.event(fired.id).status, 'completed');
   assert.equal(h.enqueues(), 1, 'submitted exactly once');
   assert.equal(f.cancels(), 0);

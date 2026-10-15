@@ -173,10 +173,34 @@ export interface RunnerHostOptions {
   /** The remote-sharing exclusion list the web process saves; reloaded with every refresh. */
   exclusions?: RemoteExclusionStore;
   /**
+   * Tests only: runs the worker's periodic handoff and idle checks in place of `everySecond`, returning how to stop
+   * them, so a test can count completed rounds instead of waiting seconds. No production caller sets it.
+   */
+  scheduleChecks?: (checks: WorkerChecks) => () => void;
+  /**
    * Settings sections kept in step with the followed Tower ("호스트 설정 따르기", see link/managed-settings.ts): each
    * owning module exports its section on the controlling Tower and applies it on a computer that follows one.
    */
   managed?: ReadonlyMap<ManagedSection, WorkerManagedSection>;
+}
+
+/** The worker's periodic checks: hand off to a newer worker at a quiet moment, and close when idle long enough. */
+export interface WorkerChecks {
+  /** Settles once this attempt has handed off, been held back or failed (a failure is logged, never thrown). */
+  handoff(): Promise<void>;
+  idle(): void;
+}
+
+/** How often the worker checks for a handoff and for idleness. */
+export const WORKER_CHECK_MS = 1000;
+
+/** The production schedule: each check on its own once-a-second timer, neither keeping the process alive. */
+export function everySecond(checks: WorkerChecks): () => void {
+  const handoffTimer = setInterval(() => { void checks.handoff(); }, WORKER_CHECK_MS);
+  handoffTimer.unref();
+  const idleTimer = setInterval(() => checks.idle(), WORKER_CHECK_MS);
+  idleTimer.unref();
+  return () => { clearInterval(handoffTimer); clearInterval(idleTimer); };
 }
 
 /** One settings section the web relays between Towers; it lives in this worker's stores. */
@@ -624,8 +648,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   options.triggers?.on('change', changed);
   options.publicAgents?.on('change', changed);
   options.sessionTasks?.on('change', changed);
-  let idleTimer: ReturnType<typeof setInterval> | undefined;
-  let handoffTimer: ReturnType<typeof setInterval> | undefined;
+  let stopChecks: (() => void) | undefined;
   let stopKeeping: (() => Promise<void>) | undefined;
   // Status alone is not enough: a cancelled turn may still be closing its provider process.
   const quiet = (ownedControlRequests = 0) => pending === ownedControlRequests && !options.runs.busy() && !options.autoPrompts?.busy()
@@ -693,8 +716,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       // Keep the authenticated diagnosis and lock until the database has acknowledged close or actually exited.
       await options.closeStorage?.();
       await stopKeeping?.();
-      if (idleTimer) clearInterval(idleTimer);
-      if (handoffTimer) clearInterval(handoffTimer);
+      stopChecks?.();
       options.runs.off('change', changed); options.sessions.off('change', changed); options.autoPrompts?.off('change', changed); options.triggers?.off('change', changed); options.publicAgents?.off('change', changed);
       server.closeAllConnections();
       await new Promise<void>(resolve => server.close(() => resolve()));
@@ -715,10 +737,9 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(paths.socket, () => { server.off('error', reject); resolve(); }); });
     await chmod(paths.socket, 0o600);
     stopKeeping = keepEndpoint({ socket: paths.socket, token: paths.token, value: token });
-    handoffTimer = setInterval(() => { void handOff().catch(error => console.error('Worker handoff remains held:', error)); }, 1000);
-    handoffTimer.unref();
-    {
-      idleTimer = setInterval(() => {
+    stopChecks = (options.scheduleChecks ?? everySecond)({
+      handoff: () => handOff().catch(error => console.error('Worker handoff remains held:', error)),
+      idle: () => {
         // A handoff past its quiet check owns shutdown until it hands off or resumes: the state stays locked meanwhile.
         if (!options.onIdle || closing || draining || pending || Date.now() - lastRequest < (options.idleMs ?? 30_000)) return;
         if (options.runs.list().some(run => run.status === 'running' || run.status === 'queued')) return;
@@ -732,9 +753,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (options.inFlight?.()) return;
         // Stop accepting requests and finish writes before releasing the worker lock.
         void close(true).catch(error => { console.error('Runner idle cleanup failed:', error); });
-      }, 1000);
-      idleTimer.unref();
-    }
+      },
+    });
     // An adopted engine keeps running after its previous host closes, which paused these timers.
     if (!options.storage || options.storage().admissionOpen) {
       options.runs.resumeAttachmentCleanup();

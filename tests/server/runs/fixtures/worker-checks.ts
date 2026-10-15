@@ -1,48 +1,47 @@
+import type { WorkerChecks } from '../../../../server/runs/worker.js';
 import { until } from '../../../helpers/until.ts';
 
-/**
- * The execution worker checks for a handoff, then for idleness, once a second: two setInterval(…, 1000) in
- * server/runs/worker.ts, the handoff timer created first. Once installed, each worker's pair runs every `periodMs`, in
- * that same order, and every round is counted, so a test proves that nothing happened after real checks instead of
- * sleeping for them. What a check decides is unchanged: hold, retry and idle deadlines are read from the clock.
- * `idleHeld` skips the idle half (a test sets it until its own request has reached the worker, as a second-long tick
- * always allowed).
- */
-export const workerChecks = { rounds: 0, idleHeld: false };
+/** The drivers whose worker is running its checks now. */
+const live = new Set<CheckDriver>();
 
-let installed = false;
-export function installWorkerChecks(periodMs = 10, onRound?: () => void): void {
-  if (installed) return;
-  installed = true;
-  const realSet = globalThis.setInterval;
-  const realClear = globalThis.clearInterval;
-  type Pair = { idle?: () => void };
-  let last: Pair | undefined;
-  const idles = new Map<unknown, Pair>();
-  globalThis.setInterval = ((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
-    const source = ms === 1000 && /server[\\/]runs[\\/]worker\.ts/.test(new Error().stack ?? '') ? String(callback) : '';
-    if (source.includes('handOff')) {
-      const pair: Pair = last = {};
-      return realSet(() => { workerChecks.rounds++; onRound?.(); callback(...args); if (!workerChecks.idleHeld) pair.idle?.(); }, periodMs);
-    }
-    if (source.includes('onIdle') && last && !last.idle) {
-      const pair = last;
-      pair.idle = () => callback(...args);
-      const handle = { unref: () => handle, ref: () => handle, hasRef: () => false };
-      idles.set(handle, pair);
-      return handle;
-    }
-    return realSet(callback, ms, ...args);
-  }) as unknown as typeof setInterval;
-  globalThis.clearInterval = ((handle: Parameters<typeof clearInterval>[0]) => {
-    const pair = idles.get(handle);
-    if (pair) { pair.idle = undefined; idles.delete(handle); return; }
-    realClear(handle);
-  }) as typeof clearInterval;
+/**
+ * Runs one worker's handoff and idle checks every `periodMs` instead of once a second, through startRunnerHost's
+ * test-only `scheduleChecks`: each round calls the handoff check, then the idle check, as the two production timers
+ * fire. A test counts the worker's completed rounds to prove nothing happened after real checks instead of sleeping
+ * for them. What a check decides is unchanged: hold, retry and idle deadlines are read from the clock.
+ */
+export class CheckDriver {
+  /** Skips the idle check (a test sets it until its own request has reached the worker, as a second-long tick always allowed). */
+  idleHeld = false;
+  private started = 0;
+  private readonly completed: number[] = [];
+
+  constructor(private readonly periodMs = 10, private readonly onRound?: () => void) {}
+
+  /** Pass as `scheduleChecks`. */
+  readonly schedule = (checks: WorkerChecks): (() => void) => {
+    live.add(this);
+    const timer = setInterval(() => {
+      const round = ++this.started;
+      const handoff = checks.handoff();
+      if (!this.idleHeld) checks.idle();
+      void handoff.then(() => { this.completed.push(round); this.onRound?.(); });
+    }, this.periodMs);
+    return () => { clearInterval(timer); live.delete(this); };
+  };
+
+  /**
+   * Waits until `count` rounds started after this call have completed (a handoff attempt underway may still pause).
+   * A worker that stops its checks meanwhile has nothing left to do.
+   */
+  async checks(count = 3): Promise<void> {
+    const after = this.started;
+    await until(() => !live.has(this) || this.completed.filter(round => round > after).length >= count);
+  }
 }
 
-/** Waits until the workers in this process have run `count` more rounds of their handoff and idle checks. */
+/** Waits until every worker running its checks has completed `count` more rounds. */
 export async function checks(count = 3): Promise<void> {
-  const target = workerChecks.rounds + count;
-  await until(() => workerChecks.rounds >= target);
+  if (live.size === 0) throw new Error('No worker is running its checks.');
+  await Promise.all([...live].map(driver => driver.checks(count)));
 }
