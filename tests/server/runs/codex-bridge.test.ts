@@ -555,7 +555,7 @@ test('an acknowledged interrupt times out without marking a still-running turn c
   await settle(() => acknowledged);
   t.mock.timers.tick(11_999);
   await settle();
-  assert.deepEqual(finished, []);
+  assert.equal(finished.length, 0, 'not given up before the deadline');
   t.mock.timers.tick(1);
   await cancelled;
   await bridge.done;
