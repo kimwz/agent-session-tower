@@ -12,10 +12,7 @@ import { processStart } from '../instance/process-start.js';
 import { HoldError, observeHold, removeHold, writeHold, type HoldGeneration } from './storage-hold.js';
 import { TransitionLockError } from './storage-transition-lock.js';
 import { currentVersion, entryPoint, installVersion, newerVersion, pointUpdate, RELEASE_WAIT_MS, restartService, runtimePaths, versionDirectory } from './service.js';
-import {
-  pinnedVersion, preparationCheck, probeInstalledArtifact, readCurrentPointer, readHelperLock, readHold, readRollbackRecord, readUpdateRecord, rollbackActive, storageKeptVersions,
-  updateActive, updatePaths, type ArtifactRead, type HelperRead, type SavedUpdate,
-} from './storage-update.js';
+import { readCurrentPointer, readHelperLock, readHold, readUpdateRecord, updateActive, updatePaths, type HelperRead, type SavedUpdate } from './storage-update.js';
 
 export { updateActive, updatePaths, type SavedUpdate } from './storage-update.js';
 
@@ -208,7 +205,7 @@ async function takeLock(stateDir: string): Promise<boolean> {
   } finally { await rm(temporary, { force: true }); }
 }
 
-export interface UpdateRequestResult { status: number; body: { update?: UpdateStatus; current?: true; error?: string; code?: string; prepare?: string } }
+export interface UpdateRequestResult { status: number; body: { update?: UpdateStatus; current?: true; error?: string; code?: string } }
 
 /**
  * This computer's side of updates: a controller asks for a newer version, and a separate helper process installs
@@ -230,7 +227,7 @@ export class Updates {
     return this.exclusive(() => this.start(version));
   }
 
-  /** Runs `work` in turn with requests and pruning: the owner's rollback pins its target this way. */
+  /** Runs `work` in turn with requests and pruning. */
   exclusive<T>(work: () => Promise<T>): Promise<T> {
     const next = this.queue.then(work);
     this.queue = next.catch(() => {});
@@ -256,15 +253,6 @@ export class Updates {
     const current = read.state === 'active' || read.state === 'terminal' ? read.update : undefined;
     if (!newerVersion(version, this.options.version)) return { status: 200, body: { current: true, ...(current ? { update: publicUpdate(current) } : {}) } };
     if (!this.options.managed) return { status: 409, body: { code: 'not-service', error: 'This computer does not run Tower as its background service.' } };
-    // The owner's pin keeps this version, whoever asks (the owner, the scheduler, a controller).
-    const pin = await pinnedVersion(stateDir);
-    if (pin.state === 'unknown') return { status: 409, body: { code: 'pin-unreadable', error: `The version pin cannot be read: ${pin.reason}` } };
-    if (pin.state === 'pinned' && pin.version !== version) return { status: 409, body: { code: 'pinned', error: `The owner pinned this computer to ${pin.version}; release the pin to update it.` } };
-    // An owner's rollback under way (or one whose record cannot be read) is settled first. Its reservation is taken in
-    // turn with requests (Updates.exclusive), so it sees an update asked for meanwhile and the other way around.
-    const rollback = await readRollbackRecord(stateDir);
-    if (rollback.state === 'unreadable' || rollback.state === 'invalid') return { status: 409, body: { code: 'rollback-unreadable', error: `The owner's rollback record cannot be read: ${rollback.reason}` } };
-    if (rollback.state === 'present' && rollbackActive(rollback.record)) return { status: 409, body: { code: 'rollback-under-way', error: `The owner's rollback to ${rollback.record.target} is under way.` } };
     // A record that cannot be read may be an update under way; one this build does not understand is replaced only
     // when no helper or hold is left that could belong to it.
     if (read.state === 'unreadable') return { status: 409, body: { code: 'update-status-unreadable', error: `The last update cannot be read: ${read.reason}` } };
@@ -274,13 +262,6 @@ export class Updates {
       if (helper !== false || (await readHold(stateDir)).state !== 'absent') {
         return { status: 409, body: { code: 'busy', error: 'The last update is not one this version understands, and its helper or hold is still there.' } };
       }
-    }
-    // The target needs its preparation release first (or cannot take over at all), and nothing here changed since it
-    // said so: asked again, it is not installed again. Installing that release (or a newer one) first is what moves on.
-    const refusal = current?.storage?.code;
-    if (current?.stage === 'failed' && current.version === version && current.previous === this.options.version && (refusal === 'prerequisite-required' || refusal === 'previous-incompatible')) {
-      return { status: 409, body: { code: refusal, ...(current.storage!.prepare ? { prepare: current.storage!.prepare } : {}), update: publicUpdate(current),
-        error: refusal === 'prerequisite-required' ? `${version} needs ${current.storage!.prepare ?? 'its preparation release'} to run here first.` : `${this.options.version} cannot take ${version}'s storage over; the owner decides how to move on.` } };
     }
     if (updateActive(current) && await this.busy(current!)) {
       // The newest version asked for wins; it is asked for again once this update has finished.
@@ -346,14 +327,14 @@ export class Updates {
     return this.exclusive(async () => {
       if (!this.options.managed) return;
       const { stateDir } = this.options;
-      // What the last update, the current link or the owner's pin and rollback keep must be known before anything goes.
+      // What the last update and the current link keep must be known before anything goes.
       const read = await readUpdateRecord(stateDir);
       if (read.state === 'unreadable' || read.state === 'invalid') return;
       const status = read.state === 'absent' ? undefined : read.update;
       if (updateActive(status) || await helperRunning(stateDir)) return;
-      const [current, storage] = await Promise.all([readCurrentPointer(stateDir), storageKeptVersions(stateDir)]);
-      if (current.state === 'unreadable' || current.state === 'invalid' || 'unknown' in storage) return;
-      const keep = new Set([this.options.version, current.state === 'version' ? current.version : undefined, status?.previous, ...storage.keep, ...await inUse()].filter(Boolean));
+      const current = await readCurrentPointer(stateDir);
+      if (current.state === 'unreadable' || current.state === 'invalid') return;
+      const keep = new Set([this.options.version, current.state === 'version' ? current.version : undefined, status?.previous, ...await inUse()].filter(Boolean));
       const installed = await readdir(runtimePaths(stateDir).versions).catch(() => [] as string[]);
       // An install cut short leaves its staging folder behind; no helper runs now to finish it.
       // An install still under way (by a join or service command run by hand) keeps its staging folder.
@@ -401,11 +382,6 @@ export interface UpdateHelperSteps {
   install(version: string): Promise<string>;
   /** Runs the installed version enough to know it starts. */
   check(directory: string, version: string): Promise<void>;
-  /**
-   * The storage contract an installed version states (`--storage-contract`). With it the helper refuses a target
-   * whose storage the version it would go back to cannot take over, before anything switches.
-   */
-  contract?(directory: string, version: string): Promise<ArtifactRead>;
   point(version: string): Promise<void>;
   restart(): Promise<void>;
   health(): Promise<{ version: string; pid: number } | undefined>;
@@ -428,7 +404,6 @@ export function serviceSteps(stateDir: string, port: number): UpdateHelperSteps 
       const { stdout } = await run(process.execPath, [entryPoint(directory), '--version'], { timeout: 60_000 });
       if (stdout.trim() !== version) throw new Error(`The installed version reports ${stdout.trim().slice(0, 40) || 'nothing'}.`);
     },
-    contract: probeInstalledArtifact,
     point: version => pointUpdate(stateDir, version),
     restart: () => restartService(stateDir),
     health: () => read<{ version: string; pid: number }>('/api/health'),
@@ -549,27 +524,6 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
     await set('checking');
     try { await steps.check(directory, version); }
     catch (error) { steps.log((error as Error).message); await set('failed', { code: 'check-failed', failedStage: 'checking' }); return status; }
-    if (steps.contract) {
-      // A target that imports a domain needs the version it would go back to to read and write that domain first: it
-      // is refused here, before the hold, the switch and the restart, and says which release to install first.
-      const target = await steps.contract(directory, version).catch(error => ({ state: 'unverifiable' as const, reason: (error as Error).message }));
-      const refusal = async (storage: NonNullable<SavedUpdate['storage']>, line: string) => {
-        steps.log(line);
-        await set('failed', { code: 'check-failed', failedStage: 'checking', storage });
-        return status;
-      };
-      if (target.state === 'missing' || target.state === 'unverifiable') return await refusal({ code: 'contract-unverifiable' }, `storage contract: ${target.state === 'missing' ? 'the installed version has no entry point' : target.reason}`);
-      if (target.state === 'contract') {
-        if (!target.contract.supported) return await refusal({ code: 'target-runtime-unsupported' }, `storage runtime: ${target.contract.refusal?.message ?? 'unsupported'}`);
-        const back = await steps.contract(versionDirectory(stateDir, previous), previous).catch(error => ({ state: 'unverifiable' as const, reason: (error as Error).message }));
-        const check = preparationCheck(target.contract.manifest, back);
-        if (check.state === 'prerequisite-required' || check.state === 'missing') {
-          return await refusal({ code: 'prerequisite-required', ...(check.prepare ? { prepare: check.prepare } : {}), domains: check.domains }, `storage: ${check.reason}`);
-        }
-        if (check.state === 'incompatible') return await refusal({ code: 'previous-incompatible', domains: check.domains }, `storage: ${check.reason}`);
-        if (check.state !== 'not-required' && check.state !== 'satisfied') return await refusal({ code: 'contract-unverifiable', domains: check.domains }, `storage: ${check.reason}`);
-      }
-    }
     const before = await steps.health();
     const linked = await steps.controllers() ?? [];
     await set('switching', { controllers: linked });

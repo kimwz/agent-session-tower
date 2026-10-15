@@ -1,17 +1,23 @@
 /**
  * A separate process taking the computer's transition turn, as the web, the update helper and the CLI each do. It
- * appends `enter <pid>` and `leave <pid>` to `marks` around `holdMs` inside the turn, then answers one JSON line;
- * exit code 3 when the turn was refused.
+ * prints `{"trying":<pid>}` before it asks for the turn; inside the turn it prints `{"entered":<pid>}` and waits for one line on stdin (the parent's release), or the end of its
+ * input; then it leaves the turn and answers `{"ok":true}`, or the refusal with exit code 3. Nothing here waits on a
+ * clock: the parent decides when each turn ends.
  */
-import { appendFileSync } from 'node:fs';
 import { withStorageTransition } from '../../../../server/link/storage-transition-lock.js';
 
-const [stateDir, marks, holdMs] = process.argv.slice(2);
+const [stateDir] = process.argv.slice(2);
+const answer = (value: unknown) => process.stdout.write(`${JSON.stringify(value)}\n`);
+const released = () => new Promise<void>(resolve => {
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', chunk => { if (String(chunk).includes('\n')) resolve(); });
+  process.stdin.on('end', () => resolve());
+});
+answer({ trying: process.pid });
 withStorageTransition(stateDir!, async () => {
-  appendFileSync(marks!, `enter ${process.pid}\n`);
-  await new Promise(resolve => setTimeout(resolve, Number(holdMs)));
-  appendFileSync(marks!, `leave ${process.pid}\n`);
-}, { waitMs: 30_000 }).then(
-  () => { process.stdout.write(`${JSON.stringify({ ok: true })}\n`); },
-  (error: Error & { code?: string }) => { process.stdout.write(`${JSON.stringify({ ok: false, code: error.code, message: error.message })}\n`); process.exitCode = 3; },
-);
+  answer({ entered: process.pid });
+  await released();
+}, { waitMs: 120_000 }).then(
+  () => answer({ ok: true }),
+  (error: Error & { code?: string }) => { answer({ ok: false, code: error.code, message: error.message }); process.exitCode = 3; },
+).finally(() => process.stdin.destroy());

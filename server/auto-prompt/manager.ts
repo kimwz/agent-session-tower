@@ -9,7 +9,7 @@ import { isAbsolute, join } from 'node:path';
 import type { AutoPromptDecision, AutoPromptJob, AutoPromptInput, AutoPromptRequest, Run, RunOrigin, Session, SessionDetail, Snapshot } from '../../shared/types.js';
 import { AttachmentStore, imagePaths, type StoredAttachment } from '../stores/attachments.js';
 import { AutoPromptRepository } from './storage-repository.js';
-import { bootstrapExternal } from '../remote/storage-transfer.js';
+import { requireDomainAuthority } from '../storage/initialize.js';
 import { canonical, type ExternalChange } from '../remote/storage-rows.js';
 import { validEntry, type Entry } from './storage-codec.js';
 import { RunError, type RunAdmission, type RunManager } from '../runs/manager.js';
@@ -152,7 +152,7 @@ export class AutoPromptManager extends EventEmitter {
   async load(): Promise<void> {
     if (this.started) return;
     if (!this.options.repository) throw new Error('AutoPromptManager requires its worker SQL repository.');
-    await bootstrapExternal(this.options.repository, this.options.stateDir);
+    await requireDomainAuthority(this.options.repository.storage, 'auto-prompt');
     for (const { entry, ordinal } of await this.options.repository.load()) {
       if (!validEntry(entry)) throw new Error('Invalid SQL Auto Prompt entry.');
       this.entries.set(entry.job.id, entry); this.ordinals.set(entry.job.id, ordinal);

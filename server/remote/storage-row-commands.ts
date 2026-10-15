@@ -1,4 +1,3 @@
-import { offlineAuthorityReceiptCommand, offlineCompletionCommand } from '../storage/offline-completion.js';
 import { defineStorageDomain, type DomainReadContext, type DomainWriteContext } from '../storage/domain.js';
 import type { DomainAuthority, StorageDomainSchema } from '../storage/contract.js';
 import { canonical, object, hash, EXTERNAL_INTENT_BYTES, EXTERNAL_CHUNK_BYTES, type ExternalCodec, type ExternalRow } from './storage-rows.js';
@@ -67,8 +66,6 @@ export function externalDomain(schema: StorageDomainSchema, codec: ExternalCodec
     return {mode:header.mode,revision,generation:c.authority.current()!.generation,requestSha256:header.requestSha256,intentSha256};
   }
   return defineStorageDomain({ schema,commands: {
-    offlineAuthorityReceipt: offlineAuthorityReceiptCommand,
-    offlineCompletion: offlineCompletionCommand(`${t}_stages`),
     head: { kind:'read',run: c=>head(c) },
     bootstrapHistory: { kind:'read',run: c=>({ stages: (c.prepare(`SELECT count(*) AS n FROM ${t}_stages`).get() as { n: number }).n }) },
     keys: { kind:'read',run(c,payload) { const p=object(payload);current(c,p);

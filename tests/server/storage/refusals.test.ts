@@ -142,17 +142,26 @@ test('an unknown schema, another program\'s database, a damaged file or a schema
   before = await filesUnder(damaged);
   await refused(t, { stateDir: damaged, bundle: productionBundle }, { phase: 'open', code: 'not-a-database', retryable: false });
   assert.deepEqual(await filesUnder(damaged), before);
-  // A pre-domain storage opened by a build with more domains is behind: it waits for an allowed migration.
+  // A pre-domain storage opened by a build with more domains is behind: refused on its copy, the live files never opened.
   const behind = await stateDir(t);
   const plain = await openStorage({ stateDir: behind, bundle: threadBundle('core') });
   await plain.prepare({ allowMigration: true });
   await plain.close();
-  const upgraded = await openFixture(t, behind);
-  assert.equal(upgraded.status().schema?.kind, 'behind');
-  await assert.rejects(upgraded.prepare({ allowMigration: false }), { code: 'migration-required', disposition: 'not-committed' });
-  const applied = await upgraded.prepare({ allowMigration: true });
-  assert.deepEqual(applied.applied, [{ scope: 'fixture', version: 1 }, { scope: 'plain', version: 1 }]);
-  assert.equal(applied.schema.kind, 'current');
+  before = await filesUnder(behind);
+  await refused(t, { stateDir: behind, bundle: threadBundle('fixture'), refuseBehind: true }, { phase: 'schema', code: 'migration-required', retryable: false });
+  assert.deepEqual(await filesUnder(behind), before);
+});
+
+test('a storage behind only in the WAL of a crashed last connection is refused on its copy: the live open is never sent, DB, WAL and shm unchanged', async t => {
+  const dir = await existingStorage(t);
+  await crashWith(databasePath(dir), "DELETE FROM schema_migrations WHERE scope = 'plain'");
+  const before = await filesUnder(dir);
+  assert.ok((before[`${DATABASE}-wal`] as { size: number }).size > 0 && before[`${DATABASE}-shm`], 'the crash left a WAL and shm');
+  const requests = threadRequests(t);
+  await refused(t, { stateDir: dir, bundle: threadBundle('fixture'), refuseBehind: true }, { phase: 'schema', code: 'migration-required', retryable: false });
+  assert.ok(requests.some(request => request.op === 'check'), 'the copy was checked');
+  assert.ok(!requests.some(request => request.op === 'open'), `the live files were never opened: ${requests.map(request => request.op).join(', ')}`);
+  assert.deepEqual(await filesUnder(dir), before, 'byte-, inode- and mtime-identical, and no check copy is left');
 });
 
 test('an unknown schema left only in the WAL of a crashed last connection is refused with DB, WAL and shm byte-, inode- and mtime-identical', async t => {

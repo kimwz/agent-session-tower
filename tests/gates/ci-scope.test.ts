@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { classify, ciScope, gatePassed, pathTier, planCi, reuseEvidence, versionOnly, GATE } from '../../scripts/ci-scope.mjs';
 import { gateVerdict, rereadClaims } from '../../scripts/ci-gate.mjs';
-import { lanesFor, plan } from '../../scripts/ci-plan.mjs';
+import { checksReceipt, lanesFor, plan } from '../../scripts/ci-plan.mjs';
 
 const real = (path: string) => readFileSync(path, 'utf8');
 const pkg = real('package.json'), lock = real('package-lock.json'), identity = real('shared/app-identity.ts');
@@ -104,10 +104,10 @@ function run(tier: string, overrides: Record<string, unknown> = {}) {
   const reuse = tier === 'reused';
   const lanes = plan(), selected = reuse ? [] : lanesFor(tier, lanes);
   const receipts: any[] = selected.map(l => ({ id: l.id, sha, node: l.node, platform: l.os.startsWith('mac') ? 'darwin' : 'linux',
-    files: l.files, exit: 0, large: l.large, started: 1000, finished: 2000, sea: l.sea, benchmark: l.benchmark, foundation: l.foundation,
-    arch: 'arm64', pathNode: l.node, input: { commit: sha, tree, dirty: false },
-    ...(l.large || l.files.some(f => f.endsWith('retention-storage.test.ts')) ? { cap: { canonicalBytes: l.large ? 133_000_000 : 33_000_000, count: l.large ? 6_000_000 : 1_500_000 } } : {}) }));
-  receipts.push({ id: 'checks', sha, exit: 0, quick: true, legacyNode: '22.13.0', input: { commit: sha, tree, dirty: false }, started: 1000, finished: 1500 });
+    files: l.files, exit: 0, started: 1000, finished: 2000, sea: l.sea, foundation: l.foundation,
+    arch: 'arm64', pathNode: l.node, input: { commit: sha, tree, dirty: false } }));
+  // The checks receipt exactly as scripts/ci-run.mjs writes it after the quick suite passed.
+  receipts.push(checksReceipt({ id: 'checks', sha, input: { commit: sha, tree, dirty: false }, admitted: 900, ready: 950 }, 1000, 1500));
   return { needs: { plan: { result: 'success' }, checks: { result: 'success' }, test: { result: selected.length ? 'success' : 'skipped' } },
     planned: { tier: reuse ? 'full' : tier, execution: reuse ? 'reuse' : 'run', head: sha, tree, lanes: selected.map(l => l.id) }, pathTier: reuse ? 'full' : tier,
     baseGate: { passed: true, reason: 'gate success' }, evidence: { reused: true, reason: 'same tree' }, receipts, sha, tree, lanes, ...overrides };
@@ -116,6 +116,9 @@ const problems = (input: ReturnType<typeof run>) => gateVerdict(input as any).pr
 
 test('the gate passes each tier with exactly its lanes', () => {
   for (const tier of ['full', 'related', 'quick', 'reused']) assert.deepEqual(problems(run(tier)), [], tier);
+  const full = run('full');
+  const slow = full.receipts.map(r => ({ ...r, slow: [{ file: 'tests/a.test.ts', name: 'a', ms: 600_000 }] }));
+  assert.deepEqual(problems({ ...full, receipts: slow }), [], 'slow tests are reported, never a failure');
   assert.equal(lanesFor('full').length, 17);
   assert.deepEqual(lanesFor('related').map(l => l.id), ['linux-22-0', 'linux-22-1', 'linux-22-2', 'linux-22-3']);
   assert.deepEqual(lanesFor('quick'), []);
@@ -238,7 +241,5 @@ test('the workflows wire the gate: it always runs on every job, lanes are skippe
   const verify = release.indexOf('scripts/ci-verify.mjs'), publish = release.indexOf('gh release create');
   assert.ok(verify > 0 && verify < publish, 'Release checks CI before it publishes');
   assert.match(release.slice(verify - 200, verify), /if: github\.event_name == 'push'/);
-  for (const step of ['Capture the pinned genuine old worker inputs', 'Run npm run check']) {
-    assert.match(release.slice(release.indexOf(`name: ${step}`)), new RegExp(`^name: ${step}\\n\\s+if: github\\.event_name == 'workflow_dispatch'`), step);
-  }
+  assert.match(release.slice(release.indexOf('name: Run npm run check')), /^name: Run npm run check\n\s+if: github\.event_name == 'workflow_dispatch'/);
 });

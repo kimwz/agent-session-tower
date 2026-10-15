@@ -10,12 +10,11 @@ import { TowerError } from '../../../shared/errors.js';
 import { processStart } from '../../../server/instance/process-start.js';
 import { entryPoint, pointCurrent, runtimePaths, versionDirectory } from '../../../server/link/service.js';
 import * as hold from '../../../server/link/storage-hold.js';
-import { evaluateStorageUpdate, readHelperLock, type HelperRead } from '../../../server/link/storage-update.js';
+import { readHelperLock, type HelperRead } from '../../../server/link/storage-update.js';
 import * as update from '../../../server/link/update.js';
 import { handoffHeld, heldWorkerEntry, runUpdateHelper, updatePaths, Updates, type UpdateHelperSteps } from '../../../server/link/update.js';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
 import { TowerAutoUpdate } from '../../../server/updates/tower.js';
-import { A, B, installArtifact, runningBuild } from './fixtures/storage-builds.js';
 import '../../helpers/skip-fsync.js';
 
 /**
@@ -338,9 +337,6 @@ test('5. a request beside a pid out of range or an observation failure: refused 
         await hold.writeHold(state, '1.1.0');
       }, '1.1.0', 409, 'helper-lock-unknown'],
       ['stale active record, another target', async state => { await save(state, record('installing')); }, '1.2.0', 409, 'busy'],
-      ['the target needs its preparation release (an early answer)', async state => {
-        await save(state, record('failed', { code: 'check-failed', failedStage: 'checking', storage: { code: 'prerequisite-required', prepare: '1.0.5' } }));
-      }, '1.1.0', 409, 'prerequisite-required'],
       ['an update whose helper never answered, the same target', async state => { await save(state, record('verifying')); }, '1.1.0', 202, undefined],
       ['a record this build does not understand', async state => { await save(state, '{'); }, '1.1.0', 409, 'busy'],
     ];
@@ -394,30 +390,5 @@ test('6. status, the automatic update and pruning beside a pid out of range or a
       assert.deepEqual(spawned, [], label);
       assert.deepEqual(await snapshot(state), before, `${label}: no record, retry schedule or version changed`);
     }
-  }
-});
-
-// ---- 7. The storage evaluation reads the same lock ----
-
-test('7. the storage evaluation beside a pid out of range or an observation failure: the helper cannot be told, nothing imported; a gone pid still allows it', async t => {
-  hookKill(t);
-  const state = await mkdtemp(join(tmpdir(), 'tower-helper-observe-'));
-  t.after(() => rm(state, { recursive: true, force: true }));
-  await mkdir(runtimePaths(state).versions, { recursive: true });
-  await installArtifact(state, A);
-  await installArtifact(state, B);
-  await pointCurrent(state, B);
-  await writeFile(updatePaths(state).status, JSON.stringify({ version: B, previous: A, stage: 'done', startedAt: at, updatedAt: at }));
-  const evaluate = () => evaluateStorageUpdate({ stateDir: state, build: runningBuild(B), managed: true });
-  await writeFile(updatePaths(state).lock, String(deadPid()));
-  const ready = await evaluate();
-  assert.deepEqual([ready.code, ready.importAllowed], ['service-update-done', true], 'gone, as before');
-  for (const shape of SHAPES) {
-    await rm(updatePaths(state).lock, { force: true });
-    await unknownLock(state, shape);
-    const evaluation = await evaluate();
-    assert.deepEqual([evaluation.verdict, evaluation.code, evaluation.importAllowed], ['recovery-required', 'helper-unreadable', false], `${shape.name}: ${evaluation.reason}`);
-    assert.equal(evaluation.evidence.helper.state, shape.helper, shape.name);
-    assert.ok(!('error' in evaluation.evidence.helper), `${shape.name}: the evidence carries no error object`);
   }
 });

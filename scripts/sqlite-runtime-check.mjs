@@ -14,17 +14,10 @@ try {
   database = new sqlite.DatabaseSync(':memory:');
   runtime.sqlite = database.prepare('SELECT sqlite_version() AS version').get().version;
   const verdict = evaluateRuntime(runtime);
-  const legacy = process.argv[2] === 'legacy-loader';
-  const sdk = legacy ? undefined : await preflightStorage({ bundle: await captureStorageBundle() });
-  console.log(JSON.stringify({ runtime, capability: verdict, sdk, sourceSHA: process.env.VALIDATION_SHA, mode: legacy ? 'legacy-loader-compatibility' : 'supported-floor' }));
-  if (legacy) {
-    await import('../server/storage/index.ts');
-    assert.equal(runtime.node, '22.13.0');
-    assert.equal(verdict.supported, false, 'legacy compatibility is not supported SQLite');
-  } else {
-    assert.equal(verdict.supported, true, JSON.stringify(verdict));
-    assert.equal(sdk.supported, true, JSON.stringify(sdk));
-  }
+  const sdk = await preflightStorage({ bundle: await captureStorageBundle() });
+  console.log(JSON.stringify({ runtime, capability: verdict, sdk, sourceSHA: process.env.VALIDATION_SHA, mode: 'supported-floor' }));
+  assert.equal(verdict.supported, true, JSON.stringify(verdict));
+  assert.equal(sdk.supported, true, JSON.stringify(sdk));
 } finally {
   database?.close();
 }

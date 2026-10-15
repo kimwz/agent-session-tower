@@ -26,7 +26,7 @@ const SKIP_FSYNC = 'tests/helpers/skip-fsync';
 const DURABILITY = [
   'tests/server/storage/durability.test.ts', 'tests/server/storage/recovery.test.ts', 'tests/server/storage/owner.test.ts',
   'tests/server/workspace-files.test.ts', 'tests/server/stores/private-json.test.ts', 'tests/server/permissions/storage-pending.test.ts',
-  'tests/server/sessions/retention-storage.test.ts', 'tests/server/link/storage-offline-backup.test.ts', 'tests/server/runs/durable-runner.test.ts',
+  'tests/server/sessions/retention-storage.test.ts', 'tests/server/runs/durable-runner.test.ts',
 ];
 /** Names through which a test watches or fails flushes. */
 const FLUSHES = new Set(['sync', 'datasync', 'syncDirectory', 'fsync', 'fdatasync', 'fsyncSync', 'fdatasyncSync']);

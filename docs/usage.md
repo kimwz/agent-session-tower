@@ -2,7 +2,7 @@
 
 ## Start
 
-Install Node.js 22.13 or later, npm, and Git. Install and sign in to Claude Code, Codex, or both on the machine whose sessions you want to view. Their commands must be available on `PATH` to start or continue work from Tower.
+Install Node.js 22.22.3 or later (22.x), 24.15.0+ or 26.0.0+, npm, and Git. Install and sign in to Claude Code, Codex, or both on the machine whose sessions you want to view. Their commands must be available on `PATH` to start or continue work from Tower.
 
 ```sh
 npx --yes github:kimwz/agent-session-tower

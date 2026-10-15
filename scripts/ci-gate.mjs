@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { lanesFor, plan, validateReceipts } from './ci-plan.mjs';
+import { lanesFor, plan, slowTestReport, validateReceipts } from './ci-plan.mjs';
 import { TIERS, atLeast, ciScope, commitGate, ghArtifact, ghJson, reuseEvidence } from './ci-scope.mjs';
 
 /**
@@ -25,8 +25,7 @@ export function gateVerdict({ needs, planned, pathTier, baseGate, evidence, rece
   if (reuse) check(evidence?.reused === true, `pull request result not reusable: ${evidence?.reason ?? 'unchecked'}`);
   if (planned?.tier === 'quick') check(baseGate?.passed === true, `base commit gate: ${baseGate?.reason ?? 'unchecked'}`);
   const checks = receipts.find(receipt => receipt.id === 'checks');
-  check(checks?.sha === sha && checks.exit === 0 && checks.quick === true && checks.legacyNode === '22.13.0',
-    'missing checks, quick suite or actual legacy verdict');
+  check(checks?.sha === sha && checks.exit === 0 && checks.quick === true, 'missing checks or quick suite');
   check(receipts.every(receipt => receipt.input?.tree === tree && receipt.input.dirty === false), 'not every job tested the checked-out tree');
   let timing = {};
   try { if (expected.length || receipts.length > 1) timing = validateReceipts(expected, receipts.filter(receipt => receipt.id !== 'checks'), sha); }
@@ -66,9 +65,12 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const report = { verdict: problems.length ? 'fail' : 'pass', problems, tier: planned?.tier, execution: planned?.execution, pathTier: path.tier, reasons: path.reasons,
     lanes: planned?.lanes, baseGate, evidence, sha, tree: path.tree, testRunnerSeconds: timing.testRunnerSeconds, testWindowSeconds: window,
     setupEnvelopeSeconds: receipts.length ? (Math.max(...receipts.map(r => r.ready)) - Math.min(...receipts.map(r => r.admitted))) / 1000 : undefined,
-    receipts: receipts.map(({ env, ...receipt }) => receipt) };
+    // Tests of a second or more, for finding slow tests; never a reason to fail.
+    slowTests: slowTestReport(receipts),
+    receipts: receipts.map(({ env, slow, ...receipt }) => receipt) };
   writeFileSync('ci-timing.json', JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
+  if (report.slowTests.length) console.log(`${report.slowTests.length} tests took 1 s or more (slowTests in ci-timing.json; reporting only).`);
   if (problems.length) { console.error(`Gate failed:\n- ${problems.join('\n- ')}`); process.exit(1); }
   // Five minutes is an owner-set soft target. Correctness failures above remain blocking.
   if (window > 300) console.warn(`Soft five-minute target exceeded: ${window.toFixed(1)}s; correctness passed.`);

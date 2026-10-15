@@ -71,10 +71,6 @@ jobs:
       - run: node scripts/ci-run.mjs prepare checks
       - name: Typecheck, release identity and test integrity
         run: node scripts/ci-run.mjs checks checks
-      - uses: actions/setup-node@v7
-        with: { node-version: '22.13.0' }
-      - name: Actual unsupported legacy-loader verdict
-        run: node scripts/ci-run.mjs legacy checks
       - if: always()
         uses: actions/upload-artifact@v4
         with:

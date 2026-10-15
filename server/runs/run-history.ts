@@ -1,7 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import type { StorageClient } from '../storage/client.js';
-import { bootstrapRuns, holdRunsEvidence } from './storage-transfer.js';
-import type { StorageUpdateInput } from '../link/storage-update.js';
 import { RunsRepository } from './storage-repository.js';
 import { canonical, type RunDocuments, type RunRow, type RunChange } from './storage-codec.js';
 import type { Run, RunInstructions } from '../../shared/types.js';
@@ -32,7 +30,7 @@ export const SCHEDULED_OUTPUT = 'Scheduled by the agent. Tower resumes this conv
 export const UPDATE_RESUME_WAIT = 'Tower resumes this conversation on its new version.';
 
 /**
- * SQL run authority and its ordered owner operations. Historical JSON bytes are handled by the transfer/export codec.
+ * SQL run authority and its ordered owner operations.
  */
 export class RunHistory {
   private readonly triggerLinks = new Map<string, import('../triggers/storage-commands.js').TriggerAdmissionLink>();
@@ -43,12 +41,6 @@ export class RunHistory {
   }
   forgetTrigger(runId: string): void { this.triggerLinks.delete(runId); }
   private repository?: RunsRepository;
-  private bootstrap?: () => Promise<void>;
-  bootstrapStorage(update: () => Promise<StorageUpdateInput>): Promise<void> {
-    if (!this.repository) throw new Error('Runs storage is unavailable.');
-    this.bootstrap ??= bootstrapRuns(this.repository, this.stateDir, update);
-    return this.bootstrap();
-  }
   private database = false;
   private current?: RunDocuments;
   private readonly rows = new Map<string, RunRow>();
@@ -68,7 +60,8 @@ export class RunHistory {
   readonly restoredRetained = new Set<string>();
   private retained: () => Iterable<string> = () => [];
 
-  constructor(private readonly stateDir: string, storage?: StorageClient) {
+  /** `_stateDir` is no longer read (the JSON transfer that used it is gone); callers still pass it. */
+  constructor(_stateDir: string, storage?: StorageClient) {
     if (storage) this.repository = new RunsRepository(storage);
   }
 
@@ -78,9 +71,9 @@ export class RunHistory {
     this.repository ??= new RunsRepository(storage);
   }
   private async readDatabase(): Promise<void> {
-    if (!this.repository) { await holdRunsEvidence(this.stateDir); throw new Error('Runs storage is unavailable; SQL authority is required.'); }
+    if (!this.repository) throw new Error('Runs storage is unavailable; SQL authority is required.');
     this.database = await this.repository.databaseAuthority();
-    if (!this.database) { await holdRunsEvidence(this.stateDir); throw new Error('Runs SQL authority is missing.'); }
+    if (!this.database) throw new Error('Runs SQL authority is missing.');
     if (this.database && !this.current) {
       const current = await this.repository.exportCurrent();
       this.current = current.documents; this.rememberRows(current.rows);

@@ -8,7 +8,7 @@ import { isAbsolute } from 'node:path';
 import type { AutoPromptJob, AutoPromptRequest, Run } from '../../shared/types.js';
 import type { SlackFollowUp, SlackMention, SlackMessage, SlackRule, SlackWorkflow } from '../../shared/slack.js';
 import { WorkflowRepository } from './storage-repository.js';
-import { bootstrapExternal } from '../remote/storage-transfer.js';
+import { requireDomainAuthority } from '../storage/initialize.js';
 import { canonical } from '../remote/storage-rows.js';
 import { validateSlackRules, type WorkflowChannel } from './storage-codec.js';
 export { validateSlackRules } from './storage-codec.js';
@@ -179,7 +179,7 @@ export class SlackAutomationManager extends EventEmitter {
   async load(): Promise<void> {
     if (this.started) return;
     if (!this.options.repository) throw new Error('SlackAutomationManager requires its worker SQL repository.');
-    await bootstrapExternal(this.options.repository, this.options.stateDir);
+    await requireDomainAuthority(this.options.repository.storage, 'automation-workflows');
     const rows = await this.options.repository.loadRows();
     const source = this.options.repository.source(rows, this.storageChannel);
     this.configured = source.rules; this.items = source.workflows;

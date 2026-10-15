@@ -1,57 +1,41 @@
-import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { tmpdir } from 'node:os';
-import { after } from 'node:test';
 import { RunManager as ProductionRunManager } from '../../../server/runs/manager.js';
 import type { StorageClient } from '../../../server/storage/client.js';
-import { retentionBuild } from '../storage/fixtures/retention-build.js';
-import { recordPreparationEvidence } from '../../../server/link/storage-update.js';
+import { StorageCommandError } from '../../../server/storage/contract.js';
 import { RunsRepository } from '../../../server/runs/storage-repository.js';
 import { RetentionRepository } from '../../../server/sessions/retention/storage-repository.js';
 import type { RunDocuments } from '../../../server/runs/storage-codec.js';
 import { TriggersRepository } from '../../../server/triggers/storage-repository.js';
 import { empty, serializeState } from '../../../server/triggers/state.js';
+import { currentStorage } from '../../helpers/current-storage.js';
+import { faultBuild } from '../../helpers/fault-storage.js';
 
-let builds: Promise<{ a: Awaited<ReturnType<typeof retentionBuild>>; b: Awaited<ReturnType<typeof retentionBuild>>; directory: string }> | undefined;
-function artifacts() {
-  return builds ??= (async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'tower-runs-sql-artifacts-'));
-    const a = await retentionBuild('1.122.0', join(directory, 'a'));
-    const b = await retentionBuild('1.125.0', join(directory, 'b'), true, false, true);
-    return { a, b, directory };
-  })();
-}
-after(async () => { if (builds) await rm((await builds).directory, { recursive: true, force: true }); });
-
-/** Existing captured SDK/actual SQLite handlers; missing SDK is a failure, never a successful mock. */
-const commandErrors = new WeakMap<StorageClient, typeof import('../../../server/storage/contract.js').StorageCommandError>();
+/** The command error class of the SDK a fixture client belongs to: the product's, or its fault build's. */
+const commandErrors = new WeakMap<StorageClient, typeof StorageCommandError>();
 export function fixtureCommandError(client: StorageClient) {
   const error = commandErrors.get(client);
   if (!error) throw new Error('Fixture SDK error class is not captured.');
   return error;
 }
-let faultBuild: ReturnType<typeof retentionBuild> | undefined;
+/**
+ * The runs fixture's storage in `stateDir`: the current build (currentStorage) with only the runs authority, imported
+ * from `initial` (or empty) when it is missing. `threadFault` makes it with a fault build of its own that also carries
+ * the fixture domain (putThenDie, …), whose client then throws that build's command errors.
+ */
 export async function actualStorage(stateDir: string, initial?: RunDocuments, threadFault = false, onUnavailable?: import('../../../server/storage/client.js').StorageClientOptions['onUnavailable']) {
-  await mkdir(stateDir, { recursive: true, mode: 0o700 });
-  const { a, b: normal, directory } = await artifacts();
-  const b = threadFault ? await (faultBuild ??= retentionBuild('1.125.0', join(directory, 'thread-fault'), true, true, true, undefined, true)) : normal;
-  let fresh = false;
-  try { await stat(join(stateDir, 'state.sqlite')); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; fresh = true; }
-  // A122 must never reopen a final consumer DB whose additional domains it cannot read.
-  if (fresh) {
-    const preparation = await a.storage.openStorage({ stateDir, bundle: a.bundle() });
-    try {
-      const prepared = await preparation.prepare({ allowMigration: true });
-      const preflight = await a.storage.preflightStorage({ stateDir, bundle: a.bundle() });
-      await recordPreparationEvidence(stateDir, { context: preparation.context!, preflight, prepared, gate: await preparation.gate('core') });
-    } finally { await preparation.close(); }
+  let client: StorageClient;
+  if (threadFault) {
+    const build = await faultBuild(undefined, { threadFaultDomain: true });
+    await mkdir(stateDir, { recursive: true, mode: 0o700 });
+    client = await build.storage.openStorage({ stateDir, bundle: build.bundle(), onUnavailable });
+    commandErrors.set(client, build.storage.StorageCommandError);
+    try { await client.prepare({ allowMigration: true }); } catch (error) { await client.close(); throw error; }
+  } else {
+    client = await currentStorage(stateDir, { initialize: false, onUnavailable });
+    commandErrors.set(client, StorageCommandError);
   }
-  const client = await b.storage.openStorage({ stateDir, bundle: b.bundle(), onUnavailable });
-  commandErrors.set(client, b.storage.StorageCommandError);
   try {
-    await client.prepare({ allowMigration: true });
     const repository = new RunsRepository(client);
     if (!await repository.databaseAuthority()) await repository.importPrepared(initial ?? { runs: [], created: [], instructions: {} }, 'a'.repeat(64), 'runs-fixture-initial-import');
     else if (initial) throw new Error('Fixture initial import cannot overwrite an existing SQL authority.');

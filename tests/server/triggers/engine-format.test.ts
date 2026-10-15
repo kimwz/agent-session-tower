@@ -1,18 +1,16 @@
 import { actualStorage } from './actual-storage-fixture.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { triggerBackupOf } from '../../../server/triggers/backup.js';
-import { ONCE_FALLBACK } from '../../../server/triggers/once-storage.js';
 import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
 import type { Run } from '../../../shared/types.js';
 import type { TriggerActor, TriggerInput } from '../../../shared/triggers.js';
-import * as OldSchema from './fixtures/trigger-schema-1.105.0.js';
 
 const OWNER: TriggerActor = { kind: 'owner', via: 'ui' };
 const FIXTURES = join(import.meta.dirname, 'fixtures');
@@ -24,12 +22,6 @@ const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 function normalized(text: string, port: number, directory: string): string {
   const ids = new Map<string, string>();
   return text.replaceAll(directory, '<dir>').replaceAll(`127.0.0.1:${port}`, '127.0.0.1:<port>').replace(UUID, id => { if (!ids.has(id)) ids.set(id, `<uuid#${ids.size + 1}>`); return ids.get(id)!; });
-}
-
-/** The golden file with real-looking IDs and a port again, so an engine can load it. */
-async function goldenState(): Promise<Record<string, any>> {
-  const text = await readFile(join(FIXTURES, 'engine-after-operations.json'), 'utf8');
-  return JSON.parse(text.replaceAll('<dir>', '/tmp/tower-engine-format').replaceAll('127.0.0.1:<port>', '127.0.0.1:1').replace(/<uuid#(\d+)>/g, (_match, n: string) => `00000000-0000-4000-8000-${n.padStart(12, '0')}`));
 }
 
 async function golden(name: string, actual: string): Promise<void> {
@@ -62,10 +54,7 @@ async function engine(t: TestContext) {
   const services: TriggerService[] = [];
   const open = async () => {
     const service = new TriggerService({ stateDir: directory, storage: sql.client, executor, now: () => clock.now, tickMs: 3_600_000 });
-    await sql.bootstrap(() => clock.now).catch(async error => {
-      // A failed first import has no authority: the real owner load below must reject and hold it.
-      assert.equal(await sql.repository.databaseAuthority(), false, String(error));
-    });
+    await sql.bootstrap(() => clock.now);
     await service.start();
     services.push(service);
     return service;
@@ -142,94 +131,7 @@ async function operations(t: TestContext, f: Awaited<ReturnType<typeof engine>>)
 test('the saved file after a fixed sequence of operations is byte-identical', async t => {
   const f = await engine(t);
   const { port } = await operations(t, f);
-  const exported = await f.sql.exportLegacy();
-  assert.equal((await stat(exported)).mode & 0o777, 0o600);
   await golden('engine-after-operations.json', `${normalized(await f.file(), port, f.directory)}\n`);
-});
-
-test('the saved file stays readable by a 1.105.0 engine', async () => {
-  const saved = await goldenState();
-  assert.doesNotMatch(JSON.stringify(saved), /"type":"once"/, 'no schedule an older engine does not know');
-  // Exactly what a 1.105.0 engine's parseState reads of each definition, checked with its own frozen schema.
-  const projection = (value: Record<string, any>) => ({ name: value.name, enabled: value.enabled, source: value.source, handler: value.handler, policy: value.policy });
-  const definitions = [...saved.triggers, ...saved.tombstones, ...Object.values(saved.revisions as Record<string, unknown[]>).flat()] as Array<Record<string, any>>;
-  for (const definition of definitions) {
-    const parsed = OldSchema.TriggerInputSchema.safeParse(projection(definition));
-    assert.equal(parsed.success, true, `${definition.name}: ${parsed.success ? '' : parsed.error.message}`);
-    assert.equal(typeof definition.id, 'string');
-    assert.ok(Number.isInteger(definition.revision));
-    if (definition.onceSchedule) {
-      assert.equal(definition.enabled, false, 'an older engine never schedules a once reservation');
-      assert.deepEqual(definition.source.schedule, ONCE_FALLBACK);
-    }
-  }
-  assert.equal(OldSchema.TriggerSettingsSchema.safeParse(saved.settings).success, true);
-  assert.ok(definitions.some(definition => definition.onceSchedule), 'the sequence stored a once reservation');
-  assert.ok(Object.keys(saved.onceConsumed).length >= 2, 'the ledger keeps both consumptions');
-});
-
-/** Loads a saved file in a fresh engine, makes its first commit, and answers the engine and the file it wrote. */
-async function load(t: TestContext, saved: unknown) {
-  const f = await engine(t);
-  await f.sql.raw(JSON.stringify(saved));
-  const source = await readFile(join(f.directory, 'trigger-engine.json'));
-  const service = await f.open();
-  await service.flush();
-  assert.deepEqual(await readFile(join(f.directory, 'trigger-engine.json')), source, 'first import and current SQL writes preserve sealed raw input');
-  const parent = join(f.directory, 'triggers-storage-migrations');
-  const manifests = await Promise.all((await readdir(parent)).map(async id => JSON.parse(await readFile(join(parent, id, 'manifest.json'), 'utf8'))));
-  assert.equal(manifests.length, 1, 'one sealed import manifest');
-  assert.deepEqual(JSON.parse(await f.file()).audit, (saved as { audit: unknown }).audit, 'original audit remains exact');
-  return { f, service, written: JSON.parse(await f.file()), warnings: manifests[0].sourceWarnings };
-}
-
-test('a file an older engine rewrote loads turned off with one audit entry', async t => {
-  const saved = await goldenState();
-  const marker = { id: '40000000-0000-4000-8000-000000000001', name: 'Rewritten reservation', enabled: false, revision: 3, createdAt: '2026-09-24T00:00:30.000Z', updatedAt: '2026-09-24T00:00:30.000Z',
-    createdBy: OWNER, updatedBy: OWNER, source: { kind: 'schedule', schedule: ONCE_FALLBACK, catchUp: 'latest' }, handler: { ...saved.triggers[0].handler }, policy: { overlap: 'skip', maxEventsPerHour: 20 },
-    onceSchedule: { at: '2026-12-01T00:00:00.000Z', enabled: true, revision: 2 } };
-  saved.triggers.push(marker);
-  saved.cursors[marker.id] = { anchorAt: start };
-  const { service, written, warnings } = await load(t, saved);
-  const loaded = service.list().find(item => item.id === marker.id)!;
-  assert.equal(loaded.enabled, false);
-  assert.equal(warnings.filter((entry: { triggerId?: string }) => entry.triggerId === marker.id).length, 1);
-  assert.match(warnings.find((entry: { triggerId?: string }) => entry.triggerId === marker.id)!.summary, /changed by an older engine/);
-  assert.equal(written.triggers.find((item: { id: string }) => item.id === marker.id).onceSchedule.enabled, false, 'saved again as a turned-off reservation');
-});
-
-test('a downgraded file without the ledger recovers consumption from snapshots with one warning', async t => {
-  const saved = await goldenState();
-  const ledger = saved.onceConsumed as Record<string, unknown>;
-  delete saved.onceConsumed;
-  const { service, written, warnings } = await load(t, saved);
-  const recovered = Object.keys(written.onceConsumed);
-  // Only consumption still visible in a snapshot (a tombstone, a revision, an archived definition) comes back.
-  assert.ok(recovered.length >= 1 && recovered.every(id => id in ledger));
-  assert.equal(warnings.filter((entry: { summary: string }) => /ledger was absent after a downgrade/.test(entry.summary)).length, 1);
-});
-
-test('a 1.105.0 state file loads and is written back as the base writes it', async t => {
-  const saved = { version: 1, triggers: [], revisions: {}, tombstones: [], cursors: {}, events: [], fired: {}, audit: [], secretGrants: {},
-    settings: { maxTriggers: 20, maxEventsPerHour: 60, maxConcurrentRuns: 2, privateHosts: [] }, trustedFolders: [], recentFires: [] };
-  const { written } = await load(t, saved);
-  assert.deepEqual(written, { ...saved, onceConsumed: {} });
-  assert.deepEqual(Object.keys(written), ['version', 'onceConsumed', 'triggers', 'revisions', 'tombstones', 'cursors', 'events', 'fired', 'audit', 'secretGrants', 'settings', 'trustedFolders', 'recentFires']);
-});
-
-test('wrong shapes and parse failures preserve state and hold startup', async t => {
-  t.mock.method(console, 'error', () => {});
-  const legacy = await goldenState();
-  for (const broken of [{ ...legacy, version: 2 }, { ...legacy, cursors: [] }, { ...legacy, triggers: [{ id: 'x' }] }, { ...legacy, events: [{ id: 1 }] }, ...['triggers','revisions','tombstones','cursors','events','fired','audit','trustedFolders','recentFires','secretGrants','onceConsumed'].flatMap(key => [null, 'broken', 1].map(value => ({ ...legacy, [key]: value }))), ...[{ triggers: {} }, { tombstones: {} }, { events: {} }, { audit: {} }, { trustedFolders: {} }, { recentFires: {} }, { revisions: [] }, { fired: [] }, { secretGrants: [] }, { onceConsumed: [] }, { trustedFolders: [1] }, { recentFires: [null] }, { audit: [null] }, { fired: { x: 1 } }, { secretGrants: { x: [1] } }].map(fields => ({ ...legacy, ...fields }))]) {
-    const f = await engine(t);
-    await f.sql.raw(JSON.stringify(broken));
-    const original = await readFile(join(f.directory,'trigger-engine.json'));
-    await assert.rejects(f.open(),{ kind: 'unavailable' });
-    assert.deepEqual(await readFile(join(f.directory,'trigger-engine.json')),original);
-    assert.equal(f.runs.length,0,'damaged collections dispatch no work');
-    assert.deepEqual(JSON.parse(await readFile(join(f.directory,'trigger-engine.json'),'utf8')),broken);
-    assert.equal((await readdir(f.directory)).filter(name => name.startsWith('trigger-engine.json.unreadable-')).length,0,'original is preserved without quarantine');
-  }
 });
 
 test('a failed write, a full state and a locked state behave as before', async t => {

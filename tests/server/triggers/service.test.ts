@@ -1,7 +1,7 @@
 import { actualStorage } from './actual-storage-fixture.js';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -9,8 +9,7 @@ import { TriggerService, triggerRequestId, type TriggerExecutor } from '../../..
 import type { RunAdmission } from '../../../server/runs/manager.js';
 import type { AutoPromptJob, CreateSessionRequest, Run, Session } from '../../../shared/types.js';
 import type { TriggerActor, TriggerInput } from '../../../shared/triggers.js';
-import { documentsHash, requestHash, rowsOf, triggerHash } from '../../../server/triggers/storage-codec.js';
-import { asideNames, blockQuarantine, captureErrors } from '../../helpers/quarantine.js';
+import { captureErrors } from '../../helpers/quarantine.js';
 
 const OWNER: TriggerActor = { kind: 'owner', via: 'ui' };
 const AGENT: TriggerActor = { kind: 'agent', via: 'mcp', sessionId: 'codex:agent', runId: randomUUID() };
@@ -54,10 +53,7 @@ async function fixture(t: TestContext) {
   const services: TriggerService[] = [];
   const open = async (limits?: { acceptBytes?: number; maxBytes?: number; firedPerTrigger?: number }) => {
     const service = new TriggerService({ stateDir: directory, storage: sql.client, executor, now: () => clock.now, tickMs: 60_000, ...(limits ? { limits } : {}) });
-    await sql.bootstrap(() => clock.now).catch(async error => {
-      // A failed first import has no authority: the real owner load below must reject and hold it.
-      assert.equal(await sql.repository.databaseAuthority(), false, String(error));
-    });
+    await sql.bootstrap(() => clock.now);
     await service.start();
     services.push(service);
     return service;
@@ -283,24 +279,6 @@ test('a refused SQL commit stops new runs and says why', async t => {
   assert.equal(f.calls.length, 1, 'the due time runs once the state can be saved');
 });
 
-test('unreadable trigger state holds startup and preserves exact original bytes', async t => {
-  const f = await fixture(t), path = join(f.directory,'trigger-engine.json');
-  await f.sql.raw('{ not json');
-  await assert.rejects(f.open(),{ kind: 'unavailable',message: /original data is preserved/ });
-  assert.equal(await readFile(path,'utf8'),'{ not json');
-  assert.deepEqual(await asideNames(path),[]);
-  assert.equal(f.calls.length,0);
-});
-
-test('wrong shape holds startup instead of treating once history as empty', async t => {
-  const f = await fixture(t), path = join(f.directory,'trigger-engine.json');
-  await f.sql.raw('[]');
-  await assert.rejects(f.open(),{ kind: 'unavailable',message: /original data is preserved/ });
-  assert.equal(await readFile(path,'utf8'),'[]');
-  assert.deepEqual(await asideNames(path),[]);
-  assert.equal(f.calls.length,0);
-});
-
 test('invalid independent once ledger holds startup without quarantine', async t => {
   // One malformed ledger row stands for any: the startup reads every row through the same validation.
   for (const onceConsumed of [{ id: { bad: 1 } }]) {
@@ -317,35 +295,12 @@ test('invalid independent once ledger holds startup without quarantine', async t
   }
 });
 
-test('occupied quarantine destination does not alter data-preserving startup hold', async t => {
-  const f = await fixture(t), path = join(f.directory,'trigger-engine.json');
-  await f.sql.raw('{ not json');
-  const blocked = await blockQuarantine(t,path);
-  await assert.rejects(f.open(),{ kind: 'unavailable' }); blocked.release();
-  assert.deepEqual(await readdir(blocked.aside),['occupied']);
-  assert.equal(await readFile(path,'utf8'),'{ not json'); assert.equal(f.calls.length,0);
-});
-
 test('trigger secrets that were moved aside are shown on the triggers page', async t => {
   const f = await fixture(t);
   await writeFile(join(f.directory, 'trigger-secrets.json'), '{}', { mode: 0o600 });
   captureErrors(t, join(f.directory, 'trigger-secrets.json'));
   const service = await f.open();
   assert.match(service.overview().storageError ?? '', /^Trigger secrets could not be read and were kept as .*trigger-secrets\.json\.unreadable-\d+; triggers that use them fail until they are entered again\.$/);
-});
-
-test('held malformed state cannot dispatch, restore or overwrite once evidence', async t => {
-  const f = await fixture(t), path = join(f.directory,'trigger-engine.json'), original = '{ "version": 1, "onceConsumed": [ not json';
-  await f.sql.raw(original);
-  const service = new TriggerService({ stateDir: f.directory,storage: f.sql.client,executor: f.executor,now: () => f.clock.now,tickMs: 60_000 });
-  await assert.rejects(service.start(),{ kind: 'unavailable' });
-  f.clock.now += 2 * HOUR; await service.tick();
-  await assert.rejects(service.create(hourly(f.project),OWNER),{ kind: 'unavailable' });
-  const backup = { triggers: [],settings: service.settings(),trustedFolders: [],secretGrants: {},fired: {},github: {} };
-  await assert.rejects(service.restoreBackup(backup),{ kind: 'unavailable' });
-  await service.flush(); await service.settle(); service.close();
-  assert.equal(service.inFlight(),false); assert.equal(f.calls.length,0); assert.equal(await readFile(path,'utf8'),original);
-  assert.deepEqual((await readdir(f.directory)).filter(name => name.startsWith('trigger-engine.json')),['trigger-engine.json']);
 });
 
 test('schedules refuse second-level cron and unknown time zones', async t => {
@@ -554,7 +509,6 @@ test('the live overview also carries older runs that are still working or just f
   assert.equal(overview.updated?.find(event => event.id === first.id)?.status, 'completed', 'its finish reaches the monitor too');
 });
 
-
 // A calendar cron is recurrent even with a day and month. Once reservations must persist their consumption.
 test('an explicit once reservation survives restart without another year, retaining run details and audit', async t => {
   const f = await fixture(t);
@@ -749,7 +703,6 @@ test('a disabled once cannot be consumed manually and a consumed source cannot b
   await assert.rejects(service.revert(trigger.id, 2, trigger.revision, OWNER), /consumed/i);
 });
 
-
 test('backups retain consumption after deleting a definition and a fresh restore cannot reissue it', async t => {
   const f = await fixture(t);
   const service = await f.open();
@@ -768,7 +721,6 @@ test('backups retain consumption after deleting a definition and a fresh restore
   await assert.rejects(restored.run(trigger.id, OWNER), /consumed/i);
   assert.equal(fresh.calls.length, 0);
 });
-
 
 test('editing a consumed reservation preserves pending execution until explicit disable', async t => {
   const f = await fixture(t); const service = await f.open();
@@ -888,7 +840,6 @@ test('restoring an older backup preserves an explicit local archive and converge
   assert.equal(service.get(trigger.id).trigger.revision, revision);
 });
 
-
 test('manual execution races a due tick as one reservation in both invocation orders', async t => {
   // One service: each order races its own reservation, due an hour after the one before.
   const f = await fixture(t); const service = await f.open();
@@ -933,79 +884,6 @@ test('restoring a consumed unarchived definition respects the active definition 
   const repeat = await service.create(hourly(f.project), OWNER);
   await assert.rejects(service.restore(trigger.id, OWNER), /active trigger definitions/);
   assert.equal(service.get(repeat.id).trigger.enabled, true);
-});
-
-test('a missing downgrade consumption ledger is recovered from snapshots with one durable sealed-manifest warning', async t => {
-  const f = await fixture(t); let service = await f.open();
-  const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
-  const event = await service.run(trigger.id, OWNER); await service.tick(); f.finish(); await service.tick();
-  service.close(); await service.settle();
-  const state = JSON.parse(await f.sql.text()); delete state.onceConsumed;
-  const source = Buffer.from(JSON.stringify(state));
-  const originalAudit = JSON.stringify(state.audit);
-  const imported = await fixture(t);
-  await imported.sql.raw(source.toString('utf8'));
-  await imported.sql.bootstrap(() => { throw new Error('raw import must not read execution clock'); });
-  const current = await imported.sql.repository.exportCurrent();
-  assert.equal(JSON.stringify(current.documents.audit), originalAudit);
-  assert.deepEqual(current.documents.onceConsumed, { [trigger.id]: state.triggers.find((entry: { id: string }) => entry.id === trigger.id).consumed });
-  assert.deepEqual(current.documents.events, state.events);
-  const parent = join(imported.directory, 'triggers-storage-migrations');
-  const evidence = await readdir(parent);
-  assert.equal(evidence.length, 1);
-  const directory = join(parent, evidence[0]);
-  const manifestBytes = await readFile(join(directory, 'manifest.json'));
-  const manifest = JSON.parse(manifestBytes.toString('utf8'));
-  const manifestHash = triggerHash(manifestBytes);
-  assert.equal(current.head.authority!.manifestSha256, manifestHash);
-  assert.equal(manifest.kind, 'raw-import'); assert.equal(manifest.domain, 'triggers');
-  assert.deepEqual(manifest.build, imported.sql.client.context!.identity);
-  assert.equal(manifest.files['trigger-engine.json'].bytes, source.length);
-  assert.equal(manifest.files['trigger-engine.json'].sha256, triggerHash(source));
-  assert.equal(manifest.canonicalSha256, documentsHash(current.documents));
-  assert.equal(manifest.warningTimeBasis, 'fixed-migration-epoch-unknown-source-time');
-  assert.equal(manifest.sourceWarnings.length, 1);
-  const warning = manifest.sourceWarnings[0];
-  assert.match(warning.summary, /ledger was absent/);
-  assert.match(warning.summary, /Deleted IDs beyond legacy retention cannot be recovered/);
-  assert.equal(warning.action, 'consume'); assert.equal(warning.triggerId, trigger.id);
-  assert.equal(warning.triggerName, trigger.name);
-  assert.equal(warning.at, '1970-01-01T00:00:00.000Z');
-  assert.deepEqual(warning.actor, { kind: 'system', via: 'migration' });
-  assert.match(warning.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-  const receiptId = `${evidence[0]}-commit`;
-  const receipt = await imported.sql.client.receipt(receiptId);
-  assert.equal(receipt.found, true);
-  if (!receipt.found) assert.fail('missing import receipt');
-  assert.equal(receipt.receipt.scope, 'triggers'); assert.equal(receipt.receipt.command, 'commit');
-  assert.equal(receipt.receipt.result.state, 'included');
-  if (receipt.receipt.result.state !== 'included') assert.fail('import receipt result omitted');
-  assert.deepEqual(receipt.receipt.result.value, {
-    revision: 1, generation: current.head.authority!.generation, mode: 'import',
-    requestSha256: requestHash('import', rowsOf(current.documents)), intentSha256: imported.sql.repository.lastIntent!.sha256,
-    documentsSha256: documentsHash(current.documents),
-  });
-  service = await imported.open();
-  assert.equal(service.get(trigger.id).trigger.consumed!.eventId, event.id);
-  assert.equal(service.audit().filter(entry => entry.summary.includes('ledger was absent')).length, 0);
-  service.close(); await service.settle();
-  await imported.sql.client.close(); await imported.sql.client.reopen(); await imported.sql.client.prepare({ allowMigration: false });
-  service = await imported.open();
-  const reopened = await imported.sql.repository.exportCurrent();
-  assert.equal(JSON.stringify(reopened.documents.audit), originalAudit);
-  assert.deepEqual(reopened.documents.onceConsumed, current.documents.onceConsumed);
-  assert.deepEqual(reopened.documents.events, state.events);
-  assert.equal(service.get(trigger.id).trigger.consumed!.eventId, event.id);
-  assert.equal(service.audit().filter(entry => entry.summary.includes('ledger was absent')).length, 0);
-  assert.deepEqual(await readFile(join(directory, 'manifest.json')), manifestBytes);
-  assert.equal(triggerHash(await readFile(join(directory, 'manifest.json'))), manifestHash);
-  assert.equal(reopened.head.authority!.manifestSha256, manifestHash);
-  assert.deepEqual(await readFile(join(directory, 'trigger-engine.json')), source);
-  assert.deepEqual(await readFile(join(imported.directory, 'trigger-engine.json')), source);
-  assert.deepEqual(await imported.sql.client.receipt(receiptId), receipt);
-  assert.equal(imported.calls.length, 0);
-  await assert.rejects(service.run(trigger.id, OWNER), /consumed/i);
-  assert.equal(imported.calls.length, 0);
 });
 
 test('a once skip policy uses the admission time after waiting for a commit', async t => {

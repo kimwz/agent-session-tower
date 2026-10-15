@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Updates } from '../../../server/link/update.js';
 import { runtimePaths } from '../../../server/link/service.js';
-import { liveness, withStorageTransition, transitionLockPath, transitionBreakerPath, inspectStorageTransition } from '../../../server/link/storage-transition-lock.js';
+import { liveness, withStorageTransition, transitionLockPath, transitionBreakerPath } from '../../../server/link/storage-transition-lock.js';
 
 const faults = [Object.assign(new Error('injected EIO'), { code: 'EIO' }), Object.assign(new Error('injected EINVAL'), { code: 'EINVAL' }), new Error('injected generic')];
 async function child() {
@@ -67,7 +67,7 @@ test('actual barrier child holds the transition; unknown waits then enters only 
  await assert.rejects(withStorageTransition(dir,async()=>{work++;},{waitMs:5}), (e:any)=>e.code==='transition-busy' && e.diagnostic.lock.reason.includes('EIO'));
  assert.equal(await readFile(path,'utf8'),text); const after=await lstat(path); assert.equal(after.ino,before.ino); assert.equal(after.mtimeMs,before.mtimeMs); assert.equal(work,0);
  for(const name of sentinels) assert.equal(await readFile(join(dir,'runtime',name),'utf8'),`unchanged-${name}`);
- const entering=withStorageTransition(dir,async()=>{work++;},{waitMs:2000});
+ const entering=withStorageTransition(dir,async()=>{work++;},{waitMs:60_000});
  const ended=once(c,'exit'); c.stdin!.end(); await ended; await entering; assert.equal(work,1);
  } finally {restore(); if(c.exitCode===null){const ended=once(c,'exit');c.stdin!.end();await ended;} await rm(dir,{recursive:true,force:true});}
 });

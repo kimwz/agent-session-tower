@@ -454,10 +454,10 @@ test('hold during CLI preparation refuses the actual spawn after files are ready
 
 test('completed-start SDK thread fault during native preparation runs the actual worker hold and fresh spawn gate', async t => {
   const source = await readFile(new URL('../../../server/runs/worker.ts', import.meta.url), 'utf8');
-  const completed = source.slice(source.indexOf('// Completed maintenance may reopen'), source.indexOf('  evaluation = await evaluate();'));
-  assert.match(completed, /onUnavailable:unavailable/);
+  const opening = source.slice(source.indexOf('  const attempt = async'), source.indexOf('  const closeStorage ='));
+  assert.match(opening, /openWorkerStorage\(\{[^\n]*onUnavailable: unavailable/);
   const holdStart = source.indexOf('  const unavailable =');
-  const holdEnd = source.indexOf('  // Completed maintenance may reopen', holdStart);
+  const holdEnd = source.indexOf('  /** A refusal of openWorkerStorage', holdStart);
   const hold = source.slice(holdStart, holdEnd).replace("reported?: ReturnType<StorageClient['status']>", 'reported').replaceAll(' as const', '');
   const gateStart = source.indexOf('  const requireEffects = async () => {');
   const gateEnd = source.indexOf('  const startupGate =', gateStart);

@@ -1,37 +1,18 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import { join, resolve, sep } from 'node:path';
 import type { StorageClient } from '../../../server/storage/client.js';
-import { importRetention } from '../../../server/sessions/retention/storage-transfer.js';
-import { recordPreparationEvidence } from '../../../server/link/storage-update.js';
-import { retentionBuild } from '../storage/fixtures/retention-build.js';
+import { currentStorage } from '../../helpers/current-storage.js';
 
 const fixtures = new Map<string, { client: StorageClient; held: boolean; stateDir: string }>();
-/** Real shared SDK/thread and released retention commands; missing SDK is a failure. */
+/** The current build's storage (currentStorage), its retention journal begun at `migratedAt`; missing SDK is a failure. */
 export async function prepareActualStorage(root: string, migratedAt = Date.UTC(2026, 8, 1)): Promise<void> {
   const stateDir = join(root, 'actual-retention-storage');
   await mkdir(stateDir, { mode: 0o700 });
-  const a = await retentionBuild('1.120.2', join(root, 'actual-retention-a'));
-  const b = await retentionBuild('1.121.0', join(root, 'actual-retention-b'));
-  const ac = await a.storage.openStorage({ stateDir, bundle: a.bundle() });
-  try {
-    const prepared = await ac.prepare({ allowMigration: true });
-    const preflight = await a.storage.preflightStorage({ stateDir, bundle: a.bundle() });
-    await recordPreparationEvidence(stateDir, { context: ac.context!, preflight, prepared, gate: await ac.gate('core') });
-  } finally { await ac.close(); }
-  await mkdir(join(stateDir, 'retention'), { mode: 0o700 });
-  await writeFile(join(stateDir, 'retention', 'journal.json'), JSON.stringify({ version: 1, migratedAt, entries: [], policies: [] }), { mode: 0o600 });
-  await writeFile(join(stateDir, 'retention-observations.json'), JSON.stringify({ version: 1, entries: [] }), { mode: 0o600 });
-  const evidenceParent = join(stateDir, 'storage-migrations'); await mkdir(evidenceParent, { mode: 0o700 });
-  const client = await b.storage.openStorage({ stateDir, bundle: b.bundle() });
-  try {
-    await client.prepare({ allowMigration: false });
-    const preflight = await b.storage.preflightStorage({ stateDir, bundle: b.bundle() });
-    await importRetention({ storage: client, stateDir, evidenceParent, update: { stateDir, managed: false, build: { version: b.version, manifest: b.manifest, preflight } }, commandId: 'fixture-first-import' });
-    const fixture = { client, held: false, stateDir }, gate = client.gate.bind(client);
-    client.gate = async scope => fixture.held ? { open: false, reasons: ['fixture SQL write held'] } : gate(scope);
-    fixtures.set(resolve(root), fixture);
-  } catch (error) { await client.close(); throw error; }
+  const client = await currentStorage(stateDir, { now: () => migratedAt });
+  const fixture = { client, held: false, stateDir }, gate = client.gate.bind(client);
+  client.gate = async scope => fixture.held ? { open: false, reasons: ['fixture SQL write held'] } : gate(scope);
+  fixtures.set(resolve(root), fixture);
 }
 function fixture(path: string) {
   const absolute = resolve(path);
