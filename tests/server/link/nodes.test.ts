@@ -1,5 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import { get, type IncomingMessage } from 'node:http';
 import { mkdir, mkdtemp, realpath, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';

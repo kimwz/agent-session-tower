@@ -2,6 +2,7 @@ import { externalStorageFixture } from './external-storage-fixture.js';
 import { RunAdmissionUncertain } from '../../../server/runs/run-records.js';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import { until } from '../../helpers/until.ts';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
