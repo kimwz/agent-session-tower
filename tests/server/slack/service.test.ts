@@ -339,7 +339,7 @@ test('the working reaction is a saved setting that marks new mentions at once on
   assert.deepEqual(reactions, ['add:loading:C1:100.001']);
   // The restart comes after the mark's outcome is saved, never while that save is still in flight.
   const savedMark = async () => (JSON.parse(await readWorkflowFixture(storage.workflows)) as { workflows: { workingMarks?: { state: string }[] }[] }).workflows[0]?.workingMarks?.[0]?.state;
-  for (let attempt = 0; await savedMark() !== 'on'; attempt++) { assert.ok(attempt < 1000, 'the mark is saved as on'); await new Promise(resolve => setTimeout(resolve, 5)); }
+  await until(async () => await savedMark() === 'on');
   service.close(); service = create(); await service.start(); await service.startRuntimeEffects();
   assert.equal(service.overview().workingReaction, 'loading', 'kept across restarts');
   await service.mutate('settings', { workingReaction: '' });
@@ -367,7 +367,7 @@ test('account authentication preparation serializes a later owner turn admission
   release(); await update; await turn; assert.equal(admitted, true);
 });
 
-test('runtime polling shows its own errors without secrets, clears them on recovery and holds automation after a failed rules write', async t => {
+test('runtime polling shows its own errors without secrets beside the socket\'s, clears them on recovery and holds automation after a failed rules write', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-poll-'));
   const storage = await externalStorageFixture(t, stateDir);
   let gateFailure: unknown;
@@ -375,9 +375,9 @@ test('runtime polling shows its own errors without secrets, clears them on recov
   const service = new SlackService({ stateDir, repository: storage.workflows,
     effectGate: async () => { if (gateFailure) throw gateFailure; await storage.effectGate(); },
     runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw Error('Must not execute'); } }, refresh: async () => {},
-  }, { client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [], reply: async () => { throw Error('Must not send'); } }),
+  }, { client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [{ user: 'U2', ts: '2', text: 'fixture failure' }], reply: async () => { throw Error('Must not send'); } }),
     socket: options => { socket = options; return { start() {}, stop() {} }; },
-    model: async () => { throw Error('Must not classify'); } });
+    model: async () => { throw Error('fixture classifier failed'); } });
   t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
   t.mock.timers.enable({ apis: ['setInterval'] });
   await service.start(); await service.startRuntimeEffects();
@@ -394,6 +394,19 @@ test('runtime polling shows its own errors without secrets, clears them on recov
   assert.match(service.overview().error!, /EACCES/);
   assert.equal(service.projection()?.error, service.overview().error);
   assert.doesNotMatch(service.overview().error!, /secret|xoxp|https/);
+  await poll();
+  assert.match(service.overview().error!, /EACCES/, 'a persistent failure remains visible');
+  // The socket's state and the poll's are separate: neither clears the other, and both show together.
+  socket.onStatus!('connected');
+  assert.match(service.overview().error!, /EACCES/, 'socket recovery cannot clear a polling error');
+  socket.onStatus!('error', 'socket unavailable');
+  assert.match(service.overview().error!, /socket unavailable/);
+  assert.match(service.overview().error!, /EACCES/);
+  gateFailure = undefined;
+  await poll();
+  assert.equal(service.overview().error, 'socket unavailable', 'once the poll recovers only the socket error remains');
+  socket.onStatus!('connected');
+  assert.equal(service.overview().error, undefined);
   // Each storage refusal has its own wording: a hold says so, an unknown outcome does not, and neither shows the cause's text.
   const { TowerError } = await import('../../../shared/errors.js');
   const { StorageCommandError } = await import('../../../server/storage/contract.js');
@@ -423,6 +436,13 @@ test('runtime polling shows its own errors without secrets, clears them on recov
   service.releaseNewWork();
   await poll();
   assert.equal(service.overview().error, undefined);
+  // A workflow that fails keeps its own error; the successful polls around it do not write over it or show it as theirs.
+  await service.mutate('rules', { rules });
+  await service.automation.ingest({ id: 'EvFailed', teamId: 'T1', channel: 'C1', user: 'U2', ts: '2', threadTs: '2', text: 'fixture failure' });
+  await until(async () => { await poll(); return service.overview().events.some(item => item.status === 'error'); });
+  await poll();
+  assert.equal(service.overview().error, undefined, 'successful polling does not rewrite the actual workflow failure');
+  assert.match(service.overview().events.find(item => item.status === 'error')!.error!, /fixture classifier failed/);
   await service.mutate('disconnect', {});
   assert.equal(service.overview().error, undefined, 'discard diagnostics when the account is removed');
 });
