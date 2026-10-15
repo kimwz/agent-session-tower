@@ -94,13 +94,14 @@ interface Spare { token: Promise<Token | undefined>; at: number }
  * (`asking`, then `verdict`) until they seem finished. `ownRule` is the words and end at which a judgment failed: the
  * page decides until the owner speaks again or the words are written differently, and then asks again.
  * A judgment is about the words as they end (`end`, see `endOf`); `pauseMs` is the longest pause it stands for (a
- * question asked again that failed leaves it standing). `resumes` counts pauses restarted by quiet writing.
+ * question asked again that failed leaves it standing). `asked` is what the latest question was about, answered or not.
+ * `resumes` counts pauses restarted by quiet writing.
  */
 interface Judgment { text: string; end: string; pauseMs: number }
 interface Utterance {
   token?: Token; socket?: WebSocket; bytes: number; sent: number; queue: Array<{ message: string; bytes: number }>; open: boolean; closed: boolean; done: Promise<string>; settle(text: string | Error): void;
   commits: number; final?: boolean; segments: string[]; partial: string; uncommitted: number;
-  heard: string; quietSince?: number; resumedQuietly?: boolean; resumes: number; judgments: number; asking?: Judgment & { at: number }; verdict?: Judgment & { finished: number }; ownRule?: Omit<Judgment, 'pauseMs'>;
+  heard: string; quietSince?: number; resumedQuietly?: boolean; resumes: number; judgments: number; asking?: Judgment & { at: number }; asked?: Omit<Judgment, 'pauseMs'>; verdict?: Judgment & { finished: number }; ownRule?: Omit<Judgment, 'pauseMs'>;
 }
 /**
  * A say being played. A notice's moment to object starts at `armedAt`; with listening on, `heard` counts the
@@ -698,9 +699,9 @@ export class VoiceSession {
     return this.holds(utterance, utterance.verdict, text) ? utterance.verdict : undefined;
   }
 
-  /** Whether the same words were judged at an earlier end: the owner spoke since, and what they said is not written yet. */
+  /** Whether the same words were asked about at an earlier end: the owner spoke since, and what they said is not written yet. */
   private unwritten(utterance: Utterance, text: string): boolean {
-    return [utterance.verdict, utterance.ownRule].some(about => about?.text === text && !this.holds(utterance, about, text));
+    return utterance.asked?.text === text && !this.holds(utterance, utterance.asked, text);
   }
 
   /** A question about other words or an earlier end is not waited for: its answer, and its failure, say nothing now. */
@@ -728,6 +729,7 @@ export class VoiceSession {
   private judge(utterance: Utterance, text: string, pauseMs: number): void {
     const asking = { text, end: this.endOf(utterance), pauseMs, at: Date.now() };
     utterance.asking = asking;
+    utterance.asked = { text, end: asking.end };
     void post<{ finished?: number; unavailable?: true }>('/api/master/voice/finished', this.options.token(), { session: this.session, text, pauseMs: Math.round(pauseMs) })
       .then(answer => {
         if (utterance.asking !== asking) return;

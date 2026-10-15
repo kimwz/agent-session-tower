@@ -720,6 +720,25 @@ test('speaking again before the pause is even reached also starts over: the same
   } finally { page.end(); }
 });
 
+test('speaking again while the first question is still unanswered also waits for the words to be written', async () => {
+  const page = await harness();
+  try {
+    // Judged 0.95 whenever asked, but the first answer is slow; the owner goes on before it comes.
+    const slow: Array<() => void> = [];
+    turnEnd = ({ text }) => text.endsWith('음') ? { finished: 0.05 } : slow.length ? { finished: 0.95 } : new Promise(resolve => { slow.push(() => resolve({ finished: 0.95 })); });
+    const socket = await startSpeaking(page, '로그 확인해 줘');
+    await page.hearSlowly(0.002, 900);
+    assert.equal(slow.length, 1, 'asked on the way to the pause, not answered yet');
+    await page.hearSlowly(0.1, 300);
+    await page.hearSlowly(0.002, 1_500);
+    assert.equal(commits(socket), 0, 'the same words are not asked again before what was said could be written');
+    socket.message({ message_type: 'partial_transcript', text: '로그 확인해 줘 그리고 음' });
+    slow[0]();
+    await page.hearSlowly(0.002, 6_000);
+    assert.deepEqual([commits(socket), requests()], [0, []], 'what was written meanwhile trails off: it waits');
+  } finally { page.end(); }
+});
+
 test('a question about words the owner has since gone on from cannot hand the decision to the page: its failure is dropped', async () => {
   const page = await harness();
   try {
