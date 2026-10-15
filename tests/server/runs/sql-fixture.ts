@@ -91,13 +91,14 @@ export async function importFixtureTriggers(client: StorageClient): Promise<void
   }
 }
 
-/** Consumer fixtures run the production manager against an actual imported SQL authority. */
+/** Consumer fixtures run the production manager against an actual imported SQL authority, with a short Claude finish recheck. */
 export class RunManager extends ProductionRunManager {
   private fixtureClient?: StorageClient;
   private bound: boolean;
   private fixtureClosed = false;
   constructor(private readonly fixtureOptions: ConstructorParameters<typeof ProductionRunManager>[0] & { fixtureInitial?: RunDocuments; fixtureThreadFault?: boolean; fixtureOnUnavailable?: import('../../../server/storage/client.js').StorageClientOptions['onUnavailable'] }) {
-    super(fixtureOptions); this.bound = Boolean(fixtureOptions.storage);
+    // Fake Claude processes write their bookends with the result; they need no 250 ms grace for a later stdout chunk.
+    super({ ...fixtureOptions, claudeFinishRecheckMs: fixtureOptions.claudeFinishRecheckMs ?? 1 }); this.bound = Boolean(fixtureOptions.storage);
   }
   override useStorage(storage: StorageClient): void { super.useStorage(storage); this.bound = true; }
   fixtureIsClosed(): boolean { return this.fixtureClosed; }

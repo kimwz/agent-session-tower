@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { isSavedRun } from '../../../server/runs/saved-state.js';
 import { BackgroundTaskTracker } from '../../../server/runs/background-tasks.js';
+import { CLAUDE_FINISH_RECHECK_MS } from '../../../server/runs/claude-turn.js';
 import { RunManager } from './sql-fixture.js';
 import { WakeupTracker } from '../../../server/runs/wakeup.js';
 import type { Session } from '../../../shared/types.js';
@@ -61,7 +62,7 @@ const takes = (taskId: string) => ({ type: 'user', isReplay: true, parent_tool_u
   message: { role: 'user', content: `<task-notification>\n<task-id>${taskId}</task-id>\n<status>completed</status>\n</task-notification>` } });
 const result = { type: 'result', is_error: false, result: 'follow-up done' };
 
-async function fixture(script: Record<string, unknown>, options: { followUpMs?: number; waitMaxMs?: number; recoveryMs?: number; resolveRunTools?: ConstructorParameters<typeof RunManager>[0]['resolveRunTools'] } = {}) {
+async function fixture(script: Record<string, unknown>, options: { followUpMs?: number; waitMaxMs?: number; recoveryMs?: number; finishRecheckMs?: number; resolveRunTools?: ConstructorParameters<typeof RunManager>[0]['resolveRunTools'] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-background-'));
   const provider = join(directory, 'provider.mjs');
   const log = join(directory, 'provider.log');
@@ -71,7 +72,7 @@ async function fixture(script: Record<string, unknown>, options: { followUpMs?: 
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
   const manager = new RunManager({ getSession: id => id === SESSION ? session : undefined, refreshSessions: async () => {}, stateDir: join(directory, 'state'), pollMs: 20,
     findExecutable: async provider => `/fixture/${provider}`, env: { LOG: log, SCRIPT: JSON.stringify(script) }, resolveRunTools: options.resolveRunTools,
-    backgroundRecoveryMs: options.recoveryMs ?? 100,
+    backgroundRecoveryMs: options.recoveryMs ?? 100, claudeFinishRecheckMs: options.finishRecheckMs,
     backgroundFollowUpMs: options.followUpMs ?? 5000, backgroundWaitMaxMs: options.waitMaxMs ?? 30_000,
     spawnProcess: (_file, args, spawnOptions) => spawn(process.execPath, [provider, ...args], spawnOptions) });
   await manager.start();
@@ -328,10 +329,12 @@ test("a wakeup is dropped only when Claude's own timer delivered it in the kept-
 
 
 test('a task start arriving after the result keeps input open', async t => {
+  // The production grace for bookends in a later stdout chunk (other fixtures shorten it); the start comes 40 ms after the result.
+  assert.equal(CLAUDE_FINISH_RECHECK_MS, 250);
   const { manager, release, cleanup } = await fixture({ first: [says('Waiting for review.')], later: [
     { at: 40, frames: [started('late')] },
     { when: 'review', frames: [notified('late'), takes('late'), says('Review complete.'), result] },
-  ] });
+  ] }, { finishRecheckMs: CLAUDE_FINISH_RECHECK_MS });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Review');
   assert.equal((await until(() => find(manager, run.id).backgroundWait)).tasks, 1);

@@ -93,6 +93,8 @@ interface RunnerOptions {
   backgroundWaitMaxMs?: number;
   /** Delay before resuming a provider that exited with unfinished background work. */
   backgroundRecoveryMs?: number;
+  /** How long a Claude turn that has answered waits for task bookends in later output before its input is closed (250 ms). */
+  claudeFinishRecheckMs?: number;
   /** Queued runs wait until `markReady()`: a worker first sets up everything a launch asks (tools, gates, limits). */
   holdUntilReady?: boolean;
 }

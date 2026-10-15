@@ -31,6 +31,7 @@ export interface TurnOptions {
   openCodexStdio?: (options: CodexStdioOptions) => Promise<CodexStdioRun>;
   backgroundFollowUpMs?: number;
   backgroundWaitMaxMs?: number;
+  claudeFinishRecheckMs?: number;
 }
 
 /**
