@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { constants, copyFile, mkdir, readdir, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { TestContext } from 'node:test';
 import type { StorageBuildContext } from '../../../../server/storage/bundle.js';
 import type { KnownStorageEvidence, RecoveryBarrier } from '../../../../server/storage/recovery.js';
@@ -35,6 +36,20 @@ export async function historyWithSidecars(t: TestContext): Promise<History> {
   const history = await historyAfterSnapshot(t);
   await crashWith(databasePath(history.dir), "INSERT INTO fixture_items (key, value) VALUES ('crash', 'x')");
   return history;
+}
+
+/** A copy of a closed history in a new state directory: the same database, sidecars and snapshot, at new inodes. */
+export async function cloneHistory(t: TestContext, history: History): Promise<History> {
+  const dir = await stateDir(t);
+  const copy = async (from: string, to: string): Promise<void> => {
+    await Promise.all((await readdir(from, { withFileTypes: true })).map(async entry => {
+      if (!entry.isDirectory()) return copyFile(join(from, entry.name), join(to, entry.name), constants.COPYFILE_FICLONE);
+      await mkdir(join(to, entry.name), { mode: 0o700 });
+      await copy(join(from, entry.name), join(to, entry.name));
+    }));
+  };
+  await copy(history.dir, dir);
+  return { ...history, dir };
 }
 
 /** The history with sidecars, and its barrier recorded: the barrier records all three files. */
