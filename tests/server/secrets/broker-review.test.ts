@@ -1,5 +1,6 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
+import '../../helpers/skip-fsync.js';
 import { access, appendFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { symlinkSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
