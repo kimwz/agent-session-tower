@@ -7,6 +7,7 @@ import { MasterRoom } from '../../server/master/room.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
 import { MasterVoice } from '../../server/master/voice.js';
 import { writePrivateJson } from '../../server/stores/private-json.js';
+import '../helpers/skip-fsync.js';
 import type { MasterEntry, MasterEntryData, MasterSpeak, MasterStreamEvent } from '../../shared/master.js';
 
 /**
