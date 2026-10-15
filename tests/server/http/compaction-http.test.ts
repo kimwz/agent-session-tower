@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../../helpers/skip-fsync.js';
-import '../../helpers/fast-scrypt.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +9,8 @@ import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import { createMonitorServer, type Backend } from '../../../server/http/server.js';
 import type { Snapshot } from '../../../shared/types.js';
 import { TowerError } from '../../../shared/errors.js';
+
+fastScrypt();
 
 async function fixture(t: test.TestContext, compaction?: Backend['compaction']) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-compaction-http-'));

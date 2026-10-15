@@ -16,8 +16,10 @@ import type { Snapshot } from '../../../shared/types.js';
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import { FixtureRuns, vaultTemplate } from '../../helpers/secrets.js';
 import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 
 fastVaultKdf();
+fastScrypt();
 
 /** The value routes over HTTP, from a remote HTTPS page and a loopback page, in front of a real secret runtime on a fixture vault. */
 const RECOVERY = 'fixture-value-http-recovery';

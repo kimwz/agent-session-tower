@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../../helpers/skip-fsync.js';
-import '../../helpers/fast-scrypt.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import http2 from 'node:http2';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -16,6 +16,8 @@ import { openTerminalSocket, type TerminalConnectionHandlers } from '../../../cl
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import { until } from '../../helpers/until.ts';
 import type { Snapshot } from '../../../shared/types.js';
+
+fastScrypt();
 
 class Pty implements WorkspacePty {
   written: string[] = [];

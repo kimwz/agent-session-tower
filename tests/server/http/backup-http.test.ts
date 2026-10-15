@@ -8,7 +8,7 @@ import { DecisionService } from '../../../server/decisions/service.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../../helpers/skip-fsync.js';
-import '../../helpers/fast-scrypt.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,6 +17,8 @@ import { createMonitorServer, type HttpOptions } from '../../../server/http/serv
 import { BackupError } from '../../../server/backup/crypto.js';
 import type { BackupOverview } from '../../../shared/backup.js';
 import type { Snapshot } from '../../../shared/types.js';
+
+fastScrypt();
 
 const snapshot: Snapshot = { sessions: [], runs: [], providers: [], scanning: false, hostname: 'here', version: 't', updatedAt: '' };
 const overview = { settings: { enabled: false, remote: { endpoint: '', bucket: '', prefix: '', region: 'auto', accessKeyId: '', secretSet: false }, passphraseSet: false, intervalHours: 24, keep: 14 }, status: { running: false } } satisfies BackupOverview;

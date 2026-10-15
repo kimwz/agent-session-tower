@@ -16,6 +16,10 @@ import { DecisionService } from '../../../server/decisions/service.js';
 import { fakeBucket } from '../../helpers/s3.js';
 
 import { applyWorkerFiles as applyOwnedWorkerFiles } from '../../../server/backup/payload.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
+
+fastScrypt();
+
 const takeWorkerRestore = async (stateDir: string) => takeOwnedWorkerRestore(stateDir, (await workerSettingsFixture(stateDir)).owner);
 const applyWorkerFiles = async (stateDir: string, files: Parameters<typeof applyOwnedWorkerFiles>[1]) => applyOwnedWorkerFiles(stateDir, files, (await workerSettingsFixture(stateDir)).owner);
 const PASS = 'correct horse battery';

@@ -2,7 +2,7 @@ import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../../helpers/skip-fsync.js';
-import '../../helpers/fast-scrypt.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +11,8 @@ import { blockRename, temporaryFiles } from '../../helpers/private-writes.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import type { Session } from '../../../shared/types.js';
 import { statusOf } from '../../../shared/errors.js';
+
+fastScrypt();
 
 test('project labels and pins survive restart privately without changing cwd identity or native history', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'monitor-groups-'));

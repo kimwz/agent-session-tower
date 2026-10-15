@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../../helpers/skip-fsync.js';
-import '../../helpers/fast-scrypt.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { request, type IncomingHttpHeaders, type IncomingMessage } from 'node:http';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -10,6 +10,8 @@ import { createMonitorServer } from '../../../server/http/server.js';
 import { AuthStore } from '../../../server/auth/store.js';
 import { requestIdentity, sessionCookie } from '../../../server/http/auth.js';
 import type { Session, Run, Snapshot } from '../../../shared/types.js';
+
+fastScrypt();
 
 function identity(address: string, host: string, headers: Record<string, string> = {}) {
   return requestIdentity({ socket: { remoteAddress: address }, headers: { host, ...headers } } as IncomingMessage);

@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../../helpers/skip-fsync.js';
-import '../../helpers/fast-scrypt.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import type { NotificationOverview } from '../../../shared/notifications.js';
+
+fastScrypt();
 
 test('the app shell installs without signing in, while notification settings need a signed-in page and its token', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-notifications-http-'));

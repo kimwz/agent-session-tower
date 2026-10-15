@@ -15,6 +15,9 @@ import { CALLER_CAPABILITY_HEADER } from '../../../server/runs/session-mcp.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import type { RequestContext } from '../../../server/http/request-context.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
+
+fastScrypt();
 
 test('only a request that proves it is the master is marked as sent by the master', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-master-sender-http-'));

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../../helpers/skip-fsync.js';
-import '../../helpers/fast-scrypt.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +10,8 @@ import { createMonitorServer, type HttpOptions } from '../../../server/http/serv
 import { parseAutoPrompt, parseAutoPromptSuggestion } from '../../../server/http/requests.js';
 import type { AutoPromptSuggestionRequest, DecisionOverview } from '../../../shared/decisions.js';
 import type { Snapshot } from '../../../shared/types.js';
+
+fastScrypt();
 
 const requestId = '95257141-1ee4-4438-8374-c5507b156cd7';
 const prompt = 'Add a dark mode toggle to the settings page';

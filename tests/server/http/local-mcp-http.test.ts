@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../../helpers/skip-fsync.js';
-import '../../helpers/fast-scrypt.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -10,6 +10,8 @@ import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { ownerMcpOverHttp } from '../../../server/owner-mcp/tools.js';
 import type { Snapshot } from '../../../shared/types.js';
+
+fastScrypt();
 
 const snapshot: Snapshot = { sessions: [], runs: [], providers: [], scanning: false, hostname: 'here', version: 't', updatedAt: '' };
 

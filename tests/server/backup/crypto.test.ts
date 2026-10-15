@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { decryptBackup, encryptBackup, readBackupHeader } from '../../../server/backup/crypto.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
+
+fastScrypt();
 
 const meta = { towerVersion: '1.91.0', from: 'studio', createdAt: '2026-09-30T00:00:00.000Z' };
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../../helpers/skip-fsync.js';
-import '../../helpers/fast-scrypt.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +9,8 @@ import { chatImageReference, MAX_CHAT_IMAGE_BYTES, readChatImage, withChatImages
 import { createMonitorServer } from '../../../server/http/server.js';
 import type { Session, SessionDetail } from '../../../shared/types.js';
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
+
+fastScrypt();
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
 async function fixture(t: test.TestContext) {

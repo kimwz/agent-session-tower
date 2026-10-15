@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../../helpers/skip-fsync.js';
-import '../../helpers/fast-scrypt.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +11,8 @@ import { createMonitorServer } from '../../../server/http/server.js';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
 import { CALLER_CAPABILITY_HEADER } from '../../../server/runs/session-mcp.js';
 import type { RequestContext } from '../../../server/http/request-context.js';
+
+fastScrypt();
 
 /**
  * A worker of 1.129–1.132 still admits the owner into a session they connected to the secret broker (#116) only with

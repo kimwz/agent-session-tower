@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes, scrypt as scryptCallback, type ScryptOptions } from 'node:crypto';
+import { createCipheriv, createDecipheriv, randomBytes, scrypt as scryptCallback, type BinaryLike, type ScryptOptions } from 'node:crypto';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { BACKUP_FORMAT, MAX_BACKUP_FILE_BYTES, MIN_BACKUP_PASSPHRASE } from '../../shared/backup.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
@@ -30,10 +30,21 @@ export function checkPassphrase(value: unknown): string {
   return value;
 }
 
+/** The node:crypto scrypt call, in the one shape deriveKey uses. */
+export type Scrypt = (password: BinaryLike, salt: BinaryLike, keylen: number, options: ScryptOptions, callback: (error: Error | null, key: Buffer) => void) => void;
+/** The scrypt call behind deriveKey; only tests/helpers/fast-scrypt.ts replaces it (a gate test keeps it so). */
+let scryptCall: Scrypt = scryptCallback;
+/** Test-only: swaps the scrypt call so tests skip the production-strength hash; returns the restore. */
+export function replaceBackupScryptForTests(fn: Scrypt): () => void {
+  const previous = scryptCall; scryptCall = fn; return () => { scryptCall = previous; };
+}
+/** Test-only: whether the scrypt call is node:crypto's. */
+export const usesRealBackupScrypt = () => scryptCall === scryptCallback;
+
 function deriveKey(passphrase: string, salt: Buffer, params: { N: number; r: number; p: number }): Promise<Buffer> {
   const options: ScryptOptions = { ...params, maxmem: KDF_MEMORY };
   return new Promise((resolve, reject) => {
-    try { scryptCallback(passphrase, salt, 32, options, (error, key) => error ? reject(new BackupError('백업 파일이 손상되었습니다.')) : resolve(key)); }
+    try { scryptCall(passphrase, salt, 32, options, (error, key) => error ? reject(new BackupError('백업 파일이 손상되었습니다.')) : resolve(key)); }
     catch { reject(new BackupError('백업 파일이 손상되었습니다.')); }
   });
 }

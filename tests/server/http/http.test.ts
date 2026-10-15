@@ -2,7 +2,7 @@ import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../../helpers/skip-fsync.js';
-import '../../helpers/fast-scrypt.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { request } from 'node:http';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -11,6 +11,8 @@ import { createMonitorServer } from '../../../server/http/server.js';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { networkAccess } from '../../../server/http/remote-access.js';
 import type { Session, Run, RunApprovalResponse, Snapshot } from '../../../shared/types.js';
+
+fastScrypt();
 
 const session: Session = {
   id: 'codex:example', nativeId: 'example', provider: 'codex', title: 'A real session', cwd: '/tmp/project', project: 'project',

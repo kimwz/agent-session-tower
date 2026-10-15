@@ -17,8 +17,10 @@ import { ownerSecretControl } from '../../../server/link/secret-routes.js';
 import { CALLER_CAPABILITY_HEADER } from '../../../server/runs/session-mcp.js';
 import { FixtureRuns, editPayload, legacyRecord, legacyRule, secretService, stored, storedTask, vaultTemplate } from '../../helpers/secrets.js';
 import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 
 fastVaultKdf();
+fastScrypt();
 const VISIBLE = 'VISIBLE_INTEGRATION_CANARY_732';
 const HIDDEN = 'HIDDEN_INTEGRATION_CANARY_928';
 const PASSWORD = 'fixture-integration-vault-password';

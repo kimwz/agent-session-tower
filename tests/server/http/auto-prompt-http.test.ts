@@ -2,13 +2,15 @@ import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../../helpers/skip-fsync.js';
-import '../../helpers/fast-scrypt.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { MAX_ATTACHMENTS } from '../../../shared/attachments.js';
 import type { AutoPromptJob, AutoPromptRequest } from '../../../shared/types.js';
+
+fastScrypt();
 
 const id = '95257141-1ee4-4438-8374-c5507b156cd7';
 const now = new Date().toISOString();

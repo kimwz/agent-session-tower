@@ -2,13 +2,15 @@ import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../../helpers/skip-fsync.js';
-import '../../helpers/fast-scrypt.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { byteRange } from '../../../server/http/sinks.js';
 import type { Snapshot } from '../../../shared/types.js';
+
+fastScrypt();
 
 test('a player’s byte range is read as one inclusive span, the whole file, or one past the end', () => {
   assert.equal(byteRange(undefined, 10), undefined);

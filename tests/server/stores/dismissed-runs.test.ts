@@ -2,7 +2,7 @@ import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import '../../helpers/skip-fsync.js';
-import '../../helpers/fast-scrypt.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import { mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +14,8 @@ import { RunManager, fixtureDocuments } from '../runs/sql-fixture.js';
 import type { Run, Session, Snapshot } from '../../../shared/types.js';
 import { computeConversationRevision } from '../../../shared/conversation-revision.js';
 import { statusOf } from '../../../shared/errors.js';
+
+fastScrypt();
 
 const session: Session = {
   id: 'codex:example', nativeId: 'example', provider: 'codex', title: 'Native conversation', cwd: '/tmp/project', project: 'project',

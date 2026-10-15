@@ -6,13 +6,30 @@ import ts from 'typescript';
 import { parse, root, sourceFiles } from '../helpers/source-scan.js';
 
 /**
- * The vault tests' fast password hash never reaches anything real: only server/secrets/crypto.ts (which defines it) and
- * tests/helpers/fast-kdf.ts name the Argon2id replacement, and only test files import that helper, never server code,
- * shared helpers or the fixture generators whose vaults must open in production.
+ * The tests' fast password hashes never reach anything real: only the module that owns a hash names its test-only
+ * replacement, next to the one helper that installs it (server/secrets/crypto.ts and tests/helpers/fast-kdf.ts for the
+ * vault's Argon2id; server/auth/store.ts, server/backup/crypto.ts and tests/helpers/fast-scrypt.ts for the sign-in and
+ * backup scrypt), and only test files import those helpers, never server code, shared helpers or the fixture
+ * generators whose vaults and backups must open in production.
+ *
+ * The same goes for tests/helpers/skip-fsync.ts, which turns file flushes into no-ops for one test process: test files
+ * only, and never a test of what a disk keeps (the durability tests below, or any test that watches flushes itself).
  */
-const HOOK = 'replaceArgon2ForTests';
-const HOOK_FILES = ['server/secrets/crypto.ts', 'tests/helpers/fast-kdf.ts'];
-const HELPER = 'tests/helpers/fast-kdf';
+const HOOKS: Record<string, string[]> = {
+  'replaceArgon2ForTests': ['server/secrets/crypto.ts', 'tests/helpers/fast-kdf.ts'],
+  'replaceAuthScryptForTests': ['server/auth/store.ts', 'tests/helpers/fast-scrypt.ts'],
+  'replaceBackupScryptForTests': ['server/backup/crypto.ts', 'tests/helpers/fast-scrypt.ts'],
+};
+const HELPERS = ['tests/helpers/fast-kdf', 'tests/helpers/fast-scrypt'];
+const SKIP_FSYNC = 'tests/helpers/skip-fsync';
+/** Tests of what survives a crash or a failed flush; they need real flushes. */
+const DURABILITY = [
+  'tests/server/storage/durability.test.ts', 'tests/server/storage/recovery.test.ts', 'tests/server/storage/owner.test.ts',
+  'tests/server/workspace-files.test.ts', 'tests/server/stores/private-json.test.ts', 'tests/server/permissions/storage-pending.test.ts',
+  'tests/server/sessions/retention-storage.test.ts', 'tests/server/link/storage-offline-backup.test.ts', 'tests/server/runs/durable-runner.test.ts',
+];
+/** Names through which a test watches or fails flushes. */
+const FLUSHES = new Set(['sync', 'datasync', 'syncDirectory', 'fsync', 'fdatasync', 'fsyncSync', 'fdatasyncSync']);
 
 /** Identifiers named `name` in code (not strings or comments). */
 function names(path: string, text: string, name: string): number {
@@ -36,16 +53,44 @@ function imports(path: string, text: string): string[] {
   return found;
 }
 
-test('only crypto.ts and the fast-kdf helper name the Argon2id replacement, and only test files import that helper', async () => {
+/** Flush calls a test makes, replaces or mocks: `x.sync()`, `x.sync = …`, `mock.method(x, 'sync', …)`, `{ fsync }` imports. */
+function flushNames(path: string, text: string): string[] {
+  const found = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isPropertyAccessExpression(node) && FLUSHES.has(node.name.text)
+      && ((ts.isCallExpression(node.parent) && node.parent.expression === node) || (ts.isBinaryExpression(node.parent) && node.parent.left === node && node.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken))) found.add(node.name.text);
+    if (ts.isStringLiteral(node) && FLUSHES.has(node.text) && ts.isCallExpression(node.parent)) found.add(node.text);
+    if (ts.isImportSpecifier(node) && FLUSHES.has(node.name.text)) found.add(node.name.text);
+    ts.forEachChild(node, visit);
+  };
+  visit(parse(path, text));
+  return [...found];
+}
+
+test('only the owning module and its fast helper name a password hash replacement, and only test files import those helpers', async () => {
   const files = await sourceFiles(['server', 'shared', 'client/src', 'scripts', 'tests']);
-  assert.ok(files.has('server/secrets/crypto.ts') && files.has(`${HELPER}.ts`));
-  const naming = [...files].filter(([path, text]) => text.includes(HOOK) && names(path, text, HOOK) > 0).map(([path]) => path).sort();
-  assert.deepEqual(naming, [...HOOK_FILES].sort());
-  const importing = [...files].filter(([path, text]) => text.includes('fast-kdf') && imports(path, text).includes(HELPER)).map(([path]) => path);
-  assert.ok(importing.length > 0);
-  assert.deepEqual(importing.filter(path => !path.endsWith('.test.ts')), [], 'fast-kdf is imported by test files only');
+  for (const [hook, owners] of Object.entries(HOOKS)) {
+    for (const owner of owners) assert.ok(files.has(owner), owner);
+    const naming = [...files].filter(([path, text]) => text.includes(hook) && names(path, text, hook) > 0).map(([path]) => path).sort();
+    assert.deepEqual(naming, [...owners].sort(), hook);
+  }
+  for (const helper of HELPERS) {
+    const importing = [...files].filter(([path, text]) => text.includes(posix.basename(helper)) && imports(path, text).includes(helper)).map(([path]) => path);
+    assert.ok(importing.length > 0, helper);
+    assert.deepEqual(importing.filter(path => !path.endsWith('.test.ts')), [], `${helper} is imported by test files only`);
+  }
   for (const name of (await readdir(join(root, 'scripts'))).filter(name => /\.[cm]?js$/.test(name))) {
     const text = await readFile(join(root, 'scripts', name), 'utf8');
-    assert.ok(!text.includes(HOOK) && !text.includes('fast-kdf'), `scripts/${name}`);
+    for (const word of [...Object.keys(HOOKS), ...HELPERS.map(helper => posix.basename(helper))]) assert.ok(!text.includes(word), `scripts/${name}: ${word}`);
   }
+});
+
+test('skip-fsync is imported by test files only, never by a durability test or a test that watches flushes', async () => {
+  const files = await sourceFiles(['server', 'shared', 'client/src', 'scripts', 'tests']);
+  for (const path of DURABILITY) assert.ok(files.has(path), path);
+  const importing = [...files].filter(([path, text]) => text.includes('skip-fsync') && imports(path, text).includes(SKIP_FSYNC)).map(([path]) => path);
+  assert.ok(importing.length > 0);
+  assert.deepEqual(importing.filter(path => !path.endsWith('.test.ts')), [], 'skip-fsync is imported by test files only');
+  assert.deepEqual(importing.filter(path => DURABILITY.includes(path)), [], 'durability tests keep real flushes');
+  assert.deepEqual(importing.map(path => [path, flushNames(path, files.get(path)!)]).filter(([, found]) => found.length > 0), [], 'a test that watches flushes keeps real ones');
 });

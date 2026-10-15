@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import '../../helpers/fast-scrypt.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 import '../../helpers/skip-fsync.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -10,6 +10,8 @@ import { AttachmentUploads } from '../../../server/stores/attachment-uploads.js'
 import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import type { Session, Run, AutoPromptInput } from '../../../shared/types.js';
+
+fastScrypt();
 
 const session: Session = { id: 'codex:fixture', nativeId: 'fixture', provider: 'codex', title: 'Fixture', cwd: '/tmp/fixture', project: 'fixture', status: 'idle', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
 test('original binary uploads send references, stream downloads, and preserve auth and other body limits', async t => {

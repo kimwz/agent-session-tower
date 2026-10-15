@@ -17,8 +17,10 @@ import { collectEncryptedVault, importPendingSecret, listPendingSecretImports } 
 import { decryptBackup, encryptBackup } from '../../../server/backup/crypto.js';
 import { takeWorkerRestore as takeOwnedWorkerRestore, readReport } from '../../../server/backup/restore-files.js';
 import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 
 fastVaultKdf();
+fastScrypt();
 const collectWorkerFiles = async (stateDir: string) => collectOwnedWorkerFiles(stateDir, (await workerSettingsFixture(stateDir)).collect);
 const takeWorkerRestore = async (stateDir: string) => takeOwnedWorkerRestore(stateDir, (await workerSettingsFixture(stateDir)).owner);
 const VAULT_PASSWORD = 'fixture-vault-password';

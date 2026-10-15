@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import '../helpers/fast-scrypt.js';
+import { fastScrypt } from '../helpers/fast-scrypt.js';
 import { createServer, type Server } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -11,6 +11,8 @@ import { masterRoutes } from '../../server/master/routes.js';
 import type { MasterClient } from '../../server/master/client.js';
 import { createRemoteAuthFixture } from '../helpers/auth.js';
 import type { Snapshot } from '../../shared/types.js';
+
+fastScrypt();
 
 const listen = (server: Server, port = 0) => new Promise<number>(resolve => server.listen(port, '127.0.0.1', () => resolve((server.address() as { port: number }).port)));
 const stop = (server: Server) => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); });

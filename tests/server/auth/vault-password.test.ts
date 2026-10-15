@@ -12,8 +12,10 @@ import { VIEW_IDLE_MS, ViewGrants } from '../../../server/secrets/view-grants.js
 import type { SecretSettingsView, SecretValue } from '../../../shared/secrets.js';
 import { FixtureRuns, secretService, vaultTemplate } from '../../helpers/secrets.js';
 import { fastVaultKdf } from '../../helpers/fast-kdf.js';
+import { fastScrypt } from '../../helpers/fast-scrypt.js';
 
 fastVaultKdf();
+fastScrypt();
 
 /** The web's coordinator on fixture state: a real AuthStore and a real secret runtime behind the owner control, with injectable failures. */
 const USER = 'monitor';
