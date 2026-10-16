@@ -54,7 +54,7 @@ export const TodoOpSchema = z.discriminatedUnion('op', [
     deadlineDate: taskFields.deadlineDate.optional(), labelIds: taskFields.labelIds.optional() }).strict(),
   z.object({ op: z.literal('task.update'), id, patch: z.object(taskFields).partial().strict().refine(patch => Object.keys(patch).length > 0, 'Nothing to change.') }).strict(),
   z.object({ op: z.literal('task.move'), id, projectId: id.optional(), sectionId: id.nullable().optional(), parentId: id.nullable().optional(), afterId }).strict(),
-  /** `occurrence` is the date being done (the task's current date, or null): a repeating occurrence is done once. `today` is the page's local date. */
+  /** `occurrence` is the date the page saw (null for a one-off task): a repeating task whose date moved since is refused, so two pages never complete one occurrence twice. `today` is the page's local date. */
   z.object({ op: z.literal('task.complete'), id, completionId: id, occurrence: date.nullable(), today: date }).strict(),
   z.object({ op: z.literal('task.uncomplete'), id, completionId: id }).strict(),
   z.object({ op: z.literal('task.delete'), id }).strict(),
