@@ -51,6 +51,7 @@ export const EDGE: ReadonlyMap<string, string> = new Map([
   ['server/http/requests.ts', 'web server: reads requests, answers errors with their status'], ['server/http/server.ts', 'web server'],
   ['server/http/sinks.ts', 'web server: the heads of audio and event streams'],
   ['server/http/terminal-socket.ts', "web server: terminal sockets, and their relay to a joined computer's routes over the link"],
+  ['server/http/todo-routes.ts', 'web server: the todo routes'],
   ['server/link/controller.ts', 'link transport'], ['server/link/managed-settings.ts', 'link client and routes of the managed settings a followed Tower keeps'], ['server/link/mirror.ts', 'link transport'], ['server/link/node.ts', "a node's own listener"],
   ['server/link/nodes.ts', 'link transport'], ['server/link/proxy.ts', 'link proxy'], ['server/link/routes.ts', 'link routes'],
   ['server/link/secret-relay.ts', 'link client of the secret relay'], ['server/link/secret-routes.ts', 'link routes of the secret relay'],
