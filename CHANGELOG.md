@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.138.2] - 2026-10-16
+
+- **Codex 턴에서 Tower 도구 호출이 승인 검토에 막히지 않습니다.** 소유자 지시에 따른 변경입니다.
+  - 대상 도구: 세션 조회(`sessions_list`·`sessions_read`·`sessions_search`), 권한 도구(`permissions_request`·`permissions_list`·`permissions_run`·`permissions_runResult`), 시크릿 이름 목록(`secrets_list`)
+  - 적용 방법: Tower가 Codex에 넘기는 `tower`·`tower_sessions`·`tower_secrets` 서버 정의에 Codex 공식 설정 `tools.<도구>.approval_mode = "approve"`를 붙입니다.
+  - 그대로인 것: 시크릿 사용(`secrets_run` 등), 트리거·Auto Prompt 쓰기, 다른 도구와 셸은 지금처럼 검토합니다. 요청된 규칙·실행은 Tower 권한 검토가, 시크릿 사용은 브로커가 계속 판단합니다.
+  - Claude 턴은 코드가 아니라 소유자가 저장한 전역 규칙으로 같은 도구를 받습니다.
+
 ## [1.138.1] - 2026-10-15
 
 - 동작 변경 없음. 버전만 올려 릴리스 경로 소요 시간을 다시 잽니다.
