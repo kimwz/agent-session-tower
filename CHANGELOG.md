@@ -4,6 +4,19 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.139.0] - 2026-10-17
+
+- **할 일(Todo) 저장소와 API를 추가했습니다.** Todo 화면의 1단계이며, 아직 화면은 없습니다.
+  - 저장 위치: 상태 폴더의 `todos.sqlite`입니다. 웹 프로세스가 상태 폴더 잠금을 잡은 채로 엽니다. 실행 worker의 `state.sqlite`와는 아무것도 공유하지 않습니다.
+  - 이 파일에 문제가 생겨도 할 일만 쓸 수 없게 되고, Tower의 나머지 기능은 그대로 동작합니다. 다른 프로그램이 파일을 잡고 있으면 기다리지 않고 바로 알립니다.
+  - 데이터: 프로젝트(3단계), 섹션, 라벨, 작업, 댓글을 저장합니다. 작업에는 날짜·시간, 반복(`every`/`every!`), 마감일, 소요시간, 우선순위를 둘 수 있고, 하위작업은 4단계까지 만들 수 있습니다.
+  - 후속작업: 작업 사이에 "다음" 연결을 둡니다. 순서만 나타내고, 어느 쪽 작업의 상태도 막지 않습니다.
+  - 변경 방식: `POST /api/todos/ops` 한 요청에 담긴 변경은 모두 적용되거나 하나도 적용되지 않습니다. 그래서 "완료 및 후속작업"도 요청 하나로 처리됩니다. 같은 요청을 다시 보내면 처음과 같은 답을 받습니다.
+  - 조회: 전체 목록(`GET /api/todos`), 작업 상세, 완료 목록, 검색 경로가 있습니다.
+  - 요청 한도: 할 일 변경은 페이지의 일반 변경 한도(분당 30회)와 따로 분당 240회입니다.
+  - 지운 항목: 30일 동안 되살릴 수 있습니다.
+  - 다른 컴퓨터: 할 일은 이 컴퓨터에만 있습니다. 원격으로 연결된 컴퓨터는 할 일 경로와 변경 번호를 받지 않습니다.
+
 ## [1.138.2] - 2026-10-16
 
 - **Codex 턴에서 Tower 도구 호출이 승인 검토에 막히지 않습니다.** 소유자 지시에 따른 변경입니다.

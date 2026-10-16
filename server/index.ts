@@ -19,6 +19,7 @@ import { DismissedRunStore } from './stores/dismissed-runs.js';
 import { ClosedSessionStore } from './stores/closed-sessions.js';
 import { worktreeCleanupFor, worktreeCleanupVisible } from './worktrees/janitor.js';
 import { ProjectGroupStore } from './stores/project-groups.js';
+import { TodoStore } from './todo/store.js';
 import { DurableRunManager } from './runs/durable-runner.js';
 import { runRunnerWorker } from './runs/worker.js';
 import { runTerminalHost } from './terminals/host.js';
@@ -247,6 +248,8 @@ async function main() {
   const closedSessions = new ClosedSessionStore(stateDir);
   const groups = new ProjectGroupStore(stateDir);
   const exclusions = new RemoteExclusionStore(stateDir);
+  // Opened under the state lock taken above, and closed before it is released.
+  const todos = new TodoStore(stateDir);
   // Only the background service's own install is replaced by an update; an update left unfinished is settled first.
   const updates = new Updates({ stateDir, version: APP_VERSION, port, managed: await managedByService(stateDir, process.argv[1], Boolean(serviceLog)) });
   // Started as the background service, this version writes the service the way it runs it best, for its next start;
@@ -273,6 +276,10 @@ async function main() {
     refusal => console.error(`This build's storage runtime is unsupported (${refusal.code}): ${refusal.message}`));
   // Load persisted history before shutdown or an HTTP request can touch the runner.
   try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await exclusions.start(); await runs.start(); } catch (error) { auth.close(); await releaseLock(); throw error; }
+  todos.start();
+  todos.purge();
+  const todoPurge = setInterval(() => todos.purge(), 6 * 60 * 60 * 1000);
+  todoPurge.unref();
   const attachmentStores = { chat: new AttachmentStore(stateDir), auto: new AttachmentStore(join(stateDir, 'auto-prompt-staging')) };
   const attachmentUploads = new AttachmentUploads(stateDir, { ...attachmentStores,
     publishedGC: false,
@@ -284,6 +291,8 @@ async function main() {
     await attachmentUploads.start();
   } catch (error) {
     attachmentUploads.close();
+    clearInterval(todoPurge);
+    todos.close();
     auth.close();
     try { await runs.close(); } finally { await releaseLock(); }
     throw error;
@@ -367,6 +376,7 @@ async function main() {
       ...(runs.storageStatus() ? { storage: runs.storageStatus() } : {}),
       sessions: sessionViews(all, managed).map(session => outcomes.apply(session)),
       groups: withoutMasterFolder(groups.list(), stateDir),
+      todoRevision: todos.revision(),
       repositories: repositories.list(),
       providers: capabilities.list().map(provider => ({ ...provider, sessionCount: all.filter(session => session.provider === provider.provider && !session.master).length })),
       runs: dismissedRuns.visible(managed), autoPrompts: runs.autoPromptList(), scanning: history.indexing, hostname: hostname(), version: APP_VERSION,
@@ -504,6 +514,13 @@ async function main() {
       importPlan: bundle => runs.skills('skillsImportPlan', [bundle]) as Promise<SkillImportPlan>,
     },
     setGroup: async patch => { const group = await groups.set(patch); changed(); return group; },
+    todos: {
+      overview: () => todos.overview(),
+      detail: id => todos.detail(id),
+      completed: input => todos.completed(input),
+      search: (query, input) => todos.search(query, input),
+      apply: request => { const changes = todos.apply(request); changed(); return changes; },
+    },
     enqueue: async (id, prompt, attachments, context) => {
       const cwd = runs.getSession(id)?.cwd;
       if (cwd) await repositories.prepareRun(cwd);
@@ -733,6 +750,8 @@ async function main() {
   }).catch(async error => {
     dispose();
     auth.close();
+    clearInterval(todoPurge);
+    todos.close();
     try { await finishCleanup([auth.flush(), titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), runs.close()]); } finally { await releaseLock(); }
     if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') throw new Error(`Port ${port} is already in use. Open http://localhost:${port} if Agent Session Tower is already running, or choose --port 8001.`);
     throw error;
@@ -810,6 +829,8 @@ async function main() {
     attachmentUploads.close();
     dispose();
     server.closeAllConnections();
+    clearInterval(todoPurge);
+    todos.close();
     server.close();
     try { await finishCleanup([auth.flush(), stoppingLinks, stoppingPublic, stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), remoteChanges.flush(), backups.flush(), notifications.close(), outcomes.close(), decisions.close(), runs.close()]); } finally { await releaseLock(); }
   };

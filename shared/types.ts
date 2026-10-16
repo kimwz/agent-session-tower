@@ -470,6 +470,8 @@ export interface Snapshot {
   /** Tower's other processes on this computer, as last asked: null when one is not running. */
   componentVersions?: ComponentVersions;
   groups?: ProjectGroup[];
+  /** Changes with every change to the owner's todos; the Todo page reloads them when it moves. */
+  todoRevision?: number;
   autoPrompts?: AutoPromptJob[];
   /** Absent while the execution worker predates triggers. */
   triggers?: TriggerOverview;

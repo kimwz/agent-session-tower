@@ -19,6 +19,7 @@ import { handleLinkRoute, type LinkRoutes } from '../link/routes.js';
 import type { RemoteNodes } from '../link/nodes.js';
 import { proxyToNode } from '../link/proxy.js';
 import { normalizeProjectGroupPatch } from '../stores/project-groups.js';
+import { todoRoute, TODO_OPS_PATH, type TodoBackend } from './todo-routes.js';
 import type { Attachment, AutoPromptJob, AutoPromptInput, NewSessionInput, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionCompaction, SessionDetail, Run, RunApprovalResponse } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { acceptedEncoding, compressedEventStream, isBuildAsset, sendBody, StaticCompression } from './compression.js';
@@ -80,6 +81,8 @@ export interface Backend {
   /** Marks the conversation's current last turn, judged as needing the owner or broken off, as done. */
   acknowledgeOutcome?(id: string): Promise<Session | undefined>;
   setGroup?(patch: ProjectGroupPatch): Promise<ProjectGroup>;
+  /** The owner's todo list, kept on this computer only. */
+  todos?: TodoBackend;
   repositoryAction?(cwd: string, action: RepositoryAction): Promise<RepositoryStatus>;
   createSession?(input: NewSessionInput, context?: RequestContext): Promise<{ session: Session; run: Run }>;
   /** The conversation compacted into a new session of the same model and effort; `get` is its latest compaction. */
@@ -375,11 +378,13 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
           // so neither uses up the owner's changes and a flood of reports never keeps voice from turning off.
           const voice = master && !masterCall ? VOICE_REPORT.exec(path)?.[1] : undefined;
           const address = req.socket.remoteAddress || 'local';
-          const key = masterCall ? '\0master' : localAgent ? '\0local-agent' : voice === 'off' ? `\0voice-off ${address}` : voice ? `\0voice ${address}` : address;
+          // Dragging and ticking off todos sends many small changes; they have a budget of their own.
+          const todo = path === TODO_OPS_PATH && !masterCall && !localAgent;
+          const key = masterCall ? '\0master' : localAgent ? '\0local-agent' : todo ? `\0todo ${address}` : voice === 'off' ? `\0voice-off ${address}` : voice ? `\0voice ${address}` : address;
           const now = Date.now();
           const rate = rates.get(key);
           if (!rate || now - rate.at > 60_000) rates.set(key, { count: 1, at: now });
-          else if (++rate.count > (masterCall || localAgent ? 120 : voice === 'off' ? 60 : voice ? 240 : 30)) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+          else if (++rate.count > (masterCall || localAgent ? 120 : voice === 'off' ? 60 : voice || todo ? 240 : 30)) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
           // A joined computer allows this computer 60 changes a minute, shared with the owner's pages: the master and
           // the owner's local agents together keep to half of it, so the pages always have room there.
           const node = masterCall || localAgent ? /^\/api\/nodes\/([a-f0-9]{32})\//.exec(path)?.[1] : undefined;
@@ -732,6 +737,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
           return json(res, 200, { job: await backend.cancelAutoPrompt(id) });
         }
       }
+      if (await todoRoute(req, res, url, path, backend.todos, json)) return;
       if (req.method === 'POST' && path === '/api/groups') {
         const patch = normalizeProjectGroupPatch(await readJson(req));
         if (!backend.setGroup) return json(res, 503, { error: '폴더 그룹을 저장할 수 없습니다.' });

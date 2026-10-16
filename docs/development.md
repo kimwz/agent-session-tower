@@ -266,6 +266,15 @@ Inspect `agent-session-tower storage status` and preserve the reported failure, 
 - **If a service was pointed back by hand** while the update record still says `done` for 1.138.0, the 1.137.x worker holds the storage as `later-update-recorded`, and `verify-update overwritten-done` refuses (`not-overwritten`). Move `runtime/update.json` aside (it is only the update record, not storage) and restart the service: the 1.137.x worker then opens the store.
 - **A store created fresh by 1.138.0 or later** (an empty state directory it initialized) has no `storage-contracts/` preparation evidence. 1.137.x refuses it as `prerequisite-required`, so 1.137.x cannot run on it; keep that computer on 1.138 or later.
 
+### Todo storage
+
+The owner's todos live in `<state-dir>/todos.sqlite`, a file of its own that the web process opens under the state directory's lock (`server/todo/store.ts`). It shares nothing with `state.sqlite`: not the worker, the storage domains, the refuse-behind rule or the migration checksums. Agent features do not read it yet. It stays on this computer; the remote router and the remote snapshot do not include it, so another computer's Tower has its own.
+
+- The page sends changes to `POST /api/todos/ops` as one request of operations (`shared/todo/ops.ts`) that apply together or not at all; a request id makes a retried request answer the same way. The store computes order keys and checks every rule (sub-task depth, a completed task never above an open one, an occurrence completed once even when two pages complete it together) inside the transaction. `todoRevision` in the snapshot moves with every change.
+- Schema steps are listed in `server/todo/schema.ts` and counted in `PRAGMA user_version`. A step that only adds tables or columns with defaults keeps older builds writing; one that changes what data means raises `min_writer`, and older builds then open the file read-only. Never edit a released step.
+- The runtime check of the worker's store applies here too; a refused runtime, a symlink, an unreadable file or a file another program holds makes the Todo page unavailable without affecting the rest of Tower. Busy files are reported at once instead of waited for, since the web runs SQLite on its event loop.
+- Deleted things can be restored for 30 days, then the web removes them; a build older than the file skips that cleanup.
+
 ## CI verification
 
 In the full tier (below), `.github/workflows/ci.yml` runs the full test inventory at the three supported Linux floors (22.22.3, 24.15.0, 26.0.0) and on macOS (full inventory at Node 22, compatibility lanes at Node 24 and 26), partitioned by `scripts/ci-plan.mjs`, all on GitHub-hosted runners. Every full lane includes every file exactly once. `validation-gate` recomputes the inventory for both platforms and verifies actual exits, source tree, runtime, the macOS architecture (arm64) and the standalone executable and durability samples each lane owes. Typecheck, test integrity, release metadata and build remain required. Floors replace the previous latest-patch lanes; this does not claim validation of every newer patch.
