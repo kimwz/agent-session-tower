@@ -70,7 +70,7 @@ export function moveProject(ctx: TodoContext, op: TodoOpOf<'project.move'>): voi
   ctx.touched.projects.add(project.id);
 }
 
-/** Deleting a project deletes what is in it, all with one time, so restoring brings back exactly that. */
+/** Deleting a project deletes what is in it under one delete id, so restoring brings back exactly that. */
 export function deleteProject(ctx: TodoContext, op: TodoOpOf<'project.delete'>): void {
   const project = liveProject(ctx, op.id);
   if (project.inbox) throw invalid('관리함은 지울 수 없습니다.');
@@ -96,7 +96,7 @@ export function restoreProject(ctx: TodoContext, op: TodoOpOf<'project.restore'>
   const batch = project.deleted_with;
   ctx.keepKeyUnique('todo_projects', 'parent_id IS ? AND inbox = 0', [project.parent_id], project.id);
   for (const row of subtree(ctx, project.id)) {
-    if (!row.deleted_at || row.deleted_with !== batch) continue;
+    if (row.deleted_with !== batch) continue;
     ctx.run('UPDATE todo_projects SET deleted_at = NULL, deleted_with = NULL, updated_at = ? WHERE id = ?', ctx.now, row.id);
     ctx.touched.projects.add(row.id);
     for (const table of ['todo_sections', 'todo_tasks'] as const) {

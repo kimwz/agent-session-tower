@@ -303,7 +303,7 @@ test('completed tasks page newest first and search finds open tasks before done 
   assert.deepEqual(store.search('50%').map(task => task.id), ['open']);
 });
 
-test('a repeating parent closes its open sub-tasks with each occurrence, and undoing it reopens them where they now are', async t => {
+test('a repeating parent closes its open sub-tasks with each occurrence, and undoing it reopens those still below it', async t => {
   const { store, apply, task } = await fixture(t);
   apply({ op: 'task.create', id: 'p', content: 'Weekly review', dueDate: '2026-10-17', recurrence: { freq: 'week', interval: 1 } },
     { op: 'task.create', id: 'c', parentId: 'p', content: 'Inbox zero' }, { op: 'task.create', id: 'other', content: 'Other' });
@@ -313,7 +313,7 @@ test('a repeating parent closes its open sub-tasks with each occurrence, and und
   apply({ op: 'task.uncomplete', id: 'p', completionId: 'pc' });
   assert.equal(task('p')?.dueDate, '2026-10-17');
   assert.ok(task('c'));
-  // A sub-task closed with its parent, then moved below another completed task, reopens that one too.
+  // A sub-task closed with its parent and then moved below another completed task is no longer below it.
   apply({ op: 'task.create', id: 'a', content: 'A' }, { op: 'task.create', id: 'ac', parentId: 'a', content: 'Below A' }, { op: 'task.create', id: 'b', content: 'B' });
   apply({ op: 'task.complete', id: 'a', completionId: 'acx', occurrence: null, today: '2026-10-17' }, { op: 'task.complete', id: 'b', completionId: 'bcx', occurrence: null, today: '2026-10-17' });
   apply({ op: 'task.move', id: 'ac', parentId: 'b' });
@@ -323,6 +323,19 @@ test('a repeating parent closes its open sub-tasks with each occurrence, and und
   assert.equal(task('ac'), undefined);
   assert.equal(task('b'), undefined);
   assert.equal(store.detail('ac').task.parentId, 'b');
+  // Moved below a sibling completed on its own, a sub-task stays done too, so nothing open sits below a done task.
+  apply({ op: 'task.create', id: 'q', content: 'Q' }, { op: 'task.create', id: 'qa', parentId: 'q', content: 'QA' }, { op: 'task.create', id: 'qb', parentId: 'q', content: 'QB' });
+  apply({ op: 'task.complete', id: 'qa', completionId: 'qac', occurrence: null, today: '2026-10-17' });
+  apply({ op: 'task.complete', id: 'q', completionId: 'qc', occurrence: null, today: '2026-10-17' });
+  apply({ op: 'task.move', id: 'qb', parentId: 'qa' });
+  apply({ op: 'task.uncomplete', id: 'q', completionId: 'qc' });
+  assert.ok(task('q'));
+  assert.deepEqual([task('qa'), task('qb')], [undefined, undefined]);
+  // A chain closed together opens together, parents before children.
+  apply({ op: 'task.create', id: 'x', content: 'X' }, { op: 'task.create', id: 'xy', parentId: 'x', content: 'XY' }, { op: 'task.create', id: 'xyz', parentId: 'xy', content: 'XYZ' });
+  apply({ op: 'task.complete', id: 'x', completionId: 'xc', occurrence: null, today: '2026-10-17' });
+  apply({ op: 'task.uncomplete', id: 'x', completionId: 'xc' });
+  assert.ok(task('x') && task('xy') && task('xyz'));
 });
 
 test('counting from completion always moves on, even when done before its date', async t => {
@@ -448,4 +461,33 @@ test('every column a delete cascades through is indexed, so removing old rows ne
     const plan = (db.prepare(`EXPLAIN QUERY PLAN SELECT 1 FROM ${table} WHERE ${column} = ?`).all('x') as { detail: string }[]).map(row => row.detail).join(' ');
     assert.match(plan, /USING (COVERING )?INDEX|USING PRIMARY KEY/, `${table}.${column}: ${plan}`);
   }
+});
+
+test('restoring below a task closed with its parent ties the restored task to the top completion', async t => {
+  const { apply, task } = await fixture(t);
+  apply({ op: 'task.create', id: 'g', content: 'G' }, { op: 'task.create', id: 'p', parentId: 'g', content: 'P' }, { op: 'task.create', id: 'c', parentId: 'p', content: 'C' });
+  apply({ op: 'task.delete', id: 'c' });
+  apply({ op: 'task.complete', id: 'g', completionId: 'gc', occurrence: null, today: '2026-10-17' });
+  apply({ op: 'task.restore', id: 'c' });
+  assert.equal(task('c'), undefined);
+  apply({ op: 'task.uncomplete', id: 'g', completionId: 'gc' });
+  assert.ok(task('g') && task('p') && task('c'));
+});
+
+test('projects keep to three levels, never nest in themselves, and restore only what their delete took', async t => {
+  const { store, apply } = await fixture(t);
+  apply({ op: 'project.create', id: 'a', name: 'A' }, { op: 'project.create', id: 'b', name: 'B', parentId: 'a' }, { op: 'project.create', id: 'c', name: 'C', parentId: 'b' });
+  assert.throws(() => apply({ op: 'project.create', id: 'd', name: 'D', parentId: 'c' }), error => kind(error) === 'invalid');
+  assert.throws(() => apply({ op: 'project.move', id: 'a', parentId: 'c' }), error => kind(error) === 'invalid');
+  assert.throws(() => apply({ op: 'project.create', id: 'x', name: 'X', parentId: INBOX_ID }), error => kind(error) === 'invalid');
+  apply({ op: 'project.create', id: 'e', name: 'E' });
+  // B carries C below it: under E it fits (E > B > C), under a level-two project it would not.
+  apply({ op: 'project.move', id: 'b', parentId: 'e' });
+  assert.equal(store.overview().projects.find(project => project.id === 'b')?.parentId, 'e');
+  apply({ op: 'task.create', id: 'k', projectId: 'c', content: 'K' }, { op: 'task.create', id: 'm', projectId: 'c', content: 'M' });
+  apply({ op: 'task.delete', id: 'k' }, { op: 'project.delete', id: 'b' });
+  apply({ op: 'project.restore', id: 'b' });
+  const tasks = store.overview().tasks.map(item => item.id);
+  assert.ok(tasks.includes('m'));
+  assert.ok(!tasks.includes('k'));
 });

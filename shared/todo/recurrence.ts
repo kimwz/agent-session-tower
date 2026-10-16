@@ -113,8 +113,8 @@ function afterCompletion(rule: TodoRecurrence, today: string): string {
 }
 
 /**
- * The date a repeating task moves to when completed on `today`: always after its current date, so an occurrence is
- * never done twice. Null when the rule has ended (`until` passed, or no date is left before year 10000).
+ * The date a repeating task moves to when completed on `today`: always after its current date, so completing it
+ * always moves it on. Null when the rule has ended (`until` passed, or no date is left before year 10000).
  */
 export function nextOccurrence(rule: TodoRecurrence, due: string, today: string): string | null {
   const stop = rule.until && rule.until < LAST ? rule.until : LAST;

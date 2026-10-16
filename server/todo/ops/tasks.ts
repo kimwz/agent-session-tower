@@ -169,7 +169,7 @@ export function completeTask(ctx: TodoContext, op: TodoOpOf<'task.complete'>): v
 }
 
 const latestCompletion = (ctx: TodoContext, taskId: string) =>
-  ctx.get<{ id: string; occurrence_date: string | null }>('SELECT id, occurrence_date FROM todo_completions WHERE task_id = ? AND undone_at IS NULL ORDER BY completed_at DESC, rowid DESC LIMIT 1', taskId);
+  ctx.get<{ id: string; occurrence_date: string | null; cause_id: string | null }>('SELECT id, occurrence_date, cause_id FROM todo_completions WHERE task_id = ? AND undone_at IS NULL ORDER BY completed_at DESC, rowid DESC LIMIT 1', taskId);
 
 function reopen(ctx: TodoContext, task: TaskRow, completion: { id: string; occurrence_date: string | null }): void {
   ctx.run('UPDATE todo_completions SET undone_at = ? WHERE id = ?', ctx.now, completion.id);
@@ -200,12 +200,16 @@ export function uncompleteTask(ctx: TodoContext, op: TodoOpOf<'task.uncomplete'>
   if (!task.recurrence && !task.completed_at) throw stale('이미 다시 열린 작업입니다.');
   reopen(ctx, task, completion);
   reopenAncestors(ctx, task.id);
-  // Tasks still below it that this completion closed open again with it; one moved elsewhere since stays as it is.
-  const below = new Set(descendants(ctx, task.id).map(row => row.id));
-  for (const caused of ctx.all<{ id: string; task_id: string; occurrence_date: string | null }>('SELECT id, task_id, occurrence_date FROM todo_completions WHERE cause_id = ? AND undone_at IS NULL', completion.id)) {
-    const row = taskRow(ctx, caused.task_id);
-    if (!row || row.deleted_at || !below.has(row.id) || latestCompletion(ctx, row.id)?.id !== caused.id) continue;
-    reopen(ctx, row, caused);
+  // Tasks still below it that this completion closed open again with it, nearest first. One moved elsewhere since, or
+  // now below a task completed on its own, stays done: undoing this completion never undoes another.
+  const depth = new Map(descendants(ctx, task.id).map(row => [row.id, row.depth]));
+  const caused = ctx.all<{ id: string; task_id: string; occurrence_date: string | null }>('SELECT id, task_id, occurrence_date FROM todo_completions WHERE cause_id = ? AND undone_at IS NULL', completion.id)
+    .filter(item => depth.has(item.task_id)).sort((a, b) => depth.get(a.task_id)! - depth.get(b.task_id)!);
+  for (const item of caused) {
+    const row = taskRow(ctx, item.task_id);
+    if (!row || row.deleted_at || latestCompletion(ctx, row.id)?.id !== item.id) continue;
+    if (ancestors(ctx, row.id).some(above => above.completed_at)) continue;
+    reopen(ctx, row, item);
   }
 }
 
@@ -244,7 +248,9 @@ export function restoreTask(ctx: TodoContext, op: TodoOpOf<'task.restore'>): voi
   ctx.keepKeyUnique('todo_tasks', where, [...params], task.id);
   const closedAbove = ancestors(ctx, task.id).find(row => row.completed_at);
   if (closedAbove) {
-    const cause = latestCompletion(ctx, closedAbove.id)?.id ?? null;
+    // The completion that closed that task, or the one above that closed it with its parent, as closeBelow records it.
+    const last = latestCompletion(ctx, closedAbove.id);
+    const cause = last ? last.cause_id ?? last.id : null;
     for (const row of restored) if (!row.completed_at) closeTask(ctx, row, randomUUID(), cause);
   }
   ctx.event(task.id, 'restored');
