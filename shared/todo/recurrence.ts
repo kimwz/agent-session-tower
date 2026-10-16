@@ -1,4 +1,4 @@
-import { addDays, addMonths, dateParts, daysBetween, daysInMonth, formatDate, isWorkday, maxDate, nthWeekday, validDate, weekday } from './dates.js';
+import { addDays, addMonths, dateParts, daysBetween, daysInMonth, formatDate, isWorkday, maxDate, monthsBetween, nthWeekday, validDate, weekday } from './dates.js';
 import type { TodoRecurrence } from './types.js';
 
 /**
@@ -7,7 +7,6 @@ import type { TodoRecurrence } from './types.js';
  * `fromCompletion` the next date counts from the day it was completed instead (`every!`).
  */
 
-const LIMIT = 50_000;
 /** The last date a task can have. */
 const LAST = '9999-12-31';
 
@@ -34,29 +33,35 @@ function stepWorkdays(date: string, count: number): string {
 }
 
 /**
- * Occurrences of an anchored rule strictly after `anchor` and up to `stop`, in order, where `anchor` is itself an
- * occurrence. It ends at `stop` even when a rule finds nothing (the fifth Monday of a February, every four years).
+ * Occurrences of an anchored rule after `from` (and after `anchor`) up to `stop`, in order, where `anchor` is itself an
+ * occurrence. It starts near `from` instead of walking from `anchor`, so a date missed for years costs no more than one
+ * missed yesterday, and it ends at `stop` even when a rule finds nothing (the fifth Monday of a February, every four
+ * years). Workday rules counting more than one day restart their count at `from` when occurrences were missed.
  */
-function* scheduleAfter(rule: TodoRecurrence, anchor: string, stop: string): Generator<string> {
+function* scheduleAfter(rule: TodoRecurrence, anchor: string, stop: string, from = anchor): Generator<string> {
   const interval = rule.interval;
   const ended = (date: string) => !validDate(date) || date > stop;
+  const after = maxDate(anchor, from);
   switch (rule.freq) {
-    case 'day':
-      for (let date = anchor; ;) {
+    case 'day': {
+      let date = rule.workdays ? after : addDays(anchor, Math.floor(daysBetween(anchor, after) / interval) * interval);
+      for (;;) {
         if (ended(date = rule.workdays ? stepWorkdays(date, interval) : addDays(date, interval))) return;
-        yield date;
+        if (date > after) yield date;
       }
+    }
     case 'week': {
       const days = new Set(rule.weekdays);
       const weekStart = addDays(anchor, -weekday(anchor));
-      for (let date = addDays(anchor, 1); !ended(date); date = addDays(date, 1)) {
-        if (Math.floor(daysBetween(weekStart, date) / 7) % interval === 0 && days.has(weekday(date))) yield date;
+      const skipped = Math.floor(Math.floor(daysBetween(weekStart, after) / 7) / interval) * interval;
+      for (let date = maxDate(addDays(anchor, 1), addDays(weekStart, skipped * 7)); !ended(date); date = addDays(date, 1)) {
+        if (date > after && Math.floor(daysBetween(weekStart, date) / 7) % interval === 0 && days.has(weekday(date))) yield date;
       }
       return;
     }
     case 'month': {
       const { year, month } = dateParts(anchor);
-      for (let step = 0; ; step += interval) {
+      for (let step = Math.floor(monthsBetween(anchor, after) / interval) * interval; ; step += interval) {
         const first = formatDate(year, month + step, 1);
         if (ended(first)) return;
         const { year: y, month: m } = dateParts(first);
@@ -64,18 +69,18 @@ function* scheduleAfter(rule: TodoRecurrence, anchor: string, stop: string): Gen
         const dates = rule.nth
           ? [nthWeekday(y, m, rule.nth.n, rule.nth.weekday)].filter((date): date is string => date !== undefined)
           : [...new Set((rule.monthDays ?? []).map(day => formatDate(y, m, day === -1 ? last : Math.min(day, last))))].sort();
-        for (const date of dates) if (date > anchor && !ended(date)) yield date;
+        for (const date of dates) if (date > after && !ended(date)) yield date;
       }
     }
     case 'year': {
       const [month, day] = rule.yearDate ?? [dateParts(anchor).month, dateParts(anchor).day];
       const { year } = dateParts(anchor);
-      for (let step = 0; ; step += interval) {
+      for (let step = Math.floor((dateParts(after).year - year) / interval) * interval; ; step += interval) {
         const y = year + step;
         if (y > 9999) return;
         const date = formatDate(y, month, Math.min(day, daysInMonth(y, month)));
         if (ended(date)) return;
-        if (date > anchor) yield date;
+        if (date > after) yield date;
       }
     }
   }
@@ -102,12 +107,8 @@ export function nextOccurrence(rule: TodoRecurrence, due: string, today: string)
     next = afterCompletion(rule, today);
     if (validDate(next) && next <= due) next = afterCompletion(rule, due);
   } else {
-    const after = maxDate(due, today);
-    let count = 0;
-    for (const date of scheduleAfter(rule, due, stop)) {
-      if (date > after) { next = date; break; }
-      if (++count > LIMIT) return null;
-    }
+    // The first one found is the answer: the search starts after both the date and today.
+    next = scheduleAfter(rule, due, stop, today).next().value ?? undefined;
   }
   return next !== undefined && validDate(next) && next > due && next <= stop ? next : null;
 }

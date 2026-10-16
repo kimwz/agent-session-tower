@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addMonths, nthWeekday, validDate, weekday } from '../../../shared/todo/dates.js';
+import { addDays, addMonths, nthWeekday, validDate, weekday } from '../../../shared/todo/dates.js';
 import { anchoredRecurrence, futureOccurrences, nextOccurrence } from '../../../shared/todo/recurrence.js';
 import { keyBetween, spreadKeys, validSortKey } from '../../../shared/todo/sort-key.js';
 import type { TodoRecurrence } from '../../../shared/todo/types.js';
@@ -69,6 +69,13 @@ test('counting from completion and ending rules', () => {
   // A rule that finds no date before it ends stops instead of searching on.
   assert.equal(next({ freq: 'month', interval: 48, nth: { n: 5, weekday: 1 }, until: '2027-02-01' }, '2026-02-01', '2026-02-01'), null);
   assert.equal(next({ freq: 'month', interval: 48, nth: { n: 5, weekday: 1 } }, '2026-02-01', '2026-02-01') !== undefined, true);
+  // A date missed for a century moves on as cheaply as one missed yesterday, on the same beat.
+  assert.equal(next({ freq: 'day', interval: 1 }, '1970-01-01', '2107-01-01'), '2107-01-02');
+  assert.equal(next({ freq: 'day', interval: 7 }, '1970-01-01', '2107-01-01'), '2107-01-06'); // Thursdays, as 1970-01-01 was
+  assert.equal(next({ freq: 'week', interval: 2, weekdays: [5] }, '2026-10-16', '2126-10-16'), '2126-10-18');
+  assert.equal(next({ freq: 'month', interval: 3, monthDays: [31] }, '2026-01-31', '2126-01-31'), '2126-04-30');
+  assert.equal(next({ freq: 'year', interval: 2 }, '2028-02-29', '2128-03-01'), '2130-02-28');
+  assert.equal(next({ freq: 'day', interval: 1, workdays: true }, '1970-01-02', '2107-01-01'), '2107-01-03'); // a Saturday's next workday is Monday
   // Nothing goes past the last date a task can have.
   assert.equal(next({ freq: 'day', interval: 1 }, '9999-12-31', '9999-12-31'), null);
   assert.equal(next({ freq: 'day', interval: 1, workdays: true }, '9999-12-31', '9999-12-31'), null);
@@ -94,4 +101,24 @@ test('order keys always fit between two others and sort as strings', () => {
   assert.ok(spread.every((key, index) => validSortKey(key) && (index === 0 || spread[index - 1] < key)));
   assert.equal(new Set(keys).size, keys.length);
   assert.throws(() => keyBetween('b', 'a'));
+});
+
+test('jumping over missed dates lands where following every occurrence one by one does', () => {
+  let seed = 7;
+  const random = (n: number) => { seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648; return seed % n; };
+  const rules: TodoRecurrence[] = [
+    { freq: 'day', interval: 1 }, { freq: 'day', interval: 5 }, { freq: 'day', interval: 1, workdays: true },
+    { freq: 'week', interval: 1, weekdays: [1, 4] }, { freq: 'week', interval: 3, weekdays: [0, 6] },
+    { freq: 'month', interval: 1, monthDays: [31] }, { freq: 'month', interval: 2, monthDays: [1, -1] }, { freq: 'month', interval: 1, nth: { n: 5, weekday: 2 } },
+    { freq: 'year', interval: 1, yearDate: [2, 29] }, { freq: 'year', interval: 3, yearDate: [12, 31] },
+  ];
+  for (let round = 0; round < 300; round++) {
+    const rule = rules[random(rules.length)];
+    const due = addDays('2020-01-01', random(3000));
+    const today = addDays(due, random(1500));
+    // Step through every occurrence up to today.
+    let stepped = due;
+    while (stepped <= today) stepped = nextOccurrence(rule, stepped, stepped)!;
+    assert.equal(nextOccurrence(rule, due, today), stepped, `${JSON.stringify(rule)} from ${due} on ${today}`);
+  }
 });
