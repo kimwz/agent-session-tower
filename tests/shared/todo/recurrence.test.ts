@@ -105,15 +105,16 @@ test('order keys always fit between two others and sort as strings', () => {
 
 test('jumping over missed dates lands where following every occurrence one by one does', () => {
   let seed = 7;
-  const random = (n: number) => { seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648; return seed % n; };
+  const random = (n: number) => { seed = (Math.imul(seed, 1_103_515_245) + 12_345) >>> 0; return seed % n; };
   const rules: TodoRecurrence[] = [
     { freq: 'day', interval: 1 }, { freq: 'day', interval: 5 }, { freq: 'day', interval: 1, workdays: true },
     { freq: 'week', interval: 1, weekdays: [1, 4] }, { freq: 'week', interval: 3, weekdays: [0, 6] },
     { freq: 'month', interval: 1, monthDays: [31] }, { freq: 'month', interval: 2, monthDays: [1, -1] }, { freq: 'month', interval: 1, nth: { n: 5, weekday: 2 } },
     { freq: 'year', interval: 1, yearDate: [2, 29] }, { freq: 'year', interval: 3, yearDate: [12, 31] },
   ];
-  for (let round = 0; round < 300; round++) {
-    const rule = rules[random(rules.length)];
+  for (let round = 0; round < 400; round++) {
+    // Every rule in turn, with random dates.
+    const rule = rules[round % rules.length];
     const due = addDays('2020-01-01', random(3000));
     const today = addDays(due, random(1500));
     // Step through every occurrence up to today.
