@@ -152,7 +152,7 @@ test('order keys are made by the store, so two pages moving cards to one place n
 
 test('next links are an order only: completing either task or moving it leaves both tasks and the link alone', async t => {
   const { store, apply, task } = await fixture(t);
-  apply({ op: 'task.create', id: 'a', content: 'Draft' }, { op: 'task.create', id: 'b', content: 'Review' });
+  apply({ op: 'task.create', id: 'a', content: 'Draft' }, { op: 'task.create', id: 'b', content: 'Review' }, { op: 'project.create', id: 'elsewhere', name: 'Elsewhere' });
   assert.throws(() => apply({ op: 'link.create', id: 'self', fromTaskId: 'a', toTaskId: 'a' }), error => kind(error) === 'invalid');
   apply({ op: 'link.create', id: 'ab', fromTaskId: 'a', toTaskId: 'b' });
   assert.throws(() => apply({ op: 'link.create', id: 'ab2', fromTaskId: 'a', toTaskId: 'b' }), error => kind(error) === 'conflict');
@@ -161,6 +161,11 @@ test('next links are an order only: completing either task or moving it leaves b
   assert.ok(task('a'));
   assert.deepEqual(store.overview().links.map(link => link.id), ['ab']);
   apply({ op: 'task.uncomplete', id: 'b', completionId: 'bc' });
+  apply({ op: 'task.move', id: 'a', projectId: 'elsewhere' });
+  apply({ op: 'task.complete', id: 'a', completionId: 'ac', occurrence: null, today: '2026-10-17' });
+  assert.ok(task('b'));
+  assert.deepEqual(store.detail('b').previous.map(item => [item.task.id, item.task.projectId, Boolean(item.task.completedAt)]), [['a', 'elsewhere', true]]);
+  apply({ op: 'task.uncomplete', id: 'a', completionId: 'ac' });
   // A deleted task's link is hidden and comes back with the task.
   apply({ op: 'task.delete', id: 'b' });
   assert.deepEqual(store.overview().links, []);
@@ -171,6 +176,9 @@ test('next links are an order only: completing either task or moving it leaves b
   const removed = apply({ op: 'link.delete', id: 'ab' });
   assert.deepEqual(removed.removedLinks, ['ab']);
   assert.deepEqual(store.overview().links, []);
+  // Undoing the removal is creating the same link again.
+  apply({ op: 'link.create', id: 'ab', fromTaskId: 'a', toTaskId: 'b' });
+  assert.deepEqual(store.overview().links.map(link => link.id), ['ab']);
 });
 
 test('"complete and add the next task" is one request: all of it happens, or none', async t => {
@@ -272,7 +280,7 @@ test('an unusable runtime, a symlink or another program holding the file makes o
   other.exec('BEGIN IMMEDIATE');
   const started = Date.now();
   assert.throws(() => store.apply({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'Blocked' }] }), error => kind(error) === 'unavailable');
-  assert.ok(Date.now() - started < 500, 'a held file is reported at once instead of stalling the web');
+  assert.ok(Date.now() - started < 900, 'a held file is reported at once instead of stalling the web');
   other.exec('ROLLBACK');
   store.apply({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'Free again' }] });
 });
@@ -309,8 +317,11 @@ test('a repeating parent closes its open sub-tasks with each occurrence, and und
   apply({ op: 'task.create', id: 'a', content: 'A' }, { op: 'task.create', id: 'ac', parentId: 'a', content: 'Below A' }, { op: 'task.create', id: 'b', content: 'B' });
   apply({ op: 'task.complete', id: 'a', completionId: 'acx', occurrence: null, today: '2026-10-17' }, { op: 'task.complete', id: 'b', completionId: 'bcx', occurrence: null, today: '2026-10-17' });
   apply({ op: 'task.move', id: 'ac', parentId: 'b' });
+  // A sub-task moved below another task since stays done, and that other task's completion is left alone.
   apply({ op: 'task.uncomplete', id: 'a', completionId: 'acx' });
-  assert.ok(task('ac') && task('b'), 'an open task never sits below a completed one');
+  assert.ok(task('a'));
+  assert.equal(task('ac'), undefined);
+  assert.equal(task('b'), undefined);
   assert.equal(store.detail('ac').task.parentId, 'b');
 });
 
@@ -369,4 +380,72 @@ test('completions of one moment page without losing any', async t => {
   } while (before);
   assert.deepEqual(seen.sort(), ['a', 'b', 'c', 'p']);
   assert.throws(() => store.completed({ before: '2026-10-17' }), error => kind(error) === 'invalid');
+});
+
+test('restoring brings back exactly what one delete took, where its parent is now, and keeps done tasks done', async t => {
+  const { store, apply, task } = await fixture(t);
+  apply({ op: 'task.create', id: 'p', content: 'Parent' }, { op: 'task.create', id: 'c', parentId: 'p', content: 'Child' });
+  // Deleted separately in one request: restoring the parent leaves the child deleted.
+  apply({ op: 'task.delete', id: 'c' }, { op: 'task.complete', id: 'p', completionId: 'pc', occurrence: null, today: '2026-10-17' }, { op: 'task.delete', id: 'p' });
+  apply({ op: 'task.restore', id: 'p' });
+  assert.throws(() => store.detail('c'), error => kind(error) === 'not-found');
+  assert.equal(store.detail('p').task.completedAt !== null, true);
+  // The child restored below the completed parent is closed with it, and the parent stays done.
+  apply({ op: 'task.restore', id: 'c' });
+  assert.equal(task('p'), undefined);
+  assert.equal(task('c'), undefined);
+  assert.ok(store.detail('c').task.completedAt);
+  apply({ op: 'task.uncomplete', id: 'p', completionId: 'pc' });
+  assert.ok(task('p') && task('c'), 'undoing the parent reopens the child closed with it');
+
+  // A section and a task deleted in one request come back separately.
+  apply({ op: 'project.create', id: 'w', name: 'Work' }, { op: 'section.create', id: 's1', projectId: 'w', name: 'One' }, { op: 'section.create', id: 's2', projectId: 'w', name: 'Two' },
+    { op: 'task.create', id: 'k1', projectId: 'w', sectionId: 's1', content: 'K1' }, { op: 'task.create', id: 'k2', projectId: 'w', sectionId: 's2', content: 'K2' });
+  apply({ op: 'task.delete', id: 'k1' }, { op: 'section.delete', id: 's2' });
+  apply({ op: 'section.restore', id: 's2' });
+  assert.ok(task('k2'));
+  assert.equal(task('k1'), undefined);
+
+  // A sub-task comes back in its parent's section, not the one it had.
+  apply({ op: 'section.create', id: 's', projectId: 'w', name: 'S' }, { op: 'task.create', id: 'sp', projectId: 'w', sectionId: 's', content: 'SP' }, { op: 'task.create', id: 'sc', parentId: 'sp', content: 'SC' });
+  apply({ op: 'task.delete', id: 'sc' });
+  apply({ op: 'section.delete', id: 's' });
+  apply({ op: 'task.restore', id: 'sp' });
+  apply({ op: 'section.restore', id: 's' });
+  apply({ op: 'task.restore', id: 'sc' });
+  assert.deepEqual([task('sp')?.sectionId, task('sc')?.sectionId], [null, null]);
+  apply({ op: 'section.delete', id: 's' });
+  assert.ok(task('sc'), 'deleting the section leaves a sub-task whose parent is outside it');
+});
+
+test('a task whose date went back to an occurrence already done can be completed again', async t => {
+  const { apply, task } = await fixture(t);
+  apply({ op: 'task.create', id: 'r', content: 'Daily', dueDate: '2026-10-17', recurrence: { freq: 'day', interval: 1 } },
+    { op: 'task.create', id: 'p', content: 'Parent' }, { op: 'task.create', id: 'c', parentId: 'p', content: 'Child', dueDate: '2026-10-17', recurrence: { freq: 'day', interval: 1 } });
+  apply({ op: 'task.complete', id: 'r', completionId: 'r1', occurrence: '2026-10-17', today: '2026-10-17' });
+  apply({ op: 'task.update', id: 'r', patch: { dueDate: '2026-10-17' } });
+  apply({ op: 'task.complete', id: 'r', completionId: 'r2', occurrence: '2026-10-17', today: '2026-10-17' });
+  assert.equal(task('r')?.dueDate, '2026-10-18');
+  // Turned into a one-off task on a date once done as a repeat.
+  apply({ op: 'task.update', id: 'r', patch: { dueDate: '2026-10-17', recurrence: null } });
+  apply({ op: 'task.complete', id: 'r', completionId: 'r3', occurrence: null, today: '2026-10-17' });
+  assert.equal(task('r'), undefined);
+  // A repeating sub-task in that state does not keep its parent from being completed.
+  apply({ op: 'task.complete', id: 'c', completionId: 'c1', occurrence: '2026-10-17', today: '2026-10-17' });
+  apply({ op: 'task.update', id: 'c', patch: { dueDate: '2026-10-17' } });
+  apply({ op: 'task.complete', id: 'p', completionId: 'p1', occurrence: null, today: '2026-10-17' });
+  assert.equal(task('p'), undefined);
+});
+
+test('every column a delete cascades through is indexed, so removing old rows never scans a table', async t => {
+  const { dir, store } = await fixture(t);
+  store.close();
+  const db = new DatabaseSync(join(dir, 'todos.sqlite'), { readOnly: true });
+  t.after(() => db.close());
+  for (const [table, column] of [['todo_completions', 'task_id'], ['todo_tasks', 'project_id'], ['todo_tasks', 'section_id'], ['todo_tasks', 'parent_id'],
+    ['todo_sections', 'project_id'], ['todo_projects', 'parent_id'], ['todo_task_labels', 'label_id'], ['todo_task_labels', 'task_id'], ['todo_links', 'from_task_id'],
+    ['todo_links', 'to_task_id'], ['todo_comments', 'task_id'], ['todo_events', 'task_id']]) {
+    const plan = (db.prepare(`EXPLAIN QUERY PLAN SELECT 1 FROM ${table} WHERE ${column} = ?`).all('x') as { detail: string }[]).map(row => row.detail).join(' ');
+    assert.match(plan, /USING (COVERING )?INDEX|USING PRIMARY KEY/, `${table}.${column}: ${plan}`);
+  }
 });

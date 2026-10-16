@@ -10,7 +10,7 @@ export const MAX_TASK_DEPTH = 4;
 
 interface TaskRow {
   id: string; project_id: string; section_id: string | null; parent_id: string | null; due_date: string | null; due_time: string | null;
-  recurrence: string | null; completed_at: string | null; deleted_at: string | null; sort_key: string;
+  recurrence: string | null; completed_at: string | null; deleted_at: string | null; deleted_with: string | null; sort_key: string;
 }
 
 export function taskRow(ctx: TodoContext, id: string): TaskRow | undefined {
@@ -181,7 +181,7 @@ function reopen(ctx: TodoContext, task: TaskRow, completion: { id: string; occur
 }
 
 /** An open task never sits below a completed one: reopening a task reopens the completed tasks above it. */
-export function reopenAncestors(ctx: TodoContext, id: string): void {
+function reopenAncestors(ctx: TodoContext, id: string): void {
   for (const row of ancestors(ctx, id)) {
     if (!row.completed_at) continue;
     const last = latestCompletion(ctx, row.id);
@@ -200,44 +200,52 @@ export function uncompleteTask(ctx: TodoContext, op: TodoOpOf<'task.uncomplete'>
   if (!task.recurrence && !task.completed_at) throw stale('이미 다시 열린 작업입니다.');
   reopen(ctx, task, completion);
   reopenAncestors(ctx, task.id);
-  // Tasks below that this completion closed open again with it.
+  // Tasks still below it that this completion closed open again with it; one moved elsewhere since stays as it is.
+  const below = new Set(descendants(ctx, task.id).map(row => row.id));
   for (const caused of ctx.all<{ id: string; task_id: string; occurrence_date: string | null }>('SELECT id, task_id, occurrence_date FROM todo_completions WHERE cause_id = ? AND undone_at IS NULL', completion.id)) {
     const row = taskRow(ctx, caused.task_id);
-    if (!row || row.deleted_at || latestCompletion(ctx, row.id)?.id !== caused.id) continue;
+    if (!row || row.deleted_at || !below.has(row.id) || latestCompletion(ctx, row.id)?.id !== caused.id) continue;
     reopen(ctx, row, caused);
-    // It may have been moved below another completed task since.
-    reopenAncestors(ctx, row.id);
   }
 }
 
 export function deleteTask(ctx: TodoContext, op: TodoOpOf<'task.delete'>): void {
   const task = liveTask(ctx, op.id);
+  const batch = randomUUID();
   for (const row of [task, ...descendants(ctx, task.id)]) {
     if (row.deleted_at) continue;
-    ctx.run('UPDATE todo_tasks SET deleted_at = ?, updated_at = ? WHERE id = ?', ctx.now, ctx.now, row.id);
+    ctx.run('UPDATE todo_tasks SET deleted_at = ?, deleted_with = ?, updated_at = ? WHERE id = ?', ctx.now, batch, ctx.now, row.id);
     ctx.touched.tasks.add(row.id);
   }
   ctx.event(task.id, 'deleted');
 }
 
-/** Brings back a deleted task with the sub-tasks deleted with it. */
+/**
+ * Brings back a deleted task with the sub-tasks deleted with it, where its parent is now. Below a task completed
+ * meanwhile, what comes back open is closed with that task's completion instead of reopening it.
+ */
 export function restoreTask(ctx: TodoContext, op: TodoOpOf<'task.restore'>): void {
   const task = taskRow(ctx, op.id);
   if (!task) throw missing('작업을 찾을 수 없습니다.');
   if (!task.deleted_at) return;
   const parent = task.parent_id ? taskRow(ctx, task.parent_id) : undefined;
   if (parent?.deleted_at) throw invalid('상위 작업을 먼저 복구하세요.');
-  liveProject(ctx, task.project_id);
-  const section = task.section_id ? ctx.get<{ deleted_at: string | null }>('SELECT deleted_at FROM todo_sections WHERE id = ?', task.section_id) : undefined;
-  const sectionId = section && !section.deleted_at ? task.section_id : null;
-  const stamp = task.deleted_at;
+  const projectId = parent ? parent.project_id : liveProject(ctx, task.project_id).id;
+  const section = !parent && task.section_id ? ctx.get<{ deleted_at: string | null }>('SELECT deleted_at FROM todo_sections WHERE id = ?', task.section_id) : undefined;
+  const sectionId = parent ? parent.section_id : section && !section.deleted_at ? task.section_id : null;
+  const restored: TaskRow[] = [];
   for (const row of [task, ...descendants(ctx, task.id)]) {
-    if (row.deleted_at !== stamp) continue;
-    ctx.run('UPDATE todo_tasks SET deleted_at = NULL, section_id = ?, updated_at = ? WHERE id = ?', sectionId, ctx.now, row.id);
+    if (row.deleted_with !== task.deleted_with) continue;
+    ctx.run('UPDATE todo_tasks SET deleted_at = NULL, deleted_with = NULL, project_id = ?, section_id = ?, updated_at = ? WHERE id = ?', projectId, sectionId, ctx.now, row.id);
     ctx.touched.tasks.add(row.id);
+    restored.push(row);
   }
-  const [where, params] = siblings(task.project_id, sectionId, task.parent_id);
+  const [where, params] = siblings(projectId, sectionId, task.parent_id);
   ctx.keepKeyUnique('todo_tasks', where, [...params], task.id);
-  if (!task.completed_at) reopenAncestors(ctx, task.id);
+  const closedAbove = ancestors(ctx, task.id).find(row => row.completed_at);
+  if (closedAbove) {
+    const cause = latestCompletion(ctx, closedAbove.id)?.id ?? null;
+    for (const row of restored) if (!row.completed_at) closeTask(ctx, row, randomUUID(), cause);
+  }
   ctx.event(task.id, 'restored');
 }

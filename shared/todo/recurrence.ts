@@ -26,6 +26,17 @@ export function anchoredRecurrence(rule: TodoRecurrence, due: string): TodoRecur
   }
 }
 
+/** The Friday before a weekend day, else the day itself: counting workdays from either lands on the same days. */
+const workdayBase = (date: string) => { const day = weekday(date); return day === 6 ? addDays(date, -1) : day === 0 ? addDays(date, -2) : date; };
+
+/** Workdays after `from` (a workday) up to and including `to`. */
+function workdaysBetween(from: string, to: string): number {
+  const days = daysBetween(from, to), weeks = Math.floor(days / 7);
+  let count = weeks * 5;
+  for (let index = weeks * 7 + 1; index <= days; index++) if (isWorkday(addDays(from, index))) count++;
+  return count;
+}
+
 function stepWorkdays(date: string, count: number): string {
   let next = date;
   for (let left = count; left > 0 && validDate(next);) { next = addDays(next, 1); if (validDate(next) && isWorkday(next)) left--; }
@@ -36,7 +47,7 @@ function stepWorkdays(date: string, count: number): string {
  * Occurrences of an anchored rule after `from` (and after `anchor`) up to `stop`, in order, where `anchor` is itself an
  * occurrence. It starts near `from` instead of walking from `anchor`, so a date missed for years costs no more than one
  * missed yesterday, and it ends at `stop` even when a rule finds nothing (the fifth Monday of a February, every four
- * years). Workday rules counting more than one day restart their count at `from` when occurrences were missed.
+ * years).
  */
 function* scheduleAfter(rule: TodoRecurrence, anchor: string, stop: string, from = anchor): Generator<string> {
   const interval = rule.interval;
@@ -44,7 +55,13 @@ function* scheduleAfter(rule: TodoRecurrence, anchor: string, stop: string, from
   const after = maxDate(anchor, from);
   switch (rule.freq) {
     case 'day': {
-      let date = rule.workdays ? after : addDays(anchor, Math.floor(daysBetween(anchor, after) / interval) * interval);
+      let date: string;
+      if (rule.workdays) {
+        // The occurrence before `after` on the anchor's beat: five workdays are seven days from a workday.
+        const base = workdayBase(anchor);
+        const skipped = Math.floor(workdaysBetween(base, after) / interval) * interval;
+        date = stepWorkdays(addDays(base, Math.floor(skipped / 5) * 7), skipped % 5);
+      } else date = addDays(anchor, Math.floor(daysBetween(anchor, after) / interval) * interval);
       for (;;) {
         if (ended(date = rule.workdays ? stepWorkdays(date, interval) : addDays(date, interval))) return;
         if (date > after) yield date;

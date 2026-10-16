@@ -68,7 +68,8 @@ test('counting from completion and ending rules', () => {
   assert.deepEqual(futureOccurrences({ freq: 'day', interval: 1, until: '2026-10-19' }, '2026-10-17', '2026-12-31'), ['2026-10-18', '2026-10-19']);
   // A rule that finds no date before it ends stops instead of searching on.
   assert.equal(next({ freq: 'month', interval: 48, nth: { n: 5, weekday: 1 }, until: '2027-02-01' }, '2026-02-01', '2026-02-01'), null);
-  assert.equal(next({ freq: 'month', interval: 48, nth: { n: 5, weekday: 1 } }, '2026-02-01', '2026-02-01') !== undefined, true);
+  // Every fourth February from 2026 is in a common year, so it never has a fifth Monday.
+  assert.equal(next({ freq: 'month', interval: 48, nth: { n: 5, weekday: 1 } }, '2026-02-01', '2026-02-01'), null);
   // A date missed for a century moves on as cheaply as one missed yesterday, on the same beat.
   assert.equal(next({ freq: 'day', interval: 1 }, '1970-01-01', '2107-01-01'), '2107-01-02');
   assert.equal(next({ freq: 'day', interval: 7 }, '1970-01-01', '2107-01-01'), '2107-01-06'); // Thursdays, as 1970-01-01 was
@@ -76,6 +77,9 @@ test('counting from completion and ending rules', () => {
   assert.equal(next({ freq: 'month', interval: 3, monthDays: [31] }, '2026-01-31', '2126-01-31'), '2126-04-30');
   assert.equal(next({ freq: 'year', interval: 2 }, '2028-02-29', '2128-03-01'), '2130-02-28');
   assert.equal(next({ freq: 'day', interval: 1, workdays: true }, '1970-01-02', '2107-01-01'), '2107-01-03'); // a Saturday's next workday is Monday
+  // Every third workday from Friday 10/16 is 10/21, 10/26, 10/29: done late on 10/22, it keeps that beat.
+  assert.equal(next({ freq: 'day', interval: 3, workdays: true }, '2026-10-16', '2026-10-22'), '2026-10-26');
+  assert.deepEqual(futureOccurrences({ freq: 'day', interval: 3, workdays: true }, '2026-10-16', '2026-10-29'), ['2026-10-21', '2026-10-26', '2026-10-29']);
   // Nothing goes past the last date a task can have.
   assert.equal(next({ freq: 'day', interval: 1 }, '9999-12-31', '9999-12-31'), null);
   assert.equal(next({ freq: 'day', interval: 1, workdays: true }, '9999-12-31', '9999-12-31'), null);
@@ -107,7 +111,7 @@ test('jumping over missed dates lands where following every occurrence one by on
   let seed = 7;
   const random = (n: number) => { seed = (Math.imul(seed, 1_103_515_245) + 12_345) >>> 0; return seed % n; };
   const rules: TodoRecurrence[] = [
-    { freq: 'day', interval: 1 }, { freq: 'day', interval: 5 }, { freq: 'day', interval: 1, workdays: true },
+    { freq: 'day', interval: 1 }, { freq: 'day', interval: 5 }, { freq: 'day', interval: 1, workdays: true }, { freq: 'day', interval: 3, workdays: true }, { freq: 'day', interval: 7, workdays: true },
     { freq: 'week', interval: 1, weekdays: [1, 4] }, { freq: 'week', interval: 3, weekdays: [0, 6] },
     { freq: 'month', interval: 1, monthDays: [31] }, { freq: 'month', interval: 2, monthDays: [1, -1] }, { freq: 'month', interval: 1, nth: { n: 5, weekday: 2 } },
     { freq: 'year', interval: 1, yearDate: [2, 29] }, { freq: 'year', interval: 3, yearDate: [12, 31] },

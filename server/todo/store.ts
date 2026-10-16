@@ -252,7 +252,7 @@ export class TodoStore {
   /** Applies a request's operations together, or none of them. A request sent again answers what it answered first. */
   apply(request: TodoRequest): TodoChanges {
     this.writable();
-    return this.transaction(() => {
+    const changes = this.transaction(() => {
       const earlier = this.get<{ result: string }>('SELECT result FROM todo_requests WHERE id = ?', request.requestId);
       if (earlier) return JSON.parse(earlier.result) as TodoChanges;
       if (Number(this.meta('min_writer') ?? 1) > TODO_SCHEMA_STEP) throw new TowerError('locked', '더 새로운 Tower가 바꾼 할 일 저장소입니다.');
@@ -262,9 +262,11 @@ export class TodoStore {
       this.setMeta('revision', String(revision));
       const changes = this.changes(ctx, revision);
       this.run('INSERT INTO todo_requests (id, result, at) VALUES (?, ?, ?)', request.requestId, JSON.stringify(changes), ctx.now);
-      this.revisionValue = revision;
       return changes;
     });
+    // Only a committed change moves the revision pages see.
+    this.revisionValue = Math.max(this.revisionValue, changes.revision);
+    return changes;
   }
 
   private changes(ctx: TodoContext, revision: number): TodoChanges {

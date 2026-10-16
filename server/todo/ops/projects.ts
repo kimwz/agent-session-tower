@@ -1,11 +1,12 @@
+import { randomUUID } from 'node:crypto';
 import type { TodoOpOf } from '../../../shared/todo/ops.js';
 import { invalid, missing, stale, type TodoContext } from '../context.js';
 
 /** Projects nest at most this many levels (a top-level project is level 1). */
 export const MAX_PROJECT_LEVELS = 3;
 
-interface ProjectRow { id: string; parent_id: string | null; inbox: number; archived_at: string | null; deleted_at: string | null }
-interface SectionRow { id: string; project_id: string; deleted_at: string | null }
+interface ProjectRow { id: string; parent_id: string | null; inbox: number; archived_at: string | null; deleted_at: string | null; deleted_with: string | null }
+interface SectionRow { id: string; project_id: string; deleted_at: string | null; deleted_with: string | null }
 
 export function liveProject(ctx: TodoContext, id: string): ProjectRow {
   const project = ctx.get<ProjectRow>('SELECT * FROM todo_projects WHERE id = ?', id);
@@ -73,17 +74,16 @@ export function moveProject(ctx: TodoContext, op: TodoOpOf<'project.move'>): voi
 export function deleteProject(ctx: TodoContext, op: TodoOpOf<'project.delete'>): void {
   const project = liveProject(ctx, op.id);
   if (project.inbox) throw invalid('관리함은 지울 수 없습니다.');
+  const batch = randomUUID();
   for (const row of subtree(ctx, project.id)) {
     if (row.deleted_at) continue;
-    ctx.run('UPDATE todo_projects SET deleted_at = ?, updated_at = ? WHERE id = ?', ctx.now, ctx.now, row.id);
+    ctx.run('UPDATE todo_projects SET deleted_at = ?, deleted_with = ?, updated_at = ? WHERE id = ?', ctx.now, batch, ctx.now, row.id);
     ctx.touched.projects.add(row.id);
-    for (const { id } of ctx.all<{ id: string }>('SELECT id FROM todo_sections WHERE project_id = ? AND deleted_at IS NULL', row.id)) {
-      ctx.run('UPDATE todo_sections SET deleted_at = ?, updated_at = ? WHERE id = ?', ctx.now, ctx.now, id);
-      ctx.touched.sections.add(id);
-    }
-    for (const { id } of ctx.all<{ id: string }>('SELECT id FROM todo_tasks WHERE project_id = ? AND deleted_at IS NULL', row.id)) {
-      ctx.run('UPDATE todo_tasks SET deleted_at = ?, updated_at = ? WHERE id = ?', ctx.now, ctx.now, id);
-      ctx.touched.tasks.add(id);
+    for (const table of ['todo_sections', 'todo_tasks'] as const) {
+      for (const { id } of ctx.all<{ id: string }>(`SELECT id FROM ${table} WHERE project_id = ? AND deleted_at IS NULL`, row.id)) {
+        ctx.run(`UPDATE ${table} SET deleted_at = ?, deleted_with = ?, updated_at = ? WHERE id = ?`, ctx.now, batch, ctx.now, id);
+        ctx.touched[table === 'todo_sections' ? 'sections' : 'tasks'].add(id);
+      }
     }
   }
 }
@@ -93,15 +93,15 @@ export function restoreProject(ctx: TodoContext, op: TodoOpOf<'project.restore'>
   if (!project) throw missing('프로젝트를 찾을 수 없습니다.');
   if (!project.deleted_at) return;
   if (project.parent_id) liveProject(ctx, project.parent_id);
-  const stamp = project.deleted_at;
+  const batch = project.deleted_with;
   ctx.keepKeyUnique('todo_projects', 'parent_id IS ? AND inbox = 0', [project.parent_id], project.id);
   for (const row of subtree(ctx, project.id)) {
-    if (row.deleted_at !== stamp) continue;
-    ctx.run('UPDATE todo_projects SET deleted_at = NULL, updated_at = ? WHERE id = ?', ctx.now, row.id);
+    if (!row.deleted_at || row.deleted_with !== batch) continue;
+    ctx.run('UPDATE todo_projects SET deleted_at = NULL, deleted_with = NULL, updated_at = ? WHERE id = ?', ctx.now, row.id);
     ctx.touched.projects.add(row.id);
     for (const table of ['todo_sections', 'todo_tasks'] as const) {
-      for (const { id } of ctx.all<{ id: string }>(`SELECT id FROM ${table} WHERE project_id = ? AND deleted_at = ?`, row.id, stamp)) {
-        ctx.run(`UPDATE ${table} SET deleted_at = NULL, updated_at = ? WHERE id = ?`, ctx.now, id);
+      for (const { id } of ctx.all<{ id: string }>(`SELECT id FROM ${table} WHERE project_id = ? AND deleted_with = ?`, row.id, batch)) {
+        ctx.run(`UPDATE ${table} SET deleted_at = NULL, deleted_with = NULL, updated_at = ? WHERE id = ?`, ctx.now, id);
         ctx.touched[table === 'todo_sections' ? 'sections' : 'tasks'].add(id);
       }
     }
@@ -138,10 +138,11 @@ export function moveSection(ctx: TodoContext, op: TodoOpOf<'section.move'>): voi
 
 export function deleteSection(ctx: TodoContext, op: TodoOpOf<'section.delete'>): void {
   const section = liveSection(ctx, op.id);
-  ctx.run('UPDATE todo_sections SET deleted_at = ?, updated_at = ? WHERE id = ?', ctx.now, ctx.now, section.id);
+  const batch = randomUUID();
+  ctx.run('UPDATE todo_sections SET deleted_at = ?, deleted_with = ?, updated_at = ? WHERE id = ?', ctx.now, batch, ctx.now, section.id);
   ctx.touched.sections.add(section.id);
   for (const { id } of ctx.all<{ id: string }>('SELECT id FROM todo_tasks WHERE section_id = ? AND deleted_at IS NULL', section.id)) {
-    ctx.run('UPDATE todo_tasks SET deleted_at = ?, updated_at = ? WHERE id = ?', ctx.now, ctx.now, id);
+    ctx.run('UPDATE todo_tasks SET deleted_at = ?, deleted_with = ?, updated_at = ? WHERE id = ?', ctx.now, batch, ctx.now, id);
     ctx.touched.tasks.add(id);
   }
 }
@@ -151,12 +152,12 @@ export function restoreSection(ctx: TodoContext, op: TodoOpOf<'section.restore'>
   if (!section) throw missing('섹션을 찾을 수 없습니다.');
   if (!section.deleted_at) return;
   liveProject(ctx, section.project_id);
-  const stamp = section.deleted_at;
-  ctx.run('UPDATE todo_sections SET deleted_at = NULL, updated_at = ? WHERE id = ?', ctx.now, section.id);
+  const batch = section.deleted_with;
+  ctx.run('UPDATE todo_sections SET deleted_at = NULL, deleted_with = NULL, updated_at = ? WHERE id = ?', ctx.now, section.id);
   ctx.touched.sections.add(section.id);
   ctx.keepKeyUnique('todo_sections', 'project_id = ?', [section.project_id], section.id);
-  for (const { id } of ctx.all<{ id: string }>('SELECT id FROM todo_tasks WHERE section_id = ? AND deleted_at = ?', section.id, stamp)) {
-    ctx.run('UPDATE todo_tasks SET deleted_at = NULL, updated_at = ? WHERE id = ?', ctx.now, id);
+  for (const { id } of ctx.all<{ id: string }>('SELECT id FROM todo_tasks WHERE section_id = ? AND deleted_with = ?', section.id, batch)) {
+    ctx.run('UPDATE todo_tasks SET deleted_at = NULL, deleted_with = NULL, updated_at = ? WHERE id = ?', ctx.now, id);
     ctx.touched.tasks.add(id);
   }
 }
