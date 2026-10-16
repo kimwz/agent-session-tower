@@ -2,12 +2,12 @@ import { stat } from 'node:fs/promises';
 import type { Run, Session } from '../../shared/types.js';
 import { attachmentPrompt, imagePaths } from '../stores/attachments.js';
 import { codexReviewer } from './approval-policy.js';
+import { codexMcpServers } from './codex-mcp.js';
 import { openCodexStdioRun, type CodexStdioRun } from './codex-stdio.js';
 import { ReplyLog } from './replies.js';
 import { errorMessage, FINISHED, RunError } from './run-records.js';
 import { UUID } from './saved-state.js';
 import { awaitToolServers } from './session-mcp.js';
-import { MASTER_TOOL_TIMEOUT_SECONDS } from './subscription.js';
 import { turnEnv } from './turn-env.js';
 import type { Prepared, TurnHost, TurnExit } from './turn-host.js';
 
@@ -43,9 +43,7 @@ export async function prepareCodexTurn(host: TurnHost, run: Run, session: Sessio
     return { kind: 'refused' };
   }
   const env = turnEnv(host.options.env, master, tools, host.options.launchMarks);
-  // The master's own tools may take longer than Codex's default minute (see MASTER_TOOL_TIMEOUT_SECONDS).
-  const mcpServers = master && tools.servers?.tower_master
-    ? { ...tools.servers, tower_master: { ...tools.servers.tower_master, tool_timeout_sec: MASTER_TOOL_TIMEOUT_SECONDS } as typeof tools.servers.tower_master } : tools.servers;
+  const mcpServers = codexMcpServers(tools.servers, Boolean(master));
   if (tools.towerTools) run.towerTools = tools.towerTools;
   const codexReplies = master ? new ReplyLog(run, Date.now) : undefined;
   const handle = await (host.options.openCodexStdio ?? openCodexStdioRun)({

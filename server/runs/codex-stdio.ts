@@ -7,7 +7,7 @@ import type { CodexApprovalsReviewer, RunApproval, RunApprovalResponse } from '.
 import { requestedEffort, requestedModel } from '../providers/models.js';
 import { SteeringError, type SteeringInput } from './steering.js';
 import { APP_NAME, APP_TITLE, APP_VERSION } from '../../shared/app-identity.js';
-import type { SessionMcpServers } from './session-mcp.js';
+import type { CodexMcpServers } from './codex-mcp.js';
 import { checkCodexAccount, checkCodexProvider, CODEX_SUBSCRIPTION_CONFIG } from './subscription.js';
 import { TowerError } from '../../shared/errors.js';
 
@@ -17,7 +17,7 @@ type RecordValue = Record<string, any>;
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 export type CodexStdioResult = { status: 'completed' | 'error' | 'cancelled'; error?: string; finishedAt?: string };
 export interface CodexStdioOptions {
-  mcpServers?: SessionMcpServers;
+  mcpServers?: CodexMcpServers;
   /** Tower's instructions for this turn, sent as a block of their own after the request (see towerInstructionsBlock). */
   instructions?: string;
   executable: string;
