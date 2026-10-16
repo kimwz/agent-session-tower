@@ -7,13 +7,14 @@ const server = (name: string) => ({ command: '/fixture/node', args: [name], env:
 const approved = (...tools: string[]) => Object.fromEntries(tools.map(tool => [tool, { approval_mode: 'approve' }]));
 
 test('Codex calls Tower lookups, permission requests and secret listings without an approval review, and nothing else', () => {
-  const servers = codexMcpServers({ tower: server('tower'), tower_sessions: server('sessions'), tower_secrets: server('secrets'), tower_slack: server('slack'), browser: server('browser') }, false);
+  const servers = codexMcpServers({ tower: server('tower'), tower_sessions: server('sessions'), tower_secrets: server('secrets'), tower_slack: server('slack'), tower_local: server('local'), browser: server('browser') }, false);
   assert.deepEqual(servers, {
     tower: { ...server('tower'), tools: approved('sessions_list', 'sessions_read', 'sessions_search', 'permissions_request', 'permissions_list', 'permissions_run', 'permissions_runResult', 'secrets_list') },
     tower_sessions: { ...server('sessions'), tools: approved('sessions_list', 'sessions_read', 'sessions_search') },
     // Using a secret (secrets_run and the rest) keeps Codex's review.
     tower_secrets: { ...server('secrets'), tools: approved('secrets_list') },
     tower_slack: server('slack'),
+    tower_local: server('local'),
     browser: server('browser'),
   });
 });
