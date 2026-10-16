@@ -94,6 +94,7 @@ export function restoreProject(ctx: TodoContext, op: TodoOpOf<'project.restore'>
   if (!project.deleted_at) return;
   if (project.parent_id) liveProject(ctx, project.parent_id);
   const stamp = project.deleted_at;
+  ctx.keepKeyUnique('todo_projects', 'parent_id IS ? AND inbox = 0', [project.parent_id], project.id);
   for (const row of subtree(ctx, project.id)) {
     if (row.deleted_at !== stamp) continue;
     ctx.run('UPDATE todo_projects SET deleted_at = NULL, updated_at = ? WHERE id = ?', ctx.now, row.id);
@@ -153,6 +154,7 @@ export function restoreSection(ctx: TodoContext, op: TodoOpOf<'section.restore'>
   const stamp = section.deleted_at;
   ctx.run('UPDATE todo_sections SET deleted_at = NULL, updated_at = ? WHERE id = ?', ctx.now, section.id);
   ctx.touched.sections.add(section.id);
+  ctx.keepKeyUnique('todo_sections', 'project_id = ?', [section.project_id], section.id);
   for (const { id } of ctx.all<{ id: string }>('SELECT id FROM todo_tasks WHERE section_id = ? AND deleted_at = ?', section.id, stamp)) {
     ctx.run('UPDATE todo_tasks SET deleted_at = NULL, updated_at = ? WHERE id = ?', ctx.now, id);
     ctx.touched.tasks.add(id);
@@ -212,5 +214,6 @@ export function restoreLabel(ctx: TodoContext, op: TodoOpOf<'label.restore'>): v
   if (labelNameTaken(ctx, label.name, label.id)) throw stale('같은 이름의 라벨이 이미 있습니다.');
   ctx.run('UPDATE todo_labels SET deleted_at = NULL, updated_at = ? WHERE id = ?', ctx.now, label.id);
   ctx.touched.labels.add(label.id);
+  ctx.keepKeyUnique('todo_labels', '1 = 1', [], label.id);
   for (const { task_id } of ctx.all<{ task_id: string }>('SELECT task_id FROM todo_task_labels WHERE label_id = ?', label.id)) ctx.touched.tasks.add(task_id);
 }

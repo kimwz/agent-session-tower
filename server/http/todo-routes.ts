@@ -29,7 +29,7 @@ export async function todoRoute(req: IncomingMessage, res: ServerResponse, url: 
   if (req.method === 'GET' && path === '/api/todos/completed') {
     const projectId = url.searchParams.get('projectId') ?? undefined, before = url.searchParams.get('before') ?? undefined;
     if (projectId !== undefined && !ID.test(projectId)) throw new TowerError('invalid', '프로젝트 id가 올바르지 않습니다.');
-    if (before !== undefined && (before.length > 40 || !Number.isFinite(Date.parse(before)))) throw new TowerError('invalid', 'before는 시각이어야 합니다.');
+    if (before !== undefined && before.length > 60) throw new TowerError('invalid', '완료 목록 커서가 올바르지 않습니다.');
     json(res, 200, todos.completed({ projectId, before, limit: number(url.searchParams.get('limit')) }));
     return true;
   }

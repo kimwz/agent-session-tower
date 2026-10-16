@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { addMonths, nthWeekday, validDate, weekday } from '../../../shared/todo/dates.js';
 import { anchoredRecurrence, futureOccurrences, nextOccurrence } from '../../../shared/todo/recurrence.js';
-import { keyBetween, validSortKey } from '../../../shared/todo/sort-key.js';
+import { keyBetween, spreadKeys, validSortKey } from '../../../shared/todo/sort-key.js';
 import type { TodoRecurrence } from '../../../shared/todo/types.js';
 
 const next = (rule: TodoRecurrence, due: string, today: string) => nextOccurrence(anchoredRecurrence(rule, due), due, today);
@@ -66,6 +66,15 @@ test('counting from completion and ending rules', () => {
   assert.equal(next({ freq: 'day', interval: 1, until: '2026-10-18' }, '2026-10-18', '2026-10-18'), null);
   assert.deepEqual(futureOccurrences(anchoredRecurrence({ freq: 'week', interval: 1 }, '2026-10-16'), '2026-10-16', '2026-11-06'), ['2026-10-23', '2026-10-30', '2026-11-06']);
   assert.deepEqual(futureOccurrences({ freq: 'day', interval: 1, until: '2026-10-19' }, '2026-10-17', '2026-12-31'), ['2026-10-18', '2026-10-19']);
+  // A rule that finds no date before it ends stops instead of searching on.
+  assert.equal(next({ freq: 'month', interval: 48, nth: { n: 5, weekday: 1 }, until: '2027-02-01' }, '2026-02-01', '2026-02-01'), null);
+  assert.equal(next({ freq: 'month', interval: 48, nth: { n: 5, weekday: 1 } }, '2026-02-01', '2026-02-01') !== undefined, true);
+  // Nothing goes past the last date a task can have.
+  assert.equal(next({ freq: 'day', interval: 1 }, '9999-12-31', '9999-12-31'), null);
+  assert.equal(next({ freq: 'day', interval: 1, workdays: true }, '9999-12-31', '9999-12-31'), null);
+  assert.equal(next({ freq: 'year', interval: 1 }, '9999-06-01', '9999-06-01'), null);
+  // Done before its date, a rule counting from completion still moves past that date.
+  assert.equal(next({ freq: 'day', interval: 3, fromCompletion: true }, '2026-10-20', '2026-10-17'), '2026-10-23');
 });
 
 test('order keys always fit between two others and sort as strings', () => {
@@ -77,6 +86,12 @@ test('order keys always fit between two others and sort as strings', () => {
   for (let index = 0; index < 200; index++) { const key = keyBetween(low, high); assert.ok(low < key && key < high); keys.push(key); high = key; }
   for (let index = 0; index < 50; index++) { const key = keyBetween(null, keys.sort()[0]); keys.push(key); }
   assert.ok(keys.every(validSortKey));
+  // Adding at the end steps a digit: a thousand appends stay short.
+  let last = keyBetween(null, null);
+  for (let index = 0; index < 1000; index++) { const key = keyBetween(last, null); assert.ok(key > last); last = key; }
+  assert.ok(last.length <= 20, last);
+  const spread = spreadKeys(5000);
+  assert.ok(spread.every((key, index) => validSortKey(key) && (index === 0 || spread[index - 1] < key)));
   assert.equal(new Set(keys).size, keys.length);
   assert.throws(() => keyBetween('b', 'a'));
 });

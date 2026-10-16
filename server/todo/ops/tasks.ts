@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { anchoredRecurrence, nextOccurrence } from '../../../shared/todo/recurrence.js';
 import type { TodoOpOf } from '../../../shared/todo/ops.js';
 import type { TodoRecurrence } from '../../../shared/todo/types.js';
@@ -138,7 +139,14 @@ function closeTask(ctx: TodoContext, task: TaskRow, completionId: string, causeI
   ctx.event(task.id, 'completed', causeId ? { with: causeId } : {});
 }
 
-/** Completing a task completes every open task below it; a repeating one among them is closed, not moved on. */
+/** Closes every open task below `id` together with the completion `causeId`; a repeating one is closed, not moved on. */
+function closeBelow(ctx: TodoContext, id: string, causeId: string): void {
+  for (const row of descendants(ctx, id)) {
+    if (!row.completed_at && !row.deleted_at) closeTask(ctx, row, randomUUID(), causeId);
+  }
+}
+
+/** Completing a task, or one occurrence of a repeating one, completes every open task below it. */
 export function completeTask(ctx: TodoContext, op: TodoOpOf<'task.complete'>): void {
   const done = ctx.get<{ task_id: string }>('SELECT task_id FROM todo_completions WHERE id = ?', op.completionId);
   if (done) { if (done.task_id !== op.id) throw invalid('완료 id가 다른 작업에 쓰였습니다.'); return; }
@@ -152,13 +160,12 @@ export function completeTask(ctx: TodoContext, op: TodoOpOf<'task.complete'>): v
       ctx.run('UPDATE todo_tasks SET due_date = ?, updated_at = ? WHERE id = ?', next, ctx.now, task.id);
       ctx.touched.tasks.add(task.id);
       ctx.event(task.id, 'completed', { occurrence: task.due_date, next });
+      closeBelow(ctx, task.id, op.completionId);
       return;
     }
   }
   closeTask(ctx, task, op.completionId, null);
-  for (const row of descendants(ctx, task.id)) {
-    if (!row.completed_at && !row.deleted_at) closeTask(ctx, row, `${op.completionId}:${row.id}`, op.completionId);
-  }
+  closeBelow(ctx, task.id, op.completionId);
 }
 
 const latestCompletion = (ctx: TodoContext, taskId: string) =>
@@ -196,7 +203,10 @@ export function uncompleteTask(ctx: TodoContext, op: TodoOpOf<'task.uncomplete'>
   // Tasks below that this completion closed open again with it.
   for (const caused of ctx.all<{ id: string; task_id: string; occurrence_date: string | null }>('SELECT id, task_id, occurrence_date FROM todo_completions WHERE cause_id = ? AND undone_at IS NULL', completion.id)) {
     const row = taskRow(ctx, caused.task_id);
-    if (row && !row.deleted_at && latestCompletion(ctx, row.id)?.id === caused.id) reopen(ctx, row, caused);
+    if (!row || row.deleted_at || latestCompletion(ctx, row.id)?.id !== caused.id) continue;
+    reopen(ctx, row, caused);
+    // It may have been moved below another completed task since.
+    reopenAncestors(ctx, row.id);
   }
 }
 
@@ -226,6 +236,8 @@ export function restoreTask(ctx: TodoContext, op: TodoOpOf<'task.restore'>): voi
     ctx.run('UPDATE todo_tasks SET deleted_at = NULL, section_id = ?, updated_at = ? WHERE id = ?', sectionId, ctx.now, row.id);
     ctx.touched.tasks.add(row.id);
   }
+  const [where, params] = siblings(task.project_id, sectionId, task.parent_id);
+  ctx.keepKeyUnique('todo_tasks', where, [...params], task.id);
   if (!task.completed_at) reopenAncestors(ctx, task.id);
   ctx.event(task.id, 'restored');
 }

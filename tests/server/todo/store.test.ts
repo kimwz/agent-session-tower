@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { TowerError } from '../../../shared/errors.js';
-import type { TodoOp } from '../../../shared/todo/ops.js';
+import { TodoRequestSchema, type TodoOp } from '../../../shared/todo/ops.js';
 import { INBOX_ID, TODO_RETENTION_MS, TodoStore } from '../../../server/todo/store.js';
 import { TODO_SCHEMA_STEP } from '../../../server/todo/schema.js';
 
@@ -17,7 +17,8 @@ async function fixture(t: TestContext, options: { runtime?: () => string | undef
   const store = make();
   store.start();
   t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
-  const apply = (...ops: TodoOp[]) => store.apply({ requestId: randomUUID(), ops });
+  // Every request goes through the schema the HTTP route applies, so tests send only what the page can send.
+  const apply = (...ops: TodoOp[]) => store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops }));
   const tick = (ms = 1000) => { clock = new Date(clock.getTime() + ms); };
   const task = (id: string) => store.overview().tasks.find(item => item.id === id);
   return { dir, store, make, apply, tick, task };
@@ -112,7 +113,8 @@ test('a plain task completes once; completing a parent closes everything below, 
   assert.deepEqual(store.overview().tasks.map(item => item.id).sort(), ['c', 'g', 'p']);
   // Reopening a task below a completed one reopens the ones above.
   apply({ op: 'task.complete', id: 'p', completionId: 'pc3', occurrence: null, today: '2026-10-17' });
-  apply({ op: 'task.uncomplete', id: 'g', completionId: 'pc3:g' as string });
+  const closedWith = store.detail('g').completions[0].id;
+  apply({ op: 'task.uncomplete', id: 'g', completionId: closedWith });
   assert.ok(task('g') && task('c') && task('p'));
 });
 
@@ -291,4 +293,80 @@ test('completed tasks page newest first and search finds open tasks before done 
   assert.deepEqual(store.search('report', { completed: true })[0].id, 'open');
   assert.equal(store.search('report', { completed: true }).length, 4);
   assert.deepEqual(store.search('50%').map(task => task.id), ['open']);
+});
+
+test('a repeating parent closes its open sub-tasks with each occurrence, and undoing it reopens them where they now are', async t => {
+  const { store, apply, task } = await fixture(t);
+  apply({ op: 'task.create', id: 'p', content: 'Weekly review', dueDate: '2026-10-17', recurrence: { freq: 'week', interval: 1 } },
+    { op: 'task.create', id: 'c', parentId: 'p', content: 'Inbox zero' }, { op: 'task.create', id: 'other', content: 'Other' });
+  apply({ op: 'task.complete', id: 'p', completionId: 'pc', occurrence: '2026-10-17', today: '2026-10-17' });
+  assert.equal(task('p')?.dueDate, '2026-10-24');
+  assert.equal(task('c'), undefined);
+  apply({ op: 'task.uncomplete', id: 'p', completionId: 'pc' });
+  assert.equal(task('p')?.dueDate, '2026-10-17');
+  assert.ok(task('c'));
+  // A sub-task closed with its parent, then moved below another completed task, reopens that one too.
+  apply({ op: 'task.create', id: 'a', content: 'A' }, { op: 'task.create', id: 'ac', parentId: 'a', content: 'Below A' }, { op: 'task.create', id: 'b', content: 'B' });
+  apply({ op: 'task.complete', id: 'a', completionId: 'acx', occurrence: null, today: '2026-10-17' }, { op: 'task.complete', id: 'b', completionId: 'bcx', occurrence: null, today: '2026-10-17' });
+  apply({ op: 'task.move', id: 'ac', parentId: 'b' });
+  apply({ op: 'task.uncomplete', id: 'a', completionId: 'acx' });
+  assert.ok(task('ac') && task('b'), 'an open task never sits below a completed one');
+  assert.equal(store.detail('ac').task.parentId, 'b');
+});
+
+test('counting from completion always moves on, even when done before its date', async t => {
+  const { apply, task } = await fixture(t);
+  apply({ op: 'task.create', id: 'r', content: 'Stretch', dueDate: '2026-10-17', recurrence: { freq: 'day', interval: 1, fromCompletion: true } });
+  apply({ op: 'task.complete', id: 'r', completionId: 'c1', occurrence: '2026-10-17', today: '2026-10-17' });
+  assert.equal(task('r')?.dueDate, '2026-10-18');
+  apply({ op: 'task.complete', id: 'r', completionId: 'c2', occurrence: '2026-10-18', today: '2026-10-17' });
+  assert.equal(task('r')?.dueDate, '2026-10-19');
+  apply({ op: 'task.complete', id: 'r', completionId: 'c3', occurrence: '2026-10-19', today: '2026-10-19' });
+  assert.equal(task('r')?.dueDate, '2026-10-20');
+  // At the last possible date a repeating task ends instead of moving past it.
+  apply({ op: 'task.create', id: 'end', content: 'End', dueDate: '9999-12-31', recurrence: { freq: 'day', interval: 1, fromCompletion: true } });
+  apply({ op: 'task.complete', id: 'end', completionId: 'c4', occurrence: '9999-12-31', today: '9999-12-31' });
+  assert.equal(task('end'), undefined);
+});
+
+test('a long list keeps short, distinct keys however often items are added at its ends or at one place', async t => {
+  const { store, apply } = await fixture(t);
+  for (let batch = 0; batch < 15; batch++) apply(...Array.from({ length: 100 }, (_, index) => ({ op: 'task.create', id: `end-${batch}-${index}`, content: 'x' }) as TodoOp));
+  apply({ op: 'task.create', id: 'top', content: 'Top', afterId: null });
+  for (let index = 0; index < 300; index++) apply({ op: 'task.create', id: `mid-${index}`, content: 'x', afterId: 'top' });
+  const tasks = store.overview().tasks;
+  assert.equal(tasks.length, 1801);
+  assert.ok(tasks.every(task => task.sortKey.length <= 24), `longest key ${Math.max(...tasks.map(task => task.sortKey.length))}`);
+  assert.equal(new Set(tasks.map(task => task.sortKey)).size, tasks.length);
+  const ordered = tasks.sort((a, b) => a.sortKey < b.sortKey ? -1 : 1).map(task => task.id);
+  // Each insert right after "top" lands before the previous one.
+  assert.deepEqual(ordered.slice(0, 3), ['top', 'mid-299', 'mid-298']);
+  assert.deepEqual([ordered[301], ordered[1800]], ['end-0-0', 'end-14-99']);
+});
+
+test('a restored item whose key another took meanwhile comes back with a key of its own', async t => {
+  const { store, apply } = await fixture(t);
+  apply({ op: 'task.create', id: 'a', content: 'A' });
+  apply({ op: 'task.delete', id: 'a' });
+  apply({ op: 'task.create', id: 'b', content: 'B' });
+  apply({ op: 'task.restore', id: 'a' });
+  const keys = store.overview().tasks.map(task => task.sortKey);
+  assert.equal(new Set(keys).size, 2);
+  apply({ op: 'label.create', id: 'l1', name: 'one' }, { op: 'label.delete', id: 'l1' }, { op: 'label.create', id: 'l2', name: 'two' }, { op: 'label.restore', id: 'l1' });
+  assert.equal(new Set(store.overview().labels.map(label => label.sortKey)).size, 2);
+});
+
+test('completions of one moment page without losing any', async t => {
+  const { store, apply } = await fixture(t);
+  apply({ op: 'task.create', id: 'p', content: 'P' }, ...['a', 'b', 'c'].map(id => ({ op: 'task.create', id, parentId: 'p', content: id }) as TodoOp));
+  apply({ op: 'task.complete', id: 'p', completionId: 'pc', occurrence: null, today: '2026-10-17' });
+  const seen: string[] = [];
+  let before: string | undefined;
+  do {
+    const page = store.completed({ limit: 2, before });
+    seen.push(...page.items.map(item => item.task.id));
+    before = page.before;
+  } while (before);
+  assert.deepEqual(seen.sort(), ['a', 'b', 'c', 'p']);
+  assert.throws(() => store.completed({ before: '2026-10-17' }), error => kind(error) === 'invalid');
 });

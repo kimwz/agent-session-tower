@@ -158,6 +158,6 @@ export interface TodoTaskDetail {
 
 export interface TodoCompletedPage {
   items: { completion: TodoCompletion; task: TodoTask }[];
-  /** Pass as `before` for the next page; absent on the last. */
+  /** Pass as `before` for the next page (an opaque cursor); absent on the last. */
   before?: string;
 }
