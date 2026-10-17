@@ -61,17 +61,19 @@ export function AttachButton({ onFiles, disabled, children, compact }: { onFiles
   </>;
 }
 
-/** Files dropped on or pasted into an area. */
-export function useFileDrop(onFiles: (files: File[]) => void, disabled = false) {
+/**
+ * Files dropped on or pasted into an area. An area inside another that takes files too (a comment box in the task's
+ * detail) keeps them to itself with `inner`, so they are added once.
+ */
+export function useFileDrop(onFiles: (files: File[]) => void, disabled = false, { inner = false }: { inner?: boolean } = {}) {
   const [over, setOver] = useState(false);
   const hasFiles = (event: DragEvent) => [...event.dataTransfer.types].includes('Files');
-  return {
-    over,
-    handlers: disabled ? {} : {
-      onDragOver: (event: DragEvent) => { if (!hasFiles(event)) return; event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setOver(true); },
-      onDragLeave: (event: DragEvent) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOver(false); },
-      onDrop: (event: DragEvent) => { if (!hasFiles(event)) return; event.preventDefault(); setOver(false); const files = [...event.dataTransfer.files]; if (files.length) onFiles(files); },
-      onPaste: (event: ClipboardEvent) => { const files = [...event.clipboardData.files]; if (!files.length) return; event.preventDefault(); onFiles(files); },
-    },
+  const mine = (event: { preventDefault(): void; stopPropagation(): void }) => { event.preventDefault(); if (inner) event.stopPropagation(); };
+  const handlers: Partial<Record<'onDragOver' | 'onDragLeave' | 'onDrop', (event: DragEvent) => void> & { onPaste: (event: ClipboardEvent) => void }> = disabled ? {} : {
+    onDragOver: (event: DragEvent) => { if (!hasFiles(event)) return; mine(event); event.dataTransfer.dropEffect = 'copy'; setOver(true); },
+    onDragLeave: (event: DragEvent) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOver(false); },
+    onDrop: (event: DragEvent) => { if (!hasFiles(event)) return; mine(event); setOver(false); const files = [...event.dataTransfer.files]; if (files.length) onFiles(files); },
+    onPaste: (event: ClipboardEvent) => { const files = [...event.clipboardData.files]; if (!files.length) return; mine(event); onFiles(files); },
   };
+  return { over, handlers };
 }

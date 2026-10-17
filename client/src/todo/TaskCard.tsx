@@ -2,7 +2,8 @@ import { useRef, useState, type ReactNode } from 'react';
 import { ArrowRight, CalendarDays, Check, ChevronRight, Clock3, Flag, MessageSquare, MoreHorizontal, Paperclip, Repeat } from 'lucide-react';
 import type { TodoTask } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
-import { isOpen } from './todo-model';
+import { useFileDrop } from './attachments/Attachments';
+import { isOpen, type TodoWorld } from './todo-model';
 import { setSubtasksFolded, subtasksFolded } from './todo-prefs';
 import { colorOf, dateLabel, durationLabel, monthDay, recurrenceLabel } from './todo-format';
 import type { CardContext } from './todo-views';
@@ -30,12 +31,21 @@ export const CARD_META: MetaChip[] = [
   { key: 'project', visible: (task, { showProject }) => showProject, render: (task, { world }) => { const project = world.projects.find(item => item.id === task.projectId); return project ? <span className="todo-chip project"><i style={{ background: colorOf(project.color) }} />{project.inbox ? t('관리함') : project.name}</span> : null; } },
 ];
 
+/** Done and all sub-tasks of each task, from the server (`TodoWorld.subtaskCounts`, which may not have come yet). */
+type SubtaskCounts = { subtaskCounts?: Record<string, { done: number; total: number }> };
+
+/** The sub-task toggle's words: done of all from the server's counts, else the open ones the card lists. */
+export function subtaskToggleText(world: TodoWorld, taskId: string, open: number): string {
+  const count = (world as TodoWorld & SubtaskCounts).subtaskCounts?.[taskId];
+  return count && count.total > 0 ? t('하위 작업 {0}/{1}', { 0: count.done, 1: count.total }) : t('하위 작업 {0}', { 0: open });
+}
+
 /** The check circle: completes on a press; held on a touch screen, completes and adds the next task. */
-export function CheckCircle({ task, onComplete, onCompleteNext, onReopen, size = 'normal' }: { task: TodoTask; onComplete: () => void; onCompleteNext?: () => void; onReopen?: () => void; size?: 'normal' | 'small' }) {
+export function CheckCircle({ task, onComplete, onCompleteNext, onReopen, size = 'normal', disabled }: { task: TodoTask; onComplete: () => void; onCompleteNext?: () => void; onReopen?: () => void; size?: 'normal' | 'small'; disabled?: boolean }) {
   const held = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const long = useRef(false);
   const done = !!task.completedAt;
-  return <button type="button" className={`todo-check p${task.priority} ${size} ${done ? 'done' : ''}`} aria-label={done ? t('“{0}” 완료 취소', { 0: task.content }) : t('“{0}” 완료', { 0: task.content })} aria-pressed={done}
+  return <button type="button" className={`todo-check p${task.priority} ${size} ${done ? 'done' : ''}`} aria-label={done ? t('“{0}” 완료 취소', { 0: task.content }) : t('“{0}” 완료', { 0: task.content })} aria-pressed={done} disabled={disabled}
     onPointerDown={event => {
       if (event.pointerType !== 'touch' || !onCompleteNext || done) return;
       long.current = false;
@@ -61,16 +71,26 @@ export interface TaskCardProps {
   onSelect?: (id: string) => void;
   /** What choosing this card chooses: the task, or one of its completions in the completed list. */
   selectId?: string;
+  /** Files dropped on the card, for its task's description; not offered on a completed card. */
+  onFiles?: (task: TodoTask, files: File[]) => void;
+  /** Shown only (an archived project): nothing on it changes the task. */
+  readOnly?: boolean;
 }
 
-export function TaskCard({ task, context, selected, onOpen, onComplete, onCompleteNext, onReopen, onMenu, onSelect, selectId = task.id }: TaskCardProps) {
+export function TaskCard({ task, context, selected, onOpen, onComplete, onCompleteNext, onReopen, onMenu, onSelect, selectId = task.id, onFiles, readOnly }: TaskCardProps) {
   // Sub-tasks show unless the owner folded them on this card; the fold is remembered (todo-prefs.ts). Completed ones
   // are in the task's detail.
   const [folded, setFolded] = useState(() => subtasksFolded(task.id));
   // A completed card (the completed list) lists none: its sub-tasks are in its detail.
   const children = task.completedAt ? [] : (context.children.get(task.id) ?? []).filter(child => isOpen(child) && !context.shown?.has(child.id));
   const chips = CARD_META.filter(chip => chip.visible(task, context));
-  return <div className={`todo-card ${selected ? 'selected' : ''} ${task.completedAt ? 'done' : ''}`} data-task={task.id} data-select={selectId} tabIndex={0} role="button" aria-label={task.content}
+  // A file dragged from the computer is not a card being dragged (dnd-kit follows the pointer, not HTML drag events).
+  // A paste is the detail's: a card taking one would attach files to whichever card the keyboard is on.
+  const drop = useFileDrop(files => onFiles?.(task, files), !onFiles || readOnly || !!task.completedAt);
+  const { onDragOver, onDragLeave, onDrop } = drop.handlers;
+  const dropHandlers = { onDragOver, onDragLeave, onDrop };
+  return <div className={`todo-card ${selected ? 'selected' : ''} ${task.completedAt ? 'done' : ''} ${drop.over ? 'file-target' : ''}`} data-task={task.id} data-select={selectId} tabIndex={0} role="button" aria-label={task.content}
+    {...dropHandlers}
     onClick={() => onOpen(task.id)} onFocus={() => onSelect?.(selectId)}
     onPointerMove={event => {
       // Only a mouse that moves chooses: cards passing under a still mouse while the arrow keys scroll do not.
@@ -83,20 +103,20 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
     }}
     onKeyDown={event => { if (event.key === 'Enter' && event.target === event.currentTarget) { event.preventDefault(); onOpen(task.id); } }}>
     <div className="todo-card-main">
-      <CheckCircle task={task} onComplete={() => onComplete(task)} onCompleteNext={() => onCompleteNext(task)} onReopen={onReopen && (() => onReopen(task))} />
+      <CheckCircle task={task} disabled={readOnly} onComplete={() => onComplete(task)} onCompleteNext={() => onCompleteNext(task)} onReopen={onReopen && (() => onReopen(task))} />
       <div className="todo-card-body">
         <span className="todo-card-title">{task.content}</span>
         {task.description && <span className="todo-card-description">{plain(task.description)}</span>}
         {chips.length > 0 && <div className="todo-meta">{chips.map(chip => <span key={chip.key} className="todo-meta-item">{chip.render(task, context)}</span>)}</div>}
       </div>
-      {onMenu && <button type="button" className="todo-card-more icon-button" aria-label={t('작업 메뉴')} onClick={event => { event.stopPropagation(); onMenu(task, event.currentTarget); }}><MoreHorizontal size={15} /></button>}
+      {onMenu && !readOnly && <button type="button" className="todo-card-more icon-button" aria-label={t('작업 메뉴')} onClick={event => { event.stopPropagation(); onMenu(task, event.currentTarget); }}><MoreHorizontal size={15} /></button>}
     </div>
     {children.length > 0 && <div className="todo-card-subtasks">
       <button type="button" className="todo-subtask-toggle" aria-expanded={!folded} onClick={event => { event.stopPropagation(); setSubtasksFolded(task.id, !folded); setFolded(!folded); }}>
-        <ChevronRight size={12} />{t('하위 작업 {0}', { 0: children.length })}
+        <ChevronRight size={12} />{subtaskToggleText(context.world, task.id, children.length)}
       </button>
       {!folded && <ul>{children.map(child => <li key={child.id}>
-        <CheckCircle task={child} size="small" onComplete={() => onComplete(child)} onReopen={onReopen && (() => onReopen(child))} />
+        <CheckCircle task={child} size="small" disabled={readOnly} onComplete={() => onComplete(child)} onReopen={onReopen && (() => onReopen(child))} />
         <button type="button" className="todo-subtask-title" onClick={event => { event.stopPropagation(); onOpen(child.id); }}>{child.content}</button>
       </li>)}</ul>}
     </div>}

@@ -1,6 +1,6 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type SyntheticEvent } from 'react';
 import { DndContext, DragOverlay, useDraggable, useDroppable, type DragEndEvent, type DragStartEvent } from '@dnd-kit/core';
-import { CalendarX, ChevronLeft, ChevronRight, Flag, Repeat } from 'lucide-react';
+import { CalendarX, Check, ChevronLeft, ChevronRight, Flag, Repeat } from 'lucide-react';
 import { dateParts, weekday } from '../../../../shared/todo/dates';
 import type { TodoOp } from '../../../../shared/todo/ops';
 import type { TodoTask } from '../../../../shared/todo/types';
@@ -16,7 +16,7 @@ import { cellEntries, resizeCommit, DAY_MINUTES, DEFAULT_DURATION, dayEntries, g
  * The calendar layout of a list: a month of days, or a week (three days on a phone) with an all-day row over a time
  * grid. Tasks are dragged to another day, time or the all-day row; a block's bottom edge sets its duration; an empty
  * day or slot adds a task there; undated tasks wait in a side panel to be dragged in. Later occurrences of repeating
- * tasks show faded and cannot be moved.
+ * tasks show faded and cannot be moved. A task's small check circle, beside the button that opens it, completes it.
  */
 
 export interface CalendarProps {
@@ -32,6 +32,7 @@ export interface CalendarProps {
   onOpen: (id: string) => void;
   onAdd: (preset: QuickAddPreset) => void;
   onChange: (ops: TodoOp[]) => void;
+  onComplete?: (task: TodoTask) => void;
 }
 
 const PRIORITY_COLORS = { 1: 'var(--p1)', 2: 'var(--p2)', 3: 'var(--p3)', 4: '#7d8aa0' } as const;
@@ -53,9 +54,23 @@ function useColor(colorBy: CalendarProps['colorBy'], world: TodoWorld) {
   return (task: TodoTask) => colorBy === 'project' ? colorOf(world.projects.find(project => project.id === task.projectId)?.color ?? 'charcoal') : PRIORITY_COLORS[task.priority];
 }
 
-function Entry({ entry, color, onOpen, draggable, compact }: { entry: CalendarEntry; color: string; onOpen: (id: string) => void; draggable: boolean; compact?: boolean }) {
+/**
+ * Completes a task from the calendar. It sits beside the entry's button, never inside it, and keeps its presses to
+ * itself: a press on it never starts a drag, opens the task or adds one on the day under it.
+ */
+export function CalendarCheck({ task, onComplete }: { task: TodoTask; onComplete: (task: TodoTask) => void }) {
+  const stop = (event: SyntheticEvent) => event.stopPropagation();
+  return <button type="button" className={`todo-cal-check p${task.priority}`} aria-label={t('“{0}” 완료', { 0: task.content })} title={t('완료')}
+    onPointerDown={stop} onMouseDown={stop} onTouchStart={stop} onKeyDown={stop} onClick={event => { event.stopPropagation(); onComplete(task); }}>
+    <Check size={8} strokeWidth={3} />
+  </button>;
+}
+
+function Entry({ entry, color, onOpen, draggable, compact, onComplete }: { entry: CalendarEntry; color: string; onOpen: (id: string) => void; draggable: boolean; compact?: boolean; onComplete?: (task: TodoTask) => void }) {
   if (entry.kind === 'future') return <FutureEntry entry={entry} color={color} compact={compact} />;
-  return <TaskEntry entry={entry} color={color} onOpen={onOpen} draggable={draggable} compact={compact} />;
+  const button = <TaskEntry entry={entry} color={color} onOpen={onOpen} draggable={draggable} compact={compact} />;
+  if (entry.kind !== 'task' || !onComplete) return button;
+  return <span className={`todo-cal-item ${compact ? 'compact' : ''}`}><CalendarCheck task={entry.task} onComplete={onComplete} />{button}</span>;
 }
 
 /** A later occurrence of a repeating task: shown only, never opened or moved, since any change would change the real one. */
@@ -79,6 +94,9 @@ function TaskEntry({ entry, color, onOpen, draggable, compact }: { entry: Calend
   </button>;
 }
 
+/** Completing from the calendar, unless it only shows. */
+const completer = (props: CalendarProps) => props.readOnly ? undefined : props.onComplete;
+
 function MonthCell({ date, month, today, entries, color, props }: { date: string; month: number; today: string; entries: DayEntries | undefined; color: (task: TodoTask) => string; props: CalendarProps & { selected: string; onSelect: (date: string) => void } }) {
   const drop = useDroppable({ id: `day:${date}`, data: { drop: { kind: 'day', date } satisfies Drop }, disabled: props.readOnly });
   const more = useRef<HTMLButtonElement>(null);
@@ -94,11 +112,11 @@ function MonthCell({ date, month, today, entries, color, props }: { date: string
     {props.mobile
       ? all.length > 0 && <span className="todo-cal-dots">{all.slice(0, 3).map((entry, index) => <i key={index} className={entry.kind} style={{ background: color(entry.task) }} />)}</span>
       : <>
-        {all.slice(0, shown).map(entry => <Entry key={`${entry.kind}:${entry.task.id}`} entry={entry} color={color(entry.task)} onOpen={props.onOpen} draggable={!props.readOnly} compact />)}
+        {all.slice(0, shown).map(entry => <Entry key={`${entry.kind}:${entry.task.id}`} entry={entry} color={color(entry.task)} onOpen={props.onOpen} draggable={!props.readOnly} compact onComplete={completer(props)} />)}
         {hidden > 0 && <button ref={more} type="button" className="todo-cal-more" onClick={event => { event.stopPropagation(); setShowAll(true); }}>{t('+{0}개', { 0: hidden })}</button>}
         {showAll && <Popover anchor={more} onClose={() => setShowAll(false)} label={longDate(date)} className="todo-cal-day-popover">
           <h4>{longDate(date)}</h4>
-          {all.map(entry => <Entry key={`${entry.kind}:${entry.task.id}`} entry={entry} color={color(entry.task)} onOpen={props.onOpen} draggable={false} />)}
+          {all.map(entry => <Entry key={`${entry.kind}:${entry.task.id}`} entry={entry} color={color(entry.task)} onOpen={props.onOpen} draggable={false} onComplete={completer(props)} />)}
         </Popover>}
       </>}
   </div>;
@@ -119,7 +137,7 @@ function MonthView({ props, days, anchor, color, selected, onSelect }: { props: 
     {props.mobile && <section className="todo-cal-agenda" aria-label={longDate(selected)}>
       <header><h3>{dateLabel(selected, props.today)}</h3><span>{longDate(selected)}</span>
         {!props.readOnly && <button type="button" className="todo-tool" onClick={() => props.onAdd({ dueDate: selected })}>{t('작업 추가')}</button>}</header>
-      {selectedEntries.length ? selectedEntries.map(entry => <Entry key={`${entry.kind}:${entry.task.id}`} entry={entry} color={color(entry.task)} onOpen={props.onOpen} draggable={!props.readOnly} />)
+      {selectedEntries.length ? selectedEntries.map(entry => <Entry key={`${entry.kind}:${entry.task.id}`} entry={entry} color={color(entry.task)} onOpen={props.onOpen} draggable={!props.readOnly} onComplete={completer(props)} />)
         : <p className="todo-muted">{t('일정이 없습니다')}</p>}
     </section>}
   </>;
@@ -128,7 +146,7 @@ function MonthView({ props, days, anchor, color, selected, onSelect }: { props: 
 function AllDayCell({ date, entries, color, props }: { date: string; entries: DayEntries | undefined; color: (task: TodoTask) => string; props: CalendarProps }) {
   const drop = useDroppable({ id: `allday:${date}`, data: { drop: { kind: 'allday', date } satisfies Drop }, disabled: props.readOnly });
   return <div ref={drop.setNodeRef} className={`todo-cal-allday-cell ${drop.isOver ? 'drop-target' : ''}`} onClick={() => !props.readOnly && props.onAdd({ dueDate: date })}>
-    {[...(entries?.allDay ?? []), ...(entries?.deadlines ?? [])].map(entry => <Entry key={`${entry.kind}:${entry.task.id}`} entry={entry} color={color(entry.task)} onOpen={props.onOpen} draggable={!props.readOnly} compact />)}
+    {[...(entries?.allDay ?? []), ...(entries?.deadlines ?? [])].map(entry => <Entry key={`${entry.kind}:${entry.task.id}`} entry={entry} color={color(entry.task)} onOpen={props.onOpen} draggable={!props.readOnly} compact onComplete={completer(props)} />)}
   </div>;
 }
 
@@ -172,11 +190,17 @@ function Block({ entry, placed, color, props, preview }: { entry: CalendarEntry;
   if (entry.kind === 'future') return <div className={`todo-cal-block future ${length < 45 ? 'short' : ''}`} style={style} title={t('“{0}”의 다음 반복 (예정)', { 0: task.content })} onClick={event => event.stopPropagation()}>
     <time>{timeOf(start)}</time><span>{task.content}</span>
   </div>;
-  return <div ref={drag.setNodeRef} className={`todo-cal-block ${entry.kind} ${drag.isDragging ? 'dragging' : ''} ${length < 45 ? 'short' : ''}`} style={style} title={task.content}
-    onClick={event => { event.stopPropagation(); props.onOpen(task.id); }} {...drag.attributes} {...drag.listeners} role="button"
-    onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); props.onOpen(task.id); } else drag.listeners?.onKeyDown?.(event); }}>
-    <time>{timeOf(start)}{length >= 45 && `–${timeOf(Math.min(DAY_MINUTES - 1, start + length))}`}</time>
-    <span>{task.content}</span>
+  // The block holds its opener (which also drags it) and, beside it, the check circle and the resize edge.
+  const complete = completer(props);
+  return <div ref={drag.setNodeRef} className={`todo-cal-block ${entry.kind} ${drag.isDragging ? 'dragging' : ''} ${length < 45 ? 'short' : ''} ${complete ? 'with-check' : ''}`} style={style} title={task.content}
+    onClick={event => event.stopPropagation()}>
+    <div className="todo-cal-block-open" aria-label={task.content} {...drag.attributes} {...drag.listeners}
+      onClick={event => { event.stopPropagation(); props.onOpen(task.id); }}
+      onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); props.onOpen(task.id); } else drag.listeners?.onKeyDown?.(event); }}>
+      <time>{timeOf(start)}{length >= 45 && `–${timeOf(Math.min(DAY_MINUTES - 1, start + length))}`}</time>
+      <span>{task.content}</span>
+    </div>
+    {complete && <CalendarCheck task={task} onComplete={complete} />}
     {movable && <span className="todo-cal-resize" aria-hidden="true" onPointerDown={onResize} onMouseDown={event => event.stopPropagation()} onTouchStart={event => event.stopPropagation()} onClick={event => event.stopPropagation()} />}
   </div>;
 }
@@ -224,7 +248,7 @@ function WeekView({ props, days, list, color, dragging }: { props: CalendarProps
 function Unscheduled({ tasks, color, props }: { tasks: TodoTask[]; color: (task: TodoTask) => string; props: CalendarProps }) {
   return <aside className="todo-cal-unscheduled" aria-label={t('날짜 없음')}>
     <h3>{t('날짜 없음')}<span>{tasks.length || ''}</span></h3>
-    {tasks.length ? <div>{tasks.map(task => <Entry key={task.id} entry={{ kind: 'task', task, date: '' }} color={color(task)} onOpen={props.onOpen} draggable={!props.readOnly} />)}</div>
+    {tasks.length ? <div>{tasks.map(task => <Entry key={task.id} entry={{ kind: 'task', task, date: '' }} color={color(task)} onOpen={props.onOpen} draggable={!props.readOnly} onComplete={completer(props)} />)}</div>
       : <p className="todo-muted">{t('날짜 없는 작업이 없습니다')}</p>}
     {!props.readOnly && tasks.length > 0 && <p className="todo-muted todo-cal-hint">{t('끌어서 날짜나 시간에 놓으세요')}</p>}
   </aside>;

@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowRight, CalendarDays, Flag, Hash, Tag, X } from 'lucide-react';
+import { ArrowRight, CalendarDays, Flag, Hash, Paperclip, Tag, X } from 'lucide-react';
+import type { TodoOp } from '../../../shared/todo/ops';
 import { parseQuickAdd, type QuickAddKind, type QuickAddToken } from '../../../shared/todo/quick-add';
 import type { TodoPriority, TodoRecurrence } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
 import { DatePicker, type DateValue } from './DatePicker';
 import { Menu, Popover, usePopover, type MenuItem } from './Popover';
 import { LabelPicker } from './TaskDetail';
+import { AttachButton, useFileDrop } from './attachments/Attachments';
+import { sizeLabel } from './attachments/upload';
 import { createTaskOps, quickAddOps, type FollowUp } from './todo-actions';
 import { colorOf, dateLabel, durationLabel, monthDay, priorityName, recurrenceLabel } from './todo-format';
 import type { TodoWorld } from './todo-model';
@@ -16,7 +19,8 @@ import { projectTree } from './todo-views';
  * Adding a task in one line. Recognized words are marked in the line and listed under it, where each can be turned
  * back into plain text; the chips set the same properties by hand (replacing the words). Opened to add the task that
  * comes after another, it adds the link too, and completes that task first for "complete and add the next" — all in
- * one request, and nothing at all when cancelled.
+ * one request, and nothing at all when cancelled. Files picked, pasted or dropped on it go to the new task's description
+ * once the server has the task.
  */
 
 export interface QuickAddPreset { projectId?: string; sectionId?: string | null; dueDate?: string; dueTime?: string; durationMin?: number; priority?: TodoPriority; labelIds?: string[]; parentId?: string }
@@ -26,6 +30,16 @@ interface Manual { date?: DateValue; priority?: TodoPriority; labelIds?: string[
 const KIND_LABELS: Record<QuickAddKind, string> = { project: '프로젝트', section: '섹션', label: '라벨', priority: '우선순위', deadline: '마감일', repeat: '반복', date: '날짜', time: '시간', duration: '소요 시간' };
 const DATE_KINDS: QuickAddKind[] = ['date', 'time', 'repeat', 'duration'];
 
+/**
+ * Saving a task that has files: they are uploaded to a task the server has, so the task is saved first and the files
+ * follow; a refused save uploads nothing, and the dialog keeps the task and its files to send again.
+ */
+export async function saveWithFiles(client: Pick<TodoClient, 'applyAndWait'>, attach: (taskId: string, files: File[]) => void, ops: TodoOp[], id: string, files: File[]): Promise<boolean> {
+  if (!(await client.applyAndWait(ops))) return false;
+  attach(id, files);
+  return true;
+}
+
 /** The text without the given tokens. */
 const without = (text: string, tokens: QuickAddToken[]) => {
   let result = '', last = 0;
@@ -33,14 +47,23 @@ const without = (text: string, tokens: QuickAddToken[]) => {
   return (result + text.slice(last)).replace(/\s{2,}/g, ' ').trimStart();
 };
 
-export function QuickAdd({ world, today, client, preset, follow, onClose, onAdded }: {
-  world: TodoWorld; today: string; client: TodoClient; preset: QuickAddPreset; follow: FollowUp | null; onClose: () => void; onAdded: (id: string) => void;
+export function QuickAdd({ world, today, client, preset, follow, attach, onClose, onAdded }: {
+  world: TodoWorld; today: string; client: TodoClient; preset: QuickAddPreset; follow: FollowUp | null;
+  /** Uploads files to a saved task's description (TodoActions.attach with the page's uploads). */
+  attach: (taskId: string, files: File[]) => void;
+  onClose: () => void; onAdded: (id: string) => void;
 }) {
   const before = follow ? world.tasks[follow.taskId] : undefined;
   const [text, setText] = useState('');
   const [description, setDescription] = useState('');
   const [ignored, setIgnored] = useState<ReadonlySet<string>>(() => new Set());
   const [manual, setManual] = useState<Manual>({});
+  const [files, setFiles] = useState<File[]>([]);
+  // Saving with files waits for the server: meanwhile Enter and the button do nothing, so one task is made.
+  const [saving, setSaving] = useState(false);
+  const busy = useRef(false);
+  const addFiles = (picked: File[]) => setFiles(previous => [...previous, ...picked]);
+  const drop = useFileDrop(addFiles);
   const input = useRef<HTMLInputElement>(null);
   const backdrop = useRef<HTMLDivElement>(null);
   const dialog = useRef<HTMLDivElement>(null);
@@ -70,14 +93,20 @@ export function QuickAdd({ world, today, client, preset, follow, onClose, onAdde
   const content = parsed.content;
 
   const dropTokens = (kinds: QuickAddKind[]) => setText(value => without(value, parsed.tokens.filter(token => kinds.includes(token.kind))));
-  const submit = () => {
+  const submit = async () => {
+    if (busy.current) return;
     if (!content.trim()) { input.current?.focus(); return; }
     const draft = { content: content.slice(0, 500), description, result: {
       projectId, sectionId, labelIds, newLabels: parsed.newLabels, priority, dueDate: date.dueDate ?? undefined, dueTime: date.dueTime ?? undefined,
       durationMin: date.durationMin ?? undefined, recurrence: (date.recurrence ?? undefined) as TodoRecurrence | undefined, deadlineDate: deadline ?? undefined,
     } };
     const { ops, id } = preset.parentId ? createTaskOps(draft, { parentId: preset.parentId }) : quickAddOps(draft, follow, before, today);
-    if (!client.apply(ops)) return;
+    if (files.length) {
+      busy.current = true; setSaving(true);
+      const saved = await saveWithFiles(client, attach, ops, id, files);
+      busy.current = false; setSaving(false);
+      if (!saved) return;
+    } else if (!client.apply(ops)) return;
     if (follow?.complete && before) client.toast(t('“{0}” 완료, 다음 작업 추가', { 0: before.content }), 'info', client.undoActions());
     onAdded(id);
     onClose();
@@ -90,7 +119,7 @@ export function QuickAdd({ world, today, client, preset, follow, onClose, onAdde
   segments.push({ text: text.slice(last) });
 
   return <div className="todo-modal-scrim" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
-    <div ref={dialog} className="todo-quick-add" role="dialog" aria-modal="true" aria-label={follow ? t('다음 작업 추가') : t('작업 추가')}
+    <div ref={dialog} className={`todo-quick-add ${drop.over ? 'drop-target' : ''}`} role="dialog" aria-modal="true" aria-label={follow ? t('다음 작업 추가') : t('작업 추가')} {...drop.handlers}
       onKeyDown={event => { if (event.key === 'Escape' && !event.nativeEvent.isComposing && !document.querySelector('.todo-popover')) { event.preventDefault(); event.stopPropagation(); onClose(); } }}>
       {before && <div className="todo-quick-follow"><ArrowRight size={13} /><span>{follow!.complete ? t('“{0}” 완료 후 다음 작업', { 0: before.content }) : t('“{0}” 다음 작업', { 0: before.content })}</span></div>}
       {preset.parentId && world.tasks[preset.parentId] && <div className="todo-quick-follow"><span>{t('“{0}”의 하위 작업', { 0: world.tasks[preset.parentId].content })}</span></div>}
@@ -98,10 +127,14 @@ export function QuickAdd({ world, today, client, preset, follow, onClose, onAdde
         <div ref={backdrop} className="todo-quick-backdrop" aria-hidden="true">{segments.map((segment, index) => segment.kind ? <mark key={index} className={segment.kind}>{segment.text}</mark> : <span key={index}>{segment.text}</span>)}{'​'}</div>
         <input ref={input} value={text} maxLength={1000} placeholder={t('예: 견적 회신 내일 오후 3시 #프로젝트 p1')} aria-label={t('작업 이름')} spellCheck={false}
           onChange={event => setText(event.target.value)} onScroll={scrollSync} onSelect={scrollSync}
-          onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); submit(); } }} />
+          onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); void submit(); } }} />
       </div>
       <textarea className="todo-quick-description" value={description} rows={description ? 3 : 1} maxLength={16_383} placeholder={t('설명')} aria-label={t('설명')} onChange={event => setDescription(event.target.value)}
-        onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submit(); } }} />
+        onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void submit(); } }} />
+      {files.length > 0 && <ul className="todo-pending-files" aria-label={t('첨부할 파일')}>{files.map((file, index) => <li key={`${file.name}-${index}`}>
+        <Paperclip size={12} /><span>{file.name}</span><small>{sizeLabel(file.size)}</small>
+        <button type="button" className="icon-button" aria-label={t('“{0}” 빼기', { 0: file.name })} disabled={saving} onClick={() => setFiles(previous => previous.filter((_, position) => position !== index))}><X size={12} /></button>
+      </li>)}</ul>}
       {parsed.tokens.length > 0 && <div className="todo-quick-tokens" aria-label={t('인식한 단어')}>
         {parsed.tokens.map(token => <span key={`${token.key}-${token.start}`} className={`todo-token ${token.kind}`}>
           <small>{t(KIND_LABELS[token.kind])}</small>{token.text}
@@ -116,9 +149,10 @@ export function QuickAdd({ world, today, client, preset, follow, onClose, onAdde
         {!preset.parentId && <ProjectChip world={world} projectId={projectId} sectionId={sectionId} onChange={place => { dropTokens(['project', 'section']); setManual(previous => ({ ...previous, place })); }} />}
       </div>
       <footer className="todo-quick-footer">
+        <AttachButton onFiles={addFiles} disabled={saving} compact />
         <span className="todo-muted todo-quick-hint">{t('Enter 추가 · Esc 취소')}</span>
         <button type="button" className="todo-secondary" onClick={onClose}>{t('취소')}</button>
-        <button type="button" className="todo-primary" disabled={!content.trim()} onClick={submit}>{follow?.complete ? t('완료하고 추가') : t('작업 추가')}</button>
+        <button type="button" className="todo-primary" disabled={!content.trim() || saving} onClick={() => void submit()}>{follow?.complete ? t('완료하고 추가') : t('작업 추가')}</button>
       </footer>
     </div>
   </div>;
