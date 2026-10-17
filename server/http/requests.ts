@@ -145,8 +145,10 @@ export function errorDisposition(error: unknown): Disposition | undefined {
 
 type Request = IncomingMessage | Http2ServerRequest;
 type Target = { kind: 'chat' | 'auto'; sessionId: string };
-export const uploadProgressPath = (path: string) => /^\/api\/(?:nodes\/[a-f0-9]{32}\/)?attachment-uploads\/[a-f0-9-]{36}(?:\/(complete|cancel))?$/.test(path);
-export const uploadAppendPath = (path: string) => /^\/api\/(?:nodes\/[a-f0-9]{32}\/)?attachment-uploads\/[a-f0-9-]{36}$/.test(path);
+/** The pieces, completion and cancellation of a resumable upload (a chat's or a todo's): apart from the change budget, four at a time. */
+export const uploadProgressPath = (path: string) => /^\/api\/(?:(?:nodes\/[a-f0-9]{32}\/)?attachment-uploads|todos\/uploads)\/[a-f0-9-]{36}(?:\/(complete|cancel))?$/.test(path);
+/** A piece of an upload, sent as bytes rather than JSON. */
+export const uploadAppendPath = (path: string) => /^\/api\/(?:(?:nodes\/[a-f0-9]{32}\/)?attachment-uploads|todos\/uploads)\/[a-f0-9-]{36}$/.test(path);
 const running = new WeakMap<AttachmentUploads, number>();
 export async function attachmentUploadRoute(req: Request, res: ServerResponse, url: URL, uploads: AttachmentUploads | undefined, owner: string,
   authorize: (target: Target) => Promise<Target>, available: () => boolean, mutation: () => void = () => {}): Promise<boolean> {

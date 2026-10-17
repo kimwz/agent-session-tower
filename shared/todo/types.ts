@@ -99,7 +99,38 @@ export interface TodoCompletion {
   completedAt: string;
 }
 
-export type TodoEventKind = 'created' | 'updated' | 'moved' | 'completed' | 'uncompleted' | 'deleted' | 'restored' | 'linked' | 'unlinked' | 'commented';
+export type TodoEventKind = 'created' | 'updated' | 'moved' | 'completed' | 'uncompleted' | 'deleted' | 'restored' | 'linked' | 'unlinked' | 'commented' | 'attached';
+
+/** A file is at most this large; it is sent in pieces of `UPLOAD_CHUNK_BYTES` (shared/attachments.ts). */
+export const TODO_FILE_MAX_BYTES = 100 * 1024 * 1024;
+
+/**
+ * A file attached to a task's description (`commentId` null) or to one of its comments. It shows while it is not
+ * deleted, its task is not deleted, and its comment (if any) is not deleted: deleting and restoring a task or comment
+ * never changes the file itself, so the page works out what shows from those three.
+ */
+export interface TodoFile {
+  id: string;
+  taskId: string;
+  commentId: string | null;
+  name: string;
+  mimeType: string;
+  size: number;
+  sha256: string;
+  createdAt: string;
+  deletedAt: string | null;
+  /** Its contents are not on this computer (a restore could not bring them back). Only in a task's detail. */
+  missing?: true;
+}
+
+/** Bringing back the attachments of a restored backup, which goes on after the restore has answered. */
+export interface TodoRestoreProgress {
+  state: 'downloading' | 'done' | 'partial';
+  /** Files to bring back. */
+  total: number;
+  /** Files that could not be brought back so far. */
+  missing: number;
+}
 
 export interface TodoEvent {
   id: string;
@@ -129,6 +160,10 @@ export interface TodoOverview {
   links: TodoLink[];
   /** Comments per open task that has any. */
   commentCounts: Record<string, number>;
+  /** Attachments that show, per open task that has any (its description's and its comments' together). */
+  fileCounts: Record<string, number>;
+  /** Present after a backup was restored here, while and after its attachments are brought back. */
+  restore?: TodoRestoreProgress;
 }
 
 /** What one request changed, including what it deleted (with `deletedAt`) or completed (with `completedAt`). */
@@ -142,6 +177,8 @@ export interface TodoChanges {
   /** Ids of links removed for good (`link.delete`). */
   removedLinks: string[];
   comments: TodoComment[];
+  /** Files added, deleted (with `deletedAt`) or restored. */
+  files: TodoFile[];
 }
 
 export interface TodoTaskDetail {
@@ -149,6 +186,8 @@ export interface TodoTaskDetail {
   /** Every task below it, completed ones included. */
   subtasks: TodoTask[];
   comments: TodoComment[];
+  /** Attachments that show: the description's and the comments' (by `commentId`), oldest first. */
+  files: TodoFile[];
   completions: TodoCompletion[];
   events: TodoEvent[];
   /** Tasks this one follows, and tasks that follow it, completed ones included. */

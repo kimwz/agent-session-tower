@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { TowerError } from '../../../shared/errors.js';
 import { TodoRequestSchema, type TodoOp } from '../../../shared/todo/ops.js';
 import { INBOX_ID, TODO_RETENTION_MS, TodoStore } from '../../../server/todo/store.js';
-import { TODO_SCHEMA_STEP } from '../../../server/todo/schema.js';
+import { TODO_DATA_TABLES, TODO_SCHEMA_STEP } from '../../../server/todo/schema.js';
 
 async function fixture(t: TestContext, options: { runtime?: () => string | undefined } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'tower-todos-'));
@@ -457,10 +457,27 @@ test('every column a delete cascades through is indexed, so removing old rows ne
   t.after(() => db.close());
   for (const [table, column] of [['todo_completions', 'task_id'], ['todo_tasks', 'project_id'], ['todo_tasks', 'section_id'], ['todo_tasks', 'parent_id'],
     ['todo_sections', 'project_id'], ['todo_projects', 'parent_id'], ['todo_task_labels', 'label_id'], ['todo_task_labels', 'task_id'], ['todo_links', 'from_task_id'],
-    ['todo_links', 'to_task_id'], ['todo_comments', 'task_id'], ['todo_events', 'task_id']]) {
+    ['todo_links', 'to_task_id'], ['todo_comments', 'task_id'], ['todo_events', 'task_id'], ['todo_files', 'task_id'], ['todo_files', 'comment_id'], ['todo_files', 'sha256']]) {
     const plan = (db.prepare(`EXPLAIN QUERY PLAN SELECT 1 FROM ${table} WHERE ${column} = ?`).all('x') as { detail: string }[]).map(row => row.detail).join(' ');
     assert.match(plan, /USING (COVERING )?INDEX|USING PRIMARY KEY/, `${table}.${column}: ${plan}`);
   }
+  // Every column a foreign key points from is in the list above.
+  const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name);
+  for (const table of tables) {
+    for (const key of db.prepare(`PRAGMA foreign_key_list(${table})`).all() as { from: string }[]) {
+      const plan = (db.prepare(`EXPLAIN QUERY PLAN SELECT 1 FROM ${table} WHERE ${key.from} = ?`).all('x') as { detail: string }[]).map(row => row.detail).join(' ');
+      assert.match(plan, /USING (COVERING )?INDEX|USING PRIMARY KEY/, `${table}.${key.from}: ${plan}`);
+    }
+  }
+});
+
+test('a backup holds every table but the file’s own bookkeeping', async t => {
+  const { dir, store } = await fixture(t);
+  store.close();
+  const db = new DatabaseSync(join(dir, 'todos.sqlite'), { readOnly: true });
+  t.after(() => db.close());
+  const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name).sort();
+  assert.deepEqual(tables, [...TODO_DATA_TABLES, 'todo_meta', 'todo_requests'].sort());
 });
 
 test('restoring below a task closed with its parent ties the restored task to the top completion', async t => {

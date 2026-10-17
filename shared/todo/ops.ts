@@ -80,6 +80,9 @@ export const TodoOpSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('comment.update'), id, body: z.string().trim().min(1).max(15_000) }).strict(),
   z.object({ op: z.literal('comment.delete'), id }).strict(),
   z.object({ op: z.literal('comment.restore'), id }).strict(),
+  /** Files are added by an upload (`/api/todos/uploads`); these delete and restore one. */
+  z.object({ op: z.literal('file.delete'), id }).strict(),
+  z.object({ op: z.literal('file.restore'), id }).strict(),
 ]);
 
 export type TodoOp = z.infer<typeof TodoOpSchema>;

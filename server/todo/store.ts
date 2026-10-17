@@ -1,17 +1,20 @@
-import { constants, lstatSync, openSync, closeSync, fchmodSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { constants, existsSync, lstatSync, openSync, closeSync, fchmodSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { TowerError } from '../../shared/errors.js';
 import type { TodoOp, TodoOpName, TodoOpOf, TodoRequest } from '../../shared/todo/ops.js';
-import type { TodoAvailability, TodoChanges, TodoCompletedPage, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
+import type { TodoAvailability, TodoChanges, TodoCompletedPage, TodoFile, TodoOverview, TodoRestoreProgress, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import { nodeVerified, sqlitePatched } from '../storage/runtime.js';
 import { TodoContext } from './context.js';
+import { checkTodoFileRow, todoFilePath } from './files.js';
 import { createComment, deleteComment, updateComment } from './ops/comments.js';
+import { attachFile, checkAttachable, deleteFile, restoreFile, type NewTodoFile } from './ops/files.js';
 import { createLink, deleteLink } from './ops/links.js';
 import { createLabel, createProject, createSection, deleteLabel, deleteProject, deleteSection, moveLabel, moveProject, moveSection, restoreLabel, restoreProject, restoreSection, updateLabel, updateProject, updateSection } from './ops/projects.js';
 import { completeTask, createTask, deleteTask, moveTask, restoreTask, uncompleteTask, updateTask } from './ops/tasks.js';
-import { TASK_COLUMNS, commentOf, completionOf, eventOf, labelOf, linkOf, projectOf, sectionOf, taskOf } from './rows.js';
-import { TODO_SCHEMA, TODO_SCHEMA_STEP, minWriterAt } from './schema.js';
+import { TASK_COLUMNS, VISIBLE_FILE, commentOf, completionOf, eventOf, fileOf, labelOf, linkOf, projectOf, sectionOf, taskOf } from './rows.js';
+import { TODO_DATA_TABLES, TODO_SCHEMA, TODO_SCHEMA_STEP, minWriterAt } from './schema.js';
 
 /** The completed list's page cursor: the last completion's time and row. */
 export const TODO_COMPLETED_CURSOR = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)~(\d{1,15})$/;
@@ -54,7 +57,16 @@ const OPERATIONS: { [N in TodoOpName]: Handler } = {
   'comment.update': handler(updateComment),
   'comment.delete': handler(deleteComment),
   'comment.restore': handler<'comment.restore'>((ctx, op) => deleteComment(ctx, { op: 'comment.delete', id: op.id }, true)),
+  'file.delete': handler(deleteFile),
+  'file.restore': handler(restoreFile),
 };
+
+/** The copies a restore makes of the file it replaces; only the newest few are kept. */
+const RESTORE_COPIES_KEPT = 3;
+const RESTORE_COPY = /^todo-restore-before-\d{8}T\d{6}\d{3}Z\.sqlite$/;
+
+/** A backup's rows, by table; see `TODO_DATA_TABLES`. */
+export type TodoTables = Record<string, Record<string, unknown>[]>;
 
 type Sqlite = typeof import('node:sqlite');
 
@@ -79,13 +91,15 @@ function runtimeProblem(sqlite: Sqlite | undefined, version: string | undefined)
  */
 export class TodoStore {
   readonly path: string;
+  private readonly stateDir: string;
   private db?: DatabaseSync;
+  private restoreProgress?: TodoRestoreProgress;
   private state: TodoAvailability = { state: 'unavailable', reason: '할 일 저장소를 아직 열지 않았습니다.' };
   private revisionValue = 0;
   /** The steps the open file has, which may be more than this build knows. */
   private fileStep = 0;
 
-  constructor(stateDir: string, private readonly options: TodoStoreOptions = {}) { this.path = join(stateDir, 'todos.sqlite'); }
+  constructor(stateDir: string, private readonly options: TodoStoreOptions = {}) { this.stateDir = stateDir; this.path = join(stateDir, 'todos.sqlite'); }
 
   private now(): string { return (this.options.now?.() ?? new Date()).toISOString(); }
 
@@ -126,8 +140,15 @@ export class TodoStore {
       : { state: 'ready' };
     this.revisionValue = Number(this.meta('revision') ?? 0);
     if (this.state.state === 'ready' && !this.get('SELECT 1 FROM todo_projects WHERE inbox = 1')) {
-      this.transaction(() => this.run('INSERT INTO todo_projects (id, name, inbox, sort_key, created_at, updated_at) VALUES (?, ?, 1, ?, ?, ?)', INBOX_ID, 'Inbox', 'V', this.now(), this.now()));
+      this.transaction(() => this.ensureInbox());
     }
+    // The key a backup encrypts this computer's attachments with (see server/todo/backup.ts); a new file makes a new one.
+    if (this.state.state === 'ready' && !this.meta('files_key')) this.transaction(() => this.setMeta('files_key', randomBytes(32).toString('base64url')));
+  }
+
+  private ensureInbox(): void {
+    if (this.get('SELECT 1 FROM todo_projects WHERE inbox = 1')) return;
+    this.run('INSERT INTO todo_projects (id, name, inbox, sort_key, created_at, updated_at) VALUES (?, ?, 1, ?, ?, ?)', INBOX_ID, 'Inbox', 'V', this.now(), this.now());
   }
 
   private migrate(): void {
@@ -181,18 +202,20 @@ export class TodoStore {
   }
 
   overview(): TodoOverview {
-    if (!this.db || this.state.state === 'unavailable') return { availability: this.state, revision: this.revisionValue, projects: [], sections: [], labels: [], tasks: [], links: [], commentCounts: {} };
+    if (!this.db || this.state.state === 'unavailable') return { availability: this.state, revision: this.revisionValue, projects: [], sections: [], labels: [], tasks: [], links: [], commentCounts: {}, fileCounts: {} };
     const tasks = this.all(`SELECT ${TASK_COLUMNS} FROM todo_tasks t JOIN todo_projects p ON p.id = t.project_id AND p.deleted_at IS NULL WHERE t.deleted_at IS NULL AND t.completed_at IS NULL`).map(taskOf);
     const links = this.all(`SELECT k.* FROM todo_links k JOIN todo_tasks a ON a.id = k.from_task_id AND a.deleted_at IS NULL JOIN todo_tasks b ON b.id = k.to_task_id AND b.deleted_at IS NULL
       WHERE a.completed_at IS NULL OR b.completed_at IS NULL`).map(linkOf);
     const commentCounts = Object.fromEntries(this.all<{ task_id: string; n: number }>(`SELECT c.task_id, COUNT(*) AS n FROM todo_comments c JOIN todo_tasks t ON t.id = c.task_id
       WHERE c.deleted_at IS NULL AND t.deleted_at IS NULL AND t.completed_at IS NULL GROUP BY c.task_id`).map(row => [row.task_id, Number(row.n)]));
+    const fileCounts = Object.fromEntries(this.all<{ task_id: string; n: number }>(`SELECT f.task_id, COUNT(*) AS n FROM todo_files f JOIN todo_tasks t ON t.id = f.task_id
+      LEFT JOIN todo_comments c ON c.id = f.comment_id WHERE ${VISIBLE_FILE} AND t.deleted_at IS NULL AND t.completed_at IS NULL GROUP BY f.task_id`).map(row => [row.task_id, Number(row.n)]));
     return {
       availability: this.state, revision: this.revisionValue,
       projects: this.all('SELECT * FROM todo_projects WHERE deleted_at IS NULL ORDER BY sort_key').map(projectOf),
       sections: this.all('SELECT * FROM todo_sections WHERE deleted_at IS NULL ORDER BY sort_key').map(sectionOf),
       labels: this.all('SELECT * FROM todo_labels WHERE deleted_at IS NULL ORDER BY sort_key').map(labelOf),
-      tasks, links, commentCounts,
+      tasks, links, commentCounts, fileCounts, ...(this.restoreProgress ? { restore: { ...this.restoreProgress } } : {}),
     };
   }
 
@@ -213,6 +236,8 @@ export class TodoStore {
     return {
       task, subtasks,
       comments: this.all('SELECT * FROM todo_comments WHERE task_id = ? AND deleted_at IS NULL ORDER BY created_at', id).map(commentOf),
+      files: this.all(`SELECT f.* FROM todo_files f LEFT JOIN todo_comments c ON c.id = f.comment_id WHERE f.task_id = ? AND ${VISIBLE_FILE} ORDER BY f.created_at, f.rowid`, id)
+        .map(fileOf).map(file => existsSync(todoFilePath(this.stateDir, file.sha256)) ? file : { ...file, missing: true as const }),
       completions: this.all('SELECT * FROM todo_completions WHERE task_id = ? AND undone_at IS NULL ORDER BY completed_at DESC LIMIT 50', id).map(completionOf),
       events: this.all('SELECT * FROM todo_events WHERE task_id = ? ORDER BY id DESC LIMIT 100', id).map(eventOf),
       previous: related('to_task_id', 'from_task_id'), next: related('from_task_id', 'to_task_id'),
@@ -251,22 +276,79 @@ export class TodoStore {
 
   /** Applies a request's operations together, or none of them. A request sent again answers what it answered first. */
   apply(request: TodoRequest): TodoChanges {
-    this.writable();
-    const changes = this.transaction(() => {
+    return this.commit(ctx => {
       const earlier = this.get<{ result: string }>('SELECT result FROM todo_requests WHERE id = ?', request.requestId);
-      if (earlier) return JSON.parse(earlier.result) as TodoChanges;
-      if (Number(this.meta('min_writer') ?? 1) > TODO_SCHEMA_STEP) throw new TowerError('locked', '더 새로운 Tower가 바꾼 할 일 저장소입니다.');
-      const ctx = new TodoContext(this.db!, this.now());
+      // An answer kept by an earlier build lacks what was added since.
+      if (earlier) return { ...this.emptyChanges(0), ...JSON.parse(earlier.result) as TodoChanges };
       for (const op of request.ops) OPERATIONS[op.op](ctx, op);
-      const revision = this.revisionValue + 1;
-      this.setMeta('revision', String(revision));
-      const changes = this.changes(ctx, revision);
+      const changes = this.changes(ctx, this.nextRevision());
       this.run('INSERT INTO todo_requests (id, result, at) VALUES (?, ?, ?)', request.requestId, JSON.stringify(changes), ctx.now);
       return changes;
+    });
+  }
+
+  /** One write transaction of the store's rules, whose answer carries the revision it made. */
+  private commit(work: (ctx: TodoContext) => TodoChanges): TodoChanges {
+    this.writable();
+    const changes = this.transaction(() => {
+      if (Number(this.meta('min_writer') ?? 1) > TODO_SCHEMA_STEP) throw new TowerError('locked', '더 새로운 Tower가 바꾼 할 일 저장소입니다.');
+      return work(new TodoContext(this.db!, this.now()));
     });
     // Only a committed change moves the revision pages see.
     this.revisionValue = Math.max(this.revisionValue, changes.revision);
     return changes;
+  }
+
+  private nextRevision(): number {
+    const revision = this.revisionValue + 1;
+    this.setMeta('revision', String(revision));
+    return revision;
+  }
+
+  /** Throws unless a file can be attached to this task and comment now. */
+  attachable(taskId: string, commentId: string | null): void {
+    this.writable();
+    checkAttachable(new TodoContext(this.db!, this.now()), taskId, commentId);
+  }
+
+  /**
+   * Adds the row of an uploaded file whose contents are already in place, checking again that its task and comment
+   * are there. The id was fixed when the upload began: a file already added answers its row and changes nothing.
+   */
+  attach(file: NewTodoFile): { file: TodoFile; changes: TodoChanges } {
+    const changes = this.commit(ctx => {
+      if (this.get('SELECT 1 FROM todo_files WHERE id = ?', file.id)) return { ...this.emptyChanges(this.revisionValue), files: [this.fileRow(file.id)!] };
+      attachFile(ctx, file);
+      return this.changes(ctx, this.nextRevision());
+    });
+    return { file: changes.files.find(item => item.id === file.id)!, changes };
+  }
+
+  private fileRow(id: string): TodoFile | undefined {
+    const row = this.get('SELECT * FROM todo_files WHERE id = ?', id);
+    return row ? fileOf(row) : undefined;
+  }
+
+  /** A file that shows (see TodoFile), for serving it. */
+  visibleFile(id: string): TodoFile | undefined {
+    this.readable();
+    const row = this.get(`SELECT f.* FROM todo_files f JOIN todo_tasks t ON t.id = f.task_id AND t.deleted_at IS NULL LEFT JOIN todo_comments c ON c.id = f.comment_id
+      WHERE f.id = ? AND ${VISIBLE_FILE}`, id);
+    return row ? fileOf(row) : undefined;
+  }
+
+  /**
+   * The contents every file row names, deleted ones included, so nothing a row may still show is removed. Undefined
+   * when this build must not remove contents: the file is unusable or newer than this build (a table it does not know
+   * may name contents too).
+   */
+  fileContents(): Map<string, number> | undefined {
+    if (!this.db || this.state.state !== 'ready' || this.fileStep !== TODO_SCHEMA_STEP) return undefined;
+    return new Map(this.all<{ sha256: string; size: number }>('SELECT sha256, MAX(size) AS size FROM todo_files GROUP BY sha256').map(row => [row.sha256, Number(row.size)]));
+  }
+
+  private emptyChanges(revision: number): TodoChanges {
+    return { revision, projects: [], sections: [], labels: [], tasks: [], links: [], removedLinks: [], comments: [], files: [] };
   }
 
   private changes(ctx: TodoContext, revision: number): TodoChanges {
@@ -280,6 +362,7 @@ export class TodoStore {
       links: rows('todo_links', ctx.touched.links).map(linkOf),
       removedLinks: ctx.removedLinks,
       comments: rows('todo_comments', ctx.touched.comments).map(commentOf),
+      files: rows('todo_files', ctx.touched.files).map(fileOf),
     };
   }
 
@@ -293,12 +376,104 @@ export class TodoStore {
     const cutoff = new Date(now.getTime() - TODO_RETENTION_MS).toISOString();
     try {
       this.transaction(() => {
-        for (const table of ['todo_comments', 'todo_tasks', 'todo_sections', 'todo_labels', 'todo_projects']) {
+        // Removing a task or comment removes its files with it (foreign keys); contents no row names go afterwards (TodoFiles).
+        for (const table of ['todo_files', 'todo_comments', 'todo_tasks', 'todo_sections', 'todo_labels', 'todo_projects']) {
           this.run(`DELETE FROM ${table} WHERE deleted_at IS NOT NULL AND deleted_at < ?`, cutoff);
         }
         this.run('DELETE FROM todo_requests WHERE at < ?', new Date(now.getTime() - REQUEST_RETENTION_MS).toISOString());
       });
     } catch (error) { console.error(`Todo cleanup failed: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+
+  // ---- Backup ---------------------------------------------------------------------------------------
+
+  /**
+   * Everything a backup keeps, read at one moment: the data tables' rows, the step of the schema this build writes, the
+   * attachments' key, and the contents the rows name. Undefined when the file cannot be read.
+   */
+  backupData(): { schema: number; tables: TodoTables; key?: string; contents: Map<string, number> } | undefined {
+    if (!this.db || this.state.state === 'unavailable') return undefined;
+    this.db.exec('BEGIN');
+    try {
+      const tables: TodoTables = {};
+      // In the order rows were added, which lists of one moment keep (rowid); a table without one by its key.
+      for (const table of TODO_DATA_TABLES) {
+        const rowid = !this.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? AND sql LIKE '%WITHOUT ROWID%'", table);
+        tables[table] = this.all(`SELECT * FROM ${table} ORDER BY ${rowid ? 'rowid' : '1, 2'}`);
+      }
+      const contents = new Map(this.all<{ sha256: string; size: number }>('SELECT sha256, MAX(size) AS size FROM todo_files GROUP BY sha256').map(row => [row.sha256, Number(row.size)]));
+      const key = this.meta('files_key');
+      return { schema: TODO_SCHEMA_STEP, tables, ...(key ? { key } : {}), contents };
+    } finally { if (this.db.isTransaction) this.db.exec('COMMIT'); }
+  }
+
+  /**
+   * Replaces every data table with a backup's rows, in one transaction, after copying the file aside (WAL included).
+   * `todo_meta` stays this file's own; the revision moves past the one before, so open pages load again. A build
+   * older than the file, or a backup of a newer schema, is refused: rows of what it does not know would be lost.
+   * Answers where the copy is.
+   */
+  restoreData(schema: number, tables: TodoTables): string {
+    this.writable();
+    if (this.fileStep !== TODO_SCHEMA_STEP) throw new TowerError('locked', '더 새로운 Tower가 만든 할 일 저장소라 복원하지 않았습니다. Tower를 업데이트한 뒤 복원하세요.');
+    if (schema > TODO_SCHEMA_STEP) throw new TowerError('conflict', '더 새로운 Tower의 할 일 백업입니다. Tower를 업데이트한 뒤 복원하세요.');
+    const columns = new Map(TODO_DATA_TABLES.map(table => [table, new Set(this.all<{ name: string }>(`PRAGMA table_info(${table})`).map(row => row.name))]));
+    for (const [table, rows] of Object.entries(tables)) {
+      const known = columns.get(table as typeof TODO_DATA_TABLES[number]);
+      if (!known) throw new TowerError('invalid', `할 일 백업에 알 수 없는 표가 있습니다: ${table}`);
+      for (const row of rows) {
+        for (const [name, value] of Object.entries(row)) {
+          if (!known.has(name)) throw new TowerError('invalid', `할 일 백업에 알 수 없는 열이 있습니다: ${table}.${name}`);
+          if (value !== null && typeof value !== 'string' && typeof value !== 'number') throw new TowerError('invalid', `할 일 백업의 값이 올바르지 않습니다: ${table}.${name}`);
+        }
+      }
+    }
+    // Contents are found by a row's hash and shown under its name: nothing but what an upload makes goes in.
+    for (const row of tables.todo_files ?? []) checkTodoFileRow(row);
+    const before = this.copyAside();
+    this.revisionValue = this.transaction(() => {
+      // Checked when the transaction commits, so rows go in table by table whatever points at what.
+      this.db!.exec('PRAGMA defer_foreign_keys = ON');
+      for (const table of [...TODO_DATA_TABLES].reverse()) this.run(`DELETE FROM ${table}`);
+      for (const table of TODO_DATA_TABLES) {
+        for (const row of tables[table] ?? []) {
+          const names = Object.keys(row);
+          if (!names.length) continue;
+          this.run(`INSERT INTO ${table} (${names.join(', ')}) VALUES (${names.map(() => '?').join(', ')})`, ...names.map(name => row[name] as string | number | null));
+        }
+      }
+      this.ensureInbox();
+      if ((this.all('PRAGMA foreign_key_check') as unknown[]).length) throw new TowerError('invalid', '할 일 백업의 항목이 서로 맞지 않습니다.');
+      return this.nextRevision();
+    });
+    return before;
+  }
+
+  /** A consistent copy of the file as it is now, kept beside it (the newest few). */
+  private copyAside(): string {
+    const stamp = new Date(this.now()).toISOString().replace(/[-:.]/g, '');
+    const path = join(this.stateDir, `todo-restore-before-${stamp}.sqlite`);
+    // Made owner-only and empty first: VACUUM INTO writes into an empty file it finds.
+    closeSync(openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600));
+    try { this.db!.prepare('VACUUM INTO ?').run(path); }
+    catch (error) { rmSync(path, { force: true }); throw error; }
+    const copies = readdirSync(this.stateDir).filter(name => RESTORE_COPY.test(name)).sort();
+    for (const name of copies.slice(0, Math.max(0, copies.length - RESTORE_COPIES_KEPT))) rmSync(join(this.stateDir, name), { force: true });
+    return path;
+  }
+
+  /** The key this computer's attachments are encrypted with in backups (base64url), when the file has one. */
+  filesKey(): string | undefined {
+    return this.db && this.state.state !== 'unavailable' ? this.meta('files_key') : undefined;
+  }
+
+  /** What the page shows about bringing back a restored backup's attachments. */
+  setRestoreProgress(progress: TodoRestoreProgress | undefined): void { this.restoreProgress = progress && { ...progress }; }
+
+  /** Moves the revision so open pages load again (attachments brought back after a restore). */
+  touch(): void {
+    if (!this.db || this.state.state !== 'ready') return;
+    this.revisionValue = this.transaction(() => this.nextRevision());
   }
 }
 

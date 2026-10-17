@@ -44,8 +44,125 @@ export function endpointUrl(value: string): URL {
   return url;
 }
 
-const xmlText = (value: string) => value.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code))).replace(/&amp;/g, '&');
+/** A character reference past Unicode's last code point stays as written. */
+const xmlText = (value: string) => value.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+  .replace(/&#(\d+);/g, (raw, code) => Number(code) <= 0x10ffff ? String.fromCodePoint(Number(code)) : raw).replace(/&amp;/g, '&');
 const tag = (xml: string, name: string) => { const found = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(xml); return found ? xmlText(found[1]!) : undefined; };
+
+/** An element of a listing as parsed: its name, its child elements in order, and its text (entities decoded). */
+interface XmlElement { name: string; children: XmlElement[]; text: string }
+
+const NAME = /^[A-Za-z_][\w.-]*$/;
+const ATTRIBUTES = /^(?:\s+[A-Za-z_][\w.:-]*\s*=\s*(?:"[^"<]*"|'[^'<]*'))*\s*$/;
+const ENTITY = /&(?:amp|lt|gt|quot|apos|#\d{1,7}|#x[0-9a-fA-F]{1,6});/g;
+
+/** Decoded text, or undefined when it holds an `&` that is not one of XML's own entities or a character reference. */
+function decodedText(raw: string): string | undefined {
+  if (raw.replace(ENTITY, '').includes('&')) return undefined;
+  let valid = true;
+  const text = raw.replace(ENTITY, entity => {
+    if (entity[1] !== '#') return ({ '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'" } as Record<string, string>)[entity]!;
+    const code = entity[2] === 'x' ? parseInt(entity.slice(3, -1), 16) : Number(entity.slice(2, -1));
+    if (code > 0x10ffff) { valid = false; return ''; }
+    return String.fromCodePoint(code);
+  });
+  return valid ? text : undefined;
+}
+
+/**
+ * The one root element of a document, or undefined for anything this does not fully understand: only unprefixed
+ * elements with simple attributes, text, comments, and one leading XML declaration; no CDATA, doctype, other
+ * processing instructions, stray `<`, unclosed or mismatched tags, or anything but whitespace beside the root.
+ */
+export function strictXmlRoot(xml: string): XmlElement | undefined {
+  let at = 0;
+  const declaration = /^\uFEFF?\s*<\?xml\s[^<>?]*\?>/.exec(xml);
+  if (declaration) at = declaration[0].length;
+  const stack: XmlElement[] = [];
+  let root: XmlElement | undefined;
+  while (at < xml.length) {
+    const open = xml.indexOf('<', at);
+    const raw = xml.slice(at, open === -1 ? xml.length : open);
+    if (stack.length) {
+      const text = decodedText(raw);
+      if (text === undefined) return undefined;
+      stack[stack.length - 1]!.text += text;
+    } else if (raw.trim()) return undefined;
+    if (open === -1) break;
+    if (xml.startsWith('<!--', open)) {
+      const close = xml.indexOf('-->', open + 4);
+      if (close === -1) return undefined;
+      at = close + 3;
+      continue;
+    }
+    const close = xml.indexOf('>', open);
+    if (close === -1) return undefined;
+    const body = xml.slice(open + 1, close);
+    at = close + 1;
+    if (body.includes('<') || body.startsWith('!') || body.startsWith('?')) return undefined;
+    if (body.startsWith('/')) {
+      const name = body.slice(1).trimEnd();
+      const element = stack.pop();
+      if (!element || element.name !== name) return undefined;
+      if (!stack.length) { if (root) return undefined; root = element; }
+      continue;
+    }
+    const selfClosing = body.endsWith('/');
+    const inner = selfClosing ? body.slice(0, -1) : body;
+    const name = /^[^\s/]*/.exec(inner)![0];
+    if (!NAME.test(name) || !ATTRIBUTES.test(inner.slice(name.length))) return undefined;
+    if (!stack.length && root) return undefined;
+    const element: XmlElement = { name, children: [], text: '' };
+    if (stack.length) stack[stack.length - 1]!.children.push(element);
+    if (selfClosing) { if (!stack.length) root = element; }
+    else stack.push(element);
+  }
+  return stack.length ? undefined : root;
+}
+
+/** Where the names a listing is read by may stand: anywhere else they could hide an entry. */
+const PLACE: Record<string, string | undefined> = { ListBucketResult: undefined, Contents: 'ListBucketResult', IsTruncated: 'ListBucketResult', Key: 'Contents' };
+
+/** Whether one of those names stands below `element` (whose parent is `parent`) other than in its place. */
+function misplaced(element: XmlElement, parent: string | undefined): boolean {
+  if (element.name in PLACE && PLACE[element.name] !== parent) return true;
+  return element.children.some(child => misplaced(child, element.name));
+}
+
+/**
+ * One page of a ListObjectsV2 answer. `whole` only when the page is provably all there: a document strictXmlRoot
+ * understands, rooted at ListBucketResult, with exactly one direct IsTruncated of true or false, every direct
+ * Contents holding exactly one Key with text, and none of those names anywhere else. Anything else is not whole; its
+ * items are then read leniently (outside comments, each key once), for showing backups only, never for removing any.
+ */
+export function listPage(xml: string): { items: RemoteBackup[]; whole: boolean; truncated: boolean; token?: string } {
+  const lenient = () => {
+    const seen = new Set<string>();
+    const items = [...xml.replace(/<!--[\s\S]*?-->/g, '').matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)].flatMap(match => {
+      const key = tag(match[1]!, 'Key');
+      if (key === undefined || seen.has(key)) return [];
+      seen.add(key);
+      return [{ key, size: Number(tag(match[1]!, 'Size') ?? 0), modifiedAt: tag(match[1]!, 'LastModified') ?? '' }];
+    });
+    return { items, whole: false, truncated: false };
+  };
+  const root = strictXmlRoot(xml);
+  if (!root || root.name !== 'ListBucketResult' || misplaced(root, undefined)) return lenient();
+  const children = (element: XmlElement, name: string) => element.children.filter(child => child.name === name);
+  /** The text of a leaf child that appears once; undefined when it is missing, repeated or has elements in it. */
+  const leaf = (element: XmlElement, name: string) => { const found = children(element, name); return found.length === 1 && !found[0]!.children.length ? found[0]!.text : undefined; };
+  const truncated = leaf(root, 'IsTruncated')?.trim();
+  if (truncated !== 'true' && truncated !== 'false') return lenient();
+  const items: RemoteBackup[] = [];
+  for (const entry of children(root, 'Contents')) {
+    const key = leaf(entry, 'Key');
+    if (!key) return lenient();
+    items.push({ key, size: Number(leaf(entry, 'Size') ?? 0), modifiedAt: leaf(entry, 'LastModified') ?? '' });
+  }
+  const more = truncated === 'true';
+  const token = more ? leaf(root, 'NextContinuationToken') : undefined;
+  return { items, whole: true, truncated: more, ...(token ? { token } : {}) };
+}
 
 export class S3Client {
   private readonly base: URL;
@@ -106,20 +223,29 @@ export class S3Client {
   }
 
   /** Every object under `prefix`, following continuation up to `limit` objects. */
-  async list(prefix: string, limit = 5000): Promise<RemoteBackup[]> {
+  async list(prefix: string, limit = 5000): Promise<RemoteBackup[]> { return (await this.scan(prefix, limit)).items; }
+
+  /**
+   * The objects under `prefix`, up to `limit`, and whether that is all of them: false when the listing stopped at the
+   * limit, or a page said there was more without saying where.
+   */
+  async scan(prefix: string, limit = 5000): Promise<{ items: RemoteBackup[]; complete: boolean }> {
     const found: RemoteBackup[] = [];
-    let token: string | undefined;
+    const seen = new Set<string>();
+    let token: string | undefined, more = false;
     // A store that keeps saying there is more without giving any is not followed forever.
-    for (let page = 0; page < 100; page++) {
+    for (let page = 0; page < Math.max(100, Math.ceil(limit / 500)); page++) {
       const response = await this.request('GET', this.url(undefined, { 'list-type': '2', prefix, ...(token ? { 'continuation-token': token } : {}) }));
-      const xml = await response.text();
-      for (const match of xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
-        const key = tag(match[1]!, 'Key');
-        if (key !== undefined) found.push({ key, size: Number(tag(match[1]!, 'Size') ?? 0), modifiedAt: tag(match[1]!, 'LastModified') ?? '' });
-      }
-      token = tag(xml, 'IsTruncated') === 'true' ? tag(xml, 'NextContinuationToken') : undefined;
+      const listed = listPage(await response.text());
+      // A key named twice is not a listing to count by: one entry may stand where another belongs.
+      const twice = listed.items.some(item => seen.has(item.key) || !seen.add(item.key));
+      found.push(...listed.items);
+      // Only a page read whole says where the listing ends; any other may have left objects out.
+      if (!listed.whole || twice) return { items: found, complete: false };
+      more = listed.truncated;
+      token = listed.token;
       if (!token || found.length >= limit) break;
     }
-    return found;
+    return { items: found, complete: !more };
   }
 }
