@@ -22,6 +22,8 @@ import { ProjectGroupStore } from './stores/project-groups.js';
 import { TodoStore } from './todo/store.js';
 import { TodoFiles } from './todo/files.js';
 import { TodoBackup } from './todo/backup.js';
+import { TodoAgents } from './todo/agents.js';
+import { writeTodoMasterGuide } from './master/guide.js';
 import { DurableRunManager } from './runs/durable-runner.js';
 import { runRunnerWorker } from './runs/worker.js';
 import { runTerminalHost } from './terminals/host.js';
@@ -64,6 +66,7 @@ import { overlapsRepository } from '../shared/repositories.js';
 import { RemoteExclusionStore } from './remote/exclusions.js';
 import { createRemoteRouter } from './remote/router.js';
 import type { RequestContext } from './http/request-context.js';
+import { errorDisposition } from './http/requests.js';
 import type { Backend } from './http/server.js';
 import { loadLinkIdentity } from './link/identity.js';
 import { ControllerLinks } from './link/controller.js';
@@ -76,7 +79,7 @@ import { GhLogin, providerLogin } from './link/readiness.js';
 import type { ManagedFolder } from '../shared/managed.js';
 import { runLinkCommand } from './link/cli.js';
 import { runModelsCommand } from './models/cli.js';
-import { applyManagedModelSettings, exportManagedModelSettings } from './models/settings.js';
+import { applyManagedModelSettings, exportManagedModelSettings, resolveModel } from './models/settings.js';
 import { RemoteNodes } from './link/nodes.js';
 import { linkRequest } from './link/transport.js';
 import { RemoteAudit } from './remote/audit.js';
@@ -267,7 +270,13 @@ async function main() {
     detail: (id: string) => todos.detail(id),
     completed: (input: Parameters<TodoStore['completed']>[0]) => todos.completed(input),
     search: (query: string, input: Parameters<TodoStore['search']>[1]) => todos.search(query, input),
-    apply: (request: Parameters<TodoStore['apply']>[0]) => { const changes = todos.apply(request); changed(); return changes; },
+    // A change that opened or closed todos moves their issue masters at once, and the answer carries them.
+    apply: (request: Parameters<TodoStore['apply']>[0]) => {
+      const changes = todos.apply(request);
+      const agents = todoAgents.settle();
+      changed();
+      return Object.keys(agents).length ? { ...changes, revision: todos.revision(), agents } : changes;
+    },
   };
   // The Todo tools every turn Tower runs gets (todo/agent-mcp.ts) reach the web with this key. Without one (a state
   // folder it cannot write) only those tools are unavailable; Tower starts all the same.
@@ -482,10 +491,12 @@ async function main() {
       return applyClosed(updated);
     },
     setClosed: async (id, closed) => {
-      const session = runs.getSession(id);
+      // Reopening asks the worker first: it brings back a session moved to compressed storage, which this web does not list.
+      const reopened = !closed && runs.supports('workerClosed') ? await runs.setClosed(id, false) : undefined;
+      const session = reopened ?? runs.getSession(id);
       if (!session) return undefined;
       if (closed && runs.supports('secrets')) await runs.secretCall('close-session', [session.id]);
-      const updated = runs.supports('workerClosed') ? await runs.setClosed(session.id, closed) : await closedSessions.set(session, closed);
+      const updated = reopened ?? (runs.supports('workerClosed') ? await runs.setClosed(session.id, closed) : await closedSessions.set(session, closed));
       if (!updated) return undefined;
       // Closing a conversation also stops what its agent planned to do in it later.
       if (closed) for (const run of runs.list()) if (run.sessionId === session.id && run.status === 'queued' && run.scheduled) await runs.cancel(run.id).catch(() => {});
@@ -501,7 +512,13 @@ async function main() {
       if (outcomes.acknowledge(session)) changed();
       return outcomes.apply(session);
     },
-    createSession: async (input, context) => { await repositories.prepareRun(input.cwd); return runs.create(input, admit(context)); },
+    createSession: async (input, context) => {
+      await repositories.prepareRun(input.cwd);
+      const created = await runs.create(input, admit(context));
+      // A session an issue master (or one of its sessions) started joins its family, so it closes with the todo.
+      todoAgents.recordFamily(created.run);
+      return created;
+    },
     compaction: async (action, id, context) => {
       // The title the owner sees, which may be one only this web process keeps.
       const session = runs.getSession(id);
@@ -542,6 +559,8 @@ async function main() {
     setGroup: async patch => { const group = await groups.set(patch); changed(); return group; },
     todos: {
       ...todoCalls,
+      startAgent: (id, text) => todoAgents.begin(id, text),
+      agentSessions: () => todos.agentSessions(),
       files: {
         startUpload: input => todoFiles.startUpload(input),
         uploadOffset: id => todoFiles.uploadOffset(id),
@@ -571,6 +590,22 @@ async function main() {
     },
     subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
   };
+  // Issue masters follow their todos (todo/agents.ts): sessions are hidden, handed to retention and shown again here.
+  const todoAgents = new TodoAgents({
+    stateDir, store: todos,
+    // Only once the worker answered and its sessions are known: an empty list would look like masters gone missing.
+    sessions: () => runs.runnerVersion() && runs.storageStatus()?.sessionsAvailable !== false ? sessionViews() : undefined,
+    run: id => runs.list().find(run => run.id === id),
+    setClosed: (id, closed) => backend.setClosed!(id, closed),
+    // The worker's retention moves them (and their sub-agents) to compressed storage once their work is over.
+    requestArchive: ids => runs.retention('requestArchive', ids),
+    createSession: input => backend.createSession!(input),
+    uncertain: error => errorDisposition(error) === 'uncertain',
+    model: () => resolveModel(stateDir, 'todo.master'),
+    writeGuide: writeTodoMasterGuide,
+    startHost: () => master.call('ping'),
+    onChange: () => changed(),
+  });
   // Other computers: those this one controls, those that control it, and what it answers them with.
   // Without a usable identity only remote computers are unavailable; everything else runs as usual.
   let linkError = '';
@@ -699,7 +734,7 @@ async function main() {
   // Full backups: the worker gives its skills; restores go through each process's own stores (see BackupService.apply).
   const backups = new BackupService({ stateDir, version: APP_VERSION, skills: () => runs.skillsBackup(), triggers: () => runs.triggersBackup(), settings: () => runs.settingsBackup(), restartWorker: () => runs.restartWorker(),
     unavailable: () => runs.supports('backup') ? undefined : '실행 워커가 아직 새 버전으로 바뀌지 않아 백업을 만들 수 없습니다. 진행 중인 작업이 끝나 워커가 바뀌면 쓸 수 있습니다.',
-    stores: { groups, exclusions, decisions }, master: body => master.call('settings', { body }), todos: todoBackup, onChange: () => changed() });
+    stores: { groups, exclusions, decisions }, master: body => master.call('settings', { body }), todos: todoBackup, onChange: () => { changed(); void todoAgents.schedule(); } });
   await backups.start();
   // The terminal and master hosts keep their own code until they restart; what they run is looked at every half
   // minute, never starting one and never keeping one alive (the master host does not count pings as use; the terminal
@@ -781,6 +816,7 @@ async function main() {
     dispose();
     auth.close();
     clearInterval(todoPurge);
+    todoAgents.close();
     todoBackup.close();
     todos.close();
     try { await finishCleanup([auth.flush(), titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), runs.close()]); } finally { await releaseLock(); }
@@ -790,6 +826,7 @@ async function main() {
   const listening = server.address();
   webCredentials = { port: listening && typeof listening === 'object' ? listening.port : port, token: pageToken, callerSecret: masterCallerSecret };
   master.start();
+  todoAgents.start();
   console.log(`\n  Agent Session Tower\n  ${access.browserUrl}\n`);
   printRemoteAccess(host, port, stateDir, publicUrls);
   if (!auth.configured()) console.log(`  Remote account not configured. Open http://localhost:${port} and select Account management in the expanded navigation.\n`);
@@ -861,6 +898,7 @@ async function main() {
     dispose();
     server.closeAllConnections();
     clearInterval(todoPurge);
+    todoAgents.close();
     todoBackup.close();
     todos.close();
     server.close();

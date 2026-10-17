@@ -2,7 +2,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { pipeline } from 'node:stream/promises';
 import { TowerError } from '../../shared/errors.js';
 import { TodoRequestSchema, type TodoRequest } from '../../shared/todo/ops.js';
-import type { TodoChanges, TodoCompletedPage, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
+import type { TodoAgent, TodoChanges, TodoCompletedPage, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
+import { CALLER_CAPABILITY_HEADER } from '../runs/session-mcp.js';
 import type { TodoFiles } from '../todo/files.js';
 import { readJson, UUID } from './requests.js';
 import { byteRange } from './sinks.js';
@@ -14,6 +15,10 @@ export interface TodoBackend {
   completed(input: { projectId?: string; labelId?: string; before?: string; limit?: number }): TodoCompletedPage;
   search(query: string, input: { completed?: boolean; limit?: number }): TodoTask[];
   apply(request: TodoRequest): TodoChanges;
+  /** Starts a todo's issue master with the owner's first message (server/todo/agents.ts). */
+  startAgent?(id: string, text: string): Promise<TodoAgent>;
+  /** The sessions of open issue masters' families, with their todo. */
+  agentSessions?(): Record<string, { taskId: string; title: string }>;
   /** Attachments; absent where they cannot be kept. */
   files?: Pick<TodoFiles, 'startUpload' | 'uploadOffset' | 'appendUpload' | 'completeUpload' | 'cancelUpload' | 'openFile'>;
 }
@@ -26,6 +31,15 @@ const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const number = (value: string | null) => value === null || !/^\d{1,4}$/.test(value) ? undefined : Number(value);
 const UPLOAD = /^\/api\/todos\/uploads\/([^/]+?)(?:\/(complete|cancel))?$/;
 const FILE = /^\/api\/todos\/files\/([^/]+)$/;
+const AGENT = /^\/api\/todos\/tasks\/([^/]+)\/agent$/;
+const MAX_AGENT_TEXT = 32_000;
+
+/**
+ * Whether a request is the owner's own page: nothing that names the master, a local agent, a calling turn or the todo
+ * tools' key, whether or not it proves it. Starting an issue master is the owner's act, never an agent's.
+ */
+const ownerPage = (req: IncomingMessage) => req.headers['x-tower-master'] === undefined && req.headers['x-tower-agent'] === undefined
+  && req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()] === undefined && !/^\s*TodoKey\b/i.test(req.headers.authorization ?? '');
 
 /** An upload that is not where the page thought answers where it is, so the page resumes from there. */
 async function atOffset<T>(json: (res: ServerResponse, status: number, body: unknown) => void, res: ServerResponse, work: () => Promise<T>): Promise<T | undefined> {
@@ -84,6 +98,22 @@ export async function todoRoute(req: IncomingMessage, res: ServerResponse, url: 
   if (req.method === 'GET' && task) {
     if (!ID.test(task[1])) throw new TowerError('invalid', '작업 id가 올바르지 않습니다.');
     json(res, 200, todos.detail(task[1]));
+    return true;
+  }
+  if (req.method === 'GET' && path === '/api/todos/agents/sessions') {
+    if (!todos.agentSessions) { json(res, 503, { error: '이슈 마스터를 사용할 수 없습니다.' }); return true; }
+    json(res, 200, { sessions: todos.agentSessions() });
+    return true;
+  }
+  const agent = AGENT.exec(path);
+  if (req.method === 'POST' && agent) {
+    if (!ownerPage(req)) { json(res, 403, { error: '이슈 마스터는 소유자의 화면에서만 시작할 수 있습니다.' }); return true; }
+    if (!ID.test(agent[1])) throw new TowerError('invalid', '작업 id가 올바르지 않습니다.');
+    const body = await readJson(req, 256 * 1024);
+    const text = typeof body.text === 'string' ? body.text.trim() : '';
+    if (Object.keys(body).some(key => key !== 'text') || !text || text.length > MAX_AGENT_TEXT) throw new TowerError('invalid', `첫 메시지는 1자 이상, ${MAX_AGENT_TEXT.toLocaleString('en-US')}자 이하여야 합니다.`);
+    if (!todos.startAgent) { json(res, 503, { error: '이슈 마스터를 사용할 수 없습니다.' }); return true; }
+    json(res, 202, { agent: await todos.startAgent(agent[1], text) });
     return true;
   }
   if (path === '/api/todos/uploads' || UPLOAD.test(path) || FILE.test(path)) return todoFileRoute(req, res, url, path, todos, json);
