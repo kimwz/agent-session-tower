@@ -9,21 +9,22 @@ import { commandEnvironment, lockOwners, type OwnerCommand } from '../instance/s
 import { defaultStateDir } from '../state-dir.js';
 import { decodeJoinCode } from './join-code.js';
 import { displayFingerprint, linkId } from './identity.js';
-import { currentVersion, entryPoint, installService, installVersion, newerVersion, runtimePaths, serviceManager, serviceStatus, START_YOURSELF, startService, stopService, uninstallService, useVersion, versionDirectory, type ServiceManager } from './service.js';
+import { currentVersion, entryPoint, installService, installVersion, newerVersion, runtimePaths, savedService, serviceManager, serviceStatus, START_YOURSELF, startService, stopService, uninstallService, useVersion, versionDirectory, type ServiceManager } from './service.js';
 import { execFile, spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { promisify } from 'node:util';
 
 const USAGE = `Usage:
   agent-session-tower join <code> [--state-dir <path>] [--port <number>] [--no-service]
-  agent-session-tower service install|uninstall|status [--state-dir <path>] [--port <number>]
+  agent-session-tower service install|uninstall|status [--state-dir <path>] [--port <number>] [--public-url <url>]
 
 join     Connects this computer to the Tower that made the code. Tower is installed and kept running in the
          background (on macOS from login, on Linux with systemd from boot, and again after a crash) unless it
          already runs here or --no-service is given.
 service  Sets up, removes or shows the background service without joining anything. A Tower you started yourself
          is replaced by the service: only its web restarts, and running agents and terminals go on. The service keeps
-         Tower, Claude Code and Codex at their latest versions.`;
+         Tower, Claude Code and Codex at their latest versions. The service answers the --public-url origins given
+         (repeatable); without any it keeps those of the Tower it replaces, or of the service already set up.`;
 
 const EVERY_START: Record<ServiceManager, string> = { launchd: 'whenever you log in', 'systemd-system': 'whenever this computer starts', 'systemd-user': 'whenever this computer starts' };
 const NEXT_START: Record<ServiceManager, string> = { launchd: 'from your next login', 'systemd-system': 'from the next time this computer starts', 'systemd-user': 'from the next time this computer starts' };
@@ -36,12 +37,14 @@ export async function runLinkCommand(args: string[]): Promise<void> {
   let stateDir = defaultStateDir();
   let port = 8000;
   let service = true;
+  const publicUrls: string[] = [];
   const positional: string[] = [];
   for (let index = 0; index < rest.length; index++) {
     const arg = rest[index];
     if (arg === '--state-dir' && rest[index + 1]) stateDir = resolve(rest[++index]);
     else if (arg === '--port' && rest[index + 1]) port = Number(rest[++index]);
     else if (arg === '--no-service') service = false;
+    else if (arg === '--public-url' && rest[index + 1]) publicUrls.push(publicOrigin(rest[++index]));
     else if (arg === '--help' || arg === '-h') { console.log(USAGE); return; }
     else if (arg.startsWith('--')) throw new Error(`Unknown option: ${arg}\n\n${USAGE}`);
     else positional.push(arg);
@@ -55,7 +58,7 @@ export async function runLinkCommand(args: string[]): Promise<void> {
     console.log(JSON.stringify(await get(running.base, '/api/storage/status')));
     return;
   }
-  if (command === 'service') return runService(positional[0], stateDir, port);
+  if (command === 'service') return runService(positional[0], stateDir, port, publicUrls);
   if (positional.length !== 1) throw new Error(USAGE);
   const code = decodeJoinCode(positional[0]);
   if (code.expiresAt <= Date.now()) throw new Error('This connection code has expired. Make a new one on the other computer.');
@@ -83,7 +86,7 @@ export async function runLinkCommand(args: string[]): Promise<void> {
     const version = running && newerVersion(running.version, code.version) ? running.version : code.version;
     await installVersion(stateDir, version, line => console.log(line), packageRoot());
     await useVersion(stateDir, version);
-    await installService(stateDir, { port: running?.port ?? port, start: !running });
+    await installService(stateDir, { port: running?.port ?? port, start: !running, publicUrls: await carriedPublicUrls(stateDir, running) });
     const current = await currentVersion(stateDir) ?? version;
     console.log(running ? `Tower ${current} will start in the background ${NEXT_START[manager]}. The Tower running now keeps serving until then. (Use --no-service to leave the service out.)`
       : `Tower ${current} now starts in the background ${EVERY_START[manager]}. Waiting for it to start…`);
@@ -116,7 +119,7 @@ export async function runLinkCommand(args: string[]): Promise<void> {
   console.log('Work runs with this computer\'s own Claude Code and Codex sign-ins; sign in to them here if you have not yet.');
 }
 
-async function runService(action: string | undefined, stateDir: string, port: number): Promise<void> {
+async function runService(action: string | undefined, stateDir: string, port: number, publicUrls: string[]): Promise<void> {
   if (action === 'install') {
     const running = await runningTower(stateDir);
     // The service runs as this account, with its home, on 127.0.0.1. A Tower started another way would come back as a
@@ -134,7 +137,8 @@ async function runService(action: string | undefined, stateDir: string, port: nu
     // The service takes over with the configuration the Tower it replaces ran with (which Claude Code and Codex homes,
     // which PATH), not with this shell's.
     const environment = replacing?.command?.env ? commandEnvironment(replacing.command.env) : undefined;
-    const manager = await installService(stateDir, { port: running?.port ?? port, start: !replacing, ...(environment ? { environment } : {}) });
+    const manager = await installService(stateDir, { port: running?.port ?? port, start: !replacing, ...(environment ? { environment } : {}),
+      publicUrls: publicUrls.length ? publicUrls : await carriedPublicUrls(stateDir, running) });
     if (replacing) await takeOver(stateDir, replacing, version);
     console.log(`${running?.service ? `The background service was started again with Tower ${version}; running agents and terminals go on. It` : `Tower ${version} now`} starts in the background ${EVERY_START[manager]}, and keeps itself, Claude Code and Codex up to date.`);
   } else if (action === 'uninstall') {
@@ -154,6 +158,24 @@ export function refuseTakeover(running: { pid: number; bindHost?: string; comman
   if (running.bindHost && running.bindHost !== '127.0.0.1') {
     throw new Error(`The Tower running now (pid ${running.pid}) listens on ${running.bindHost}, but the service listens on 127.0.0.1 only, so other devices would lose it. Nothing was changed; keep running Tower yourself for that.`);
   }
+}
+
+/** A --public-url value as the origin `run` accepts; the service's own start refuses anything else (remote-access.ts). */
+function publicOrigin(value: string): string {
+  const url = URL.canParse(value) ? new URL(value) : undefined;
+  if (!url || !['http:', 'https:'].includes(url.protocol) || url.pathname !== '/' || url.search || url.hash || url.username) throw new Error(`--public-url requires an origin such as https://tower.example.com, not ${value}.`);
+  return url.origin;
+}
+
+/**
+ * The tunnel or proxy origins the service keeps answering: those a Tower started by hand was given with --public-url,
+ * otherwise those the service already set up kept. Without them the service would refuse its public address.
+ */
+export async function carriedPublicUrls(stateDir: string, running?: { service: boolean; command?: OwnerCommand }): Promise<string[]> {
+  if (running && !running.service && running.command) {
+    return running.command.argv.flatMap((arg, index, argv) => arg === '--public-url' && argv[index + 1] ? [publicOrigin(argv[index + 1])] : []);
+  }
+  return (await savedService(stateDir))?.publicUrls ?? [];
 }
 
 /** The Tower that holds this state folder, confirmed by its process: another Tower on the same port is never used. */
