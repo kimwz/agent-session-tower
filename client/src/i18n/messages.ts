@@ -274,6 +274,8 @@ export const english: Record<string, string> = {
   "워커가 적용할 것: {0}": "For the worker to apply: {0}",
   "원격 공유 제외 폴더": "Folders kept from remote sharing",
   "할 일·첨부 파일": "Todos and attachments",
+  "할 일 저장소를 읽지 못해 내보낸 파일에 할 일이 들어가지 않았습니다.": "The todos could not be read, so the exported file does not contain them.",
+  "백업이 40MB를 넘습니다. 스킬 파일이나 할 일 데이터가 커서 그럴 수 있습니다. 큰 스킬 파일이나 오래된 할 일을 정리한 뒤 다시 시도하세요.": "The backup is over 40 MB, possibly because of large skill files or todo data. Clean up large skill files or old todos and try again.",
   "내보낸 파일에는 첨부 본문이 들어가지 않습니다. 자동 백업 저장소에 남아 있으면 복원할 때 받아 옵니다.": "The exported file does not contain attachment contents. If they are still in the automatic backup bucket, restoring fetches them from there.",
   "첨부 본문은 파일에 없고, 자동 백업 저장소에 남아 있으면 받아 옵니다": "attachment contents are not in the file; they are fetched from the automatic backup bucket if still there",
   "이 백업으로 복원": "Restore this backup",

@@ -74,9 +74,11 @@ export function BackupPanel({ token }: { token: string }) {
   const exportReady = exportPass[0].length >= MIN_BACKUP_PASSPHRASE && exportPass[0] === exportPass[1];
   const exportBackup = (event: FormEvent) => {
     event.preventDefault();
-    let omitted = false;
-    if (exportReady) void act('export', async () => { omitted = await saveFile('/api/backup/export', token, { passphrase: exportPass[0] }) === 'todo-attachments-omitted'; setExportPass(['', '']); },
-      () => [t('백업 파일을 내려받았습니다. 암호를 잊으면 복원할 수 없습니다.'), ...(omitted ? [t('내보낸 파일에는 첨부 본문이 들어가지 않습니다. 자동 백업 저장소에 남아 있으면 복원할 때 받아 옵니다.')] : [])].join(' '));
+    let notice: string | null = null;
+    if (exportReady) void act('export', async () => { notice = await saveFile('/api/backup/export', token, { passphrase: exportPass[0] }); setExportPass(['', '']); },
+      () => [t('백업 파일을 내려받았습니다. 암호를 잊으면 복원할 수 없습니다.'),
+        ...(notice === 'todo-attachments-omitted' ? [t('내보낸 파일에는 첨부 본문이 들어가지 않습니다. 자동 백업 저장소에 남아 있으면 복원할 때 받아 옵니다.')] : []),
+        ...(notice === 'todos-omitted' ? [t('할 일 저장소를 읽지 못해 내보낸 파일에 할 일이 들어가지 않았습니다.')] : [])].join(' '));
   };
   const checkBackup = (event: FormEvent) => {
     event.preventDefault();

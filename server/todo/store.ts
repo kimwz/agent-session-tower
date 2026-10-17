@@ -474,17 +474,20 @@ export class TodoStore {
     const named = new Set<string>();
     if (!this.sqlite) return named;
     for (const name of readdirSync(this.stateDir).filter(item => RESTORE_COPY.test(item))) {
-      const copy = new this.sqlite.DatabaseSync(join(this.stateDir, name), { readOnly: true });
+      // A copy that cannot be read (cut short while it was made) names nothing it can bring back; the others still count.
       try {
-        if (!copy.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'todo_files'").get()) continue;
-        for (const row of copy.prepare('SELECT DISTINCT sha256 FROM todo_files').all() as { sha256: string }[]) named.add(row.sha256);
-      } finally { copy.close(); }
+        const copy = new this.sqlite.DatabaseSync(join(this.stateDir, name), { readOnly: true });
+        try {
+          if (!copy.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'todo_files'").get()) continue;
+          for (const row of copy.prepare('SELECT DISTINCT sha256 FROM todo_files').all() as { sha256: string }[]) named.add(row.sha256);
+        } finally { copy.close(); }
+      } catch (error) { console.warn(`The todo copy ${name} could not be read and protects no attachments: ${error instanceof Error ? error.message : String(error)}`); }
     }
     return named;
   }
 
   /** What the page shows about bringing back a restored backup's attachments. */
-  setRestoreProgress(progress: TodoRestoreProgress | undefined): void { this.restoreProgress = progress && { ...progress }; }
+  setRestoreProgress(progress: TodoRestoreProgress | undefined): void { this.restoreProgress = progress && { state: progress.state, total: progress.total, missing: progress.missing }; }
 
   /** Moves the revision so open pages load again (attachments brought back after a restore). */
   touch(): void {

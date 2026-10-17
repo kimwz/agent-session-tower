@@ -187,7 +187,8 @@ export class S3Client {
     const { host: _host, ...sent } = signed;
     let response: Response;
     try { response = await this.fetcher(url, { method, headers: sent, ...(body ? { body: new Uint8Array(body) } : {}), signal: this.signal ? AbortSignal.any([this.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs), redirect: 'error' }); }
-    catch (error) { throw new BackupError(`저장소에 연결하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`, 'upstream'); }
+    // `unreachable`: no answer came at all, so the next request to the same bucket would most likely fare no better.
+    catch (error) { throw Object.assign(new BackupError(`저장소에 연결하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`, 'upstream'), { unreachable: true }); }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
       const code = tag(text, 'Code'), message = tag(text, 'Message');

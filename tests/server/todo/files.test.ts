@@ -356,3 +356,14 @@ test('a restore refused for an unknown table, column or a broken reference leave
     assert.equal(store.revision(), before.revision, what);
   }
 });
+
+test('a copy from before a restore that cannot be read does not stop the cleanup', async t => {
+  const { dir, apply, store, files, upload, tick } = await fixture(t);
+  apply({ op: 'task.create', id: 't', content: 'Task' });
+  const done = await upload('t', Buffer.from('deleted for good'));
+  await writeFile(join(dir, 'todo-restore-before-20261017T090000000Z.sqlite'), Buffer.concat([Buffer.from('SQLite format 3\0'), Buffer.alloc(84, 0xff)]));
+  apply({ op: 'file.delete', id: done.file.id });
+  tick(TODO_RETENTION_MS + 1000);
+  store.purge(); await files.purge();
+  assert.equal(await files.hasContent(done.file.sha256, done.file.size), false);
+});
