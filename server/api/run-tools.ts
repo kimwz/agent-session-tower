@@ -48,9 +48,10 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
   const lookups = { [SESSION_TOOLS_SERVER]: sessionToolServer(options.stateDir, thisBuild()) };
   // The owner opened the todos to every agent Tower runs, outside input and controlling computers' turns included.
   const todos = { [TODO_TOOLS_SERVER]: todoToolServer(options.stateDir, thisBuild()) };
+  /** What every turn but the heartbeat gets, whatever started it: the browsers and the todo tools. */
   const withBrowsers = (session: Session, tools: RunTools): RunTools => {
     const browsers = sessionBrowsers(options.stateDir, options.runs, session, options.browsers?.());
-    return { ...tools, servers: { ...tools.servers, ...browsers.servers }, claudeChrome: browsers.claudeChrome };
+    return { ...tools, servers: { ...tools.servers, ...browsers.servers, ...todos }, claudeChrome: browsers.claudeChrome };
   };
   /**
    * The secret broker, bound to this run alone: a later turn, even in the same conversation, gets its own credential. A new
@@ -74,13 +75,13 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
       return { servers: { tower_master: masterToolServer(options.stateDir, capability), ...secrets }, required: true };
     }
     const tools = resolve(run, session, secrets);
-    if (run.origin?.controllerId) return withBrowsers(session, { ...tools, servers: { ...tools.servers, ...todos } });
+    if (run.origin?.controllerId) return withBrowsers(session, tools);
     const env = { [CALLER_CAPABILITY_ENV]: options.capabilities.issue({ kind: 'caller-run', runId: run.id, sessionId: run.sessionId }) };
     // A global HTTP MCP connection has no per-turn environment. Override it only where owner tools already belong.
     const local: SessionMcpServers = tools.towerTools === 'attached' && !subscriptionOnly(options.stateDir, session.cwd)
       ? { tower_local: { ...thisBuild(), args: [...thisBuild().args, 'mcp', '--state-dir', options.stateDir], env } } : {};
     // Given here too, so they work even where the user configuration does not name them.
-    return withBrowsers(session, { ...tools, env, servers: { ...tools.servers, ...local, ...lookups, ...todos } });
+    return withBrowsers(session, { ...tools, env, servers: { ...tools.servers, ...local, ...lookups } });
   };
   /** `secrets` joins whatever else the turn gets; a turn that gains only them never waits or fails for them (`required` unchanged). */
   function resolve(run: Run, session: Session, secrets: SessionMcpServers): RunTools {

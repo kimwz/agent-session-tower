@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
 import { z } from 'zod';
-import { completeOp, createTaskOps, quickAddOps, type QuickAddDraft } from '../../shared/todo/compose.js';
+import { completeOp, liveProjectIds, quickAddOps, type QuickAddDraft } from '../../shared/todo/compose.js';
 import { addDays, formatDate } from '../../shared/todo/dates.js';
-import { TodoOpSchema, TodoRequestSchema, type TodoOp } from '../../shared/todo/ops.js';
+import { labelName, MAX_TODO_OPS, TodoOpSchema, TodoRequestSchema, type TodoOp } from '../../shared/todo/ops.js';
 import { parseQuickAdd, type QuickAddResult } from '../../shared/todo/quick-add.js';
 import type { TodoChanges, TodoCompletedPage, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import { TowerError } from '../../shared/errors.js';
@@ -36,7 +37,7 @@ const id = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, 'A task, project, section o
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'YYYY-MM-DD');
 const time = z.string().regex(/^\d{2}:\d{2}$/, 'HH:mm');
 const priority = z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]).describe('1 is the highest, 4 (default) none.');
-const labels = z.array(z.string().trim().min(1).max(60)).max(20).describe('Label names; ones that do not exist yet are created.');
+const labels = z.array(labelName).max(20).describe('Label names (no spaces or # @ % /); ones that do not exist yet are created.');
 const limit = (max: number) => z.number().int().min(1).max(max).optional();
 
 const fields = {
@@ -60,6 +61,12 @@ const NextInput = AddInput;
 
 /** Comments a task's detail carries (the latest); together they stay well under what a tool answer may hold. */
 const MAX_COMMENTS = 50;
+const MAX_COMMENT_CHARS = 2000;
+/** Every op the page can send, with its fields, read from the schema itself so a new op shows here by itself. */
+const OP_SHAPES = TodoOpSchema.options.map(option => option.shape as Record<string, z.ZodType>);
+const OP_NAMES = OP_SHAPES.map(shape => (shape.op as z.ZodLiteral<string>).value) as [string, ...string[]];
+const OP_FIELDS = OP_SHAPES.map(shape => `${(shape.op as z.ZodLiteral<string>).value}(${Object.entries(shape).filter(([key]) => key !== 'op')
+  .map(([key, field]) => `${key}${field.safeParse(undefined).success ? '?' : ''}`).join(', ')})`).join('; ');
 const DAY = (now: Date) => formatDate(now.getFullYear(), now.getMonth() + 1, now.getDate());
 
 /** Names instead of ids, and only what a task has: what an agent reads. */
@@ -90,6 +97,12 @@ function namer(overview: Pick<TodoOverview, 'projects' | 'sections' | 'labels' |
   };
 }
 
+/** Open tasks that show on the page: not in an archived project (asked for by its id, a project's own still show). */
+const shownTasks = (overview: TodoOverview, projectId?: string) => {
+  const live = liveProjectIds(overview.projects);
+  return overview.tasks.filter(item => live.has(item.projectId) || item.projectId === projectId);
+};
+
 /** Dated first (by date, then time), then by priority and the list's own order. */
 const byWhen = (a: TodoTask, b: TodoTask) => (a.dueDate ?? '9999') .localeCompare(b.dueDate ?? '9999') || (a.dueTime ?? '99').localeCompare(b.dueTime ?? '99')
   || a.priority - b.priority || (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0);
@@ -99,7 +112,8 @@ function task(overview: TodoOverview, store: TodoToolStore, taskId: string): Tod
   return overview.tasks.find(item => item.id === taskId) ?? store.detail(taskId).task;
 }
 
-function apply(context: Context, ops: TodoOp[]): TodoChanges {
+/** Checks a request in full, as the HTTP route does, and applies it. */
+function apply(context: Context, ops: readonly unknown[]): TodoChanges {
   const request = TodoRequestSchema.safeParse({ requestId: context.newId(), ops });
   if (!request.success) throw new TowerError('invalid', request.error.issues.map(issue => `${issue.path.join('.') || 'ops'}: ${issue.message}`).join('; '));
   return context.store.apply(request.data);
@@ -120,6 +134,7 @@ function labelIds(overview: TodoOverview, names: readonly string[], newId: () =>
 /** A task added in words, as Quick Add reads them; explicit fields win over what the words say. */
 function draftOf(overview: TodoOverview, input: z.infer<typeof AddInput>, today: string, newId: () => string): { draft: QuickAddDraft; labelOps: TodoOp[] } {
   const projects = overview.projects.filter(project => !project.archivedAt).flatMap(project => project.inbox ? [{ id: project.id, name: '관리함' }, { id: project.id, name: 'Inbox' }] : [{ id: project.id, name: project.name }]);
+  if (input.parentId && (input.projectId || input.sectionId)) throw new TowerError('invalid', 'A sub-task goes where its parent is: give parentId alone, without projectId or sectionId.');
   const sections = overview.sections.filter(section => !section.archivedAt);
   const section = input.sectionId ? sections.find(item => item.id === input.sectionId) : undefined;
   if (input.sectionId && !section) throw new TowerError('not-found', `Section ${input.sectionId} not found (todos_overview lists them).`);
@@ -165,14 +180,16 @@ function add(context: Context, input: z.infer<typeof AddInput>, follow?: { after
 const TOOLS: Tool[] = [
   tool({
     name: 'todos_overview', input: z.object({}).strict(),
-    description: 'The todo lists on this computer: projects (Inbox first), sections, labels, how many tasks are overdue, due today and in the Inbox, and today\'s date. Read it for the ids the other tools take.',
+    description: 'The todo lists on this computer (each computer\'s Tower keeps its own): projects (Inbox first), sections, labels, how many tasks are overdue, due today and in the Inbox, and today\'s date. Read it for the ids the other tools take.',
     run: (_, { store, today }) => {
       const overview = store.overview();
       const inbox = overview.projects.find(project => project.inbox);
+      const open = shownTasks(overview);
       return {
-        today, ...(overview.availability.state === 'read-only' ? { readOnly: overview.availability.reason } : {}),
-        counts: { open: overview.tasks.length, overdue: overview.tasks.filter(item => item.dueDate && item.dueDate < today).length,
-          today: overview.tasks.filter(item => item.dueDate === today).length, inbox: overview.tasks.filter(item => item.projectId === inbox?.id).length },
+        // The todos of the computer this tool runs on; another computer's Tower keeps its own.
+        computer: hostname(), today, ...(overview.availability.state === 'read-only' ? { readOnly: overview.availability.reason } : {}),
+        counts: { open: open.length, overdue: open.filter(item => item.dueDate && item.dueDate < today).length,
+          today: open.filter(item => item.dueDate === today).length, inbox: open.filter(item => item.projectId === inbox?.id).length },
         projects: overview.projects.map(project => ({ id: project.id, name: project.inbox ? 'Inbox' : project.name, ...(project.parentId ? { parentId: project.parentId } : {}),
           ...(project.inbox ? { inbox: true } : {}), ...(project.archivedAt ? { archived: true } : {}), ...(project.favorite ? { favorite: true } : {}) })),
         sections: overview.sections.filter(section => !section.archivedAt).map(section => ({ id: section.id, projectId: section.projectId, name: section.name })),
@@ -191,7 +208,7 @@ const TOOLS: Tool[] = [
       if (view === 'project' && !projectId) throw new TowerError('invalid', 'view "project" needs projectId.');
       if (view === 'label' && !labelId) throw new TowerError('invalid', 'view "label" needs labelId.');
       const end = addDays(today, days ?? 7);
-      const shown = overview.tasks.filter(item => view === 'all' ? true
+      const shown = shownTasks(overview, view === 'project' ? projectId : undefined).filter(item => view === 'all' ? true
         : view === 'today' ? !!item.dueDate && item.dueDate <= today
         : view === 'upcoming' ? !!item.dueDate && item.dueDate >= today && item.dueDate < end
         : view === 'inbox' ? item.projectId === inbox
@@ -222,7 +239,8 @@ const TOOLS: Tool[] = [
         task: name(detail.task, true),
         subtasks: detail.subtasks.map(item => name(item)),
         // The latest comments, so a long discussion still fits one answer.
-        comments: comments.slice(-MAX_COMMENTS).map(comment => ({ id: comment.id, body: comment.body, createdAt: comment.createdAt })),
+        comments: comments.slice(-MAX_COMMENTS).map(comment => ({ id: comment.id, createdAt: comment.createdAt,
+          ...(comment.body.length > MAX_COMMENT_CHARS ? { body: `${comment.body.slice(0, MAX_COMMENT_CHARS)}…`, truncated: true } : { body: comment.body }) })),
         ...(comments.length > MAX_COMMENTS ? { olderComments: comments.length - MAX_COMMENTS } : {}),
         files: detail.files.map(file => ({ id: file.id, name: file.name, size: file.size, ...(file.commentId ? { commentId: file.commentId } : {}) })),
         completions: detail.completions.map(item => ({ id: item.id, completedAt: item.completedAt, ...(item.occurrenceDate ? { date: item.occurrenceDate } : {}) })),
@@ -321,8 +339,10 @@ const TOOLS: Tool[] = [
   }),
   tool({
     name: 'todos_apply',
-    description: 'Any other change, as the Todo page makes them, applied together or not at all (up to 100): projects, sections and labels (create, update, move, delete, restore), links between tasks (link.create / link.delete), moving and restoring tasks, editing or deleting comments, deleting or restoring attachments. New items take ids you choose (letters, digits, - or _). Ops: task.create, task.update, task.move, task.complete, task.uncomplete, task.delete, task.restore, link.create, link.delete, project.create, project.update, project.move, project.delete, project.restore, section.create, section.update, section.move, section.delete, section.restore, label.create, label.update, label.move, label.delete, label.restore, comment.create, comment.update, comment.delete, comment.restore, file.delete, file.restore.',
-    input: z.object({ ops: z.array(TodoOpSchema).min(1).max(100) }).strict(),
+    description: `Any other change, as the Todo page makes them, applied together or not at all (up to ${MAX_TODO_OPS}): projects, sections and labels (create, update, move, delete, restore), links between tasks, moving and restoring tasks, editing or deleting comments, deleting or restoring attachments. New items take ids you choose (letters, digits, - or _); afterId places an item after a sibling (null: first). Each op with its fields (? optional): ${OP_FIELDS}.`,
+    // Only each op's name is described here: the whole schema would weigh on every turn. The request is checked in full
+    // before it is applied, and a mistake comes back with the op and field it is in.
+    input: z.object({ ops: z.array(z.looseObject({ op: z.enum(OP_NAMES) })).min(1).max(MAX_TODO_OPS) }).strict(),
     run: ({ ops }, context) => {
       const changes = apply(context, ops);
       return { revision: changes.revision, changed: { projects: changes.projects.length, sections: changes.sections.length, labels: changes.labels.length, tasks: changes.tasks.length, links: changes.links.length, comments: changes.comments.length } };
@@ -354,6 +374,13 @@ export function callTodoTool(store: TodoToolStore, name: string, args: unknown, 
   const parsed = found.input.safeParse(args ?? {});
   if (!parsed.success) throw new TowerError('invalid', `Invalid input: ${parsed.error.issues.map(issue => `${issue.path.join('.') || 'input'}: ${issue.message}`).join('; ')}`);
   return found.run(parsed.data, { store: readable(store), today: DAY(options.now ?? new Date()), newId: options.newId ?? randomUUID });
+}
+
+/** One request of the tool server (agent-mcp.ts), as the web answers it. */
+export function answerTodoTools(store: TodoToolStore, body: Record<string, unknown>): unknown {
+  if (body.method === 'tools/list') return { tools: todoToolList() };
+  if (body.method === 'tools/call') return callTodoTool(store, String(body.name ?? ''), body.arguments);
+  throw new TowerError('not-found', 'Unknown todo tools request.');
 }
 
 /** Tool names, for the providers' approval lists. */

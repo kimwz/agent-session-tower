@@ -51,7 +51,7 @@ import { installAgentGuidance } from './agent-guidance/install.js';
 import type { SkillBundle, SkillDetail, SkillImportPlan, SkillOverview, SkillSummary } from '../shared/skills.js';
 import { startSessionsMcp } from './api/session-tools.js';
 import { startTodosMcp, todoToolsKey } from './todo/agent-mcp.js';
-import { callTodoTool, todoToolList } from './todo/agent-tools.js';
+import { answerTodoTools } from './todo/agent-tools.js';
 import { startSecretsMcp } from './secrets/runtime.js';
 import { runSecretsCommand } from './secrets/cli.js';
 import { SecretRelay } from './link/secret-relay.js';
@@ -269,9 +269,10 @@ async function main() {
     search: (query: string, input: Parameters<TodoStore['search']>[1]) => todos.search(query, input),
     apply: (request: Parameters<TodoStore['apply']>[0]) => { const changes = todos.apply(request); changed(); return changes; },
   };
-  // The Todo tools every turn Tower runs gets (todo/agent-mcp.ts) reach the web with this key.
-  const todoTools = { key: await todoToolsKey(stateDir), answer: (body: Record<string, unknown>) => body.method === 'tools/list'
-    ? { tools: todoToolList() } : callTodoTool(todoCalls, String(body.name ?? ''), body.arguments) };
+  // The Todo tools every turn Tower runs gets (todo/agent-mcp.ts) reach the web with this key. Without one (a state
+  // folder it cannot write) only those tools are unavailable; Tower starts all the same.
+  const todoToolKey = await todoToolsKey(stateDir).catch(error => { console.error(`The agents' todo tools are unavailable: ${error instanceof Error ? error.message : String(error)}`); return undefined; });
+  const todoTools = todoToolKey ? { key: todoToolKey, answer: (body: Record<string, unknown>) => answerTodoTools(todoCalls, body) } : undefined;
   // Only the background service's own install is replaced by an update; an update left unfinished is settled first.
   const updates = new Updates({ stateDir, version: APP_VERSION, port, managed: await managedByService(stateDir, process.argv[1], Boolean(serviceLog)) });
   // Started as the background service, this version writes the service the way it runs it best, for its next start;

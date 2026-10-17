@@ -1,3 +1,4 @@
+import { liveProjectIds } from '../../../shared/todo/compose';
 import { addDays } from '../../../shared/todo/dates';
 import type { TodoOp } from '../../../shared/todo/ops';
 import type { TodoPriority, TodoProject, TodoTask } from '../../../shared/todo/types';
@@ -85,16 +86,7 @@ export const projectOf = (world: TodoWorld, view: TodoView): TodoProject | undef
   view.kind === 'inbox' ? world.projects.find(project => project.inbox) : view.kind === 'project' ? world.projects.find(project => project.id === view.id) : undefined;
 
 /** Projects shown: not archived, and not inside an archived one. */
-function liveProjects(world: TodoWorld): Set<string> {
-  const byId = new Map(world.projects.map(project => [project.id, project]));
-  const live = new Set<string>();
-  for (const project of world.projects) {
-    let current: TodoProject | undefined = project, ok = true;
-    for (let depth = 0; current && depth < 5; depth++) { if (current.archivedAt) { ok = false; break; } current = current.parentId ? byId.get(current.parentId) : undefined; }
-    if (ok) live.add(project.id);
-  }
-  return live;
-}
+const liveProjects = (world: TodoWorld) => liveProjectIds(world.projects);
 
 export function openTasks(world: TodoWorld): TodoTask[] {
   const live = liveProjects(world);

@@ -1,6 +1,6 @@
 import type { TodoOp } from './ops.js';
 import type { QuickAddResult } from './quick-add.js';
-import type { TodoTask } from './types.js';
+import type { TodoProject, TodoTask } from './types.js';
 
 /**
  * The operations behind a change made in words: adding a task (from Quick Add or an agent), completing one, and the
@@ -20,6 +20,18 @@ export interface QuickAddDraft {
 
 export type NewId = () => string;
 const randomId: NewId = () => crypto.randomUUID();
+
+/** Projects that show: neither archived nor under an archived one (a deleted one is not in the list at all). */
+export function liveProjectIds(projects: readonly Pick<TodoProject, 'id' | 'parentId' | 'archivedAt'>[]): Set<string> {
+  const byId = new Map(projects.map(project => [project.id, project]));
+  const live = new Set<string>();
+  for (const project of projects) {
+    let current: Pick<TodoProject, 'id' | 'parentId' | 'archivedAt'> | undefined = project, ok = true;
+    for (let depth = 0; current && depth < 5; depth++) { if (current.archivedAt) { ok = false; break; } current = current.parentId ? byId.get(current.parentId) : undefined; }
+    if (ok) live.add(project.id);
+  }
+  return live;
+}
 
 /** Neither completed nor deleted. */
 export const isOpenTask = (task: Pick<TodoTask, 'completedAt' | 'deletedAt'> | undefined): boolean => !!task && !task.completedAt && !task.deletedAt;

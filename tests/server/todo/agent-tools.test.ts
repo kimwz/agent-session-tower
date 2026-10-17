@@ -110,7 +110,10 @@ test('comments, deletes, and refusals come back as errors with their reason; not
   call('todos_comment', { id: item.id, body: '**Tomorrow** morning' });
   assert.equal(call('todos_get', { id: item.id }).comments[0].body, '**Tomorrow** morning');
   const revision = store.revision();
-  assert.throws(() => call('todos_apply', { ops: [{ op: 'task.update', id: item.id, patch: { content: 'x' } }, { op: 'task.update', id: 'missing', patch: { content: 'y' } }] }));
+  assert.throws(() => call('todos_apply', { ops: [{ op: 'task.update', id: item.id, patch: { content: 'x' } }, { op: 'task.update', id: 'missing', patch: { content: 'y' } }] }),
+    (error: unknown) => error instanceof TowerError && error.kind === 'not-found');
+  assert.throws(() => call('todos_apply', { ops: [{ op: 'task.update', id: item.id, patch: { content: '' } }] }), /ops\.0\.patch\.content/, 'a mistake names the op and field it is in');
+  assert.throws(() => call('todos_apply', { ops: [{ op: 'task.vanish', id: item.id }] }), /Invalid input/);
   assert.equal(store.revision(), revision, 'a refused request changes nothing');
   assert.throws(() => call('todos_add', { text: '' }), /Invalid input/);
   assert.throws(() => call('todos_nothing'), /Unknown todo tool/);
@@ -131,4 +134,28 @@ test('inputs that would be changed quietly are refused instead, and one new labe
 test('todos that cannot be read are an error with the reason, never an empty list', () => {
   const store = { overview: () => ({ availability: { state: 'unavailable', reason: 'the file is held by another program' }, revision: 0, projects: [], sections: [], labels: [], tasks: [], links: [], commentCounts: {}, fileCounts: {} }) } as never;
   assert.throws(() => callTodoTool(store, 'todos_list', { view: 'today' }, { now }), /cannot be read now: the file is held/);
+});
+
+test('archived projects stay out of the lists and counts, as on the page, unless asked for by id', async t => {
+  const { call } = await fixture(t);
+  call('todos_apply', { ops: [
+    { op: 'project.create', id: 'old', name: 'Old' }, { op: 'project.create', id: 'child', name: 'Child', parentId: 'old' },
+    { op: 'task.create', id: 'a', content: 'A', projectId: 'old', dueDate: '2026-10-16' }, { op: 'task.create', id: 'b', content: 'B', projectId: 'child', dueDate: '2026-10-17' },
+    { op: 'task.create', id: 'c', content: 'C', dueDate: '2026-10-17' },
+    { op: 'project.update', id: 'old', patch: { archived: true } },
+  ] });
+  assert.deepEqual(call('todos_list', { view: 'today' }).tasks.map((item: { id: string }) => item.id), ['c']);
+  assert.deepEqual([call('todos_overview').counts.open, call('todos_overview').counts.overdue], [1, 0]);
+  assert.deepEqual(call('todos_list', { view: 'project', projectId: 'old' }).tasks.map((item: { id: string }) => item.id), ['a']);
+});
+
+test('a sub-task goes where its parent is; a long discussion comes back as its latest comments', async t => {
+  const { call } = await fixture(t);
+  const parent = call('todos_add', { text: 'Parent' }).added;
+  assert.equal(call('todos_add', { text: 'Child', parentId: parent.id }).added.parentId, parent.id);
+  assert.throws(() => call('todos_add', { text: 'Child', parentId: parent.id, projectId: 'inbox' }), /give parentId alone/);
+  call('todos_apply', { ops: Array.from({ length: 55 }, (_, n) => ({ op: 'comment.create', id: `c${n}`, taskId: parent.id, body: n === 54 ? 'x'.repeat(3000) : `note ${n}` })) });
+  const detail = call('todos_get', { id: parent.id });
+  assert.deepEqual([detail.comments.length, detail.olderComments, detail.comments[0].body, detail.comments.at(-1).truncated], [50, 5, 'note 5', true]);
+  assert.equal(detail.subtasks.length, 1);
 });

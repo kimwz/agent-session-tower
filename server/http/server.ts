@@ -361,7 +361,9 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         const now = Date.now(), rate = rates.get('\0todo-agent');
         if (!rate || now - rate.at > 60_000) rates.set('\0todo-agent', { count: 1, at: now });
         else if (++rate.count > 240) return json(res, 429, { error: { message: 'Too many todo tool calls; try again in a minute.' } });
-        const body = await readJson(req, 4 * 1024 * 1024);
+        let body: Record<string, unknown>;
+        try { body = await readJson(req, 4 * 1024 * 1024); }
+        catch (error) { return json(res, statusOf(error) ?? 400, { error: { message: error instanceof Error ? error.message : "The request could not be read." } }); }
         try { return json(res, 200, { result: await todoTools.answer(body) }); }
         catch (error) { return json(res, statusOf(error) === 500 ? 500 : 200, { error: { message: error instanceof Error ? error.message : 'The todo tool failed.' } }); }
       }

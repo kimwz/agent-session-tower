@@ -41,19 +41,28 @@ export async function answerRpc(bridge: ToolBridge, frame: any): Promise<RpcRepl
   return { jsonrpc: '2.0', id: frame.id, error: { code: -32601, message: 'Method not found' } };
 }
 
+/** One message's size limit: above the largest request the todo tools take (4 MiB at the web). */
+const MAX_MCP_INPUT = 8 * 1024 * 1024;
+
 /** Newline-delimited JSON-RPC over stdio, as Claude Code and Codex speak to local MCP servers. */
 export async function serveToolBridge(bridge: ToolBridge, input: Readable = process.stdin, output: Writable = process.stdout): Promise<void> {
   const respond = (value: unknown) => output.write(JSON.stringify(value) + '\n');
   let buffer = '';
   for await (const chunk of input) {
     buffer += chunk.toString();
-    if (Buffer.byteLength(buffer) > 1_000_000) throw new Error('MCP input is too large.');
+    // Past this no message can be read at all; up to it, one too large is answered as such and the server goes on.
+    if (Buffer.byteLength(buffer) > 4 * MAX_MCP_INPUT) throw new Error('MCP input is too large.');
     let end: number;
     while ((end = buffer.indexOf('\n')) !== -1) {
       const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
       if (!line.trim()) continue;
       let frame: unknown;
       try { frame = JSON.parse(line); } catch { respond({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Invalid JSON' } }); continue; }
+      if (Buffer.byteLength(line) > MAX_MCP_INPUT) {
+        const id = (frame as { id?: unknown })?.id;
+        respond({ jsonrpc: '2.0', id: typeof id === 'string' || typeof id === 'number' ? id : null, error: { code: -32600, message: 'The request is too large; send fewer or shorter changes at a time.' } });
+        continue;
+      }
       const reply = await answerRpc(bridge, frame);
       if (reply) respond(reply);
     }
@@ -103,7 +112,8 @@ export async function callWebTools(stateDir: string, path: string, key: string, 
         catch { resolve({ status: res.statusCode ?? 0, reply: {} }); }
       });
     });
-    req.setTimeout(60_000, () => req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
+    // Shorter than the providers' own tool timeout (Codex: a minute), so the agent hears that the change is uncertain.
+    req.setTimeout(50_000, () => req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
     // Only a connection that was never made is safe to try elsewhere; anything after sending may have been applied.
     req.on('error', error => reject((error as NodeJS.ErrnoException).code === 'ECONNREFUSED' ? Object.assign(new Error('refused'), { unreached: true }) : uncertain()));
     req.end(payload);
@@ -119,6 +129,6 @@ export async function callWebTools(stateDir: string, path: string, key: string, 
     if (answer.reply.error) throw new Error(answer.reply.error.message ?? 'Tower refused the request.');
     return answer.reply.result;
   }
-  throw new Error(refused ? 'Tower on this computer did not accept the todo tools key; restarting Tower writes it again.'
+  throw new Error(refused ? 'Tower on this computer did not accept the todo tools key; it was changed after Tower started, and restarting Tower takes the new one.'
     : 'Agent Session Tower is not running on this computer, so the todos cannot be reached now.');
 }

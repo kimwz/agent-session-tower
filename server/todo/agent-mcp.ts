@@ -4,7 +4,7 @@ import type { Readable, Writable } from 'node:stream';
 import { callWebTools, serveToolBridge } from '../mcp/stdio.js';
 import type { SessionMcpServer } from '../runs/session-mcp.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
-import { TODO_TOOLS_PATH, TODO_TOOLS_SERVER } from './agent-tools.js';
+import { TODO_TOOLS_PATH, TODO_TOOLS_SERVER, todoToolList } from './agent-tools.js';
 
 /**
  * The tool server that brings the Todo tools (agent-tools.ts) to a turn. The todos live in the web process, so the
@@ -14,13 +14,15 @@ import { TODO_TOOLS_PATH, TODO_TOOLS_SERVER } from './agent-tools.js';
 const KEY_FILE = 'todo-tools-key.json';
 const KEY = /^[a-f\d]{64}$/;
 
-/** The web's standing key for these tools, made once and kept owner-only beside the todos. */
+/**
+ * The web's standing key for these tools, made once and kept owner-only beside the todos. A file that cannot be read
+ * as one (cut short, replaced by a link) is written anew: the tool servers read it on every call.
+ */
 export async function todoToolsKey(stateDir: string): Promise<string> {
   const path = join(stateDir, KEY_FILE);
-  try {
-    const saved = await readPrivateJson(path, 4096) as { key?: unknown };
-    if (typeof saved?.key === 'string' && KEY.test(saved.key)) return saved.key;
-  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  // best-effort: a key that cannot be read is replaced below; the tool servers read the new one on their next call.
+  const saved = await readPrivateJson(path, 4096).catch(() => undefined) as { key?: unknown } | undefined;
+  if (typeof saved?.key === 'string' && KEY.test(saved.key)) return saved.key;
   const key = randomBytes(32).toString('hex');
   await writePrivateJson(path, JSON.stringify({ key }));
   return key;
@@ -38,10 +40,11 @@ export async function startTodosMcp(stateDir: string, input: Readable = process.
     let key: unknown;
     try { key = ((await readPrivateJson(join(stateDir, KEY_FILE), 4096)) as { key?: unknown }).key; }
     catch { throw new Error('Agent Session Tower has not started on this computer yet, so the todos cannot be reached.'); }
-    if (typeof key !== 'string' || !KEY.test(key)) throw new Error('The todo tools key is damaged; restarting Tower makes a new one.');
+    if (typeof key !== 'string' || !KEY.test(key)) throw new Error('The todo tools key is damaged; restarting Tower writes a new one.');
     return callWebTools(stateDir, TODO_TOOLS_PATH, key, body, ports);
   };
   await serveToolBridge({ name: TODO_TOOLS_SERVER,
-    listTools: async () => ((await call({ method: 'tools/list' })) as { tools: unknown[] }).tools,
+    // The list is this build's own, so a turn that starts while the web restarts still has the tools.
+    listTools: async () => todoToolList(),
     callTool: (name, args) => call({ method: 'tools/call', name, arguments: args }) }, input, output);
 }
