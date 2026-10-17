@@ -336,7 +336,8 @@ select.todo-property-value { border:0; background:none; }
 /* Attachments */
 .todo-description-area { border-radius:9px; transition:box-shadow .12s, background .12s; }
 .todo-description-area.drop-target, .todo-comment-form.drop-target { background:#13233a; box-shadow:inset 0 0 0 1px #3e5f8a; }
-.todo-description-files { display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin:0 0 4px 33px; }
+.todo-description-files { display:flex; flex-direction:column; gap:6px; margin:0 0 4px 33px; }
+.todo-description-files > .todo-attach-icon { align-self:flex-start; }
 .todo-files { display:flex; flex-direction:column; gap:8px; }
 .todo-file-thumbs { display:grid; grid-template-columns:repeat(auto-fill, minmax(104px, 1fr)); gap:8px; list-style:none; margin:0; padding:0; }
 .todo-file-thumbs li { position:relative; aspect-ratio:1; overflow:hidden; border:1px solid #243041; border-radius:8px; background:#0e1520; }
