@@ -67,6 +67,11 @@ const RESTORE_COPY = /^todo-restore-before-\d{8}T\d{6}\d{3}Z\.sqlite$/;
 
 /** A backup's rows, by table; see `TODO_DATA_TABLES`. */
 export type TodoTables = Record<string, Record<string, unknown>[]>;
+/** Where attachments sealed with a key are in a backup bucket, and the key (base64url). */
+export interface TodoFileKey { namespace: string; key: string }
+/** Both lists, each namespace once (the first one's entry wins). */
+export const mergeKeys = (first: TodoFileKey[], second: TodoFileKey[]): TodoFileKey[] =>
+  [...first, ...second].filter((item, index, all) => all.findIndex(other => other.namespace === item.namespace) === index).map(({ namespace, key }) => ({ namespace, key }));
 
 type Sqlite = typeof import('node:sqlite');
 
@@ -417,7 +422,7 @@ export class TodoStore {
    * older than the file, or a backup of a newer schema, is refused: rows of what it does not know would be lost.
    * Answers where the copy is.
    */
-  restoreData(schema: number, tables: TodoTables): string {
+  restoreData(schema: number, tables: TodoTables, keys: TodoFileKey[] = []): string {
     this.writable();
     if (this.fileStep !== TODO_SCHEMA_STEP) throw new TowerError('locked', '더 새로운 Tower가 만든 할 일 저장소라 복원하지 않았습니다. Tower를 업데이트한 뒤 복원하세요.');
     if (schema > TODO_SCHEMA_STEP) throw new TowerError('conflict', '더 새로운 Tower의 할 일 백업입니다. Tower를 업데이트한 뒤 복원하세요.');
@@ -448,6 +453,8 @@ export class TodoStore {
         }
       }
       this.ensureInbox();
+      // The keys that open the restored attachments where the bucket holds them stay with this file from now on.
+      this.setMeta('files_keys', JSON.stringify(mergeKeys(this.fileKeys(), keys)));
       if ((this.all('PRAGMA foreign_key_check') as unknown[]).length) throw new TowerError('invalid', '할 일 백업의 항목이 서로 맞지 않습니다.');
       return this.nextRevision();
     });
@@ -477,6 +484,14 @@ export class TodoStore {
     const copies = readdirSync(this.stateDir).filter(name => RESTORE_COPY.test(name)).sort();
     for (const name of copies.slice(0, Math.max(0, copies.length - RESTORE_COPIES_KEPT))) rmSync(join(this.stateDir, name), { force: true });
     return path;
+  }
+
+  /** Keys of attachments sealed elsewhere (other computers, earlier keys of this one) that restores brought here. */
+  fileKeys(): TodoFileKey[] {
+    if (!this.db || this.state.state === 'unavailable') return [];
+    const value = this.meta('files_keys');
+    const list: unknown = value ? JSON.parse(value) : [];
+    return Array.isArray(list) ? list.filter((item): item is TodoFileKey => !!item && typeof item.namespace === 'string' && typeof item.key === 'string') : [];
   }
 
   /** The key this computer's attachments are encrypted with in backups (base64url), when the file has one. */

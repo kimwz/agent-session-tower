@@ -271,21 +271,19 @@ export class BackupService {
       const partial: string[] = [];
       if (this.options.todos && !todos) partial.push('할 일 저장소를 읽지 못해 할 일이 빠졌습니다');
       if (todos?.newer) partial.push('더 새로운 Tower가 바꾼 할 일 저장소라 이 Tower가 아는 내용만 담았습니다');
-      if (this.options.todos?.restoring()) partial.push('복원한 첨부 파일을 아직 받아 오는 중입니다');
       const warnings: string[] = [];
       let key = '';
       try {
         const text = await encryptBackup(await this.payload(todos, settings), settings.passphrase, { towerVersion: this.options.version, from: hostname(), createdAt: new Date(at).toISOString() });
-        const plan = todos ? await this.options.todos!.plan(this.objects(client), settings.remote.prefix, todos) : undefined;
-        if (plan?.missing.length) partial.push(`이 컴퓨터에 내용이 없는 첨부 파일 ${plan.missing.length}개가 빠졌습니다`);
         key = `${settings.remote.prefix}${this.uploadName(at, partial.length > 0)}`;
-        // The backup first, so a slow or stopped attachment upload never costs the settings. Attachments that then
-        // fail to go up are still on this computer and named by the backup: the next backup sends them.
+        // The backup first, so a slow or stopped attachment upload never costs the settings. It carries every key the
+        // todos know, so attachments that then do not go up stay openable wherever the bucket already holds them.
         await client.put(key, Buffer.from(text), 'application/octet-stream');
-        if (todos && plan) {
-          const attachments = await this.options.todos!.upload(this.objects(client), settings.remote.prefix, todos, plan, this.closing.signal);
+        if (todos) {
+          const attachments = await this.options.todos!.upload(this.objects(client), settings.remote.prefix, todos, this.closing.signal);
           if (attachments.damaged.length) warnings.push(`이 컴퓨터에서 손상된 첨부 파일 ${attachments.damaged.length}개는 올리지 않았습니다.`);
           if (attachments.failed.length) warnings.push(`첨부 파일 ${attachments.failed.length}개를 저장소에 올리지 못했습니다. 다음 백업 때 다시 올립니다.`);
+          if (attachments.missing.length) warnings.push(`이 컴퓨터에 내용이 없는 첨부 파일 ${attachments.missing.length}개는 올리지 않았습니다(저장소에 다른 키로 남아 있으면 복원할 수 있습니다).`);
         }
       } catch (error) {
         // Stopped because Tower is shutting down: not a failure, and the next start tries again when due.
@@ -294,7 +292,7 @@ export class BackupService {
         await this.change(() => { this.saved = { ...this.saved, status: { ...this.saved.status, lastError: message } }; }).catch(() => {});
         throw error;
       }
-      if (partial.length) warnings.push(`할 일이 온전히 들어가지 않은 부분 백업으로 올렸고, 온전한 백업은 지우지 않았습니다: ${partial.join(', ')}. 원인을 해결하면(내용이 없는 첨부 파일을 지우거나 할 일 저장소를 고치면) 다시 온전한 백업이 만들어집니다.`);
+      if (partial.length) warnings.push(`할 일이 온전히 들어가지 않은 부분 백업으로 올렸고, 온전한 백업은 지우지 않았습니다: ${partial.join(', ')}. 할 일 저장소를 고치거나 Tower를 업데이트하면 다시 온전한 백업이 만들어집니다.`);
       try {
         const listing = await client.scan(own);
         // Only a whole listing says which backups are the oldest; from any other nothing is removed.
@@ -433,7 +431,7 @@ export class BackupService {
     let todoBefore: string | undefined;
     if (web.todos !== undefined) await step('todos', async () => {
       if (!this.options.todos) throw new BackupError('할 일을 사용할 수 없습니다.', 'unavailable');
-      todoBefore = (await this.options.todos.restore(web.todos, () => this.objects(this.client()), this.saved.settings.remote.prefix)).before;
+      todoBefore = (await this.options.todos.restore(web.todos, () => this.objects(this.client()), this.saved.settings.remote.prefix, this.computer)).before;
     });
     if (master && this.options.master) await step('master', () => this.options.master!({ ...(master.settings?.voice !== undefined ? { voice: master.settings.voice } : {}), voiceKey: master.voiceKey ?? null }));
     if (applied.length) this.options.onChange?.();
