@@ -182,8 +182,9 @@ test('the master stays removable: only these existing files reach into it', asyn
   const root = join(import.meta.dirname, '..', '..');
   // The worker knows the master's folder, to give its turns their tools and keep them to a subscription sign-in.
   // Heartbeat's shared admission contract crosses HTTP and worker boundaries; no runtime master module enters them.
+  // A todo's issue master is started and closed with the todo, so the todo side knows the issue masters' folder.
   const allowed = new Set(['server/index.ts', 'client/src/app/App.tsx', 'server/api/run-tools.ts', 'server/runs/subscription.ts',
-    'server/http/request-context.ts', 'server/http/server.ts', 'server/runs/manager.ts', 'server/runs/worker.ts']);
+    'server/http/request-context.ts', 'server/http/server.ts', 'server/runs/manager.ts', 'server/runs/worker.ts', 'server/todo/agents.ts']);
   const offenders: string[] = [];
   const walk = async (directory: string): Promise<void> => {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
