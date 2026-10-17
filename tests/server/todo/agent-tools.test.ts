@@ -119,3 +119,16 @@ test('comments, deletes, and refusals come back as errors with their reason; not
   call('todos_apply', { ops: [{ op: 'task.restore', id: item.id }] });
   assert.equal(store.overview().tasks.length, 1);
 });
+
+test('inputs that would be changed quietly are refused instead, and one new label named twice is made once', async t => {
+  const { call } = await fixture(t);
+  assert.throws(() => call('todos_add', { text: 'Call', dueTime: '15:00' }), /dueTime needs a date/);
+  assert.throws(() => call('todos_add', { text: 'x'.repeat(501), parse: false }), /at most 500/);
+  const { added } = call('todos_add', { text: 'Plan', labels: ['new', 'New'] });
+  assert.deepEqual(added.labels, ['new']);
+});
+
+test('todos that cannot be read are an error with the reason, never an empty list', () => {
+  const store = { overview: () => ({ availability: { state: 'unavailable', reason: 'the file is held by another program' }, revision: 0, projects: [], sections: [], labels: [], tasks: [], links: [], commentCounts: {}, fileCounts: {} }) } as never;
+  assert.throws(() => callTodoTool(store, 'todos_list', { view: 'today' }, { now }), /cannot be read now: the file is held/);
+});

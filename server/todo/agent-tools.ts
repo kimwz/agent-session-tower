@@ -58,6 +58,8 @@ const AddInput = z.object({
 }).strict();
 const NextInput = AddInput;
 
+/** Comments a task's detail carries (the latest); together they stay well under what a tool answer may hold. */
+const MAX_COMMENTS = 50;
 const DAY = (now: Date) => formatDate(now.getFullYear(), now.getMonth() + 1, now.getDate());
 
 /** Names instead of ids, and only what a task has: what an agent reads. */
@@ -105,14 +107,14 @@ function apply(context: Context, ops: TodoOp[]): TodoChanges {
 
 /** Label names as ids, with label.create operations for the new ones (to go first in the same request). */
 function labelIds(overview: TodoOverview, names: readonly string[], newId: () => string): { ids: string[]; ops: TodoOp[] } {
-  const ids: string[] = [], ops: TodoOp[] = [];
+  const known = new Map(overview.labels.map(label => [label.name.toLocaleLowerCase(), label.id]));
+  const ops: TodoOp[] = [];
   for (const name of names) {
-    const found = overview.labels.find(label => label.name.toLocaleLowerCase() === name.toLocaleLowerCase());
-    if (found) { if (!ids.includes(found.id)) ids.push(found.id); continue; }
+    if (known.has(name.toLocaleLowerCase())) continue;
     const made = { op: 'label.create' as const, id: newId(), name };
-    ops.push(made); ids.push(made.id);
+    ops.push(made); known.set(name.toLocaleLowerCase(), made.id);
   }
-  return { ids, ops };
+  return { ids: [...new Set(names.map(name => known.get(name.toLocaleLowerCase())!))], ops };
 }
 
 /** A task added in words, as Quick Add reads them; explicit fields win over what the words say. */
@@ -126,13 +128,15 @@ function draftOf(overview: TodoOverview, input: z.infer<typeof AddInput>, today:
     : parseQuickAdd(input.text, { today, projects, sections, labels: overview.labels, ...(explicitProject ? { defaultProjectId: explicitProject } : {}) });
   const content = parsed.content.trim();
   if (!content) throw new TowerError('invalid', 'The task has no title once the recognized words are taken out; pass parse: false to keep the text as it is.');
+  if (content.length > 500) throw new TowerError('invalid', 'A task title is at most 500 characters; put the rest in description.');
+  if (input.dueTime && !(input.dueDate ?? parsed.dueDate)) throw new TowerError('invalid', 'dueTime needs a date: give dueDate, or a date in the text.');
   const named = input.labels ? labelIds(overview, input.labels, newId) : { ids: [], ops: [] };
   const projectId = explicitProject ?? parsed.projectId;
   const sectionId = input.sectionId ?? (input.projectId && input.projectId !== parsed.projectId ? undefined : parsed.sectionId);
   return {
     labelOps: named.ops,
     draft: {
-      content: content.slice(0, 500), description: input.description ?? '',
+      content, description: input.description ?? '',
       result: {
         ...(projectId ? { projectId } : {}), ...(sectionId ? { sectionId } : {}),
         labelIds: [...new Set([...parsed.labelIds, ...named.ids])], newLabels: parsed.newLabels.filter(name => !input.labels?.some(label => label.toLocaleLowerCase() === name.toLocaleLowerCase())),
@@ -166,7 +170,7 @@ const TOOLS: Tool[] = [
       const overview = store.overview();
       const inbox = overview.projects.find(project => project.inbox);
       return {
-        today,
+        today, ...(overview.availability.state === 'read-only' ? { readOnly: overview.availability.reason } : {}),
         counts: { open: overview.tasks.length, overdue: overview.tasks.filter(item => item.dueDate && item.dueDate < today).length,
           today: overview.tasks.filter(item => item.dueDate === today).length, inbox: overview.tasks.filter(item => item.projectId === inbox?.id).length },
         projects: overview.projects.map(project => ({ id: project.id, name: project.inbox ? 'Inbox' : project.name, ...(project.parentId ? { parentId: project.parentId } : {}),
@@ -211,11 +215,15 @@ const TOOLS: Tool[] = [
     run: ({ id: taskId }, { store }) => {
       const detail = store.detail(taskId);
       const overview = store.overview();
-      const name = namer({ ...overview, links: [...overview.links, ...detail.next.map(item => item.link)] });
+      const links = new Map([...overview.links, ...detail.next.map(item => item.link)].map(link => [link.id, link]));
+      const name = namer({ ...overview, links: [...links.values()] });
+      const comments = detail.comments.filter(comment => !comment.deletedAt);
       return {
         task: name(detail.task, true),
         subtasks: detail.subtasks.map(item => name(item)),
-        comments: detail.comments.filter(comment => !comment.deletedAt).map(comment => ({ id: comment.id, body: comment.body, createdAt: comment.createdAt })),
+        // The latest comments, so a long discussion still fits one answer.
+        comments: comments.slice(-MAX_COMMENTS).map(comment => ({ id: comment.id, body: comment.body, createdAt: comment.createdAt })),
+        ...(comments.length > MAX_COMMENTS ? { olderComments: comments.length - MAX_COMMENTS } : {}),
         files: detail.files.map(file => ({ id: file.id, name: file.name, size: file.size, ...(file.commentId ? { commentId: file.commentId } : {}) })),
         completions: detail.completions.map(item => ({ id: item.id, completedAt: item.completedAt, ...(item.occurrenceDate ? { date: item.occurrenceDate } : {}) })),
         previous: detail.previous.map(item => ({ linkId: item.link.id, task: name(item.task) })),
@@ -322,6 +330,15 @@ const TOOLS: Tool[] = [
   }),
 ];
 
+/** A store whose overview says why it cannot be read is an error, never an empty list. */
+function readable(store: TodoToolStore): TodoToolStore {
+  return { ...store, overview: () => {
+    const overview = store.overview();
+    if (overview.availability.state === 'unavailable') throw new TowerError('unavailable', `The todos cannot be read now: ${overview.availability.reason}`);
+    return overview;
+  } };
+}
+
 /** The tools as MCP lists them. */
 export function todoToolList(): unknown[] {
   return TOOLS.map(item => {
@@ -336,7 +353,7 @@ export function callTodoTool(store: TodoToolStore, name: string, args: unknown, 
   if (!found) throw new TowerError('not-found', `Unknown todo tool: ${name}.`);
   const parsed = found.input.safeParse(args ?? {});
   if (!parsed.success) throw new TowerError('invalid', `Invalid input: ${parsed.error.issues.map(issue => `${issue.path.join('.') || 'input'}: ${issue.message}`).join('; ')}`);
-  return found.run(parsed.data, { store, today: DAY(options.now ?? new Date()), newId: options.newId ?? randomUUID });
+  return found.run(parsed.data, { store: readable(store), today: DAY(options.now ?? new Date()), newId: options.newId ?? randomUUID });
 }
 
 /** Tool names, for the providers' approval lists. */

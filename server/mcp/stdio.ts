@@ -83,43 +83,42 @@ export async function callWorkerTools(stateDir: string, capability: string | und
   return reply.result;
 }
 
-/** Where the web of this state directory answered last; looked for again when it stops answering (a restart). */
-const webPorts = new Map<string, number>();
-
 /**
  * Sends one tool request to this computer's Tower web with a standing key (`TodoKey`), for tools whose data the web
- * keeps (the todos). The web is found through the state directory's lock, again after a restart moved it; a request
- * is never sent twice, so a lost answer is reported as uncertain.
+ * keeps (the todos). The web is looked for through the state directory's lock on every request, so a restart that
+ * moved it is followed. A request is never sent twice: only a refused connection tries the next candidate, and an
+ * answer lost after sending is reported as uncertain.
  */
 export async function callWebTools(stateDir: string, path: string, key: string, body: Record<string, unknown>,
   ports: () => Promise<number[]> = async () => (await lockOwners(stateDir)).map(owner => owner.port)): Promise<unknown> {
   const payload = JSON.stringify(body);
+  const uncertain = () => new Error('Tower did not finish answering. The change may or may not have been made; read the todos before trying again.');
   const send = (port: number) => new Promise<{ status: number; reply: { result?: unknown; error?: { message?: string } } }>((resolve, reject) => {
     const req = request({ host: '127.0.0.1', port, method: 'POST', path, headers: { authorization: `TodoKey ${key}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, res => {
       const chunks: Buffer[] = []; let size = 0;
       res.on('data', (chunk: Buffer) => { size += chunk.length; if (size > MAX_RPC_BYTES) res.destroy(new Error('Tool response too large.')); else chunks.push(chunk); });
-      res.on('error', reject);
+      res.on('error', () => reject(uncertain()));
       res.on('end', () => {
         try { resolve({ status: res.statusCode ?? 0, reply: JSON.parse(Buffer.concat(chunks).toString('utf8')) }); }
         catch { resolve({ status: res.statusCode ?? 0, reply: {} }); }
       });
     });
-    req.setTimeout(60_000, () => req.destroy(Object.assign(new Error('Tower did not answer in time. The change may or may not have been made; read the todos before trying again.'), { sent: true })));
-    req.on('error', error => reject((error as { sent?: boolean }).sent ? error : Object.assign(new Error('connect'), { unreached: true })));
+    req.setTimeout(60_000, () => req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
+    // Only a connection that was never made is safe to try elsewhere; anything after sending may have been applied.
+    req.on('error', error => reject((error as NodeJS.ErrnoException).code === 'ECONNREFUSED' ? Object.assign(new Error('refused'), { unreached: true }) : uncertain()));
     req.end(payload);
   });
-  const known = webPorts.get(stateDir);
-  const candidates = [...new Set([...(known ? [known] : []), ...await ports().catch(() => [] as number[])])];
-  for (const port of candidates) {
+  let refused = false;
+  for (const port of [...new Set(await ports().catch(() => [] as number[]))]) {
     let answer: Awaited<ReturnType<typeof send>>;
     try { answer = await send(port); }
-    catch (error) { if ((error as { unreached?: boolean }).unreached) { if (webPorts.get(stateDir) === port) webPorts.delete(stateDir); continue; } throw error; }
-    // Another program on that port, or a Tower without these tools: try the next one.
-    if (answer.status === 404 || (answer.status === 403 && !answer.reply.error?.message)) continue;
-    webPorts.set(stateDir, port);
+    catch (error) { if ((error as { unreached?: boolean }).unreached) continue; throw error; }
+    // Another program, or another Tower whose key this is not: try the next one.
+    if (answer.status === 403) { refused = true; continue; }
+    if (answer.status === 404 || (!('result' in answer.reply) && !answer.reply.error)) continue;
     if (answer.reply.error) throw new Error(answer.reply.error.message ?? 'Tower refused the request.');
-    if (answer.status !== 200) throw new Error(`Tower answered ${answer.status}.`);
     return answer.reply.result;
   }
-  throw new Error('Agent Session Tower is not running on this computer, so the todos cannot be reached now.');
+  throw new Error(refused ? 'Tower on this computer did not accept the todo tools key; restarting Tower writes it again.'
+    : 'Agent Session Tower is not running on this computer, so the todos cannot be reached now.');
 }
