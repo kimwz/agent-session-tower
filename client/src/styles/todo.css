@@ -173,7 +173,7 @@
 .todo-properties { display:flex; flex-wrap:wrap; margin:0; padding:6px; border:1px solid #1c2736; border-radius:10px; background:#111a26; }
 .todo-property { display:grid; flex:1 0 100%; grid-template-columns:62px minmax(0, 1fr); align-items:center; gap:4px; min-height:34px; padding:0 4px 0 8px; }
 /* A rare property without a value: a small "add" after the others, under one line. */
-.todo-property.adding { display:block; flex:0 0 auto; min-height:0; margin-top:4px; padding:6px 4px 0 0; border-top:1px solid #1c2736; }
+.todo-property.adding { display:block; order:1; flex:0 0 auto; min-height:0; margin-top:4px; padding:6px 4px 0 0; border-top:1px solid #1c2736; }
 .todo-property:not(.adding) + .todo-property.adding { padding-left:4px; }
 .todo-property.adding:last-child { flex-grow:1; }
 .todo-property.adding dt { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
@@ -485,7 +485,7 @@ a.todo-file-name:hover { text-decoration:underline; }
   /* On a phone the properties are a line of chips under the title; rarely used ones without a value are dashed. */
   .todo-detail-body > .todo-properties { position:static; }
   .todo-properties { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0 4px; padding:0; border:0; background:none; }
-  .todo-property, .todo-property.adding { display:block; flex:0 0 auto; min-height:0; margin:0; padding:0; border:0; }
+  .todo-property, .todo-property.adding, .todo-property.adding:last-child { display:block; flex:0 0 auto; min-height:0; margin:0; padding:0; border:0; }
   .todo-property dt { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
   .todo-property dd { padding-left:9px; border:1px solid #243246; border-radius:999px; background:#121b28; }
   .todo-property-icon { display:inline-flex; color:#7c8aa0; }

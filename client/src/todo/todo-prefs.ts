@@ -7,6 +7,8 @@
 const FOLDED_KEY = 'tower.todo.collapsedSubtasks';
 const MAX_FOLDED = 500;
 let memory: string[] | null = null;
+/** Saving failed once: this page's memory is what is known, not storage. */
+let unsaved = false;
 
 function read(): string[] {
   if (memory) return memory;
@@ -21,12 +23,12 @@ function read(): string[] {
 export const subtasksFolded = (taskId: string): boolean => read().includes(taskId);
 
 export function setSubtasksFolded(taskId: string, folded: boolean): void {
-  // Read again first: another tab may have folded something since.
-  memory = null;
+  // Read again first, as another tab may have folded something since; not when saving fails, as memory has the folds.
+  if (!unsaved) memory = null;
   memory = [...read().filter(id => id !== taskId), ...(folded ? [taskId] : [])].slice(-MAX_FOLDED);
   // best-effort: storage that refuses keeps the fold for this page only.
-  try { window.localStorage.setItem(FOLDED_KEY, JSON.stringify(memory)); } catch { /* best-effort: see above */ }
+  try { window.localStorage.setItem(FOLDED_KEY, JSON.stringify(memory)); unsaved = false; } catch { unsaved = true; }
 }
 
 /** For tests: forget what was read, so the next read sees storage again. */
-export const forgetFoldedForTests = () => { memory = null; };
+export const forgetFoldedForTests = () => { memory = null; unsaved = false; };

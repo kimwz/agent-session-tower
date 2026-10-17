@@ -34,3 +34,12 @@ test('only the newest 500 folds are kept; damaged or refusing storage still work
   setSubtasksFolded('b', true);
   assert.equal(subtasksFolded('b'), true, 'kept in memory when storage refuses');
 });
+
+test('when saving keeps failing, every fold of this page is still remembered', () => {
+  (globalThis as { window?: unknown }).window = { localStorage: storage({}, true) };
+  forgetFoldedForTests();
+  setSubtasksFolded('a', true);
+  setSubtasksFolded('b', true);
+  assert.equal(subtasksFolded('a'), true);
+  assert.equal(subtasksFolded('b'), true);
+});

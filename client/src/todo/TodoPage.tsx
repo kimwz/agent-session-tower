@@ -151,14 +151,18 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     setQuick({ preset: { projectId: task.projectId, sectionId: task.sectionId }, follow: { taskId: task.id, complete } });
   }, [readOnly]);
 
-  const target = (): TodoTask | undefined => (openTaskId ? world.tasks[openTaskId] : undefined) ?? (selectedId ? world.tasks[selectedId] : undefined);
+  // The completed list as it shows (the list's own filter), each row chosen by its completion: a repeating task has several.
+  const completedItems = display.completed && state.completed ? state.completed.items.filter(({ completion, task }) => view.kind === 'label' ? task.labelIds.includes(view.id) : view.kind === 'today' ? localToday(new Date(completion.completedAt)) === today : true) : [];
+  const doneKey = (completionId: string) => `done:${completionId}`;
+  const chosenDone = selectedId?.startsWith('done:') ? completedItems.find(item => doneKey(item.completion.id) === selectedId)?.task : undefined;
+  const target = (): TodoTask | undefined => (openTaskId ? world.tasks[openTaskId] : undefined) ?? chosenDone ?? (selectedId ? world.tasks[selectedId] : undefined);
   /** Chooses a card and puts the keyboard on it, so Enter and Space act on the card that shows chosen. */
   const focusFrame = useRef(0);
   const choose = (id: string) => {
     setSelectedId(id);
     cancelAnimationFrame(focusFrame.current);
     focusFrame.current = requestAnimationFrame(() => {
-      const card = document.querySelector<HTMLElement>(`.todo-board .todo-card[data-task="${CSS.escape(id)}"]`);
+      const card = document.querySelector<HTMLElement>(`.todo-board .todo-card[data-select="${CSS.escape(id)}"]`);
       card?.focus({ preventScroll: true });
       card?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     });
@@ -170,9 +174,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   };
   const setCalendar = (mode: DisplaySettings['calendar']) => { setLayout('calendar'); if (display.calendar !== mode) setDisplay({ ...display, calendar: mode }); };
   // The columns the arrow keys go through: the board's, and the completed list when it shows.
-  const completedTasks = display.completed && state.completed ? [...new Map(state.completed.items.map(item => [item.task.id, item.task])).values()] : [];
-  const navColumns = completedTasks.length ? [...columns, { tasks: completedTasks }] : columns;
-  const shortcuts = { target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask, layout, setLayout, setCalendar, navColumns, selectedId, choose, letGo };
+  const navColumns = completedItems.length ? [...columns, { tasks: completedItems.map(item => ({ ...item.task, id: doneKey(item.completion.id) })) }] : columns;
+  const shortcuts = { target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask, layout, setLayout, setCalendar, navColumns, selectedId, choose, letGo, world };
   const shortcutState = useRef(shortcuts);
   shortcutState.current = shortcuts;
   useEffect(() => {
@@ -197,9 +200,10 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
         case 'today': case 'upcoming': case 'inbox': current.goTo({ kind: shortcut.action }); break;
         case 'complete': {
           if (!task || task.completedAt) break;
-          // The choice goes on to the card below (or above), not back to the first one.
-          const below = moveSelection(current.navColumns, task.id, 'down');
-          const neighbour = below !== task.id ? below : moveSelection(current.navColumns, task.id, 'up');
+          // The choice goes on to a card that stays: below, above, or in the next column; never one of its own sub-tasks,
+          // which complete with it.
+          const under = (id: string) => { for (let item = current.world.tasks[id]; item?.parentId; item = current.world.tasks[item.parentId]) if (item.parentId === task.id) return true; return false; };
+          const neighbour = (['down', 'up', 'right', 'left'] as const).map(direction => moveSelection(current.navColumns, task.id, direction)).find(id => id && id !== task.id && !under(id));
           current.actions.complete(task);
           if (!current.openTaskId && neighbour && neighbour !== task.id) current.choose(neighbour);
           break;
@@ -212,6 +216,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
           if (current.layout !== 'board' || document.querySelector('.todo-board.dragging')) return;
           if (current.openTaskId && !(event.target instanceof Element && event.target.closest('.todo-board'))) return;
           const next = moveSelection(current.navColumns, current.openTaskId ?? current.selectedId, shortcut.direction);
+          if (next === (current.openTaskId ?? current.selectedId) && !current.openTaskId) break;
           if (!next) return;
           if (current.openTaskId) current.closeTask();
           current.choose(next);
@@ -266,12 +271,12 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   ];
 
   const completedColumn = display.completed && state.completed ? (() => {
-    const items = state.completed.items.filter(({ completion, task }) => view.kind === 'label' ? task.labelIds.includes(view.id) : view.kind === 'today' ? localToday(new Date(completion.completedAt)) === today : true);
+    const items = completedItems;
     return <section className="todo-column todo-completed-column" aria-label={t('완료됨')}>
       <header className="todo-column-head"><h3>{t('완료됨')}</h3><span className="todo-column-count">{items.length || ''}</span></header>
       <div className="todo-column-cards">
         {items.map(({ completion, task }) => <TaskCard key={completion.id} task={{ ...task, completedAt: task.completedAt ?? completion.completedAt }} context={context} {...card} onMenu={undefined}
-          selected={(openTaskId ?? selectedId) === task.id}
+          selectId={doneKey(completion.id)} selected={selectedId === doneKey(completion.id)}
           onReopen={() => void actions.reopen(task, completion.id)} />)}
         {state.completed.loading && <LoaderCircle className="spin todo-muted" size={16} />}
         {state.completed.error && <p className="todo-error" role="alert">{state.completed.error}</p>}

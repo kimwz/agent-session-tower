@@ -59,21 +59,23 @@ export interface TaskCardProps {
   /** Opens the card's menu from its button. */
   onMenu?: (task: TodoTask, anchor: HTMLElement) => void;
   onSelect?: (id: string) => void;
+  /** What choosing this card chooses: the task, or one of its completions in the completed list. */
+  selectId?: string;
 }
 
-export function TaskCard({ task, context, selected, onOpen, onComplete, onCompleteNext, onReopen, onMenu, onSelect }: TaskCardProps) {
+export function TaskCard({ task, context, selected, onOpen, onComplete, onCompleteNext, onReopen, onMenu, onSelect, selectId = task.id }: TaskCardProps) {
   // Sub-tasks show unless the owner folded them on this card; the fold is remembered (todo-prefs.ts). Completed ones
   // are in the task's detail.
   const [folded, setFolded] = useState(() => subtasksFolded(task.id));
   // A completed card (the completed list) lists none: its sub-tasks are in its detail.
   const children = task.completedAt ? [] : (context.children.get(task.id) ?? []).filter(child => isOpen(child) && !context.shown?.has(child.id));
   const chips = CARD_META.filter(chip => chip.visible(task, context));
-  return <div className={`todo-card ${selected ? 'selected' : ''} ${task.completedAt ? 'done' : ''}`} data-task={task.id} tabIndex={0} role="button" aria-label={task.content}
-    onClick={() => onOpen(task.id)} onFocus={() => onSelect?.(task.id)}
+  return <div className={`todo-card ${selected ? 'selected' : ''} ${task.completedAt ? 'done' : ''}`} data-task={task.id} data-select={selectId} tabIndex={0} role="button" aria-label={task.content}
+    onClick={() => onOpen(task.id)} onFocus={() => onSelect?.(selectId)}
     onPointerMove={event => {
       // Only a mouse that moves chooses: cards passing under a still mouse while the arrow keys scroll do not.
       if (event.pointerType !== 'mouse' || selected) return;
-      onSelect?.(task.id);
+      onSelect?.(selectId);
       // With the keyboard on another card (or a button in one), it follows the mouse, so Enter opens the card that shows
       // chosen. A field or the task's detail keeps the keyboard.
       const active = document.activeElement;
