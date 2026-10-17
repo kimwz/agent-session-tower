@@ -38,21 +38,33 @@ interface Faults {
   commentedBackupList?: boolean;
   /** This computer's backup listing, whole, but naming its oldest backup twice. */
   duplicatedBackupList?: boolean;
+  /** This computer's backup listing, whole, with only the lists of attachments and no backups. */
+  bodiesHiddenList?: boolean;
+  /** Reading attachment pieces fails. */
+  failAttachmentGet?: boolean;
+  /** Reading attachment pieces waits for this. */
+  holdAttachmentGet?: Promise<void>;
+  /** Writing attachment pieces of these contents fails. */
+  failPut?: Set<string>;
 }
 
-async function computer(t: TestContext, bucket: Bucket, options: { stateDir?: string; host?: string; keep?: number; faults?: Faults; clock?: { now: number }; skillsGate?: () => Promise<void> } = {}) {
+async function computer(t: TestContext, bucket: Bucket, options: { stateDir?: string; host?: string; keep?: number; faults?: Faults; clock?: { now: number }; skillsGate?: () => Promise<void>; pieceBytes?: number } = {}) {
   const stateDir = options.stateDir ?? await mkdtemp(join(tmpdir(), 'tower-todo-backup-'));
   const clock = options.clock ?? { now: Date.parse('2026-10-17T09:00:00Z') };
   const todos = new TodoStore(stateDir, { now: () => new Date(clock.now) });
   todos.start();
   const files = new TodoFiles(stateDir, todos, { now: () => clock.now });
   await files.start();
-  const backup = new TodoBackup(todos, files, { pieceBytes: PIECE });
+  const backup = new TodoBackup(todos, files, { pieceBytes: options.pieceBytes ?? PIECE });
   const faults = options.faults;
   const fetcher: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     const key = decodeURIComponent(url.pathname.replace(/^\/bucket\//, ''));
     if (init?.method === 'DELETE' && faults?.failDelete.has(key)) return new Response('<Error><Code>AccessDenied</Code></Error>', { status: 403 });
+    const piece = key.includes(TODO_FILES_FOLDER) && !url.searchParams.has('list-type');
+    if (piece && init?.method === 'GET' && faults?.holdAttachmentGet) await faults.holdAttachmentGet;
+    if (piece && init?.method === 'GET' && faults?.failAttachmentGet) return new Response('<Error><Code>InternalError</Code></Error>', { status: 500 });
+    if (piece && init?.method === 'PUT' && [...faults?.failPut ?? []].some(part => key.includes(part))) return new Response('<Error><Code>SlowDown</Code></Error>', { status: 503 });
     const attachmentList = init?.method === 'GET' && url.searchParams.has('list-type') && (url.searchParams.get('prefix') ?? '').includes(TODO_FILES_FOLDER);
     if (attachmentList && faults?.failList) return new Response('<Error><Code>AccessDenied</Code><Message>no listing</Message></Error>', { status: 403 });
     const response = await fetch(input, init);
@@ -68,6 +80,10 @@ async function computer(t: TestContext, bucket: Bucket, options: { stateDir?: st
         ? `<ListBucketResult><IsTruncated>false</IsTruncated>${shown}<CommonPrefixes>${keys.filter(name => !name.startsWith(newest)).map(entry).join('')}</CommonPrefixes></ListBucketResult>`
         : `<ListBucketResult><IsTruncated>false</IsTruncated>${keys.map(entry).join('')}<!-- ${entry(newest)}${entry(newest)} --><Name><![CDATA[bucket]]></Name></ListBucketResult>`;
       return new Response(body, { status: 200 });
+    }
+    if (backupList && faults?.bodiesHiddenList) {
+      const keys = [...(await response.text()).matchAll(/<Key>([^<]+)<\/Key>/g)].map(match => match[1]!).filter(name => !name.endsWith('.towerbackup'));
+      return new Response(`<ListBucketResult><IsTruncated>false</IsTruncated>${keys.map(name => `<Contents><Key>${name}</Key></Contents>`).join('')}</ListBucketResult>`, { status: 200 });
     }
     if (backupList && faults?.duplicatedBackupList) {
       const xml = await response.text();
@@ -504,4 +520,183 @@ test('a listing that names a backup twice removes no backup', async t => {
   assert.ok(bucket.objects.has(second));
   assert.equal(piecesOf(bucket, namespaceOf(a), file).length, 1);
   assert.match((await a.service.overview()).status.lastWarning ?? '', /정리하지/);
+});
+
+/** A computer whose todo file and attachments were lost and made anew, with the same backup settings. */
+async function remade(t: TestContext, bucket: Bucket, a: Computer, faults?: Faults) {
+  a.service.close(); await a.service.flush(); a.todos.close();
+  for (const name of await readdir(a.stateDir)) if (name.startsWith('todos.sqlite') || name === 'todo-files') await rm(join(a.stateDir, name), { recursive: true, force: true });
+  return computer(t, bucket, { stateDir: a.stateDir, clock: a.clock, faults });
+}
+const keepOne = (c: Computer, bucket: Bucket) => c.service.saveSettings({ enabled: false, intervalHours: 24, keep: 1, passphrase: PASS, remote: { endpoint: bucket.endpoint, bucket: 'bucket', prefix: 'tower/', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret-key' } });
+
+test('attachments a restore could not bring back stay in the bucket under the key they were sealed with', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket);
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  const file = randomBytes(PIECE * 2);
+  await a.attach('t', file);
+  const first = await a.upload();
+  const oldNamespace = namespaceOf(a);
+  const faults: Faults = { failDelete: new Set(), failList: false, truncateList: false, failAttachmentGet: true };
+  const again = await remade(t, bucket, a, faults);
+  await again.restore(first);
+  assert.deepEqual(again.todos.overview().restore, { state: 'partial', total: 1, missing: 1 });
+  await keepOne(again, bucket);
+  await again.upload();
+  assert.equal(bucket.objects.has(first), false, 'the backup that listed it is gone');
+  assert.equal(piecesOf(bucket, oldNamespace, file).length, 2, 'the only copy of what a row still names');
+});
+
+test('no attachment cleanup runs while a restore is bringing attachments back', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket);
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  await a.attach('t', randomBytes(PIECE));
+  const first = await a.upload();
+  let release!: () => void;
+  const faults: Faults = { failDelete: new Set(), failList: false, truncateList: false, holdAttachmentGet: new Promise(resolve => { release = resolve; }) };
+  const again = await remade(t, bucket, a, faults);
+  await again.service.apply((await again.service.check(bucket.objects.get(first)!.body.toString('utf8'), PASS)).id);
+  const untouched = { put: async () => assert.fail('nothing written'), get: async () => assert.fail('nothing read'), delete: async () => assert.fail('nothing removed'), scan: async () => assert.fail('nothing listed') };
+  assert.equal(await again.backup.cleanup(untouched, 'tower/', `studio-${again.machine}`, []), 'a restore is bringing attachments back');
+  release();
+  await again.backup.downloads();
+  assert.deepEqual(again.todos.overview().restore, { state: 'done', total: 1, missing: 0 });
+});
+
+test('a downloaded backup says its attachments come from the bucket, and they do while it holds them', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket);
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  const kept = randomBytes(PIECE + 1);
+  await a.attach('t', kept);
+  await a.upload();
+  const never = Buffer.from('attached after the last automatic backup');
+  await a.attach('t', never);
+  const exported = await a.service.export(PASS);
+  assert.equal(exported.notice, 'todo-attachments-omitted');
+  assert.equal(exported.text.includes(never.toString()), false);
+  const b = await computer(t, bucket);
+  const preview = await b.service.check(exported.text, PASS);
+  assert.equal(preview.todoFilesFetched, true);
+  await b.service.apply(preview.id);
+  await b.backup.downloads();
+  assert.deepEqual(b.todos.overview().restore, { state: 'partial', total: 2, missing: 1 });
+  assert.deepEqual(await content(b, kept), kept);
+  // An automatic backup is not called a downloaded one.
+  const automatic = await a.upload();
+  assert.equal((await b.service.check(bucket.objects.get(automatic)!.body.toString('utf8'), PASS)).todoFilesFetched, undefined);
+});
+
+test('a restore replaces local contents that are not what their hash says', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket);
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  const file = Buffer.from('the right bytes of this attachment');
+  await a.attach('t', file);
+  const key = await a.upload();
+  await writeFile(todoFilePath(a.stateDir, sha(file)), Buffer.alloc(file.length, 0x41));
+  await a.restore(key);
+  assert.deepEqual(a.todos.overview().restore, { state: 'done', total: 1, missing: 0 });
+  assert.deepEqual(await content(a, file), file);
+});
+
+test('a restore after another leaves the page showing the later one', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket);
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  await a.attach('t', Buffer.from('one attachment'));
+  const key = await a.upload();
+  const text = bucket.objects.get(key)!.body.toString('utf8');
+  const hasContent = a.files.hasContent.bind(a.files);
+  let release!: () => void, entered!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; }), reached = new Promise<void>(resolve => { entered = resolve; });
+  let first = true;
+  a.files.hasContent = async (sha256, size) => { if (first) { first = false; entered(); await held; } return hasContent(sha256, size); };
+  await a.service.apply((await a.service.check(text, PASS)).id);
+  const earlier = a.backup.downloads();
+  await reached;
+  a.clock.now += 1000;
+  await a.service.apply((await a.service.check(text, PASS)).id);
+  await a.backup.downloads();
+  assert.deepEqual(a.todos.overview().restore, { state: 'done', total: 0, missing: 0 });
+  const revision = a.todos.revision();
+  release();
+  await earlier;
+  assert.deepEqual(a.todos.overview().restore, { state: 'done', total: 0, missing: 0 }, 'the earlier one stopped');
+  assert.equal(a.todos.revision(), revision);
+});
+
+test('todos that cannot be read leave only themselves out of the backup', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket);
+  a.backup.snapshot = () => { throw Object.assign(new Error('database disk image is malformed'), { errcode: 11 }); };
+  const key = await a.upload();
+  assert.ok(bucket.objects.has(key));
+  assert.equal((await a.service.overview()).status.lastError, undefined);
+  assert.match((await a.service.overview()).status.lastWarning ?? '', /할 일/);
+  const b = await computer(t, bucket);
+  assert.equal((await b.service.check(bucket.objects.get(key)!.body.toString('utf8'), PASS)).parts.includes('todos'), false);
+});
+
+test('an attachment that cannot be sent leaves only itself out, and nothing is cleaned up after it', async t => {
+  const bucket = await fakeBucket(t);
+  const faults: Faults = { failDelete: new Set(), failList: false, truncateList: false, failPut: new Set() };
+  const a = await computer(t, bucket, { faults, keep: 1 });
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  const fine = Buffer.from('this one goes up'), stuck = Buffer.from('this one cannot be sent');
+  await a.attach('t', fine); await a.attach('t', stuck);
+  faults.failPut!.add(sha(stuck));
+  const otherKey = `tower/${TODO_FILES_FOLDER}studio-${a.machine}-0000000000000000/${sha(fine)}/1-of-1`;
+  bucket.objects.set(otherKey, { body: Buffer.from('x'), at: '2026-01-01T00:00:00Z' });
+  const key = await a.upload();
+  assert.ok(bucket.objects.has(key));
+  assert.match((await a.service.overview()).status.lastWarning ?? '', /올리지 못해/);
+  assert.equal(piecesOf(bucket, namespaceOf(a), fine).length, 1);
+  assert.ok(bucket.objects.has(otherKey), 'no cleanup after a backup that left something out');
+  const b = await computer(t, bucket);
+  await b.restore(key);
+  assert.deepEqual(b.todos.overview().restore, { state: 'partial', total: 2, missing: 1 });
+});
+
+test('lists of attachments are removed only from a listing that shows the backup just made', async t => {
+  const bucket = await fakeBucket(t);
+  const faults: Faults = { failDelete: new Set(), failList: false, truncateList: false };
+  const a = await computer(t, bucket, { faults });
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  await a.attach('t', Buffer.from('listed'));
+  const first = await a.upload();
+  faults.bodiesHiddenList = true;
+  await a.upload();
+  assert.ok(bucket.objects.has(`${first}${TODO_SIDECAR}`));
+});
+
+test('the list of backups asks the bucket for backups only', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket);
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  await a.attach('t', randomBytes(PIECE * 3));
+  const key = await a.upload();
+  const seen = bucket.seen.length;
+  assert.deepEqual((await a.service.remote()).map(item => item.key), [key]);
+  assert.deepEqual(bucket.seen.slice(seen), ['GET /bucket?list-type=2&prefix=tower%2Ftower-backup-']);
+});
+
+test('a 17 MiB incompressible attachment goes up in real 8 MiB pieces and comes back whole', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket, { pieceBytes: 8 * 1024 * 1024 });
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  const file = randomBytes(17 * 1024 * 1024);
+  const started = await a.files.startUpload({ taskId: 't', name: 'big.bin', mimeType: 'application/octet-stream', size: file.length });
+  for (let offset = 0; offset < file.length; offset += 4 * 1024 * 1024) await a.files.appendUpload(started.id, offset, once(file.subarray(offset, offset + 4 * 1024 * 1024)));
+  await a.files.completeUpload(started.id);
+  const key = await a.upload();
+  const pieces = piecesOf(bucket, namespaceOf(a), file);
+  assert.deepEqual(pieces.map(name => name.slice(name.lastIndexOf('/') + 1)), ['1-of-3', '2-of-3', '3-of-3']);
+  assert.equal(bucket.objects.get(pieces[2]!)!.body.length, 1024 * 1024 + 28);
+  const b = await computer(t, bucket, { pieceBytes: 8 * 1024 * 1024 });
+  await b.restore(key);
+  assert.deepEqual(b.todos.overview().restore, { state: 'done', total: 1, missing: 0 });
+  assert.equal(sha(await content(b, file)), sha(file));
 });

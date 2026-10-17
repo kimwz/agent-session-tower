@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { constants, existsSync, lstatSync, openSync, closeSync, fchmodSync, readdirSync, rmSync } from 'node:fs';
+import { constants, lstatSync, openSync, closeSync, fchmodSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { TowerError } from '../../shared/errors.js';
@@ -7,7 +7,7 @@ import type { TodoOp, TodoOpName, TodoOpOf, TodoRequest } from '../../shared/tod
 import type { TodoAvailability, TodoChanges, TodoCompletedPage, TodoFile, TodoOverview, TodoRestoreProgress, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import { nodeVerified, sqlitePatched } from '../storage/runtime.js';
 import { TodoContext } from './context.js';
-import { checkTodoFileRow, todoFilePath } from './files.js';
+import { checkTodoFileRow, todoFilePath, usableContent } from './files.js';
 import { createComment, deleteComment, updateComment } from './ops/comments.js';
 import { attachFile, checkAttachable, deleteFile, restoreFile, type NewTodoFile } from './ops/files.js';
 import { createLink, deleteLink } from './ops/links.js';
@@ -93,6 +93,7 @@ export class TodoStore {
   readonly path: string;
   private readonly stateDir: string;
   private db?: DatabaseSync;
+  private sqlite?: Sqlite;
   private restoreProgress?: TodoRestoreProgress;
   private state: TodoAvailability = { state: 'unavailable', reason: '할 일 저장소를 아직 열지 않았습니다.' };
   private revisionValue = 0;
@@ -128,6 +129,7 @@ export class TodoStore {
     if (!sqlite?.DatabaseSync) throw new Error(runtimeProblem(sqlite, undefined));
     const db = new sqlite.DatabaseSync(this.path);
     this.db = db;
+    this.sqlite = sqlite;
     const problem = this.options.runtime ? this.options.runtime() : runtimeProblem(sqlite, (db.prepare('SELECT sqlite_version() AS v').get() as { v: string }).v);
     if (problem) throw new Error(problem);
     // Only this process writes, under the state lock: waiting for a lock would only stall the web, so none is waited for.
@@ -237,7 +239,7 @@ export class TodoStore {
       task, subtasks,
       comments: this.all('SELECT * FROM todo_comments WHERE task_id = ? AND deleted_at IS NULL ORDER BY created_at', id).map(commentOf),
       files: this.all(`SELECT f.* FROM todo_files f LEFT JOIN todo_comments c ON c.id = f.comment_id WHERE f.task_id = ? AND ${VISIBLE_FILE} ORDER BY f.created_at, f.rowid`, id)
-        .map(fileOf).map(file => existsSync(todoFilePath(this.stateDir, file.sha256)) ? file : { ...file, missing: true as const }),
+        .map(fileOf).map(file => usableContent(lstatSync(todoFilePath(this.stateDir, file.sha256), { throwIfNoEntry: false }), file.size) ? file : { ...file, missing: true as const }),
       completions: this.all('SELECT * FROM todo_completions WHERE task_id = ? AND undone_at IS NULL ORDER BY completed_at DESC LIMIT 50', id).map(completionOf),
       events: this.all('SELECT * FROM todo_events WHERE task_id = ? ORDER BY id DESC LIMIT 100', id).map(eventOf),
       previous: related('to_task_id', 'from_task_id'), next: related('from_task_id', 'to_task_id'),
@@ -465,6 +467,20 @@ export class TodoStore {
   /** The key this computer's attachments are encrypted with in backups (base64url), when the file has one. */
   filesKey(): string | undefined {
     return this.db && this.state.state !== 'unavailable' ? this.meta('files_key') : undefined;
+  }
+
+  /** The contents the kept copies of the file before restores name (see copyAside), read without changing them. */
+  restoreCopyContents(): Set<string> {
+    const named = new Set<string>();
+    if (!this.sqlite) return named;
+    for (const name of readdirSync(this.stateDir).filter(item => RESTORE_COPY.test(item))) {
+      const copy = new this.sqlite.DatabaseSync(join(this.stateDir, name), { readOnly: true });
+      try {
+        if (!copy.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'todo_files'").get()) continue;
+        for (const row of copy.prepare('SELECT DISTINCT sha256 FROM todo_files').all() as { sha256: string }[]) named.add(row.sha256);
+      } finally { copy.close(); }
+    }
+    return named;
   }
 
   /** What the page shows about bringing back a restored backup's attachments. */

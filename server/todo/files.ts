@@ -1,4 +1,4 @@
-import { constants } from 'node:fs';
+import { constants, type Stats } from 'node:fs';
 import { lstat, mkdir, open, readdir, rename, rm, statfs, type FileHandle } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
@@ -59,6 +59,12 @@ function mimeType(value: unknown, name: string): string {
   if (!MIME.test(mime)) throw invalid('첨부 파일 형식이 올바르지 않습니다.');
   return mime;
 }
+
+/**
+ * Whether stored contents can be used: a plain file, not a symlink, with no other link to it (one elsewhere could change
+ * it behind the store's back), of the size its rows say. Serving, backing up, restoring and a task's detail all ask this.
+ */
+export const usableContent = (info: Stats | undefined, size: number): boolean => !!info && info.isFile() && !info.isSymbolicLink() && info.nlink === 1 && info.size === size;
 
 /** Throws unless a file row (from a backup) is one an upload could have made. */
 export function checkTodoFileRow(row: Record<string, unknown>): void {
@@ -207,13 +213,12 @@ export class TodoFiles {
     const target = todoFilePath(this.stateDir, sha256);
     await this.checkDirectory(this.contents);
     const [content, existing] = await Promise.all([lstat(staged).catch(absent), lstat(target).catch(absent)]);
-    if (existing && (!existing.isFile() || existing.isSymbolicLink())) throw new TowerError('unavailable', '첨부 파일 저장소가 올바르지 않습니다.');
+    if (existing?.isDirectory()) throw new TowerError('unavailable', '첨부 파일 저장소가 올바르지 않습니다.');
     if (content) {
       if (!content.isFile() || content.isSymbolicLink()) throw missing();
-      // A copy of another size under the same name is damaged; the new one replaces it.
-      if (existing?.size === size) await rm(staged, { force: true });
-      else await rename(staged, target);
-    } else if (existing?.size !== size) throw missing();
+      // The arrived copy, just hashed, always takes the name: the same bytes, and one damaged or linked elsewhere is replaced.
+      await rename(staged, target);
+    } else if (!usableContent(existing, size)) throw missing();
   }
 
   // ---- Serving ---------------------------------------------------------------------------------------
@@ -245,17 +250,27 @@ export class TodoFiles {
       throw error;
     });
     try {
-      const info = await handle.stat();
-      if (!info.isFile() || info.nlink !== 1 || info.size !== size) throw gone();
+      if (!usableContent(await handle.stat(), size)) throw gone();
       return handle;
     } catch (error) { await handle.close(); throw error; }
+  }
+
+  /** Whether usable contents are there and are exactly what `sha256` says (they are read whole). */
+  async verifyContent(sha256: string, size: number): Promise<boolean> {
+    if (!await this.hasContent(sha256, size)) return false;
+    const handle = await this.openContent(sha256, size);
+    try {
+      const hash = createHash('sha256');
+      for await (const chunk of handle.createReadStream({ start: 0, autoClose: false })) hash.update(chunk as Buffer);
+      return hash.digest('hex') === sha256;
+    } finally { await handle.close(); }
   }
 
   // ---- Contents brought back by a restore --------------------------------------------------------------
 
   hasContent(sha256: string, size: number): Promise<boolean> {
-    // The same test openContent makes: contents it would refuse are not there, and are brought back or stored again.
-    return lstat(todoFilePath(this.stateDir, sha256)).then(info => info.isFile() && !info.isSymbolicLink() && info.nlink === 1 && info.size === size, error => absent(error) ?? false);
+    // Contents openContent would refuse are not there, and are brought back or stored again.
+    return lstat(todoFilePath(this.stateDir, sha256)).then(info => usableContent(info, size), error => absent(error) ?? false);
   }
 
   /** Writes contents from elsewhere, keeping them only when they are exactly `sha256`. */
@@ -316,6 +331,8 @@ export class TodoFiles {
     await this.contentTurnOf(async () => {
       const named = this.store.fileContents();
       if (!named) return;
+      // The copies kept from before restores name contents too: going back to one finds its attachments.
+      const copies = this.store.restoreCopyContents();
       // Read in this turn: contents move into place only in a turn, after their upload's record names them, so an
       // upload that moved its contents and has yet to add its row is seen here, however it ran while the cleanup began.
       const pending = new Set<string>();
@@ -327,7 +344,7 @@ export class TodoFiles {
       await this.checkDirectory(this.contents);
       for (const name of await readdir(this.contents)) {
         const path = join(this.contents, name);
-        if (SHA256.test(name) && !named.has(name) && !pending.has(name)) await rm(path, { force: true });
+        if (SHA256.test(name) && !named.has(name) && !pending.has(name) && !copies.has(name)) await rm(path, { force: true });
         else if (name.startsWith(INCOMING)) {
           const info = await lstat(path).catch(absent);
           if (info && info.mtimeMs <= now - TODO_UPLOAD_TTL_MS) await rm(path, { force: true });

@@ -185,17 +185,25 @@ export class BackupService {
   private fileName(at: number): string { return `tower-backup-${this.computer}-${new Date(at).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}${BACKUP_EXTENSION}`; }
 
   /** An encrypted backup to download. */
-  async export(passphrase: unknown): Promise<{ name: string; text: string }> {
+  /**
+   * An encrypted backup to download. It holds the todos and where their attachments are in the bucket, but not the
+   * attachments' contents, which only automatic backups put there: it is marked as exported, and `notice` tells the page
+   * when there were attachments whose contents it does not hold.
+   */
+  async export(passphrase: unknown): Promise<{ name: string; text: string; notice?: 'todo-attachments-omitted' }> {
     const secret = checkPassphrase(passphrase);
     const at = this.now();
-    const text = await encryptBackup(await this.payload(this.todoSnapshot(), structuredClone(this.saved.settings)), secret, { towerVersion: this.options.version, from: hostname(), createdAt: new Date(at).toISOString() });
-    return { name: this.fileName(at), text };
+    const todos = this.todoSnapshot();
+    const text = await encryptBackup(await this.payload(todos && { ...todos, part: { ...todos.part, exported: true } }, structuredClone(this.saved.settings)), secret, { towerVersion: this.options.version, from: hostname(), createdAt: new Date(at).toISOString() });
+    return { name: this.fileName(at), text, ...(todos?.contents.size ? { notice: 'todo-attachments-omitted' as const } : {}) };
   }
 
   /** The todos to back up; undefined (logged) when their file cannot be read, so the rest is still backed up. */
   private todoSnapshot(): TodoBackupSnapshot | undefined {
-    const snapshot = this.options.todos?.snapshot(this.computer);
-    if (this.options.todos && !snapshot) console.warn('The todos could not be read and were left out of the backup.');
+    let snapshot: TodoBackupSnapshot | undefined;
+    try { snapshot = this.options.todos?.snapshot(this.computer); }
+    catch (error) { console.warn(`The todos could not be read: ${error instanceof Error ? error.message : String(error)}`); }
+    if (this.options.todos && !snapshot) console.warn('The todos were left out of the backup.');
     return snapshot;
   }
 
@@ -251,8 +259,9 @@ export class BackupService {
         const text = await encryptBackup(await this.payload(todos, settings), settings.passphrase, { towerVersion: this.options.version, from: hostname(), createdAt: new Date(at).toISOString() });
         // The attachments, then the list of them, then the backup: a backup in the bucket always has what it names.
         if (todos) {
-          attachments = await this.options.todos!.upload(this.objects(client), settings.remote.prefix, todos, key);
+          attachments = await this.options.todos!.upload(this.objects(client), settings.remote.prefix, todos, key, this.closing.signal);
           if (attachments.damaged.length) warnings.push(`이 컴퓨터에서 손상된 첨부 파일 ${attachments.damaged.length}개는 백업하지 않았습니다.`);
+          if (attachments.failed.length) warnings.push(`첨부 파일 ${attachments.failed.length}개를 저장소에 올리지 못해 이번 백업에서 빠졌습니다.`);
           if (attachments.sidecar) await client.put(`${key}${TODO_SIDECAR}`, attachments.sidecar);
         }
         await client.put(key, Buffer.from(text), 'application/octet-stream');
@@ -278,17 +287,20 @@ export class BackupService {
             removed.add(item);
           }
         } catch (error) { warnings.push(`오래된 백업을 정리하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`); }
-        // A removed backup's list of attachments goes after it, and so does one whose backup never arrived.
-        for (const name of names) {
-          const backup = name.endsWith(TODO_SIDECAR) ? name.slice(0, -TODO_SIDECAR.length) : undefined;
-          if (!backup || !this.own(backup, own) || backup === key || (names.has(backup) && !removed.has(backup))) continue;
-          await client.delete(name).catch(error => warnings.push(`지운 백업의 첨부 파일 목록을 지우지 못했습니다: ${error instanceof Error ? error.message : String(error)}`));
-        }
         // A listing that does not show the backup just made is not trusted to show the others.
-        if (names.has(key)) remaining = mine.filter(item => !removed.has(item));
+        if (names.has(key)) {
+          // A removed backup's list of attachments goes after it, and so does one whose backup never arrived.
+          for (const name of names) {
+            const backup = name.endsWith(TODO_SIDECAR) ? name.slice(0, -TODO_SIDECAR.length) : undefined;
+            if (!backup || !this.own(backup, own) || backup === key || (names.has(backup) && !removed.has(backup))) continue;
+            await client.delete(name).catch(error => warnings.push(`지운 백업의 첨부 파일 목록을 지우지 못했습니다: ${error instanceof Error ? error.message : String(error)}`));
+          }
+          remaining = mine.filter(item => !removed.has(item));
+        }
       } catch (error) { warnings.push(`오래된 백업을 정리하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`); }
       // Attachment objects nothing needs any more; only when every list of them could be seen.
-      if (todos && attachments?.listed && remaining) {
+      // Not after a backup that left attachments out: what it could not send may be needed where it already is.
+      if (todos && attachments?.listed && !attachments.failed.length && !attachments.damaged.length && remaining) {
         try {
           const skipped = await this.options.todos!.cleanup(this.objects(client), settings.remote.prefix, this.computer, remaining);
           if (skipped) console.log(`Old todo attachments in the backup bucket were left alone: ${skipped}.`);
@@ -316,7 +328,7 @@ export class BackupService {
   }
 
   async remote(): Promise<RemoteBackup[]> {
-    return (await this.client().list(this.saved.settings.remote.prefix)).filter(item => item.key.endsWith(BACKUP_EXTENSION)).sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt) || b.key.localeCompare(a.key));
+    return (await this.client().list(`${this.saved.settings.remote.prefix}tower-backup-`)).filter(item => item.key.endsWith(BACKUP_EXTENSION)).sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt) || b.key.localeCompare(a.key));
   }
 
   async download(key: unknown): Promise<{ name: string; text: string }> {
@@ -343,7 +355,11 @@ export class BackupService {
     this.checked.clear();
     const id = randomUUID();
     this.checked.set(id, { payload: parsed, header, passphrase: secret, at: now });
-    return { id, createdAt: header.createdAt, from: header.from, towerVersion: header.towerVersion, parts: payloadParts(parsed), skills: parsed.worker.skills?.bundle.skills.length ?? 0, otherComputer: this.otherComputer(parsed, header) };
+    const todos = parsed.web.todos;
+    // A downloaded backup holds no attachment contents; the page says they come from the bucket, if still there.
+    const fetched = record(todos) && todos.exported === true && record(todos.tables) && Array.isArray(todos.tables.todo_files) && todos.tables.todo_files.length > 0;
+    return { id, createdAt: header.createdAt, from: header.from, towerVersion: header.towerVersion, parts: payloadParts(parsed), skills: parsed.worker.skills?.bundle.skills.length ?? 0, otherComputer: this.otherComputer(parsed, header),
+      ...(fetched ? { todoFilesFetched: true } : {}) };
   }
 
   /**
