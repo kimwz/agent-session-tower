@@ -6,12 +6,15 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LiveState } from '../../server/tower-tools/live-state.js';
-import { IssueMasters, KEEP_CLOSED_MS } from '../../server/master/issues.js';
+import { IssueMasters } from '../../server/master/issues.js';
+import { KEEP_CLOSED_MS } from '../../server/master/issue-files.js';
 import { MasterClient } from '../../server/master/client.js';
 import { MasterRoom } from '../../server/master/room.js';
 import { MasterSession } from '../../server/master/session.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
-import { MasterScreen } from '../../server/master/tools.js';
+import { MasterScreen, MasterTools } from '../../server/master/tools.js';
+import { masterPaths } from '../../server/master/paths.js';
+import type { ReadDatabase } from '../../server/tower-tools/read-db.js';
 import { startMasterHost } from '../../server/master/host.js';
 import { startMasterMcp, type MasterMcpInstance } from '../../server/master/mcp.js';
 import { PassThrough } from 'node:stream';
@@ -39,6 +42,8 @@ async function harness(t: test.TestContext) {
   const headers: Array<{ path: string; capability?: string }> = [];
   /** Which turn a reporting credential belongs to, as the web's capability registry would know it. */
   const callers = new Map<string, string>();
+  /** Messages to sessions are refused while set. */
+  let refuse = false;
   let clock = Date.now();
   const tick = () => new Date(clock += 1000).toISOString();
   const history = (id: string) => { let known = histories.get(id); if (!known) histories.set(id, known = { updatedAt: tick(), messages: [] }); return known; };
@@ -63,6 +68,7 @@ async function harness(t: test.TestContext) {
     if (req.method === 'POST') headers.push({ path: url.pathname, ...(capability ? { capability } : {}) });
     const caller = capability ? runs.find(run => run.id === callers.get(capability)) : undefined;
     const message = /^\/api\/sessions\/([^/]+)\/messages$/.exec(url.pathname);
+    if (req.method === 'POST' && message && refuse) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'busy' })); return; }
     if (req.method === 'POST' && (message || url.pathname === '/api/sessions')) {
       const run = turn(message ? decodeURIComponent(message[1]) : `codex:${randomUUID().slice(0, 6)}`, String(body.prompt), caller ? from(caller) : undefined);
       res.writeHead(202, { 'Content-Type': 'application/json' }).end(JSON.stringify(message ? { run } : { session: { id: run.sessionId }, run }));
@@ -82,23 +88,28 @@ async function harness(t: test.TestContext) {
   const tower = new TowerClient(2_000);
   tower.setCredentials({ port: (server.address() as { port: number }).port, token: 'a'.repeat(64), callerSecret: 'b'.repeat(64) });
   const snapshot = (): Snapshot => ({ sessions, runs, autoPrompts: [], providers: [], scanning: false, hostname: 'here', version: 't', updatedAt: '' });
-  const live = { fresh: async () => snapshot(), snapshot, node: () => undefined } as unknown as LiveState;
+  /** The next look at Tower waits for this, once. */
+  let held: Promise<void> | undefined;
+  const live = { fresh: async () => { const wait = held; held = undefined; await wait; return snapshot(); }, snapshot, node: () => undefined } as unknown as LiveState;
+  const hold = () => { let release!: () => void; held = new Promise<void>(resolve => { release = resolve; }); return release; };
   const settings = new MasterSettingsStore(data);
   await mkdir(data, { recursive: true });
   await settings.start();
   await settings.bind({ sessionId: MAIN, provider: 'claude', startedAt: new Date().toISOString() });
   const room = new MasterRoom(join(data, 'voice'));
   await room.start();
-  let issues!: IssueMasters;
-  const main = new MasterSession({ stateDir: dir, dataDir: data, settings, tower, live, room, followMs: 60_000, reportRetryMs: 1,
-    otherMaster: { session: id => issues.masterSession(id), run: id => issues.masterRun(id) } });
-  await main.start();
+  let main: MasterSession | undefined;
   const openIssues = () => {
-    const opened = new IssueMasters({ stateDir: dir, dataDir: data, tower, live, screen: new MasterScreen({ broadcast: () => {} }), main: { binding: () => main.binding(), ownRun: id => main.ownRun(id) }, followMs: 60_000 });
+    const opened = new IssueMasters({ stateDir: dir, dataDir: data, tower, live, screen: new MasterScreen({ broadcast: () => {} }), main: { binding: () => main?.binding() }, followMs: 60_000, reportRetryMs: 1 });
     cleanup.push(() => opened.close());
     return opened;
   };
-  issues = openIssues();
+  let issues = openIssues();
+  // The main master tells the first registry of its turns; a registry opened later is told by its own masters only.
+  const first = issues;
+  main = new MasterSession({ stateDir: dir, dataDir: data, settings, tower, live, room, followMs: 60_000, reportRetryMs: 1,
+    otherMaster: { session: id => issues.masterSession(id), run: id => issues.masterRun(id) }, turns: first.turnsOf() });
+  await main.start();
   cleanup.push(async () => { await main.close(); await room.flush(); });
   const issueSession = (taskId: string, extra: Partial<Session> = {}): Session => {
     const session: Session = { id: `claude:${taskId}-${randomUUID().slice(0, 4)}`, nativeId: randomUUID(), provider: 'claude', title: '이슈', cwd: join(dir, 'todo-masters', taskId), project: 'x',
@@ -108,7 +119,7 @@ async function harness(t: test.TestContext) {
   };
   const reports = (sessionId: string) => runs.filter(run => run.sessionId === sessionId && run.prompt.startsWith('[Tower report]')).map(run => run.prompt);
   const follow = async () => { await issues.refresh(); await main.follow(); for (const id of ['task-a', 'task-b']) await issues.get(id)?.follow(); };
-  return { dir, data, tower, sessions, runs, headers, callers, tick, turn, from, finish, main, issues: () => issues, reopen: () => { issues = openIssues(); return issues; }, issueSession, reports, follow };
+  return { dir, data, tower, sessions, runs, headers, callers, tick, turn, from, finish, main: main!, issues: () => issues, reopen: () => { issues = openIssues(); return issues; }, issueSession, reports, follow, hold, refuse: (value: boolean) => { refuse = value; } };
 }
 
 test('each issue master follows its own work and reports to its own session, apart from the main master and each other', async t => {
@@ -300,4 +311,102 @@ test('through the host, an issue master\'s tool server names its todo and sends 
   assert.equal(host.session!.delegatedTable().rows.length, 1, 'the main master follows its own call');
   // A tool server that names no proper todo is refused.
   await assert.rejects(page.call('tool', { name: 'tower_api', arguments: { method: 'GET', path: '/api/link' }, instance: 'todo:../x', capability: CAPABILITY }), /올바르지 않습니다/);
+});
+
+test('a first caller that was another master\'s turn never makes that master\'s other work this one\'s, in or out of the snapshot', async t => {
+  const h = await harness(t);
+  const b = h.issueSession('task-b');
+  await h.issues().refresh();
+  const mainTurn = h.turn(MAIN, 'main turn');
+  await h.main.follow();
+  // The main master's turn writes to issue master B as its caller; B hands work on, whose first caller is the main turn.
+  const bTurn = h.turn(b.id, 'from main', h.from(mainTurn));
+  const forB = h.turn('codex:b-work', 'b work', h.from(bTurn));
+  await h.follow();
+  const issue = h.issues().get('task-b')!;
+  assert.deepEqual(issue.delegatedTable().rows.map(row => row[1]), ['b work']);
+  // The main master's own work afterwards stays its own, while the main turn is in the snapshot and after it left.
+  const mainWork = h.turn('codex:main-work', 'main work', h.from(mainTurn));
+  await h.follow();
+  h.runs.splice(h.runs.indexOf(mainTurn), 1);
+  const laterWork = h.turn('codex:later', 'later main work', { parentRunId: mainTurn.id, rootRunId: mainTurn.id });
+  await h.follow();
+  await h.follow();
+  // Work handed on from the main master's work, once that work left the snapshot too.
+  h.runs.splice(h.runs.indexOf(mainWork), 1);
+  h.turn('codex:next', 'next main work', { parentRunId: mainWork.id, rootRunId: mainTurn.id });
+  await h.follow();
+  await h.follow();
+  assert.deepEqual(issue.delegatedTable().rows.map(row => row[1]), ['b work'], 'nothing of the main master\'s comes to B');
+  assert.deepEqual(h.main.delegatedTable().rows.map(row => row[1]).sort(), ['from main', 'later main work', 'main work', 'next main work'].sort());
+  assert.ok(forB && laterWork);
+});
+
+test('an issue master closed while it looks at Tower sends no new report', async t => {
+  const h = await harness(t);
+  const a = h.issueSession('task-a');
+  await h.issues().refresh();
+  const aTurn = h.turn(a.id, 'A 일');
+  const work = h.turn('codex:a-work', 'a work', h.from(aTurn));
+  const issue = h.issues().get('task-a')!;
+  await issue.follow();
+  // Its report was refused once, and is due to go again at the next look.
+  h.refuse(true);
+  h.finish(work, 'done');
+  await issue.follow();
+  h.refuse(false);
+  const posted = h.headers.length;
+  const release = h.hold();
+  const looking = issue.follow();
+  a.closed = true;
+  const refreshed = h.issues().refresh();
+  await until(() => h.issues().size() === 0);
+  release();
+  await looking;
+  await refreshed;
+  assert.equal(h.reports(a.id).length, 0);
+  assert.equal(h.headers.length, posted, 'nothing was posted to the closed issue master');
+});
+
+test('masters sharing one lookup database each query their own delegated work', async t => {
+  const h = await harness(t);
+  // Like the real one, it rebuilds its tables only when the version it is given changes.
+  const asked: string[] = [];
+  let built: { version: string; rows: unknown[][] } | undefined;
+  const readDb = { query: async (_sql: string, version: string, tables: () => Array<{ name: string; rows: unknown[][] }>) => {
+    asked.push(version);
+    if (built?.version !== version) built = { version, rows: tables().find(table => table.name === 'delegated')!.rows };
+    return { columns: ['title'], rows: built.rows.map(row => [row[1]]), truncated: false };
+  } } as unknown as ReadDatabase;
+  const live = { fresh: async () => ({ sessions: [], runs: [], autoPrompts: [], providers: [], scanning: false, hostname: 'h', version: 't', updatedAt: '' }), snapshot: () => ({ sessions: [], runs: [] }), version: () => 1, nodeSnapshots: () => new Map(), missing: () => [] } as unknown as LiveState;
+  const table = (title: string) => () => ({ name: 'delegated', columns: ['id', 'title', 'state'], rows: [['x', title, 'running']] });
+  const screen = new MasterScreen({ broadcast: () => {} });
+  const one = new MasterTools({ tower: h.tower, live, readDb, scope: 'todo:a', screen, started: async () => {}, delegated: table('A의 일') });
+  const two = new MasterTools({ tower: h.tower, live, readDb, scope: 'todo:b', screen, started: async () => {}, delegated: table('B의 일') });
+  assert.deepEqual((await one.call('tower_query', { sql: 'SELECT title FROM delegated' }) as { rows: unknown[] }).rows, [['A의 일']]);
+  assert.deepEqual((await two.call('tower_query', { sql: 'SELECT title FROM delegated' }) as { rows: unknown[] }).rows, [['B의 일']]);
+  assert.notEqual(asked[0], asked[1], 'the same states of different work are not the same tables');
+});
+
+test('the web clears away closed issue masters\' data on its own, and knows an open issue master before the host saw it', async t => {
+  const stateDir = await temporaryFixture('tower-issue-clear-');
+  t.after(() => removeTemporaryFixture(stateDir));
+  const { data } = await masterPaths(stateDir);
+  const write = async (taskId: string, closedAt?: string, followed: unknown[] = []) => {
+    await mkdir(join(data, 'todo', taskId), { recursive: true });
+    await writeFile(join(data, 'todo', taskId, 'follow.json'), JSON.stringify({ version: 1, baselineAt: new Date().toISOString(), masterRuns: [], followed, ...(closedAt ? { closedAt } : {}) }), { mode: 0o600 });
+  };
+  await write('task-old', new Date(Date.now() - KEEP_CLOSED_MS - 1000).toISOString(), [{ id: 'x', kind: 'delegated', report: 'pending' }]);
+  await write('task-recent', new Date().toISOString());
+  let open = false;
+  const client = new MasterClient({ stateDir, credentials: () => undefined, issueMastersOpen: () => open });
+  t.after(() => client.dispose());
+  const pendingWork = () => (client as unknown as { pendingWork(): Promise<boolean> }).pendingWork();
+  assert.equal(await pendingWork(), false, 'closed issue masters need no host, undelivered reports or not');
+  open = true;
+  assert.equal(await pendingWork(), true, 'an open issue master the web knows of does');
+  open = false;
+  client.start();
+  await until(async () => !(await stat(join(data, 'todo', 'task-old')).then(() => true, () => false)));
+  assert.ok((await stat(join(data, 'todo', 'task-recent'))).isDirectory());
 });

@@ -54,12 +54,20 @@ export class ReadDatabase {
   private sequence = 0;
   /** Requests waiting for an answer, each with the process it was sent to. */
   private readonly pending = new Map<number, { child: ChildProcessWithoutNullStreams; done: (reply: Reply) => void }>();
+  /** One lookup at a time: tables built for one asker are never queried by another (each master has its own). */
+  private queue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: { entry?: string; cpuLimitSeconds?: number } = {}) {}
   private get entry() { return this.options.entry ?? fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? '../index.ts' : '../index.js', import.meta.url)); }
 
   /** `version` tells whether the tables changed since the last build. */
-  async query(sql: string, version: string, tables: () => Table[]): Promise<QueryResult> {
+  query(sql: string, version: string, tables: () => Table[]): Promise<QueryResult> {
+    const next = this.queue.then(() => this.queryNow(sql, version, tables));
+    this.queue = next.catch(() => {}); // best-effort: the caller gets the error; the next lookup goes on.
+    return next;
+  }
+
+  private async queryNow(sql: string, version: string, tables: () => Table[]): Promise<QueryResult> {
     if (typeof sql !== 'string' || !sql.trim() || sql.length > 20_000) throw new TowerError('invalid', 'SQL을 한 문장으로 주세요.');
     if (!this.child || this.builtFrom !== version) {
       const built = await this.send({ type: 'rebuild', tables: tables() }, 10_000);

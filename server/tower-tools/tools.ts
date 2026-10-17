@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { SessionDetail } from '../../shared/types.js';
 import { apiTarget, type ApiTarget } from './api-target.js';
 import type { LiveState } from './live-state.js';
@@ -40,6 +40,8 @@ export interface TowerToolsOptions {
   /** The work handed out, for tower_query. */
   delegated(): Table;
   toolMs?: number;
+  /** Who asks, when several share one lookup database (the main master, an issue master): their tables differ. */
+  scope?: string;
   /** Routes tower_api may not call (the master's own list unless given). */
   refused?: readonly RegExp[];
   /** Says why a route is not called through tower_api, if it is not. */
@@ -112,7 +114,7 @@ export class TowerTools {
     if (!live || !readDb) return { error: '빠른 조회를 쓸 수 없습니다. tower_api로 조회하세요.' };
     if (!await live.fresh()) return { error: 'Tower의 현재 상태를 받지 못했습니다. 잠시 뒤 다시 하거나 tower_api로 조회하세요.' };
     const delegated = this.options.delegated();
-    const signature = `${live.version()}:${delegated.rows.map(row => row[2]).join(',')}`;
+    const signature = `${this.options.scope ?? ''}:${live.version()}:${createHash('sha256').update(JSON.stringify(delegated.rows)).digest('hex')}`;
     try {
       const result = await readDb.query(String(args.sql ?? ''), signature, () => tablesFrom(live.snapshot(), live.nodeSnapshots(), text => text, [delegated]));
       const missing = live.missing();

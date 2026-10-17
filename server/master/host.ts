@@ -249,11 +249,10 @@ export async function startMasterHost(options: MasterHostOptions) {
     await room.start();
     // The owner's screen is one, whichever master uses it.
     const screen = new MasterScreen({ broadcast: event => room.broadcast(event) });
-    session = new MasterSession({ stateDir: paths.stateDir, dataDir: paths.data, settings, tower, live, room, onChange: broadcastOverview, otherMaster: { session: id => issues!.masterSession(id), run: id => issues!.masterRun(id) },
+    const masters = issues = new IssueMasters({ stateDir: paths.stateDir, dataDir: paths.data, tower, live, ...(readDb ? { readDb } : {}), screen, main: { binding: () => session?.binding() },
       ...(options.followMs ? { followMs: options.followMs } : {}) });
-    const main = session;
-    issues = new IssueMasters({ stateDir: paths.stateDir, dataDir: paths.data, tower, live, ...(readDb ? { readDb } : {}), screen, main: { binding: () => main.binding(), ownRun: id => main.ownRun(id) },
-      ...(options.followMs ? { followMs: options.followMs } : {}) });
+    session = new MasterSession({ stateDir: paths.stateDir, dataDir: paths.data, settings, tower, live, room, onChange: broadcastOverview,
+      otherMaster: { session: id => masters.masterSession(id), run: id => masters.masterRun(id) }, turns: masters.turnsOf(), ...(options.followMs ? { followMs: options.followMs } : {}) });
     tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), screen, started: (target, body, answer) => session!.started(target, body, answer), delegated: () => session!.delegatedTable() });
     const elevenLabs = new ElevenLabs({ key: () => settings.voiceKey(), ...options.voice?.elevenLabs });
     voice = new MasterVoice({ dataDir: paths.data, settings, room, elevenLabs, firstReply: options.voice?.firstReply ?? new FirstReplyMaker({ stateDir: paths.stateDir }), ...(options.voice?.timing ? { timing: options.voice.timing } : {}),

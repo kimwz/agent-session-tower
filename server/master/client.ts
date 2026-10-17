@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { open, readdir } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { request, type ClientRequest, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { isSea } from 'node:sea';
@@ -10,8 +10,8 @@ import { APP_VERSION } from '../../shared/app-identity.js';
 import { readPrivateJson } from '../stores/private-json.js';
 import { MASTER_PROTOCOL, type MasterHostReply } from './host.js';
 import type { VoiceTransportStage } from './voice-timings.js';
-import { issueDataDir, masterPaths, type MasterPaths } from './paths.js';
-import { TODO_MASTER_TASK_ID } from '../../shared/master.js';
+import { masterPaths, type MasterPaths } from './paths.js';
+import { clearClosedIssueFiles, issueMastersPending } from './issue-files.js';
 import type { WebCredentials } from '../tower-tools/tower-client.js';
 import { TowerError, fromStatus, statusOf, type ErrorKind } from '../../shared/errors.js';
 import { audioSink } from '../http/sinks.js';
@@ -29,7 +29,12 @@ export interface MasterClientOptions {
   startupTimeoutMs?: number;
   /** Only talk to a running host, never start or replace one (the master session's tool server, of the worker's build). */
   attachOnly?: boolean;
+  /** Whether the web knows an open issue master, which needs the host even before the host has seen it. */
+  issueMastersOpen?: () => boolean | Promise<boolean>;
 }
+
+/** How often the web clears away closed issue masters' data, whether or not a host runs. */
+const CLEAR_MS = 24 * 60 * 60_000;
 
 /**
  * The web side of the master host: starts it on first use, hands it this web's credentials, and relays its answers
@@ -40,6 +45,7 @@ export class MasterClient {
   private starting?: Promise<void>;
   private readonly streams = new Set<ClientRequest>();
   private heartbeat?: ReturnType<typeof setInterval>;
+  private clearing?: ReturnType<typeof setInterval>;
   private closed = false;
 
   constructor(private readonly options: MasterClientOptions) {}
@@ -57,16 +63,22 @@ export class MasterClient {
     });
     this.heartbeat = setInterval(tell, 15_000);
     this.heartbeat.unref();
+    const clear = () => { void this.hostPaths().then(paths => clearClosedIssueFiles(paths.data)).catch(error => {
+      console.error(`Closed issue masters' data could not be cleared away: ${(error as NodeJS.ErrnoException)?.code ?? 'error'}`);
+    }); };
+    clear();
+    this.clearing = setInterval(clear, CLEAR_MS);
+    this.clearing.unref();
   }
 
   /**
-   * Whether a master session exists, so the host should run to follow it: the main master's, or an issue master's
-   * whose session was open when the host last looked.
+   * Whether a master session exists, so the host should run to follow it: the main master's, an issue master the web
+   * knows open, or one whose session was open when the host last looked.
    */
   private async pendingWork(): Promise<boolean> {
     const { data } = await this.hostPaths();
     const saved = await readPrivateJson(join(data, 'settings.json')).catch(() => undefined) as { session?: { sessionId?: unknown } } | undefined;
-    return typeof saved?.session?.sessionId === 'string' || await issueMastersOpen(data);
+    return typeof saved?.session?.sessionId === 'string' || Boolean(await this.options.issueMastersOpen?.()) || await issueMastersPending(data);
   }
 
   async call(method: string, args: Record<string, unknown> = {}): Promise<unknown> {
@@ -148,6 +160,7 @@ export class MasterClient {
   dispose(): void {
     this.closed = true;
     if (this.heartbeat) clearInterval(this.heartbeat);
+    if (this.clearing) clearInterval(this.clearing);
     for (const stream of this.streams) stream.destroy();
     this.streams.clear();
   }
@@ -229,17 +242,3 @@ export class MasterClient {
   }
 }
 
-/**
- * Whether an issue master's follow file says its session was open when the host last looked (the host marks it
- * `closedAt` when the session is closed or gone; see issues.ts).
- */
-async function issueMastersOpen(masterData: string): Promise<boolean> {
-  const root = issueDataDir(masterData);
-  for (const taskId of await readdir(root).catch(() => [] as string[])) {
-    if (!TODO_MASTER_TASK_ID.test(taskId)) continue;
-    // best-effort: a file that cannot be read gives no reason to start the host; the host itself sorts it out.
-    const saved = await readPrivateJson(join(root, taskId, 'follow.json')).catch(() => undefined) as { version?: unknown; closedAt?: unknown } | undefined;
-    if (saved?.version === 1 && typeof saved.closedAt !== 'string') return true;
-  }
-  return false;
-}

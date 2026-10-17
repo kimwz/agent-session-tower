@@ -124,6 +124,8 @@ export interface MasterSessionOptions {
    * another master's turn hands out is that master's, even when it began with a message from this one.
    */
   otherMaster?: { session(id: string): boolean; run(id: string): boolean };
+  /** Told of this master's own turns as they are remembered and forgotten, so other masters can tell them apart. */
+  turns?: { add(runId: string): void; delete(runId: string): void };
   tower: TowerClient;
   live: LiveState;
   /** The voice's ledger: spoken requests and what is read aloud. Only the main master has one. */
@@ -178,6 +180,7 @@ export class MasterSession {
       if (item.report === 'sending') item.report = 'uncertain';
       if (item.kind === 'spoken' && !item.runId && item.state === 'running') item.state = 'unknown';
     }
+    for (const id of this.file.masterRuns) this.options.turns?.add(id);
     // Started again, an issue master's session is open again.
     delete this.file.closedAt;
     await this.save();
@@ -260,8 +263,8 @@ export class MasterSession {
     return this.options.settings;
   }
 
-  /** Whether a run is one of this master's own turns, as far back as they are kept. */
-  ownRun(runId: string): boolean { return this.file.masterRuns.includes(runId); }
+  /** This master's own turns, as far back as they are kept. */
+  ownRuns(): readonly string[] { return this.file.masterRuns; }
 
   /** Work handed out and not reported yet. */
   activeTasks(): number { return this.file.followed.filter(item => item.kind === 'delegated' && (item.state === 'running' || (item.report !== undefined && item.report !== 'sent' && item.report !== 'failed'))).length; }
@@ -415,7 +418,8 @@ export class MasterSession {
     const binding = this.binding();
     if (this.closed || !binding || !this.options.tower.hasCredentials()) return;
     const snapshot = await this.options.live.fresh();
-    if (!snapshot) return;
+    // Let go of (an issue master closed) while it waited: it looks no further and reports nothing.
+    if (!snapshot || this.closed) return;
     let changed = this.discover(snapshot, binding);
     for (const item of this.file.followed.filter(entry => entry.state === 'running')) {
       if (this.closed) return;
@@ -426,7 +430,7 @@ export class MasterSession {
       if (item.currentRunId !== current) changed = true;
     }
     if (await this.reconcile(snapshot, binding)) changed = true;
-    if (await this.sendReports(binding)) changed = true;
+    if (!this.closed && await this.sendReports(binding)) changed = true;
     if (changed) { this.trim(); await this.save(); this.options.onChange?.(); }
   }
 
@@ -461,18 +465,20 @@ export class MasterSession {
     // Another master's turns are reported when they end, but what they hand out is that master's (its nearest master).
     const runs = new Map((snapshot.runs ?? []).map(run => [run.id, run]));
     const otherSession = (id: string | undefined) => !!id && id !== binding.sessionId && Boolean(this.options.otherMaster?.session(id));
+    const own = new Set(this.file.masterRuns);
     const otherRun = (id: string) => {
-      if (this.file.masterRuns.includes(id)) return false;
+      if (own.has(id)) return false;
       const run = runs.get(id);
       return run ? otherSession(run.sessionId) : Boolean(this.options.otherMaster?.run(id));
     };
+    // Another master's turns, and first callers that were another master's, never call on this master's behalf.
     const callers = new Set([...this.file.masterRuns, ...this.file.followed.filter(item => item.kind === 'delegated' && !item.node && !otherSession(item.sessionId))
-      .flatMap(item => [item.runId, item.currentRunId, item.rootRunId, item.turn].filter((id): id is string => !!id))]);
+      .flatMap(item => [item.runId, item.currentRunId, item.rootRunId, item.turn].filter((id): id is string => !!id && !otherRun(id)))]);
     const ours = (item: Pick<Run, 'origin' | 'delegation'>) => {
       if (!item.delegation) return item.origin?.kind === 'agent' && !!item.origin.runId && callers.has(item.origin.runId);
       const { parentRunId, rootRunId } = item.delegation;
-      if (callers.has(parentRunId)) return true;
       if (otherRun(parentRunId)) return false;
+      if (callers.has(parentRunId)) return true;
       // The nearest master decides, through the parent; the first caller stands in only for a parent no longer there.
       const parent = runs.get(parentRunId);
       return (!parent || !after(parent.createdAt)) && callers.has(rootRunId);
@@ -610,11 +616,13 @@ export class MasterSession {
       size += length;
     }
     for (const batch of batches) {
+      if (this.closed) break;
       const reportId = randomUUID().slice(0, 8);
       const prompt = `${REPORT_MARK} Work you handed out ended (report ${reportId}):\n${batch.map(line).join('\n')}\n\nExecution completed is not proof that the owner's goal is done. Inspect the answers and tracked follow-up work; continue authorized remaining steps, respect real approval waits and owner stops, and do not resubmit work already running.`;
       for (const item of batch) { item.report = 'sending'; item.reportId = reportId; item.reportAt = new Date().toISOString(); }
       await this.save();
-      const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(binding.sessionId)}/messages`, { prompt }, { write: true })
+      // A master let go of meanwhile (an issue master closed) gets no new turn; one already sent is not taken back.
+      const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(binding.sessionId)}/messages`, { prompt }, { write: true, gate: async () => !this.closed })
         .catch(() => ({ state: 'uncertain' as const, status: 0, body: undefined }));
       const run = (response.body as { run?: Run } | undefined)?.run;
       for (const item of batch) {
@@ -752,7 +760,8 @@ export class MasterSession {
   private remember(runId: string): void {
     if (this.file.masterRuns.includes(runId)) return;
     this.file.masterRuns.push(runId);
-    if (this.file.masterRuns.length > MASTER_RUNS) this.file.masterRuns.splice(0, this.file.masterRuns.length - MASTER_RUNS);
+    this.options.turns?.add(runId);
+    if (this.file.masterRuns.length > MASTER_RUNS) for (const id of this.file.masterRuns.splice(0, this.file.masterRuns.length - MASTER_RUNS)) this.options.turns?.delete(id);
   }
 
   private add(item: Followed): void { this.file.followed.push(item); }

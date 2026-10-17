@@ -1,11 +1,11 @@
-import { mkdir, readdir, rm, stat } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { TODO_MASTER_TASK_ID, TODO_MASTERS_FOLDER, type MasterBinding } from '../../shared/master.js';
+import { TODO_MASTERS_FOLDER, type MasterBinding } from '../../shared/master.js';
 import type { Session, Snapshot } from '../../shared/types.js';
 import { CALLER_CAPABILITY_HEADER } from '../runs/session-mcp.js';
 import { todoMasterTaskId } from '../runs/subscription.js';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { clearClosedIssueFiles } from './issue-files.js';
 import type { LiveState } from '../tower-tools/live-state.js';
 import type { ReadDatabase } from '../tower-tools/read-db.js';
 import type { TowerClient } from '../tower-tools/tower-client.js';
@@ -15,8 +15,6 @@ import { MasterSession } from './session.js';
 import { MasterTools, type MasterScreen } from './tools.js';
 
 const FOLLOW_MS = 5_000;
-/** An issue master's follow file is cleared away this long after its session was closed (or went away). */
-export const KEEP_CLOSED_MS = 30 * 24 * 60 * 60_000;
 /** How often the follow files of closed issue masters are looked over. */
 const SWEEP_MS = 60 * 60_000;
 
@@ -33,9 +31,11 @@ export interface IssueMastersOptions {
   readDb?: ReadDatabase;
   /** The owner's screen, shared with the main master. */
   screen: MasterScreen;
-  /** The main master: its session and its own turns, which belong to it and not to an issue master. */
-  main: { binding(): MasterBinding | undefined; ownRun(id: string): boolean };
+  /** The main master's session. */
+  main: { binding(): MasterBinding | undefined };
   followMs?: number;
+  /** Tests shorten the wait before a refused report goes again. */
+  reportRetryMs?: number;
 }
 
 /**
@@ -53,6 +53,10 @@ export class IssueMasters {
   /** The sessions in issue master folders, worked out once for each snapshot. */
   private folders?: { snapshot: Snapshot; ids: Set<string> };
   private untracked?: MasterTools;
+  /** Every master's turns, by run: the master's todo, or '' for the main master. */
+  private readonly turns = new Map<string, string>();
+  /** The sessions the issue masters are bound to. */
+  private bound = new Set<string>();
   private readonly parents = new Map<string, string>();
 
   constructor(private readonly options: IssueMastersOptions) {}
@@ -74,10 +78,15 @@ export class IssueMasters {
    * asking issue master's todo, or nothing for the main master.
    */
   masterSession(id: string): boolean {
-    return id === this.options.main.binding()?.sessionId || [...this.instances.values()].some(entry => entry.binding.sessionId === id) || this.folderSessions().has(id);
+    return id === this.options.main.binding()?.sessionId || this.bound.has(id) || this.folderSessions().has(id);
   }
-  masterRun(id: string, self?: string): boolean {
-    return (self !== undefined && this.options.main.ownRun(id)) || [...this.instances.values()].some(entry => entry.taskId !== self && entry.session.ownRun(id));
+  masterRun(id: string, self = ''): boolean {
+    const owner = this.turns.get(id);
+    return owner !== undefined && owner !== self;
+  }
+  /** Where a master tells of its own turns: `owner` is its todo, or '' for the main master. */
+  turnsOf(owner = ''): { add(runId: string): void; delete(runId: string): void } {
+    return { add: id => { this.turns.set(id, owner); }, delete: id => { if (this.turns.get(id) === owner) this.turns.delete(id); } };
   }
 
   /**
@@ -88,7 +97,7 @@ export class IssueMasters {
   async call(taskId: string, name: string, args: Record<string, unknown>, capability: string): Promise<unknown> {
     if (!this.instances.has(taskId)) await this.refresh();
     const tools = this.instances.get(taskId)?.tools ?? (this.untracked ??= new MasterTools({ tower: this.options.tower, live: this.options.live, ...(this.options.readDb ? { readDb: this.options.readDb } : {}),
-      screen: this.options.screen, started: async () => {}, delegated: () => ({ name: 'delegated', columns: ['id', 'title', 'state', 'session_id', 'node', 'created_at', 'report', 'outcome'], rows: [] }) }));
+      scope: 'untracked', screen: this.options.screen, started: async () => {}, delegated: () => ({ name: 'delegated', columns: ['id', 'title', 'state', 'session_id', 'node', 'created_at', 'report', 'outcome'], rows: [] }) }));
     return tools.call(name, args, { [CALLER_CAPABILITY_HEADER]: capability });
   }
 
@@ -114,17 +123,20 @@ export class IssueMasters {
     }
     for (const [taskId, entry] of [...this.instances]) {
       if (open.has(taskId) || this.closed) continue;
-      this.instances.delete(taskId);
+      this.forget(entry);
       await entry.session.retire().catch(error => console.error(`An issue master could not be let go of: ${error instanceof Error ? error.message : String(error)}`));
     }
     for (const [taskId, session] of open) {
       if (this.closed) return;
       const known = this.instances.get(taskId);
       // Only the newest session of a todo is its master; Tower hides the others.
-      if (known) { if (known.binding.sessionId !== session.id) known.binding = bindingOf(session); continue; }
+      if (known) { if (known.binding.sessionId !== session.id) { known.binding = bindingOf(session); this.rebind(); } continue; }
       await this.open(taskId, session, snapshot);
     }
-    if (Date.now() - this.sweptAt >= SWEEP_MS) { this.sweptAt = Date.now(); await this.sweep(); }
+    if (Date.now() - this.sweptAt >= SWEEP_MS) {
+      this.sweptAt = Date.now();
+      await clearClosedIssueFiles(this.options.dataDir, { following: taskId => this.instances.has(taskId), markOpen: true });
+    }
   }
 
   private async open(taskId: string, session: Session, snapshot: Snapshot): Promise<void> {
@@ -132,47 +144,30 @@ export class IssueMasters {
     const times = [session.createdAt, ...(snapshot.runs ?? []).filter(run => run.sessionId === session.id).map(run => run.createdAt)].map(Date.parse).filter(Number.isFinite);
     const baselineAt = times.length ? new Date(Math.min(...times) - 60_000).toISOString() : undefined;
     const entry = { taskId, binding: bindingOf(session) } as IssueMaster;
-    const { tower, live, readDb, screen, followMs } = this.options;
+    const { tower, live, readDb, screen, followMs, reportRetryMs } = this.options;
     entry.session = new MasterSession({ stateDir: this.options.stateDir, dataDir: issueDataDir(this.options.dataDir, taskId), binding: () => entry.binding,
       folder: join(this.options.stateDir, TODO_MASTERS_FOLDER, taskId), writeGuide: folder => writeTodoMasterGuide(folder, taskId), ...(baselineAt ? { baselineAt } : {}),
-      otherMaster: { session: id => this.masterSession(id), run: id => this.masterRun(id, taskId) }, tower, live, ...(followMs ? { followMs } : {}) });
-    entry.tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), screen, started: (target, body, answer) => entry.session.started(target, body, answer), delegated: () => entry.session.delegatedTable() });
+      otherMaster: { session: id => this.masterSession(id), run: id => this.masterRun(id, taskId) }, turns: this.turnsOf(taskId), tower, live, ...(followMs ? { followMs } : {}), ...(reportRetryMs ? { reportRetryMs } : {}) });
+    entry.tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), scope: `todo:${taskId}`, screen, started: (target, body, answer) => entry.session.started(target, body, answer), delegated: () => entry.session.delegatedTable() });
     try { await mkdir(issueDataDir(this.options.dataDir, taskId), { recursive: true, mode: 0o700 }); await entry.session.start(); }
     catch (error) {
       // best-effort: it never started; the error that stopped it is logged below.
       await entry.session.close().catch(() => {});
+      for (const id of entry.session.ownRuns()) this.turnsOf(taskId).delete(id);
       console.error(`An issue master could not start following its work: ${error instanceof Error ? error.message : String(error)}`);
       return;
     }
     this.instances.set(taskId, entry);
+    this.rebind();
   }
 
-  /**
-   * The files of issue masters not followed now: one left open when its session went away while the host was not
-   * running is marked closed; one closed for long enough is removed, with anything set aside beside it.
-   */
-  private async sweep(): Promise<void> {
-    const root = issueDataDir(this.options.dataDir);
-    const names = await readdir(root).catch(() => [] as string[]);
-    for (const taskId of names) {
-      if (this.closed) return;
-      if (!TODO_MASTER_TASK_ID.test(taskId) || this.instances.has(taskId)) continue;
-      const folder = join(root, taskId);
-      const path = join(folder, 'follow.json');
-      // best-effort: a file that cannot be read is judged by how long it has lain untouched, below.
-      const saved = await readPrivateJson(path).catch(() => undefined) as Record<string, unknown> | undefined;
-      const closedAt = typeof saved?.closedAt === 'string' ? Date.parse(saved.closedAt) : NaN;
-      if (Number.isFinite(closedAt)) {
-        if (Date.now() - closedAt >= KEEP_CLOSED_MS) await rm(folder, { recursive: true, force: true });
-      } else if (saved && typeof saved === 'object' && saved.version === 1) {
-        await writePrivateJson(path, JSON.stringify({ ...saved, closedAt: new Date().toISOString() }));
-      } else {
-        // Nothing readable to mark: how long it has lain untouched decides.
-        const changed = await stat(folder).then(info => info.mtimeMs, () => Date.now());
-        if (Date.now() - changed >= KEEP_CLOSED_MS) await rm(folder, { recursive: true, force: true });
-      }
-    }
+  /** An issue master let go of: its turns and session no longer count as a master's (unless its folder still says so). */
+  private forget(entry: IssueMaster): void {
+    this.instances.delete(entry.taskId);
+    for (const id of entry.session.ownRuns()) this.turnsOf(entry.taskId).delete(id);
+    this.rebind();
   }
+  private rebind(): void { this.bound = new Set([...this.instances.values()].map(entry => entry.binding.sessionId)); }
 
   /** The sessions in issue master folders, closed ones too: their work is theirs while they exist. */
   private folderSessions(): Set<string> {
