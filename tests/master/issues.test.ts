@@ -25,7 +25,7 @@ import type { ChatMessage, Run, Session, Snapshot } from '../../shared/types.js'
 import '../helpers/skip-fsync.js';
 
 const MAIN = 'claude:main';
-const CAPABILITY = 'c'.repeat(64);
+const SECRET = 'b'.repeat(64);
 
 /**
  * Tower as the masters see it: the main master and issue masters in `<state>/todo-masters/<taskId>`, with sessions and
@@ -39,9 +39,7 @@ async function harness(t: test.TestContext) {
   const sessions: Session[] = [];
   const runs: Run[] = [];
   const histories = new Map<string, { updatedAt: string; messages: ChatMessage[] }>();
-  const headers: Array<{ path: string; capability?: string }> = [];
-  /** Which turn a reporting credential belongs to, as the web's capability registry would know it. */
-  const callers = new Map<string, string>();
+  const headers: Array<{ path: string; capability?: string; master?: string; issue?: string }> = [];
   /** Messages to sessions are refused while set. */
   let refuse = false;
   let clock = Date.now();
@@ -64,13 +62,12 @@ async function harness(t: test.TestContext) {
     for await (const chunk of req) chunks.push(chunk as Buffer);
     const url = new URL(req.url!, 'http://x');
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown> : {};
-    const capability = req.headers['x-tower-run-capability'] as string | undefined;
-    if (req.method === 'POST') headers.push({ path: url.pathname, ...(capability ? { capability } : {}) });
-    const caller = capability ? runs.find(run => run.id === callers.get(capability)) : undefined;
+    const sent = (name: string) => typeof req.headers[name] === 'string' ? req.headers[name] as string : undefined;
+    if (req.method === 'POST') headers.push({ path: url.pathname, ...Object.fromEntries(([['capability', 'x-tower-run-capability'], ['master', 'x-tower-master'], ['issue', 'x-tower-issue']] as const).flatMap(([key, name]) => sent(name) ? [[key, sent(name)]] : [])) });
     const message = /^\/api\/sessions\/([^/]+)\/messages$/.exec(url.pathname);
     if (req.method === 'POST' && message && refuse) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'busy' })); return; }
     if (req.method === 'POST' && (message || url.pathname === '/api/sessions')) {
-      const run = turn(message ? decodeURIComponent(message[1]) : `codex:${randomUUID().slice(0, 6)}`, String(body.prompt), caller ? from(caller) : undefined);
+      const run = turn(message ? decodeURIComponent(message[1]) : `codex:${randomUUID().slice(0, 6)}`, String(body.prompt));
       res.writeHead(202, { 'Content-Type': 'application/json' }).end(JSON.stringify(message ? { run } : { session: { id: run.sessionId }, run }));
       return;
     }
@@ -119,7 +116,7 @@ async function harness(t: test.TestContext) {
   };
   const reports = (sessionId: string) => runs.filter(run => run.sessionId === sessionId && run.prompt.startsWith('[Tower report]')).map(run => run.prompt);
   const follow = async () => { await issues.refresh(); await main.follow(); for (const id of ['task-a', 'task-b']) await issues.get(id)?.follow(); };
-  return { dir, data, tower, sessions, runs, headers, callers, tick, turn, from, finish, main: main!, issues: () => issues, reopen: () => { issues = openIssues(); return issues; }, issueSession, reports, follow, hold, refuse: (value: boolean) => { refuse = value; } };
+  return { dir, data, tower, sessions, runs, headers, tick, turn, from, finish, main: main!, issues: () => issues, reopen: () => { issues = openIssues(); return issues; }, issueSession, reports, follow, hold, refuse: (value: boolean) => { refuse = value; } };
 }
 
 test('each issue master follows its own work and reports to its own session, apart from the main master and each other', async t => {
@@ -176,14 +173,13 @@ test('a message the main master sends to an issue master is reported to it as th
   assert.match(h.reports(MAIN)[0], /answered the main master/);
 });
 
-test('an issue master\'s tool call carries its turn\'s credential, and the work it starts is followed by that issue master only', async t => {
+test('an issue master\'s tool call goes as the main master\'s do, naming its todo, and the work it starts is followed by that issue master only', async t => {
   const h = await harness(t);
   const a = h.issueSession('task-a');
-  const aTurn = h.turn(a.id, '배포해 줘');
-  h.callers.set(CAPABILITY, aTurn.id);
-  const answer = await h.issues().call('task-a', 'tower_api', { method: 'POST', path: '/api/sessions', body: { cwd: '/work', prompt: 'deploy it' } }, CAPABILITY) as { state: string; body: { run: Run } };
+  h.turn(a.id, '배포해 줘');
+  const answer = await h.issues().call('task-a', 'tower_api', { method: 'POST', path: '/api/sessions', body: { cwd: '/work', prompt: 'deploy it' } }) as { state: string; body: { run: Run } };
   assert.equal(answer.state, 'succeeded');
-  assert.deepEqual(h.headers.at(-1), { path: '/api/sessions', capability: CAPABILITY });
+  assert.deepEqual(h.headers.at(-1), { path: '/api/sessions', master: SECRET, issue: 'task-a' }, 'the master\'s own secret and its todo, no calling-turn credential');
   const issue = h.issues().get('task-a')!;
   assert.deepEqual(issue.delegatedTable().rows.map(row => row[1]), ['deploy it'], 'the issue master was found for the call and follows its work');
   // A follow-up the delegated session hands on with its own credential stays with the issue master.
@@ -195,9 +191,9 @@ test('an issue master\'s tool call carries its turn\'s credential, and the work 
   await h.follow();
   assert.equal(h.reports(MAIN).length, 0);
   assert.equal(h.reports(a.id).length, 1);
-  // A call for a todo with no open issue master still goes, with its credential.
-  await h.issues().call('task-z', 'tower_api', { method: 'POST', path: '/api/sessions/codex:x/messages', body: { prompt: 'still goes' } }, CAPABILITY);
-  assert.deepEqual(h.headers.at(-1), { path: '/api/sessions/codex:x/messages', capability: CAPABILITY });
+  // A call for a todo with no open issue master still goes, naming its todo.
+  await h.issues().call('task-z', 'tower_api', { method: 'POST', path: '/api/sessions/codex:x/messages', body: { prompt: 'still goes' } });
+  assert.deepEqual(h.headers.at(-1), { path: '/api/sessions/codex:x/messages', master: SECRET, issue: 'task-z' });
 });
 
 test('the newest open session of a todo is its master; subfolders and subagents are not; a closed one stops and its file is cleared away after 30 days', async t => {
@@ -260,13 +256,13 @@ test('the web brings the host back for an issue master whose session was open wh
   assert.equal(await pendingWork(), false);
 });
 
-test('through the host, an issue master\'s tool server names its todo and sends its credential; the main master\'s calls stay as they were', async t => {
+test('through the host, an issue master\'s tool server names its todo and calls as the master, without a calling-turn credential; the main master\'s calls stay as they were', async t => {
   const stateDir = await temporaryFixture('tower-issue-host-');
   const cleanup: Array<() => unknown> = [];
   t.after(async () => { for (const step of cleanup.reverse()) await step(); await removeTemporaryFixture(stateDir); });
   const issue: Session = { id: 'claude:issue', nativeId: 'n', provider: 'claude', title: '이슈', cwd: join(stateDir, 'todo-masters', 'task-h'), project: 'x', status: 'working', statusReason: '',
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 0, isSubagent: false, resumable: true };
-  const seen: Array<{ path: string; capability?: string; master?: string }> = [];
+  const seen: Array<{ path: string; capability?: string; master?: string; issue?: string }> = [];
   const web = createServer(async (req, res) => {
     for await (const _ of req) { /* drained */ }
     if (req.url?.startsWith('/api/events')) {
@@ -275,7 +271,7 @@ test('through the host, an issue master\'s tool server names its todo and sends 
       res.write(`id: 1\nevent: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
       return;
     }
-    seen.push({ path: req.url!, ...(req.headers['x-tower-run-capability'] ? { capability: String(req.headers['x-tower-run-capability']) } : {}), ...(req.headers['x-tower-master'] ? { master: String(req.headers['x-tower-master']) } : {}) });
+    seen.push({ path: req.url!, ...(req.headers['x-tower-run-capability'] ? { capability: String(req.headers['x-tower-run-capability']) } : {}), ...(req.headers['x-tower-master'] ? { master: String(req.headers['x-tower-master']) } : {}), ...(req.headers['x-tower-issue'] ? { issue: String(req.headers['x-tower-issue']) } : {}) });
     res.writeHead(202, { 'Content-Type': 'application/json' }).end(JSON.stringify({ session: { id: 'codex:new' }, run: { id: 'run-new', sessionId: 'codex:new', createdAt: new Date().toISOString() } }));
   });
   await new Promise<void>(resolve => web.listen(0, '127.0.0.1', resolve));
@@ -299,10 +295,10 @@ test('through the host, an issue master\'s tool server names its todo and sends 
       return until(() => lines.find(line => line.id === ask));
     };
   };
-  const issueTools = await mcp({ id: 'todo:task-h', capability: CAPABILITY });
+  const issueTools = await mcp({ id: 'todo:task-h' });
   const reply = await issueTools('tower_api', { method: 'POST', path: '/api/sessions', body: { cwd: '/work', prompt: 'fix it' } });
   assert.equal(reply.result.isError, undefined);
-  assert.deepEqual(seen.at(-1), { path: '/api/sessions', capability: CAPABILITY, master: 'b'.repeat(64) });
+  assert.deepEqual(seen.at(-1), { path: '/api/sessions', master: 'b'.repeat(64), issue: 'task-h' });
   assert.deepEqual(host.issues!.get('task-h')!.delegatedTable().rows.map(row => row[3]), ['codex:new'], 'the issue master follows what it started');
   assert.match(await readFile(join(stateDir, 'todo-masters', 'task-h', 'CLAUDE.md'), 'utf8'), /`task-h`/);
   const mainTools = await mcp();
@@ -310,7 +306,7 @@ test('through the host, an issue master\'s tool server names its todo and sends 
   assert.deepEqual(seen.at(-1), { path: '/api/sessions/codex:new/messages', master: 'b'.repeat(64) });
   assert.equal(host.session!.delegatedTable().rows.length, 1, 'the main master follows its own call');
   // A tool server that names no proper todo is refused.
-  await assert.rejects(page.call('tool', { name: 'tower_api', arguments: { method: 'GET', path: '/api/link' }, instance: 'todo:../x', capability: CAPABILITY }), /올바르지 않습니다/);
+  await assert.rejects(page.call('tool', { name: 'tower_api', arguments: { method: 'GET', path: '/api/link' }, instance: 'todo:../x' }), /올바르지 않습니다/);
 });
 
 test('a first caller that was another master\'s turn never makes that master\'s other work this one\'s, in or out of the snapshot', async t => {
@@ -412,4 +408,52 @@ test('the web leaves closed issue masters\' data to the host: one due to be clea
   await assert.rejects(stat(join(h.data, 'todo', 'task-old')), { code: 'ENOENT' });
   assert.ok((await stat(join(h.data, 'todo', 'task-recent'))).isDirectory());
   assert.equal(await pendingWork(), false);
+});
+
+test('work sent to an issue master stays that master\'s boundary after its session is gone and the host started again', async t => {
+  const h = await harness(t);
+  const b = h.issueSession('task-b');
+  await h.issues().refresh();
+  const mainTurn = h.turn(MAIN, '이슈 마스터에게');
+  await h.main.follow();
+  const asked = h.turn(b.id, 'main asks B');
+  await h.main.started({ method: 'POST', path: `/api/sessions/${b.id}/messages`, route: '/api/sessions/:id/messages', local: `/api/sessions/${b.id}/messages`, write: true }, { prompt: asked.prompt }, { run: asked });
+  await h.follow();
+  // B's session goes cold (out of the snapshot) and a new host knows nothing of B's turns.
+  h.sessions.splice(h.sessions.indexOf(b), 1);
+  h.runs.splice(h.runs.indexOf(asked), 1);
+  await h.issues().close();
+  await h.reopen().refresh();
+  h.turn('codex:b-child', 'B handed this on', { parentRunId: asked.id, rootRunId: asked.id });
+  await h.main.follow();
+  await h.main.follow();
+  assert.deepEqual(h.main.delegatedTable().rows.map(row => row[1]), ['main asks B'], 'the main master does not take B\'s work');
+  assert.ok(mainTurn);
+});
+
+test('the host chooses a todo\'s master by the web\'s rule: a helper an agent started there is never it', async t => {
+  const h = await harness(t);
+  const master = h.issueSession('task-a');
+  h.issueSession('task-a', { launchedByAgent: true });
+  await h.issues().refresh();
+  assert.equal(h.issues().get('task-a')!.binding()?.sessionId, master.id);
+});
+
+test('clearing away an expired issue master takes its guides and empty folder, never other files', async t => {
+  const h = await harness(t);
+  const expired = new Date(Date.now() - KEEP_CLOSED_MS - 1000).toISOString();
+  for (const [taskId, extra] of [['task-x', false], ['task-y', true]] as const) {
+    await mkdir(join(h.data, 'todo', taskId), { recursive: true });
+    await writeFile(join(h.data, 'todo', taskId, 'follow.json'), JSON.stringify({ version: 1, baselineAt: expired, masterRuns: [], followed: [], closedAt: expired }), { mode: 0o600 });
+    const folder = join(h.dir, 'todo-masters', taskId);
+    await mkdir(folder, { recursive: true });
+    for (const name of ['CLAUDE.md', 'AGENTS.md']) await writeFile(join(folder, name), 'guide');
+    if (extra) await writeFile(join(folder, 'notes.txt'), 'the master\'s own');
+  }
+  await h.reopen().refresh();
+  await assert.rejects(stat(join(h.dir, 'todo-masters', 'task-x')), { code: 'ENOENT' });
+  const kept = join(h.dir, 'todo-masters', 'task-y');
+  assert.equal(await readFile(join(kept, 'notes.txt'), 'utf8'), 'the master\'s own');
+  await assert.rejects(stat(join(kept, 'CLAUDE.md')), { code: 'ENOENT' });
+  await assert.rejects(stat(join(h.data, 'todo', 'task-y')), { code: 'ENOENT' });
 });

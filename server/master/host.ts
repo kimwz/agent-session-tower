@@ -140,10 +140,10 @@ export async function startMasterHost(options: MasterHostOptions) {
       case 'tool': {
         if (typeof args.name !== 'string' || !args.arguments || typeof args.arguments !== 'object' || Array.isArray(args.arguments)) throw failure('도구 호출이 올바르지 않습니다.', 'invalid');
         if (args.instance === undefined) return tools!.call(args.name, args.arguments as Record<string, unknown>);
-        // An issue master's call: it goes as that master's, with its turn's reporting credential.
+        // An issue master's call: it goes as the main master's do, naming its todo.
         const issue = typeof args.instance === 'string' ? ISSUE_INSTANCE.exec(args.instance)?.[1] : undefined;
-        if (!issue || typeof args.capability !== 'string' || !/^[a-f\d]{64}$/.test(args.capability)) throw failure('도구 호출이 올바르지 않습니다.', 'invalid');
-        return issues!.call(issue, args.name, args.arguments as Record<string, unknown>, args.capability);
+        if (!issue) throw failure('도구 호출이 올바르지 않습니다.', 'invalid');
+        return issues!.call(issue, args.name, args.arguments as Record<string, unknown>);
       }
       case 'voiceOn': return speech.voiceOn({ tabId: args.tabId, local: args.local === true });
       case 'voiceOff': return speech.voiceOff({ session: args.session });

@@ -20,13 +20,13 @@ export function thisBuild(): { command: string; args: string[] } {
 }
 /**
  * The master session's page tools; they reach the master host, which only the owner's own processes can. A heartbeat
- * run gets its two scoped tools; an issue master's turn names its todo and carries its reporting credential, so the host
- * answers as that master and Tower records what the turn starts as its own.
+ * run gets its two scoped tools; an issue master's turn names its todo, so the host answers as that master, with the
+ * main master's own powers.
  */
-function masterToolServer(stateDir: string, scope?: { heartbeat: string } | { taskId: string; capability: string }): SessionMcpServer {
+function masterToolServer(stateDir: string, scope?: { heartbeat: string } | { taskId: string }): SessionMcpServer {
   const build = thisBuild();
   if (scope && 'heartbeat' in scope) return { command: build.command, args: [...build.args, '--master-mcp', stateDir, '--heartbeat'], env: { TOWER_HEARTBEAT_CAPABILITY: scope.heartbeat } };
-  if (scope) return { command: build.command, args: [...build.args, '--master-mcp', stateDir, '--instance', `todo:${scope.taskId}`], env: { [CALLER_CAPABILITY_ENV]: scope.capability } };
+  if (scope) return { command: build.command, args: [...build.args, '--master-mcp', stateDir, '--instance', `todo:${scope.taskId}`] };
   return { command: build.command, args: [...build.args, '--master-mcp', stateDir] };
 }
 function toolServer(stateDir: string, mode: '--tower-mcp' | '--slack-mcp', extra: string[], capability: string): SessionMcpServer {
@@ -111,7 +111,7 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
     const servers: SessionMcpServers = { tower, ...secrets };
     if (!origin.controllerId && subscriptionOnly(options.stateDir, session.cwd)) {
       const taskId = todoMasterTaskId(options.stateDir, session.cwd);
-      servers.tower_master = masterToolServer(options.stateDir, taskId ? { taskId, capability: options.capabilities.issue({ kind: 'caller-run', runId: run.id, sessionId: session.id }) } : undefined);
+      servers.tower_master = masterToolServer(options.stateDir, taskId ? { taskId } : undefined);
     }
     // The owner's own top-level conversation waits for its secrets rather than starting without them, as it always has.
     const child = session.isSubagent || session.launchedByAgent || session.parentId || session.launchedBy;
