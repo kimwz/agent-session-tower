@@ -557,6 +557,7 @@ async function main() {
     todos: {
       ...todoCalls,
       startAgent: (id, text) => todoAgents.begin(id, text),
+      issueSession: (taskId, sessionId) => todoAgents.recordIssueSession(taskId, sessionId),
       agentSessions: () => todos.agentSessions(),
       files: {
         startUpload: input => todoFiles.startUpload(input),

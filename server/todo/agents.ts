@@ -5,7 +5,7 @@ import { TowerError } from '../../shared/errors.js';
 import type { TodoAgent, TodoOverview, TodoTaskDetail } from '../../shared/todo/types.js';
 import type { CreateSessionRequest, Run, Session } from '../../shared/types.js';
 import { MAX_PROMPT } from '../runs/run-records.js';
-import { todoMasterTaskId } from '../runs/subscription.js';
+import { issueMasterCandidates, newestIssueMaster, todoMasterTaskId } from '../runs/subscription.js';
 import { todoFilePath } from './files.js';
 import type { TodoStore } from './store.js';
 
@@ -32,14 +32,16 @@ const PASS_MS = 60_000;
 const TITLE_CHARS = 60;
 const COMMENTS = 20;
 const LIST_ITEMS = 50;
+/** The most session ids one hand-over to retention takes (the worker refuses more). */
+const HAND_OVER_CHUNK = 500;
 const LINE_CHARS = 300;
 
 /** What a pass needs to know of a session, as pages see it (closed ones included). */
-export type AgentSession = Pick<Session, 'id' | 'cwd' | 'provider' | 'status' | 'closed' | 'activeProcess' | 'scheduledAt' | 'creationPending' | 'createdAt' | 'isSubagent' | 'parentId'>;
+export type AgentSession = Pick<Session, 'id' | 'cwd' | 'provider' | 'status' | 'closed' | 'activeProcess' | 'scheduledAt' | 'creationPending' | 'createdAt' | 'isSubagent' | 'parentId' | 'launchedByAgent' | 'node'>;
 
 export interface TodoAgentsOptions {
   stateDir: string;
-  store: Pick<TodoStore, 'availability' | 'agents' | 'agent' | 'taskState' | 'settleAgents' | 'changeAgent' | 'familyOf' | 'familyTask' | 'addFamily' | 'removeFamily' | 'detail' | 'overview'>;
+  store: Pick<TodoStore, 'availability' | 'agentsToSettle' | 'agent' | 'taskState' | 'settleAgents' | 'changeAgent' | 'familyOf' | 'familyTask' | 'addFamily' | 'removeFamily' | 'detail' | 'overview'>;
   /** This computer's sessions; undefined while they cannot be known (no worker, sessions unavailable). */
   sessions(): AgentSession[] | undefined;
   run(id: string): Pick<Run, 'sessionId'> | undefined;
@@ -67,7 +69,6 @@ export const todoMasterFolder = (stateDir: string, taskId: string) => join(state
 
 /** A session still at work, or about to be: its family record stays until it is not. */
 const busy = (session: AgentSession) => session.status === 'working' || Boolean(session.activeProcess || session.scheduledAt || session.creationPending);
-const newest = <T extends AgentSession>(sessions: T[]) => sessions.reduce<T | undefined>((best, session) => !best || session.createdAt > best.createdAt ? session : best, undefined);
 
 export class TodoAgents {
   private tail: Promise<void> = Promise.resolve();
@@ -197,6 +198,25 @@ export class TodoAgents {
     } catch (error) { console.error(`A session an issue master started was not recorded: ${message(error)}`); }
   }
 
+  /**
+   * Records a session an issue master made itself (its calls carry the todo, see TODO_MASTER_ISSUE_HEADER) in that
+   * todo's family; one made for a closed issue is handed over by the next pass.
+   */
+  recordIssueSession(taskId: string, sessionId: string): void {
+    try {
+      const store = this.options.store;
+      const agent = store.agent(taskId);
+      if (!agent) return;
+      store.addFamily(sessionId, taskId);
+      this.options.onChange();
+      if (agent.state === 'closing' || agent.state === 'closed') void this.schedule();
+    } catch (error) { console.error(`A session an issue master started was not recorded: ${message(error)}`); }
+  }
+
+  /**
+   * One pass. Its cost follows the issues still at work: the rows read are those not closed or with a family left,
+   * plus those of folders that still list sessions, and the folders are grouped once.
+   */
   private async pass(): Promise<void> {
     const store = this.options.store;
     // A todo file this build may not change (or cannot open) is left as it is until one that may does.
@@ -206,34 +226,56 @@ export class TodoAgents {
     for (const taskId of Object.keys(moved)) this.confirmed.delete(taskId);
     if (Object.keys(moved).length) this.options.onChange();
     const byId = new Map(sessions.map(session => [session.id, session]));
-    const agents = store.agents();
+    const folders = this.folders(sessions);
+    const agents = store.agentsToSettle();
+    const known = new Set(agents.map(agent => agent.taskId));
+    for (const taskId of folders.keys()) {
+      if (known.has(taskId)) continue;
+      const agent = store.agent(taskId);
+      if (agent) { agents.push(agent); known.add(taskId); }
+    }
     // What this process remembers stays as small as what is still listed: moved sessions and old failures go.
     for (const id of this.handed) if (!byId.has(id)) this.handed.delete(id);
-    for (const [taskId, at] of this.failed) if (this.now() - at >= PASS_MS || !agents.some(agent => agent.taskId === taskId)) this.failed.delete(taskId);
+    for (const [taskId, at] of this.failed) if (this.now() - at >= PASS_MS || !known.has(taskId)) this.failed.delete(taskId);
     for (const taskId of this.confirmed) if (!agents.some(agent => agent.taskId === taskId && agent.state === 'active')) this.confirmed.delete(taskId);
     for (const agent of agents) {
       if (this.stopped) return;
       try {
-        if (agent.state === 'starting') this.recover(agent, sessions);
-        else if (agent.state === 'active') await this.keep(agent, sessions, byId);
-        else if (agent.state === 'closing') await this.closeAgent(agent, sessions, byId);
-        else await this.tidy(agent, sessions, byId);
+        const folder = folders.get(agent.taskId) ?? [];
+        if (agent.state === 'starting') this.recover(agent, folder);
+        else if (agent.state === 'active') await this.keep(agent, folder, byId);
+        else if (agent.state === 'closing') await this.closeAgent(agent, folder, byId);
+        else await this.tidy(agent, folder, byId);
       } catch (error) {
         this.failed.set(agent.taskId, this.now());
         console.error(`The issue master of todo ${agent.taskId} could not be brought in line: ${message(error)}`);
       }
     }
+    // Sessions in the folder of a todo with no master (a start given up on whose session came late) are handed over.
+    for (const [taskId, folder] of folders) {
+      if (this.stopped || known.has(taskId) || this.starting.has(taskId)) continue;
+      try { await this.handOver(folder.map(session => session.id), byId); }
+      catch (error) { console.error(`Sessions left in the folder of todo ${taskId} were not handed over: ${message(error)}`); }
+    }
   }
 
-  /** Top-level sessions in a todo's issue master folder (its own sub-agents run there too, under it). */
-  private folder(taskId: string, sessions: AgentSession[]): AgentSession[] {
-    return sessions.filter(session => !session.isSubagent && !session.parentId && todoMasterTaskId(this.options.stateDir, session.cwd) === taskId);
+  /** Each todo's issue-master folder sessions that can be its master (issueMasterCandidates), grouped once a pass. */
+  private folders(sessions: AgentSession[]): Map<string, AgentSession[]> {
+    const groups = new Map<string, AgentSession[]>();
+    for (const session of sessions) {
+      const taskId = todoMasterTaskId(this.options.stateDir, session.cwd);
+      if (taskId) groups.set(taskId, [...groups.get(taskId) ?? [], session]);
+    }
+    for (const [taskId, group] of groups) {
+      const candidates = issueMasterCandidates(this.options.stateDir, taskId, group);
+      if (candidates.length) groups.set(taskId, candidates); else groups.delete(taskId);
+    }
+    return groups;
   }
 
   /** Everything of a todo's issue master: its session, every session in its folder, and its recorded family. */
-  private members(agent: TodoAgent, sessions: AgentSession[]): string[] {
-    return [...new Set([...agent.sessionId ? [agent.sessionId] : [], ...this.folder(agent.taskId, sessions).map(session => session.id),
-      ...this.options.store.familyOf(agent.taskId).map(member => member.sessionId)])];
+  private members(agent: TodoAgent, folder: AgentSession[], family = this.options.store.familyOf(agent.taskId)): string[] {
+    return [...new Set([...agent.sessionId ? [agent.sessionId] : [], ...folder.map(session => session.id), ...family.map(member => member.sessionId)])];
   }
 
   private waitingAfterFailure(taskId: string): boolean {
@@ -242,9 +284,9 @@ export class TodoAgents {
   }
 
   /** A start whose answer was lost: the newest session in the folder is its master; none after a while, and it goes. */
-  private recover(agent: TodoAgent, sessions: AgentSession[]): void {
+  private recover(agent: TodoAgent, folder: AgentSession[]): void {
     if (this.starting.has(agent.taskId)) return;
-    const found = newest(this.folder(agent.taskId, sessions).filter(session => !session.closed));
+    const found = newestIssueMaster(this.options.stateDir, agent.taskId, folder.filter(session => !session.closed));
     const store = this.options.store;
     const changed = found ? store.changeAgent(agent.taskId, agent, { state: 'active', sessionId: found.id, provider: found.provider })
       : this.now() - Date.parse(agent.createdAt) > TODO_AGENT_START_WAIT_MS && store.changeAgent(agent.taskId, agent, null);
@@ -257,15 +299,17 @@ export class TodoAgents {
    * which also brings it back from compressed storage; the newest session in its folder (a compaction's, a late
    * start's) is the master, and any other is handed over.
    */
-  private async keep(agent: TodoAgent, sessions: AgentSession[], byId: Map<string, AgentSession>): Promise<void> {
+  private async keep(agent: TodoAgent, folder: AgentSession[], byId: Map<string, AgentSession>): Promise<void> {
     const store = this.options.store;
     const bound = agent.sessionId ? byId.get(agent.sessionId) : undefined;
     if (!bound || bound.closed || !this.confirmed.has(agent.taskId)) {
       if (!agent.sessionId || this.waitingAfterFailure(agent.taskId)) return;
+      // Its folder may be gone (the master host removes a closed issue's files after a while), and a turn needs it.
+      await this.options.writeGuide(todoMasterFolder(this.options.stateDir, agent.taskId), agent.taskId);
       if (await this.options.reopen(agent.sessionId)) {
         this.handed.delete(agent.sessionId);
         this.confirmed.add(agent.taskId);
-        if (bound && !bound.closed) return this.keep(agent, sessions, byId);
+        if (bound && !bound.closed) return this.keep(agent, folder, byId);
         return;
       }
       // Its session is nowhere, even in compressed storage: the owner can start a new master.
@@ -275,8 +319,8 @@ export class TodoAgents {
       }
       return;
     }
-    const open = this.folder(agent.taskId, sessions).filter(session => !session.closed && !session.creationPending && !this.handed.has(session.id));
-    const master = newest(open) ?? bound;
+    const open = folder.filter(session => !session.closed && !session.creationPending && !this.handed.has(session.id));
+    const master = newestIssueMaster(this.options.stateDir, agent.taskId, open) ?? bound;
     if (master.id !== bound.id && store.changeAgent(agent.taskId, agent, { state: 'active', sessionId: master.id, provider: master.provider })) {
       this.confirmed.delete(agent.taskId);
       this.options.onChange();
@@ -286,10 +330,10 @@ export class TodoAgents {
   }
 
   /** A closed todo's master: it, its folder and its family are handed to retention, then it is `closed`. */
-  private async closeAgent(agent: TodoAgent, sessions: AgentSession[], byId: Map<string, AgentSession>): Promise<void> {
+  private async closeAgent(agent: TodoAgent, folder: AgentSession[], byId: Map<string, AgentSession>): Promise<void> {
     if (this.starting.has(agent.taskId) || this.waitingAfterFailure(agent.taskId)) return;
     const store = this.options.store;
-    await this.handOver(this.members(agent, sessions), byId);
+    await this.handOver(this.members(agent, folder), byId);
     // Only if nothing reopened the todo or rebound its master meanwhile.
     if (store.taskState(agent.taskId) !== 'open' && store.changeAgent(agent.taskId, agent, { state: 'closed', sessionId: agent.sessionId, provider: agent.provider })) this.options.onChange();
   }
@@ -299,32 +343,36 @@ export class TodoAgents {
    * handed over too. Once all of it is handed over and none of it can lose work, the family record goes, since nothing
    * of a master whose work is over starts new sessions. One the owner reopened by hand is left to ordinary retention.
    */
-  private async tidy(agent: TodoAgent, sessions: AgentSession[], byId: Map<string, AgentSession>): Promise<void> {
+  private async tidy(agent: TodoAgent, folder: AgentSession[], byId: Map<string, AgentSession>): Promise<void> {
     const store = this.options.store;
-    const loose = this.members(agent, sessions).filter(id => byId.has(id) && !this.handed.has(id));
+    const family = store.familyOf(agent.taskId);
+    const loose = this.members(agent, folder, family).filter(id => byId.has(id) && !this.handed.has(id));
     if (loose.length) {
       if (!this.waitingAfterFailure(agent.taskId)) await this.handOver(loose, byId);
       return;
     }
+    if (!family.length) return;
     // Decided on the sessions and records as they are now, not as this pass began: others may have been added since.
     const fresh = this.options.sessions();
-    const family = store.familyOf(agent.taskId);
-    if (!fresh || !family.length) return;
-    const now = new Map(fresh.map(session => [session.id, session]));
+    const now = new Map((fresh ?? []).map(session => [session.id, session]));
+    const current = store.familyOf(agent.taskId);
+    if (!fresh || !current.length) return;
     // One recorded but not listed yet would look moved away; it is waited for.
-    if (family.some(member => !now.has(member.sessionId) && this.now() - Date.parse(member.createdAt) < TODO_AGENT_START_WAIT_MS)) return;
+    if (current.some(member => !now.has(member.sessionId) && this.now() - Date.parse(member.createdAt) < TODO_AGENT_START_WAIT_MS)) return;
     const unsettled = (id: string) => { const session = now.get(id); return session !== undefined && (busy(session) || !this.handed.has(id)); };
-    if (this.members(agent, fresh).some(unsettled)) return;
+    if (this.members(agent, this.folders(fresh).get(agent.taskId) ?? [], current).some(unsettled)) return;
     store.removeFamily(agent.taskId);
     this.options.onChange();
   }
 
-  /** Hands listed sessions to retention, once each; ones already moved away need nothing. */
+  /** Hands listed sessions to retention, once each and at most 500 at a time; ones already moved away need nothing. */
   private async handOver(ids: string[], byId: Map<string, AgentSession>): Promise<void> {
     const unhanded = ids.filter(id => byId.has(id) && !this.handed.has(id));
-    if (!unhanded.length) return;
-    await this.options.requestArchive(unhanded);
-    for (const id of unhanded) this.handed.add(id);
+    for (let at = 0; at < unhanded.length; at += HAND_OVER_CHUNK) {
+      const chunk = unhanded.slice(at, at + HAND_OVER_CHUNK);
+      await this.options.requestArchive(chunk);
+      for (const id of chunk) this.handed.add(id);
+    }
   }
 }
 
@@ -356,8 +404,8 @@ export function todoAgentPrompt(text: string, detail: Pick<TodoTaskDetail, 'task
     ...when.length ? [when.join(' · ')] : []];
   const subtasks = detail.subtasks.slice(0, LIST_ITEMS).map(item => `- [${item.completedAt ? 'x' : ' '}] ${oneLine(item.content)}`);
   if (detail.subtasks.length > LIST_ITEMS) subtasks.push(`- … 외 ${detail.subtasks.length - LIST_ITEMS}개`);
-  const files = detail.files.slice(0, LIST_ITEMS).map(file => `- ${oneLine(file.name)} (${size(file.size)}${file.commentId ? ', 댓글 첨부' : ''}): ${file.missing ? '이 컴퓨터에 없음' : filePath(file.sha256)}`);
-  if (detail.files.length > LIST_ITEMS) files.push(`- … 외 ${detail.files.length - LIST_ITEMS}개`);
+  // Every attachment, always: the master reads them from these paths before it starts.
+  const files = detail.files.map(file => `- ${oneLine(file.name)} (${size(file.size)}${file.commentId ? ', 댓글 첨부' : ''}): ${file.missing ? '이 컴퓨터에 없음' : filePath(file.sha256)}`);
   const comments = detail.comments.slice(-COMMENTS);
   const read = '시작하기 전에 첨부 파일(이미지·문서)을 먼저 읽으세요.';
   const compose = (description: string, listed: string[], kept: { at: string; body: string }[], cut: boolean) => [

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { CALLER_CAPABILITY_HEADER } from '../../../server/runs/session-mcp.js';
 import { TowerError } from '../../../shared/errors.js';
+import { TODO_MASTER_ISSUE_HEADER } from '../../../shared/master.js';
 import type { Snapshot } from '../../../shared/types.js';
 import type { TodoAgent } from '../../../shared/todo/types.js';
 
@@ -54,4 +55,40 @@ test('only the owner\'s own page starts an issue master; badges read the open fa
   assert.equal((await start({ text: 'go' }, {}, 'closed')).status, 409);
 
   assert.deepEqual(await (await fetch(`${base}/api/todos/agents/sessions`)).json(), { sessions: { s1: { taskId: 'a', title: 'A' } } });
+});
+
+test('an issue master creates sessions as the main master does, and only the verified master\'s todo header records them in a family', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-todo-issue-http-'));
+  await writeFile(join(dir, 'index.html'), '<!doctype html><title>Tower</title>');
+  const contexts: unknown[] = [];
+  const recorded: [string, string][] = [];
+  const unused = () => { throw new Error('unused'); };
+  const masterSecret = 'm'.repeat(64);
+  let count = 0;
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, master: { callerSecret: masterSecret, handle: async () => false }, backend: {
+    snapshot: () => ({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'test', version: 'test', updatedAt: new Date().toISOString(), todoRevision: 0 }),
+    detail: async () => undefined, enqueue: async () => unused(), cancel: async () => {}, subscribe: () => () => {},
+    createSession: async (_input, context) => {
+      contexts.push(context);
+      const id = `s${++count}`;
+      return { session: { id } as never, run: { id: `r${count}`, sessionId: id } as never };
+    },
+    todos: { overview: unused, detail: unused, completed: unused, search: unused, apply: unused, issueSession: (taskId, sessionId) => { recorded.push([taskId, sessionId]); } },
+  } });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
+  const { token } = await (await fetch(`${base}/api/bootstrap`)).json() as { token: string };
+  const create = (extra: Record<string, string>) => fetch(`${base}/api/sessions`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token, ...extra },
+    body: JSON.stringify({ provider: 'claude', cwd: '/work', prompt: 'do it' }) });
+
+  assert.equal((await create({ 'X-Tower-Master': masterSecret })).status, 202);
+  assert.equal((await create({ 'X-Tower-Master': masterSecret, [TODO_MASTER_ISSUE_HEADER]: 'task_1' })).status, 202);
+  // The same calling rights as the main master's: no calling turn, so secrets and approvals work as the owner's.
+  assert.deepEqual(contexts[1], contexts[0]);
+  assert.equal((contexts[0] as { callerCapability?: string }).callerCapability, undefined);
+  // Without the verified master the header is nobody's word, and a malformed one is ignored.
+  assert.equal((await create({ [TODO_MASTER_ISSUE_HEADER]: 'task_1', 'X-Tower-Agent': 'local' })).status, 202);
+  assert.equal((await create({ 'X-Tower-Master': masterSecret, [TODO_MASTER_ISSUE_HEADER]: '../x' })).status, 202);
+  assert.deepEqual(recorded, [['task_1', 's2']]);
 });

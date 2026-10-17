@@ -1,5 +1,5 @@
 import type { WorkerStorageStatus } from '../../shared/storage.js';
-import { MASTER_HEARTBEAT_HEADER, type HeartbeatAdmission } from '../../shared/master.js';
+import { MASTER_HEARTBEAT_HEADER, TODO_MASTER_ISSUE_HEADER, TODO_MASTER_TASK_ID, type HeartbeatAdmission } from '../../shared/master.js';
 import type { AttachmentStore } from '../stores/attachments.js';
 import type { AttachmentUploads } from '../stores/attachment-uploads.js';
 import { createServer, STATUS_CODES, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -881,6 +881,9 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         const input = parseCreateSession(masterCall ? { ...body, modelRole: 'master.worker' } : body);
         if (!backend.createSession) return json(res, 503, { error: '새 세션을 생성할 수 없습니다.' });
         const result = await backend.createSession(input, callerContext());
+        // An issue master calls as the master does, naming its todo; only the verified master is believed.
+        const issue = masterCall ? req.headers[TODO_MASTER_ISSUE_HEADER.toLowerCase()] : undefined;
+        if (typeof issue === 'string' && TODO_MASTER_TASK_ID.test(issue)) backend.todos?.issueSession?.(issue, result.session.id);
         return json(res, 202, { ...result, session: publicSession(result.session) });
       }
       const compactionMatch = path.match(/^\/api\/sessions\/([^/]+)\/compaction(\/cancel)?$/);
