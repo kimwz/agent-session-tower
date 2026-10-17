@@ -61,7 +61,8 @@ function Entry({ entry, color, onOpen, draggable, compact }: { entry: CalendarEn
 /** A later occurrence of a repeating task: shown only, never opened or moved, since any change would change the real one. */
 function FutureEntry({ entry, color, compact }: { entry: CalendarEntry; color: string; compact?: boolean }) {
   const { task } = entry;
-  return <span className={`todo-cal-entry future ${compact ? 'compact' : ''}`} style={{ '--entry-color': color } as CSSProperties} title={t('“{0}”의 다음 반복 (예정)', { 0: task.content })}>
+  // A press on it is not a press on the empty day under it.
+  return <span className={`todo-cal-entry future ${compact ? 'compact' : ''}`} style={{ '--entry-color': color } as CSSProperties} title={t('“{0}”의 다음 반복 (예정)', { 0: task.content })} onClick={event => event.stopPropagation()}>
     <i />{task.dueTime && <time>{task.dueTime}</time>}<span>{task.content}</span><Repeat size={10} />
   </span>;
 }

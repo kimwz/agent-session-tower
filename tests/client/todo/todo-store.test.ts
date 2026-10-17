@@ -302,3 +302,16 @@ test('the open task’s file count follows its detail, so answers arriving out o
   world = applyOps(world, [{ op: 'comment.delete', id: 'c' }], { now: at, today: '2026-10-14' });
   assert.equal(world.fileCounts.a, 2, 'a deleted comment’s file stops counting');
 });
+
+test('an upload answer older than the overview is not counted again, and the overview is read to be sure', async () => {
+  const transport = new FakeTransport();
+  const at = '2026-10-14T00:00:00.000Z';
+  const file = (id: string): TodoFile => ({ id, taskId: 'a', commentId: null, name: id, mimeType: 'text/plain', size: 1, sha256: 'x'.repeat(64), createdAt: at, deletedAt: null });
+  transport.current = { ...transport.current, revision: 3, fileCounts: { a: 2 } };
+  const { client } = await ready(transport);
+  const reads = transport.reads.overview;
+  client.receive(changes(2, { files: [file('f2')] }));
+  assert.equal(client.getState().world.fileCounts.a, 2);
+  await settle();
+  assert.equal(transport.reads.overview, reads + 1);
+});

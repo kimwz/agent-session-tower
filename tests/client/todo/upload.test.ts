@@ -59,8 +59,7 @@ test('an upload sends every piece and completes, reporting its progress', async 
   const result = await runUpload(job(10), server, new AbortController().signal, update => reports.push(update));
   assert.equal(result.file.id, 'f1');
   assert.deepEqual(server.calls, ['start', 'append:0', 'append:4', 'append:8', 'complete']);
-  assert.deepEqual(reports.map(report => report.offset), [0, 0, 4, 8, 10, 10]);
-  assert.equal(reports.at(-1)?.status, 'done');
+  assert.deepEqual(reports.map(report => [report.offset, report.status]), [[0, 'uploading'], [0, 'uploading'], [4, 'uploading'], [8, 'uploading'], [10, 'uploading'], [10, 'finishing'], [10, 'done']]);
 });
 
 test('a lost answer is retried from where the server says it is, not from the start', async () => {
@@ -152,4 +151,53 @@ test('an upload shows its progress, and a failed one its reason with retry and c
   assert.match(markup, /aria-label="“video.mp4” 다시 올리기"/);
   assert.equal((markup.match(/올리기 취소/g) ?? []).length, 2);
   assert.match(markup, /role="alert">연결이 끊겼습니다/);
+});
+
+test('after the page goes, no queued file starts and no late answer is kept', async () => {
+  const received: TodoChanges[] = [];
+  let started = 0;
+  const gates: (() => void)[] = [];
+  const io: UploadIO = {
+    start: async () => { started++; return { id: `u${started}`, offset: 0 }; },
+    offset: async () => 0,
+    append: async (_id, offset, piece) => { await new Promise<void>(resolve => gates.push(resolve)); return { offset: offset + piece.size }; },
+    complete: async id => ({ file: file(id), changes: changes([file(id)]) }),
+    cancel: async () => undefined,
+  };
+  const uploads = new TodoUploads(io, { receive: value => { received.push(value); }, toast: () => 0 });
+  uploads.add(['a', 'b', 'c'].map(name => Object.assign(blob(3), { name })), { taskId: 't' });
+  await settle();
+  assert.equal(started, 2);
+  uploads.dispose();
+  for (let round = 0; round < 3; round++) { while (gates.length) gates.shift()!(); await settle(); }
+  assert.equal(started, 2, 'the third file never starts');
+  assert.deepEqual(received, []);
+  assert.deepEqual(uploads.getJobs(), []);
+  uploads.add([Object.assign(blob(3), { name: 'd' })], { taskId: 't' });
+  await settle();
+  assert.equal(started, 2);
+});
+
+test('while the server makes the attachment, the upload cannot be cancelled', async () => {
+  let finish!: () => void;
+  const cancels: string[] = [];
+  const received: TodoChanges[] = [];
+  const io: UploadIO = {
+    start: async () => ({ id: 'u1', offset: 0 }),
+    offset: async () => 0,
+    append: async (_id, offset, piece) => ({ offset: offset + piece.size }),
+    complete: async id => { await new Promise<void>(resolve => { finish = resolve; }); return { file: file(id), changes: changes([file(id)]) }; },
+    cancel: async id => { cancels.push(id); },
+  };
+  const uploads = new TodoUploads(io, { receive: value => { received.push(value); }, toast: () => 0 });
+  uploads.add([Object.assign(blob(3), { name: 'a' })], { taskId: 't' });
+  await settle();
+  assert.equal(uploads.getJobs()[0].status, 'finishing');
+  uploads.cancel(uploads.getJobs()[0].key);
+  assert.equal(uploads.getJobs().length, 1);
+  finish();
+  await settle();
+  assert.deepEqual(cancels, []);
+  assert.equal(received.length, 1, 'the attachment made is shown, not left unseen on the server');
+  uploads.dispose();
 });

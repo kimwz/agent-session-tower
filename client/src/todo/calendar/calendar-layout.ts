@@ -122,6 +122,9 @@ export function spanOf(task: TodoTask): { start: number; end: number } {
  */
 export function occurrencesIn(rule: TodoRecurrence, due: string, from: string, to: string): string[] {
   if (due >= from) return futureOccurrences(rule, due, to, 400);
+  // Counted from completion, the dates are a chain from the task's own date: walked from it, so every range sees the
+  // same beat (a month step clamps to the month's end, so it cannot be jumped arithmetically).
+  if (rule.fromCompletion) return futureOccurrences(rule, due, to, 20_000).filter(date => date >= from);
   const first = nextOccurrence(rule, due, addDays(from, -1));
   if (!first || first > to) return [];
   return [first, ...futureOccurrences(rule, first, to, 400)];

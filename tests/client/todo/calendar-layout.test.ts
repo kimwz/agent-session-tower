@@ -130,3 +130,12 @@ test('a later occurrence is drawn without a way to open or move it', () => {
     for (const tag of future) assert.doesNotMatch(tag, /^<button|role="button"|tabindex|aria-roledescription/);
   }
 });
+
+test('repeats counted from completion keep their beat from the task’s date in every range', () => {
+  const rule = { freq: 'day' as const, interval: 2, fromCompletion: true };
+  assert.deepEqual(occurrencesIn(rule, '2026-01-01', '2026-10-12', '2026-10-18'), ['2026-10-12', '2026-10-14', '2026-10-16', '2026-10-18']);
+  assert.deepEqual(occurrencesIn(rule, '2026-01-01', '2026-10-13', '2026-10-19'), ['2026-10-14', '2026-10-16', '2026-10-18']);
+  const monthly = { freq: 'month' as const, interval: 1, fromCompletion: true };
+  const wide = occurrencesIn(monthly, '2026-01-31', '2026-05-01', '2026-08-31');
+  assert.deepEqual(occurrencesIn(monthly, '2026-01-31', '2026-06-01', '2026-07-31'), wide.filter(date => date >= '2026-06-01' && date <= '2026-07-31'));
+});

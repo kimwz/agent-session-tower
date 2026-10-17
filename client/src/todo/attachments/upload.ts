@@ -41,7 +41,8 @@ export interface UploadIO {
   cancel(id: string): Promise<void>;
 }
 
-export type UploadStatus = 'waiting' | 'uploading' | 'failed' | 'done';
+/** `finishing`: the server is making the attachment, which a cancel could no longer take back. */
+export type UploadStatus = 'waiting' | 'uploading' | 'finishing' | 'failed' | 'done';
 
 export interface UploadJob {
   key: string;
@@ -101,8 +102,9 @@ export async function runUpload(job: UploadJob, io: UploadIO, signal: AbortSigna
       if (answer.offset <= piece.start) throw new Error('업로드 위치가 올바르지 않습니다.');
       update({ offset: checkedOffset(answer.offset, current.size), chunkBytes: nextChunkBytes(current.chunkBytes, now() - began) });
     }
+    update({ status: 'finishing' });
     const done = await io.complete(id, signal);
-    if ('conflict' in done) { update({ offset: checkedOffset(done.conflict, current.size) }); continue; }
+    if ('conflict' in done) { update({ status: 'uploading', offset: checkedOffset(done.conflict, current.size) }); continue; }
     update({ status: 'done', offset: current.size });
     return done;
   }

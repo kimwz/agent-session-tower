@@ -217,6 +217,14 @@ export class TodoClient {
   }
 
   private accept(changes: TodoChanges, ops: readonly TodoOp[]) {
+    if (changes.revision <= this.base.revision) {
+      // An answer the page has already moved past (an upload finishing after a newer overview): what it changed is in
+      // what the page has, maybe newer, and counting it again would count it twice. Read again to be sure.
+      this.wantRead = true;
+      this.publish();
+      this.pump();
+      return;
+    }
     // One request moves the revision by one: more means another page changed something in between.
     if (changes.revision > this.base.revision + 1) this.wantRead = true;
     this.base = mergeChanges(this.base, changes);

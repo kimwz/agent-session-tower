@@ -2666,6 +2666,7 @@ export const english: Record<string, string> = {
   "보관함을 열면 붙여넣은 값과 저장한 시크릿을 사용할 수 있습니다.": "Open the vault to use the pasted value and saved secrets.",
 
   // Todo page
+  "마무리 중": "Finishing",
   "“{0}” 빼기": "Remove “{0}”",
   "파일을 첨부했습니다": "Attached a file",
   "백업의 첨부 파일을 받는 중입니다 ({0}개)": "Bringing back the backup’s attachments ({0})",

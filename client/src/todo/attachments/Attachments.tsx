@@ -37,9 +37,9 @@ export function UploadRows({ jobs, onCancel, onRetry }: { jobs: readonly UploadJ
     return <li key={job.key} className={job.status}>
       <div className="todo-upload-line">
         <Paperclip size={13} /><span className="todo-file-name" title={job.name}>{job.name}</span>
-        <span className="todo-file-size">{job.status === 'failed' ? t('실패') : job.status === 'waiting' ? t('대기 중') : `${percent}%`}</span>
+        <span className="todo-file-size">{job.status === 'failed' ? t('실패') : job.status === 'waiting' ? t('대기 중') : job.status === 'finishing' ? t('마무리 중') : `${percent}%`}</span>
         {job.status === 'failed' && <button type="button" className="icon-button" aria-label={t('“{0}” 다시 올리기', { 0: job.name })} onClick={() => onRetry(job.key)}><RotateCcw size={13} /></button>}
-        <button type="button" className="icon-button" aria-label={t('“{0}” 올리기 취소', { 0: job.name })} onClick={() => onCancel(job.key)}><X size={13} /></button>
+        <button type="button" className="icon-button" aria-label={t('“{0}” 올리기 취소', { 0: job.name })} disabled={job.status === 'finishing'} onClick={() => onCancel(job.key)}><X size={13} /></button>
       </div>
       <progress max={100} value={percent} aria-label={job.name} />
       {job.error && <p className="todo-error" role="alert">{job.error}</p>}

@@ -15,6 +15,8 @@ export class TodoUploads {
   private running = new Map<string, AbortController>();
   private listeners = new Set<() => void>();
   private next = 0;
+  /** The page is gone: nothing starts, and nothing late is shown or kept. */
+  private disposed = false;
 
   constructor(private readonly io: UploadIO, private readonly client: Pick<TodoClient, 'receive' | 'toast'>) {}
 
@@ -26,6 +28,7 @@ export class TodoUploads {
 
   /** Queues files for a task's description, or for one of its comments. Too large ones are refused at once. */
   add(files: readonly (Blob & { name?: string })[], target: { taskId: string; commentId?: string | null }) {
+    if (this.disposed) return;
     const accepted: UploadJob[] = [];
     for (const file of files) {
       if (fileProblem(file.size)) { this.client.toast(t('“{0}”: 파일 하나는 100MB 이하여야 합니다.', { 0: file.name ?? '' }), 'error'); continue; }
@@ -38,15 +41,15 @@ export class TodoUploads {
 
   retry(key: string) {
     const job = this.jobs.find(item => item.key === key);
-    if (!job || job.status !== 'failed') return;
+    if (this.disposed || !job || job.status !== 'failed') return;
     this.patch(key, { status: 'waiting', error: undefined });
     this.pump();
   }
 
-  /** Stops one and tells the server, which drops what it received. */
+  /** Stops one and tells the server, which drops what it received. Once it is finishing, the file is being made: too late. */
   cancel(key: string) {
     const job = this.jobs.find(item => item.key === key);
-    if (!job) return;
+    if (!job || job.status === 'finishing') return;
     this.running.get(key)?.abort();
     this.running.delete(key);
     this.set(this.jobs.filter(item => item.key !== key));
@@ -56,6 +59,7 @@ export class TodoUploads {
   }
 
   private pump() {
+    if (this.disposed) return;
     for (const job of this.jobs) {
       if (this.running.size >= RUNNING) return;
       if (job.status === 'waiting' && !this.running.has(job.key)) void this.run(job);
@@ -67,11 +71,11 @@ export class TodoUploads {
     this.running.set(job.key, controller);
     try {
       const { changes } = await runUpload(job, this.io, controller.signal, update => { if (this.running.get(job.key) === controller) this.patch(job.key, update); });
-      if (this.running.get(job.key) !== controller) return;
+      if (this.disposed || this.running.get(job.key) !== controller) return;
       this.client.receive(changes);
       this.set(this.jobs.filter(item => item.key !== job.key));
     } catch (error) {
-      if (this.running.get(job.key) !== controller) return;
+      if (this.disposed || this.running.get(job.key) !== controller) return;
       this.patch(job.key, { status: 'failed', error: error instanceof Error ? translateMessage(error.message) : String(error) });
     } finally {
       if (this.running.get(job.key) === controller) this.running.delete(job.key);
@@ -80,7 +84,13 @@ export class TodoUploads {
   }
 
   /** Stops everything when the page goes; the server forgets unfinished uploads by itself. */
-  dispose() { for (const controller of this.running.values()) controller.abort(); this.running.clear(); this.listeners.clear(); }
+  dispose() {
+    this.disposed = true;
+    for (const controller of this.running.values()) controller.abort();
+    this.running.clear();
+    this.jobs = [];
+    this.listeners.clear();
+  }
 }
 
 export function useUploads(uploads: TodoUploads): UploadJob[] {
