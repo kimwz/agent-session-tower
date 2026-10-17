@@ -42,7 +42,11 @@ export interface TodoAgentsOptions {
   /** This computer's sessions; undefined while they cannot be known (no worker, sessions unavailable). */
   sessions(): AgentSession[] | undefined;
   run(id: string): Pick<Run, 'sessionId'> | undefined;
-  /** Hides or shows a session, as the owner's close and reopen do; showing restores one moved to compressed storage. */
+  /**
+   * Hides or shows a session. Hiding only hides: unlike the owner's close it cancels nothing (scheduled continuations,
+   * permission rules, secret use), since closing a todo never stops work. Showing restores one moved to compressed
+   * storage and takes back its hand-over to retention.
+   */
   setClosed(id: string, closed: boolean): Promise<unknown>;
   /** Hands sessions to retention, which moves them (and their sub-agents) to compressed storage once idle. */
   requestArchive(ids: string[]): Promise<unknown>;
@@ -190,13 +194,17 @@ export class TodoAgents {
     if (this.stopped || !sessions || store.availability().state !== 'ready') return;
     if (Object.keys(store.settleAgents()).length) this.options.onChange();
     const byId = new Map(sessions.map(session => [session.id, session]));
-    for (const agent of store.agents()) {
+    const agents = store.agents();
+    // What this process remembers stays as small as what is still listed: moved sessions and old failures go.
+    for (const id of this.handed) if (!byId.has(id)) this.handed.delete(id);
+    for (const [taskId, at] of this.failed) if (this.now() - at >= PASS_MS || !agents.some(agent => agent.taskId === taskId)) this.failed.delete(taskId);
+    for (const agent of agents) {
       if (this.stopped) return;
       try {
         if (agent.state === 'starting') this.recover(agent, sessions);
         else if (agent.state === 'active') await this.keep(agent, sessions, byId);
         else if (agent.state === 'closing') await this.closeAgent(agent, sessions, byId);
-        else await this.tidy(agent, byId);
+        else await this.tidy(agent, sessions, byId);
       } catch (error) {
         this.failed.set(agent.taskId, this.now());
         console.error(`The issue master of todo ${agent.taskId} could not be brought in line: ${message(error)}`);
@@ -207,6 +215,12 @@ export class TodoAgents {
   /** Top-level sessions in a todo's issue master folder (its own sub-agents run there too, under it). */
   private folder(taskId: string, sessions: AgentSession[]): AgentSession[] {
     return sessions.filter(session => !session.isSubagent && !session.parentId && todoMasterTaskId(this.options.stateDir, session.cwd) === taskId);
+  }
+
+  /** Everything of a todo's issue master: its session, every session in its folder, and its recorded family. */
+  private members(agent: TodoAgent, sessions: AgentSession[]): string[] {
+    return [...new Set([...agent.sessionId ? [agent.sessionId] : [], ...this.folder(agent.taskId, sessions).map(session => session.id),
+      ...this.options.store.familyOf(agent.taskId).map(member => member.sessionId)])];
   }
 
   private waitingAfterFailure(taskId: string): boolean {
@@ -253,33 +267,47 @@ export class TodoAgents {
   private async closeAgent(agent: TodoAgent, sessions: AgentSession[], byId: Map<string, AgentSession>): Promise<void> {
     if (this.starting.has(agent.taskId) || this.waitingAfterFailure(agent.taskId)) return;
     const store = this.options.store;
-    const family = [...agent.sessionId ? [agent.sessionId] : [], ...this.folder(agent.taskId, sessions).map(session => session.id), ...store.familyOf(agent.taskId)];
-    await this.retire([...new Set(family)], byId);
+    await this.retire(this.members(agent, sessions), byId);
     // Only if nothing reopened the todo or rebound its master meanwhile.
     if (store.taskState(agent.taskId) !== 'open' && store.changeAgent(agent.taskId, agent, { state: 'closed', sessionId: agent.sessionId, provider: agent.provider })) this.options.onChange();
   }
 
   /**
-   * A closed master's family: one started since (or shown again by hand) is hidden and handed over too; once none of
-   * them can lose work, the record goes, since nothing of a hidden master starts new sessions.
+   * A closed master: whatever of it shows since (a late start in its folder, a session its family started, one shown
+   * again by hand) is hidden and handed over too. Once nothing of it can lose work, the family record goes, since
+   * nothing of a hidden master starts new sessions.
    */
-  private async tidy(agent: TodoAgent, byId: Map<string, AgentSession>): Promise<void> {
+  private async tidy(agent: TodoAgent, sessions: AgentSession[], byId: Map<string, AgentSession>): Promise<void> {
     const store = this.options.store;
-    const members = store.familyOf(agent.taskId).flatMap(id => byId.get(id) ?? []);
-    const loose = members.filter(session => !session.closed || !this.handed.has(session.id)).map(session => session.id);
+    const loose = this.members(agent, sessions).filter(id => byId.has(id) && (!byId.get(id)!.closed || !this.handed.has(id)));
     if (loose.length) {
       if (!this.waitingAfterFailure(agent.taskId)) await this.retire(loose, byId);
       return;
     }
-    if (members.some(busy)) return;
+    // Decided on the sessions and records as they are now, not as this pass began: others may have been added since.
+    const fresh = this.options.sessions();
+    const family = store.familyOf(agent.taskId);
+    if (!fresh || !family.length) return;
+    const now = new Map(fresh.map(session => [session.id, session]));
+    // One recorded but not listed yet would look moved away; it is waited for.
+    if (family.some(member => !now.has(member.sessionId) && this.now() - Date.parse(member.createdAt) < TODO_AGENT_START_WAIT_MS)) return;
+    const unsettled = (id: string) => { const session = now.get(id); return session !== undefined && (busy(session) || !session.closed || !this.handed.has(id)); };
+    if (this.members(agent, fresh).some(unsettled)) return;
     store.removeFamily(agent.taskId);
     this.options.onChange();
   }
 
-  /** Hides sessions (their turns go on) and hands them to retention; ones already moved away need neither. */
+  /**
+   * Hides sessions without stopping or cancelling anything of theirs, and hands them to retention; ones already moved
+   * away need neither. One hidden again (shown by hand meanwhile, which took back its hand-over) is handed over again.
+   */
   private async retire(ids: string[], byId: Map<string, AgentSession>): Promise<void> {
     const present = ids.filter(id => byId.has(id));
-    for (const id of present) if (!byId.get(id)!.closed) await this.options.setClosed(id, true);
+    for (const id of present) {
+      if (byId.get(id)!.closed) continue;
+      this.handed.delete(id);
+      await this.options.setClosed(id, true);
+    }
     const unhanded = present.filter(id => !this.handed.has(id));
     if (!unhanded.length) return;
     await this.options.requestArchive(unhanded);
@@ -318,39 +346,41 @@ export function todoAgentPrompt(text: string, detail: Pick<TodoTaskDetail, 'task
   const files = detail.files.slice(0, LIST_ITEMS).map(file => `- ${oneLine(file.name)} (${size(file.size)}${file.commentId ? ', 댓글 첨부' : ''}): ${file.missing ? '이 컴퓨터에 없음' : filePath(file.sha256)}`);
   if (detail.files.length > LIST_ITEMS) files.push(`- … 외 ${detail.files.length - LIST_ITEMS}개`);
   const comments = detail.comments.slice(-COMMENTS);
-  const compose = (description: string, kept: { at: string; body: string }[], cut: boolean) => [
+  const read = '시작하기 전에 첨부 파일(이미지·문서)을 먼저 읽으세요.';
+  const compose = (description: string, listed: string[], kept: { at: string; body: string }[], cut: boolean) => [
     text, '', ...head,
     ...description ? ['설명:', description] : [],
-    ...subtasks.length ? ['하위 작업:', ...subtasks] : [],
+    ...listed.length ? ['하위 작업:', ...listed] : [],
     ...kept.length ? [`최근 댓글 (${detail.comments.length}개 중 ${kept.length}개, 오래된 것부터):`, ...kept.map(comment => `- ${comment.at}\n${indent(comment.body)}`)] : [],
-    ...files.length ? ['첨부 파일:', ...files, '시작하기 전에 첨부 파일(이미지·문서)을 먼저 읽으세요.'] : [],
+    ...files.length ? ['첨부 파일:', ...files, read] : [],
     ...cut ? [CUT] : [],
   ].join('\n');
   const all = comments.map(comment => ({ at: comment.createdAt, body: comment.body }));
-  const whole = compose(task.description, all, false);
+  const whole = compose(task.description, subtasks, all, false);
   if (whole.length <= limit) return whole;
-  // Everything but the description and the comments must fit; the description gets up to half of what is left,
-  // the newest comments the rest, and whatever still does not fit goes, oldest comment first.
-  const room = limit - compose('', [], true).length;
-  if (room >= 0) {
-    let description = clip(task.description, Math.floor(room / 2));
-    let left = room - description.length;
-    const kept: { at: string; body: string }[] = [];
-    for (const comment of [...all].reverse()) {
-      const body = clip(comment.body, Math.max(0, left - comment.at.length));
-      if (!body.trim()) break;
-      kept.unshift({ at: comment.at, body });
-      left -= comment.at.length + body.length;
-    }
-    let result = compose(description, kept, true);
-    while (result.length > limit) {
-      if (kept.length) kept.shift();
-      else description = description.length > 1 ? clip(task.description, Math.max(0, description.length - (result.length - limit) - 2)) : '';
-      result = compose(description, kept, true);
-    }
-    return result;
+  // What the master needs before anything else (what the todo is, where its files are) always goes in; a first
+  // message that leaves no room for it is refused rather than either being cut.
+  const least = compose('', [], [], true);
+  if (least.length > limit) throw new TowerError('invalid', `첫 메시지가 너무 깁니다. 할 일 내용과 첨부 파일 경로를 붙일 수 있게 ${limit - (least.length - text.length)}자 이하로 줄여 주세요.`);
+  // The description gets up to half of what is left, the newest comments the rest; whatever still does not fit goes:
+  // the oldest comments, then the description, then sub-tasks from the end.
+  const room = limit - compose('', subtasks, [], true).length;
+  let description = clip(task.description, Math.max(0, Math.floor(room / 2)));
+  let left = room - description.length;
+  const kept: { at: string; body: string }[] = [];
+  for (const comment of [...all].reverse()) {
+    const body = clip(comment.body, Math.max(0, left - comment.at.length));
+    if (!body.trim() || left <= 0) break;
+    kept.unshift({ at: comment.at, body });
+    left -= comment.at.length + body.length;
   }
-  const least = [text, '', MARK, `할 일 id: ${task.id}`, `제목: ${oneLine(task.content)}`, CUT].join('\n');
-  if (least.length > limit) throw new TowerError('invalid', `첫 메시지가 너무 깁니다. 할 일 내용을 붙일 수 있게 ${limit - (least.length - text.length)}자 이하로 줄여 주세요.`);
-  return least;
+  const listed = [...subtasks];
+  let result = compose(description, listed, kept, true);
+  while (result.length > limit) {
+    if (kept.length) kept.shift();
+    else if (description) description = description.length > 1 ? clip(task.description, Math.max(0, description.length - (result.length - limit) - 2)) : '';
+    else listed.pop();
+    result = compose(description, listed, kept, true);
+  }
+  return result;
 }

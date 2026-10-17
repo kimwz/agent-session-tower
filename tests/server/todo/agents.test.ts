@@ -253,7 +253,7 @@ test('sessions an issue master starts, directly or through them, join its family
   runs.set('run-child', { sessionId: 'child' });
   session('grandchild', '/work/two');
   agents.recordFamily({ sessionId: 'grandchild', delegation: { parentRunId: 'run-child', rootRunId: 'run-master' } });
-  assert.deepEqual(store.familyOf('a'), ['child', 'grandchild']);
+  assert.deepEqual(store.familyOf('a').map(member => member.sessionId), ['child', 'grandchild']);
   assert.deepEqual(store.agentSessions(), { [sessionId!]: { taskId: 'a', title: 'A' }, child: { taskId: 'a', title: 'A' }, grandchild: { taskId: 'a', title: 'A' } });
 
   session('main', join(dir, MASTER_FOLDER));
@@ -262,7 +262,7 @@ test('sessions an issue master starts, directly or through them, join its family
   agents.recordFamily({ sessionId: 'from-main', delegation: { parentRunId: 'run-main', rootRunId: 'run-main' } });
   session('owner', '/work/four');
   agents.recordFamily({ sessionId: 'owner' });
-  assert.deepEqual(store.familyOf('a'), ['child', 'grandchild']);
+  assert.deepEqual(store.familyOf('a').map(member => member.sessionId), ['child', 'grandchild']);
 
   // Closed: a session one of them starts now is hidden and handed over by the next pass.
   apply(complete('a', 'ca'));
@@ -274,6 +274,7 @@ test('sessions an issue master starts, directly or through them, join its family
   assert.deepEqual(calls, ['hide late', 'archive late']);
   assert.equal(sessions.find(item => item.id === 'late')!.closed, true);
   assert.deepEqual(store.agentSessions(), {});
+  assert.equal(store.hasOpenAgents(), false);
 });
 
 test('a closed master\'s family record goes once none of its sessions can lose work; its row goes with its task, once closed', async t => {
@@ -287,10 +288,10 @@ test('a closed master\'s family record goes once none of its sessions can lose w
   await agents.schedule();
   assert.equal(store.agent('a')!.state, 'closed');
   await agents.schedule();
-  assert.deepEqual(store.familyOf('a'), ['working']);
+  assert.deepEqual(store.familyOf('a').map(member => member.sessionId), ['working']);
   working.status = 'idle';
   await agents.schedule();
-  assert.deepEqual(store.familyOf('a'), []);
+  assert.deepEqual(store.familyOf('a').map(member => member.sessionId), []);
 
   // Removed for good after 30 days: the closed master goes with it; one not yet closed waits for its pass.
   apply({ op: 'task.delete', id: 'b' });
@@ -357,4 +358,49 @@ test('a prompt too long for the limit cuts the description and the oldest commen
   const tight = todoAgentPrompt('x'.repeat(31_000), long, names, sha256 => sha256);
   assert.ok(tight.length <= 32_000);
   assert.match(tight, /할 일 id: t1/);
+});
+
+test('a long first message never costs the attachments: their paths and the instruction to read them stay, or the message is refused', () => {
+  const files = [{ id: 'f1', taskId: 't1', commentId: null, name: 'shot.png', mimeType: 'image/png', size: 2048, sha256: 'ab'.repeat(32), createdAt: '', deletedAt: null }];
+  const withFile = detail({ description: 'D'.repeat(5000) }, { files, subtasks: Array.from({ length: 30 }, (_, index) => ({ ...detail().task, id: `s${index}`, content: `Sub ${index} ${'s'.repeat(200)}` })) });
+  const prompt = todoAgentPrompt('x'.repeat(31_500), withFile, names, sha256 => `/state/todo-files/${sha256}`);
+  assert.ok(prompt.length <= 32_000, String(prompt.length));
+  assert.ok(prompt.includes(`/state/todo-files/${'ab'.repeat(32)}`));
+  assert.match(prompt, /시작하기 전에 첨부 파일\(이미지·문서\)을 먼저 읽으세요\.\n\(길어서 일부를 줄였습니다/);
+  assert.throws(() => todoAgentPrompt('x'.repeat(31_850), withFile, names, sha256 => `/state/todo-files/${sha256}`), error => kind(error) === 'invalid' && /자 이하로 줄여/.test((error as Error).message));
+});
+
+test('a closed master keeps collecting: a late start in its folder and a family session shown again by hand are hidden and handed over again', async t => {
+  const { store, agents, calls, session, apply, folder } = await fixture(t);
+  apply({ op: 'task.create', id: 'a', content: 'A' });
+  await agents.begin('a', 'go');
+  const child = session('child', '/work/one');
+  store.addFamily('child', 'a');
+  apply(complete('a', 'ca'));
+  await agents.schedule();
+  assert.equal(store.agent('a')!.state, 'closed');
+  calls.length = 0;
+  session('late', folder('a'));
+  child.closed = false;
+  await agents.schedule();
+  assert.deepEqual(calls, ['hide late', 'hide child', 'archive late,child']);
+});
+
+test('a closed master\'s family record waits for a session recorded but not listed yet, and for its master\'s own work', async t => {
+  const { store, agents, sessions, apply, tick } = await fixture(t);
+  apply({ op: 'task.create', id: 'a', content: 'A' });
+  const { sessionId } = await agents.begin('a', 'go');
+  apply(complete('a', 'ca'));
+  await agents.schedule();
+  store.addFamily('unlisted', 'a');
+  await agents.schedule();
+  assert.deepEqual(store.familyOf('a').map(member => member.sessionId), ['unlisted']);
+  const master = sessions.find(item => item.id === sessionId)!;
+  master.status = 'working';
+  tick(TODO_AGENT_START_WAIT_MS + 1000);
+  await agents.schedule();
+  assert.deepEqual(store.familyOf('a').map(member => member.sessionId), ['unlisted'], 'the master still works');
+  master.status = 'idle';
+  await agents.schedule();
+  assert.deepEqual(store.familyOf('a'), []);
 });

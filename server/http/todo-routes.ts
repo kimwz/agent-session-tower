@@ -3,7 +3,6 @@ import { pipeline } from 'node:stream/promises';
 import { TowerError } from '../../shared/errors.js';
 import { TodoRequestSchema, type TodoRequest } from '../../shared/todo/ops.js';
 import type { TodoAgent, TodoChanges, TodoCompletedPage, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
-import { CALLER_CAPABILITY_HEADER } from '../runs/session-mcp.js';
 import type { TodoFiles } from '../todo/files.js';
 import { readJson, UUID } from './requests.js';
 import { byteRange } from './sinks.js';
@@ -34,12 +33,6 @@ const FILE = /^\/api\/todos\/files\/([^/]+)$/;
 const AGENT = /^\/api\/todos\/tasks\/([^/]+)\/agent$/;
 const MAX_AGENT_TEXT = 32_000;
 
-/**
- * Whether a request is the owner's own page: nothing that names the master, a local agent, a calling turn or the todo
- * tools' key, whether or not it proves it. Starting an issue master is the owner's act, never an agent's.
- */
-const ownerPage = (req: IncomingMessage) => req.headers['x-tower-master'] === undefined && req.headers['x-tower-agent'] === undefined
-  && req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()] === undefined && !/^\s*TodoKey\b/i.test(req.headers.authorization ?? '');
 
 /** An upload that is not where the page thought answers where it is, so the page resumes from there. */
 async function atOffset<T>(json: (res: ServerResponse, status: number, body: unknown) => void, res: ServerResponse, work: () => Promise<T>): Promise<T | undefined> {
@@ -74,9 +67,12 @@ async function sendFile(req: IncomingMessage, res: ServerResponse, files: NonNul
   } finally { await handle.close(); }
 }
 
-/** Answers `/api/todos…`; false for any other path. */
+/**
+ * Answers `/api/todos…`; false for any other path. `owner` says the request is the owner's own page (see
+ * server/http/server.ts), which starting an issue master needs.
+ */
 export async function todoRoute(req: IncomingMessage, res: ServerResponse, url: URL, path: string, todos: TodoBackend | undefined,
-  json: (res: ServerResponse, status: number, body: unknown) => void): Promise<boolean> {
+  json: (res: ServerResponse, status: number, body: unknown) => void, owner = false): Promise<boolean> {
   if (path !== '/api/todos' && !path.startsWith('/api/todos/')) return false;
   if (!todos) { json(res, 503, { error: '할 일을 사용할 수 없습니다.' }); return true; }
   if (req.method === 'GET' && path === '/api/todos') { json(res, 200, todos.overview()); return true; }
@@ -107,7 +103,7 @@ export async function todoRoute(req: IncomingMessage, res: ServerResponse, url: 
   }
   const agent = AGENT.exec(path);
   if (req.method === 'POST' && agent) {
-    if (!ownerPage(req)) { json(res, 403, { error: '이슈 마스터는 소유자의 화면에서만 시작할 수 있습니다.' }); return true; }
+    if (!owner) { json(res, 403, { error: '이슈 마스터는 소유자의 화면에서만 시작할 수 있습니다.' }); return true; }
     if (!ID.test(agent[1])) throw new TowerError('invalid', '작업 id가 올바르지 않습니다.');
     const body = await readJson(req, 256 * 1024);
     const text = typeof body.text === 'string' ? body.text.trim() : '';

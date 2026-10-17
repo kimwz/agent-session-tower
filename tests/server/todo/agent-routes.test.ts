@@ -32,14 +32,17 @@ test('only the owner\'s own page starts an issue master; badges read the open fa
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
   const { token } = await (await fetch(`${base}/api/bootstrap`)).json() as { token: string };
-  const headers = { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
+  // As the page sends it: a browser names the page's origin on every POST.
+  const headers = { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token, Origin: base };
   const start = (body: unknown, extra: Record<string, string> = {}, id = 'a') => fetch(`${base}/api/todos/tasks/${id}/agent`, { method: 'POST', headers: { ...headers, ...extra }, body: JSON.stringify(body) });
 
   // Whatever names the master, a local agent, a calling turn or the todo tools' key is refused, proven or not.
   for (const extra of <Record<string, string>[]>[{ 'X-Tower-Master': masterSecret }, { 'X-Tower-Master': 'x' }, { 'X-Tower-Agent': 'local' }, { [CALLER_CAPABILITY_HEADER]: 'a'.repeat(64) }, { Authorization: `TodoKey ${'b'.repeat(64)}` }]) {
     assert.equal((await start({ text: 'go' }, extra)).status, 403, JSON.stringify(extra));
   }
-  assert.equal((await fetch(`${base}/api/todos/tasks/a/agent`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"text":"go"}' })).status, 403);
+  assert.equal((await fetch(`${base}/api/todos/tasks/a/agent`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: base }, body: '{"text":"go"}' })).status, 403);
+  // Something on this computer that is not a page (no origin) is not the owner either, page token or not.
+  assert.equal((await fetch(`${base}/api/todos/tasks/a/agent`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body: '{"text":"go"}' })).status, 403);
   for (const body of [{}, { text: '   ' }, { text: 'x'.repeat(32_001) }, { text: 'go', provider: 'codex' }, { text: 1 }]) assert.equal((await start(body)).status, 400, JSON.stringify(body).slice(0, 40));
   assert.equal((await start({ text: 'go' }, {}, 'a%20b')).status, 400);
   assert.deepEqual(started, []);

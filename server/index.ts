@@ -477,6 +477,28 @@ async function main() {
   runs.on('change', () => notifications.changed());
   // Visitor pages of public agents, on their own port bound to this computer only; a tunnel publishes them.
   const publicListener = new PublicListener({ stateDir, backend: runs, reservedPorts: () => [port] });
+  /**
+   * Hides or shows a conversation. The owner's close also ends what it kept for later: its scheduled continuations,
+   * its permission rules and its secret use. `hideOnly` (an issue master's sessions closing with their todo) only
+   * hides, so no work of theirs stops.
+   */
+  const setSessionClosed = async (id: string, closed: boolean, hideOnly = false) => {
+    // Reopening asks the worker first: it brings back a session moved to compressed storage, which this web does not list.
+    const reopened = !closed && runs.supports('workerClosed') ? await runs.setClosed(id, false) : undefined;
+    const session = reopened ?? runs.getSession(id);
+    if (!session) return undefined;
+    const ending = closed && !hideOnly;
+    if (ending && runs.supports('secrets')) await runs.secretCall('close-session', [session.id]);
+    const updated = reopened ?? (runs.supports('workerClosed') ? await runs.setClosed(session.id, closed) : await closedSessions.set(session, closed));
+    if (!updated) return undefined;
+    // Closing a conversation also stops what its agent planned to do in it later.
+    if (ending) for (const run of runs.list()) if (run.sessionId === session.id && run.status === 'queued' && run.scheduled) await runs.cancel(run.id).catch(() => {});
+    // Its rules for this conversation go now. A worker busy handing off is asked again for a few minutes; one older
+    // than 1.92 refuses at once, and its sweep catches the rest.
+    if (ending) void forgetConversation(session.id);
+    changed();
+    return titles.apply(updated);
+  };
   const backend: Backend = {
     storageStatus: () => runs.storageStatus(), storageRetry: () => runs.storageRetry(), storageRecovery: (action, input) => runs.storageRecovery(action, input),
     snapshot, detail,
@@ -490,22 +512,7 @@ async function main() {
       changed();
       return applyClosed(updated);
     },
-    setClosed: async (id, closed) => {
-      // Reopening asks the worker first: it brings back a session moved to compressed storage, which this web does not list.
-      const reopened = !closed && runs.supports('workerClosed') ? await runs.setClosed(id, false) : undefined;
-      const session = reopened ?? runs.getSession(id);
-      if (!session) return undefined;
-      if (closed && runs.supports('secrets')) await runs.secretCall('close-session', [session.id]);
-      const updated = reopened ?? (runs.supports('workerClosed') ? await runs.setClosed(session.id, closed) : await closedSessions.set(session, closed));
-      if (!updated) return undefined;
-      // Closing a conversation also stops what its agent planned to do in it later.
-      if (closed) for (const run of runs.list()) if (run.sessionId === session.id && run.status === 'queued' && run.scheduled) await runs.cancel(run.id).catch(() => {});
-      // Its rules for this conversation go now. A worker busy handing off is asked again for a few minutes; one older
-      // than 1.92 refuses at once, and its sweep catches the rest.
-      if (closed) void forgetConversation(session.id);
-      changed();
-      return titles.apply(updated);
-    },
+    setClosed: (id, closed) => setSessionClosed(id, closed),
     acknowledgeOutcome: async id => {
       const session = sessionViews().find(item => item.id === id);
       if (!session) return undefined;
@@ -596,7 +603,7 @@ async function main() {
     // Only once the worker answered and its sessions are known: an empty list would look like masters gone missing.
     sessions: () => runs.runnerVersion() && runs.storageStatus()?.sessionsAvailable !== false ? sessionViews() : undefined,
     run: id => runs.list().find(run => run.id === id),
-    setClosed: (id, closed) => backend.setClosed!(id, closed),
+    setClosed: (id, closed) => setSessionClosed(id, closed, true),
     // The worker's retention moves them (and their sub-agents) to compressed storage once their work is over.
     requestArchive: ids => runs.retention('requestArchive', ids),
     createSession: input => backend.createSession!(input),

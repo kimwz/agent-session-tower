@@ -482,10 +482,17 @@ export class TodoStore {
     });
   }
 
-  /** The sessions a todo's issue master started (directly or through them), as recorded. */
-  familyOf(taskId: string): string[] {
+  /** The sessions a todo's issue master started (directly or through them), as recorded, and when. */
+  familyOf(taskId: string): { sessionId: string; createdAt: string }[] {
     this.readable();
-    return this.all<{ session_id: string }>('SELECT session_id FROM todo_agent_sessions WHERE task_id = ? ORDER BY created_at, session_id', taskId).map(row => row.session_id);
+    return this.all<{ session_id: string; created_at: string }>('SELECT session_id, created_at FROM todo_agent_sessions WHERE task_id = ? ORDER BY created_at, session_id', taskId)
+      .map(row => ({ sessionId: row.session_id, createdAt: row.created_at }));
+  }
+
+  /** Whether any issue master is not closed yet, so the master host has one to follow or a close to see through. */
+  hasOpenAgents(): boolean {
+    if (!this.db || this.state.state === 'unavailable') return false;
+    return Boolean(this.get("SELECT 1 FROM todo_agents WHERE state != 'closed' LIMIT 1"));
   }
 
   /** The todo whose issue master's family a session is in. */
