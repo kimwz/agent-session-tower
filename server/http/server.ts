@@ -492,8 +492,9 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         if (masterCall) return json(res, 403, { error: '백업은 소유자만 할 수 있습니다.' });
         if (path === '/api/backup' && req.method === 'GET') return json(res, 200, await backup.overview());
         if (req.method === 'POST') {
-          const sendFile = (file: { name: string; text: string }) => {
-            res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': Buffer.byteLength(file.text), 'Content-Disposition': `attachment; filename="${file.name.replace(/[^A-Za-z0-9._-]/g, '_')}"`, 'Cache-Control': 'no-store' });
+          const sendFile = (file: { name: string; text: string; notice?: string }) => {
+            res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': Buffer.byteLength(file.text), 'Content-Disposition': `attachment; filename="${file.name.replace(/[^A-Za-z0-9._-]/g, '_')}"`, 'Cache-Control': 'no-store',
+              ...(file.notice ? { 'X-Tower-Backup-Notice': file.notice } : {}) });
             res.end(file.text);
           };
           switch (path) {

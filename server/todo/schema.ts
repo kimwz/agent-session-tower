@@ -73,9 +73,28 @@ export const TODO_SCHEMA: readonly TodoSchemaStep[] = [
     CREATE INDEX todo_events_task ON todo_events(task_id, id);
     CREATE TABLE todo_requests (id TEXT PRIMARY KEY, result TEXT NOT NULL, at TEXT NOT NULL) STRICT;
   ` },
+  // Attachments. Their contents live in `<state>/todo-files/<sha256>`; deleting a task or comment leaves the row alone
+  // (what shows is worked out from the three), so builds that know only step 1 keep the rule when they delete things.
+  { sql: `
+    CREATE TABLE todo_files (
+      id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES todo_tasks(id) ON DELETE CASCADE,
+      comment_id TEXT REFERENCES todo_comments(id) ON DELETE CASCADE,
+      name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL, created_at TEXT NOT NULL, deleted_at TEXT
+    ) STRICT;
+    CREATE INDEX todo_files_task ON todo_files(task_id);
+    CREATE INDEX todo_files_comment ON todo_files(comment_id);
+    CREATE INDEX todo_files_sha256 ON todo_files(sha256);
+  ` },
 ];
 
 export const TODO_SCHEMA_STEP = TODO_SCHEMA.length;
+
+/**
+ * The tables a backup holds, parents before children: everything but the file's own bookkeeping (`todo_meta`) and
+ * request answers (`todo_requests`), which stay with the file they belong to.
+ */
+export const TODO_DATA_TABLES = ['todo_projects', 'todo_sections', 'todo_labels', 'todo_tasks', 'todo_task_labels', 'todo_links', 'todo_comments',
+  'todo_completions', 'todo_events', 'todo_files'] as const;
 
 /** The lowest step whose code may write a file at `step` applied steps. */
 export const minWriterAt = (step: number) => TODO_SCHEMA.slice(0, step).reduce((min, item) => Math.max(min, item.minWriter ?? 1), 1);

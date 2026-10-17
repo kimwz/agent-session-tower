@@ -7,6 +7,8 @@ import { liveProject, liveSection } from './projects.js';
 
 /** Sub-tasks go at most this many levels below a top-level task. */
 export const MAX_TASK_DEPTH = 4;
+/** Walks up and down stop here even in a file that broke the rules (a cycle never hangs a query). */
+const WALK_LIMIT = MAX_TASK_DEPTH + 2;
 
 interface TaskRow {
   id: string; project_id: string; section_id: string | null; parent_id: string | null; due_date: string | null; due_time: string | null;
@@ -23,12 +25,12 @@ export function liveTask(ctx: TodoContext, id: string): TaskRow {
 }
 
 const ancestors = (ctx: TodoContext, id: string) => ctx.all<TaskRow>(`WITH RECURSIVE up(id, depth) AS (SELECT parent_id, 1 FROM todo_tasks WHERE id = ? AND parent_id IS NOT NULL
-  UNION ALL SELECT t.parent_id, up.depth + 1 FROM todo_tasks t JOIN up ON t.id = up.id WHERE t.parent_id IS NOT NULL)
+  UNION ALL SELECT t.parent_id, up.depth + 1 FROM todo_tasks t JOIN up ON t.id = up.id WHERE t.parent_id IS NOT NULL AND up.depth < ${WALK_LIMIT})
   SELECT t.* FROM up JOIN todo_tasks t ON t.id = up.id ORDER BY up.depth`, id);
 
 /** Every task below `id` (not `id` itself), with how far below. */
 const descendants = (ctx: TodoContext, id: string) => ctx.all<TaskRow & { depth: number }>(`WITH RECURSIVE down(id, depth) AS (SELECT id, 1 FROM todo_tasks WHERE parent_id = ?
-  UNION ALL SELECT t.id, down.depth + 1 FROM todo_tasks t JOIN down ON t.parent_id = down.id)
+  UNION ALL SELECT t.id, down.depth + 1 FROM todo_tasks t JOIN down ON t.parent_id = down.id WHERE down.depth < ${WALK_LIMIT})
   SELECT t.*, down.depth AS depth FROM down JOIN todo_tasks t ON t.id = down.id`, id);
 
 function labelsOf(ctx: TodoContext, ids: string[]): string[] {

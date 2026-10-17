@@ -65,7 +65,7 @@ export async function encryptBackup(payload: unknown, passphrase: string, meta: 
   const data = Buffer.concat([cipher.update(gzipSync(Buffer.from(JSON.stringify(payload)))), cipher.final()]);
   const envelope: BackupEnvelope = { ...header, tag: cipher.getAuthTag().toString('base64'), data: data.toString('base64') };
   const text = JSON.stringify(envelope);
-  if (Buffer.byteLength(text) > MAX_BACKUP_FILE_BYTES) throw new BackupError('백업이 40MB를 넘습니다. 큰 스킬 파일을 정리한 뒤 다시 시도하세요.', 'too-large');
+  if (Buffer.byteLength(text) > MAX_BACKUP_FILE_BYTES) throw new BackupError('백업이 40MB를 넘습니다. 스킬 파일이나 할 일 데이터가 커서 그럴 수 있습니다. 큰 스킬 파일이나 오래된 할 일을 정리한 뒤 다시 시도하세요.', 'too-large');
   return text;
 }
 

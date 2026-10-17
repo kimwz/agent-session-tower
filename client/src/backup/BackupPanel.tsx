@@ -12,7 +12,8 @@ const headers = (token: string) => ({ 'Content-Type': 'application/json', [REQUE
 const post = <T,>(path: string, token: string, body: unknown = {}) => api<T>(path, { method: 'POST', headers: headers(token), body: JSON.stringify(body) });
 
 /** Asks for a file and saves what the server sends under the name it gives. */
-async function saveFile(path: string, token: string, body: unknown): Promise<void> {
+/** Downloads the file the server answers with; answers its notice (X-Tower-Backup-Notice), if any. */
+async function saveFile(path: string, token: string, body: unknown): Promise<string | null> {
   const response = await fetch(path, { method: 'POST', headers: headers(token), body: JSON.stringify(body) });
   if (!response.ok) {
     let message = `${response.status}`;
@@ -24,10 +25,11 @@ async function saveFile(path: string, token: string, body: unknown): Promise<voi
   const link = document.createElement('a');
   link.href = url; link.download = name; link.click();
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  return response.headers.get('x-tower-backup-notice');
 }
 
 const PART_LABELS: Record<BackupPart, string> = { triggers: '트리거', secretVault: '암호화한 시크릿 보관함', triggerSecrets: '트리거 비밀값', permissions: '권한 규칙', models: '모델 설정', slack: 'Slack 연결과 규칙', github: 'GitHub 자동화 규칙', publicAgents: '공개 에이전트',
-  skills: '스킬과 지침', decisions: '빠른 판단', projectGroups: '폴더 그룹·숨김', remoteExclusions: '원격 공유 제외 폴더', master: '마스터 음성 설정', backup: '자동 백업 설정' };
+  skills: '스킬과 지침', decisions: '빠른 판단', projectGroups: '폴더 그룹·숨김', remoteExclusions: '원격 공유 제외 폴더', todos: '할 일·첨부 파일', master: '마스터 음성 설정', backup: '자동 백업 설정' };
 
 interface RemoteForm { enabled: boolean; endpoint: string; bucket: string; prefix: string; region: string; accessKeyId: string; secretAccessKey: string; passphrase: string; intervalHours: string; keep: string }
 const formOf = (overview: BackupOverview): RemoteForm => ({ enabled: overview.settings.enabled, endpoint: overview.settings.remote.endpoint, bucket: overview.settings.remote.bucket, prefix: overview.settings.remote.prefix,
@@ -61,10 +63,10 @@ export function BackupPanel({ token }: { token: string }) {
     return () => clearInterval(timer);
   }, [active, waiting, load]);
 
-  async function act(name: string, action: () => Promise<void>, done = '') {
+  async function act(name: string, action: () => Promise<void>, done: string | (() => string) = '') {
     if (busy) return;
     setBusy(name); setError(''); setNotice('');
-    try { await action(); if (done) setNotice(done); }
+    try { await action(); const message = typeof done === 'function' ? done() : done; if (message) setNotice(message); }
     catch (error) { setError(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(''); }
   }
@@ -72,7 +74,11 @@ export function BackupPanel({ token }: { token: string }) {
   const exportReady = exportPass[0].length >= MIN_BACKUP_PASSPHRASE && exportPass[0] === exportPass[1];
   const exportBackup = (event: FormEvent) => {
     event.preventDefault();
-    if (exportReady) void act('export', async () => { await saveFile('/api/backup/export', token, { passphrase: exportPass[0] }); setExportPass(['', '']); }, t('백업 파일을 내려받았습니다. 암호를 잊으면 복원할 수 없습니다.'));
+    let notice: string | null = null;
+    if (exportReady) void act('export', async () => { notice = await saveFile('/api/backup/export', token, { passphrase: exportPass[0] }); setExportPass(['', '']); },
+      () => [t('백업 파일을 내려받았습니다. 암호를 잊으면 복원할 수 없습니다.'),
+        ...(notice === 'todo-attachments-omitted' ? [t('내보낸 파일에는 첨부 본문이 들어가지 않습니다. 자동 백업 저장소에 남아 있으면 복원할 때 받아 옵니다.')] : []),
+        ...(notice === 'todos-omitted' ? [t('할 일 저장소를 읽지 못해 내보낸 파일에 할 일이 들어가지 않았습니다.')] : [])].join(' '));
   };
   const checkBackup = (event: FormEvent) => {
     event.preventDefault();
@@ -125,7 +131,7 @@ export function BackupPanel({ token }: { token: string }) {
         {preview && <div className="backup-preview">
           <p>{t('{0}에서 {1}에 만든 백업 (Tower {2})', { 0: preview.from, 1: date(preview.createdAt), 2: preview.towerVersion })}</p>
           {preview.otherComputer && <p className="auth-error">{t('다른 컴퓨터에서 만든 백업입니다. 그 컴퓨터의 Tower가 계속 켜져 있으면 트리거, Slack, GitHub 자동화, 공개 에이전트가 두 곳에서 함께 동작합니다. 옮기는 중이라면 원래 컴퓨터의 Tower를 먼저 끄세요.')}</p>}
-          <ul>{preview.parts.map(part => <li key={part}>{t(PART_LABELS[part])}{part === 'skills' ? ` · ${t('{0}개', { 0: preview.skills })}` : ''}</li>)}</ul>
+          <ul>{preview.parts.map(part => <li key={part}>{t(PART_LABELS[part])}{part === 'skills' ? ` · ${t('{0}개', { 0: preview.skills })}` : ''}{part === 'todos' && preview.todoFilesFetched ? ` · ${t('첨부 본문은 파일에 없고, 자동 백업 저장소에 남아 있으면 받아 옵니다')}` : ''}</li>)}</ul>
           <button className="primary-button" disabled={Boolean(busy)} onClick={applyBackup}>{spin('apply') ?? <RotateCcw size={14} />}{t('이 백업으로 복원')}</button>
         </div>}
         {overview.restore && <RestoreStatus report={overview.restore} busy={Boolean(busy)} onCancel={() => void act('cancel', async () => { await post('/api/backup/restore/cancel', token, { id: overview.restore!.id }); await load(); })} />}
@@ -159,7 +165,7 @@ export function BackupPanel({ token }: { token: string }) {
         <h3>{t('저장된 백업')}<button className="icon-button decision-refresh" title={t('새로고침')} aria-label={t('새로고침')} disabled={Boolean(busy) || !overview.settings.remote.secretSet} onClick={() => void listRemote()}><RefreshCw size={14} /></button></h3>
         {remote === null ? <p className="auth-empty">{t('새로고침을 누르면 저장소의 백업을 봅니다.')}</p> : remote.length ? <ul className="backup-list">{remote.map(item => <li key={item.key}>
           <div><strong>{item.key.slice(item.key.lastIndexOf('/') + 1)}</strong><small>{date(item.modifiedAt)} · {(item.size / 1024).toFixed(0)} KB</small></div>
-          <button className="icon-button" title={t('내려받기')} aria-label={t('{0} 내려받기', { 0: item.key })} disabled={Boolean(busy)} onClick={() => void act('download', () => saveFile('/api/backup/remote/download', token, { key: item.key }))}><Download size={15} /></button>
+          <button className="icon-button" title={t('내려받기')} aria-label={t('{0} 내려받기', { 0: item.key })} disabled={Boolean(busy)} onClick={() => void act('download', async () => { await saveFile('/api/backup/remote/download', token, { key: item.key }); })}><Download size={15} /></button>
         </li>)}</ul> : <p className="auth-empty">{t('저장소에 백업이 없습니다.')}</p>}
       </section>}
     </>}

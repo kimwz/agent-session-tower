@@ -5,7 +5,7 @@ import type { TodoEventKind } from '../../shared/todo/types.js';
 
 /** What one request's operations share inside its transaction: the connection, the time, and what they changed. */
 export class TodoContext {
-  readonly touched = { projects: new Set<string>(), sections: new Set<string>(), labels: new Set<string>(), tasks: new Set<string>(), links: new Set<string>(), comments: new Set<string>() };
+  readonly touched = { projects: new Set<string>(), sections: new Set<string>(), labels: new Set<string>(), tasks: new Set<string>(), links: new Set<string>(), comments: new Set<string>(), files: new Set<string>() };
   readonly removedLinks: string[] = [];
   constructor(readonly db: DatabaseSync, readonly now: string) {}
 
