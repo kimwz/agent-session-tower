@@ -273,6 +273,25 @@ test('the owner\'s turns in the master\'s folder also get the master\'s page too
   assert.equal(resolver(turn('codex:native', { kind: 'owner' }), session('codex:native')).servers?.tower_master, undefined);
 });
 
+test('the owner\'s turns in an issue master\'s folder get the master\'s page tools as that issue master, with the main master\'s powers', async t => {
+  const f = await fixture(t);
+  const resolver = runToolResolver({ stateDir: f.stateDir, capabilities: f.capabilities, runs: { sessionOrigin: () => undefined }, browsers: () => ({ playwright: true, claudeInChrome: false }) });
+  const turn = (id: string, origin: Run['origin']): Run => ({ id: randomUUID(), sessionId: id, prompt: '', status: 'queued', createdAt: '', output: '', origin });
+  const issue = { ...session('claude:issue'), cwd: join(f.stateDir, 'todo-masters', 'task_1') };
+  const run = turn(issue.id, { kind: 'owner' });
+  const tools = resolver(run, issue);
+  assert.deepEqual(Object.keys(tools.servers ?? {}).sort(), ['browser', 'browser_light', 'tower', 'tower_master', 'tower_sessions', 'tower_todos'], 'the same tools as the main master');
+  assert.deepEqual(tools.servers!.tower_master.args.slice(-4), ['--master-mcp', f.stateDir, '--instance', 'todo:task_1']);
+  assert.equal(tools.servers!.tower_master.env, undefined, 'no calling-turn credential: what it starts is the owner\'s, as the main master\'s is');
+  // A folder below it, another computer's turn, or a turn the owner did not start gets no master tools.
+  assert.equal(resolver(turn('claude:sub', { kind: 'owner' }), { ...issue, id: 'claude:sub', cwd: join(issue.cwd, 'sub') }).servers?.tower_master, undefined);
+  assert.equal(resolver(turn(issue.id, { kind: 'owner', controllerId: 'c'.repeat(32) }), issue).servers?.tower_master, undefined);
+  assert.equal(resolver(turn(issue.id, { kind: 'agent' }), issue).servers?.tower_master, undefined);
+  // The heartbeat's scoped tools stay the main master's.
+  const heartbeat: Run = { ...turn(issue.id, { kind: 'agent' }), heartbeat: { targets: [{ sessionId: 'codex:x', latestRunId: 'r', lastRequestAt: '' }] } as unknown as Run['heartbeat'] };
+  assert.equal(resolver(heartbeat, issue).servers?.tower_master, undefined);
+});
+
 
 test('a trusted Claude conversation gets the owner\'s Chrome as its strong browser; one with outside content does not', async t => {
   const f = await fixture(t);

@@ -1,4 +1,4 @@
-import type { TodoComment, TodoCompletion, TodoEvent, TodoEventKind, TodoFile, TodoLabel, TodoLayout, TodoLink, TodoPriority, TodoProject, TodoRecurrence, TodoSection, TodoTask } from '../../shared/todo/types.js';
+import type { TodoAgent, TodoAgentState, TodoComment, TodoCompletion, TodoEvent, TodoEventKind, TodoFile, TodoLabel, TodoLayout, TodoLink, TodoPriority, TodoProject, TodoRecurrence, TodoSection, TodoTask } from '../../shared/todo/types.js';
 
 /** Each table's row and the value the page sees, converted in one place per table. */
 
@@ -51,6 +51,11 @@ export const eventOf = (row: Row): TodoEvent => ({
 export const fileOf = (row: Row): TodoFile => ({
   id: text(row.id), taskId: text(row.task_id), commentId: maybe(row.comment_id), name: text(row.name), mimeType: text(row.mime), size: Number(row.size),
   sha256: text(row.sha256), createdAt: text(row.created_at), deletedAt: maybe(row.deleted_at),
+});
+
+export const agentOf = (row: Row): TodoAgent => ({
+  taskId: text(row.task_id), ...(row.session_id ? { sessionId: text(row.session_id) } : {}), provider: text(row.provider) as TodoAgent['provider'],
+  state: text(row.state) as TodoAgentState, createdAt: text(row.created_at), updatedAt: text(row.updated_at),
 });
 
 /** Files that show: not deleted, on a task not deleted, and on no comment or one not deleted (`f` the file, `c` its comment). */

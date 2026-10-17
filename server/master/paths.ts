@@ -17,3 +17,10 @@ export async function masterPaths(stateDir: string) {
   };
 }
 export type MasterPaths = Awaited<ReturnType<typeof masterPaths>>;
+
+/** Where the host keeps the issue masters' data, each in `<state>/master/todo/<taskId>`. */
+export function issueDataDir(masterData: string, taskId?: string): string {
+  return taskId === undefined ? join(masterData, 'todo') : join(masterData, 'todo', taskId);
+}
+/** How an issue master's tool server names it to the host (`--instance todo:<taskId>`). */
+export const ISSUE_INSTANCE = /^todo:([A-Za-z0-9_-]{1,64})$/;

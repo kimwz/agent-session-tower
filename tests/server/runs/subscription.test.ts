@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { RunManager } from './sql-fixture.js';
-import { checkClaudeSubscription, checkCodexAccount, markMaster, subscriptionOnly, withoutMasterFolder, SubscriptionError, withoutKeys } from '../../../server/runs/subscription.js';
+import { checkClaudeSubscription, checkCodexAccount, inMasterFolder, markMaster, subscriptionOnly, todoMasterTaskId, withoutMasterFolder, SubscriptionError, withoutKeys } from '../../../server/runs/subscription.js';
 import type { Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
 
@@ -27,6 +27,19 @@ test('only a claude.ai sign-in with Anthropic\'s own service passes; anything el
   assert.equal(subscriptionOnly('/state', '/state/master-session'), true);
   assert.equal(subscriptionOnly('/state', '/state/master-session/'), true);
   assert.equal(subscriptionOnly('/state', '/state/other'), false);
+});
+
+test('an issue master runs in its todo\'s folder beside the main master\'s: the same sign-in rule, hidden like it, and named by the todo', () => {
+  assert.equal(todoMasterTaskId('/state', '/state/todo-masters/task_1'), 'task_1');
+  assert.equal(todoMasterTaskId('/state', '/state/todo-masters/task_1/'), 'task_1');
+  for (const cwd of ['/state/todo-masters', '/state/todo-masters/task_1/sub', '/state/todo-masters/bad id', '/state/master-session', '/other/todo-masters/x', 'relative/todo-masters/x', ''])
+    assert.equal(todoMasterTaskId('/state', cwd), undefined, cwd);
+  assert.equal(subscriptionOnly('/state', '/state/todo-masters/task_1'), true);
+  assert.equal(subscriptionOnly('/state', '/state/todo-masters/task_1/sub'), false);
+  assert.equal(inMasterFolder('/state', '/state/todo-masters/task_1'), true);
+  assert.equal(inMasterFolder('/state', '/state/todo-masters/task_1/sub'), true);
+  assert.equal(inMasterFolder('/state', '/state/todo-masters'), false);
+  assert.equal(inMasterFolder('/state', '/state/master-session/x'), true, 'the main master as before');
 });
 
 /** A Claude session in `folder`, run by a manager whose sign-in check and processes are fakes. */

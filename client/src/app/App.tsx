@@ -16,7 +16,7 @@ import { openShareRequest, openShareRequestFromAddress } from '../secrets/share-
 import type { SettingsContext } from '../settings/SettingsDialog';
 import { RunnerUpdateBadge, ToolVersion, TowerUpdateBadge } from './AutoUpdate';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
-import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Archive, Check, ChevronDown, CircleHelp, Folder, LoaderCircle, Monitor, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Search, ShieldCheck, Terminal, TriangleAlert, WifiOff, X } from 'lucide-react';
 import type { ProjectGroup, ProjectGroupPatch, Provider, Run, Session, SessionStatus, Snapshot } from '../../../shared/types';
 import type { RepositoryAction, RepositoryStatus } from '../../../shared/repositories';
@@ -49,6 +49,7 @@ import { localPart, nodeOf, nodePath, pathFor, scopedId, splitScopedId } from '.
 import type { MasterFilter } from '../../../shared/master';
 import { PageSwitch, type TowerPage } from '../todo/PageSwitch';
 import { isTodoPage, pageSearch } from '../todo/todo-url';
+import { screenSelect, TodoAgentContext, useTodoSessionBadges, type TodoAgentView } from '../todo/todo-agents';
 
 type StatusFilter = 'all' | SessionStatus;
 const readSelection = () => new URLSearchParams(window.location.search).get('session');
@@ -96,6 +97,10 @@ function TowerApp() {
     try { return window.localStorage.getItem(todoSidebarPreferenceKey) === 'true'; } catch { return false; }
   });
   const [showTodoSidebar, setShowTodoSidebar] = useState(false);
+  /** The issue master whose chat the Todo page shows. */
+  const [issueChatId, setIssueChatId] = useState<string | null>(null);
+  /** How that chat is left, for the master's `close`. */
+  const issueChatClose = useRef<(() => void) | null>(null);
   const { mentionId: selectedSlackId, chatId: activeChatId } = slackChatSelection(slack?.events || [], requestedSlackId, selectedId);
   const [triggerEventId, setTriggerEventId] = useState<string | null>(null);
   /** The trigger monitor panel is open: its overview, a Slack mention, or a trigger run. */
@@ -132,8 +137,10 @@ function TowerApp() {
   const canvasRef = useRef<HTMLElement>(null);
   const canvasPointerScope = useRef(true);
   const sidebarToggleRef = useRef<HTMLButtonElement>(null);
-  // The page holds only the sessions its list shows and the opened session's family (shared/session-scope.ts).
-  const scope = useMemo(() => pageScope(period, showClosed, activeChatId), [period, showClosed, activeChatId]);
+  // The page holds only the sessions its list shows and the opened session's family (shared/session-scope.ts); the Todo
+  // page also every master session, for its issue masters, and the family of the issue chat it shows.
+  const scopeFocus = page === 'todo' && issueChatId ? issueChatId : activeChatId;
+  const scope = useMemo(() => pageScope(period, showClosed, scopeFocus, page === 'todo'), [period, showClosed, scopeFocus, page]);
   const scopeRef = useRef(scope);
   const tokenRef = useRef(token);
   tokenRef.current = token;
@@ -306,7 +313,7 @@ function TowerApp() {
   const closeAutoPrompt = useCallback(() => setShowAutoPrompt(false), []);
   // The master agent works the page through its own controls and setters, never through state of its own.
   const masterControls = useMemo(() => ({
-    selectSession,
+    selectSession: screenSelect(selectSession, () => issueChatClose.current),
     openNewSession,
     openAutoPrompt,
     showHelp: () => setShowHelp(true),
@@ -450,13 +457,13 @@ function TowerApp() {
       refresh();
     } finally { setChangingClosed(false); }
   }, [changingClosed, closeChat, connection, refresh, selectedMainSession, snapshots, token]);
-  const acknowledgeOutcome = useCallback(async () => {
-    if (!selectedMainSession || !token || connection !== 'connected') return;
-    const id = selectedMainSession.id;
+  const acknowledgeOutcomeOf = useCallback(async (id: string) => {
+    if (!token || connection !== 'connected') return;
     await api(pathFor(id, local => `/api/sessions/${encodeURIComponent(local)}/acknowledge`), { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}' });
     snapshots.provisional(previous => previous ? { ...previous, sessions: previous.sessions.map(session => session.id === id && (session.outcome === 'needsOwner' || session.outcome === 'blocked') ? { ...session, outcome: 'done' } : session) } : previous);
     refresh();
-  }, [connection, refresh, selectedMainSession, snapshots, token]);
+  }, [connection, refresh, snapshots, token]);
+  const acknowledgeOutcome = useCallback(async () => { if (selectedMainSession) await acknowledgeOutcomeOf(selectedMainSession.id); }, [acknowledgeOutcomeOf, selectedMainSession]);
   const sessionCreated = useCallback((session: Session, run: Run) => {
     // Another computer's new session arrives on its own stream.
     if (!session.node) snapshots.provisional(previous => previous ? { ...previous, sessions: previous.sessions.some(item => item.id === session.id) ? previous.sessions : [...previous.sessions, session], runs: previous.runs.some(item => item.id === run.id) ? previous.runs : [...previous.runs, run] } : previous);
@@ -468,6 +475,24 @@ function TowerApp() {
   const settingsContext = useMemo((): SettingsContext => ({ token, triggers: snapshot?.triggers, providers: snapshot?.providers || [], projects: localProjects, secretCanvas,
     computers: triggerComputers, targets: triggerTargets, controlledBy: snapshot?.controlledBy || [], showHidden, onShowHiddenChange: setShowHidden, onOpenSession: selectSession }),
   [token, snapshot?.triggers, snapshot?.providers, localProjects, secretCanvas, triggerComputers, triggerTargets, snapshot?.controlledBy, showHidden, selectSession]);
+  // The Todo page's issue masters: this computer's sessions, and their chat drawn as the canvas draws its own.
+  const localSessions = snapshot?.sessions;
+  const todoAgentView = useMemo((): TodoAgentView => {
+    const byId = new Map((localSessions ?? []).map(session => [session.id, session]));
+    return {
+      session: id => byId.get(id),
+      chat: (sessionId, onClose) => {
+        const session = byId.get(sessionId);
+        const runs = (view?.runs || []).filter(run => run.sessionId === sessionId).sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt));
+        return <ShownChat sessionId={sessionId} onShown={setIssueChatId} onClose={onClose} closer={issueChatClose}><Suspense fallback={<div className="chat-loading"><LoaderCircle className="spin" size={20} /></div>}>
+          <ChatPanel key={sessionId} sessionId={sessionId} session={session} allSessions={sessions} workspaceFolders={workspaceFolders} provider={(snapshot?.providers ?? []).find(item => item.provider === (session?.provider ?? (sessionId.startsWith('claude') ? 'claude' : 'codex')))}
+            compactionReady={!!snapshot?.compaction} runs={runs} token={token} connected={connection === 'connected'} onClose={onClose} onNavigate={onSelect} onSnapshotRefresh={refresh} onSessionUpdate={onSessionUpdate}
+            onAcknowledgeOutcome={() => acknowledgeOutcomeOf(sessionId)} />
+        </Suspense></ShownChat>;
+      },
+    };
+  }, [localSessions, view?.runs, sessions, workspaceFolders, snapshot?.providers, snapshot?.compaction, token, connection, onSelect, refresh, onSessionUpdate, acknowledgeOutcomeOf]);
+  const todoBadges = useTodoSessionBadges(snapshot?.todoRevision);
   const chatHostEntry = activeChatId ? hostOf(hosts, nodeOf(activeChatId)) : undefined;
   const chatHost = chatHostEntry?.node ? { name: chatHostEntry.name, live: chatHostEntry.live, canWork: chatHostEntry.canWork, problem: hostProblem(chatHostEntry), workspace: chatHostEntry.workspace, workspaceNote: workspaceNote(chatHostEntry), ...(chatHostEntry.compaction ? { compaction: true } : {}) }
     : activeChatId && nodeOf(activeChatId) ? { name: t("더 이상 연결되지 않은 컴퓨터"), live: false, canWork: false, workspace: false, problem: t("그 컴퓨터는 더 이상 연결되어 있지 않습니다.") } : undefined;
@@ -488,7 +513,7 @@ function TowerApp() {
     <header className="app-header"><div className="brand">{page === 'todo' ? <button className="icon-button sidebar-toggle" onClick={() => onTodoSidebarOpen(!todoSidebarOpen)} aria-label={todoSidebarOpen ? t("할 일 목록 접기") : t("할 일 목록 열기")} title={todoSidebarOpen ? t("할 일 목록 접기") : t("할 일 목록 열기")} aria-expanded={todoSidebarOpen}>{todoSidebarOpen ? <PanelLeftClose size={19} /> : <PanelLeftOpen size={19} />}</button> : <button ref={sidebarToggleRef} className="icon-button sidebar-toggle" onClick={() => sidebarIsDrawer ? setShowSidebar(value => !value) : setSidebarCollapsed(value => !value)} aria-label={sidebarOpen ? t("세션 목록 접기") : t("세션 목록 열기")} title={sidebarOpen ? t("세션 목록 접기") : t("세션 목록 열기")} aria-controls="session-sidebar" aria-expanded={sidebarOpen}>{sidebarOpen ? <PanelLeftClose size={19} /> : <PanelLeftOpen size={19} />}</button>}<span className="brand-mark"><BrandMark /></span><h1>Agent Session Tower</h1><span className="brand-local">local</span><PageSwitch page={page} onChange={switchPage} /></div><div className="header-center"><Monitor size={13} /><span>{snapshot?.hostname || t("이 Mac")}</span><span className="header-divider" /><span className="localhost">{window.location.host}</span></div><div className="header-actions"><span className={`connection-state ${connection}`} role="status">{connection === 'offline' ? <WifiOff size={12} /> : <i />}{connection === 'connected' ? t("실시간 연결") : connection === 'offline' ? t("재연결 중") : t("연결 중")}</span><TowerUpdateBadge snapshot={snapshot} /><RunnerUpdateBadge snapshot={snapshot} token={token} /><button className={`icon-button ${showHelp ? 'active' : ''}`} title={t("사용 안내")} aria-label={t("사용 안내")} aria-expanded={showHelp} onClick={() => setShowHelp(!showHelp)}><CircleHelp size={18} /></button><SettingsButton context={settingsContext} joined={snapshot?.controllerJoined} /></div></header>
     {connection === 'offline' && <div className="connection-banner" role="alert"><WifiOff size={14} /><span>{t("Monitor와의 연결이 끊겼습니다. 저장된 화면을 표시하며 자동으로 다시 연결합니다.")}</span><button onClick={refresh}>{t("다시 확인")}</button></div>}
     {showHelp && <div className="help-popover"><div className="help-heading"><h2>{t("내 컴퓨터의 에이전트를 한눈에")}</h2><button className="icon-button" onClick={() => setShowHelp(false)} aria-label={t("안내 닫기")}><X size={15} /></button></div><p>{t("Claude Code와 Codex의 로컬 세션 기록을 자동으로 읽습니다. 그래프의 에이전트를 선택하면 실제 대화를 보고 작업을 이어갈 수 있습니다.")}</p><div className="help-statuses"><span><i className="legend-dot working" /><b>{t("작업 중")}</b>{t("현재 실행 중인 작업")}</span><span><i className="legend-dot idle" /><b>{t("대기 중")}</b>{t("입력이나 다음 작업 대기")}</span><span><i className="legend-dot completed" /><b>{t("완료")}</b>{t("작업 종료가 기록된 세션")}</span></div><p>{t("상태는 프로세스와 세션 기록을 함께 확인합니다. 대화 상단의 프로젝트 이름을 누르면 상태 판단 근거를 볼 수 있습니다.")}</p><div className="help-privacy"><ShieldCheck size={16} /><span>{t("로컬에서 실행됩니다. 새 요청은 해당 CLI와 기존 로그인 계정을 사용합니다.")}</span></div>{page === 'todo' ? <div className="help-shortcuts"><span><kbd>1</kbd> <kbd>2</kbd> {t("캔버스·할 일 전환")}</span><span><kbd>Q</kbd> {t("작업 추가")}</span><span><kbd>/</kbd> {t("할 일 검색")}</span><span><kbd>B</kbd> <kbd>C</kbd> {t("보드·캘린더")}</span><span><kbd>Shift V</kbd> {t("보드·캘린더 전환")}</span><span><kbd>W</kbd> <kbd>M</kbd> {t("캘린더 주·월")}</span><span><kbd>↑↓←→</kbd> {t("작업 고르기")}</span><span><kbd>Enter</kbd> {t("고른 작업 열기")}</span><span><kbd>E</kbd> {t("고른 작업 완료")}</span><span><kbd>Shift E</kbd> {t("완료 및 후속작업")}</span><span><kbd>N</kbd> {t("후속 작업 추가")}</span><span><kbd>G T</kbd> {t("오늘로 이동")}</span><span><kbd>G U</kbd> {t("다가오는으로 이동")}</span><span><kbd>G I</kbd> {t("관리함으로 이동")}</span><span><kbd>Esc</kbd> {t("닫기·선택 해제")}</span><span><kbd>⌘ Z</kbd> {t("마지막 변경 되돌리기")}</span></div> : <div className="help-shortcuts"><span><kbd>1</kbd> <kbd>2</kbd> {t("캔버스·할 일 전환")}</span><span><kbd>/</kbd> {' '}{t("세션 검색")}</span><span><kbd>Shift N</kbd> {t("새 세션")}</span><span><kbd>Shift P</kbd> Auto Prompt</span><span><kbd>Shift A</kbd> {t("숨긴 폴더 표시 전환")}</span><span><kbd>Esc</kbd> {' '}{t("대화 닫기")}</span><span><kbd>⌘ Enter</kbd> {' '}{t("요청 보내기")}</span></div>}</div>}
-    {page === 'todo' && <div className="workspace todo-workspace"><Suspense fallback={<div className="chat-loading"><LoaderCircle className="spin" size={20} /></div>}><TodoPage token={token} revision={snapshot?.todoRevision} sidebarOpen={todoSidebarOpen} drawer={todoDrawer} onSidebarOpen={onTodoSidebarOpen} /></Suspense></div>}
+    {page === 'todo' && <div className="workspace todo-workspace"><Suspense fallback={<div className="chat-loading"><LoaderCircle className="spin" size={20} /></div>}><TodoAgentContext.Provider value={todoAgentView}><TodoPage token={token} revision={snapshot?.todoRevision} sidebarOpen={todoSidebarOpen} drawer={todoDrawer} onSidebarOpen={onTodoSidebarOpen} /></TodoAgentContext.Provider></Suspense></div>}
     {/* The canvas stays mounted, hidden, while Todo is shown, so its view, zoom and open conversation are as left. */}
     <div className="workspace" hidden={page === 'todo'}>
       {sidebarIsDrawer && sidebarOpen && <button className="sidebar-scrim" aria-label={t("세션 목록 닫기")} onClick={() => setShowSidebar(false)} />}
@@ -507,7 +532,7 @@ function TowerApp() {
         {!sessionListReady || (snapshot.scanning && sessions.length === 0 && !visiblePins.length && !monitorVisible(!!slack?.connected, snapshot.triggers)) ? <>
           {slackLoadError && !slack ? <div className="graph-loading"><TriangleAlert size={25} /><h3>{t("세션 표시 정보를 불러오지 못했습니다")}</h3><p role="alert">{translateMessage(slackLoadError)}</p><button className="secondary-button" onClick={() => void refreshSlack()}>{t("다시 시도")}</button></div> : <div className="graph-loading"><div className="loading-constellation"><span /><span /><span /><Monitor size={25} /></div><h3>{t("이 Mac의 에이전트를 찾고 있습니다")}</h3><p>{t("Claude Code와 Codex의 실제 세션 기록을 연결합니다.")}</p></div>}
         </> : <Graph slackUnreadIds={slackUnreadIds} slack={slack || undefined} selectedSlackId={selectedSlackId} onSelectSlack={selectSlack}
-          triggerOverview={snapshot.triggers} triggerEvents={triggerEvents} triggerUnreadIds={triggerUnreadIds} selectedTriggerEventId={triggerEventId} onSelectTriggerEvent={selectTriggerEvent} triggerHasMore={triggerHasMore} onMoreTriggers={loadMoreTriggers} token={token} providers={snapshot.providers} hosts={canvasHosts} allHosts={hosts} hostsComplete={hostsComplete} sessions={canvasSessions} projectFolders={summary.openFolders} sessionsReady={!snapshot.scanning} unreadIds={unreadIds} selectedId={selectedMainId} hostname={snapshot.hostname} onSelect={onSelect} onCanvasClick={closeChat} filterKey={`${filterKey}:${showHidden}`} groups={groups} visiblePins={visiblePins} groupSaving={groupSaving} groupErrors={groupErrors} groupActionsDisabled={!token || connection !== 'connected'} onGroupUpdate={updateGroup} onGroupCreate={openNewSession} onAutoPrompt={openAutoPrompt} repositories={view?.repositories} onRepositoryAction={repositoryAction} onIssue={setIssueCwd} emptyState={canvasEmptyState} />}
+          triggerOverview={snapshot.triggers} triggerEvents={triggerEvents} triggerUnreadIds={triggerUnreadIds} selectedTriggerEventId={triggerEventId} onSelectTriggerEvent={selectTriggerEvent} triggerHasMore={triggerHasMore} onMoreTriggers={loadMoreTriggers} token={token} providers={snapshot.providers} hosts={canvasHosts} allHosts={hosts} hostsComplete={hostsComplete} sessions={canvasSessions} projectFolders={summary.openFolders} sessionsReady={!snapshot.scanning} unreadIds={unreadIds} selectedId={selectedMainId} hostname={snapshot.hostname} onSelect={onSelect} onCanvasClick={closeChat} filterKey={`${filterKey}:${showHidden}`} groups={groups} visiblePins={visiblePins} groupSaving={groupSaving} groupErrors={groupErrors} groupActionsDisabled={!token || connection !== 'connected'} onGroupUpdate={updateGroup} onGroupCreate={openNewSession} onAutoPrompt={openAutoPrompt} repositories={view?.repositories} onRepositoryAction={repositoryAction} onIssue={setIssueCwd} emptyState={canvasEmptyState} todoBadges={todoBadges} />}
       </main>
       {monitorOpen && !activeChatId && <TriggerMonitorPanel token={token} slack={slack} slackError={slackError} mentionId={selectedSlackId} jobs={snapshot?.autoPrompts || []} slackUnreadIds={slackUnreadIds} onSlackRead={acknowledgeSlack}
         events={triggerEvents} eventId={triggerEventId} triggerUnreadIds={triggerUnreadIds} onTriggerRead={acknowledgeTrigger} hasMore={triggerHasMore} onMore={() => void loadMoreTriggers()} onEventUpdate={updateTriggerEvent} onClose={closeChat} onSelectMention={selectSlack} onSelectEvent={selectTriggerEvent} onNavigate={onSelect} />}
@@ -517,6 +542,18 @@ function TowerApp() {
     <AutoPromptDialog visible={showAutoPrompt} initialCwd={autoPromptCwd} initialNode={autoPromptNode === '' ? undefined : autoPromptNode ?? (autoPromptCwd ? undefined : selectedSession?.node)} providers={snapshot?.providers || []} hosts={hosts} projects={projects} sessions={sessions} jobs={view?.autoPrompts || []} token={token} connected={connection === 'connected'} onClose={closeAutoPrompt} onNavigate={openAutoPromptSession} onRefresh={refresh} />
     {issueCwd && <IssueDialog key={issueCwd} cwd={issueCwd} providers={snapshot?.providers || []} hosts={hosts} token={token} connected={connection === 'connected'} onClose={closeIssue} onCreated={sessionCreated} />}
     {showNewSession && <NewSessionDialog providers={snapshot?.providers || []} hosts={hosts} projects={projects} initialCwd={newSessionCwd || (selectedSession?.master ? undefined : selectedSession?.cwd) || (project !== 'all' ? project : undefined)} draft={newSessionDraft} token={token} connected={connection === 'connected'} onClose={closeNewSession} onCreated={sessionCreated} />}
-    {token && <ProvidersContext.Provider value={snapshot?.providers || []}><Suspense fallback={null}><MasterDock token={token} controls={masterControls} sessionId={page === 'todo' ? null : activeChatId ?? null} /></Suspense></ProvidersContext.Provider>}
+    {token && <ProvidersContext.Provider value={snapshot?.providers || []}><Suspense fallback={null}><MasterDock token={token} controls={masterControls} sessionId={page === 'todo' ? null : activeChatId ?? null} issueChat={page === 'todo' && !!issueChatId} /></Suspense></ProvidersContext.Provider>}
   </div>;
+}
+
+/** An issue chat the Todo page shows: while it does, the page holds its session's family and the master's screen commands come here. */
+function ShownChat({ sessionId, onShown, onClose, closer, children }: { sessionId: string; onShown: (id: string | null) => void; onClose: () => void; closer: { current: (() => void) | null }; children: ReactNode }) {
+  const latest = useRef(onClose);
+  latest.current = onClose;
+  useEffect(() => {
+    const close = () => latest.current();
+    onShown(sessionId); closer.current = close;
+    return () => { onShown(null); if (closer.current === close) closer.current = null; };
+  }, [sessionId, onShown, closer]);
+  return children;
 }

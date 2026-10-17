@@ -1,5 +1,5 @@
 import type { WorkerStorageStatus } from '../../shared/storage.js';
-import { MASTER_HEARTBEAT_HEADER, type HeartbeatAdmission } from '../../shared/master.js';
+import { MASTER_HEARTBEAT_HEADER, TODO_MASTER_ISSUE_HEADER, TODO_MASTER_TASK_ID, type HeartbeatAdmission } from '../../shared/master.js';
 import type { AttachmentStore } from '../stores/attachments.js';
 import type { AttachmentUploads } from '../stores/attachment-uploads.js';
 import { createServer, STATUS_CODES, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -759,7 +759,12 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
           return json(res, 200, { job: await backend.cancelAutoPrompt(id) });
         }
       }
-      if (await todoRoute(req, res, url, path, backend.todos, json)) return;
+      // Starting an issue master is the owner's own act, decided as for the secret vault's screens: a page (it names its
+      // origin) of the signed-in owner, or of this computer where no sign-in is asked, and nothing that names the master,
+      // a local agent, a calling turn or the todo tools' key, whether or not it proves it.
+      const ownerPage = Boolean(origin) && (identity.local || Boolean(auth?.session(sessionId, identity.ip))) && req.headers['x-tower-master'] === undefined
+        && req.headers['x-tower-agent'] === undefined && req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()] === undefined && !/^\s*TodoKey\b/i.test(req.headers.authorization ?? '');
+      if (await todoRoute(req, res, url, path, backend.todos, json, ownerPage)) return;
       if (req.method === 'POST' && path === '/api/groups') {
         const patch = normalizeProjectGroupPatch(await readJson(req));
         if (!backend.setGroup) return json(res, 503, { error: '폴더 그룹을 저장할 수 없습니다.' });
@@ -876,6 +881,9 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         const input = parseCreateSession(masterCall ? { ...body, modelRole: 'master.worker' } : body);
         if (!backend.createSession) return json(res, 503, { error: '새 세션을 생성할 수 없습니다.' });
         const result = await backend.createSession(input, callerContext());
+        // An issue master calls as the master does, naming its todo; only the verified master is believed.
+        const issue = masterCall ? req.headers[TODO_MASTER_ISSUE_HEADER.toLowerCase()] : undefined;
+        if (typeof issue === 'string' && TODO_MASTER_TASK_ID.test(issue)) backend.todos?.issueSession?.(issue, result.session.id);
         return json(res, 202, { ...result, session: publicSession(result.session) });
       }
       const compactionMatch = path.match(/^\/api\/sessions\/([^/]+)\/compaction(\/cancel)?$/);

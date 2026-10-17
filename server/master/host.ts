@@ -8,13 +8,14 @@ import type { Provider } from '../../shared/types.js';
 import { acquireStateLock, MonitorAlreadyRunning } from '../instance/state-lock.js';
 import { LiveState } from '../tower-tools/live-state.js';
 import { lookupsSupported, ReadDatabase } from '../tower-tools/read-db.js';
-import { masterPaths } from './paths.js';
+import { ISSUE_INSTANCE, masterPaths } from './paths.js';
 import { MasterRoom } from './room.js';
 import { HeartbeatTools } from './heartbeat-tools.js';
 import { MasterHeartbeat } from './heartbeat.js';
 import { MasterSession } from './session.js';
 import { MasterSettingsStore } from './settings.js';
-import { MASTER_TOOLS, MasterTools } from './tools.js';
+import { MASTER_TOOLS, MasterScreen, MasterTools } from './tools.js';
+import { IssueMasters } from './issues.js';
 import { TowerClient, type WebCredentials } from '../tower-tools/tower-client.js';
 import { ElevenLabs, type ElevenLabsOptions } from './elevenlabs.js';
 import { FirstReplyMaker } from './first-reply.js';
@@ -43,9 +44,9 @@ const failure = (message: string, kind: ErrorKind) => new TowerError(kind, messa
 
 /**
  * The master's own process: it keeps the master session's guide, gives the session Tower's page tools, follows the
- * work the master hands out and reports when it ends, and runs the voice. The web starts it and talks to it over an
- * owner-only socket; the session's tool server reaches it the same way. It keeps running when the web restarts, and
- * while a master session exists, so no report is missed.
+ * work the master hands out and reports when it ends, and runs the voice. It does the same, voice aside, for each issue
+ * master (issues.ts). The web starts it and talks to it over an owner-only socket; the sessions' tool servers reach it
+ * the same way. It keeps running when the web restarts, and while a master session exists, so no report is missed.
  */
 export async function startMasterHost(options: MasterHostOptions) {
   const paths = await masterPaths(options.stateDir);
@@ -61,6 +62,7 @@ export async function startMasterHost(options: MasterHostOptions) {
   let session: MasterSession | undefined;
   let heartbeat: MasterHeartbeat | undefined;
   let tools: MasterTools | undefined;
+  let issues: IssueMasters | undefined;
   let heartbeatTools: HeartbeatTools | undefined;
   let voice: MasterVoice | undefined;
   let lastRequest = Date.now();
@@ -95,7 +97,7 @@ export async function startMasterHost(options: MasterHostOptions) {
   const broadcastOverview = () => room.broadcast({ type: 'overview', seq: 0, overview: overview() });
   // A host of another build steps aside unless a report is on its way, a tool is being answered, or something is being
   // read aloud (a turn read while it is written, audio being made, or a page's word awaited).
-  const working = () => pending > 1 || Boolean(session?.busy()) || Boolean(voice?.busy());
+  const working = () => pending > 1 || Boolean(session?.busy()) || Boolean(issues?.busy()) || Boolean(voice?.busy());
   const dispatch = async (method: string, args: Record<string, unknown>) => {
     const master = session!;
     const speech = voice!;
@@ -137,7 +139,11 @@ export async function startMasterHost(options: MasterHostOptions) {
       case 'tools': return MASTER_TOOLS;
       case 'tool': {
         if (typeof args.name !== 'string' || !args.arguments || typeof args.arguments !== 'object' || Array.isArray(args.arguments)) throw failure('도구 호출이 올바르지 않습니다.', 'invalid');
-        return tools!.call(args.name, args.arguments as Record<string, unknown>);
+        if (args.instance === undefined) return tools!.call(args.name, args.arguments as Record<string, unknown>);
+        // An issue master's call: it goes as the main master's do, naming its todo.
+        const issue = typeof args.instance === 'string' ? ISSUE_INSTANCE.exec(args.instance)?.[1] : undefined;
+        if (!issue) throw failure('도구 호출이 올바르지 않습니다.', 'invalid');
+        return issues!.call(issue, args.name, args.arguments as Record<string, unknown>);
       }
       case 'voiceOn': return speech.voiceOn({ tabId: args.tabId, local: args.local === true });
       case 'voiceOff': return speech.voiceOff({ session: args.session });
@@ -230,7 +236,7 @@ export async function startMasterHost(options: MasterHostOptions) {
     await new Promise<void>(resolve => server.close(() => resolve()));
     await unlink(paths.socket).catch(() => {});
     await unlink(paths.token).catch(() => {});
-    try { await toolsDrain; await heartbeatDrain; await voice?.close(); await session?.close(); await room.flush(); } finally {
+    try { await toolsDrain; await heartbeatDrain; await voice?.close(); await issues?.close(); await session?.close(); await room.flush(); } finally {
       live.close();
       readDb?.close();
       await release();
@@ -241,8 +247,13 @@ export async function startMasterHost(options: MasterHostOptions) {
   try {
     await settings.start();
     await room.start();
-    session = new MasterSession({ stateDir: paths.stateDir, dataDir: paths.data, settings, tower, live, room, onChange: broadcastOverview, ...(options.followMs ? { followMs: options.followMs } : {}) });
-    tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), broadcast: event => room.broadcast(event), started: (target, body, answer) => session!.started(target, body, answer), delegated: () => session!.delegatedTable() });
+    // The owner's screen is one, whichever master uses it.
+    const screen = new MasterScreen({ broadcast: event => room.broadcast(event) });
+    const masters = issues = new IssueMasters({ stateDir: paths.stateDir, dataDir: paths.data, tower, live, ...(readDb ? { readDb } : {}), screen, main: { binding: () => session?.binding() },
+      ...(options.followMs ? { followMs: options.followMs } : {}) });
+    session = new MasterSession({ stateDir: paths.stateDir, dataDir: paths.data, settings, tower, live, room, onChange: broadcastOverview,
+      otherMaster: { session: id => masters.masterSession(id), run: id => masters.masterRun(id) }, turns: masters.turnsOf(), ...(options.followMs ? { followMs: options.followMs } : {}) });
+    tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), screen, started: (target, body, answer) => session!.started(target, body, answer), delegated: () => session!.delegatedTable() });
     const elevenLabs = new ElevenLabs({ key: () => settings.voiceKey(), ...options.voice?.elevenLabs });
     voice = new MasterVoice({ dataDir: paths.data, settings, room, elevenLabs, firstReply: options.voice?.firstReply ?? new FirstReplyMaker({ stateDir: paths.stateDir }), ...(options.voice?.timing ? { timing: options.voice.timing } : {}),
       hooks: { hide: text => text, connectedSince: () => tower.connectedSince(), send: input => session!.spoken({ text: input.text, key: input.voice.key, voiceSession: input.voice.session ?? '' }),
@@ -254,6 +265,7 @@ export async function startMasterHost(options: MasterHostOptions) {
     await heartbeat.start();
     heartbeatTools = new HeartbeatTools({ stateDir: paths.stateDir, dataDir: paths.data, tower, settings, master: session, status: () => heartbeat!.status() });
     await heartbeatTools.start();
+    issues.start();
     await unlink(paths.socket).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
     await unlink(paths.token).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(paths.socket, () => { server.off('error', reject); resolve(); }); });
@@ -262,12 +274,12 @@ export async function startMasterHost(options: MasterHostOptions) {
     await writeFile(paths.token, token, { flag: 'wx', mode: 0o600 });
     stopKeeping = keepEndpoint({ socket: paths.socket, token: paths.token, value: token });
     idleTimer = setInterval(() => {
-      // With a master session it stays, to report the work handed out whenever it ends.
-      if (closing || pending || streams.size || settings.current().session || Date.now() - lastRequest < (options.idleMs ?? IDLE_MS)) return;
+      // With a master session (the main master's or an issue master's) it stays, to report the work handed out whenever it ends.
+      if (closing || pending || streams.size || settings.current().session || issues?.size() || Date.now() - lastRequest < (options.idleMs ?? IDLE_MS)) return;
       void close(true).catch(error => { console.error(`Master host idle cleanup failed: ${(error as NodeJS.ErrnoException)?.code ?? 'error'}`); });
     }, 1000);
     idleTimer.unref();
-    return { socketPath: paths.socket, close, session, tools };
+    return { socketPath: paths.socket, close, session, tools, issues };
   } catch (error) { await close(); throw error; }
 }
 

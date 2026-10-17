@@ -471,13 +471,13 @@ test('every column a delete cascades through is indexed, so removing old rows ne
   }
 });
 
-test('a backup holds every table but the file’s own bookkeeping', async t => {
+test('a backup holds every table but the file’s own bookkeeping and this computer\'s issue masters', async t => {
   const { dir, store } = await fixture(t);
   store.close();
   const db = new DatabaseSync(join(dir, 'todos.sqlite'), { readOnly: true });
   t.after(() => db.close());
   const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name).sort();
-  assert.deepEqual(tables, [...TODO_DATA_TABLES, 'todo_meta', 'todo_requests'].sort());
+  assert.deepEqual(tables, [...TODO_DATA_TABLES, 'todo_meta', 'todo_requests', 'todo_agents', 'todo_agent_sessions'].sort());
 });
 
 test('restoring below a task closed with its parent ties the restored task to the top completion', async t => {

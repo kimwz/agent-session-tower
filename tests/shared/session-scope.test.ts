@@ -23,6 +23,23 @@ test('a scope is read from the page request and written back the same way; anyth
   assert.deepEqual(scopeFromBody(null), { closed: false });
   assert.ok(sameScope({ days: 1, closed: false }, { days: 1, closed: false }));
   assert.ok(!sameScope({ days: 1, closed: false }, { days: 1, closed: false, focus: 'a' }));
+  const masters = scopeFromParams(new URLSearchParams(scopeParams({ closed: false, masters: true })));
+  assert.deepEqual(masters, { closed: false, masters: true });
+  assert.deepEqual(scopeFromBody({ masters: true }), { closed: false, masters: true });
+  assert.ok(!sameScope({ closed: false }, masters!));
+});
+
+test('with masters the page also holds every open master session, without their subagents', () => {
+  const sessions = [
+    session('recent'),
+    session('master', { master: true, lastCompletedAt: hoursAgo(500), createdAt: hoursAgo(500) }),
+    session('master-sub', { master: true, isSubagent: true, parentId: 'master' }),
+    session('issue', { master: true }),
+    session('issue-closed', { master: true, closed: true }),
+  ];
+  const select = sessionSelector({ sessions, runs: [] }, NOW);
+  assert.deepEqual(ids(select({ days: 1, closed: false })), ['recent']);
+  assert.deepEqual(ids(select({ days: 1, closed: false, masters: true })), ['recent', 'master', 'issue']);
 });
 
 test('the default scope holds only the open main sessions the list can show', () => {

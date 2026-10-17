@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { MASTER_FOLDER } from '../../shared/master.js';
+import { MASTER_FOLDER, TODO_MASTER_TASK_ID, TODO_MASTERS_FOLDER } from '../../shared/master.js';
 import type { Session } from '../../shared/types.js';
 
 /**
@@ -38,7 +38,21 @@ function canonical(path: string): string {
  */
 export function subscriptionOnly(stateDir: string, cwd: string): boolean {
   if (resolve(cwd) === join(resolve(stateDir), MASTER_FOLDER)) return true;
-  return canonical(cwd) === masterFolder(stateDir);
+  return canonical(cwd) === masterFolder(stateDir) || todoMasterTaskId(stateDir, cwd) !== undefined;
+}
+/**
+ * The todo whose issue master runs in this folder: `<state>/todo-masters/<taskId>` exactly, as written or under the
+ * state directory with links followed (as a CLI records where it runs). Folders below it are not issue masters.
+ */
+export function todoMasterTaskId(stateDir: string, cwd: string): string | undefined {
+  if (!cwd || !cwd.startsWith('/')) return undefined;
+  const path = resolve(cwd);
+  for (const root of [join(resolve(stateDir), TODO_MASTERS_FOLDER), todoMastersFolder(stateDir)]) {
+    if (dirname(path) !== root) continue;
+    const id = basename(path);
+    if (TODO_MASTER_TASK_ID.test(id)) return id;
+  }
+  return undefined;
 }
 /**
  * Whether a folder is the master's or inside it, for lists that leave the master out. Decided without asking the disk
@@ -47,8 +61,24 @@ export function subscriptionOnly(stateDir: string, cwd: string): boolean {
 export function inMasterFolder(stateDir: string, cwd: string): boolean {
   if (!cwd || !cwd.startsWith('/')) return false;
   const path = resolve(cwd);
-  return [join(resolve(stateDir), MASTER_FOLDER), masterFolder(stateDir)].some(folder => path === folder || path.startsWith(`${folder}/`));
+  if ([join(resolve(stateDir), MASTER_FOLDER), masterFolder(stateDir)].some(folder => path === folder || path.startsWith(`${folder}/`))) return true;
+  return [join(resolve(stateDir), TODO_MASTERS_FOLDER), todoMastersFolder(stateDir)].some(folder => path.startsWith(`${folder}/`));
 }
+/** What decides which session in a todo's folder is its issue master. */
+export interface IssueMasterCandidate { id: string; cwd: string; createdAt: string; isSubagent?: boolean; parentId?: string; launchedByAgent?: boolean; node?: string }
+/**
+ * The sessions in a todo's issue-master folder that can be its master: top-level conversations Tower runs there on this
+ * computer, not their sub-agents nor helpers an agent started there (`claude -p`, `codex exec`). The web and the master
+ * host both choose the newest of these, so they always agree on which one is the master.
+ */
+export function issueMasterCandidates<T extends IssueMasterCandidate>(stateDir: string, taskId: string, sessions: readonly T[]): T[] {
+  return sessions.filter(session => !session.node && !session.isSubagent && !session.parentId && !session.launchedByAgent && todoMasterTaskId(stateDir, session.cwd) === taskId);
+}
+/** The newest of `issueMasterCandidates`. */
+export function newestIssueMaster<T extends IssueMasterCandidate>(stateDir: string, taskId: string, sessions: readonly T[]): T | undefined {
+  return issueMasterCandidates(stateDir, taskId, sessions).reduce<T | undefined>((newest, session) => !newest || Date.parse(session.createdAt) > Date.parse(newest.createdAt) ? session : newest, undefined);
+}
+
 /** Sessions marked as the master's (and its subagents'). */
 export function markMaster(sessions: Session[], stateDir: string): Session[] {
   return sessions.map(session => inMasterFolder(stateDir, session.cwd) ? { ...session, master: true } : session);
@@ -57,11 +87,14 @@ export function markMaster(sessions: Session[], stateDir: string): Session[] {
 export const withoutMasterFolder = <T extends { cwd: string }>(groups: T[], stateDir: string): T[] => groups.filter(group => !inMasterFolder(stateDir, group.cwd));
 /** The master's folder with links followed (itself included), kept a little so busy callers do not ask the disk each time. */
 const folders = new Map<string, { path: string; at: number }>();
-function masterFolder(stateDir: string): string {
-  const known = folders.get(stateDir);
+function masterFolder(stateDir: string): string { return knownFolder(stateDir, MASTER_FOLDER); }
+function todoMastersFolder(stateDir: string): string { return knownFolder(stateDir, TODO_MASTERS_FOLDER); }
+function knownFolder(stateDir: string, name: string): string {
+  const key = `${stateDir}\0${name}`;
+  const known = folders.get(key);
   if (known && Date.now() - known.at < 10_000) return known.path;
-  const path = canonical(join(stateDir, MASTER_FOLDER));
-  folders.set(stateDir, { path, at: Date.now() });
+  const path = canonical(join(stateDir, name));
+  folders.set(key, { path, at: Date.now() });
   return path;
 }
 

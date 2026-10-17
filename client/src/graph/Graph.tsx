@@ -22,6 +22,7 @@ import { graphProjectId, graphProjectKey, graphSessionGroups, clearHostPosition,
 import { defaultGraphPreferences, GRAPH_PREFERENCES_KEY, manualSessionGroups, moveManualGraphNodes, parseGraphPreferences, projectColumns, projectGrid, PROJECT_GAP, reconcileManualGraph, setGraphLayoutMode, setProjectColumns, type GraphLayoutMode, type GraphPreferences, type ProjectFrame } from './graph-layout-preferences';
 import { includePinnedProjectGroups, projectGroupLabel } from '../project-groups/project-groups';
 import { publishCanvasControls } from './canvas-controls-store';
+import type { TodoSessionBadge } from '../todo/todo-agents';
 import { GRAPH_FIT, graphFitSignature } from './graph-fit';
 import { projectGroupMinimumWidth, projectGroupTitleMeasurer } from '../project-groups/project-group-title';
 
@@ -33,7 +34,9 @@ type GraphProps = { slackUnreadIds?: ReadonlySet<string>; slack?: SlackPublicSta
   /** The list of joined computers is final; until then nothing saved for one of them is forgotten. */
   hostsComplete?: boolean;
   /** Every joined computer, including those the computer filter leaves off the canvas. */
-  allHosts?: Host[]; sessions: Session[]; projectFolders?: ReadonlyArray<Pick<Session, 'cwd' | 'node' | 'project'>>; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string, draft?: SessionDraft) => void; onAutoPrompt: (cwd?: string, node?: string) => void; repositories?: RepositoryStatus[]; onRepositoryAction?: (cwd: string, action: RepositoryAction) => Promise<string | undefined>; onIssue?: (cwd: string) => void; emptyState?: ReactNode };
+  allHosts?: Host[]; sessions: Session[]; projectFolders?: ReadonlyArray<Pick<Session, 'cwd' | 'node' | 'project'>>; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string, draft?: SessionDraft) => void; onAutoPrompt: (cwd?: string, node?: string) => void; repositories?: RepositoryStatus[]; onRepositoryAction?: (cwd: string, action: RepositoryAction) => Promise<string | undefined>; onIssue?: (cwd: string) => void; emptyState?: ReactNode;
+  /** The todo of each session in an open issue family, by session id. */
+  todoBadges?: Readonly<Record<string, TodoSessionBadge>> };
 
 const noEvents: TriggerEvent[] = [];
 
@@ -48,7 +51,7 @@ function viewportTransitionDuration() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 280;
 }
 
-function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, triggerOverview, triggerEvents = noEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore = false, onMoreTriggers, token = '', providers, hosts, hostsComplete = true, allHosts, sessions, projectFolders = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, repositories, onRepositoryAction, onIssue, emptyState }: GraphProps) {
+function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, triggerOverview, triggerEvents = noEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore = false, onMoreTriggers, token = '', providers, hosts, hostsComplete = true, allHosts, sessions, projectFolders = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, repositories, onRepositoryAction, onIssue, emptyState, todoBadges }: GraphProps) {
   const { language } = useI18n();
   const { fitView, zoomIn, zoomOut, getViewport, setViewport } = useReactFlow();
   const canvas = useRef<HTMLDivElement>(null);
@@ -182,7 +185,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
         es.push({ id: `${hostId}-${projectId}`, source: hostId, target: projectId, type: 'project', zIndex: 0, animated: motion && !stale && members.some(s => s.status === 'working'), style: { stroke: '#2e3e52', strokeWidth: 1.2 }, pathOptions: { borderRadius: 14 } } as Edge);
         // Cards keep flat world positions and follow their folder's corner in its grid.
         members.forEach((session, index) => {
-          ns.push({ id: session.id, type: 'agent', position: { x: origin.x + grid.cards[index].x, y: origin.y + grid.cards[index].y }, zIndex: 3, data: { session, selected: session.id === selectedId, unread: unreadIds?.has(session.id) || false, onSelect, stale }, style: { pointerEvents: 'all' }, draggable: false, selectable: false, focusable: false });
+          ns.push({ id: session.id, type: 'agent', position: { x: origin.x + grid.cards[index].x, y: origin.y + grid.cards[index].y }, zIndex: 3, data: { session, selected: session.id === selectedId, unread: unreadIds?.has(session.id) || false, onSelect, stale, todo: session.node ? undefined : todoBadges?.[session.id]?.title }, style: { pointerEvents: 'all' }, draggable: false, selectable: false, focusable: false });
         });
         x += grid.width + PROJECT_GAP;
       });
@@ -218,7 +221,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
       es.push({ id: 'host-monitor', source: 'host', target: TRIGGER_MONITOR_ID, type: 'smoothstep', animated: motion && active > 0, style: { stroke: '#675077', strokeWidth: 1.2 } });
     }
     return { modelNodes: ns, edges: es, shown: grouped.reduce((total, [, members]) => total + members.length, 0) };
-  }, [slackUnreadIds, slack, slackLimit, slackPosition, selectedSlackId, onSelectSlack, showMoreSlack, showMonitor, monitorTotal, triggerOverview, triggerEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore, token, sessions, selectedId, onSelect, machines, language, motion, grouped, columns, changeColumns, manual, manualLayout, unreadIds, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt, repositoryByPath, onRepositoryAction, onIssue]);
+  }, [slackUnreadIds, slack, slackLimit, slackPosition, selectedSlackId, onSelectSlack, showMoreSlack, showMonitor, monitorTotal, triggerOverview, triggerEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore, token, sessions, selectedId, onSelect, machines, language, motion, grouped, columns, changeColumns, manual, manualLayout, unreadIds, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt, repositoryByPath, onRepositoryAction, onIssue, todoBadges]);
 
   const [nodes, setNodes] = useState(modelNodes);
   const visibleProjectKey = modelNodes.filter(node => node.type === 'projectGroup' || node.type === 'triggerMonitor').map(node => node.id).join('|');

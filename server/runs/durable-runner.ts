@@ -243,7 +243,7 @@ export class DurableRunManager extends EventEmitter {
     if (!this.supports('workerClosed')) throw new TowerError('unavailable', '실행 워커 업데이트 후 세션 표시 상태를 저장할 수 있습니다.');
     return this.call('setClosed', [id, closed]) as Promise<Session | undefined>;
   }
-  async retention(action: string, value?: string, extra?: string): Promise<unknown> {
+  async retention(action: string, value?: string | readonly string[], extra?: string): Promise<unknown> {
     if (!this.supports('retention')) throw new TowerError('unavailable', '실행 워커가 아직 업데이트되지 않아 세션 보관 정책을 사용할 수 없습니다. 진행 중인 작업이 끝나면 업데이트됩니다.');
     return this.call('retention', [action, value, extra]);
   }

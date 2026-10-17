@@ -68,6 +68,8 @@ export interface Followed {
   reportAt?: string;
   /** A spoken request's key (from its client message ID), so the same request is sent once. */
   key?: string;
+  /** Work sent to another master's session: reported when its turn ends, but what that master hands out is its own. */
+  master?: true;
   /** Spoken or report runs that share one turn (steered into it) are read aloud once, as that turn's answer. */
   turn?: string;
   spoke?: true;
@@ -86,7 +88,8 @@ export interface Followed {
 export interface VoicedTurn { turn: string; state: 'started' | 'stopped' | 'done'; at: string }
 const VOICED = 200;
 
-interface FollowFile { version: 1; baselineAt: string; masterRuns: string[]; followed: Followed[]; voiced?: VoicedTurn[]; stoppedAt?: string }
+/** `closedAt`: an issue master's session was closed then; its file waits there to be opened again or cleared away. */
+interface FollowFile { version: 1; baselineAt: string; masterRuns: string[]; followed: Followed[]; voiced?: VoicedTurn[]; stoppedAt?: string; closedAt?: string }
 
 /** What the voice gets from the master session. */
 export interface VoiceSide {
@@ -109,11 +112,26 @@ const FINISHED_RUN = new Set<Run['status']>(['completed', 'error', 'cancelled'])
 export interface MasterSessionOptions {
   stateDir: string;
   dataDir: string;
-  settings: MasterSettingsStore;
+  /** The main master's settings, which hold its session. An issue master has none and is given its session instead. */
+  settings?: MasterSettingsStore;
+  /** The session this master is, when it is not the main master's (an issue master: server/master/issues.ts). */
+  binding?: () => MasterBinding | undefined;
+  /** Its folder and guide; the main master's unless given. */
+  folder?: string;
+  writeGuide?: (folder: string) => Promise<void>;
+  /** Where a new follow file starts looking for work: an issue master may have handed work out before it is first seen. */
+  baselineAt?: string;
+  /**
+   * The other masters (the main master and the other issue masters). Work is attributed to the nearest master: what
+   * another master's turn hands out is that master's, even when it began with a message from this one.
+   */
+  otherMaster?: { session(id: string): boolean; run(id: string): boolean };
+  /** Told of this master's own turns as they are remembered and forgotten, so other masters can tell them apart. */
+  turns?: { add(runId: string): void; delete(runId: string): void };
   tower: TowerClient;
   live: LiveState;
-  /** The voice's ledger: spoken requests and what is read aloud. */
-  room: MasterRoom;
+  /** The voice's ledger: spoken requests and what is read aloud. Only the main master has one. */
+  room?: MasterRoom;
   followMs?: number;
   /** Tests shorten the wait before a refused report goes again. */
   reportRetryMs?: number;
@@ -144,8 +162,9 @@ export class MasterSession {
   private lookScheduled = false;
 
   constructor(private readonly options: MasterSessionOptions) {
-    this.folder = join(options.stateDir, MASTER_FOLDER);
+    this.folder = options.folder ?? join(options.stateDir, MASTER_FOLDER);
     this.path = join(options.dataDir, 'follow.json');
+    if (options.baselineAt) this.file.baselineAt = options.baselineAt;
   }
 
   async start(): Promise<void> {
@@ -163,8 +182,11 @@ export class MasterSession {
       if (item.report === 'sending') item.report = 'uncertain';
       if (item.kind === 'spoken' && !item.runId && item.state === 'running') item.state = 'unknown';
     }
+    for (const id of this.file.masterRuns) this.options.turns?.add(id);
+    // Started again, an issue master's session is open again.
+    delete this.file.closedAt;
     await this.save();
-    await writeMasterGuide(this.folder);
+    await (this.options.writeGuide ?? writeMasterGuide)(this.folder);
     this.timer = setInterval(() => { void this.follow(); }, this.options.followMs ?? FOLLOW_MS);
     this.timer.unref();
     this.unsubscribeLive = this.options.live.subscribe?.(() => this.changed());
@@ -235,7 +257,16 @@ export class MasterSession {
   heartbeatStopped(): boolean { return Boolean(this.file.stoppedAt) || !this.persist; }
   async heartbeatAccepted(run: Run): Promise<void> { this.remember(run.id); await this.save(); }
 
-  binding(): MasterBinding | undefined { return this.options.settings.current().session; }
+  binding(): MasterBinding | undefined { return this.options.binding ? this.options.binding() : this.options.settings?.current().session; }
+
+  /** The main master's settings; an issue master is started and let go of by the web, never here. */
+  private settings(): MasterSettingsStore {
+    if (!this.options.settings) throw new TowerError('conflict', '이 마스터는 여기서 시작하거나 놓을 수 없습니다.');
+    return this.options.settings;
+  }
+
+  /** This master's own turns, as far back as they are kept. */
+  ownRuns(): readonly string[] { return this.file.masterRuns; }
 
   /** Work handed out and not reported yet. */
   activeTasks(): number { return this.file.followed.filter(item => item.kind === 'delegated' && (item.state === 'running' || (item.report !== undefined && item.report !== 'sent' && item.report !== 'failed'))).length; }
@@ -289,6 +320,7 @@ export class MasterSession {
    * ordinary session. A start whose answer was lost is not tried again: the owner sees it in the session list.
    */
   begin(input: { provider: Provider; text: string; model?: string; effort?: string; replace?: boolean }): Promise<MasterBinding> {
+    const settings = this.settings();
     if (this.starting) throw new TowerError('conflict', '마스터 세션을 시작하는 중입니다.');
     const run = async (): Promise<MasterBinding> => {
       if (this.binding() && !input.replace) throw new TowerError('conflict', '마스터 세션이 이미 있습니다.');
@@ -303,7 +335,7 @@ export class MasterSession {
           : replyError(`마스터 세션을 시작하지 못했습니다${message ? `: ${message}` : '.'}`, response, 'upstream');
       }
       const binding: MasterBinding = { sessionId: created.session.id, provider: input.provider, startedAt: new Date().toISOString() };
-      await this.options.settings.bind(binding);
+      await settings.bind(binding);
       if (created.run?.id) this.remember(created.run.id);
       await this.save();
       this.options.onChange?.();
@@ -314,7 +346,7 @@ export class MasterSession {
 
   /** Lets go of the master session; the next message starts a new one. The session itself stays as it is. */
   async release(): Promise<void> {
-    await this.options.settings.bind(undefined);
+    await this.settings().bind(undefined);
     this.options.onChange?.();
   }
 
@@ -335,7 +367,7 @@ export class MasterSession {
     this.add(item);
     this.voice?.timings?.mark(timingKey(item), 'request', Date.now(), { kind: 'answer' });
     await this.save();
-    this.options.room.add({ kind: 'owner', text: input.text, voice: true });
+    this.options.room?.add({ kind: 'owner', text: input.text, voice: true });
     const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(binding.sessionId)}/messages`, { prompt }, { write: true })
       .catch(() => ({ state: 'uncertain' as const, status: 0, body: undefined }));
     const run = (response.body as { run?: Run } | undefined)?.run;
@@ -366,7 +398,8 @@ export class MasterSession {
     // Work sent to the master session itself is its own conversation, not work handed out.
     if (!target.node && found.sessionId === this.binding()?.sessionId) return;
     if (this.file.followed.some(item => (found.runId && item.runId === found.runId) || (found.jobId && item.jobId === found.jobId))) return;
-    this.add({ id: randomUUID(), kind: 'delegated', title, ...found, ...(target.node ? { node: target.node } : {}), ...(value.run?.delegation ? { rootRunId: value.run.delegation.rootRunId } : {}), ...(prompt ? { prompt } : {}), createdAt: new Date().toISOString(), state: 'running' });
+    const master = !target.node && !!found.sessionId && Boolean(this.options.otherMaster?.session(found.sessionId));
+    this.add({ id: randomUUID(), kind: 'delegated', title, ...found, ...(target.node ? { node: target.node } : {}), ...(master ? { master: true as const } : {}), ...(value.run?.delegation ? { rootRunId: value.run.delegation.rootRunId } : {}), ...(prompt ? { prompt } : {}), createdAt: new Date().toISOString(), state: 'running' });
     await this.save();
     this.options.onChange?.();
   }
@@ -388,7 +421,8 @@ export class MasterSession {
     const binding = this.binding();
     if (this.closed || !binding || !this.options.tower.hasCredentials()) return;
     const snapshot = await this.options.live.fresh();
-    if (!snapshot) return;
+    // Let go of (an issue master closed) while it waited: it looks no further and reports nothing.
+    if (!snapshot || this.closed) return;
     let changed = this.discover(snapshot, binding);
     for (const item of this.file.followed.filter(entry => entry.state === 'running')) {
       if (this.closed) return;
@@ -399,7 +433,7 @@ export class MasterSession {
       if (item.currentRunId !== current) changed = true;
     }
     if (await this.reconcile(snapshot, binding)) changed = true;
-    if (await this.sendReports(binding)) changed = true;
+    if (!this.closed && await this.sendReports(binding)) changed = true;
     if (changed) { this.trim(); await this.save(); this.options.onChange?.(); }
   }
 
@@ -431,20 +465,43 @@ export class MasterSession {
       }
       if (run?.steering?.state === 'delivered' && item.turn !== run.steering.targetRunId) { item.turn = run.steering.targetRunId; changed = true; }
     }
-    const callers = new Set([...this.file.masterRuns, ...this.file.followed.filter(item => item.kind === 'delegated' && !item.node)
-      .flatMap(item => [item.runId, item.currentRunId, item.rootRunId, item.turn].filter((id): id is string => !!id))]);
-    const ours = (item: Pick<Run, 'origin' | 'delegation'>) => item.delegation
-      ? callers.has(item.delegation.parentRunId) || callers.has(item.delegation.rootRunId)
-      : item.origin?.kind === 'agent' && !!item.origin.runId && callers.has(item.origin.runId);
+    // Another master's turns are reported when they end, but what they hand out is that master's (its nearest master).
+    const runs = new Map((snapshot.runs ?? []).map(run => [run.id, run]));
+    const otherSession = (id: string | undefined) => !!id && id !== binding.sessionId && Boolean(this.options.otherMaster?.session(id));
+    // Work sent to another master is marked so for good: the boundary holds after that master's session is gone too.
+    for (const item of this.file.followed) {
+      if (item.kind === 'delegated' && !item.node && !item.master && otherSession(item.sessionId)) { item.master = true; changed = true; }
+    }
+    const own = new Set(this.file.masterRuns);
+    const boundary = new Set(this.file.followed.filter(item => item.master).flatMap(item => [item.runId, item.currentRunId, item.turn].filter((id): id is string => !!id)));
+    const otherRun = (id: string) => {
+      if (own.has(id)) return false;
+      if (boundary.has(id)) return true;
+      const run = runs.get(id);
+      return run ? otherSession(run.sessionId) : Boolean(this.options.otherMaster?.run(id));
+    };
+    // Another master's turns, and first callers that were another master's, never call on this master's behalf.
+    const callers = new Set([...this.file.masterRuns, ...this.file.followed.filter(item => item.kind === 'delegated' && !item.node && !item.master && !otherSession(item.sessionId))
+      .flatMap(item => [item.runId, item.currentRunId, item.rootRunId, item.turn].filter((id): id is string => !!id && !otherRun(id)))]);
+    const ours = (item: Pick<Run, 'origin' | 'delegation'>) => {
+      if (!item.delegation) return item.origin?.kind === 'agent' && !!item.origin.runId && callers.has(item.origin.runId);
+      const { parentRunId, rootRunId } = item.delegation;
+      if (otherRun(parentRunId)) return false;
+      if (callers.has(parentRunId)) return true;
+      // The nearest master decides, through the parent; the first caller stands in only for a parent no longer there.
+      const parent = runs.get(parentRunId);
+      return (!parent || !after(parent.createdAt)) && callers.has(rootRunId);
+    };
     // Snapshots need not be in parent-first order. Include job dispatches and update continuations in the same closure.
     for (let added = true; added;) {
       added = false;
       for (const item of [...(snapshot.autoPrompts ?? []), ...(snapshot.runs ?? [])]) {
-        if (!after(item.createdAt)) continue;
+        // Another master's turn is followed (and reported) when it is this master's, but never calls on its behalf.
+        if (!after(item.createdAt) || otherSession(item.sessionId)) continue;
         const id = 'sessionId' in item && 'output' in item ? item.id : (item as AutoPromptJob).runId;
         const continuation = 'scheduled' in item && (item.scheduled?.resume === 'update' || item.scheduled?.resume === 'permission') && callers.has(item.scheduled.afterRunId);
         if (id && !callers.has(id) && (ours(item) || continuation)) { callers.add(id); added = true; }
-        if (id && callers.has(id) && 'steering' in item && item.steering?.state === 'delivered' && !callers.has(item.steering.targetRunId)) {
+        if (id && callers.has(id) && 'steering' in item && item.steering?.state === 'delivered' && !callers.has(item.steering.targetRunId) && !otherRun(item.steering.targetRunId)) {
           callers.add(item.steering.targetRunId); added = true;
         }
       }
@@ -460,7 +517,7 @@ export class MasterSession {
     for (const run of snapshot.runs ?? []) {
       // Tower's continuation after a forced update carries on a run already followed; it is not new work.
       if (run.scheduled?.resume === 'update' || run.scheduled?.resume === 'permission' || run.permissionNotice || run.permissionRequestIds?.length || run.updateWrapUp || !ours(run) || !after(run.createdAt) || run.sessionId === binding.sessionId || this.file.followed.some(item => item.runId === run.id)) continue;
-      this.add({ id: randomUUID(), kind: 'delegated', title: truncate(run.prompt, 80), ...(run.delegation ? { rootRunId: run.delegation.rootRunId } : run.origin?.runId ? { rootRunId: run.origin.runId } : {}), runId: run.id, sessionId: run.sessionId, prompt: run.prompt, createdAt: run.createdAt, state: 'running' });
+      this.add({ id: randomUUID(), kind: 'delegated', title: truncate(run.prompt, 80), ...(run.delegation ? { rootRunId: run.delegation.rootRunId } : run.origin?.runId ? { rootRunId: run.origin.runId } : {}), runId: run.id, sessionId: run.sessionId, ...(otherSession(run.sessionId) ? { master: true as const } : {}), prompt: run.prompt, createdAt: run.createdAt, state: 'running' });
       changed = true;
     }
     return changed;
@@ -541,7 +598,7 @@ export class MasterSession {
     if (!data) return;
     // Only an answer read aloud stands for its turn; a failure does not keep the turn's answer from being read.
     if (data.kind !== 'error') item.spoke = true;
-    this.options.room.add(data);
+    this.options.room?.add(data);
     voice.deliver();
   }
 
@@ -568,11 +625,13 @@ export class MasterSession {
       size += length;
     }
     for (const batch of batches) {
+      if (this.closed) break;
       const reportId = randomUUID().slice(0, 8);
       const prompt = `${REPORT_MARK} Work you handed out ended (report ${reportId}):\n${batch.map(line).join('\n')}\n\nExecution completed is not proof that the owner's goal is done. Inspect the answers and tracked follow-up work; continue authorized remaining steps, respect real approval waits and owner stops, and do not resubmit work already running.`;
       for (const item of batch) { item.report = 'sending'; item.reportId = reportId; item.reportAt = new Date().toISOString(); }
       await this.save();
-      const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(binding.sessionId)}/messages`, { prompt }, { write: true })
+      // A master let go of meanwhile (an issue master closed) gets no new turn; one already sent is not taken back.
+      const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(binding.sessionId)}/messages`, { prompt }, { write: true, gate: async () => !this.closed })
         .catch(() => ({ state: 'uncertain' as const, status: 0, body: undefined }));
       const run = (response.body as { run?: Run } | undefined)?.run;
       for (const item of batch) {
@@ -710,7 +769,8 @@ export class MasterSession {
   private remember(runId: string): void {
     if (this.file.masterRuns.includes(runId)) return;
     this.file.masterRuns.push(runId);
-    if (this.file.masterRuns.length > MASTER_RUNS) this.file.masterRuns.splice(0, this.file.masterRuns.length - MASTER_RUNS);
+    this.options.turns?.add(runId);
+    if (this.file.masterRuns.length > MASTER_RUNS) for (const id of this.file.masterRuns.splice(0, this.file.masterRuns.length - MASTER_RUNS)) this.options.turns?.delete(id);
   }
 
   private add(item: Followed): void { this.file.followed.push(item); }
@@ -732,6 +792,15 @@ export class MasterSession {
     const next = this.writes.then(() => writePrivateJson(this.path, text));
     this.writes = next.catch(() => {});
     return next;
+  }
+
+  /** An issue master whose session was closed: it stops, and its file says since when (see issues.ts). */
+  async retire(): Promise<void> {
+    await this.close();
+    if (this.file.closedAt) return;
+    this.file.closedAt = new Date().toISOString();
+    await this.save();
+    await this.writes;
   }
 
   async close(): Promise<void> {
