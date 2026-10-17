@@ -15,6 +15,8 @@ const name = (max: number) => z.string().trim().min(1).max(max);
 const color = z.string().regex(/^[a-z][a-z0-9-]{0,31}$/, 'A color name is required.');
 /** Where an item goes among its siblings: after this one, first (null), or last (absent). */
 const afterId = id.nullable().optional();
+/** A label's name: what `@name` in Quick Add can hold. */
+export const labelName = name(60).refine(value => !/[\s#@%/]/.test(value), 'A label name has no spaces or # @ % /.');
 
 export const RecurrenceSchema = z.object({
   freq: z.enum(['day', 'week', 'month', 'year']),
@@ -71,8 +73,8 @@ export const TodoOpSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('section.move'), id, afterId }).strict(),
   z.object({ op: z.literal('section.delete'), id }).strict(),
   z.object({ op: z.literal('section.restore'), id }).strict(),
-  z.object({ op: z.literal('label.create'), id, name: name(60).refine(value => !/[\s#@%/]/.test(value), 'A label name has no spaces or # @ % /.'), color: color.optional() }).strict(),
-  z.object({ op: z.literal('label.update'), id, patch: z.object({ name: name(60).refine(value => !/[\s#@%/]/.test(value), 'A label name has no spaces or # @ % /.'), color, favorite: z.boolean() }).partial().strict() }).strict(),
+  z.object({ op: z.literal('label.create'), id, name: labelName, color: color.optional() }).strict(),
+  z.object({ op: z.literal('label.update'), id, patch: z.object({ name: labelName, color, favorite: z.boolean() }).partial().strict() }).strict(),
   z.object({ op: z.literal('label.move'), id, afterId }).strict(),
   z.object({ op: z.literal('label.delete'), id }).strict(),
   z.object({ op: z.literal('label.restore'), id }).strict(),

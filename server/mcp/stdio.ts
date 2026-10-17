@@ -1,5 +1,6 @@
 import { request } from 'node:http';
 import type { Readable, Writable } from 'node:stream';
+import { lockOwners } from '../instance/state-lock.js';
 import { MAX_RPC_BYTES, runnerPaths } from '../runs/runner-protocol.js';
 
 export interface ToolBridge {
@@ -40,19 +41,28 @@ export async function answerRpc(bridge: ToolBridge, frame: any): Promise<RpcRepl
   return { jsonrpc: '2.0', id: frame.id, error: { code: -32601, message: 'Method not found' } };
 }
 
+/** One message's size limit, the web's for a todo tools request: a message the bridge takes, the web takes too. */
+const MAX_MCP_INPUT = 4 * 1024 * 1024;
+
 /** Newline-delimited JSON-RPC over stdio, as Claude Code and Codex speak to local MCP servers. */
 export async function serveToolBridge(bridge: ToolBridge, input: Readable = process.stdin, output: Writable = process.stdout): Promise<void> {
   const respond = (value: unknown) => output.write(JSON.stringify(value) + '\n');
   let buffer = '';
   for await (const chunk of input) {
     buffer += chunk.toString();
-    if (Buffer.byteLength(buffer) > 1_000_000) throw new Error('MCP input is too large.');
+    // Past this no message can be read at all; up to it, one too large is answered as such and the server goes on.
+    if (Buffer.byteLength(buffer) > 4 * MAX_MCP_INPUT) throw new Error('MCP input is too large.');
     let end: number;
     while ((end = buffer.indexOf('\n')) !== -1) {
       const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
       if (!line.trim()) continue;
       let frame: unknown;
       try { frame = JSON.parse(line); } catch { respond({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Invalid JSON' } }); continue; }
+      if (Buffer.byteLength(line) > MAX_MCP_INPUT) {
+        const id = (frame as { id?: unknown })?.id;
+        respond({ jsonrpc: '2.0', id: typeof id === 'string' || typeof id === 'number' ? id : null, error: { code: -32600, message: 'The request is too large; send fewer or shorter changes at a time.' } });
+        continue;
+      }
       const reply = await answerRpc(bridge, frame);
       if (reply) respond(reply);
     }
@@ -80,4 +90,47 @@ export async function callWorkerTools(stateDir: string, capability: string | und
   });
   if (reply.error) throw new Error(reply.error.message);
   return reply.result;
+}
+
+/**
+ * Sends one tool request to this computer's Tower web with a standing key (`TodoKey`), for tools whose data the web
+ * keeps (the todos). The web is looked for through the state directory's lock on every request, so a restart that
+ * moved it is followed. A request is never sent twice: only a refused connection tries the next candidate, and an
+ * answer lost after sending is reported as uncertain.
+ */
+export async function callWebTools(stateDir: string, path: string, key: string, body: Record<string, unknown>,
+  ports: () => Promise<number[]> = async () => (await lockOwners(stateDir)).map(owner => owner.port)): Promise<unknown> {
+  const payload = JSON.stringify(body);
+  const uncertain = () => new Error('Tower did not finish answering. The change may or may not have been made; read the todos before trying again.');
+  const send = (port: number) => new Promise<{ status: number; reply: { result?: unknown; error?: { message?: string } } }>((resolve, reject) => {
+    // A connection of its own each time: one the web stopped reading is never reused for the next call.
+    const req = request({ host: '127.0.0.1', port, method: 'POST', path, agent: false, headers: { authorization: `TodoKey ${key}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, res => {
+      const chunks: Buffer[] = []; let size = 0;
+      res.on('data', (chunk: Buffer) => { size += chunk.length; if (size > MAX_RPC_BYTES) res.destroy(new Error('Tool response too large.')); else chunks.push(chunk); });
+      res.on('error', () => reject(uncertain()));
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode ?? 0, reply: JSON.parse(Buffer.concat(chunks).toString('utf8')) }); }
+        catch { resolve({ status: res.statusCode ?? 0, reply: {} }); }
+      });
+    });
+    // Shorter than the providers' own tool timeout (Codex: a minute), so the agent hears that the change is uncertain.
+    const deadline = setTimeout(() => req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })), 50_000);
+    req.on('close', () => clearTimeout(deadline));
+    // Only a connection that was never made is safe to try elsewhere; anything after sending may have been applied.
+    req.on('error', error => reject((error as NodeJS.ErrnoException).code === 'ECONNREFUSED' ? Object.assign(new Error('refused'), { unreached: true }) : uncertain()));
+    req.end(payload);
+  });
+  let refused = false;
+  for (const port of [...new Set(await ports().catch(() => [] as number[]))]) {
+    let answer: Awaited<ReturnType<typeof send>>;
+    try { answer = await send(port); }
+    catch (error) { if ((error as { unreached?: boolean }).unreached) continue; throw error; }
+    // Another program, or another Tower whose key this is not: try the next one.
+    if (answer.status === 403) { refused = true; continue; }
+    if (answer.status === 404 || (!('result' in answer.reply) && !answer.reply.error)) continue;
+    if (answer.reply.error) throw new Error(answer.reply.error.message ?? 'Tower refused the request.');
+    return answer.reply.result;
+  }
+  throw new Error(refused ? 'Tower on this computer did not accept the todo tools key; it was changed after Tower started, and restarting Tower takes the new one.'
+    : 'Agent Session Tower is not running on this computer, so the todos cannot be reached now.');
 }

@@ -78,6 +78,7 @@ Search and provider, time, and status filters narrow the graph. Blue **새 활�
 - **다음** (Next) links say which task comes after which. They only order work: either task can be done first. **완료 및 후속작업** (Complete and add next, **Shift E**, or press and hold the check circle on a phone) completes a task and adds the next one in one step.
 - **⌘Z** or a toast's **되돌리기** (Undo) takes back a change, a delete included. Deleted tasks, sections, projects and attachments are kept for 30 days before they are removed for good.
 - Automatic backups include todos and their attachments; an exported backup file includes the todos but not attachment contents.
+- Every agent Tower runs (your turns, the master's conversations, triggers, Slack and GitHub work, public agents, agents' own work, turns another computer started here) gets the `tower_todos` tools for this computer's todos: it can list, search, add (in Quick Add words), complete, complete and add the next, reopen, change, comment on and delete todos, and make any other change the page can. Claude and Codex call them without asking. A turn handed to the open Codex app runs with that app's own tools, without Tower's.
 
 ## Existing sessions and new work
 

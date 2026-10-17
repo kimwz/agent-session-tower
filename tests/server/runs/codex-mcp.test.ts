@@ -1,3 +1,4 @@
+import { TODO_TOOLS_SERVER, todoToolList } from '../../../server/todo/agent-tools.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { towerTools } from '../../../server/api/mcp.js';
@@ -33,6 +34,7 @@ test('every tool Codex calls without review is one its server offers, so a renam
     tower: towerTools().map(tool => tool.name),
     [SESSION_TOOLS_SERVER]: towerTools(SESSION_TOOL_OPERATIONS).map(tool => tool.name),
     tower_secrets: SECRET_TOOLS.map(tool => tool.name),
+    [TODO_TOOLS_SERVER]: todoToolList().map(tool => (tool as { name: string }).name),
   };
   assert.deepEqual(Object.keys(CODEX_APPROVED_TOWER_TOOLS).sort(), Object.keys(offered).sort());
   for (const [server, tools] of Object.entries(CODEX_APPROVED_TOWER_TOOLS)) for (const tool of tools) assert.ok(offered[server]!.includes(tool), `${server} offers ${tool}`);

@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.142.0] - 2026-10-17
+
+- **Tower가 실행하는 모든 에이전트가 할 일을 조회하고 바꿀 수 있습니다.** 소유자의 턴, 마스터의 대화(정기 점검 턴 제외), 트리거·Slack·GitHub 작업, 공개 에이전트, 에이전트가 시작한 작업, 다른 컴퓨터가 이 컴퓨터에서 시작한 턴이 모두 이 컴퓨터의 할 일을 다루는 `tower_todos` 도구를 받습니다.
+  - 도구: `todos_overview`, `todos_list`(오늘·다가오는·관리함·프로젝트·라벨·전체), `todos_search`, `todos_get`, `todos_completed`, `todos_add`(빠른 추가 문법 그대로, 예: `견적 회신 내일 오후 3시 #프로젝트 p1`), `todos_complete`(`next`로 완료 및 후속작업), `todos_reopen`, `todos_update`, `todos_comment`, `todos_delete`, 그리고 화면이 하는 그 밖의 모든 변경을 하는 `todos_apply`.
+  - Claude와 Codex 모두 승인 질문 없이 부릅니다. 변경은 화면과 같은 저장 경로를 거쳐 곧바로 화면에 보입니다.
+  - 도구 서버는 상태 폴더의 전용 키로 이 컴퓨터의 Tower에만 연결되며, 이 키로는 할 일 말고 다른 기능을 쓸 수 없습니다.
+  - 열려 있는 Codex 앱으로 넘겨진 턴은 앱의 도구로 실행되어 Tower 도구를 받지 않습니다(지금까지의 세션 조회 도구와 같습니다).
+
 ## [1.141.1] - 2026-10-17
 
 - **백그라운드 서비스가 공개 주소(`--public-url`)를 이어받습니다.** 직접 실행하던 Tower를 `service install`로 서비스로 바꾸면 터널·프록시 주소가 빠져, 그 주소로 접속하면 "허용되지 않은 호스트입니다."가 났습니다. 이제 서비스는 대체한 Tower의 `--public-url`을 그대로 쓰고, 설정을 저장해 업데이트 뒤에도 유지합니다. `service install --public-url <url>`로 직접 지정할 수도 있습니다.

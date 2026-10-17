@@ -918,6 +918,18 @@ test('Claude receives only the session-bound MCP configuration as a single argum
   assert.deepEqual(JSON.parse(args[args.indexOf('--mcp-config') + 1]), { mcpServers });
 });
 
+test('Claude may call the todo tools without asking wherever the turn has them, and gets no such allowance otherwise', async t => {
+  const servers = new Map<string, Record<string, { command: string; args: string[] }> | undefined>();
+  const f = await fixture({ provider: 'claude', resolveRunTools: (_run, session) => ({ servers: servers.get(session.id), required: false }) });
+  t.after(f.cleanup);
+  const withTodos = await claudeConversation(f, 0), without = await claudeConversation(f, 1);
+  servers.set(withTodos.id, { tower_todos: { command: '/fixture/node', args: ['index.js', '--todos-mcp', '/state'] } });
+  servers.set(without.id, { tower_sessions: { command: '/fixture/node', args: ['index.js', '--sessions-mcp', '/state'] } });
+  for (const session of [withTodos, without]) assert.equal((await finished(f.manager, (await f.manager.enqueue(session.id, 'Add a todo')).id)).status, 'completed');
+  assert.ok(launchOf(f, withTodos).args.includes('--allowedTools=mcp__tower_todos'));
+  assert.ok(!launchOf(f, without).args.some(arg => arg.startsWith('--allowedTools')));
+});
+
 test('Claude gets the owner\'s Chrome only when it is the turn\'s strong browser, and is told not to use it otherwise', async t => {
   const settings = [true, false, undefined];
   const chrome = new Map<string, boolean | undefined>();

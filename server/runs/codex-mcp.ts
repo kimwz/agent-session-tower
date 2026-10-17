@@ -1,5 +1,6 @@
 import type { SessionMcpServer, SessionMcpServers } from './session-mcp.js';
 import { MASTER_TOOL_TIMEOUT_SECONDS } from './subscription.js';
+import { TODO_TOOL_NAMES, TODO_TOOLS_SERVER } from '../todo/agent-tools.js';
 
 /** A tool server as Codex's `mcp_servers` config takes it, with the settings Tower adds for its own servers. */
 export interface CodexMcpServer extends SessionMcpServer {
@@ -18,6 +19,8 @@ export const CODEX_APPROVED_TOWER_TOOLS: Readonly<Record<string, readonly string
   tower: ['sessions_list', 'sessions_read', 'sessions_search', 'permissions_request', 'permissions_list', 'permissions_run', 'permissions_runResult', 'secrets_list'],
   tower_sessions: ['sessions_list', 'sessions_read', 'sessions_search'],
   tower_secrets: ['secrets_list'],
+  // The owner opened the todos to every agent (2026-10-17): reading and changing them needs no review.
+  [TODO_TOOLS_SERVER]: TODO_TOOL_NAMES,
 };
 
 /**

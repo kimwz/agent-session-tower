@@ -154,21 +154,23 @@ test('only owner turns in the owner’s own conversations receive Tower tools; e
   assert.match(native.servers!.tower.env!.TOWER_MCP_CAPABILITY, /^[a-f\d]{64}$/);
   assert.equal(resolve(owner, session('codex:created')).towerTools, 'attached');
   const lookups = (tools: ReturnType<typeof resolve>) => Object.keys(tools.servers ?? {}).sort();
-  assert.deepEqual(lookups(native), ['browser', 'browser_light', 'tower', 'tower_local', 'tower_sessions']);
+  assert.deepEqual(lookups(native), ['browser', 'browser_light', 'tower', 'tower_local', 'tower_sessions', 'tower_todos']);
   assert.deepEqual(native.servers!.tower_sessions.args.slice(-2), ['--sessions-mcp', f.stateDir]);
   assert.equal(native.servers!.tower_sessions.env, undefined, 'its key stays in the state directory');
+  assert.deepEqual(native.servers!.tower_todos.args.slice(-2), ['--todos-mcp', f.stateDir]);
+  assert.equal(native.servers!.tower_todos.env, undefined, 'its key stays in the state directory too');
   const issue = resolve(owner, session('codex:issue'));
-  assert.deepEqual([issue.towerTools, lookups(issue)], ['external-input', ['browser', 'browser_light', 'tower_sessions']]);
+  assert.deepEqual([issue.towerTools, lookups(issue)], ['external-input', ['browser', 'browser_light', 'tower_sessions', 'tower_todos']]);
   assert.ok(issue.servers!.browser.args.includes('--outside-content'), 'outside content never reaches the saved logins or this computer\'s own addresses');
   assert.ok(!native.servers!.browser.args.includes('--outside-content'));
   const scheduled = resolve(owner, session('codex:scheduled'));
-  assert.deepEqual([scheduled.towerTools, lookups(scheduled)], ['not-owner-session', ['browser', 'browser_light', 'tower_sessions']]);
-  assert.deepEqual(lookups(resolve({ kind: 'trigger', triggerId: 'daily' }, session('codex:native'))), ['browser', 'browser_light', 'tower_sessions']);
-  assert.deepEqual(lookups(resolve({ kind: 'agent' }, session('codex:native'))), ['browser', 'browser_light', 'tower_sessions']);
-  assert.deepEqual(lookups(resolve({ kind: 'owner', controllerId: 'c'.repeat(32) }, session('codex:native'))), ['browser', 'browser_light', 'tower'], 'a controlling computer keeps to what it may see');
+  assert.deepEqual([scheduled.towerTools, lookups(scheduled)], ['not-owner-session', ['browser', 'browser_light', 'tower_sessions', 'tower_todos']]);
+  assert.deepEqual(lookups(resolve({ kind: 'trigger', triggerId: 'daily' }, session('codex:native'))), ['browser', 'browser_light', 'tower_sessions', 'tower_todos']);
+  assert.deepEqual(lookups(resolve({ kind: 'agent' }, session('codex:native'))), ['browser', 'browser_light', 'tower_sessions', 'tower_todos']);
+  assert.deepEqual(lookups(resolve({ kind: 'owner', controllerId: 'c'.repeat(32) }, session('codex:native'))), ['browser', 'browser_light', 'tower', 'tower_todos'], 'a controlling computer keeps to what it may see; the todos are this computer\'s to every turn');
   const coordinator = resolve(owner, session('codex:coordinator'));
   assert.equal(coordinator.required, true);
-  assert.deepEqual(lookups(coordinator), ['browser', 'browser_light', 'tower_sessions', 'tower_slack']);
+  assert.deepEqual(lookups(coordinator), ['browser', 'browser_light', 'tower_sessions', 'tower_slack', 'tower_todos']);
   assert.equal(f.capabilities.resolve(coordinator.servers!.tower_slack.env!.TOWER_MCP_CAPABILITY)?.kind, 'slack-workflow');
   assert.equal(towerTools().some(tool => tool.name === 'triggers_updateSettings'), false);
 });
@@ -262,7 +264,7 @@ test('the owner\'s turns in the master\'s folder also get the master\'s page too
   const turn = (id: string, origin: Run['origin']): Run => ({ id: randomUUID(), sessionId: id, prompt: '', status: 'queued', createdAt: '', output: '', origin });
   const master = { ...session('claude:master'), cwd: join(f.stateDir, 'master-session') };
   const tools = resolver(turn(master.id, { kind: 'owner' }), master);
-  assert.deepEqual(Object.keys(tools.servers ?? {}).sort(), ['browser', 'browser_light', 'tower', 'tower_master', 'tower_sessions']);
+  assert.deepEqual(Object.keys(tools.servers ?? {}).sort(), ['browser', 'browser_light', 'tower', 'tower_master', 'tower_sessions', 'tower_todos']);
   assert.deepEqual(tools.servers!.tower_master.args.slice(-2), ['--master-mcp', f.stateDir]);
   assert.equal(tools.servers!.tower_master.env, undefined, 'it reaches the master host through the owner-only socket');
   assert.equal(tools.required, false);
@@ -390,7 +392,7 @@ test('every turn in a session that may use secrets gets its own secret broker ne
 
   const native = add('codex:native'), mine = add('codex:mine', {}, { kind: 'owner', untrustedInput: false });
   const ownTurn = turn(native, owner), ownTools = resolver(ownTurn, native);
-  assert.deepEqual([names(ownTools), ownTools.required, ownTools.towerTools], [['browser', 'browser_light', 'tower', 'tower_local', 'tower_secrets', 'tower_sessions'], true, 'attached']);
+  assert.deepEqual([names(ownTools), ownTools.required, ownTools.towerTools], [['browser', 'browser_light', 'tower', 'tower_local', 'tower_secrets', 'tower_sessions', 'tower_todos'], true, 'attached']);
   assert.deepEqual(capability(ownTools), { kind: 'secret-run', runId: ownTurn.id, sessionId: native.id }, 'bound to this run, with nothing else to present');
   assert.deepEqual(ownTools.servers!.tower_secrets.args.slice(-2), ['--secrets-mcp', f.stateDir]);
   const next = resolver(turn(native, owner), native);
@@ -412,20 +414,20 @@ test('every turn in a session that may use secrets gets its own secret broker ne
     assert.deepEqual([tools.required, tools.towerTools], [false, plain.towerTools], label);
     assert.equal(capability(tools)?.kind, 'secret-run', label);
   }
-  assert.deepEqual(names(resolver(turn(mine, { kind: 'agent' }), mine)), ['browser', 'browser_light', 'tower_secrets', 'tower_sessions'], 'an agent’s turn: no owner or master tools');
+  assert.deepEqual(names(resolver(turn(mine, { kind: 'agent' }), mine)), ['browser', 'browser_light', 'tower_secrets', 'tower_sessions', 'tower_todos'], 'an agent’s turn: no owner or master tools');
 
   // Workflow conversations keep their tools and add the broker.
   const slack = add('codex:slack', {}, { kind: 'slack', workflowId: WORKFLOW, untrustedInput: true });
   const slackTools = resolver(turn(slack, { kind: 'slack', workflowId: WORKFLOW }), slack);
-  assert.deepEqual([names(slackTools), slackTools.required], [['browser', 'browser_light', 'tower_secrets', 'tower_sessions', 'tower_slack'], true]);
+  assert.deepEqual([names(slackTools), slackTools.required], [['browser', 'browser_light', 'tower_secrets', 'tower_sessions', 'tower_slack', 'tower_todos'], true]);
   assert.deepEqual(f.capabilities.resolve(slackTools.servers!.tower_slack.env!.TOWER_MCP_CAPABILITY), { kind: 'slack-workflow', workflowId: WORKFLOW });
   const github = add('codex:github', {}, { kind: 'trigger', triggerId: 'gh', untrustedInput: true });
   const githubTools = resolver(turn(github, { kind: 'trigger', triggerId: 'gh' }), github);
-  assert.deepEqual([names(githubTools), githubTools.required], [['browser', 'browser_light', 'tower_github', 'tower_secrets', 'tower_sessions'], true]);
+  assert.deepEqual([names(githubTools), githubTools.required], [['browser', 'browser_light', 'tower_github', 'tower_secrets', 'tower_sessions', 'tower_todos'], true]);
   const remoteSlack = resolver(turn(slack, { kind: 'owner', controllerId: CONTROLLER }), slack);
-  assert.deepEqual([names(remoteSlack), remoteSlack.towerTools, remoteSlack.required], [['browser', 'browser_light', 'tower_secrets'], 'remote', false], 'a controller’s turn never gets the coordinator’s tools');
+  assert.deepEqual([names(remoteSlack), remoteSlack.towerTools, remoteSlack.required], [['browser', 'browser_light', 'tower_secrets', 'tower_todos'], 'remote', false], 'a controller’s turn never gets the coordinator’s tools');
   const remoteOwner = resolver(turn(native, { kind: 'owner', controllerId: CONTROLLER }), native);
-  assert.deepEqual(names(remoteOwner), ['browser', 'browser_light', 'tower', 'tower_secrets']);
+  assert.deepEqual(names(remoteOwner), ['browser', 'browser_light', 'tower', 'tower_secrets', 'tower_todos']);
 
   // A new conversation's first turn: its provider fixes the tools before the creation is confirmed.
   const creating = add('codex:creating', { creationPending: true }, { kind: 'owner', untrustedInput: false });
@@ -437,7 +439,7 @@ test('every turn in a session that may use secrets gets its own secret broker ne
   // The master follows the same rules: the owner's requests are the owner's, its own agent turns are reviewed.
   const master = add('claude:master', { cwd: join(f.stateDir, 'master-session') }, { kind: 'owner', untrustedInput: false });
   const masterTools = resolver(turn(master, owner), master);
-  assert.deepEqual([names(masterTools), masterTools.required], [['browser', 'browser_light', 'tower', 'tower_master', 'tower_secrets', 'tower_sessions'], true]);
+  assert.deepEqual([names(masterTools), masterTools.required], [['browser', 'browser_light', 'tower', 'tower_master', 'tower_secrets', 'tower_sessions', 'tower_todos'], true]);
   const heartbeat: Run = { ...turn(master, { kind: 'agent' }), heartbeat: { checkId: 'check', updatedAt: '', sessionIds: [master.id], targets: [{ taskId: 'task', sessionId: 'codex:worker', nativeRequestId: 'u', latestRunId: 'run' }] } };
   assert.deepEqual(Object.keys(resolver(heartbeat, master).servers!).sort(), ['tower_master', 'tower_secrets'], 'nothing else beside the heartbeat’s own tools');
 
@@ -450,7 +452,7 @@ test('every turn in a session that may use secrets gets its own secret broker ne
   const publicSession = add('codex:public', { launchedBy: { kind: 'trigger', triggerId: PUBLIC } }, { kind: 'trigger', triggerId: PUBLIC, untrustedInput: true });
   const publicChild = add('codex:public-child', { isSubagent: true, parentId: publicSession.id });
   const publicRun = turn(publicSession, { kind: 'trigger', triggerId: PUBLIC, eventId: 'request' });
-  assert.deepEqual(names(resolver(publicRun, publicSession)), ['browser', 'browser_light', 'tower_sessions']);
+  assert.deepEqual(names(resolver(publicRun, publicSession)), ['browser', 'browser_light', 'tower_sessions', 'tower_todos']);
   assert.equal(resolver(turn(publicChild, owner), publicChild).servers?.tower_secrets, undefined);
   assert.equal(resolver(turn(mine, { kind: 'trigger', triggerId: PUBLIC }), mine).servers?.tower_secrets, undefined);
   const opened = add('codex:opened-by-public', { creationPending: true }, { kind: 'owner', untrustedInput: false });
