@@ -1,0 +1,121 @@
+import test, { type TestContext } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { TowerError } from '../../../shared/errors.js';
+import { TodoStore } from '../../../server/todo/store.js';
+import { callTodoTool, TODO_TOOL_NAMES, todoToolList } from '../../../server/todo/agent-tools.js';
+
+// Saturday, 2026-10-17, as the tools' local date.
+const now = new Date(2026, 9, 17, 10, 0);
+
+async function fixture(t: TestContext) {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-todo-tools-'));
+  const store = new TodoStore(dir);
+  store.start();
+  t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
+  let applied = 0;
+  const calls = { overview: () => store.overview(), detail: (id: string) => store.detail(id), completed: (input: Parameters<TodoStore['completed']>[0]) => store.completed(input),
+    search: (query: string, input: Parameters<TodoStore['search']>[1]) => store.search(query, input), apply: (request: Parameters<TodoStore['apply']>[0]) => { applied++; return store.apply(request); } };
+  const call = (name: string, args: Record<string, unknown> = {}) => callTodoTool(calls, name, args, { now }) as any;
+  return { store, call, applied: () => applied };
+}
+
+test('the tools list their inputs, and every listed name is one the approvals can name', () => {
+  const tools = todoToolList() as { name: string; description: string; inputSchema: { type: string } }[];
+  assert.deepEqual(tools.map(tool => tool.name), TODO_TOOL_NAMES);
+  for (const tool of tools) { assert.match(tool.name, /^todos_[a-z]+$/); assert.equal(tool.inputSchema.type, 'object'); assert.ok(tool.description.length > 20); }
+});
+
+test('a task added in words gets what the words say, explicit fields win, and new labels are made in the same request', async t => {
+  const { call, applied } = await fixture(t);
+  call('todos_apply', { ops: [{ op: 'project.create', id: 'tower', name: '타워' }, { op: 'section.create', id: 'ops', projectId: 'tower', name: '운영' }] });
+  const { added } = call('todos_add', { text: '견적 회신 내일 오후 3시 #타워 /운영 p1 @급함', labels: ['call'] });
+  assert.equal(added.content, '견적 회신');
+  assert.deepEqual([added.projectId, added.sectionId, added.due, added.priority], ['tower', 'ops', '2026-10-18 15:00', 1]);
+  assert.deepEqual(added.labels.sort(), ['call', '급함']);
+  const plain = call('todos_add', { text: '내일 p1 그대로', parse: false, priority: 3 }).added;
+  assert.deepEqual([plain.content, plain.priority, plain.project, plain.due], ['내일 p1 그대로', 3, 'Inbox', undefined]);
+  assert.equal(applied(), 3);
+  const overview = call('todos_overview');
+  assert.deepEqual([overview.today, overview.counts.open, overview.labels.map((label: { name: string }) => label.name).sort()], ['2026-10-17', 2, ['call', '급함']]);
+});
+
+test('lists: today holds overdue and today, upcoming the coming days, and a project its own', async t => {
+  const { call } = await fixture(t);
+  call('todos_apply', { ops: [
+    { op: 'project.create', id: 'p', name: 'Home' },
+    { op: 'task.create', id: 'late', content: 'Late', dueDate: '2026-10-15' },
+    { op: 'task.create', id: 'now', content: 'Now', dueDate: '2026-10-17', dueTime: '09:00' },
+    { op: 'task.create', id: 'soon', content: 'Soon', dueDate: '2026-10-20', projectId: 'p' },
+    { op: 'task.create', id: 'far', content: 'Far', dueDate: '2026-11-30' },
+  ] });
+  const ids = (view: string, extra: Record<string, unknown> = {}) => call('todos_list', { view, ...extra }).tasks.map((item: { id: string }) => item.id);
+  assert.deepEqual(ids('today'), ['late', 'now']);
+  assert.deepEqual(ids('upcoming'), ['now', 'soon']);
+  assert.deepEqual(ids('upcoming', { days: 60 }), ['now', 'soon', 'far']);
+  assert.deepEqual(ids('project', { projectId: 'p' }), ['soon']);
+  assert.deepEqual(ids('inbox'), ['late', 'now', 'far']);
+  assert.throws(() => call('todos_list', { view: 'project' }), /needs projectId/);
+  assert.deepEqual(call('todos_search', { query: 'soo' }).tasks.map((item: { id: string }) => item.id), ['soon']);
+});
+
+test('complete and add next is one request: the first is done, the next follows it', async t => {
+  const { call, applied } = await fixture(t);
+  const first = call('todos_add', { text: 'Draft' }).added;
+  const before = applied();
+  const result = call('todos_complete', { id: first.id, next: { text: 'Review 내일' } });
+  assert.equal(applied(), before + 1);
+  assert.ok(result.completed.completedAt);
+  assert.equal(result.added.due, '2026-10-18');
+  const detail = call('todos_get', { id: first.id });
+  assert.deepEqual(detail.next.map((item: { task: { id: string } }) => item.task.id), [result.added.id]);
+  assert.equal(detail.completions.length, 1);
+  assert.throws(() => call('todos_complete', { id: first.id }), (error: unknown) => error instanceof TowerError && error.kind === 'conflict');
+  // Reopening takes back that completion.
+  assert.equal(call('todos_reopen', { id: first.id }).reopened.completedAt, undefined);
+  // A follow-up added after an open task, completing it in the same request.
+  const third = call('todos_add', { text: 'Ship', after: result.added.id, completeAfter: true });
+  assert.ok(third.completed.completedAt);
+  assert.deepEqual(call('todos_completed').items.map((item: { task: { id: string } }) => item.task.id), [result.added.id], 'the reopened one is open again');
+});
+
+test('a repeating task moves on to its next date when completed', async t => {
+  const { call } = await fixture(t);
+  const weekly = call('todos_add', { text: 'Standup 매주 월' }).added;
+  assert.equal(weekly.due, '2026-10-19');
+  const done = call('todos_complete', { id: weekly.id }).completed;
+  assert.deepEqual([done.due, done.completedAt], ['2026-10-26', undefined]);
+});
+
+test('update changes fields and place in one request; recurrence and labels are read from words and names', async t => {
+  const { call, applied } = await fixture(t);
+  call('todos_apply', { ops: [{ op: 'project.create', id: 'p', name: 'Work' }, { op: 'label.create', id: 'l', name: 'deep' }] });
+  const item = call('todos_add', { text: 'Write' }).added;
+  const before = applied();
+  const { updated } = call('todos_update', { id: item.id, content: 'Write the plan', priority: 2, recurrence: '매일', labels: ['Deep', 'new'], projectId: 'p' });
+  assert.equal(applied(), before + 1);
+  assert.deepEqual([updated.content, updated.priority, updated.projectId, updated.due, updated.recurrence?.freq], ['Write the plan', 2, 'p', '2026-10-17', 'day']);
+  assert.deepEqual(updated.labels.sort(), ['deep', 'new']);
+  const cleared = call('todos_update', { id: item.id, recurrence: null, labels: [], dueDate: null }).updated;
+  assert.deepEqual([cleared.recurrence, cleared.labels, cleared.due], [undefined, undefined, undefined]);
+  assert.throws(() => call('todos_update', { id: item.id }), /Nothing to change/);
+  assert.throws(() => call('todos_update', { id: item.id, recurrence: 'sometimes' }), /not read as a repeat/);
+});
+
+test('comments, deletes, and refusals come back as errors with their reason; nothing half-applied', async t => {
+  const { call, store } = await fixture(t);
+  const item = call('todos_add', { text: 'Call' }).added;
+  call('todos_comment', { id: item.id, body: '**Tomorrow** morning' });
+  assert.equal(call('todos_get', { id: item.id }).comments[0].body, '**Tomorrow** morning');
+  const revision = store.revision();
+  assert.throws(() => call('todos_apply', { ops: [{ op: 'task.update', id: item.id, patch: { content: 'x' } }, { op: 'task.update', id: 'missing', patch: { content: 'y' } }] }));
+  assert.equal(store.revision(), revision, 'a refused request changes nothing');
+  assert.throws(() => call('todos_add', { text: '' }), /Invalid input/);
+  assert.throws(() => call('todos_nothing'), /Unknown todo tool/);
+  call('todos_delete', { id: item.id });
+  assert.equal(store.overview().tasks.length, 0);
+  call('todos_apply', { ops: [{ op: 'task.restore', id: item.id }] });
+  assert.equal(store.overview().tasks.length, 1);
+});

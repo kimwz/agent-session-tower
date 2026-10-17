@@ -1,62 +1,20 @@
+import { completeOp } from '../../../shared/todo/compose';
 import type { TodoOp } from '../../../shared/todo/ops';
-import type { QuickAddResult } from '../../../shared/todo/quick-add';
 import type { TodoPriority, TodoTask } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
 import { dateLabel } from './todo-format';
 import { isOpen } from './todo-model';
-import { newId, type TodoClient } from './todo-store';
+import type { TodoClient } from './todo-store';
 
 /**
  * The page's actions as operations. Each call is one request, so a compound action ("complete and add the next")
  * applies whole or not at all; the toast after a completion offers undo and the task that comes next.
  */
 
-/** Quick Add opened to add the task that comes after `taskId`, completing it too when `complete`. */
-export interface FollowUp { taskId: string; complete: boolean }
-
-export interface QuickAddDraft {
-  content: string;
-  description: string;
-  /** A section of null puts it outside any section. */
-  result: Omit<QuickAddResult, 'content' | 'tokens' | 'sectionId'> & { sectionId?: string | null };
-}
+export { completeOp, createTaskOps, quickAddOps, type FollowUp, type QuickAddDraft } from '../../../shared/todo/compose';
 
 export interface ActionHost {
   openTask: (id: string) => void;
-}
-
-export function completeOp(task: TodoTask, today: string): TodoOp {
-  return { op: 'task.complete', id: task.id, completionId: newId(), occurrence: task.recurrence ? task.dueDate : null, today };
-}
-
-export function createTaskOps(draft: QuickAddDraft, place: { afterId?: string | null; parentId?: string | null } = {}): { ops: TodoOp[]; id: string } {
-  const id = newId();
-  const ops: TodoOp[] = draft.result.newLabels.map(name => ({ op: 'label.create', id: newId(), name }));
-  const labelIds = [...draft.result.labelIds, ...ops.map(op => op.id)];
-  const { result } = draft;
-  ops.push({
-    op: 'task.create', id, content: draft.content,
-    ...(place.parentId ? { parentId: place.parentId } : { ...(result.projectId ? { projectId: result.projectId } : {}), ...(result.sectionId !== undefined ? { sectionId: result.sectionId } : {}) }),
-    ...(place.afterId !== undefined ? { afterId: place.afterId } : {}),
-    ...(draft.description.trim() ? { description: draft.description } : {}),
-    ...(result.priority ? { priority: result.priority } : {}),
-    ...(result.dueDate ? { dueDate: result.dueDate, ...(result.dueTime ? { dueTime: result.dueTime } : {}), ...(result.recurrence ? { recurrence: result.recurrence } : {}) } : {}),
-    ...(result.durationMin ? { durationMin: result.durationMin } : {}),
-    ...(result.deadlineDate ? { deadlineDate: result.deadlineDate } : {}),
-    ...(labelIds.length ? { labelIds } : {}),
-  });
-  return { ops, id };
-}
-
-/** Adding a task from Quick Add: alone, after another task, or completing that one too, in one request. */
-export function quickAddOps(draft: QuickAddDraft, follow: FollowUp | null, before: TodoTask | undefined, today: string): { ops: TodoOp[]; id: string } {
-  const created = createTaskOps(draft);
-  if (!follow || !before) return created;
-  return { id: created.id, ops: [
-    ...(follow.complete && isOpen(before) ? [completeOp(before, today)] : []),
-    ...created.ops,
-    { op: 'link.create', id: newId(), fromTaskId: follow.taskId, toTaskId: created.id },
-  ] };
 }
 
 export function createActions(client: TodoClient, host: ActionHost) {

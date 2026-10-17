@@ -15,6 +15,13 @@ Tower's session tools (\`sessions_search\`, \`sessions_read\`, \`sessions_list\`
 - Then build on what it found: check that it still holds, and say which session it came from. Do not repeat an investigation that is already done.
 - Skip the lookup for self-contained tasks whose context is all in the request or the repository.
 
+## Keep the owner's todos
+
+Tower's todo tools (\`todos_list\`, \`todos_add\`, \`todos_complete\` and the other \`todos_*\` tools) read and change the owner's todos on this computer, when they are available to you.
+
+- Use them when the owner asks about their tasks or todos (할 일), or asks you to note, schedule, complete or follow up on one.
+- \`todos_add\` takes the task as the owner would type it (\`견적 회신 내일 오후 3시 #프로젝트 p1\`); \`todos_complete\` with \`next\` completes one and adds the task that follows it.
+
 ## Follow the owner's skills
 
 The owner keeps their recurring ways of working as skills (\`SKILL.md\` folders in \`~/.agents/skills\`, \`~/.claude/skills\` and a project's \`.agents/skills\` or \`.claude/skills\`).

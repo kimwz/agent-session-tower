@@ -10,6 +10,8 @@ import type { GitHubCoordinator } from '../triggers/github-coordinator.js';
 import type { CapabilityRegistry } from './mcp.js';
 import type { SecretRuntime } from '../secrets/runtime.js';
 import { SESSION_TOOLS_SERVER, sessionToolServer } from './session-tools.js';
+import { todoToolServer } from '../todo/agent-mcp.js';
+import { TODO_TOOLS_SERVER } from '../todo/agent-tools.js';
 
 /** How to start this build's own entry, so a tool server always matches the worker that answers it. */
 export function thisBuild(): { command: string; args: string[] } {
@@ -40,10 +42,12 @@ export function sessionBrowsers(stateDir: string, runs: Pick<RunManager, 'sessio
  * two scoped master tools, without the generic lookups, browsers or owner capability below. Other turns started here get the read-only session
  * lookups, which Claude Code and Codex elsewhere on this computer get from their user configuration. The owner's turns in
  * the master's folder also get the master's page tools. Those other turns, whoever started them, get the browsers
- * (see browser/tools.ts).
+ * (see browser/tools.ts) and the Todo tools (todo/agent-tools.ts), a controlling computer's turns too.
  */
 export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp'>; github?: Pick<GitHubCoordinator, 'sessionWorkflow'>; capabilities: CapabilityRegistry; secrets?: Pick<SecretRuntime, 'initialized' | 'subject'>; browsers?: () => BrowserEnvironment }) {
   const lookups = { [SESSION_TOOLS_SERVER]: sessionToolServer(options.stateDir, thisBuild()) };
+  // The owner opened the todos to every agent Tower runs, outside input and controlling computers' turns included.
+  const todos = { [TODO_TOOLS_SERVER]: todoToolServer(options.stateDir, thisBuild()) };
   const withBrowsers = (session: Session, tools: RunTools): RunTools => {
     const browsers = sessionBrowsers(options.stateDir, options.runs, session, options.browsers?.());
     return { ...tools, servers: { ...tools.servers, ...browsers.servers }, claudeChrome: browsers.claudeChrome };
@@ -70,13 +74,13 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
       return { servers: { tower_master: masterToolServer(options.stateDir, capability), ...secrets }, required: true };
     }
     const tools = resolve(run, session, secrets);
-    if (run.origin?.controllerId) return withBrowsers(session, tools);
+    if (run.origin?.controllerId) return withBrowsers(session, { ...tools, servers: { ...tools.servers, ...todos } });
     const env = { [CALLER_CAPABILITY_ENV]: options.capabilities.issue({ kind: 'caller-run', runId: run.id, sessionId: run.sessionId }) };
     // A global HTTP MCP connection has no per-turn environment. Override it only where owner tools already belong.
     const local: SessionMcpServers = tools.towerTools === 'attached' && !subscriptionOnly(options.stateDir, session.cwd)
       ? { tower_local: { ...thisBuild(), args: [...thisBuild().args, 'mcp', '--state-dir', options.stateDir], env } } : {};
     // Given here too, so they work even where the user configuration does not name them.
-    return withBrowsers(session, { ...tools, env, servers: { ...tools.servers, ...local, ...lookups } });
+    return withBrowsers(session, { ...tools, env, servers: { ...tools.servers, ...local, ...lookups, ...todos } });
   };
   /** `secrets` joins whatever else the turn gets; a turn that gains only them never waits or fails for them (`required` unchanged). */
   function resolve(run: Run, session: Session, secrets: SessionMcpServers): RunTools {

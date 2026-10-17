@@ -50,6 +50,8 @@ import { RepositoryMonitor, watchedRepositoryPaths } from './repositories/monito
 import { installAgentGuidance } from './agent-guidance/install.js';
 import type { SkillBundle, SkillDetail, SkillImportPlan, SkillOverview, SkillSummary } from '../shared/skills.js';
 import { startSessionsMcp } from './api/session-tools.js';
+import { startTodosMcp, todoToolsKey } from './todo/agent-mcp.js';
+import { callTodoTool, todoToolList } from './todo/agent-tools.js';
 import { startSecretsMcp } from './secrets/runtime.js';
 import { runSecretsCommand } from './secrets/cli.js';
 import { SecretRelay } from './link/secret-relay.js';
@@ -138,6 +140,11 @@ async function main() {
   if (args[0] === '--sessions-mcp') {
     if (args.length !== 2) throw new Error('The session tools require a state directory.');
     await startSessionsMcp(resolve(args[1]));
+    return;
+  }
+  if (args[0] === '--todos-mcp') {
+    if (args.length !== 2) throw new Error('The todo tools require a state directory.');
+    await startTodosMcp(resolve(args[1]));
     return;
   }
   if (args[0] === '--tower-mcp') {
@@ -254,6 +261,17 @@ async function main() {
   const todos = new TodoStore(stateDir);
   const todoFiles = new TodoFiles(stateDir, todos);
   const todoBackup = new TodoBackup(todos, todoFiles, { onChange: () => changed() });
+  // The page's and the agents' todo calls: a change tells the pages either way.
+  const todoCalls = {
+    overview: () => todos.overview(),
+    detail: (id: string) => todos.detail(id),
+    completed: (input: Parameters<TodoStore['completed']>[0]) => todos.completed(input),
+    search: (query: string, input: Parameters<TodoStore['search']>[1]) => todos.search(query, input),
+    apply: (request: Parameters<TodoStore['apply']>[0]) => { const changes = todos.apply(request); changed(); return changes; },
+  };
+  // The Todo tools every turn Tower runs gets (todo/agent-mcp.ts) reach the web with this key.
+  const todoTools = { key: await todoToolsKey(stateDir), answer: (body: Record<string, unknown>) => body.method === 'tools/list'
+    ? { tools: todoToolList() } : callTodoTool(todoCalls, String(body.name ?? ''), body.arguments) };
   // Only the background service's own install is replaced by an update; an update left unfinished is settled first.
   const updates = new Updates({ stateDir, version: APP_VERSION, port, managed: await managedByService(stateDir, process.argv[1], Boolean(serviceLog)) });
   // Started as the background service, this version writes the service the way it runs it best, for its next start;
@@ -522,11 +540,7 @@ async function main() {
     },
     setGroup: async patch => { const group = await groups.set(patch); changed(); return group; },
     todos: {
-      overview: () => todos.overview(),
-      detail: id => todos.detail(id),
-      completed: input => todos.completed(input),
-      search: (query, input) => todos.search(query, input),
-      apply: request => { const changes = todos.apply(request); changed(); return changes; },
+      ...todoCalls,
       files: {
         startUpload: input => todoFiles.startUpload(input),
         uploadOffset: id => todoFiles.uploadOffset(id),
@@ -730,7 +744,7 @@ async function main() {
       sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })), managed: managedSync,
       // The trust is made first when it is still pending (right after joining), so the folder can be shared at once.
       afterClone: async id => { await followingSecrets?.align(id); await followingSecrets?.shareFolders(id, managedSync?.folders(id) ?? []); } } : { error: linkError },
-    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups, localMcp,
+    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups, localMcp, todoTools,
     decisions: {
       overview: () => decisions.overview(),
       // Turning the key or the canvas outcomes on or off shows or hides them at once.

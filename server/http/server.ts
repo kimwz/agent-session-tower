@@ -20,6 +20,7 @@ import type { RemoteNodes } from '../link/nodes.js';
 import { proxyToNode } from '../link/proxy.js';
 import { normalizeProjectGroupPatch } from '../stores/project-groups.js';
 import { todoRoute, TODO_OPS_PATH, type TodoBackend } from './todo-routes.js';
+import { TODO_TOOLS_PATH } from '../todo/agent-tools.js';
 import type { Attachment, AutoPromptJob, AutoPromptInput, NewSessionInput, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionCompaction, SessionDetail, Run, RunApprovalResponse } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { acceptedEncoding, compressedEventStream, isBuildAsset, sendBody, StaticCompression } from './compression.js';
@@ -161,6 +162,8 @@ export interface HttpOptions {
   };
   /** Tower's tools for the owner's own agents on this computer, as MCP over HTTP at `/mcp` (see owner-mcp). */
   localMcp?: { answer(body: unknown): Promise<unknown> };
+  /** The Todo tools of the agents' turns (todo/agent-mcp.ts): opened by their own key, at this computer only. */
+  todoTools?: { key: string; answer(body: Record<string, unknown>): unknown };
   /**
    * The master agent's `/api/master/*` routes, answered after the usual sign-in and page-token checks. Its own calls
    * to this API carry `callerSecret`, which gives them a request budget apart from the owner's pages.
@@ -192,7 +195,7 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ attachmentStores, attachmentUploads, port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, storageRefusal, forceRunnerUpdate, service, notifications, decisions, master, backup, localMcp }: HttpOptions) {
+export function createMonitorServer({ attachmentStores, attachmentUploads, port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, storageRefusal, forceRunnerUpdate, service, notifications, decisions, master, backup, localMcp, todoTools }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   // The Tower password's part in the vault: value viewing of each sign-in, and unlock, lock and credential changes in one turn.
@@ -345,6 +348,22 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         const reply = await localMcp.answer(body);
         if (reply === undefined) { res.writeHead(202).end(); return; }
         return json(res, 200, reply);
+      }
+      if (path === TODO_TOOLS_PATH) {
+        // A turn's todo tools, from this computer only and never a page: the key opens these tools and nothing else.
+        if (!identity.local) return json(res, 403, { error: { message: 'The todo tools work only on this computer.' } });
+        if (req.headers.origin || req.headers['sec-fetch-site']) return json(res, 403, { error: { message: 'The todo tools cannot be called from a browser.' } });
+        if (!todoTools) return json(res, 503, { error: { message: 'The todos are unavailable.' } });
+        const presented = /^TodoKey ([a-f\d]{64})$/.exec(req.headers.authorization ?? '')?.[1];
+        if (!presented || !timingSafeEqual(Buffer.from(presented), Buffer.from(todoTools.key))) return json(res, 403, { error: { message: 'This todo tools key is not valid.' } });
+        if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }).end(); return; }
+        if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: { message: 'A JSON request is required.' } });
+        const now = Date.now(), rate = rates.get('\0todo-agent');
+        if (!rate || now - rate.at > 60_000) rates.set('\0todo-agent', { count: 1, at: now });
+        else if (++rate.count > 240) return json(res, 429, { error: { message: 'Too many todo tool calls; try again in a minute.' } });
+        const body = await readJson(req, 4 * 1024 * 1024);
+        try { return json(res, 200, { result: await todoTools.answer(body) }); }
+        catch (error) { return json(res, statusOf(error) === 500 ? 500 : 200, { error: { message: error instanceof Error ? error.message : 'The todo tool failed.' } }); }
       }
       // The master agent calls with its own secret, and its calls count apart.
       const caller = req.headers['x-tower-master'];
