@@ -70,8 +70,10 @@ export type TodoTables = Record<string, Record<string, unknown>[]>;
 /** Where attachments sealed with a key are in a backup bucket, and the key (base64url). */
 export interface TodoFileKey { namespace: string; key: string }
 /** Both lists, each namespace once (the first one's entry wins). */
-export const mergeKeys = (first: TodoFileKey[], second: TodoFileKey[]): TodoFileKey[] =>
-  [...first, ...second].filter((item, index, all) => all.findIndex(other => other.namespace === item.namespace) === index).map(({ namespace, key }) => ({ namespace, key }));
+export function mergeKeys(first: TodoFileKey[], second: TodoFileKey[]): TodoFileKey[] {
+  const seen = new Set<string>();
+  return [...first, ...second].filter(item => !seen.has(item.namespace) && Boolean(seen.add(item.namespace))).map(({ namespace, key }) => ({ namespace, key }));
+}
 
 type Sqlite = typeof import('node:sqlite');
 

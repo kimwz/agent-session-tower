@@ -3,7 +3,7 @@ import { mkdir } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { BACKUP_EXTENSION, DEFAULT_BACKUP_SETTINGS, MAX_BACKUP_FILE_BYTES, type BackupOverview, type BackupPart, type BackupPreview, type BackupSettingsInput, type BackupStatus, type RemoteBackup, type RestoreReport } from '../../shared/backup.js';
-import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { BackupError, checkPassphrase, decryptBackup, encryptBackup, readBackupHeader, type BackupHeader } from './crypto.js';
 import { stageLegacyImport } from './secrets.js';
 import { deferredSecretParts, encryptedVaultOf, machineKeyOf, stageVaultImport } from '../secrets/imports.js';
@@ -59,6 +59,8 @@ const FILE = 'backup-settings.json';
  * builds rewrite. Restores add to it; nothing replaces it.
  */
 const KEYS_FILE = 'todo-backup-keys.json';
+const KEYS_FILE_MAX_BYTES = 256 * 1024 * 1024;
+const KEYS_UNREADABLE = '첨부 키 파일(todo-backup-keys.json)을 읽을 수 없어 키를 더하지 못했고, 백업은 부분 백업으로 올라갑니다. 상태 폴더의 이 파일을 확인하세요.';
 /** Files a restore may replace, copied aside first. Skills replaced go to Tower's skill trash as usual. */
 const REPLACED = [...Object.keys(WORKER_FILES), 'skills.json', 'guidance', 'project-groups.json', 'remote-exclusions.json', 'decisions.json', FILE, join('master', 'settings.json'), join('master', 'elevenlabs-key.json')];
 
@@ -117,23 +119,30 @@ export class BackupService {
   private todoKeys: TodoFileKey[] = [];
   private keyWrites: Promise<unknown> = Promise.resolve();
 
-  private async loadKeys(): Promise<void> {
-    const path = join(this.options.stateDir, KEYS_FILE);
+  /**
+   * Reads the kept keys again. A file that cannot be read or understood is left exactly as it is (it may hold the only
+   * copy of a key) and the keys are unavailable until it can be read: answers false then, logged, never thrown.
+   */
+  private async loadKeys(): Promise<boolean> {
     try {
-      const value = await readPrivateJson(path);
+      // Far above any real list (every restore of another key adds one entry of about 100 bytes).
+      const value = await readPrivateJson(join(this.options.stateDir, KEYS_FILE), KEYS_FILE_MAX_BYTES);
       if (!record(value) || !Array.isArray(value.keys)) throw new Error('not a list of keys');
       this.todoKeys = mergeKeys([], (value.keys as unknown[]).filter((item): item is TodoFileKey => record(item) && typeof item.namespace === 'string' && typeof item.key === 'string'));
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      // Never written over: set aside where the owner can still find the keys.
-      const aside = await quarantineFile(path);
-      console.error(`The kept attachment keys could not be read and were set aside as ${aside}: ${error instanceof Error ? error.message : String(error)}`);
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        console.error(`The kept attachment keys (${KEYS_FILE}) cannot be read; backups are partial until it can be: ${error instanceof Error ? error.message : String(error)}`);
+        return false;
+      }
+      this.todoKeys = [];
     }
+    return true;
   }
+
 
   async start(): Promise<void> {
     await mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
-    await this.loadKeys();
+    await this.rememberKeys([]).catch(error => console.error(`The kept attachment keys could not be looked at: ${error instanceof Error ? error.message : String(error)}`));
     try {
       const value = await readPrivateJson(this.path) as Partial<SavedFile>;
       // This computer's mark survives settings that can no longer be read, so its old backups are still its own.
@@ -256,20 +265,24 @@ export class BackupService {
   }
 
   /**
-   * Adds keys to the ones this computer keeps (KEYS_FILE), never dropping any. One at a time, each looking at what was
-   * last written; settles only once the keys are on disk, and fails when they could not be written.
+   * Adds keys to the ones this computer keeps (KEYS_FILE), never dropping any: one at a time, each reading the file
+   * again first. Settles once the keys are on disk, and fails when they could not be written; answers false, writing
+   * nothing, while the file cannot be read (merging into what cannot be read could drop a key).
    */
-  private rememberKeys(keys: TodoFileKey[]): Promise<void> {
+  private rememberKeys(keys: TodoFileKey[]): Promise<boolean> {
     // best-effort: the write before already gave its failure to its own caller; this one looks again at what is on disk.
     const next = this.keyWrites.catch(() => {}).then(async () => {
+      if (!await this.loadKeys()) return false;
       const merged = mergeKeys(this.todoKeys, keys);
-      if (merged.length === this.todoKeys.length) return;
+      if (merged.length === this.todoKeys.length) return true;
       await writePrivateJson(join(this.options.stateDir, KEYS_FILE), JSON.stringify({ version: 1, keys: merged }));
       this.todoKeys = merged;
+      return true;
     });
     this.keyWrites = next;
     return next;
   }
+
 
   // ---- Automatic backups -------------------------------------------------------------------------
 
@@ -319,18 +332,24 @@ export class BackupService {
       const undoAttempt = () => this.change(() => { const { lastAttemptAt: _at, ...status } = this.saved.status; this.saved = { ...this.saved, status: { ...status, ...(attempted ? { lastAttemptAt: attempted } : {}) } }; }).catch(() => {});
       // A restore after this point replaces what the snapshot below holds: the round then removes nothing.
       const generation = this.options.todos?.generation();
-      const todos = this.todoSnapshot();
       // Why this backup cannot hold all the todos, known before it goes up; any of it makes it a partial backup.
       const partial: string[] = [];
+      const warnings: string[] = [];
+      // The kept keys read again first, so the snapshot carries them (a fixed file is used again without a restart).
+      let keysReadable = await this.rememberKeys([]);
+      const todos = this.todoSnapshot();
       if (this.options.todos && !todos) partial.push('할 일 저장소를 읽지 못해 할 일이 빠졌습니다');
       if (todos?.newer) partial.push('더 새로운 Tower가 바꾼 할 일 저장소라 이 Tower가 아는 내용만 담았습니다');
-      const warnings: string[] = [];
       let key = '';
       try {
         const text = await encryptBackup(await this.payload(todos, settings), settings.passphrase, { towerVersion: this.options.version, from: hostname(), createdAt: new Date(at).toISOString() });
-        key = `${settings.remote.prefix}${this.uploadName(at, partial.length > 0)}`;
         // Kept before the backup goes up: a later backup carries these keys even if the todo file is lost meanwhile.
-        if (todos?.part.files) await this.rememberKeys([{ namespace: todos.part.files.namespace, key: todos.part.files.key }, ...todos.part.files.keys ?? []]);
+        if (todos?.part.files) keysReadable = await this.rememberKeys([{ namespace: todos.part.files.namespace, key: todos.part.files.key }, ...todos.part.files.keys ?? []]);
+        if (!keysReadable) {
+          partial.push('첨부 키 파일을 읽을 수 없어 예전 백업의 첨부 키를 모두 싣지 못했습니다');
+          warnings.push(KEYS_UNREADABLE);
+        }
+        key = `${settings.remote.prefix}${this.uploadName(at, partial.length > 0)}`;
         // The backup first, so a slow or stopped attachment upload never costs the settings. It carries every key the
         // todos know, so attachments that then do not go up stay openable wherever the bucket already holds them.
         await client.put(key, Buffer.from(text), 'application/octet-stream');
@@ -484,17 +503,19 @@ export class BackupService {
     }));
     // After the backup settings: its attachments come from the bucket those name.
     let todoBefore: string | undefined;
+    const restoreNotes: string[] = [];
     if (web.todos !== undefined) await step('todos', async () => {
       if (!this.options.todos) throw new BackupError('할 일을 사용할 수 없습니다.', 'unavailable');
       const restored = await this.options.todos.restore(web.todos, () => this.objects(this.client()), this.saved.settings.remote.prefix, this.computer);
       todoBefore = restored.before;
-      await this.rememberKeys(restored.keys);
+      // Its keys stay in the todo file either way; the kept keys need the file readable to take them too.
+      if (!await this.rememberKeys(restored.keys)) restoreNotes.push(KEYS_UNREADABLE);
     });
     if (master && this.options.master) await step('master', () => this.options.master!({ ...(master.settings?.voice !== undefined ? { voice: master.settings.voice } : {}), voiceKey: master.voiceKey ?? null }));
     if (applied.length) this.options.onChange?.();
     const requestedAt = new Date(this.now()).toISOString();
     const report: RestoreReport = { id: restoreId, status: worker.length ? 'waiting-worker' : pendingSecretImports.length ? 'waiting-secrets' : 'applied', requestedAt, from: header.from, createdAt: header.createdAt, applied, worker, errors, before, ...(todoBefore ? { todoBefore } : {}), ...(pendingSecretImports.length ? { pendingSecretImports } : {}),
-      ...((passphraseAdopted || pendingSecretImports.length) ? { notes: [...(passphraseAdopted ? ['자동 백업은 이제 이 백업을 연 암호로 암호화됩니다.'] : []), ...(pendingSecretImports.length ? ['시크릿과 트리거 복원은 암호화 가져오기 대기 중입니다. Vault 기록에는 원본 Vault 비밀번호를, 트리거·이전 시크릿 기록에는 백업 암호를 입력하세요.'] : [])] } : {}),
+      ...((passphraseAdopted || pendingSecretImports.length || restoreNotes.length) ? { notes: [...(passphraseAdopted ? ['자동 백업은 이제 이 백업을 연 암호로 암호화됩니다.'] : []), ...(pendingSecretImports.length ? ['시크릿과 트리거 복원은 암호화 가져오기 대기 중입니다. Vault 기록에는 원본 Vault 비밀번호를, 트리거·이전 시크릿 기록에는 백업 암호를 입력하세요.'] : []), ...restoreNotes] } : {}),
       ...(worker.length || pendingSecretImports.length ? {} : { appliedAt: requestedAt }) };
     await writeReport(stateDir, report);
     if (!worker.length) return report;

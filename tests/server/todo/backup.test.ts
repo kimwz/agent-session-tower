@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { link, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, link, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -1010,24 +1010,26 @@ test('a key that could not be kept fails the backup and the restore that needed 
   a.service.close(); await a.service.flush(); a.todos.close();
   for (const name of await readdir(a.stateDir)) if (name.startsWith('todos.sqlite') || name === 'todo-files' || name === 'todo-backup-keys.json') await rm(join(a.stateDir, name), { recursive: true, force: true });
   const again = await computer(t, bucket, { stateDir: a.stateDir, clock: a.clock });
-  // The kept keys cannot be written for now.
-  const blocked = join(again.stateDir, 'todo-backup-keys.json');
-  await mkdir(join(blocked, 'in-the-way'), { recursive: true });
+  t.after(() => chmod(again.stateDir, 0o700).catch(() => undefined));
   let release!: () => void, entered!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; }), reached = new Promise<void>(resolve => { entered = resolve; });
   const restore = again.backup.restore.bind(again.backup);
   again.backup.restore = async (...args) => { entered(); await held; return restore(...args); };
   const restoring = again.service.apply((await again.service.check(bucket.objects.get(first)!.body.toString('utf8'), PASS)).id);
   await reached;
+  // From here nothing new can be written in the state folder: the kept keys neither.
+  await chmod(again.stateDir, 0o500);
   const making = again.service.upload();
   release();
   await assert.rejects(making);
-  const report = await restoring;
-  assert.match(report.errors.join(' '), /^todos: /);
-  assert.equal(report.applied.includes('todos'), false);
-  // Once the keys can be written, the next backup keeps them, and a todo file lost after that drops none.
-  await rm(blocked, { recursive: true });
+  // Refused whole (nothing can be set aside either) or without its todos: never reported as applied.
+  const report = await restoring.catch(() => undefined);
+  assert.ok(!report || !report.applied.includes('todos'));
+  // Once files can be written, the restore run again keeps its keys, and a todo file lost after that drops none.
+  await chmod(again.stateDir, 0o700);
   again.backup.restore = restore;
+  const retried = await again.restore(first);
+  assert.ok(retried.applied.includes('todos'), retried.errors.join(' '));
   await again.upload();
   const third = await remade(t, bucket, again);
   await keepOne(third, bucket);
@@ -1057,4 +1059,67 @@ test('an older build rewriting the backup settings leaves the kept keys alone', 
   const c = await elsewhere(t, bucket, newest);
   await rowsOnly(c, bucket, tables);
   assert.deepEqual(await content(c, file), file);
+});
+
+test('a key file that cannot be read is left as it is, and backups go up partial until it can be read again', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket, { keep: 1 });
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  await a.attach('t', randomBytes(PIECE));
+  const complete = await a.upload();
+  const keysFile = join(a.stateDir, 'todo-backup-keys.json');
+  const written = await readFile(keysFile);
+  await chmod(keysFile, 0o000);
+  t.after(() => chmod(keysFile, 0o600).catch(() => undefined));
+  const partial = await a.upload();
+  assert.ok(partial.endsWith('-partial.towerbackup'));
+  assert.ok(bucket.objects.has(complete), 'the complete backup stays');
+  assert.match((await a.service.overview()).status.lastWarning ?? '', /첨부 키 파일\(todo-backup-keys\.json\)을 읽을 수 없어/);
+  // A restore still applies, and says the key file could not take its keys.
+  const report = await a.restore(complete);
+  assert.ok(report.applied.includes('todos'));
+  assert.ok(report.notes?.some(note => /첨부 키 파일/.test(note)));
+  await chmod(keysFile, 0o600);
+  assert.deepEqual(await readFile(keysFile), written, 'never written over');
+  // Readable again: the next backup is complete and rotates as usual, without a restart.
+  const fixed = await a.upload();
+  assert.equal(fixed.endsWith('-partial.towerbackup'), false);
+  assert.equal(bucket.objects.has(complete), false);
+});
+
+test('a key file that is not valid stays untouched, and starting Tower never fails over it', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket, { keep: 1 });
+  const complete = await a.upload();
+  const keysFile = join(a.stateDir, 'todo-backup-keys.json');
+  await writeFile(keysFile, '{"keys": [ cut short', { mode: 0o600 });
+  // A state folder that cannot take a new name either, as when it is not writable.
+  await chmod(a.stateDir, 0o500);
+  try {
+    const service = new BackupService({ stateDir: a.stateDir, version: '1.140.0', skills: async () => structuredClone(skills), triggers: async () => undefined,
+      settings: async () => ({ 'permissions.json': {}, 'slack-automation.json': {}, 'github-automation.json': {} }), restartWorker: async () => true,
+      stores: { groups: store, exclusions: store, decisions: store }, host: 'studio' });
+    await service.start();
+    service.close(); await service.flush();
+  } finally { await chmod(a.stateDir, 0o700); }
+  const partial = await a.upload();
+  assert.ok(partial.endsWith('-partial.towerbackup'));
+  assert.ok(bucket.objects.has(complete));
+  assert.equal(await readFile(keysFile, 'utf8'), '{"keys": [ cut short');
+  assert.deepEqual((await readdir(a.stateDir)).filter(name => name.startsWith('todo-backup-keys.json.')), [], 'not set aside either');
+});
+
+test('a key file larger than private files usually are is read whole', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket);
+  const keys = Array.from({ length: 140_000 }, (_, index) => ({ namespace: `other-${(index % 0xffffff).toString(16).padStart(6, '0')}-${index.toString(16).padStart(16, '0')}`, key: randomBytes(32).toString('base64url') }));
+  const text = JSON.stringify({ version: 1, keys });
+  assert.ok(Buffer.byteLength(text) > 12_000_000);
+  await writeFile(join(a.stateDir, 'todo-backup-keys.json'), text, { mode: 0o600 });
+  const key = await a.upload();
+  assert.equal(key.endsWith('-partial.towerbackup'), false);
+  const b = await computer(t, bucket);
+  const report = await b.restore(key);
+  assert.ok(report.applied.includes('todos'), report.errors.join(' '));
+  assert.ok(b.todos.fileKeys().length >= 140_000);
 });
