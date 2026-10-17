@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { link, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -978,10 +978,10 @@ test('a removal racing a failed restore, then the todo file lost, still leaves t
   assert.deepEqual(await content(c, file), file);
 });
 
-test('a backup carrying more than a thousand keys restores, and keeps them all', async t => {
+test('a backup carrying more than ten thousand keys restores, and keeps them all', async t => {
   const bucket = await fakeBucket(t);
   const a = await computer(t, bucket);
-  const keys = Array.from({ length: 1500 }, (_, index) => ({ namespace: `other-${index.toString(16).padStart(6, '0')}-${index.toString(16).padStart(16, '0')}`, key: randomBytes(32).toString('base64url') }));
+  const keys = Array.from({ length: 10_050 }, (_, index) => ({ namespace: `other-${index.toString(16).padStart(6, '0')}-${index.toString(16).padStart(16, '0')}`, key: randomBytes(32).toString('base64url') }));
   a.todos.close();
   const db = new DatabaseSync(join(a.stateDir, 'todos.sqlite'));
   db.prepare("INSERT INTO todo_meta (key, value) VALUES ('files_keys', ?)").run(JSON.stringify(keys));
@@ -991,9 +991,70 @@ test('a backup carrying more than a thousand keys restores, and keeps them all',
   const b = await computer(t, bucket);
   const report = await b.restore(key);
   assert.ok(report.applied.includes('todos'), report.errors.join(' '));
-  assert.ok(b.todos.fileKeys().length >= 1500);
-  assert.ok(a.todos.fileKeys().length === 1500);
+  assert.ok(b.todos.fileKeys().length >= 10_050);
+  assert.ok(a.todos.fileKeys().length === 10_050);
   // Its own backup restores on it too.
   const own = await a.restore(key);
   assert.ok(own.applied.includes('todos'), own.errors.join(' '));
+});
+
+test('a key that could not be kept fails the backup and the restore that needed it, never reported as kept', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket);
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  const file = randomBytes(PIECE);
+  await a.attach('t', file);
+  const first = await a.upload();
+  const tables = a.todos.backupData()!.tables;
+  // The todo file and the kept keys are both lost.
+  a.service.close(); await a.service.flush(); a.todos.close();
+  for (const name of await readdir(a.stateDir)) if (name.startsWith('todos.sqlite') || name === 'todo-files' || name === 'todo-backup-keys.json') await rm(join(a.stateDir, name), { recursive: true, force: true });
+  const again = await computer(t, bucket, { stateDir: a.stateDir, clock: a.clock });
+  // The kept keys cannot be written for now.
+  const blocked = join(again.stateDir, 'todo-backup-keys.json');
+  await mkdir(join(blocked, 'in-the-way'), { recursive: true });
+  let release!: () => void, entered!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; }), reached = new Promise<void>(resolve => { entered = resolve; });
+  const restore = again.backup.restore.bind(again.backup);
+  again.backup.restore = async (...args) => { entered(); await held; return restore(...args); };
+  const restoring = again.service.apply((await again.service.check(bucket.objects.get(first)!.body.toString('utf8'), PASS)).id);
+  await reached;
+  const making = again.service.upload();
+  release();
+  await assert.rejects(making);
+  const report = await restoring;
+  assert.match(report.errors.join(' '), /^todos: /);
+  assert.equal(report.applied.includes('todos'), false);
+  // Once the keys can be written, the next backup keeps them, and a todo file lost after that drops none.
+  await rm(blocked, { recursive: true });
+  again.backup.restore = restore;
+  await again.upload();
+  const third = await remade(t, bucket, again);
+  await keepOne(third, bucket);
+  let newest = '';
+  for (let round = 0; round < 2; round++) newest = await third.upload();
+  const c = await elsewhere(t, bucket, newest);
+  await rowsOnly(c, bucket, tables);
+  assert.deepEqual(await content(c, file), file);
+});
+
+test('an older build rewriting the backup settings leaves the kept keys alone', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket);
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  const file = randomBytes(PIECE);
+  await a.attach('t', file);
+  await a.upload();
+  const tables = a.todos.backupData()!.tables;
+  const again = await remade(t, bucket, a);
+  // What an older build writes: the settings it knows, nothing else.
+  const settings = JSON.parse(await readFile(join(again.stateDir, 'backup-settings.json'), 'utf8')) as Record<string, unknown>;
+  await writeFile(join(again.stateDir, 'backup-settings.json'), JSON.stringify({ version: 1, machine: settings.machine, settings: settings.settings, status: settings.status }), { mode: 0o600 });
+  const later = await remade(t, bucket, again);
+  await keepOne(later, bucket);
+  let newest = '';
+  for (let round = 0; round < 2; round++) newest = await later.upload();
+  const c = await elsewhere(t, bucket, newest);
+  await rowsOnly(c, bucket, tables);
+  assert.deepEqual(await content(c, file), file);
 });

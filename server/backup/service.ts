@@ -3,7 +3,7 @@ import { mkdir } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { BACKUP_EXTENSION, DEFAULT_BACKUP_SETTINGS, MAX_BACKUP_FILE_BYTES, type BackupOverview, type BackupPart, type BackupPreview, type BackupSettingsInput, type BackupStatus, type RemoteBackup, type RestoreReport } from '../../shared/backup.js';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { BackupError, checkPassphrase, decryptBackup, encryptBackup, readBackupHeader, type BackupHeader } from './crypto.js';
 import { stageLegacyImport } from './secrets.js';
 import { deferredSecretParts, encryptedVaultOf, machineKeyOf, stageVaultImport } from '../secrets/imports.js';
@@ -17,12 +17,8 @@ import type { TodoBackup, TodoBackupSnapshot, TodoObjectStore } from '../todo/ba
 import { mergeKeys, type TodoFileKey } from '../todo/store.js';
 
 interface SavedSettings extends BackupSettingsInput { remote: BackupSettingsInput['remote'] & { secretAccessKey?: string } }
-/**
- * `machine`: this computer's own mark in backup names, so two computers with one name never remove each other's; never
- * restored. `todoKeys`: every attachment key a backup from here has carried or a restore here brought, kept apart from
- * the todo file so that losing that file never makes later backups drop a key older ones carried.
- */
-interface SavedFile { version: 1; machine: string; settings: SavedSettings; status: Omit<BackupStatus, 'running'>; todoKeys?: TodoFileKey[] }
+/** `machine`: this computer's own mark in backup names, so two computers with one name never remove each other's; never restored. */
+interface SavedFile { version: 1; machine: string; settings: SavedSettings; status: Omit<BackupStatus, 'running'> }
 
 /** What the backup needs from the rest of the web process. */
 export interface BackupServiceOptions {
@@ -57,6 +53,12 @@ const CHECK_EVERY = 10 * 60 * 1000;
 const RETRY_AFTER = 30 * 60 * 1000;
 const CHECKED_KEPT_MS = 10 * 60 * 1000;
 const FILE = 'backup-settings.json';
+/**
+ * Every attachment key a backup from here has carried or a restore here brought: kept apart from the todo file, so a
+ * lost todo file never makes later backups drop a key older ones carried, and apart from the settings, which older
+ * builds rewrite. Restores add to it; nothing replaces it.
+ */
+const KEYS_FILE = 'todo-backup-keys.json';
 /** Files a restore may replace, copied aside first. Skills replaced go to Tower's skill trash as usual. */
 const REPLACED = [...Object.keys(WORKER_FILES), 'skills.json', 'guidance', 'project-groups.json', 'remote-exclusions.json', 'decisions.json', FILE, join('master', 'settings.json'), join('master', 'elevenlabs-key.json')];
 
@@ -111,8 +113,27 @@ export class BackupService {
   }
   private get path() { return join(this.options.stateDir, FILE); }
 
+  /** The attachment keys kept in KEYS_FILE, as last written. */
+  private todoKeys: TodoFileKey[] = [];
+  private keyWrites: Promise<unknown> = Promise.resolve();
+
+  private async loadKeys(): Promise<void> {
+    const path = join(this.options.stateDir, KEYS_FILE);
+    try {
+      const value = await readPrivateJson(path);
+      if (!record(value) || !Array.isArray(value.keys)) throw new Error('not a list of keys');
+      this.todoKeys = mergeKeys([], (value.keys as unknown[]).filter((item): item is TodoFileKey => record(item) && typeof item.namespace === 'string' && typeof item.key === 'string'));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      // Never written over: set aside where the owner can still find the keys.
+      const aside = await quarantineFile(path);
+      console.error(`The kept attachment keys could not be read and were set aside as ${aside}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   async start(): Promise<void> {
     await mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
+    await this.loadKeys();
     try {
       const value = await readPrivateJson(this.path) as Partial<SavedFile>;
       // This computer's mark survives settings that can no longer be read, so its old backups are still its own.
@@ -121,10 +142,6 @@ export class BackupService {
         const settings = parseSettings({ ...value.settings, enabled: false }, value.settings as SavedSettings);
         this.saved = { version: 1, machine: typeof value.machine === 'string' && /^[0-9a-f]{6}$/.test(value.machine) ? value.machine : this.saved.machine,
           settings: { ...settings, enabled: value.settings.enabled === true }, status: record(value.status) ? value.status as SavedFile['status'] : {} };
-      }
-      if (record(value) && Array.isArray(value.todoKeys)) {
-        const todoKeys = (value.todoKeys as unknown[]).filter((item): item is TodoFileKey => record(item) && typeof item.namespace === 'string' && typeof item.key === 'string');
-        this.saved = { ...this.saved, todoKeys: mergeKeys([], todoKeys) };
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { console.error(`Backup settings could not be read: ${error instanceof Error ? error.message : String(error)}`); return; }
@@ -143,7 +160,11 @@ export class BackupService {
   /** Stops the schedule and any upload under way; the next start backs up again when due. */
   close(): void { if (this.first) clearTimeout(this.first); if (this.timer) clearInterval(this.timer); this.closing.abort(); }
   private readonly closing = new AbortController();
-  async flush(): Promise<void> { await this.restores.catch(() => {}); await this.writes.catch(() => {}); await this.running?.catch(() => {}); }
+  async flush(): Promise<void> {
+    await this.restores.catch(() => {}); await this.writes.catch(() => {}); await this.running?.catch(() => {});
+    // best-effort: a key write's failure already reached the backup or restore that asked for it.
+    await this.keyWrites.catch(() => {});
+  }
 
   async overview(): Promise<BackupOverview> {
     const { passphrase, remote: { secretAccessKey, ...remote }, ...settings } = this.saved.settings;
@@ -230,16 +251,24 @@ export class BackupService {
     const files = snapshot?.part.files;
     if (!snapshot || !files) return snapshot;
     const own = { namespace: files.namespace, key: files.key };
-    const keys = mergeKeys([own], mergeKeys(files.keys ?? [], this.saved.todoKeys ?? [])).slice(1);
+    const keys = mergeKeys([own], mergeKeys(files.keys ?? [], this.todoKeys)).slice(1);
     return { ...snapshot, part: { ...snapshot.part, files: { ...own, ...(keys.length ? { keys } : {}) } } };
   }
 
-  /** Adds keys to the ones this computer keeps (SavedFile.todoKeys), never dropping any. */
+  /**
+   * Adds keys to the ones this computer keeps (KEYS_FILE), never dropping any. One at a time, each looking at what was
+   * last written; settles only once the keys are on disk, and fails when they could not be written.
+   */
   private rememberKeys(keys: TodoFileKey[]): Promise<void> {
-    const known = this.saved.todoKeys ?? [];
-    const merged = mergeKeys(known, keys);
-    if (merged.length === known.length) return Promise.resolve();
-    return this.change(() => { this.saved = { ...this.saved, todoKeys: mergeKeys(this.saved.todoKeys ?? [], keys) }; });
+    // best-effort: the write before already gave its failure to its own caller; this one looks again at what is on disk.
+    const next = this.keyWrites.catch(() => {}).then(async () => {
+      const merged = mergeKeys(this.todoKeys, keys);
+      if (merged.length === this.todoKeys.length) return;
+      await writePrivateJson(join(this.options.stateDir, KEYS_FILE), JSON.stringify({ version: 1, keys: merged }));
+      this.todoKeys = merged;
+    });
+    this.keyWrites = next;
+    return next;
   }
 
   // ---- Automatic backups -------------------------------------------------------------------------

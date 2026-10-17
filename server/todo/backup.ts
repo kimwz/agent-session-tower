@@ -40,8 +40,6 @@ export interface TodoBackupPart { schema: number; tables: TodoTables; files?: To
 export interface TodoBackupSnapshot { part: TodoBackupPart; contents: Map<string, number>; newer: boolean }
 
 export const TODO_FILES_FOLDER = 'tower-todo-files/';
-/** Keys a backup may carry, far more than one computer ever holds (each restore of another key adds one). */
-export const MAX_CARRIED_KEYS = 10_000;
 const PIECE_BYTES = 8 * 1024 * 1024;
 /** Attachments the bucket refuses one after another before the rest of a round's are given up. */
 const REFUSALS_IN_A_ROW = 3;
@@ -100,7 +98,7 @@ export function parseTodoPart(value: unknown): TodoBackupPart {
     tables[name] = rows as Record<string, unknown>[];
   }
   const files = value.files, keys = record(files) ? files.keys : undefined;
-  if (files !== undefined && !(validKey(files) && (keys === undefined || (Array.isArray(keys) && keys.length <= MAX_CARRIED_KEYS && keys.every(validKey))))) throw wrong();
+  if (files !== undefined && !(validKey(files) && (keys === undefined || (Array.isArray(keys) && keys.every(validKey))))) throw wrong();
   return { schema: value.schema as number, tables,
     ...(validKey(files) ? { files: { namespace: files.namespace, key: files.key, ...(Array.isArray(keys) ? { keys: mergeKeys([], keys as TodoFileKey[]) } : {}) } } : {}) };
 }
