@@ -42,6 +42,8 @@ async function harness(t: test.TestContext) {
   const headers: Array<{ path: string; capability?: string; master?: string; issue?: string }> = [];
   /** Messages to sessions are refused while set. */
   let refuse = false;
+  /** Messages to sessions are answered only once this settles. */
+  let paused: Promise<void> | undefined;
   let clock = Date.now();
   const tick = () => new Date(clock += 1000).toISOString();
   const history = (id: string) => { let known = histories.get(id); if (!known) histories.set(id, known = { updatedAt: tick(), messages: [] }); return known; };
@@ -65,6 +67,7 @@ async function harness(t: test.TestContext) {
     const sent = (name: string) => typeof req.headers[name] === 'string' ? req.headers[name] as string : undefined;
     if (req.method === 'POST') headers.push({ path: url.pathname, ...Object.fromEntries(([['capability', 'x-tower-run-capability'], ['master', 'x-tower-master'], ['issue', 'x-tower-issue']] as const).flatMap(([key, name]) => sent(name) ? [[key, sent(name)]] : [])) });
     const message = /^\/api\/sessions\/([^/]+)\/messages$/.exec(url.pathname);
+    if (req.method === 'POST' && message) await paused;
     if (req.method === 'POST' && message && refuse) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'busy' })); return; }
     if (req.method === 'POST' && (message || url.pathname === '/api/sessions')) {
       const run = turn(message ? decodeURIComponent(message[1]) : `codex:${randomUUID().slice(0, 6)}`, String(body.prompt));
@@ -116,7 +119,8 @@ async function harness(t: test.TestContext) {
   };
   const reports = (sessionId: string) => runs.filter(run => run.sessionId === sessionId && run.prompt.startsWith('[Tower report]')).map(run => run.prompt);
   const follow = async () => { await issues.refresh(); await main.follow(); for (const id of ['task-a', 'task-b']) await issues.get(id)?.follow(); };
-  return { dir, data, tower, sessions, runs, headers, tick, turn, from, finish, main: main!, issues: () => issues, reopen: () => { issues = openIssues(); return issues; }, issueSession, reports, follow, hold, refuse: (value: boolean) => { refuse = value; } };
+  return { dir, data, tower, sessions, runs, headers, tick, turn, from, finish, main: main!, issues: () => issues, reopen: () => { issues = openIssues(); return issues; }, issueSession, reports, follow, hold, refuse: (value: boolean) => { refuse = value; },
+    pause: () => { let release!: () => void; paused = new Promise<void>(resolve => { release = resolve; }); return () => { paused = undefined; release(); }; } };
 }
 
 test('each issue master follows its own work and reports to its own session, apart from the main master and each other', async t => {
@@ -460,4 +464,27 @@ test('clearing away an expired issue master takes its guides and empty folder, n
   assert.equal(await readFile(join(kept, 'notes.txt'), 'utf8'), 'the master\'s own');
   await assert.rejects(stat(join(kept, 'CLAUDE.md')), { code: 'ENOENT' });
   await assert.rejects(stat(join(h.data, 'todo', 'task-y')), { code: 'ENOENT' });
+});
+
+test('an issue master let go of while its report is answered leaves none of its turns behind', async t => {
+  const h = await harness(t);
+  const a = h.issueSession('task-a');
+  await h.issues().refresh();
+  const work = h.turn('codex:a-work', 'a work');
+  const issue = h.issues().get('task-a')!;
+  await issue.started({ method: 'POST', path: '/api/sessions', route: '/api/sessions', local: '/api/sessions', write: true }, { prompt: work.prompt }, { session: { id: work.sessionId }, run: work });
+  h.finish(work, 'done');
+  const release = h.pause();
+  const looking = issue.follow();
+  // The report is on its way when the issue master is closed and let go of.
+  await until(() => h.headers.some(item => item.path === `/api/sessions/${encodeURIComponent(a.id)}/messages`));
+  a.closed = true;
+  const refreshed = h.issues().refresh();
+  await until(() => h.issues().size() === 0);
+  release();
+  await looking;
+  await refreshed;
+  const report = h.runs.find(run => run.sessionId === a.id && run.prompt.startsWith('[Tower report]'));
+  assert.ok(report, 'the report already sent is not taken back');
+  assert.equal(h.issues().masterRun(report.id), false, 'its turn is not kept for a master no longer followed');
 });
