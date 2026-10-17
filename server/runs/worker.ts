@@ -332,6 +332,10 @@ export async function startRunnerHost(options: RunnerHostOptions) {
           }
           return { ...await service.cycle(), temporary: temporaryOverview() };
         }
+        if (action === 'requestArchive') {
+          if (!Array.isArray(value) || !value.length || value.length > 500 || value.some(id => typeof id !== 'string' || !id || id.length > 4096)) throw new TowerError('invalid', 'Invalid retention archive request.');
+          return service.requestArchive((value as string[]).map(id => options.runs.getSession(id)?.id ?? id));
+        }
         if (typeof value !== 'string' || !value || value.length > 4096) throw new TowerError('invalid', 'Invalid retention target.');
         if (action === 'archive') return service.archiveSession(value);
         if (action === 'backup') return service.backup(value);

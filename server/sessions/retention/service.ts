@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { selectRetention, type RetentionCandidate, type RetentionObservation, type RetentionRecord } from './policy.js';
+import { RETENTION_SESSION_BUDGET, selectRetention, type RetentionCandidate, type RetentionObservation, type RetentionRecord } from './policy.js';
 import { RetentionArchive } from './archive.js';
+import { retentionNodeMap } from './ancestry.js';
 import { RetentionStore } from './store.js';
 import type { RetentionAdapter, RetentionJournalEntry, RetentionOverview, RetentionMember, RetentionOperationContext } from './types.js';
 
@@ -19,6 +20,10 @@ export interface RetentionServiceOptions {
 export class RetentionService {
   private timer?: ReturnType<typeof setTimeout>;
   private catchUp = false;
+  /** An archive request arrived since the last cycle began; the next one comes soon rather than in an hour. */
+  private requested = false;
+  /** Subagent parent links (hot and cold) from the latest observation, to tell whether a reopen sits under a request. */
+  private parents = new Map<string, string | undefined>();
   private cycleIncomplete = false;
   private nextCandidateId?: string;
   private checking?: Promise<RetentionOverview>;
@@ -155,7 +160,7 @@ export class RetentionService {
   cycle(): Promise<RetentionOverview> {
     if (this.checking) return this.checking;
     const task = this.serial(() => this.runCycle()); this.checking = task;
-    void task.finally(() => { this.checking = undefined; this.schedule(this.catchUp ? 1000 : 3_600_000); }).catch(error => this.report(error));
+    void task.finally(() => { this.checking = undefined; this.schedule(this.catchUp || this.requested ? 1000 : 3_600_000); }).catch(error => this.report(error));
     return task;
   }
   verifyBackups(): Promise<void> { return this.serial(() => this.verifyBackupsNow()); }
@@ -176,7 +181,7 @@ export class RetentionService {
     await this.countBytes(); this.verification = 'complete';
   }
   private async runCycle(): Promise<RetentionOverview> {
-    this.catchUp = false; this.cycleIncomplete = false;
+    this.catchUp = false; this.requested = false; this.cycleIncomplete = false;
     const archivedBefore = this.coldMembers().length;
     await this.verifyBackupsNow();
     if (this.verification !== 'complete') return this.overview();
@@ -195,7 +200,7 @@ export class RetentionService {
     const candidates = offset > 0 ? [...selected.candidates.slice(offset), ...selected.candidates.slice(0, offset)] : selected.candidates;
     if (!candidates.length) this.nextCandidateId = undefined;
 
-    const started = Date.now(); let count = 0; const blockedEntries: RetentionJournalEntry[] = [];
+    const started = Date.now(); let count = 0, oversized = false; const blockedEntries: RetentionJournalEntry[] = [];
     for (const [index, candidate] of candidates.entries()) {
       if (this.stopped) { this.addDeferred('maintenance-paused', candidates.length - index); break; }
       if (Date.now() - started >= 30_000) { this.addDeferred('time-budget', candidates.length - index); break; }
@@ -211,22 +216,72 @@ export class RetentionService {
         if (entry.phase !== 'blocked-provider' || entry.error !== error) blockedEntries.push({ ...entry, phase: 'blocked-provider', error, updatedAt: new Date().toISOString() });
         continue;
       }
-      if (count + candidate.ids.length > 100) {
-        if (candidate.ids.length > 100) { this.addDeferred('session-budget'); continue; }
+      // The budget paces work. A requested family larger than it is still one operation, so one such
+      // family goes per cycle rather than never.
+      if (candidate.ids.length > RETENTION_SESSION_BUDGET && candidate.reason === 'explicit-archive' && !oversized) oversized = true;
+      else if (count + candidate.ids.length > RETENTION_SESSION_BUDGET) {
+        if (candidate.ids.length > RETENTION_SESSION_BUDGET) { this.addDeferred('session-budget'); continue; }
         this.nextCandidateId = candidate.rootId;
         this.addDeferred('session-budget', candidates.length - index); break;
       }
       await this.archiveCandidate(entry, records); count += candidate.ids.length;
     }
     if (blockedEntries.length) await this.options.store.putMany(blockedEntries);
+    if (observation.complete) await this.prunePolicies(observation);
     this.catchUp = observation.complete && !this.cycleIncomplete && this.coldMembers().length > archivedBefore
       && Boolean(this.deferredReasons['time-budget'] || this.deferredReasons['session-budget']);
     this.lastCheckedAt = new Date().toISOString(); await this.countBytes(); return this.overview();
   }
+  /**
+   * Reopening withdraws this session's archive request. Under an ancestor's pending request it also
+   * records the reopen, which keeps the session out of that request (see selectRetention).
+   */
   cancelArchiveRequest(id: string): Promise<void> {
     return this.serial(async () => {
-      const policy = this.options.store.policy(id); if (!policy?.archivedAt) return;
-      await this.options.store.setPolicy({ ...policy, archivedAt: undefined, archiveRevision: policy.archiveRevision + 1 });
+      const policy = this.options.store.policy(id);
+      const underRequest = this.parents.has(id) ? this.ancestorRequested(id) : this.options.store.policyList().some(other => other.archiveWhenIdle);
+      if (!policy?.archivedAt && !policy?.archiveWhenIdle && !underRequest) return;
+      const { archiveWhenIdle: _, archiveRequestedAt: __, ...kept } = policy || { id, archiveRevision: 0 };
+      await this.options.store.setPolicy({ ...kept, archivedAt: undefined, archiveRevision: kept.archiveRevision + 1,
+        ...(underRequest ? { reopenedAt: new Date(this.options.now?.() ?? Date.now()).toISOString() } : {}) });
+    });
+  }
+  private ancestorRequested(id: string): boolean {
+    const seen = new Set<string>();
+    for (let parent = this.parents.get(id); parent && !seen.has(parent); parent = this.parents.get(parent)) {
+      seen.add(parent); if (this.options.store.policy(parent)?.archiveWhenIdle) return true;
+    }
+    return false;
+  }
+  /**
+   * Policy rows stay bounded by live requests and archived sessions: a request for a session that is
+   * neither hot nor cold is gone, and a row left with only a reopen no request covers carries nothing.
+   * Runs after the cycle's operations, so no selected candidate sees its revision reset.
+   */
+  private async prunePolicies(observation: RetentionObservation): Promise<void> {
+    const hot = new Set(observation.records.map(record => record.session.id));
+    const cold = new Set(this.options.store.list().flatMap(entry => entry.members || []).filter(member => member.state !== 'restored').map(member => member.sessionId));
+    const stale = this.options.store.policyList().filter(policy => {
+      if (policy.archiveWhenIdle) return !hot.has(policy.id) && !cold.has(policy.id);
+      return !policy.archivedAt && !policy.restoredAt && !(policy.reopenedAt && this.ancestorRequested(policy.id));
+    }).map(policy => policy.id);
+    if (stale.length) await this.options.store.removePolicies(stale);
+  }
+  /**
+   * Records that these sessions leave for cold storage once they settle (see selectRetention).
+   * Nothing is checked or moved here: parents and masters are accepted, and a busy session simply
+   * waits. The request lasts across restarts until the session is archived or reopened.
+   */
+  requestArchive(ids: readonly string[]): Promise<{ requested: number }> {
+    return this.serial(async () => {
+      const unique = [...new Set(ids)]; const at = new Date(this.options.now?.() ?? Date.now()).toISOString();
+      for (const id of unique) {
+        const policy = this.options.store.policy(id) || { id, archiveRevision: 0 };
+        if (!policy.archiveWhenIdle) await this.options.store.setPolicy({ ...policy, archiveWhenIdle: true, archiveRequestedAt: at, archiveRevision: policy.archiveRevision + 1 });
+      }
+      // Several closings tend to arrive together; one cycle a few seconds later takes them all.
+      this.requested = true; if (!this.checking) this.schedule(5_000);
+      return { requested: unique.length };
     });
   }
   archiveSession(id: string): Promise<RetentionOverview> { return this.serial(() => this.archiveSessionNow(id)); }
@@ -239,7 +294,7 @@ export class RetentionService {
     record.archivedAt = new Date(observation.now).toISOString(); record.archiveRevision = (record.archiveRevision || 0) + 1;
     const candidate = selectRetention(observation).candidates.find(candidate => candidate.rootId === id);
     if (!candidate) throw new Error('Child session is active, pending or has unproven termination.');
-    await this.options.store.setPolicy({ id, archivedAt: record.archivedAt, archiveRevision: record.archiveRevision, restoredAt: record.restoredAt });
+    await this.options.store.setPolicy({ ...this.options.store.policy(id), id, archivedAt: record.archivedAt, archiveRevision: record.archiveRevision, restoredAt: record.restoredAt });
     const records = this.records(candidate, observation);
     const entry: RetentionJournalEntry = { id: this.operationId(candidate, records), candidate, phase: 'planned', updatedAt: new Date().toISOString() };
     const blocked = records.map(record => this.options.adapter.capability(record.session.provider)).find(capability => capability.status === 'blocked');
@@ -315,7 +370,12 @@ export class RetentionService {
       await this.options.adapter.restore(manifest, operationId, members, this.context(entry));
       const current = this.options.store.get(id)!;
       const restoredAt = entry.restoredAt || new Date().toISOString();
-      for (const member of current.members || []) if (member.state === 'restored') await this.options.store.setPolicy({ id: member.sessionId, archiveRevision: (this.options.store.policy(member.sessionId)?.archiveRevision || 0) + 1, restoredAt });
+      // An archive request outlives a restore (a closed issue's session resumed by a message goes back
+      // once it settles); only reopening the session cancels it.
+      for (const member of current.members || []) if (member.state === 'restored') {
+        const { archivedAt: _, ...previous } = this.options.store.policy(member.sessionId) || { id: member.sessionId, archiveRevision: 0 };
+        await this.options.store.setPolicy({ ...previous, archiveRevision: previous.archiveRevision + 1, restoredAt });
+      }
       await this.options.store.put({ ...current, phase: current.members?.every(member => member.state === 'restored') ? 'restored-awaiting-start' : 'conflict', restoredAt, restoreOperationId: operationId, updatedAt: new Date().toISOString() });
     } catch (error) { await this.put(entry, 'conflict', String(error)); throw error; }
     finally {
@@ -342,7 +402,7 @@ export class RetentionService {
     return JSON.stringify([record.session.provider, record.session.nativeId, record.session.createdAt, record.session.readRevision,
       record.session.parentId, record.session.isSubagent, record.session.parentLink, record.kind, record.projectKey,
       record.latestTaskEndedAt, record.lastActivityAt, record.latestTaskEndedAt ? undefined : record.inactiveSince,
-      record.archivedAt, record.archiveRevision || 0, record.restoredAt]);
+      record.archivedAt, record.archiveRevision || 0, record.restoredAt, record.archiveWhenIdle, record.archiveRequestedAt, record.reopenedAt]);
   }
   private operationId(candidate: RetentionCandidate, records: RetentionRecord[]): string {
     return createHash('sha256').update(JSON.stringify({ candidate, revisions: records.map(record => [record.session.id, record.session.readRevision, record.latestTaskEndedAt, record.latestTaskEndedAt ? undefined : record.inactiveSince]) })).digest('hex');
@@ -369,11 +429,14 @@ export class RetentionService {
     try { observation = await this.options.observe(); }
     catch (error) { this.cycleIncomplete = true; throw error; }
     this.observationComplete = observation.complete; this.cycleIncomplete ||= !observation.complete; this.observationIssues = observation.issues || [];
+    // Cold ancestry counts too: a request two levels up reaches a hot child through a cold parent, as selection sees it.
+    if (observation.complete) this.parents = new Map([...new Set(retentionNodeMap(observation).values())].map(node => [node.id, node.isSubagent ? node.parentId : undefined]));
     for (const record of observation.records) {
       const policy = this.options.store.policy(record.session.id); if (!policy) continue;
       const newer = policy.archivedAt && Date.parse(record.lastActivityAt || '') > Date.parse(policy.archivedAt);
       if (newer) { policy.archivedAt = undefined; policy.archiveRevision++; await this.options.store.setPolicy(policy); }
       record.archivedAt = policy.archivedAt; record.archiveRevision = policy.archiveRevision; record.restoredAt = policy.restoredAt;
+      record.archiveWhenIdle = policy.archiveWhenIdle; record.archiveRequestedAt = policy.archiveRequestedAt; record.reopenedAt = policy.reopenedAt;
     }
     return observation;
   }
