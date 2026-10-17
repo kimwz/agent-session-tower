@@ -95,7 +95,10 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const readOnly = world.availability.state !== 'ready';
   // An archived project opens to be read: nothing in it is added, moved, changed or attached to (`locked`).
   const live = useMemo(() => liveProjectIds(world.projects), [world.projects]);
-  const lockedTask = useCallback((id: string | null | undefined) => { const item = id ? world.tasks[id] : undefined; return !!item && !live.has(item.projectId); }, [world.tasks, live]);
+  // Read only: a task of an archived project or section, wherever it shows (a board, a search, the completed list).
+  const archivedSections = useMemo(() => new Set(world.sections.filter(section => section.archivedAt).map(section => section.id)), [world.sections]);
+  const isLocked = useCallback((item: TodoTask | undefined) => !!item && (!live.has(item.projectId) || (!!item.sectionId && archivedSections.has(item.sectionId))), [live, archivedSections]);
+  const lockedTask = useCallback((id: string | null | undefined) => isLocked(id ? world.tasks[id] ?? (world.detail?.task.id === id ? world.detail.task : undefined) : undefined), [world.tasks, world.detail, isLocked]);
 
   useEffect(() => { client.start(); uploads.open(); return () => { uploads.dispose(); client.dispose(); }; }, [client, uploads]);
   // What a press began on, read before the press closes any popover (see the main area's click).
@@ -240,7 +243,9 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
       const taskAction = ['complete', 'complete-next', 'add-next', 'open'].includes(shortcut.action);
       if (taskAction && !task) return;
       // An archived project's tasks are only read: keys that would change something do nothing there.
-      if (['add', 'complete', 'complete-next', 'add-next', 'undo'].includes(shortcut.action) && (current.locked || (task && current.lockedTask(task.id)))) return;
+      // An archived project's page changes nothing; elsewhere only the chosen task's own keys stop at a locked task.
+      if (['add', 'undo'].includes(shortcut.action) && current.locked) return;
+      if (['complete', 'complete-next', 'add-next'].includes(shortcut.action) && (current.locked || (task && current.lockedTask(task.id)))) return;
       switch (shortcut.action) {
         case 'add': current.openAdd(); break;
         case 'search':
@@ -343,7 +348,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
       <header className="todo-column-head"><h3>{t('완료됨')}</h3><span className="todo-column-count">{items.length || ''}</span></header>
       <div className="todo-column-cards">
         {items.map(({ completion, task }) => <TaskCard key={completion.id} task={{ ...task, completedAt: task.completedAt ?? completion.completedAt }} context={context} {...card} onMenu={undefined} onFiles={undefined}
-          selectId={doneKey(completion.id)} selected={doneChosen && selectedId === doneKey(completion.id)}
+          selectId={doneKey(completion.id)} selected={doneChosen && selectedId === doneKey(completion.id)} readOnly={readOnly || isLocked(task)}
           onReopen={() => void actions.reopen(task, completion.id)} />)}
         {state.completed.loading && <LoaderCircle className="spin todo-muted" size={16} />}
         {state.completed.error && <p className="todo-error" role="alert">{state.completed.error}</p>}
@@ -356,7 +361,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const searchDoneColumn = searchDone && searchResults !== null ? <section className="todo-column todo-completed-column" aria-label={t('완료')}>
     <header className="todo-column-head"><h3>{t('완료')}</h3><span className="todo-column-count">{doneResults.length || ''}</span></header>
     <div className="todo-column-cards">
-      {doneResults.map(item => <TaskCard key={item.id} task={world.tasks[item.id]?.completedAt ? world.tasks[item.id] : item} context={context} {...card} onMenu={undefined} onFiles={undefined} readOnly={readOnly || lockedTask(item.id)} />)}
+      {doneResults.map(item => <TaskCard key={item.id} task={world.tasks[item.id]?.completedAt ? world.tasks[item.id] : item} context={context} {...card} onMenu={undefined} onFiles={undefined} readOnly={readOnly || isLocked(item)} />)}
       {!doneResults.length && <p className="todo-muted todo-column-empty">{t('완료한 작업이 없습니다')}</p>}
     </div>
   </section> : undefined;
@@ -381,6 +386,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     {view.kind !== 'search' && !readOnly && !locked && <button type="button" className="secondary-button" onClick={() => openAdd()}><Plus size={13} />{t('작업 추가')}</button>}</div>;
   else body = <BoardView columns={columns} context={context} manual={manualOrder(display) && !readOnly && !locked} sections={!!project && display.group === 'section' && !readOnly && !locked} mobile={mobile} selectedId={boardChosen}
     card={card} onAdd={column => openAdd({ ...column.preset })} onDrop={onDrop}
+    onDayMove={(task, afterId) => { if (!locked && !isLocked(task)) client.apply([{ op: 'task.move', id: task.id, dayAfterId: afterId }]); }}
     onSectionMove={(id, afterId) => client.apply([{ op: 'section.move', id, afterId }])}
     onAddSection={name => project && client.apply([{ op: 'section.create', id: newId(), projectId: project.id, name }])}
     onSectionMenu={(id, anchor) => { if (locked) return; menuAnchor.current = anchor; setSectionRename(null); setSectionMenu(id); }} completed={doneColumn} />;

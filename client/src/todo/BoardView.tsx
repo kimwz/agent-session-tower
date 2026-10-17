@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { closestCorners, DndContext, DragOverlay, pointerWithin, useDroppable, type CollisionDetection, type DragEndEvent, type DragOverEvent, type DragStartEvent } from '@dnd-kit/core';
-import { horizontalListSortingStrategy, SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { arrayMove, horizontalListSortingStrategy, SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { useTodoSensors } from './todo-dnd';
 import { GripVertical, MoreHorizontal, Plus } from 'lucide-react';
 import type { TodoTask } from '../../../shared/todo/types';
@@ -29,6 +29,8 @@ export interface BoardProps {
   card: Omit<TaskCardProps, 'task' | 'context' | 'selected'>;
   onAdd: (column: BoardColumn) => void;
   onDrop: (task: TodoTask, column: BoardColumn, afterId: string | null | undefined) => void;
+  /** A card put in order among its own date's tasks in a column of several dates. */
+  onDayMove?: (task: TodoTask, afterId: string | null) => void;
   onSectionMove: (sectionId: string, afterId: string | null) => void;
   onAddSection: (name: string) => void;
   onSectionMenu: (sectionId: string, anchor: HTMLElement) => void;
@@ -154,9 +156,18 @@ export function BoardView(board: BoardProps) {
     }
     if (data?.type !== 'task') return;
     const task = data.task as TodoTask, source = columnOf(data)!, target = columnOf(over.data.current);
+    const overTask = over.data.current?.type === 'task' ? (over.data.current.task as TodoTask) : undefined;
+    // In a column of several dates (overdue, the next days, later), a card put among its own date's tasks takes its
+    // place there; it never changes its date by being dropped in the column it came from.
+    if (manual && target && !target.drop && target.id === source.id && !target.locked && task.dueDate && overTask?.dueDate === task.dueDate && overTask.id !== task.id) {
+      const from = target.tasks.findIndex(item => item.id === task.id), to = target.tasks.findIndex(item => item.id === overTask.id);
+      const order = arrayMove(target.tasks, from, to);
+      const before = order.slice(0, order.findIndex(item => item.id === task.id)).filter(item => item.dueDate === task.dueDate);
+      board.onDayMove?.(task, before.at(-1)?.id ?? null);
+      return;
+    }
     if (!target?.drop) return;
     const list = target.tasks.filter(item => item.id !== task.id);
-    const overTask = over.data.current?.type === 'task' ? (over.data.current.task as TodoTask) : undefined;
     if (!manual) { if (target.id !== source.id) board.onDrop(task, target, undefined); return; }
     let index = overTask ? target.tasks.findIndex(item => item.id === overTask.id) : list.length;
     if (target.id === source.id) {

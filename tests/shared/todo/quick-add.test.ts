@@ -147,6 +147,10 @@ test('a repeat may say when it starts and ends, both part of its word', () => {
   const kept = parse('회의 매주 월 10월 20일부터 12월 31일까지', { ignored: new Set([repeat.key]) });
   assert.equal(kept.recurrence, undefined);
   assert.equal(kept.content, '회의 매주 월 10월 20일부터 12월 31일까지');
+  // In English too: the start's date is not read again as the task's date.
+  const english = parse('standup every mon starting oct 20 until dec 31');
+  const keptEnglish = parse('standup every mon starting oct 20 until dec 31', { ignored: new Set([english.tokens.find(token => token.kind === 'repeat')!.key]) });
+  assert.deepEqual([keptEnglish.recurrence, keptEnglish.dueDate, keptEnglish.content], [undefined, undefined, 'standup every mon starting oct 20 until dec 31']);
 });
 
 test('only standalone words count, only the first of a kind counts, and the rest stays text', () => {

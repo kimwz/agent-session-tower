@@ -263,11 +263,13 @@ export function parseQuickAdd(input: string, context: QuickAddContext): QuickAdd
   const sectionProject = projectId ?? context.defaultProjectId;
 
   let cursor = 0;
+  /** Text read as words to keep: a repeat turned back into text keeps its start and end as text too. */
+  let skip = 0;
   for (const start of starts) {
     if (start < cursor) continue;
     const rest = input.slice(start);
     const found = readToken(rest);
-    if (!found) continue;
+    if (!found) { if (skip) { cursor = start + skip; skip = 0; } continue; }
     const text = rest.slice(0, found.length);
     tokens.push({ kind: found.kind, start, end: start + found.length, text, key: found.key ?? keyOf(found.kind, text) });
     found.apply();
@@ -311,6 +313,7 @@ export function parseQuickAdd(input: string, context: QuickAddContext): QuickAdd
       // Its start and end belong to it: turning the repeat back into text turns them too.
       const read = repeatMatcher(rest, today);
       const found = attempt('repeat', read, value => { result.recurrence = value; });
+      if (read && !found) skip = read.length + repeatBounds(rest.slice(read.length), today, true).length;
       if (read && found) {
         const bounds = repeatBounds(rest.slice(read.length), today, !taken('date'));
         return { ...found, length: read.length + bounds.length, key: keyOf('repeat', rest.slice(0, read.length)), apply: () => {

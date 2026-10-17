@@ -59,11 +59,12 @@ export function QuickAdd({ world, today, client, preset, follow, attach, onClose
   const [ignored, setIgnored] = useState<ReadonlySet<string>>(() => new Set());
   const [manual, setManual] = useState<Manual>({});
   const [files, setFiles] = useState<File[]>([]);
-  // Saving with files waits for the server: meanwhile Enter and the button do nothing, so one task is made.
+  // Saving with files waits for the server: meanwhile the whole dialog holds still (no typing, adding, removing or
+  // closing), so what is saved and uploaded is what it shows, and one task is made.
   const [saving, setSaving] = useState(false);
   const busy = useRef(false);
   const addFiles = (picked: File[]) => setFiles(previous => [...previous, ...picked]);
-  const drop = useFileDrop(addFiles);
+  const drop = useFileDrop(addFiles, saving);
   const input = useRef<HTMLInputElement>(null);
   const backdrop = useRef<HTMLDivElement>(null);
   const dialog = useRef<HTMLDivElement>(null);
@@ -105,7 +106,7 @@ export function QuickAdd({ world, today, client, preset, follow, attach, onClose
       busy.current = true; setSaving(true);
       const saved = await saveWithFiles(client, attach, ops, id, files);
       busy.current = false; setSaving(false);
-      if (!saved) return;
+      if (!saved) { requestAnimationFrame(() => input.current?.focus()); return; }
     } else if (!client.apply(ops)) return;
     if (follow?.complete && before) client.toast(t('“{0}” 완료, 다음 작업 추가', { 0: before.content }), 'info', client.undoActions());
     onAdded(id);
@@ -118,8 +119,8 @@ export function QuickAdd({ world, today, client, preset, follow, attach, onClose
   for (const token of parsed.tokens) { segments.push({ text: text.slice(last, token.start) }, { text: text.slice(token.start, token.end), kind: token.kind }); last = token.end; }
   segments.push({ text: text.slice(last) });
 
-  return <div className="todo-modal-scrim" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
-    <div ref={dialog} className={`todo-quick-add ${drop.over ? 'drop-target' : ''}`} role="dialog" aria-modal="true" aria-label={follow ? t('다음 작업 추가') : t('작업 추가')} {...drop.handlers}
+  return <div className="todo-modal-scrim" onMouseDown={event => { if (event.target === event.currentTarget && !busy.current) onClose(); }}>
+    <div ref={dialog} className={`todo-quick-add ${drop.over ? 'drop-target' : ''} ${saving ? 'saving' : ''}`} role="dialog" aria-modal="true" aria-busy={saving} inert={saving} aria-label={follow ? t('다음 작업 추가') : t('작업 추가')} {...drop.handlers}
       onKeyDown={event => { if (event.key === 'Escape' && !event.nativeEvent.isComposing && !document.querySelector('.todo-popover')) { event.preventDefault(); event.stopPropagation(); onClose(); } }}>
       {before && <div className="todo-quick-follow"><ArrowRight size={13} /><span>{follow!.complete ? t('“{0}” 완료 후 다음 작업', { 0: before.content }) : t('“{0}” 다음 작업', { 0: before.content })}</span></div>}
       {preset.parentId && world.tasks[preset.parentId] && <div className="todo-quick-follow"><span>{t('“{0}”의 하위 작업', { 0: world.tasks[preset.parentId].content })}</span></div>}
